@@ -11,6 +11,7 @@ use rayon::prelude::*;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::{BuildHasher, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::compiler::stages::equivalence_analysis::disallowed_follows::normalize_disallowed_follows;
@@ -109,6 +110,8 @@ struct Scratch {
     dirty_groups: Vec<SmallVec<[usize; 16]>>,
     targets: Vec<usize>,
     target_gids: HashMap<usize, SmallVec<[usize; 16]>>,
+    single_target_pos: usize,
+    single_target_gids: SmallVec<[usize; 16]>,
     // Suffix DAG
     dag: HashMap<usize, DagNode>,
     dag_queue: Vec<usize>,
@@ -123,6 +126,84 @@ static HASH_RANDOM_STATE: Lazy<RandomState> =
     Lazy::new(|| RandomState::with_seeds(HASH_SEED1, HASH_SEED2, HASH_SEED3, HASH_SEED4));
 static VOCAB_UNGROUPED_BATCH: Lazy<bool> =
     Lazy::new(|| env_flag_enabled("GLRMASK_VOCAB_UNGROUPED_BATCH"));
+static VOCAB_SIGNATURE_PROFILE_TOTALS: Lazy<VocabSignatureProfileTotals> =
+    Lazy::new(VocabSignatureProfileTotals::new);
+
+struct VocabSignatureProfileTotals {
+    tokens: AtomicU64,
+    zero_target_tokens: AtomicU64,
+    single_target_tokens: AtomicU64,
+    multi_target_tokens: AtomicU64,
+    tokens_with_targets: AtomicU64,
+    target_positions: AtomicU64,
+    run_batch_ns: AtomicU64,
+    run_batch_inner_ns: AtomicU64,
+    collect_targets_ns: AtomicU64,
+    try_single_target_ns: AtomicU64,
+    try_single_target_hits: AtomicU64,
+    try_single_target_fallbacks: AtomicU64,
+    hash_suffix_calls: AtomicU64,
+    hash_suffix_ns: AtomicU64,
+    hash_suffix_setup_ns: AtomicU64,
+    hash_suffix_bfs_ns: AtomicU64,
+    hash_suffix_run_suffix_ns: AtomicU64,
+    hash_suffix_propagate_ns: AtomicU64,
+    hash_suffix_hash_ns: AtomicU64,
+    hash_suffix_nodes: AtomicU64,
+    finish_ns: AtomicU64,
+}
+
+impl VocabSignatureProfileTotals {
+    const fn new() -> Self {
+        Self {
+            tokens: AtomicU64::new(0),
+            zero_target_tokens: AtomicU64::new(0),
+            single_target_tokens: AtomicU64::new(0),
+            multi_target_tokens: AtomicU64::new(0),
+            tokens_with_targets: AtomicU64::new(0),
+            target_positions: AtomicU64::new(0),
+            run_batch_ns: AtomicU64::new(0),
+            run_batch_inner_ns: AtomicU64::new(0),
+            collect_targets_ns: AtomicU64::new(0),
+            try_single_target_ns: AtomicU64::new(0),
+            try_single_target_hits: AtomicU64::new(0),
+            try_single_target_fallbacks: AtomicU64::new(0),
+            hash_suffix_calls: AtomicU64::new(0),
+            hash_suffix_ns: AtomicU64::new(0),
+            hash_suffix_setup_ns: AtomicU64::new(0),
+            hash_suffix_bfs_ns: AtomicU64::new(0),
+            hash_suffix_run_suffix_ns: AtomicU64::new(0),
+            hash_suffix_propagate_ns: AtomicU64::new(0),
+            hash_suffix_hash_ns: AtomicU64::new(0),
+            hash_suffix_nodes: AtomicU64::new(0),
+            finish_ns: AtomicU64::new(0),
+        }
+    }
+
+    fn reset(&self) {
+        self.tokens.store(0, Ordering::Relaxed);
+        self.zero_target_tokens.store(0, Ordering::Relaxed);
+        self.single_target_tokens.store(0, Ordering::Relaxed);
+        self.multi_target_tokens.store(0, Ordering::Relaxed);
+        self.tokens_with_targets.store(0, Ordering::Relaxed);
+        self.target_positions.store(0, Ordering::Relaxed);
+        self.run_batch_ns.store(0, Ordering::Relaxed);
+        self.run_batch_inner_ns.store(0, Ordering::Relaxed);
+        self.collect_targets_ns.store(0, Ordering::Relaxed);
+        self.try_single_target_ns.store(0, Ordering::Relaxed);
+        self.try_single_target_hits.store(0, Ordering::Relaxed);
+        self.try_single_target_fallbacks.store(0, Ordering::Relaxed);
+        self.hash_suffix_calls.store(0, Ordering::Relaxed);
+        self.hash_suffix_ns.store(0, Ordering::Relaxed);
+        self.hash_suffix_setup_ns.store(0, Ordering::Relaxed);
+        self.hash_suffix_bfs_ns.store(0, Ordering::Relaxed);
+        self.hash_suffix_run_suffix_ns.store(0, Ordering::Relaxed);
+        self.hash_suffix_propagate_ns.store(0, Ordering::Relaxed);
+        self.hash_suffix_hash_ns.store(0, Ordering::Relaxed);
+        self.hash_suffix_nodes.store(0, Ordering::Relaxed);
+        self.finish_ns.store(0, Ordering::Relaxed);
+    }
+}
 
 #[inline]
 fn new_hasher() -> AHasher {
@@ -169,6 +250,14 @@ fn diversity_state_order_enabled() -> bool {
 
 fn elapsed_ms(started_at: Instant) -> f64 {
     started_at.elapsed().as_secs_f64() * 1000.0
+}
+
+fn elapsed_ns(started_at: Instant) -> u64 {
+    started_at.elapsed().as_nanos() as u64
+}
+
+fn ns_to_ms(ns: u64) -> f64 {
+    ns as f64 / 1_000_000.0
 }
 
 fn reachable_state_count(tokenizer: &TokenizerView, initial_states: &[usize]) -> usize {
@@ -408,6 +497,8 @@ impl Scratch {
             dirty_groups: vec![SmallVec::new(); num_states],
             targets: Vec::new(),
             target_gids: HashMap::new(),
+            single_target_pos: usize::MAX,
+            single_target_gids: SmallVec::new(),
             dag: HashMap::new(),
             dag_queue: Vec::new(),
             dag_disallowed: HashMap::new(),
@@ -416,6 +507,52 @@ impl Scratch {
             suffix_match_positions: vec![NONE; num_groups],
             suffix_dirty_groups: SmallVec::new(),
         }
+    }
+}
+
+fn ensure_target_gids_map(
+    target_gids: &mut HashMap<usize, SmallVec<[usize; 16]>>,
+    single_target_pos: usize,
+    single_target_gids: &[usize],
+) {
+    if target_gids.is_empty() && single_target_pos != usize::MAX {
+        let mut gids = SmallVec::new();
+        gids.extend(single_target_gids.iter().copied());
+        target_gids.insert(single_target_pos, gids);
+    }
+}
+
+fn record_target_gid(
+    targets: &mut Vec<usize>,
+    target_gids: &mut HashMap<usize, SmallVec<[usize; 16]>>,
+    single_target_pos: &mut usize,
+    single_target_gids: &mut SmallVec<[usize; 16]>,
+    pos: usize,
+    gid: usize,
+) {
+    if targets.is_empty() {
+        targets.push(pos);
+        *single_target_pos = pos;
+        single_target_gids.clear();
+        single_target_gids.push(gid);
+        return;
+    }
+
+    if target_gids.is_empty() && targets.len() == 1 && *single_target_pos == pos {
+        if !single_target_gids.contains(&gid) {
+            single_target_gids.push(gid);
+        }
+        return;
+    }
+
+    ensure_target_gids_map(target_gids, *single_target_pos, single_target_gids.as_slice());
+
+    let gids = target_gids.entry(pos).or_default();
+    if gids.is_empty() {
+        targets.push(pos);
+    }
+    if !gids.contains(&gid) {
+        gids.push(gid);
     }
 }
 
@@ -544,19 +681,29 @@ fn collect_targets(
         return;
     }
 
+    let Scratch {
+        dirty_groups,
+        match_positions,
+        targets,
+        target_gids,
+        single_target_pos,
+        single_target_gids,
+        ..
+    } = scratch;
+
     for i in state_offset..state_offset + num_states {
         let base = i * num_groups;
-        for &gid in &scratch.dirty_groups[i] {
-            let pv = scratch.match_positions[base + gid];
+        for &gid in &dirty_groups[i] {
+            let pv = match_positions[base + gid];
             if pv != NONE && pv > 0 && (pv as usize) <= len {
-                let pos = pv as usize;
-                let gids = scratch.target_gids.entry(pos).or_default();
-                if gids.is_empty() {
-                    scratch.targets.push(pos);
-                }
-                if !gids.contains(&gid) {
-                    gids.push(gid);
-                }
+                record_target_gid(
+                    targets,
+                    target_gids,
+                    single_target_pos,
+                    single_target_gids,
+                    pv as usize,
+                    gid,
+                );
             }
         }
     }
@@ -573,10 +720,14 @@ fn run_batch(
     slice: &[u8],
     initial_states: &[usize],
     state_group_size: usize,
+    profile_signature_detail: bool,
 ) {
     let num_states = initial_states.len();
     let num_groups = dfa.num_groups;
     let len = slice.len();
+    let run_batch_started_at = profile_signature_detail.then(Instant::now);
+    let mut run_batch_inner_ns = 0u64;
+    let mut collect_targets_ns = 0u64;
 
     if num_states == 0 {
         scratch.targets.clear();
@@ -586,17 +737,215 @@ fn run_batch(
     scratch.current_states[..num_states].clone_from_slice(initial_states);
     scratch.targets.clear();
     scratch.target_gids.clear();
+    scratch.single_target_pos = usize::MAX;
+    scratch.single_target_gids.clear();
 
     if state_group_size >= num_states {
+        let run_batch_inner_started_at = profile_signature_detail.then(Instant::now);
         run_batch_inner(dfa, scratch, slice, 0, num_states);
+        run_batch_inner_ns += run_batch_inner_started_at.map_or(0, elapsed_ns);
+
+        let collect_targets_started_at = profile_signature_detail.then(Instant::now);
         collect_targets(scratch, num_groups, len, 0, num_states);
+        collect_targets_ns += collect_targets_started_at.map_or(0, elapsed_ns);
     } else {
         for state_offset in (0..num_states).step_by(state_group_size) {
             let group_len = (state_offset + state_group_size).min(num_states) - state_offset;
+
+            let run_batch_inner_started_at = profile_signature_detail.then(Instant::now);
             run_batch_inner(dfa, scratch, slice, state_offset, group_len);
+            run_batch_inner_ns += run_batch_inner_started_at.map_or(0, elapsed_ns);
+
+            let collect_targets_started_at = profile_signature_detail.then(Instant::now);
             collect_targets(scratch, num_groups, len, state_offset, group_len);
+            collect_targets_ns += collect_targets_started_at.map_or(0, elapsed_ns);
         }
     }
+
+    if profile_signature_detail {
+        let totals = &*VOCAB_SIGNATURE_PROFILE_TOTALS;
+        totals
+            .run_batch_ns
+            .fetch_add(run_batch_started_at.map_or(0, elapsed_ns), Ordering::Relaxed);
+        totals
+            .run_batch_inner_ns
+            .fetch_add(run_batch_inner_ns, Ordering::Relaxed);
+        totals
+            .collect_targets_ns
+            .fetch_add(collect_targets_ns, Ordering::Relaxed);
+    }
+}
+
+fn hash_suffixes(
+    dfa: &Dfa,
+    slice: &[u8],
+    scratch: &mut Scratch,
+    profile_signature_detail: bool,
+) -> usize {
+    let total_started_at = profile_signature_detail.then(Instant::now);
+    let setup_started_at = profile_signature_detail.then(Instant::now);
+    let len = slice.len();
+    scratch.dag.clear();
+    scratch.dag_queue.clear();
+    scratch.dag_disallowed.clear();
+
+    for (&pos, gids) in &scratch.target_gids {
+        if let Some((&first_gid, rest)) = gids.split_first() {
+            let mut combined = dfa.disallowed_for(first_gid).clone();
+            for &gid in rest {
+                combined = combined.intersection(dfa.disallowed_for(gid));
+            }
+            scratch.dag_disallowed.insert(pos, combined);
+        }
+    }
+    let setup_ns = setup_started_at.map_or(0, elapsed_ns);
+
+    // BFS from target positions: run suffix DFA at each, discover new positions from edges
+    for &pos in &scratch.targets {
+        if pos < len && !scratch.dag.contains_key(&pos) {
+            scratch.dag_queue.push(pos);
+            scratch.dag.insert(
+                pos,
+                DagNode {
+                    hash: 0,
+                    edges: EdgeList::new(),
+                    end_state: STATE_NONE,
+                },
+            );
+        }
+    }
+
+    let mut cursor = 0;
+    let bfs_started_at = profile_signature_detail.then(Instant::now);
+    let mut run_suffix_ns = 0u64;
+    while cursor < scratch.dag_queue.len() {
+        let pos = scratch.dag_queue[cursor];
+        cursor += 1;
+        let run_suffix_started_at = profile_signature_detail.then(Instant::now);
+        let (end_state, edges) = run_suffix(
+            dfa,
+            &slice[pos..],
+            pos,
+            &mut scratch.suffix_match_positions,
+            &mut scratch.suffix_dirty_groups,
+        );
+        run_suffix_ns += run_suffix_started_at.map_or(0, elapsed_ns);
+        for &(_, target) in &edges {
+            if target < len && !scratch.dag.contains_key(&target) {
+                scratch.dag_queue.push(target);
+                scratch.dag.insert(
+                    target,
+                    DagNode {
+                        hash: 0,
+                        edges: EdgeList::new(),
+                        end_state: STATE_NONE,
+                    },
+                );
+            }
+        }
+        scratch.dag.insert(
+            pos,
+            DagNode {
+                hash: 0,
+                edges,
+                end_state: end_state.unwrap_or(STATE_NONE),
+            },
+        );
+    }
+    let bfs_ns = bfs_started_at.map_or(0, elapsed_ns);
+
+    let propagate_started_at = profile_signature_detail.then(Instant::now);
+    scratch.dag_queue.sort_unstable();
+    for idx in 0..scratch.dag_queue.len() {
+        let pos = scratch.dag_queue[idx];
+        let edges = scratch.dag[&pos].edges.clone();
+
+        let first_hop_target = edges.iter().map(|&(_, t)| t).min();
+        let first_hop_blocked = first_hop_target.is_some_and(|ft| {
+            edges.iter()
+                .filter(|&&(_, t)| t == ft)
+                .all(|&(gid, _)| node_disallows_gid(scratch, pos, gid))
+        });
+
+        for &(gid, target) in &edges {
+            if node_disallows_gid(scratch, pos, gid) {
+                continue;
+            }
+            if first_hop_blocked && Some(target) != first_hop_target {
+                continue;
+            }
+            if target < len {
+                intersect_node_disallowed(scratch, target, dfa.disallowed_for(gid));
+            }
+        }
+    }
+    let propagate_ns = propagate_started_at.map_or(0, elapsed_ns);
+
+    // Hash bottom-up: process deeper positions first
+    let hash_started_at = profile_signature_detail.then(Instant::now);
+    scratch.dag_queue.sort_unstable_by(|a, b| b.cmp(a));
+    for idx in 0..scratch.dag_queue.len() {
+        let pos = scratch.dag_queue[idx];
+        let node = scratch.dag.get(&pos).unwrap();
+        let edges = node.edges.clone();
+        let end_state = node.end_state;
+        let mut h = new_hasher();
+        h.write_u64(dfa.completion_with_disallowed(end_state, scratch.dag_disallowed.get(&pos)));
+
+        // Multi-segment edge fix: the earliest-target edges represent
+        // "first hop" (single-segment) choices from this position.
+        // Edges at later positions represent multi-segment paths that
+        // necessarily pass through the first hop's segment. If ALL
+        // first-hop groups are disallowed, later edges are unreachable.
+        let first_hop_target = edges.iter().map(|&(_, t)| t).min();
+        let first_hop_blocked = first_hop_target.is_some_and(|ft| {
+            edges.iter()
+                .filter(|&&(_, t)| t == ft)
+                .all(|&(gid, _)| node_disallows_gid(scratch, pos, gid))
+        });
+
+        for &(gid, target) in &edges {
+            if node_disallows_gid(scratch, pos, gid) {
+                continue;
+            }
+            // Skip later-hop edges when ALL first-hop edges are disallowed
+            if first_hop_blocked && Some(target) != first_hop_target {
+                continue;
+            }
+            h.write_u64(gid as u64);
+            h.write_u64(scratch.dag.get(&target).map_or(0, |node| node.hash));
+        }
+        scratch.dag.get_mut(&pos).unwrap().hash = h.finish();
+    }
+    let hash_ns = hash_started_at.map_or(0, elapsed_ns);
+
+    if profile_signature_detail {
+        let totals = &*VOCAB_SIGNATURE_PROFILE_TOTALS;
+        totals.hash_suffix_calls.fetch_add(1, Ordering::Relaxed);
+        totals
+            .hash_suffix_ns
+            .fetch_add(total_started_at.map_or(0, elapsed_ns), Ordering::Relaxed);
+        totals
+            .hash_suffix_setup_ns
+            .fetch_add(setup_ns, Ordering::Relaxed);
+        totals
+            .hash_suffix_bfs_ns
+            .fetch_add(bfs_ns, Ordering::Relaxed);
+        totals
+            .hash_suffix_run_suffix_ns
+            .fetch_add(run_suffix_ns, Ordering::Relaxed);
+        totals
+            .hash_suffix_propagate_ns
+            .fetch_add(propagate_ns, Ordering::Relaxed);
+        totals
+            .hash_suffix_hash_ns
+            .fetch_add(hash_ns, Ordering::Relaxed);
+        totals
+            .hash_suffix_nodes
+            .fetch_add(scratch.dag_queue.len() as u64, Ordering::Relaxed);
+    }
+
+    scratch.dag_queue.len()
 }
 
 /// Run DFA on a suffix from start_state, returning (end_state, edges to match positions).
@@ -657,147 +1006,15 @@ fn run_suffix(
     (end_state, edges)
 }
 
-/// Build suffix DAG via BFS from match target positions and hash bottom-up.
-fn hash_suffixes(
-    dfa: &Dfa,
-    slice: &[u8],
-    scratch: &mut Scratch,
-) -> usize {
-    let len = slice.len();
-    scratch.dag.clear();
-    scratch.dag_queue.clear();
-    scratch.dag_disallowed.clear();
-
-    for (&pos, gids) in &scratch.target_gids {
-        if let Some((&first_gid, rest)) = gids.split_first() {
-            let mut combined = dfa.disallowed_for(first_gid).clone();
-            for &gid in rest {
-                combined = combined.intersection(dfa.disallowed_for(gid));
-            }
-            scratch.dag_disallowed.insert(pos, combined);
-        }
-    }
-
-    // BFS from target positions: run suffix DFA at each, discover new positions from edges
-    for &pos in &scratch.targets {
-        if pos < len && !scratch.dag.contains_key(&pos) {
-            scratch.dag_queue.push(pos);
-            scratch.dag.insert(
-                pos,
-                DagNode {
-                    hash: 0,
-                    edges: EdgeList::new(),
-                    end_state: STATE_NONE,
-                },
-            );
-        }
-    }
-
-    let mut cursor = 0;
-    while cursor < scratch.dag_queue.len() {
-        let pos = scratch.dag_queue[cursor];
-        cursor += 1;
-        let (end_state, edges) =
-            run_suffix(
-                dfa,
-                &slice[pos..],
-                pos,
-                &mut scratch.suffix_match_positions,
-                &mut scratch.suffix_dirty_groups,
-            );
-        for &(_, target) in &edges {
-            if target < len && !scratch.dag.contains_key(&target) {
-                scratch.dag_queue.push(target);
-                scratch.dag.insert(
-                    target,
-                    DagNode {
-                        hash: 0,
-                        edges: EdgeList::new(),
-                        end_state: STATE_NONE,
-                    },
-                );
-            }
-        }
-        scratch.dag.insert(
-            pos,
-            DagNode {
-                hash: 0,
-                edges,
-                end_state: end_state.unwrap_or(STATE_NONE),
-            },
-        );
-    }
-
-    scratch.dag_queue.sort_unstable();
-    for idx in 0..scratch.dag_queue.len() {
-        let pos = scratch.dag_queue[idx];
-        let edges = scratch.dag[&pos].edges.clone();
-
-        let first_hop_target = edges.iter().map(|&(_, t)| t).min();
-        let first_hop_blocked = first_hop_target.is_some_and(|ft| {
-            edges.iter()
-                .filter(|&&(_, t)| t == ft)
-                .all(|&(gid, _)| node_disallows_gid(scratch, pos, gid))
-        });
-
-        for &(gid, target) in &edges {
-            if node_disallows_gid(scratch, pos, gid) {
-                continue;
-            }
-            if first_hop_blocked && Some(target) != first_hop_target {
-                continue;
-            }
-            if target < len {
-                intersect_node_disallowed(scratch, target, dfa.disallowed_for(gid));
-            }
-        }
-    }
-
-    // Hash bottom-up: process deeper positions first
-    scratch.dag_queue.sort_unstable_by(|a, b| b.cmp(a));
-    for idx in 0..scratch.dag_queue.len() {
-        let pos = scratch.dag_queue[idx];
-        let node = scratch.dag.get(&pos).unwrap();
-        let edges = node.edges.clone();
-        let end_state = node.end_state;
-        let mut h = new_hasher();
-        h.write_u64(dfa.completion_with_disallowed(end_state, scratch.dag_disallowed.get(&pos)));
-
-        // Multi-segment edge fix: the earliest-target edges represent
-        // "first hop" (single-segment) choices from this position.
-        // Edges at later positions represent multi-segment paths that
-        // necessarily pass through the first hop's segment. If ALL
-        // first-hop groups are disallowed, later edges are unreachable.
-        let first_hop_target = edges.iter().map(|&(_, t)| t).min();
-        let first_hop_blocked = first_hop_target.is_some_and(|ft| {
-            edges.iter()
-                .filter(|&&(_, t)| t == ft)
-                .all(|&(gid, _)| node_disallows_gid(scratch, pos, gid))
-        });
-
-        for &(gid, target) in &edges {
-            if node_disallows_gid(scratch, pos, gid) {
-                continue;
-            }
-            // Skip later-hop edges when ALL first-hop edges are disallowed
-            if first_hop_blocked && Some(target) != first_hop_target {
-                continue;
-            }
-            h.write_u64(gid as u64);
-            h.write_u64(scratch.dag.get(&target).map_or(0, |node| node.hash));
-        }
-        scratch.dag.get_mut(&pos).unwrap().hash = h.finish();
-    }
-
-    scratch.dag_queue.len()
-}
-
 fn try_hash_single_target_suffix(
     dfa: &Dfa,
     slice: &[u8],
     scratch: &mut Scratch,
 ) -> Option<usize> {
-    let pos = *scratch.targets.first()?;
+    let pos = scratch.single_target_pos;
+    if pos == usize::MAX {
+        return None;
+    }
     let len = slice.len();
 
     if pos >= len {
@@ -806,8 +1023,7 @@ fn try_hash_single_target_suffix(
         return Some(0);
     }
 
-    let gids = scratch.target_gids.get(&pos)?;
-    let (&first_gid, rest) = gids.split_first()?;
+    let (&first_gid, rest) = scratch.single_target_gids.split_first()?;
     let mut root_disallowed = dfa.disallowed_for(first_gid).clone();
     for &gid in rest {
         root_disallowed = root_disallowed.intersection(dfa.disallowed_for(gid));
@@ -869,46 +1085,30 @@ fn finish_token_signature(
         let completion = dfa.completion(scratch.current_states[i]);
         let base = i * num_groups;
 
-        // Sort dirty groups for deterministic hashing.
         let dirty = &mut scratch.dirty_groups[i];
         dirty.sort_unstable();
 
         let state_sig = if !dirty.is_empty() {
-            // Check if any dirty group has a non-zero match position
-            let has_match = dirty.iter().any(|&gid| {
+            let mut h = new_hasher();
+            h.write_u64(completion);
+            for &gid in dirty.iter() {
                 let pv = scratch.match_positions[base + gid];
-                pv != NONE && pv > 0
-            });
-            if has_match {
-                let mut h = new_hasher();
-                h.write_u64(completion);
-                for &gid in dirty.iter() {
-                    let pv = scratch.match_positions[base + gid];
-                    if pv != NONE && pv > 0 {
-                        h.write_u64(gid as u64);
-                        let target = pv as usize;
-                        let target_hash = if single_target_hash_pos == target {
-                            single_target_hash
-                        } else {
-                            dag.get(&target).map_or(0, |node| node.hash)
-                        };
-                        h.write_u64(target_hash);
-                    }
+                if pv != NONE && pv > 0 {
+                    h.write_u64(gid as u64);
+                    let target = pv as usize;
+                    let target_hash = if single_target_hash_pos == target {
+                        single_target_hash
+                    } else {
+                        dag.get(&target).map_or(0, |node| node.hash)
+                    };
+                    h.write_u64(target_hash);
                 }
-                h.finish()
-            } else {
-                let mut h = new_hasher();
-                h.write_u64(completion);
-                h.finish()
+                scratch.match_positions[base + gid] = NONE;
             }
+            h.finish()
         } else {
             completion
         };
-
-        // Clean up: reset match_positions for dirty groups back to NONE
-        for &gid in dirty.iter() {
-            scratch.match_positions[base + gid] = NONE;
-        }
 
         sig = sig.wrapping_mul(HASH_SEED1).wrapping_add(state_sig);
     }
@@ -921,22 +1121,95 @@ fn token_signature(
     chunk_states: &[usize],
     state_group_size: usize,
     scratch: &mut Scratch,
+    profile_signature_detail: bool,
 ) -> u64 {
+    if profile_signature_detail {
+        VOCAB_SIGNATURE_PROFILE_TOTALS
+            .tokens
+            .fetch_add(1, Ordering::Relaxed);
+    }
     scratch.single_target_hash_pos = usize::MAX;
     scratch.single_target_hash = 0;
-    run_batch(dfa, scratch, token, chunk_states, state_group_size);
+    run_batch(
+        dfa,
+        scratch,
+        token,
+        chunk_states,
+        state_group_size,
+        profile_signature_detail,
+    );
     let target_count = scratch.targets.len();
+    if profile_signature_detail {
+        let totals = &*VOCAB_SIGNATURE_PROFILE_TOTALS;
+        totals
+            .target_positions
+            .fetch_add(target_count as u64, Ordering::Relaxed);
+        match target_count {
+            0 => {
+                totals
+                    .zero_target_tokens
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            1 => {
+                totals
+                    .single_target_tokens
+                    .fetch_add(1, Ordering::Relaxed);
+                totals
+                    .tokens_with_targets
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {
+                totals
+                    .multi_target_tokens
+                    .fetch_add(1, Ordering::Relaxed);
+                totals
+                    .tokens_with_targets
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
     if target_count == 1 {
+        let try_single_target_started_at = profile_signature_detail.then(Instant::now);
         if let Some(dag_nodes) = try_hash_single_target_suffix(dfa, token, scratch) {
             let _ = dag_nodes;
+            if profile_signature_detail {
+                let totals = &*VOCAB_SIGNATURE_PROFILE_TOTALS;
+                totals
+                    .try_single_target_ns
+                    .fetch_add(try_single_target_started_at.map_or(0, elapsed_ns), Ordering::Relaxed);
+                totals
+                    .try_single_target_hits
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         } else {
-            hash_suffixes(dfa, token, scratch);
+            if profile_signature_detail {
+                let totals = &*VOCAB_SIGNATURE_PROFILE_TOTALS;
+                totals
+                    .try_single_target_ns
+                    .fetch_add(try_single_target_started_at.map_or(0, elapsed_ns), Ordering::Relaxed);
+                totals
+                    .try_single_target_fallbacks
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            ensure_target_gids_map(
+                &mut scratch.target_gids,
+                scratch.single_target_pos,
+                scratch.single_target_gids.as_slice(),
+            );
+            hash_suffixes(dfa, token, scratch, profile_signature_detail);
         }
     } else if target_count > 0 {
-        hash_suffixes(dfa, token, scratch);
+        hash_suffixes(dfa, token, scratch, profile_signature_detail);
     }
 
-    finish_token_signature(dfa, chunk_states, scratch)
+    let finish_started_at = profile_signature_detail.then(Instant::now);
+    let sig = finish_token_signature(dfa, chunk_states, scratch);
+    if profile_signature_detail {
+        VOCAB_SIGNATURE_PROFILE_TOTALS
+            .finish_ns
+            .fetch_add(finish_started_at.map_or(0, elapsed_ns), Ordering::Relaxed);
+    }
+    sig
 }
 
 pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
@@ -991,6 +1264,10 @@ pub fn find_vocab_equivalence_classes_with_follow_and_byte_classes<S: AsRef<[u8]
     let mut signature_total_ms = 0.0;
     let mut refine_total_ms = 0.0;
 
+    if profile_compile {
+        VOCAB_SIGNATURE_PROFILE_TOTALS.reset();
+    }
+
     for (batch_index, batch_start) in (0..num_initial_states).step_by(batch_size).enumerate() {
         if active_indices.is_empty() {
             break;
@@ -1008,7 +1285,17 @@ pub fn find_vocab_equivalence_classes_with_follow_and_byte_classes<S: AsRef<[u8]
                 || Scratch::new(batch.len(), num_groups),
                 |scratch, &token_idx| {
                     let token = strings[token_idx].as_ref();
-                    (token_idx, token_signature(&dfa, token, batch, state_group_size, scratch))
+                    (
+                        token_idx,
+                        token_signature(
+                            &dfa,
+                            token,
+                            batch,
+                            state_group_size,
+                            scratch,
+                            profile_compile,
+                        ),
+                    )
                 },
             )
             .collect();
@@ -1076,6 +1363,7 @@ pub fn find_vocab_equivalence_classes_with_follow_and_byte_classes<S: AsRef<[u8]
     let materialize_ms = elapsed_ms(materialize_started_at);
 
     if profile_compile {
+        let totals = &*VOCAB_SIGNATURE_PROFILE_TOTALS;
         eprintln!(
             "[glrmask/profile][vocab_summary] dfa_states={} reachable_states={} relevant_states={} tokens={} build_dfa_ms={:.3} order_states_ms={:.3} batch_ms={:.3} signature_ms={:.3} refine_ms={:.3} materialize_ms={:.3} classes={}",
             dfa.num_states,
@@ -1089,6 +1377,30 @@ pub fn find_vocab_equivalence_classes_with_follow_and_byte_classes<S: AsRef<[u8]
             refine_total_ms,
             materialize_ms,
             result.len(),
+        );
+        eprintln!(
+            "[glrmask/profile][vocab_signature] tokens={} zero_target_tokens={} single_target_tokens={} multi_target_tokens={} tokens_with_targets={} target_positions={} run_batch_work_ms={:.3} run_batch_inner_work_ms={:.3} collect_targets_work_ms={:.3} try_single_target_work_ms={:.3} try_single_target_hits={} try_single_target_fallbacks={} hash_suffix_calls={} hash_suffix_work_ms={:.3} hash_suffix_setup_work_ms={:.3} hash_suffix_bfs_work_ms={:.3} hash_suffix_run_suffix_work_ms={:.3} hash_suffix_propagate_work_ms={:.3} hash_suffix_hash_work_ms={:.3} hash_suffix_nodes={} finish_work_ms={:.3}",
+            totals.tokens.load(Ordering::Relaxed),
+            totals.zero_target_tokens.load(Ordering::Relaxed),
+            totals.single_target_tokens.load(Ordering::Relaxed),
+            totals.multi_target_tokens.load(Ordering::Relaxed),
+            totals.tokens_with_targets.load(Ordering::Relaxed),
+            totals.target_positions.load(Ordering::Relaxed),
+            ns_to_ms(totals.run_batch_ns.load(Ordering::Relaxed)),
+            ns_to_ms(totals.run_batch_inner_ns.load(Ordering::Relaxed)),
+            ns_to_ms(totals.collect_targets_ns.load(Ordering::Relaxed)),
+            ns_to_ms(totals.try_single_target_ns.load(Ordering::Relaxed)),
+            totals.try_single_target_hits.load(Ordering::Relaxed),
+            totals.try_single_target_fallbacks.load(Ordering::Relaxed),
+            totals.hash_suffix_calls.load(Ordering::Relaxed),
+            ns_to_ms(totals.hash_suffix_ns.load(Ordering::Relaxed)),
+            ns_to_ms(totals.hash_suffix_setup_ns.load(Ordering::Relaxed)),
+            ns_to_ms(totals.hash_suffix_bfs_ns.load(Ordering::Relaxed)),
+            ns_to_ms(totals.hash_suffix_run_suffix_ns.load(Ordering::Relaxed)),
+            ns_to_ms(totals.hash_suffix_propagate_ns.load(Ordering::Relaxed)),
+            ns_to_ms(totals.hash_suffix_hash_ns.load(Ordering::Relaxed)),
+            totals.hash_suffix_nodes.load(Ordering::Relaxed),
+            ns_to_ms(totals.finish_ns.load(Ordering::Relaxed)),
         );
     }
 
