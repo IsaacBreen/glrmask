@@ -113,6 +113,8 @@ struct Scratch {
     dag: HashMap<usize, DagNode>,
     dag_queue: Vec<usize>,
     dag_disallowed: HashMap<usize, BitSet>,
+    single_target_hash_pos: usize,
+    single_target_hash: u64,
     suffix_match_positions: Vec<u32>,
     suffix_dirty_groups: SmallVec<[usize; 16]>,
 }
@@ -409,6 +411,8 @@ impl Scratch {
             dag: HashMap::new(),
             dag_queue: Vec::new(),
             dag_disallowed: HashMap::new(),
+            single_target_hash_pos: usize::MAX,
+            single_target_hash: 0,
             suffix_match_positions: vec![NONE; num_groups],
             suffix_dirty_groups: SmallVec::new(),
         }
@@ -593,7 +597,6 @@ fn run_batch(
             collect_targets(scratch, num_groups, len, state_offset, group_len);
         }
     }
-
 }
 
 /// Run DFA on a suffix from start_state, returning (end_state, edges to match positions).
@@ -789,6 +792,67 @@ fn hash_suffixes(
     scratch.dag_queue.len()
 }
 
+fn try_hash_single_target_suffix(
+    dfa: &Dfa,
+    slice: &[u8],
+    scratch: &mut Scratch,
+) -> Option<usize> {
+    let pos = *scratch.targets.first()?;
+    let len = slice.len();
+
+    if pos >= len {
+        scratch.single_target_hash_pos = pos;
+        scratch.single_target_hash = 0;
+        return Some(0);
+    }
+
+    let gids = scratch.target_gids.get(&pos)?;
+    let (&first_gid, rest) = gids.split_first()?;
+    let mut root_disallowed = dfa.disallowed_for(first_gid).clone();
+    for &gid in rest {
+        root_disallowed = root_disallowed.intersection(dfa.disallowed_for(gid));
+    }
+
+    let (end_state, edges) = run_suffix(
+        dfa,
+        &slice[pos..],
+        pos,
+        &mut scratch.suffix_match_positions,
+        &mut scratch.suffix_dirty_groups,
+    );
+    if edges.iter().any(|&(_, target)| target < len) {
+        return None;
+    }
+
+    let first_hop_target = edges.iter().map(|&(_, target)| target).min();
+    let first_hop_blocked = first_hop_target.is_some_and(|target| {
+        edges
+            .iter()
+            .filter(|&&(_, edge_target)| edge_target == target)
+            .all(|&(gid, _)| root_disallowed.contains(gid))
+    });
+
+    let mut h = new_hasher();
+    h.write_u64(dfa.completion_with_disallowed(
+        end_state.unwrap_or(STATE_NONE),
+        Some(&root_disallowed),
+    ));
+    for &(gid, target) in &edges {
+        if root_disallowed.contains(gid) {
+            continue;
+        }
+        if first_hop_blocked && Some(target) != first_hop_target {
+            continue;
+        }
+        h.write_u64(gid as u64);
+        h.write_u64(0);
+    }
+
+    scratch.single_target_hash_pos = pos;
+    scratch.single_target_hash = h.finish();
+    Some(1)
+}
+
 /// Compute a token's full signature over a batch of initial states.
 /// Also cleans up match_positions for dirty groups (maintaining the NONE invariant).
 fn finish_token_signature(
@@ -797,6 +861,9 @@ fn finish_token_signature(
     scratch: &mut Scratch,
 ) -> u64 {
     let num_groups = dfa.num_groups;
+    let dag = &scratch.dag;
+    let single_target_hash_pos = scratch.single_target_hash_pos;
+    let single_target_hash = scratch.single_target_hash;
     let mut sig: u64 = HASH_SEED3;
     for i in 0..chunk_states.len() {
         let completion = dfa.completion(scratch.current_states[i]);
@@ -819,12 +886,17 @@ fn finish_token_signature(
                     let pv = scratch.match_positions[base + gid];
                     if pv != NONE && pv > 0 {
                         h.write_u64(gid as u64);
-                        h.write_u64(scratch.dag.get(&(pv as usize)).map_or(0, |node| node.hash));
+                        let target = pv as usize;
+                        let target_hash = if single_target_hash_pos == target {
+                            single_target_hash
+                        } else {
+                            dag.get(&target).map_or(0, |node| node.hash)
+                        };
+                        h.write_u64(target_hash);
                     }
                 }
                 h.finish()
             } else {
-                // Groups matched at position 0 only — still use hasher for distinction
                 let mut h = new_hasher();
                 h.write_u64(completion);
                 h.finish()
@@ -850,8 +922,17 @@ fn token_signature(
     state_group_size: usize,
     scratch: &mut Scratch,
 ) -> u64 {
+    scratch.single_target_hash_pos = usize::MAX;
+    scratch.single_target_hash = 0;
     run_batch(dfa, scratch, token, chunk_states, state_group_size);
-    if !scratch.targets.is_empty() {
+    let target_count = scratch.targets.len();
+    if target_count == 1 {
+        if let Some(dag_nodes) = try_hash_single_target_suffix(dfa, token, scratch) {
+            let _ = dag_nodes;
+        } else {
+            hash_suffixes(dfa, token, scratch);
+        }
+    } else if target_count > 0 {
         hash_suffixes(dfa, token, scratch);
     }
 
@@ -901,8 +982,6 @@ pub fn find_vocab_equivalence_classes_with_follow_and_byte_classes<S: AsRef<[u8]
     }
 
     let num_groups = dfa.num_groups;
-    // Use large batches now that dirty-group tracking avoids clearing every group slot.
-    // Memory per thread is batch_size * num_groups * 4 bytes for match positions.
     let batch_size = vocab_batch_size_override()
         .unwrap_or_else(|| num_initial_states.min(5000));
     let mut active_indices: Vec<usize> = (0..num_tokens).collect();
@@ -929,16 +1008,12 @@ pub fn find_vocab_equivalence_classes_with_follow_and_byte_classes<S: AsRef<[u8]
                 || Scratch::new(batch.len(), num_groups),
                 |scratch, &token_idx| {
                     let token = strings[token_idx].as_ref();
-                    (
-                        token_idx,
-                        token_signature(&dfa, token, batch, state_group_size, scratch),
-                    )
+                    (token_idx, token_signature(&dfa, token, batch, state_group_size, scratch))
                 },
             )
             .collect();
         let signature_ms = elapsed_ms(signature_started_at);
 
-        // Refine partition: group tokens by (old_class, signature)
         let refine_started_at = Instant::now();
         let mut refinement: HashMap<(usize, u64), Vec<usize>> =
             HashMap::with_capacity(active_sigs.len() / 2);
@@ -949,7 +1024,6 @@ pub fn find_vocab_equivalence_classes_with_follow_and_byte_classes<S: AsRef<[u8]
                 .push(ti);
         }
 
-        // Assign class IDs: first sub-group of each old class keeps the old ID
         let mut new_active = Vec::with_capacity(active_indices.len());
         let mut seen_classes = vec![false; next_class_id.max(1)];
         for ((old_class, _), tokens) in refinement {
