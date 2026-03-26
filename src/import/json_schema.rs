@@ -1508,8 +1508,8 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
     })
 }
 
-struct SchemaCtx {
-    root_schema: Value,
+struct SchemaCtx<'a> {
+    root_schema: &'a Value,
     rules: Vec<(String, GrammarExpr)>,
     rule_indices: HashMap<String, usize>,
     used_rule_names: HashSet<String>,
@@ -1523,10 +1523,10 @@ struct SchemaCtx {
     draft_stack: Vec<JsonSchemaDraft>,
 }
 
-impl SchemaCtx {
-    fn new(root: &Value) -> Self {
+impl<'a> SchemaCtx<'a> {
+    fn new(root: &'a Value) -> Self {
         let mut ctx = Self {
-            root_schema: root.clone(),
+            root_schema: root,
             rules: Vec::new(),
             rule_indices: HashMap::new(),
             used_rule_names: HashSet::new(),
@@ -1894,7 +1894,7 @@ impl SchemaCtx {
         token.replace("~1", "/").replace("~0", "~")
     }
 
-    fn find_local_anchor_target<'a>(node: &'a Value, ref_value: &str) -> Option<&'a Value> {
+    fn find_local_anchor_target<'v>(node: &'v Value, ref_value: &str) -> Option<&'v Value> {
         match node {
             Value::Object(map) => {
                 if map.get("id").and_then(Value::as_str) == Some(ref_value)
@@ -1921,7 +1921,7 @@ impl SchemaCtx {
         }
     }
 
-    fn resolve_local_ref(&self, ref_value: &str) -> Result<Value, GlrMaskError> {
+    fn resolve_local_ref(&self, ref_value: &str) -> Result<&Value, GlrMaskError> {
         if !ref_value.starts_with('#') {
             return Err(GlrMaskError::GrammarParse(format!(
                 "unsupported $ref '{ref_value}'"
@@ -1929,25 +1929,24 @@ impl SchemaCtx {
         }
 
         if ref_value == "#" {
-            return Ok(self.root_schema.clone());
+            return Ok(self.root_schema);
         }
 
         if !ref_value.starts_with("#/") {
-            return Self::find_local_anchor_target(&self.root_schema, ref_value)
-                .cloned()
+            return Self::find_local_anchor_target(self.root_schema, ref_value)
                 .ok_or_else(|| {
                     GlrMaskError::GrammarParse(format!("unknown $ref target '{ref_value}'"))
                 });
         }
 
-        let mut current = &self.root_schema;
+        let mut current = self.root_schema;
         for token in ref_value[2..].split('/') {
             let key = Self::decode_ref_token(token);
             current = current.get(&key).ok_or_else(|| {
                 GlrMaskError::GrammarParse(format!("unknown $ref target '{ref_value}'"))
             })?;
         }
-        Ok(current.clone())
+        Ok(current)
     }
 
     fn schema_for_intersection(&self, schema: &Value) -> Map<String, Value> {
@@ -2074,7 +2073,7 @@ impl SchemaCtx {
         }
 
         self.ref_compile_stack.insert(ref_value.to_string());
-        let expr_result = match self.resolve_local_ref(ref_value) {
+        let expr_result = match self.resolve_local_ref(ref_value).cloned() {
             Ok(target) => match self.convert_schema(&target) {
                 Ok(expr) => Ok(expr),
                 Err(err) if is_unsat_schema_error(&err) => Ok(never_expr()),
@@ -2358,7 +2357,7 @@ impl SchemaCtx {
 
         if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
             if let Ok(target) = self.resolve_local_ref(reference) {
-                return self.value_satisfies_schema(value, &target);
+                return self.value_satisfies_schema(value, target);
             }
             return true;
         }
@@ -3877,7 +3876,7 @@ impl SchemaCtx {
         Ok((GrammarExpr::Ref(rule_name), left_can_be_empty && right_can_be_empty))
     }
 
-    fn property_name_pattern<'a>(property_names: &'a Value) -> Result<&'a str, GlrMaskError> {
+    fn property_name_pattern(property_names: &Value) -> Result<&str, GlrMaskError> {
         let property_names = property_names.as_object().ok_or_else(|| {
             GlrMaskError::GrammarParse(
                 "propertyNames is not supported unless it is an object with a pattern".into(),
