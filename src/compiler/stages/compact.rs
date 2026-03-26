@@ -22,6 +22,8 @@ use super::equivalence_analysis::{InternalIdMap, ManyToOneIdMap};
 const TOKEN_ORDER_LOCAL_SEARCH_PASSES: usize = 3;
 const TOKEN_ORDER_FINISH_ITERS: usize = 20000;
 const TOKEN_ORDER_FINISH_SEED: u64 = 7;
+const TOKEN_ORDER_FINISH_PATIENCE_MIN: usize = 256;
+const TOKEN_ORDER_FINISH_PATIENCE_FACTOR: usize = 16;
 
 pub struct CompactReport {
     pub tsid_perm: Vec<u32>,
@@ -139,33 +141,45 @@ fn build_dimension_compaction(
     num_tsids: usize,
     num_tokens: u32,
 ) -> DimensionCompaction {
-    let original_weight_refs = weight_refs(unique_weights);
+    let ((tsid_perm, ordered_num_tsids), (token_perm, ordered_num_tokens)) = rayon::join(
+        || {
+            let original_weight_refs = weight_refs(unique_weights);
+            let tsid_merge_profiles = build_tsid_context_profiles(&original_weight_refs, num_tsids);
+            let (tsid_merge_perm, merged_num_tsids) =
+                build_profile_merge_permutation(&tsid_merge_profiles);
+            let merged_tsid_weights = apply_permutations_to_weight_set(
+                unique_weights,
+                &tsid_merge_perm,
+                &identity_perm(num_tokens as usize),
+            );
 
-    let tsid_merge_profiles = build_tsid_context_profiles(&original_weight_refs, num_tsids);
-    let (tsid_merge_perm, merged_num_tsids) = build_profile_merge_permutation(&tsid_merge_profiles);
-    let merged_tsid_weights = apply_permutations_to_weight_set(
-        unique_weights,
-        &tsid_merge_perm,
-        &identity_perm(num_tokens as usize),
-    );
+            let merged_tsid_refs = weight_refs(&merged_tsid_weights);
+            let tsid_order_profiles =
+                build_tsid_context_profiles(&merged_tsid_refs, merged_num_tsids);
+            let (tsid_order_perm, ordered_num_tsids) =
+                build_profile_merge_permutation(&tsid_order_profiles);
 
-    let merged_tsid_refs = weight_refs(&merged_tsid_weights);
-    let tsid_order_profiles = build_tsid_context_profiles(&merged_tsid_refs, merged_num_tsids);
-    let (tsid_order_perm, ordered_num_tsids) =
-        build_profile_merge_permutation(&tsid_order_profiles);
+            (compose_perm(&tsid_merge_perm, &tsid_order_perm), ordered_num_tsids)
+        },
+        || {
+            let original_weight_refs = weight_refs(unique_weights);
+            let token_profiles = build_token_profiles(&original_weight_refs, num_tokens);
+            let (token_group_perm, ordered_num_tokens) =
+                build_profile_merge_permutation(&token_profiles);
+            let merged_token_sets =
+                collect_token_sets_after_permutation(unique_weights, &token_group_perm);
+            let token_perm = optimize_token_group_order(
+                &merged_token_sets,
+                token_group_perm,
+                ordered_num_tokens,
+            );
 
-    let token_profiles = build_token_profiles(&original_weight_refs, num_tokens);
-    let (token_group_perm, ordered_num_tokens) =
-        build_profile_merge_permutation(&token_profiles);
-    let merged_token_sets = collect_token_sets_after_permutation(unique_weights, &token_group_perm);
-    let token_perm = optimize_token_group_order(
-        &merged_token_sets,
-        token_group_perm,
-        ordered_num_tokens,
+            (token_perm, ordered_num_tokens)
+        },
     );
 
     DimensionCompaction {
-        tsid_perm: compose_perm(&tsid_merge_perm, &tsid_order_perm),
+        tsid_perm,
         ordered_num_tsids,
         token_perm,
         ordered_num_tokens,
@@ -402,6 +416,12 @@ fn finish_layout_with_seeded_search(
     let mut current_score = scorer.score_layout(&current_layout);
     let mut best_layout = current_layout.clone();
     let mut best_score = current_score;
+    let patience = TOKEN_ORDER_FINISH_PATIENCE_MIN.max(
+        initial_layout
+            .len()
+            .saturating_mul(TOKEN_ORDER_FINISH_PATIENCE_FACTOR),
+    );
+    let mut iters_since_best = 0usize;
 
     let mut temperature = 8.0f64;
     for _ in 0..TOKEN_ORDER_FINISH_ITERS {
@@ -412,6 +432,12 @@ fn finish_layout_with_seeded_search(
         if candidate_score < best_score {
             best_score = candidate_score;
             best_layout = candidate_layout.clone();
+            iters_since_best = 0;
+        } else {
+            iters_since_best += 1;
+            if iters_since_best >= patience {
+                break;
+            }
         }
 
         let delta = candidate_score as i64 - current_score as i64;
