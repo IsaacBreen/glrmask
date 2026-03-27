@@ -239,9 +239,10 @@ def escape_dot(s):
 
 def generate_dot_svg(
     states, transitions, start_state, transition_weights,
-    terminal_names, token_map, title, output_dir, filename
+    terminal_names, token_map, title, output_dir, filename,
+    annotate_future=False
 ):
-    """Generate SVG with honest edge annotations."""
+    """Generate SVG graph. With annotate_future=True, classifies and styles future edges."""
     if not states:
         return None
 
@@ -293,7 +294,7 @@ def generate_dot_svg(
         # Build label text
         label_parts = []
         for tname, cls in labels_with_class[:4]:
-            if cls == "future":
+            if annotate_future and cls == "future":
                 label_parts.append(f"[future] {tname}")
             else:
                 label_parts.append(tname)
@@ -302,8 +303,8 @@ def generate_dot_svg(
 
         label_text = "\\n".join(label_parts)
 
-        # Add sample tokens for future edges
-        if has_future and info["all_samples"]:
+        # Add sample tokens for future edges (only when annotating)
+        if annotate_future and has_future and info["all_samples"]:
             unique_samples = list(dict.fromkeys(info["all_samples"]))[:3]
             sample_str = ", ".join(escape_dot(s) for s in unique_samples)
             if len(info["all_samples"]) > 3:
@@ -312,7 +313,7 @@ def generate_dot_svg(
 
         attrs = [f'label="{label_text}"']
 
-        if has_future:
+        if annotate_future and has_future:
             attrs.append("style=dashed")
             attrs.append('color="#999999"')
             attrs.append('fontcolor="#666666"')
@@ -363,7 +364,7 @@ CONFIGS = {
 }
 
 
-def process_log(log_path, title, output_dir, filename):
+def process_log(log_path, title, output_dir, filename, annotate_future=False):
     """Process a single log file into a graph."""
     token_map = parse_token_map(log_path)
     terminal_names = parse_terminal_names(log_path)
@@ -383,7 +384,8 @@ def process_log(log_path, title, output_dir, filename):
 
     svg_path = generate_dot_svg(
         states, transitions, start_state, weights,
-        terminal_names, token_map, title, output_dir, filename
+        terminal_names, token_map, title, output_dir, filename,
+        annotate_future=annotate_future
     )
     return svg_path
 
@@ -397,6 +399,8 @@ def main():
     parser.add_argument("--all-configs", action="store_true", help="Run all 4 configs")
     parser.add_argument("--output-dir", default=".", help="Output directory for SVGs")
     parser.add_argument("--title", help="Graph title prefix")
+    parser.add_argument("--annotate-future", action="store_true",
+                        help="Annotate future-terminal edges with dashed styling and token samples")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -407,7 +411,8 @@ def main():
             title = args.title or basename
             print(f"\n{'='*50}")
             print(f"Processing {log_path}...")
-            svg = process_log(log_path, title, args.output_dir, f"dwa_{basename}")
+            svg = process_log(log_path, title, args.output_dir, f"dwa_{basename}",
+                            annotate_future=args.annotate_future)
             if svg:
                 print(f"  SVG: {svg}")
 
@@ -422,7 +427,8 @@ def main():
             print(f"  Log: {log_path}")
             title = f"{schema_name} / {config_name.replace('_', ' ').title()}"
             filename = f"dwa_{config_name}_{schema_name}"
-            svg = process_log(log_path, title, args.output_dir, filename)
+            svg = process_log(log_path, title, args.output_dir, filename,
+                            annotate_future=args.annotate_future)
             if svg:
                 print(f"  SVG: {svg}")
     else:
