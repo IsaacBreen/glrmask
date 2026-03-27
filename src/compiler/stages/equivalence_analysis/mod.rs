@@ -15,6 +15,25 @@ pub struct ManyToOneIdMap {
 }
 
 impl ManyToOneIdMap {
+    /// Construct from a pre-computed original→internal mapping (e.g. oracle).
+    pub fn from_original_to_internal(original_to_internal: Vec<u32>, num_internal: u32) -> Self {
+        let mut internal_to_originals = vec![Vec::new(); num_internal as usize];
+        for (original, &internal) in original_to_internal.iter().enumerate() {
+            if (internal as usize) < internal_to_originals.len() {
+                internal_to_originals[internal as usize].push(original as u32);
+            }
+        }
+        let representative_original_ids: Vec<u32> = internal_to_originals
+            .iter()
+            .map(|originals| originals.first().copied().unwrap_or(0))
+            .collect();
+        Self {
+            original_to_internal,
+            internal_to_originals,
+            representative_original_ids,
+        }
+    }
+
     pub fn num_internal_ids(&self) -> u32 {
         self.internal_to_originals.len() as u32
     }

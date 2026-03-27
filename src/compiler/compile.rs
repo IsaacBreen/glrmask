@@ -267,12 +267,46 @@ fn compile_prepared_with_profile(
         let ((mut internal_ids, id_map_ms), (templates, templates_ms)) = rayon::join(
             || {
                 let id_map_started_at = Instant::now();
-                let result = InternalIdMap::build(
-                    &tokenizer,
-                    vocab,
-                    &disallowed_follows,
-                    prepared_grammar.ignore_terminal,
-                );
+                let result = if let Ok(load_path) = std::env::var("GLRMASK_ORACLE_LOAD") {
+                    let data: serde_json::Value = serde_json::from_str(
+                        &std::fs::read_to_string(&load_path).expect("failed to read oracle file"),
+                    )
+                    .expect("failed to parse oracle JSON");
+                    let state_map: Vec<u32> = data["state_map"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|v| v.as_u64().unwrap() as u32)
+                        .collect();
+                    let token_map: Vec<u32> = data["token_map"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|v| v.as_u64().unwrap() as u32)
+                        .collect();
+                    let num_state_classes = data["num_state_classes"].as_u64().unwrap() as u32;
+                    let num_token_classes = data["num_token_classes"].as_u64().unwrap() as u32;
+                    eprintln!(
+                        "[glrmask/oracle] loaded from {load_path}: {num_state_classes} state classes, {num_token_classes} token classes"
+                    );
+                    InternalIdMap {
+                        tokenizer_states: crate::compiler::stages::equivalence_analysis::ManyToOneIdMap::from_original_to_internal(
+                            state_map,
+                            num_state_classes,
+                        ),
+                        vocab_tokens: crate::compiler::stages::equivalence_analysis::ManyToOneIdMap::from_original_to_internal(
+                            token_map,
+                            num_token_classes,
+                        ),
+                    }
+                } else {
+                    InternalIdMap::build(
+                        &tokenizer,
+                        vocab,
+                        &disallowed_follows,
+                        prepared_grammar.ignore_terminal,
+                    )
+                };
                 (result, elapsed_ms(id_map_started_at))
             },
             || {
@@ -329,6 +363,19 @@ fn compile_prepared_with_profile(
                 stats.total_ranges_before(),
                 stats.total_ranges_after(),
             );
+        }
+
+        // Oracle dump: save post-compact mappings for two-pass experiment
+        if let Ok(dump_path) = std::env::var("GLRMASK_ORACLE_DUMP") {
+            let oracle_data = serde_json::json!({
+                "state_map": internal_ids.tokenizer_states.original_to_internal,
+                "token_map": internal_ids.vocab_tokens.original_to_internal,
+                "num_state_classes": internal_ids.num_tsids(),
+                "num_token_classes": internal_ids.num_internal_tokens(),
+            });
+            std::fs::write(&dump_path, serde_json::to_string(&oracle_data).unwrap())
+                .expect("failed to write oracle dump");
+            eprintln!("[glrmask/oracle] dumped post-compact mappings to {dump_path}");
         }
 
         let permute_possible_matches_started_at = Instant::now();

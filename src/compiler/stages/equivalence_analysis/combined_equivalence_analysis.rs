@@ -75,6 +75,10 @@ fn compile_profile_enabled() -> bool {
     env_flag_enabled("GLRMASK_PROFILE_COMPILE") || env_flag_enabled("GLRMASK_PROFILE_COMPILE_SUMMARY")
 }
 
+fn debug_profile_enabled() -> bool {
+    env_flag_enabled("GLRMASK_DEBUG_PROFILE")
+}
+
 fn elapsed_ms(started_at: std::time::Instant) -> f64 {
     started_at.elapsed().as_secs_f64() * 1000.0
 }
@@ -254,6 +258,7 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
         || initial_states.len() <= SKIP_MAX_LENGTH_SMALL_STATE_THRESHOLD;
     let skip_token_state = env_flag_enabled(SKIP_TOKEN_STATE_EQUIV_ENV);
     let profile_compile = compile_profile_enabled();
+    let debug_profile = debug_profile_enabled();
     let combined_started_at = std::time::Instant::now();
 
     // Deduplicate tokens by byte-class sequence. Tokens whose bytes map
@@ -400,6 +405,19 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
             vocab_ms,
             state_classes.len(),
             vocab_classes.len(),
+            elapsed_ms(combined_started_at),
+        );
+    }
+
+    if debug_profile {
+        eprintln!(
+            "[glrmask/debug][equiv] raw_vocab={} dedup_vocab={} vocab_classes={} raw_states={} pre_reduced_states={} state_classes={} total_ms={:.3}",
+            tokens.len(),
+            dedup.representative_token_bytes.len(),
+            vocab_classes.len(),
+            initial_states.len(),
+            pre_reduced_states.len(),
+            state_classes.len(),
             elapsed_ms(combined_started_at),
         );
     }
