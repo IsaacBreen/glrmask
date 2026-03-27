@@ -278,80 +278,6 @@ fn hash_weight(weight: &Weight, hasher: &mut impl std::hash::Hasher) {
     }
 }
 
-/// Deduplicate exact-duplicate root states in the terminal NWA.
-///
-/// Root states are states `start_state+1 .. start_state+1+num_roots` that were
-/// created one-per-tokenizer-state-class. Many of these end up structurally
-/// identical after trie-based construction and pruning. This function:
-/// 1. Groups roots by a cheap structural hash, then confirms equality with PartialEq.
-/// 2. For each group of duplicates, picks one canonical representative.
-/// 3. Rewrites the start state's epsilon edges to point to the representative,
-///    unioning the epsilon weights of merged roots.
-/// 4. Calls `prune_unreachable_states` to compact the result.
-fn deduplicate_roots(
-    nwa: &mut NWA,
-    start_state: u32,
-    num_roots: usize,
-) {
-    let root_start = start_state as usize + 1;
-    let root_end = root_start + num_roots;
-    if root_end > nwa.states.len() {
-        return;
-    }
-
-    // Group roots by structural hash, then confirm equality within each bucket.
-    let mut hash_buckets: HashMap<u64, Vec<u32>> = HashMap::new();
-    for root_idx in 0..num_roots {
-        let state_id = (root_start + root_idx) as u32;
-        let h = structural_hash_nwa_state(&nwa.states[state_id as usize]);
-        hash_buckets.entry(h).or_default().push(state_id);
-    }
-
-    // For each bucket, find the canonical representative via exact equality.
-    let mut remap: Vec<u32> = (0..nwa.states.len() as u32).collect();
-    let mut dedup_count = 0usize;
-
-    for (_hash, bucket) in &hash_buckets {
-        if bucket.len() < 2 {
-            continue;
-        }
-        let mut canonical_reps: Vec<u32> = Vec::new();
-        for &state_id in bucket {
-            if let Some(&rep) = canonical_reps
-                .iter()
-                .find(|&&rep| nwa.states[state_id as usize] == nwa.states[rep as usize])
-            {
-                remap[state_id as usize] = rep;
-                dedup_count += 1;
-            } else {
-                canonical_reps.push(state_id);
-            }
-        }
-    }
-
-    if dedup_count == 0 {
-        return;
-    }
-
-    // Rewrite start state epsilon edges: merge weights for roots that map to the
-    // same canonical representative.
-    let start = &nwa.states[start_state as usize];
-    let mut merged_epsilons: BTreeMap<u32, Weight> = BTreeMap::new();
-    for (target, weight) in &start.epsilons {
-        let canonical = remap[*target as usize];
-        merged_epsilons
-            .entry(canonical)
-            .and_modify(|existing| *existing = existing.union(weight))
-            .or_insert_with(|| weight.clone());
-    }
-    nwa.states[start_state as usize].epsilons = merged_epsilons
-        .into_iter()
-        .collect();
-
-    // Prune now-unreachable duplicate root states.
-    prune_unreachable_states(nwa);
-}
-
 fn canonicalize_acyclic_nwa(nwa: &mut NWA) {
     if nwa.states.len() <= 1 {
         return;
@@ -600,37 +526,6 @@ fn compute_coreachable_nwa(nwa: &NWA) -> Vec<bool> {
     }
 
     coreachable
-}
-
-fn count_coreachable_nwa_states(nwa: &NWA, coreachable: &[bool]) -> (usize, usize) {
-    if nwa.states.is_empty() {
-        return (0, 0);
-    }
-
-    let state_count = coreachable.iter().filter(|&&flag| flag).count();
-    let mut transition_count = 0usize;
-    for (state_id, state) in nwa.states.iter().enumerate() {
-        if !coreachable[state_id] {
-            continue;
-        }
-        transition_count += state
-            .epsilons
-            .iter()
-            .filter(|(dst, weight)| !weight.is_empty() && coreachable[*dst as usize])
-            .count();
-        transition_count += state
-            .transitions
-            .values()
-            .map(|targets| {
-                targets
-                    .iter()
-                    .filter(|(dst, weight)| !weight.is_empty() && coreachable[*dst as usize])
-                    .count()
-            })
-            .sum::<usize>();
-    }
-
-    (state_count, transition_count)
 }
 
 fn prune_non_coreachable_states(nwa: &mut NWA) -> bool {
@@ -990,7 +885,7 @@ struct NodesByTokenizerState {
 }
 
 impl NodesByTokenizerState {
-    fn new(_num_states: usize) -> Self {
+    fn new() -> Self {
         Self {
             entries: FxHashMap::default(),
         }
@@ -1021,9 +916,14 @@ impl NodesByTokenizerState {
             .iter()
             .map(|(&state, nodes)| (state, nodes.as_slice()))
     }
+}
 
-    fn drain_pairs(&mut self) -> Vec<(TokenizerState, Vec<NwaState>)> {
-        std::mem::take(&mut self.entries).into_iter().collect()
+impl IntoIterator for NodesByTokenizerState {
+    type Item = (TokenizerState, Vec<NwaState>);
+    type IntoIter = <FxHashMap<TokenizerState, Vec<NwaState>> as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.into_iter()
     }
 }
 
@@ -1044,8 +944,7 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     future_leaf_weight_buffer: FxHashMap<(u32, TokenizerState, ColorId), Weight>,
     reachable_weight_cache: HashMap<usize, Weight>,
     pruned_weight_cache: HashMap<(usize, u32, TerminalID), Weight>,
-    leaf_weight_cache_raw: HashMap<LeafTokenIds, Weight>,
-    leaf_weight_cache_canonical: HashMap<LeafTokenIds, Weight>,
+    leaf_weight_cache: HashMap<LeafTokenIds, Weight>,
     transition_buffer: FxHashMap<(u32, i32, u32), Weight>,
     epsilon_buffer: FxHashMap<(u32, u32), Weight>,
     profile: TerminalDwaBuildProfile,
@@ -1092,24 +991,22 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         &mut self,
         tokenizer_state: TokenizerState,
     ) -> FutureTerminalColorGroups {
-        if let Some(groups) = self.future_terminal_color_groups.get(&tokenizer_state) {
-            return groups.clone();
-        }
-
-        let mut groups = BTreeMap::<ColorId, SmallVec<[TerminalID; 4]>>::new();
-        for terminal_id in self.tokenizer.possible_future_terminals_iter(tokenizer_state) {
-            if Some(terminal_id) == self.ignore_terminal {
-                continue;
-            }
-            groups
-                .entry(self.terminal_coloring.color_for(terminal_id))
-                .or_default()
-                .push(terminal_id);
-        }
-        let groups: FutureTerminalColorGroups = groups.into_iter().collect();
         self.future_terminal_color_groups
-            .insert(tokenizer_state, groups.clone());
-        groups
+            .entry(tokenizer_state)
+            .or_insert_with(|| {
+                let mut groups = BTreeMap::<ColorId, SmallVec<[TerminalID; 4]>>::new();
+                for terminal_id in self.tokenizer.possible_future_terminals_iter(tokenizer_state) {
+                    if Some(terminal_id) == self.ignore_terminal {
+                        continue;
+                    }
+                    groups
+                        .entry(self.terminal_coloring.color_for(terminal_id))
+                        .or_default()
+                        .push(terminal_id);
+                }
+                groups.into_iter().collect()
+            })
+            .clone()
     }
 
     fn future_terminals_for_color(
@@ -1135,28 +1032,6 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             .entry((source, internal_tsid, color))
             .or_default()
             .push(internal_token_id);
-    }
-
-    fn add_future_match_from_sources_by_color(
-        &mut self,
-        sources: &[u32],
-        internal_tsid: TokenizerState,
-        color: ColorId,
-        target: u32,
-        weight: &Weight,
-    ) {
-        if weight.is_empty() {
-            return;
-        }
-        debug_assert_eq!(target, self.leaf_state);
-
-        for &source in sources {
-            self.profile.future_terminal_additions += 1;
-            self.future_leaf_weight_buffer
-                .entry((source, internal_tsid, color))
-                .and_modify(|existing| *existing = existing.union(weight))
-                .or_insert_with(|| weight.clone());
-        }
     }
 
     fn add_future_leaf_token_from_sources(
@@ -1224,16 +1099,16 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
 
         let color_groups = self.future_terminal_color_groups_for_state(tokenizer_state);
         for (color, terminals) in color_groups {
-            if terminals.is_empty() {
+            if terminals.is_empty() || weight.is_empty() {
                 continue;
             }
-            self.add_future_match_from_sources_by_color(
-                sources,
-                tokenizer_state,
-                color,
-                self.leaf_state,
-                weight,
-            );
+            for &source in sources {
+                self.profile.future_terminal_additions += 1;
+                self.future_leaf_weight_buffer
+                    .entry((source, tokenizer_state, color))
+                    .and_modify(|existing| *existing = existing.union(weight))
+                    .or_insert_with(|| weight.clone());
+            }
         }
     }
 
@@ -1260,27 +1135,18 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         Weight::from_uniform(0..=self.num_tsids - 1, tokens)
     }
 
-    fn cached_leaf_weight(&mut self, token_ids: LeafTokenIds) -> (Weight, bool) {
-        if let Some(weight) = self.leaf_weight_cache_raw.get(&token_ids) {
-            return (weight.clone(), false);
+    fn cached_leaf_weight(&mut self, mut token_ids: LeafTokenIds) -> Weight {
+        token_ids.sort_unstable();
+        token_ids.dedup();
+
+        if let Some(weight) = self.leaf_weight_cache.get(&token_ids) {
+            return weight.clone();
         }
 
-        let mut canonical_token_ids = token_ids.clone();
-        canonical_token_ids.sort_unstable();
-        canonical_token_ids.dedup();
-
-        if let Some(weight) = self.leaf_weight_cache_canonical.get(&canonical_token_ids) {
-            let weight = weight.clone();
-            self.leaf_weight_cache_raw.insert(token_ids, weight.clone());
-            return (weight, false);
-        }
-
-        let tokens = RangeSetBlaze::from_iter(canonical_token_ids.iter().copied().map(|id| id..=id));
+        let tokens = RangeSetBlaze::from_iter(token_ids.iter().copied().map(|id| id..=id));
         let weight = Weight::from_uniform(0..=self.num_tsids - 1, tokens);
-        self.leaf_weight_cache_canonical
-            .insert(canonical_token_ids, weight.clone());
-        self.leaf_weight_cache_raw.insert(token_ids, weight.clone());
-        (weight, true)
+        self.leaf_weight_cache.insert(token_ids, weight.clone());
+        weight
     }
 
     fn continuation_weight_for_match(
@@ -1347,9 +1213,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         node: &VocabPrefixTreeNode,
         tokenizer_state: TokenizerState,
     ) -> bool {
-        let self_loop_bytes = if let Some(bytes) = self.self_loop_bytes.get(&tokenizer_state) {
-            bytes.clone()
-        } else {
+        let self_loop_bytes = self.self_loop_bytes.entry(tokenizer_state).or_insert_with(|| {
             let state = &self.tokenizer.dfa.states()[tokenizer_state as usize];
             let mut bytes = U8Set::empty();
             for (byte, &target) in state.transitions.iter() {
@@ -1357,10 +1221,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     bytes.insert(byte);
                 }
             }
-            self.self_loop_bytes.insert(tokenizer_state, bytes.clone());
             bytes
-        };
-        U8Set::from_words(*node.subtree_bytes()).is_subset(&self_loop_bytes)
+        });
+        U8Set::from_words(*node.subtree_bytes()).is_subset(self_loop_bytes)
     }
 
     fn emit_self_loop_leaf_only_subtree(
@@ -1392,13 +1255,15 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         target: u32,
         weight: &Weight,
     ) {
-        for &source in sources {
-            if self.ignore_terminal == Some(label) {
+        if self.ignore_terminal == Some(label) {
+            for &source in sources {
                 self.epsilon_buffer
                     .entry((source, target))
                     .and_modify(|existing| *existing = existing.union(weight))
                     .or_insert_with(|| weight.clone());
-            } else {
+            }
+        } else {
+            for &source in sources {
                 self.transition_buffer
                     .entry((source, label as i32, target))
                     .and_modify(|existing| *existing = existing.union(weight))
@@ -1495,7 +1360,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             for (label, mut entry) in entries {
                 let mut weight = entry.weight.take().unwrap_or_else(Weight::empty);
                 if !entry.token_ids.is_empty() {
-                    let (token_weight, _) = self.cached_leaf_weight(entry.token_ids);
+                    let token_weight = self.cached_leaf_weight(entry.token_ids);
                     weight = if weight.is_empty() {
                         token_weight
                     } else {
@@ -1523,9 +1388,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         node: &VocabPrefixTreeNode,
         assoc_by_state: &NodesByTokenizerState,
     ) {
-        let assoc_capacity = self.num_tsids as usize;
-        let mut recursive_nodes = NodesByTokenizerState::new(assoc_capacity);
-        let mut self_loop_only_nodes = NodesByTokenizerState::new(assoc_capacity);
+        let mut recursive_nodes = NodesByTokenizerState::new();
+        let mut self_loop_only_nodes = NodesByTokenizerState::new();
         for (tokenizer_state, source_nodes) in assoc_by_state.iter() {
             if self.can_skip_self_loop_subtree(node, tokenizer_state) {
                 self_loop_only_nodes.merge(tokenizer_state, source_nodes);
@@ -1543,88 +1407,101 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         }
 
         for (segment_bytes, child_node) in node.iter_children() {
-            // Token IDs in the trie are already internal (equivalence class) IDs.
-            let leaf_token_id = child_node.token_id() as u32;
-
-            let mut next_level_nodes = NodesByTokenizerState::new(assoc_capacity);
-            let mut pending_by_offset = BTreeMap::<usize, NodesByTokenizerState>::new();
-            pending_by_offset.insert(0, recursive_nodes.clone());
-
-            while let Some((offset, mut nodes_at_offset)) = pending_by_offset.pop_first() {
-                if offset == segment_bytes.len() {
-                    for (tokenizer_state, nwa_states) in nodes_at_offset.drain_pairs() {
-                        next_level_nodes.merge(tokenizer_state, &nwa_states);
-                    }
-                    continue;
-                }
-
-                for (tokenizer_state, source_nodes) in nodes_at_offset.drain_pairs() {
-                    let exec = self
-                        .tokenizer
-                        .execute_from_state(&segment_bytes[offset..], tokenizer_state);
-                    let end_state = exec.end_state;
-
-                    if let Some(end_state) = end_state {
-                        if child_node.has_token() {
-                            self.add_future_leaf_token_from_sources(
-                                &source_nodes,
-                                end_state,
-                                leaf_token_id,
-                            );
-                        }
-
-                        next_level_nodes.merge(end_state, &source_nodes);
-                    }
-
-                    for matched in exec.matches {
-                        let next_offset = offset + matched.width;
-
-                        if next_offset == segment_bytes.len() && child_node.has_token() {
-                            self.profile.match_transition_additions += source_nodes.len() as u64;
-                            self.add_leaf_token_from_sources(
-                                &source_nodes,
-                                matched.id,
-                                leaf_token_id,
-                            );
-                        }
-
-                        let Some(continuation_weight) = self.continuation_weight_for_match(
-                            child_node,
-                            leaf_token_id,
-                            matched.id,
-                            end_state,
-                            next_offset == segment_bytes.len(),
-                        ) else {
-                            continue;
-                        };
-                        if continuation_weight.is_empty() {
-                            continue;
-                        }
-
-                        let continuation_nodes = pending_by_offset
-                            .entry(next_offset)
-                            .or_insert_with(|| NodesByTokenizerState::new(assoc_capacity));
-                        let destination = ensure_continuation_state(
-                            continuation_nodes,
-                            self.tokenizer.initial_state_id(),
-                            self.nwa,
-                        );
-
-                        self.profile.match_transition_additions += source_nodes.len() as u64;
-                        self.add_match_from_sources(
-                            &source_nodes,
-                            matched.id,
-                            destination,
-                            &continuation_weight,
-                        );
-                    }
-                }
-            }
-
+            let next_level_nodes = self.process_child_segment(
+                segment_bytes,
+                child_node,
+                &recursive_nodes,
+            );
             if !next_level_nodes.is_empty() {
                 self.build_from_trie(child_node, &next_level_nodes);
             }
         }
+    }
+
+    fn process_child_segment(
+        &mut self,
+        segment_bytes: &[u8],
+        child_node: &VocabPrefixTreeNode,
+        initial_nodes: &NodesByTokenizerState,
+    ) -> NodesByTokenizerState {
+        // Token IDs in the trie are already internal (equivalence class) IDs.
+        let leaf_token_id = child_node.token_id() as u32;
+        let mut next_level_nodes = NodesByTokenizerState::new();
+        let mut pending_by_offset = BTreeMap::<usize, NodesByTokenizerState>::new();
+        pending_by_offset.insert(0, initial_nodes.clone());
+
+        while let Some((offset, nodes_at_offset)) = pending_by_offset.pop_first() {
+            if offset == segment_bytes.len() {
+                for (tokenizer_state, nwa_states) in nodes_at_offset {
+                    next_level_nodes.merge(tokenizer_state, &nwa_states);
+                }
+                continue;
+            }
+
+            for (tokenizer_state, source_nodes) in nodes_at_offset {
+                let exec = self
+                    .tokenizer
+                    .execute_from_state(&segment_bytes[offset..], tokenizer_state);
+                let end_state = exec.end_state;
+
+                if let Some(end_state) = end_state {
+                    if child_node.has_token() {
+                        self.add_future_leaf_token_from_sources(
+                            &source_nodes,
+                            end_state,
+                            leaf_token_id,
+                        );
+                    }
+
+                    next_level_nodes.merge(end_state, &source_nodes);
+                }
+
+                for matched in exec.matches {
+                    let next_offset = offset + matched.width;
+
+                    if next_offset == segment_bytes.len() && child_node.has_token() {
+                        self.profile.match_transition_additions += source_nodes.len() as u64;
+                        self.add_leaf_token_from_sources(
+                            &source_nodes,
+                            matched.id,
+                            leaf_token_id,
+                        );
+                    }
+
+                    let Some(continuation_weight) = self.continuation_weight_for_match(
+                        child_node,
+                        leaf_token_id,
+                        matched.id,
+                        end_state,
+                        next_offset == segment_bytes.len(),
+                    ) else {
+                        continue;
+                    };
+                    if continuation_weight.is_empty() {
+                        continue;
+                    }
+
+                    let continuation_nodes = pending_by_offset
+                        .entry(next_offset)
+                        .or_insert_with(NodesByTokenizerState::new);
+                    let destination = ensure_continuation_state(
+                        continuation_nodes,
+                        self.tokenizer.initial_state_id(),
+                        self.nwa,
+                    );
+
+                    self.profile.match_transition_additions += source_nodes.len() as u64;
+                    self.add_match_from_sources(
+                        &source_nodes,
+                        matched.id,
+                        destination,
+                        &continuation_weight,
+                    );
+                }
+            }
+        }
+
+        next_level_nodes
     }
 }
 
@@ -1670,7 +1547,7 @@ fn seed_root_nodes(
     start_state: u32,
     id_map: &InternalIdMap,
 ) -> NodesByTokenizerState {
-    let mut roots_by_tokenizer_state = NodesByTokenizerState::new(id_map.num_tsids() as usize);
+    let mut roots_by_tokenizer_state = NodesByTokenizerState::new();
 
     for internal_tsid in 0..id_map.num_tsids() {
         let root = nwa.add_state();
@@ -1705,16 +1582,6 @@ pub(crate) fn build_terminal_dwa(
     id_map: &InternalIdMap,
     ignore_terminal: Option<TerminalID>,
 ) -> DWA {
-    build_terminal_dwa_with_possible_matches(grammar, tokenizer, vocab, id_map, ignore_terminal).0
-}
-
-pub(crate) fn build_terminal_dwa_with_possible_matches(
-    grammar: &AnalyzedGrammar,
-    tokenizer: &Tokenizer,
-    vocab: &Vocab,
-    id_map: &InternalIdMap,
-    ignore_terminal: Option<TerminalID>,
-) -> (DWA, PossibleMatchesByState) {
     let terminal_coloring = TerminalColoring::identity(grammar.num_terminals as usize);
     build_terminal_dwa_with_possible_matches_and_coloring(
         grammar,
@@ -1725,29 +1592,10 @@ pub(crate) fn build_terminal_dwa_with_possible_matches(
         false,
         ignore_terminal,
     )
+    .0
 }
 
 pub(crate) fn build_terminal_dwa_with_possible_matches_and_coloring(
-    grammar: &AnalyzedGrammar,
-    tokenizer: &Tokenizer,
-    vocab: &Vocab,
-    id_map: &InternalIdMap,
-    terminal_coloring: &TerminalColoring,
-    use_terminal_coloring: bool,
-    ignore_terminal: Option<TerminalID>,
-) -> (DWA, PossibleMatchesByState) {
-    build_terminal_dwa_impl(
-        grammar,
-        tokenizer,
-        vocab,
-        id_map,
-        terminal_coloring,
-        use_terminal_coloring,
-        ignore_terminal,
-    )
-}
-
-fn build_terminal_dwa_impl(
     grammar: &AnalyzedGrammar,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -1820,8 +1668,7 @@ fn build_terminal_dwa_impl(
         future_leaf_weight_buffer: FxHashMap::default(),
         reachable_weight_cache: HashMap::new(),
         pruned_weight_cache: HashMap::new(),
-        leaf_weight_cache_raw: HashMap::new(),
-        leaf_weight_cache_canonical: HashMap::new(),
+        leaf_weight_cache: HashMap::new(),
         transition_buffer: FxHashMap::default(),
         epsilon_buffer: FxHashMap::default(),
         profile: TerminalDwaBuildProfile::default(),
@@ -1873,17 +1720,10 @@ fn build_terminal_dwa_impl(
     apply_disallowed_follow_constraints(&mut nwa, grammar);
     let disallowed_ms = disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let dedup_started_at = std::time::Instant::now();
-    deduplicate_roots(&mut nwa, start_state, id_map.num_tsids() as usize);
-    let dedup_ms = dedup_started_at.elapsed().as_secs_f64() * 1000.0;
-
+    // Prune non-co-reachable states (dead ends), then canonicalize
+    // (which deduplicates structurally identical states including roots).
     let coreachable_prune_started_at = std::time::Instant::now();
-    let coreachable_before_states = nwa.num_states() as usize;
-    let coreachable_before_transitions = nwa.num_transitions();
-    let coreachable_before = compute_coreachable_nwa(&nwa);
-    let (coreachable_before_count, coreachable_before_transition_count) =
-        count_coreachable_nwa_states(&nwa, &coreachable_before);
-    let coreachable_pruned = prune_non_coreachable_states(&mut nwa);
+    prune_non_coreachable_states(&mut nwa);
     let coreachable_prune_ms = coreachable_prune_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let canonicalize_started_at = std::time::Instant::now();
@@ -1892,14 +1732,9 @@ fn build_terminal_dwa_impl(
 
     if debug_profile {
         eprintln!(
-            "[glrmask/debug][terminal_dwa] coreachable_nwa before_states={} before_transitions={} coreachable_states={} coreachable_transitions={} after_states={} after_transitions={} pruned={}",
-            coreachable_before_states,
-            coreachable_before_transitions,
-            coreachable_before_count,
-            coreachable_before_transition_count,
+            "[glrmask/debug][terminal_dwa] after_cleanup nwa_states={} nwa_transitions={}",
             nwa.num_states(),
             nwa.num_transitions(),
-            coreachable_pruned,
         );
     }
 
@@ -1943,7 +1778,7 @@ fn build_terminal_dwa_impl(
             dwa.num_states(),
         );
         eprintln!(
-            "[glrmask/debug][terminal_dwa] setup_ms={:.3} seed_ms={:.3} build_trie_ms={:.3} possible_matches_ms={:.3} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} dedup_ms={:.3} coreachable_prune_ms={:.3} canonicalize_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
+            "[glrmask/debug][terminal_dwa] setup_ms={:.3} seed_ms={:.3} build_trie_ms={:.3} possible_matches_ms={:.3} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} coreachable_prune_ms={:.3} canonicalize_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
             setup_ms,
             seed_ms,
             build_trie_ms,
@@ -1951,7 +1786,6 @@ fn build_terminal_dwa_impl(
             always_allowed_ms,
             collapse_ms,
             disallowed_ms,
-            dedup_ms,
             coreachable_prune_ms,
             canonicalize_ms,
             determinize_ms,
