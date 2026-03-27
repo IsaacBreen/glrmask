@@ -1972,7 +1972,102 @@ fn build_terminal_dwa_impl(
         );
     }
 
+    if debug_profile {
+        emit_terminal_dwa_debug_dump(&dwa);
+    }
+
     (dwa, possible_matches_by_state)
+}
+
+fn emit_terminal_dwa_debug_dump(dwa: &DWA) {
+    let num_states = dwa.num_states() as usize;
+    let start_state = dwa.start_state as usize;
+    let mut incoming_counts = vec![0usize; num_states];
+    let mut outgoing_counts = vec![0usize; num_states];
+    let mut final_states = 0usize;
+    let mut self_loops = 0usize;
+    let mut transitions_to_start = 0usize;
+    let mut transitions_from_start = 0usize;
+    let mut transitions_from_start_to_start = 0usize;
+
+    for (from, state) in dwa.states.iter().enumerate() {
+        outgoing_counts[from] = state.transitions.len();
+        if state.final_weight.is_some() {
+            final_states += 1;
+        }
+        for (_, (to, _)) in &state.transitions {
+            let to = *to as usize;
+            if let Some(slot) = incoming_counts.get_mut(to) {
+                *slot += 1;
+            }
+            if to == from {
+                self_loops += 1;
+            }
+            if to == start_state {
+                transitions_to_start += 1;
+                if from == start_state {
+                    transitions_from_start_to_start += 1;
+                }
+            }
+        }
+        if from == start_state {
+            transitions_from_start = state.transitions.len();
+        }
+    }
+
+    eprintln!(
+        "[glrmask/debug][terminal_dwa][summary] states={} transitions={} start_state={} final_states={} transitions_from_start={} transitions_to_start={} transitions_to_start_from_non_start={} start_to_start={} self_loops={}",
+        num_states,
+        dwa.num_transitions(),
+        dwa.start_state,
+        final_states,
+        transitions_from_start,
+        transitions_to_start,
+        transitions_to_start.saturating_sub(transitions_from_start_to_start),
+        transitions_from_start_to_start,
+        self_loops,
+    );
+
+    for (state_id, state) in dwa.states.iter().enumerate() {
+        let incoming = incoming_counts[state_id];
+        let outgoing = outgoing_counts[state_id];
+        let to_start = state
+            .transitions
+            .values()
+            .filter(|(to, _)| *to as usize == start_state)
+            .count();
+        let self_loop_count = state
+            .transitions
+            .values()
+            .filter(|(to, _)| *to as usize == state_id)
+            .count();
+        let final_weight = state
+            .final_weight
+            .as_ref()
+            .map(|weight| format!("{weight}"))
+            .unwrap_or_else(|| "none".to_string());
+        let start_mark = if state_id == start_state {
+            " [START]"
+        } else {
+            ""
+        };
+
+        eprintln!(
+            "[glrmask/debug][terminal_dwa][state] id={}{} incoming={} outgoing={} to_start={} self_loops={} final={}",
+            state_id,
+            start_mark,
+            incoming,
+            outgoing,
+            to_start,
+            self_loop_count,
+            final_weight,
+        );
+
+        for (label, (target, weight)) in &state.transitions {
+            eprintln!("    {label} -> State {target}");
+            eprintln!("      weight: {weight}");
+        }
+    }
 }
 
 #[cfg(test)]
