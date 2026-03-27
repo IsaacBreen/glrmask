@@ -1807,10 +1807,41 @@ pub(crate) fn build_terminal_dwa_with_possible_matches_and_coloring(
     }
 
     if debug_profile {
+        emit_terminal_dwa_token_map(&dwa, vocab, id_map);
         emit_terminal_dwa_debug_dump(&dwa);
     }
 
     (dwa, possible_matches_by_state)
+}
+
+fn emit_terminal_dwa_token_map(dwa: &DWA, vocab: &Vocab, id_map: &InternalIdMap) {
+    let internal_vocab = internal_vocab_entries(vocab, id_map);
+    let internal_bytes: std::collections::BTreeMap<u32, &[u8]> =
+        internal_vocab.iter().map(|(id, bytes)| (*id, bytes.as_slice())).collect();
+    let mut referenced_tokens = std::collections::BTreeSet::new();
+    for state in &dwa.states {
+        for (_, (_, weight)) in &state.transitions {
+            for tid in weight.token_union().iter() {
+                referenced_tokens.insert(tid);
+            }
+        }
+        if let Some(fw) = &state.final_weight {
+            for tid in fw.token_union().iter() {
+                referenced_tokens.insert(tid);
+            }
+        }
+    }
+    for tid in &referenced_tokens {
+        if let Some(bytes) = internal_bytes.get(tid) {
+            let originals = id_map.vocab_tokens.internal_to_originals.get(*tid as usize)
+                .map(|v| v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","))
+                .unwrap_or_else(|| "?".into());
+            eprintln!(
+                "[glrmask/debug][terminal_dwa][token_map] internal={} originals=[{}] bytes={:?}",
+                tid, originals, String::from_utf8_lossy(bytes)
+            );
+        }
+    }
 }
 
 fn emit_terminal_dwa_debug_dump(dwa: &DWA) {
