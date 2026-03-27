@@ -366,11 +366,55 @@ fn canonicalize_acyclic_nwa(nwa: &mut NWA) {
     nwa.start_states = start_states;
 }
 
-fn prune_unreachable_states(nwa: &mut NWA) -> bool {
-    if nwa.states.is_empty() {
+/// Remove NWA states where `retain[state_id]` is false, remapping all
+/// remaining state references. When `drop_empty_weights` is true, also
+/// drop edges whose weight is empty. Returns true if any states were removed.
+fn retain_nwa_states(nwa: &mut NWA, retain: &[bool], drop_empty_weights: bool) -> bool {
+    if retain.iter().all(|&f| f) {
         return false;
     }
 
+    let mut remap = vec![u32::MAX; nwa.states.len()];
+    let mut new_states = Vec::with_capacity(retain.iter().filter(|&&f| f).count());
+
+    for (old_id, state) in nwa.states.iter().enumerate() {
+        if retain[old_id] {
+            remap[old_id] = new_states.len() as u32;
+            new_states.push(state.clone());
+        }
+    }
+
+    for state in &mut new_states {
+        state.epsilons.retain(|(target, weight)| {
+            retain[*target as usize] && (!drop_empty_weights || !weight.is_empty())
+        });
+        for (target, _) in &mut state.epsilons {
+            *target = remap[*target as usize];
+        }
+
+        for targets in state.transitions.values_mut() {
+            targets.retain(|(target, weight)| {
+                retain[*target as usize] && (!drop_empty_weights || !weight.is_empty())
+            });
+            for (target, _) in targets.iter_mut() {
+                *target = remap[*target as usize];
+            }
+        }
+        state.transitions.retain(|_, targets| !targets.is_empty());
+    }
+
+    nwa.start_states = nwa
+        .start_states
+        .iter()
+        .copied()
+        .filter(|state_id| retain[*state_id as usize])
+        .map(|state_id| remap[state_id as usize])
+        .collect();
+    nwa.states = new_states;
+    true
+}
+
+fn compute_forward_reachable(nwa: &NWA) -> Vec<bool> {
     let mut reachable = vec![false; nwa.states.len()];
     let mut queue = VecDeque::new();
 
@@ -403,44 +447,15 @@ fn prune_unreachable_states(nwa: &mut NWA) -> bool {
         }
     }
 
-    if reachable.iter().all(|flag| *flag) {
+    reachable
+}
+
+fn prune_unreachable_states(nwa: &mut NWA) -> bool {
+    if nwa.states.is_empty() {
         return false;
     }
-
-    let mut remap = vec![u32::MAX; nwa.states.len()];
-    let mut new_states = Vec::with_capacity(reachable.iter().filter(|flag| **flag).count());
-
-    for (old_id, state) in nwa.states.iter().enumerate() {
-        if reachable[old_id] {
-            remap[old_id] = new_states.len() as u32;
-            new_states.push(state.clone());
-        }
-    }
-
-    for state in &mut new_states {
-        state.epsilons.retain(|(target, _)| reachable[*target as usize]);
-        for (target, _) in &mut state.epsilons {
-            *target = remap[*target as usize];
-        }
-
-        for targets in state.transitions.values_mut() {
-            targets.retain(|(target, _)| reachable[*target as usize]);
-            for (target, _) in targets.iter_mut() {
-                *target = remap[*target as usize];
-            }
-        }
-        state.transitions.retain(|_, targets| !targets.is_empty());
-    }
-
-    nwa.start_states = nwa
-        .start_states
-        .iter()
-        .copied()
-        .filter(|state_id| reachable[*state_id as usize])
-        .map(|state_id| remap[state_id as usize])
-        .collect();
-    nwa.states = new_states;
-    true
+    let reachable = compute_forward_reachable(nwa);
+    retain_nwa_states(nwa, &reachable, false)
 }
 
 fn topological_order(nwa: &NWA) -> Vec<usize> {
@@ -532,46 +547,8 @@ fn prune_non_coreachable_states(nwa: &mut NWA) -> bool {
     if nwa.states.is_empty() {
         return false;
     }
-
     let coreachable = compute_coreachable_nwa(nwa);
-    if coreachable.iter().all(|&flag| flag) {
-        return false;
-    }
-
-    let mut remap = vec![u32::MAX; nwa.states.len()];
-    let mut new_states = Vec::with_capacity(coreachable.iter().filter(|&&flag| flag).count());
-
-    for (old_id, state) in nwa.states.iter().enumerate() {
-        if coreachable[old_id] {
-            remap[old_id] = new_states.len() as u32;
-            new_states.push(state.clone());
-        }
-    }
-
-    for state in &mut new_states {
-        state.epsilons.retain(|(target, weight)| !weight.is_empty() && coreachable[*target as usize]);
-        for (target, _) in &mut state.epsilons {
-            *target = remap[*target as usize];
-        }
-
-        for targets in state.transitions.values_mut() {
-            targets.retain(|(target, weight)| !weight.is_empty() && coreachable[*target as usize]);
-            for (target, _) in targets.iter_mut() {
-                *target = remap[*target as usize];
-            }
-        }
-        state.transitions.retain(|_, targets| !targets.is_empty());
-    }
-
-    nwa.start_states = nwa
-        .start_states
-        .iter()
-        .copied()
-        .filter(|state_id| coreachable[*state_id as usize])
-        .map(|state_id| remap[state_id as usize])
-        .collect();
-    nwa.states = new_states;
-    true
+    retain_nwa_states(nwa, &coreachable, true)
 }
 
 fn propagate_collapse_context(
@@ -862,16 +839,6 @@ fn subtract_disallowed_dfa(nwa: &NWA, right: &crate::automata::unweighted::dfa::
     result
 }
 
-fn token_weight_all_tsids(num_tsids: u32, internal_token_id: u32) -> Weight {
-    if num_tsids == 0 {
-        return Weight::empty();
-    }
-    Weight::from_uniform(
-        0..=num_tsids - 1,
-        RangeSetBlaze::from_iter([internal_token_id..=internal_token_id]),
-    )
-}
-
 fn all_token_weight(internal_tsid: u32, max_token_id: u32) -> Weight {
     Weight::from_token_set_for_tsid(
         internal_tsid,
@@ -895,12 +862,8 @@ impl NodesByTokenizerState {
         self.entries.is_empty()
     }
 
-    fn slot_for(&mut self, state: TokenizerState) -> &mut Vec<NwaState> {
-        self.entries.entry(state).or_default()
-    }
-
     fn merge(&mut self, state: TokenizerState, nodes: &[NwaState]) {
-        self.slot_for(state).extend_from_slice(nodes);
+        self.entries.entry(state).or_default().extend_from_slice(nodes);
     }
 
     fn first(&self, state: TokenizerState) -> Option<NwaState> {
@@ -908,7 +871,7 @@ impl NodesByTokenizerState {
     }
 
     fn push_one(&mut self, state: TokenizerState, node: NwaState) {
-        self.slot_for(state).push(node);
+        self.entries.entry(state).or_default().push(node);
     }
 
     fn iter(&self) -> impl Iterator<Item = (TokenizerState, &[NwaState])> {
@@ -940,8 +903,7 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     use_terminal_coloring: bool,
     self_loop_bytes: FxHashMap<TokenizerState, U8Set>,
     leaf_token_ids_buffer: Vec<Vec<LeafTokenIds>>,
-    future_leaf_token_ids_buffer: FxHashMap<(u32, TokenizerState, ColorId), LeafTokenIds>,
-    future_leaf_weight_buffer: FxHashMap<(u32, TokenizerState, ColorId), Weight>,
+    future_leaf_buffer: FxHashMap<(u32, TokenizerState, ColorId), BufferedLeafTransition>,
     reachable_weight_cache: HashMap<usize, Weight>,
     pruned_weight_cache: HashMap<(usize, u32, TerminalID), Weight>,
     leaf_weight_cache: HashMap<LeafTokenIds, Weight>,
@@ -1028,9 +990,10 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         internal_token_id: u32,
     ) {
         self.profile.future_terminal_additions += 1;
-        self.future_leaf_token_ids_buffer
+        self.future_leaf_buffer
             .entry((source, internal_tsid, color))
             .or_default()
+            .token_ids
             .push(internal_token_id);
     }
 
@@ -1104,10 +1067,14 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             }
             for &source in sources {
                 self.profile.future_terminal_additions += 1;
-                self.future_leaf_weight_buffer
+                let entry = self.future_leaf_buffer
                     .entry((source, tokenizer_state, color))
-                    .and_modify(|existing| *existing = existing.union(weight))
-                    .or_insert_with(|| weight.clone());
+                    .or_default();
+                if let Some(existing) = &mut entry.weight {
+                    *existing = existing.union(weight);
+                } else {
+                    entry.weight = Some(weight.clone());
+                }
             }
         }
     }
@@ -1198,7 +1165,14 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         internal_token_id: u32,
     ) {
         if self.ignore_terminal == Some(label) {
-            let weight = token_weight_all_tsids(self.num_tsids, internal_token_id);
+            let weight = if self.num_tsids == 0 {
+                Weight::empty()
+            } else {
+                Weight::from_uniform(
+                    0..=self.num_tsids - 1,
+                    RangeSetBlaze::from_iter([internal_token_id..=internal_token_id]),
+                )
+            };
             self.add_match_from_sources(sources, label, self.leaf_state, &weight);
             return;
         }
@@ -1292,36 +1266,26 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             }
         }
 
-        for ((source, tokenizer_state, color), token_ids) in
-            std::mem::take(&mut self.future_leaf_token_ids_buffer)
+        for ((source, tokenizer_state, color), buffered) in
+            std::mem::take(&mut self.future_leaf_buffer)
         {
-            if token_ids.is_empty() {
+            if buffered.token_ids.is_empty() && buffered.weight.as_ref().map_or(true, |w| w.is_empty()) {
                 continue;
             }
             let terminals = self.future_terminals_for_color(tokenizer_state, color);
             for terminal_id in terminals {
-                leaf_transition_buckets[source as usize]
-                    .entry(terminal_id as i32)
-                    .or_default()
-                    .token_ids
-                    .extend_from_slice(&token_ids);
-            }
-        }
-
-        for ((from, tokenizer_state, color), weight) in
-            std::mem::take(&mut self.future_leaf_weight_buffer)
-        {
-            if weight.is_empty() {
-                continue;
-            }
-            for terminal_id in self.future_terminals_for_color(tokenizer_state, color) {
-                let entry = leaf_transition_buckets[from as usize]
+                let entry = leaf_transition_buckets[source as usize]
                     .entry(terminal_id as i32)
                     .or_default();
-                if let Some(existing) = &mut entry.weight {
-                    *existing = existing.union(&weight);
-                } else {
-                    entry.weight = Some(weight.clone());
+                if !buffered.token_ids.is_empty() {
+                    entry.token_ids.extend_from_slice(&buffered.token_ids);
+                }
+                if let Some(w) = &buffered.weight {
+                    if let Some(existing) = &mut entry.weight {
+                        *existing = existing.union(w);
+                    } else {
+                        entry.weight = Some(w.clone());
+                    }
                 }
             }
         }
@@ -1664,8 +1628,7 @@ pub(crate) fn build_terminal_dwa_with_possible_matches_and_coloring(
         use_terminal_coloring,
         self_loop_bytes: FxHashMap::default(),
         leaf_token_ids_buffer: Vec::new(),
-        future_leaf_token_ids_buffer: FxHashMap::default(),
-        future_leaf_weight_buffer: FxHashMap::default(),
+        future_leaf_buffer: FxHashMap::default(),
         reachable_weight_cache: HashMap::new(),
         pruned_weight_cache: HashMap::new(),
         leaf_weight_cache: HashMap::new(),
