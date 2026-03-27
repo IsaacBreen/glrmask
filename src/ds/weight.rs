@@ -646,6 +646,79 @@ where
     builder.finish()
 }
 
+/// Direct multi-way union that avoids creating O(N) intermediate Weight objects.
+/// Uses a sweep-line approach: collects all range entries, sorts boundary points,
+/// and computes the union of active token sets at each boundary interval.
+fn union_all_multiway(weights: &[&Weight]) -> Weight {
+    // Collect all (start, end, tokens) entries from all weights
+    let total_entry_hint: usize = weights.iter().map(|w| w.0.ranges().count()).sum();
+    let mut all_entries: Vec<WeightRangeEntry> = Vec::with_capacity(total_entry_hint);
+    for weight in weights {
+        for (range, tokens) in weight.0.range_values() {
+            all_entries.push(WeightRangeEntry {
+                start: *range.start(),
+                end: *range.end(),
+                tokens: Arc::clone(tokens),
+            });
+        }
+    }
+
+    if all_entries.is_empty() {
+        return Weight::empty();
+    }
+
+    // Compute sorted unique boundaries
+    let mut boundaries = Vec::with_capacity(all_entries.len() * 2);
+    for entry in &all_entries {
+        boundaries.push(u64::from(entry.start));
+        boundaries.push(u64::from(entry.end) + 1);
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    if boundaries.len() < 2 {
+        return Weight::empty();
+    }
+
+    // Sort entries by start for efficient scanning
+    all_entries.sort_unstable_by_key(|e| e.start);
+
+    let mut builder = CompactRangeBuilder::new();
+    let mut scan_start = 0usize;
+
+    for window in boundaries.windows(2) {
+        let interval_start = window[0] as u32;
+        let interval_end = (window[1] - 1) as u32;
+
+        // Advance scan_start past entries that end before this interval
+        while scan_start < all_entries.len() && all_entries[scan_start].end < interval_start {
+            scan_start += 1;
+        }
+
+        // Collect all token sets active in this interval
+        let mut merged_tokens: Option<SharedTokenSet> = None;
+        for entry in &all_entries[scan_start..] {
+            if entry.start > interval_start {
+                break;
+            }
+            if entry.start <= interval_start && entry.end >= interval_end {
+                merged_tokens = Some(match merged_tokens {
+                    Some(existing) => shared_token_union(&existing, &entry.tokens),
+                    None => Arc::clone(&entry.tokens),
+                });
+            }
+        }
+
+        if let Some(tokens) = merged_tokens {
+            builder.push(interval_start, interval_end, tokens);
+        } else {
+            builder.flush();
+        }
+    }
+
+    builder.finish()
+}
+
 fn union_all_single_tsid_entries(weights: &[&Weight]) -> Option<Weight> {
     let mut per_tsid: BTreeMap<u32, SharedTokenSet> = BTreeMap::new();
 
@@ -948,8 +1021,25 @@ impl Weight {
             _ => {}
         }
 
+        // Dedup by Arc pointer: union(a, a) = a, so identical weights are redundant.
+        // Only worthwhile when there are enough inputs that duplicates are likely
+        // and the sort cost is amortized by skipping expensive union operations.
+        if meaningful.len() > 4 {
+            meaningful.sort_unstable_by_key(|w| w.ptr_key());
+            meaningful.dedup_by_key(|w| w.ptr_key());
+            if meaningful.len() == 1 {
+                return meaningful[0].clone();
+            }
+        }
+
         if let Some(result) = union_all_single_tsid_entries(&meaningful) {
             return result;
+        }
+
+        // For many inputs, use direct multiway sweep to avoid O(N) intermediate
+        // Weight allocations, interner locks, and memoization overhead.
+        if meaningful.len() > 4 {
+            return union_all_multiway(&meaningful);
         }
 
         let mut iter = meaningful.into_iter();
