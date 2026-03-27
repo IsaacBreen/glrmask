@@ -645,13 +645,15 @@ fn test_conversion_enum() {
     let named = named_grammar_from_schema(schema);
     assert!(!named.rules.is_empty());
 
-    let has_red = named.rules.iter().any(|r| contains_literal(&r.expr, b"\"red\""));
-    let has_green = named.rules.iter().any(|r| contains_literal(&r.expr, b"\"green\""));
-    let has_blue = named.rules.iter().any(|r| contains_literal(&r.expr, b"\"blue\""));
+    // After opening-quote separation, string literals are split:
+    // literal_expr(b"\"") + literal_expr(b"red\"") etc.
+    let has_red = named.rules.iter().any(|r| contains_literal(&r.expr, b"red\""));
+    let has_green = named.rules.iter().any(|r| contains_literal(&r.expr, b"green\""));
+    let has_blue = named.rules.iter().any(|r| contains_literal(&r.expr, b"blue\""));
 
-    assert!(has_red, "Grammar should contain literal for \"red\"");
-    assert!(has_green, "Grammar should contain literal for \"green\"");
-    assert!(has_blue, "Grammar should contain literal for \"blue\"");
+    assert!(has_red, "Grammar should contain literal body for red");
+    assert!(has_green, "Grammar should contain literal body for green");
+    assert!(has_blue, "Grammar should contain literal body for blue");
 }
 
 /// Adapted from the original `$ref` conversion regression.
@@ -688,12 +690,12 @@ fn test_conversion_merges_property_key_and_colon() {
     let named = named_grammar_from_schema(schema);
 
     assert!(
-        named.rules.iter().any(|r| r.name == "JSON_KEY_COLON"),
-        "CFA-style lowering should include a shared JSON_KEY_COLON rule"
+        named.rules.iter().any(|r| r.name == "JSON_KEY_COLON_BODY"),
+        "CFA-style lowering should include a shared JSON_KEY_COLON_BODY terminal rule"
     );
     assert!(
-        named.rules.iter().any(|r| contains_literal(&r.expr, b"\"name\": ")),
-        "Known object properties should use merged key+colon literals"
+        named.rules.iter().any(|r| contains_literal(&r.expr, b"name\": ")),
+        "Known object properties should use merged key+colon body literals (without opening quote)"
     );
 }
 
@@ -715,12 +717,12 @@ fn test_conversion_supports_definitions_ref() {
     let named = named_grammar_from_schema(schema);
 
     assert!(
-        named.rules.iter().any(|r| contains_literal(&r.expr, b"\"x\": ")),
-        "Resolved definitions ref should contribute merged literal for x"
+        named.rules.iter().any(|r| contains_literal(&r.expr, b"x\": ")),
+        "Resolved definitions ref should contribute merged body literal for x"
     );
     assert!(
-        named.rules.iter().any(|r| contains_literal(&r.expr, b"\"y\": ")),
-        "Resolved definitions ref should contribute merged literal for y"
+        named.rules.iter().any(|r| contains_literal(&r.expr, b"y\": ")),
+        "Resolved definitions ref should contribute merged body literal for y"
     );
 }
 
@@ -748,12 +750,12 @@ fn test_conversion_allof_merges_object_properties() {
     let named = named_grammar_from_schema(schema);
 
     assert!(
-        named.rules.iter().any(|r| contains_literal(&r.expr, b"\"a\": ")),
-        "allOf merge should preserve property a"
+        named.rules.iter().any(|r| contains_literal(&r.expr, b"a\": ")),
+        "allOf merge should preserve property a body literal"
     );
     assert!(
-        named.rules.iter().any(|r| contains_literal(&r.expr, b"\"b\": ")),
-        "allOf merge should preserve property b"
+        named.rules.iter().any(|r| contains_literal(&r.expr, b"b\": ")),
+        "allOf merge should preserve property b body literal"
     );
 }
 

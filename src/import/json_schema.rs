@@ -14,7 +14,8 @@ const JSON_VALUE_RULE: &str = "json_value";
 const JSON_OBJECT_RULE: &str = "json_object";
 const JSON_ARRAY_RULE: &str = "json_array";
 const JSON_KV_RULE: &str = "json_kv";
-const JSON_STRING_RULE: &str = "JSON_STRING";
+const JSON_STRING_RULE: &str = "json_string";
+const JSON_STRING_BODY_RULE: &str = "JSON_STRING_BODY";
 const JSON_STRING_CHAR_RULE: &str = "JSON_STRING_CHAR";
 const JSON_INTEGER_RULE: &str = "JSON_INTEGER";
 const JSON_NUMBER_RULE: &str = "JSON_NUMBER";
@@ -22,13 +23,14 @@ const JSON_NONNEG_INTEGER_RULE: &str = "JSON_NONNEG_INTEGER";
 const JSON_NONNEG_NUMBER_RULE: &str = "JSON_NONNEG_NUMBER";
 const JSON_BOOL_RULE: &str = "JSON_BOOL";
 const JSON_NULL_RULE: &str = "JSON_NULL";
-const JSON_KEY_COLON_RULE: &str = "JSON_KEY_COLON";
+const JSON_KEY_COLON_RULE: &str = "json_key_colon";
+const JSON_KEY_COLON_BODY_RULE: &str = "JSON_KEY_COLON_BODY";
 const JSON_STRING_REPEAT_CHUNK: usize = 1024;
 
-const JSON_STRING_REGEX: &str =
-    r#""([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*""#;
-const JSON_KEY_COLON_REGEX: &str =
-    r#""([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*": "#;
+const JSON_STRING_BODY_REGEX: &str =
+    r#"([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*""#;
+const JSON_KEY_COLON_BODY_REGEX: &str =
+    r#"([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*": "#;
 const JSON_STRING_CHAR_PATTERN: &str = r#"[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}"#;
 const JSON_NUMBER_NONINTEGER_REGEX: &str =
     r#"-?(0|[1-9][0-9]*)(\.[0-9]+([eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+)"#;
@@ -964,22 +966,34 @@ fn jsonify_regex_dot(pattern: &str) -> String {
 
 fn json_wrapped_pattern(pattern: &str) -> GrammarExpr {
     let inner = json_search_pattern(pattern);
-    regex_expr(format!(r#""(?:{})""#, inner))
+    sequence_or_single(vec![
+        literal_expr(b"\""),
+        regex_expr(format!(r#"(?:{})""#, inner)),
+    ])
 }
 
 fn json_wrapped_pattern_bounded(pattern: &str, max_tail: usize) -> GrammarExpr {
     let inner = json_search_pattern_bounded(pattern, max_tail);
-    regex_expr(format!(r#""(?:{})""#, inner))
+    sequence_or_single(vec![
+        literal_expr(b"\""),
+        regex_expr(format!(r#"(?:{})""#, inner)),
+    ])
 }
 
 fn json_wrapped_fullmatch_pattern(pattern: &str) -> GrammarExpr {
     let inner = jsonify_regex_dot(pattern);
-    regex_expr(format!(r#""(?:{})""#, inner))
+    sequence_or_single(vec![
+        literal_expr(b"\""),
+        regex_expr(format!(r#"(?:{})""#, inner)),
+    ])
 }
 
 fn json_wrapped_key_colon_pattern(pattern: &str) -> GrammarExpr {
     let inner = json_search_pattern(pattern);
-    regex_expr(format!(r#""(?:{})": "#, inner))
+    sequence_or_single(vec![
+        literal_expr(b"\""),
+        regex_expr(format!(r#"(?:{})": "#, inner)),
+    ])
 }
 
 fn quoted_expr(inner: GrammarExpr) -> GrammarExpr {
@@ -1145,7 +1159,16 @@ fn json_value_literal_bytes(value: &Value) -> Vec<u8> {
 }
 
 fn json_value_literal_expr(value: &Value) -> GrammarExpr {
-    literal_expr(&json_value_literal_bytes(value))
+    let bytes = json_value_literal_bytes(value);
+    if value.is_string() && bytes.len() >= 2 && bytes[0] == b'"' {
+        // Split opening quote from string literal body+closing quote
+        sequence_or_single(vec![
+            literal_expr(b"\""),
+            literal_expr(&bytes[1..]),
+        ])
+    } else {
+        literal_expr(&bytes)
+    }
 }
 
 fn expr_key(expr: &GrammarExpr) -> String {
@@ -1777,6 +1800,13 @@ impl<'a> SchemaCtx<'a> {
         GrammarExpr::Ref(JSON_KEY_COLON_RULE.into())
     }
 
+    /// Full key-colon expression including the opening quote, for use in
+    /// DFA-level operations (Exclude, DFA building) where a terminal-compilable
+    /// expression is needed.
+    fn json_key_colon_full_expr() -> GrammarExpr {
+        regex_expr(format!(r#""{}"#, JSON_KEY_COLON_BODY_REGEX))
+    }
+
     fn json_integer_ref(&self) -> GrammarExpr {
         GrammarExpr::Ref(JSON_INTEGER_RULE.into())
     }
@@ -1799,7 +1829,11 @@ impl<'a> SchemaCtx<'a> {
 
     fn ensure_base_rules(&mut self) {
         self.insert_rule(JSON_STRING_CHAR_RULE, regex_expr(JSON_STRING_CHAR_PATTERN));
-        self.insert_rule(JSON_STRING_RULE, regex_expr(JSON_STRING_REGEX));
+        self.insert_rule(JSON_STRING_BODY_RULE, regex_expr(JSON_STRING_BODY_REGEX));
+        self.insert_rule(JSON_STRING_RULE, sequence_or_single(vec![
+            literal_expr(b"\""),
+            GrammarExpr::Ref(JSON_STRING_BODY_RULE.into()),
+        ]));
         self.insert_rule(JSON_INTEGER_RULE, regex_expr(r#"-?(0|[1-9][0-9]*)"#));
         self.insert_rule(JSON_NUMBER_RULE, regex_expr(JSON_NUMBER_NONINTEGER_REGEX));
         self.insert_rule(JSON_NONNEG_INTEGER_RULE, regex_expr(r#"(0|[1-9][0-9]*)"#));
@@ -1809,7 +1843,11 @@ impl<'a> SchemaCtx<'a> {
             choice_or_single(vec![literal_expr(b"true"), literal_expr(b"false")]),
         );
         self.insert_rule(JSON_NULL_RULE, literal_expr(b"null"));
-        self.insert_rule(JSON_KEY_COLON_RULE, regex_expr(JSON_KEY_COLON_REGEX));
+        self.insert_rule(JSON_KEY_COLON_BODY_RULE, regex_expr(JSON_KEY_COLON_BODY_REGEX));
+        self.insert_rule(JSON_KEY_COLON_RULE, sequence_or_single(vec![
+            literal_expr(b"\""),
+            GrammarExpr::Ref(JSON_KEY_COLON_BODY_RULE.into()),
+        ]));
         self.insert_rule(
             JSON_KV_RULE,
             sequence_or_single(vec![self.json_key_colon_ref(), self.json_value_ref()]),
@@ -2691,14 +2729,11 @@ impl<'a> SchemaCtx<'a> {
             }
         };
 
-        Ok(self.extract_terminal_rule(
-            sequence_or_single(vec![
-                literal_expr(b"\""),
-                bounded_body,
-                literal_expr(b"\""),
-            ]),
+        let body = self.extract_terminal_rule(
+            sequence_or_single(vec![bounded_body, literal_expr(b"\"")]),
             "JSON_STRING_BOUNDED",
-        ))
+        );
+        Ok(sequence_or_single(vec![literal_expr(b"\""), body]))
     }
 
     fn build_bounded_string_from_unit_regex(
@@ -2733,42 +2768,44 @@ impl<'a> SchemaCtx<'a> {
             }
         };
 
-        self.extract_terminal_rule(
-            sequence_or_single(vec![
-                literal_expr(b"\""),
-                bounded_body,
-                literal_expr(b"\""),
-            ]),
+        let body = self.extract_terminal_rule(
+            sequence_or_single(vec![bounded_body, literal_expr(b"\"")]),
             "JSON_STRING_BOUNDED_PATTERN",
-        )
+        );
+        sequence_or_single(vec![literal_expr(b"\""), body])
     }
 
     fn build_format_string_expr(&mut self, format_name: &str) -> Result<GrammarExpr, GlrMaskError> {
-        let expr = match format_name {
-            "date" => quoted_expr(json_date_body_expr()),
-            "time" => quoted_expr(json_time_body_expr()),
-            "date-time" => quoted_expr(json_date_time_body_expr()),
+        match format_name {
+            "date" | "time" | "date-time" => {
+                let body_inner = match format_name {
+                    "date" => json_date_body_expr(),
+                    "time" => json_time_body_expr(),
+                    _ => json_date_time_body_expr(),
+                };
+                let body = self.extract_terminal_rule(
+                    sequence_or_single(vec![body_inner, literal_expr(b"\"")]),
+                    "JSON_FORMAT_STRING",
+                );
+                Ok(sequence_or_single(vec![literal_expr(b"\""), body]))
+            }
             "hostname" => {
                 let label = self.extract_terminal_rule(
                     regex_expr(json_hostname_label_pattern()),
                     "JSON_FORMAT_HOSTNAME_LABEL",
                 );
-                quoted_expr(sequence_or_single(vec![
+                Ok(quoted_expr(sequence_or_single(vec![
                     label.clone(),
                     GrammarExpr::Repeat(Box::new(sequence_or_single(vec![
                         literal_expr(b"."),
                         label,
                     ]))),
-                ]))
+                ])))
             }
             _ => json_format_pattern(format_name)
                 .map(json_wrapped_fullmatch_pattern)
-                .ok_or_else(|| GlrMaskError::GrammarParse(format!("Unknown format: {format_name}")))?,
-        };
-        Ok(match format_name {
-            "hostname" => expr,
-            _ => self.extract_terminal_rule(expr, "JSON_FORMAT_STRING"),
-        })
+                .ok_or_else(|| GlrMaskError::GrammarParse(format!("Unknown format: {format_name}"))),
+        }
     }
 
     fn json_literal(&self, value: &Value) -> GrammarExpr {
@@ -2778,7 +2815,11 @@ impl<'a> SchemaCtx<'a> {
     fn json_key_colon_literal(&self, text: &str) -> GrammarExpr {
         let mut bytes = json_string_literal_bytes(text);
         bytes.extend_from_slice(JSON_KEY_SEPARATOR);
-        literal_expr(&bytes)
+        // Split opening quote into separate literal; rest is body+colon
+        sequence_or_single(vec![
+            literal_expr(b"\""),
+            literal_expr(&bytes[1..]),
+        ])
     }
 
     fn json_item_separator_expr(&self) -> GrammarExpr {
@@ -2957,7 +2998,7 @@ impl<'a> SchemaCtx<'a> {
             let inner = json_search_pattern(Self::property_name_pattern(property_names)?);
             format!(r#""(?:{})": "#, inner)
         } else {
-            JSON_KEY_COLON_REGEX.to_string()
+            format!(r#""{}"#, JSON_KEY_COLON_BODY_REGEX)
         };
         Ok(build_regex(&[parse_regex(&pattern, true)]).dfa)
     }
@@ -3244,7 +3285,7 @@ impl<'a> SchemaCtx<'a> {
                     "JSON_SCOPED_KEY_COLON",
                 )
             } else {
-                self.json_key_colon_ref()
+                Self::json_key_colon_full_expr()
             };
             return self.build_mixed_pattern_named_object_expr(
                 &matched_property_names,
@@ -3306,7 +3347,7 @@ impl<'a> SchemaCtx<'a> {
             let extra_value_expr = self.convert_schema(&schema)?;
             let ck_prefix = format!("{}_CK", base_name.to_uppercase());
             let extra_key_expr = self.build_excluding_key_colon_expr(
-                self.json_key_colon_ref(),
+                Self::json_key_colon_full_expr(),
                 Vec::new(),
                 &format!("{ck_prefix}_KEY_COLON"),
             );
@@ -4649,13 +4690,20 @@ mod tests {
         let schema: Value = serde_json::from_str(r#"{"type": "string", "minLength": 1, "maxLength": 5}"#).unwrap();
         let grammar = schema_to_named_grammar(&schema).unwrap();
         let start_rule = grammar.rules.iter().find(|rule| rule.name == "start").unwrap();
-        match &start_rule.expr {
-            GrammarExpr::Ref(rule_name) => {
-                let target = grammar.rules.iter().find(|rule| rule.name == *rule_name).unwrap();
-                assert!(target.is_terminal, "expected bounded string start to reference a terminal rule");
+        // After opening-quote separation, the start rule is a sequence:
+        // [literal_expr(b"\""), Ref(JSON_STRING_BOUNDED_xxx)]
+        // Verify the body terminal exists in the sequence.
+        fn has_terminal_ref(expr: &GrammarExpr, grammar: &NamedGrammar) -> bool {
+            match expr {
+                GrammarExpr::Ref(name) => {
+                    grammar.rules.iter().any(|r| r.name == *name && r.is_terminal)
+                }
+                GrammarExpr::Sequence(parts) => parts.iter().any(|p| has_terminal_ref(p, grammar)),
+                _ => false,
             }
-            other => panic!("expected bounded string start to be a terminal ref, got {other:?}"),
         }
+        assert!(has_terminal_ref(&start_rule.expr, &grammar),
+            "expected bounded string to contain a terminal ref for the body");
     }
 
     #[test]
@@ -4942,7 +4990,9 @@ mod tests {
             "additionalProperties": {"type": "string"}
         }"#).unwrap();
         let grammar = schema_to_named_grammar(&schema).unwrap();
-        assert!(named_grammar_has_literal(&grammar, b"\"opacity\": "));
+        // After opening-quote separation, the key literal is split:
+        // literal_expr(b"\"") + literal_expr(b"opacity\": ")
+        assert!(named_grammar_has_literal(&grammar, b"opacity\": "));
         assert!(!named_grammar_has_split_separator(&grammar, b":", b" "));
     }
 
