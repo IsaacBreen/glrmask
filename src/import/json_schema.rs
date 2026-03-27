@@ -964,36 +964,116 @@ fn jsonify_regex_dot(pattern: &str) -> String {
     out
 }
 
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off"))
+        .unwrap_or(false)
+}
+
+fn split_close_quote_colon_enabled() -> bool {
+    env_flag("GLRMASK_SPLIT_CLOSE_QUOTE_COLON")
+}
+
+fn no_open_quote_split() -> bool {
+    env_flag("GLRMASK_NO_OPEN_QUOTE_SPLIT")
+}
+
+fn split_close_quote() -> bool {
+    env_flag("GLRMASK_SPLIT_CLOSE_QUOTE")
+}
+
+fn split_key_colon_suffix_enabled() -> bool {
+    env_flag("GLRMASK_SPLIT_KEY_COLON_SUFFIX")
+}
+
 fn json_wrapped_pattern(pattern: &str) -> GrammarExpr {
     let inner = json_search_pattern(pattern);
-    sequence_or_single(vec![
-        literal_expr(b"\""),
-        regex_expr(format!(r#"(?:{})""#, inner)),
-    ])
+    let open_split = !no_open_quote_split();
+    let close_split = split_close_quote();
+    match (open_split, close_split) {
+        (false, false) => regex_expr(format!(r#""(?:{})""#, inner)),
+        (false, true) => sequence_or_single(vec![
+            regex_expr(format!(r#""(?:{})"#, inner)),
+            literal_expr(b"\""),
+        ]),
+        (true, false) => sequence_or_single(vec![
+            literal_expr(b"\""),
+            regex_expr(format!(r#"(?:{})""#, inner)),
+        ]),
+        (true, true) => sequence_or_single(vec![
+            literal_expr(b"\""),
+            regex_expr(format!(r#"(?:{})"#, inner)),
+            literal_expr(b"\""),
+        ]),
+    }
 }
 
 fn json_wrapped_pattern_bounded(pattern: &str, max_tail: usize) -> GrammarExpr {
     let inner = json_search_pattern_bounded(pattern, max_tail);
-    sequence_or_single(vec![
-        literal_expr(b"\""),
-        regex_expr(format!(r#"(?:{})""#, inner)),
-    ])
+    let open_split = !no_open_quote_split();
+    let close_split = split_close_quote();
+    match (open_split, close_split) {
+        (false, false) => regex_expr(format!(r#""(?:{})""#, inner)),
+        (false, true) => sequence_or_single(vec![
+            regex_expr(format!(r#""(?:{})"#, inner)),
+            literal_expr(b"\""),
+        ]),
+        (true, false) => sequence_or_single(vec![
+            literal_expr(b"\""),
+            regex_expr(format!(r#"(?:{})""#, inner)),
+        ]),
+        (true, true) => sequence_or_single(vec![
+            literal_expr(b"\""),
+            regex_expr(format!(r#"(?:{})"#, inner)),
+            literal_expr(b"\""),
+        ]),
+    }
 }
 
 fn json_wrapped_fullmatch_pattern(pattern: &str) -> GrammarExpr {
     let inner = jsonify_regex_dot(pattern);
-    sequence_or_single(vec![
-        literal_expr(b"\""),
-        regex_expr(format!(r#"(?:{})""#, inner)),
-    ])
+    let open_split = !no_open_quote_split();
+    let close_split = split_close_quote();
+    match (open_split, close_split) {
+        (false, false) => regex_expr(format!(r#""(?:{})""#, inner)),
+        (false, true) => sequence_or_single(vec![
+            regex_expr(format!(r#""(?:{})"#, inner)),
+            literal_expr(b"\""),
+        ]),
+        (true, false) => sequence_or_single(vec![
+            literal_expr(b"\""),
+            regex_expr(format!(r#"(?:{})""#, inner)),
+        ]),
+        (true, true) => sequence_or_single(vec![
+            literal_expr(b"\""),
+            regex_expr(format!(r#"(?:{})"#, inner)),
+            literal_expr(b"\""),
+        ]),
+    }
 }
 
 fn json_wrapped_key_colon_pattern(pattern: &str) -> GrammarExpr {
     let inner = json_search_pattern(pattern);
-    sequence_or_single(vec![
-        literal_expr(b"\""),
-        regex_expr(format!(r#"(?:{})": "#, inner)),
-    ])
+    if split_key_colon_suffix_enabled() {
+        // Config D: keep opening quote with body, split closing ": "
+        sequence_or_single(vec![
+            regex_expr(format!(r#""(?:{})"#, inner)),
+            literal_expr(b"\": "),
+        ])
+    } else if no_open_quote_split() {
+        regex_expr(format!(r#""(?:{})\": "#, inner))
+    } else if split_close_quote_colon_enabled() {
+        sequence_or_single(vec![
+            literal_expr(b"\""),
+            regex_expr(format!(r#"(?:{})"#, inner)),
+            literal_expr(b"\": "),
+        ])
+    } else {
+        sequence_or_single(vec![
+            literal_expr(b"\""),
+            regex_expr(format!(r#"(?:{})\": "#, inner)),
+        ])
+    }
 }
 
 fn quoted_expr(inner: GrammarExpr) -> GrammarExpr {
@@ -1161,11 +1241,29 @@ fn json_value_literal_bytes(value: &Value) -> Vec<u8> {
 fn json_value_literal_expr(value: &Value) -> GrammarExpr {
     let bytes = json_value_literal_bytes(value);
     if value.is_string() && bytes.len() >= 2 && bytes[0] == b'"' {
-        // Split opening quote from string literal body+closing quote
-        sequence_or_single(vec![
-            literal_expr(b"\""),
-            literal_expr(&bytes[1..]),
-        ])
+        let open_split = !no_open_quote_split();
+        let close_split = split_close_quote();
+        match (open_split, close_split) {
+            (false, false) => literal_expr(&bytes),
+            (false, true) if bytes.last() == Some(&b'"') => sequence_or_single(vec![
+                literal_expr(&bytes[..bytes.len() - 1]),
+                literal_expr(b"\""),
+            ]),
+            (false, true) => literal_expr(&bytes),
+            (true, false) => sequence_or_single(vec![
+                literal_expr(b"\""),
+                literal_expr(&bytes[1..]),
+            ]),
+            (true, true) if bytes.last() == Some(&b'"') => sequence_or_single(vec![
+                literal_expr(b"\""),
+                literal_expr(&bytes[1..bytes.len() - 1]),
+                literal_expr(b"\""),
+            ]),
+            (true, true) => sequence_or_single(vec![
+                literal_expr(b"\""),
+                literal_expr(&bytes[1..]),
+            ]),
+        }
     } else {
         literal_expr(&bytes)
     }
@@ -1793,6 +1891,536 @@ impl<'a> SchemaCtx<'a> {
             }
             None => parts.push(repeat_expr(self.json_string_char_ref(), 0, None)),
         }
+        sequence_or_single(parts)
+    }
+
+    /// Like `build_split_json_string_body`, but fuses a suffix (e.g. closing `"`)
+    /// into the last terminal chunk so it doesn't become a standalone terminal.
+    fn build_split_json_string_body_with_suffix(
+        &mut self,
+        min_len: usize,
+        max_len: Option<usize>,
+        suffix: GrammarExpr,
+    ) -> GrammarExpr {
+        match max_len {
+            Some(max_len) if max_len == min_len => {
+                if min_len == 0 {
+                    return suffix;
+                }
+                self.build_split_json_string_exact_expr_with_suffix(min_len, suffix)
+            }
+            Some(max_len) => {
+                let mut parts = Vec::new();
+                if min_len > 0 {
+                    parts.push(self.build_split_json_string_exact_expr(min_len));
+                }
+                if max_len > min_len {
+                    parts.push(self.build_split_json_string_upto_expr_with_suffix(
+                        max_len - min_len,
+                        suffix,
+                    ));
+                }
+                sequence_or_single(parts)
+            }
+            None => {
+                let mut parts = Vec::new();
+                if min_len > 0 {
+                    parts.push(self.build_split_json_string_exact_expr(min_len));
+                }
+                let repeat_close = self.extract_terminal_rule(
+                    sequence_or_single(vec![
+                        GrammarExpr::Repeat(Box::new(self.json_string_char_ref())),
+                        suffix,
+                    ]),
+                    "JSON_STRING_REPEAT_CLOSE",
+                );
+                parts.push(repeat_close);
+                sequence_or_single(parts)
+            }
+        }
+    }
+
+    /// Like `build_split_json_string_upto_expr`, but the last leaf terminal
+    /// in each choice alternative includes a fused suffix.
+    fn build_split_json_string_upto_expr_with_suffix(
+        &mut self,
+        max: usize,
+        suffix: GrammarExpr,
+    ) -> GrammarExpr {
+        if max == 0 {
+            return suffix;
+        }
+        if max <= JSON_STRING_REPEAT_CHUNK {
+            let upto = self.json_string_char_upto_ref(max);
+            return self.extract_terminal_rule(
+                sequence_or_single(vec![upto, suffix]),
+                "JSON_STRING_CHAR_UPTO_CLOSE",
+            );
+        }
+
+        let full_chunks = max / JSON_STRING_REPEAT_CHUNK;
+        let remainder = max % JSON_STRING_REPEAT_CHUNK;
+        let mut options = Vec::new();
+
+        let upto_chunk_close = {
+            let upto = self.json_string_char_upto_ref(JSON_STRING_REPEAT_CHUNK);
+            self.extract_terminal_rule(
+                sequence_or_single(vec![upto, suffix.clone()]),
+                "JSON_STRING_CHAR_UPTO_CLOSE",
+            )
+        };
+
+        if full_chunks == 1 {
+            options.push(upto_chunk_close);
+        } else {
+            options.push(sequence_or_single(vec![
+                repeat_expr(
+                    self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK),
+                    0,
+                    Some(full_chunks - 1),
+                ),
+                upto_chunk_close,
+            ]));
+        }
+
+        if remainder > 0 {
+            let upto_rem_close = {
+                let upto = self.json_string_char_upto_ref(remainder);
+                self.extract_terminal_rule(
+                    sequence_or_single(vec![upto, suffix]),
+                    "JSON_STRING_CHAR_UPTO_CLOSE",
+                )
+            };
+            options.push(sequence_or_single(vec![
+                self.build_split_json_string_exact_expr(full_chunks * JSON_STRING_REPEAT_CHUNK),
+                upto_rem_close,
+            ]));
+        }
+
+        choice_or_single(options)
+    }
+
+    /// Like `build_split_json_string_exact_expr`, but the last terminal chunk
+    /// includes a fused suffix.
+    fn build_split_json_string_exact_expr_with_suffix(
+        &mut self,
+        count: usize,
+        suffix: GrammarExpr,
+    ) -> GrammarExpr {
+        if count == 0 {
+            return suffix;
+        }
+        if count <= JSON_STRING_REPEAT_CHUNK {
+            let exact = self.json_string_char_exact_ref(count);
+            return self.extract_terminal_rule(
+                sequence_or_single(vec![exact, suffix]),
+                "JSON_STRING_CHAR_EXACT_CLOSE",
+            );
+        }
+
+        let full_chunks = count / JSON_STRING_REPEAT_CHUNK;
+        let remainder = count % JSON_STRING_REPEAT_CHUNK;
+        let mut parts = Vec::new();
+
+        if remainder > 0 {
+            if full_chunks == 1 {
+                parts.push(self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK));
+            } else {
+                parts.push(repeat_expr(
+                    self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK),
+                    full_chunks,
+                    Some(full_chunks),
+                ));
+            }
+            let exact_rem = self.json_string_char_exact_ref(remainder);
+            parts.push(self.extract_terminal_rule(
+                sequence_or_single(vec![exact_rem, suffix]),
+                "JSON_STRING_CHAR_EXACT_CLOSE",
+            ));
+        } else {
+            if full_chunks == 1 {
+                let exact = self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK);
+                return self.extract_terminal_rule(
+                    sequence_or_single(vec![exact, suffix]),
+                    "JSON_STRING_CHAR_EXACT_CLOSE",
+                );
+            }
+            parts.push(repeat_expr(
+                self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK),
+                full_chunks - 1,
+                Some(full_chunks - 1),
+            ));
+            let exact_last = self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK);
+            parts.push(self.extract_terminal_rule(
+                sequence_or_single(vec![exact_last, suffix]),
+                "JSON_STRING_CHAR_EXACT_CLOSE",
+            ));
+        }
+
+        sequence_or_single(parts)
+    }
+
+    /// Like `build_split_json_string_exact_expr`, but fuses a prefix with the
+    /// first terminal-sized chunk (≤ 1024 chars).
+    fn build_split_json_string_exact_expr_with_prefix(
+        &mut self,
+        count: usize,
+        prefix: GrammarExpr,
+    ) -> GrammarExpr {
+        if count == 0 {
+            return prefix;
+        }
+        if count <= JSON_STRING_REPEAT_CHUNK {
+            let exact = self.json_string_char_exact_ref(count);
+            return self.extract_terminal_rule(
+                sequence_or_single(vec![prefix, exact]),
+                "JSON_STRING_CHAR_EXACT_OPEN",
+            );
+        }
+
+        let full_chunks = count / JSON_STRING_REPEAT_CHUNK;
+        let remainder = count % JSON_STRING_REPEAT_CHUNK;
+
+        let first_exact = self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK);
+        let first_open = self.extract_terminal_rule(
+            sequence_or_single(vec![prefix, first_exact]),
+            "JSON_STRING_CHAR_EXACT_OPEN",
+        );
+
+        let mut parts = vec![first_open];
+        if full_chunks > 1 {
+            parts.push(repeat_expr(
+                self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK),
+                full_chunks - 1,
+                Some(full_chunks - 1),
+            ));
+        }
+        if remainder > 0 {
+            parts.push(self.json_string_char_exact_ref(remainder));
+        }
+
+        sequence_or_single(parts)
+    }
+
+    /// Like `build_split_json_string_upto_expr`, but fuses a prefix with the
+    /// first terminal-sized chunk in each choice alternative.
+    fn build_split_json_string_upto_expr_with_prefix(
+        &mut self,
+        max: usize,
+        prefix: GrammarExpr,
+    ) -> GrammarExpr {
+        if max == 0 {
+            return prefix;
+        }
+        if max <= JSON_STRING_REPEAT_CHUNK {
+            let upto = self.json_string_char_upto_ref(max);
+            return self.extract_terminal_rule(
+                sequence_or_single(vec![prefix, upto]),
+                "JSON_STRING_CHAR_UPTO_OPEN",
+            );
+        }
+
+        let full_chunks = max / JSON_STRING_REPEAT_CHUNK;
+        let remainder = max % JSON_STRING_REPEAT_CHUNK;
+        let mut options = Vec::new();
+
+        // Subcase: 0 exact reps → just upto_1024 with prefix
+        let upto_chunk = self.json_string_char_upto_ref(JSON_STRING_REPEAT_CHUNK);
+        let upto_chunk_open = self.extract_terminal_rule(
+            sequence_or_single(vec![prefix.clone(), upto_chunk]),
+            "JSON_STRING_CHAR_UPTO_OPEN",
+        );
+
+        if full_chunks == 1 {
+            options.push(upto_chunk_open);
+        } else {
+            // 0 reps → prefix + upto_1024
+            options.push(upto_chunk_open);
+            // 1+ reps → exact_1024_open + Repeat(exact_1024, 0, N-2) + upto_1024
+            let exact_chunk = self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK);
+            let exact_open = self.extract_terminal_rule(
+                sequence_or_single(vec![prefix.clone(), exact_chunk]),
+                "JSON_STRING_CHAR_EXACT_OPEN",
+            );
+            let mut subparts = vec![exact_open];
+            if full_chunks > 2 {
+                subparts.push(repeat_expr(
+                    self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK),
+                    0,
+                    Some(full_chunks - 2),
+                ));
+            }
+            subparts.push(self.json_string_char_upto_ref(JSON_STRING_REPEAT_CHUNK));
+            options.push(sequence_or_single(subparts));
+        }
+
+        if remainder > 0 {
+            let exact_chunk = self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK);
+            let exact_open = self.extract_terminal_rule(
+                sequence_or_single(vec![prefix.clone(), exact_chunk]),
+                "JSON_STRING_CHAR_EXACT_OPEN",
+            );
+            let mut subparts = vec![exact_open];
+            if full_chunks > 1 {
+                subparts.push(repeat_expr(
+                    self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK),
+                    full_chunks - 1,
+                    Some(full_chunks - 1),
+                ));
+            }
+            subparts.push(self.json_string_char_upto_ref(remainder));
+            options.push(sequence_or_single(subparts));
+        }
+
+        choice_or_single(options)
+    }
+
+    /// Like `build_split_json_string_upto_expr`, but fuses both a prefix with
+    /// the first chunk and a suffix with the last chunk in each alternative.
+    fn build_split_json_string_upto_expr_with_prefix_and_suffix(
+        &mut self,
+        max: usize,
+        prefix: GrammarExpr,
+        suffix: GrammarExpr,
+    ) -> GrammarExpr {
+        if max == 0 {
+            return sequence_or_single(vec![prefix, suffix]);
+        }
+        if max <= JSON_STRING_REPEAT_CHUNK {
+            let upto = self.json_string_char_upto_ref(max);
+            return self.extract_terminal_rule(
+                sequence_or_single(vec![prefix, upto, suffix]),
+                "JSON_STRING_CHAR_UPTO_WRAPPED",
+            );
+        }
+
+        let full_chunks = max / JSON_STRING_REPEAT_CHUNK;
+        let remainder = max % JSON_STRING_REPEAT_CHUNK;
+        let mut options = Vec::new();
+
+        // Subcase: 0 exact reps → prefix + upto_1024 + suffix
+        let upto_chunk = self.json_string_char_upto_ref(JSON_STRING_REPEAT_CHUNK);
+        let upto_wrapped = self.extract_terminal_rule(
+            sequence_or_single(vec![prefix.clone(), upto_chunk, suffix.clone()]),
+            "JSON_STRING_CHAR_UPTO_WRAPPED",
+        );
+
+        if full_chunks == 1 {
+            options.push(upto_wrapped);
+        } else {
+            options.push(upto_wrapped);
+
+            // 1+ reps → exact_open + middle + upto_close
+            let exact_chunk = self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK);
+            let exact_open = self.extract_terminal_rule(
+                sequence_or_single(vec![prefix.clone(), exact_chunk]),
+                "JSON_STRING_CHAR_EXACT_OPEN",
+            );
+            let upto_chunk2 = self.json_string_char_upto_ref(JSON_STRING_REPEAT_CHUNK);
+            let upto_close = self.extract_terminal_rule(
+                sequence_or_single(vec![upto_chunk2, suffix.clone()]),
+                "JSON_STRING_CHAR_UPTO_CLOSE",
+            );
+            let mut subparts = vec![exact_open];
+            if full_chunks > 2 {
+                subparts.push(repeat_expr(
+                    self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK),
+                    0,
+                    Some(full_chunks - 2),
+                ));
+            }
+            subparts.push(upto_close);
+            options.push(sequence_or_single(subparts));
+        }
+
+        if remainder > 0 {
+            let exact_chunk = self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK);
+            let exact_open = self.extract_terminal_rule(
+                sequence_or_single(vec![prefix.clone(), exact_chunk]),
+                "JSON_STRING_CHAR_EXACT_OPEN",
+            );
+            let upto_rem = self.json_string_char_upto_ref(remainder);
+            let upto_rem_close = self.extract_terminal_rule(
+                sequence_or_single(vec![upto_rem, suffix.clone()]),
+                "JSON_STRING_CHAR_UPTO_CLOSE",
+            );
+            let mut subparts = vec![exact_open];
+            if full_chunks > 1 {
+                subparts.push(repeat_expr(
+                    self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK),
+                    full_chunks - 1,
+                    Some(full_chunks - 1),
+                ));
+            }
+            subparts.push(upto_rem_close);
+            options.push(sequence_or_single(subparts));
+        }
+
+        choice_or_single(options)
+    }
+
+    /// General split body builder with optional prefix/suffix fusion.
+    fn build_split_json_string_body_wrapped(
+        &mut self,
+        min_len: usize,
+        max_len: Option<usize>,
+        prefix: Option<GrammarExpr>,
+        suffix: Option<GrammarExpr>,
+    ) -> GrammarExpr {
+        let has_exact = min_len > 0;
+        let has_tail = match max_len {
+            Some(ml) if ml > min_len => true,
+            None => true,
+            _ => false,
+        };
+
+        match (has_exact, has_tail) {
+            (true, true) => {
+                // Two parts: exact + tail. Prefix on exact, suffix on tail.
+                let exact = if let Some(p) = prefix {
+                    self.build_split_json_string_exact_expr_with_prefix(min_len, p)
+                } else {
+                    self.build_split_json_string_exact_expr(min_len)
+                };
+
+                let tail = match max_len {
+                    Some(ml) => {
+                        if let Some(s) = suffix {
+                            self.build_split_json_string_upto_expr_with_suffix(ml - min_len, s)
+                        } else {
+                            self.build_split_json_string_upto_expr(ml - min_len)
+                        }
+                    }
+                    None => {
+                        if let Some(s) = suffix {
+                            self.extract_terminal_rule(
+                                sequence_or_single(vec![
+                                    GrammarExpr::Repeat(Box::new(self.json_string_char_ref())),
+                                    s,
+                                ]),
+                                "JSON_STRING_REPEAT_CLOSE",
+                            )
+                        } else {
+                            repeat_expr(self.json_string_char_ref(), 0, None)
+                        }
+                    }
+                };
+                sequence_or_single(vec![exact, tail])
+            }
+            (true, false) => {
+                // Exact only (min == max). Both prefix and suffix go here.
+                match (prefix, suffix) {
+                    (Some(p), Some(s)) => {
+                        self.build_split_json_string_exact_expr_with_prefix_and_suffix(min_len, p, s)
+                    }
+                    (Some(p), None) => {
+                        self.build_split_json_string_exact_expr_with_prefix(min_len, p)
+                    }
+                    (None, Some(s)) => {
+                        self.build_split_json_string_exact_expr_with_suffix(min_len, s)
+                    }
+                    (None, None) => {
+                        self.build_split_json_string_exact_expr(min_len)
+                    }
+                }
+            }
+            (false, true) => {
+                // Tail only (min == 0). Both prefix and suffix go on tail.
+                match max_len {
+                    Some(ml) => match (prefix, suffix) {
+                        (Some(p), Some(s)) => {
+                            self.build_split_json_string_upto_expr_with_prefix_and_suffix(ml, p, s)
+                        }
+                        (Some(p), None) => {
+                            self.build_split_json_string_upto_expr_with_prefix(ml, p)
+                        }
+                        (None, Some(s)) => {
+                            self.build_split_json_string_upto_expr_with_suffix(ml, s)
+                        }
+                        (None, None) => {
+                            self.build_split_json_string_upto_expr(ml)
+                        }
+                    },
+                    None => {
+                        let mut inner = Vec::new();
+                        if let Some(p) = prefix { inner.push(p); }
+                        inner.push(GrammarExpr::Repeat(Box::new(self.json_string_char_ref())));
+                        if let Some(s) = suffix { inner.push(s); }
+                        self.extract_terminal_rule(
+                            sequence_or_single(inner),
+                            "JSON_STRING_REPEAT_WRAPPED",
+                        )
+                    }
+                }
+            }
+            (false, false) => {
+                // min=0, max=0: body is empty
+                let mut inner = Vec::new();
+                if let Some(p) = prefix { inner.push(p); }
+                if let Some(s) = suffix { inner.push(s); }
+                if inner.is_empty() { empty_expr() } else { sequence_or_single(inner) }
+            }
+        }
+    }
+
+    /// Like `build_split_json_string_exact_expr`, but fuses both a prefix with
+    /// the first chunk and a suffix with the last chunk.
+    fn build_split_json_string_exact_expr_with_prefix_and_suffix(
+        &mut self,
+        count: usize,
+        prefix: GrammarExpr,
+        suffix: GrammarExpr,
+    ) -> GrammarExpr {
+        if count == 0 {
+            return sequence_or_single(vec![prefix, suffix]);
+        }
+        if count <= JSON_STRING_REPEAT_CHUNK {
+            let exact = self.json_string_char_exact_ref(count);
+            return self.extract_terminal_rule(
+                sequence_or_single(vec![prefix, exact, suffix]),
+                "JSON_STRING_CHAR_EXACT_WRAPPED",
+            );
+        }
+
+        let full_chunks = count / JSON_STRING_REPEAT_CHUNK;
+        let remainder = count % JSON_STRING_REPEAT_CHUNK;
+
+        let first_exact = self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK);
+        let first_open = self.extract_terminal_rule(
+            sequence_or_single(vec![prefix, first_exact]),
+            "JSON_STRING_CHAR_EXACT_OPEN",
+        );
+
+        let mut parts = vec![first_open];
+
+        if remainder > 0 {
+            if full_chunks > 1 {
+                parts.push(repeat_expr(
+                    self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK),
+                    full_chunks - 1,
+                    Some(full_chunks - 1),
+                ));
+            }
+            let last_exact = self.json_string_char_exact_ref(remainder);
+            parts.push(self.extract_terminal_rule(
+                sequence_or_single(vec![last_exact, suffix]),
+                "JSON_STRING_CHAR_EXACT_CLOSE",
+            ));
+        } else {
+            if full_chunks > 2 {
+                parts.push(repeat_expr(
+                    self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK),
+                    full_chunks - 2,
+                    Some(full_chunks - 2),
+                ));
+            }
+            let last_exact = self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK);
+            parts.push(self.extract_terminal_rule(
+                sequence_or_single(vec![last_exact, suffix]),
+                "JSON_STRING_CHAR_EXACT_CLOSE",
+            ));
+        }
+
         sequence_or_single(parts)
     }
 
@@ -2697,13 +3325,23 @@ impl<'a> SchemaCtx<'a> {
         }
 
         if self.should_split_bounded_string(min_len, max_len) {
-            let split_body = self.build_split_json_string_body(min_len, max_len);
+            let open_split = !no_open_quote_split();
+            let close_split = split_close_quote();
+            let prefix = if open_split { None } else { Some(literal_expr(b"\"")) };
+            let suffix = if close_split { None } else { Some(literal_expr(b"\"")) };
+            let body = self.build_split_json_string_body_wrapped(min_len, max_len, prefix, suffix);
+
+            let mut result_parts = Vec::new();
+            if open_split {
+                result_parts.push(literal_expr(b"\""));
+            }
+            result_parts.push(body);
+            if close_split {
+                result_parts.push(literal_expr(b"\""));
+            }
+
             return Ok(self.extract_rule(
-                sequence_or_single(vec![
-                    literal_expr(b"\""),
-                    split_body,
-                    literal_expr(b"\""),
-                ]),
+                sequence_or_single(result_parts),
                 "json_string_bounded_split",
             ));
         }
@@ -2729,11 +3367,23 @@ impl<'a> SchemaCtx<'a> {
             }
         };
 
+        let open_split = !no_open_quote_split();
+        let close_split = split_close_quote();
         let body = self.extract_terminal_rule(
-            sequence_or_single(vec![bounded_body, literal_expr(b"\"")]),
+            match (open_split, close_split) {
+                (false, false) => sequence_or_single(vec![literal_expr(b"\""), bounded_body, literal_expr(b"\"")]),
+                (false, true) => sequence_or_single(vec![literal_expr(b"\""), bounded_body]),
+                (true, false) => sequence_or_single(vec![bounded_body, literal_expr(b"\"")]),
+                (true, true) => bounded_body,
+            },
             "JSON_STRING_BOUNDED",
         );
-        Ok(sequence_or_single(vec![literal_expr(b"\""), body]))
+        match (open_split, close_split) {
+            (false, false) => Ok(body),
+            (false, true) => Ok(sequence_or_single(vec![body, literal_expr(b"\"")])),
+            (true, false) => Ok(sequence_or_single(vec![literal_expr(b"\""), body])),
+            (true, true) => Ok(sequence_or_single(vec![literal_expr(b"\""), body, literal_expr(b"\"")])),
+        }
     }
 
     fn build_bounded_string_from_unit_regex(
@@ -2768,11 +3418,23 @@ impl<'a> SchemaCtx<'a> {
             }
         };
 
+        let open_split = !no_open_quote_split();
+        let close_split = split_close_quote();
         let body = self.extract_terminal_rule(
-            sequence_or_single(vec![bounded_body, literal_expr(b"\"")]),
+            match (open_split, close_split) {
+                (false, false) => sequence_or_single(vec![literal_expr(b"\""), bounded_body, literal_expr(b"\"")]),
+                (false, true) => sequence_or_single(vec![literal_expr(b"\""), bounded_body]),
+                (true, false) => sequence_or_single(vec![bounded_body, literal_expr(b"\"")]),
+                (true, true) => bounded_body,
+            },
             "JSON_STRING_BOUNDED_PATTERN",
         );
-        sequence_or_single(vec![literal_expr(b"\""), body])
+        match (open_split, close_split) {
+            (false, false) => body,
+            (false, true) => sequence_or_single(vec![body, literal_expr(b"\"")]),
+            (true, false) => sequence_or_single(vec![literal_expr(b"\""), body]),
+            (true, true) => sequence_or_single(vec![literal_expr(b"\""), body, literal_expr(b"\"")]),
+        }
     }
 
     fn build_format_string_expr(&mut self, format_name: &str) -> Result<GrammarExpr, GlrMaskError> {
@@ -2783,11 +3445,23 @@ impl<'a> SchemaCtx<'a> {
                     "time" => json_time_body_expr(),
                     _ => json_date_time_body_expr(),
                 };
+                let open_split = !no_open_quote_split();
+                let close_split = split_close_quote();
                 let body = self.extract_terminal_rule(
-                    sequence_or_single(vec![body_inner, literal_expr(b"\"")]),
+                    match (open_split, close_split) {
+                        (false, false) => sequence_or_single(vec![literal_expr(b"\""), body_inner, literal_expr(b"\"")]),
+                        (false, true) => sequence_or_single(vec![literal_expr(b"\""), body_inner]),
+                        (true, false) => sequence_or_single(vec![body_inner, literal_expr(b"\"")]),
+                        (true, true) => body_inner,
+                    },
                     "JSON_FORMAT_STRING",
                 );
-                Ok(sequence_or_single(vec![literal_expr(b"\""), body]))
+                match (open_split, close_split) {
+                    (false, false) => Ok(body),
+                    (false, true) => Ok(sequence_or_single(vec![body, literal_expr(b"\"")])),
+                    (true, false) => Ok(sequence_or_single(vec![literal_expr(b"\""), body])),
+                    (true, true) => Ok(sequence_or_single(vec![literal_expr(b"\""), body, literal_expr(b"\"")])),
+                }
             }
             "hostname" => {
                 let label = self.extract_terminal_rule(
@@ -2815,11 +3489,31 @@ impl<'a> SchemaCtx<'a> {
     fn json_key_colon_literal(&self, text: &str) -> GrammarExpr {
         let mut bytes = json_string_literal_bytes(text);
         bytes.extend_from_slice(JSON_KEY_SEPARATOR);
-        // Split opening quote into separate literal; rest is body+colon
-        sequence_or_single(vec![
-            literal_expr(b"\""),
-            literal_expr(&bytes[1..]),
-        ])
+        if split_key_colon_suffix_enabled() {
+            // Config D: keep opening quote with body, split closing ": "
+            let key_body = json_string_literal_bytes(text);
+            sequence_or_single(vec![
+                literal_expr(&key_body[..key_body.len() - 1]),
+                literal_expr(b"\": "),
+            ])
+        } else if no_open_quote_split() {
+            // No split at all — single terminal
+            literal_expr(&bytes)
+        } else if split_close_quote_colon_enabled() {
+            // Split opening quote, key body, and closing quote+colon separately
+            let key_body = json_string_literal_bytes(text);
+            sequence_or_single(vec![
+                literal_expr(b"\""),
+                literal_expr(&key_body[1..key_body.len() - 1]),
+                literal_expr(b"\": "),
+            ])
+        } else {
+            // Split opening quote into separate literal; rest is body+colon
+            sequence_or_single(vec![
+                literal_expr(b"\""),
+                literal_expr(&bytes[1..]),
+            ])
+        }
     }
 
     fn json_item_separator_expr(&self) -> GrammarExpr {
@@ -2944,8 +3638,14 @@ impl<'a> SchemaCtx<'a> {
             return expr;
         }
 
+        let key = expr_key(&expr);
+        if let Some(rule_name) = self.expr_dedup_cache.get(&key) {
+            return GrammarExpr::Ref(rule_name.clone());
+        }
+
         let rule_name = self.fresh_rule_name(prefix);
         self.insert_rule(rule_name.clone(), expr);
+        self.expr_dedup_cache.insert(key, rule_name.clone());
         GrammarExpr::Ref(rule_name)
     }
 
