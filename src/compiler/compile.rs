@@ -312,8 +312,24 @@ fn compile_prepared_with_profile(
         let compact_report = crate::compiler::stages::compact::compact_dwa_dimensions(
             &mut terminal_dwa,
             &mut internal_ids,
+            compile_profile_summary_enabled(),
         );
         profile.compact_ms = elapsed_ms(compact_started_at);
+        if let Some(stats) = compact_report.profile_stats {
+            eprintln!(
+                "[glrmask/profile][compact] tsids={}=>{} tokens={}=>{} weight_ranges={}=>{} token_ranges={}=>{} total_ranges={}=>{}",
+                stats.tsids_before,
+                stats.tsids_after,
+                stats.tokens_before,
+                stats.tokens_after,
+                stats.weight_ranges_before,
+                stats.weight_ranges_after,
+                stats.token_ranges_before,
+                stats.token_ranges_after,
+                stats.total_ranges_before(),
+                stats.total_ranges_after(),
+            );
+        }
 
         let permute_possible_matches_started_at = Instant::now();
         crate::compiler::possible_matches::permute_possible_match_state_ids_in_place(

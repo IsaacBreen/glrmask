@@ -28,6 +28,7 @@ const TOKEN_ORDER_FINISH_PATIENCE_FACTOR: usize = 16;
 pub struct CompactReport {
     pub tsid_perm: Vec<u32>,
     pub token_perm: Vec<u32>,
+    pub profile_stats: Option<CompactProfileStats>,
 }
 
 struct DimensionCompaction {
@@ -37,17 +38,37 @@ struct DimensionCompaction {
     ordered_num_tokens: usize,
 }
 
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct UniqueStorageCounts {
     weight_ranges: usize,
     token_ranges: usize,
 }
 
-#[cfg(test)]
 impl UniqueStorageCounts {
     fn total_ranges(self) -> usize {
         self.weight_ranges + self.token_ranges
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CompactProfileStats {
+    pub tsids_before: usize,
+    pub tsids_after: usize,
+    pub tokens_before: usize,
+    pub tokens_after: usize,
+    pub weight_ranges_before: usize,
+    pub weight_ranges_after: usize,
+    pub token_ranges_before: usize,
+    pub token_ranges_after: usize,
+}
+
+impl CompactProfileStats {
+    pub fn total_ranges_before(self) -> usize {
+        self.weight_ranges_before + self.token_ranges_before
+    }
+
+    pub fn total_ranges_after(self) -> usize {
+        self.weight_ranges_after + self.token_ranges_after
     }
 }
 
@@ -104,9 +125,11 @@ impl TokenOrderScorer {
 pub fn compact_dwa_dimensions(
     dwa: &mut DWA,
     id_map: &mut InternalIdMap,
+    collect_profile_stats: bool,
 ) -> CompactReport {
     let num_tsids = id_map.num_tsids();
     let num_tokens = id_map.num_internal_tokens();
+    let storage_before = collect_profile_stats.then(|| count_unique_storage(dwa));
 
     let unique_weights = collect_unique_weights(dwa);
     let compaction = build_dimension_compaction(&unique_weights, num_tsids as usize, num_tokens);
@@ -127,10 +150,24 @@ pub fn compact_dwa_dimensions(
         &compaction.token_perm,
         compaction.ordered_num_tokens,
     );
+    let profile_stats = storage_before.map(|storage_before| {
+        let storage_after = count_unique_storage(dwa);
+        CompactProfileStats {
+            tsids_before: num_tsids as usize,
+            tsids_after: compaction.ordered_num_tsids,
+            tokens_before: num_tokens as usize,
+            tokens_after: compaction.ordered_num_tokens,
+            weight_ranges_before: storage_before.weight_ranges,
+            weight_ranges_after: storage_after.weight_ranges,
+            token_ranges_before: storage_before.token_ranges,
+            token_ranges_after: storage_after.token_ranges,
+        }
+    });
 
     CompactReport {
         tsid_perm: compaction.tsid_perm,
         token_perm: compaction.token_perm,
+        profile_stats,
     }
 }
 
@@ -684,13 +721,11 @@ fn apply_perm_to_id_map(id_map: &mut ManyToOneIdMap, perm: &[u32], new_count: us
     id_map.representative_original_ids = new_representatives;
 }
 
-#[cfg(test)]
 fn count_unique_storage(dwa: &DWA) -> UniqueStorageCounts {
     let unique_weights = collect_unique_weights(dwa);
     count_unique_storage_for_weights(&unique_weights)
 }
 
-#[cfg(test)]
 fn count_unique_storage_for_weights(weights: &[Weight]) -> UniqueStorageCounts {
     let mut seen_token_sets = std::collections::HashSet::new();
     let mut storage = UniqueStorageCounts::default();
