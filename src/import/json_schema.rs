@@ -29,8 +29,20 @@ const JSON_STRING_REPEAT_CHUNK: usize = 1024;
 
 const JSON_STRING_BODY_REGEX: &str =
     r#"([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*""#;
+/// Body chars only, no surrounding quotes.
+const JSON_STRING_BODY_ONLY_REGEX: &str =
+    r#"([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*"#;
+/// Full JSON string including both opening and closing quotes.
+const JSON_STRING_FULL_REGEX: &str =
+    r#""([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*""#;
+/// Opening quote + body chars, no closing quote.
+const JSON_STRING_OPEN_BODY_REGEX: &str =
+    r#""([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*"#;
 const JSON_KEY_COLON_BODY_REGEX: &str =
     r#"([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*": "#;
+/// Full key+colon including opening quote: `"key": `.
+const JSON_KEY_COLON_FULL_REGEX: &str =
+    r#""([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*": "#;
 const JSON_STRING_CHAR_PATTERN: &str = r#"[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}"#;
 const JSON_NUMBER_NONINTEGER_REGEX: &str =
     r#"-?(0|[1-9][0-9]*)(\.[0-9]+([eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+)"#;
@@ -2456,12 +2468,50 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn ensure_base_rules(&mut self) {
+        let open_split = !no_open_quote_split();
+        let close_split = split_close_quote();
+
         self.insert_rule(JSON_STRING_CHAR_RULE, regex_expr(JSON_STRING_CHAR_PATTERN));
-        self.insert_rule(JSON_STRING_BODY_RULE, regex_expr(JSON_STRING_BODY_REGEX));
-        self.insert_rule(JSON_STRING_RULE, sequence_or_single(vec![
-            literal_expr(b"\""),
-            GrammarExpr::Ref(JSON_STRING_BODY_RULE.into()),
-        ]));
+
+        // JSON_STRING_BODY_RULE: the body regex used in split paths.
+        // Its definition depends on whether the closing quote is fused.
+        let body_regex = if close_split {
+            JSON_STRING_BODY_ONLY_REGEX // body chars only, no closing "
+        } else {
+            JSON_STRING_BODY_REGEX // body chars + closing "
+        };
+        self.insert_rule(JSON_STRING_BODY_RULE, regex_expr(body_regex));
+
+        // JSON_STRING_RULE: 4-way based on open_split × close_split.
+        let json_string_expr = match (open_split, close_split) {
+            (false, false) => {
+                // No split: full string as one terminal regex: "body*"
+                regex_expr(JSON_STRING_FULL_REGEX)
+            }
+            (true, false) => {
+                // Open only: literal(") + body*"
+                sequence_or_single(vec![
+                    literal_expr(b"\""),
+                    GrammarExpr::Ref(JSON_STRING_BODY_RULE.into()),
+                ])
+            }
+            (false, true) => {
+                // Close only: "body* + literal(")
+                sequence_or_single(vec![
+                    regex_expr(JSON_STRING_OPEN_BODY_REGEX),
+                    literal_expr(b"\""),
+                ])
+            }
+            (true, true) => {
+                // Both split: literal(") + body* + literal(")
+                sequence_or_single(vec![
+                    literal_expr(b"\""),
+                    GrammarExpr::Ref(JSON_STRING_BODY_RULE.into()),
+                    literal_expr(b"\""),
+                ])
+            }
+        };
+        self.insert_rule(JSON_STRING_RULE, json_string_expr);
         self.insert_rule(JSON_INTEGER_RULE, regex_expr(r#"-?(0|[1-9][0-9]*)"#));
         self.insert_rule(JSON_NUMBER_RULE, regex_expr(JSON_NUMBER_NONINTEGER_REGEX));
         self.insert_rule(JSON_NONNEG_INTEGER_RULE, regex_expr(r#"(0|[1-9][0-9]*)"#));
@@ -2471,11 +2521,46 @@ impl<'a> SchemaCtx<'a> {
             choice_or_single(vec![literal_expr(b"true"), literal_expr(b"false")]),
         );
         self.insert_rule(JSON_NULL_RULE, literal_expr(b"null"));
-        self.insert_rule(JSON_KEY_COLON_BODY_RULE, regex_expr(JSON_KEY_COLON_BODY_REGEX));
-        self.insert_rule(JSON_KEY_COLON_RULE, sequence_or_single(vec![
-            literal_expr(b"\""),
-            GrammarExpr::Ref(JSON_KEY_COLON_BODY_RULE.into()),
-        ]));
+
+        // JSON_KEY_COLON_BODY_RULE: the key body regex used in split paths.
+        let kc_body_regex = if close_split {
+            JSON_STRING_BODY_ONLY_REGEX // body only (closing " split into suffix literal)
+        } else {
+            JSON_KEY_COLON_BODY_REGEX // body + ": 
+        };
+        self.insert_rule(JSON_KEY_COLON_BODY_RULE, regex_expr(kc_body_regex));
+
+        // JSON_KEY_COLON_RULE: respects open_split.
+        // close_split for key-colon means the `": ` suffix is split out.
+        let json_key_colon_expr = match (open_split, close_split) {
+            (false, false) => {
+                // No split: full key+colon as one terminal regex: "body*": 
+                regex_expr(JSON_KEY_COLON_FULL_REGEX)
+            }
+            (true, false) => {
+                // Open only: literal(") + body*": 
+                sequence_or_single(vec![
+                    literal_expr(b"\""),
+                    GrammarExpr::Ref(JSON_KEY_COLON_BODY_RULE.into()),
+                ])
+            }
+            (false, true) => {
+                // Close only: "body* + literal(": )
+                sequence_or_single(vec![
+                    regex_expr(JSON_STRING_OPEN_BODY_REGEX),
+                    literal_expr(b"\": "),
+                ])
+            }
+            (true, true) => {
+                // Both split: literal(") + body* + literal(": )
+                sequence_or_single(vec![
+                    literal_expr(b"\""),
+                    GrammarExpr::Ref(JSON_KEY_COLON_BODY_RULE.into()),
+                    literal_expr(b"\": "),
+                ])
+            }
+        };
+        self.insert_rule(JSON_KEY_COLON_RULE, json_key_colon_expr);
         self.insert_rule(
             JSON_KV_RULE,
             sequence_or_single(vec![self.json_key_colon_ref(), self.json_value_ref()]),
