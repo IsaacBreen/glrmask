@@ -594,16 +594,14 @@ fn run_batch_inner(
     let has_bytes = !slice.is_empty();
     let first_byte = if has_bytes { slice[0] } else { 0 };
 
-    // Process initial finalizers
+    // Initialize active states. Position-0 finalizer matches are NOT recorded
+    // here because collect_targets filters them out (requires pv > 0) and
+    // finish_token_signature skips them too. Omitting position-0 recording
+    // avoids creating dirty-tracking entries for the ~97% of tokens that never
+    // match at any position > 0, eliminating unnecessary SmallVec/bitmask
+    // overhead in collect_targets and finish_token_signature.
     for i in state_offset..state_offset + num_states {
         let state = scratch.current_states[i];
-        let base = i * num_groups;
-        for &gid in &dfa.finalizers[state] {
-            if gid < num_groups && scratch.match_positions[base + gid] == NONE {
-                scratch.match_positions[base + gid] = 0;
-                mark_dirty_group(scratch, i, gid, use_masked_dirty_groups);
-            }
-        }
         if dfa.is_dead_end[state] {
             scratch.current_states[i] = STATE_NONE;
             continue;
@@ -1325,8 +1323,18 @@ pub fn find_vocab_equivalence_classes_with_follow_and_byte_classes<S: AsRef<[u8]
     }
 
     let num_groups = dfa.num_groups;
+    // Adaptive batch size: with many groups (>64), the per-state overhead in
+    // finish_token_signature and collect_targets grows (SmallVec dirty tracking,
+    // large match_positions arrays). Smaller batches reduce this cost because
+    // each token iterates fewer states in finish/collect. Target ~2MB for the
+    // match_positions working set (batch_size * num_groups * 4 bytes).
+    let default_batch_size = {
+        let target_bytes = 2_000_000usize;
+        let per_state_bytes = num_groups.max(1) * std::mem::size_of::<u32>();
+        (target_bytes / per_state_bytes).clamp(500, 5000)
+    };
     let batch_size = vocab_batch_size_override()
-        .unwrap_or_else(|| num_initial_states.min(5000));
+        .unwrap_or_else(|| num_initial_states.min(default_batch_size));
     let mut active_indices: Vec<usize> = (0..num_tokens).collect();
     let mut partition = vec![0usize; num_tokens];
     let mut next_class_id = 1usize;
