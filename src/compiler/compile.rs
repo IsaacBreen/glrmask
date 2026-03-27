@@ -286,17 +286,31 @@ fn compile_prepared_with_profile(
                         .collect();
                     let num_state_classes = data["num_state_classes"].as_u64().unwrap() as u32;
                     let num_token_classes = data["num_token_classes"].as_u64().unwrap() as u32;
+                    let state_reps: Vec<u32> = data["state_representatives"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|v| v.as_u64().unwrap() as u32)
+                        .collect();
+                    let token_reps: Vec<u32> = data["token_representatives"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|v| v.as_u64().unwrap() as u32)
+                        .collect();
                     eprintln!(
                         "[glrmask/oracle] loaded from {load_path}: {num_state_classes} state classes, {num_token_classes} token classes"
                     );
                     InternalIdMap {
-                        tokenizer_states: crate::compiler::stages::equivalence_analysis::ManyToOneIdMap::from_original_to_internal(
+                        tokenizer_states: crate::compiler::stages::equivalence_analysis::ManyToOneIdMap::from_original_to_internal_with_representatives(
                             state_map,
                             num_state_classes,
+                            state_reps,
                         ),
-                        vocab_tokens: crate::compiler::stages::equivalence_analysis::ManyToOneIdMap::from_original_to_internal(
+                        vocab_tokens: crate::compiler::stages::equivalence_analysis::ManyToOneIdMap::from_original_to_internal_with_representatives(
                             token_map,
                             num_token_classes,
+                            token_reps,
                         ),
                     }
                 } else {
@@ -367,11 +381,28 @@ fn compile_prepared_with_profile(
 
         // Oracle dump: save post-compact mappings for two-pass experiment
         if let Ok(dump_path) = std::env::var("GLRMASK_ORACLE_DUMP") {
+            // Canonical representatives: min original ID in each class
+            let mut canonical_state_reps = vec![u32::MAX; internal_ids.num_tsids() as usize];
+            for (orig, &class) in internal_ids.tokenizer_states.original_to_internal.iter().enumerate() {
+                let orig = orig as u32;
+                if orig < canonical_state_reps[class as usize] {
+                    canonical_state_reps[class as usize] = orig;
+                }
+            }
+            let mut canonical_token_reps = vec![u32::MAX; internal_ids.num_internal_tokens() as usize];
+            for (orig, &class) in internal_ids.vocab_tokens.original_to_internal.iter().enumerate() {
+                let orig = orig as u32;
+                if orig < canonical_token_reps[class as usize] {
+                    canonical_token_reps[class as usize] = orig;
+                }
+            }
             let oracle_data = serde_json::json!({
                 "state_map": internal_ids.tokenizer_states.original_to_internal,
                 "token_map": internal_ids.vocab_tokens.original_to_internal,
                 "num_state_classes": internal_ids.num_tsids(),
                 "num_token_classes": internal_ids.num_internal_tokens(),
+                "state_representatives": canonical_state_reps,
+                "token_representatives": canonical_token_reps,
             });
             std::fs::write(&dump_path, serde_json::to_string(&oracle_data).unwrap())
                 .expect("failed to write oracle dump");
