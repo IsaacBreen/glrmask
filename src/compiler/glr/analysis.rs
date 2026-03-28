@@ -148,13 +148,18 @@ pub(crate) fn eliminate_right_recursion(
         }
     }
 
-    // Resolve direct right recursion for each nonterminal.
-    let all_nts: BTreeSet<NonterminalID> = rules.iter().map(|r| r.lhs).collect();
-    for nt in all_nts {
-        if rules.iter().any(|r| r.lhs == nt && is_direct_right_recursive(r)) {
-            let new_nt = fresh_nt();
-            resolve_direct_rr_single_nt(rules, nt, new_nt);
-        }
+    // Resolve direct right recursion for all nonterminals in a single pass.
+    let rr_nts: BTreeMap<NonterminalID, NonterminalID> = rules
+        .iter()
+        .filter(|r| is_direct_right_recursive(r))
+        .map(|r| r.lhs)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|nt| (nt, fresh_nt()))
+        .collect();
+
+    if !rr_nts.is_empty() {
+        resolve_direct_rr_batched(rules, &rr_nts);
     }
 }
 
@@ -423,6 +428,69 @@ fn resolve_direct_rr_single_nt(
         let mut rhs = vec![Symbol::Nonterminal(new_nt)];
         rhs.extend(body.iter().cloned());
         new_rules.push(Rule { lhs: new_nt, rhs });
+    }
+
+    *rules = new_rules;
+}
+
+/// Resolve direct right recursion for multiple nonterminals in a single pass.
+///
+/// Each entry maps a right-recursive NT to its fresh replacement NT.
+/// Equivalent to calling `resolve_direct_rr_single_nt` for each NT independently,
+/// but avoids the O(NTs × rules) cost of repeated full-vector rebuilds.
+fn resolve_direct_rr_batched(
+    rules: &mut Vec<Rule>,
+    rr_map: &BTreeMap<NonterminalID, NonterminalID>,
+) {
+    // Partition rules by whether they belong to a right-recursive NT.
+    let mut recursive_by_nt: BTreeMap<NonterminalID, Vec<Rule>> = BTreeMap::new();
+    let mut non_recursive_by_nt: BTreeMap<NonterminalID, Vec<Rule>> = BTreeMap::new();
+    let mut new_rules = Vec::with_capacity(rules.len() * 2);
+
+    for rule in rules.iter() {
+        if rr_map.contains_key(&rule.lhs) {
+            if is_direct_right_recursive(rule) {
+                recursive_by_nt.entry(rule.lhs).or_default().push(rule.clone());
+            } else {
+                non_recursive_by_nt.entry(rule.lhs).or_default().push(rule.clone());
+            }
+        } else {
+            new_rules.push(rule.clone());
+        }
+    }
+
+    for (&nt, &new_nt) in rr_map {
+        let rec_rules = recursive_by_nt.remove(&nt).unwrap_or_default();
+        let base_rules = non_recursive_by_nt.remove(&nt).unwrap_or_default();
+
+        if rec_rules.is_empty() {
+            new_rules.extend(base_rules);
+            continue;
+        }
+
+        // Keep base rules: A → β
+        new_rules.extend(base_rules.iter().cloned());
+
+        // Add A → new_nt β for each base rule
+        for base in &base_rules {
+            let mut rhs = vec![Symbol::Nonterminal(new_nt)];
+            rhs.extend(base.rhs.iter().cloned());
+            new_rules.push(Rule { lhs: nt, rhs });
+        }
+
+        // Add new_nt → α (body without trailing A) for each recursive rule
+        for rec in &rec_rules {
+            let body = rec.rhs[..rec.rhs.len() - 1].to_vec();
+            new_rules.push(Rule { lhs: new_nt, rhs: body });
+        }
+
+        // Add new_nt → new_nt α (left-recursive) for each recursive rule
+        for rec in &rec_rules {
+            let body = &rec.rhs[..rec.rhs.len() - 1];
+            let mut rhs = vec![Symbol::Nonterminal(new_nt)];
+            rhs.extend(body.iter().cloned());
+            new_rules.push(Rule { lhs: new_nt, rhs });
+        }
     }
 
     *rules = new_rules;
@@ -890,6 +958,10 @@ pub(crate) fn merge_identical_nonterminals(
 pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
     use std::cell::Cell;
 
+    let debug_profile = std::env::var("GLRMASK_DEBUG_PROFILE")
+        .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
+        .unwrap_or(false);
+
     let next_nt = Cell::new(max_nt_id(rules) + 1);
     let mut fresh_nt = || {
         let id = next_nt.get();
@@ -897,23 +969,47 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
         id
     };
 
+    let mut iteration = 0;
     loop {
+        let iter_start = std::time::Instant::now();
         let snap = rules.clone();
+        let clone_ms = iter_start.elapsed().as_secs_f64() * 1000.0;
 
+        let t0 = std::time::Instant::now();
         replace_rules_with_resync(rules, &next_nt, inline_null_productions);
+        let inline_null_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
+        let t1 = std::time::Instant::now();
         with_resynced_next_nonterminal(rules, &next_nt, |rules| {
             eliminate_right_recursion(rules, &mut fresh_nt);
         });
+        let elim_right_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
+        let t2 = std::time::Instant::now();
         with_resynced_next_nonterminal(rules, &next_nt, |rules| {
             let nullable = compute_nullable(rules, max_nt_id(rules) + 1);
             eliminate_hidden_left_recursion(rules, &nullable);
         });
+        let elim_hidden_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
+        let t3 = std::time::Instant::now();
         dedup_rules(rules);
+        let dedup_ms = t3.elapsed().as_secs_f64() * 1000.0;
 
-        if *rules == snap {
+        let t4 = std::time::Instant::now();
+        let converged = *rules == snap;
+        let compare_ms = t4.elapsed().as_secs_f64() * 1000.0;
+
+        if debug_profile {
+            eprintln!(
+                "[glrmask/debug][normalize] iter={} rules={} clone_ms={:.3} inline_null_ms={:.3} elim_right_ms={:.3} elim_hidden_ms={:.3} dedup_ms={:.3} compare_ms={:.3} total_ms={:.3}",
+                iteration, rules.len(), clone_ms, inline_null_ms, elim_right_ms, elim_hidden_ms, dedup_ms, compare_ms,
+                iter_start.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        iteration += 1;
+
+        if converged {
             break;
         }
     }

@@ -436,26 +436,54 @@ fn prepare_owned_grammar_for_compile_impl(
     normalized: &mut GrammarDef,
     nullable_terminals: &BTreeSet<TerminalID>,
 ) -> (GrammarDef, Tokenizer) {
+    let debug_profile = std::env::var("GLRMASK_DEBUG_PROFILE")
+        .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
+        .unwrap_or(false);
+    let t0 = std::time::Instant::now();
     expand_nullable_terminals(&mut normalized.rules, nullable_terminals);
+    let expand_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
+    let t1 = std::time::Instant::now();
     normalize_grammar(&mut normalized.rules, normalized.start);
+    let normalize_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
+    let t2 = std::time::Instant::now();
     let protected_nonterminals = collect_protected_nonterminals(normalized);
     inline_single_use_nonterminals(&mut normalized.rules, &protected_nonterminals);
+    let inline_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
+    let t3 = std::time::Instant::now();
     normalized.rules = merge_identical_nonterminals(&normalized.rules, normalized.start);
+    let merge1_ms = t3.elapsed().as_secs_f64() * 1000.0;
 
+    let t4 = std::time::Instant::now();
     bound_runtime_reduction_length(normalized, MAX_RUNTIME_REDUCTION_LEN);
+    let bound_ms = t4.elapsed().as_secs_f64() * 1000.0;
 
+    let t5 = std::time::Instant::now();
     normalized.rules = merge_identical_nonterminals(&normalized.rules, normalized.start);
+    let merge2_ms = t5.elapsed().as_secs_f64() * 1000.0;
 
+    let t6 = std::time::Instant::now();
     compact_unused_terminals(normalized);
+    let compact_ms = t6.elapsed().as_secs_f64() * 1000.0;
 
     // Build the real tokenizer only from the compacted live terminal set so
     // dead terminals never make it into downstream lexer/parser stages.
+    let t7 = std::time::Instant::now();
     let mut tokenizer = build_tokenizer(normalized);
+    let tokenizer_ms = t7.elapsed().as_secs_f64() * 1000.0;
 
+    let t8 = std::time::Instant::now();
     let _ = tokenizer.isolate_start_state_and_drain_nullable_terminals();
+    let isolate_ms = t8.elapsed().as_secs_f64() * 1000.0;
+
+    if debug_profile {
+        eprintln!(
+            "[glrmask/debug][prepare_transforms] expand_ms={:.3} normalize_ms={:.3} inline_ms={:.3} merge1_ms={:.3} bound_ms={:.3} merge2_ms={:.3} compact_ms={:.3} tokenizer_ms={:.3} isolate_ms={:.3}",
+            expand_ms, normalize_ms, inline_ms, merge1_ms, bound_ms, merge2_ms, compact_ms, tokenizer_ms, isolate_ms,
+        );
+    }
 
     (std::mem::take(normalized), tokenizer)
 }
