@@ -1555,17 +1555,26 @@ fn seed_root_nodes(
     id_map: &InternalIdMap,
 ) -> NodesByTokenizerState {
     let mut roots_by_tokenizer_state = NodesByTokenizerState::new();
+    let mut shared_roots = FxHashMap::<TokenizerState, NwaState>::default();
+    let mut start_weights_by_root = BTreeMap::<NwaState, Weight>::new();
 
     for internal_tsid in 0..id_map.num_tsids() {
-        let root = nwa.add_state();
-        nwa.add_epsilon(
-            start_state,
-            root,
-            all_token_weight(internal_tsid, id_map.max_internal_token_id()),
-        );
-
         let representative_state = id_map.tokenizer_states.representative_original_ids[internal_tsid as usize];
-        roots_by_tokenizer_state.merge(representative_state, &[root]);
+        let root = *shared_roots.entry(representative_state).or_insert_with(|| {
+            let root = nwa.add_state();
+            roots_by_tokenizer_state.push_one(representative_state, root);
+            root
+        });
+
+        let root_weight = all_token_weight(internal_tsid, id_map.max_internal_token_id());
+        start_weights_by_root
+            .entry(root)
+            .and_modify(|existing| *existing = existing.union(&root_weight))
+            .or_insert(root_weight);
+    }
+
+    for (root, weight) in start_weights_by_root {
+        nwa.add_epsilon(start_state, root, weight);
     }
 
     roots_by_tokenizer_state
