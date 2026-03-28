@@ -4,7 +4,8 @@ set -euo pipefail
 SERVER_NAME="${GLRMASK_BENCH_SERVER:-glrmask-bench}"
 REMOTE_ROOT="${GLRMASK_BENCH_REMOTE_ROOT:-/root/bench}"
 REMOTE_REPO="${GLRMASK_BENCH_REMOTE_REPO:-${REMOTE_ROOT}/glrmask}"
-REMOTE_BRANCH="${GLRMASK_BENCH_REMOTE_BRANCH:-worker2-remote}"
+SOURCE_BRANCH="${GLRMASK_BENCH_SOURCE_BRANCH:-glrmask-main}"
+REMOTE_BRANCH="${GLRMASK_BENCH_REMOTE_BRANCH:-glrmask-dev}"
 SESSION_NAME="${GLRMASK_BENCH_SESSION:-glrmask-bench}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 LOCAL_REPO="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -55,26 +56,28 @@ remote_bash() {
 sync_repo() {
     local ip
     ip="$(server_ip)"
-    rsync -az --delete \
+
+    git -C "${LOCAL_REPO}" rev-parse --verify "${SOURCE_BRANCH}^{commit}" >/dev/null
+
+    rsync -rltDz --delete --no-owner --no-group \
         --exclude 'target/' \
         --exclude '__pycache__/' \
         --exclude '.pytest_cache/' \
         --exclude '.mypy_cache/' \
         --exclude '.ruff_cache/' \
         --exclude '.venv/' \
-        --exclude '.git/' \
+        --exclude '.DS_Store' \
         "${LOCAL_REPO}/" root@"${ip}":"${REMOTE_REPO}/"
 
-    remote_bash "${REMOTE_REPO}" "${REMOTE_BRANCH}" <<'REMOTE'
+    remote_bash "${REMOTE_REPO}" "${SOURCE_BRANCH}" "${REMOTE_BRANCH}" <<'REMOTE'
 set -euo pipefail
 repo="$1"
-branch="$2"
+source_branch="$2"
+branch="$3"
 git config --global --add safe.directory "${repo}" || true
-if git -C "${repo}" show-ref --verify --quiet "refs/heads/${branch}"; then
-    git -C "${repo}" checkout "${branch}" >/dev/null
-else
-    git -C "${repo}" checkout -b "${branch}" >/dev/null
-fi
+git -C "${repo}" checkout -f "${source_branch}" >/dev/null
+git -C "${repo}" branch -f "${branch}" "${source_branch}" >/dev/null
+git -C "${repo}" checkout -f "${branch}" >/dev/null
 REMOTE
 }
 
@@ -136,13 +139,21 @@ status_remote() {
     require_token
     "${HCLOUD_BIN}" server list
     echo
-    remote_bash "${REMOTE_ROOT}" "${REMOTE_REPO}" <<'REMOTE'
+    remote_bash "${REMOTE_ROOT}" "${REMOTE_REPO}" "${SOURCE_BRANCH}" "${REMOTE_BRANCH}" <<'REMOTE'
 set -euo pipefail
 remote_root="$1"
 repo="$2"
+source_branch="$3"
+branch="$4"
 git config --global --add safe.directory "${repo}" || true
 printf 'remote_branch='
 git -C "${repo}" branch --show-current
+printf '\nsource_branch='
+printf '%s' "${source_branch}"
+printf '\nsource_head='
+git -C "${repo}" rev-parse --short "${source_branch}"
+printf '\nactive_branch='
+printf '%s' "${branch}"
 printf '\nremote_head='
 git -C "${repo}" rev-parse --short HEAD
 printf '\npython='
@@ -163,8 +174,8 @@ Usage: scripts/hetzner_bench.sh <command> [args...]
 
 Commands:
   ip                 Print the current server IP
-  status             Show Hetzner server state and remote branch info
-  sync               Rsync local glrmask/ to /root/bench/glrmask on the server
+    status             Show Hetzner server state and remote branch info
+    sync               Refresh remote git state from local glrmask-main, then checkout glrmask-dev
   build              Build the remote Python extension and Rust release binary
   shell              Open an interactive remote shell with cargo + venv loaded
   tmux               Attach/create the remote tmux session
