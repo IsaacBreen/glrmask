@@ -106,6 +106,7 @@ struct Scratch {
     current_states: Vec<usize>,
     active_indices: Vec<usize>,
     match_positions: Vec<u32>,
+    dirty_state_flags: Vec<u8>,
     /// Per-state multi-word dirty bitmask.  Layout: `[dirty_words * num_states]`
     /// where state `i`'s dirty mask occupies indices `[i*dirty_words .. (i+1)*dirty_words]`.
     dirty_group_masks: Vec<u64>,
@@ -498,6 +499,7 @@ impl Scratch {
             current_states: vec![0; num_states],
             active_indices: Vec::new(),
             match_positions: vec![NONE; num_states * num_groups],
+            dirty_state_flags: vec![0; num_states],
             dirty_group_masks: vec![0; num_states * dirty_words.max(1)],
             dirty_words,
             targets: Vec::new(),
@@ -520,6 +522,7 @@ fn mark_dirty_group(scratch: &mut Scratch, state_idx: usize, gid: usize) {
     let word_idx = gid / 64;
     let bit = gid % 64;
     let flat_idx = state_idx * scratch.dirty_words + word_idx;
+    scratch.dirty_state_flags[state_idx] = 1;
     scratch.dirty_group_masks[flat_idx] |= 1u64 << bit;
 }
 
@@ -587,6 +590,9 @@ fn run_batch_inner(
         for v in scratch.dirty_group_masks[mask_start..mask_end].iter_mut() {
             *v = 0;
         }
+    }
+    for flag in scratch.dirty_state_flags[state_offset..state_offset + num_states].iter_mut() {
+        *flag = 0;
     }
 
     let has_bytes = !slice.is_empty();
@@ -700,6 +706,7 @@ fn collect_targets(
     let dirty_words = scratch.dirty_words;
 
     let Scratch {
+        dirty_state_flags,
         dirty_group_masks,
         match_positions,
         targets,
@@ -710,6 +717,9 @@ fn collect_targets(
     } = scratch;
 
     for i in state_offset..state_offset + num_states {
+        if dirty_state_flags[i] == 0 {
+            continue;
+        }
         let base = i * num_groups;
         let mask_base = i * dirty_words;
         for w in 0..dirty_words {
@@ -1114,15 +1124,7 @@ fn finish_token_signature(
         let base = i * num_groups;
         let mask_base = i * dirty_words;
 
-        let mut any_dirty = false;
-        for w in 0..dirty_words {
-            if scratch.dirty_group_masks[mask_base + w] != 0 {
-                any_dirty = true;
-                break;
-            }
-        }
-
-        let state_sig = if any_dirty {
+        let state_sig = if scratch.dirty_state_flags[i] != 0 {
             let mut h = new_hasher();
             h.write_u64(completion);
             for w in 0..dirty_words {
@@ -1149,6 +1151,7 @@ fn finish_token_signature(
                 }
                 scratch.dirty_group_masks[mask_base + w] = 0;
             }
+            scratch.dirty_state_flags[i] = 0;
             h.finish()
         } else {
             completion
@@ -1271,6 +1274,8 @@ struct DepthChangeLog {
     match_changes: Vec<(usize, u32)>,
     /// (state_idx, old_dirty_mask)
     dirty_changes: Vec<(usize, u64)>,
+    /// (state_idx, old_dirty_state_flag)
+    dirty_state_flag_changes: Vec<(usize, u8)>,
 }
 
 impl DepthChangeLog {
@@ -1279,6 +1284,7 @@ impl DepthChangeLog {
             state_changes: Vec::new(),
             match_changes: Vec::new(),
             dirty_changes: Vec::new(),
+            dirty_state_flag_changes: Vec::new(),
         }
     }
 
@@ -1286,6 +1292,7 @@ impl DepthChangeLog {
         self.state_changes.clear();
         self.match_changes.clear();
         self.dirty_changes.clear();
+        self.dirty_state_flag_changes.clear();
     }
 }
 
@@ -1356,6 +1363,11 @@ fn dfs_step(
                     let flat_idx = i * dirty_words + word_idx;
                     log.dirty_changes
                         .push((flat_idx, scratch.dirty_group_masks[flat_idx]));
+                    if scratch.dirty_state_flags[i] == 0 {
+                        log.dirty_state_flag_changes
+                            .push((i, scratch.dirty_state_flags[i]));
+                        scratch.dirty_state_flags[i] = 1;
+                    }
                     scratch.dirty_group_masks[flat_idx] |= 1u64 << bit;
                 }
                 log.match_changes.push((ix, old_mp));
@@ -1376,6 +1388,9 @@ fn dfs_undo_depth(scratch: &mut Scratch, log: &DepthChangeLog) {
     }
     for &(flat_idx, old_dirty) in log.dirty_changes.iter().rev() {
         scratch.dirty_group_masks[flat_idx] = old_dirty;
+    }
+    for &(state_idx, old_flag) in log.dirty_state_flag_changes.iter().rev() {
+        scratch.dirty_state_flags[state_idx] = old_flag;
     }
     for &(i, old_state) in log.state_changes.iter().rev() {
         scratch.current_states[i] = old_state;
@@ -1412,15 +1427,7 @@ fn finish_token_signature_no_cleanup(
         let base = i * num_groups;
         let mask_base = i * dirty_words;
 
-        let mut any_dirty = false;
-        for w in 0..dirty_words {
-            if scratch.dirty_group_masks[mask_base + w] != 0 {
-                any_dirty = true;
-                break;
-            }
-        }
-
-        let state_sig = if any_dirty {
+        let state_sig = if scratch.dirty_state_flags[i] != 0 {
             let mut h = new_hasher();
             h.write_u64(completion);
             for w in 0..dirty_words {
@@ -1478,6 +1485,9 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
         for v in scratch.dirty_group_masks[..mask_end].iter_mut() {
             *v = 0;
         }
+    }
+    for flag in scratch.dirty_state_flags[..batch_len].iter_mut() {
+        *flag = 0;
     }
     for i in 0..batch_len {
         if dfa.is_dead_end[scratch.current_states[i]] {
