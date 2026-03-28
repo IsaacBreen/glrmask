@@ -575,29 +575,44 @@ fn compile_prepared_with_profile(
             eprintln!("[glrmask/oracle] dumped post-compact mappings to {dump_path}");
         }
 
-        let permute_possible_matches_started_at = Instant::now();
-        crate::compiler::possible_matches::permute_possible_match_state_ids_in_place(
-            &mut possible_matches,
-            &compact_report.tsid_perm,
-        );
-        crate::compiler::possible_matches::permute_possible_matches_in_place(
-            &mut possible_matches,
-            &compact_report.token_perm,
-        );
-        profile.permute_possible_matches_ms = elapsed_ms(permute_possible_matches_started_at);
+        // Overlap parser_dwa build with possible_matches permutation + internal_token_bytes.
+        // Parser_dwa (~300ms) does not depend on possible_matches or internal_token_bytes.
+        let (
+            (parser_dwa, parser_dwa_ms),
+            (permute_possible_matches_ms, internal_token_bytes, internal_token_bytes_ms),
+        ) = rayon::join(
+            || {
+                let parser_dwa_started_at = Instant::now();
+                let parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
+                    &table,
+                    &analyzed_grammar,
+                    &terminal_dwa,
+                    templates,
+                );
+                (parser_dwa, elapsed_ms(parser_dwa_started_at))
+            },
+            || {
+                let permute_possible_matches_started_at = Instant::now();
+                crate::compiler::possible_matches::permute_possible_match_state_ids_in_place(
+                    &mut possible_matches,
+                    &compact_report.tsid_perm,
+                );
+                crate::compiler::possible_matches::permute_possible_matches_in_place(
+                    &mut possible_matches,
+                    &compact_report.token_perm,
+                );
+                let permute_possible_matches_ms = elapsed_ms(permute_possible_matches_started_at);
 
-        let internal_token_bytes_started_at = Instant::now();
-        let internal_token_bytes = build_internal_token_bytes(vocab, &internal_ids);
-        profile.internal_token_bytes_ms = elapsed_ms(internal_token_bytes_started_at);
+                let internal_token_bytes_started_at = Instant::now();
+                let internal_token_bytes = build_internal_token_bytes(vocab, &internal_ids);
+                let internal_token_bytes_ms = elapsed_ms(internal_token_bytes_started_at);
 
-        let parser_dwa_started_at = Instant::now();
-        let parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
-            &table,
-            &analyzed_grammar,
-            &terminal_dwa,
-            templates,
+                (permute_possible_matches_ms, internal_token_bytes, internal_token_bytes_ms)
+            },
         );
-        profile.parser_dwa_ms = elapsed_ms(parser_dwa_started_at);
+        profile.permute_possible_matches_ms = permute_possible_matches_ms;
+        profile.internal_token_bytes_ms = internal_token_bytes_ms;
+        profile.parser_dwa_ms = parser_dwa_ms;
 
         let finalize_started_at = Instant::now();
         let constraint = finalize_constraint(Constraint {
