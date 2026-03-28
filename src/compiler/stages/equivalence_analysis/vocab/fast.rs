@@ -1280,6 +1280,313 @@ fn token_signature(
     sig
 }
 
+// ----- DFS Trie Walk for Prefix Sharing -----
+
+const TRIE_CHUNK_SIZE: usize = 128;
+const TRIE_WALK_MIN_TOKENS: usize = 256;
+
+static TRIE_WALK_DISABLED: Lazy<bool> =
+    Lazy::new(|| env_flag_enabled("GLRMASK_DISABLE_TRIE_WALK"));
+
+struct DepthChangeLog {
+    /// (state_idx, old_state_value)
+    state_changes: Vec<(usize, usize)>,
+    /// (match_positions_flat_idx, old_value)
+    match_changes: Vec<(usize, u32)>,
+    /// (state_idx, old_dirty_mask)
+    dirty_changes: Vec<(usize, u64)>,
+}
+
+impl DepthChangeLog {
+    fn new() -> Self {
+        Self {
+            state_changes: Vec::new(),
+            match_changes: Vec::new(),
+            dirty_changes: Vec::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.state_changes.clear();
+        self.match_changes.clear();
+        self.dirty_changes.clear();
+    }
+}
+
+struct TrieWalkState {
+    depth_logs: Vec<DepthChangeLog>,
+}
+
+impl TrieWalkState {
+    fn new() -> Self {
+        Self {
+            depth_logs: Vec::new(),
+        }
+    }
+
+    fn ensure_depth(&mut self, depth: usize) {
+        while self.depth_logs.len() <= depth {
+            self.depth_logs.push(DepthChangeLog::new());
+        }
+    }
+}
+
+/// Walk one byte forward at the given depth, recording all state changes
+/// to the change log for later backtracking.
+fn dfs_step(
+    dfa: &Dfa,
+    scratch: &mut Scratch,
+    trie: &mut TrieWalkState,
+    byte: u8,
+    depth: usize,
+    batch_len: usize,
+) {
+    trie.ensure_depth(depth);
+    let log = &mut trie.depth_logs[depth];
+    log.clear();
+
+    let num_groups = dfa.num_groups;
+    let position = (depth + 1) as u32;
+    let class = dfa.byte_to_class[byte as usize] as usize;
+    let class_base = class * dfa.num_states;
+
+    for i in 0..batch_len {
+        let old_state = scratch.current_states[i];
+        if old_state == STATE_NONE {
+            continue;
+        }
+
+        let next_state_raw =
+            unsafe { *dfa.trans_by_class.get_unchecked(class_base + old_state) };
+        if next_state_raw == NONE {
+            log.state_changes.push((i, old_state));
+            scratch.current_states[i] = STATE_NONE;
+            continue;
+        }
+
+        let ns = next_state_raw as usize;
+        log.state_changes.push((i, old_state));
+        scratch.current_states[i] = ns;
+
+        let base = i * num_groups;
+        for &gid in &dfa.finalizers[ns] {
+            if gid < num_groups {
+                let ix = base + gid;
+                let old_mp = scratch.match_positions[ix];
+                if old_mp == NONE {
+                    log.dirty_changes
+                        .push((i, scratch.dirty_group_masks[i]));
+                    scratch.dirty_group_masks[i] |= 1u64 << gid;
+                }
+                log.match_changes.push((ix, old_mp));
+                scratch.match_positions[ix] = position;
+            }
+        }
+
+        if dfa.is_dead_end[ns] {
+            scratch.current_states[i] = STATE_NONE;
+        }
+    }
+}
+
+/// Undo all changes recorded at a single depth level.
+fn dfs_undo_depth(scratch: &mut Scratch, log: &DepthChangeLog) {
+    for &(ix, old_mp) in log.match_changes.iter().rev() {
+        scratch.match_positions[ix] = old_mp;
+    }
+    for &(i, old_dirty) in log.dirty_changes.iter().rev() {
+        scratch.dirty_group_masks[i] = old_dirty;
+    }
+    for &(i, old_state) in log.state_changes.iter().rev() {
+        scratch.current_states[i] = old_state;
+    }
+}
+
+/// Backtrack from current_depth to target_depth by undoing changes.
+fn dfs_backtrack(
+    scratch: &mut Scratch,
+    trie: &TrieWalkState,
+    current_depth: usize,
+    target_depth: usize,
+) {
+    for depth in (target_depth..current_depth).rev() {
+        dfs_undo_depth(scratch, &trie.depth_logs[depth]);
+    }
+}
+
+/// Compute token signature without modifying scratch state (no cleanup).
+/// Only handles the bitmask dirty tracking path (num_groups <= 64).
+fn finish_token_signature_no_cleanup(
+    dfa: &Dfa,
+    num_initial_states: usize,
+    scratch: &Scratch,
+) -> u64 {
+    let num_groups = dfa.num_groups;
+    let dag = &scratch.dag;
+    let single_target_hash_pos = scratch.single_target_hash_pos;
+    let single_target_hash = scratch.single_target_hash;
+    let mut sig: u64 = HASH_SEED3;
+    for i in 0..num_initial_states {
+        let completion = dfa.completion(scratch.current_states[i]);
+        let base = i * num_groups;
+        let dirty_mask = scratch.dirty_group_masks[i];
+        let state_sig = if dirty_mask != 0 {
+            let mut h = new_hasher();
+            h.write_u64(completion);
+            let mut dm = dirty_mask;
+            while dm != 0 {
+                let gid = dm.trailing_zeros() as usize;
+                dm &= dm - 1;
+                let pv = scratch.match_positions[base + gid];
+                if pv != NONE && pv > 0 {
+                    h.write_u64(gid as u64);
+                    let target = pv as usize;
+                    let target_hash = if single_target_hash_pos == target {
+                        single_target_hash
+                    } else {
+                        dag.get(&target).map_or(0, |node| node.hash)
+                    };
+                    h.write_u64(target_hash);
+                }
+            }
+            h.finish()
+        } else {
+            completion
+        };
+        sig = sig.wrapping_mul(HASH_SEED1).wrapping_add(state_sig);
+    }
+    sig
+}
+
+/// Process a sorted chunk of tokens using DFS trie walk with prefix sharing.
+/// Tokens must be sorted by byte content. Returns (token_idx, signature) pairs.
+fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
+    dfa: &Dfa,
+    strings: &[S],
+    chunk: &[usize],
+    batch: &[usize],
+    state_group_size: usize,
+    scratch: &mut Scratch,
+    trie: &mut TrieWalkState,
+    profile: bool,
+) -> Vec<(usize, u64)> {
+    let batch_len = batch.len();
+    let num_groups = dfa.num_groups;
+    let mut results = Vec::with_capacity(chunk.len());
+
+    // Initialize: copy initial states and mark dead-ends
+    scratch.current_states[..batch_len].clone_from_slice(batch);
+    for i in 0..batch_len {
+        scratch.dirty_group_masks[i] = 0;
+    }
+    for i in 0..batch_len {
+        if dfa.is_dead_end[scratch.current_states[i]] {
+            scratch.current_states[i] = STATE_NONE;
+        }
+    }
+
+    let mut current_depth: usize = 0;
+    let mut prev_token: &[u8] = &[];
+
+    for &token_idx in chunk {
+        let token = strings[token_idx].as_ref();
+        let token_len = token.len();
+
+        // Compute LCP with previous token
+        let lcp = prev_token
+            .iter()
+            .zip(token.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+
+        // Backtrack to LCP depth
+        if current_depth > lcp {
+            dfs_backtrack(scratch, trie, current_depth, lcp);
+        }
+
+        // Walk forward from LCP to token end
+        for d in lcp..token_len {
+            dfs_step(dfa, scratch, trie, token[d], d, batch_len);
+        }
+        current_depth = token_len;
+
+        // Collect targets across all state groups
+        scratch.targets.clear();
+        scratch.target_gids.clear();
+        scratch.single_target_pos = usize::MAX;
+        scratch.single_target_gids.clear();
+        scratch.single_target_hash_pos = usize::MAX;
+        scratch.single_target_hash = 0;
+
+        if state_group_size >= batch_len {
+            collect_targets(scratch, num_groups, token_len, 0, batch_len);
+        } else {
+            for state_offset in (0..batch_len).step_by(state_group_size) {
+                let group_len =
+                    (state_offset + state_group_size).min(batch_len) - state_offset;
+                collect_targets(scratch, num_groups, token_len, state_offset, group_len);
+            }
+        }
+
+        // Hash suffixes
+        let target_count = scratch.targets.len();
+        if target_count == 1 {
+            if try_hash_single_target_suffix(dfa, token, scratch).is_none() {
+                ensure_target_gids_map(
+                    &mut scratch.target_gids,
+                    scratch.single_target_pos,
+                    scratch.single_target_gids.as_slice(),
+                );
+                hash_suffixes(dfa, token, scratch, profile);
+            }
+        } else if target_count > 0 {
+            hash_suffixes(dfa, token, scratch, profile);
+        }
+
+        // Compute signature without cleanup (DFS backtrack handles state restoration)
+        let sig = finish_token_signature_no_cleanup(dfa, batch_len, scratch);
+
+        if profile {
+            let totals = &*VOCAB_SIGNATURE_PROFILE_TOTALS;
+            totals.tokens.fetch_add(1, Ordering::Relaxed);
+            totals
+                .target_positions
+                .fetch_add(target_count as u64, Ordering::Relaxed);
+            match target_count {
+                0 => {
+                    totals.zero_target_tokens.fetch_add(1, Ordering::Relaxed);
+                }
+                1 => {
+                    totals
+                        .single_target_tokens
+                        .fetch_add(1, Ordering::Relaxed);
+                    totals
+                        .tokens_with_targets
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                _ => {
+                    totals
+                        .multi_target_tokens
+                        .fetch_add(1, Ordering::Relaxed);
+                    totals
+                        .tokens_with_targets
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        results.push((token_idx, sig));
+        prev_token = token;
+    }
+
+    // Final backtrack to restore scratch to clean state
+    if current_depth > 0 {
+        dfs_backtrack(scratch, trie, current_depth, 0);
+    }
+
+    results
+}
+
 pub fn find_vocab_equivalence_classes_with_follow<S: AsRef<[u8]> + Sync>(
     tokenizer: &TokenizerView,
     strings: &[S],
@@ -1357,26 +1664,60 @@ pub fn find_vocab_equivalence_classes_with_follow_and_byte_classes<S: AsRef<[u8]
         let batch = &ordered_states[batch_start..batch_end];
         let state_group_size = vocab_state_group_size(batch.len(), num_groups);
         let signature_started_at = Instant::now();
-        let active_sigs: Vec<(usize, u64)> = active_indices
-            .par_iter()
-            .map_init(
-                || Scratch::new(batch.len(), num_groups),
-                |scratch, &token_idx| {
-                    let token = strings[token_idx].as_ref();
-                    (
-                        token_idx,
-                        token_signature(
+        let use_trie_walk = num_groups <= u64::BITS as usize
+            && active_indices.len() >= TRIE_WALK_MIN_TOKENS
+            && !*TRIE_WALK_DISABLED;
+        let active_sigs: Vec<(usize, u64)> = if use_trie_walk {
+            let mut sorted_indices = active_indices.clone();
+            sorted_indices.sort_unstable_by(|&a, &b| {
+                strings[a].as_ref().cmp(strings[b].as_ref())
+            });
+            let chunk_results: Vec<Vec<(usize, u64)>> = sorted_indices
+                .par_chunks(TRIE_CHUNK_SIZE)
+                .map_init(
+                    || {
+                        (
+                            Scratch::new(batch.len(), num_groups),
+                            TrieWalkState::new(),
+                        )
+                    },
+                    |(scratch, trie_state), chunk| {
+                        trie_walk_chunk_signatures(
                             &dfa,
-                            token,
+                            strings,
+                            chunk,
                             batch,
                             state_group_size,
                             scratch,
+                            trie_state,
                             profile_compile,
-                        ),
-                    )
-                },
-            )
-            .collect();
+                        )
+                    },
+                )
+                .collect();
+            chunk_results.into_iter().flatten().collect()
+        } else {
+            active_indices
+                .par_iter()
+                .map_init(
+                    || Scratch::new(batch.len(), num_groups),
+                    |scratch, &token_idx| {
+                        let token = strings[token_idx].as_ref();
+                        (
+                            token_idx,
+                            token_signature(
+                                &dfa,
+                                token,
+                                batch,
+                                state_group_size,
+                                scratch,
+                                profile_compile,
+                            ),
+                        )
+                    },
+                )
+                .collect()
+        };
         let signature_ms = elapsed_ms(signature_started_at);
 
         let refine_started_at = Instant::now();
