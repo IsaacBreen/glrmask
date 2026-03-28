@@ -232,6 +232,97 @@ fn finalize_constraint(mut constraint: Constraint) -> Constraint {
     constraint
 }
 
+/// Warn if the grammar has length-1 terminal matches on bytes that appear
+/// frequently in the vocabulary.  Such terminals create many product-DFA
+/// states and can slow compilation significantly.
+fn warn_problematic_byte_terminals(tokenizer: &Tokenizer, vocab: &Vocab) {
+    const SCORE_THRESHOLD: u64 = 100_000;
+
+    // Count byte appearances across all vocab tokens.
+    let mut byte_count = [0u64; 256];
+    for bytes in vocab.entries.values() {
+        for &b in bytes {
+            byte_count[b as usize] += 1;
+        }
+    }
+
+    // A byte is "problematic" if, from the tokenizer's start state, consuming
+    // that byte reaches a state where at least one terminal is matched (i.e.
+    // the byte alone forms a complete terminal match).
+    let start = tokenizer.start_state();
+    let mut problematic = [false; 256];
+    for b in 0u16..=255 {
+        if let Some(next_state) = tokenizer.step(start, b as u8) {
+            if tokenizer.matched_terminals(next_state).len() > 0 {
+                problematic[b as usize] = true;
+            }
+        }
+    }
+
+    let score: u64 = (0..256)
+        .filter(|&b| problematic[b])
+        .map(|b| byte_count[b])
+        .sum();
+    if score < SCORE_THRESHOLD {
+        return;
+    }
+
+    let problematic_bytes: Vec<u8> = (0..=255u8).filter(|&b| problematic[b as usize]).collect();
+    let display = format_byte_ranges(&problematic_bytes);
+    eprintln!(
+        "[glrmask/warn] grammar has length-1 terminal matches on high-frequency bytes \
+         (score={score}, threshold={SCORE_THRESHOLD}): {display}"
+    );
+}
+
+/// Format a list of bytes into compact ranges.  Alphanumeric runs like
+/// `a,b,c,d` are compressed into `a-d`, while punctuation bytes are always
+/// listed individually.
+fn format_byte_ranges(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+    fn is_rangeable(b: u8) -> bool {
+        b.is_ascii_alphanumeric()
+    }
+    fn display_byte(b: u8) -> String {
+        if b.is_ascii_graphic() || b == b' ' {
+            format!("{}", b as char)
+        } else {
+            format!("0x{b:02x}")
+        }
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let start = bytes[i];
+        if is_rangeable(start) {
+            // Try to extend a consecutive alphanumeric range.
+            let mut end = start;
+            while i + 1 < bytes.len()
+                && bytes[i + 1] == end + 1
+                && is_rangeable(bytes[i + 1])
+            {
+                i += 1;
+                end = bytes[i];
+            }
+            if end > start + 1 {
+                parts.push(format!("{}-{}", display_byte(start), display_byte(end)));
+            } else if end == start + 1 {
+                parts.push(display_byte(start));
+                parts.push(display_byte(end));
+            } else {
+                parts.push(display_byte(start));
+            }
+        } else {
+            parts.push(display_byte(start));
+        }
+        i += 1;
+    }
+    parts.join(", ")
+}
+
 fn compile_prepared_with_profile(
     prepared_grammar: GrammarDef,
     tokenizer: Tokenizer,
@@ -244,6 +335,8 @@ fn compile_prepared_with_profile(
         let analyze_grammar_started_at = Instant::now();
         let analyzed_grammar = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
         profile.analyze_grammar_ms = elapsed_ms(analyze_grammar_started_at);
+
+        warn_problematic_byte_terminals(&tokenizer, vocab);
 
         #[cfg(debug_assertions)]
         if let Err(message) = analyzed_grammar.debug_check_grammar_preconditions() {
