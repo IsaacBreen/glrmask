@@ -4,7 +4,7 @@
 //! states by topological height, colors each height bucket subject to
 //! compatibility constraints, and reconstructs the minimized automaton from the
 //! merged buckets.
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use range_set_blaze::RangeSetBlaze;
 use rayon::prelude::*;
@@ -12,6 +12,15 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::dwa::{DWA, DWAState};
 use crate::ds::weight::Weight;
+
+fn debug_profile_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLRMASK_DEBUG_PROFILE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
+}
 
 type Label = i32;
 
@@ -720,15 +729,16 @@ fn build_incompatibility_graph_sparse(
     old_to_new: &[u32],
     productive_transitions: &[Vec<ProductiveTransition>],
 ) -> Option<Vec<Vec<usize>>> {
+    let debug = debug_profile_enabled();
     let t0 = std::time::Instant::now();
     let overlap_pairs = overlapping_candidate_pairs(candidates, needed)?;
-    let overlap_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let overlap_ms = if debug { t0.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
     let num_overlap_pairs = overlap_pairs.len();
 
     let nc = candidates.len();
     let mut incompatible_pairs = FxHashSet::default();
 
-    let t1 = std::time::Instant::now();
+    let t1 = if debug { std::time::Instant::now() } else { t0 };
     // Sparse needed-set overlap is not sufficient on its own: even disjoint-needed
     // states are incompatible if they expose the same label but remap it to
     // different targets. Seed the sparse graph with those label-target conflicts.
@@ -768,10 +778,10 @@ fn build_incompatibility_graph_sparse(
             }
         }
     }
-    let label_conflict_ms = t1.elapsed().as_secs_f64() * 1000.0;
+    let label_conflict_ms = if debug { t1.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
     let label_conflict_pairs = incompatible_pairs.len();
 
-    let t2 = std::time::Instant::now();
+    let t2 = if debug { std::time::Instant::now() } else { t0 };
     let additional_incompatible: Vec<(usize, usize)> = overlap_pairs
         .par_iter()
         .filter_map(|&(i, j)| {
@@ -793,14 +803,16 @@ fn build_incompatibility_graph_sparse(
             }
         })
         .collect();
-    let compat_ms = t2.elapsed().as_secs_f64() * 1000.0;
+    let compat_ms = if debug { t2.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
 
     for pair in additional_incompatible {
         incompatible_pairs.insert(pair);
     }
 
-    eprintln!("[glrmask/debug][sparse_graph] candidates={} overlap_pairs={} overlap_ms={:.1} label_conflict_pairs={} label_ms={:.1} compat_check_ms={:.1} total_incompat={}",
-        nc, num_overlap_pairs, overlap_ms, label_conflict_pairs, label_conflict_ms, compat_ms, incompatible_pairs.len());
+    if debug {
+        eprintln!("[glrmask/debug][sparse_graph] candidates={} overlap_pairs={} overlap_ms={:.1} label_conflict_pairs={} label_ms={:.1} compat_check_ms={:.1} total_incompat={}",
+            nc, num_overlap_pairs, overlap_ms, label_conflict_pairs, label_conflict_ms, compat_ms, incompatible_pairs.len());
+    }
 
     let mut adj: Vec<Vec<usize>> = vec![vec![]; nc];
     for (i, j) in incompatible_pairs {
@@ -867,13 +879,14 @@ fn build_and_color_with_signature_dedup(
     productive_transitions: &[Vec<ProductiveTransition>],
 ) -> Vec<usize> {
     let nc = candidates.len();
+    let debug = debug_profile_enabled();
 
     let t0 = std::time::Instant::now();
     let signatures: Vec<u64> = candidates
         .iter()
         .map(|&id| compute_state_signature(id, dwa, needed, old_to_new, productive_transitions))
         .collect();
-    let sig_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let sig_ms = if debug { t0.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
 
     let mut sig_to_rep_idx: FxHashMap<u64, usize> = FxHashMap::default();
     let mut unique_indices: Vec<usize> = Vec::new(); // indices into candidates
@@ -887,7 +900,7 @@ fn build_and_color_with_signature_dedup(
 
     let rep_candidates: Vec<usize> = unique_indices.iter().map(|&i| candidates[i]).collect();
 
-    let t1 = std::time::Instant::now();
+    let t1 = if debug { std::time::Instant::now() } else { t0 };
     let rep_adj = build_incompatibility_graph_sparse(
         dwa,
         &rep_candidates,
@@ -904,15 +917,17 @@ fn build_and_color_with_signature_dedup(
             productive_transitions,
         )
     });
-    let graph_ms = t1.elapsed().as_secs_f64() * 1000.0;
+    let graph_ms = if debug { t1.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
 
-    let t2 = std::time::Instant::now();
+    let t2 = if debug { std::time::Instant::now() } else { t0 };
     let rep_coloring = greedy_coloring(&rep_adj);
-    let color_ms = t2.elapsed().as_secs_f64() * 1000.0;
-    let num_colors = rep_coloring.iter().max().map(|c| c + 1).unwrap_or(0);
-    let total_edges: usize = rep_adj.iter().map(|a| a.len()).sum::<usize>() / 2;
-    eprintln!("[glrmask/debug][minimize_dedup] candidates={} unique_reps={} sig_ms={:.1} graph_ms={:.1} edges={} color_ms={:.1} colors={}",
-        nc, rep_candidates.len(), sig_ms, graph_ms, total_edges, color_ms, num_colors);
+    if debug {
+        let color_ms = t2.elapsed().as_secs_f64() * 1000.0;
+        let num_colors = rep_coloring.iter().max().map(|c| c + 1).unwrap_or(0);
+        let total_edges: usize = rep_adj.iter().map(|a| a.len()).sum::<usize>() / 2;
+        eprintln!("[glrmask/debug][minimize_dedup] candidates={} unique_reps={} sig_ms={:.1} graph_ms={:.1} edges={} color_ms={:.1} colors={}",
+            nc, rep_candidates.len(), sig_ms, graph_ms, total_edges, color_ms, num_colors);
+    }
 
     let mut coloring = vec![0usize; nc];
     for (idx, &sig) in signatures.iter().enumerate() {
