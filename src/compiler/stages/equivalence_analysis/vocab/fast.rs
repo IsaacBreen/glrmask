@@ -1630,15 +1630,16 @@ pub fn find_vocab_equivalence_classes_with_follow_and_byte_classes<S: AsRef<[u8]
     }
 
     let num_groups = dfa.num_groups;
-    // Adaptive batch size: with many groups (>64), the per-state overhead in
-    // finish_token_signature and collect_targets grows (SmallVec dirty tracking,
-    // large match_positions arrays). Smaller batches reduce this cost because
-    // each token iterates fewer states in finish/collect. Target ~2MB for the
-    // match_positions working set (batch_size * num_groups * 4 bytes).
+    // Use all states in a single batch when feasible.  A single batch avoids
+    // repeated token sorting, trie walk reinitialisation, rayon sync points
+    // between batches, and redundant finish_token_signature iterations.
+    // Memory per rayon thread is bounded by the match_positions working set
+    // (batch_size * num_groups * 4 bytes).  With the 16 MB target, the worst
+    // case across an 8-thread pool is ~128 MB — fine for a one-shot compile.
     let default_batch_size = {
-        let target_bytes = 2_000_000usize;
+        let target_bytes = 16_000_000usize;
         let per_state_bytes = num_groups.max(1) * std::mem::size_of::<u32>();
-        (target_bytes / per_state_bytes).clamp(500, 5000)
+        (target_bytes / per_state_bytes).clamp(500, 50_000)
     };
     let batch_size = vocab_batch_size_override()
         .unwrap_or_else(|| num_initial_states.min(default_batch_size));
