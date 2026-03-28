@@ -123,6 +123,25 @@ fn collect_representative_states(states: &[usize]) -> Vec<usize> {
     states.iter().copied().collect::<BTreeSet<_>>().into_iter().collect()
 }
 
+/// Compute which groups can be skipped in state equivalence hashing.
+///
+/// A group is "universally disallowed" if it appears in the disallowed set
+/// of EVERY other group, meaning it can never follow any match.
+fn compute_skip_groups(num_groups: usize, disallowed_follows: &BTreeMap<u32, BitSet>) -> Vec<bool> {
+    let mut skip = vec![false; num_groups];
+    for gid in 0..num_groups {
+        let is_disallowed_by_all = (0..num_groups).all(|other| {
+            disallowed_follows
+                .get(&(other as u32))
+                .map_or(false, |bs| bs.contains(gid))
+        });
+        if is_disallowed_by_all {
+            skip[gid] = true;
+        }
+    }
+    skip
+}
+
 fn tokenizer_group_count(tokenizer: &TokenizerView) -> usize {
     tokenizer
         .dfa()
@@ -296,6 +315,12 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     };
     let vocab_states = if use_pre_vocab_state_reduction {
         let pre_vocab_state_started_at = std::time::Instant::now();
+
+        // NOTE: disallowed_follows cannot be used to skip groups in the state
+        // equivalence hash because "universally disallowed" groups can still be
+        // the FIRST match in a sequence. Skipping them would incorrectly merge
+        // states that differ in first-match behavior. Context-dependent filtering
+        // (per-parent-edge) would be correct but prohibitively expensive.
         let reduced_state_reps = state_equivalence_analysis::find_state_equivalence_classes(
             tokenizer,
             &dedup.representative_token_bytes,

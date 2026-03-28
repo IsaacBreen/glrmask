@@ -264,6 +264,28 @@ fn compile_prepared_with_profile(
         let disallowed_follows = compute_disallowed_follows(&analyzed_grammar);
         profile.disallowed_follows_ms = elapsed_ms(disallowed_follows_started_at);
 
+        if compile_profile_enabled() {
+            let num_groups = analyzed_grammar.num_terminals as usize;
+            let mut universally_disallowed = 0usize;
+            for gid in 0..num_groups {
+                let is_disallowed_by_all = (0..num_groups).all(|other| {
+                    disallowed_follows.get(&(other as u32)).map_or(false, |bs| bs.contains(gid))
+                });
+                if is_disallowed_by_all {
+                    universally_disallowed += 1;
+                }
+            }
+            let total_disallowed: usize = disallowed_follows.values().map(|bs| bs.count_ones()).sum();
+            let total_possible = num_groups * num_groups;
+            let groups_with_disallowed = disallowed_follows.len();
+            eprintln!(
+                "[glrmask/profile][disallowed_follows] num_groups={} groups_with_disallowed={} total_disallowed_pairs={}/{} ({:.1}%) universally_disallowed_groups={}",
+                num_groups, groups_with_disallowed, total_disallowed, total_possible,
+                total_disallowed as f64 / total_possible as f64 * 100.0,
+                universally_disallowed,
+            );
+        }
+
         let ((mut internal_ids, id_map_ms), (templates, templates_ms)) = rayon::join(
             || {
                 let id_map_started_at = Instant::now();

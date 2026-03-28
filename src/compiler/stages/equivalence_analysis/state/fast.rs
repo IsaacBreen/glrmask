@@ -58,6 +58,7 @@ fn hash_trellis_node_from_positions(
     token_len: usize,
     suffix_hashes: &[u128],
     future_group_hashes: &[u128],
+    skip_groups: &[bool],
 ) -> u128 {
     const DEAD_NODE_TAG: u128 = 0xDEAD_DEAD_DEAD_DEAD;
     const ACCEPT_SINK_HASH: u128 = 0xA11C_EA5E_A11C_EA5E;
@@ -78,6 +79,9 @@ fn hash_trellis_node_from_positions(
 
     for (gid, &target_pos) in positions.iter().enumerate() {
         if target_pos < 0 {
+            continue;
+        }
+        if !skip_groups.is_empty() && skip_groups[gid] {
             continue;
         }
         edge_count += 1;
@@ -122,6 +126,7 @@ fn build_start_state_suffix_hashes(
     dfa_future_groups: &[Vec<usize>],
     future_group_hashes: &[u128],
     num_groups: usize,
+    skip_groups: &[bool],
 ) -> Vec<u128> {
     let len = token.len();
     let mut suffix_hashes = vec![0u128; len];
@@ -161,6 +166,7 @@ fn build_start_state_suffix_hashes(
             len,
             &suffix_hashes,
             future_group_hashes,
+            skip_groups,
         );
     }
 
@@ -173,6 +179,25 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]> + Sync>(
     tokens: &[S],
     states: &[usize],
 ) -> Vec<usize> {
+    find_state_equivalence_classes_ex(tokenizer, tokens, states, &[], None, None)
+}
+
+/// Find state equivalence classes with optional disallowed-follows filtering
+/// and batch limit.
+///
+/// `skip_groups`: groups that are universally disallowed and can be ignored
+///                in the trellis hash.
+/// `max_batches`: if `Some(n)`, stop after processing `n` token batches
+///                (useful for coarse pre-vocab reduction).
+/// `batch_size`: override the default 5000-token batch size.
+pub fn find_state_equivalence_classes_ex<S: AsRef<[u8]> + Sync>(
+    tokenizer: &TokenizerView,
+    tokens: &[S],
+    states: &[usize],
+    skip_groups: &[bool],
+    max_batches: Option<usize>,
+    batch_size: Option<usize>,
+) -> Vec<usize> {
     let profile_equivalence = profile_equivalence_enabled();
 
     if states.is_empty() {
@@ -180,17 +205,19 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]> + Sync>(
     }
 
     let refinement_started_at = std::time::Instant::now();
-    let mapping = find_state_equivalence_classes_token_based(tokenizer, tokens, states);
+    let mapping = find_state_equivalence_classes_token_based(tokenizer, tokens, states, skip_groups, max_batches, batch_size);
     let refinement_time = refinement_started_at.elapsed();
 
     if profile_equivalence {
         let final_classes = count_classes(&mapping);
         eprintln!(
-            "[glrmask/profile][state_equiv] token_refine_ms={:.3} states={}→{} ({:.2}x)",
+            "[glrmask/profile][state_equiv] token_refine_ms={:.3} states={}→{} ({:.2}x) skip_groups={} max_batches={:?}",
             refinement_time.as_secs_f64() * 1000.0,
             states.len(),
             final_classes,
             states.len() as f64 / final_classes.max(1) as f64,
+            skip_groups.iter().filter(|&&b| b).count(),
+            max_batches,
         );
     }
 
@@ -201,6 +228,9 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     tokenizer: &TokenizerView,
     tokens: &[S],
     states: &[usize],
+    skip_groups: &[bool],
+    max_batches: Option<usize>,
+    custom_batch_size: Option<usize>,
 ) -> Vec<usize> {
     use std::collections::{hash_map::Entry, HashMap};
 
@@ -265,6 +295,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                 &dfa_future_groups,
                 &future_group_hashes,
                 num_groups,
+                skip_groups,
             )
         })
         .collect();
@@ -281,7 +312,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     let early_stop = std::env::var("STATE_EQUIV_EARLY_STOP")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    let batch_size = 5000usize;
+    let batch_size = custom_batch_size.unwrap_or(5000);
     let batches = build_strided_batches(total_tokens, batch_size);
     let dead_positions = vec![-1i32; num_groups];
     let fully_dead_token_hash = hash_trellis_node_from_positions(
@@ -290,6 +321,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
         0,
         &[],
         &future_group_hashes,
+        skip_groups,
     );
 
     let mut group_ids: Vec<usize> = vec![0usize; states.len()];
@@ -300,9 +332,15 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     let mut prev_groups = 1usize;
     let mut stable_batches = 0usize;
     let mut tokens_tested = 0usize;
+    let mut batches_processed = 0usize;
     for batch_indices in &batches {
         if active_indices.is_empty() {
             break;
+        }
+        if let Some(max) = max_batches {
+            if batches_processed >= max {
+                break;
+            }
         }
 
         let batch_len = batch_indices.len();
@@ -478,6 +516,9 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                                             if gid >= num_groups {
                                                 continue;
                                             }
+                                            if !skip_groups.is_empty() && skip_groups[gid] {
+                                                continue;
+                                            }
                                             let pos_i32 = position as i32;
                                             let prev = positions[gid];
                                             if prev != pos_i32 {
@@ -517,6 +558,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                                     token.len(),
                                     &suffix_hashes_by_token[global_token_idx],
                                     &future_group_hashes,
+                                    skip_groups,
                                 )
                             } else {
                                 let current = *state_stack.last().unwrap();
@@ -526,6 +568,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                                     token.len(),
                                     &suffix_hashes_by_token[global_token_idx],
                                     &future_group_hashes,
+                                    skip_groups,
                                 )
                             };
                             hash_delta = hash_delta.wrapping_add(
@@ -539,6 +582,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
             )
             .collect();
 
+        batches_processed += 1;
         let previous_active_indices = std::mem::take(&mut active_indices);
         let all_active = previous_active_indices.len() == states.len();
 
@@ -686,7 +730,7 @@ mod tests {
         ];
         let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
 
-        let direct = find_state_equivalence_classes_token_based(&tokenizer_view, &tokens, &states);
+        let direct = find_state_equivalence_classes_token_based(&tokenizer_view, &tokens, &states, &[], None, None);
         let actual = find_state_equivalence_classes(&tokenizer_view, &tokens, &states);
 
         assert_eq!(
