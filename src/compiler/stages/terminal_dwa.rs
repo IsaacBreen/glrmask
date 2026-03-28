@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
@@ -78,6 +79,53 @@ fn debug_profile_enabled() -> bool {
             !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
         })
         .unwrap_or(false)
+}
+
+fn root_combined_signature(
+    tokenizer: &Tokenizer,
+    representative_state: u32,
+    internal_tsid: u32,
+    terminal_coloring: &TerminalColoring,
+    ignore_terminal: Option<TerminalID>,
+    possible_matches_by_state: &PossibleMatchesByState,
+) -> u64 {
+    let mut future_groups = BTreeMap::<ColorId, SmallVec<[TerminalID; 4]>>::new();
+    for terminal_id in tokenizer.possible_future_terminals_iter(representative_state) {
+        if Some(terminal_id) == ignore_terminal {
+            continue;
+        }
+        future_groups
+            .entry(terminal_coloring.color_for(terminal_id))
+            .or_default()
+            .push(terminal_id);
+    }
+
+    let mut future_hasher = std::collections::hash_map::DefaultHasher::new();
+    for (color, terminals) in future_groups {
+        color.hash(&mut future_hasher);
+        terminals.len().hash(&mut future_hasher);
+        for terminal_id in terminals {
+            terminal_id.hash(&mut future_hasher);
+        }
+    }
+    let future_sig = future_hasher.finish();
+
+    let mut possible_matches_hasher = std::collections::hash_map::DefaultHasher::new();
+    if let Some(matches_by_terminal) = possible_matches_by_state.get(&internal_tsid) {
+        for (terminal_id, token_ids) in matches_by_terminal {
+            terminal_id.hash(&mut possible_matches_hasher);
+            for range in token_ids.ranges() {
+                range.start().hash(&mut possible_matches_hasher);
+                range.end().hash(&mut possible_matches_hasher);
+            }
+        }
+    }
+    let possible_matches_sig = possible_matches_hasher.finish();
+
+    let mut combined_hasher = std::collections::hash_map::DefaultHasher::new();
+    future_sig.hash(&mut combined_hasher);
+    possible_matches_sig.hash(&mut combined_hasher);
+    combined_hasher.finish()
 }
 
 pub(crate) fn compute_terminal_coloring(table: &GLRTable) -> TerminalColoring {
@@ -991,17 +1039,6 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             .clone()
     }
 
-    fn future_terminals_for_color(
-        &mut self,
-        tokenizer_state: TokenizerState,
-        color: ColorId,
-    ) -> Vec<TerminalID> {
-        self.future_terminal_color_groups_for_state(tokenizer_state)
-            .iter()
-            .find_map(|(group_color, terminals)| (*group_color == color).then_some(terminals.to_vec()))
-            .unwrap_or_default()
-    }
-
     fn buffer_future_leaf_token_id(
         &mut self,
         source: u32,
@@ -1292,7 +1329,11 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             if buffered.token_ids.is_empty() && buffered.weight.as_ref().map_or(true, |w| w.is_empty()) {
                 continue;
             }
-            let terminals = self.future_terminals_for_color(tokenizer_state, color);
+            let color_groups = self.future_terminal_color_groups_for_state(tokenizer_state);
+            let terminals = color_groups
+                .iter()
+                .find_map(|(group_color, terminals)| (*group_color == color).then_some(terminals.to_vec()))
+                .unwrap_or_default();
             for terminal_id in terminals {
                 let entry = leaf_transition_buckets[source as usize]
                     .entry(terminal_id as i32)
@@ -1552,20 +1593,46 @@ fn internal_vocab_entries(vocab: &Vocab, id_map: &InternalIdMap) -> Vec<(u32, Ve
 fn seed_root_nodes(
     nwa: &mut NWA,
     start_state: u32,
+    tokenizer: &Tokenizer,
     id_map: &InternalIdMap,
+    terminal_coloring: &TerminalColoring,
+    ignore_terminal: Option<TerminalID>,
+    possible_matches_by_state: &PossibleMatchesByState,
 ) -> NodesByTokenizerState {
     let mut roots_by_tokenizer_state = NodesByTokenizerState::new();
+    let mut roots_by_signature = HashMap::<u64, NwaState>::new();
+    let mut start_weights_by_root = HashMap::<NwaState, Weight>::new();
 
-    for internal_tsid in 0..id_map.num_tsids() {
-        let root = nwa.add_state();
-        nwa.add_epsilon(
-            start_state,
-            root,
-            all_token_weight(internal_tsid, id_map.max_internal_token_id()),
+    for (internal_tsid, representative_state) in id_map
+        .tokenizer_states
+        .iter_representative_ids()
+        .enumerate()
+    {
+        let combined_sig = root_combined_signature(
+            tokenizer,
+            representative_state,
+            internal_tsid as u32,
+            terminal_coloring,
+            ignore_terminal,
+            possible_matches_by_state,
         );
 
-        let representative_state = id_map.tokenizer_states.representative_original_ids[internal_tsid as usize];
+        let root = *roots_by_signature
+            .entry(combined_sig)
+            .or_insert_with(|| nwa.add_state());
+        let start_weight = all_token_weight(internal_tsid as u32, id_map.max_internal_token_id());
+        start_weights_by_root
+            .entry(root)
+            .and_modify(|existing| *existing = existing.union(&start_weight))
+            .or_insert(start_weight);
+
         roots_by_tokenizer_state.merge(representative_state, &[root]);
+    }
+
+    let mut start_weight_entries: Vec<(NwaState, Weight)> = start_weights_by_root.into_iter().collect();
+    start_weight_entries.sort_unstable_by_key(|(root, _)| *root);
+    for (root, weight) in start_weight_entries {
+        nwa.add_epsilon(start_state, root, weight);
     }
 
     roots_by_tokenizer_state
@@ -1645,8 +1712,36 @@ pub(crate) fn build_terminal_dwa_with_possible_matches_and_coloring(
         );
     }
 
+    let possible_matches_started_at = std::time::Instant::now();
+    let possible_matches_by_state = collect_possible_matches_by_internal_tsid(
+        tokenizer,
+        &vocab_tree.root,
+        &mut possible_matches,
+        &id_map.tokenizer_states,
+    );
+    let possible_matches_ms = possible_matches_started_at.elapsed().as_secs_f64() * 1000.0;
+    let possible_matches_profile = possible_matches.profile();
+
+    if debug_profile {
+        eprintln!(
+            "[glrmask/debug][terminal_dwa] stage=possible_matches states={} cache_entries={} reachable_cache_entries={} ms={:.3}",
+            possible_matches_by_state.len(),
+            possible_matches_profile.cache_entries,
+            possible_matches_profile.reachable_cache_entries,
+            possible_matches_ms,
+        );
+    }
+
     let seed_started_at = std::time::Instant::now();
-    let roots_by_tokenizer_state = seed_root_nodes(&mut nwa, start_state, id_map);
+    let roots_by_tokenizer_state = seed_root_nodes(
+        &mut nwa,
+        start_state,
+        tokenizer,
+        id_map,
+        terminal_coloring,
+        ignore_terminal,
+        &possible_matches_by_state,
+    );
     let seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
 
     if debug_profile {
@@ -1692,26 +1787,6 @@ pub(crate) fn build_terminal_dwa_with_possible_matches_and_coloring(
             nwa.num_states(),
             nwa.num_transitions(),
             build_trie_ms,
-        );
-    }
-
-    let possible_matches_started_at = std::time::Instant::now();
-    let possible_matches_by_state = collect_possible_matches_by_internal_tsid(
-        tokenizer,
-        &vocab_tree.root,
-        &mut possible_matches,
-        &id_map.tokenizer_states,
-    );
-    let possible_matches_ms = possible_matches_started_at.elapsed().as_secs_f64() * 1000.0;
-    let possible_matches_profile = possible_matches.profile();
-
-    if debug_profile {
-        eprintln!(
-            "[glrmask/debug][terminal_dwa] stage=possible_matches states={} cache_entries={} reachable_cache_entries={} ms={:.3}",
-            possible_matches_by_state.len(),
-            possible_matches_profile.cache_entries,
-            possible_matches_profile.reachable_cache_entries,
-            possible_matches_ms,
         );
     }
 
