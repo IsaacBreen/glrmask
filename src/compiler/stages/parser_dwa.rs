@@ -2,11 +2,12 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
+use rustc_hash::FxHashMap;
+
 #[cfg(test)]
 use crate::Vocab;
 #[cfg(test)]
 use crate::automata::lexer::tokenizer::Tokenizer;
-use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::minimize_fast;
 use crate::automata::weighted::nwa::{NWA, NwaBody};
@@ -338,7 +339,7 @@ fn build_possible_outgoing_ids_by_state(
 }
 
 fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
-    fn canonicalize(subset: &HashMap<u32, Weight>) -> Vec<(u32, Weight)> {
+    fn canonicalize(subset: &FxHashMap<u32, Weight>) -> Vec<(u32, Weight)> {
         let mut entries: Vec<_> = subset
             .iter()
             .filter_map(|(&state_id, weight)| (!weight.is_empty()).then_some((state_id, weight.clone())))
@@ -347,7 +348,17 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
         entries
     }
 
-    fn epsilon_closure(nwa: &NWA, seed: HashMap<u32, Weight>) -> HashMap<u32, Weight> {
+    fn epsilon_closure(nwa: &NWA, seed: FxHashMap<u32, Weight>) -> FxHashMap<u32, Weight> {
+        // Fast path: single-state seed with no epsilon transitions
+        if seed.len() == 1 {
+            let (&state_id, _) = seed.iter().next().unwrap();
+            if let Some(state) = nwa.states.get(state_id as usize) {
+                if state.epsilons.is_empty() {
+                    return seed;
+                }
+            }
+        }
+
         let mut closure = seed;
         let mut queue: VecDeque<u32> = closure.keys().copied().collect();
 
@@ -377,7 +388,7 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
     let mut dwa = DWA::new(0, 0);
     let mut supports = vec![Vec::new()];
 
-    let mut start_subset = HashMap::new();
+    let mut start_subset = FxHashMap::default();
     for &state_id in &nwa.start_states {
         let existing = start_subset.get(&state_id).cloned().unwrap_or_else(Weight::empty);
         start_subset.insert(state_id, existing.union(&Weight::all()));
@@ -390,11 +401,13 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
     let start_entries = canonicalize(&start_subset);
     supports[0] = start_entries.iter().map(|(state_id, _)| *state_id).collect();
 
-    let mut subset_map: HashMap<Vec<(u32, Weight)>, u32> = HashMap::new();
+    let mut subset_map: FxHashMap<Vec<(u32, Weight)>, u32> = FxHashMap::default();
     let mut worklist: VecDeque<(Vec<(u32, Weight)>, Vec<(u32, Weight)>)> = VecDeque::new();
     let start_key = start_entries.clone();
     subset_map.insert(start_key.clone(), dwa.start_state);
     worklist.push_back((start_key, start_entries));
+
+    let mut raw_targets: FxHashMap<i32, FxHashMap<u32, Vec<Weight>>> = FxHashMap::default();
 
     while let Some((subset_key, subset_entries)) = worklist.pop_front() {
         let from_state = subset_map[&subset_key];
@@ -409,7 +422,6 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
             dwa.set_final_weight(from_state, final_weight);
         }
 
-        let mut raw_targets: HashMap<i32, HashMap<u32, Weight>> = HashMap::new();
         for (nwa_state_id, path_weight) in &subset_entries {
             let state = &nwa.states[*nwa_state_id as usize];
             for (&label, targets) in &state.transitions {
@@ -419,16 +431,24 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
                         continue;
                     }
 
-                    let target_entry = raw_targets.entry(label).or_default();
-                    target_entry
-                        .entry(*target)
-                        .and_modify(|existing| *existing = existing.union(&next_weight))
-                        .or_insert(next_weight);
+                    raw_targets.entry(label).or_default().entry(*target).or_default().push(next_weight);
                 }
             }
         }
 
-        for (label, target_subset) in raw_targets {
+        for (label, target_contributions) in raw_targets.drain() {
+            if target_contributions.is_empty() {
+                continue;
+            }
+
+            let mut target_subset: FxHashMap<u32, Weight> = FxHashMap::default();
+            for (dst, weights) in target_contributions {
+                let combined = Weight::union_all(weights.iter());
+                if !combined.is_empty() {
+                    target_subset.insert(dst, combined);
+                }
+            }
+
             if target_subset.is_empty() {
                 continue;
             }
@@ -444,7 +464,7 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
             }
 
             let edge_complement = edge_weight.complement();
-            let normalized: HashMap<u32, Weight> = if edge_complement.is_empty() {
+            let normalized: FxHashMap<u32, Weight> = if edge_complement.is_empty() {
                 expanded
             } else {
                 expanded
@@ -478,6 +498,195 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
     }
 
     DeterminizedDwaWithSupports { dwa, supports }
+}
+
+/// Apply default-transition optimization directly on a DWA, avoiding the
+/// DWA→NWA→optimize→determinize round-trip. This replaces repeated per-parser-state
+/// transitions (all going to the same target) with a single DEFAULT_LABEL transition,
+/// lifts final weights from the default target, and subtracts covered weights.
+fn optimize_parser_dwa_defaults(
+    dwa: &mut DWA,
+    possible_by_state: &[BitSet],
+    num_parser_states: u32,
+) {
+    loop {
+        let mut changed = false;
+
+        // Phase 1: Identify states where all possible parser-state labels go to the same
+        // target and create a DEFAULT_LABEL entry with the intersection weight.
+        for (state_id, possible_ids) in possible_by_state.iter().enumerate() {
+            if possible_ids.is_empty() || possible_ids.count_ones() < 2 {
+                continue;
+            }
+
+            let state = &dwa.states[state_id];
+
+            // Check that every possible parser_state label is present
+            let mut actual_positive = BitSet::new(num_parser_states as usize);
+            for &label in state.transitions.keys() {
+                if let Some(ps) = parser_state_label(label, num_parser_states) {
+                    actual_positive.set(ps as usize);
+                }
+            }
+            if actual_positive != *possible_ids {
+                continue;
+            }
+
+            // Check all parser-state transitions share the same target
+            let mut shared_target: Option<u32> = None;
+            let mut default_weight: Option<Weight> = None;
+            let mut valid = true;
+
+            for ps in possible_ids.iter_ones() {
+                let label = ps as i32;
+                let Some((target, weight)) = state.transitions.get(&label) else {
+                    valid = false;
+                    break;
+                };
+                match shared_target {
+                    Some(existing) if existing != *target => {
+                        valid = false;
+                        break;
+                    }
+                    None => shared_target = Some(*target),
+                    _ => {}
+                }
+                default_weight = Some(match default_weight {
+                    Some(existing) => existing.intersection(weight),
+                    None => weight.clone(),
+                });
+            }
+
+            let Some(target) = shared_target else { continue };
+            let Some(default_weight) = default_weight else { continue };
+            if !valid || default_weight.is_empty() {
+                continue;
+            }
+
+            // Add or union DEFAULT_LABEL transition
+            let state = &mut dwa.states[state_id];
+            let entry = state.transitions.entry(DEFAULT_LABEL);
+            match entry {
+                std::collections::btree_map::Entry::Occupied(mut occ) => {
+                    let (existing_target, existing_weight) = occ.get_mut();
+                    if *existing_target == target {
+                        let updated = existing_weight.union(&default_weight);
+                        if updated != *existing_weight {
+                            *existing_weight = updated;
+                            changed = true;
+                        }
+                    }
+                    // Different target — skip (cannot merge in DWA)
+                }
+                std::collections::btree_map::Entry::Vacant(vac) => {
+                    vac.insert((target, default_weight));
+                    changed = true;
+                }
+            }
+        }
+
+        // Phase 2: Lift final weights from default targets to source states.
+        for state_id in 0..dwa.states.len() {
+            let Some((default_target, default_weight)) =
+                dwa.states[state_id].transitions.get(&DEFAULT_LABEL).cloned()
+            else {
+                continue;
+            };
+
+            let target_final = dwa.states[default_target as usize].final_weight.clone();
+            let Some(target_final) = target_final else { continue };
+            let lifted = default_weight.intersection(&target_final);
+            if lifted.is_empty() {
+                continue;
+            }
+
+            // Union lifted final weight into source state
+            if union_final_weight(&mut dwa.states[state_id].final_weight, lifted.clone()) {
+                changed = true;
+            }
+
+            // Subtract lifted weight from all outgoing transitions of this state
+            let state = &mut dwa.states[state_id];
+            let mut to_remove = Vec::new();
+            for (&label, (_, weight)) in state.transitions.iter_mut() {
+                let new_weight = weight.difference(&lifted);
+                if new_weight != *weight {
+                    *weight = new_weight;
+                    changed = true;
+                }
+                if weight.is_empty() {
+                    to_remove.push(label);
+                }
+            }
+            for label in to_remove {
+                state.transitions.remove(&label);
+            }
+        }
+
+        // Phase 3: For each state with DEFAULT_LABEL, subtract default weight from
+        // explicit transitions that share the same target.
+        for state_id in 0..dwa.states.len() {
+            let Some(&(default_target, ref default_weight)) =
+                dwa.states[state_id].transitions.get(&DEFAULT_LABEL)
+            else {
+                continue;
+            };
+            let default_target = default_target;
+            let default_weight = default_weight.clone();
+
+            let state = &mut dwa.states[state_id];
+            let mut to_remove = Vec::new();
+            for (&label, (target, weight)) in state.transitions.iter_mut() {
+                if label == DEFAULT_LABEL {
+                    continue;
+                }
+                if *target != default_target {
+                    continue;
+                }
+                let new_weight = weight.difference(&default_weight);
+                if new_weight != *weight {
+                    *weight = new_weight;
+                    changed = true;
+                }
+                if weight.is_empty() {
+                    to_remove.push(label);
+                }
+            }
+            for label in to_remove {
+                state.transitions.remove(&label);
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+}
+
+/// Subtract final weights from all outgoing transitions (DWA version).
+fn subtract_final_weights_from_outgoing_dwa(dwa: &mut DWA) {
+    for state_id in 0..dwa.states.len() {
+        let Some(final_weight) = dwa.states[state_id].final_weight.clone() else {
+            continue;
+        };
+        if final_weight.is_empty() {
+            continue;
+        }
+        let state = &mut dwa.states[state_id];
+        let mut to_remove = Vec::new();
+        for (&label, (_, weight)) in state.transitions.iter_mut() {
+            let new_weight = weight.difference(&final_weight);
+            if new_weight != *weight {
+                *weight = new_weight;
+            }
+            if weight.is_empty() {
+                to_remove.push(label);
+            }
+        }
+        for label in to_remove {
+            state.transitions.remove(&label);
+        }
+    }
 }
 
 fn dwa_to_nwa(dwa: &DWA) -> NWA {
@@ -703,6 +912,7 @@ fn build_parser_nwa_from_terminal_dwa(
     profile.compose_state_ms = elapsed_ms(compose_started_at);
 
     arena.start_states = parser_body.start_states.clone();
+
     Some((arena, profile))
 }
 
@@ -753,41 +963,33 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     let determinize_supports_started_at = Instant::now();
     let determinized = determinize_with_supports(&parser_nwa);
     profile.determinize_supports_ms = elapsed_ms(determinize_supports_started_at);
-    let parser_dwa_pre_minimize = determinized.dwa;
+    let mut parser_dwa_pre_minimize = determinized.dwa;
 
-    let ((possible_by_state, viable_suffix_ms), mut optimized_parser_nwa) = rayon::join(
-        || {
-            let viable_suffix_started_at = Instant::now();
-            let possible_by_state = build_possible_outgoing_ids_by_state(
-                &parser_nwa,
-                &determinized.supports,
-                table.num_states,
-            );
-            (possible_by_state, elapsed_ms(viable_suffix_started_at))
-        },
-        || dwa_to_nwa(&parser_dwa_pre_minimize),
+    let viable_suffix_started_at = Instant::now();
+    let possible_by_state = build_possible_outgoing_ids_by_state(
+        &parser_nwa,
+        &determinized.supports,
+        table.num_states,
     );
-    profile.viable_suffix_ms = viable_suffix_ms;
+    profile.viable_suffix_ms = elapsed_ms(viable_suffix_started_at);
 
     let optimize_defaults_started_at = Instant::now();
-    optimize_parser_default_transitions(
-        &mut optimized_parser_nwa,
+    optimize_parser_dwa_defaults(
+        &mut parser_dwa_pre_minimize,
         &possible_by_state,
         table.num_states,
     );
     profile.optimize_defaults_ms = elapsed_ms(optimize_defaults_started_at);
 
     let subtract_final_started_at = Instant::now();
-    optimized_parser_nwa.subtract_final_weights_from_outgoing();
+    subtract_final_weights_from_outgoing_dwa(&mut parser_dwa_pre_minimize);
     profile.subtract_final_ms = elapsed_ms(subtract_final_started_at);
 
-    let determinize_after_defaults_started_at = Instant::now();
-    let determinized_after_defaults = determinize(&optimized_parser_nwa)
-        .expect("parser NWA determinization failed after default-transition optimization");
-    profile.determinize_after_defaults_ms = elapsed_ms(determinize_after_defaults_started_at);
+    // determinize_after_defaults is no longer needed — optimization is done directly on the DWA
+    profile.determinize_after_defaults_ms = 0.0;
 
     let minimize_started_at = Instant::now();
-    let minimized = minimize_fast(&determinized_after_defaults);
+    let minimized = minimize_fast(&parser_dwa_pre_minimize);
     profile.minimize_ms = elapsed_ms(minimize_started_at);
     profile.total_ms = elapsed_ms(total_started_at);
 
