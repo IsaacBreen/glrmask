@@ -5,7 +5,7 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use crate::Vocab;
-use crate::automata::lexer::tokenizer::Tokenizer;
+use crate::automata::lexer::tokenizer::{Tokenizer, TokenizerMatch};
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::minimize;
@@ -910,6 +910,10 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     transition_buffer: FxHashMap<(u32, i32, u32), Weight>,
     epsilon_buffer: FxHashMap<(u32, u32), Weight>,
     profile: TerminalDwaBuildProfile,
+    /// Lazily-built flat DFA transition table. Indexed by state ID.
+    /// Each entry maps byte → next_state (u32::MAX = no transition).
+    /// Replaces binary-search CharTransitions::get with O(1) array index.
+    flat_transitions: Vec<Option<Box<[u32; 256]>>>,
 }
 
 #[derive(Default)]
@@ -919,6 +923,22 @@ struct BufferedLeafTransition {
 }
 
 impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
+    /// O(1) DFA step using lazily-built flat transition table.
+    #[inline]
+    fn fast_step(&mut self, state: u32, byte: u8) -> Option<u32> {
+        let state_idx = state as usize;
+        if self.flat_transitions[state_idx].is_none() {
+            let dfa_state = &self.tokenizer.dfa.states()[state_idx];
+            let mut flat = Box::new([u32::MAX; 256]);
+            for (b, &target) in dfa_state.transitions.iter() {
+                flat[b as usize] = target;
+            }
+            self.flat_transitions[state_idx] = Some(flat);
+        }
+        let next = self.flat_transitions[state_idx].as_ref().unwrap()[byte as usize];
+        if next == u32::MAX { None } else { Some(next) }
+    }
+
     fn leaf_token_ids_for(&mut self, source: u32, label: TerminalID) -> &mut LeafTokenIds {
         let source_idx = source as usize;
         if source_idx >= self.leaf_token_ids_buffer.len() {
@@ -1394,6 +1414,10 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         let mut pending_by_offset = BTreeMap::<usize, NodesByTokenizerState>::new();
         pending_by_offset.insert(0, initial_nodes.clone());
 
+        // Reusable buffers for DFA execution (avoids per-call allocation)
+        let mut match_map_buf = FxHashMap::<TerminalID, (usize, u32)>::default();
+        let mut matches_buf: Vec<TokenizerMatch> = Vec::new();
+
         while let Some((offset, nodes_at_offset)) = pending_by_offset.pop_first() {
             if offset == segment_bytes.len() {
                 for (tokenizer_state, nwa_states) in nodes_at_offset {
@@ -1403,10 +1427,29 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             }
 
             for (tokenizer_state, source_nodes) in nodes_at_offset {
-                let exec = self
-                    .tokenizer
-                    .execute_from_state(&segment_bytes[offset..], tokenizer_state);
-                let end_state = exec.end_state;
+                // Inline DFA scanning with flat transition table for O(1) per-byte stepping
+                match_map_buf.clear();
+                let mut scan_state = tokenizer_state;
+                let mut scan_alive = true;
+                for (index, &byte) in segment_bytes[offset..].iter().enumerate() {
+                    if let Some(next) = self.fast_step(scan_state, byte) {
+                        scan_state = next;
+                        // Record longest match per terminal
+                        for terminal in self.tokenizer.matched_terminals_iter(scan_state) {
+                            match_map_buf.insert(terminal, (index + 1, scan_state));
+                        }
+                    } else {
+                        scan_alive = false;
+                        break;
+                    }
+                }
+                let end_state = if scan_alive { Some(scan_state) } else { None };
+
+                // Collect matches into reusable buffer
+                matches_buf.clear();
+                for (&id, &(width, end_st)) in match_map_buf.iter() {
+                    matches_buf.push(TokenizerMatch { id, width, end_state: end_st });
+                }
 
                 if let Some(end_state) = end_state {
                     if child_node.has_token() {
@@ -1420,7 +1463,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     next_level_nodes.merge(end_state, &source_nodes);
                 }
 
-                for matched in exec.matches {
+                for matched in &matches_buf {
                     let next_offset = offset + matched.width;
 
                     if next_offset == segment_bytes.len() && child_node.has_token() {
@@ -1635,6 +1678,7 @@ pub(crate) fn build_terminal_dwa_with_possible_matches_and_coloring(
         transition_buffer: FxHashMap::default(),
         epsilon_buffer: FxHashMap::default(),
         profile: TerminalDwaBuildProfile::default(),
+        flat_transitions: vec![None; tokenizer.num_states() as usize],
     };
     builder.build_from_trie(&vocab_tree.root, &roots_by_tokenizer_state);
     builder.flush_transition_buffer();
