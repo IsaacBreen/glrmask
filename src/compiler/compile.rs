@@ -26,6 +26,7 @@ use crate::compiler::stages::terminal_dwa::{
     TerminalColoring,
 };
 use crate::ds::bitset::BitSet;
+use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::runtime::Constraint;
 
 fn env_flag_enabled(name: &str) -> bool {
@@ -238,22 +239,45 @@ fn finalize_constraint(mut constraint: Constraint) -> Constraint {
 fn warn_problematic_byte_terminals(tokenizer: &Tokenizer, vocab: &Vocab) {
     const SCORE_THRESHOLD: u64 = 100_000;
 
-    // Count byte appearances across all vocab tokens.
+    // Count byte appearances across vocab trie segment bytes.
+    // Each edge (segment) in the trie contributes its bytes once, so shared
+    // prefixes are deduplicated.
+    let trie = VocabPrefixTree::build_owned(
+        vocab
+            .entries
+            .iter()
+            .map(|(&id, bytes)| (id as usize, bytes.clone()))
+            .collect(),
+    );
     let mut byte_count = [0u64; 256];
-    for bytes in vocab.entries.values() {
-        for &b in bytes {
+    fn count_segment_bytes(
+        node: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
+        parent_prefix_len: usize,
+        byte_count: &mut [u64; 256],
+    ) {
+        // Count bytes in this node's edge label (segment from parent).
+        for &b in &node.prefix()[parent_prefix_len..] {
             byte_count[b as usize] += 1;
         }
+        // Recurse into children.
+        for child in node.children() {
+            count_segment_bytes(child, node.prefix_length(), byte_count);
+        }
+    }
+    for child in trie.root.children() {
+        count_segment_bytes(child, 0, &mut byte_count);
     }
 
-    // A byte is "problematic" if, from the tokenizer's start state, consuming
-    // that byte reaches a state where at least one terminal is matched (i.e.
-    // the byte alone forms a complete terminal match).
+    // A byte is "problematic" if, from the tokenizer's start state:
+    // 1. consuming that byte reaches a state with a finalizer (terminal match)
+    // 2. AND from that destination state there is no transition on the same byte
     let start = tokenizer.start_state();
     let mut problematic = [false; 256];
     for b in 0u16..=255 {
         if let Some(next_state) = tokenizer.step(start, b as u8) {
-            if tokenizer.matched_terminals(next_state).len() > 0 {
+            if !tokenizer.matched_terminals(next_state).is_empty()
+                && tokenizer.step(next_state, b as u8).is_none()
+            {
                 problematic[b as usize] = true;
             }
         }
