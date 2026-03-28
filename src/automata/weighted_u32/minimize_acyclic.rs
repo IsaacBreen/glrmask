@@ -456,15 +456,101 @@ fn are_compatible(
         needed_u.is_disjoint(needed_v)
     };
 
-    // Compute overlap lazily — only needed for non-disjoint case
-    let overlap = if domain_disjoint {
-        Weight::empty()
-    } else {
-        needed_u.intersection(needed_v)
-    };
+    // Check transitions — do target conflict detection first (cheap).
+    let n = dwa.states.len();
+    let trans_u = &productive_transitions[u];
+    let trans_v = &productive_transitions[v];
 
-    // Check final weights on the overlapping domain (skip if disjoint)
-    if !domain_disjoint {
+    // Quick target-conflict check first (no weight ops needed)
+    {
+        let mut idx_u = 0usize;
+        let mut idx_v = 0usize;
+        while idx_u < trans_u.len() || idx_v < trans_v.len() {
+            let (entry_u, entry_v) = match (trans_u.get(idx_u), trans_v.get(idx_v)) {
+                (Some(u_entry), Some(v_entry)) => {
+                    if u_entry.label == v_entry.label {
+                        idx_u += 1;
+                        idx_v += 1;
+                        (Some(u_entry), Some(v_entry))
+                    } else if u_entry.label < v_entry.label {
+                        idx_u += 1;
+                        (Some(u_entry), None)
+                    } else {
+                        idx_v += 1;
+                        (None, Some(v_entry))
+                    }
+                }
+                (Some(u_entry), None) => { idx_u += 1; (Some(u_entry), None) }
+                (None, Some(v_entry)) => { idx_v += 1; (None, Some(v_entry)) }
+                (None, None) => break,
+            };
+
+            let target_u = entry_u.and_then(|e| ((e.target as usize) < n).then_some(e.target));
+            let target_v = entry_v.and_then(|e| ((e.target as usize) < n).then_some(e.target));
+            let mapped_u = target_u.and_then(|t| mapped_target(old_to_new, t));
+            let mapped_v = target_v.and_then(|t| mapped_target(old_to_new, t));
+            match (mapped_u, mapped_v) {
+                (Some(mu), Some(mv)) if mu != mv => {
+                    let has_u = entry_u.is_some_and(|e| !e.weight.is_empty());
+                    let has_v = entry_v.is_some_and(|e| !e.weight.is_empty());
+                    if has_u || has_v {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // If domains are disjoint we're done — no overlap weight checks needed.
+    if domain_disjoint {
+        return true;
+    }
+
+    // Check if all transition weights are identical (Arc-equal or value-equal).
+    // This is a fast path that avoids computing the overlap weight entirely.
+    {
+        let mut all_equal = true;
+        let fw_u = dwa.states[u].final_weight.as_ref();
+        let fw_v = dwa.states[v].final_weight.as_ref();
+        match (fw_u, fw_v) {
+            (Some(wu), Some(wv)) if wu == wv => {}
+            (None, None) => {}
+            _ => { all_equal = false; }
+        }
+        if all_equal {
+            let mut idx_u = 0usize;
+            let mut idx_v = 0usize;
+            while idx_u < trans_u.len() || idx_v < trans_v.len() {
+                let (eu, ev) = match (trans_u.get(idx_u), trans_v.get(idx_v)) {
+                    (Some(a), Some(b)) => {
+                        if a.label == b.label { idx_u += 1; idx_v += 1; (Some(a), Some(b)) }
+                        else if a.label < b.label { idx_u += 1; (Some(a), None) }
+                        else { idx_v += 1; (None, Some(b)) }
+                    }
+                    (Some(a), None) => { idx_u += 1; (Some(a), None) }
+                    (None, Some(b)) => { idx_v += 1; (None, Some(b)) }
+                    (None, None) => break,
+                };
+                let w_u = eu.map(|e| &e.weight);
+                let w_v = ev.map(|e| &e.weight);
+                match (w_u, w_v) {
+                    (Some(wu), Some(wv)) if wu == wv => {}
+                    (None, None) => {}
+                    _ => { all_equal = false; break; }
+                }
+            }
+        }
+        if all_equal {
+            return true;
+        }
+    }
+
+    // Slow path: compute overlap and check weight equality on the intersection
+    let overlap = needed_u.intersection(needed_v);
+
+    // Check final weights on the overlapping domain
+    {
         let fw_u = dwa.states[u].final_weight.as_ref();
         let fw_v = dwa.states[v].final_weight.as_ref();
         match (fw_u, fw_v) {
@@ -482,108 +568,53 @@ fn are_compatible(
         }
     }
 
-    // Check transitions
-    let n = dwa.states.len();
-    let trans_u = &productive_transitions[u];
-    let trans_v = &productive_transitions[v];
-    let mut idx_u = 0usize;
-    let mut idx_v = 0usize;
-
-    while idx_u < trans_u.len() || idx_v < trans_v.len() {
-        let (entry_u, entry_v) = match (trans_u.get(idx_u), trans_v.get(idx_v)) {
-            (Some(u_entry), Some(v_entry)) => {
-                if u_entry.label == v_entry.label {
-                    idx_u += 1;
-                    idx_v += 1;
-                    (Some(u_entry), Some(v_entry))
-                } else if u_entry.label < v_entry.label {
-                    idx_u += 1;
-                    (Some(u_entry), None)
-                } else {
-                    idx_v += 1;
-                    (None, Some(v_entry))
+    // Slow path: check overlap weights per transition label.
+    // Target conflicts were already caught in pass 1 above.
+    {
+        let mut idx_u = 0usize;
+        let mut idx_v = 0usize;
+        while idx_u < trans_u.len() || idx_v < trans_v.len() {
+            let (entry_u, entry_v) = match (trans_u.get(idx_u), trans_v.get(idx_v)) {
+                (Some(a), Some(b)) => {
+                    if a.label == b.label { idx_u += 1; idx_v += 1; (Some(a), Some(b)) }
+                    else if a.label < b.label { idx_u += 1; (Some(a), None) }
+                    else { idx_v += 1; (None, Some(b)) }
                 }
-            }
-            (Some(u_entry), None) => {
-                idx_u += 1;
-                (Some(u_entry), None)
-            }
-            (None, Some(v_entry)) => {
-                idx_v += 1;
-                (None, Some(v_entry))
-            }
-            (None, None) => break,
-        };
-
-        let (target_u, w_u_full) = match entry_u {
-            Some(entry) => {
-                let t = entry.target as usize;
-                if t < n { (Some(t), Some(&entry.weight)) } else { (None, None) }
-            }
-            None => (None, None),
-        };
-        let (target_v, w_v_full) = match entry_v {
-            Some(entry) => {
-                let t = entry.target as usize;
-                if t < n { (Some(t), Some(&entry.weight)) } else { (None, None) }
-            }
-            None => (None, None),
-        };
-
-        // Map targets to new IDs
-        let mapped_u = target_u.and_then(|target| mapped_target(old_to_new, target as u32));
-        let mapped_v = target_v.and_then(|target| mapped_target(old_to_new, target as u32));
-
-        // If the remapped targets differ and either side still carries weight,
-        // the merged builder would need two targets for one label.
-        match (mapped_u, mapped_v) {
-            (Some(mu), Some(mv)) if mu != mv => {
-                let has_u = w_u_full.is_some_and(|w| !w.is_empty());
-                let has_v = w_v_full.is_some_and(|w| !w.is_empty());
-                if has_u || has_v {
-                    return false;
-                }
-            }
-            _ => {}
-        }
-
-        // If domains aren't disjoint, also check overlap weights and targets
-        if !domain_disjoint {
-            // Fast path: if both full weights are equal, their overlap restrictions
-            // are also equal. Skip expensive intersection computation.
-            let weights_equal = match (w_u_full, w_v_full) {
-                (Some(wu), Some(wv)) => wu == wv,
-                (None, None) => true,
-                _ => false,
+                (Some(a), None) => { idx_u += 1; (Some(a), None) }
+                (None, Some(b)) => { idx_v += 1; (None, Some(b)) }
+                (None, None) => break,
             };
 
-            if weights_equal {
-                // Same weight → same intersection → compatible on this label.
-                // Targets already verified above (mapped_u == mapped_v or both empty weight).
-                continue;
+            let w_u_full = entry_u.and_then(|e| ((e.target as usize) < n).then_some(&e.weight));
+            let w_v_full = entry_v.and_then(|e| ((e.target as usize) < n).then_some(&e.weight));
+
+            // Fast path: if both full weights are equal, overlap restrictions are too.
+            match (w_u_full, w_v_full) {
+                (Some(wu), Some(wv)) if wu == wv => continue,
+                (None, None) => continue,
+                _ => {}
             }
 
-            // Fused check: compare overlap-restricted weights without allocating
-            // intermediate Weight objects.
             let u_disjoint = w_u_full.map_or(true, |w| w.is_disjoint(&overlap));
             let v_disjoint = w_v_full.map_or(true, |w| w.is_disjoint(&overlap));
 
             if u_disjoint && v_disjoint {
-                // Both empty on overlap → compatible on this label.
                 continue;
             }
-
             if u_disjoint != v_disjoint {
-                // One empty, other non-empty on overlap → incompatible.
                 return false;
             }
 
-            // Both non-empty on overlap → check equality without allocation.
+            // Both non-empty on overlap → check equality.
             if !weights_equal_on_domain(w_u_full.unwrap(), w_v_full.unwrap(), &overlap) {
                 return false;
             }
 
-            // Equal and non-empty on overlap → targets must agree.
+            // Equal on overlap → targets must agree (re-check for this specific case).
+            let target_u = entry_u.and_then(|e| ((e.target as usize) < n).then_some(e.target));
+            let target_v = entry_v.and_then(|e| ((e.target as usize) < n).then_some(e.target));
+            let mapped_u = target_u.and_then(|t| mapped_target(old_to_new, t));
+            let mapped_v = target_v.and_then(|t| mapped_target(old_to_new, t));
             match (mapped_u, mapped_v) {
                 (Some(mu), Some(mv)) if mu != mv => return false,
                 (Some(_), None) | (None, Some(_)) => return false,
@@ -689,11 +720,15 @@ fn build_incompatibility_graph_sparse(
     old_to_new: &[u32],
     productive_transitions: &[Vec<ProductiveTransition>],
 ) -> Option<Vec<Vec<usize>>> {
+    let t0 = std::time::Instant::now();
     let overlap_pairs = overlapping_candidate_pairs(candidates, needed)?;
+    let overlap_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let num_overlap_pairs = overlap_pairs.len();
 
     let nc = candidates.len();
     let mut incompatible_pairs = FxHashSet::default();
 
+    let t1 = std::time::Instant::now();
     // Sparse needed-set overlap is not sufficient on its own: even disjoint-needed
     // states are incompatible if they expose the same label but remap it to
     // different targets. Seed the sparse graph with those label-target conflicts.
@@ -733,7 +768,10 @@ fn build_incompatibility_graph_sparse(
             }
         }
     }
+    let label_conflict_ms = t1.elapsed().as_secs_f64() * 1000.0;
+    let label_conflict_pairs = incompatible_pairs.len();
 
+    let t2 = std::time::Instant::now();
     let additional_incompatible: Vec<(usize, usize)> = overlap_pairs
         .par_iter()
         .filter_map(|&(i, j)| {
@@ -755,10 +793,14 @@ fn build_incompatibility_graph_sparse(
             }
         })
         .collect();
+    let compat_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
     for pair in additional_incompatible {
         incompatible_pairs.insert(pair);
     }
+
+    eprintln!("[glrmask/debug][sparse_graph] candidates={} overlap_pairs={} overlap_ms={:.1} label_conflict_pairs={} label_ms={:.1} compat_check_ms={:.1} total_incompat={}",
+        nc, num_overlap_pairs, overlap_ms, label_conflict_pairs, label_conflict_ms, compat_ms, incompatible_pairs.len());
 
     let mut adj: Vec<Vec<usize>> = vec![vec![]; nc];
     for (i, j) in incompatible_pairs {
@@ -826,10 +868,12 @@ fn build_and_color_with_signature_dedup(
 ) -> Vec<usize> {
     let nc = candidates.len();
 
+    let t0 = std::time::Instant::now();
     let signatures: Vec<u64> = candidates
         .iter()
         .map(|&id| compute_state_signature(id, dwa, needed, old_to_new, productive_transitions))
         .collect();
+    let sig_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     let mut sig_to_rep_idx: FxHashMap<u64, usize> = FxHashMap::default();
     let mut unique_indices: Vec<usize> = Vec::new(); // indices into candidates
@@ -843,6 +887,7 @@ fn build_and_color_with_signature_dedup(
 
     let rep_candidates: Vec<usize> = unique_indices.iter().map(|&i| candidates[i]).collect();
 
+    let t1 = std::time::Instant::now();
     let rep_adj = build_incompatibility_graph_sparse(
         dwa,
         &rep_candidates,
@@ -859,8 +904,15 @@ fn build_and_color_with_signature_dedup(
             productive_transitions,
         )
     });
+    let graph_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
+    let t2 = std::time::Instant::now();
     let rep_coloring = greedy_coloring(&rep_adj);
+    let color_ms = t2.elapsed().as_secs_f64() * 1000.0;
+    let num_colors = rep_coloring.iter().max().map(|c| c + 1).unwrap_or(0);
+    let total_edges: usize = rep_adj.iter().map(|a| a.len()).sum::<usize>() / 2;
+    eprintln!("[glrmask/debug][minimize_dedup] candidates={} unique_reps={} sig_ms={:.1} graph_ms={:.1} edges={} color_ms={:.1} colors={}",
+        nc, rep_candidates.len(), sig_ms, graph_ms, total_edges, color_ms, num_colors);
 
     let mut coloring = vec![0usize; nc];
     for (idx, &sig) in signatures.iter().enumerate() {
