@@ -399,13 +399,15 @@ fn compile_prepared_with_profile(
             );
         }
 
-        let warn_started_at = Instant::now();
-        warn_problematic_byte_terminals(&tokenizer, vocab);
-        if debug_profile {
-            eprintln!(
-                "[glrmask/debug][warn_byte_terminals] ms={:.3}",
-                elapsed_ms(warn_started_at),
-            );
+        if env_flag_enabled("GLRMASK_WARN_PROBLEMATIC_BYTE_TERMINALS") {
+            let warn_started_at = Instant::now();
+            warn_problematic_byte_terminals(&tokenizer, vocab);
+            if debug_profile {
+                eprintln!(
+                    "[glrmask/debug][warn_byte_terminals] ms={:.3}",
+                    elapsed_ms(warn_started_at),
+                );
+            }
         }
 
         if compile_profile_enabled() {
