@@ -79,10 +79,6 @@ impl Constraint {
         );
 
         self.internal_token_buf_masks = internal_token_buf_masks;
-        // Dense token-byte materialization duplicates the full vocabulary and is
-        // only used by commit_token(). Mask generation, including TTFM, already
-        // runs entirely from the sparse token_bytes map and the precomputed
-        // internal-token masks, so keep the dense table cold by default.
         self.token_bytes_dense = Vec::new();
         self.internal_token_dense_words = dense_mask_words;
         self.weight_token_dense_masks = dense_masks;

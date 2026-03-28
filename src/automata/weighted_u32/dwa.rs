@@ -1,20 +1,207 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 use serde::{Deserialize, Serialize};
 
 use super::nwa::Label;
-use crate::ds::weight::Weight;
+use crate::ds::weight::{finalize_weight_map, shared_rangeset, Weight};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct DWAState {
     pub transitions: BTreeMap<Label, (u32, Weight)>,
     pub final_weight: Option<Weight>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct DWA {
     pub states: Vec<DWAState>,
     pub start_state: u32,
+}
+
+// --- Two-level weight-pool serde for DWA ---
+// Level 1: Pool unique RangeSetBlaze<u32> (token sets) by Arc pointer
+// Level 2: Pool unique Weight (RangeMapBlaze) by Arc pointer, referencing token set indices
+
+/// Serialized token set: Vec of [start, end] range pairs
+type EncodedTokenSet = Vec<[u32; 2]>;
+
+/// A single entry in a pooled weight: (tsid_start, tsid_end, token_set_pool_index)
+#[derive(Serialize, Deserialize)]
+struct WeightPoolEntry {
+    all: bool,
+    /// Entries: (tsid_range_start, tsid_range_end, token_set_pool_index)
+    entries: Vec<(u32, u32, u32)>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DWAStateSerde {
+    /// transitions: (label, target_state, weight_pool_index)
+    transitions: Vec<(Label, u32, u32)>,
+    /// final_weight: Some(weight_pool_index) or None
+    final_weight: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DWASerde {
+    /// Pool of unique token sets (level 1)
+    token_set_pool: Vec<EncodedTokenSet>,
+    /// Pool of unique weights referencing token_set_pool indices (level 2)
+    weight_pool: Vec<WeightPoolEntry>,
+    states: Vec<DWAStateSerde>,
+    start_state: u32,
+}
+
+impl Serialize for DWA {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Level 1: Pool unique token sets by Arc pointer
+        let mut ts_ptr_to_idx: std::collections::HashMap<usize, u32> =
+            std::collections::HashMap::new();
+        let mut token_set_pool: Vec<EncodedTokenSet> = Vec::new();
+
+        let mut intern_token_set = |ts: &std::sync::Arc<RangeSetBlaze<u32>>| -> u32 {
+            let ptr = std::sync::Arc::as_ptr(ts) as usize;
+            *ts_ptr_to_idx.entry(ptr).or_insert_with(|| {
+                let idx = token_set_pool.len() as u32;
+                token_set_pool.push(
+                    ts.ranges()
+                        .map(|r| [*r.start(), *r.end()])
+                        .collect(),
+                );
+                idx
+            })
+        };
+
+        // Level 2: Pool unique weights by Arc pointer
+        let mut w_ptr_to_idx: std::collections::HashMap<usize, u32> =
+            std::collections::HashMap::new();
+        let mut weight_pool: Vec<WeightPoolEntry> = Vec::new();
+
+        let mut intern_weight = |w: &Weight| -> u32 {
+            let ptr = std::sync::Arc::as_ptr(&w.0) as usize;
+            *w_ptr_to_idx.entry(ptr).or_insert_with(|| {
+                let idx = weight_pool.len() as u32;
+                if w.is_full() {
+                    weight_pool.push(WeightPoolEntry {
+                        all: true,
+                        entries: Vec::new(),
+                    });
+                } else {
+                    let entries = w
+                        .0
+                        .range_values()
+                        .map(|(range, tokens)| {
+                            let ts_idx = intern_token_set(tokens);
+                            (*range.start(), *range.end(), ts_idx)
+                        })
+                        .collect();
+                    weight_pool.push(WeightPoolEntry {
+                        all: false,
+                        entries,
+                    });
+                }
+                idx
+            })
+        };
+
+        let states: Vec<DWAStateSerde> = self
+            .states
+            .iter()
+            .map(|state| {
+                let transitions = state
+                    .transitions
+                    .iter()
+                    .map(|(&label, (target, weight))| (label, *target, intern_weight(weight)))
+                    .collect();
+                let final_weight = state.final_weight.as_ref().map(|w| intern_weight(w));
+                DWAStateSerde {
+                    transitions,
+                    final_weight,
+                }
+            })
+            .collect();
+
+        let serde_repr = DWASerde {
+            token_set_pool,
+            weight_pool,
+            states,
+            start_state: self.start_state,
+        };
+        serde_repr.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for DWA {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let serde_repr = DWASerde::deserialize(deserializer)?;
+
+        // Reconstruct token set pool (shared Arcs)
+        let ts_pool: Vec<std::sync::Arc<RangeSetBlaze<u32>>> = serde_repr
+            .token_set_pool
+            .into_iter()
+            .map(|encoded| {
+                let rs: RangeSetBlaze<u32> =
+                    encoded.into_iter().map(|[s, e]| s..=e).collect();
+                shared_rangeset(rs)
+            })
+            .collect();
+
+        // Reconstruct weight pool
+        let w_pool: Vec<Weight> = serde_repr
+            .weight_pool
+            .into_iter()
+            .map(|entry| {
+                if entry.all {
+                    return Weight::all();
+                }
+                if entry.entries.is_empty() {
+                    return Weight::empty();
+                }
+                let mut map = RangeMapBlaze::new();
+                for (start, end, ts_idx) in entry.entries {
+                    let tokens = ts_pool
+                        .get(ts_idx as usize)
+                        .cloned()
+                        .unwrap_or_else(|| std::sync::Arc::new(RangeSetBlaze::new()));
+                    map.extend_simple(std::iter::once((start..=end, tokens)));
+                }
+                finalize_weight_map(map)
+            })
+            .collect();
+
+        // Reconstruct DWA states
+        let states = serde_repr
+            .states
+            .into_iter()
+            .map(|s| {
+                let transitions = s
+                    .transitions
+                    .into_iter()
+                    .map(|(label, target, weight_idx)| {
+                        let weight = w_pool
+                            .get(weight_idx as usize)
+                            .cloned()
+                            .unwrap_or_else(Weight::empty);
+                        (label, (target, weight))
+                    })
+                    .collect();
+                let final_weight = s.final_weight.map(|idx| {
+                    w_pool
+                        .get(idx as usize)
+                        .cloned()
+                        .unwrap_or_else(Weight::empty)
+                });
+                DWAState {
+                    transitions,
+                    final_weight,
+                }
+            })
+            .collect();
+
+        Ok(DWA {
+            states,
+            start_state: serde_repr.start_state,
+        })
+    }
 }
 
 impl DWA {
