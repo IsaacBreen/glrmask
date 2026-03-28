@@ -298,6 +298,7 @@ impl Parser {
             name,
             expr,
             is_terminal: false,
+            is_internal: false,
         })
     }
 

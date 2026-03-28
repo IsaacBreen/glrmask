@@ -1638,10 +1638,22 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
         })
         .map(|s| s.to_string())
         .collect();
-    let rules = ctx.rules.into_iter().map(|(name, expr)| {
+    let rules: Vec<NamedRule> = ctx.rules.into_iter().map(|(name, expr)| {
         let is_terminal = terminal_names.contains(&name);
-        NamedRule { name, expr, is_terminal }
+        NamedRule { name, expr, is_terminal, is_internal: false }
     }).collect();
+
+    // Mark terminal rules as internal-only when they are never referenced
+    // from any nonterminal rule body.  Internal terminals exist solely as
+    // sub-expressions of other terminal rules (resolved via Expr::Shared).
+    let grammar_visible = collect_grammar_visible_refs(&rules, &terminal_names);
+    let rules = rules.into_iter().map(|mut rule| {
+        if rule.is_terminal && !grammar_visible.contains(&rule.name) {
+            rule.is_internal = true;
+        }
+        rule
+    }).collect();
+
     Ok(NamedGrammar {
         rules,
         start: "start".into(),
@@ -4932,6 +4944,48 @@ impl<'a> SchemaCtx<'a> {
             _ => (min_value, max_value),
         }
     }
+}
+
+/// Collect terminal names that are referenced from nonterminal rule bodies.
+/// These terminals are "grammar-visible" and must have their own TerminalID.
+fn collect_grammar_visible_refs(
+    rules: &[NamedRule],
+    terminal_names: &HashSet<String>,
+) -> HashSet<String> {
+    fn walk(expr: &GrammarExpr, terminal_names: &HashSet<String>, out: &mut HashSet<String>) {
+        match expr {
+            GrammarExpr::Ref(name) => {
+                if terminal_names.contains(name) {
+                    out.insert(name.clone());
+                }
+            }
+            GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
+                for p in parts {
+                    walk(p, terminal_names, out);
+                }
+            }
+            GrammarExpr::Optional(inner)
+            | GrammarExpr::Repeat(inner)
+            | GrammarExpr::RepeatOne(inner) => walk(inner, terminal_names, out),
+            GrammarExpr::RepeatRange { expr, .. } => walk(expr, terminal_names, out),
+            GrammarExpr::Exclude { expr, exclude } => {
+                walk(expr, terminal_names, out);
+                walk(exclude, terminal_names, out);
+            }
+            GrammarExpr::Literal(_)
+            | GrammarExpr::CharClass { .. }
+            | GrammarExpr::RawRegex(_)
+            | GrammarExpr::TerminalExpr(_)
+            | GrammarExpr::AnyByte => {}
+        }
+    }
+    let mut visible = HashSet::new();
+    for rule in rules {
+        if !rule.is_terminal {
+            walk(&rule.expr, terminal_names, &mut visible);
+        }
+    }
+    visible
 }
 
 fn choice_or_single(alts: Vec<GrammarExpr>) -> GrammarExpr {

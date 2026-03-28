@@ -38,6 +38,10 @@ pub struct NamedRule {
     pub name: String,
     pub expr: GrammarExpr,
     pub is_terminal: bool,
+    /// Internal-only terminals exist solely as sub-expressions of other
+    /// terminal rules (resolved via `Expr::Shared`). They do not produce
+    /// their own `TerminalID` or parser production.
+    pub is_internal: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +71,7 @@ struct Lowerer {
     nonterminal_ids: BTreeMap<String, NonterminalID>,
     generated_nonterminal_counter: u32,
     terminal_names: BTreeMap<TerminalID, String>,
+    internal_terminal_names: HashSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +139,7 @@ impl Lowerer {
             nonterminal_ids: BTreeMap::new(),
             generated_nonterminal_counter: 0,
             terminal_names: BTreeMap::new(),
+            internal_terminal_names: HashSet::new(),
         }
     }
 
@@ -408,7 +414,14 @@ impl Lowerer {
 
     fn lower_expr_terminalish(&mut self, expr: &GrammarExpr) -> Result<Symbol, GlrMaskError> {
         Ok(match expr {
-            GrammarExpr::Ref(name) => Symbol::Nonterminal(self.nonterminal_id(name)),
+            GrammarExpr::Ref(name) => {
+                if self.internal_terminal_names.contains(name) {
+                    return Err(GlrMaskError::GrammarParse(format!(
+                        "internal-only terminal {name} referenced from nonterminal context"
+                    )));
+                }
+                Symbol::Nonterminal(self.nonterminal_id(name))
+            }
             GrammarExpr::Literal(bytes) => {
                 let pattern = bytes.iter().map(|&b| regex_escape_byte(b)).collect::<String>();
                 Symbol::Terminal(self.terminal_id(&String::from_utf8_lossy(bytes), &pattern, false))
@@ -600,6 +613,7 @@ fn promote_expr_literals(
                             name: name.clone(),
                             expr: std::mem::replace(expr, GrammarExpr::Literal(Vec::new())),
                             is_terminal: true,
+                            is_internal: false,
                         });
                         name
                     })
@@ -634,7 +648,18 @@ fn promote_expr_literals(
 pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
     let mut lowerer = Lowerer::new();
 
+    // Collect internal terminal names for validation.
+    lowerer.internal_terminal_names = grammar
+        .rules
+        .iter()
+        .filter(|r| r.is_terminal && r.is_internal)
+        .map(|r| r.name.clone())
+        .collect();
+
     for rule in &grammar.rules {
+        if rule.is_terminal && rule.is_internal {
+            continue; // don't allocate nonterminal IDs for internal terminals
+        }
         lowerer.nonterminal_id(&rule.name);
     }
 
@@ -648,8 +673,6 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
     let mut terminal_expr_cache: HashMap<String, Arc<Expr>> = HashMap::new();
 
     for rule in &grammar.rules {
-        let lhs = lowerer.nonterminal_id(&rule.name);
-
         // Terminal rules: convert the entire body to a single Terminal::Expr.
         // Refs to other terminal rules are resolved via Expr::Shared.
         if rule.is_terminal {
@@ -663,10 +686,19 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
             )?;
             let arc = Arc::new(expr.clone());
             terminal_expr_cache.insert(rule.name.clone(), arc);
+
+            if rule.is_internal {
+                // Internal-only: cached for Shared resolution, no terminal or production.
+                continue;
+            }
+
+            let lhs = lowerer.nonterminal_id(&rule.name);
             let tid = lowerer.register_terminal_expr(&rule.name, expr);
             lowerer.rules.push(Rule { lhs, rhs: vec![Symbol::Terminal(tid)] });
             continue;
         }
+
+        let lhs = lowerer.nonterminal_id(&rule.name);
 
         match &rule.expr {
             GrammarExpr::Sequence(parts) => {
@@ -764,11 +796,11 @@ mod tests {
     use std::collections::BTreeSet;
 
     fn nt(name: &str, expr: GrammarExpr) -> NamedRule {
-        NamedRule { name: name.into(), expr, is_terminal: false }
+        NamedRule { name: name.into(), expr, is_terminal: false, is_internal: false }
     }
 
     fn term(name: &str, expr: GrammarExpr) -> NamedRule {
-        NamedRule { name: name.into(), expr, is_terminal: true }
+        NamedRule { name: name.into(), expr, is_terminal: true, is_internal: false }
     }
 
     fn derivable_terminal_counts(

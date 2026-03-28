@@ -391,6 +391,7 @@ fn synthesize_lark_ignore_rule(
         name: ignore_name.clone(),
         expr: choice_or_single(ignore_exprs),
         is_terminal: true,
+        is_internal: false,
     });
     Some(ignore_name)
 }
@@ -677,7 +678,7 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
             &mut memo,
             &mut visiting,
         )?;
-        rules.push(NamedRule { name: rule.name.clone(), expr: expanded, is_terminal: true });
+        rules.push(NamedRule { name: rule.name.clone(), expr: expanded, is_terminal: true, is_internal: false });
     }
 
     // Process parser rules while leaving terminal references as `Ref` nodes.
@@ -694,7 +695,7 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
             &mut memo,
             &mut visiting,
         )?;
-        rules.push(NamedRule { name: rule.name.clone(), expr: expanded, is_terminal: false });
+        rules.push(NamedRule { name: rule.name.clone(), expr: expanded, is_terminal: false, is_internal: false });
     }
 
     if start_is_terminal {
@@ -709,7 +710,7 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
         if let Some(existing) = rules.iter_mut().find(|r| r.name == output_start) {
             existing.expr = start_expr;
         } else {
-            rules.insert(0, NamedRule { name: output_start.clone(), expr: start_expr, is_terminal: true });
+            rules.insert(0, NamedRule { name: output_start.clone(), expr: start_expr, is_terminal: true, is_internal: false });
         }
     }
 
@@ -857,6 +858,7 @@ impl Parser {
             name,
             expr,
             is_terminal: false,
+            is_internal: false,
         })
     }
 

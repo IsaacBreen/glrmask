@@ -23,6 +23,7 @@ fn nonterminal_rule(name: &str, expr: GrammarExpr) -> NamedRule {
         name: name.to_string(),
         expr,
         is_terminal: false,
+        is_internal: false,
     }
 }
 

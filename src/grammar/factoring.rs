@@ -106,6 +106,7 @@ impl ChoiceFactorer {
                 name,
                 expr: factored_expr,
                 is_terminal,
+                is_internal: false,
             });
         }
 
@@ -328,6 +329,7 @@ impl ChoiceFactorer {
             name: helper_name.clone(),
             expr: helper_expr,
             is_terminal: false,
+            is_internal: false,
         });
         self.factor_cache.insert(alternatives, helper_name.clone());
         helper_name
@@ -412,11 +414,11 @@ mod tests {
     }
 
     fn nt(name: &str, expr: GrammarExpr) -> NamedRule {
-        NamedRule { name: name.to_string(), expr, is_terminal: false }
+        NamedRule { name: name.to_string(), expr, is_terminal: false, is_internal: false }
     }
 
     fn term(name: &str, expr: GrammarExpr) -> NamedRule {
-        NamedRule { name: name.to_string(), expr, is_terminal: true }
+        NamedRule { name: name.to_string(), expr, is_terminal: true, is_internal: false }
     }
 
     #[test]
