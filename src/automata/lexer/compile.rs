@@ -904,7 +904,11 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
     let mut state_map = FxHashMap::<ProductStateTuple, u32>::default();
     let mut worklist = VecDeque::new();
     let mut pending_class_transitions = vec![Vec::<(u8, u32)>::new()];
-    let mut transitions_by_class = vec![None::<ProductStateTuple>; num_classes];
+    // Pre-allocated buffers for class transition tuples (reused across states)
+    let mut class_buffers: Vec<ProductStateTuple> = (0..num_classes)
+        .map(|_| ProductStateTuple::new())
+        .collect();
+    let mut class_active = vec![false; num_classes];
     let mut used_classes = Vec::<usize>::new();
     let mut live_state_counts = if debug_profile { vec![0u64; num_groups] } else { Vec::new() };
     let mut processed_product_states = 0u64;
@@ -940,18 +944,15 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
                 ) => {
                     for &(class_id, target) in &class_transitions[component_state as usize] {
                         let class_index = class_id as usize;
-                        if transitions_by_class[class_index].is_none() {
-                            transitions_by_class[class_index] = Some(ProductStateTuple::new());
+                        if !class_active[class_index] {
+                            class_active[class_index] = true;
                             used_classes.push(class_index);
                         }
                         if component_dead_states[group_index] == Some(target) {
                             continue;
                         }
 
-                        let next_tuple = transitions_by_class[class_index]
-                            .as_mut()
-                            .expect("class transition bucket initialized");
-                        next_tuple.push((group_id, target));
+                        class_buffers[class_index].push((group_id, target));
                     }
                 }
                 (
@@ -970,8 +971,8 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
                     }
                     for &(class_id, target_base) in &base_class_transitions[base_state as usize] {
                         let class_index = class_id as usize;
-                        if transitions_by_class[class_index].is_none() {
-                            transitions_by_class[class_index] = Some(ProductStateTuple::new());
+                        if !class_active[class_index] {
+                            class_active[class_index] = true;
                             used_classes.push(class_index);
                         }
                         if component_dead_states[group_index] == Some(target_base) {
@@ -984,10 +985,7 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
                             copy_count * base_state_count + target_base
                         };
 
-                        let next_tuple = transitions_by_class[class_index]
-                            .as_mut()
-                            .expect("class transition bucket initialized");
-                        next_tuple.push((group_id, target));
+                        class_buffers[class_index].push((group_id, target));
                     }
                 }
                 _ => unreachable!("component and class-transition kinds must match"),
@@ -1003,12 +1001,10 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
         for &class_index in &used_classes {
             if debug_profile {
                 let bucket_take_started_at = std::time::Instant::now();
-                let next_tuple = transitions_by_class[class_index]
-                    .take()
-                    .expect("used class transition bucket populated");
+                let next_tuple = &class_buffers[class_index];
                 bucket_take_ns += bucket_take_started_at.elapsed().as_nanos();
                 let lookup_started_at = std::time::Instant::now();
-                let existing = state_map.get(&next_tuple).copied();
+                let existing = state_map.get(next_tuple).copied();
                 state_lookup_ns += lookup_started_at.elapsed().as_nanos();
                 let next_state = if let Some(existing) = existing {
                     existing
@@ -1017,7 +1013,7 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
                     let new_state = dfa.add_state();
                     state_add_ns += state_add_started_at.elapsed().as_nanos();
                     let metadata_started_at = std::time::Instant::now();
-                    let (finalizers, future) = product_state_metadata(&components, &next_tuple);
+                    let (finalizers, future) = product_state_metadata(&components, next_tuple);
                     metadata_ns += metadata_started_at.elapsed().as_nanos();
                     dfa.overwrite_state_metadata(new_state, finalizers, future);
                     let insert_started_at = std::time::Instant::now();
@@ -1025,28 +1021,28 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
                     state_insert_ns += insert_started_at.elapsed().as_nanos();
                     pending_class_transitions.push(Vec::new());
                     let worklist_push_started_at = std::time::Instant::now();
-                    worklist.push_back((new_state, next_tuple));
+                    worklist.push_back((new_state, next_tuple.clone()));
                     worklist_push_ns += worklist_push_started_at.elapsed().as_nanos();
                     new_state
                 };
                 class_transitions.push((class_index as u8, next_state));
             } else {
-                let next_tuple = transitions_by_class[class_index]
-                    .take()
-                    .expect("used class transition bucket populated");
-                let next_state = if let Some(&existing) = state_map.get(&next_tuple) {
+                let next_tuple = &class_buffers[class_index];
+                let next_state = if let Some(&existing) = state_map.get(next_tuple) {
                     existing
                 } else {
                     let new_state = dfa.add_state();
-                    let (finalizers, future) = product_state_metadata(&components, &next_tuple);
+                    let (finalizers, future) = product_state_metadata(&components, next_tuple);
                     dfa.overwrite_state_metadata(new_state, finalizers, future);
                     state_map.insert(next_tuple.clone(), new_state);
                     pending_class_transitions.push(Vec::new());
-                    worklist.push_back((new_state, next_tuple));
+                    worklist.push_back((new_state, next_tuple.clone()));
                     new_state
                 };
                 class_transitions.push((class_index as u8, next_state));
             }
+            class_buffers[class_index].clear();
+            class_active[class_index] = false;
         }
         used_classes.clear();
         pending_class_transitions[current_state as usize] = class_transitions;
