@@ -3,6 +3,14 @@ use crate::compiler::grammar_def::GrammarDef;
 use crate::grammar::factoring::factor_named_grammar;
 use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, lower};
 
+/// All-uppercase (plus underscores and digits) rule names are terminals.
+fn is_terminal_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
     Ident(String),
@@ -294,10 +302,11 @@ impl Parser {
         let name = self.parse_rule_name()?;
         self.expect(&Token::Separator)?;
         let expr = self.parse_alternatives()?;
+        let is_terminal = is_terminal_name(&name);
         Ok(NamedRule {
             name,
             expr,
-            is_terminal: false,
+            is_terminal,
             is_internal: false,
         })
     }
