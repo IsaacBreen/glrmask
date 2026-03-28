@@ -1444,9 +1444,14 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, partition_refine_threshold: us
         return dwa.clone();
     }
 
+    let debug = debug_profile_enabled();
+    let t_start = std::time::Instant::now();
+
     // Clone and push weights
     let mut pushed = dwa.clone();
     let (_, topo_from_push, reachable_from_push) = push_weights(&mut pushed);
+
+    let push_ms = if debug { t_start.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
 
     // Reuse topo order from push_weights (graph structure unchanged by push).
     let topo = match topo_from_push {
@@ -1460,7 +1465,9 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, partition_refine_threshold: us
     // w_pushed = w_orig ∩ reachable[t], and A ∩ A = A in the needed recurrence).
     // Both produce identical results, so we skip the redundant recomputation.
     let needed = reachable_from_push;
+    let t1 = if debug { std::time::Instant::now() } else { t_start };
     let productive_transitions = compute_productive_transitions(&pushed, &needed);
+    let prod_ms = if debug { t1.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
     let heights = compute_heights(&pushed, &topo);
     let max_height = heights.iter().max().copied().unwrap_or(0);
 
@@ -1566,7 +1573,15 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, partition_refine_threshold: us
         }
     }
 
+    let t_recon = if debug { std::time::Instant::now() } else { t_start };
     let minimized = reconstruct_dwa(start_state, &old_to_new, new_states);
+    if debug {
+        let recon_ms = t_recon.elapsed().as_secs_f64() * 1000.0;
+        let total_ms = t_start.elapsed().as_secs_f64() * 1000.0;
+        let coloring_ms = total_ms - push_ms - prod_ms - recon_ms;
+        eprintln!("[glrmask/debug][minimize_acyclic] states={} push_ms={:.1} prod_ms={:.1} coloring_ms={:.1} recon_ms={:.1} total_ms={:.1} minimized_states={}",
+            dwa.states.len(), push_ms, prod_ms, coloring_ms, recon_ms, total_ms, minimized.states.len());
+    }
     minimized
 }
 
