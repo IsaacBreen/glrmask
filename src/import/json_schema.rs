@@ -1609,22 +1609,63 @@ fn merge_two_schemas(s1: &Map<String, Value>, s2: &Map<String, Value>) -> Map<St
 }
 
 pub fn json_schema_to_grammar(schema_json: &str) -> Result<GrammarDef, GlrMaskError> {
+    let debug_profile = std::env::var("GLRMASK_DEBUG_PROFILE")
+        .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
+        .unwrap_or(false);
+
+    let t0 = std::time::Instant::now();
     let schema: Value = serde_json::from_str(schema_json)
         .map_err(|err| GlrMaskError::GrammarParse(err.to_string()))?;
+    let parse_json_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    let t1 = std::time::Instant::now();
     let mut named = schema_to_named_grammar(&schema)?;
+    let schema_to_named_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
+    let t2 = std::time::Instant::now();
     promote_large_literal_alts(&mut named, 10);
-    lower(&named)
+    let promote_ms = t2.elapsed().as_secs_f64() * 1000.0;
+
+    let t3 = std::time::Instant::now();
+    let result = lower(&named)?;
+    let lower_ms = t3.elapsed().as_secs_f64() * 1000.0;
+
+    if debug_profile {
+        eprintln!(
+            "[glrmask/debug][import] parse_json_ms={:.3} schema_to_named_ms={:.3} promote_ms={:.3} lower_ms={:.3} rules={} total_ms={:.3}",
+            parse_json_ms, schema_to_named_ms, promote_ms, lower_ms, result.rules.len(),
+            t0.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    Ok(result)
 }
 
 pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskError> {
+    let debug_profile = std::env::var("GLRMASK_DEBUG_PROFILE")
+        .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
+        .unwrap_or(false);
+
+    let t0 = std::time::Instant::now();
     let mut ctx = SchemaCtx::new(schema);
+    let new_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    let t1 = std::time::Instant::now();
     ctx.register_root_definitions();
+    let register_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
+    let t2 = std::time::Instant::now();
     ctx.materialize_registered_refs()?;
+    let materialize_ms = t2.elapsed().as_secs_f64() * 1000.0;
+
+    let t3 = std::time::Instant::now();
     let start_expr = match ctx.convert_schema(schema) {
         Ok(expr) => expr,
         Err(err) if is_unsat_schema_error(&err) => never_expr(),
         Err(err) => return Err(err),
     };
+    let convert_ms = t3.elapsed().as_secs_f64() * 1000.0;
+
     ctx.insert_rule("start", start_expr);
     let terminal_names: HashSet<String> = ctx
         .rules
@@ -1653,6 +1694,13 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
         }
         rule
     }).collect();
+
+    if debug_profile {
+        eprintln!(
+            "[glrmask/debug][schema_to_named] new_ms={:.3} register_ms={:.3} materialize_ms={:.3} convert_ms={:.3} total_ms={:.3}",
+            new_ms, register_ms, materialize_ms, convert_ms, t0.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
 
     Ok(NamedGrammar {
         rules,
