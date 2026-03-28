@@ -845,13 +845,20 @@ fn compile_product_component(
 
 fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -> DFA {
     let product_total_started_at = std::time::Instant::now();
+    let parallel_results: Vec<(usize, ProductComponent, usize, f64)> = exprs
+        .par_iter()
+        .enumerate()
+        .map(|(group_id, expr)| {
+            let group_started_at = std::time::Instant::now();
+            let component = compile_product_component(expr, profile_label);
+            let group_ms = group_started_at.elapsed().as_secs_f64() * 1000.0;
+            let state_count = component.debug_state_count();
+            (group_id, component, state_count, group_ms)
+        })
+        .collect();
     let mut component_build_stats = Vec::<(usize, usize, f64)>::with_capacity(exprs.len());
     let mut components = Vec::with_capacity(exprs.len());
-    for (group_id, expr) in exprs.iter().enumerate() {
-        let group_started_at = std::time::Instant::now();
-        let component = compile_product_component(expr, profile_label);
-        let group_ms = group_started_at.elapsed().as_secs_f64() * 1000.0;
-        let state_count = component.debug_state_count();
+    for (group_id, component, state_count, group_ms) in parallel_results {
         if debug_profile {
             eprintln!(
                 "[glrmask/debug][product] group={} dfa_states={} compile_ms={:.3}",
@@ -899,7 +906,7 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
     let mut pending_class_transitions = vec![Vec::<(u8, u32)>::new()];
     let mut transitions_by_class = vec![None::<ProductStateTuple>; num_classes];
     let mut used_classes = Vec::<usize>::new();
-    let mut live_state_counts = vec![0u64; num_groups];
+    let mut live_state_counts = if debug_profile { vec![0u64; num_groups] } else { Vec::new() };
     let mut processed_product_states = 0u64;
     let mut total_live_groups = 0u64;
     let mut max_live_groups = 0usize;
@@ -918,11 +925,13 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
     let product_walk_started_at = std::time::Instant::now();
     while let Some((current_state, state_tuple)) = worklist.pop_front() {
         processed_product_states += 1;
-        let transition_scatter_started_at = std::time::Instant::now();
+        let transition_scatter_started_at = if debug_profile { std::time::Instant::now() } else { product_walk_started_at };
         let live_groups = state_tuple.len();
         for &(group_id, component_state) in &state_tuple {
             let group_index = group_id as usize;
-            live_state_counts[group_index] += 1;
+            if debug_profile {
+                live_state_counts[group_index] += 1;
+            }
 
             match (&components[group_index], &component_class_transitions[group_index]) {
                 (
@@ -984,47 +993,66 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
                 _ => unreachable!("component and class-transition kinds must match"),
             }
         }
-        transition_scatter_ns += transition_scatter_started_at.elapsed().as_nanos();
+        if debug_profile {
+            transition_scatter_ns += transition_scatter_started_at.elapsed().as_nanos();
+        }
         total_live_groups += live_groups as u64;
         max_live_groups = max_live_groups.max(live_groups);
 
         let mut class_transitions = Vec::with_capacity(used_classes.len());
         for &class_index in &used_classes {
-            let bucket_take_started_at = std::time::Instant::now();
-            let next_tuple = transitions_by_class[class_index]
-                .take()
-                .expect("used class transition bucket populated");
-            bucket_take_ns += bucket_take_started_at.elapsed().as_nanos();
-            let lookup_started_at = std::time::Instant::now();
-            let existing = state_map.get(&next_tuple).copied();
-            state_lookup_ns += lookup_started_at.elapsed().as_nanos();
-            let next_state = if let Some(existing) = existing {
-                existing
+            if debug_profile {
+                let bucket_take_started_at = std::time::Instant::now();
+                let next_tuple = transitions_by_class[class_index]
+                    .take()
+                    .expect("used class transition bucket populated");
+                bucket_take_ns += bucket_take_started_at.elapsed().as_nanos();
+                let lookup_started_at = std::time::Instant::now();
+                let existing = state_map.get(&next_tuple).copied();
+                state_lookup_ns += lookup_started_at.elapsed().as_nanos();
+                let next_state = if let Some(existing) = existing {
+                    existing
+                } else {
+                    let state_add_started_at = std::time::Instant::now();
+                    let new_state = dfa.add_state();
+                    state_add_ns += state_add_started_at.elapsed().as_nanos();
+                    let metadata_started_at = std::time::Instant::now();
+                    let (finalizers, future) = product_state_metadata(&components, &next_tuple);
+                    metadata_ns += metadata_started_at.elapsed().as_nanos();
+                    dfa.overwrite_state_metadata(new_state, finalizers, future);
+                    let insert_started_at = std::time::Instant::now();
+                    state_map.insert(next_tuple.clone(), new_state);
+                    state_insert_ns += insert_started_at.elapsed().as_nanos();
+                    pending_class_transitions.push(Vec::new());
+                    let worklist_push_started_at = std::time::Instant::now();
+                    worklist.push_back((new_state, next_tuple));
+                    worklist_push_ns += worklist_push_started_at.elapsed().as_nanos();
+                    new_state
+                };
+                class_transitions.push((class_index as u8, next_state));
             } else {
-                let state_add_started_at = std::time::Instant::now();
-                let new_state = dfa.add_state();
-                state_add_ns += state_add_started_at.elapsed().as_nanos();
-                let metadata_started_at = std::time::Instant::now();
-                let (finalizers, future) = product_state_metadata(&components, &next_tuple);
-                metadata_ns += metadata_started_at.elapsed().as_nanos();
-                dfa.overwrite_state_metadata(new_state, finalizers, future);
-                let insert_started_at = std::time::Instant::now();
-                state_map.insert(next_tuple.clone(), new_state);
-                state_insert_ns += insert_started_at.elapsed().as_nanos();
-                pending_class_transitions.push(Vec::new());
-                let worklist_push_started_at = std::time::Instant::now();
-                worklist.push_back((new_state, next_tuple));
-                worklist_push_ns += worklist_push_started_at.elapsed().as_nanos();
-                new_state
-            };
-
-            class_transitions.push((class_index as u8, next_state));
+                let next_tuple = transitions_by_class[class_index]
+                    .take()
+                    .expect("used class transition bucket populated");
+                let next_state = if let Some(&existing) = state_map.get(&next_tuple) {
+                    existing
+                } else {
+                    let new_state = dfa.add_state();
+                    let (finalizers, future) = product_state_metadata(&components, &next_tuple);
+                    dfa.overwrite_state_metadata(new_state, finalizers, future);
+                    state_map.insert(next_tuple.clone(), new_state);
+                    pending_class_transitions.push(Vec::new());
+                    worklist.push_back((new_state, next_tuple));
+                    new_state
+                };
+                class_transitions.push((class_index as u8, next_state));
+            }
         }
         used_classes.clear();
         pending_class_transitions[current_state as usize] = class_transitions;
     }
 
-    let transition_expand_started_at = std::time::Instant::now();
+    let transition_expand_started_at = if debug_profile { std::time::Instant::now() } else { product_walk_started_at };
     let expanded_transitions: Vec<crate::ds::char_transitions::CharTransitions<u32>> = pending_class_transitions
         .into_par_iter()
         .map(|class_transitions| {
@@ -1044,13 +1072,17 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
             crate::ds::char_transitions::CharTransitions::from_sorted_entries(transitions)
         })
         .collect();
-    transition_expand_ns += transition_expand_started_at.elapsed().as_nanos();
+    if debug_profile {
+        transition_expand_ns += transition_expand_started_at.elapsed().as_nanos();
+    }
 
-    let transition_assign_started_at = std::time::Instant::now();
+    let transition_assign_started_at = if debug_profile { std::time::Instant::now() } else { product_walk_started_at };
     for (state, transitions) in dfa.states_mut().iter_mut().zip(expanded_transitions) {
         state.transitions = transitions;
     }
-    transition_assign_ns += transition_assign_started_at.elapsed().as_nanos();
+    if debug_profile {
+        transition_assign_ns += transition_assign_started_at.elapsed().as_nanos();
+    }
 
     if debug_profile {
         let avg_live_groups = if processed_product_states == 0 {
