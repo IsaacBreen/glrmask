@@ -116,6 +116,8 @@ struct Scratch {
     target_gids: HashMap<usize, SmallVec<[usize; 16]>>,
     single_target_pos: usize,
     single_target_gids: SmallVec<[usize; 16]>,
+    single_target_seen: Vec<u32>,
+    single_target_seen_epoch: u32,
     // Suffix DAG
     dag: HashMap<usize, DagNode>,
     dag_queue: Vec<usize>,
@@ -506,6 +508,8 @@ impl Scratch {
             target_gids: HashMap::new(),
             single_target_pos: usize::MAX,
             single_target_gids: SmallVec::new(),
+            single_target_seen: vec![0; num_groups],
+            single_target_seen_epoch: 1,
             dag: HashMap::new(),
             dag_queue: Vec::new(),
             dag_disallowed: HashMap::new(),
@@ -538,11 +542,21 @@ fn ensure_target_gids_map(
     }
 }
 
+fn advance_seen_epoch(seen: &mut [u32], epoch: &mut u32) {
+    *epoch = epoch.wrapping_add(1);
+    if *epoch == 0 {
+        seen.fill(0);
+        *epoch = 1;
+    }
+}
+
 fn record_target_gid(
     targets: &mut Vec<usize>,
     target_gids: &mut HashMap<usize, SmallVec<[usize; 16]>>,
     single_target_pos: &mut usize,
     single_target_gids: &mut SmallVec<[usize; 16]>,
+    single_target_seen: &mut [u32],
+    single_target_seen_epoch: &mut u32,
     pos: usize,
     gid: usize,
 ) {
@@ -550,12 +564,21 @@ fn record_target_gid(
         targets.push(pos);
         *single_target_pos = pos;
         single_target_gids.clear();
+        advance_seen_epoch(single_target_seen, single_target_seen_epoch);
+        if gid < single_target_seen.len() {
+            single_target_seen[gid] = *single_target_seen_epoch;
+        }
         single_target_gids.push(gid);
         return;
     }
 
     if target_gids.is_empty() && targets.len() == 1 && *single_target_pos == pos {
-        if !single_target_gids.contains(&gid) {
+        if gid < single_target_seen.len() {
+            if single_target_seen[gid] != *single_target_seen_epoch {
+                single_target_seen[gid] = *single_target_seen_epoch;
+                single_target_gids.push(gid);
+            }
+        } else if !single_target_gids.contains(&gid) {
             single_target_gids.push(gid);
         }
         return;
@@ -713,6 +736,8 @@ fn collect_targets(
         target_gids,
         single_target_pos,
         single_target_gids,
+        single_target_seen,
+        single_target_seen_epoch,
         ..
     } = scratch;
 
@@ -738,6 +763,8 @@ fn collect_targets(
                         target_gids,
                         single_target_pos,
                         single_target_gids,
+                        single_target_seen,
+                        single_target_seen_epoch,
                         pv as usize,
                         gid,
                     );
