@@ -131,8 +131,11 @@ pub fn compact_dwa_dimensions(
     let num_tokens = id_map.num_internal_tokens();
     let storage_before = collect_profile_stats.then(|| count_unique_storage(dwa));
 
+    let t0 = std::time::Instant::now();
     let unique_weights = collect_unique_weights(dwa);
+    let t1 = std::time::Instant::now();
     let compaction = build_dimension_compaction(&unique_weights, num_tsids as usize, num_tokens);
+    let t2 = std::time::Instant::now();
 
     apply_permutations_to_dwa(
         dwa,
@@ -140,6 +143,7 @@ pub fn compact_dwa_dimensions(
         &compaction.tsid_perm,
         &compaction.token_perm,
     );
+    let t3 = std::time::Instant::now();
     apply_perm_to_id_map(
         &mut id_map.tokenizer_states,
         &compaction.tsid_perm,
@@ -150,6 +154,17 @@ pub fn compact_dwa_dimensions(
         &compaction.token_perm,
         compaction.ordered_num_tokens,
     );
+    let t4 = std::time::Instant::now();
+    if std::env::var("GLRMASK_PROFILE_COMPACT").is_ok() {
+        eprintln!(
+            "[glrmask/profile][compact_breakdown] unique_weights={} collect_ms={:.3} build_dim_ms={:.3} apply_perm_ms={:.3} id_map_ms={:.3}",
+            unique_weights.len(),
+            (t1 - t0).as_secs_f64() * 1000.0,
+            (t2 - t1).as_secs_f64() * 1000.0,
+            (t3 - t2).as_secs_f64() * 1000.0,
+            (t4 - t3).as_secs_f64() * 1000.0,
+        );
+    }
     let profile_stats = storage_before.map(|storage_before| {
         let storage_after = count_unique_storage(dwa);
         CompactProfileStats {
@@ -178,38 +193,65 @@ fn build_dimension_compaction(
     num_tsids: usize,
     num_tokens: u32,
 ) -> DimensionCompaction {
+    let profile_compact = std::env::var("GLRMASK_PROFILE_COMPACT").is_ok();
     let ((tsid_perm, ordered_num_tsids), (token_perm, ordered_num_tokens)) = rayon::join(
         || {
+            let t0 = std::time::Instant::now();
             let original_weight_refs = weight_refs(unique_weights);
             let tsid_merge_profiles = build_tsid_context_profiles(&original_weight_refs, num_tsids);
             let (tsid_merge_perm, merged_num_tsids) =
                 build_profile_merge_permutation(&tsid_merge_profiles);
+            let t1 = std::time::Instant::now();
             let merged_tsid_weights = apply_permutations_to_weight_set(
                 unique_weights,
                 &tsid_merge_perm,
                 &identity_perm(num_tokens as usize),
             );
+            let t2 = std::time::Instant::now();
 
             let merged_tsid_refs = weight_refs(&merged_tsid_weights);
             let tsid_order_profiles =
                 build_tsid_context_profiles(&merged_tsid_refs, merged_num_tsids);
             let (tsid_order_perm, ordered_num_tsids) =
                 build_profile_merge_permutation(&tsid_order_profiles);
+            let t3 = std::time::Instant::now();
+            if profile_compact {
+                eprintln!(
+                    "[glrmask/profile][compact_tsid] merge_profile_ms={:.3} apply_perm_ms={:.3} order_profile_ms={:.3} merged_tsids={}",
+                    (t1 - t0).as_secs_f64() * 1000.0,
+                    (t2 - t1).as_secs_f64() * 1000.0,
+                    (t3 - t2).as_secs_f64() * 1000.0,
+                    merged_num_tsids,
+                );
+            }
 
             (compose_perm(&tsid_merge_perm, &tsid_order_perm), ordered_num_tsids)
         },
         || {
+            let t0 = std::time::Instant::now();
             let original_weight_refs = weight_refs(unique_weights);
             let token_profiles = build_token_profiles(&original_weight_refs, num_tokens);
             let (token_group_perm, ordered_num_tokens) =
                 build_profile_merge_permutation(&token_profiles);
+            let t1 = std::time::Instant::now();
             let merged_token_sets =
                 collect_token_sets_after_permutation(unique_weights, &token_group_perm);
+            let t2 = std::time::Instant::now();
             let token_perm = optimize_token_group_order(
                 &merged_token_sets,
                 token_group_perm,
                 ordered_num_tokens,
             );
+            let t3 = std::time::Instant::now();
+            if profile_compact {
+                eprintln!(
+                    "[glrmask/profile][compact_token] merge_profile_ms={:.3} collect_sets_ms={:.3} optimize_order_ms={:.3} merged_tokens={}",
+                    (t1 - t0).as_secs_f64() * 1000.0,
+                    (t2 - t1).as_secs_f64() * 1000.0,
+                    (t3 - t2).as_secs_f64() * 1000.0,
+                    ordered_num_tokens,
+                );
+            }
 
             (token_perm, ordered_num_tokens)
         },
@@ -269,10 +311,11 @@ fn apply_permutations_to_weight_set(
     tsid_perm: &[u32],
     token_perm: &[u32],
 ) -> Vec<Weight> {
+    let mut cache = HashMap::new();
     dedup_weights_by_storage_ptr(
         weights
             .iter()
-            .map(|weight| permute_weight(weight, tsid_perm, token_perm))
+            .map(|weight| permute_weight_with_cache(weight, tsid_perm, token_perm, &mut cache))
             .collect(),
     )
 }
@@ -382,14 +425,20 @@ fn collect_token_sets_after_permutation(
     weights: &[Weight],
     token_perm: &[u32],
 ) -> Vec<RangeSetBlaze<u32>> {
+    // Cache permuted token sets by Arc pointer — many weights share the same
+    // interned token set, so we avoid redundant permute_rangeset calls.
+    let mut cache: HashMap<usize, RangeSetBlaze<u32>> = HashMap::new();
     let mut seen = std::collections::HashSet::new();
     let mut unique_sets = Vec::new();
     for weight in weights {
         for (_, token_set) in weight.0.range_values() {
-            let merged = permute_rangeset(token_set, token_perm);
-            let key = rangeset_key(&merged);
+            let ptr = Arc::as_ptr(token_set) as usize;
+            let merged = cache
+                .entry(ptr)
+                .or_insert_with(|| permute_rangeset(token_set, token_perm));
+            let key = rangeset_key(merged);
             if seen.insert(key) {
-                unique_sets.push(merged);
+                unique_sets.push(merged.clone());
             }
         }
     }
@@ -461,14 +510,16 @@ fn finish_layout_with_seeded_search(
     let mut iters_since_best = 0usize;
 
     let mut temperature = 8.0f64;
+    // Reusable buffer to record the move for undo.
+    let mut undo_buf: Vec<u32> = Vec::new();
     for _ in 0..TOKEN_ORDER_FINISH_ITERS {
-        let mut candidate_layout = current_layout.clone();
-        apply_random_layout_move(&mut candidate_layout, &mut rng);
-        let candidate_score = scorer.score_layout(&candidate_layout);
+        // Apply move in-place and record undo info
+        apply_random_layout_move_with_undo(&mut current_layout, &mut rng, &mut undo_buf);
+        let candidate_score = scorer.score_layout(&current_layout);
 
         if candidate_score < best_score {
             best_score = candidate_score;
-            best_layout = candidate_layout.clone();
+            best_layout.copy_from_slice(&current_layout);
             iters_since_best = 0;
         } else {
             iters_since_best += 1;
@@ -486,8 +537,10 @@ fn finish_layout_with_seeded_search(
         };
 
         if accept {
-            current_layout = candidate_layout;
             current_score = candidate_score;
+        } else {
+            // Rejected: undo the move
+            undo_layout_move(&mut current_layout, &undo_buf);
         }
 
         temperature *= 0.995;
@@ -527,10 +580,11 @@ fn apply_permutations_to_dwa(
     tsid_perm: &[u32],
     token_perm: &[u32],
 ) {
+    let mut cache = HashMap::new();
     let mut weight_map: HashMap<usize, Weight> = HashMap::with_capacity(unique_weights.len());
     for w in unique_weights {
         let old_ptr = Arc::as_ptr(&w.0) as usize;
-        let new_w = permute_weight(w, tsid_perm, token_perm);
+        let new_w = permute_weight_with_cache(w, tsid_perm, token_perm, &mut cache);
         weight_map.insert(old_ptr, new_w);
     }
 
@@ -584,6 +638,92 @@ fn apply_random_layout_move(layout: &mut [u32], rng: &mut StdRng) {
     }
 }
 
+/// Apply a random move and record undo info.
+/// undo_buf format: [move_type, args...] where move_type:
+///   0 → swap(left, right)
+///   1 → adjacent swap(left)
+///   2 → block move(from, to)
+fn apply_random_layout_move_with_undo(
+    layout: &mut [u32],
+    rng: &mut StdRng,
+    undo_buf: &mut Vec<u32>,
+) {
+    undo_buf.clear();
+    if layout.len() < 2 {
+        return;
+    }
+
+    match rng.gen_range(0..3) {
+        0 => {
+            let left = rng.gen_range(0..layout.len());
+            let mut right = rng.gen_range(0..layout.len());
+            if left == right {
+                right = (right + 1) % layout.len();
+            }
+            undo_buf.extend_from_slice(&[0, left as u32, right as u32]);
+            layout.swap(left, right);
+        }
+        1 => {
+            let left = rng.gen_range(0..layout.len() - 1);
+            undo_buf.extend_from_slice(&[1, left as u32]);
+            layout.swap(left, left + 1);
+        }
+        _ => {
+            let from = rng.gen_range(0..layout.len());
+            let to = rng.gen_range(0..layout.len());
+            undo_buf.extend_from_slice(&[2, from as u32, to as u32]);
+            if from != to {
+                let value = layout[from];
+                if from < to {
+                    layout.copy_within((from + 1)..=to, from);
+                } else {
+                    layout.copy_within(to..from, to + 1);
+                }
+                layout[to] = value;
+            }
+        }
+    }
+}
+
+/// Undo a move recorded by `apply_random_layout_move_with_undo`.
+fn undo_layout_move(layout: &mut [u32], undo_buf: &[u32]) {
+    if undo_buf.is_empty() {
+        return;
+    }
+    match undo_buf[0] {
+        0 => {
+            // Swap: just swap back
+            layout.swap(undo_buf[1] as usize, undo_buf[2] as usize);
+        }
+        1 => {
+            // Adjacent swap: swap back
+            let left = undo_buf[1] as usize;
+            layout.swap(left, left + 1);
+        }
+        2 => {
+            // Block move: reverse the block move
+            let from = undo_buf[1] as usize;
+            let to = undo_buf[2] as usize;
+            if from != to {
+                // Original moved layout[from] to layout[to] by shifting.
+                // To undo: move layout[to] back to layout[from].
+                let value = layout[to];
+                if from < to {
+                    // Original: copy_within((from+1)..=to, from), layout[to] = value
+                    // Undo: copy_within(from..to, from+1), layout[from] = value
+                    layout.copy_within(from..to, from + 1);
+                } else {
+                    // Original: copy_within(to..from, to+1), layout[to] = value
+                    // Undo: copy_within((to+1)..=from, to), layout[from] = value
+                    layout.copy_within((to + 1)..=from, to);
+                }
+                layout[from] = value;
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 fn score_permuted_weights(
     weights: &[Weight],
@@ -599,6 +739,17 @@ fn score_permuted_weights(
 
 /// Create a new Weight from `w` with permuted (possibly many-to-one) coords.
 fn permute_weight(w: &Weight, tsid_perm: &[u32], token_perm: &[u32]) -> Weight {
+    let mut cache = HashMap::new();
+    permute_weight_with_cache(w, tsid_perm, token_perm, &mut cache)
+}
+
+/// Like `permute_weight` but reuses a token-set permutation cache across calls.
+fn permute_weight_with_cache(
+    w: &Weight,
+    tsid_perm: &[u32],
+    token_perm: &[u32],
+    permuted_token_cache: &mut HashMap<usize, RangeSetBlaze<u32>>,
+) -> Weight {
     if w.is_empty() {
         return Weight::empty();
     }
@@ -606,7 +757,6 @@ fn permute_weight(w: &Weight, tsid_perm: &[u32], token_perm: &[u32]) -> Weight {
         return Weight::all();
     }
 
-    let mut permuted_token_cache: HashMap<usize, RangeSetBlaze<u32>> = HashMap::new();
     let mut tokens_by_new_tsid: std::collections::BTreeMap<u32, RangeSetBlaze<u32>> =
         std::collections::BTreeMap::new();
 
