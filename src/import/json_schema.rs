@@ -10,6 +10,14 @@ use crate::compiler::grammar_def::GrammarDef;
 use crate::ds::bitset::BitSet;
 use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, lower, promote_large_literal_alts};
 
+// WARNING: Do NOT break terminals containing repeats of multi-char subexpressions
+// into grammar-level repeats of single characters. Doing so creates terminals of
+// byte-length 1, which catastrophically bloats the terminal DWA (the parser must
+// track every possible single-byte terminal match at every position). Instead,
+// keep repeated character patterns fused into chunked multi-char terminals
+// (e.g. char{1024}) and use TerminalExpr(Repeat{...}) to trigger the direct
+// bounded-repeat DFA construction path, which avoids NFA→DFA blowup.
+
 const JSON_VALUE_RULE: &str = "json_value";
 const JSON_OBJECT_RULE: &str = "json_object";
 const JSON_ARRAY_RULE: &str = "json_array";
@@ -1754,6 +1762,12 @@ impl<'a> SchemaCtx<'a> {
         GrammarExpr::Ref(JSON_STRING_CHAR_RULE.into())
     }
 
+    /// Threshold above which bounded string char terminals use direct
+    /// `Expr::Repeat` instead of binary-tree grammar decomposition.
+    /// This enables the constructive DFA path in the regex compiler,
+    /// avoiding expensive NFA→DFA determinization for large repeats.
+    const DIRECT_REPEAT_TERMINAL_THRESHOLD: usize = 32;
+
     fn json_string_char_exact_ref(&mut self, count: usize) -> GrammarExpr {
         match count {
             0 => empty_expr(),
@@ -1763,19 +1777,31 @@ impl<'a> SchemaCtx<'a> {
                     return GrammarExpr::Ref(rule_name.clone());
                 }
 
-                let chunk = highest_power_of_two_leq(count);
-                let expr = if chunk == count {
-                    let left = self.json_string_char_exact_ref(count / 2);
-                    let right = self.json_string_char_exact_ref(count / 2);
-                    sequence_or_single(vec![left, right])
+                let expr = if count >= Self::DIRECT_REPEAT_TERMINAL_THRESHOLD {
+                    // Use direct Expr::Repeat to trigger constructive DFA
+                    // construction (build_bounded_repeat_dfa), avoiding the
+                    // O(count × char_states) NFA determinization.
+                    let char_expr = parse_regex(JSON_STRING_CHAR_PATTERN, true);
+                    GrammarExpr::TerminalExpr(LexerExpr::Repeat {
+                        expr: Box::new(char_expr),
+                        min: count,
+                        max: Some(count),
+                    })
                 } else {
-                    sequence_or_single(vec![
-                        self.json_string_char_exact_ref(chunk),
-                        self.json_string_char_exact_ref(count - chunk),
-                    ])
+                    let chunk = highest_power_of_two_leq(count);
+                    if chunk == count {
+                        let left = self.json_string_char_exact_ref(count / 2);
+                        let right = self.json_string_char_exact_ref(count / 2);
+                        sequence_or_single(vec![left, right])
+                    } else {
+                        sequence_or_single(vec![
+                            self.json_string_char_exact_ref(chunk),
+                            self.json_string_char_exact_ref(count - chunk),
+                        ])
+                    }
                 };
 
-                let rule = self.extract_rule(expr, &format!("JSON_STRING_CHAR_EXACT_{count}"));
+                let rule = self.extract_terminal_rule(expr, &format!("JSON_STRING_CHAR_EXACT_{count}"));
                 if let GrammarExpr::Ref(rule_name) = &rule {
                     self.json_string_exact_cache.insert(count, rule_name.clone());
                 }
@@ -1793,23 +1819,34 @@ impl<'a> SchemaCtx<'a> {
                     return GrammarExpr::Ref(rule_name.clone());
                 }
 
-                let chunk = highest_power_of_two_leq(max);
-                let expr = if chunk == max {
-                    choice_or_single(vec![
-                        self.json_string_char_upto_ref(max - 1),
-                        self.json_string_char_exact_ref(max),
-                    ])
+                let expr = if max >= Self::DIRECT_REPEAT_TERMINAL_THRESHOLD {
+                    // Use direct Expr::Repeat to trigger constructive DFA
+                    // construction, same rationale as json_string_char_exact_ref.
+                    let char_expr = parse_regex(JSON_STRING_CHAR_PATTERN, true);
+                    GrammarExpr::TerminalExpr(LexerExpr::Repeat {
+                        expr: Box::new(char_expr),
+                        min: 0,
+                        max: Some(max),
+                    })
                 } else {
-                    choice_or_single(vec![
-                        self.json_string_char_upto_ref(chunk - 1),
-                        sequence_or_single(vec![
-                            self.json_string_char_exact_ref(chunk),
-                            self.json_string_char_upto_ref(max - chunk),
-                        ]),
-                    ])
+                    let chunk = highest_power_of_two_leq(max);
+                    if chunk == max {
+                        choice_or_single(vec![
+                            self.json_string_char_upto_ref(max - 1),
+                            self.json_string_char_exact_ref(max),
+                        ])
+                    } else {
+                        choice_or_single(vec![
+                            self.json_string_char_upto_ref(chunk - 1),
+                            sequence_or_single(vec![
+                                self.json_string_char_exact_ref(chunk),
+                                self.json_string_char_upto_ref(max - chunk),
+                            ]),
+                        ])
+                    }
                 };
 
-                let rule = self.extract_rule(expr, &format!("JSON_STRING_CHAR_UPTO_{max}"));
+                let rule = self.extract_terminal_rule(expr, &format!("JSON_STRING_CHAR_UPTO_{max}"));
                 if let GrammarExpr::Ref(rule_name) = &rule {
                     self.json_string_upto_cache.insert(max, rule_name.clone());
                 }

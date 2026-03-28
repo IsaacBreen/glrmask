@@ -407,6 +407,141 @@ fn build_bounded_repeat_dfa(expr: &Expr, min: usize, max: usize) -> Option<DFA> 
     Some(dfa)
 }
 
+/// Collects all bytes from a slice of suffix expressions that are all U8Seq.
+/// Returns None if any expression is not a simple byte sequence.
+fn collect_suffix_bytes(exprs: &[Expr]) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    for expr in exprs {
+        match expr {
+            Expr::U8Seq(b) => bytes.extend_from_slice(b),
+            Expr::Shared(inner) => match inner.as_ref() {
+                Expr::U8Seq(b) => bytes.extend_from_slice(b),
+                _ => return None,
+            },
+            _ => return None,
+        }
+    }
+    if bytes.is_empty() { None } else { Some(bytes) }
+}
+
+/// Builds a DFA for `Seq([Repeat{expr, min, max}, suffix_bytes...])` directly,
+/// avoiding NFA→DFA determinization. Works when the first suffix byte does not
+/// overlap with the repeat expression's start-state transitions (e.g., closing
+/// quote `"` after JSON string chars that exclude `"`).
+fn build_bounded_repeat_with_suffix_dfa(parts: &[Expr]) -> Option<(DFA, bool)> {
+    if parts.len() < 2 {
+        return None;
+    }
+
+    // Extract repeat parameters, unwrapping Shared if needed.
+    let first = match &parts[0] {
+        Expr::Shared(inner) => inner.as_ref(),
+        other => other,
+    };
+    let (repeat_expr, min, max) = match first {
+        Expr::Repeat {
+            expr,
+            min,
+            max: Some(max),
+        } => (expr.as_ref(), *min, *max),
+        _ => return None,
+    };
+
+    let suffix_bytes = collect_suffix_bytes(&parts[1..])?;
+    let base_dfa = compile_direct_bounded_repeat_base_dfa(repeat_expr, max)?;
+
+    let base_states = base_dfa.states();
+    let base_state_count = base_states.len();
+    let repeat_state_count = (max + 1).checked_mul(base_state_count)?;
+    let suffix_len = suffix_bytes.len();
+    let total_states = repeat_state_count + suffix_len;
+
+    // Safety check: first suffix byte must NOT appear in start-state transitions
+    // of the base DFA, otherwise the DFA would be nondeterministic at accepting
+    // positions (ambiguity between continuing the repeat and starting the suffix).
+    if base_states[0].transitions.get(suffix_bytes[0]).is_some() {
+        return None;
+    }
+
+    let mut dfa = DFA::new(total_states);
+    dfa.ensure_group_capacity(1);
+    let first_suffix_state = repeat_state_count as u32;
+
+    for copies_done in 0..=max {
+        for (state_id, state) in base_states.iter().enumerate() {
+            let mapped_state = (copies_done * base_state_count + state_id) as u32;
+            // No finalizers on repeat states — only the suffix chain end finalizes.
+            let finalizers = crate::ds::bitset::BitSet::new(1);
+            let mut future = crate::ds::bitset::BitSet::new(1);
+
+            let is_accepting_pos = state_id == 0 && copies_done >= min;
+            if copies_done < max || is_accepting_pos {
+                future.set(0);
+            }
+            dfa.overwrite_state_metadata(mapped_state, finalizers, future);
+
+            // At max copies or at a base-DFA finalizer state: no repeat transitions,
+            // but accepting positions still get the suffix entry transition.
+            if copies_done == max || !base_dfa.finalizers(state_id as u32).is_empty() {
+                if is_accepting_pos {
+                    dfa.set_transitions_from_sorted_entries(
+                        mapped_state,
+                        vec![(suffix_bytes[0], first_suffix_state)],
+                    );
+                }
+                continue;
+            }
+
+            // Build transitions: repeat transitions + optional suffix entry.
+            let extra = if is_accepting_pos { 1 } else { 0 };
+            let mut transitions = Vec::with_capacity(state.transitions.len() + extra);
+            for (byte, &target) in state.transitions.iter() {
+                let mapped_target = if !base_dfa.finalizers(target).is_empty() {
+                    ((copies_done + 1) * base_state_count) as u32
+                } else {
+                    (copies_done * base_state_count + target as usize) as u32
+                };
+                transitions.push((byte, mapped_target));
+            }
+            if is_accepting_pos {
+                let pos = transitions.partition_point(|&(b, _)| b < suffix_bytes[0]);
+                transitions.insert(pos, (suffix_bytes[0], first_suffix_state));
+            }
+            dfa.set_transitions_from_sorted_entries(mapped_state, transitions);
+        }
+    }
+
+    // Build suffix chain: each state transitions on the NEXT suffix byte.
+    for i in 0..suffix_len {
+        let suffix_state = (repeat_state_count + i) as u32;
+        if i + 1 < suffix_len {
+            let next_suffix = (repeat_state_count + i + 1) as u32;
+            let mut future = crate::ds::bitset::BitSet::new(1);
+            future.set(0);
+            dfa.overwrite_state_metadata(
+                suffix_state,
+                crate::ds::bitset::BitSet::new(1),
+                future,
+            );
+            dfa.set_transitions_from_sorted_entries(
+                suffix_state,
+                vec![(suffix_bytes[i + 1], next_suffix)],
+            );
+        } else {
+            // Last suffix state: finalizer, no transitions, no future.
+            let mut finalizers = crate::ds::bitset::BitSet::new(1);
+            finalizers.set(0);
+            dfa.overwrite_state_metadata(
+                suffix_state,
+                finalizers,
+                crate::ds::bitset::BitSet::new(1),
+            );
+        }
+    }
+
+    Some((dfa, false))
+}
+
 fn append_bounded_repeat_expr(expr: &Expr, min: usize, max: usize, nfa: &mut NFA, start: u32, end: u32) {
     if max < min {
         return;
@@ -626,6 +761,7 @@ fn compile_product_component_dfa_direct(expr: &Expr) -> Option<(DFA, bool)> {
             min,
             max: Some(max),
         } => build_bounded_repeat_dfa(expr, *min, *max).map(|dfa| (dfa, false)),
+        Expr::Seq(parts) => build_bounded_repeat_with_suffix_dfa(parts),
         _ => None,
     }
 }
