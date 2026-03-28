@@ -203,6 +203,8 @@ pub(crate) fn inline_single_use_nonterminals(
         // Build indexes
         let mut productions_by_lhs = BTreeMap::<NonterminalID, Vec<usize>>::new();
         let mut use_counts = BTreeMap::<NonterminalID, usize>::new();
+        // For each nonterminal, track which rule LHS values have it at RHS position 0.
+        let mut position_0_users = BTreeMap::<NonterminalID, BTreeSet<NonterminalID>>::new();
 
         for (index, rule) in rules.iter().enumerate() {
             productions_by_lhs.entry(rule.lhs).or_default().push(index);
@@ -210,6 +212,9 @@ pub(crate) fn inline_single_use_nonterminals(
                 if let Symbol::Nonterminal(nonterminal) = symbol {
                     *use_counts.entry(*nonterminal).or_default() += 1;
                 }
+            }
+            if let Some(Symbol::Nonterminal(first_nt)) = rule.rhs.first() {
+                position_0_users.entry(*first_nt).or_default().insert(rule.lhs);
             }
         }
 
@@ -237,17 +242,16 @@ pub(crate) fn inline_single_use_nonterminals(
                 continue;
             }
 
+            // Inlining `nonterminal → first ...` into a rule `X → nonterminal ...`
+            // creates direct left recursion if X == first. Use precomputed index.
             let creates_direct_left_recursion =
-                rules.iter().enumerate().any(|(index, outer_rule)| {
-                    if index == production_indexes[0] {
-                        return false;
-                    }
-                    outer_rule.rhs.iter().enumerate().any(|(position, symbol)| {
-                        matches!(symbol, Symbol::Nonterminal(id) if *id == nonterminal)
-                            && position == 0
-                            && matches!(rule.rhs.first(), Some(Symbol::Nonterminal(first)) if *first == outer_rule.lhs)
-                    })
-                });
+                if let Some(Symbol::Nonterminal(first)) = rule.rhs.first() {
+                    position_0_users
+                        .get(&nonterminal)
+                        .map_or(false, |lhss| lhss.contains(first))
+                } else {
+                    false
+                };
             if creates_direct_left_recursion {
                 continue;
             }
