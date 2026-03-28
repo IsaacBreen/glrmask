@@ -824,15 +824,21 @@ fn nullable_prefix_len(rhs: &[Symbol], nullable: &BTreeSet<NonterminalID>) -> us
 
 /// Remove rules for nonterminals not reachable from the start symbol.
 fn remove_unreachable_rules(rules: &[Rule], start: NonterminalID) -> Vec<Rule> {
+    // Build index: lhs → rule indices for O(1) lookup per NT.
+    let mut rules_by_lhs = BTreeMap::<NonterminalID, Vec<usize>>::new();
+    for (i, rule) in rules.iter().enumerate() {
+        rules_by_lhs.entry(rule.lhs).or_default().push(i);
+    }
+
     let mut reachable = BTreeSet::new();
     let mut worklist = vec![start];
     while let Some(nt) = worklist.pop() {
         if !reachable.insert(nt) {
             continue;
         }
-        for rule in rules {
-            if rule.lhs == nt {
-                for sym in &rule.rhs {
+        if let Some(indexes) = rules_by_lhs.get(&nt) {
+            for &idx in indexes {
+                for sym in &rules[idx].rhs {
                     if let Symbol::Nonterminal(n) = sym {
                         if !reachable.contains(n) {
                             worklist.push(*n);
@@ -1014,11 +1020,24 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
         }
     }
 
+    let post_t0 = std::time::Instant::now();
     replace_rules_with_resync(rules, &next_nt, inline_null_productions);
+    let post_inline_null_ms = post_t0.elapsed().as_secs_f64() * 1000.0;
 
+    let post_t1 = std::time::Instant::now();
     *rules = remove_unreachable_rules(rules, start);
+    let post_remove_ms = post_t1.elapsed().as_secs_f64() * 1000.0;
 
+    let post_t2 = std::time::Instant::now();
     dedup_rules(rules);
+    let post_dedup_ms = post_t2.elapsed().as_secs_f64() * 1000.0;
+
+    if debug_profile {
+        eprintln!(
+            "[glrmask/debug][normalize] post_loop rules={} inline_null_ms={:.3} remove_unreachable_ms={:.3} dedup_ms={:.3}",
+            rules.len(), post_inline_null_ms, post_remove_ms, post_dedup_ms,
+        );
+    }
 }
 
 fn replace_rules_with_resync(
