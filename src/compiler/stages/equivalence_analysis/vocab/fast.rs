@@ -106,11 +106,11 @@ struct Scratch {
     current_states: Vec<usize>,
     active_indices: Vec<usize>,
     match_positions: Vec<u32>,
-    /// Per-state dirty-bit mask for the common `num_groups <= 64` case.
+    /// Per-state multi-word dirty bitmask.  Layout: `[dirty_words * num_states]`
+    /// where state `i`'s dirty mask occupies indices `[i*dirty_words .. (i+1)*dirty_words]`.
     dirty_group_masks: Vec<u64>,
-    /// Per-state list of group IDs touched during the last run_batch call.
-    /// Used to avoid O(num_states * num_groups) memset and scan.
-    dirty_groups: Vec<SmallVec<[usize; 16]>>,
+    /// Number of u64 words per state in `dirty_group_masks` (= ceil(num_groups/64)).
+    dirty_words: usize,
     targets: Vec<usize>,
     target_gids: HashMap<usize, SmallVec<[usize; 16]>>,
     single_target_pos: usize,
@@ -493,12 +493,13 @@ fn node_disallows_gid(scratch: &Scratch, pos: usize, gid: usize) -> bool {
 
 impl Scratch {
     fn new(num_states: usize, num_groups: usize) -> Self {
+        let dirty_words = (num_groups + 63) / 64;
         Scratch {
             current_states: vec![0; num_states],
             active_indices: Vec::new(),
             match_positions: vec![NONE; num_states * num_groups],
-            dirty_group_masks: vec![0; num_states],
-            dirty_groups: vec![SmallVec::new(); num_states],
+            dirty_group_masks: vec![0; num_states * dirty_words.max(1)],
+            dirty_words,
             targets: Vec::new(),
             target_gids: HashMap::new(),
             single_target_pos: usize::MAX,
@@ -515,12 +516,11 @@ impl Scratch {
 }
 
 #[inline]
-fn mark_dirty_group(scratch: &mut Scratch, state_idx: usize, gid: usize, use_masked_dirty_groups: bool) {
-    if use_masked_dirty_groups {
-        scratch.dirty_group_masks[state_idx] |= 1u64 << gid;
-    } else {
-        scratch.dirty_groups[state_idx].push(gid);
-    }
+fn mark_dirty_group(scratch: &mut Scratch, state_idx: usize, gid: usize) {
+    let word_idx = gid / 64;
+    let bit = gid % 64;
+    let flat_idx = state_idx * scratch.dirty_words + word_idx;
+    scratch.dirty_group_masks[flat_idx] |= 1u64 << bit;
 }
 
 fn ensure_target_gids_map(
@@ -578,16 +578,14 @@ fn run_batch_inner(
 ) {
     let num_groups = dfa.num_groups;
     let len = slice.len();
-    let use_masked_dirty_groups = num_groups <= u64::BITS as usize;
+    let dirty_words = scratch.dirty_words;
 
     scratch.active_indices.clear();
-    if use_masked_dirty_groups {
-        for mask in scratch.dirty_group_masks[state_offset..state_offset + num_states].iter_mut() {
-            *mask = 0;
-        }
-    } else {
-        for dg in scratch.dirty_groups[state_offset..state_offset + num_states].iter_mut() {
-            dg.clear();
+    {
+        let mask_start = state_offset * dirty_words;
+        let mask_end = (state_offset + num_states) * dirty_words;
+        for v in scratch.dirty_group_masks[mask_start..mask_end].iter_mut() {
+            *v = 0;
         }
     }
 
@@ -598,7 +596,7 @@ fn run_batch_inner(
     // here because collect_targets filters them out (requires pv > 0) and
     // finish_token_signature skips them too. Omitting position-0 recording
     // avoids creating dirty-tracking entries for the ~97% of tokens that never
-    // match at any position > 0, eliminating unnecessary SmallVec/bitmask
+    // match at any position > 0, eliminating unnecessary bitmask
     // overhead in collect_targets and finish_token_signature.
     for i in state_offset..state_offset + num_states {
         let state = scratch.current_states[i];
@@ -632,7 +630,7 @@ fn run_batch_inner(
                         if gid < num_groups {
                             let ix = base + gid;
                             if scratch.match_positions[ix] == NONE {
-                                mark_dirty_group(scratch, i, gid, use_masked_dirty_groups);
+                                mark_dirty_group(scratch, i, gid);
                             }
                             scratch.match_positions[ix] = position;
                         }
@@ -675,7 +673,7 @@ fn run_batch_inner(
                             if gid < num_groups {
                                 let ix = base + gid;
                                 if scratch.match_positions[ix] == NONE {
-                                    mark_dirty_group(scratch, i, gid, use_masked_dirty_groups);
+                                    mark_dirty_group(scratch, i, gid);
                                 }
                                 scratch.match_positions[ix] = token_len;
                             }
@@ -699,11 +697,10 @@ fn collect_targets(
         return;
     }
 
-    let use_masked_dirty_groups = num_groups <= u64::BITS as usize;
+    let dirty_words = scratch.dirty_words;
 
     let Scratch {
         dirty_group_masks,
-        dirty_groups,
         match_positions,
         targets,
         target_gids,
@@ -714,25 +711,16 @@ fn collect_targets(
 
     for i in state_offset..state_offset + num_states {
         let base = i * num_groups;
-        if use_masked_dirty_groups {
-            let mut dirty_mask = dirty_group_masks[i];
+        let mask_base = i * dirty_words;
+        for w in 0..dirty_words {
+            let mut dirty_mask = dirty_group_masks[mask_base + w];
             while dirty_mask != 0 {
-                let gid = dirty_mask.trailing_zeros() as usize;
+                let bit = dirty_mask.trailing_zeros() as usize;
                 dirty_mask &= dirty_mask - 1;
-                let pv = match_positions[base + gid];
-                if pv != NONE && pv > 0 && (pv as usize) <= len {
-                    record_target_gid(
-                        targets,
-                        target_gids,
-                        single_target_pos,
-                        single_target_gids,
-                        pv as usize,
-                        gid,
-                    );
+                let gid = w * 64 + bit;
+                if gid >= num_groups {
+                    break;
                 }
-            }
-        } else {
-            for &gid in &dirty_groups[i] {
                 let pv = match_positions[base + gid];
                 if pv != NONE && pv > 0 && (pv as usize) <= len {
                     record_target_gid(
@@ -750,10 +738,9 @@ fn collect_targets(
 }
 
 /// Run DFA from all initial states on a token, recording end states and match positions.
-/// Uses dirty_groups tracking to avoid O(num_states * num_groups) memset.
+/// Uses dirty bitmask tracking to avoid O(num_states * num_groups) memset.
 /// INVARIANT: match_positions entries are NONE except for dirty entries from a previous
 /// call that must have been cleaned up by the caller (token_signature does this).
-/// Each `dirty_groups[i]` entry is unique within a run_batch call.
 fn run_batch(
     dfa: &Dfa,
     scratch: &mut Scratch,
@@ -1117,48 +1104,36 @@ fn finish_token_signature(
     scratch: &mut Scratch,
 ) -> u64 {
     let num_groups = dfa.num_groups;
+    let dirty_words = scratch.dirty_words;
     let dag = &scratch.dag;
     let single_target_hash_pos = scratch.single_target_hash_pos;
     let single_target_hash = scratch.single_target_hash;
-    let use_masked_dirty_iteration = num_groups <= u64::BITS as usize;
     let mut sig: u64 = HASH_SEED3;
     for i in 0..chunk_states.len() {
         let completion = dfa.completion(scratch.current_states[i]);
         let base = i * num_groups;
+        let mask_base = i * dirty_words;
 
-        let state_sig = if use_masked_dirty_iteration {
-            let mut dirty_mask = scratch.dirty_group_masks[i];
-            if dirty_mask != 0 {
-                let mut h = new_hasher();
-                h.write_u64(completion);
-                while dirty_mask != 0 {
-                    let gid = dirty_mask.trailing_zeros() as usize;
-                    dirty_mask &= dirty_mask - 1;
-                    let pv = scratch.match_positions[base + gid];
-                    if pv != NONE && pv > 0 {
-                        h.write_u64(gid as u64);
-                        let target = pv as usize;
-                        let target_hash = if single_target_hash_pos == target {
-                            single_target_hash
-                        } else {
-                            dag.get(&target).map_or(0, |node| node.hash)
-                        };
-                        h.write_u64(target_hash);
-                    }
-                    scratch.match_positions[base + gid] = NONE;
-                }
-                scratch.dirty_group_masks[i] = 0;
-                h.finish()
-            } else {
-                completion
+        let mut any_dirty = false;
+        for w in 0..dirty_words {
+            if scratch.dirty_group_masks[mask_base + w] != 0 {
+                any_dirty = true;
+                break;
             }
-        } else {
-            let dirty = &mut scratch.dirty_groups[i];
-            if !dirty.is_empty() {
+        }
+
+        let state_sig = if any_dirty {
             let mut h = new_hasher();
             h.write_u64(completion);
-                dirty.sort_unstable();
-                for &gid in dirty.iter() {
+            for w in 0..dirty_words {
+                let mut dirty_mask = scratch.dirty_group_masks[mask_base + w];
+                while dirty_mask != 0 {
+                    let bit = dirty_mask.trailing_zeros() as usize;
+                    dirty_mask &= dirty_mask - 1;
+                    let gid = w * 64 + bit;
+                    if gid >= num_groups {
+                        break;
+                    }
                     let pv = scratch.match_positions[base + gid];
                     if pv != NONE && pv > 0 {
                         h.write_u64(gid as u64);
@@ -1172,10 +1147,11 @@ fn finish_token_signature(
                     }
                     scratch.match_positions[base + gid] = NONE;
                 }
-                h.finish()
-            } else {
-                completion
+                scratch.dirty_group_masks[mask_base + w] = 0;
             }
+            h.finish()
+        } else {
+            completion
         };
 
         sig = sig.wrapping_mul(HASH_SEED1).wrapping_add(state_sig);
@@ -1346,6 +1322,7 @@ fn dfs_step(
     log.clear();
 
     let num_groups = dfa.num_groups;
+    let dirty_words = scratch.dirty_words;
     let position = (depth + 1) as u32;
     let class = dfa.byte_to_class[byte as usize] as usize;
     let class_base = class * dfa.num_states;
@@ -1374,9 +1351,12 @@ fn dfs_step(
                 let ix = base + gid;
                 let old_mp = scratch.match_positions[ix];
                 if old_mp == NONE {
+                    let word_idx = gid / 64;
+                    let bit = gid % 64;
+                    let flat_idx = i * dirty_words + word_idx;
                     log.dirty_changes
-                        .push((i, scratch.dirty_group_masks[i]));
-                    scratch.dirty_group_masks[i] |= 1u64 << gid;
+                        .push((flat_idx, scratch.dirty_group_masks[flat_idx]));
+                    scratch.dirty_group_masks[flat_idx] |= 1u64 << bit;
                 }
                 log.match_changes.push((ix, old_mp));
                 scratch.match_positions[ix] = position;
@@ -1394,8 +1374,8 @@ fn dfs_undo_depth(scratch: &mut Scratch, log: &DepthChangeLog) {
     for &(ix, old_mp) in log.match_changes.iter().rev() {
         scratch.match_positions[ix] = old_mp;
     }
-    for &(i, old_dirty) in log.dirty_changes.iter().rev() {
-        scratch.dirty_group_masks[i] = old_dirty;
+    for &(flat_idx, old_dirty) in log.dirty_changes.iter().rev() {
+        scratch.dirty_group_masks[flat_idx] = old_dirty;
     }
     for &(i, old_state) in log.state_changes.iter().rev() {
         scratch.current_states[i] = old_state;
@@ -1415,13 +1395,14 @@ fn dfs_backtrack(
 }
 
 /// Compute token signature without modifying scratch state (no cleanup).
-/// Only handles the bitmask dirty tracking path (num_groups <= 64).
+/// Uses multi-word bitmask dirty tracking for any number of groups.
 fn finish_token_signature_no_cleanup(
     dfa: &Dfa,
     num_initial_states: usize,
     scratch: &Scratch,
 ) -> u64 {
     let num_groups = dfa.num_groups;
+    let dirty_words = scratch.dirty_words;
     let dag = &scratch.dag;
     let single_target_hash_pos = scratch.single_target_hash_pos;
     let single_target_hash = scratch.single_target_hash;
@@ -1429,24 +1410,39 @@ fn finish_token_signature_no_cleanup(
     for i in 0..num_initial_states {
         let completion = dfa.completion(scratch.current_states[i]);
         let base = i * num_groups;
-        let dirty_mask = scratch.dirty_group_masks[i];
-        let state_sig = if dirty_mask != 0 {
+        let mask_base = i * dirty_words;
+
+        let mut any_dirty = false;
+        for w in 0..dirty_words {
+            if scratch.dirty_group_masks[mask_base + w] != 0 {
+                any_dirty = true;
+                break;
+            }
+        }
+
+        let state_sig = if any_dirty {
             let mut h = new_hasher();
             h.write_u64(completion);
-            let mut dm = dirty_mask;
-            while dm != 0 {
-                let gid = dm.trailing_zeros() as usize;
-                dm &= dm - 1;
-                let pv = scratch.match_positions[base + gid];
-                if pv != NONE && pv > 0 {
-                    h.write_u64(gid as u64);
-                    let target = pv as usize;
-                    let target_hash = if single_target_hash_pos == target {
-                        single_target_hash
-                    } else {
-                        dag.get(&target).map_or(0, |node| node.hash)
-                    };
-                    h.write_u64(target_hash);
+            for w in 0..dirty_words {
+                let mut dm = scratch.dirty_group_masks[mask_base + w];
+                while dm != 0 {
+                    let bit = dm.trailing_zeros() as usize;
+                    dm &= dm - 1;
+                    let gid = w * 64 + bit;
+                    if gid >= num_groups {
+                        break;
+                    }
+                    let pv = scratch.match_positions[base + gid];
+                    if pv != NONE && pv > 0 {
+                        h.write_u64(gid as u64);
+                        let target = pv as usize;
+                        let target_hash = if single_target_hash_pos == target {
+                            single_target_hash
+                        } else {
+                            dag.get(&target).map_or(0, |node| node.hash)
+                        };
+                        h.write_u64(target_hash);
+                    }
                 }
             }
             h.finish()
@@ -1476,8 +1472,12 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
 
     // Initialize: copy initial states and mark dead-ends
     scratch.current_states[..batch_len].clone_from_slice(batch);
-    for i in 0..batch_len {
-        scratch.dirty_group_masks[i] = 0;
+    {
+        let dirty_words = scratch.dirty_words;
+        let mask_end = batch_len * dirty_words;
+        for v in scratch.dirty_group_masks[..mask_end].iter_mut() {
+            *v = 0;
+        }
     }
     for i in 0..batch_len {
         if dfa.is_dead_end[scratch.current_states[i]] {
@@ -1664,8 +1664,7 @@ pub fn find_vocab_equivalence_classes_with_follow_and_byte_classes<S: AsRef<[u8]
         let batch = &ordered_states[batch_start..batch_end];
         let state_group_size = vocab_state_group_size(batch.len(), num_groups);
         let signature_started_at = Instant::now();
-        let use_trie_walk = num_groups <= u64::BITS as usize
-            && active_indices.len() >= TRIE_WALK_MIN_TOKENS
+        let use_trie_walk = active_indices.len() >= TRIE_WALK_MIN_TOKENS
             && !*TRIE_WALK_DISABLED;
         let active_sigs: Vec<(usize, u64)> = if use_trie_walk {
             let mut sorted_indices = active_indices.clone();
