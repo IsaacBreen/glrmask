@@ -13,7 +13,7 @@ use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar::model::{GrammarDef, Terminal};
 #[cfg(test)]
 use crate::compiler::grammar::transforms::prepare_grammar_for_compile;
-use crate::compiler::grammar::transforms::prepare_owned_grammar_for_compile;
+use crate::compiler::grammar::transforms::prepare_grammar_transforms_only;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 use crate::compiler::stages::parser_dwa::build_parser_dwa_from_terminal_dwa_with_precomputed_templates;
 use crate::compiler::stages::templates::Templates;
@@ -349,37 +349,72 @@ fn format_byte_ranges(bytes: &[u8]) -> String {
 
 fn compile_prepared_with_profile(
     prepared_grammar: GrammarDef,
-    tokenizer: Tokenizer,
     vocab: &Vocab,
 ) -> (Constraint, CompilePhaseProfile) {
     run_with_compile_thread_pool(|| {
         let compile_started_at = Instant::now();
         let mut profile = CompilePhaseProfile::default();
 
-        let analyze_grammar_started_at = Instant::now();
-        let analyzed_grammar = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
-        profile.analyze_grammar_ms = elapsed_ms(analyze_grammar_started_at);
+        // Build tokenizer concurrently with grammar analysis + GLR table + disallowed follows.
+        // Tokenizer build (~70ms) runs in parallel with analysis (~46ms), saving ~46ms.
+        let analysis_started_at = Instant::now();
+        let (
+            tokenizer,
+            (analyzed_grammar, analyze_grammar_ms, table, glr_table_ms,
+             terminal_coloring, terminal_coloring_enabled,
+             disallowed_follows, disallowed_follows_ms),
+        ) = rayon::join(
+            || {
+                let mut tokenizer = build_tokenizer(&prepared_grammar);
+                tokenizer.isolate_start_state_and_drain_nullable_terminals();
+                tokenizer
+            },
+            || {
+                let analyze_grammar_started_at = Instant::now();
+                let analyzed_grammar = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
+                let analyze_grammar_ms = elapsed_ms(analyze_grammar_started_at);
 
-        warn_problematic_byte_terminals(&tokenizer, vocab);
+                #[cfg(debug_assertions)]
+                if let Err(message) = analyzed_grammar.debug_check_grammar_preconditions() {
+                    panic!("[glrmask] grammar precondition violations:\n{}", message);
+                }
 
-        #[cfg(debug_assertions)]
-        if let Err(message) = analyzed_grammar.debug_check_grammar_preconditions() {
-            panic!("[glrmask] grammar precondition violations:\n{}", message);
+                let table_started_at = Instant::now();
+                let table = GLRTable::build(&analyzed_grammar);
+                let glr_table_ms = elapsed_ms(table_started_at);
+
+                let terminal_coloring_enabled = !env_flag_enabled("GLRMASK_DISABLE_TERMINAL_COLORING");
+                let terminal_coloring = if terminal_coloring_enabled {
+                    compute_terminal_coloring(&table)
+                } else {
+                    TerminalColoring::identity(table.num_terminals as usize)
+                };
+
+                let disallowed_follows_started_at = Instant::now();
+                let disallowed_follows = compute_disallowed_follows(&analyzed_grammar);
+                let disallowed_follows_ms = elapsed_ms(disallowed_follows_started_at);
+
+                (analyzed_grammar, analyze_grammar_ms, table, glr_table_ms,
+                 terminal_coloring, terminal_coloring_enabled,
+                 disallowed_follows, disallowed_follows_ms)
+            },
+        );
+
+        profile.analyze_grammar_ms = analyze_grammar_ms;
+        profile.glr_table_ms = glr_table_ms;
+        profile.disallowed_follows_ms = disallowed_follows_ms;
+
+        let debug_profile = std::env::var("GLRMASK_DEBUG_PROFILE")
+            .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
+            .unwrap_or(false);
+        if debug_profile {
+            eprintln!(
+                "[glrmask/debug][analysis_overlap] wall_ms={:.3} analyze_ms={:.3} glr_ms={:.3} disallowed_ms={:.3}",
+                elapsed_ms(analysis_started_at), analyze_grammar_ms, glr_table_ms, disallowed_follows_ms,
+            );
         }
 
-        let table_started_at = Instant::now();
-        let table = GLRTable::build(&analyzed_grammar);
-        profile.glr_table_ms = elapsed_ms(table_started_at);
-        let terminal_coloring_enabled = !env_flag_enabled("GLRMASK_DISABLE_TERMINAL_COLORING");
-        let terminal_coloring = if terminal_coloring_enabled {
-            compute_terminal_coloring(&table)
-        } else {
-            TerminalColoring::identity(table.num_terminals as usize)
-        };
-
-        let disallowed_follows_started_at = Instant::now();
-        let disallowed_follows = compute_disallowed_follows(&analyzed_grammar);
-        profile.disallowed_follows_ms = elapsed_ms(disallowed_follows_started_at);
+        warn_problematic_byte_terminals(&tokenizer, vocab);
 
         if compile_profile_enabled() {
             let num_groups = analyzed_grammar.num_terminals as usize;
@@ -601,14 +636,14 @@ fn compile_prepared_with_profile(
     })
 }
 
-fn compile_prepared(prepared_grammar: GrammarDef, tokenizer: Tokenizer, vocab: &Vocab) -> Constraint {
-    compile_prepared_with_profile(prepared_grammar, tokenizer, vocab).0
+fn compile_prepared(prepared_grammar: GrammarDef, vocab: &Vocab) -> Constraint {
+    compile_prepared_with_profile(prepared_grammar, vocab).0
 }
 
 #[cfg(test)]
 pub(crate) fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
-    let (prepared_grammar, tokenizer) = prepare_grammar_for_compile(grammar);
-    compile_prepared(prepared_grammar, tokenizer, vocab)
+    let (prepared_grammar, _tokenizer) = prepare_grammar_for_compile(grammar);
+    compile_prepared(prepared_grammar, vocab)
 }
 
 pub(crate) fn compile_owned(grammar: GrammarDef, vocab: &Vocab) -> Constraint {
@@ -618,8 +653,8 @@ pub(crate) fn compile_owned(grammar: GrammarDef, vocab: &Vocab) -> Constraint {
         return constraint;
     }
 
-    let (prepared_grammar, tokenizer) = prepare_owned_grammar_for_compile(grammar);
-    compile_prepared(prepared_grammar, tokenizer, vocab)
+    let prepared_grammar = prepare_grammar_transforms_only(grammar);
+    compile_prepared(prepared_grammar, vocab)
 }
 
 pub(crate) fn compile_owned_profiled(
@@ -628,10 +663,10 @@ pub(crate) fn compile_owned_profiled(
 ) -> (Constraint, CompilePhaseProfile) {
     let total_started_at = Instant::now();
     let prepare_started_at = Instant::now();
-    let (prepared_grammar, tokenizer) = prepare_owned_grammar_for_compile(grammar);
+    let prepared_grammar = prepare_grammar_transforms_only(grammar);
     let prepare_ms = elapsed_ms(prepare_started_at);
 
-    let (constraint, mut profile) = compile_prepared_with_profile(prepared_grammar, tokenizer, vocab);
+    let (constraint, mut profile) = compile_prepared_with_profile(prepared_grammar, vocab);
     profile.prepare_ms = prepare_ms;
     profile.total_ms = elapsed_ms(total_started_at);
     (constraint, profile)

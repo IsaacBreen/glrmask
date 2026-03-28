@@ -436,10 +436,20 @@ pub(crate) fn prepare_owned_grammar_for_compile(grammar: GrammarDef) -> (Grammar
     prepare_owned_grammar_for_compile_impl(&mut normalized, &nullable_terminals)
 }
 
-fn prepare_owned_grammar_for_compile_impl(
+/// Run only the grammar transforms without building the tokenizer.
+/// The caller is responsible for calling `build_tokenizer` on the result.
+pub(crate) fn prepare_grammar_transforms_only(grammar: GrammarDef) -> GrammarDef {
+    let nullable_terminals = nullable_terminals_for_grammar(&grammar);
+    let mut normalized = grammar;
+    prepare_grammar_transforms_impl(&mut normalized, &nullable_terminals);
+    std::mem::take(&mut normalized)
+}
+
+/// The shared grammar transform steps (without tokenizer build).
+fn prepare_grammar_transforms_impl(
     normalized: &mut GrammarDef,
     nullable_terminals: &BTreeSet<TerminalID>,
-) -> (GrammarDef, Tokenizer) {
+) {
     let debug_profile = std::env::var("GLRMASK_DEBUG_PROFILE")
         .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
         .unwrap_or(false);
@@ -472,6 +482,24 @@ fn prepare_owned_grammar_for_compile_impl(
     compact_unused_terminals(normalized);
     let compact_ms = t6.elapsed().as_secs_f64() * 1000.0;
 
+    if debug_profile {
+        eprintln!(
+            "[glrmask/debug][prepare_transforms] expand_ms={:.3} normalize_ms={:.3} inline_ms={:.3} merge1_ms={:.3} bound_ms={:.3} merge2_ms={:.3} compact_ms={:.3}",
+            expand_ms, normalize_ms, inline_ms, merge1_ms, bound_ms, merge2_ms, compact_ms,
+        );
+    }
+}
+
+fn prepare_owned_grammar_for_compile_impl(
+    normalized: &mut GrammarDef,
+    nullable_terminals: &BTreeSet<TerminalID>,
+) -> (GrammarDef, Tokenizer) {
+    prepare_grammar_transforms_impl(normalized, nullable_terminals);
+
+    let debug_profile = std::env::var("GLRMASK_DEBUG_PROFILE")
+        .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
+        .unwrap_or(false);
+
     // Build the real tokenizer only from the compacted live terminal set so
     // dead terminals never make it into downstream lexer/parser stages.
     let t7 = std::time::Instant::now();
@@ -484,8 +512,8 @@ fn prepare_owned_grammar_for_compile_impl(
 
     if debug_profile {
         eprintln!(
-            "[glrmask/debug][prepare_transforms] expand_ms={:.3} normalize_ms={:.3} inline_ms={:.3} merge1_ms={:.3} bound_ms={:.3} merge2_ms={:.3} compact_ms={:.3} tokenizer_ms={:.3} isolate_ms={:.3}",
-            expand_ms, normalize_ms, inline_ms, merge1_ms, bound_ms, merge2_ms, compact_ms, tokenizer_ms, isolate_ms,
+            "[glrmask/debug][prepare_tokenizer] tokenizer_ms={:.3} isolate_ms={:.3}",
+            tokenizer_ms, isolate_ms,
         );
     }
 
