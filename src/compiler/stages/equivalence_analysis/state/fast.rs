@@ -12,6 +12,13 @@ use super::super::compat::TokenizerView;
 /// The result of state equivalence analysis: sets of state IDs that behave identically.
 pub type StateEquivalenceResult = BTreeSet<BTreeSet<usize>>;
 
+#[derive(Clone, Copy)]
+struct WalkFrame {
+    state: u32,
+    dead_at_depth: Option<usize>,
+    changes_len: usize,
+}
+
 #[inline(always)]
 fn mix_u128(mut x: u128) -> u128 {
     x ^= x >> 33;
@@ -392,9 +399,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
             .map_init(
                 || {
                     (
-                        Vec::<u32>::new(),
-                        Vec::<Option<usize>>::new(),
-                        Vec::<usize>::new(),
+                        Vec::<WalkFrame>::new(),
                         vec![-1; num_groups],
                         Vec::<(usize, i32)>::new(),
                     )
@@ -425,7 +430,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                             live_ranges.push((range_start, range_end));
                         }
                     }
-                    let (state_stack, dead_depth_stack, depth_marks, positions, changes) = scratch;
+                    let (walk_frames, positions, changes) = scratch;
                     let mut prev_groups_hash: u128;
 
                     for (range_start, range_end) in live_ranges {
@@ -433,12 +438,12 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                             continue;
                         }
 
-                        state_stack.clear();
-                        state_stack.push(state);
-                        dead_depth_stack.clear();
-                        dead_depth_stack.push(None);
-                        depth_marks.clear();
-                        depth_marks.push(0);
+                        walk_frames.clear();
+                        walk_frames.push(WalkFrame {
+                            state,
+                            dead_at_depth: None,
+                            changes_len: 0,
+                        });
                         if num_groups > 0 {
                             positions.fill(-1);
                         }
@@ -453,13 +458,13 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                             } else {
                                 batch_lcp_with_prev[token_idx]
                             };
-                            let max_prefix = state_stack.len().saturating_sub(1);
+                            let max_prefix = walk_frames.len().saturating_sub(1);
                             if prefix_len > max_prefix {
                                 prefix_len = max_prefix;
                             }
 
-                            if state_stack.len() > prefix_len + 1 {
-                                let target_mark = depth_marks[prefix_len];
+                            if walk_frames.len() > prefix_len + 1 {
+                                let target_mark = walk_frames[prefix_len].changes_len;
                                 while changes.len() > target_mark {
                                     let (gid, prev_pos) = changes.pop().unwrap();
                                     let cur_pos = positions[gid];
@@ -485,15 +490,13 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                                     }
                                 }
 
-                                state_stack.truncate(prefix_len + 1);
-                                dead_depth_stack.truncate(prefix_len + 1);
-                                depth_marks.truncate(prefix_len + 1);
+                                walk_frames.truncate(prefix_len + 1);
                             }
 
-                            let mut dead_at_depth = dead_depth_stack[prefix_len];
+                            let mut dead_at_depth = walk_frames[prefix_len].dead_at_depth;
 
                             if dead_at_depth.is_none() {
-                                let mut current = *state_stack.last().unwrap();
+                                let mut current = walk_frames.last().unwrap().state;
                                 for (offset, &byte) in token[prefix_len..].iter().enumerate() {
                                     if current == NONE_STATE {
                                         dead_at_depth = Some(prefix_len + offset);
@@ -502,13 +505,14 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                                     let next = dfa_transitions[current as usize][byte as usize];
                                     if next == NONE_STATE {
                                         dead_at_depth = Some(prefix_len + offset + 1);
-                                        state_stack.push(NONE_STATE);
-                                        dead_depth_stack.push(dead_at_depth);
-                                        depth_marks.push(changes.len());
+                                        walk_frames.push(WalkFrame {
+                                            state: NONE_STATE,
+                                            dead_at_depth,
+                                            changes_len: changes.len(),
+                                        });
                                         break;
                                     }
                                     current = next;
-                                    state_stack.push(current);
                                     let position = prefix_len + offset + 1;
 
                                     if num_groups > 0 {
@@ -546,8 +550,11 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                                         }
                                     }
 
-                                    dead_depth_stack.push(dead_at_depth);
-                                    depth_marks.push(changes.len());
+                                    walk_frames.push(WalkFrame {
+                                        state: current,
+                                        dead_at_depth,
+                                        changes_len: changes.len(),
+                                    });
                                 }
                             }
 
@@ -561,7 +568,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                                     skip_groups,
                                 )
                             } else {
-                                let current = *state_stack.last().unwrap();
+                                let current = walk_frames.last().unwrap().state;
                                 hash_trellis_node_from_positions(
                                     Some(current as usize),
                                     positions,

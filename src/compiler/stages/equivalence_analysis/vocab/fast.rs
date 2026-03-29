@@ -810,7 +810,13 @@ fn run_batch(
         run_batch_inner_ns += run_batch_inner_started_at.map_or(0, elapsed_ns);
 
         let collect_targets_started_at = profile_signature_detail.then(Instant::now);
-        collect_targets(scratch, num_groups, len, 0, num_states);
+        collect_targets(
+            scratch,
+            num_groups,
+            len,
+            0,
+            num_states,
+        );
         collect_targets_ns += collect_targets_started_at.map_or(0, elapsed_ns);
     } else {
         for state_offset in (0..num_states).step_by(state_group_size) {
@@ -821,7 +827,13 @@ fn run_batch(
             run_batch_inner_ns += run_batch_inner_started_at.map_or(0, elapsed_ns);
 
             let collect_targets_started_at = profile_signature_detail.then(Instant::now);
-            collect_targets(scratch, num_groups, len, state_offset, group_len);
+            collect_targets(
+                scratch,
+                num_groups,
+                len,
+                state_offset,
+                group_len,
+            );
             collect_targets_ns += collect_targets_started_at.map_or(0, elapsed_ns);
         }
     }
@@ -1556,12 +1568,24 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
         scratch.single_target_hash = 0;
 
         if state_group_size >= batch_len {
-            collect_targets(scratch, num_groups, token_len, 0, batch_len);
+            collect_targets(
+                scratch,
+                num_groups,
+                token_len,
+                0,
+                batch_len,
+            );
         } else {
             for state_offset in (0..batch_len).step_by(state_group_size) {
                 let group_len =
                     (state_offset + state_group_size).min(batch_len) - state_offset;
-                collect_targets(scratch, num_groups, token_len, state_offset, group_len);
+                collect_targets(
+                    scratch,
+                    num_groups,
+                    token_len,
+                    state_offset,
+                    group_len,
+                );
             }
         }
 
