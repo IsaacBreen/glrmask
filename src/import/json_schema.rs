@@ -558,6 +558,269 @@ fn regex_byte_length_bounds(expr: &crate::automata::lexer::ast::Expr) -> (usize,
     }
 }
 
+/// Compute the minimum number of logical characters a regex pattern can match.
+///
+/// Operates on the pattern string directly rather than the byte-level AST,
+/// so it correctly handles multi-byte Unicode characters (each char-class
+/// atom or literal counts as one character regardless of UTF-8 byte width).
+///
+/// Returns `None` when the pattern contains any construct the walker does
+/// not recognise (backreferences, Unicode property escapes, flag groups, …).
+/// The caller should fall back to a conservative tail budget in that case.
+fn pattern_min_char_count(pattern: &str) -> Option<usize> {
+    let branches = split_top_level_regex_branches(pattern);
+    let mut overall_min = usize::MAX;
+    for b in &branches {
+        overall_min = overall_min.min(pattern_branch_min_chars(b.as_bytes())?);
+    }
+    Some(if overall_min == usize::MAX { 0 } else { overall_min })
+}
+
+fn pattern_branch_min_chars(bytes: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    let mut total = 0usize;
+    while i < bytes.len() {
+        let (atom_min, next) = pattern_atom_min_chars(bytes, i)?;
+        i = next;
+        let (rep_min, next) = pattern_quantifier_min(bytes, i);
+        i = next;
+        total = total.saturating_add(atom_min.saturating_mul(rep_min));
+    }
+    Some(total)
+}
+
+/// Read one regex atom starting at position `i`.
+/// Returns `None` for unrecognised constructs.
+fn pattern_atom_min_chars(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
+    if i >= bytes.len() {
+        return Some((0, i));
+    }
+    match bytes[i] {
+        b'^' | b'$' => Some((0, i + 1)),
+        b'.' => Some((1, i + 1)),
+        b'|' => Some((0, i + 1)), // should not appear at branch level; advance to prevent loop
+        b'[' => {
+            let end = pattern_skip_char_class(bytes, i);
+            Some((1, end))
+        }
+        b'(' => pattern_group_min_chars(bytes, i),
+        b'\\' if i + 1 < bytes.len() => pattern_escape_min_chars(bytes, i),
+        b'\\' => None, // trailing backslash — malformed
+        _ if bytes[i] < 0x80 => Some((1, i + 1)), // ASCII literal
+        _ => {
+            // Multi-byte UTF-8 literal.
+            let byte = bytes[i];
+            let char_len = if byte < 0xE0 { 2 } else if byte < 0xF0 { 3 } else { 4 };
+            Some((1, (i + char_len).min(bytes.len())))
+        }
+    }
+}
+
+/// Handle a backslash escape starting at position `i`.
+/// Returns `None` for unrecognised / unsupported escape sequences
+/// (backreferences, Unicode properties, control escapes, etc.).
+fn pattern_escape_min_chars(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
+    let escaped = bytes[i + 1];
+    match escaped {
+        // Zero-width assertions
+        b'b' | b'B' => Some((0, i + 2)),
+        // Character class shorthands — each matches 1 character
+        b'd' | b'D' | b'w' | b'W' | b's' | b'S' => Some((1, i + 2)),
+        // Named control-character escapes — each matches 1 character
+        b't' | b'n' | b'r' | b'f' | b'v' | b'0' => Some((1, i + 2)),
+        // Hex escape \xHH — 1 character
+        b'x' if i + 3 < bytes.len()
+            && bytes[i + 2].is_ascii_hexdigit()
+            && bytes[i + 3].is_ascii_hexdigit() =>
+        {
+            Some((1, i + 4))
+        }
+        // Unicode escape \uHHHH — 1 character
+        b'u' if i + 5 < bytes.len()
+            && bytes[i + 2].is_ascii_hexdigit()
+            && bytes[i + 3].is_ascii_hexdigit()
+            && bytes[i + 4].is_ascii_hexdigit()
+            && bytes[i + 5].is_ascii_hexdigit() =>
+        {
+            Some((1, i + 6))
+        }
+        // Backreferences \1..\9 — length depends on captured group
+        b'1'..=b'9' => None,
+        // Unicode property escapes \p{..}, \P{..}
+        b'p' | b'P' => None,
+        // Named backreference \k<name>
+        b'k' => None,
+        // Control escape \cX
+        b'c' => None,
+        // Escaped non-alphanumeric ASCII: literal metachar (1 character)
+        _ if !escaped.is_ascii_alphanumeric() => Some((1, i + 2)),
+        // Any other alphabetic escape — unknown, bail out
+        _ => None,
+    }
+}
+
+/// Skip from '[' to the position after the closing ']'.
+fn pattern_skip_char_class(bytes: &[u8], start: usize) -> usize {
+    let mut i = start + 1;
+    if i < bytes.len() && bytes[i] == b'^' {
+        i += 1;
+    }
+    // First char after [^ can be ']' as a literal member.
+    if i < bytes.len() && bytes[i] == b']' {
+        i += 1;
+    }
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            i += 2;
+        } else if bytes[i] == b']' {
+            return i + 1;
+        } else {
+            i += 1;
+        }
+    }
+    i
+}
+
+/// Parse a parenthesized group and return (min_chars, position_after_close_paren).
+/// Returns `None` for unrecognised group syntax (named groups, flag groups, …).
+fn pattern_group_min_chars(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
+    let mut i = start + 1; // skip '('
+
+    if i < bytes.len() && bytes[i] == b'?' {
+        i += 1;
+        if i >= bytes.len() {
+            return None;
+        }
+        match bytes[i] {
+            b':' => {
+                // Non-capturing group (?:...) — parse contents normally.
+                i += 1;
+            }
+            b'=' | b'!' => {
+                // Lookahead (?=...) or (?!...) — zero-width.
+                i += 1;
+                let end = pattern_skip_group_close(bytes, i);
+                return Some((0, end));
+            }
+            b'<' if i + 1 < bytes.len() && matches!(bytes[i + 1], b'=' | b'!') => {
+                // Lookbehind (?<=...) or (?<!...) — zero-width.
+                i += 2;
+                let end = pattern_skip_group_close(bytes, i);
+                return Some((0, end));
+            }
+            _ => {
+                // Named group (?<name>...), flag group (?i...), etc. — unsupported.
+                return None;
+            }
+        }
+    }
+    // Regular capturing group (...) or non-capturing (?:...) — parse branches.
+
+    let mut branch_total = 0usize;
+    let mut min_across = usize::MAX;
+
+    while i < bytes.len() && bytes[i] != b')' {
+        if bytes[i] == b'|' {
+            min_across = min_across.min(branch_total);
+            branch_total = 0;
+            i += 1;
+            continue;
+        }
+        let (atom_min, next) = pattern_atom_min_chars(bytes, i)?;
+        i = next;
+        let (rep_min, next) = pattern_quantifier_min(bytes, i);
+        i = next;
+        branch_total = branch_total.saturating_add(atom_min.saturating_mul(rep_min));
+    }
+
+    min_across = min_across.min(branch_total);
+    if min_across == usize::MAX {
+        min_across = 0;
+    }
+    if i < bytes.len() && bytes[i] == b')' {
+        Some((min_across, i + 1))
+    } else {
+        None // unterminated group
+    }
+}
+
+/// Skip forward to the position after the matching ')'.
+fn pattern_skip_group_close(bytes: &[u8], start: usize) -> usize {
+    let mut i = start;
+    let mut depth = 1u32;
+    while i < bytes.len() && depth > 0 {
+        match bytes[i] {
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                depth -= 1;
+                i += 1;
+            }
+            b'\\' if i + 1 < bytes.len() => {
+                i += 2;
+            }
+            b'[' => {
+                i = pattern_skip_char_class(bytes, i);
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+    i
+}
+
+/// Parse an optional quantifier and return (min_repetitions, next_position).
+/// Returns (1, same_pos) when no quantifier is present.
+fn pattern_quantifier_min(bytes: &[u8], i: usize) -> (usize, usize) {
+    if i >= bytes.len() {
+        return (1, i);
+    }
+    let lazy_skip = |pos: usize| -> usize {
+        if pos < bytes.len() && bytes[pos] == b'?' {
+            pos + 1
+        } else {
+            pos
+        }
+    };
+    match bytes[i] {
+        b'*' => (0, lazy_skip(i + 1)),
+        b'+' => (1, lazy_skip(i + 1)),
+        b'?' => (0, lazy_skip(i + 1)),
+        b'{' => {
+            let mut j = i + 1;
+            let mut n = 0usize;
+            let mut has_digit = false;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                n = n.saturating_mul(10).saturating_add((bytes[j] - b'0') as usize);
+                has_digit = true;
+                j += 1;
+            }
+            if !has_digit {
+                return (1, i); // not a quantifier, literal '{'
+            }
+            if j < bytes.len() && bytes[j] == b'}' {
+                (n, lazy_skip(j + 1)) // {n}
+            } else if j < bytes.len() && bytes[j] == b',' {
+                j += 1;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'}' {
+                    (n, lazy_skip(j + 1)) // {n,} or {n,m}
+                } else {
+                    (1, i) // malformed
+                }
+            } else {
+                (1, i) // not a quantifier
+            }
+        }
+        _ => (1, i),
+    }
+}
+
 fn prune_pattern_branches_for_min_length(pattern: &str, min_len: usize) -> Option<String> {
     if min_len == 0 {
         return Some(pattern.to_string());
@@ -3447,7 +3710,14 @@ impl<'a> SchemaCtx<'a> {
                 const MAX_BOUNDED_SEARCH_TAIL: usize = 100;
                 if let Some(ml) = max_len {
                     if ml <= MAX_BOUNDED_SEARCH_TAIL {
-                        return Ok(json_wrapped_pattern_bounded(&pattern, ml));
+                        // Subtract the pattern's minimum character count from
+                        // maxLength so the string tails cannot extend the
+                        // total content beyond the length constraint.
+                        // Falls back to full maxLength when the pattern
+                        // contains unsupported syntax (None → 0).
+                        let pattern_min = pattern_min_char_count(&pattern).unwrap_or(0);
+                        let tail_budget = ml.saturating_sub(pattern_min);
+                        return Ok(json_wrapped_pattern_bounded(&pattern, tail_budget));
                     }
                 }
                 // maxLength is too large or absent — drop pattern, use length only
@@ -6281,6 +6551,61 @@ mod tests {
         assert!(accepts_sequence(schema, &[br#"{"s_id": "ABC"}"#]));
         assert!(!accepts_sequence(schema, &[br#"{"s_id": "AB"}"#]));
         assert!(!accepts_sequence(schema, &[br#"{"s_id": "AbC"}"#]));
+    }
+
+    #[test]
+    fn test_unanchored_pattern_with_max_length_rejects_non_matching() {
+        // Regression: unanchored pattern [0-9]{10,10} with maxLength=10
+        // must reject non-digit strings like "egg". Previously the string
+        // tails were each allowed maxLength chars, defeating the constraint.
+        let schema = r#"{
+            "type": "string",
+            "pattern": "[0-9]{10,10}",
+            "minLength": 10,
+            "maxLength": 10
+        }"#;
+        // 10 digits should be accepted
+        assert!(accepts_sequence(schema, &[br#""1234567890""#]));
+        // Non-digit string should be rejected
+        assert!(!accepts_sequence(schema, &[br#""egg""#]));
+        assert!(!accepts_sequence(schema, &[br#""abcdefghij""#]));
+    }
+
+    #[test]
+    fn test_anchored_pattern_with_max_length_control() {
+        // Anchored pattern: already works correctly (no tails generated).
+        let schema = r#"{
+            "type": "string",
+            "pattern": "^[0-9]{10,10}$",
+            "minLength": 10,
+            "maxLength": 10
+        }"#;
+        assert!(accepts_sequence(schema, &[br#""1234567890""#]));
+        assert!(!accepts_sequence(schema, &[br#""egg""#]));
+        assert!(!accepts_sequence(schema, &[br#""abcdefghij""#]));
+    }
+
+    #[test]
+    fn test_pattern_min_char_count_basic() {
+        assert_eq!(pattern_min_char_count("[0-9]{10,10}"), Some(10));
+        assert_eq!(pattern_min_char_count("abc"), Some(3));
+        assert_eq!(pattern_min_char_count("a|bc"), Some(1));
+        assert_eq!(pattern_min_char_count(".{5,10}"), Some(5));
+        assert_eq!(pattern_min_char_count("^[0-9]+$"), Some(1));
+        assert_eq!(pattern_min_char_count("\\d{3}-\\d{4}"), Some(8));
+        assert_eq!(pattern_min_char_count("(?:a|bb)+"), Some(1));
+        assert_eq!(pattern_min_char_count(""), Some(0));
+        assert_eq!(pattern_min_char_count("a*"), Some(0));
+    }
+
+    #[test]
+    fn test_pattern_min_char_count_returns_none_for_unsupported() {
+        // Backreference — min length depends on captured group content
+        assert_eq!(pattern_min_char_count("(a)\\1"), None);
+        // Unicode property escape
+        assert_eq!(pattern_min_char_count("\\p{L}+"), None);
+        // Named backreference
+        assert_eq!(pattern_min_char_count("(?P<n>a)\\k<n>"), None);
     }
 
 }
