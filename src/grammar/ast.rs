@@ -79,12 +79,15 @@ enum RepeatTreeShape {
     Balanced,
     Left,
     Right,
+    /// Left exact decomposition (prefix-sharing for O(1) item commits)
+    /// with balanced range alternation (O(log N) close-bracket resolution).
+    LeftBalanced,
 }
 
 fn repeat_tree_shape() -> RepeatTreeShape {
     match std::env::var("GLRMASK_REPEAT_TREE_SHAPE").ok().as_deref() {
         Some(v) => repeat_tree_shape_from_value(v),
-        None => RepeatTreeShape::Balanced,
+        None => RepeatTreeShape::LeftBalanced,
     }
 }
 
@@ -92,6 +95,7 @@ fn repeat_tree_shape_from_value(value: &str) -> RepeatTreeShape {
     match value {
         "left" => RepeatTreeShape::Left,
         "balanced" => RepeatTreeShape::Balanced,
+        "leftbalanced" | "left_balanced" => RepeatTreeShape::LeftBalanced,
         _ => RepeatTreeShape::Right,
     }
 }
@@ -106,7 +110,7 @@ fn exact_repeat_split(count: usize, shape: RepeatTreeShape) -> (usize, usize) {
             let left = count / 2;
             (left, count - left)
         }
-        RepeatTreeShape::Left => (count - 1, 1),
+        RepeatTreeShape::Left | RepeatTreeShape::LeftBalanced => (count - 1, 1),
         RepeatTreeShape::Right => (1, count - 1),
     }
 }
@@ -115,7 +119,7 @@ fn range_repeat_split(min: usize, max: usize, shape: RepeatTreeShape) -> (usize,
     debug_assert!(min < max);
     let width = max - min + 1;
     match shape {
-        RepeatTreeShape::Balanced => {
+        RepeatTreeShape::Balanced | RepeatTreeShape::LeftBalanced => {
             let left_width = width / 2;
             let split = min + left_width - 1;
             (split, width - left_width)
