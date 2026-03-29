@@ -36,9 +36,31 @@ struct TableRowKey {
 
 impl GLRTable {
     pub fn build(grammar: &AnalyzedGrammar) -> Self {
+        let t0 = std::time::Instant::now();
         let (item_sets, transitions) = build_lr1_item_sets(grammar);
+        let lr1_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        let t1 = std::time::Instant::now();
         let mut table = build_ielr_table(grammar, &item_sets, &transitions);
+        let ielr_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
+        let pre_merge_states = table.num_states;
+        let t2 = std::time::Instant::now();
         table.merge_identical_rows();
+        let merge_ms = t2.elapsed().as_secs_f64() * 1000.0;
+
+        let debug_profile = std::env::var("GLRMASK_DEBUG_PROFILE")
+            .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
+            .unwrap_or(false);
+        if debug_profile {
+            let max_items = item_sets.iter().map(|s| s.len()).max().unwrap_or(0);
+            let total_items: usize = item_sets.iter().map(|s| s.len()).sum();
+            eprintln!(
+                "[glrmask/debug][glr_table] lr1_states={} lr1_ms={:.3} ielr_ms={:.3} pre_merge_states={} merge_ms={:.3} final_states={} max_items_per_state={} total_items={}",
+                item_sets.len(), lr1_ms, ielr_ms, pre_merge_states, merge_ms, table.num_states, max_items, total_items,
+            );
+        }
+
         table
     }
 
@@ -455,13 +477,11 @@ fn lr1_closure(
 
             let lookaheads = first_of_sequence(beta, item.lookahead, &grammar.first, &grammar.nullable);
 
-            for (i, r) in rules.iter().enumerate() {
-                if r.lhs == *nt {
-                    for &la in &lookaheads {
-                        let new_item = LR1Item::new(i as u32, 0, la);
-                        if result.insert(new_item) {
-                            queue.push_back(new_item);
-                        }
+            for &i in &grammar.rules_by_lhs[*nt as usize] {
+                for &la in &lookaheads {
+                    let new_item = LR1Item::new(i, 0, la);
+                    if result.insert(new_item) {
+                        queue.push_back(new_item);
                     }
                 }
             }
@@ -496,11 +516,47 @@ fn build_lr1_item_sets(
         lr1_closure(&s, grammar)
     };
 
-    build_item_sets(
-        initial,
-        |item| item.next_symbol(rules).cloned(),
-        |items, sym| lr1_goto_set(items, sym, grammar),
-    )
+    let mut item_sets = vec![initial.clone()];
+    let mut transitions = vec![BTreeMap::new()];
+    let mut set_to_id: FxHashMap<Vec<LR1Item>, u32> = FxHashMap::default();
+    set_to_id.insert(initial.iter().copied().collect(), 0);
+
+    let mut queue = VecDeque::from([0u32]);
+    while let Some(state_id) = queue.pop_front() {
+        // Build all goto kernels in a single pass over items.
+        let mut kernels: BTreeMap<Symbol, BTreeSet<LR1Item>> = BTreeMap::new();
+        for item in &item_sets[state_id as usize] {
+            if let Some(sym) = item.next_symbol(rules) {
+                kernels
+                    .entry(sym.clone())
+                    .or_default()
+                    .insert(LR1Item::new(item.rule, item.dot + 1, item.lookahead));
+            }
+        }
+
+        for (symbol, kernel) in &kernels {
+            let target_items = lr1_closure(kernel, grammar);
+            if target_items.is_empty() {
+                continue;
+            }
+
+            let key: Vec<LR1Item> = target_items.iter().copied().collect();
+            let target_id = if let Some(&existing_id) = set_to_id.get(&key) {
+                existing_id
+            } else {
+                let new_id = item_sets.len() as u32;
+                set_to_id.insert(key, new_id);
+                item_sets.push(target_items);
+                transitions.push(BTreeMap::new());
+                queue.push_back(new_id);
+                new_id
+            };
+
+            transitions[state_id as usize].insert(symbol.clone(), target_id);
+        }
+    }
+
+    (item_sets, transitions)
 }
 
 fn build_lr1_table(

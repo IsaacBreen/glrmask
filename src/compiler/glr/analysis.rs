@@ -14,6 +14,8 @@ pub struct AnalyzedGrammar {
     pub nullable: BTreeSet<NonterminalID>,
     pub first: Vec<BTreeSet<TerminalID>>,
     pub follow: Vec<BTreeSet<TerminalID>>,
+    /// Index: nonterminal → list of rule indices with that nonterminal as LHS.
+    pub rules_by_lhs: Vec<Vec<u32>>,
 }
 
 impl AnalyzedGrammar {
@@ -31,6 +33,13 @@ impl AnalyzedGrammar {
         let first = compute_first(&rules, num_nonterminals, &nullable);
         let follow = compute_follow(&rules, num_nonterminals, augmented_start, &first, &nullable);
 
+        let mut rules_by_lhs = vec![Vec::new(); num_nonterminals as usize];
+        for (i, r) in rules.iter().enumerate() {
+            if (r.lhs as usize) < rules_by_lhs.len() {
+                rules_by_lhs[r.lhs as usize].push(i as u32);
+            }
+        }
+
         Self {
             rules,
             start: augmented_start,
@@ -39,6 +48,7 @@ impl AnalyzedGrammar {
             nullable,
             first,
             follow,
+            rules_by_lhs,
         }
     }
 
