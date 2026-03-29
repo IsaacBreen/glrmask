@@ -123,6 +123,7 @@ fn root_combined_signature(
     let possible_matches_sig = possible_matches_hasher.finish();
 
     let mut combined_hasher = std::collections::hash_map::DefaultHasher::new();
+    representative_state.hash(&mut combined_hasher);
     future_sig.hash(&mut combined_hasher);
     possible_matches_sig.hash(&mut combined_hasher);
     combined_hasher.finish()

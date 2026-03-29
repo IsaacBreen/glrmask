@@ -2321,3 +2321,41 @@ fn test_reference_equivalence_matches_fast_analysis_for_o56012_repro() {
     // Should succeed without panic — both fast and reference agree.
     let _c = Constraint::from_lark(r#"start: "{" "}""#, &vocab).unwrap();
 }
+
+#[test]
+fn test_anchored_pattern_rejects_false_positive_after_partial_match() {
+    // Regression test for root-signature merging bug (6357d90ee).
+    // Pattern ^abc$ after consuming "a should allow only 'b' and 'bc', not 'c'.
+    let vocab = Vocab::new(
+        vec![
+            (0, b"\"".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"b".to_vec()),
+            (3, b"c".to_vec()),
+            (4, b"bc".to_vec()),
+            (5, b"abc".to_vec()),
+        ],
+        None,
+    );
+    let schema = r#"{"type":"string","pattern":"^abc$"}"#;
+    let c = Constraint::from_json_schema(schema, &vocab).unwrap();
+
+    let mut s = c.start();
+    // Commit opening quote and 'a'
+    s.commit_token(0); // "
+    s.commit_token(1); // a
+
+    let mask = s.mask();
+    assert!(
+        token_allowed(&mask, 2),
+        "token 'b' must be allowed after '\"a' in pattern ^abc$"
+    );
+    assert!(
+        token_allowed(&mask, 4),
+        "token 'bc' must be allowed after '\"a' in pattern ^abc$"
+    );
+    assert!(
+        !token_allowed(&mask, 3),
+        "token 'c' must be rejected after '\"a' in pattern ^abc$ (root-signature merge regression)"
+    );
+}
