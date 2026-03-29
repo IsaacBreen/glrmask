@@ -62,6 +62,141 @@ impl NamedGrammar {
             .map(|r| r.name.clone())
             .collect()
     }
+
+    /// Dump the grammar in a Lark-like human-readable format.
+    ///
+    /// `GrammarExpr` variants with no direct Lark equivalent (e.g. `Exclude`,
+    /// `TerminalExpr`) are preserved as inline comments so the dump still
+    /// reflects the full original grammar structure.
+    pub fn to_lark(&self) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+
+        // Start rule
+        writeln!(out, "// start: {}", self.start).unwrap();
+        if let Some(ref ign) = self.ignore {
+            writeln!(out, "%ignore {}", ign).unwrap();
+        }
+        writeln!(out).unwrap();
+
+        // Terminal rules first, then nonterminal rules
+        let terminals: Vec<_> = self.rules.iter().filter(|r| r.is_terminal).collect();
+        let nonterminals: Vec<_> = self.rules.iter().filter(|r| !r.is_terminal).collect();
+
+        if !nonterminals.is_empty() {
+            writeln!(out, "// === Nonterminal rules ===").unwrap();
+            for rule in &nonterminals {
+                let prefix = if rule.is_internal { "// [internal] " } else { "" };
+                write!(out, "{}{}: ", prefix, rule.name).unwrap();
+                grammar_expr_to_lark(&rule.expr, &mut out, false);
+                writeln!(out).unwrap();
+            }
+            writeln!(out).unwrap();
+        }
+
+        if !terminals.is_empty() {
+            writeln!(out, "// === Terminal rules ===").unwrap();
+            for rule in &terminals {
+                let prefix = if rule.is_internal { "// [internal] " } else { "" };
+                write!(out, "{}{}: ", prefix, rule.name).unwrap();
+                grammar_expr_to_lark(&rule.expr, &mut out, false);
+                writeln!(out).unwrap();
+            }
+        }
+
+        out
+    }
+}
+
+/// Format a `GrammarExpr` in Lark-like syntax. `parens` controls whether
+/// compound expressions get wrapped in parentheses for disambiguation.
+fn grammar_expr_to_lark(expr: &GrammarExpr, out: &mut String, parens: bool) {
+    use std::fmt::Write;
+    match expr {
+        GrammarExpr::Ref(name) => {
+            out.push_str(name);
+        }
+        GrammarExpr::Sequence(items) => {
+            if parens && items.len() > 1 {
+                out.push('(');
+            }
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(' ');
+                }
+                grammar_expr_to_lark(item, out, true);
+            }
+            if parens && items.len() > 1 {
+                out.push(')');
+            }
+        }
+        GrammarExpr::Choice(alts) => {
+            if parens && alts.len() > 1 {
+                out.push('(');
+            }
+            for (i, alt) in alts.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(" | ");
+                }
+                grammar_expr_to_lark(alt, out, true);
+            }
+            if parens && alts.len() > 1 {
+                out.push(')');
+            }
+        }
+        GrammarExpr::Literal(bytes) => {
+            // Try UTF-8 first; fall back to hex
+            if let Ok(s) = std::str::from_utf8(bytes) {
+                write!(out, "\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")).unwrap();
+            } else {
+                let hex_str: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                write!(out, "/*hex:{}*/", hex_str).unwrap();
+            }
+        }
+        GrammarExpr::Optional(inner) => {
+            grammar_expr_to_lark(inner, out, true);
+            out.push('?');
+        }
+        GrammarExpr::Repeat(inner) => {
+            grammar_expr_to_lark(inner, out, true);
+            out.push('*');
+        }
+        GrammarExpr::RepeatOne(inner) => {
+            grammar_expr_to_lark(inner, out, true);
+            out.push('+');
+        }
+        GrammarExpr::RepeatRange { expr: inner, min, max } => {
+            grammar_expr_to_lark(inner, out, true);
+            write!(out, "~{}..{}", min, max).unwrap();
+        }
+        GrammarExpr::TerminalExpr(terminal_expr) => {
+            // No direct Lark equivalent — emit as comment with Debug repr
+            write!(out, "/*TerminalExpr:{:?}*/", terminal_expr).unwrap();
+        }
+        GrammarExpr::Exclude { expr: inner, exclude } => {
+            write!(out, "/*Exclude(").unwrap();
+            grammar_expr_to_lark(inner, out, false);
+            write!(out, " \\ ").unwrap();
+            grammar_expr_to_lark(exclude, out, false);
+            write!(out, ")*/").unwrap();
+        }
+        GrammarExpr::CharClass { def, negate, utf8 } => {
+            if *negate {
+                write!(out, "[^{}]", def).unwrap();
+            } else {
+                write!(out, "[{}]", def).unwrap();
+            }
+            if *utf8 {
+                write!(out, "/*utf8*/").unwrap();
+            }
+        }
+        GrammarExpr::RawRegex(pattern) => {
+            write!(out, "/{}/", pattern).unwrap();
+        }
+        GrammarExpr::AnyByte => {
+            out.push_str("/./ /*AnyByte*/");
+        }
+    }
 }
 
 struct Lowerer {

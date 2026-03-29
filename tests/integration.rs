@@ -2359,3 +2359,138 @@ fn test_anchored_pattern_rejects_false_positive_after_partial_match() {
         "token 'c' must be rejected after '\"a' in pattern ^abc$ (root-signature merge regression)"
     );
 }
+
+/// Integration test: compile ONLY the 281 literal terminals from kb_815 (no Expr/DFA terminals).
+/// Measures id_map and terminal_dwa build times in isolation.
+#[test]
+fn bench_kb815_literals_only() {
+    use std::time::Instant;
+
+    // The 281 literal terminals extracted from kb_815's GrammarDef.
+    // These are the exact property-key byte strings and JSON structural tokens.
+    let literals: &[&[u8]] = &[
+        b"\"", b"{", b"}", b", ", b"[", b"]",
+        b"level\": ", b"role\": ", b"type\": ", b"user\": ", b"name\": ", b"value\": ",
+        b"gmsaCredentialSpec\": ", b"gmsaCredentialSpecName\": ", b"runAsUserName\": ",
+        b"fsGroup\": ", b"fsGroupChangePolicy\": ", b"runAsGroup\": ", b"runAsNonRoot\": ",
+        b"runAsUser\": ", b"seLinuxOptions\": ", b"supplementalGroups\": ", b"sysctls\": ",
+        b"windowsOptions\": ", b"apiVersion\": ", b"fieldsType\": ", b"fieldsV1\": ",
+        b"manager\": ", b"operation\": ", b"time\": ", b"blockOwnerDeletion\": ",
+        b"controller\": ", b"kind\": ", b"uid\": ", b"annotations\": ", b"clusterName\": ",
+        b"creationTimestamp\": ", b"deletionGracePeriodSeconds\": ", b"deletionTimestamp\": ",
+        b"finalizers\": ", b"generateName\": ", b"generation\": ", b"labels\": ",
+        b"managedFields\": ", b"namespace\": ", b"ownerReferences\": ",
+        b"resourceVersion\": ", b"selfLink\": ", b"values\": ", b"operator\": ", b"key\": ",
+        b"matchExpressions\": ", b"matchFields\": ", b"preference\": ", b"weight\": ",
+        b"nodeSelectorTerms\": ",
+        b"preferredDuringSchedulingIgnoredDuringExecution\": ",
+        b"requiredDuringSchedulingIgnoredDuringExecution\": ",
+        b"matchLabels\": ", b"labelSelector\": ", b"namespaces\": ", b"topologyKey\": ",
+        b"podAffinityTerm\": ", b"nodeAffinity\": ", b"podAffinity\": ",
+        b"podAntiAffinity\": ", b"optional\": ", b"fieldPath\": ", b"containerName\": ",
+        b"divisor\": ", b"resource\": ", b"configMapKeyRef\": ", b"fieldRef\": ",
+        b"resourceFieldRef\": ", b"secretKeyRef\": ", b"valueFrom\": ", b"configMapRef\": ",
+        b"prefix\": ", b"secretRef\": ", b"command\": ", b"host\": ", b"httpHeaders\": ",
+        b"path\": ", b"scheme\": ", b"port\": ", b"exec\": ", b"httpGet\": ",
+        b"tcpSocket\": ", b"postStart\": ", b"preStop\": ", b"failureThreshold\": ",
+        b"initialDelaySeconds\": ", b"periodSeconds\": ", b"successThreshold\": ",
+        b"timeoutSeconds\": ", b"hostIP\": ", b"containerPort\": ", b"hostPort\": ",
+        b"protocol\": ", b"limits\": ", b"requests\": ", b"add\": ", b"drop\": ",
+        b"allowPrivilegeEscalation\": ", b"capabilities\": ", b"privileged\": ",
+        b"procMount\": ", b"readOnlyRootFilesystem\": ", b"devicePath\": ",
+        b"mountPropagation\": ", b"readOnly\": ", b"subPath\": ", b"subPathExpr\": ",
+        b"mountPath\": ", b"args\": ", b"env\": ", b"envFrom\": ", b"image\": ",
+        b"imagePullPolicy\": ", b"lifecycle\": ", b"livenessProbe\": ", b"ports\": ",
+        b"readinessProbe\": ", b"resources\": ", b"securityContext\": ",
+        b"startupProbe\": ", b"stdin\": ", b"stdinOnce\": ",
+        b"terminationMessagePath\": ", b"terminationMessagePolicy\": ", b"tty\": ",
+        b"volumeDevices\": ", b"volumeMounts\": ", b"workingDir\": ", b"nameservers\": ",
+        b"options\": ", b"searches\": ", b"targetContainerName\": ", b"hostnames\": ",
+        b"ip\": ", b"conditionType\": ", b"effect\": ", b"tolerationSeconds\": ",
+        b"maxSkew\": ", b"whenUnsatisfiable\": ", b"fsType\": ", b"partition\": ",
+        b"volumeID\": ", b"cachingMode\": ", b"diskName\": ", b"diskURI\": ",
+        b"secretName\": ", b"shareName\": ", b"monitors\": ", b"secretFile\": ",
+        b"mode\": ", b"defaultMode\": ", b"items\": ", b"driver\": ",
+        b"nodePublishSecretRef\": ", b"volumeAttributes\": ", b"medium\": ",
+        b"sizeLimit\": ", b"lun\": ", b"targetWWNs\": ", b"wwids\": ",
+        b"datasetName\": ", b"datasetUUID\": ", b"pdName\": ", b"directory\": ",
+        b"revision\": ", b"repository\": ", b"endpoints\": ",
+        b"chapAuthDiscovery\": ", b"chapAuthSession\": ", b"initiatorName\": ",
+        b"iqn\": ", b"iscsiInterface\": ", b"portals\": ", b"targetPortal\": ",
+        b"server\": ", b"claimName\": ", b"pdID\": ", b"audience\": ",
+        b"expirationSeconds\": ", b"configMap\": ", b"downwardAPI\": ", b"secret\": ",
+        b"serviceAccountToken\": ", b"sources\": ", b"group\": ", b"registry\": ",
+        b"tenant\": ", b"volume\": ", b"keyring\": ", b"pool\": ", b"gateway\": ",
+        b"protectionDomain\": ", b"sslEnabled\": ", b"storageMode\": ",
+        b"storagePool\": ", b"volumeName\": ", b"system\": ", b"volumeNamespace\": ",
+        b"storagePolicyID\": ", b"storagePolicyName\": ", b"volumePath\": ",
+        b"awsElasticBlockStore\": ", b"azureDisk\": ", b"azureFile\": ", b"cephfs\": ",
+        b"cinder\": ", b"csi\": ", b"emptyDir\": ", b"fc\": ", b"flexVolume\": ",
+        b"flocker\": ", b"gcePersistentDisk\": ", b"gitRepo\": ", b"glusterfs\": ",
+        b"hostPath\": ", b"iscsi\": ", b"nfs\": ", b"persistentVolumeClaim\": ",
+        b"photonPersistentDisk\": ", b"portworxVolume\": ", b"projected\": ",
+        b"quobyte\": ", b"rbd\": ", b"scaleIO\": ", b"storageos\": ",
+        b"vsphereVolume\": ", b"activeDeadlineSeconds\": ", b"affinity\": ",
+        b"automountServiceAccountToken\": ", b"containers\": ", b"dnsConfig\": ",
+        b"dnsPolicy\": ", b"enableServiceLinks\": ", b"ephemeralContainers\": ",
+        b"hostAliases\": ", b"hostIPC\": ", b"hostNetwork\": ", b"hostPID\": ",
+        b"hostname\": ", b"imagePullSecrets\": ", b"initContainers\": ", b"nodeName\": ",
+        b"nodeSelector\": ", b"overhead\": ", b"preemptionPolicy\": ", b"priority\": ",
+        b"priorityClassName\": ", b"readinessGates\": ", b"restartPolicy\": ",
+        b"runtimeClassName\": ", b"schedulerName\": ", b"serviceAccount\": ",
+        b"serviceAccountName\": ", b"shareProcessNamespace\": ", b"subdomain\": ",
+        b"terminationGracePeriodSeconds\": ", b"tolerations\": ",
+        b"topologySpreadConstraints\": ", b"volumes\": ", b"metadata\": ", b"spec\": ",
+        b"minReadySeconds\": ", b"replicas\": ", b"selector\": ", b"template\": ",
+        b"lastTransitionTime\": ", b"message\": ", b"reason\": ", b"status\": ",
+        b"availableReplicas\": ", b"conditions\": ", b"fullyLabeledReplicas\": ",
+        b"observedGeneration\": ", b"readyReplicas\": ",
+        b"ReplicationController\"",
+    ];
+
+    assert_eq!(literals.len(), 281, "expected 281 literal terminals from kb_815");
+
+    // Build a byte-level vocab (256 tokens, one per byte value).
+    let byte_vocab_entries: Vec<(u32, Vec<u8>)> =
+        (0..=255u32).map(|b| (b, vec![b as u8])).collect();
+    let vocab = Vocab::new(byte_vocab_entries, None);
+
+    // Build a minimal GrammarDef JSON: start -> T_0 | T_1 | ... | T_280
+    let mut terminals_json = Vec::new();
+    for (i, lit) in literals.iter().enumerate() {
+        let bytes_array: Vec<u8> = lit.to_vec();
+        terminals_json.push(serde_json::json!({
+            "Literal": { "id": i, "bytes": bytes_array }
+        }));
+    }
+    let rules_json: Vec<serde_json::Value> = (0..literals.len())
+        .map(|i| serde_json::json!({"lhs": 0, "rhs": [{"Terminal": i}]}))
+        .collect();
+    let terminal_names: std::collections::BTreeMap<String, String> = literals
+        .iter()
+        .enumerate()
+        .map(|(i, lit)| (i.to_string(), String::from_utf8_lossy(lit).into_owned()))
+        .collect();
+    let grammar_def = serde_json::json!({
+        "rules": rules_json,
+        "start": 0,
+        "terminals": terminals_json,
+        "nonterminal_names": {"0": "start"},
+        "terminal_names": terminal_names,
+        "ignore_terminal": null,
+    });
+    let grammar_def_json = serde_json::to_string(&grammar_def).unwrap();
+
+    // Enable compile profiling
+    unsafe { std::env::set_var("GLRMASK_PROFILE_COMPILE_SUMMARY", "1"); }
+
+    // Compile and time
+    let t0 = Instant::now();
+    let constraint = glrmask::compile_grammar_def_json(&grammar_def_json, &vocab).unwrap();
+    let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    eprintln!("bench_kb815_literals_only: {:.1}ms total ({} terminals, byte vocab)", total_ms, literals.len());
+
+    // Basic sanity check
+    let _state = constraint.start();
+}
