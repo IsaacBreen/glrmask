@@ -1382,6 +1382,10 @@ fn no_additional_properties() -> bool {
     env_flag("GLRMASK_NO_ADDITIONAL_PROPERTIES")
 }
 
+fn additional_properties_default_false() -> bool {
+    env_flag("GLRMASK_AP_DEFAULT_FALSE")
+}
+
 fn ap_key_any_string() -> bool {
     env_flag("GLRMASK_AP_KEY_ANY_STRING")
 }
@@ -4272,7 +4276,14 @@ impl<'a> SchemaCtx<'a> {
         let schema = match additional_properties {
             Some(Value::Bool(false)) => None,
             Some(Value::Object(map)) => Some(Value::Object(map.clone())),
-            _ => Some(serde_json::json!({})),
+            // Absent or `true`: use default based on env var
+            _ => {
+                if additional_properties.is_none() && additional_properties_default_false() {
+                    None
+                } else {
+                    Some(serde_json::json!({}))
+                }
+            }
         };
 
         if schema
