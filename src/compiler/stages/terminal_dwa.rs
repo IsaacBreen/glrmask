@@ -2195,36 +2195,38 @@ fn remap_weight_to_global(
         return Weight::empty();
     }
 
-    let mut compact_entries = Vec::new();
+    // Build WeightMap directly with interned/shared token sets.
+    // This is O(n) instead of the O(n²) from_compact_ranges path,
+    // and deduplicates identical token sets via the global interner.
+    use crate::ds::weight::{finalize_weight_map, shared_rangeset};
+    use range_set_blaze::RangeMapBlaze;
+
+    let mut map = RangeMapBlaze::<u32, std::sync::Arc<RangeSetBlaze<u32>>>::new();
     let mut iter = tokens_by_global_tsid.into_iter();
-    let Some((mut run_start, mut run_tokens)) = iter.next() else {
-        return Weight::empty();
-    };
+    let (mut run_start, first_tokens) = iter.next().unwrap();
     let mut run_end = run_start;
+    let mut run_shared = shared_rangeset(first_tokens);
 
     for (global_tsid, tokens) in iter {
-        if global_tsid == run_end + 1 && tokens == run_tokens {
+        let next_shared = shared_rangeset(tokens);
+        if global_tsid == run_end + 1
+            && (std::sync::Arc::ptr_eq(&run_shared, &next_shared)
+                || run_shared.as_ref() == next_shared.as_ref())
+        {
             run_end = global_tsid;
         } else {
-            compact_entries.push((
+            map.extend_simple(std::iter::once((
                 run_start..=run_end,
-                run_tokens.ranges().collect::<Vec<_>>(),
-            ));
+                std::sync::Arc::clone(&run_shared),
+            )));
             run_start = global_tsid;
             run_end = global_tsid;
-            run_tokens = tokens;
+            run_shared = next_shared;
         }
     }
-    compact_entries.push((
-        run_start..=run_end,
-        run_tokens.ranges().collect::<Vec<_>>(),
-    ));
+    map.extend_simple(std::iter::once((run_start..=run_end, run_shared)));
 
-    Weight::from_compact_ranges(
-        compact_entries
-            .into_iter()
-            .map(|(tsid_range, token_ranges)| (tsid_range, token_ranges.into_iter())),
-    )
+    finalize_weight_map(map)
 }
 
 fn remap_partition_nwa_to_global(
