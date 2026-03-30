@@ -1288,6 +1288,14 @@ fn split_key_colon_suffix_enabled() -> bool {
     env_flag("GLRMASK_SPLIT_KEY_COLON_SUFFIX")
 }
 
+fn no_additional_properties() -> bool {
+    env_flag("GLRMASK_NO_ADDITIONAL_PROPERTIES")
+}
+
+fn ap_key_any_string() -> bool {
+    env_flag("GLRMASK_AP_KEY_ANY_STRING")
+}
+
 fn json_wrapped_pattern(pattern: &str) -> GrammarExpr {
     let inner = json_search_pattern(pattern);
     let open_split = !no_open_quote_split();
@@ -4265,6 +4273,10 @@ impl<'a> SchemaCtx<'a> {
         &mut self,
         additional_properties: Option<&Value>,
     ) -> Option<Value> {
+        if no_additional_properties() {
+            return None;
+        }
+
         let schema = match additional_properties {
             Some(Value::Bool(false)) => None,
             Some(Value::Object(map)) => Some(Value::Object(map.clone())),
@@ -5446,7 +5458,15 @@ impl<'a> SchemaCtx<'a> {
 
         let mut additional_pair_exprs = Vec::<GrammarExpr>::new();
         if let Some(schema) = additional_properties_schema {
-            let additional_key_expr = if key_dfa_needed {
+            let additional_key_expr = if ap_key_any_string() {
+                // Skip key exclusion — AP keys accept any JSON string.
+                // Each object still gets its own uniquely-named terminal to preserve grammar structure.
+                let full_key_dfa = Self::scoped_key_colon_dfa(property_names)?;
+                Some(self.build_lexer_dfa_expr(
+                    &full_key_dfa,
+                    &format!("{}_AP_KEY", base_name.to_uppercase()),
+                ))
+            } else if key_dfa_needed {
                 let mut additional_key_dfa = base_key_colon_dfa
                     .as_ref()
                     .expect("additional-properties DFA should exist when needed")
