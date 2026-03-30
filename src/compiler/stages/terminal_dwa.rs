@@ -19,6 +19,7 @@ use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::possible_matches::{
     PossibleMatchesByState,
     PossibleMatchesComputer,
+    PossibleMatchesProfile,
     collect_possible_matches_by_internal_tsid,
 };
 use crate::compiler::stages::equivalence_analysis::disallowed_follows::{
@@ -1785,6 +1786,518 @@ fn merge_partition_nwas(
     merged
 }
 
+#[derive(Debug, Default)]
+struct PartitionTerminalNwaBuild {
+    nwa: Option<NWA>,
+    possible_matches_by_state: PossibleMatchesByState,
+    build_profile: TerminalDwaBuildProfile,
+    possible_matches_profile: PossibleMatchesProfile,
+    internal_vocab_len: usize,
+    roots_count: usize,
+}
+
+fn build_partition_terminal_nwa(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    id_map: &InternalIdMap,
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
+    ignore_terminal: Option<TerminalID>,
+) -> PartitionTerminalNwaBuild {
+    let internal_vocab = internal_vocab_entries(vocab, id_map);
+    if internal_vocab.is_empty() {
+        return PartitionTerminalNwaBuild::default();
+    }
+
+    let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
+    let leaf_state = nwa.add_state();
+    nwa.set_final_weight(leaf_state, Weight::all());
+    let start_state = nwa.add_state();
+    nwa.start_states.push(start_state);
+
+    let full_tree = VocabPrefixTree::build_owned(
+        internal_vocab
+            .iter()
+            .map(|(token_id, bytes)| (*token_id as usize, bytes.clone()))
+            .collect(),
+    );
+
+    let mut possible_matches = PossibleMatchesComputer::new(tokenizer);
+    let possible_matches_by_state = collect_possible_matches_by_internal_tsid(
+        tokenizer,
+        &full_tree.root,
+        &mut possible_matches,
+        &id_map.tokenizer_states,
+    );
+
+    let roots_by_tokenizer_state = seed_root_nodes(
+        &mut nwa,
+        start_state,
+        tokenizer,
+        id_map,
+        terminal_coloring,
+        ignore_terminal,
+        &possible_matches_by_state,
+    );
+
+    let num_tsids = id_map.num_tsids();
+    let num_tokenizer_states = tokenizer.num_states() as usize;
+    let mut builder = TerminalNwaBuilder {
+        tokenizer,
+        terminal_coloring: terminal_coloring.clone(),
+        possible_future_terminals: FxHashMap::default(),
+        future_terminal_color_groups: FxHashMap::default(),
+        possible_matches: &mut possible_matches,
+        nwa: &mut nwa,
+        num_tsids,
+        leaf_state,
+        ignore_terminal,
+        use_terminal_coloring,
+        self_loop_bytes: FxHashMap::default(),
+        leaf_token_ids_buffer: Vec::new(),
+        future_leaf_buffer: FxHashMap::default(),
+        reachable_weight_cache: HashMap::new(),
+        pruned_weight_cache: HashMap::new(),
+        leaf_weight_cache: HashMap::new(),
+        transition_buffer: FxHashMap::default(),
+        epsilon_buffer: FxHashMap::default(),
+        profile: TerminalDwaBuildProfile::default(),
+        flat_transitions: vec![None; num_tokenizer_states],
+    };
+    builder.build_from_trie(&full_tree.root, &roots_by_tokenizer_state);
+    builder.flush_transition_buffer();
+    let build_profile = builder.profile;
+    drop(builder);
+    let possible_matches_profile = possible_matches.profile();
+
+    PartitionTerminalNwaBuild {
+        nwa: Some(nwa),
+        possible_matches_by_state,
+        build_profile,
+        possible_matches_profile,
+        internal_vocab_len: internal_vocab.len(),
+        roots_count: roots_by_tokenizer_state.entries.len(),
+    }
+}
+
+fn build_local_to_global_tsid_map(
+    local_id_map: &InternalIdMap,
+    global_id_map: &InternalIdMap,
+) -> Vec<Vec<u32>> {
+    let mut local_to_global = vec![BTreeSet::new(); local_id_map.num_tsids() as usize];
+
+    for (state_id, &local_tsid) in local_id_map
+        .tokenizer_states
+        .original_to_internal
+        .iter()
+        .enumerate()
+    {
+        let global_tsid = global_id_map.tokenizer_states.original_to_internal[state_id];
+        local_to_global[local_tsid as usize].insert(global_tsid);
+    }
+
+    local_to_global
+        .into_iter()
+        .map(|bucket| bucket.into_iter().collect())
+        .collect()
+}
+
+fn offset_token_set(tokens: &RangeSetBlaze<u32>, offset: u32) -> RangeSetBlaze<u32> {
+    if offset == 0 {
+        return tokens.clone();
+    }
+
+    RangeSetBlaze::from_iter(
+        tokens
+            .ranges()
+            .map(|range| (*range.start() + offset)..=(*range.end() + offset)),
+    )
+}
+
+fn remap_weight_to_global(
+    weight: &Weight,
+    local_to_global_tsids: &[Vec<u32>],
+    token_offset: u32,
+    token_cache: &mut HashMap<usize, RangeSetBlaze<u32>>,
+) -> Weight {
+    if weight.is_empty() || weight.is_full() {
+        return weight.clone();
+    }
+
+    let Some(entries) = weight.compact_entries() else {
+        return weight.clone();
+    };
+
+    let mut tokens_by_global_tsid = BTreeMap::<u32, RangeSetBlaze<u32>>::new();
+    for (start, end, tokens) in entries {
+        let token_key = std::sync::Arc::as_ptr(&tokens) as usize;
+        let mapped_tokens = token_cache
+            .entry(token_key)
+            .or_insert_with(|| offset_token_set(tokens.as_ref(), token_offset))
+            .clone();
+
+        for local_tsid in start..=end {
+            let Some(global_tsids) = local_to_global_tsids.get(local_tsid as usize) else {
+                continue;
+            };
+            for &global_tsid in global_tsids {
+                tokens_by_global_tsid
+                    .entry(global_tsid)
+                    .and_modify(|existing| *existing |= mapped_tokens.clone())
+                    .or_insert_with(|| mapped_tokens.clone());
+            }
+        }
+    }
+
+    if tokens_by_global_tsid.is_empty() {
+        return Weight::empty();
+    }
+
+    let mut compact_entries = Vec::new();
+    let mut iter = tokens_by_global_tsid.into_iter();
+    let Some((mut run_start, mut run_tokens)) = iter.next() else {
+        return Weight::empty();
+    };
+    let mut run_end = run_start;
+
+    for (global_tsid, tokens) in iter {
+        if global_tsid == run_end + 1 && tokens == run_tokens {
+            run_end = global_tsid;
+        } else {
+            compact_entries.push((
+                run_start..=run_end,
+                run_tokens.ranges().collect::<Vec<_>>(),
+            ));
+            run_start = global_tsid;
+            run_end = global_tsid;
+            run_tokens = tokens;
+        }
+    }
+    compact_entries.push((
+        run_start..=run_end,
+        run_tokens.ranges().collect::<Vec<_>>(),
+    ));
+
+    Weight::from_compact_ranges(
+        compact_entries
+            .into_iter()
+            .map(|(tsid_range, token_ranges)| (tsid_range, token_ranges.into_iter())),
+    )
+}
+
+fn remap_partition_nwa_to_global(
+    nwa: &mut NWA,
+    local_to_global_tsids: &[Vec<u32>],
+    token_offset: u32,
+) {
+    let mut token_cache = HashMap::<usize, RangeSetBlaze<u32>>::new();
+
+    for state in &mut nwa.states {
+        if let Some(final_weight) = state.final_weight.as_mut() {
+            *final_weight = remap_weight_to_global(
+                final_weight,
+                local_to_global_tsids,
+                token_offset,
+                &mut token_cache,
+            );
+            if final_weight.is_empty() {
+                state.final_weight = None;
+            }
+        }
+
+        for targets in state.transitions.values_mut() {
+            for (_, weight) in targets.iter_mut() {
+                *weight = remap_weight_to_global(
+                    weight,
+                    local_to_global_tsids,
+                    token_offset,
+                    &mut token_cache,
+                );
+            }
+            targets.retain(|(_, weight)| !weight.is_empty());
+        }
+        state.transitions.retain(|_, targets| !targets.is_empty());
+
+        for (_, weight) in state.epsilons.iter_mut() {
+            *weight = remap_weight_to_global(
+                weight,
+                local_to_global_tsids,
+                token_offset,
+                &mut token_cache,
+            );
+        }
+        state.epsilons.retain(|(_, weight)| !weight.is_empty());
+    }
+}
+
+fn merge_partition_possible_matches_into_global(
+    merged: &mut PossibleMatchesByState,
+    partition_matches: &PossibleMatchesByState,
+    local_to_global_tsids: &[Vec<u32>],
+    token_offset: u32,
+) {
+    for (&local_tsid, matches_by_terminal) in partition_matches {
+        let Some(global_tsids) = local_to_global_tsids.get(local_tsid as usize) else {
+            continue;
+        };
+
+        for &global_tsid in global_tsids {
+            let global_matches = merged.entry(global_tsid).or_default();
+            for (&terminal_id, token_ids) in matches_by_terminal {
+                let mapped_tokens = offset_token_set(token_ids, token_offset);
+                global_matches
+                    .entry(terminal_id)
+                    .and_modify(|existing| *existing |= mapped_tokens.clone())
+                    .or_insert(mapped_tokens);
+            }
+        }
+    }
+}
+
+pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_and_coloring(
+    grammar: &AnalyzedGrammar,
+    tokenizer: &Tokenizer,
+    full_vocab: &Vocab,
+    partition_vocabs: &[Vocab],
+    partition_id_maps: &[InternalIdMap],
+    global_id_map: &InternalIdMap,
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
+    ignore_terminal: Option<TerminalID>,
+) -> (DWA, PossibleMatchesByState) {
+    debug_assert_eq!(partition_vocabs.len(), partition_id_maps.len());
+
+    let debug_profile = debug_profile_enabled();
+    let profile_enabled = terminal_dwa_profile_enabled();
+    let total_started_at = std::time::Instant::now();
+    let raw_build_started_at = std::time::Instant::now();
+
+    let builds: Vec<PartitionTerminalNwaBuild> = match partition_vocabs.len() {
+        0 => Vec::new(),
+        1 => vec![build_partition_terminal_nwa(
+            tokenizer,
+            &partition_vocabs[0],
+            &partition_id_maps[0],
+            terminal_coloring,
+            use_terminal_coloring,
+            ignore_terminal,
+        )],
+        2 => {
+            let (left, right) = rayon::join(
+                || build_partition_terminal_nwa(
+                    tokenizer,
+                    &partition_vocabs[0],
+                    &partition_id_maps[0],
+                    terminal_coloring,
+                    use_terminal_coloring,
+                    ignore_terminal,
+                ),
+                || build_partition_terminal_nwa(
+                    tokenizer,
+                    &partition_vocabs[1],
+                    &partition_id_maps[1],
+                    terminal_coloring,
+                    use_terminal_coloring,
+                    ignore_terminal,
+                ),
+            );
+            vec![left, right]
+        }
+        _ => {
+            let (left, (middle, right)) = rayon::join(
+                || build_partition_terminal_nwa(
+                    tokenizer,
+                    &partition_vocabs[0],
+                    &partition_id_maps[0],
+                    terminal_coloring,
+                    use_terminal_coloring,
+                    ignore_terminal,
+                ),
+                || rayon::join(
+                    || build_partition_terminal_nwa(
+                        tokenizer,
+                        &partition_vocabs[1],
+                        &partition_id_maps[1],
+                        terminal_coloring,
+                        use_terminal_coloring,
+                        ignore_terminal,
+                    ),
+                    || build_partition_terminal_nwa(
+                        tokenizer,
+                        &partition_vocabs[2],
+                        &partition_id_maps[2],
+                        terminal_coloring,
+                        use_terminal_coloring,
+                        ignore_terminal,
+                    ),
+                ),
+            );
+            let mut results = vec![left, middle, right];
+            for index in 3..partition_vocabs.len() {
+                results.push(build_partition_terminal_nwa(
+                    tokenizer,
+                    &partition_vocabs[index],
+                    &partition_id_maps[index],
+                    terminal_coloring,
+                    use_terminal_coloring,
+                    ignore_terminal,
+                ));
+            }
+            results
+        }
+    };
+
+    let mut aggregate_profile = TerminalDwaBuildProfile::default();
+    let mut merged_nwa = NWA::new(global_id_map.num_tsids(), global_id_map.max_internal_token_id());
+    let mut merged_body = merged_nwa.body();
+    let mut merged_possible_matches = PossibleMatchesByState::new();
+    let mut aggregate_possible_matches_profile = PossibleMatchesProfile::default();
+    let mut aggregate_internal_vocab_len = 0usize;
+    let mut aggregate_roots = 0usize;
+    let mut token_offset = 0u32;
+
+    for (build, partition_id_map) in builds.into_iter().zip(partition_id_maps.iter()) {
+        aggregate_profile.future_terminal_additions += build.build_profile.future_terminal_additions;
+        aggregate_profile.match_transition_additions += build.build_profile.match_transition_additions;
+        aggregate_possible_matches_profile.cache_hits += build.possible_matches_profile.cache_hits;
+        aggregate_possible_matches_profile.cache_misses += build.possible_matches_profile.cache_misses;
+        aggregate_possible_matches_profile.reachable_cache_hits += build.possible_matches_profile.reachable_cache_hits;
+        aggregate_possible_matches_profile.reachable_cache_misses += build.possible_matches_profile.reachable_cache_misses;
+        aggregate_possible_matches_profile.child_segments_visited += build.possible_matches_profile.child_segments_visited;
+        aggregate_possible_matches_profile.byte_steps += build.possible_matches_profile.byte_steps;
+        aggregate_possible_matches_profile.blocked_segments += build.possible_matches_profile.blocked_segments;
+        aggregate_possible_matches_profile.recursive_descents += build.possible_matches_profile.recursive_descents;
+        aggregate_possible_matches_profile.terminal_insertions += build.possible_matches_profile.terminal_insertions;
+        aggregate_possible_matches_profile.cache_entries += build.possible_matches_profile.cache_entries;
+        aggregate_possible_matches_profile.reachable_cache_entries += build.possible_matches_profile.reachable_cache_entries;
+        aggregate_internal_vocab_len += build.internal_vocab_len;
+        aggregate_roots += build.roots_count;
+
+        if let Some(mut partition_nwa) = build.nwa {
+            let local_to_global_tsids = build_local_to_global_tsid_map(partition_id_map, global_id_map);
+            remap_partition_nwa_to_global(&mut partition_nwa, &local_to_global_tsids, token_offset);
+            merge_partition_possible_matches_into_global(
+                &mut merged_possible_matches,
+                &build.possible_matches_by_state,
+                &local_to_global_tsids,
+                token_offset,
+            );
+            merged_body = merged_nwa.union_in_place(&partition_nwa, &merged_body);
+        }
+
+        token_offset = partition_id_map
+            .num_internal_tokens()
+            .checked_add(token_offset)
+            .expect("global token offset overflow while merging partition terminal DWAs");
+    }
+    merged_nwa.start_states = merged_body.start_states;
+
+    let raw_build_ms = raw_build_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    if merged_nwa.states.is_empty() {
+        return (DWA::new(global_id_map.num_tsids(), global_id_map.max_internal_token_id()), merged_possible_matches);
+    }
+
+    if debug_profile {
+        eprintln!(
+            "[glrmask/debug][terminal_dwa] partitioned_merge internal_tokenizer_states={} vocab_entries={} roots={} possible_matches_states={} raw_build_ms={:.3}",
+            global_id_map.num_tsids(),
+            aggregate_internal_vocab_len,
+            aggregate_roots,
+            merged_possible_matches.len(),
+            raw_build_ms,
+        );
+    }
+
+    let always_allowed_started_at = std::time::Instant::now();
+    let always_allowed_by_label = compute_always_allowed_follows(grammar);
+    let always_allowed_ms = always_allowed_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let collapse_started_at = std::time::Instant::now();
+    let _ = collapse_always_allowed(&mut merged_nwa, &always_allowed_by_label, grammar.num_terminals as usize);
+    let collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let disallowed_started_at = std::time::Instant::now();
+    apply_disallowed_follow_constraints(&mut merged_nwa, grammar);
+    let disallowed_ms = disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let coreachable_prune_started_at = std::time::Instant::now();
+    prune_non_coreachable_states(&mut merged_nwa);
+    let coreachable_prune_ms = coreachable_prune_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let canonicalize_started_at = std::time::Instant::now();
+    canonicalize_acyclic_nwa(&mut merged_nwa);
+    let canonicalize_ms = canonicalize_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let nwa_states = merged_nwa.num_states();
+    let nwa_transitions = merged_nwa.num_transitions();
+
+    let determinize_started_at = std::time::Instant::now();
+    let determinized = determinize(&merged_nwa)
+        .expect("terminal NWA determinization failed despite acyclic token trie construction");
+    let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
+    let determinized_states = determinized.num_states();
+    let determinized_transitions = determinized.num_transitions();
+
+    let minimize_started_at = std::time::Instant::now();
+    let dwa = minimize(&determinized);
+    let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][terminal_dwa] colors={} future_terminal_additions={} match_transition_additions={}",
+            terminal_coloring.num_colors,
+            aggregate_profile.future_terminal_additions,
+            aggregate_profile.match_transition_additions,
+        );
+    }
+
+    if debug_profile {
+        eprintln!(
+            "[glrmask/debug][terminal_dwa] tokenizer_states={} internal_tokenizer_states={} vocab_entries={} roots={} possible_matches_states={} possible_matches_cache_entries={} reachable_cache_entries={} nwa_states={} nwa_transitions={} determinized_states={} determinized_transitions={} minimized_states={}",
+            tokenizer.num_states(),
+            global_id_map.num_tsids(),
+            aggregate_internal_vocab_len,
+            aggregate_roots,
+            merged_possible_matches.len(),
+            aggregate_possible_matches_profile.cache_entries,
+            aggregate_possible_matches_profile.reachable_cache_entries,
+            nwa_states,
+            nwa_transitions,
+            determinized_states,
+            determinized_transitions,
+            dwa.num_states(),
+        );
+        eprintln!(
+            "[glrmask/debug][terminal_dwa] raw_build_ms={:.3} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} coreachable_prune_ms={:.3} canonicalize_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
+            raw_build_ms,
+            always_allowed_ms,
+            collapse_ms,
+            disallowed_ms,
+            coreachable_prune_ms,
+            canonicalize_ms,
+            determinize_ms,
+            minimize_ms,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+        eprintln!(
+            "[glrmask/debug][terminal_dwa] possible_matches cache_hits={} cache_misses={} reachable_hits={} reachable_misses={} child_segments={} byte_steps={} blocked_segments={} recursive_descents={} terminal_insertions={}",
+            aggregate_possible_matches_profile.cache_hits,
+            aggregate_possible_matches_profile.cache_misses,
+            aggregate_possible_matches_profile.reachable_cache_hits,
+            aggregate_possible_matches_profile.reachable_cache_misses,
+            aggregate_possible_matches_profile.child_segments_visited,
+            aggregate_possible_matches_profile.byte_steps,
+            aggregate_possible_matches_profile.blocked_segments,
+            aggregate_possible_matches_profile.recursive_descents,
+            aggregate_possible_matches_profile.terminal_insertions,
+        );
+        emit_terminal_dwa_token_map(&dwa, full_vocab, global_id_map);
+    }
+
+    (dwa, merged_possible_matches)
+}
+
 pub(crate) fn build_terminal_dwa(
     grammar: &AnalyzedGrammar,
     tokenizer: &Tokenizer,
@@ -2215,8 +2728,8 @@ mod tests {
     use crate::compiler::glr::analysis::AnalyzedGrammar;
     use crate::compiler::grammar::model::{GrammarDef, Rule, Symbol, Terminal};
     use crate::compiler::grammar::model::tests::simple_ab_grammar;
-    use crate::compiler::stages::equivalence_analysis::ManyToOneIdMap;
-    use std::collections::BTreeSet;
+    use crate::compiler::stages::equivalence_analysis::{ManyToOneIdMap, refine_partition_id_maps};
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn expand_original_tokens(weight: &Weight, id_map: &InternalIdMap) -> BTreeSet<u32> {
         let mut original_tokens = BTreeSet::new();
@@ -2548,5 +3061,101 @@ start: "a" X
             start.transitions.len(), 1,
             "only terminal X should get a transition from start",
         );
+    }
+
+    #[test]
+    fn test_partition_local_terminal_dwa_matches_global_build() {
+        let grammar = GrammarDef {
+            rules: vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Terminal(0)] },
+                Rule { lhs: 0, rhs: vec![Symbol::Terminal(1)] },
+                Rule { lhs: 0, rhs: vec![Symbol::Terminal(2)] },
+                Rule { lhs: 0, rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1)] },
+                Rule { lhs: 0, rhs: vec![Symbol::Terminal(2), Symbol::Terminal(1)] },
+            ],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal { id: 0, bytes: b"a".to_vec() },
+                Terminal::Literal { id: 1, bytes: b"!".to_vec() },
+                Terminal::Literal { id: 2, bytes: b"a!".to_vec() },
+            ],
+            ..Default::default()
+        };
+        let analyzed = AnalyzedGrammar::from_grammar_def(&grammar);
+        let tokenizer = crate::compiler::compile::build_tokenizer(&grammar);
+        let vocab = Vocab::new(
+            vec![
+                (0, b"a".to_vec()),
+                (1, b"!".to_vec()),
+                (2, b"a!".to_vec()),
+                (3, b"aa".to_vec()),
+                (4, b"!!".to_vec()),
+                (5, b"!a".to_vec()),
+            ],
+            None,
+        );
+
+        let mut partition_entries: [Vec<(u32, Vec<u8>)>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        for (&token_id, bytes) in &vocab.entries {
+            partition_entries[classify_vocab_char_type(bytes) as usize].push((token_id, bytes.clone()));
+        }
+        let partition_vocabs: Vec<Vocab> = partition_entries
+            .into_iter()
+            .map(|entries| Vocab::new(entries, None))
+            .collect();
+        let partition_maps: Vec<InternalIdMap> = partition_vocabs
+            .iter()
+            .map(|sub_vocab| InternalIdMap::build(&tokenizer, sub_vocab, &BTreeMap::new(), None))
+            .collect();
+        let global_id_map = refine_partition_id_maps(
+            &partition_maps,
+            tokenizer.num_states() as usize,
+            vocab.max_token_id(),
+        );
+        let terminal_coloring = TerminalColoring::identity(analyzed.num_terminals as usize);
+
+        let (global_dwa, global_matches) = build_terminal_dwa_with_possible_matches_and_coloring(
+            &analyzed,
+            &tokenizer,
+            &vocab,
+            &global_id_map,
+            &terminal_coloring,
+            false,
+            None,
+        );
+        let (partitioned_dwa, partitioned_matches) =
+            build_terminal_dwa_from_partition_id_maps_with_possible_matches_and_coloring(
+                &analyzed,
+                &tokenizer,
+                &vocab,
+                &partition_vocabs,
+                &partition_maps,
+                &global_id_map,
+                &terminal_coloring,
+                false,
+                None,
+            );
+
+        assert_eq!(partitioned_matches, global_matches);
+
+        let sequences = [
+            vec![],
+            vec![0],
+            vec![1],
+            vec![2],
+            vec![0, 1],
+            vec![2, 1],
+            vec![1, 0],
+        ];
+        for sequence in sequences {
+            let global_tokens = expand_original_tokens(&global_dwa.eval_word(&sequence), &global_id_map);
+            let partitioned_tokens = expand_original_tokens(&partitioned_dwa.eval_word(&sequence), &global_id_map);
+            assert_eq!(
+                partitioned_tokens,
+                global_tokens,
+                "partitioned terminal DWA disagreed with global build for sequence {:?}",
+                sequence,
+            );
+        }
     }
 }

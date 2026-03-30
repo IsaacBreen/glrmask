@@ -20,6 +20,7 @@ use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::characterize_terminals;
 use crate::compiler::stages::templates::compile_dfa::emit_template_profile_summary;
 use crate::compiler::stages::terminal_dwa::{
+    build_terminal_dwa_from_partition_id_maps_with_possible_matches_and_coloring,
     build_terminal_dwa_with_possible_matches_and_coloring,
     compute_terminal_coloring,
     compute_ever_allowed_follows,
@@ -433,7 +434,16 @@ fn compile_prepared_with_profile(
             );
         }
 
-        let ((mut internal_ids, id_map_ms), (templates, templates_ms)) = rayon::join(
+        enum IdMapBuildResult {
+            Ready(InternalIdMap),
+            Partitioned {
+                global: InternalIdMap,
+                partition_vocabs: Vec<Vocab>,
+                partition_maps: Vec<InternalIdMap>,
+            },
+        }
+
+        let ((id_map_build_result, id_map_ms), (templates, templates_ms)) = rayon::join(
             || {
                 let id_map_started_at = Instant::now();
                 let result = if let Ok(load_path) = std::env::var("GLRMASK_ORACLE_LOAD") {
@@ -470,7 +480,7 @@ fn compile_prepared_with_profile(
                     eprintln!(
                         "[glrmask/oracle] loaded from {load_path}: {num_state_classes} state classes, {num_token_classes} token classes"
                     );
-                    InternalIdMap {
+                    IdMapBuildResult::Ready(InternalIdMap {
                         tokenizer_states: crate::compiler::stages::equivalence_analysis::ManyToOneIdMap::from_original_to_internal_with_representatives(
                             state_map,
                             num_state_classes,
@@ -481,7 +491,7 @@ fn compile_prepared_with_profile(
                             num_token_classes,
                             token_reps,
                         ),
-                    }
+                    })
                 } else {
                     // Partition the vocab into 3 character-type groups and
                     // build per-partition id_maps in parallel, then refine
@@ -532,7 +542,13 @@ fn compile_prepared_with_profile(
 
                     let num_states = tok_ref.num_states() as usize;
                     let max_token = vocab.max_token_id();
-                    refine_partition_id_maps(&[map_a, map_b, map_c], num_states, max_token)
+                    let partition_maps = vec![map_a, map_b, map_c];
+                    let global = refine_partition_id_maps(&partition_maps, num_states, max_token);
+                    IdMapBuildResult::Partitioned {
+                        global,
+                        partition_vocabs: sub_vocabs,
+                        partition_maps,
+                    }
                 };
                 (result, elapsed_ms(id_map_started_at))
             },
@@ -553,20 +569,44 @@ fn compile_prepared_with_profile(
                 }
             },
         );
+        let (mut internal_ids, partition_terminal_dwa_inputs) = match id_map_build_result {
+            IdMapBuildResult::Ready(id_map) => (id_map, None),
+            IdMapBuildResult::Partitioned {
+                global,
+                partition_vocabs,
+                partition_maps,
+            } => (global, Some((partition_vocabs, partition_maps))),
+        };
         profile.id_map_ms = id_map_ms;
         profile.templates_ms = templates_ms;
         let token_bytes = vocab.entries.clone();
 
         let terminal_dwa_started_at = Instant::now();
-        let (mut terminal_dwa, mut possible_matches) = build_terminal_dwa_with_possible_matches_and_coloring(
-            &analyzed_grammar,
-            &tokenizer,
-            vocab,
-            &internal_ids,
-            &terminal_coloring,
-            terminal_coloring_enabled,
-            prepared_grammar.ignore_terminal,
-        );
+        let (mut terminal_dwa, mut possible_matches) = if let Some((partition_vocabs, partition_maps)) =
+            partition_terminal_dwa_inputs.as_ref()
+        {
+            build_terminal_dwa_from_partition_id_maps_with_possible_matches_and_coloring(
+                &analyzed_grammar,
+                &tokenizer,
+                vocab,
+                partition_vocabs,
+                partition_maps,
+                &internal_ids,
+                &terminal_coloring,
+                terminal_coloring_enabled,
+                prepared_grammar.ignore_terminal,
+            )
+        } else {
+            build_terminal_dwa_with_possible_matches_and_coloring(
+                &analyzed_grammar,
+                &tokenizer,
+                vocab,
+                &internal_ids,
+                &terminal_coloring,
+                terminal_coloring_enabled,
+                prepared_grammar.ignore_terminal,
+            )
+        };
         profile.terminal_dwa_ms = elapsed_ms(terminal_dwa_started_at);
 
         let compact_started_at = Instant::now();
