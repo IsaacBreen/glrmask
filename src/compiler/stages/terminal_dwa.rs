@@ -2087,6 +2087,7 @@ fn build_partition_terminal_nwa(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     num_terminals: u32,
     partition_index: usize,
+    grammar: &AnalyzedGrammar,
 ) -> PartitionTerminalNwaBuild {
     let partition_total_start = std::time::Instant::now();
     let internal_vocab = internal_vocab_entries(vocab, id_map);
@@ -2186,16 +2187,38 @@ fn build_partition_terminal_nwa(
     drop(builder);
     let possible_matches_profile = possible_matches.profile();
 
+    // Per-partition post-processing: collapse, disallowed, prune, canonicalize,
+    // determinize, minimize. This reduces NWA size before the global merge.
+    let postproc_start = std::time::Instant::now();
+    let always_allowed_by_label = compute_always_allowed_follows(grammar);
+    collapse_always_allowed(&mut nwa, &always_allowed_by_label, grammar.num_terminals as usize);
+    apply_disallowed_follow_constraints(&mut nwa, grammar);
+    prune_non_coreachable_states(&mut nwa);
+    canonicalize_acyclic_nwa(&mut nwa);
+
+    let pp_nwa_states = nwa.num_states();
+    let pp_nwa_transitions = nwa.num_transitions();
+
+    // Determinize and minimize per-partition, then convert back to NWA.
+    use crate::automata::weighted_u32::determinize::determinize;
+    use crate::automata::weighted_u32::minimize::minimize;
+    let dwa = determinize(&nwa).expect("partition determinize failed");
+    let dwa = minimize(&dwa);
+    let minimized_nwa = dwa.to_nwa();
+    let postproc_ms = postproc_start.elapsed().as_secs_f64() * 1000.0;
+
     if debug_profile_enabled() {
         let partition_total_ms = partition_total_start.elapsed().as_secs_f64() * 1000.0;
         eprintln!(
-            "[glrmask/debug][terminal_dwa] partition_build[{}] nwa_build_ms={:.1} nwa_states={} nwa_transitions={} partition_total_ms={:.1}",
-            partition_index, nwa_build_ms, nwa.num_states(), nwa.num_transitions(), partition_total_ms,
+            "[glrmask/debug][terminal_dwa] partition_build[{}] nwa_build_ms={:.1} nwa_states={} nwa_transitions={} pp_nwa_states={} pp_nwa_transitions={} dwa_states={} postproc_ms={:.1} partition_total_ms={:.1}",
+            partition_index, nwa_build_ms, nwa.num_states(), nwa.num_transitions(),
+            pp_nwa_states, pp_nwa_transitions,
+            dwa.num_states(), postproc_ms, partition_total_ms,
         );
     }
 
     PartitionTerminalNwaBuild {
-        nwa: Some(nwa),
+        nwa: Some(minimized_nwa),
         possible_matches_by_state,
         build_profile,
         possible_matches_profile,
@@ -2467,6 +2490,7 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
             disallowed_follows,
             num_terminals,
             0,
+            grammar,
         )],
         2 => {
             let (left, right) = rayon::join(
@@ -2480,6 +2504,7 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
                     disallowed_follows,
                     num_terminals,
                     0,
+                    grammar,
                 ),
                 || build_partition_terminal_nwa(
                     tokenizer,
@@ -2491,6 +2516,7 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
                     disallowed_follows,
                     num_terminals,
                     1,
+                    grammar,
                 ),
             );
             vec![left, right]
@@ -2507,6 +2533,7 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
                     disallowed_follows,
                     num_terminals,
                     0,
+                    grammar,
                 ),
                 || rayon::join(
                     || build_partition_terminal_nwa(
@@ -2519,6 +2546,7 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
                         disallowed_follows,
                         num_terminals,
                         1,
+                        grammar,
                     ),
                     || build_partition_terminal_nwa(
                         tokenizer,
@@ -2530,6 +2558,7 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
                         disallowed_follows,
                         num_terminals,
                         2,
+                        grammar,
                     ),
                 ),
             );
@@ -2545,6 +2574,7 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
                     disallowed_follows,
                     num_terminals,
                     index,
+                    grammar,
                 ));
             }
             results
