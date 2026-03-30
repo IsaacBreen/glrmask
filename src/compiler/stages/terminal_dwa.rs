@@ -1307,9 +1307,11 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     }
 
     fn flush_transition_buffer(&mut self) {
+        let flush_start = std::time::Instant::now();
         let mut leaf_transition_buckets: Vec<FxHashMap<i32, BufferedLeafTransition>> =
             (0..self.nwa.states.len()).map(|_| FxHashMap::default()).collect();
 
+        let leaf_buf_count = self.leaf_token_ids_buffer.len();
         for (from, labels_vec) in std::mem::take(&mut self.leaf_token_ids_buffer)
             .into_iter()
             .enumerate()
@@ -1325,7 +1327,10 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     .extend(token_ids);
             }
         }
+        let flush_leaf_ms = flush_start.elapsed().as_secs_f64() * 1000.0;
 
+        let future_buf_count = self.future_leaf_buffer.len();
+        let flush_future_start = std::time::Instant::now();
         for ((source, tokenizer_state, color), buffered) in
             std::mem::take(&mut self.future_leaf_buffer)
         {
@@ -1353,7 +1358,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 }
             }
         }
+        let flush_future_ms = flush_future_start.elapsed().as_secs_f64() * 1000.0;
 
+        let flush_weight_start = std::time::Instant::now();
         let mut epsilon_entries: Vec<_> = std::mem::take(&mut self.epsilon_buffer).into_iter().collect();
         epsilon_entries.sort_unstable_by_key(|((from, target), _)| (*from, *target));
         for ((from, target), weight) in epsilon_entries {
@@ -1409,12 +1416,25 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 state.transitions.entry(label).or_default().push((self.leaf_state, weight));
             }
         }
+        let flush_weight_ms = flush_weight_start.elapsed().as_secs_f64() * 1000.0;
+
+        if debug_profile_enabled() {
+            eprintln!(
+                "[glrmask/debug][flush] leaf_buf={} future_buf={} flush_leaf_ms={:.1} flush_future_ms={:.1} flush_weight_ms={:.1}",
+                leaf_buf_count, future_buf_count, flush_leaf_ms, flush_future_ms, flush_weight_ms,
+            );
+        }
     }
 
     /// Fast NWA construction for L1-only grammars (all terminals have path
     /// length ≤ 1).  Replaces the trie walk with a simple flat loop over
     /// internal vocab × state class representatives.
-    /// Uses the O(1) flat transition table for byte stepping.
+    ///
+    /// Uses a two-phase approach to avoid per-token future-leaf buffering:
+    /// Phase 1: Walk all (token, state) pairs, collecting:
+    ///   - Terminal matches at token endpoint → direct leaf buffering
+    ///   - Alive pairs grouped by (start_state, end_state) → batched token lists
+    /// Phase 2: Process grouped alive pairs, adding future leaves in batch.
     fn build_l1_fast(
         &mut self,
         internal_vocab: &[(u32, Vec<u8>)],
@@ -1434,6 +1454,13 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             }
         }
 
+        // Phase 1: Walk all (token, state) pairs.
+        // Group alive pairs by (representative_state, ending_state) to batch future leaves.
+        let mut future_groups: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
+        let phase1_start = std::time::Instant::now();
+        let mut total_alive: u64 = 0;
+        let mut total_pairs: u64 = 0;
+
         for &(internal_token_id, ref bytes) in internal_vocab {
             for (_tsid_idx, representative_state) in
                 id_map.tokenizer_states.iter_representative_ids().enumerate()
@@ -1446,6 +1473,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 if source_nodes.is_empty() {
                     continue;
                 }
+
+                total_pairs += 1;
 
                 // Walk bytes using O(1) flat transition table.
                 let mut scan_state = representative_state;
@@ -1468,6 +1497,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 }
 
                 if alive {
+                    total_alive += 1;
                     // Terminal matches at the exact token endpoint.
                     let finalizers = self.tokenizer.dfa.finalizers(scan_state);
                     for t in finalizers.iter() {
@@ -1480,14 +1510,49 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                         );
                     }
 
-                    // Future leaf: token fully consumed, tokenizer still alive.
-                    self.add_future_leaf_token_from_sources(
-                        source_nodes,
-                        scan_state,
-                        internal_token_id,
-                    );
+                    // Collect for batched future leaf processing.
+                    future_groups
+                        .entry((representative_state, scan_state))
+                        .or_default()
+                        .push(internal_token_id);
                 }
             }
+        }
+        let phase1_ms = phase1_start.elapsed().as_secs_f64() * 1000.0;
+
+        // Phase 2: Process future leaves in batch using pre-computed weights.
+        // Convert each group's token_ids to a Weight ONCE, then distribute.
+        let phase2_start = std::time::Instant::now();
+        let num_groups = future_groups.len();
+        for ((representative_state, ending_state), token_ids) in future_groups {
+            let source_nodes =
+                match roots_by_tokenizer_state.entries.get(&representative_state) {
+                    Some(nodes) => nodes.as_slice(),
+                    None => continue,
+                };
+
+            if token_ids.is_empty() {
+                continue;
+            }
+
+            // Pre-compute weight from token_ids (ONCE per group).
+            let leaf_ids: LeafTokenIds = token_ids.into();
+            let weight = self.cached_leaf_weight(leaf_ids);
+
+            // Distribute the lightweight Weight (Arc) to all future terminals.
+            self.add_future_weighted_match_from_sources(
+                source_nodes,
+                ending_state,
+                &weight,
+            );
+        }
+        let phase2_ms = phase2_start.elapsed().as_secs_f64() * 1000.0;
+
+        if debug_profile_enabled() {
+            eprintln!(
+                "[glrmask/debug][build_l1_fast] phase1_ms={:.1} phase2_ms={:.1} total_pairs={} alive={} groups={}",
+                phase1_ms, phase2_ms, total_pairs, total_alive, num_groups,
+            );
         }
     }
 
@@ -2110,10 +2175,7 @@ fn build_partition_terminal_nwa(
         flat_transitions: vec![None; num_tokenizer_states],
     };
     let nwa_build_start = std::time::Instant::now();
-    // Use L1 fast path for small partitions (< 500K token×state pairs).
-    // For larger partitions, the trie walk is faster because it shares prefix
-    // computation and batches future-leaf buffer operations.
-    if all_l1 && (internal_vocab.len() as u64) * (id_map.num_tsids() as u64) < 500_000 {
+    if all_l1 {
         builder.build_l1_fast(&internal_vocab, &roots_by_tokenizer_state, id_map);
     } else {
         builder.build_from_trie(&full_tree.root, &roots_by_tokenizer_state);
