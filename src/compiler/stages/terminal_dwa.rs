@@ -2243,6 +2243,7 @@ fn remap_weight_to_global(
     local_to_global_tsids: &[Vec<u32>],
     token_offset: u32,
     token_cache: &mut HashMap<usize, RangeSetBlaze<u32>>,
+    global_tsid_count: usize,
 ) -> Weight {
     if weight.is_empty() || weight.is_full() {
         return weight.clone();
@@ -2252,61 +2253,95 @@ fn remap_weight_to_global(
         return weight.clone();
     };
 
-    let mut tokens_by_global_tsid = BTreeMap::<u32, RangeSetBlaze<u32>>::new();
+    // Use a Vec indexed by global TSID for O(1) access instead of BTreeMap O(log n).
+    // Each slot holds an Arc<RangeSetBlaze<u32>> to avoid cloning token sets.
+    use crate::ds::weight::{finalize_weight_map, shared_rangeset};
+    use std::sync::Arc;
+
+    let mut tokens_by_global_tsid: Vec<Option<Arc<RangeSetBlaze<u32>>>> =
+        vec![None; global_tsid_count];
+    let mut max_global_tsid = 0u32;
+    let mut min_global_tsid = global_tsid_count as u32;
+    let mut any_set = false;
+
     for (start, end, tokens) in entries {
-        let token_key = std::sync::Arc::as_ptr(&tokens) as usize;
-        let mapped_tokens = token_cache
+        let token_key = Arc::as_ptr(&tokens) as usize;
+        let mapped_tokens_ref = token_cache
             .entry(token_key)
-            .or_insert_with(|| offset_token_set(tokens.as_ref(), token_offset))
-            .clone();
+            .or_insert_with(|| offset_token_set(tokens.as_ref(), token_offset));
+        let shared_mapped = shared_rangeset(mapped_tokens_ref.clone());
 
         for local_tsid in start..=end {
             let Some(global_tsids) = local_to_global_tsids.get(local_tsid as usize) else {
                 continue;
             };
             for &global_tsid in global_tsids {
-                tokens_by_global_tsid
-                    .entry(global_tsid)
-                    .and_modify(|existing| *existing |= mapped_tokens.clone())
-                    .or_insert_with(|| mapped_tokens.clone());
+                let idx = global_tsid as usize;
+                if idx >= global_tsid_count {
+                    continue;
+                }
+                match &mut tokens_by_global_tsid[idx] {
+                    Some(existing) => {
+                        // Must union: different entries map to same global TSID
+                        let merged = existing.as_ref() | shared_mapped.as_ref();
+                        *existing = shared_rangeset(merged);
+                    }
+                    slot @ None => {
+                        *slot = Some(Arc::clone(&shared_mapped));
+                    }
+                }
+                max_global_tsid = max_global_tsid.max(global_tsid);
+                min_global_tsid = min_global_tsid.min(global_tsid);
+                any_set = true;
             }
         }
     }
 
-    if tokens_by_global_tsid.is_empty() {
+    if !any_set {
         return Weight::empty();
     }
 
-    // Build WeightMap directly with interned/shared token sets.
-    // This is O(n) instead of the O(n²) from_compact_ranges path,
-    // and deduplicates identical token sets via the global interner.
-    use crate::ds::weight::{finalize_weight_map, shared_rangeset};
+    // Build WeightMap by scanning dense Vec for contiguous runs.
     use range_set_blaze::RangeMapBlaze;
 
-    let mut map = RangeMapBlaze::<u32, std::sync::Arc<RangeSetBlaze<u32>>>::new();
-    let mut iter = tokens_by_global_tsid.into_iter();
-    let (mut run_start, first_tokens) = iter.next().unwrap();
-    let mut run_end = run_start;
-    let mut run_shared = shared_rangeset(first_tokens);
+    let mut map = RangeMapBlaze::<u32, Arc<RangeSetBlaze<u32>>>::new();
+    let mut run_start: Option<u32> = None;
+    let mut run_end: u32 = 0;
+    let mut run_shared: Option<Arc<RangeSetBlaze<u32>>> = None;
 
-    for (global_tsid, tokens) in iter {
-        let next_shared = shared_rangeset(tokens);
-        if global_tsid == run_end + 1
-            && (std::sync::Arc::ptr_eq(&run_shared, &next_shared)
-                || run_shared.as_ref() == next_shared.as_ref())
-        {
+    for global_tsid in min_global_tsid..=max_global_tsid {
+        let idx = global_tsid as usize;
+        if let Some(tokens) = &tokens_by_global_tsid[idx] {
+            if let Some(ref current) = run_shared {
+                if Arc::ptr_eq(current, tokens) || current.as_ref() == tokens.as_ref() {
+                    run_end = global_tsid;
+                    continue;
+                }
+                // Flush previous run
+                map.extend_simple(std::iter::once((
+                    run_start.unwrap()..=run_end,
+                    Arc::clone(current),
+                )));
+            }
+            run_start = Some(global_tsid);
             run_end = global_tsid;
-        } else {
+            run_shared = Some(Arc::clone(tokens));
+        } else if let Some(ref current) = run_shared {
+            // Gap: flush previous run
             map.extend_simple(std::iter::once((
-                run_start..=run_end,
-                std::sync::Arc::clone(&run_shared),
+                run_start.unwrap()..=run_end,
+                Arc::clone(current),
             )));
-            run_start = global_tsid;
-            run_end = global_tsid;
-            run_shared = next_shared;
+            run_start = None;
+            run_shared = None;
         }
     }
-    map.extend_simple(std::iter::once((run_start..=run_end, run_shared)));
+    if let Some(current) = run_shared {
+        map.extend_simple(std::iter::once((
+            run_start.unwrap()..=run_end,
+            current,
+        )));
+    }
 
     finalize_weight_map(map)
 }
@@ -2315,23 +2350,31 @@ fn remap_partition_nwa_to_global(
     nwa: &mut NWA,
     local_to_global_tsids: &[Vec<u32>],
     token_offset: u32,
+    global_tsid_count: usize,
 ) {
     let mut token_cache = HashMap::<usize, RangeSetBlaze<u32>>::new();
     let mut weight_cache = HashMap::<usize, Weight>::new();
+    let mut cache_hits = 0u64;
+    let mut cache_misses = 0u64;
 
     let remap = |weight: &Weight,
                  token_cache: &mut HashMap<usize, RangeSetBlaze<u32>>,
-                 weight_cache: &mut HashMap<usize, Weight>|
+                 weight_cache: &mut HashMap<usize, Weight>,
+                 hits: &mut u64,
+                 misses: &mut u64|
      -> Weight {
         let weight_ptr = std::sync::Arc::as_ptr(&weight.0) as usize;
         if let Some(cached) = weight_cache.get(&weight_ptr) {
+            *hits += 1;
             return cached.clone();
         }
+        *misses += 1;
         let remapped = remap_weight_to_global(
             weight,
             local_to_global_tsids,
             token_offset,
             token_cache,
+            global_tsid_count,
         );
         weight_cache.insert(weight_ptr, remapped.clone());
         remapped
@@ -2339,7 +2382,7 @@ fn remap_partition_nwa_to_global(
 
     for state in &mut nwa.states {
         if let Some(final_weight) = state.final_weight.as_mut() {
-            *final_weight = remap(final_weight, &mut token_cache, &mut weight_cache);
+            *final_weight = remap(final_weight, &mut token_cache, &mut weight_cache, &mut cache_hits, &mut cache_misses);
             if final_weight.is_empty() {
                 state.final_weight = None;
             }
@@ -2347,16 +2390,23 @@ fn remap_partition_nwa_to_global(
 
         for targets in state.transitions.values_mut() {
             for (_, weight) in targets.iter_mut() {
-                *weight = remap(weight, &mut token_cache, &mut weight_cache);
+                *weight = remap(weight, &mut token_cache, &mut weight_cache, &mut cache_hits, &mut cache_misses);
             }
             targets.retain(|(_, weight)| !weight.is_empty());
         }
         state.transitions.retain(|_, targets| !targets.is_empty());
 
         for (_, weight) in state.epsilons.iter_mut() {
-            *weight = remap(weight, &mut token_cache, &mut weight_cache);
+            *weight = remap(weight, &mut token_cache, &mut weight_cache, &mut cache_hits, &mut cache_misses);
         }
         state.epsilons.retain(|(_, weight)| !weight.is_empty());
+    }
+
+    if debug_profile_enabled() {
+        eprintln!(
+            "[glrmask/debug][terminal_dwa] remap_stats weight_cache_hits={} weight_cache_misses={} unique_weights={} token_cache_entries={}",
+            cache_hits, cache_misses, weight_cache.len(), token_cache.len(),
+        );
     }
 }
 
@@ -2528,15 +2578,29 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
         aggregate_roots += build.roots_count;
 
         if let Some(mut partition_nwa) = build.nwa {
+            let remap_start = std::time::Instant::now();
             let local_to_global_tsids = build_local_to_global_tsid_map(partition_id_map, global_id_map);
-            remap_partition_nwa_to_global(&mut partition_nwa, &local_to_global_tsids, token_offset);
+            remap_partition_nwa_to_global(&mut partition_nwa, &local_to_global_tsids, token_offset, global_id_map.num_tsids() as usize);
+            let remap_ms = remap_start.elapsed().as_secs_f64() * 1000.0;
+            let pm_start = std::time::Instant::now();
             merge_partition_possible_matches_into_global(
                 &mut merged_possible_matches,
                 &build.possible_matches_by_state,
                 &local_to_global_tsids,
                 token_offset,
             );
+            let pm_ms = pm_start.elapsed().as_secs_f64() * 1000.0;
+            let union_start = std::time::Instant::now();
             merged_body = merged_nwa.union_in_place(&partition_nwa, &merged_body);
+            let union_ms = union_start.elapsed().as_secs_f64() * 1000.0;
+            if debug_profile {
+                eprintln!(
+                    "[glrmask/debug][terminal_dwa] merge_partition partition_states={} partition_transitions={} remap_ms={:.1} pm_ms={:.1} union_ms={:.1}",
+                    partition_nwa.num_states(),
+                    partition_nwa.num_transitions(),
+                    remap_ms, pm_ms, union_ms,
+                );
+            }
         }
 
         token_offset = partition_id_map
