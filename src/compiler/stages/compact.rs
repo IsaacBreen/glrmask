@@ -757,55 +757,64 @@ fn permute_weight_with_cache(
         return Weight::all();
     }
 
-    let mut tokens_by_new_tsid: std::collections::BTreeMap<u32, RangeSetBlaze<u32>> =
-        std::collections::BTreeMap::new();
+    // Use a flat Vec for O(1) access by new_tsid instead of BTreeMap O(log n).
+    let new_tsid_cap = tsid_perm.iter().copied().max().map_or(0, |m| m as usize + 1);
+    let mut tokens_by_new_tsid: Vec<Option<RangeSetBlaze<u32>>> = vec![None; new_tsid_cap];
+
+    // Check if token_perm is identity (common in intermediate compact steps).
+    let token_perm_is_identity = token_perm.iter().enumerate().all(|(i, &v)| v == i as u32);
 
     for (tsid_range, token_set) in w.0.range_values() {
         let ts_ptr = Arc::as_ptr(token_set) as usize;
         let new_ts = permuted_token_cache
             .entry(ts_ptr)
-            .or_insert_with(|| permute_rangeset(token_set, token_perm))
+            .or_insert_with(|| {
+                if token_perm_is_identity {
+                    (**token_set).clone()
+                } else {
+                    permute_rangeset(token_set, token_perm)
+                }
+            })
             .clone();
 
         for tsid in *tsid_range.start()..=*tsid_range.end() {
             if (tsid as usize) < tsid_perm.len() {
-                let new_tsid = tsid_perm[tsid as usize];
-                tokens_by_new_tsid
-                    .entry(new_tsid)
-                    .and_modify(|existing| *existing |= new_ts.clone())
-                    .or_insert_with(|| new_ts.clone());
+                let new_tsid = tsid_perm[tsid as usize] as usize;
+                match &mut tokens_by_new_tsid[new_tsid] {
+                    Some(existing) => *existing |= new_ts.clone(),
+                    slot @ None => *slot = Some(new_ts.clone()),
+                }
             }
         }
     }
 
-    if tokens_by_new_tsid.is_empty() {
-        return Weight::empty();
-    }
-
-    let mut ordered_pairs: Vec<(u32, RangeSetBlaze<u32>)> = tokens_by_new_tsid.into_iter().collect();
-    ordered_pairs.sort_unstable_by_key(|(tsid, _)| *tsid);
-
-    // Merge consecutive tsids with the same token set and rebuild through the
-    // shared weight/token-set interner so unique-storage accounting is real.
+    // Build the output weight from the Vec, iterating in order.
     let mut map = RangeMapBlaze::new();
-    let mut pairs = ordered_pairs.into_iter();
-    let (mut run_start, mut run_tokens) = pairs.next().unwrap();
-    let mut run_end = run_start;
+    let mut run: Option<(u32, u32, RangeSetBlaze<u32>)> = None; // (start, end, tokens)
 
-    for (tsid, tokens) in pairs {
-        if tsid == run_end + 1 && tokens == run_tokens {
-            run_end = tsid;
-        } else {
-            map.extend_simple(std::iter::once((
-                run_start..=run_end,
-                shared_rangeset(std::mem::take(&mut run_tokens)),
-            )));
-            run_start = tsid;
-            run_end = tsid;
-            run_tokens = tokens;
+    for (new_tsid, slot) in tokens_by_new_tsid.into_iter().enumerate() {
+        if let Some(tokens) = slot {
+            let new_tsid = new_tsid as u32;
+            match run {
+                Some((_start, end, ref prev_tokens)) if new_tsid == end + 1 && tokens == *prev_tokens => {
+                    run.as_mut().unwrap().1 = new_tsid;
+                }
+                Some((start, end, prev_tokens)) => {
+                    map.extend_simple(std::iter::once((
+                        start..=end,
+                        shared_rangeset(prev_tokens),
+                    )));
+                    run = Some((new_tsid, new_tsid, tokens));
+                }
+                None => {
+                    run = Some((new_tsid, new_tsid, tokens));
+                }
+            }
         }
     }
-    map.extend_simple(std::iter::once((run_start..=run_end, shared_rangeset(run_tokens))));
+    if let Some((start, end, tokens)) = run {
+        map.extend_simple(std::iter::once((start..=end, shared_rangeset(tokens))));
+    }
 
     finalize_weight_map(map)
 }
