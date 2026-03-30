@@ -20,7 +20,6 @@ use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::characterize_terminals;
 use crate::compiler::stages::templates::compile_dfa::emit_template_profile_summary;
 use crate::compiler::stages::terminal_dwa::{
-    build_terminal_dwa_from_partition_id_maps_with_possible_matches_and_coloring,
     build_terminal_dwa_with_possible_matches_and_coloring,
     compute_terminal_coloring,
     compute_ever_allowed_follows,
@@ -535,6 +534,9 @@ fn compile_prepared_with_profile(
                     // L1 fast path: direct fingerprint-based equivalence,
                     // no partitioning needed. Opt-in via env var for now.
                     IdMapBuildResult::Ready(InternalIdMap::build_l1(&tokenizer, vocab))
+                } else if std::env::var("GLRMASK_NO_PARTITION").map_or(false, |v| v == "1") {
+                    // Force non-partitioned path for benchmarking.
+                    IdMapBuildResult::Ready(InternalIdMap::build(&tokenizer, vocab, &disallowed_follows, prepared_grammar.ignore_terminal))
                 } else {
                     let mut partition_vocabs: [Vec<(u32, Vec<u8>)>; 3] =
                         [Vec::new(), Vec::new(), Vec::new()];
@@ -609,7 +611,7 @@ fn compile_prepared_with_profile(
                 }
             },
         );
-        let (mut internal_ids, partition_terminal_dwa_inputs) = match id_map_build_result {
+        let (mut internal_ids, _partition_terminal_dwa_inputs) = match id_map_build_result {
             IdMapBuildResult::Ready(id_map) => (id_map, None),
             IdMapBuildResult::Partitioned {
                 global,
@@ -622,22 +624,7 @@ fn compile_prepared_with_profile(
         let token_bytes = vocab.entries.clone();
 
         let terminal_dwa_started_at = Instant::now();
-        let (mut terminal_dwa, mut possible_matches) = if let Some((partition_vocabs, partition_maps)) =
-            partition_terminal_dwa_inputs.as_ref()
-        {
-            build_terminal_dwa_from_partition_id_maps_with_possible_matches_and_coloring(
-                &analyzed_grammar,
-                &tokenizer,
-                vocab,
-                partition_vocabs,
-                partition_maps,
-                &internal_ids,
-                &terminal_coloring,
-                terminal_coloring_enabled,
-                prepared_grammar.ignore_terminal,
-                Some(&terminal_path_lengths),
-            )
-        } else {
+        let (mut terminal_dwa, mut possible_matches) =
             build_terminal_dwa_with_possible_matches_and_coloring(
                 &analyzed_grammar,
                 &tokenizer,
@@ -646,9 +633,8 @@ fn compile_prepared_with_profile(
                 &terminal_coloring,
                 terminal_coloring_enabled,
                 prepared_grammar.ignore_terminal,
-                Some(&terminal_path_lengths),
-            )
-        };
+                Some(&adjusted_disallowed_for_classification),
+            );
         profile.terminal_dwa_ms = elapsed_ms(terminal_dwa_started_at);
 
         let compact_started_at = Instant::now();

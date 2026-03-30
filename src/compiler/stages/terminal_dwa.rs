@@ -2002,8 +2002,11 @@ fn build_partition_terminal_nwa(
     terminal_coloring: &TerminalColoring,
     use_terminal_coloring: bool,
     ignore_terminal: Option<TerminalID>,
-    terminal_path_lengths: Option<&[TerminalPathLength]>,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    num_terminals: u32,
+    partition_index: usize,
 ) -> PartitionTerminalNwaBuild {
+    let partition_total_start = std::time::Instant::now();
     let internal_vocab = internal_vocab_entries(vocab, id_map);
     if internal_vocab.is_empty() {
         return PartitionTerminalNwaBuild::default();
@@ -2015,13 +2018,16 @@ fn build_partition_terminal_nwa(
     let start_state = nwa.add_state();
     nwa.start_states.push(start_state);
 
+    let tree_start = std::time::Instant::now();
     let full_tree = VocabPrefixTree::build_owned(
         internal_vocab
             .iter()
             .map(|(token_id, bytes)| (*token_id as usize, bytes.clone()))
             .collect(),
     );
+    let tree_ms = tree_start.elapsed().as_secs_f64() * 1000.0;
 
+    let pm_start = std::time::Instant::now();
     let mut possible_matches = PossibleMatchesComputer::new(tokenizer);
     let possible_matches_by_state = collect_possible_matches_by_internal_tsid(
         tokenizer,
@@ -2029,7 +2035,9 @@ fn build_partition_terminal_nwa(
         &mut possible_matches,
         &id_map.tokenizer_states,
     );
+    let pm_ms = pm_start.elapsed().as_secs_f64() * 1000.0;
 
+    let seed_start = std::time::Instant::now();
     let roots_by_tokenizer_state = seed_root_nodes(
         &mut nwa,
         start_state,
@@ -2039,17 +2047,23 @@ fn build_partition_terminal_nwa(
         ignore_terminal,
         &possible_matches_by_state,
     );
+    let seed_ms = seed_start.elapsed().as_secs_f64() * 1000.0;
 
-    let all_l1 = terminal_path_lengths
-        .map(|lengths| {
-            lengths.iter().all(|l| matches!(l, TerminalPathLength::Zero | TerminalPathLength::One))
-        })
-        .unwrap_or(false);
+    let terminal_path_lengths = classify_terminal_path_lengths(
+        tokenizer,
+        vocab,
+        disallowed_follows,
+        num_terminals,
+    );
+    let all_l1 = terminal_path_lengths.iter().all(|l| matches!(l, TerminalPathLength::Zero | TerminalPathLength::One));
 
     if debug_profile_enabled() {
+        let n0 = terminal_path_lengths.iter().filter(|l| **l == TerminalPathLength::Zero).count();
+        let n1 = terminal_path_lengths.iter().filter(|l| **l == TerminalPathLength::One).count();
+        let n2 = terminal_path_lengths.iter().filter(|l| **l == TerminalPathLength::TwoPlus).count();
         eprintln!(
-            "[glrmask/debug][terminal_dwa] partition_build all_l1={} internal_vocab_len={}",
-            all_l1, internal_vocab.len(),
+            "[glrmask/debug][terminal_dwa] partition_build[{}] all_l1={} internal_vocab_len={} num_tsids={} l0={} l1={} l2p={} tree_ms={:.1} pm_ms={:.1} seed_ms={:.1}",
+            partition_index, all_l1, internal_vocab.len(), id_map.num_tsids(), n0, n1, n2, tree_ms, pm_ms, seed_ms,
         );
     }
 
@@ -2066,7 +2080,7 @@ fn build_partition_terminal_nwa(
         leaf_state,
         ignore_terminal,
         use_terminal_coloring,
-        terminal_path_lengths: terminal_path_lengths.map(|s| s.to_vec()),
+        terminal_path_lengths: Some(terminal_path_lengths.clone()),
         self_loop_bytes: FxHashMap::default(),
         leaf_token_ids_buffer: Vec::new(),
         future_leaf_buffer: FxHashMap::default(),
@@ -2078,15 +2092,25 @@ fn build_partition_terminal_nwa(
         profile: TerminalDwaBuildProfile::default(),
         flat_transitions: vec![None; num_tokenizer_states],
     };
+    let nwa_build_start = std::time::Instant::now();
     if all_l1 {
         builder.build_l1_fast(&internal_vocab, &roots_by_tokenizer_state, id_map);
     } else {
         builder.build_from_trie(&full_tree.root, &roots_by_tokenizer_state);
     }
     builder.flush_transition_buffer();
+    let nwa_build_ms = nwa_build_start.elapsed().as_secs_f64() * 1000.0;
     let build_profile = builder.profile;
     drop(builder);
     let possible_matches_profile = possible_matches.profile();
+
+    if debug_profile_enabled() {
+        let partition_total_ms = partition_total_start.elapsed().as_secs_f64() * 1000.0;
+        eprintln!(
+            "[glrmask/debug][terminal_dwa] partition_build[{}] nwa_build_ms={:.1} nwa_states={} nwa_transitions={} partition_total_ms={:.1}",
+            partition_index, nwa_build_ms, nwa.num_states(), nwa.num_transitions(), partition_total_ms,
+        );
+    }
 
     PartitionTerminalNwaBuild {
         nwa: Some(nwa),
@@ -2282,7 +2306,7 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
     terminal_coloring: &TerminalColoring,
     use_terminal_coloring: bool,
     ignore_terminal: Option<TerminalID>,
-    terminal_path_lengths: Option<&[TerminalPathLength]>,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
 ) -> (DWA, PossibleMatchesByState) {
     debug_assert_eq!(partition_vocabs.len(), partition_id_maps.len());
 
@@ -2290,6 +2314,8 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
     let profile_enabled = terminal_dwa_profile_enabled();
     let total_started_at = std::time::Instant::now();
     let raw_build_started_at = std::time::Instant::now();
+
+    let num_terminals = grammar.num_terminals;
 
     let builds: Vec<PartitionTerminalNwaBuild> = match partition_vocabs.len() {
         0 => Vec::new(),
@@ -2300,7 +2326,9 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
             terminal_coloring,
             use_terminal_coloring,
             ignore_terminal,
-            terminal_path_lengths,
+            disallowed_follows,
+            num_terminals,
+            0,
         )],
         2 => {
             let (left, right) = rayon::join(
@@ -2311,7 +2339,9 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
                     terminal_coloring,
                     use_terminal_coloring,
                     ignore_terminal,
-                    terminal_path_lengths,
+                    disallowed_follows,
+                    num_terminals,
+                    0,
                 ),
                 || build_partition_terminal_nwa(
                     tokenizer,
@@ -2320,7 +2350,9 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
                     terminal_coloring,
                     use_terminal_coloring,
                     ignore_terminal,
-                    terminal_path_lengths,
+                    disallowed_follows,
+                    num_terminals,
+                    1,
                 ),
             );
             vec![left, right]
@@ -2334,7 +2366,9 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
                     terminal_coloring,
                     use_terminal_coloring,
                     ignore_terminal,
-                    terminal_path_lengths,
+                    disallowed_follows,
+                    num_terminals,
+                    0,
                 ),
                 || rayon::join(
                     || build_partition_terminal_nwa(
@@ -2344,7 +2378,9 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
                         terminal_coloring,
                         use_terminal_coloring,
                         ignore_terminal,
-                        terminal_path_lengths,
+                        disallowed_follows,
+                        num_terminals,
+                        1,
                     ),
                     || build_partition_terminal_nwa(
                         tokenizer,
@@ -2353,7 +2389,9 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
                         terminal_coloring,
                         use_terminal_coloring,
                         ignore_terminal,
-                        terminal_path_lengths,
+                        disallowed_follows,
+                        num_terminals,
+                        2,
                     ),
                 ),
             );
@@ -2366,7 +2404,9 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
                     terminal_coloring,
                     use_terminal_coloring,
                     ignore_terminal,
-                    terminal_path_lengths,
+                    disallowed_follows,
+                    num_terminals,
+                    index,
                 ));
             }
             results
@@ -2553,7 +2593,7 @@ pub(crate) fn build_terminal_dwa_with_possible_matches_and_coloring(
     terminal_coloring: &TerminalColoring,
     use_terminal_coloring: bool,
     ignore_terminal: Option<TerminalID>,
-    terminal_path_lengths: Option<&[TerminalPathLength]>,
+    disallowed_follows: Option<&BTreeMap<u32, BitSet>>,
 ) -> (DWA, PossibleMatchesByState) {
     let debug_profile = debug_profile_enabled();
     let total_started_at = std::time::Instant::now();
@@ -2576,11 +2616,25 @@ pub(crate) fn build_terminal_dwa_with_possible_matches_and_coloring(
     );
 
     // Check if all terminals are L1 (or L0) for fast path.
-    let all_l1 = terminal_path_lengths
-        .map(|lengths| {
-            lengths.iter().all(|l| matches!(l, TerminalPathLength::Zero | TerminalPathLength::One))
-        })
-        .unwrap_or(false);
+    let empty_disallowed = BTreeMap::new();
+    let effective_disallowed = disallowed_follows.unwrap_or(&empty_disallowed);
+    let terminal_path_lengths = classify_terminal_path_lengths(
+        tokenizer,
+        vocab,
+        effective_disallowed,
+        grammar.num_terminals,
+    );
+    let all_l1 = terminal_path_lengths.iter().all(|l| matches!(l, TerminalPathLength::Zero | TerminalPathLength::One));
+
+    if debug_profile_enabled() {
+        let n0 = terminal_path_lengths.iter().filter(|l| **l == TerminalPathLength::Zero).count();
+        let n1 = terminal_path_lengths.iter().filter(|l| **l == TerminalPathLength::One).count();
+        let n2 = terminal_path_lengths.iter().filter(|l| **l == TerminalPathLength::TwoPlus).count();
+        eprintln!(
+            "[glrmask/debug][terminal_dwa] non_partition_build all_l1={} internal_vocab_len={} l0={} l1={} l2p={}",
+            all_l1, internal_vocab.len(), n0, n1, n2,
+        );
+    }
 
     // Partition the vocab into 3 sets by character type and build per-partition trees.
     // Skip partitioning on the L1 fast path (trie trees are not needed).
@@ -2693,7 +2747,7 @@ pub(crate) fn build_terminal_dwa_with_possible_matches_and_coloring(
             leaf_state,
             ignore_terminal,
             use_terminal_coloring,
-            terminal_path_lengths: terminal_path_lengths.map(|s| s.to_vec()),
+            terminal_path_lengths: Some(terminal_path_lengths.clone()),
             self_loop_bytes: FxHashMap::default(),
             leaf_token_ids_buffer: Vec::new(),
             future_leaf_buffer: FxHashMap::default(),
@@ -2728,7 +2782,7 @@ pub(crate) fn build_terminal_dwa_with_possible_matches_and_coloring(
                 leaf_state,
                 ignore_terminal,
                 use_terminal_coloring,
-                terminal_path_lengths: terminal_path_lengths.map(|s| s.to_vec()),
+                terminal_path_lengths: Some(terminal_path_lengths.clone()),
                 self_loop_bytes: FxHashMap::default(),
                 leaf_token_ids_buffer: Vec::new(),
                 future_leaf_buffer: FxHashMap::default(),
@@ -3419,7 +3473,7 @@ start: "a" X
                 &terminal_coloring,
                 false,
                 None,
-                None,
+                &BTreeMap::new(),
             );
 
         assert_eq!(partitioned_matches, global_matches);
