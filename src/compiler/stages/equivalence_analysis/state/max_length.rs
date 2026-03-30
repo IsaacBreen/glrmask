@@ -169,11 +169,50 @@ fn find_state_equivalence_classes_kstep(
     build_subset_mapping(states, &prev_hashes)
 }
 
+/// Compute a cheap hash of a state's transitions without allocating a HashMap.
+/// This is used as a fast precheck: if all states have unique cheap hashes,
+/// the expensive `build_state_shape` + kstep iteration can be skipped entirely.
+#[inline]
+fn cheap_state_hash(state: &FlatDfaState) -> u64 {
+    let label = hash_state_label(state);
+    let mut transition_hash: u64 = 0;
+    for (byte, &target) in state.transitions.iter().enumerate() {
+        if target != u32::MAX {
+            transition_hash = transition_hash.wrapping_add(
+                mix_u64((byte as u64) ^ ((target as u64) << 16) ^ 0xD6E8_FD93_5E6C_A271),
+            );
+        }
+    }
+    mix_u64(label ^ transition_hash)
+}
+
 pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
     tokenizer: &TokenizerView,
     tokens: &[S],
     states: &[usize],
 ) -> Vec<usize> {
+    if states.is_empty() {
+        return Vec::new();
+    }
+
+    // Fast precheck: compute cheap hashes (no HashMap allocation per state)
+    // and check if all states in the subset are already unique.
+    // If so, no equivalences are possible and we can skip the expensive
+    // build_state_shape + kstep iteration entirely.
+    let dfa = tokenizer.dfa();
+    let cheap_hashes: Vec<u64> = dfa
+        .states
+        .par_iter()
+        .map(cheap_state_hash)
+        .collect();
+    let mut seen = rustc_hash::FxHashSet::default();
+    let all_unique = states.iter().all(|&s| seen.insert(cheap_hashes[s]));
+    if all_unique {
+        return states.to_vec();
+    }
+    drop(seen);
+    drop(cheap_hashes);
+
     let max_len = tokens.iter().map(|token| token.as_ref().len()).max().unwrap_or(0);
     let mapping = find_state_equivalence_classes_kstep(tokenizer, states, max_len);
 
