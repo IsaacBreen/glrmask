@@ -1650,6 +1650,141 @@ fn apply_disallowed_follow_constraints(nwa: &mut NWA, grammar: &AnalyzedGrammar)
     *nwa = subtract_disallowed_dfa(nwa, &disallowed_dfa);
 }
 
+/// Classifies a token's bytes by character type for vocab partitioning.
+/// Returns 0 (pure non-alnum), 1 (mixed), or 2 (pure alnum).
+pub(crate) fn classify_vocab_char_type(bytes: &[u8]) -> u8 {
+    let mut has_alnum = false;
+    let mut has_non_alnum = false;
+    for &b in bytes {
+        if b.is_ascii_alphanumeric() {
+            has_alnum = true;
+        } else {
+            has_non_alnum = true;
+        }
+        if has_alnum && has_non_alnum {
+            return 1; // Mixed
+        }
+    }
+    if has_alnum { 2 } else { 0 } // PureAlnum or PureNonAlnum
+}
+
+/// Splits internal vocab entries into 3 partitions by character type:
+/// [0] = pure non-alnum, [1] = mixed, [2] = pure alnum.
+fn partition_internal_vocab(
+    entries: Vec<(u32, Vec<u8>)>,
+) -> [Vec<(usize, Vec<u8>)>; 3] {
+    let mut partitions: [Vec<(usize, Vec<u8>)>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    for (token_id, bytes) in entries {
+        let idx = classify_vocab_char_type(&bytes) as usize;
+        partitions[idx].push((token_id as usize, bytes));
+    }
+    partitions
+}
+
+/// Merges partition NWAs that share template states (start, leaf, root nodes).
+///
+/// Template states (indices `0..template_state_count`) are shared across all
+/// partition NWAs.  Non-template states from each partition are renumbered to
+/// occupy distinct ranges in the merged NWA.
+fn merge_partition_nwas(
+    template_state_count: u32,
+    partition_nwas: Vec<NWA>,
+) -> NWA {
+    if partition_nwas.len() == 1 {
+        return partition_nwas.into_iter().next().unwrap();
+    }
+
+    // Renumber offsets: partition i's non-template state `s` (where s >= T)
+    // becomes `s + offsets[i]` in the merged NWA.
+    let mut offsets = Vec::with_capacity(partition_nwas.len());
+    let mut cumulative = 0u32;
+    for nwa in &partition_nwas {
+        offsets.push(cumulative);
+        let extra = nwa.num_states() - template_state_count;
+        cumulative += extra;
+    }
+
+    let total_states = template_state_count + cumulative;
+    let renumber = |state: u32, p: usize| -> u32 {
+        if state < template_state_count {
+            state
+        } else {
+            state + offsets[p]
+        }
+    };
+
+    let mut merged = NWA {
+        states: Vec::with_capacity(total_states as usize),
+        start_states: partition_nwas[0].start_states.clone(),
+    };
+
+    // Template states: union transitions from all partitions with
+    // deduplication — identical (target, weight) entries from different
+    // partitions (e.g. start→root epsilons) are merged rather than
+    // tripled, keeping the NWA compact.
+    for s in 0..template_state_count as usize {
+        let mut state = NWAStateType::default();
+        state.final_weight = partition_nwas[0].states[s].final_weight.clone();
+
+        let mut eps_map: BTreeMap<u32, Weight> = BTreeMap::new();
+        let mut trans_map: BTreeMap<i32, BTreeMap<u32, Weight>> = BTreeMap::new();
+
+        for (p, nwa) in partition_nwas.iter().enumerate() {
+            let src = &nwa.states[s];
+            for (&label, targets) in &src.transitions {
+                let m = trans_map.entry(label).or_default();
+                for &(target, ref weight) in targets {
+                    let t = renumber(target, p);
+                    m.entry(t)
+                        .and_modify(|w| *w = w.union(weight))
+                        .or_insert_with(|| weight.clone());
+                }
+            }
+            for &(target, ref weight) in &src.epsilons {
+                let t = renumber(target, p);
+                eps_map
+                    .entry(t)
+                    .and_modify(|w| *w = w.union(weight))
+                    .or_insert_with(|| weight.clone());
+            }
+        }
+
+        state.epsilons = eps_map.into_iter().collect();
+        for (label, targets) in trans_map {
+            state
+                .transitions
+                .insert(label, targets.into_iter().collect());
+        }
+
+        merged.states.push(state);
+    }
+
+    // Non-template states from each partition, renumbered.
+    for (p, nwa) in partition_nwas.iter().enumerate() {
+        for s in template_state_count as usize..nwa.num_states() as usize {
+            let src = &nwa.states[s];
+            let mut state = NWAStateType::default();
+            state.final_weight = src.final_weight.clone();
+
+            for (&label, targets) in &src.transitions {
+                let v = state.transitions.entry(label).or_default();
+                for &(target, ref weight) in targets {
+                    v.push((renumber(target, p), weight.clone()));
+                }
+            }
+            for &(target, ref weight) in &src.epsilons {
+                state
+                    .epsilons
+                    .push((renumber(target, p), weight.clone()));
+            }
+
+            merged.states.push(state);
+        }
+    }
+
+    merged
+}
+
 pub(crate) fn build_terminal_dwa(
     grammar: &AnalyzedGrammar,
     tokenizer: &Tokenizer,
@@ -1690,25 +1825,43 @@ pub(crate) fn build_terminal_dwa_with_possible_matches_and_coloring(
     let setup_started_at = std::time::Instant::now();
     let internal_vocab = internal_vocab_entries(vocab, id_map);
     let internal_vocab_len = internal_vocab.len();
-    let vocab_tree = VocabPrefixTree::build_owned(
+
+    // Build the full vocab tree (needed for possible_matches computation).
+    let full_tree = VocabPrefixTree::build_owned(
         internal_vocab
-            .into_iter()
-            .map(|(token_id, bytes)| (token_id as usize, bytes))
+            .iter()
+            .map(|(token_id, bytes)| (*token_id as usize, bytes.clone()))
             .collect(),
     );
+
+    // Partition the vocab into 3 sets by character type and build per-partition trees.
+    let partitions = partition_internal_vocab(internal_vocab);
+    let partition_sizes: [usize; 3] = [
+        partitions[0].len(),
+        partitions[1].len(),
+        partitions[2].len(),
+    ];
+    let partition_trees: Vec<VocabPrefixTree> = partitions
+        .into_iter()
+        .map(|entries| VocabPrefixTree::build_owned(entries))
+        .collect();
+
     let setup_ms = setup_started_at.elapsed().as_secs_f64() * 1000.0;
     let profile_enabled = terminal_dwa_profile_enabled();
     let mut possible_matches = PossibleMatchesComputer::new(tokenizer);
 
     if debug_profile {
         eprintln!(
-            "[glrmask/debug][terminal_dwa] start grammar_rules={} grammar_terminals={} grammar_nonterminals={} tokenizer_states={} internal_tokenizer_states={} vocab_entries={} setup_ms={:.3}",
+            "[glrmask/debug][terminal_dwa] start grammar_rules={} grammar_terminals={} grammar_nonterminals={} tokenizer_states={} internal_tokenizer_states={} vocab_entries={} partitions=[{},{},{}] setup_ms={:.3}",
             grammar.rules.len(),
             grammar.num_terminals,
             grammar.num_nonterminals,
             tokenizer.num_states(),
             id_map.num_tsids(),
             internal_vocab_len,
+            partition_sizes[0],
+            partition_sizes[1],
+            partition_sizes[2],
             setup_ms,
         );
     }
@@ -1716,7 +1869,7 @@ pub(crate) fn build_terminal_dwa_with_possible_matches_and_coloring(
     let possible_matches_started_at = std::time::Instant::now();
     let possible_matches_by_state = collect_possible_matches_by_internal_tsid(
         tokenizer,
-        &vocab_tree.root,
+        &full_tree.root,
         &mut possible_matches,
         &id_map.tokenizer_states,
     );
@@ -1744,43 +1897,81 @@ pub(crate) fn build_terminal_dwa_with_possible_matches_and_coloring(
         &possible_matches_by_state,
     );
     let seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
+    let template_state_count = nwa.num_states();
 
     if debug_profile {
         eprintln!(
-            "[glrmask/debug][terminal_dwa] stage=seed roots={} ms={:.3}",
+            "[glrmask/debug][terminal_dwa] stage=seed roots={} template_states={} ms={:.3}",
             roots_by_tokenizer_state.entries.len(),
+            template_state_count,
             seed_ms,
         );
     }
 
+    // Build partition NWAs in parallel.  Each partition clones the template
+    // NWA (which has start, leaf, and root states) and walks its own
+    // VocabPrefixTree, adding intermediate/leaf transitions.  Afterwards
+    // the three NWAs are merged back with shared root nodes.
     let build_trie_started_at = std::time::Instant::now();
-    let mut builder = TerminalNwaBuilder {
-        tokenizer,
-        terminal_coloring: terminal_coloring.clone(),
-        possible_future_terminals: FxHashMap::default(),
-        future_terminal_color_groups: FxHashMap::default(),
-        possible_matches: &mut possible_matches,
-        nwa: &mut nwa,
-        num_tsids: id_map.num_tsids(),
-        leaf_state,
-        ignore_terminal,
-        use_terminal_coloring,
-        self_loop_bytes: FxHashMap::default(),
-        leaf_token_ids_buffer: Vec::new(),
-        future_leaf_buffer: FxHashMap::default(),
-        reachable_weight_cache: HashMap::new(),
-        pruned_weight_cache: HashMap::new(),
-        leaf_weight_cache: HashMap::new(),
-        transition_buffer: FxHashMap::default(),
-        epsilon_buffer: FxHashMap::default(),
-        profile: TerminalDwaBuildProfile::default(),
-        flat_transitions: vec![None; tokenizer.num_states() as usize],
+
+    let num_tsids = id_map.num_tsids();
+    let num_tokenizer_states = tokenizer.num_states() as usize;
+    let template_nwa = &nwa;
+
+    // Helper closure: build one partition's NWA.
+    let build_one = |tree: &VocabPrefixTree| -> (NWA, TerminalDwaBuildProfile) {
+        let mut part_nwa = template_nwa.clone();
+        let mut pm = PossibleMatchesComputer::new(tokenizer);
+        let mut builder = TerminalNwaBuilder {
+            tokenizer,
+            terminal_coloring: terminal_coloring.clone(),
+            possible_future_terminals: FxHashMap::default(),
+            future_terminal_color_groups: FxHashMap::default(),
+            possible_matches: &mut pm,
+            nwa: &mut part_nwa,
+            num_tsids,
+            leaf_state,
+            ignore_terminal,
+            use_terminal_coloring,
+            self_loop_bytes: FxHashMap::default(),
+            leaf_token_ids_buffer: Vec::new(),
+            future_leaf_buffer: FxHashMap::default(),
+            reachable_weight_cache: HashMap::new(),
+            pruned_weight_cache: HashMap::new(),
+            leaf_weight_cache: HashMap::new(),
+            transition_buffer: FxHashMap::default(),
+            epsilon_buffer: FxHashMap::default(),
+            profile: TerminalDwaBuildProfile::default(),
+            flat_transitions: vec![None; num_tokenizer_states],
+        };
+        builder.build_from_trie(&tree.root, &roots_by_tokenizer_state);
+        builder.flush_transition_buffer();
+        let prof = builder.profile;
+        drop(builder);
+        (part_nwa, prof)
     };
-    builder.build_from_trie(&vocab_tree.root, &roots_by_tokenizer_state);
-    builder.flush_transition_buffer();
-    let profile = builder.profile;
+
+    let ((nwa_a, prof_a), ((nwa_b, prof_b), (nwa_c, prof_c))) = rayon::join(
+        || build_one(&partition_trees[0]),
+        || rayon::join(
+            || build_one(&partition_trees[1]),
+            || build_one(&partition_trees[2]),
+        ),
+    );
+
+    let mut nwa = merge_partition_nwas(
+        template_state_count,
+        vec![nwa_a, nwa_b, nwa_c],
+    );
+    let profile = TerminalDwaBuildProfile {
+        future_terminal_additions: prof_a.future_terminal_additions
+            + prof_b.future_terminal_additions
+            + prof_c.future_terminal_additions,
+        match_transition_additions: prof_a.match_transition_additions
+            + prof_b.match_transition_additions
+            + prof_c.match_transition_additions,
+    };
     let build_trie_ms = build_trie_started_at.elapsed().as_secs_f64() * 1000.0;
-    drop(builder);
 
     if debug_profile {
         eprintln!(

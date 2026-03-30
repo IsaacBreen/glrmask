@@ -138,3 +138,69 @@ impl InternalIdMap {
         self.vocab_tokens.max_original_id()
     }
 }
+
+/// Compute a refined global `InternalIdMap` from partition-specific id maps.
+///
+/// Tokenizer state equivalence is the **finest common refinement**: two states
+/// are globally equivalent iff they are equivalent in every partition.
+///
+/// Token equivalence classes from disjoint partitions are concatenated.
+pub fn refine_partition_id_maps(
+    partition_maps: &[InternalIdMap],
+    num_tokenizer_states: usize,
+    full_vocab_max_token_id: u32,
+) -> InternalIdMap {
+    use std::collections::HashMap;
+
+    // --- State refinement: composite key = (class_P0, class_P1, ...) ---
+    let mut composite_to_class: HashMap<Vec<u32>, u32> = HashMap::new();
+    let mut state_original_to_internal = vec![0u32; num_tokenizer_states];
+    let mut state_internal_to_originals: Vec<Vec<u32>> = Vec::new();
+    let mut state_representative_ids: Vec<u32> = Vec::new();
+
+    for state in 0..num_tokenizer_states {
+        let composite: Vec<u32> = partition_maps
+            .iter()
+            .map(|m| m.tokenizer_states.original_to_internal[state])
+            .collect();
+        let next_id = state_internal_to_originals.len() as u32;
+        let class = *composite_to_class.entry(composite).or_insert_with(|| {
+            state_internal_to_originals.push(Vec::new());
+            state_representative_ids.push(state as u32);
+            next_id
+        });
+        state_original_to_internal[state] = class;
+        state_internal_to_originals[class as usize].push(state as u32);
+    }
+
+    // --- Token refinement: concatenate partition classes ---
+    let mut token_original_to_internal = vec![u32::MAX; full_vocab_max_token_id as usize + 1];
+    let mut token_internal_to_originals: Vec<Vec<u32>> = Vec::new();
+    let mut token_representative_ids: Vec<u32> = Vec::new();
+
+    for id_map in partition_maps {
+        let offset = token_internal_to_originals.len() as u32;
+        for (partition_internal, originals) in id_map.vocab_tokens.internal_to_originals.iter().enumerate() {
+            token_internal_to_originals.push(originals.clone());
+            token_representative_ids.push(
+                id_map.vocab_tokens.representative_original_ids[partition_internal],
+            );
+            for &orig in originals {
+                token_original_to_internal[orig as usize] = offset + partition_internal as u32;
+            }
+        }
+    }
+
+    InternalIdMap {
+        tokenizer_states: ManyToOneIdMap {
+            original_to_internal: state_original_to_internal,
+            internal_to_originals: state_internal_to_originals,
+            representative_original_ids: state_representative_ids,
+        },
+        vocab_tokens: ManyToOneIdMap {
+            original_to_internal: token_original_to_internal,
+            internal_to_originals: token_internal_to_originals,
+            representative_original_ids: token_representative_ids,
+        },
+    }
+}

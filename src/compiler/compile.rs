@@ -14,7 +14,7 @@ use crate::compiler::grammar::model::{GrammarDef, Terminal};
 #[cfg(test)]
 use crate::compiler::grammar::transforms::prepare_grammar_for_compile;
 use crate::compiler::grammar::transforms::prepare_grammar_transforms_only;
-use crate::compiler::stages::equivalence_analysis::InternalIdMap;
+use crate::compiler::stages::equivalence_analysis::{InternalIdMap, refine_partition_id_maps};
 use crate::compiler::stages::parser_dwa::build_parser_dwa_from_terminal_dwa_with_precomputed_templates;
 use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::characterize_terminals;
@@ -23,6 +23,7 @@ use crate::compiler::stages::terminal_dwa::{
     build_terminal_dwa_with_possible_matches_and_coloring,
     compute_terminal_coloring,
     compute_ever_allowed_follows,
+    classify_vocab_char_type,
     TerminalColoring,
 };
 use crate::ds::bitset::BitSet;
@@ -482,12 +483,56 @@ fn compile_prepared_with_profile(
                         ),
                     }
                 } else {
-                    InternalIdMap::build(
-                        &tokenizer,
-                        vocab,
-                        &disallowed_follows,
-                        prepared_grammar.ignore_terminal,
-                    )
+                    // Partition the vocab into 3 character-type groups and
+                    // build per-partition id_maps in parallel, then refine
+                    // into a global id_map.
+                    let mut partition_vocabs: [Vec<(u32, Vec<u8>)>; 3] =
+                        [Vec::new(), Vec::new(), Vec::new()];
+                    for (&token_id, bytes) in &vocab.entries {
+                        let idx = classify_vocab_char_type(bytes) as usize;
+                        partition_vocabs[idx].push((token_id, bytes.clone()));
+                    }
+                    let sub_vocabs: Vec<Vocab> = partition_vocabs
+                        .into_iter()
+                        .map(|entries| Vocab::new(entries, None))
+                        .collect();
+
+                    let disallowed_ref = &disallowed_follows;
+                    let ignore = prepared_grammar.ignore_terminal;
+                    let tok_ref = &tokenizer;
+
+                    let build_partition_id_map = |sub_vocab: &Vocab| -> InternalIdMap {
+                        if sub_vocab.is_empty() {
+                            // Empty partition: map all states to class 0, no tokens.
+                            let num_states = tok_ref.num_states() as usize;
+                            InternalIdMap {
+                                tokenizer_states: crate::compiler::stages::equivalence_analysis::ManyToOneIdMap {
+                                    original_to_internal: vec![0u32; num_states],
+                                    internal_to_originals: vec![(0..num_states as u32).collect()],
+                                    representative_original_ids: vec![0],
+                                },
+                                vocab_tokens: crate::compiler::stages::equivalence_analysis::ManyToOneIdMap {
+                                    original_to_internal: Vec::new(),
+                                    internal_to_originals: Vec::new(),
+                                    representative_original_ids: Vec::new(),
+                                },
+                            }
+                        } else {
+                            InternalIdMap::build(tok_ref, sub_vocab, disallowed_ref, ignore)
+                        }
+                    };
+
+                    let (map_a, (map_b, map_c)) = rayon::join(
+                        || build_partition_id_map(&sub_vocabs[0]),
+                        || rayon::join(
+                            || build_partition_id_map(&sub_vocabs[1]),
+                            || build_partition_id_map(&sub_vocabs[2]),
+                        ),
+                    );
+
+                    let num_states = tok_ref.num_states() as usize;
+                    let max_token = vocab.max_token_id();
+                    refine_partition_id_maps(&[map_a, map_b, map_c], num_states, max_token)
                 };
                 (result, elapsed_ms(id_map_started_at))
             },
