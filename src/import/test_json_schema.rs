@@ -1164,3 +1164,33 @@ fn test_group_wrapped_anchored_pattern_rejects_leading_space() {
         "a non-whitespace leading character should remain allowed after '{{\"question\": \"'",
     );
 }
+
+#[test]
+fn test_large_max_length_string_respects_min_length() {
+    let schema = r#"{
+        "type": "string",
+        "minLength": 8,
+        "maxLength": 2048
+    }"#;
+
+    let vocab = Vocab::new(
+        vec![
+            (1u32, br#""Pass""#.to_vec()),
+            (2u32, br#""Password123""#.to_vec()),
+        ],
+        None,
+    );
+    let c = schema_constraint_with_vocab(schema, &vocab);
+    let state = c.start();
+    let mask = state.mask();
+    assert_token_disallowed(
+        &mask,
+        1,
+        "short string token must be rejected when minLength=8",
+    );
+    assert_token_allowed(
+        &mask,
+        2,
+        "long-enough string token should remain allowed when minLength=8",
+    );
+}

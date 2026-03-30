@@ -481,7 +481,26 @@ fn json_search_branch_fragment_impl(branch: &str, max_tail: Option<usize>) -> St
         // (e.g. LATEX|MATHML) binds correctly with the string_tail suffix/prefix.
         (true, false) => format!("(?:{}){}", inner, string_tail),
         (false, true) => format!("{}(?:{})", string_tail, inner),
-        (false, false) => format!("{}(?:{}){}", string_tail, inner, string_tail),
+        (false, false) => match max_tail {
+            Some(n) => {
+                let constrained_tails = (0..=n)
+                    .map(|left_budget| {
+                        let right_budget = n.saturating_sub(left_budget);
+                        format!(
+                            r#"(?:{}){{0,{}}}(?:{})(?:{}){{0,{}}}"#,
+                            JSON_STRING_CHAR_PATTERN,
+                            left_budget,
+                            inner,
+                            JSON_STRING_CHAR_PATTERN,
+                            right_budget,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("|");
+                format!("(?:{})", constrained_tails)
+            }
+            None => format!("{}(?:{}){}", string_tail, inner, string_tail),
+        },
     }
 }
 
@@ -1311,6 +1330,195 @@ fn json_wrapped_pattern_bounded(pattern: &str, max_tail: usize) -> GrammarExpr {
             literal_expr(b"\""),
         ]),
     }
+}
+
+fn json_wrapped_string_length_regex(min_len: usize, max_len: usize) -> String {
+    if min_len == max_len {
+        return format!(r#""(?:{}){{{}}}""# , JSON_STRING_CHAR_PATTERN, min_len);
+    }
+    format!(
+        r#""(?:{}){{{},{}}}""#,
+        JSON_STRING_CHAR_PATTERN,
+        min_len,
+        max_len,
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SupportedMultipleOf {
+    Integer(u64),
+    ReciprocalPowerOfTen(usize),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+enum IntegerMultipleState {
+    Start,
+    Sign,
+    Zero,
+    Integer(u64),
+    Dot(u64),
+    FractionZero(u64),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+enum ReciprocalPow10State {
+    Start,
+    Sign,
+    Zero,
+    Integer,
+    Dot,
+    FractionWithin(usize),
+    FractionBeyond,
+}
+
+fn supported_multiple_of(value: f64) -> Option<SupportedMultipleOf> {
+    if !value.is_finite() || value <= 0.0 {
+        return None;
+    }
+
+    let rounded = value.round();
+    if (value - rounded).abs() <= 1e-9 && rounded >= 1.0 && rounded <= u64::MAX as f64 {
+        return Some(SupportedMultipleOf::Integer(rounded as u64));
+    }
+
+    power_of_ten_multiple_scale(value).map(SupportedMultipleOf::ReciprocalPowerOfTen)
+}
+
+fn power_of_ten_multiple_scale(value: f64) -> Option<usize> {
+    if !value.is_finite() || value <= 0.0 {
+        return None;
+    }
+
+    let mut scaled = value;
+    for scale in 0..=12 {
+        if (scaled - 1.0).abs() <= 1e-9 {
+            return Some(scale);
+        }
+        scaled *= 10.0;
+    }
+    None
+}
+
+fn integer_multiple_dfa(multiple: u64, allow_fractional_zero: bool) -> LexerDfa {
+    assert!(multiple > 0);
+
+    SchemaCtx::build_product_lexer_dfa(
+        IntegerMultipleState::Start,
+        |state| match state {
+            IntegerMultipleState::Zero => true,
+            IntegerMultipleState::Integer(remainder) => remainder == 0,
+            IntegerMultipleState::FractionZero(remainder) => remainder == 0,
+            _ => false,
+        },
+        |state| {
+            let mut transitions = Vec::new();
+            match state {
+                IntegerMultipleState::Start => {
+                    transitions.push((b'-', IntegerMultipleState::Sign));
+                    transitions.push((b'0', IntegerMultipleState::Zero));
+                    for digit in b'1'..=b'9' {
+                        let remainder = (digit - b'0') as u64 % multiple;
+                        transitions.push((digit, IntegerMultipleState::Integer(remainder)));
+                    }
+                }
+                IntegerMultipleState::Sign => {
+                    transitions.push((b'0', IntegerMultipleState::Zero));
+                    for digit in b'1'..=b'9' {
+                        let remainder = (digit - b'0') as u64 % multiple;
+                        transitions.push((digit, IntegerMultipleState::Integer(remainder)));
+                    }
+                }
+                IntegerMultipleState::Zero => {
+                    if allow_fractional_zero {
+                        transitions.push((b'.', IntegerMultipleState::Dot(0)));
+                    }
+                }
+                IntegerMultipleState::Integer(remainder) => {
+                    if allow_fractional_zero {
+                        transitions.push((b'.', IntegerMultipleState::Dot(remainder)));
+                    }
+                    for digit in b'0'..=b'9' {
+                        let next = (remainder * 10 + (digit - b'0') as u64) % multiple;
+                        transitions.push((digit, IntegerMultipleState::Integer(next)));
+                    }
+                }
+                IntegerMultipleState::Dot(remainder) => {
+                    transitions.push((b'0', IntegerMultipleState::FractionZero(remainder)));
+                }
+                IntegerMultipleState::FractionZero(remainder) => {
+                    transitions.push((b'0', IntegerMultipleState::FractionZero(remainder)));
+                }
+            }
+            transitions
+        },
+    )
+}
+
+fn reciprocal_power_of_ten_dfa(scale: usize) -> LexerDfa {
+    assert!(scale > 0);
+
+    SchemaCtx::build_product_lexer_dfa(
+        ReciprocalPow10State::Start,
+        |state| match state {
+            ReciprocalPow10State::Zero
+            | ReciprocalPow10State::Integer
+            | ReciprocalPow10State::FractionWithin(_)
+            | ReciprocalPow10State::FractionBeyond => true,
+            _ => false,
+        },
+        |state| {
+            let mut transitions = Vec::new();
+            match state {
+                ReciprocalPow10State::Start => {
+                    transitions.push((b'-', ReciprocalPow10State::Sign));
+                    transitions.push((b'0', ReciprocalPow10State::Zero));
+                    for digit in b'1'..=b'9' {
+                        transitions.push((digit, ReciprocalPow10State::Integer));
+                    }
+                }
+                ReciprocalPow10State::Sign => {
+                    transitions.push((b'0', ReciprocalPow10State::Zero));
+                    for digit in b'1'..=b'9' {
+                        transitions.push((digit, ReciprocalPow10State::Integer));
+                    }
+                }
+                ReciprocalPow10State::Zero | ReciprocalPow10State::Integer => {
+                    transitions.push((b'.', ReciprocalPow10State::Dot));
+                    if state == ReciprocalPow10State::Integer {
+                        for digit in b'0'..=b'9' {
+                            transitions.push((digit, ReciprocalPow10State::Integer));
+                        }
+                    }
+                }
+                ReciprocalPow10State::Dot => {
+                    for digit in b'0'..=b'9' {
+                        transitions.push((digit, ReciprocalPow10State::FractionWithin(1)));
+                    }
+                }
+                ReciprocalPow10State::FractionWithin(consumed) => {
+                    if consumed < scale {
+                        for digit in b'0'..=b'9' {
+                            transitions.push((digit, ReciprocalPow10State::FractionWithin(consumed + 1)));
+                        }
+                    } else {
+                        transitions.push((b'0', ReciprocalPow10State::FractionBeyond));
+                    }
+                }
+                ReciprocalPow10State::FractionBeyond => {
+                    transitions.push((b'0', ReciprocalPow10State::FractionBeyond));
+                }
+            }
+            transitions
+        },
+    )
+}
+
+fn compile_regex_union_dfa(regexes: &[String]) -> LexerDfa {
+    let exprs = regexes
+        .iter()
+        .map(|regex| parse_regex(regex, true))
+        .collect::<Vec<_>>();
+    build_regex(&exprs).dfa
 }
 
 fn json_wrapped_fullmatch_pattern(pattern: &str) -> GrammarExpr {
@@ -3615,10 +3823,65 @@ impl<'a> SchemaCtx<'a> {
             Some((int_left, int_right))
         }
 
+        fn number_base_regexes(nonnegative: bool) -> Vec<String> {
+            let integer = if nonnegative {
+                r#"(0|[1-9][0-9]*)"#
+            } else {
+                r#"-?(0|[1-9][0-9]*)"#
+            };
+            let noninteger = if nonnegative {
+                JSON_NONNEG_NUMBER_NONINTEGER_REGEX
+            } else {
+                JSON_NUMBER_NONINTEGER_REGEX
+            };
+            vec![integer.to_string(), noninteger.to_string()]
+        }
+
+        let build_supported_multiple_expr = |
+            this: &mut Self,
+            regexes: Vec<String>,
+            supported: SupportedMultipleOf,
+            allow_fractional_zero: bool,
+        | {
+            let base_dfa = compile_regex_union_dfa(&regexes);
+            let multiple_dfa = match supported {
+                SupportedMultipleOf::Integer(multiple) => {
+                    integer_multiple_dfa(multiple, allow_fractional_zero)
+                }
+                SupportedMultipleOf::ReciprocalPowerOfTen(scale) => {
+                    reciprocal_power_of_ten_dfa(scale)
+                }
+            };
+            let intersected = Self::intersect_lexer_dfa(&base_dfa, &multiple_dfa);
+            this.build_lexer_dfa_expr(&intersected, "JSON_NUMBER_MULTIPLE_OF")
+        };
+
         let (left, left_inclusive, right, right_inclusive) = normalize_numeric_bounds(schema);
+        let multiple_of = schema.get("multipleOf").and_then(Value::as_f64);
+        let supported_multiple = multiple_of.and_then(supported_multiple_of);
 
         let has_bounds = left.is_some() || right.is_some();
         if !has_bounds {
+            if let Some(supported) = supported_multiple {
+                return match (type_name, supported) {
+                    ("integer", SupportedMultipleOf::ReciprocalPowerOfTen(_)) => {
+                        self.json_integer_ref()
+                    }
+                    ("integer", SupportedMultipleOf::Integer(_)) => build_supported_multiple_expr(
+                        self,
+                        vec![r#"-?(0|[1-9][0-9]*)"#.to_string()],
+                        supported,
+                        false,
+                    ),
+                    ("number", _) => build_supported_multiple_expr(
+                        self,
+                        number_base_regexes(false),
+                        supported,
+                        true,
+                    ),
+                    _ => self.json_value_ref(),
+                };
+            }
             return if type_name == "integer" {
                 self.json_integer_ref()
             } else {
@@ -3629,6 +3892,26 @@ impl<'a> SchemaCtx<'a> {
         // Only the exact lower bound of 0 can safely use the generic non-negative rules.
         let use_nonneg_shortcut = right.is_none() && left == Some(0.0) && left_inclusive;
         if use_nonneg_shortcut {
+            if let Some(supported) = supported_multiple {
+                return match (type_name, supported) {
+                    ("integer", SupportedMultipleOf::ReciprocalPowerOfTen(_)) => {
+                        GrammarExpr::Ref(JSON_NONNEG_INTEGER_RULE.into())
+                    }
+                    ("integer", SupportedMultipleOf::Integer(_)) => build_supported_multiple_expr(
+                        self,
+                        vec![r#"(0|[1-9][0-9]*)"#.to_string()],
+                        supported,
+                        false,
+                    ),
+                    ("number", _) => build_supported_multiple_expr(
+                        self,
+                        number_base_regexes(true),
+                        supported,
+                        true,
+                    ),
+                    _ => self.json_value_ref(),
+                };
+            }
             return if type_name == "integer" {
                 GrammarExpr::Ref(JSON_NONNEG_INTEGER_RULE.into())
             } else {
@@ -3650,7 +3933,21 @@ impl<'a> SchemaCtx<'a> {
             let int_left = left.map(|l| if left_inclusive { l as i64 } else { l as i64 + 1 });
             let int_right = right.map(|r| if right_inclusive { r as i64 } else { r as i64 - 1 });
             return match rx_int_range(int_left, int_right) {
-                Ok(regex) => GrammarExpr::RawRegex(regex),
+                Ok(regex) => {
+                    if let Some(supported) = supported_multiple {
+                        match supported {
+                            SupportedMultipleOf::ReciprocalPowerOfTen(_) => GrammarExpr::RawRegex(regex),
+                            SupportedMultipleOf::Integer(_) => build_supported_multiple_expr(
+                                self,
+                                vec![regex],
+                                supported,
+                                false,
+                            ),
+                        }
+                    } else {
+                        GrammarExpr::RawRegex(regex)
+                    }
+                }
                 Err(_) => self.json_integer_ref(),
             };
         }
@@ -3668,13 +3965,44 @@ impl<'a> SchemaCtx<'a> {
 
         match (float_regex_result, non_integer_regex_result, integer_range_result) {
             (Ok(_float_regex), Ok(Some(non_integer_regex)), Some(Ok(int_regex))) => {
-                choice_or_single(vec![
-                    regex_expr(int_regex),
-                    regex_expr(non_integer_regex),
-                ])
+                if let Some(supported) = supported_multiple {
+                    build_supported_multiple_expr(
+                        self,
+                        vec![int_regex, non_integer_regex],
+                        supported,
+                        true,
+                    )
+                } else {
+                    choice_or_single(vec![
+                        regex_expr(int_regex),
+                        regex_expr(non_integer_regex),
+                    ])
+                }
             }
-            (Ok(_float_regex), Ok(Some(non_integer_regex)), None) => regex_expr(non_integer_regex),
-            (Ok(_float_regex), Ok(None), Some(Ok(int_regex))) => regex_expr(int_regex),
+            (Ok(_float_regex), Ok(Some(non_integer_regex)), None) => {
+                if let Some(supported) = supported_multiple {
+                    build_supported_multiple_expr(
+                        self,
+                        vec![non_integer_regex],
+                        supported,
+                        true,
+                    )
+                } else {
+                    regex_expr(non_integer_regex)
+                }
+            }
+            (Ok(_float_regex), Ok(None), Some(Ok(int_regex))) => {
+                if let Some(supported) = supported_multiple {
+                    build_supported_multiple_expr(
+                        self,
+                        vec![int_regex],
+                        supported,
+                        true,
+                    )
+                } else {
+                    regex_expr(int_regex)
+                }
+            }
             _ => self.json_number_type_expr(),
         }
     }
@@ -3707,21 +4035,21 @@ impl<'a> SchemaCtx<'a> {
                 return Ok(json_wrapped_pattern(&pattern));
             }
             if min_len > 0 || max_len.is_some() {
-                // Unanchored pattern with length bounds. Use bounded search
-                // wrapping (string tails capped to maxLength) to keep the DFA
-                // compact. For very large maxLength values, fall through to the
-                // length-only path to avoid state explosion.
+                // Unanchored pattern with length bounds. For reasonably small
+                // maxLength values, build the exact intersection of:
+                // 1. the quoted JSON-string search-pattern regex, and
+                // 2. the quoted JSON-string length-bounded regex.
+                // This preserves JSON Schema search semantics while enforcing
+                // minLength/maxLength exactly.
                 const MAX_BOUNDED_SEARCH_TAIL: usize = 100;
                 if let Some(ml) = max_len {
                     if ml <= MAX_BOUNDED_SEARCH_TAIL {
-                        // Subtract the pattern's minimum character count from
-                        // maxLength so the string tails cannot extend the
-                        // total content beyond the length constraint.
-                        // Falls back to full maxLength when the pattern
-                        // contains unsupported syntax (None → 0).
-                        let pattern_min = pattern_min_char_count(&pattern).unwrap_or(0);
-                        let tail_budget = ml.saturating_sub(pattern_min);
-                        return Ok(json_wrapped_pattern_bounded(&pattern, tail_budget));
+                        let search_regex = format!(r#""(?:{})""#, json_search_pattern(&pattern));
+                        let search_dfa = build_regex(&[parse_regex(&search_regex, true)]).dfa;
+                        let length_regex = json_wrapped_string_length_regex(min_len, ml);
+                        let length_dfa = build_regex(&[parse_regex(&length_regex, true)]).dfa;
+                        let intersected = Self::intersect_lexer_dfa(&search_dfa, &length_dfa);
+                        return Ok(self.build_lexer_dfa_expr(&intersected, "JSON_STRING_PATTERN_BOUNDED"));
                     }
                 }
                 // maxLength is too large or absent — drop pattern, use length only
@@ -6367,6 +6695,80 @@ mod tests {
     }
 
     #[test]
+    fn test_integer_multiple_of_rejects_invalid_open_values() {
+        let schema = r#"{
+            "type": "integer",
+            "multipleOf": 5
+        }"#;
+
+        assert!(accepts_sequence(schema, &[b"5"]));
+        assert!(accepts_sequence(schema, &[b"10"]));
+        assert!(!accepts_sequence(schema, &[b"7"]));
+        assert!(!accepts_sequence(schema, &[b"12"]));
+    }
+
+    #[test]
+    fn test_integer_multiple_of_rejects_invalid_bounded_values() {
+        let schema = r#"{
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10,
+            "multipleOf": 5
+        }"#;
+
+        assert!(accepts_sequence(schema, &[b"0"]));
+        assert!(accepts_sequence(schema, &[b"5"]));
+        assert!(accepts_sequence(schema, &[b"10"]));
+        assert!(!accepts_sequence(schema, &[b"7"]));
+    }
+
+    #[test]
+    fn test_number_integer_multiple_of_allows_zero_fraction_only() {
+        let schema = r#"{
+            "type": "number",
+            "multipleOf": 5
+        }"#;
+
+        assert!(lexer_dfa_accepts(&integer_multiple_dfa(5, true), b"10.0"));
+        assert!(accepts_sequence(schema, &[b"10"]));
+        assert!(accepts_sequence(schema, &[b"10.0"]));
+        assert!(accepts_sequence(schema, &[b"10.000"]));
+        assert!(!accepts_sequence(schema, &[b"10.5"]));
+        assert!(!accepts_sequence(schema, &[b"7"]));
+    }
+
+    #[test]
+    fn test_nonnegative_power_of_ten_multiple_of_rejects_extra_precision() {
+        let schema = r#"{
+            "type": "number",
+            "minimum": 0,
+            "multipleOf": 0.01
+        }"#;
+
+        assert!(lexer_dfa_accepts(&reciprocal_power_of_ten_dfa(2), b"10.99"));
+        assert!(accepts_sequence(schema, &[b"10.99"]));
+        assert!(accepts_sequence(schema, &[b"10.0"]));
+        assert!(accepts_sequence(schema, &[b"10.000"]));
+        assert!(accepts_sequence(schema, &[b"10"]));
+        assert!(!accepts_sequence(schema, &[b"10.001"]));
+        assert!(!accepts_sequence(schema, &[b"-10.0"]));
+    }
+
+    #[test]
+    fn test_power_of_ten_multiple_of_rejects_extra_precision_without_bounds() {
+        let schema = r#"{
+            "type": "number",
+            "multipleOf": 0.01
+        }"#;
+
+        assert!(lexer_dfa_accepts(&reciprocal_power_of_ten_dfa(2), b"10.0"));
+        assert!(accepts_sequence(schema, &[b"10"]));
+        assert!(accepts_sequence(schema, &[b"10.0"]));
+        assert!(accepts_sequence(schema, &[b"10.000"]));
+        assert!(!accepts_sequence(schema, &[b"10.001"]));
+    }
+
+    #[test]
     fn test_allof_ref_merge_preserves_required_properties() {
         let schema = r##"{
             "type": "object",
@@ -6435,6 +6837,29 @@ mod tests {
         accepts_compiled_sequence(tokens, |vocab| {
             crate::Constraint::from_json_schema(schema_json, vocab)
         })
+    }
+
+    fn regex_dfa_accepts(pattern: &str, text: &[u8]) -> bool {
+        let dfa = build_regex(&[parse_regex(pattern, true)]).dfa;
+        let mut state = 0u32;
+        for &byte in text {
+            let Some(next) = dfa.step(state, byte) else {
+                return false;
+            };
+            state = next;
+        }
+        dfa.finalizers(state).contains(0)
+    }
+
+    fn lexer_dfa_accepts(dfa: &LexerDfa, text: &[u8]) -> bool {
+        let mut state = 0u32;
+        for &byte in text {
+            let Some(next) = dfa.step(state, byte) else {
+                return false;
+            };
+            state = next;
+        }
+        !dfa.finalizers(state).is_empty()
     }
 
     fn accepts_ebnf_sequence(ebnf: &str, tokens: &[&[u8]]) -> bool {
@@ -6573,6 +6998,26 @@ mod tests {
         // Non-digit string should be rejected
         assert!(!accepts_sequence(schema, &[br#""egg""#]));
         assert!(!accepts_sequence(schema, &[br#""abcdefghij""#]));
+    }
+
+    #[test]
+    fn test_unanchored_pattern_with_max_length_rejects_overlong_match() {
+        // Regression: with an unanchored pattern and maxLength, the importer
+        // must keep the combined prefix+suffix slack within the remaining
+        // length budget, not apply that budget independently to both sides.
+        let schema = r#"{
+            "type": "string",
+            "pattern": "[0-9a-fA-F]+",
+            "minLength": 12,
+            "maxLength": 12
+        }"#;
+        let search_regex = format!(r#""(?:{})""#, json_search_pattern("[0-9a-fA-F]+"));
+        let length_regex = json_wrapped_string_length_regex(12, 12);
+        assert!(regex_dfa_accepts(&search_regex, br#""0123456789ab""#));
+        assert!(regex_dfa_accepts(&length_regex, br#""0123456789ab""#));
+        assert!(accepts_sequence(schema, &[br#""0123456789ab""#]));
+        assert!(!accepts_sequence(schema, &[br#""0123456789abc""#]));
+        assert!(!accepts_sequence(schema, &[br#""0123456789abz""#]));
     }
 
     #[test]
