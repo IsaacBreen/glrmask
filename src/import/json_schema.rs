@@ -1272,20 +1272,110 @@ fn env_flag(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn split_close_quote_colon_enabled() -> bool {
-    env_flag("GLRMASK_SPLIT_CLOSE_QUOTE_COLON")
-}
-
-fn no_open_quote_split() -> bool {
-    env_flag("GLRMASK_NO_OPEN_QUOTE_SPLIT")
+fn split_open_quote() -> bool {
+    // Default to true: opening quote is split unless explicitly disabled
+    std::env::var("GLRMASK_SPLIT_OPEN_QUOTE")
+        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off"))
+        .unwrap_or(true)
 }
 
 fn split_close_quote() -> bool {
     env_flag("GLRMASK_SPLIT_CLOSE_QUOTE")
 }
 
-fn split_key_colon_suffix_enabled() -> bool {
-    env_flag("GLRMASK_SPLIT_KEY_COLON_SUFFIX")
+fn split_colon_space() -> bool {
+    env_flag("GLRMASK_SPLIT_COLON_SPACE")
+}
+
+fn split_colon_from_space() -> bool {
+    env_flag("GLRMASK_SPLIT_COLON_FROM_SPACE")
+}
+
+/// Wrap a string body regex in opening/closing quote handling.
+///
+/// For values: `"body"` with configurable quote splitting.
+fn wrap_string_value_regex(inner_regex: &str) -> GrammarExpr {
+    let open = split_open_quote();
+    let close = split_close_quote();
+    match (open, close) {
+        (false, false) => regex_expr(format!(r#""(?:{})""#, inner_regex)),
+        (false, true) => sequence_or_single(vec![
+            regex_expr(format!(r#""(?:{})"#, inner_regex)),
+            literal_expr(b"\""),
+        ]),
+        (true, false) => sequence_or_single(vec![
+            literal_expr(b"\""),
+            regex_expr(format!(r#"(?:{})""#, inner_regex)),
+        ]),
+        (true, true) => sequence_or_single(vec![
+            literal_expr(b"\""),
+            regex_expr(format!(r#"(?:{})"#, inner_regex)),
+            literal_expr(b"\""),
+        ]),
+    }
+}
+
+/// Build the colon-space suffix expression for keys: `": "`, `":"` + `" "`, or nothing.
+fn key_colon_suffix_expr() -> GrammarExpr {
+    if split_colon_from_space() {
+        sequence_or_single(vec![literal_expr(b":"), literal_expr(b" ")])
+    } else {
+        literal_expr(b": ")
+    }
+}
+
+/// Wrap a key body regex in opening quote, closing quote, and colon-space handling.
+///
+/// For keys: `"body": ` with configurable splitting of `"` (open/close) and `": "`.
+///
+/// The body terminal always contains the key content regex.
+/// Split flags control which delimiters are separate terminals:
+///  - `split_open_quote`: leading `"` is a separate terminal
+///  - `split_close_quote`: trailing `"` is a separate terminal
+///  - `split_colon_space`: `: ` is a separate terminal
+///  - `split_colon_from_space`: `:` and ` ` are separate terminals (within colon-space)
+///
+/// When close_quote is split but colon_space is not, the `"\": "` suffix
+/// becomes a single literal terminal. When both are split, `"` and `: ` are
+/// separate terminals.
+fn wrap_key_colon_regex(inner_regex: &str) -> GrammarExpr {
+    let open = split_open_quote();
+    let close = split_close_quote();
+    let colon = split_colon_space();
+
+    // Build the body terminal regex. It absorbs everything not split off.
+    let body_regex = match (open, close, colon) {
+        (false, false, false) => format!(r#""(?:{})\": "#, inner_regex),
+        (false, false, true)  => format!(r#""(?:{})""#, inner_regex),
+        (false, true, _)      => format!(r#""(?:{})"#, inner_regex),
+        (true, false, false)  => format!(r#"(?:{})\": "#, inner_regex),
+        (true, false, true)   => format!(r#"(?:{})""#, inner_regex),
+        (true, true, _)       => format!(r#"(?:{})"#, inner_regex),
+    };
+    let body = regex_expr(body_regex);
+
+    let mut parts = Vec::new();
+    if open {
+        parts.push(literal_expr(b"\""));
+    }
+    parts.push(body);
+    if close && colon {
+        // Both close quote and colon-space are independently split
+        parts.push(literal_expr(b"\""));
+        parts.push(key_colon_suffix_expr());
+    } else if close {
+        // Close quote is split but colon-space is not independently split.
+        // The `"\": "` suffix is one literal terminal.
+        parts.push(literal_expr(b"\": "));
+    } else if colon {
+        // Colon-space is split but close quote is not.
+        // Body regex already includes the close quote: `"body"` or `body"`.
+        // Emit `: ` (or `:` + ` `) as separate terminal(s).
+        parts.push(key_colon_suffix_expr());
+    }
+    // If neither close nor colon: body regex already has `"\": "`
+
+    sequence_or_single(parts)
 }
 
 fn no_additional_properties() -> bool {
@@ -1298,46 +1388,12 @@ fn ap_key_any_string() -> bool {
 
 fn json_wrapped_pattern(pattern: &str) -> GrammarExpr {
     let inner = json_search_pattern(pattern);
-    let open_split = !no_open_quote_split();
-    let close_split = split_close_quote();
-    match (open_split, close_split) {
-        (false, false) => regex_expr(format!(r#""(?:{})""#, inner)),
-        (false, true) => sequence_or_single(vec![
-            regex_expr(format!(r#""(?:{})"#, inner)),
-            literal_expr(b"\""),
-        ]),
-        (true, false) => sequence_or_single(vec![
-            literal_expr(b"\""),
-            regex_expr(format!(r#"(?:{})""#, inner)),
-        ]),
-        (true, true) => sequence_or_single(vec![
-            literal_expr(b"\""),
-            regex_expr(format!(r#"(?:{})"#, inner)),
-            literal_expr(b"\""),
-        ]),
-    }
+    wrap_string_value_regex(&inner)
 }
 
 fn json_wrapped_pattern_bounded(pattern: &str, max_tail: usize) -> GrammarExpr {
     let inner = json_search_pattern_bounded(pattern, max_tail);
-    let open_split = !no_open_quote_split();
-    let close_split = split_close_quote();
-    match (open_split, close_split) {
-        (false, false) => regex_expr(format!(r#""(?:{})""#, inner)),
-        (false, true) => sequence_or_single(vec![
-            regex_expr(format!(r#""(?:{})"#, inner)),
-            literal_expr(b"\""),
-        ]),
-        (true, false) => sequence_or_single(vec![
-            literal_expr(b"\""),
-            regex_expr(format!(r#"(?:{})""#, inner)),
-        ]),
-        (true, true) => sequence_or_single(vec![
-            literal_expr(b"\""),
-            regex_expr(format!(r#"(?:{})"#, inner)),
-            literal_expr(b"\""),
-        ]),
-    }
+    wrap_string_value_regex(&inner)
 }
 
 fn json_wrapped_string_length_regex(min_len: usize, max_len: usize) -> String {
@@ -1531,52 +1587,50 @@ fn compile_regex_union_dfa(regexes: &[String]) -> LexerDfa {
 
 fn json_wrapped_fullmatch_pattern(pattern: &str) -> GrammarExpr {
     let inner = jsonify_regex_dot(pattern);
-    let open_split = !no_open_quote_split();
-    let close_split = split_close_quote();
-    match (open_split, close_split) {
-        (false, false) => regex_expr(format!(r#""(?:{})""#, inner)),
-        (false, true) => sequence_or_single(vec![
-            regex_expr(format!(r#""(?:{})"#, inner)),
-            literal_expr(b"\""),
-        ]),
-        (true, false) => sequence_or_single(vec![
-            literal_expr(b"\""),
-            regex_expr(format!(r#"(?:{})""#, inner)),
-        ]),
-        (true, true) => sequence_or_single(vec![
-            literal_expr(b"\""),
-            regex_expr(format!(r#"(?:{})"#, inner)),
-            literal_expr(b"\""),
-        ]),
-    }
+    wrap_string_value_regex(&inner)
 }
 
 fn json_wrapped_key_colon_pattern(pattern: &str) -> GrammarExpr {
     let inner = json_search_pattern(pattern);
-    if split_key_colon_suffix_enabled() {
-        // Config D: keep opening quote with body, split closing ": "
-        sequence_or_single(vec![
-            regex_expr(format!(r#""(?:{})"#, inner)),
-            literal_expr(b"\": "),
-        ])
-    } else if no_open_quote_split() {
-        regex_expr(format!(r#""(?:{})\": "#, inner))
-    } else if split_close_quote_colon_enabled() {
-        sequence_or_single(vec![
-            literal_expr(b"\""),
-            regex_expr(format!(r#"(?:{})"#, inner)),
-            literal_expr(b"\": "),
-        ])
-    } else {
-        sequence_or_single(vec![
-            literal_expr(b"\""),
-            regex_expr(format!(r#"(?:{})\": "#, inner)),
-        ])
-    }
+    wrap_key_colon_regex(&inner)
+}
+
+/// Wrap a GrammarExpr body in quotes, respecting split_open_quote / split_close_quote.
+/// Returns (terminal_body, full_expr) where terminal_body is the part to pass to
+/// extract_terminal_rule, and full_expr wraps it with literal quote pieces.
+fn wrap_string_value_expr_parts(body: GrammarExpr) -> (GrammarExpr, Box<dyn FnOnce(GrammarExpr) -> GrammarExpr>) {
+    let open = split_open_quote();
+    let close = split_close_quote();
+    let terminal_body = match (open, close) {
+        (false, false) => sequence_or_single(vec![literal_expr(b"\""), body, literal_expr(b"\"")]),
+        (false, true) => sequence_or_single(vec![literal_expr(b"\""), body]),
+        (true, false) => sequence_or_single(vec![body, literal_expr(b"\"")]),
+        (true, true) => body,
+    };
+    let wrap = move |term: GrammarExpr| -> GrammarExpr {
+        match (open, close) {
+            (false, false) => term,
+            (false, true) => sequence_or_single(vec![term, literal_expr(b"\"")]),
+            (true, false) => sequence_or_single(vec![literal_expr(b"\""), term]),
+            (true, true) => sequence_or_single(vec![literal_expr(b"\""), term, literal_expr(b"\"")]),
+        }
+    };
+    (terminal_body, Box::new(wrap))
 }
 
 fn quoted_expr(inner: GrammarExpr) -> GrammarExpr {
-    sequence_or_single(vec![literal_expr(b"\""), inner, literal_expr(b"\"")])
+    let open = split_open_quote();
+    let close = split_close_quote();
+    let mut parts = Vec::new();
+    if !open { parts.push(literal_expr(b"\"")); }
+    parts.push(inner);
+    if !close { parts.push(literal_expr(b"\"")); }
+    let body = sequence_or_single(parts);
+    let mut result_parts = Vec::new();
+    if open { result_parts.push(literal_expr(b"\"")); }
+    result_parts.push(body);
+    if close { result_parts.push(literal_expr(b"\"")); }
+    sequence_or_single(result_parts)
 }
 
 fn json_date_body_expr() -> GrammarExpr {
@@ -1740,9 +1794,9 @@ fn json_value_literal_bytes(value: &Value) -> Vec<u8> {
 fn json_value_literal_expr(value: &Value) -> GrammarExpr {
     let bytes = json_value_literal_bytes(value);
     if value.is_string() && bytes.len() >= 2 && bytes[0] == b'"' {
-        let open_split = !no_open_quote_split();
-        let close_split = split_close_quote();
-        match (open_split, close_split) {
+        let open = split_open_quote();
+        let close = split_close_quote();
+        match (open, close) {
             (false, false) => literal_expr(&bytes),
             (false, true) if bytes.last() == Some(&b'"') => sequence_or_single(vec![
                 literal_expr(&bytes[..bytes.len() - 1]),
@@ -3005,48 +3059,36 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn ensure_base_rules(&mut self) {
-        let open_split = !no_open_quote_split();
-        let close_split = split_close_quote();
+        let open = split_open_quote();
+        let close = split_close_quote();
+        let colon = split_colon_space();
 
         self.insert_rule(JSON_STRING_CHAR_RULE, regex_expr(JSON_STRING_CHAR_PATTERN));
 
         // JSON_STRING_BODY_RULE: the body regex used in split paths.
-        // Its definition depends on whether the closing quote is fused.
-        let body_regex = if close_split {
+        let body_regex = if close {
             JSON_STRING_BODY_ONLY_REGEX // body chars only, no closing "
         } else {
             JSON_STRING_BODY_REGEX // body chars + closing "
         };
         self.insert_rule(JSON_STRING_BODY_RULE, regex_expr(body_regex));
 
-        // JSON_STRING_RULE: 4-way based on open_split × close_split.
-        let json_string_expr = match (open_split, close_split) {
-            (false, false) => {
-                // No split: full string as one terminal regex: "body*"
-                regex_expr(JSON_STRING_FULL_REGEX)
-            }
-            (true, false) => {
-                // Open only: literal(") + body*"
-                sequence_or_single(vec![
-                    literal_expr(b"\""),
-                    GrammarExpr::Ref(JSON_STRING_BODY_RULE.into()),
-                ])
-            }
-            (false, true) => {
-                // Close only: "body* + literal(")
-                sequence_or_single(vec![
-                    regex_expr(JSON_STRING_OPEN_BODY_REGEX),
-                    literal_expr(b"\""),
-                ])
-            }
-            (true, true) => {
-                // Both split: literal(") + body* + literal(")
-                sequence_or_single(vec![
-                    literal_expr(b"\""),
-                    GrammarExpr::Ref(JSON_STRING_BODY_RULE.into()),
-                    literal_expr(b"\""),
-                ])
-            }
+        // JSON_STRING_RULE: 4-way based on open × close.
+        let json_string_expr = match (open, close) {
+            (false, false) => regex_expr(JSON_STRING_FULL_REGEX),
+            (true, false) => sequence_or_single(vec![
+                literal_expr(b"\""),
+                GrammarExpr::Ref(JSON_STRING_BODY_RULE.into()),
+            ]),
+            (false, true) => sequence_or_single(vec![
+                regex_expr(JSON_STRING_OPEN_BODY_REGEX),
+                literal_expr(b"\""),
+            ]),
+            (true, true) => sequence_or_single(vec![
+                literal_expr(b"\""),
+                GrammarExpr::Ref(JSON_STRING_BODY_RULE.into()),
+                literal_expr(b"\""),
+            ]),
         };
         self.insert_rule(JSON_STRING_RULE, json_string_expr);
         self.insert_rule(JSON_INTEGER_RULE, regex_expr(r#"-?(0|[1-9][0-9]*)"#));
@@ -3059,44 +3101,17 @@ impl<'a> SchemaCtx<'a> {
         );
         self.insert_rule(JSON_NULL_RULE, literal_expr(b"null"));
 
-        // JSON_KEY_COLON_BODY_RULE: the key body regex used in split paths.
-        let kc_body_regex = if close_split {
-            JSON_STRING_BODY_ONLY_REGEX // body only (closing " split into suffix literal)
+        // JSON_KEY_COLON_BODY_RULE: the key body regex.
+        // If close or colon is split, body doesn't include `"\": "` suffix.
+        let kc_body_regex = if close || colon {
+            JSON_STRING_BODY_ONLY_REGEX
         } else {
-            JSON_KEY_COLON_BODY_REGEX // body + ": 
+            JSON_KEY_COLON_BODY_REGEX // body + `"\": `
         };
         self.insert_rule(JSON_KEY_COLON_BODY_RULE, regex_expr(kc_body_regex));
 
-        // JSON_KEY_COLON_RULE: respects open_split.
-        // close_split for key-colon means the `": ` suffix is split out.
-        let json_key_colon_expr = match (open_split, close_split) {
-            (false, false) => {
-                // No split: full key+colon as one terminal regex: "body*": 
-                regex_expr(JSON_KEY_COLON_FULL_REGEX)
-            }
-            (true, false) => {
-                // Open only: literal(") + body*": 
-                sequence_or_single(vec![
-                    literal_expr(b"\""),
-                    GrammarExpr::Ref(JSON_KEY_COLON_BODY_RULE.into()),
-                ])
-            }
-            (false, true) => {
-                // Close only: "body* + literal(": )
-                sequence_or_single(vec![
-                    regex_expr(JSON_STRING_OPEN_BODY_REGEX),
-                    literal_expr(b"\": "),
-                ])
-            }
-            (true, true) => {
-                // Both split: literal(") + body* + literal(": )
-                sequence_or_single(vec![
-                    literal_expr(b"\""),
-                    GrammarExpr::Ref(JSON_KEY_COLON_BODY_RULE.into()),
-                    literal_expr(b"\": "),
-                ])
-            }
-        };
+        // JSON_KEY_COLON_RULE: respects all split flags.
+        let json_key_colon_expr = wrap_key_colon_regex(JSON_STRING_BODY_ONLY_REGEX);
         self.insert_rule(JSON_KEY_COLON_RULE, json_key_colon_expr);
         self.insert_rule(
             JSON_KV_RULE,
@@ -4074,18 +4089,18 @@ impl<'a> SchemaCtx<'a> {
         }
 
         if self.should_split_bounded_string(min_len, max_len) {
-            let open_split = !no_open_quote_split();
-            let close_split = split_close_quote();
-            let prefix = if open_split { None } else { Some(literal_expr(b"\"")) };
-            let suffix = if close_split { None } else { Some(literal_expr(b"\"")) };
+            let open = split_open_quote();
+            let close = split_close_quote();
+            let prefix = if open { None } else { Some(literal_expr(b"\"")) };
+            let suffix = if close { None } else { Some(literal_expr(b"\"")) };
             let body = self.build_split_json_string_body_wrapped(min_len, max_len, prefix, suffix);
 
             let mut result_parts = Vec::new();
-            if open_split {
+            if open {
                 result_parts.push(literal_expr(b"\""));
             }
             result_parts.push(body);
-            if close_split {
+            if close {
                 result_parts.push(literal_expr(b"\""));
             }
 
@@ -4116,23 +4131,9 @@ impl<'a> SchemaCtx<'a> {
             }
         };
 
-        let open_split = !no_open_quote_split();
-        let close_split = split_close_quote();
-        let body = self.extract_terminal_rule(
-            match (open_split, close_split) {
-                (false, false) => sequence_or_single(vec![literal_expr(b"\""), bounded_body, literal_expr(b"\"")]),
-                (false, true) => sequence_or_single(vec![literal_expr(b"\""), bounded_body]),
-                (true, false) => sequence_or_single(vec![bounded_body, literal_expr(b"\"")]),
-                (true, true) => bounded_body,
-            },
-            "JSON_STRING_BOUNDED",
-        );
-        match (open_split, close_split) {
-            (false, false) => Ok(body),
-            (false, true) => Ok(sequence_or_single(vec![body, literal_expr(b"\"")])),
-            (true, false) => Ok(sequence_or_single(vec![literal_expr(b"\""), body])),
-            (true, true) => Ok(sequence_or_single(vec![literal_expr(b"\""), body, literal_expr(b"\"")])),
-        }
+        let (terminal_body, wrap) = wrap_string_value_expr_parts(bounded_body);
+        let body = self.extract_terminal_rule(terminal_body, "JSON_STRING_BOUNDED");
+        Ok(wrap(body))
     }
 
     fn build_bounded_string_from_unit_regex(
@@ -4167,23 +4168,9 @@ impl<'a> SchemaCtx<'a> {
             }
         };
 
-        let open_split = !no_open_quote_split();
-        let close_split = split_close_quote();
-        let body = self.extract_terminal_rule(
-            match (open_split, close_split) {
-                (false, false) => sequence_or_single(vec![literal_expr(b"\""), bounded_body, literal_expr(b"\"")]),
-                (false, true) => sequence_or_single(vec![literal_expr(b"\""), bounded_body]),
-                (true, false) => sequence_or_single(vec![bounded_body, literal_expr(b"\"")]),
-                (true, true) => bounded_body,
-            },
-            "JSON_STRING_BOUNDED_PATTERN",
-        );
-        match (open_split, close_split) {
-            (false, false) => body,
-            (false, true) => sequence_or_single(vec![body, literal_expr(b"\"")]),
-            (true, false) => sequence_or_single(vec![literal_expr(b"\""), body]),
-            (true, true) => sequence_or_single(vec![literal_expr(b"\""), body, literal_expr(b"\"")]),
-        }
+        let (terminal_body, wrap) = wrap_string_value_expr_parts(bounded_body);
+        let body = self.extract_terminal_rule(terminal_body, "JSON_STRING_BOUNDED_PATTERN");
+        wrap(body)
     }
 
     fn build_format_string_expr(&mut self, format_name: &str) -> Result<GrammarExpr, GlrMaskError> {
@@ -4194,23 +4181,9 @@ impl<'a> SchemaCtx<'a> {
                     "time" => json_time_body_expr(),
                     _ => json_date_time_body_expr(),
                 };
-                let open_split = !no_open_quote_split();
-                let close_split = split_close_quote();
-                let body = self.extract_terminal_rule(
-                    match (open_split, close_split) {
-                        (false, false) => sequence_or_single(vec![literal_expr(b"\""), body_inner, literal_expr(b"\"")]),
-                        (false, true) => sequence_or_single(vec![literal_expr(b"\""), body_inner]),
-                        (true, false) => sequence_or_single(vec![body_inner, literal_expr(b"\"")]),
-                        (true, true) => body_inner,
-                    },
-                    "JSON_FORMAT_STRING",
-                );
-                match (open_split, close_split) {
-                    (false, false) => Ok(body),
-                    (false, true) => Ok(sequence_or_single(vec![body, literal_expr(b"\"")])),
-                    (true, false) => Ok(sequence_or_single(vec![literal_expr(b"\""), body])),
-                    (true, true) => Ok(sequence_or_single(vec![literal_expr(b"\""), body, literal_expr(b"\"")])),
-                }
+                let (terminal_body, wrap) = wrap_string_value_expr_parts(body_inner);
+                let body = self.extract_terminal_rule(terminal_body, "JSON_FORMAT_STRING");
+                Ok(wrap(body))
             }
             "hostname" => {
                 let label = self.extract_terminal_rule(
@@ -4236,33 +4209,52 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn json_key_colon_literal(&self, text: &str) -> GrammarExpr {
-        let mut bytes = json_string_literal_bytes(text);
-        bytes.extend_from_slice(JSON_KEY_SEPARATOR);
-        if split_key_colon_suffix_enabled() {
-            // Config D: keep opening quote with body, split closing ": "
-            let key_body = json_string_literal_bytes(text);
-            sequence_or_single(vec![
-                literal_expr(&key_body[..key_body.len() - 1]),
-                literal_expr(b"\": "),
-            ])
-        } else if no_open_quote_split() {
-            // No split at all — single terminal
-            literal_expr(&bytes)
-        } else if split_close_quote_colon_enabled() {
-            // Split opening quote, key body, and closing quote+colon separately
-            let key_body = json_string_literal_bytes(text);
-            sequence_or_single(vec![
-                literal_expr(b"\""),
-                literal_expr(&key_body[1..key_body.len() - 1]),
-                literal_expr(b"\": "),
-            ])
-        } else {
-            // Split opening quote into separate literal; rest is body+colon
-            sequence_or_single(vec![
-                literal_expr(b"\""),
-                literal_expr(&bytes[1..]),
-            ])
+        let open = split_open_quote();
+        let close = split_close_quote();
+        let colon = split_colon_space();
+
+        let key_body_bytes = json_string_literal_bytes(text);
+        // key_body_bytes is e.g. b'"hello"' — strip outer quotes for body only
+        let body_only = &key_body_bytes[1..key_body_bytes.len() - 1];
+
+        let mut parts = Vec::new();
+
+        // Opening quote (separate if open split)
+        if open {
+            parts.push(literal_expr(b"\""));
         }
+
+        // Core body: fuses with non-split delimiters
+        let mut core = Vec::new();
+        if !open {
+            core.push(b'"'); // fused opening quote
+        }
+        core.extend_from_slice(body_only);
+        if !close && !colon {
+            // Everything merged: body + close + colon+space
+            core.extend_from_slice(b"\": ");
+        } else if !close {
+            // Close fused with body, colon separate
+            core.push(b'"');
+        }
+        // If close is split, body is just body (+ maybe open quote)
+        parts.push(literal_expr(&core));
+
+        // Closing quote + colon-space handling
+        if close && !colon {
+            // Close split from body but fuses with colon-space → "\": "
+            parts.push(literal_expr(b"\": "));
+        } else if close && colon {
+            // Close and colon both split
+            parts.push(literal_expr(b"\""));
+            parts.push(key_colon_suffix_expr());
+        } else if !close && colon {
+            // Close fused with body, but colon is separate
+            parts.push(key_colon_suffix_expr());
+        }
+        // else: !close && !colon already handled in core
+
+        sequence_or_single(parts)
     }
 
     fn json_item_separator_expr(&self) -> GrammarExpr {
