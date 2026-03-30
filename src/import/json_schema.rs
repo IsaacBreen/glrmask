@@ -2136,8 +2136,12 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn should_split_bounded_string(&self, min_len: usize, max_len: Option<usize>) -> bool {
-        min_len > JSON_STRING_REPEAT_CHUNK
-            || max_len
+        if min_len > JSON_STRING_REPEAT_CHUNK {
+            return true;
+        }
+
+        min_len == 0
+            && max_len
                 .map(|value| value > JSON_STRING_REPEAT_CHUNK)
                 .unwrap_or(false)
     }
