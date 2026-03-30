@@ -900,6 +900,7 @@ fn build_and_color_with_signature_dedup(
 
     let rep_candidates: Vec<usize> = unique_indices.iter().map(|&i| candidates[i]).collect();
 
+    // Build incompatibility graph and greedy-color it.
     let t1 = if debug { std::time::Instant::now() } else { t0 };
     let rep_adj = build_incompatibility_graph_sparse(
         dwa,

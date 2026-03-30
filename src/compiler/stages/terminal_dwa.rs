@@ -10,7 +10,7 @@ use crate::Vocab;
 use crate::automata::lexer::tokenizer::{Tokenizer, TokenizerMatch};
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
-use crate::automata::weighted::minimize::minimize;
+use crate::automata::weighted::minimize::{minimize, minimize_fast};
 use crate::automata::weighted::nwa::{NWA, NWAState as NWAStateType};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::analysis::EOF;
@@ -2313,7 +2313,7 @@ fn build_partition_terminal_nwa_l1_direct(
     let det_ms = det_start.elapsed().as_secs_f64() * 1000.0;
     let det_states = dwa_result.num_states();
     let min_start_t = std::time::Instant::now();
-    let dwa_min = minimize(&dwa_result);
+    let dwa_min = minimize_fast(&dwa_result);
     let min_ms = min_start_t.elapsed().as_secs_f64() * 1000.0;
     let min_states = dwa_min.num_states();
     let result_nwa = dwa_min.to_nwa();
@@ -2486,7 +2486,7 @@ fn build_partition_terminal_nwa(
     let det_ms = det_start.elapsed().as_secs_f64() * 1000.0;
     let det_states = dwa.num_states();
     let min_start = std::time::Instant::now();
-    let dwa = minimize(&dwa);
+    let dwa = minimize_fast(&dwa);
     let min_ms = min_start.elapsed().as_secs_f64() * 1000.0;
     let minimized_nwa = dwa.to_nwa();
     let postproc_ms = postproc_start.elapsed().as_secs_f64() * 1000.0;
