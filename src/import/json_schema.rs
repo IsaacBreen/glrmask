@@ -3119,11 +3119,11 @@ impl<'a> SchemaCtx<'a> {
         GrammarExpr::Ref(JSON_KEY_COLON_RULE.into())
     }
 
-    /// Full key-colon expression including the opening quote, for use in
+    /// Full key-colon expression using the hierarchy, for use in
     /// DFA-level operations (Exclude, DFA building) where a terminal-compilable
     /// expression is needed.
     fn json_key_colon_full_expr() -> GrammarExpr {
-        regex_expr(format!(r#""{}"#, JSON_KEY_COLON_BODY_REGEX))
+        regex_expr(key_colon_body_regex(JSON_STRING_BODY_ONLY_REGEX))
     }
 
     fn json_integer_ref(&self) -> GrammarExpr {
@@ -4608,30 +4608,6 @@ impl<'a> SchemaCtx<'a> {
         dfa.minimize()
     }
 
-    fn subtract_lexer_dfa(left: &LexerDfa, right: &LexerDfa) -> LexerDfa {
-        Self::build_product_lexer_dfa(
-            (0u32, Some(0u32)),
-            |(left_state_id, right_state_id)| {
-                let left_accepting = !left.states()[left_state_id as usize].finalizers.is_empty();
-                let right_accepting = right_state_id
-                    .map(|state_id| !right.states()[state_id as usize].finalizers.is_empty())
-                    .unwrap_or(false);
-                left_accepting && !right_accepting
-            },
-            |(left_state_id, right_state_id)| {
-                left.states()[left_state_id as usize]
-                    .transitions
-                    .iter()
-                    .map(|(byte, &left_next)| {
-                        let right_next =
-                            right_state_id.and_then(|state_id| right.step(state_id, byte));
-                        (byte, (left_next, right_next))
-                    })
-                    .collect()
-            },
-        )
-    }
-
     fn intersect_lexer_dfa(left: &LexerDfa, right: &LexerDfa) -> LexerDfa {
         Self::build_product_lexer_dfa(
             (0u32, 0u32),
@@ -4668,51 +4644,53 @@ impl<'a> SchemaCtx<'a> {
     /// the split-off literal parts (opening quote, close quote, colon-space)
     /// just like `wrap_key_colon_regex` does for regex-based keys.
     fn build_key_colon_dfa_expr(&mut self, dfa: &LexerDfa, prefix: &str) -> GrammarExpr {
-        if !Self::dfa_accepts_any(dfa) {
+        self.build_excluding_key_colon_dfa_expr(dfa, &[], prefix)
+    }
+
+    /// Build a key-colon terminal from a base DFA, excluding any keys matched
+    /// by the `excluded` DFAs.  Uses `GrammarExpr::Exclude` instead of
+    /// DFA-level subtraction so that the grammar compiler handles exclusion.
+    fn build_excluding_key_colon_dfa_expr(
+        &mut self,
+        base_dfa: &LexerDfa,
+        excluded_dfas: &[&LexerDfa],
+        prefix: &str,
+    ) -> GrammarExpr {
+        if !Self::dfa_accepts_any(base_dfa) {
             return never_expr();
         }
-
-        let open = split_open_quote();
-        let close = split_close_quote();
-        let colon = split_colon_space();
-
-        let body = self.extract_terminal_rule(
-            GrammarExpr::TerminalExpr(LexerExpr::Dfa(dfa.clone())),
-            prefix,
-        );
-
-        let mut parts = Vec::new();
-        if open {
-            parts.push(literal_expr(b"\""));
-        }
-        parts.push(body);
-        if close && colon {
-            parts.push(literal_expr(b"\""));
-            parts.push(key_colon_suffix_expr());
-        } else if close {
-            parts.push(literal_expr(b"\": "));
-        } else if colon {
-            parts.push(key_colon_suffix_expr());
-        }
-
-        sequence_or_single(parts)
+        let base_body = GrammarExpr::TerminalExpr(LexerExpr::Dfa(base_dfa.clone()));
+        let body = if excluded_dfas.is_empty() {
+            base_body
+        } else {
+            let excluded_exprs: Vec<GrammarExpr> = excluded_dfas
+                .iter()
+                .map(|dfa| GrammarExpr::TerminalExpr(LexerExpr::Dfa((*dfa).clone())))
+                .collect();
+            GrammarExpr::Exclude {
+                expr: Box::new(base_body),
+                exclude: Box::new(choice_or_single(excluded_exprs)),
+            }
+        };
+        let body_terminal = self.extract_terminal_rule(body, prefix);
+        wrap_key_colon_terminal(body_terminal)
     }
 
     fn build_excluding_key_colon_expr(
         &mut self,
-        base_key_colon_expr: GrammarExpr,
-        excluded_key_colon_exprs: Vec<GrammarExpr>,
+        base_key_colon_body_expr: GrammarExpr,
+        excluded_key_colon_body_exprs: Vec<GrammarExpr>,
         prefix: &str,
     ) -> GrammarExpr {
-        let expr = if excluded_key_colon_exprs.is_empty() {
-            base_key_colon_expr
+        let expr = if excluded_key_colon_body_exprs.is_empty() {
+            base_key_colon_body_expr
         } else {
             GrammarExpr::Exclude {
-                expr: Box::new(base_key_colon_expr),
-                exclude: Box::new(choice_or_single(excluded_key_colon_exprs)),
+                expr: Box::new(base_key_colon_body_expr),
+                exclude: Box::new(choice_or_single(excluded_key_colon_body_exprs)),
             }
         };
-        self.extract_terminal_rule(expr, prefix)
+        wrap_key_colon_terminal(self.extract_terminal_rule(expr, prefix))
     }
 
     fn build_object_expr(&mut self, schema: &Map<String, Value>) -> Result<GrammarExpr, GlrMaskError> {
@@ -4851,18 +4829,17 @@ impl<'a> SchemaCtx<'a> {
                 Some(Value::Bool(true)) | None => self.json_value_ref(),
                 _ => return Ok(self.json_object_ref()),
             };
-            let unmatched_key_colon_expr = if let Some(property_names) = property_names {
-                self.extract_terminal_rule(
-                    json_wrapped_key_colon_pattern(Self::property_name_pattern(property_names)?),
-                    "JSON_SCOPED_KEY_COLON",
-                )
+            let unmatched_key_colon_body = if let Some(property_names) = property_names {
+                regex_expr(key_colon_body_regex(&json_search_pattern(
+                    Self::property_name_pattern(property_names)?,
+                )))
             } else {
                 Self::json_key_colon_full_expr()
             };
             return self.build_mixed_pattern_named_object_expr(
                 &matched_property_names,
                 value_expr,
-                unmatched_key_colon_expr,
+                unmatched_key_colon_body,
                 additional_value_expr,
             );
         }
@@ -5076,22 +5053,20 @@ impl<'a> SchemaCtx<'a> {
                 let mut excluded_literal_keys = BTreeSet::<String>::new();
                 excluded_literal_keys.extend(properties.keys().cloned());
                 excluded_literal_keys.extend(required_list.iter().cloned());
-                let mut key_dfa = Self::scoped_key_colon_dfa(None)?;
-                if let Some(excluded_dfa) = Self::literal_key_colon_union_dfa(&excluded_literal_keys) {
-                    key_dfa = Self::subtract_lexer_dfa(&key_dfa, &excluded_dfa);
+                let key_dfa = Self::scoped_key_colon_dfa(None)?;
+                let mut excluded_dfas: Vec<&LexerDfa> = Vec::new();
+                let excluded_literal_dfa = Self::literal_key_colon_union_dfa(&excluded_literal_keys);
+                if let Some(ref dfa) = excluded_literal_dfa {
+                    excluded_dfas.push(dfa);
                 }
-
-                if !Self::dfa_accepts_any(&key_dfa) {
-                    None
-                } else {
-                    Some(sequence_or_single(vec![
-                        self.build_key_colon_dfa_expr(
-                            &key_dfa,
-                            &format!("{}_KEY_COLON", base_name.to_uppercase()),
-                        ),
-                        extra_value_expr,
-                    ]))
-                }
+                Some(sequence_or_single(vec![
+                    self.build_excluding_key_colon_dfa_expr(
+                        &key_dfa,
+                        &excluded_dfas,
+                        &format!("{}_KEY_COLON", base_name.to_uppercase()),
+                    ),
+                    extra_value_expr,
+                ]))
             }
         } else {
             None
@@ -5489,28 +5464,21 @@ impl<'a> SchemaCtx<'a> {
                     continue;
                 }
 
-                if let Some(fixed_key_union_dfa) = &fixed_key_union_dfa {
-                    key_dfa = Self::subtract_lexer_dfa(&key_dfa, fixed_key_union_dfa);
-                    if !Self::dfa_accepts_any(&key_dfa) {
-                        continue;
-                    }
-                }
-
+                // Collect DFAs to exclude via GrammarExpr::Exclude
                 let subset_members: HashSet<usize> = subset.iter().copied().collect();
+                let mut excluded_dfas: Vec<&LexerDfa> = Vec::new();
+                if let Some(ref fk_dfa) = fixed_key_union_dfa {
+                    excluded_dfas.push(fk_dfa);
+                }
                 for (pattern_idx, pattern_dfa) in pattern_key_colon_dfas.iter().enumerate() {
                     if !subset_members.contains(&pattern_idx) {
-                        key_dfa = Self::subtract_lexer_dfa(&key_dfa, pattern_dfa);
-                        if !Self::dfa_accepts_any(&key_dfa) {
-                            break;
-                        }
+                        excluded_dfas.push(pattern_dfa);
                     }
                 }
-                if !Self::dfa_accepts_any(&key_dfa) {
-                    continue;
-                }
 
-                let key_expr = self.build_key_colon_dfa_expr(
+                let key_expr = self.build_excluding_key_colon_dfa_expr(
                     &key_dfa,
+                    &excluded_dfas,
                     &format!("{}_PP_SUBSET_{}_KEY", base_name.to_uppercase(), subset_idx),
                 );
 
@@ -5541,28 +5509,21 @@ impl<'a> SchemaCtx<'a> {
                     &format!("{}_AP_KEY", base_name.to_uppercase()),
                 ))
             } else if key_dfa_needed {
-                let mut additional_key_dfa = base_key_colon_dfa
+                let additional_key_dfa = base_key_colon_dfa
                     .as_ref()
-                    .expect("additional-properties DFA should exist when needed")
-                    .clone();
-                if let Some(fixed_key_union_dfa) = &additional_fixed_key_union_dfa {
-                    additional_key_dfa = Self::subtract_lexer_dfa(&additional_key_dfa, fixed_key_union_dfa);
+                    .expect("additional-properties DFA should exist when needed");
+                let mut excluded_dfas: Vec<&LexerDfa> = Vec::new();
+                if let Some(ref fk_dfa) = additional_fixed_key_union_dfa {
+                    excluded_dfas.push(fk_dfa);
                 }
                 for pattern_dfa in &pattern_key_colon_dfas {
-                    additional_key_dfa = Self::subtract_lexer_dfa(&additional_key_dfa, pattern_dfa);
-                    if !Self::dfa_accepts_any(&additional_key_dfa) {
-                        break;
-                    }
+                    excluded_dfas.push(pattern_dfa);
                 }
-
-                if !Self::dfa_accepts_any(&additional_key_dfa) {
-                    None
-                } else {
-                    Some(self.build_key_colon_dfa_expr(
-                        &additional_key_dfa,
-                        &format!("{}_AP_KEY", base_name.to_uppercase()),
-                    ))
-                }
+                Some(self.build_excluding_key_colon_dfa_expr(
+                    additional_key_dfa,
+                    &excluded_dfas,
+                    &format!("{}_AP_KEY", base_name.to_uppercase()),
+                ))
             } else {
                 Some(self.json_key_colon_ref())
             };
@@ -5704,19 +5665,20 @@ impl<'a> SchemaCtx<'a> {
         &mut self,
         property_names: &Value,
         matched_value_expr: GrammarExpr,
-        unmatched_key_colon_expr: GrammarExpr,
+        unmatched_key_colon_body: GrammarExpr,
         unmatched_value_expr: GrammarExpr,
     ) -> Result<GrammarExpr, GlrMaskError> {
         let pattern = Self::property_name_pattern(property_names)?;
-        let matched_key_colon_expr = json_wrapped_key_colon_pattern(pattern);
+        let matched_key_colon_body = regex_expr(key_colon_body_regex(&json_search_pattern(pattern)));
+        let matched_key_colon_full = wrap_key_colon_terminal(matched_key_colon_body.clone());
         let matched_pair = sequence_or_single(vec![
-            matched_key_colon_expr.clone(),
+            matched_key_colon_full,
             matched_value_expr,
         ]);
         let unmatched_pair = sequence_or_single(vec![
             self.build_excluding_key_colon_expr(
-                unmatched_key_colon_expr,
-                vec![matched_key_colon_expr],
+                unmatched_key_colon_body,
+                vec![matched_key_colon_body],
                 "PP_KEY_COLON",
             ),
             unmatched_value_expr,
