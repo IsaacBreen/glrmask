@@ -553,8 +553,18 @@ fn compile_prepared_with_profile(
                     let disallowed_ref = &disallowed_follows;
                     let ignore = prepared_grammar.ignore_terminal;
                     let tok_ref = &tokenizer;
+                    let num_terminals = analyzed_grammar.num_terminals as u32;
 
-                    let build_partition_id_map = |sub_vocab: &Vocab| -> InternalIdMap {
+                    // Pre-compute per-partition L1 status.
+                    let partition_all_l1: Vec<bool> = sub_vocabs.iter().map(|sv| {
+                        if sv.is_empty() { return false; }
+                        use crate::compiler::stages::terminal_dwa::{classify_terminal_path_lengths, TerminalPathLength};
+                        let lengths = classify_terminal_path_lengths(tok_ref, sv, disallowed_ref, num_terminals);
+                        lengths.iter().all(|l| matches!(l, TerminalPathLength::Zero | TerminalPathLength::One))
+                    }).collect();
+
+                    let partition_all_l1_ref = &partition_all_l1;
+                    let build_partition_id_map = |sub_vocab: &Vocab, part_idx: usize| -> InternalIdMap {
                         if sub_vocab.is_empty() {
                             // Empty partition: map all states to class 0, no tokens.
                             let num_states = tok_ref.num_states() as usize;
@@ -571,15 +581,29 @@ fn compile_prepared_with_profile(
                                 },
                             }
                         } else {
-                            InternalIdMap::build(tok_ref, sub_vocab, disallowed_ref, ignore)
+                            let t0 = Instant::now();
+                            let part_all_l1 = partition_all_l1_ref[part_idx];
+                            let result = if part_all_l1 {
+                                InternalIdMap::build_l1(tok_ref, sub_vocab)
+                            } else {
+                                InternalIdMap::build(tok_ref, sub_vocab, disallowed_ref, ignore)
+                            };
+                            if compile_profile_enabled() {
+                                eprintln!(
+                                    "[glrmask/debug][id_map] partition[{}] vocab_size={} tsids={} token_classes={} ms={:.1}{}",
+                                    part_idx, sub_vocab.len(), result.num_tsids(), result.num_internal_tokens(), elapsed_ms(t0),
+                                    if part_all_l1 { " (l1_fast)" } else { "" },
+                                );
+                            }
+                            result
                         }
                     };
 
                     let (map_a, (map_b, map_c)) = rayon::join(
-                        || build_partition_id_map(&sub_vocabs[0]),
+                        || build_partition_id_map(&sub_vocabs[0], 0),
                         || rayon::join(
-                            || build_partition_id_map(&sub_vocabs[1]),
-                            || build_partition_id_map(&sub_vocabs[2]),
+                            || build_partition_id_map(&sub_vocabs[1], 1),
+                            || build_partition_id_map(&sub_vocabs[2], 2),
                         ),
                     );
 

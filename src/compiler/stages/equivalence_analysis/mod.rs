@@ -89,7 +89,7 @@ impl InternalIdMap {
         tokenizer: &crate::automata::lexer::tokenizer::Tokenizer,
         vocab: &crate::Vocab,
     ) -> Self {
-        combined::analyze_equivalences_l1(tokenizer, vocab)
+        combined::analyze_equivalences_l1_fast(tokenizer, vocab)
     }
 
     /// Build a trivial identity map where each tokenizer state and vocab token

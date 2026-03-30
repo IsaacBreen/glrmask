@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
@@ -2077,6 +2078,268 @@ struct PartitionTerminalNwaBuild {
     roots_count: usize,
 }
 
+/// Direct L1 NWA construction: bypasses the full NWA build → postproc → det →
+/// min pipeline for partitions where all terminals are L0/L1.
+///
+/// Instead of building a 1800+ state NWA with 140K+ transitions and then
+/// determinizing/minimizing to 2 states, this function computes the equivalent
+/// 2-state NWA directly by walking all (token, TSID) pairs and collecting
+/// per-terminal per-TSID token sets.
+fn build_partition_terminal_nwa_l1_direct(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    id_map: &InternalIdMap,
+    ignore_terminal: Option<TerminalID>,
+    num_terminals: u32,
+    partition_index: usize,
+) -> PartitionTerminalNwaBuild {
+    let partition_total_start = std::time::Instant::now();
+    let internal_vocab = internal_vocab_entries(vocab, id_map);
+    if internal_vocab.is_empty() {
+        return PartitionTerminalNwaBuild::default();
+    }
+
+    let num_tsids = id_map.num_tsids();
+    let num_term = num_terminals as usize;
+
+    // Build VocabPrefixTree and possible_matches (needed for downstream merge).
+    let tree_start = std::time::Instant::now();
+    let full_tree = VocabPrefixTree::build_owned(
+        internal_vocab
+            .iter()
+            .map(|(token_id, bytes)| (*token_id as usize, bytes.clone()))
+            .collect(),
+    );
+    let tree_ms = tree_start.elapsed().as_secs_f64() * 1000.0;
+
+    let pm_start = std::time::Instant::now();
+    let mut possible_matches_computer = PossibleMatchesComputer::new(tokenizer);
+    let possible_matches_by_state = collect_possible_matches_by_internal_tsid(
+        tokenizer,
+        &full_tree.root,
+        &mut possible_matches_computer,
+        &id_map.tokenizer_states,
+    );
+    let pm_ms = pm_start.elapsed().as_secs_f64() * 1000.0;
+    let possible_matches_profile = possible_matches_computer.profile();
+
+    // Pre-populate flat DFA transition table for fast byte-by-byte walking.
+    let dfa = tokenizer.dfa.states();
+    let num_dfa_states = dfa.len();
+    let flat_dfa: Vec<[u32; 256]> = (0..num_dfa_states)
+        .map(|s| {
+            let mut flat = [u32::MAX; 256];
+            for (b, &target) in dfa[s].transitions.iter() {
+                flat[b as usize] = target;
+            }
+            flat
+        })
+        .collect();
+
+    // Build map: representative_state → list of internal TSIDs with that representative.
+    let mut rep_to_tsids: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+    for (tsid_idx, representative_state) in
+        id_map.tokenizer_states.iter_representative_ids().enumerate()
+    {
+        rep_to_tsids
+            .entry(representative_state)
+            .or_default()
+            .push(tsid_idx as u32);
+    }
+    let unique_reps: Vec<u32> = rep_to_tsids.keys().copied().collect();
+    let _num_unique_reps = unique_reps.len();
+
+    // Phase 1: Walk only unique (token, representative_state) pairs.
+    // tokens_direct_by_rep[terminal_id][rep_state] = RangeSetBlaze of token IDs (built incrementally)
+    let mut tokens_direct_by_rep: Vec<FxHashMap<u32, RangeSetBlaze<u32>>> = vec![FxHashMap::default(); num_term];
+    let mut future_groups_by_rep: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
+
+    let walk_start = std::time::Instant::now();
+    let mut total_pairs: u64 = 0;
+    let mut total_alive: u64 = 0;
+
+    for &(internal_token_id, ref bytes) in &internal_vocab {
+        for &rep_state in &unique_reps {
+            total_pairs += 1;
+
+            // Walk DFA bytes.
+            let mut scan_state = rep_state;
+            let mut alive = true;
+            for &byte in bytes.iter() {
+                let next = flat_dfa[scan_state as usize][byte as usize];
+                if next == u32::MAX {
+                    alive = false;
+                    break;
+                }
+                scan_state = next;
+            }
+            if !alive {
+                continue;
+            }
+            total_alive += 1;
+
+            // Direct terminal matches at endpoint.
+            for t in tokenizer.dfa.finalizers(scan_state).iter() {
+                let terminal = t as TerminalID;
+                tokens_direct_by_rep[terminal as usize]
+                    .entry(rep_state)
+                    .or_default()
+                    .insert(internal_token_id);
+            }
+
+            // Batch alive pair for future terminal processing.
+            future_groups_by_rep
+                .entry((rep_state, scan_state))
+                .or_default()
+                .push(internal_token_id);
+        }
+    }
+    let phase1_ms = walk_start.elapsed().as_secs_f64() * 1000.0;
+
+    // Phase 2: Process future groups, collecting per (terminal, rep_state).
+    // Build a RangeSetBlaze per group (sorted data, O(n)), then union into each future terminal's set.
+    let phase2_start = std::time::Instant::now();
+    let mut future_cache: FxHashMap<u32, Vec<TerminalID>> = FxHashMap::default();
+    let num_groups = future_groups_by_rep.len();
+
+    let mut tokens_future_by_rep: Vec<FxHashMap<u32, RangeSetBlaze<u32>>> = vec![FxHashMap::default(); num_term];
+
+    for ((rep_state, ending_state), token_ids) in &future_groups_by_rep {
+        let futures = future_cache
+            .entry(*ending_state)
+            .or_insert_with(|| {
+                tokenizer
+                    .possible_future_terminals_iter(*ending_state)
+                    .collect()
+            });
+        // Build group RangeSetBlaze once (token_ids are sorted from Phase 1 iteration order).
+        let group_set: RangeSetBlaze<u32> =
+            RangeSetBlaze::from_iter(token_ids.iter().copied().map(|id| id..=id));
+        for &future_terminal in futures.iter() {
+            let entry = tokens_future_by_rep[future_terminal as usize]
+                .entry(*rep_state)
+                .or_default();
+            *entry |= &group_set;
+        }
+    }
+    let phase2_ms = phase2_start.elapsed().as_secs_f64() * 1000.0;
+
+    // Build the 2-state NWA directly.
+    // For each terminal, build a Weight mapping each TSID → token set.
+    // TSIDs sharing a representative state get the same token set, allowing
+    // CompactRangeBuilder to merge them into ranges.
+    let nwa_start = std::time::Instant::now();
+    let mut nwa = NWA::new(num_tsids, id_map.max_internal_token_id());
+    let start = nwa.add_state(); // state 0
+    let accept = nwa.add_state(); // state 1
+    nwa.start_states = vec![start];
+    nwa.set_final_weight(accept, Weight::all());
+
+    let rep_ids: Vec<u32> = id_map.tokenizer_states.iter_representative_ids().collect();
+
+    let mut num_transitions = 0u32;
+    for terminal_id in 0..num_term {
+        let is_ignored = ignore_terminal == Some(terminal_id as TerminalID);
+        let direct_map = &mut tokens_direct_by_rep[terminal_id];
+        let future_map = &mut tokens_future_by_rep[terminal_id];
+
+        // Build a Weight from pre-computed RangeSetBlaze collections.
+        // direct_map and future_map already contain RangeSetBlaze<u32> per rep_state.
+        let build_weight = |direct: &mut FxHashMap<u32, RangeSetBlaze<u32>>,
+                            future: &mut FxHashMap<u32, RangeSetBlaze<u32>>,
+                            include_future: bool|
+         -> Option<Weight> {
+            let mut rep_token_sets: FxHashMap<u32, Arc<RangeSetBlaze<u32>>> = FxHashMap::default();
+            for (&rep_state, direct_set) in direct.iter() {
+                let mut token_set = direct_set.clone();
+                if include_future {
+                    if let Some(future_set) = future.get(&rep_state) {
+                        token_set |= future_set.clone();
+                    }
+                }
+                if !token_set.is_empty() {
+                    rep_token_sets.insert(rep_state, Arc::new(token_set));
+                }
+            }
+            if include_future {
+                for (&rep_state, future_set) in future.iter() {
+                    if rep_token_sets.contains_key(&rep_state) {
+                        continue;
+                    }
+                    if !future_set.is_empty() {
+                        rep_token_sets.insert(rep_state, Arc::new(future_set.clone()));
+                    }
+                }
+            }
+            if rep_token_sets.is_empty() {
+                return None;
+            }
+
+            let weight = Weight::from_per_tsid_shared(
+                rep_ids.iter().enumerate().filter_map(|(tsid, &rep_state)| {
+                    rep_token_sets
+                        .get(&rep_state)
+                        .map(|ts| (tsid as u32, Arc::clone(ts)))
+                }),
+            );
+            if weight.is_empty() {
+                None
+            } else {
+                Some(weight)
+            }
+        };
+
+        if is_ignored {
+            let mut empty_future: FxHashMap<u32, RangeSetBlaze<u32>> = FxHashMap::default();
+            if let Some(weight) = build_weight(direct_map, &mut empty_future, false) {
+                nwa.add_transition(start, terminal_id as i32, accept, weight);
+                num_transitions += 1;
+            }
+            let mut empty_direct: FxHashMap<u32, RangeSetBlaze<u32>> = FxHashMap::default();
+            if let Some(weight) = build_weight(&mut empty_direct, future_map, true) {
+                nwa.add_epsilon(start, accept, weight);
+            }
+        } else {
+            if let Some(weight) = build_weight(direct_map, future_map, true) {
+                nwa.add_transition(start, terminal_id as i32, accept, weight);
+                num_transitions += 1;
+            }
+        }
+    }
+
+    // Det + min on this tiny NWA (should be <1ms for ~362 transitions).
+    let det_start = std::time::Instant::now();
+    let dwa_result = determinize(&nwa).expect("L1 direct NWA determinize failed");
+    let det_ms = det_start.elapsed().as_secs_f64() * 1000.0;
+    let det_states = dwa_result.num_states();
+    let min_start_t = std::time::Instant::now();
+    let dwa_min = minimize(&dwa_result);
+    let min_ms = min_start_t.elapsed().as_secs_f64() * 1000.0;
+    let min_states = dwa_min.num_states();
+    let result_nwa = dwa_min.to_nwa();
+
+    let nwa_ms = nwa_start.elapsed().as_secs_f64() * 1000.0;
+    let partition_total_ms = partition_total_start.elapsed().as_secs_f64() * 1000.0;
+
+    if debug_profile_enabled() {
+        eprintln!(
+            "[glrmask/debug][terminal_dwa] partition_build_l1_direct[{}] vocab={} tsids={} pairs={} alive={} groups={} transitions={} tree_ms={:.1} pm_ms={:.1} phase1_ms={:.1} phase2_ms={:.1} nwa_ms={:.1} det_states={} det_ms={:.1} min_states={} min_ms={:.1} total_ms={:.1}",
+            partition_index, internal_vocab.len(), num_tsids, total_pairs, total_alive,
+            num_groups, num_transitions, tree_ms, pm_ms, phase1_ms, phase2_ms, nwa_ms, det_states, det_ms,
+            min_states, min_ms, partition_total_ms,
+        );
+    }
+
+    PartitionTerminalNwaBuild {
+        nwa: Some(result_nwa),
+        possible_matches_by_state,
+        build_profile: TerminalDwaBuildProfile::default(),
+        possible_matches_profile,
+        internal_vocab_len: internal_vocab.len(),
+        roots_count: 0,
+    }
+}
+
 fn build_partition_terminal_nwa(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -2089,6 +2352,26 @@ fn build_partition_terminal_nwa(
     partition_index: usize,
     grammar: &AnalyzedGrammar,
 ) -> PartitionTerminalNwaBuild {
+    // Check for all-L1 partition early and delegate to the fast direct path.
+    let terminal_path_lengths = classify_terminal_path_lengths(
+        tokenizer,
+        vocab,
+        disallowed_follows,
+        num_terminals,
+    );
+    let all_l1 = terminal_path_lengths.iter().all(|l| matches!(l, TerminalPathLength::Zero | TerminalPathLength::One));
+
+    if all_l1 {
+        return build_partition_terminal_nwa_l1_direct(
+            tokenizer,
+            vocab,
+            id_map,
+            ignore_terminal,
+            num_terminals,
+            partition_index,
+        );
+    }
+
     let partition_total_start = std::time::Instant::now();
     let internal_vocab = internal_vocab_entries(vocab, id_map);
     if internal_vocab.is_empty() {
@@ -2132,21 +2415,13 @@ fn build_partition_terminal_nwa(
     );
     let seed_ms = seed_start.elapsed().as_secs_f64() * 1000.0;
 
-    let terminal_path_lengths = classify_terminal_path_lengths(
-        tokenizer,
-        vocab,
-        disallowed_follows,
-        num_terminals,
-    );
-    let all_l1 = terminal_path_lengths.iter().all(|l| matches!(l, TerminalPathLength::Zero | TerminalPathLength::One));
-
     if debug_profile_enabled() {
         let n0 = terminal_path_lengths.iter().filter(|l| **l == TerminalPathLength::Zero).count();
         let n1 = terminal_path_lengths.iter().filter(|l| **l == TerminalPathLength::One).count();
         let n2 = terminal_path_lengths.iter().filter(|l| **l == TerminalPathLength::TwoPlus).count();
         eprintln!(
-            "[glrmask/debug][terminal_dwa] partition_build[{}] all_l1={} internal_vocab_len={} num_tsids={} l0={} l1={} l2p={} tree_ms={:.1} pm_ms={:.1} seed_ms={:.1}",
-            partition_index, all_l1, internal_vocab.len(), id_map.num_tsids(), n0, n1, n2, tree_ms, pm_ms, seed_ms,
+            "[glrmask/debug][terminal_dwa] partition_build[{}] all_l1=false internal_vocab_len={} num_tsids={} l0={} l1={} l2p={} tree_ms={:.1} pm_ms={:.1} seed_ms={:.1}",
+            partition_index, internal_vocab.len(), id_map.num_tsids(), n0, n1, n2, tree_ms, pm_ms, seed_ms,
         );
     }
 
@@ -2176,11 +2451,7 @@ fn build_partition_terminal_nwa(
         flat_transitions: vec![None; num_tokenizer_states],
     };
     let nwa_build_start = std::time::Instant::now();
-    if all_l1 {
-        builder.build_l1_fast(&internal_vocab, &roots_by_tokenizer_state, id_map);
-    } else {
-        builder.build_from_trie(&full_tree.root, &roots_by_tokenizer_state);
-    }
+    builder.build_from_trie(&full_tree.root, &roots_by_tokenizer_state);
     builder.flush_transition_buffer();
     let nwa_build_ms = nwa_build_start.elapsed().as_secs_f64() * 1000.0;
     let build_profile = builder.profile;
@@ -2190,30 +2461,45 @@ fn build_partition_terminal_nwa(
     // Per-partition post-processing: collapse, disallowed, prune, canonicalize,
     // determinize, minimize. This reduces NWA size before the global merge.
     let postproc_start = std::time::Instant::now();
+    let pp0 = std::time::Instant::now();
     let always_allowed_by_label = compute_always_allowed_follows(grammar);
+    let pp_always_ms = pp0.elapsed().as_secs_f64() * 1000.0;
+    let pp1 = std::time::Instant::now();
     collapse_always_allowed(&mut nwa, &always_allowed_by_label, grammar.num_terminals as usize);
+    let pp_collapse_ms = pp1.elapsed().as_secs_f64() * 1000.0;
+    let pp2 = std::time::Instant::now();
     apply_disallowed_follow_constraints(&mut nwa, grammar);
+    let pp_disallowed_ms = pp2.elapsed().as_secs_f64() * 1000.0;
+    let pp3 = std::time::Instant::now();
     prune_non_coreachable_states(&mut nwa);
+    let pp_prune_ms = pp3.elapsed().as_secs_f64() * 1000.0;
+    let pp4 = std::time::Instant::now();
     canonicalize_acyclic_nwa(&mut nwa);
+    let pp_canon_ms = pp4.elapsed().as_secs_f64() * 1000.0;
 
     let pp_nwa_states = nwa.num_states();
     let pp_nwa_transitions = nwa.num_transitions();
 
     // Determinize and minimize per-partition, then convert back to NWA.
-    use crate::automata::weighted_u32::determinize::determinize;
-    use crate::automata::weighted_u32::minimize::minimize;
+    let det_start = std::time::Instant::now();
     let dwa = determinize(&nwa).expect("partition determinize failed");
+    let det_ms = det_start.elapsed().as_secs_f64() * 1000.0;
+    let det_states = dwa.num_states();
+    let min_start = std::time::Instant::now();
     let dwa = minimize(&dwa);
+    let min_ms = min_start.elapsed().as_secs_f64() * 1000.0;
     let minimized_nwa = dwa.to_nwa();
     let postproc_ms = postproc_start.elapsed().as_secs_f64() * 1000.0;
 
     if debug_profile_enabled() {
         let partition_total_ms = partition_total_start.elapsed().as_secs_f64() * 1000.0;
         eprintln!(
-            "[glrmask/debug][terminal_dwa] partition_build[{}] nwa_build_ms={:.1} nwa_states={} nwa_transitions={} pp_nwa_states={} pp_nwa_transitions={} dwa_states={} postproc_ms={:.1} partition_total_ms={:.1}",
+            "[glrmask/debug][terminal_dwa] partition_build[{}] nwa_build_ms={:.1} nwa_states={} nwa_transitions={} pp_nwa_states={} pp_nwa_transitions={} det_states={} det_ms={:.1} min_states={} min_ms={:.1} postproc_ms={:.1} pp_always={:.1} pp_collapse={:.1} pp_disallowed={:.1} pp_prune={:.1} pp_canon={:.1} partition_total_ms={:.1}",
             partition_index, nwa_build_ms, nwa.num_states(), nwa.num_transitions(),
             pp_nwa_states, pp_nwa_transitions,
-            dwa.num_states(), postproc_ms, partition_total_ms,
+            det_states, det_ms, dwa.num_states(), min_ms, postproc_ms,
+            pp_always_ms, pp_collapse_ms, pp_disallowed_ms, pp_prune_ms, pp_canon_ms,
+            partition_total_ms,
         );
     }
 

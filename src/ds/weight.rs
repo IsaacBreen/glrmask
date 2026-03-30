@@ -919,6 +919,34 @@ impl Weight {
         finalize_weight_map(map)
     }
 
+    /// Build a weight from per-TSID token sets without creating intermediate Weight objects.
+    /// Each entry is (tsid, token_set). Entries MUST be sorted by tsid (ascending).
+    /// Adjacent TSIDs with identical (Arc-equal) token sets are merged into ranges.
+    pub fn from_per_tsid_token_sets(entries: impl IntoIterator<Item = (u32, RangeSetBlaze<u32>)>) -> Self {
+        let mut builder = CompactRangeBuilder::new();
+        for (tsid, tokens) in entries {
+            if tokens.is_empty() {
+                continue;
+            }
+            builder.push(tsid, tsid, shared_rangeset(tokens));
+        }
+        builder.finish()
+    }
+
+    /// Like `from_per_tsid_token_sets` but accepts pre-shared (Arc) token sets.
+    /// This allows TSIDs sharing the same representative state to reuse the same
+    /// Arc, enabling CompactRangeBuilder to merge them into contiguous ranges.
+    pub fn from_per_tsid_shared(entries: impl IntoIterator<Item = (u32, SharedTokenSet)>) -> Self {
+        let mut builder = CompactRangeBuilder::new();
+        for (tsid, tokens) in entries {
+            if tokens.is_empty() {
+                continue;
+            }
+            builder.push(tsid, tsid, tokens);
+        }
+        builder.finish()
+    }
+
     pub fn insert(
         &mut self,
         tsid_range: std::ops::RangeInclusive<u32>,
