@@ -20,6 +20,7 @@ use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::characterize_terminals;
 use crate::compiler::stages::templates::compile_dfa::emit_template_profile_summary;
 use crate::compiler::stages::terminal_dwa::{
+    build_terminal_dwa_from_partition_id_maps_with_possible_matches_and_coloring,
     build_terminal_dwa_with_possible_matches_and_coloring,
     compute_terminal_coloring,
     compute_ever_allowed_follows,
@@ -611,7 +612,7 @@ fn compile_prepared_with_profile(
                 }
             },
         );
-        let (mut internal_ids, _partition_terminal_dwa_inputs) = match id_map_build_result {
+        let (mut internal_ids, partition_terminal_dwa_inputs) = match id_map_build_result {
             IdMapBuildResult::Ready(id_map) => (id_map, None),
             IdMapBuildResult::Partitioned {
                 global,
@@ -624,7 +625,22 @@ fn compile_prepared_with_profile(
         let token_bytes = vocab.entries.clone();
 
         let terminal_dwa_started_at = Instant::now();
-        let (mut terminal_dwa, mut possible_matches) =
+        let (mut terminal_dwa, mut possible_matches) = if let Some((partition_vocabs, partition_maps)) =
+            partition_terminal_dwa_inputs.as_ref()
+        {
+            build_terminal_dwa_from_partition_id_maps_with_possible_matches_and_coloring(
+                &analyzed_grammar,
+                &tokenizer,
+                vocab,
+                partition_vocabs,
+                partition_maps,
+                &internal_ids,
+                &terminal_coloring,
+                terminal_coloring_enabled,
+                prepared_grammar.ignore_terminal,
+                &adjusted_disallowed_for_classification,
+            )
+        } else {
             build_terminal_dwa_with_possible_matches_and_coloring(
                 &analyzed_grammar,
                 &tokenizer,
@@ -634,7 +650,8 @@ fn compile_prepared_with_profile(
                 terminal_coloring_enabled,
                 prepared_grammar.ignore_terminal,
                 Some(&adjusted_disallowed_for_classification),
-            );
+            )
+        };
         profile.terminal_dwa_ms = elapsed_ms(terminal_dwa_started_at);
 
         let compact_started_at = Instant::now();

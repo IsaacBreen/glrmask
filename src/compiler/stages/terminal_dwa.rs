@@ -2093,7 +2093,7 @@ fn build_partition_terminal_nwa(
         flat_transitions: vec![None; num_tokenizer_states],
     };
     let nwa_build_start = std::time::Instant::now();
-    if all_l1 {
+    if all_l1 && (internal_vocab.len() as u64) * (id_map.num_tsids() as u64) < 100_000 {
         builder.build_l1_fast(&internal_vocab, &roots_by_tokenizer_state, id_map);
     } else {
         builder.build_from_trie(&full_tree.root, &roots_by_tokenizer_state);
@@ -2233,15 +2233,29 @@ fn remap_partition_nwa_to_global(
     token_offset: u32,
 ) {
     let mut token_cache = HashMap::<usize, RangeSetBlaze<u32>>::new();
+    let mut weight_cache = HashMap::<usize, Weight>::new();
+
+    let remap = |weight: &Weight,
+                 token_cache: &mut HashMap<usize, RangeSetBlaze<u32>>,
+                 weight_cache: &mut HashMap<usize, Weight>|
+     -> Weight {
+        let weight_ptr = std::sync::Arc::as_ptr(&weight.0) as usize;
+        if let Some(cached) = weight_cache.get(&weight_ptr) {
+            return cached.clone();
+        }
+        let remapped = remap_weight_to_global(
+            weight,
+            local_to_global_tsids,
+            token_offset,
+            token_cache,
+        );
+        weight_cache.insert(weight_ptr, remapped.clone());
+        remapped
+    };
 
     for state in &mut nwa.states {
         if let Some(final_weight) = state.final_weight.as_mut() {
-            *final_weight = remap_weight_to_global(
-                final_weight,
-                local_to_global_tsids,
-                token_offset,
-                &mut token_cache,
-            );
+            *final_weight = remap(final_weight, &mut token_cache, &mut weight_cache);
             if final_weight.is_empty() {
                 state.final_weight = None;
             }
@@ -2249,24 +2263,14 @@ fn remap_partition_nwa_to_global(
 
         for targets in state.transitions.values_mut() {
             for (_, weight) in targets.iter_mut() {
-                *weight = remap_weight_to_global(
-                    weight,
-                    local_to_global_tsids,
-                    token_offset,
-                    &mut token_cache,
-                );
+                *weight = remap(weight, &mut token_cache, &mut weight_cache);
             }
             targets.retain(|(_, weight)| !weight.is_empty());
         }
         state.transitions.retain(|_, targets| !targets.is_empty());
 
         for (_, weight) in state.epsilons.iter_mut() {
-            *weight = remap_weight_to_global(
-                weight,
-                local_to_global_tsids,
-                token_offset,
-                &mut token_cache,
-            );
+            *weight = remap(weight, &mut token_cache, &mut weight_cache);
         }
         state.epsilons.retain(|(_, weight)| !weight.is_empty());
     }
