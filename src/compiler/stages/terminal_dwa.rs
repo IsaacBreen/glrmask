@@ -1414,12 +1414,26 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     /// Fast NWA construction for L1-only grammars (all terminals have path
     /// length ≤ 1).  Replaces the trie walk with a simple flat loop over
     /// internal vocab × state class representatives.
+    /// Uses the O(1) flat transition table for byte stepping.
     fn build_l1_fast(
         &mut self,
         internal_vocab: &[(u32, Vec<u8>)],
         roots_by_tokenizer_state: &NodesByTokenizerState,
         id_map: &InternalIdMap,
     ) {
+        // Pre-populate flat transition tables for ALL tokenizer states.
+        let num_states = self.tokenizer.num_states() as usize;
+        for state_idx in 0..num_states {
+            if self.flat_transitions[state_idx].is_none() {
+                let dfa_state = &self.tokenizer.dfa.states()[state_idx];
+                let mut flat = Box::new([u32::MAX; 256]);
+                for (b, &target) in dfa_state.transitions.iter() {
+                    flat[b as usize] = target;
+                }
+                self.flat_transitions[state_idx] = Some(flat);
+            }
+        }
+
         for &(internal_token_id, ref bytes) in internal_vocab {
             for (_tsid_idx, representative_state) in
                 id_map.tokenizer_states.iter_representative_ids().enumerate()
@@ -1433,26 +1447,31 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     continue;
                 }
 
-                // Scan bytes through the tokenizer DFA.
+                // Walk bytes using O(1) flat transition table.
                 let mut scan_state = representative_state;
-                let mut scan_alive = true;
-                let mut match_map: FxHashMap<TerminalID, (usize, u32)> = FxHashMap::default();
-                for (index, &byte) in bytes.iter().enumerate() {
-                    if let Some(next) = self.tokenizer.step(scan_state, byte) {
-                        scan_state = next;
-                        for terminal in self.tokenizer.matched_terminals_iter(scan_state) {
-                            match_map.insert(terminal, (index + 1, scan_state));
-                        }
-                    } else {
-                        scan_alive = false;
+                let mut alive = true;
+                for &byte in bytes.iter() {
+                    let next = unsafe {
+                        // SAFETY: scan_state < num_states (maintained by DFA construction)
+                        // and flat table is always Some (populated above).
+                        *self.flat_transitions
+                            .get_unchecked(scan_state as usize)
+                            .as_ref()
+                            .unwrap_unchecked()
+                            .get_unchecked(byte as usize)
+                    };
+                    if next == u32::MAX {
+                        alive = false;
                         break;
                     }
+                    scan_state = next;
                 }
-                let end_state = if scan_alive { Some(scan_state) } else { None };
 
-                // Record terminal matches at the token endpoint.
-                for (&terminal, &(width, _end_st)) in &match_map {
-                    if width == bytes.len() {
+                if alive {
+                    // Terminal matches at the exact token endpoint.
+                    let finalizers = self.tokenizer.dfa.finalizers(scan_state);
+                    for t in finalizers.iter() {
+                        let terminal = t as TerminalID;
                         self.profile.match_transition_additions += source_nodes.len() as u64;
                         self.add_leaf_token_from_sources(
                             source_nodes,
@@ -1460,13 +1479,11 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                             internal_token_id,
                         );
                     }
-                }
 
-                // Future leaf: token fully consumed, tokenizer still alive.
-                if let Some(end_state) = end_state {
+                    // Future leaf: token fully consumed, tokenizer still alive.
                     self.add_future_leaf_token_from_sources(
                         source_nodes,
-                        end_state,
+                        scan_state,
                         internal_token_id,
                     );
                 }
@@ -2093,7 +2110,10 @@ fn build_partition_terminal_nwa(
         flat_transitions: vec![None; num_tokenizer_states],
     };
     let nwa_build_start = std::time::Instant::now();
-    if all_l1 && (internal_vocab.len() as u64) * (id_map.num_tsids() as u64) < 100_000 {
+    // Use L1 fast path for small partitions (< 500K token×state pairs).
+    // For larger partitions, the trie walk is faster because it shares prefix
+    // computation and batches future-leaf buffer operations.
+    if all_l1 && (internal_vocab.len() as u64) * (id_map.num_tsids() as u64) < 500_000 {
         builder.build_l1_fast(&internal_vocab, &roots_by_tokenizer_state, id_map);
     } else {
         builder.build_from_trie(&full_tree.root, &roots_by_tokenizer_state);
