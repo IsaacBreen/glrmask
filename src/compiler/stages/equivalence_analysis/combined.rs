@@ -5,6 +5,7 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equivalence_analysis::{InternalIdMap, ManyToOneIdMap};
 use crate::compiler::stages::equivalence_analysis::compat::TokenizerView;
 use crate::compiler::stages::equivalence_analysis::combined_equivalence_analysis;
+use crate::compiler::stages::equivalence_analysis::combined_equivalence_analysis::hash_byte_class_seq;
 use crate::ds::bitset::BitSet;
 
 fn env_flag_enabled(name: &str) -> bool {
@@ -108,6 +109,213 @@ fn build_vocab_map(
         original_to_internal,
         internal_to_originals,
         representative_original_ids,
+    }
+}
+
+/// L1 fast path for equivalence analysis.
+///
+/// When all terminals have max path length ≤ 1, no multi-terminal token paths
+/// exist. Token equivalence reduces to "same finalizer set from every state"
+/// and state equivalence to "same token-class behavior for every token class".
+///
+/// Uses byte-class token deduplication then direct DFA fingerprinting,
+/// avoiding the product-DFA construction used in the general case.
+pub(crate) fn analyze_equivalences_l1(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+) -> InternalIdMap {
+    use std::collections::HashMap;
+    use std::hash::{Hash, Hasher};
+
+    let profile_compile = compile_profile_enabled();
+    let total_started_at = std::time::Instant::now();
+
+    let num_states = tokenizer.num_states() as usize;
+    let max_token_id = vocab.max_token_id();
+
+    // Extract vocab token IDs and byte slices.
+    let mut token_ids: Vec<u32> = Vec::with_capacity(vocab.len());
+    let mut token_bytes_list: Vec<&[u8]> = Vec::with_capacity(vocab.len());
+    for (&tid, bytes) in &vocab.entries {
+        token_ids.push(tid);
+        token_bytes_list.push(bytes.as_slice());
+    }
+    let num_tokens = token_ids.len();
+
+    // Byte-class token deduplication: tokens with the same byte-class sequence
+    // produce identical DFA behavior from every state.
+    let dedup_started_at = std::time::Instant::now();
+    let tokenizer_view = TokenizerView::new(tokenizer);
+    let byte_to_class = super::compat::compute_byte_classes(tokenizer_view.dfa());
+    let mut bc_hash_to_repr: HashMap<u128, usize> = HashMap::with_capacity(num_tokens / 2);
+    let mut repr_indices: Vec<usize> = Vec::new(); // indices into token_ids/token_bytes_list
+    let mut original_to_repr: Vec<usize> = Vec::with_capacity(num_tokens);
+    for (idx, &bytes) in token_bytes_list.iter().enumerate() {
+        let h = hash_byte_class_seq(bytes, &byte_to_class);
+        let repr = *bc_hash_to_repr.entry(h).or_insert_with(|| {
+            let r = repr_indices.len();
+            repr_indices.push(idx);
+            r
+        });
+        original_to_repr.push(repr);
+    }
+    let num_repr = repr_indices.len();
+    let dedup_ms = elapsed_ms(dedup_started_at);
+
+    // Fingerprint per representative token: one u64 per state.
+    let fp_started_at = std::time::Instant::now();
+    let mut repr_fps: Vec<Vec<u64>> = Vec::with_capacity(num_repr);
+    for &idx in &repr_indices {
+        let bytes = token_bytes_list[idx];
+        let mut fps = Vec::with_capacity(num_states);
+        for state in 0..num_states as u32 {
+            let mut s = state;
+            let mut dead = false;
+            for &b in bytes {
+                match tokenizer.step(s, b) {
+                    Some(next) => s = next,
+                    None => {
+                        dead = true;
+                        break;
+                    }
+                }
+            }
+            if dead {
+                fps.push(0u64);
+            } else {
+                let finalizers = tokenizer.dfa.finalizers(s);
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                finalizers.hash(&mut hasher);
+                1u8.hash(&mut hasher);
+                fps.push(hasher.finish());
+            }
+        }
+        repr_fps.push(fps);
+    }
+    let fp_ms = elapsed_ms(fp_started_at);
+
+    // Group representative tokens by fingerprint vector → token dedup classes.
+    let token_group_started_at = std::time::Instant::now();
+    let mut repr_sig_to_class: HashMap<u64, u32> = HashMap::new();
+    let mut repr_class: Vec<u32> = Vec::with_capacity(num_repr);
+    let mut repr_class_reps: Vec<usize> = Vec::new(); // repr index for each class
+    for (r, fps) in repr_fps.iter().enumerate() {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        fps.hash(&mut hasher);
+        let sig = hasher.finish();
+        let next_id = repr_class_reps.len() as u32;
+        let class = *repr_sig_to_class.entry(sig).or_insert_with(|| {
+            repr_class_reps.push(r);
+            next_id
+        });
+        repr_class.push(class);
+    }
+    let num_repr_classes = repr_class_reps.len();
+
+    // Expand back to original tokens.
+    let mut token_original_to_internal = vec![u32::MAX; (max_token_id + 1) as usize];
+    let mut token_internal_to_originals: Vec<Vec<u32>> = vec![Vec::new(); num_repr_classes];
+    let mut token_representative_ids: Vec<u32> = vec![u32::MAX; num_repr_classes];
+    for (orig_idx, &tid) in token_ids.iter().enumerate() {
+        let repr = original_to_repr[orig_idx];
+        let class = repr_class[repr];
+        token_original_to_internal[tid as usize] = class;
+        let bucket = &mut token_internal_to_originals[class as usize];
+        bucket.push(tid);
+        if tid < token_representative_ids[class as usize] {
+            token_representative_ids[class as usize] = tid;
+        }
+    }
+    let token_group_ms = elapsed_ms(token_group_started_at);
+
+    // Group states by behavior across token class representative fingerprints.
+    let state_group_started_at = std::time::Instant::now();
+    let mut state_sig_to_class: HashMap<u64, u32> = HashMap::new();
+    let mut state_original_to_internal = vec![0u32; num_states];
+    let mut state_internal_to_originals: Vec<Vec<u32>> = Vec::new();
+    let mut state_representative_ids: Vec<u32> = Vec::new();
+
+    for state in 0..num_states {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for &rep_r in &repr_class_reps {
+            repr_fps[rep_r][state].hash(&mut hasher);
+        }
+        let sig = hasher.finish();
+        let next_id = state_internal_to_originals.len() as u32;
+        let class = *state_sig_to_class.entry(sig).or_insert_with(|| {
+            state_internal_to_originals.push(Vec::new());
+            state_representative_ids.push(state as u32);
+            next_id
+        });
+        state_original_to_internal[state] = class;
+        state_internal_to_originals[class as usize].push(state as u32);
+    }
+    let num_state_classes = state_internal_to_originals.len();
+    let state_group_ms = elapsed_ms(state_group_started_at);
+
+    // Re-group tokens using only state class representative fingerprints.
+    let refine_started_at = std::time::Instant::now();
+    let state_class_reps: Vec<usize> = state_representative_ids
+        .iter()
+        .map(|&sid| sid as usize)
+        .collect();
+
+    let mut refined_repr_sig_to_class: HashMap<u64, u32> = HashMap::new();
+    let mut refined_repr_class: Vec<u32> = Vec::with_capacity(num_repr);
+    let mut refined_class_reps: Vec<usize> = Vec::new();
+    for (r, fps) in repr_fps.iter().enumerate() {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for &state in &state_class_reps {
+            fps[state].hash(&mut hasher);
+        }
+        let sig = hasher.finish();
+        let next_id = refined_class_reps.len() as u32;
+        let class = *refined_repr_sig_to_class.entry(sig).or_insert_with(|| {
+            refined_class_reps.push(r);
+            next_id
+        });
+        refined_repr_class.push(class);
+    }
+    let refined_num_token_classes = refined_class_reps.len();
+
+    // Expand refined classes back to original tokens.
+    let mut refined_token_original_to_internal = vec![u32::MAX; (max_token_id + 1) as usize];
+    let mut refined_token_internal_to_originals: Vec<Vec<u32>> = vec![Vec::new(); refined_num_token_classes];
+    let mut refined_token_representative_ids: Vec<u32> = vec![u32::MAX; refined_num_token_classes];
+    for (orig_idx, &tid) in token_ids.iter().enumerate() {
+        let repr = original_to_repr[orig_idx];
+        let class = refined_repr_class[repr];
+        refined_token_original_to_internal[tid as usize] = class;
+        let bucket = &mut refined_token_internal_to_originals[class as usize];
+        bucket.push(tid);
+        if tid < refined_token_representative_ids[class as usize] {
+            refined_token_representative_ids[class as usize] = tid;
+        }
+    }
+    let refine_ms = elapsed_ms(refine_started_at);
+
+    if profile_compile {
+        eprintln!(
+            "[glrmask/profile][id_map_l1] dedup_ms={:.3} tokens={}->{} fp_ms={:.3} token_group_ms={:.3} state_group_ms={:.3} refine_ms={:.3} states={} state_classes={} token_classes_raw={} token_classes_refined={} total_ms={:.3}",
+            dedup_ms, num_tokens, num_repr,
+            fp_ms, token_group_ms, state_group_ms, refine_ms,
+            num_states, num_state_classes,
+            num_repr_classes, refined_num_token_classes,
+            elapsed_ms(total_started_at),
+        );
+    }
+
+    InternalIdMap {
+        tokenizer_states: ManyToOneIdMap {
+            original_to_internal: state_original_to_internal,
+            internal_to_originals: state_internal_to_originals,
+            representative_original_ids: state_representative_ids,
+        },
+        vocab_tokens: ManyToOneIdMap {
+            original_to_internal: refined_token_original_to_internal,
+            internal_to_originals: refined_token_internal_to_originals,
+            representative_original_ids: refined_token_representative_ids,
+        },
     }
 }
 

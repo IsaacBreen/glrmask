@@ -25,6 +25,7 @@ use crate::compiler::stages::terminal_dwa::{
     compute_terminal_coloring,
     compute_ever_allowed_follows,
     classify_vocab_char_type,
+    classify_terminal_path_lengths,
     TerminalColoring,
 };
 use crate::ds::bitset::BitSet;
@@ -434,6 +435,44 @@ fn compile_prepared_with_profile(
             );
         }
 
+        // Classify terminals by path length for future optimization.
+        // Adjust disallowed follows for the ignore terminal: the ignore
+        // terminal can follow and be followed by any terminal.
+        let adjusted_disallowed_for_classification = if let Some(ign) = prepared_grammar.ignore_terminal {
+            let mut adj = disallowed_follows.clone();
+            adj.remove(&ign);
+            for bits in adj.values_mut() {
+                if (ign as usize) < bits.len() {
+                    bits.clear(ign as usize);
+                }
+            }
+            adj.retain(|_, bits| !bits.is_zero());
+            adj
+        } else {
+            disallowed_follows.clone()
+        };
+        let terminal_path_lengths = classify_terminal_path_lengths(
+            &tokenizer,
+            vocab,
+            &adjusted_disallowed_for_classification,
+            analyzed_grammar.num_terminals,
+        );
+        if compile_profile_enabled() {
+            use crate::compiler::stages::terminal_dwa::TerminalPathLength;
+            let n0 = terminal_path_lengths.iter().filter(|l| **l == TerminalPathLength::Zero).count();
+            let n1 = terminal_path_lengths.iter().filter(|l| **l == TerminalPathLength::One).count();
+            let n2 = terminal_path_lengths.iter().filter(|l| **l == TerminalPathLength::TwoPlus).count();
+            eprintln!(
+                "[glrmask/profile][terminal_path_lengths] total={} length0={} length1={} length2plus={}",
+                terminal_path_lengths.len(), n0, n1, n2,
+            );
+        }
+
+        let all_l1 = {
+            use crate::compiler::stages::terminal_dwa::TerminalPathLength;
+            terminal_path_lengths.iter().all(|l| matches!(l, TerminalPathLength::Zero | TerminalPathLength::One))
+        };
+
         enum IdMapBuildResult {
             Ready(InternalIdMap),
             Partitioned {
@@ -492,10 +531,11 @@ fn compile_prepared_with_profile(
                             token_reps,
                         ),
                     })
+                } else if all_l1 && std::env::var("GLRMASK_L1_IDMAP").map_or(false, |v| v == "1") {
+                    // L1 fast path: direct fingerprint-based equivalence,
+                    // no partitioning needed. Opt-in via env var for now.
+                    IdMapBuildResult::Ready(InternalIdMap::build_l1(&tokenizer, vocab))
                 } else {
-                    // Partition the vocab into 3 character-type groups and
-                    // build per-partition id_maps in parallel, then refine
-                    // into a global id_map.
                     let mut partition_vocabs: [Vec<(u32, Vec<u8>)>; 3] =
                         [Vec::new(), Vec::new(), Vec::new()];
                     for (&token_id, bytes) in &vocab.entries {
@@ -595,6 +635,7 @@ fn compile_prepared_with_profile(
                 &terminal_coloring,
                 terminal_coloring_enabled,
                 prepared_grammar.ignore_terminal,
+                Some(&terminal_path_lengths),
             )
         } else {
             build_terminal_dwa_with_possible_matches_and_coloring(
@@ -605,6 +646,7 @@ fn compile_prepared_with_profile(
                 &terminal_coloring,
                 terminal_coloring_enabled,
                 prepared_grammar.ignore_terminal,
+                Some(&terminal_path_lengths),
             )
         };
         profile.terminal_dwa_ms = elapsed_ms(terminal_dwa_started_at);

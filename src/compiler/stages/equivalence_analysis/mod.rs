@@ -83,6 +83,15 @@ impl InternalIdMap {
         combined::analyze_equivalences(tokenizer, vocab, disallowed_follows, ignore_terminal)
     }
 
+    /// L1 fast path: compute equivalence classes using direct DFA fingerprinting.
+    /// Only valid when all terminals have max path length ≤ 1.
+    pub fn build_l1(
+        tokenizer: &crate::automata::lexer::tokenizer::Tokenizer,
+        vocab: &crate::Vocab,
+    ) -> Self {
+        combined::analyze_equivalences_l1(tokenizer, vocab)
+    }
+
     /// Build a trivial identity map where each tokenizer state and vocab token
     /// maps to its own singleton equivalence class (no merging).
     #[cfg(test)]

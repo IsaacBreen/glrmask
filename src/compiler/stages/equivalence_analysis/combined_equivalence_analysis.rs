@@ -175,7 +175,7 @@ struct TokenDedup<'a> {
 /// Hash a token's byte-class sequence into a u128 for dedup.
 /// Collision probability is ~n²/2^128 ≈ 0 for any practical n.
 #[inline]
-fn hash_byte_class_seq(bytes: &[u8], byte_to_class: &[u8; 256]) -> u128 {
+pub(crate) fn hash_byte_class_seq(bytes: &[u8], byte_to_class: &[u8; 256]) -> u128 {
     // Length-prefixed hash with a good mixing function.
     let mut h: u128 = 0xFF51_AFD7_ED55_8CCD;
     h = h.wrapping_mul(0xC4CE_B9FE_1A85_EC53).wrapping_add(bytes.len() as u128);
