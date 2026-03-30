@@ -134,8 +134,18 @@ fn find_state_equivalence_classes_kstep(
         .collect();
     let (outgoing_targets, mut prev_hashes): (Vec<_>, Vec<_>) = state_shapes.into_iter().unzip();
 
+    // Count initial unique hashes among the subset of states we care about.
+    let count_unique = |hashes: &[u64], states: &[usize]| -> usize {
+        let mut seen = rustc_hash::FxHashSet::default();
+        for &s in states {
+            seen.insert(hashes[s]);
+        }
+        seen.len()
+    };
+    let mut prev_unique = count_unique(&prev_hashes, states);
+
     let mut next_hashes = vec![0u64; dfa.states.len()];
-    for _ in 0..k {
+    for _step in 0..k {
         next_hashes
             .par_iter_mut()
             .enumerate()
@@ -146,6 +156,14 @@ fn find_state_equivalence_classes_kstep(
                 );
             });
         std::mem::swap(&mut prev_hashes, &mut next_hashes);
+
+        // Early termination: if no new equivalence classes formed, further
+        // iterations won't help (hash propagation has converged).
+        let curr_unique = count_unique(&prev_hashes, states);
+        if curr_unique == prev_unique {
+            break;
+        }
+        prev_unique = curr_unique;
     }
 
     build_subset_mapping(states, &prev_hashes)
