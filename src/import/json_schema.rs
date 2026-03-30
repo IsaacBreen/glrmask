@@ -4480,19 +4480,67 @@ impl<'a> SchemaCtx<'a> {
         bytes
     }
 
+    /// Build the regex pattern for the key-colon DFA body, respecting split
+    /// flags. The returned pattern covers exactly the portion that is NOT
+    /// split off into separate literal terminals.
+    fn key_colon_dfa_body_pattern(inner_regex: &str) -> String {
+        let open = split_open_quote();
+        let close = split_close_quote();
+        let colon = split_colon_space();
+        match (open, close, colon) {
+            (false, false, false) => format!(r#""(?:{})": "#, inner_regex),
+            (false, false, true)  => format!(r#""(?:{})""#, inner_regex),
+            (false, true, _)      => format!(r#""(?:{})"#, inner_regex),
+            (true, false, false)  => format!(r#"(?:{})": "#, inner_regex),
+            (true, false, true)   => format!(r#"(?:{})""#, inner_regex),
+            (true, true, _)       => format!(r#"(?:{})"#, inner_regex),
+        }
+    }
+
+    /// Build literal bytes for a key-colon DFA entry, respecting split flags.
+    fn key_colon_literal_bytes_split(text: &str) -> Vec<u8> {
+        let open = split_open_quote();
+        let close = split_close_quote();
+        let colon = split_colon_space();
+        let full = json_string_literal_bytes(text); // includes surrounding quotes: "text"
+        let body_only = &full[1..full.len() - 1]; // strip both quotes
+
+        let mut bytes = Vec::new();
+        if !open {
+            bytes.push(b'"'); // fused opening quote
+        }
+        bytes.extend_from_slice(body_only);
+        if !close && !colon {
+            bytes.extend_from_slice(b"\": ");
+        } else if !close {
+            bytes.push(b'"');
+        }
+        // If close is split, the close quote and colon are not in this span
+        bytes
+    }
+
     fn scoped_key_colon_dfa(property_names: Option<&Value>) -> Result<LexerDfa, GlrMaskError> {
         let pattern = if let Some(property_names) = property_names {
-            let inner = json_search_pattern(Self::property_name_pattern(property_names)?);
-            format!(r#""(?:{})": "#, inner)
+            Self::key_colon_dfa_body_pattern(
+                &json_search_pattern(Self::property_name_pattern(property_names)?),
+            )
         } else {
-            format!(r#""{}"#, JSON_KEY_COLON_BODY_REGEX)
+            let open = split_open_quote();
+            let close = split_close_quote();
+            let colon = split_colon_space();
+            if !open && !close && !colon {
+                format!(r#""{}"#, JSON_KEY_COLON_BODY_REGEX)
+            } else {
+                Self::key_colon_dfa_body_pattern(JSON_STRING_BODY_ONLY_REGEX)
+            }
         };
         Ok(build_regex(&[parse_regex(&pattern, true)]).dfa)
     }
 
     fn pattern_key_colon_dfa(pattern: &str) -> LexerDfa {
         let inner = json_search_pattern(pattern);
-        build_regex(&[parse_regex(&format!(r#""(?:{})": "#, inner), true)]).dfa
+        let pat = Self::key_colon_dfa_body_pattern(&inner);
+        build_regex(&[parse_regex(&pat, true)]).dfa
     }
 
     fn literal_key_colon_union_dfa(keys: &BTreeSet<String>) -> Option<LexerDfa> {
@@ -4501,7 +4549,7 @@ impl<'a> SchemaCtx<'a> {
         }
         let exprs = keys
             .iter()
-            .map(|key| LexerExpr::U8Seq(Self::json_key_colon_literal_bytes(key)))
+            .map(|key| LexerExpr::U8Seq(Self::key_colon_literal_bytes_split(key)))
             .collect::<Vec<_>>();
         let expr = if exprs.len() == 1 {
             exprs.into_iter().next().unwrap()
@@ -4625,6 +4673,40 @@ impl<'a> SchemaCtx<'a> {
             GrammarExpr::TerminalExpr(LexerExpr::Dfa(dfa.clone())),
             prefix,
         )
+    }
+
+    /// Build a grammar expression for a key-colon DFA, wrapping it with
+    /// the split-off literal parts (opening quote, close quote, colon-space)
+    /// just like `wrap_key_colon_regex` does for regex-based keys.
+    fn build_key_colon_dfa_expr(&mut self, dfa: &LexerDfa, prefix: &str) -> GrammarExpr {
+        if !Self::dfa_accepts_any(dfa) {
+            return never_expr();
+        }
+
+        let open = split_open_quote();
+        let close = split_close_quote();
+        let colon = split_colon_space();
+
+        let body = self.extract_terminal_rule(
+            GrammarExpr::TerminalExpr(LexerExpr::Dfa(dfa.clone())),
+            prefix,
+        );
+
+        let mut parts = Vec::new();
+        if open {
+            parts.push(literal_expr(b"\""));
+        }
+        parts.push(body);
+        if close && colon {
+            parts.push(literal_expr(b"\""));
+            parts.push(key_colon_suffix_expr());
+        } else if close {
+            parts.push(literal_expr(b"\": "));
+        } else if colon {
+            parts.push(key_colon_suffix_expr());
+        }
+
+        sequence_or_single(parts)
     }
 
     fn build_excluding_key_colon_expr(
@@ -4995,7 +5077,7 @@ impl<'a> SchemaCtx<'a> {
                 // Each object still gets its own uniquely-named terminal.
                 let full_key_dfa = Self::scoped_key_colon_dfa(None)?;
                 Some(sequence_or_single(vec![
-                    self.build_lexer_dfa_expr(
+                    self.build_key_colon_dfa_expr(
                         &full_key_dfa,
                         &format!("{}_KEY_COLON", base_name.to_uppercase()),
                     ),
@@ -5014,7 +5096,7 @@ impl<'a> SchemaCtx<'a> {
                     None
                 } else {
                     Some(sequence_or_single(vec![
-                        self.build_lexer_dfa_expr(
+                        self.build_key_colon_dfa_expr(
                             &key_dfa,
                             &format!("{}_KEY_COLON", base_name.to_uppercase()),
                         ),
@@ -5438,7 +5520,7 @@ impl<'a> SchemaCtx<'a> {
                     continue;
                 }
 
-                let key_expr = self.build_lexer_dfa_expr(
+                let key_expr = self.build_key_colon_dfa_expr(
                     &key_dfa,
                     &format!("{}_PP_SUBSET_{}_KEY", base_name.to_uppercase(), subset_idx),
                 );
@@ -5465,7 +5547,7 @@ impl<'a> SchemaCtx<'a> {
                 // Skip key exclusion — AP keys accept any JSON string.
                 // Each object still gets its own uniquely-named terminal to preserve grammar structure.
                 let full_key_dfa = Self::scoped_key_colon_dfa(property_names)?;
-                Some(self.build_lexer_dfa_expr(
+                Some(self.build_key_colon_dfa_expr(
                     &full_key_dfa,
                     &format!("{}_AP_KEY", base_name.to_uppercase()),
                 ))
@@ -5487,7 +5569,7 @@ impl<'a> SchemaCtx<'a> {
                 if !Self::dfa_accepts_any(&additional_key_dfa) {
                     None
                 } else {
-                    Some(self.build_lexer_dfa_expr(
+                    Some(self.build_key_colon_dfa_expr(
                         &additional_key_dfa,
                         &format!("{}_AP_KEY", base_name.to_uppercase()),
                     ))
