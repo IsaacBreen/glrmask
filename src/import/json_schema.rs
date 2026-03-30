@@ -4319,18 +4319,49 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn build_repeated_object_pairs(&self, pair: GrammarExpr) -> GrammarExpr {
+        self.build_repeated_object_pairs_with_bounds(pair, 0, None)
+    }
+
+    fn build_repeated_object_pairs_with_bounds(
+        &self,
+        pair: GrammarExpr,
+        min_pairs: usize,
+        max_pairs: Option<usize>,
+    ) -> GrammarExpr {
+        if max_pairs == Some(0) {
+            return sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]);
+        }
+
+        let nonempty = sequence_or_single(vec![
+            literal_expr(b"{"),
+            pair.clone(),
+            repeat_expr(
+                sequence_or_single(vec![self.json_item_separator_expr(), pair]),
+                min_pairs.saturating_sub(1),
+                max_pairs.map(|max| max.saturating_sub(1)),
+            ),
+            literal_expr(b"}"),
+        ]);
+
+        if min_pairs == 0 {
+            choice_or_single(vec![
+                sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]),
+                nonempty,
+            ])
+        } else {
+            nonempty
+        }
+    }
+
+    fn build_repeated_dynamic_object_pairs(
+        &mut self,
+        value_expr: GrammarExpr,
+        min_pairs: usize,
+        max_pairs: Option<usize>,
+    ) -> GrammarExpr {
+        let pair = sequence_or_single(vec![self.json_key_colon_ref(), value_expr]);
         choice_or_single(vec![
-            sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]),
-            sequence_or_single(vec![
-                literal_expr(b"{"),
-                pair.clone(),
-                repeat_expr(
-                    sequence_or_single(vec![self.json_item_separator_expr(), pair]),
-                    0,
-                    None,
-                ),
-                literal_expr(b"}"),
-            ]),
+            self.build_repeated_object_pairs_with_bounds(pair, min_pairs, max_pairs),
         ])
     }
 
@@ -4675,6 +4706,20 @@ impl<'a> SchemaCtx<'a> {
 
         let additional_schema = self.normalized_additional_properties_schema(additional_properties);
 
+        if property_names.is_none() && pattern_properties.is_none() && (min_properties.is_some() || max_properties.is_some()) {
+            let min_pairs = min_properties.map(|value| value as usize).unwrap_or(0);
+            let max_pairs = max_properties.map(|value| value as usize);
+            let Some(schema) = additional_schema.clone() else {
+                if min_pairs > 0 {
+                    return Err(unsat_schema_error());
+                }
+                return Ok(sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]));
+            };
+
+            let value_expr = self.convert_schema(&schema)?;
+            return Ok(self.build_repeated_dynamic_object_pairs(value_expr, min_pairs, max_pairs));
+        }
+
         if !required_list.is_empty() && pattern_properties.is_none() && property_names.is_none() {
             return self.build_required_any_order_object_expr(&required_list, additional_schema);
         }
@@ -4841,6 +4886,177 @@ impl<'a> SchemaCtx<'a> {
                     nc_alts.push(empty_expr());
                     c_alts.push(empty_expr());
                 }
+            }
+
+            self.insert_rule(nc_name, choice_or_single(nc_alts));
+            self.insert_rule(c_name, choice_or_single(c_alts));
+        }
+
+        Ok(sequence_or_single(vec![
+            literal_expr(b"{"),
+            GrammarExpr::Ref(format!(
+                "{base_name}_nc_{}",
+                mask_indices.get(&full_mask).copied().unwrap_or(0)
+            )),
+            literal_expr(b"}"),
+        ]))
+    }
+
+    fn build_literal_properties_any_order_object_expr(
+        &mut self,
+        properties: &Map<String, Value>,
+        required_list: &[String],
+        required_keys: &BTreeSet<String>,
+        additional_properties_schema: Option<Value>,
+    ) -> Result<GrammarExpr, GlrMaskError> {
+        let mut literal_entries = Vec::<(String, GrammarExpr, bool)>::new();
+
+        for (key, subschema) in properties {
+            let value_expr = match self.convert_schema(subschema) {
+                Ok(expr) => expr,
+                Err(err) if is_unsat_schema_error(&err) => {
+                    if required_keys.contains(key) {
+                        return Err(unsat_schema_error());
+                    }
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
+            literal_entries.push((key.clone(), value_expr, required_keys.contains(key)));
+        }
+
+        for key in required_list {
+            if properties.contains_key(key) {
+                continue;
+            }
+            let Some(schema) = additional_properties_schema.as_ref() else {
+                return Err(unsat_schema_error());
+            };
+            let value_expr = self.convert_schema(schema)?;
+            literal_entries.push((key.clone(), value_expr, true));
+        }
+
+        if literal_entries.is_empty() && additional_properties_schema.is_none() {
+            return Ok(sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]));
+        }
+
+        let mut base_index = self.generated_object_rule_counter;
+        let base_name = loop {
+            let candidate = format!("obj_lit_any_{base_index}");
+            if !self.used_rule_names.contains(&format!("{candidate}_nc_0")) {
+                break candidate;
+            }
+            base_index += 1;
+        };
+        self.generated_object_rule_counter = base_index + 1;
+
+        let full_mask: Vec<usize> = (0..literal_entries.len()).collect();
+        let mut masks = Vec::<Vec<usize>>::new();
+        let mut mask_indices = HashMap::<Vec<usize>, usize>::new();
+        let mut pending = vec![full_mask.clone()];
+        while let Some(mask) = pending.pop() {
+            if mask_indices.contains_key(&mask) {
+                continue;
+            }
+            let index = masks.len();
+            mask_indices.insert(mask.clone(), index);
+            masks.push(mask.clone());
+            for &item in &mask {
+                let next_mask = mask
+                    .iter()
+                    .copied()
+                    .filter(|candidate| *candidate != item)
+                    .collect::<Vec<_>>();
+                if !mask_indices.contains_key(&next_mask) {
+                    pending.push(next_mask);
+                }
+            }
+        }
+
+        let extra_pair = if let Some(schema) = additional_properties_schema {
+            let extra_value_expr = self.convert_schema(&schema)?;
+            if ap_key_any_string() {
+                // Skip key exclusion — AP keys accept any JSON string.
+                // Each object still gets its own uniquely-named terminal.
+                let full_key_dfa = Self::scoped_key_colon_dfa(None)?;
+                Some(sequence_or_single(vec![
+                    self.build_lexer_dfa_expr(
+                        &full_key_dfa,
+                        &format!("{}_KEY_COLON", base_name.to_uppercase()),
+                    ),
+                    extra_value_expr,
+                ]))
+            } else {
+                let mut excluded_literal_keys = BTreeSet::<String>::new();
+                excluded_literal_keys.extend(properties.keys().cloned());
+                excluded_literal_keys.extend(required_list.iter().cloned());
+                let mut key_dfa = Self::scoped_key_colon_dfa(None)?;
+                if let Some(excluded_dfa) = Self::literal_key_colon_union_dfa(&excluded_literal_keys) {
+                    key_dfa = Self::subtract_lexer_dfa(&key_dfa, &excluded_dfa);
+                }
+
+                if !Self::dfa_accepts_any(&key_dfa) {
+                    None
+                } else {
+                    Some(sequence_or_single(vec![
+                        self.build_lexer_dfa_expr(
+                            &key_dfa,
+                            &format!("{}_KEY_COLON", base_name.to_uppercase()),
+                        ),
+                        extra_value_expr,
+                    ]))
+                }
+            }
+        } else {
+            None
+        };
+
+        for mask in &masks {
+            let mask_index = *mask_indices.get(mask).unwrap();
+            let nc_name = format!("{base_name}_nc_{mask_index}");
+            let c_name = format!("{base_name}_c_{mask_index}");
+            let mut nc_alts = Vec::new();
+            let mut c_alts = Vec::new();
+
+            if let Some(extra_pair) = &extra_pair {
+                nc_alts.push(sequence_or_single(vec![
+                    extra_pair.clone(),
+                    GrammarExpr::Ref(c_name.clone()),
+                ]));
+                c_alts.push(sequence_or_single(vec![
+                    self.json_item_separator_expr(),
+                    extra_pair.clone(),
+                    GrammarExpr::Ref(c_name.clone()),
+                ]));
+            }
+
+            for &item in mask {
+                let (key, value_expr, _) = &literal_entries[item];
+                let pair_expr = sequence_or_single(vec![
+                    self.json_key_colon_literal(key),
+                    value_expr.clone(),
+                ]);
+                let next_mask = mask
+                    .iter()
+                    .copied()
+                    .filter(|candidate| *candidate != item)
+                    .collect::<Vec<_>>();
+                let next_index = *mask_indices.get(&next_mask).unwrap();
+                nc_alts.push(sequence_or_single(vec![
+                    pair_expr.clone(),
+                    GrammarExpr::Ref(format!("{base_name}_c_{next_index}")),
+                ]));
+                c_alts.push(sequence_or_single(vec![
+                    self.json_item_separator_expr(),
+                    pair_expr,
+                    GrammarExpr::Ref(format!("{base_name}_c_{next_index}")),
+                ]));
+            }
+
+            let missing_required = mask.iter().any(|&item| literal_entries[item].2);
+            if !missing_required {
+                nc_alts.push(empty_expr());
+                c_alts.push(empty_expr());
             }
 
             self.insert_rule(nc_name, choice_or_single(nc_alts));
@@ -5976,6 +6192,33 @@ mod tests {
     }
 
     #[test]
+    fn test_min_properties_with_additional_properties_schema_requires_nonempty_object() {
+        let schema = r#"{
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": {"type": "string"}
+        }"#;
+
+        assert!(!accepts_sequence(schema, &[b"{}"]));
+        assert!(accepts_sequence(schema, &[b"{\"k\": \"v\"}"]));
+        assert!(!accepts_sequence(schema, &[b"{\"k\": 1}"]));
+    }
+
+    #[test]
+    fn test_max_properties_with_additional_properties_schema_bounds_pair_count() {
+        let schema = r#"{
+            "type": "object",
+            "minProperties": 1,
+            "maxProperties": 1,
+            "additionalProperties": {"type": "string"}
+        }"#;
+
+        assert!(!accepts_sequence(schema, &[b"{}"]));
+        assert!(accepts_sequence(schema, &[b"{\"k\": \"v\"}"]));
+        assert!(!accepts_sequence(schema, &[b"{\"a\": \"x\", \"b\": \"y\"}"]));
+    }
+
+    #[test]
     fn test_oneof_schema() {
         let schema = r#"{
             "oneOf": [{"type": "string"}, {"type": "integer"}]
@@ -6962,6 +7205,60 @@ mod tests {
         // Non-matching key should be rejected
         assert!(!accepts_sequence(schema, &[br#"{"default": "err.html", "abc": "x"}"#]));
     }
+
+    #[test]
+    fn test_literal_properties_accept_any_order() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "required": ["a", "b"]
+        }"#;
+
+        assert!(accepts_sequence(schema, &[br#"{"a": "1", "b": "2"}"#]));
+        assert!(accepts_sequence(schema, &[br#"{"b": "2", "a": "1"}"#]));
+    }
+
+    #[test]
+    fn test_additional_properties_can_precede_declared_keys() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "known": {"type": "string"}
+            }
+        }"#;
+
+        assert!(accepts_sequence(schema, &[br#"{"known": "x", "extra": "y"}"#]));
+        assert!(accepts_sequence(schema, &[br#"{"extra": "y", "known": "x"}"#]));
+    }
+
+    #[test]
+    fn test_allof_properties_accept_declared_keys_after_unknown_keys() {
+        let schema = r##"{
+            "$schema": "http://json-schema.org/draft-04/schema#",
+            "type": "object",
+            "definitions": {
+                "Thing": {
+                    "type": "object",
+                    "properties": {
+                        "additionalType": {"type": "string"},
+                        "name": {"type": "string"}
+                    }
+                }
+            },
+            "allOf": [
+                {"$ref": "#/definitions/Thing"}
+            ]
+        }"##;
+
+        assert!(accepts_sequence(
+            schema,
+            &[br#"{"@type": "OfferItemCondition", "additionalType": "x", "name": "n"}"#],
+        ));
+    }
+
     #[test]
     fn test_literal_property_inherits_all_matching_pattern_properties() {
         let schema = r#"{
