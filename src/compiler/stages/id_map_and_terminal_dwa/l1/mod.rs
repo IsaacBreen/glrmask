@@ -359,6 +359,21 @@ fn collect_terminal_weights(
         let mut child_states_to_initial_tsids = FxHashMap::<u32, Vec<u32>>::default();
         let mut self_loop_states = FxHashMap::<u32, Vec<u32>>::default();
 
+        // Pre-compute reachable_u32 once per child for self-loop optimization
+        let reachable_u32: Option<RangeSetBlaze<u32>> = {
+            let reachable = child.reachable_token_ids();
+            if reachable.is_empty() {
+                None
+            } else {
+                Some(
+                    reachable
+                        .ranges()
+                        .map(|r| (*r.start() as u32)..=(*r.end() as u32))
+                        .collect(),
+                )
+            }
+        };
+
         for (&start_state, initial_tsids) in states_to_initial_tsids {
             profile.segment_execs += 1;
             let Some(end_state) = tokenizer.execute_from_state_end_only(segment, start_state) else {
@@ -366,7 +381,7 @@ fn collect_terminal_weights(
             };
             profile.live_segments += 1;
 
-            if is_self_loop_subtree(self_loop_cache, tokenizer, child, end_state) {
+            if reachable_u32.is_some() && is_self_loop_subtree(self_loop_cache, tokenizer, child, end_state) {
                 self_loop_states
                     .entry(end_state)
                     .or_default()
@@ -380,14 +395,8 @@ fn collect_terminal_weights(
         }
 
         // Self-loop optimization: merge reachable token set via union (O(ranges), not O(elements))
-        if !self_loop_states.is_empty() {
-            let reachable = child.reachable_token_ids();
-            if !reachable.is_empty() {
-                // Convert RangeSetBlaze<usize> to RangeSetBlaze<u32>
-                let reachable_u32: RangeSetBlaze<u32> = reachable
-                    .ranges()
-                    .map(|r| (*r.start() as u32)..=(*r.end() as u32))
-                    .collect();
+        if let Some(ref reachable_u32) = reachable_u32 {
+            if !self_loop_states.is_empty() {
                 profile.self_loop_skipped_subtrees += self_loop_states.len();
 
                 for (&end_state, initial_tsids) in &self_loop_states {
@@ -398,7 +407,7 @@ fn collect_terminal_weights(
                         }
                         let weights = &mut terminal_to_token_weights[terminal_id];
                         for &initial_tsid in initial_tsids {
-                            *weights.entry(initial_tsid).or_default() |= &reachable_u32;
+                            *weights.entry(initial_tsid).or_default() |= reachable_u32;
                         }
                         profile.terminal_hits += initial_tsids.len();
                     }
@@ -408,7 +417,7 @@ fn collect_terminal_weights(
                         }
                         let weights = &mut terminal_to_token_weights[terminal_id];
                         for &initial_tsid in initial_tsids {
-                            *weights.entry(initial_tsid).or_default() |= &reachable_u32;
+                            *weights.entry(initial_tsid).or_default() |= reachable_u32;
                         }
                         profile.terminal_hits += initial_tsids.len();
                     }
