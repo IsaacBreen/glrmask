@@ -1818,18 +1818,13 @@ fn apply_disallowed_follow_constraints(nwa: &mut NWA, grammar: &AnalyzedGrammar)
 
 /// Classifies a token's bytes by character type for vocab partitioning.
 /// Returns 0 (pure non-alnum), 1 (mixed), or 2 (alnum, optionally with leading space).
-///
-/// The "leading space" can be either ASCII 0x20 or the sentencepiece marker
-/// `Ġ` (U+0120, encoded as `\xc4\xa0` in UTF-8).
 pub(crate) fn classify_vocab_char_type(bytes: &[u8]) -> u8 {
     if bytes.is_empty() {
         return 0;
     }
-    // Check for optional leading space prefix (ASCII or sentencepiece Ġ)
+    // Strip optional leading ASCII space (GPT-2 BPE decodes Ġ → 0x20 before we see it)
     let content = if bytes[0] == b' ' {
         &bytes[1..]
-    } else if bytes.len() >= 2 && bytes[0] == 0xc4 && bytes[1] == 0xa0 {
-        &bytes[2..]
     } else {
         bytes
     };

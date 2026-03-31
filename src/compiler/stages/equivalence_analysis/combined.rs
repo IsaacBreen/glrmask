@@ -313,7 +313,12 @@ pub(crate) fn analyze_equivalences_l1_fast(
     let state_group_ms = elapsed_ms(state_group_started_at);
 
     // Re-group tokens using only state class representative fingerprints.
+    // Skip if no state reduction occurred (same fingerprints guaranteed).
     let refine_started_at = std::time::Instant::now();
+    let (refined_num_token_classes, refined_token_original_to_internal, refined_token_internal_to_originals, refined_token_representative_ids) = if num_state_classes == num_states {
+        // No state reduction: raw token classes are already optimal.
+        (num_repr_classes, token_original_to_internal.clone(), token_internal_to_originals.clone(), token_representative_ids.clone())
+    } else {
     let state_class_rep_indices: Vec<usize> = state_representative_ids
         .iter()
         .map(|&sid| sid as usize)
@@ -358,21 +363,23 @@ pub(crate) fn analyze_equivalences_l1_fast(
         });
         refined_repr_class.push(class);
     }
-    let refined_num_token_classes = refined_class_reps.len();
+    let refined_num_tc = refined_class_reps.len();
 
     // Expand refined classes.
-    let mut refined_token_original_to_internal = vec![u32::MAX; (max_token_id + 1) as usize];
-    let mut refined_token_internal_to_originals: Vec<Vec<u32>> = vec![Vec::new(); refined_num_token_classes];
-    let mut refined_token_representative_ids: Vec<u32> = vec![u32::MAX; refined_num_token_classes];
+    let mut ref_token_o2i = vec![u32::MAX; (max_token_id + 1) as usize];
+    let mut ref_token_i2o: Vec<Vec<u32>> = vec![Vec::new(); refined_num_tc];
+    let mut ref_token_reps: Vec<u32> = vec![u32::MAX; refined_num_tc];
     for (orig_idx, &tid) in token_ids.iter().enumerate() {
         let repr = original_to_repr[orig_idx];
         let class = refined_repr_class[repr];
-        refined_token_original_to_internal[tid as usize] = class;
-        refined_token_internal_to_originals[class as usize].push(tid);
-        if tid < refined_token_representative_ids[class as usize] {
-            refined_token_representative_ids[class as usize] = tid;
+        ref_token_o2i[tid as usize] = class;
+        ref_token_i2o[class as usize].push(tid);
+        if tid < ref_token_reps[class as usize] {
+            ref_token_reps[class as usize] = tid;
         }
     }
+    (refined_num_tc, ref_token_o2i, ref_token_i2o, ref_token_reps)
+    }; // end of if/else for refinement
     let refine_ms = elapsed_ms(refine_started_at);
 
     if profile_compile {
