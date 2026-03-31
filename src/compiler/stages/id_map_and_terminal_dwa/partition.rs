@@ -1,8 +1,8 @@
-//! Per-partition terminal DWA builder (f1).
+//! Per-partition terminal DWA builder.
 //!
-//! Given a (sub-)vocab and shared parameters, classifies terminals into L1 and
-//! L2+, builds separate `(InternalIdMap, DWA)` pairs for each via f2 and f3,
-//! then merges them via f4 to produce a single `(InternalIdMap, DWA)`.
+//! Given a partition vocab and shared parameters, classify terminals into L1
+//! and L2+, build those two pieces independently, then merge them into a
+//! single `(InternalIdMap, DWA)` for the partition.
 
 use std::collections::BTreeMap;
 
@@ -20,10 +20,10 @@ use crate::Vocab;
 
 /// Build an id_map and terminal DWA for a single vocab partition.
 ///
-/// 1. Classifies terminal path lengths → L1 / L2+ masks.
-/// 2. Builds L1 and L2+ `(InternalIdMap, DWA)` pairs in parallel.
-/// 3. Merges them via f4.
-/// 4. Returns a single `(InternalIdMap, DWA)`.
+/// 1. Classify terminal path lengths into L1 / L2+ masks.
+/// 2. Build L1 and L2+ `(InternalIdMap, DWA)` pairs in parallel.
+/// 3. Merge the two results.
+/// 4. Return a single `(InternalIdMap, DWA)`.
 ///
 /// Returns `None` if the vocab is empty.
 pub(crate) fn build_partition_id_map_and_terminal_dwa(

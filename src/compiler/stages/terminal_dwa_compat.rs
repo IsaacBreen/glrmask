@@ -1,7 +1,8 @@
-//! Monolithic terminal DWA builder (non-partitioned fallback path).
+//! Compatibility surface for the legacy terminal-DWA fallback path.
 //!
-//! Used by `compile.rs` when env-var overrides force the old single-partition
-//! path, and by `parser_dwa.rs` for building the parser's terminal DWA.
+//! The canonical terminal-DWA implementation lives under
+//! `id_map_and_terminal_dwa/`. This module exists only for code paths that
+//! already have an `InternalIdMap` and need the old non-split builder.
 
 use std::collections::BTreeMap;
 
@@ -20,21 +21,20 @@ use crate::ds::bitset::BitSet;
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::ds::weight::Weight;
 
-use super::classify::classify_vocab_char_type;
-use super::grammar_helpers::compute_always_allowed_follows;
-use super::l2p::nwa_builder::{
+use super::id_map_and_terminal_dwa::classify::classify_terminal_path_lengths;
+use super::id_map_and_terminal_dwa::grammar_helpers::compute_always_allowed_follows;
+use super::id_map_and_terminal_dwa::l2p::nwa_builder::{
     TerminalNwaBuilder, internal_vocab_entries, seed_root_nodes,
 };
-use super::l2p::postprocess::{
+use super::id_map_and_terminal_dwa::l2p::postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa,
     collapse_always_allowed, prune_non_coreachable_states,
 };
-use super::types::{
+use super::id_map_and_terminal_dwa::types::{
     TerminalColoring, TerminalDwaBuildProfile, TerminalPathLength,
     debug_profile_enabled, terminal_dwa_profile_enabled,
 };
-
-use crate::compiler::stages::id_map_and_terminal_dwa::classify::classify_terminal_path_lengths;
+use super::id_map_and_terminal_dwa::classify::classify_vocab_char_type;
 
 fn partition_internal_vocab(
     entries: Vec<(u32, Vec<u8>)>,
@@ -140,7 +140,7 @@ fn merge_partition_nwas(
     merged
 }
 
-pub(crate) fn build_terminal_dwa(
+pub(crate) fn build_terminal_dwa_for_existing_id_map(
     grammar: &AnalyzedGrammar,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -148,7 +148,7 @@ pub(crate) fn build_terminal_dwa(
     ignore_terminal: Option<TerminalID>,
 ) -> DWA {
     let terminal_coloring = TerminalColoring::identity(grammar.num_terminals as usize);
-    build_terminal_dwa_with_possible_matches_and_coloring(
+    build_terminal_dwa_for_existing_id_map_with_possible_matches_and_coloring(
         grammar,
         tokenizer,
         vocab,
@@ -161,7 +161,7 @@ pub(crate) fn build_terminal_dwa(
     .0
 }
 
-pub(crate) fn build_terminal_dwa_with_possible_matches_and_coloring(
+pub(crate) fn build_terminal_dwa_for_existing_id_map_with_possible_matches_and_coloring(
     grammar: &AnalyzedGrammar,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
