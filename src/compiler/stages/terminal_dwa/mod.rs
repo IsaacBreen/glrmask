@@ -2598,6 +2598,108 @@ pub(crate) fn build_partition_terminal_nwa_split(
     }
 }
 
+/// Build a partition's id_map and terminal NWA using separate L1 and L2+
+/// equivalence analysis streams.
+///
+/// For each partition this:
+/// 1. Classifies terminal path lengths into L1 / L2+ masks
+/// 2. Builds an L1 id_map (fast, max-length only) and an L2+ id_map (full
+///    equiv with group filter) **in parallel**
+/// 3. Merges the two id_maps into a single merged id_map (finest common
+///    refinement)
+/// 4. Builds L1 and L2+ sub-NWAs in parallel using the merged id_map
+/// 5. Unions the sub-NWAs
+/// 6. Returns `(merged_id_map, PartitionTerminalNwaBuild)`
+pub(crate) fn build_partition_with_split_id_maps(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
+    ignore_terminal: Option<TerminalID>,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    num_terminals: u32,
+    partition_index: usize,
+    grammar: &AnalyzedGrammar,
+) -> (InternalIdMap, PartitionTerminalNwaBuild) {
+    use crate::compiler::stages::equivalence_analysis::merge_overlapping_id_maps;
+
+    if vocab.is_empty() {
+        let num_states = tokenizer.num_states() as usize;
+        let empty_map = InternalIdMap {
+            tokenizer_states: crate::compiler::stages::equivalence_analysis::ManyToOneIdMap {
+                original_to_internal: vec![0u32; num_states],
+                internal_to_originals: vec![(0..num_states as u32).collect()],
+                representative_original_ids: vec![0],
+            },
+            vocab_tokens: crate::compiler::stages::equivalence_analysis::ManyToOneIdMap {
+                original_to_internal: Vec::new(),
+                internal_to_originals: Vec::new(),
+                representative_original_ids: Vec::new(),
+            },
+        };
+        return (empty_map, PartitionTerminalNwaBuild::default());
+    }
+
+    let id_map_t0 = std::time::Instant::now();
+
+    // 1. Classify terminal path lengths to determine L2+ group filter
+    let terminal_path_lengths = classify_terminal_path_lengths(
+        tokenizer, vocab, disallowed_follows, num_terminals,
+    );
+    let mut l2p_group = vec![false; num_terminals as usize];
+    let mut has_l2p = false;
+    for (i, len) in terminal_path_lengths.iter().enumerate() {
+        if matches!(len, TerminalPathLength::TwoPlus) {
+            l2p_group[i] = true;
+            has_l2p = true;
+        }
+    }
+
+    // 2. Build L1 and L2+ id_maps in parallel
+    let (l1_id_map, l2p_id_map) = rayon::join(
+        || InternalIdMap::build_l1(tokenizer, vocab),
+        || {
+            if has_l2p {
+                InternalIdMap::build_with_group_filter(
+                    tokenizer, vocab, disallowed_follows, ignore_terminal,
+                    Some(&l2p_group),
+                )
+            } else {
+                InternalIdMap::build_l1(tokenizer, vocab)
+            }
+        },
+    );
+
+    // 3. Merge id_maps into finest common refinement
+    let num_states = tokenizer.num_states() as usize;
+    let max_token = vocab.max_token_id();
+    let (merged_id_map, _, _, _, _) = merge_overlapping_id_maps(
+        &l1_id_map, &l2p_id_map, num_states, max_token,
+    );
+
+    let id_map_ms = id_map_t0.elapsed().as_secs_f64() * 1000.0;
+    if debug_profile_enabled() {
+        eprintln!(
+            "[glrmask/debug][split_id_maps] partition[{}] l1_tsids={} l1_tokens={} l2p_tsids={} l2p_tokens={} merged_tsids={} merged_tokens={} id_map_ms={:.1}",
+            partition_index,
+            l1_id_map.num_tsids(), l1_id_map.num_internal_tokens(),
+            l2p_id_map.num_tsids(), l2p_id_map.num_internal_tokens(),
+            merged_id_map.num_tsids(), merged_id_map.num_internal_tokens(),
+            id_map_ms,
+        );
+    }
+
+    // 4. Build sub-NWAs using merged_id_map
+    let build = build_partition_terminal_nwa_split(
+        tokenizer, vocab, &merged_id_map,
+        terminal_coloring, use_terminal_coloring,
+        ignore_terminal, disallowed_follows, num_terminals,
+        partition_index, grammar,
+    );
+
+    (merged_id_map, build)
+}
+
 /// Build a partition terminal NWA with optional terminal filtering.
 ///
 /// When `active_terminals` is Some, only terminals marked `true` will have
@@ -3021,9 +3123,6 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
 ) -> (DWA, PossibleMatchesByState) {
     debug_assert_eq!(partition_vocabs.len(), partition_id_maps.len());
 
-    let debug_profile = debug_profile_enabled();
-    let profile_enabled = terminal_dwa_profile_enabled();
-    let total_started_at = std::time::Instant::now();
     let raw_build_started_at = std::time::Instant::now();
 
     let num_terminals = grammar.num_terminals;
@@ -3130,6 +3229,31 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
             results
         }
     };
+
+    merge_partition_builds_to_terminal_dwa(
+        grammar, tokenizer, full_vocab, builds, partition_id_maps,
+        global_id_map, terminal_coloring, raw_build_started_at,
+    )
+}
+
+/// Merge pre-built partition NWAs into a single terminal DWA.
+///
+/// Handles: remap each partition NWA from local id_map to global id_map,
+/// union, collapse always-allowed, apply disallowed follows, prune,
+/// canonicalize, determinize, minimize.
+pub(crate) fn merge_partition_builds_to_terminal_dwa(
+    grammar: &AnalyzedGrammar,
+    tokenizer: &Tokenizer,
+    full_vocab: &Vocab,
+    builds: Vec<PartitionTerminalNwaBuild>,
+    partition_id_maps: &[InternalIdMap],
+    global_id_map: &InternalIdMap,
+    terminal_coloring: &TerminalColoring,
+    raw_build_started_at: std::time::Instant,
+) -> (DWA, PossibleMatchesByState) {
+    let debug_profile = debug_profile_enabled();
+    let profile_enabled = terminal_dwa_profile_enabled();
+    let total_started_at = raw_build_started_at;
 
     let mut aggregate_profile = TerminalDwaBuildProfile::default();
     let mut merged_nwa = NWA::new(global_id_map.num_tsids(), global_id_map.max_internal_token_id());

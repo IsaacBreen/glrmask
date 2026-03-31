@@ -22,6 +22,8 @@ use crate::compiler::stages::templates::compile_dfa::emit_template_profile_summa
 use crate::compiler::stages::terminal_dwa::{
     build_terminal_dwa_from_partition_id_maps_with_possible_matches_and_coloring,
     build_terminal_dwa_with_possible_matches_and_coloring,
+    build_partition_with_split_id_maps,
+    merge_partition_builds_to_terminal_dwa,
     compute_terminal_coloring,
     compute_ever_allowed_follows,
     classify_vocab_char_type,
@@ -480,6 +482,13 @@ fn compile_prepared_with_profile(
                 partition_vocabs: Vec<Vocab>,
                 partition_maps: Vec<InternalIdMap>,
             },
+            /// 6-stream split: id_maps + terminal DWA built together.
+            SplitComplete {
+                global: InternalIdMap,
+                terminal_dwa: crate::automata::weighted::dwa::DWA,
+                possible_matches: crate::compiler::possible_matches::PossibleMatchesByState,
+                terminal_dwa_ms: f64,
+            },
         }
 
         let ((id_map_build_result, id_map_ms), (templates, templates_ms)) = rayon::join(
@@ -550,108 +559,54 @@ fn compile_prepared_with_profile(
                         .map(|entries| Vocab::new(entries, None))
                         .collect();
 
-                    let disallowed_ref = &disallowed_follows;
+                    let disallowed_ref = &adjusted_disallowed_for_classification;
                     let ignore = prepared_grammar.ignore_terminal;
                     let tok_ref = &tokenizer;
                     let num_terminals = analyzed_grammar.num_terminals as u32;
+                    let tc_ref = &terminal_coloring;
+                    let tc_enabled = terminal_coloring_enabled;
+                    let grammar_ref = &analyzed_grammar;
 
-                    // Pre-compute per-partition terminal path lengths and L1 status.
-                    let partition_path_lengths: Vec<Vec<crate::compiler::stages::terminal_dwa::TerminalPathLength>> = sub_vocabs.iter().map(|sv| {
-                        if sv.is_empty() { return Vec::new(); }
-                        use crate::compiler::stages::terminal_dwa::classify_terminal_path_lengths;
-                        classify_terminal_path_lengths(tok_ref, sv, disallowed_ref, num_terminals)
-                    }).collect();
-
-                    let partition_all_l1: Vec<bool> = partition_path_lengths.iter().map(|lengths| {
-                        if lengths.is_empty() { return false; }
-                        use crate::compiler::stages::terminal_dwa::TerminalPathLength;
-                        lengths.iter().all(|l| matches!(l, TerminalPathLength::Zero | TerminalPathLength::One))
-                    }).collect();
-
-                    if compile_profile_enabled() {
-                        use crate::compiler::stages::terminal_dwa::TerminalPathLength;
-                        for (i, lengths) in partition_path_lengths.iter().enumerate() {
-                            let n0 = lengths.iter().filter(|l| **l == TerminalPathLength::Zero).count();
-                            let n1 = lengths.iter().filter(|l| **l == TerminalPathLength::One).count();
-                            let n2 = lengths.iter().filter(|l| **l == TerminalPathLength::TwoPlus).count();
-                            eprintln!(
-                                "[glrmask/profile][partition_path_lengths] partition[{}] vocab_size={} l0={} l1={} l2p={} all_l1={}",
-                                i, sub_vocabs[i].len(), n0, n1, n2, partition_all_l1[i],
-                            );
-                        }
-                    }
-
-                    // Pre-compute per-partition L2+ active group masks.
-                    let partition_l2p_groups: Vec<Vec<bool>> = partition_path_lengths.iter().map(|lengths| {
-                        use crate::compiler::stages::terminal_dwa::TerminalPathLength;
-                        lengths.iter().map(|l| matches!(l, TerminalPathLength::TwoPlus)).collect()
-                    }).collect();
-
-                    let use_l2p_filter = std::env::var("GLRMASK_L2P_GROUP_FILTER").map_or(false, |v| v == "1");
-                    let partition_all_l1_ref = &partition_all_l1;
-                    let partition_l2p_groups_ref = &partition_l2p_groups;
-                    let build_partition_id_map = |sub_vocab: &Vocab, part_idx: usize| -> InternalIdMap {
-                        if sub_vocab.is_empty() {
-                            // Empty partition: map all states to class 0, no tokens.
-                            let num_states = tok_ref.num_states() as usize;
-                            InternalIdMap {
-                                tokenizer_states: crate::compiler::stages::equivalence_analysis::ManyToOneIdMap {
-                                    original_to_internal: vec![0u32; num_states],
-                                    internal_to_originals: vec![(0..num_states as u32).collect()],
-                                    representative_original_ids: vec![0],
-                                },
-                                vocab_tokens: crate::compiler::stages::equivalence_analysis::ManyToOneIdMap {
-                                    original_to_internal: Vec::new(),
-                                    internal_to_originals: Vec::new(),
-                                    representative_original_ids: Vec::new(),
-                                },
-                            }
-                        } else {
-                            let t0 = Instant::now();
-                            let part_all_l1 = partition_all_l1_ref[part_idx];
-                            let part_has_l2p = partition_l2p_groups_ref[part_idx].iter().any(|&active| active);
-                            let result = if part_all_l1 {
-                                InternalIdMap::build_l1(tok_ref, sub_vocab)
-                            } else if use_l2p_filter && part_has_l2p {
-                                // Use L2+ group filtering: only L2+ terminal groups
-                                // contribute to vocab equivalence discrimination.
-                                InternalIdMap::build_with_group_filter(
-                                    tok_ref, sub_vocab, disallowed_ref, ignore,
-                                    Some(&partition_l2p_groups_ref[part_idx]),
-                                )
-                            } else {
-                                InternalIdMap::build(tok_ref, sub_vocab, disallowed_ref, ignore)
-                            };
-                            if compile_profile_enabled() {
-                                let label = if part_all_l1 { " (l1_fast)" }
-                                    else if use_l2p_filter && part_has_l2p { " (l2p_filtered)" }
-                                    else { "" };
-                                eprintln!(
-                                    "[glrmask/debug][id_map] partition[{}] vocab_size={} tsids={} token_classes={} ms={:.1}{}",
-                                    part_idx, sub_vocab.len(), result.num_tsids(), result.num_internal_tokens(), elapsed_ms(t0),
-                                    label,
-                                );
-                            }
-                            result
-                        }
-                    };
-
-                    let (map_a, (map_b, map_c)) = rayon::join(
-                        || build_partition_id_map(&sub_vocabs[0], 0),
+                    // Build 3 partition streams in parallel: each builds
+                    // separate L1/L2+ id_maps, then L1/L2+ sub-NWAs,
+                    // then merges them into a per-partition (id_map, NWA).
+                    let ((map_a, build_a), ((map_b, build_b), (map_c, build_c))) = rayon::join(
+                        || build_partition_with_split_id_maps(
+                            tok_ref, &sub_vocabs[0], tc_ref, tc_enabled,
+                            ignore, disallowed_ref, num_terminals, 0, grammar_ref,
+                        ),
                         || rayon::join(
-                            || build_partition_id_map(&sub_vocabs[1], 1),
-                            || build_partition_id_map(&sub_vocabs[2], 2),
+                            || build_partition_with_split_id_maps(
+                                tok_ref, &sub_vocabs[1], tc_ref, tc_enabled,
+                                ignore, disallowed_ref, num_terminals, 1, grammar_ref,
+                            ),
+                            || build_partition_with_split_id_maps(
+                                tok_ref, &sub_vocabs[2], tc_ref, tc_enabled,
+                                ignore, disallowed_ref, num_terminals, 2, grammar_ref,
+                            ),
                         ),
                     );
 
+                    let partition_maps = vec![map_a, map_b, map_c];
+                    let builds = vec![build_a, build_b, build_c];
+
                     let num_states = tok_ref.num_states() as usize;
                     let max_token = vocab.max_token_id();
-                    let partition_maps = vec![map_a, map_b, map_c];
                     let global = refine_partition_id_maps(&partition_maps, num_states, max_token);
-                    IdMapBuildResult::Partitioned {
+
+                    // Merge partition NWAs → terminal DWA.
+                    let terminal_dwa_started = Instant::now();
+                    let (terminal_dwa, possible_matches) = merge_partition_builds_to_terminal_dwa(
+                        grammar_ref, tok_ref, vocab, builds,
+                        &partition_maps, &global, tc_ref, terminal_dwa_started,
+                    );
+                    let terminal_dwa_ms = elapsed_ms(terminal_dwa_started);
+
+                    IdMapBuildResult::SplitComplete {
                         global,
-                        partition_vocabs: sub_vocabs,
-                        partition_maps,
+                        terminal_dwa,
+                        possible_matches,
+                        terminal_dwa_ms,
                     }
                 };
                 (result, elapsed_ms(id_map_started_at))
@@ -673,36 +628,41 @@ fn compile_prepared_with_profile(
                 }
             },
         );
-        let (mut internal_ids, partition_terminal_dwa_inputs) = match id_map_build_result {
+        let (mut internal_ids, prebuilt_terminal_dwa) = match id_map_build_result {
             IdMapBuildResult::Ready(id_map) => (id_map, None),
             IdMapBuildResult::Partitioned {
                 global,
                 partition_vocabs,
                 partition_maps,
-            } => (global, Some((partition_vocabs, partition_maps))),
+            } => {
+                // Legacy path: build terminal DWA from pre-built partition id_maps
+                let t0 = Instant::now();
+                let (dwa, pm) = build_terminal_dwa_from_partition_id_maps_with_possible_matches_and_coloring(
+                    &analyzed_grammar, &tokenizer, vocab,
+                    &partition_vocabs, &partition_maps, &global,
+                    &terminal_coloring, terminal_coloring_enabled,
+                    prepared_grammar.ignore_terminal, &adjusted_disallowed_for_classification,
+                );
+                let ms = elapsed_ms(t0);
+                (global, Some((dwa, pm, ms)))
+            }
+            IdMapBuildResult::SplitComplete {
+                global,
+                terminal_dwa,
+                possible_matches,
+                terminal_dwa_ms,
+            } => (global, Some((terminal_dwa, possible_matches, terminal_dwa_ms))),
         };
         profile.id_map_ms = id_map_ms;
         profile.templates_ms = templates_ms;
         let token_bytes = vocab.entries.clone();
 
-        let terminal_dwa_started_at = Instant::now();
-        let (mut terminal_dwa, mut possible_matches) = if let Some((partition_vocabs, partition_maps)) =
-            partition_terminal_dwa_inputs.as_ref()
-        {
-            build_terminal_dwa_from_partition_id_maps_with_possible_matches_and_coloring(
-                &analyzed_grammar,
-                &tokenizer,
-                vocab,
-                partition_vocabs,
-                partition_maps,
-                &internal_ids,
-                &terminal_coloring,
-                terminal_coloring_enabled,
-                prepared_grammar.ignore_terminal,
-                &adjusted_disallowed_for_classification,
-            )
+        let (mut terminal_dwa, mut possible_matches) = if let Some((dwa, pm, tdwa_ms)) = prebuilt_terminal_dwa {
+            profile.terminal_dwa_ms = tdwa_ms;
+            (dwa, pm)
         } else {
-            build_terminal_dwa_with_possible_matches_and_coloring(
+            let terminal_dwa_started_at = Instant::now();
+            let result = build_terminal_dwa_with_possible_matches_and_coloring(
                 &analyzed_grammar,
                 &tokenizer,
                 vocab,
@@ -711,9 +671,10 @@ fn compile_prepared_with_profile(
                 terminal_coloring_enabled,
                 prepared_grammar.ignore_terminal,
                 Some(&adjusted_disallowed_for_classification),
-            )
+            );
+            profile.terminal_dwa_ms = elapsed_ms(terminal_dwa_started_at);
+            result
         };
-        profile.terminal_dwa_ms = elapsed_ms(terminal_dwa_started_at);
 
         let compact_started_at = Instant::now();
         let compact_report = crate::compiler::stages::compact::compact_dwa_dimensions(
