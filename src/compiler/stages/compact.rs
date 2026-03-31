@@ -5,7 +5,7 @@
 //! placed adjacently. This reduces the number of ranges in the underlying
 //! `RangeMapBlaze` / `RangeSetBlaze` structures.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use rand::{Rng, SeedableRng};
@@ -127,6 +127,22 @@ pub fn compact_dwa_dimensions(
     id_map: &mut InternalIdMap,
     collect_profile_stats: bool,
 ) -> CompactReport {
+    compact_dwa_dimensions_inner(dwa, id_map, collect_profile_stats, false)
+}
+
+pub fn compact_dwa_dimensions_fast(
+    dwa: &mut DWA,
+    id_map: &mut InternalIdMap,
+) -> CompactReport {
+    compact_dwa_dimensions_inner(dwa, id_map, false, true)
+}
+
+fn compact_dwa_dimensions_inner(
+    dwa: &mut DWA,
+    id_map: &mut InternalIdMap,
+    collect_profile_stats: bool,
+    skip_token_ordering: bool,
+) -> CompactReport {
     let num_tsids = id_map.num_tsids();
     let num_tokens = id_map.num_internal_tokens();
     let storage_before = collect_profile_stats.then(|| count_unique_storage(dwa));
@@ -134,7 +150,7 @@ pub fn compact_dwa_dimensions(
     let t0 = std::time::Instant::now();
     let unique_weights = collect_unique_weights(dwa);
     let t1 = std::time::Instant::now();
-    let compaction = build_dimension_compaction(&unique_weights, num_tsids as usize, num_tokens);
+    let compaction = build_dimension_compaction(&unique_weights, num_tsids as usize, num_tokens, skip_token_ordering);
     let t2 = std::time::Instant::now();
 
     apply_permutations_to_dwa(
@@ -192,6 +208,7 @@ fn build_dimension_compaction(
     unique_weights: &[Weight],
     num_tsids: usize,
     num_tokens: u32,
+    skip_token_ordering: bool,
 ) -> DimensionCompaction {
     let profile_compact = std::env::var("GLRMASK_PROFILE_COMPACT").is_ok();
     let ((tsid_perm, ordered_num_tsids), (token_perm, ordered_num_tokens)) = rayon::join(
@@ -230,28 +247,46 @@ fn build_dimension_compaction(
         || {
             let t0 = std::time::Instant::now();
             let original_weight_refs = weight_refs(unique_weights);
-            let token_profiles = build_token_profiles(&original_weight_refs, num_tokens);
-            let (token_group_perm, ordered_num_tokens) =
-                build_profile_merge_permutation(&token_profiles);
-            let t1 = std::time::Instant::now();
-            let merged_token_sets =
-                collect_token_sets_after_permutation(unique_weights, &token_group_perm);
-            let t2 = std::time::Instant::now();
-            let token_perm = optimize_token_group_order(
-                &merged_token_sets,
-                token_group_perm,
-                ordered_num_tokens,
-            );
-            let t3 = std::time::Instant::now();
-            if profile_compact {
-                eprintln!(
-                    "[glrmask/profile][compact_token] merge_profile_ms={:.3} collect_sets_ms={:.3} optimize_order_ms={:.3} merged_tokens={}",
-                    (t1 - t0).as_secs_f64() * 1000.0,
-                    (t2 - t1).as_secs_f64() * 1000.0,
-                    (t3 - t2).as_secs_f64() * 1000.0,
+
+            let (token_perm, ordered_num_tokens) = if skip_token_ordering {
+                // Range-aware sweep: avoids expanding ranges element-by-element
+                let result = build_token_merge_permutation_ranged(&original_weight_refs, num_tokens);
+                let t1 = std::time::Instant::now();
+                if profile_compact {
+                    eprintln!(
+                        "[glrmask/profile][compact_token] merge_profile_ms={:.3} collect_sets_ms={:.3} optimize_order_ms={:.3} merged_tokens={}",
+                        (t1 - t0).as_secs_f64() * 1000.0,
+                        0.0,
+                        0.0,
+                        result.1,
+                    );
+                }
+                result
+            } else {
+                let token_profiles = build_token_profiles(&original_weight_refs, num_tokens);
+                let (token_group_perm, ordered_num_tokens) =
+                    build_profile_merge_permutation(&token_profiles);
+                let t1 = std::time::Instant::now();
+                let merged_token_sets =
+                    collect_token_sets_after_permutation(unique_weights, &token_group_perm);
+                let t2 = std::time::Instant::now();
+                let token_perm = optimize_token_group_order(
+                    &merged_token_sets,
+                    token_group_perm,
                     ordered_num_tokens,
                 );
-            }
+                let t3 = std::time::Instant::now();
+                if profile_compact {
+                    eprintln!(
+                        "[glrmask/profile][compact_token] merge_profile_ms={:.3} collect_sets_ms={:.3} optimize_order_ms={:.3} merged_tokens={}",
+                        (t1 - t0).as_secs_f64() * 1000.0,
+                        (t2 - t1).as_secs_f64() * 1000.0,
+                        (t3 - t2).as_secs_f64() * 1000.0,
+                        ordered_num_tokens,
+                    );
+                }
+                (token_perm, ordered_num_tokens)
+            };
 
             (token_perm, ordered_num_tokens)
         },
@@ -369,6 +404,94 @@ fn build_token_profiles(weights: &[&Weight], num_tokens: u32) -> Vec<Vec<u32>> {
         }
     }
     profiles
+}
+
+/// Range-aware token merge: sweep boundary events to produce the merge
+/// permutation directly, without expanding ranges to individual tokens.
+fn build_token_merge_permutation_ranged(weights: &[&Weight], num_tokens: u32) -> (Vec<u32>, usize) {
+    let n = num_tokens as usize;
+    if n == 0 {
+        return (vec![], 0);
+    }
+
+    // Collect boundary events: (position, is_addition, ctx)
+    let mut events: Vec<(u32, bool, u32)> = Vec::new();
+    let mut ctx = 0u32;
+    for w in weights {
+        for (_tsid_range, token_set) in w.0.range_values() {
+            for token_range in token_set.ranges() {
+                let lo = *token_range.start();
+                let hi = *token_range.end();
+                if (lo as usize) < n {
+                    events.push((lo, true, ctx));
+                    let end = (hi + 1).min(num_tokens);
+                    if (end as usize) < n {
+                        events.push((end, false, ctx));
+                    }
+                }
+            }
+            ctx += 1;
+        }
+    }
+
+    // Sort: by position, removals before additions at the same position
+    events.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+    // Sweep to assign group IDs
+    let mut perm = vec![0u32; n];
+    let mut active: BTreeSet<u32> = BTreeSet::new();
+    let mut profile_to_group: HashMap<Vec<u32>, u32> = HashMap::new();
+    let mut num_groups = 0u32;
+
+    // Assign group for the empty profile (tokens before any range)
+    let empty_group = {
+        let g = num_groups;
+        num_groups += 1;
+        profile_to_group.insert(Vec::new(), g);
+        g
+    };
+    let mut current_group = empty_group;
+    let mut prev_pos = 0u32;
+    let mut event_idx = 0;
+
+    // Collect unique boundary positions
+    let mut boundaries: Vec<u32> = events.iter().map(|e| e.0).collect();
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    for &boundary in &boundaries {
+        // Fill perm[prev_pos..boundary] with current_group
+        for i in prev_pos..boundary.min(num_tokens) {
+            perm[i as usize] = current_group;
+        }
+        prev_pos = boundary;
+
+        // Process all events at this boundary
+        while event_idx < events.len() && events[event_idx].0 == boundary {
+            let (_, is_start, c) = events[event_idx];
+            if is_start {
+                active.insert(c);
+            } else {
+                active.remove(&c);
+            }
+            event_idx += 1;
+        }
+
+        // Determine group for the new active set
+        let profile: Vec<u32> = active.iter().copied().collect();
+        current_group = *profile_to_group.entry(profile).or_insert_with(|| {
+            let g = num_groups;
+            num_groups += 1;
+            g
+        });
+    }
+
+    // Fill remaining tokens
+    for i in prev_pos..num_tokens {
+        perm[i as usize] = current_group;
+    }
+
+    (perm, num_groups as usize)
 }
 
 /// Merge elements with identical profiles, then sort by profile.

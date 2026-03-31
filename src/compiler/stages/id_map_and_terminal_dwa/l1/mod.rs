@@ -10,7 +10,7 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::grammar::model::TerminalID;
-use crate::compiler::stages::compact::compact_dwa_dimensions;
+use crate::compiler::stages::compact::compact_dwa_dimensions_fast;
 use crate::compiler::stages::equivalence_analysis::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::u8set::U8Set;
 use crate::ds::weight::Weight;
@@ -56,7 +56,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     let terminal_build_ms = dwa_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let compact_started_at = Instant::now();
-    compact_dwa_dimensions(&mut dwa, &mut id_map, false);
+    compact_dwa_dimensions_fast(&mut dwa, &mut id_map);
     let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
 
     if compile_profile_enabled() || debug_profile_enabled() {
