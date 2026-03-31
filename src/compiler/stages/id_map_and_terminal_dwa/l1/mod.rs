@@ -174,7 +174,7 @@ fn build_l1_terminal_dwa(
     }
 
     let vocab_tree_started_at = Instant::now();
-    let tree = VocabPrefixTree::build_owned(internal_vocab);
+    let tree = VocabPrefixTree::build_presorted(internal_vocab);
     let vocab_tree_build_ms = vocab_tree_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let state_seed_started_at = Instant::now();

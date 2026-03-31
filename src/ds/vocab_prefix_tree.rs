@@ -126,9 +126,7 @@ fn merge_reachable_token_ids(
     reachable_token_ids: &mut RangeSetBlaze<usize>,
     child: &VocabPrefixTreeNode,
 ) {
-    for token_id in child.reachable_token_ids.iter() {
-        reachable_token_ids.insert(token_id);
-    }
+    *reachable_token_ids |= &child.reachable_token_ids;
 }
 
 fn merge_child_metadata(
@@ -244,14 +242,18 @@ impl VocabPrefixTree {
     }
 
     pub fn build_owned(mut tokens: Vec<(usize, Vec<u8>)>) -> Self {
+        Self::sort_and_dedup_tokens(&mut tokens);
+        Self::build_presorted(tokens)
+    }
+
+    /// Build from tokens that are already sorted by byte content and deduplicated.
+    pub fn build_presorted(tokens: Vec<(usize, Vec<u8>)>) -> Self {
         let mut tree = Self::new();
         tree.max_token_id = tokens.iter().map(|(id, _)| *id).max().unwrap_or(0);
 
         if tokens.is_empty() {
             return tree;
         }
-
-        Self::sort_and_dedup_tokens(&mut tokens);
 
         let mut start = 0usize;
         if !tokens.is_empty() && tokens[0].1.is_empty() {
