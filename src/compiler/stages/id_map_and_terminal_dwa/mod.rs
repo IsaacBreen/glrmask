@@ -9,7 +9,7 @@ pub(crate) mod grammar_helpers;
 pub(crate) mod l1;
 pub(crate) mod l2p;
 pub(crate) mod merge;
-pub(crate) mod monolithic;
+mod monolithic;
 pub(crate) mod partition;
 pub(crate) mod types;
 
@@ -19,6 +19,7 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::grammar::model::TerminalID;
+use crate::compiler::possible_matches::PossibleMatchesByState;
 use crate::compiler::stages::equivalence_analysis::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::bitset::BitSet;
 use crate::Vocab;
@@ -126,4 +127,42 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     let max_token_id = vocab.max_token_id();
 
     merge::merge_id_maps_and_terminal_dwas(pairs, num_tokenizer_states, max_token_id)
+}
+
+/// Build a terminal DWA for an already-chosen `InternalIdMap`.
+///
+/// This is the legacy fallback surface used when compile-time overrides bypass
+/// the split id_map+terminal_dwa pipeline.
+pub(crate) fn build_terminal_dwa_for_existing_id_map(
+    grammar: &AnalyzedGrammar,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    id_map: &InternalIdMap,
+    ignore_terminal: Option<TerminalID>,
+) -> DWA {
+    monolithic::build_terminal_dwa(grammar, tokenizer, vocab, id_map, ignore_terminal)
+}
+
+/// Build a terminal DWA plus possible-matches data for an already-chosen
+/// `InternalIdMap`.
+pub(crate) fn build_terminal_dwa_for_existing_id_map_with_possible_matches_and_coloring(
+    grammar: &AnalyzedGrammar,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    id_map: &InternalIdMap,
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
+    ignore_terminal: Option<TerminalID>,
+    disallowed_follows: Option<&BTreeMap<u32, BitSet>>,
+) -> (DWA, PossibleMatchesByState) {
+    monolithic::build_terminal_dwa_with_possible_matches_and_coloring(
+        grammar,
+        tokenizer,
+        vocab,
+        id_map,
+        terminal_coloring,
+        use_terminal_coloring,
+        ignore_terminal,
+        disallowed_follows,
+    )
 }

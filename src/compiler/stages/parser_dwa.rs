@@ -19,7 +19,7 @@ use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 use crate::compiler::stages::resolve_negatives::resolve_negative_codes_in_nwa;
 #[cfg(test)]
-use crate::compiler::stages::id_map_and_terminal_dwa::monolithic::build_terminal_dwa;
+use crate::compiler::stages::id_map_and_terminal_dwa::build_terminal_dwa_for_existing_id_map;
 use crate::compiler::stages::templates::Templates;
 #[cfg(test)]
 use crate::compiler::stages::templates::characterize::characterize_terminals;
@@ -926,7 +926,7 @@ pub(crate) fn build_parser_dwa(
     ignore_terminal: Option<TerminalID>,
 ) -> DWA {
     let (terminal_dwa, templates) = rayon::join(
-        || build_terminal_dwa(grammar, tokenizer, vocab, id_map, ignore_terminal),
+        || build_terminal_dwa_for_existing_id_map(grammar, tokenizer, vocab, id_map, ignore_terminal),
         || {
             let characterizations = characterize_terminals(table, grammar);
             Templates::from_characterizations(&characterizations)

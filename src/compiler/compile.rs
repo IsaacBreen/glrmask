@@ -15,11 +15,11 @@ use crate::compiler::grammar::model::{GrammarDef, Terminal};
 use crate::compiler::grammar::transforms::prepare_grammar_for_compile;
 use crate::compiler::grammar::transforms::prepare_grammar_transforms_only;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
+use crate::compiler::stages::id_map_and_terminal_dwa::build_terminal_dwa_for_existing_id_map_with_possible_matches_and_coloring;
 use crate::compiler::stages::parser_dwa::build_parser_dwa_from_terminal_dwa_with_precomputed_templates;
 use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::characterize_terminals;
 use crate::compiler::stages::templates::compile_dfa::emit_template_profile_summary;
-use crate::compiler::stages::id_map_and_terminal_dwa::monolithic::build_terminal_dwa_with_possible_matches_and_coloring;
 use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::compute_terminal_coloring;
 use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::compute_ever_allowed_follows;
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::classify_terminal_path_lengths;
@@ -584,7 +584,7 @@ fn compile_prepared_with_profile(
             (dwa, true) // SplitComplete: already compacted by merge::f4
         } else {
             let terminal_dwa_started_at = Instant::now();
-            let (dwa, _pm) = build_terminal_dwa_with_possible_matches_and_coloring(
+            let (dwa, _pm) = build_terminal_dwa_for_existing_id_map_with_possible_matches_and_coloring(
                 &analyzed_grammar,
                 &tokenizer,
                 vocab,
