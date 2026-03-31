@@ -100,7 +100,9 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     // 4. Compact.
     let mut global = global_id_map;
     let compact_started_at = Instant::now();
-    compact_dwa_dimensions_fast(&mut dwa, &mut global);
+    if label != "global" {
+        compact_dwa_dimensions_fast(&mut dwa, &mut global);
+    }
     let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
 
     if compile_profile_enabled() || debug_profile_enabled() {
