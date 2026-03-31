@@ -273,6 +273,19 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<u32>,
 ) -> CombinedEquivalenceResult {
+    compute_combined_equivalence_with_group_filter(
+        tokenizer, tokens, initial_states, disallowed_follows, ignore_terminal, None,
+    )
+}
+
+pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
+    tokenizer: &TokenizerView,
+    tokens: &[S],
+    initial_states: &[usize],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    ignore_terminal: Option<u32>,
+    active_groups: Option<&[bool]>,
+) -> CombinedEquivalenceResult {
     let skip_max_length = env_flag_enabled(SKIP_MAX_LENGTH_STATE_EQUIV_ENV)
         || initial_states.len() <= SKIP_MAX_LENGTH_SMALL_STATE_THRESHOLD;
     let skip_token_state = env_flag_enabled(SKIP_TOKEN_STATE_EQUIV_ENV);
@@ -352,12 +365,13 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
             disallowed_follows,
         )
     } else {
-        vocab_equivalence_analysis::find_vocab_equivalence_classes_with_follow_and_byte_classes(
+        vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter(
             tokenizer,
             &dedup.representative_token_bytes,
             &vocab_states,
             disallowed_follows,
             Some(&byte_to_class),
+            active_groups,
         )
     };
     let vocab_ms = elapsed_ms(vocab_started_at);

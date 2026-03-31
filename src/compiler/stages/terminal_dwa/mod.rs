@@ -65,9 +65,9 @@ impl TerminalColoring {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct TerminalDwaBuildProfile {
-    future_terminal_additions: u64,
-    match_transition_additions: u64,
+pub(crate) struct TerminalDwaBuildProfile {
+    pub(crate) future_terminal_additions: u64,
+    pub(crate) match_transition_additions: u64,
 }
 
 fn terminal_dwa_profile_enabled() -> bool {
@@ -1734,7 +1734,7 @@ fn ensure_continuation_state(
     state
 }
 
-fn internal_vocab_entries(vocab: &Vocab, id_map: &InternalIdMap) -> Vec<(u32, Vec<u8>)> {
+pub(crate) fn internal_vocab_entries(vocab: &Vocab, id_map: &InternalIdMap) -> Vec<(u32, Vec<u8>)> {
     id_map
         .vocab_tokens
         .iter_representative_ids()
@@ -2069,13 +2069,13 @@ fn merge_partition_nwas(
 }
 
 #[derive(Debug, Default)]
-struct PartitionTerminalNwaBuild {
-    nwa: Option<NWA>,
-    possible_matches_by_state: PossibleMatchesByState,
-    build_profile: TerminalDwaBuildProfile,
-    possible_matches_profile: PossibleMatchesProfile,
-    internal_vocab_len: usize,
-    roots_count: usize,
+pub(crate) struct PartitionTerminalNwaBuild {
+    pub(crate) nwa: Option<NWA>,
+    pub(crate) possible_matches_by_state: PossibleMatchesByState,
+    pub(crate) build_profile: TerminalDwaBuildProfile,
+    pub(crate) possible_matches_profile: PossibleMatchesProfile,
+    pub(crate) internal_vocab_len: usize,
+    pub(crate) roots_count: usize,
 }
 
 /// Direct L1 NWA construction: bypasses the full NWA build → postproc → det →
@@ -2085,7 +2085,7 @@ struct PartitionTerminalNwaBuild {
 /// determinizing/minimizing to 2 states, this function computes the equivalent
 /// 2-state NWA directly by walking all (token, TSID) pairs and collecting
 /// per-terminal per-TSID token sets.
-fn build_partition_terminal_nwa_l1_direct(
+pub(crate) fn build_partition_terminal_nwa_l1_direct(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     id_map: &InternalIdMap,
@@ -2513,7 +2513,7 @@ fn build_partition_terminal_nwa(
     }
 }
 
-fn build_local_to_global_tsid_map(
+pub(crate) fn build_local_to_global_tsid_map(
     local_id_map: &InternalIdMap,
     global_id_map: &InternalIdMap,
 ) -> Vec<Vec<u32>> {
@@ -2655,7 +2655,7 @@ fn remap_weight_to_global(
     finalize_weight_map(map)
 }
 
-fn remap_partition_nwa_to_global(
+pub(crate) fn remap_partition_nwa_to_global(
     nwa: &mut NWA,
     local_to_global_tsids: &[Vec<u32>],
     token_offset: u32,
@@ -2719,7 +2719,7 @@ fn remap_partition_nwa_to_global(
     }
 }
 
-fn merge_partition_possible_matches_into_global(
+pub(crate) fn merge_partition_possible_matches_into_global(
     merged: &mut PossibleMatchesByState,
     partition_matches: &PossibleMatchesByState,
     local_to_global_tsids: &[Vec<u32>],

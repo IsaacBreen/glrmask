@@ -614,7 +614,17 @@ pub(crate) fn analyze_equivalences(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<u32>,
 ) -> InternalIdMap {
-    analyze_equivalences_impl(tokenizer, vocab, disallowed_follows, ignore_terminal)
+    analyze_equivalences_impl(tokenizer, vocab, disallowed_follows, ignore_terminal, None)
+}
+
+pub(crate) fn analyze_equivalences_with_group_filter(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    ignore_terminal: Option<u32>,
+    active_groups: Option<&[bool]>,
+) -> InternalIdMap {
+    analyze_equivalences_impl(tokenizer, vocab, disallowed_follows, ignore_terminal, active_groups)
 }
 
 /// Combined equivalence analysis over a flattened tokenizer DFA.
@@ -626,6 +636,7 @@ fn analyze_equivalences_impl(
     vocab: &Vocab,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<u32>,
+    active_groups: Option<&[bool]>,
 ) -> InternalIdMap {
     let profile_compile = compile_profile_enabled();
     let total_started_at = std::time::Instant::now();
@@ -656,12 +667,13 @@ fn analyze_equivalences_impl(
     let initial_states_ms = elapsed_ms(initial_states_started_at);
 
     let combined_started_at = std::time::Instant::now();
-    let result = combined_equivalence_analysis::compute_combined_equivalence(
+    let result = combined_equivalence_analysis::compute_combined_equivalence_with_group_filter(
         &tokenizer_view,
         &token_bytes,
         &initial_states,
         effective_disallowed,
         ignore_terminal,
+        active_groups,
     );
     let combined_ms = elapsed_ms(combined_started_at);
 

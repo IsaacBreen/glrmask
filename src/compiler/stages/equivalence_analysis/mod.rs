@@ -83,6 +83,23 @@ impl InternalIdMap {
         combined::analyze_equivalences(tokenizer, vocab, disallowed_follows, ignore_terminal)
     }
 
+    /// Build equivalence classes with optional terminal group filtering.
+    ///
+    /// When `active_groups` is provided, only the specified terminal groups are
+    /// considered during vocab equivalence analysis. Groups not in the active set
+    /// are ignored, producing coarser (but faster) token classes.
+    pub fn build_with_group_filter(
+        tokenizer: &crate::automata::lexer::tokenizer::Tokenizer,
+        vocab: &crate::Vocab,
+        disallowed_follows: &std::collections::BTreeMap<u32, crate::ds::bitset::BitSet>,
+        ignore_terminal: Option<u32>,
+        active_groups: Option<&[bool]>,
+    ) -> Self {
+        combined::analyze_equivalences_with_group_filter(
+            tokenizer, vocab, disallowed_follows, ignore_terminal, active_groups,
+        )
+    }
+
     /// L1 fast path: compute equivalence classes using direct DFA fingerprinting.
     /// Only valid when all terminals have max path length ≤ 1.
     pub fn build_l1(
