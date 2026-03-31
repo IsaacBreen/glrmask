@@ -94,7 +94,6 @@ fn build_l1_id_map<'a>(tokenizer: &Tokenizer, vocab: &'a Vocab) -> (InternalIdMa
     let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
 
     // Identity state mapping: each state is its own class.
-    // (max-length state reduction is disabled for now.)
     let state_equiv_started_at = Instant::now();
     let mut state_original_to_internal = vec![u32::MAX; states.len()];
     let mut state_representatives = Vec::new();
@@ -185,16 +184,54 @@ fn build_l1_terminal_dwa(
     let mut terminal_to_token_weights = vec![FxHashMap::<u32, RangeSetBlaze<u32>>::default(); num_terminals as usize];
     let mut profile = L1BuildProfile::default();
     let mut self_loop_cache = FxHashMap::<u32, U8Set>::default();
+
+    // Pre-compute the combined active terminal list per DFA state.
+    // This avoids re-iterating finalizer + accessible BitSets on every hit.
+    let num_dfa_states = tokenizer.num_states() as usize;
+    let active_terminals_at_state: Vec<Vec<usize>> = (0..num_dfa_states)
+        .map(|state| {
+            let state = state as u32;
+            let mut terminals = Vec::new();
+            for tid in tokenizer.dfa.finalizers(state).iter() {
+                if active_terminals.get(tid).copied().unwrap_or(false) {
+                    terminals.push(tid);
+                }
+            }
+            for tid in tokenizer.tokens_accessible_from_state(state).iter() {
+                if active_terminals.get(tid).copied().unwrap_or(false) {
+                    terminals.push(tid);
+                }
+            }
+            terminals
+        })
+        .collect();
+
+    // Deferred self-loop accumulation: end_state -> (tsid -> combined reachable tokens)
+    let mut self_loop_deferred: FxHashMap<u32, FxHashMap<u32, RangeSetBlaze<u32>>> =
+        FxHashMap::default();
+
     let traversal_started_at = Instant::now();
     collect_terminal_weights(
         tokenizer,
         &tree.root,
         &states_to_initial_tsids,
-        active_terminals,
+        &active_terminals_at_state,
         &mut terminal_to_token_weights,
         &mut self_loop_cache,
+        &mut self_loop_deferred,
         &mut profile,
     );
+
+    // Distribute deferred self-loop data to terminal weights
+    for (&end_state, tsid_map) in &self_loop_deferred {
+        for &terminal_id in &active_terminals_at_state[end_state as usize] {
+            let weights = &mut terminal_to_token_weights[terminal_id];
+            for (&tsid, combined) in tsid_map {
+                *weights.entry(tsid).or_default() |= combined;
+            }
+            profile.terminal_hits += tsid_map.len();
+        }
+    }
     let vocab_tree_traversal_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let direct_dwa_started_at = Instant::now();
@@ -311,9 +348,10 @@ fn collect_terminal_weights(
     tokenizer: &Tokenizer,
     node: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
     states_to_initial_tsids: &FxHashMap<u32, Vec<u32>>,
-    active_terminals: &[bool],
+    active_terminals_at_state: &[Vec<usize>],
     terminal_to_token_weights: &mut [FxHashMap<u32, RangeSetBlaze<u32>>],
     self_loop_cache: &mut FxHashMap<u32, U8Set>,
+    self_loop_deferred: &mut FxHashMap<u32, FxHashMap<u32, RangeSetBlaze<u32>>>,
     profile: &mut L1BuildProfile,
 ) {
     profile.tree_nodes += 1;
@@ -327,20 +365,7 @@ fn collect_terminal_weights(
             if initial_tsids.len() > profile.max_tsids_per_state {
                 profile.max_tsids_per_state = initial_tsids.len();
             }
-            for terminal_id in tokenizer.dfa.finalizers(end_state).iter() {
-                if !active_terminals.get(terminal_id).copied().unwrap_or(false) {
-                    continue;
-                }
-                let weights = &mut terminal_to_token_weights[terminal_id];
-                for &initial_tsid in initial_tsids {
-                    weights.entry(initial_tsid).or_default().insert(internal_token_id);
-                }
-                profile.terminal_hits += initial_tsids.len();
-            }
-            for terminal_id in tokenizer.tokens_accessible_from_state(end_state).iter() {
-                if !active_terminals.get(terminal_id).copied().unwrap_or(false) {
-                    continue;
-                }
+            for &terminal_id in &active_terminals_at_state[end_state as usize] {
                 let weights = &mut terminal_to_token_weights[terminal_id];
                 for &initial_tsid in initial_tsids {
                     weights.entry(initial_tsid).or_default().insert(internal_token_id);
@@ -402,32 +427,19 @@ fn collect_terminal_weights(
             }
         }
 
-        // Self-loop optimization: merge reachable token set via union (O(ranges), not O(elements))
+        // Self-loop optimization: defer terminal weight updates.
+        // Accumulate (end_state, tsid) -> reachable union across all children.
+        // Terminal distribution happens once at the end, avoiding redundant
+        // iterations over active terminals for duplicate (end_state, tsid) pairs.
         if let Some(ref reachable_u32) = reachable_u32 {
             if !self_loop_states.is_empty() {
                 profile.self_loop_skipped_subtrees += self_loop_states.len();
 
                 for (&end_state, initial_tsids) in &self_loop_states {
                     profile.self_loop_skipped_tokens += reachable_u32.len() as usize * initial_tsids.len();
-                    for terminal_id in tokenizer.dfa.finalizers(end_state).iter() {
-                        if !active_terminals.get(terminal_id).copied().unwrap_or(false) {
-                            continue;
-                        }
-                        let weights = &mut terminal_to_token_weights[terminal_id];
-                        for &initial_tsid in initial_tsids {
-                            *weights.entry(initial_tsid).or_default() |= reachable_u32;
-                        }
-                        profile.terminal_hits += initial_tsids.len();
-                    }
-                    for terminal_id in tokenizer.tokens_accessible_from_state(end_state).iter() {
-                        if !active_terminals.get(terminal_id).copied().unwrap_or(false) {
-                            continue;
-                        }
-                        let weights = &mut terminal_to_token_weights[terminal_id];
-                        for &initial_tsid in initial_tsids {
-                            *weights.entry(initial_tsid).or_default() |= reachable_u32;
-                        }
-                        profile.terminal_hits += initial_tsids.len();
+                    let state_entry = self_loop_deferred.entry(end_state).or_default();
+                    for &initial_tsid in initial_tsids {
+                        *state_entry.entry(initial_tsid).or_default() |= reachable_u32;
                     }
                 }
             }
@@ -441,9 +453,10 @@ fn collect_terminal_weights(
             tokenizer,
             child,
             &child_states_to_initial_tsids,
-            active_terminals,
+            active_terminals_at_state,
             terminal_to_token_weights,
             self_loop_cache,
+            self_loop_deferred,
             profile,
         );
     }
