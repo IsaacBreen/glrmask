@@ -12,14 +12,14 @@ use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 use crate::compiler::stages::terminal_dwa::{
-    build_partition_terminal_nwa, PartitionTerminalNwaBuild, TerminalColoring,
+    build_partition_terminal_nwa_filtered, PartitionTerminalNwaBuild, TerminalColoring,
 };
 use crate::Vocab;
 
 /// Build an L2+-only terminal NWA for the given partition.
 ///
-/// Delegates to the full trie-walk NWA construction pipeline
-/// (build → postprocess → determinize → minimize).
+/// Uses the full trie-walk NWA construction pipeline, but only emits
+/// match transitions for terminals marked `true` in `active_terminals`.
 pub fn build_l2p_terminal_nwa(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -31,8 +31,9 @@ pub fn build_l2p_terminal_nwa(
     num_terminals: u32,
     partition_index: usize,
     grammar: &AnalyzedGrammar,
+    active_terminals: &[bool],
 ) -> PartitionTerminalNwaBuild {
-    build_partition_terminal_nwa(
+    build_partition_terminal_nwa_filtered(
         tokenizer,
         vocab,
         id_map,
@@ -43,6 +44,7 @@ pub fn build_l2p_terminal_nwa(
         num_terminals,
         partition_index,
         grammar,
+        Some(active_terminals),
     )
 }
 

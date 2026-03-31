@@ -953,6 +953,9 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     ignore_terminal: Option<TerminalID>,
     use_terminal_coloring: bool,
     terminal_path_lengths: Option<Vec<TerminalPathLength>>,
+    /// Optional filter: only process terminals where active_terminals[id] == true.
+    /// When None, all terminals are processed.
+    active_terminals: Option<Vec<bool>>,
     self_loop_bytes: FxHashMap<TokenizerState, U8Set>,
     leaf_token_ids_buffer: Vec<Vec<LeafTokenIds>>,
     future_leaf_buffer: FxHashMap<(u32, TokenizerState, ColorId), BufferedLeafTransition>,
@@ -1626,6 +1629,12 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                         scan_state = next;
                         // Record longest match per terminal
                         for terminal in self.tokenizer.matched_terminals_iter(scan_state) {
+                            // Skip non-active terminals when filtering
+                            if let Some(ref active) = self.active_terminals {
+                                if !active.get(terminal as usize).copied().unwrap_or(false) {
+                                    continue;
+                                }
+                            }
                             match_map_buf.insert(terminal, (index + 1, scan_state));
                         }
                     } else {
@@ -2376,6 +2385,38 @@ pub(crate) fn build_partition_terminal_nwa(
     partition_index: usize,
     grammar: &AnalyzedGrammar,
 ) -> PartitionTerminalNwaBuild {
+    build_partition_terminal_nwa_filtered(
+        tokenizer,
+        vocab,
+        id_map,
+        terminal_coloring,
+        use_terminal_coloring,
+        ignore_terminal,
+        disallowed_follows,
+        num_terminals,
+        partition_index,
+        grammar,
+        None,
+    )
+}
+
+/// Build a partition terminal NWA with optional terminal filtering.
+///
+/// When `active_terminals` is Some, only terminals marked `true` will have
+/// match transitions emitted in the trie-walk NWA builder.
+pub(crate) fn build_partition_terminal_nwa_filtered(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    id_map: &InternalIdMap,
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
+    ignore_terminal: Option<TerminalID>,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    num_terminals: u32,
+    partition_index: usize,
+    grammar: &AnalyzedGrammar,
+    active_terminals: Option<&[bool]>,
+) -> PartitionTerminalNwaBuild {
     // Check for all-L1 partition early and delegate to the fast direct path.
     let terminal_path_lengths = classify_terminal_path_lengths(
         tokenizer,
@@ -2463,6 +2504,7 @@ pub(crate) fn build_partition_terminal_nwa(
         ignore_terminal,
         use_terminal_coloring,
         terminal_path_lengths: Some(terminal_path_lengths.clone()),
+        active_terminals: active_terminals.map(|a| a.to_vec()),
         self_loop_bytes: FxHashMap::default(),
         leaf_token_ids_buffer: Vec::new(),
         future_leaf_buffer: FxHashMap::default(),
@@ -3240,6 +3282,7 @@ pub(crate) fn build_terminal_dwa_with_possible_matches_and_coloring(
             ignore_terminal,
             use_terminal_coloring,
             terminal_path_lengths: Some(terminal_path_lengths.clone()),
+            active_terminals: None,
             self_loop_bytes: FxHashMap::default(),
             leaf_token_ids_buffer: Vec::new(),
             future_leaf_buffer: FxHashMap::default(),
@@ -3275,6 +3318,7 @@ pub(crate) fn build_terminal_dwa_with_possible_matches_and_coloring(
                 ignore_terminal,
                 use_terminal_coloring,
                 terminal_path_lengths: Some(terminal_path_lengths.clone()),
+                active_terminals: None,
                 self_loop_bytes: FxHashMap::default(),
                 leaf_token_ids_buffer: Vec::new(),
                 future_leaf_buffer: FxHashMap::default(),
