@@ -555,27 +555,41 @@ fn compile_prepared_with_profile(
                     let tok_ref = &tokenizer;
                     let num_terminals = analyzed_grammar.num_terminals as u32;
 
-                    // Compute L2+ active groups mask for group-filtered id_map.
-                    // Terminals with path length ≤ 1 are excluded from the
-                    // active group set, producing coarser but faster token classes.
-                    let l2p_active_groups: Vec<bool> = {
-                        use crate::compiler::stages::terminal_dwa::TerminalPathLength;
-                        terminal_path_lengths.iter().map(|l| {
-                            matches!(l, TerminalPathLength::TwoPlus)
-                        }).collect()
-                    };
-                    let has_l2p = l2p_active_groups.iter().any(|&active| active);
-                    let l2p_active_groups_ref = &l2p_active_groups;
+                    // Pre-compute per-partition terminal path lengths and L1 status.
+                    let partition_path_lengths: Vec<Vec<crate::compiler::stages::terminal_dwa::TerminalPathLength>> = sub_vocabs.iter().map(|sv| {
+                        if sv.is_empty() { return Vec::new(); }
+                        use crate::compiler::stages::terminal_dwa::classify_terminal_path_lengths;
+                        classify_terminal_path_lengths(tok_ref, sv, disallowed_ref, num_terminals)
+                    }).collect();
 
-                    // Pre-compute per-partition L1 status.
-                    let partition_all_l1: Vec<bool> = sub_vocabs.iter().map(|sv| {
-                        if sv.is_empty() { return false; }
-                        use crate::compiler::stages::terminal_dwa::{classify_terminal_path_lengths, TerminalPathLength};
-                        let lengths = classify_terminal_path_lengths(tok_ref, sv, disallowed_ref, num_terminals);
+                    let partition_all_l1: Vec<bool> = partition_path_lengths.iter().map(|lengths| {
+                        if lengths.is_empty() { return false; }
+                        use crate::compiler::stages::terminal_dwa::TerminalPathLength;
                         lengths.iter().all(|l| matches!(l, TerminalPathLength::Zero | TerminalPathLength::One))
                     }).collect();
 
+                    if compile_profile_enabled() {
+                        use crate::compiler::stages::terminal_dwa::TerminalPathLength;
+                        for (i, lengths) in partition_path_lengths.iter().enumerate() {
+                            let n0 = lengths.iter().filter(|l| **l == TerminalPathLength::Zero).count();
+                            let n1 = lengths.iter().filter(|l| **l == TerminalPathLength::One).count();
+                            let n2 = lengths.iter().filter(|l| **l == TerminalPathLength::TwoPlus).count();
+                            eprintln!(
+                                "[glrmask/profile][partition_path_lengths] partition[{}] vocab_size={} l0={} l1={} l2p={} all_l1={}",
+                                i, sub_vocabs[i].len(), n0, n1, n2, partition_all_l1[i],
+                            );
+                        }
+                    }
+
+                    // Pre-compute per-partition L2+ active group masks.
+                    let partition_l2p_groups: Vec<Vec<bool>> = partition_path_lengths.iter().map(|lengths| {
+                        use crate::compiler::stages::terminal_dwa::TerminalPathLength;
+                        lengths.iter().map(|l| matches!(l, TerminalPathLength::TwoPlus)).collect()
+                    }).collect();
+
+                    let use_l2p_filter = std::env::var("GLRMASK_L2P_GROUP_FILTER").map_or(false, |v| v == "1");
                     let partition_all_l1_ref = &partition_all_l1;
+                    let partition_l2p_groups_ref = &partition_l2p_groups;
                     let build_partition_id_map = |sub_vocab: &Vocab, part_idx: usize| -> InternalIdMap {
                         if sub_vocab.is_empty() {
                             // Empty partition: map all states to class 0, no tokens.
@@ -595,21 +609,22 @@ fn compile_prepared_with_profile(
                         } else {
                             let t0 = Instant::now();
                             let part_all_l1 = partition_all_l1_ref[part_idx];
+                            let part_has_l2p = partition_l2p_groups_ref[part_idx].iter().any(|&active| active);
                             let result = if part_all_l1 {
                                 InternalIdMap::build_l1(tok_ref, sub_vocab)
-                            } else if has_l2p && std::env::var("GLRMASK_L2P_GROUP_FILTER").map_or(false, |v| v == "1") {
+                            } else if use_l2p_filter && part_has_l2p {
                                 // Use L2+ group filtering: only L2+ terminal groups
                                 // contribute to vocab equivalence discrimination.
                                 InternalIdMap::build_with_group_filter(
                                     tok_ref, sub_vocab, disallowed_ref, ignore,
-                                    Some(l2p_active_groups_ref),
+                                    Some(&partition_l2p_groups_ref[part_idx]),
                                 )
                             } else {
                                 InternalIdMap::build(tok_ref, sub_vocab, disallowed_ref, ignore)
                             };
                             if compile_profile_enabled() {
                                 let label = if part_all_l1 { " (l1_fast)" }
-                                    else if has_l2p && std::env::var("GLRMASK_L2P_GROUP_FILTER").map_or(false, |v| v == "1") { " (l2p_filtered)" }
+                                    else if use_l2p_filter && part_has_l2p { " (l2p_filtered)" }
                                     else { "" };
                                 eprintln!(
                                     "[glrmask/debug][id_map] partition[{}] vocab_size={} tsids={} token_classes={} ms={:.1}{}",
