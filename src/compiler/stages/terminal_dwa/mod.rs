@@ -1805,9 +1805,12 @@ pub(crate) fn seed_root_nodes(
     roots_by_tokenizer_state
 }
 
-pub(crate) fn apply_disallowed_follow_constraints(nwa: &mut NWA, grammar: &AnalyzedGrammar) {
-    let disallowed_follows = compute_disallowed_follows(grammar);
-    let normalized = normalize_disallowed_follows(grammar.num_terminals as usize, &disallowed_follows);
+pub(crate) fn apply_disallowed_follow_constraints(
+    nwa: &mut NWA,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    num_terminals: usize,
+) {
+    let normalized = normalize_disallowed_follows(num_terminals, disallowed_follows);
     if normalized.iter().all(|bits| bits.is_zero()) {
         return;
     }
@@ -2896,7 +2899,8 @@ pub(crate) fn build_l2p_partition_terminal_nwa(
     let collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let disallowed_started_at = std::time::Instant::now();
-    apply_disallowed_follow_constraints(&mut nwa, grammar);
+    let df = compute_disallowed_follows(grammar);
+    apply_disallowed_follow_constraints(&mut nwa, &df, grammar.num_terminals as usize);
     let disallowed_ms = disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let coreachable_prune_started_at = std::time::Instant::now();
@@ -3078,7 +3082,8 @@ pub(crate) fn build_partition_terminal_nwa_filtered(
     collapse_always_allowed(&mut nwa, &always_allowed_by_label, grammar.num_terminals as usize);
     let pp_collapse_ms = pp1.elapsed().as_secs_f64() * 1000.0;
     let pp2 = std::time::Instant::now();
-    apply_disallowed_follow_constraints(&mut nwa, grammar);
+    let df = compute_disallowed_follows(grammar);
+    apply_disallowed_follow_constraints(&mut nwa, &df, grammar.num_terminals as usize);
     let pp_disallowed_ms = pp2.elapsed().as_secs_f64() * 1000.0;
     let pp3 = std::time::Instant::now();
     prune_non_coreachable_states(&mut nwa);
@@ -3584,7 +3589,8 @@ pub(crate) fn merge_partition_builds_to_terminal_dwa(
     let collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let disallowed_started_at = std::time::Instant::now();
-    apply_disallowed_follow_constraints(&mut merged_nwa, grammar);
+    let df = compute_disallowed_follows(grammar);
+    apply_disallowed_follow_constraints(&mut merged_nwa, &df, grammar.num_terminals as usize);
     let disallowed_ms = disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let coreachable_prune_started_at = std::time::Instant::now();
@@ -3944,7 +3950,8 @@ pub(crate) fn build_terminal_dwa_with_possible_matches_and_coloring(
     let collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let disallowed_started_at = std::time::Instant::now();
-    apply_disallowed_follow_constraints(&mut nwa, grammar);
+    let df = compute_disallowed_follows(grammar);
+    apply_disallowed_follow_constraints(&mut nwa, &df, grammar.num_terminals as usize);
     let disallowed_ms = disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // Prune non-co-reachable states (dead ends), then canonicalize

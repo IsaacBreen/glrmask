@@ -134,7 +134,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // 6. Postprocess: same sequence as old code (67146d8).
     let always_allowed = compute_always_allowed_follows(grammar);
     collapse_always_allowed(&mut nwa, &always_allowed, grammar.num_terminals as usize);
-    apply_disallowed_follow_constraints(&mut nwa, grammar);
+    apply_disallowed_follow_constraints(&mut nwa, disallowed_follows, grammar.num_terminals as usize);
     prune_non_coreachable_states(&mut nwa);
     canonicalize_acyclic_nwa(&mut nwa);
 
