@@ -187,38 +187,55 @@ pub(crate) fn analyze_equivalences_l1_fast(
     let build_dfa_ms = elapsed_ms(build_dfa_started_at);
 
     // Compute fingerprints: for each repr token, hash the ending state from
-    // every starting state. Process states in batches for cache locality.
+    // state group representatives only. States with identical transition rows
+    // produce identical token walks, so grouping them first avoids redundant work.
     let fp_started_at = std::time::Instant::now();
-    const STATE_GROUP_SIZE: usize = 256;
-    let num_groups = num_states.div_ceil(STATE_GROUP_SIZE);
 
-    // Each repr token gets a fingerprint: hash of ending state from every starting state.
+    // Initial state grouping by transition row: states with identical
+    // 1-byte transitions for all byte classes are provably equivalent
+    // for all tokens (since the DFA is deterministic).
+    let mut row_hash_to_group: HashMap<u64, u32> = HashMap::with_capacity(num_states / 2);
+    let mut initial_state_reps: Vec<usize> = Vec::new();
+    let mut initial_state_group: Vec<u32> = Vec::with_capacity(num_states);
+    for state in 0..num_states {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for c in 0..num_byte_classes {
+            trans_by_class[c * num_states + state].hash(&mut hasher);
+        }
+        let h = hasher.finish();
+        let next_id = initial_state_reps.len() as u32;
+        let group = *row_hash_to_group.entry(h).or_insert_with(|| {
+            initial_state_reps.push(state);
+            next_id
+        });
+        initial_state_group.push(group);
+    }
+    let num_initial_reps = initial_state_reps.len();
+
+    // Each repr token gets a fingerprint: hash of ending state from
+    // initial state group representatives only.
     let repr_fps: Vec<u64> = repr_indices
         .par_iter()
         .map(|&idx| {
             let bytes = token_bytes_list[idx];
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            for g in 0..num_groups {
-                let start = g * STATE_GROUP_SIZE;
-                let end = (start + STATE_GROUP_SIZE).min(num_states);
-                for state in start..end {
-                    let mut s = state as u32;
-                    let mut dead = false;
-                    for &b in bytes {
-                        let class = byte_to_class[b as usize] as usize;
-                        let next = trans_by_class[class * num_states + s as usize];
-                        if next == u32::MAX {
-                            dead = true;
-                            break;
-                        }
-                        s = next;
+            for &state in &initial_state_reps {
+                let mut s = state as u32;
+                let mut dead = false;
+                for &b in bytes {
+                    let class = byte_to_class[b as usize] as usize;
+                    let next = trans_by_class[class * num_states + s as usize];
+                    if next == u32::MAX {
+                        dead = true;
+                        break;
                     }
-                    if dead {
-                        0u32.hash(&mut hasher);
-                    } else {
-                        1u32.hash(&mut hasher);
-                        s.hash(&mut hasher);
-                    }
+                    s = next;
+                }
+                if dead {
+                    0u32.hash(&mut hasher);
+                } else {
+                    1u32.hash(&mut hasher);
+                    s.hash(&mut hasher);
                 }
             }
             let sig: u64 = hasher.finish();
@@ -384,10 +401,10 @@ pub(crate) fn analyze_equivalences_l1_fast(
 
     if profile_compile {
         eprintln!(
-            "[glrmask/profile][id_map_l1_fast] dedup_ms={:.3} tokens={}->{} build_dfa_ms={:.3} fp_ms={:.3} token_group_ms={:.3} state_group_ms={:.3} refine_ms={:.3} states={} state_classes={} token_classes_raw={} token_classes_refined={} total_ms={:.3}",
+            "[glrmask/profile][id_map_l1_fast] dedup_ms={:.3} tokens={}->{} build_dfa_ms={:.3} fp_ms={:.3} initial_state_reps={} token_group_ms={:.3} state_group_ms={:.3} refine_ms={:.3} states={} state_classes={} token_classes_raw={} token_classes_refined={} total_ms={:.3}",
             dedup_ms, num_tokens, num_repr,
             build_dfa_ms,
-            fp_ms, token_group_ms, state_group_ms, refine_ms,
+            fp_ms, num_initial_reps, token_group_ms, state_group_ms, refine_ms,
             num_states, num_state_classes,
             num_repr_classes, refined_num_token_classes,
             elapsed_ms(total_started_at),

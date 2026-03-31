@@ -2461,19 +2461,17 @@ pub(crate) fn build_partition_terminal_nwa_split(
     }
 
     if !has_l1 {
-        // All L2+: use the full trie-walk path
-        return build_partition_terminal_nwa_filtered(
+        // All L2+: use the old-shaped trie-walk path
+        return build_l2p_partition_terminal_nwa(
             tokenizer,
             vocab,
             id_map,
             terminal_coloring,
             use_terminal_coloring,
             ignore_terminal,
-            disallowed_follows,
-            num_terminals,
-            partition_index,
             grammar,
-            Some(&l2p_mask),
+            &l2p_mask,
+            partition_index,
         );
     }
 
@@ -2491,18 +2489,16 @@ pub(crate) fn build_partition_terminal_nwa_split(
             )
         },
         || {
-            build_partition_terminal_nwa_filtered(
+            build_l2p_partition_terminal_nwa(
                 tokenizer,
                 vocab,
                 id_map,
                 terminal_coloring,
                 use_terminal_coloring,
                 ignore_terminal,
-                disallowed_follows,
-                num_terminals,
-                partition_index,
                 grammar,
-                Some(&l2p_mask),
+                &l2p_mask,
+                partition_index,
             )
         },
     );
@@ -2698,6 +2694,176 @@ pub(crate) fn build_partition_with_split_id_maps(
     );
 
     (merged_id_map, build)
+}
+
+/// Build an L2+-only terminal NWA for a single partition.
+///
+/// Follows the same structure as the pre-partition/path-length code
+/// (commit 67146d8): build vocab trie → compute possible_matches →
+/// seed root nodes → trie-walk NWA build → postprocess → det → min.
+///
+/// The only structural differences from the old code:
+/// - `active_terminals` filtering: terminals not in the L2+ set are skipped
+///   during the trie walk.
+/// - Returns `PartitionTerminalNwaBuild` (with NWA) instead of `(DWA, ...)`,
+///   since the global merge happens downstream.
+pub(crate) fn build_l2p_partition_terminal_nwa(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    id_map: &InternalIdMap,
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
+    ignore_terminal: Option<TerminalID>,
+    grammar: &AnalyzedGrammar,
+    active_terminals: &[bool],
+    partition_index: usize,
+) -> PartitionTerminalNwaBuild {
+    let debug_profile = debug_profile_enabled();
+    let partition_total_start = std::time::Instant::now();
+
+    let internal_vocab = internal_vocab_entries(vocab, id_map);
+    if internal_vocab.is_empty() {
+        return PartitionTerminalNwaBuild::default();
+    }
+    let internal_vocab_len = internal_vocab.len();
+
+    let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
+    let leaf_state = nwa.add_state();
+    nwa.set_final_weight(leaf_state, Weight::all());
+    let start_state = nwa.add_state();
+    nwa.start_states.push(start_state);
+
+    let setup_started_at = std::time::Instant::now();
+    let full_tree = VocabPrefixTree::build_owned(
+        internal_vocab
+            .iter()
+            .map(|(token_id, bytes)| (*token_id as usize, bytes.clone()))
+            .collect(),
+    );
+    let setup_ms = setup_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let possible_matches_started_at = std::time::Instant::now();
+    let mut possible_matches = PossibleMatchesComputer::new(tokenizer);
+    let possible_matches_by_state = collect_possible_matches_by_internal_tsid(
+        tokenizer,
+        &full_tree.root,
+        &mut possible_matches,
+        &id_map.tokenizer_states,
+    );
+    let possible_matches_ms = possible_matches_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let seed_started_at = std::time::Instant::now();
+    let roots_by_tokenizer_state = seed_root_nodes(
+        &mut nwa,
+        start_state,
+        tokenizer,
+        id_map,
+        terminal_coloring,
+        ignore_terminal,
+        &possible_matches_by_state,
+    );
+    let seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    if debug_profile {
+        eprintln!(
+            "[glrmask/debug][terminal_dwa] l2p_build[{}] internal_vocab_len={} num_tsids={} roots={} setup_ms={:.1} pm_ms={:.1} seed_ms={:.1}",
+            partition_index, internal_vocab_len, id_map.num_tsids(),
+            roots_by_tokenizer_state.entries.len(),
+            setup_ms, possible_matches_ms, seed_ms,
+        );
+    }
+
+    // Build NWA via trie walk.  Only difference from old code: active_terminals
+    // causes non-L2+ terminals to be skipped during the walk.
+    let num_tokenizer_states = tokenizer.num_states() as usize;
+    let build_trie_started_at = std::time::Instant::now();
+    let mut builder = TerminalNwaBuilder {
+        tokenizer,
+        terminal_coloring: terminal_coloring.clone(),
+        possible_future_terminals: FxHashMap::default(),
+        future_terminal_color_groups: FxHashMap::default(),
+        possible_matches: &mut possible_matches,
+        nwa: &mut nwa,
+        num_tsids: id_map.num_tsids(),
+        leaf_state,
+        ignore_terminal,
+        use_terminal_coloring,
+        terminal_path_lengths: None,
+        active_terminals: Some(active_terminals.to_vec()),
+        self_loop_bytes: FxHashMap::default(),
+        leaf_token_ids_buffer: Vec::new(),
+        future_leaf_buffer: FxHashMap::default(),
+        reachable_weight_cache: HashMap::new(),
+        pruned_weight_cache: HashMap::new(),
+        leaf_weight_cache: HashMap::new(),
+        transition_buffer: FxHashMap::default(),
+        epsilon_buffer: FxHashMap::default(),
+        profile: TerminalDwaBuildProfile::default(),
+        flat_transitions: vec![None; num_tokenizer_states],
+    };
+    builder.build_from_trie(&full_tree.root, &roots_by_tokenizer_state);
+    builder.flush_transition_buffer();
+    let build_profile = builder.profile;
+    let build_trie_ms = build_trie_started_at.elapsed().as_secs_f64() * 1000.0;
+    drop(builder);
+    let possible_matches_profile = possible_matches.profile();
+
+    // Postprocess: same sequence as old code (67146d8).
+    let always_allowed_started_at = std::time::Instant::now();
+    let always_allowed_by_label = compute_always_allowed_follows(grammar);
+    let always_allowed_ms = always_allowed_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let collapse_started_at = std::time::Instant::now();
+    collapse_always_allowed(&mut nwa, &always_allowed_by_label, grammar.num_terminals as usize);
+    let collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let disallowed_started_at = std::time::Instant::now();
+    apply_disallowed_follow_constraints(&mut nwa, grammar);
+    let disallowed_ms = disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let coreachable_prune_started_at = std::time::Instant::now();
+    prune_non_coreachable_states(&mut nwa);
+    let coreachable_prune_ms = coreachable_prune_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let canonicalize_started_at = std::time::Instant::now();
+    canonicalize_acyclic_nwa(&mut nwa);
+    let canonicalize_ms = canonicalize_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let nwa_states = nwa.num_states();
+    let nwa_transitions = nwa.num_transitions();
+
+    // Determinize and minimize, matching old code (uses full `minimize`).
+    let determinize_started_at = std::time::Instant::now();
+    let determinized = determinize(&nwa)
+        .expect("L2+ terminal NWA determinization failed");
+    let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
+    let det_states = determinized.num_states();
+
+    let minimize_started_at = std::time::Instant::now();
+    let dwa = minimize(&determinized);
+    let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
+    let min_states = dwa.num_states();
+
+    let result_nwa = dwa.to_nwa();
+
+    if debug_profile {
+        let partition_total_ms = partition_total_start.elapsed().as_secs_f64() * 1000.0;
+        eprintln!(
+            "[glrmask/debug][terminal_dwa] l2p_build[{}] build_trie_ms={:.1} nwa_states={} nwa_transitions={} always_allowed_ms={:.1} collapse_ms={:.1} disallowed_ms={:.1} prune_ms={:.1} canon_ms={:.1} det_states={} det_ms={:.1} min_states={} min_ms={:.1} total_ms={:.1}",
+            partition_index, build_trie_ms, nwa_states, nwa_transitions,
+            always_allowed_ms, collapse_ms, disallowed_ms, coreachable_prune_ms, canonicalize_ms,
+            det_states, determinize_ms, min_states, minimize_ms, partition_total_ms,
+        );
+    }
+
+    PartitionTerminalNwaBuild {
+        nwa: Some(result_nwa),
+        possible_matches_by_state,
+        build_profile,
+        possible_matches_profile,
+        internal_vocab_len,
+        roots_count: roots_by_tokenizer_state.entries.len(),
+    }
 }
 
 /// Build a partition terminal NWA with optional terminal filtering.
