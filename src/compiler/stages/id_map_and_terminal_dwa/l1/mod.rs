@@ -1,6 +1,7 @@
 //! L1 terminal DWA: direct 2-state construction for terminals with max path
 //! length ≤ 1.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
@@ -181,76 +182,152 @@ fn build_l1_terminal_dwa(
     }
     let state_seed_ms = state_seed_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let mut terminal_to_token_weights = vec![FxHashMap::<u32, RangeSetBlaze<u32>>::default(); num_terminals as usize];
     let mut profile = L1BuildProfile::default();
     let mut self_loop_cache = FxHashMap::<u32, U8Set>::default();
 
-    // Pre-compute the combined active terminal list per DFA state.
-    // This avoids re-iterating finalizer + accessible BitSets on every hit.
+    // Fully deferred accumulation: end_state → (tsid → token_ids).
+    // Both token nodes and self-loop subtrees accumulate here.
+    // Terminal distribution happens once at the end via grouping.
     let num_dfa_states = tokenizer.num_states() as usize;
-    let active_terminals_at_state: Vec<Vec<usize>> = (0..num_dfa_states)
-        .map(|state| {
-            let state = state as u32;
-            let mut terminals = Vec::new();
-            for tid in tokenizer.dfa.finalizers(state).iter() {
-                if active_terminals.get(tid).copied().unwrap_or(false) {
-                    terminals.push(tid);
-                }
-            }
-            for tid in tokenizer.tokens_accessible_from_state(state).iter() {
-                if active_terminals.get(tid).copied().unwrap_or(false) {
-                    terminals.push(tid);
-                }
-            }
-            terminals
-        })
-        .collect();
-
-    // Deferred self-loop accumulation: end_state -> (tsid -> combined reachable tokens)
-    let mut self_loop_deferred: FxHashMap<u32, FxHashMap<u32, RangeSetBlaze<u32>>> =
-        FxHashMap::default();
+    let mut deferred: Vec<FxHashMap<u32, RangeSetBlaze<u32>>> =
+        vec![FxHashMap::default(); num_dfa_states];
 
     let traversal_started_at = Instant::now();
     collect_terminal_weights(
         tokenizer,
         &tree.root,
         &states_to_initial_tsids,
-        &active_terminals_at_state,
-        &mut terminal_to_token_weights,
+        &mut deferred,
         &mut self_loop_cache,
-        &mut self_loop_deferred,
         &mut profile,
     );
+    let traversal_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    // Distribute deferred self-loop data to terminal weights
-    for (&end_state, tsid_map) in &self_loop_deferred {
-        for &terminal_id in &active_terminals_at_state[end_state as usize] {
-            let weights = &mut terminal_to_token_weights[terminal_id];
-            for (&tsid, combined) in tsid_map {
-                *weights.entry(tsid).or_default() |= combined;
+    // Pre-wrap deferred entries in Arc to enable cheap sharing during distribution.
+    // Single-source (terminal, tsid) pairs just Arc::clone (~5ns) vs full clone (~200ns).
+    let distribute_started_at = Instant::now();
+    let deferred_arced: Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>> = deferred
+        .into_iter()
+        .map(|m| {
+            m.into_iter()
+                .map(|(tsid, rsb)| (tsid, Arc::new(rsb)))
+                .collect()
+        })
+        .collect();
+    let arc_wrap_ms = distribute_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    // Build terminal → sorted deduped set of active DFA states
+    let inverse_started_at = Instant::now();
+    let mut terminal_to_active_states: Vec<Vec<u32>> = vec![Vec::new(); num_terminals as usize];
+    for state in 0..num_dfa_states {
+        let state_u32 = state as u32;
+        for tid in tokenizer.dfa.finalizers(state_u32).iter() {
+            if active_terminals.get(tid).copied().unwrap_or(false) {
+                terminal_to_active_states[tid].push(state_u32);
             }
-            profile.terminal_hits += tsid_map.len();
+        }
+        for tid in tokenizer.tokens_accessible_from_state(state_u32).iter() {
+            if active_terminals.get(tid).copied().unwrap_or(false) {
+                terminal_to_active_states[tid].push(state_u32);
+            }
         }
     }
-    let vocab_tree_traversal_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0;
+    for states in &mut terminal_to_active_states {
+        states.sort_unstable();
+        states.dedup();
+    }
+    let inverse_map_ms = inverse_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let direct_dwa_started_at = Instant::now();
+    // Per-terminal distribution: collect deferred entries, sort by tsid,
+    // merge per-tsid using Arc sharing for single-source, build Weight.
+    let merge_started_at = Instant::now();
     let mut dwa = DWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
     let end_state = dwa.add_state();
     dwa.set_final_weight(end_state, Weight::all());
 
     let mut num_transitions = 0usize;
-    for (terminal_id, tsid_to_tokens) in terminal_to_token_weights.into_iter().enumerate() {
-        if tsid_to_tokens.is_empty() {
+    let mut num_distribution_ops = 0usize;
+    let mut num_single_source = 0usize;
+    let mut num_multi_source = 0usize;
+    let mut entries_buf: Vec<(u32, *const Arc<RangeSetBlaze<u32>>)> = Vec::new();
+    let mut range_buf: Vec<(u32, u32)> = Vec::new();
+
+    for (tid, active_states) in terminal_to_active_states.iter().enumerate() {
+        if active_states.is_empty() {
             continue;
         }
 
-        let weight = Weight::from_per_tsid_token_sets(tsid_to_tokens.into_iter());
+        // Collect (tsid, Arc ref) from deferred at active states
+        entries_buf.clear();
+        for &state in active_states {
+            for entry in &deferred_arced[state as usize] {
+                entries_buf.push((entry.0, &entry.1 as *const _));
+            }
+        }
+        if entries_buf.is_empty() {
+            continue;
+        }
+
+        // Sort by tsid for grouping
+        entries_buf.sort_unstable_by_key(|&(tsid, _)| tsid);
+
+        // Group by tsid: single-source → Arc::clone, multi-source → range merge
+        let mut weight_entries: Vec<(u32, Arc<RangeSetBlaze<u32>>)> = Vec::new();
+        let mut i = 0;
+        while i < entries_buf.len() {
+            let tsid = entries_buf[i].0;
+            let mut j = i + 1;
+            while j < entries_buf.len() && entries_buf[j].0 == tsid {
+                j += 1;
+            }
+            num_distribution_ops += j - i;
+
+            // SAFETY: pointers are valid references into deferred_arced which outlives this loop
+            if j == i + 1 {
+                // Single source: just share the Arc
+                let arc = unsafe { &*entries_buf[i].1 };
+                weight_entries.push((tsid, Arc::clone(arc)));
+                num_single_source += 1;
+            } else {
+                // Multi source: extract ranges, sort, consolidate, build once
+                // Avoids expensive RangeSetBlaze clone + |= chain
+                range_buf.clear();
+                for k in i..j {
+                    let src = unsafe { &*entries_buf[k].1 };
+                    for r in src.ranges() {
+                        range_buf.push((*r.start(), *r.end()));
+                    }
+                }
+                range_buf.sort_unstable();
+                // In-place consolidation of overlapping/adjacent ranges
+                if !range_buf.is_empty() {
+                    let mut write = 0;
+                    for read in 1..range_buf.len() {
+                        if range_buf[read].0 <= range_buf[write].1.saturating_add(1) {
+                            range_buf[write].1 = range_buf[write].1.max(range_buf[read].1);
+                        } else {
+                            write += 1;
+                            range_buf[write] = range_buf[read];
+                        }
+                    }
+                    range_buf.truncate(write + 1);
+                }
+                let merged: RangeSetBlaze<u32> = range_buf
+                    .iter()
+                    .map(|&(s, e)| s..=e)
+                    .collect();
+                weight_entries.push((tsid, Arc::new(merged)));
+                num_multi_source += 1;
+            }
+            i = j;
+        }
+
+        let weight = Weight::from_per_tsid_shared(weight_entries.into_iter());
         if weight.is_empty() {
             continue;
         }
 
-        dwa.add_transition(dwa.start_state, terminal_id as i32, end_state, weight);
+        dwa.add_transition(dwa.start_state, tid as i32, end_state, weight);
         num_transitions += 1;
     }
 
@@ -258,11 +335,14 @@ fn build_l1_terminal_dwa(
         return None;
     }
 
-    let direct_terminal_dwa_ms = direct_dwa_started_at.elapsed().as_secs_f64() * 1000.0;
+    let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
+    let direct_terminal_dwa_ms = merge_ms;
+    let distribute_ms = distribute_started_at.elapsed().as_secs_f64() * 1000.0;
+    let vocab_tree_traversal_ms = traversal_ms;
 
     if debug_profile_enabled() {
         eprintln!(
-            "[glrmask/debug][terminal_dwa] partition_build_l1_assoc vocab={} tsids={} tree_nodes={} token_nodes={} segment_execs={} live_segments={} terminal_hits={} states_at_token_nodes={} total_tsids_at_token_nodes={} max_tsids_per_state={} self_loop_skipped_subtrees={} self_loop_skipped_tokens={} transitions={} total_ms={:.1}",
+            "[glrmask/debug][terminal_dwa] partition_build_l1_assoc vocab={} tsids={} tree_nodes={} token_nodes={} segment_execs={} live_segments={} terminal_hits={} states_at_token_nodes={} total_tsids_at_token_nodes={} max_tsids_per_state={} self_loop_skipped_subtrees={} self_loop_skipped_tokens={} distribution_ops={} single_source={} multi_source={} transitions={} traversal_ms={:.1} arc_wrap_ms={:.1} inverse_map_ms={:.1} merge_ms={:.1} distribute_ms={:.1} total_ms={:.1}",
             tree.root.reachable_token_ids().len(),
             id_map.num_tsids(),
             profile.tree_nodes,
@@ -275,7 +355,15 @@ fn build_l1_terminal_dwa(
             profile.max_tsids_per_state,
             profile.self_loop_skipped_subtrees,
             profile.self_loop_skipped_tokens,
+            num_distribution_ops,
+            num_single_source,
+            num_multi_source,
             num_transitions,
+            traversal_ms,
+            arc_wrap_ms,
+            inverse_map_ms,
+            merge_ms,
+            distribute_ms,
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
@@ -348,10 +436,8 @@ fn collect_terminal_weights(
     tokenizer: &Tokenizer,
     node: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
     states_to_initial_tsids: &FxHashMap<u32, Vec<u32>>,
-    active_terminals_at_state: &[Vec<usize>],
-    terminal_to_token_weights: &mut [FxHashMap<u32, RangeSetBlaze<u32>>],
+    deferred: &mut Vec<FxHashMap<u32, RangeSetBlaze<u32>>>,
     self_loop_cache: &mut FxHashMap<u32, U8Set>,
-    self_loop_deferred: &mut FxHashMap<u32, FxHashMap<u32, RangeSetBlaze<u32>>>,
     profile: &mut L1BuildProfile,
 ) {
     profile.tree_nodes += 1;
@@ -365,13 +451,12 @@ fn collect_terminal_weights(
             if initial_tsids.len() > profile.max_tsids_per_state {
                 profile.max_tsids_per_state = initial_tsids.len();
             }
-            for &terminal_id in &active_terminals_at_state[end_state as usize] {
-                let weights = &mut terminal_to_token_weights[terminal_id];
-                for &initial_tsid in initial_tsids {
-                    weights.entry(initial_tsid).or_default().insert(internal_token_id);
-                }
-                profile.terminal_hits += initial_tsids.len();
+            // Accumulate into deferred structure — no terminal iteration here
+            let state_entry = &mut deferred[end_state as usize];
+            for &initial_tsid in initial_tsids {
+                state_entry.entry(initial_tsid).or_default().insert(internal_token_id);
             }
+            profile.terminal_hits += initial_tsids.len();
         }
     }
 
@@ -427,17 +512,14 @@ fn collect_terminal_weights(
             }
         }
 
-        // Self-loop optimization: defer terminal weight updates.
-        // Accumulate (end_state, tsid) -> reachable union across all children.
-        // Terminal distribution happens once at the end, avoiding redundant
-        // iterations over active terminals for duplicate (end_state, tsid) pairs.
+        // Self-loop optimization: accumulate into the same deferred structure
         if let Some(ref reachable_u32) = reachable_u32 {
             if !self_loop_states.is_empty() {
                 profile.self_loop_skipped_subtrees += self_loop_states.len();
 
                 for (&end_state, initial_tsids) in &self_loop_states {
                     profile.self_loop_skipped_tokens += reachable_u32.len() as usize * initial_tsids.len();
-                    let state_entry = self_loop_deferred.entry(end_state).or_default();
+                    let state_entry = &mut deferred[end_state as usize];
                     for &initial_tsid in initial_tsids {
                         *state_entry.entry(initial_tsid).or_default() |= reachable_u32;
                     }
@@ -453,10 +535,8 @@ fn collect_terminal_weights(
             tokenizer,
             child,
             &child_states_to_initial_tsids,
-            active_terminals_at_state,
-            terminal_to_token_weights,
+            deferred,
             self_loop_cache,
-            self_loop_deferred,
             profile,
         );
     }
