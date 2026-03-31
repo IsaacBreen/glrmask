@@ -51,7 +51,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     let mut has_l2p = false;
     for (i, len) in terminal_path_lengths.iter().enumerate() {
         match len {
-            TerminalPathLength::Zero | TerminalPathLength::One => {
+            TerminalPathLength::One => {
                 l1_mask[i] = true;
                 has_l1 = true;
             }
@@ -59,6 +59,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                 l2p_mask[i] = true;
                 has_l2p = true;
             }
+            TerminalPathLength::Zero => {}
         }
     }
 

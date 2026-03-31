@@ -69,16 +69,13 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         return None;
     }
 
-    // 1. Build L2+ id_map with group filter.
-    let id_map = InternalIdMap::build_with_group_filter(
+    let id_map = InternalIdMap::build(
         tokenizer,
         vocab,
         disallowed_follows,
         ignore_terminal,
-        Some(active_terminals),
     );
 
-    // 2. Build internal vocab entries and prefix trie.
     let internal_vocab = internal_vocab_entries(vocab, &id_map);
     if internal_vocab.is_empty() {
         return None;

@@ -163,6 +163,10 @@ impl Tokenizer {
         }
     }
 
+    pub(crate) fn execute_from_state_end_only(&self, input: &[u8], start: u32) -> Option<u32> {
+        self.scan_input(input, start, &mut (), |_, _, _, _| {})
+    }
+
     pub fn execute_all_matches(&self, input: &[u8], start: u32) -> TokenizerResult {
         let exec = self.execute_from_state_all_widths(input, start);
         let end_state = exec.end_state.unwrap_or(start);

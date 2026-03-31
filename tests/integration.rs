@@ -2112,6 +2112,71 @@ fn test_o63377_rejects_false_positive_b_after_double_a_prefix() {
 }
 
 #[test]
+fn test_o17408_rejects_false_positive_3_after_sas_phase_prefix() {
+    let vocab = Vocab::new(
+        vec![
+            (16u32, b"1".to_vec()),
+            (17u32, b"2".to_vec()),
+            (18u32, b"3".to_vec()),
+        ],
+        None,
+    );
+    let prefix = b"{\"certificationConditions\": \"This device is certified for use in the United States.\", \"certificationDate\": \"2022-01-01\", \"certificationExpiration\": \"2027-01-01\", \"certificationId\": \"DA-123456\", \"frn\": \"0012345678\", \"sasPhase\": \"";
+    let lark = r#"
+        start: PREFIX ("1" | "2") "\"}"
+        PREFIX: /\{"certificationConditions": "This device is certified for use in the United States\.", "certificationDate": "2022-01-01", "certificationExpiration": "2027-01-01", "certificationId": "DA-123456", "frn": "0012345678", "sasPhase": "/
+    "#;
+
+    let c = Constraint::from_lark(lark, &vocab).unwrap();
+    let mut s = c.start();
+    s.commit_bytes(prefix).unwrap();
+
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 16), "token '1' must be allowed after the sasPhase prefix");
+    assert!(token_allowed(&mask, 17), "token '2' must be allowed after the sasPhase prefix");
+    assert!(
+        !token_allowed(&mask, 18),
+        "token '3' must be rejected after the sasPhase prefix"
+    );
+}
+
+#[test]
+fn test_o17408_rejects_false_positive_3_with_ordered_object_context() {
+    let vocab = Vocab::new(
+        vec![
+            (16u32, b"1".to_vec()),
+            (17u32, b"2".to_vec()),
+            (18u32, b"3".to_vec()),
+        ],
+        None,
+    );
+    let prefix = b"{\"certificationConditions\": \"This device is certified for use in the United States.\", \"certificationDate\": \"2022-01-01\", \"certificationExpiration\": \"2027-01-01\", \"certificationId\": \"DA-123456\", \"frn\": \"0012345678\", \"sasPhase\": \"";
+    let lark = r#"
+        start: "{" CERT_COND ", " CERT_DATE ", " CERT_EXP ", " CERT_ID ", " FRN ", " SAS_PHASE "}"
+        CERT_COND: "\"certificationConditions\": " JSON_STRING
+        CERT_DATE: "\"certificationDate\": " JSON_STRING
+        CERT_EXP: "\"certificationExpiration\": " JSON_STRING
+        CERT_ID: "\"certificationId\": " JSON_STRING
+        FRN: "\"frn\": " JSON_STRING
+        SAS_PHASE: "\"sasPhase\": " ("\"1\"" | "\"2\"")
+        JSON_STRING: "\"" STR_CHAR* "\""
+        STR_CHAR: /[A-Za-z0-9 .:-]/
+    "#;
+
+    let c = Constraint::from_lark(lark, &vocab).unwrap();
+    let mut s = c.start();
+    s.commit_bytes(prefix).unwrap();
+
+    let mask = s.mask();
+    assert!(token_allowed(&mask, 16), "token '1' must be allowed after the sasPhase prefix");
+    assert!(token_allowed(&mask, 17), "token '2' must be allowed after the sasPhase prefix");
+    assert!(
+        !token_allowed(&mask, 18),
+        "token '3' must be rejected after the sasPhase prefix in the ordered-object grammar"
+    );
+}
+
+#[test]
 fn test_nested_object_prefix_keeps_joint_comma_quote_token_allowed() {
     let lark = r#"
 PATTERN_0: /[\x20-\x21\x23-\x5B\x5D-\x7F]/

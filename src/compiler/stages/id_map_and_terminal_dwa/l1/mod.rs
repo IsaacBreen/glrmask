@@ -1,32 +1,28 @@
-//! L1 terminal DWA: fast direct construction for terminals with max path length ≤ 1.
-//!
-//! Since L1 terminals never co-occur with another terminal in a single token,
-//! the DWA can be built by walking each token from each state and checking
-//! which terminal matches at the end. No full NWA trie-walk pipeline needed.
-
-use std::collections::HashMap;
-use std::sync::Arc;
+//! L1 terminal DWA: direct 2-state construction for terminals with max path
+//! length ≤ 1.
 
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
-use crate::automata::weighted::determinize::determinize;
-use crate::automata::weighted::minimize::minimize_fast;
-use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::grammar::model::TerminalID;
-use crate::compiler::stages::equivalence_analysis::InternalIdMap;
+use crate::compiler::stages::compact::compact_dwa_dimensions;
+use crate::compiler::stages::equivalence_analysis::compat::TokenizerView;
+use crate::compiler::stages::equivalence_analysis::state::max_length;
+use crate::compiler::stages::equivalence_analysis::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::weight::Weight;
+use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::Vocab;
 
 use super::types::{TerminalColoring, debug_profile_enabled};
 
 /// Build an L1 id_map and terminal DWA for the given vocab and terminal set.
 ///
-/// 1. Build id_map via `InternalIdMap::build_l1` (fast fingerprint-based equiv).
-/// 2. Build L1 terminal DWA via the direct walk path (no trie-walk NWA).
+/// Uses max-length state equivalence and an identity vocab map, then traverses
+/// the vocab tree to accumulate `terminal -> Weight` before building the final
+/// 2-state DWA directly.
 ///
 /// Returns `None` if the vocab is empty or no terminal matches exist.
 pub(crate) fn build_l1_id_map_and_terminal_dwa(
@@ -34,7 +30,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     vocab: &Vocab,
     _terminal_coloring: &TerminalColoring,
     _use_terminal_coloring: bool,
-    ignore_terminal: Option<TerminalID>,
+    _ignore_terminal: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
     active_terminals: &[bool],
 ) -> Option<(InternalIdMap, DWA)> {
@@ -42,38 +38,69 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
         return None;
     }
 
-    // 1. Build L1 id_map (fast fingerprint-based equivalence, no DFA walk).
-    let id_map = InternalIdMap::build_l1(tokenizer, vocab);
-
-    // 2. Build L1 terminal DWA via direct walk.
+    let mut id_map = build_l1_id_map(tokenizer, vocab);
     let num_terminals = grammar.num_terminals as u32;
-    let dwa = build_l1_terminal_dwa(
+    let mut dwa = build_l1_terminal_dwa(
         tokenizer,
         vocab,
         &id_map,
-        ignore_terminal,
         num_terminals,
-        Some(active_terminals),
+        active_terminals,
     )?;
+
+    compact_dwa_dimensions(&mut dwa, &mut id_map, false);
 
     Some((id_map, dwa))
 }
 
-/// Build an L1 terminal DWA directly — returns just the DWA.
-///
-/// Walks all (token, representative_state) pairs, builds a 2-state NWA,
-/// then determinizes + minimizes.
+fn build_l1_id_map(tokenizer: &Tokenizer, vocab: &Vocab) -> InternalIdMap {
+    let tokenizer_view = TokenizerView::new(tokenizer);
+    let token_bytes: Vec<&[u8]> = vocab.entries.values().map(|bytes| bytes.as_slice()).collect();
+    let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
+    let state_reps = max_length::find_state_equivalence_classes(&tokenizer_view, &token_bytes, &states);
+
+    let mut rep_to_internal = FxHashMap::<usize, u32>::default();
+    let mut state_original_to_internal = vec![u32::MAX; states.len()];
+    let mut state_representatives = Vec::new();
+    for (state_id, &representative_state) in state_reps.iter().enumerate() {
+        let next_internal = state_representatives.len() as u32;
+        let internal = *rep_to_internal.entry(representative_state).or_insert_with(|| {
+            state_representatives.push(representative_state as u32);
+            next_internal
+        });
+        state_original_to_internal[state_id] = internal;
+    }
+
+    let token_ids: Vec<u32> = vocab.entries.keys().copied().collect();
+    let mut token_original_to_internal = vec![u32::MAX; vocab.max_token_id() as usize + 1];
+    for (internal_token_id, token_id) in token_ids.iter().copied().enumerate() {
+        token_original_to_internal[token_id as usize] = internal_token_id as u32;
+    }
+
+    InternalIdMap {
+        tokenizer_states: ManyToOneIdMap::from_original_to_internal_with_representatives(
+            state_original_to_internal,
+            state_representatives.len() as u32,
+            state_representatives,
+        ),
+        vocab_tokens: ManyToOneIdMap::from_original_to_internal_with_representatives(
+            token_original_to_internal,
+            token_ids.len() as u32,
+            token_ids,
+        ),
+    }
+}
+
 fn build_l1_terminal_dwa(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     id_map: &InternalIdMap,
-    ignore_terminal: Option<TerminalID>,
     num_terminals: u32,
-    active_terminals: Option<&[bool]>,
+    active_terminals: &[bool],
 ) -> Option<DWA> {
-    let partition_total_start = std::time::Instant::now();
+    let total_started_at = std::time::Instant::now();
 
-    let internal_vocab: Vec<(u32, Vec<u8>)> = id_map
+    let internal_vocab: Vec<(usize, Vec<u8>)> = id_map
         .vocab_tokens
         .iter_representative_ids()
         .enumerate()
@@ -81,7 +108,7 @@ fn build_l1_terminal_dwa(
             vocab
                 .entries
                 .get(&representative)
-                .map(|bytes| (internal_token_id as u32, bytes.clone()))
+                .map(|bytes| (internal_token_id, bytes.clone()))
         })
         .collect();
 
@@ -89,207 +116,139 @@ fn build_l1_terminal_dwa(
         return None;
     }
 
-    let num_tsids = id_map.num_tsids();
-    let num_term = num_terminals as usize;
-
-    // Pre-populate flat DFA transition table for fast byte-by-byte walking.
-    let dfa = tokenizer.dfa.states();
-    let num_dfa_states = dfa.len();
-    let flat_dfa: Vec<[u32; 256]> = (0..num_dfa_states)
-        .map(|s| {
-            let mut flat = [u32::MAX; 256];
-            for (b, &target) in dfa[s].transitions.iter() {
-                flat[b as usize] = target;
-            }
-            flat
-        })
-        .collect();
-
-    // Build map: representative_state → list of internal TSIDs with that representative.
-    let mut rep_to_tsids: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
-    for (tsid_idx, representative_state) in
-        id_map.tokenizer_states.iter_representative_ids().enumerate()
-    {
-        rep_to_tsids
+    let tree = VocabPrefixTree::build_owned(internal_vocab);
+    let mut states_to_initial_tsids = FxHashMap::<u32, Vec<u32>>::default();
+    for (internal_tsid, representative_state) in id_map.tokenizer_states.iter_representative_ids().enumerate() {
+        states_to_initial_tsids
             .entry(representative_state)
             .or_default()
-            .push(tsid_idx as u32);
-    }
-    let unique_reps: Vec<u32> = rep_to_tsids.keys().copied().collect();
-
-    // Phase 1: Walk only unique (token, representative_state) pairs.
-    let mut tokens_direct_by_rep: Vec<FxHashMap<u32, RangeSetBlaze<u32>>> = vec![FxHashMap::default(); num_term];
-    let mut future_groups_by_rep: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
-
-    let walk_start = std::time::Instant::now();
-    let mut total_pairs: u64 = 0;
-    let mut total_alive: u64 = 0;
-
-    for &(internal_token_id, ref bytes) in &internal_vocab {
-        for &rep_state in &unique_reps {
-            total_pairs += 1;
-
-            let mut scan_state = rep_state;
-            let mut alive = true;
-            for &byte in <[u8]>::iter(bytes) {
-                let next = flat_dfa[scan_state as usize][byte as usize];
-                if next == u32::MAX {
-                    alive = false;
-                    break;
-                }
-                scan_state = next;
-            }
-            if !alive {
-                continue;
-            }
-            total_alive += 1;
-
-            for t in tokenizer.dfa.finalizers(scan_state).iter() {
-                let terminal = t as TerminalID;
-                tokens_direct_by_rep[terminal as usize]
-                    .entry(rep_state)
-                    .or_default()
-                    .insert(internal_token_id);
-            }
-
-            future_groups_by_rep
-                .entry((rep_state, scan_state))
-                .or_default()
-                .push(internal_token_id);
-        }
-    }
-    let phase1_ms = walk_start.elapsed().as_secs_f64() * 1000.0;
-
-    // Phase 2: Process future groups, collecting per (terminal, rep_state).
-    let phase2_start = std::time::Instant::now();
-    let mut future_cache: FxHashMap<u32, Vec<TerminalID>> = FxHashMap::default();
-    let num_groups = future_groups_by_rep.len();
-
-    let mut tokens_future_by_rep: Vec<FxHashMap<u32, RangeSetBlaze<u32>>> = vec![FxHashMap::default(); num_term];
-
-    for ((rep_state, ending_state), token_ids) in &future_groups_by_rep {
-        let futures = future_cache
-            .entry(*ending_state)
-            .or_insert_with(|| {
-                tokenizer
-                    .possible_future_terminals_iter(*ending_state)
-                    .collect()
-            });
-        let group_set: RangeSetBlaze<u32> =
-            RangeSetBlaze::from_iter(token_ids.iter().copied().map(|id| id..=id));
-        for &future_terminal in futures.iter() {
-            let entry = tokens_future_by_rep[future_terminal as usize]
-                .entry(*rep_state)
-                .or_default();
-            *entry |= &group_set;
-        }
-    }
-    let phase2_ms = phase2_start.elapsed().as_secs_f64() * 1000.0;
-
-    // Build the 2-state NWA directly.
-    let nwa_start = std::time::Instant::now();
-    let mut nwa = NWA::new(num_tsids, id_map.max_internal_token_id());
-    let start = nwa.add_state();
-    let accept = nwa.add_state();
-    nwa.start_states = vec![start];
-    nwa.set_final_weight(accept, Weight::all());
-
-    let rep_ids: Vec<u32> = id_map.tokenizer_states.iter_representative_ids().collect();
-
-    let mut num_transitions = 0u32;
-    for terminal_id in 0..num_term {
-        if let Some(active) = active_terminals {
-            if !active.get(terminal_id).copied().unwrap_or(false) {
-                continue;
-            }
-        }
-        let is_ignored = ignore_terminal == Some(terminal_id as TerminalID);
-        let direct_map = &mut tokens_direct_by_rep[terminal_id];
-        let future_map = &mut tokens_future_by_rep[terminal_id];
-
-        let build_weight = |direct: &mut FxHashMap<u32, RangeSetBlaze<u32>>,
-                            future: &mut FxHashMap<u32, RangeSetBlaze<u32>>,
-                            include_future: bool|
-         -> Option<Weight> {
-            let mut rep_token_sets: FxHashMap<u32, Arc<RangeSetBlaze<u32>>> = FxHashMap::default();
-            for (&rep_state, direct_set) in direct.iter() {
-                let mut token_set = direct_set.clone();
-                if include_future {
-                    if let Some(future_set) = future.get(&rep_state) {
-                        token_set |= future_set.clone();
-                    }
-                }
-                if !token_set.is_empty() {
-                    rep_token_sets.insert(rep_state, Arc::new(token_set));
-                }
-            }
-            if include_future {
-                for (&rep_state, future_set) in future.iter() {
-                    if rep_token_sets.contains_key(&rep_state) {
-                        continue;
-                    }
-                    if !future_set.is_empty() {
-                        rep_token_sets.insert(rep_state, Arc::new(future_set.clone()));
-                    }
-                }
-            }
-            if rep_token_sets.is_empty() {
-                return None;
-            }
-
-            let weight = Weight::from_per_tsid_shared(
-                rep_ids.iter().enumerate().filter_map(|(tsid, &rep_state)| {
-                    rep_token_sets
-                        .get(&rep_state)
-                        .map(|ts| (tsid as u32, Arc::clone(ts)))
-                }),
-            );
-            if weight.is_empty() {
-                None
-            } else {
-                Some(weight)
-            }
-        };
-
-        if is_ignored {
-            let mut empty_future: FxHashMap<u32, RangeSetBlaze<u32>> = FxHashMap::default();
-            if let Some(weight) = build_weight(direct_map, &mut empty_future, false) {
-                nwa.add_transition(start, terminal_id as i32, accept, weight);
-                num_transitions += 1;
-            }
-            let mut empty_direct: FxHashMap<u32, RangeSetBlaze<u32>> = FxHashMap::default();
-            if let Some(weight) = build_weight(&mut empty_direct, future_map, true) {
-                nwa.add_epsilon(start, accept, weight);
-            }
-        } else {
-            if let Some(weight) = build_weight(direct_map, future_map, true) {
-                nwa.add_transition(start, terminal_id as i32, accept, weight);
-                num_transitions += 1;
-            }
-        }
+            .push(internal_tsid as u32);
     }
 
-    // Determinize + minimize.
-    let det_start = std::time::Instant::now();
-    let dwa_result = determinize(&nwa).expect("L1 direct NWA determinize failed");
-    let det_ms = det_start.elapsed().as_secs_f64() * 1000.0;
-    let det_states = dwa_result.num_states();
-    let min_start_t = std::time::Instant::now();
-    let dwa_min = minimize_fast(&dwa_result);
-    let min_ms = min_start_t.elapsed().as_secs_f64() * 1000.0;
-    let min_states = dwa_min.num_states();
+    let mut terminal_to_token_weights = vec![FxHashMap::<u32, RangeSetBlaze<u32>>::default(); num_terminals as usize];
+    let mut profile = L1BuildProfile::default();
+    collect_terminal_weights(
+        tokenizer,
+        &tree.root,
+        &states_to_initial_tsids,
+        active_terminals,
+        &mut terminal_to_token_weights,
+        &mut profile,
+    );
 
-    let nwa_ms = nwa_start.elapsed().as_secs_f64() * 1000.0;
-    let partition_total_ms = partition_total_start.elapsed().as_secs_f64() * 1000.0;
+    let mut dwa = DWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
+    let end_state = dwa.add_state();
+    dwa.set_final_weight(end_state, Weight::all());
+
+    let mut num_transitions = 0usize;
+    for (terminal_id, tsid_to_tokens) in terminal_to_token_weights.into_iter().enumerate() {
+        if tsid_to_tokens.is_empty() {
+            continue;
+        }
+
+        let weight = Weight::from_per_tsid_token_sets(tsid_to_tokens.into_iter());
+        if weight.is_empty() {
+            continue;
+        }
+
+        dwa.add_transition(dwa.start_state, terminal_id as i32, end_state, weight);
+        num_transitions += 1;
+    }
+
+    if num_transitions == 0 {
+        return None;
+    }
 
     if debug_profile_enabled() {
         eprintln!(
-            "[glrmask/debug][terminal_dwa] partition_build_l1_direct vocab={} tsids={} pairs={} alive={} groups={} transitions={} phase1_ms={:.1} phase2_ms={:.1} nwa_ms={:.1} det_states={} det_ms={:.1} min_states={} min_ms={:.1} total_ms={:.1}",
-            internal_vocab.len(), num_tsids, total_pairs, total_alive,
-            num_groups, num_transitions, phase1_ms, phase2_ms, nwa_ms, det_states, det_ms,
-            min_states, min_ms, partition_total_ms,
+            "[glrmask/debug][terminal_dwa] partition_build_l1_assoc vocab={} tsids={} tree_nodes={} segment_execs={} live_segments={} terminal_hits={} transitions={} total_ms={:.1}",
+            tree.root.reachable_token_ids().len(),
+            id_map.num_tsids(),
+            profile.tree_nodes,
+            profile.segment_execs,
+            profile.live_segments,
+            profile.terminal_hits,
+            num_transitions,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
 
-    Some(dwa_min)
+    Some(dwa)
+}
+
+#[derive(Default)]
+struct L1BuildProfile {
+    tree_nodes: usize,
+    segment_execs: usize,
+    live_segments: usize,
+    terminal_hits: usize,
+}
+
+fn collect_terminal_weights(
+    tokenizer: &Tokenizer,
+    node: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
+    states_to_initial_tsids: &FxHashMap<u32, Vec<u32>>,
+    active_terminals: &[bool],
+    terminal_to_token_weights: &mut [FxHashMap<u32, RangeSetBlaze<u32>>],
+    profile: &mut L1BuildProfile,
+) {
+    profile.tree_nodes += 1;
+
+    if node.has_token() {
+        let internal_token_id = node.token_id() as u32;
+        for (&end_state, initial_tsids) in states_to_initial_tsids {
+            for terminal_id in tokenizer.dfa.finalizers(end_state).iter() {
+                if !active_terminals.get(terminal_id).copied().unwrap_or(false) {
+                    continue;
+                }
+                for &initial_tsid in initial_tsids {
+                    terminal_to_token_weights[terminal_id]
+                        .entry(initial_tsid)
+                        .or_default()
+                        .insert(internal_token_id);
+                }
+                profile.terminal_hits += initial_tsids.len();
+            }
+            for terminal_id in tokenizer.tokens_accessible_from_state(end_state).iter() {
+                if !active_terminals.get(terminal_id).copied().unwrap_or(false) {
+                    continue;
+                }
+                for &initial_tsid in initial_tsids {
+                    terminal_to_token_weights[terminal_id]
+                        .entry(initial_tsid)
+                        .or_default()
+                        .insert(internal_token_id);
+                }
+                profile.terminal_hits += initial_tsids.len();
+            }
+        }
+    }
+
+    for (segment, child) in node.iter_children() {
+        let mut child_states_to_initial_tsids = FxHashMap::<u32, Vec<u32>>::default();
+        for (&start_state, initial_tsids) in states_to_initial_tsids {
+            profile.segment_execs += 1;
+            let Some(end_state) = tokenizer.execute_from_state_end_only(segment, start_state) else {
+                continue;
+            };
+            profile.live_segments += 1;
+            child_states_to_initial_tsids
+                .entry(end_state)
+                .or_default()
+                .extend(initial_tsids.iter().copied());
+        }
+
+        if child_states_to_initial_tsids.is_empty() {
+            continue;
+        }
+
+        collect_terminal_weights(
+            tokenizer,
+            child,
+            &child_states_to_initial_tsids,
+            active_terminals,
+            terminal_to_token_weights,
+            profile,
+        );
+    }
 }
