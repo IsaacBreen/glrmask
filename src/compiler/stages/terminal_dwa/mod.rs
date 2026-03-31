@@ -1817,21 +1817,32 @@ fn apply_disallowed_follow_constraints(nwa: &mut NWA, grammar: &AnalyzedGrammar)
 }
 
 /// Classifies a token's bytes by character type for vocab partitioning.
-/// Returns 0 (pure non-alnum), 1 (mixed), or 2 (pure alnum).
+/// Returns 0 (pure non-alnum), 1 (mixed), or 2 (alnum, optionally with leading space).
+///
+/// The "leading space" can be either ASCII 0x20 or the sentencepiece marker
+/// `Ġ` (U+0120, encoded as `\xc4\xa0` in UTF-8).
 pub(crate) fn classify_vocab_char_type(bytes: &[u8]) -> u8 {
-    let mut has_alnum = false;
-    let mut has_non_alnum = false;
-    for &b in bytes {
-        if b.is_ascii_alphanumeric() {
-            has_alnum = true;
-        } else {
-            has_non_alnum = true;
-        }
-        if has_alnum && has_non_alnum {
-            return 1; // Mixed
-        }
+    if bytes.is_empty() {
+        return 0;
     }
-    if has_alnum { 2 } else { 0 } // PureAlnum or PureNonAlnum
+    // Check for optional leading space prefix (ASCII or sentencepiece Ġ)
+    let content = if bytes[0] == b' ' {
+        &bytes[1..]
+    } else if bytes.len() >= 2 && bytes[0] == 0xc4 && bytes[1] == 0xa0 {
+        &bytes[2..]
+    } else {
+        bytes
+    };
+    if content.is_empty() {
+        return 0; // Just a space marker → non-alnum
+    }
+    if content.iter().all(|b| b.is_ascii_alphanumeric()) {
+        return 2; // Alnum (optionally with leading space)
+    }
+    if bytes.iter().all(|b| !b.is_ascii_alphanumeric()) {
+        return 0; // Pure non-alnum
+    }
+    1 // Mixed
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
