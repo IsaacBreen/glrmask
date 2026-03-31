@@ -1,6 +1,8 @@
 //! L1 terminal DWA: direct 2-state construction for terminals with max path
 //! length ≤ 1.
 
+use std::time::Instant;
+
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
 
@@ -9,14 +11,13 @@ use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::stages::compact::compact_dwa_dimensions;
-use crate::compiler::stages::equivalence_analysis::compat::TokenizerView;
-use crate::compiler::stages::equivalence_analysis::state::max_length;
 use crate::compiler::stages::equivalence_analysis::{InternalIdMap, ManyToOneIdMap};
+use crate::ds::u8set::U8Set;
 use crate::ds::weight::Weight;
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::Vocab;
 
-use super::types::{TerminalColoring, debug_profile_enabled};
+use super::types::{TerminalColoring, compile_profile_enabled, debug_profile_enabled};
 
 /// Build an L1 id_map and terminal DWA for the given vocab and terminal set.
 ///
@@ -26,6 +27,7 @@ use super::types::{TerminalColoring, debug_profile_enabled};
 ///
 /// Returns `None` if the vocab is empty or no terminal matches exist.
 pub(crate) fn build_l1_id_map_and_terminal_dwa(
+    partition_label: &str,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     _terminal_coloring: &TerminalColoring,
@@ -38,85 +40,144 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
         return None;
     }
 
-    let mut id_map = build_l1_id_map(tokenizer, vocab);
+    let total_started_at = Instant::now();
+    let id_map_started_at = Instant::now();
+    let (mut id_map, sorted_entries, id_map_profile) = build_l1_id_map(tokenizer, vocab);
+    let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
     let num_terminals = grammar.num_terminals as u32;
-    let mut dwa = build_l1_terminal_dwa(
+    let dwa_started_at = Instant::now();
+    let (mut dwa, terminal_profile) = build_l1_terminal_dwa(
         tokenizer,
-        vocab,
+        sorted_entries,
         &id_map,
         num_terminals,
         active_terminals,
     )?;
+    let terminal_build_ms = dwa_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    let compact_started_at = Instant::now();
     compact_dwa_dimensions(&mut dwa, &mut id_map, false);
+    let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    if compile_profile_enabled() || debug_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][l1] partition={} vocab_tokens={} tsids={} state_equiv_ms={:.3} token_identity_map_ms={:.3} id_map_ms={:.3} internal_vocab_ms={:.3} vocab_tree_build_ms={:.3} state_seed_ms={:.3} vocab_tree_traversal_ms={:.3} direct_terminal_dwa_ms={:.3} terminal_build_ms={:.3} compact_ms={:.3} determinize=none minimize=none prune=none total_ms={:.3}",
+            partition_label,
+            vocab.entries.len(),
+            id_map.num_tsids(),
+            id_map_profile.state_equiv_ms,
+            id_map_profile.token_identity_map_ms,
+            id_map_ms,
+            terminal_profile.internal_vocab_ms,
+            terminal_profile.vocab_tree_build_ms,
+            terminal_profile.state_seed_ms,
+            terminal_profile.vocab_tree_traversal_ms,
+            terminal_profile.direct_terminal_dwa_ms,
+            terminal_build_ms,
+            compact_ms,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    // Fast iteration: exit after L1 for a specific partition
+    if let Ok(exit_label) = std::env::var("GLRMASK_EXIT_AFTER_L1") {
+        if exit_label == partition_label {
+            eprintln!("[glrmask/debug] EXIT_AFTER_L1={} triggered.", partition_label);
+            std::process::exit(0);
+        }
+    }
 
     Some((id_map, dwa))
 }
 
-fn build_l1_id_map(tokenizer: &Tokenizer, vocab: &Vocab) -> InternalIdMap {
-    let tokenizer_view = TokenizerView::new(tokenizer);
-    let token_bytes: Vec<&[u8]> = vocab.entries.values().map(|bytes| bytes.as_slice()).collect();
+fn build_l1_id_map(tokenizer: &Tokenizer, vocab: &Vocab) -> (InternalIdMap, Vec<(u32, Vec<u8>)>, L1IdMapProfile) {
     let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
-    let state_reps = max_length::find_state_equivalence_classes(&tokenizer_view, &token_bytes, &states);
 
-    let mut rep_to_internal = FxHashMap::<usize, u32>::default();
+    // Identity state mapping: each state is its own class.
+    // (max-length state reduction is disabled for now.)
+    let state_equiv_started_at = Instant::now();
     let mut state_original_to_internal = vec![u32::MAX; states.len()];
     let mut state_representatives = Vec::new();
-    for (state_id, &representative_state) in state_reps.iter().enumerate() {
-        let next_internal = state_representatives.len() as u32;
-        let internal = *rep_to_internal.entry(representative_state).or_insert_with(|| {
-            state_representatives.push(representative_state as u32);
-            next_internal
-        });
-        state_original_to_internal[state_id] = internal;
+    for &state_id in &states {
+        state_original_to_internal[state_id] = state_representatives.len() as u32;
+        state_representatives.push(state_id as u32);
     }
+    let state_equiv_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let token_ids: Vec<u32> = vocab.entries.keys().copied().collect();
+    // Sort token IDs by byte content so internal IDs follow DFS traversal order
+    // in the VocabPrefixTree. This makes reachable_token_ids() contiguous ranges,
+    // enabling O(1) RangeSetBlaze unions during self-loop optimization.
+    let token_identity_started_at = Instant::now();
+    let mut token_id_bytes: Vec<(u32, &[u8])> = vocab
+        .entries
+        .iter()
+        .map(|(&id, bytes)| (id, bytes.as_slice()))
+        .collect();
+    token_id_bytes.sort_unstable_by(|(_, a), (_, b)| a.cmp(b));
     let mut token_original_to_internal = vec![u32::MAX; vocab.max_token_id() as usize + 1];
-    for (internal_token_id, token_id) in token_ids.iter().copied().enumerate() {
-        token_original_to_internal[token_id as usize] = internal_token_id as u32;
-    }
+    let token_ids_sorted: Vec<u32> = token_id_bytes
+        .iter()
+        .enumerate()
+        .map(|(internal_id, &(original_id, _))| {
+            token_original_to_internal[original_id as usize] = internal_id as u32;
+            original_id
+        })
+        .collect();
+    // Build the sorted entries list for downstream use (avoids BTreeMap lookups later)
+    let sorted_entries: Vec<(u32, Vec<u8>)> = token_id_bytes
+        .into_iter()
+        .map(|(id, bytes)| (id, bytes.to_vec()))
+        .collect();
+    let token_identity_map_ms = token_identity_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    InternalIdMap {
-        tokenizer_states: ManyToOneIdMap::from_original_to_internal_with_representatives(
-            state_original_to_internal,
-            state_representatives.len() as u32,
-            state_representatives,
-        ),
-        vocab_tokens: ManyToOneIdMap::from_original_to_internal_with_representatives(
-            token_original_to_internal,
-            token_ids.len() as u32,
-            token_ids,
-        ),
-    }
+    (
+        InternalIdMap {
+            tokenizer_states: ManyToOneIdMap::from_original_to_internal_with_representatives(
+                state_original_to_internal,
+                state_representatives.len() as u32,
+                state_representatives,
+            ),
+            vocab_tokens: ManyToOneIdMap::from_original_to_internal_with_representatives(
+                token_original_to_internal,
+                token_ids_sorted.len() as u32,
+                token_ids_sorted,
+            ),
+        },
+        sorted_entries,
+        L1IdMapProfile {
+            state_equiv_ms,
+            token_identity_map_ms,
+        },
+    )
 }
 
 fn build_l1_terminal_dwa(
     tokenizer: &Tokenizer,
-    vocab: &Vocab,
+    sorted_entries: Vec<(u32, Vec<u8>)>,
     id_map: &InternalIdMap,
     num_terminals: u32,
     active_terminals: &[bool],
-) -> Option<DWA> {
+) -> Option<(DWA, L1TerminalBuildProfile)> {
     let total_started_at = std::time::Instant::now();
 
-    let internal_vocab: Vec<(usize, Vec<u8>)> = id_map
-        .vocab_tokens
-        .iter_representative_ids()
+    // Internal vocab is already in DFS (byte-sorted) order from build_l1_id_map
+    let internal_vocab_started_at = Instant::now();
+    let internal_vocab: Vec<(usize, Vec<u8>)> = sorted_entries
+        .into_iter()
         .enumerate()
-        .filter_map(|(internal_token_id, representative)| {
-            vocab
-                .entries
-                .get(&representative)
-                .map(|bytes| (internal_token_id, bytes.clone()))
-        })
+        .map(|(internal_token_id, (_original_id, bytes))| (internal_token_id, bytes))
         .collect();
+    let internal_vocab_ms = internal_vocab_started_at.elapsed().as_secs_f64() * 1000.0;
 
     if internal_vocab.is_empty() {
         return None;
     }
 
+    let vocab_tree_started_at = Instant::now();
     let tree = VocabPrefixTree::build_owned(internal_vocab);
+    let vocab_tree_build_ms = vocab_tree_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let state_seed_started_at = Instant::now();
     let mut states_to_initial_tsids = FxHashMap::<u32, Vec<u32>>::default();
     for (internal_tsid, representative_state) in id_map.tokenizer_states.iter_representative_ids().enumerate() {
         states_to_initial_tsids
@@ -124,18 +185,24 @@ fn build_l1_terminal_dwa(
             .or_default()
             .push(internal_tsid as u32);
     }
+    let state_seed_ms = state_seed_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let mut terminal_to_token_weights = vec![FxHashMap::<u32, RangeSetBlaze<u32>>::default(); num_terminals as usize];
     let mut profile = L1BuildProfile::default();
+    let mut self_loop_cache = FxHashMap::<u32, U8Set>::default();
+    let traversal_started_at = Instant::now();
     collect_terminal_weights(
         tokenizer,
         &tree.root,
         &states_to_initial_tsids,
         active_terminals,
         &mut terminal_to_token_weights,
+        &mut self_loop_cache,
         &mut profile,
     );
+    let vocab_tree_traversal_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    let direct_dwa_started_at = Instant::now();
     let mut dwa = DWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
     let end_state = dwa.add_state();
     dwa.set_final_weight(end_state, Weight::all());
@@ -159,21 +226,51 @@ fn build_l1_terminal_dwa(
         return None;
     }
 
+    let direct_terminal_dwa_ms = direct_dwa_started_at.elapsed().as_secs_f64() * 1000.0;
+
     if debug_profile_enabled() {
         eprintln!(
-            "[glrmask/debug][terminal_dwa] partition_build_l1_assoc vocab={} tsids={} tree_nodes={} segment_execs={} live_segments={} terminal_hits={} transitions={} total_ms={:.1}",
+            "[glrmask/debug][terminal_dwa] partition_build_l1_assoc vocab={} tsids={} tree_nodes={} token_nodes={} segment_execs={} live_segments={} terminal_hits={} states_at_token_nodes={} total_tsids_at_token_nodes={} max_tsids_per_state={} self_loop_skipped_subtrees={} self_loop_skipped_tokens={} transitions={} total_ms={:.1}",
             tree.root.reachable_token_ids().len(),
             id_map.num_tsids(),
             profile.tree_nodes,
+            profile.token_nodes,
             profile.segment_execs,
             profile.live_segments,
             profile.terminal_hits,
+            profile.states_at_token_nodes,
+            profile.total_tsids_at_token_nodes,
+            profile.max_tsids_per_state,
+            profile.self_loop_skipped_subtrees,
+            profile.self_loop_skipped_tokens,
             num_transitions,
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
 
-    Some(dwa)
+    Some((
+        dwa,
+        L1TerminalBuildProfile {
+            internal_vocab_ms,
+            vocab_tree_build_ms,
+            state_seed_ms,
+            vocab_tree_traversal_ms,
+            direct_terminal_dwa_ms,
+        },
+    ))
+}
+
+struct L1IdMapProfile {
+    state_equiv_ms: f64,
+    token_identity_map_ms: f64,
+}
+
+struct L1TerminalBuildProfile {
+    internal_vocab_ms: f64,
+    vocab_tree_build_ms: f64,
+    state_seed_ms: f64,
+    vocab_tree_traversal_ms: f64,
+    direct_terminal_dwa_ms: f64,
 }
 
 #[derive(Default)]
@@ -182,6 +279,37 @@ struct L1BuildProfile {
     segment_execs: usize,
     live_segments: usize,
     terminal_hits: usize,
+    token_nodes: usize,
+    states_at_token_nodes: usize,
+    max_tsids_per_state: usize,
+    total_tsids_at_token_nodes: usize,
+    self_loop_skipped_subtrees: usize,
+    self_loop_skipped_tokens: usize,
+}
+
+/// Compute the set of byte values that are self-loops for a DFA state.
+fn compute_self_loop_bytes(tokenizer: &Tokenizer, state: u32) -> U8Set {
+    let dfa_state = &tokenizer.dfa.states()[state as usize];
+    let mut bytes = U8Set::empty();
+    for (byte, &target) in dfa_state.transitions.iter() {
+        if target == state {
+            bytes.insert(byte);
+        }
+    }
+    bytes
+}
+
+/// Check if all bytes in a subtree are self-loops for the given state.
+fn is_self_loop_subtree(
+    self_loop_cache: &mut FxHashMap<u32, U8Set>,
+    tokenizer: &Tokenizer,
+    node: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
+    state: u32,
+) -> bool {
+    let self_loop_bytes = self_loop_cache
+        .entry(state)
+        .or_insert_with(|| compute_self_loop_bytes(tokenizer, state));
+    U8Set::from_words(*node.subtree_bytes()).is_subset(self_loop_bytes)
 }
 
 fn collect_terminal_weights(
@@ -190,22 +318,27 @@ fn collect_terminal_weights(
     states_to_initial_tsids: &FxHashMap<u32, Vec<u32>>,
     active_terminals: &[bool],
     terminal_to_token_weights: &mut [FxHashMap<u32, RangeSetBlaze<u32>>],
+    self_loop_cache: &mut FxHashMap<u32, U8Set>,
     profile: &mut L1BuildProfile,
 ) {
     profile.tree_nodes += 1;
 
     if node.has_token() {
         let internal_token_id = node.token_id() as u32;
+        profile.token_nodes += 1;
+        profile.states_at_token_nodes += states_to_initial_tsids.len();
         for (&end_state, initial_tsids) in states_to_initial_tsids {
+            profile.total_tsids_at_token_nodes += initial_tsids.len();
+            if initial_tsids.len() > profile.max_tsids_per_state {
+                profile.max_tsids_per_state = initial_tsids.len();
+            }
             for terminal_id in tokenizer.dfa.finalizers(end_state).iter() {
                 if !active_terminals.get(terminal_id).copied().unwrap_or(false) {
                     continue;
                 }
+                let weights = &mut terminal_to_token_weights[terminal_id];
                 for &initial_tsid in initial_tsids {
-                    terminal_to_token_weights[terminal_id]
-                        .entry(initial_tsid)
-                        .or_default()
-                        .insert(internal_token_id);
+                    weights.entry(initial_tsid).or_default().insert(internal_token_id);
                 }
                 profile.terminal_hits += initial_tsids.len();
             }
@@ -213,11 +346,9 @@ fn collect_terminal_weights(
                 if !active_terminals.get(terminal_id).copied().unwrap_or(false) {
                     continue;
                 }
+                let weights = &mut terminal_to_token_weights[terminal_id];
                 for &initial_tsid in initial_tsids {
-                    terminal_to_token_weights[terminal_id]
-                        .entry(initial_tsid)
-                        .or_default()
-                        .insert(internal_token_id);
+                    weights.entry(initial_tsid).or_default().insert(internal_token_id);
                 }
                 profile.terminal_hits += initial_tsids.len();
             }
@@ -226,16 +357,63 @@ fn collect_terminal_weights(
 
     for (segment, child) in node.iter_children() {
         let mut child_states_to_initial_tsids = FxHashMap::<u32, Vec<u32>>::default();
+        let mut self_loop_states = FxHashMap::<u32, Vec<u32>>::default();
+
         for (&start_state, initial_tsids) in states_to_initial_tsids {
             profile.segment_execs += 1;
             let Some(end_state) = tokenizer.execute_from_state_end_only(segment, start_state) else {
                 continue;
             };
             profile.live_segments += 1;
-            child_states_to_initial_tsids
-                .entry(end_state)
-                .or_default()
-                .extend(initial_tsids.iter().copied());
+
+            if is_self_loop_subtree(self_loop_cache, tokenizer, child, end_state) {
+                self_loop_states
+                    .entry(end_state)
+                    .or_default()
+                    .extend(initial_tsids.iter().copied());
+            } else {
+                child_states_to_initial_tsids
+                    .entry(end_state)
+                    .or_default()
+                    .extend(initial_tsids.iter().copied());
+            }
+        }
+
+        // Self-loop optimization: merge reachable token set via union (O(ranges), not O(elements))
+        if !self_loop_states.is_empty() {
+            let reachable = child.reachable_token_ids();
+            if !reachable.is_empty() {
+                // Convert RangeSetBlaze<usize> to RangeSetBlaze<u32>
+                let reachable_u32: RangeSetBlaze<u32> = reachable
+                    .ranges()
+                    .map(|r| (*r.start() as u32)..=(*r.end() as u32))
+                    .collect();
+                profile.self_loop_skipped_subtrees += self_loop_states.len();
+
+                for (&end_state, initial_tsids) in &self_loop_states {
+                    profile.self_loop_skipped_tokens += reachable_u32.len() as usize * initial_tsids.len();
+                    for terminal_id in tokenizer.dfa.finalizers(end_state).iter() {
+                        if !active_terminals.get(terminal_id).copied().unwrap_or(false) {
+                            continue;
+                        }
+                        let weights = &mut terminal_to_token_weights[terminal_id];
+                        for &initial_tsid in initial_tsids {
+                            *weights.entry(initial_tsid).or_default() |= &reachable_u32;
+                        }
+                        profile.terminal_hits += initial_tsids.len();
+                    }
+                    for terminal_id in tokenizer.tokens_accessible_from_state(end_state).iter() {
+                        if !active_terminals.get(terminal_id).copied().unwrap_or(false) {
+                            continue;
+                        }
+                        let weights = &mut terminal_to_token_weights[terminal_id];
+                        for &initial_tsid in initial_tsids {
+                            *weights.entry(initial_tsid).or_default() |= &reachable_u32;
+                        }
+                        profile.terminal_hits += initial_tsids.len();
+                    }
+                }
+            }
         }
 
         if child_states_to_initial_tsids.is_empty() {
@@ -248,6 +426,7 @@ fn collect_terminal_weights(
             &child_states_to_initial_tsids,
             active_terminals,
             terminal_to_token_weights,
+            self_loop_cache,
             profile,
         );
     }
