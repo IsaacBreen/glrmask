@@ -373,6 +373,12 @@ fn collect_terminal_weights(
                 )
             }
         };
+        // Pre-compute child's subtree byte set once (avoids repeated U8Set::from_words per state)
+        let child_subtree_bytes = if reachable_u32.is_some() {
+            Some(U8Set::from_words(*child.subtree_bytes()))
+        } else {
+            None
+        };
 
         for (&start_state, initial_tsids) in states_to_initial_tsids {
             profile.segment_execs += 1;
@@ -381,7 +387,14 @@ fn collect_terminal_weights(
             };
             profile.live_segments += 1;
 
-            if reachable_u32.is_some() && is_self_loop_subtree(self_loop_cache, tokenizer, child, end_state) {
+            let is_self_loop = child_subtree_bytes.as_ref().map_or(false, |csb| {
+                let self_loop_bytes = self_loop_cache
+                    .entry(end_state)
+                    .or_insert_with(|| compute_self_loop_bytes(tokenizer, end_state));
+                csb.is_subset(self_loop_bytes)
+            });
+
+            if is_self_loop {
                 self_loop_states
                     .entry(end_state)
                     .or_default()
