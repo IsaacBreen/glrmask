@@ -9,7 +9,7 @@ use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::grammar::model::TerminalID;
-use crate::compiler::stages::equivalence_analysis::ManyToOneIdMap;
+use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 
 pub(crate) type PossibleMatchesByState = BTreeMap<u32, BTreeMap<TerminalID, RangeSetBlaze<u32>>>;

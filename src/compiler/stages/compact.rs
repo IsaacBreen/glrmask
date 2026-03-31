@@ -15,7 +15,7 @@ use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 use crate::automata::weighted_u32::dwa::DWA;
 use crate::ds::weight::{Weight, finalize_weight_map, shared_rangeset};
 
-use super::equivalence_analysis::{InternalIdMap, ManyToOneIdMap};
+use super::equiv_types::{InternalIdMap, ManyToOneIdMap};
 
 // ── public entry point ──────────────────────────────────────────────────────
 

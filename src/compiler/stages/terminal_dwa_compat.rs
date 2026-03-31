@@ -16,7 +16,7 @@ use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::possible_matches::{
     PossibleMatchesByState, PossibleMatchesComputer, collect_possible_matches_by_internal_tsid,
 };
-use crate::compiler::stages::equivalence_analysis::InternalIdMap;
+use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::ds::bitset::BitSet;
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::ds::weight::Weight;

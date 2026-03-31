@@ -717,7 +717,7 @@ mod tests {
     };
     use crate::automata::lexer::ast::{bytes, choice, repeat, seq};
     use crate::compiler::compile::build_tokenizer_from_exprs;
-    use crate::compiler::stages::equivalence_analysis::compat::TokenizerView;
+    use super::super::super::compat::TokenizerView;
 
     #[test]
     fn full_refinement_matches_direct_token_analysis() {

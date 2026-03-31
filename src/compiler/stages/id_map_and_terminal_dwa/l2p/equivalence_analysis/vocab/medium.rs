@@ -12,7 +12,7 @@ use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{BuildHasher, Hasher};
 
-use crate::compiler::stages::equivalence_analysis::disallowed_follows::normalize_disallowed_follows;
+use super::super::disallowed_follows::normalize_disallowed_follows;
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 

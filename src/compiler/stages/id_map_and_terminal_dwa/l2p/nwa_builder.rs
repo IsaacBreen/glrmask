@@ -18,7 +18,7 @@ use crate::compiler::possible_matches::{
     PossibleMatchesByState,
     PossibleMatchesComputer,
 };
-use crate::compiler::stages::equivalence_analysis::InternalIdMap;
+use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
 use crate::ds::weight::Weight;

@@ -473,9 +473,9 @@ mod tests {
 
     use crate::automata::lexer::ast::{bytes, star};
     use crate::compiler::compile::build_tokenizer_from_exprs;
-    use crate::compiler::stages::equivalence_analysis::compat::TokenizerView;
-    use crate::compiler::stages::equivalence_analysis::reference::find_equivalence_classes;
-    use crate::compiler::stages::equivalence_analysis::state::fast as fast_state_equivalence;
+    use super::super::compat::TokenizerView;
+    use super::super::reference::find_equivalence_classes;
+    use super::super::state::fast as fast_state_equivalence;
     use crate::ds::bitset::BitSet;
 
     use super::verify_state_partition_reference;

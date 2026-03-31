@@ -14,7 +14,7 @@ use crate::compiler::grammar::model::{GrammarDef, Terminal};
 #[cfg(test)]
 use crate::compiler::grammar::transforms::prepare_grammar_for_compile;
 use crate::compiler::grammar::transforms::prepare_grammar_transforms_only;
-use crate::compiler::stages::equivalence_analysis::InternalIdMap;
+use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::compiler::stages::parser_dwa::build_parser_dwa_from_terminal_dwa_with_precomputed_templates;
 use crate::compiler::stages::terminal_dwa_compat::build_terminal_dwa_for_existing_id_map_with_possible_matches_and_coloring;
 use crate::compiler::stages::templates::Templates;
@@ -533,12 +533,12 @@ fn compile_prepared_with_profile(
                         "[glrmask/oracle] loaded from {load_path}: {num_state_classes} state classes, {num_token_classes} token classes"
                     );
                     IdMapBuildResult::Ready(InternalIdMap {
-                        tokenizer_states: crate::compiler::stages::equivalence_analysis::ManyToOneIdMap::from_original_to_internal_with_representatives(
+                        tokenizer_states: crate::compiler::stages::equiv_types::ManyToOneIdMap::from_original_to_internal_with_representatives(
                             state_map,
                             num_state_classes,
                             state_reps,
                         ),
-                        vocab_tokens: crate::compiler::stages::equivalence_analysis::ManyToOneIdMap::from_original_to_internal_with_representatives(
+                        vocab_tokens: crate::compiler::stages::equiv_types::ManyToOneIdMap::from_original_to_internal_with_representatives(
                             token_map,
                             num_token_classes,
                             token_reps,
@@ -547,10 +547,14 @@ fn compile_prepared_with_profile(
                 } else if all_l1 && std::env::var("GLRMASK_L1_IDMAP").map_or(false, |v| v == "1") {
                     // L1 fast path: direct fingerprint-based equivalence,
                     // no partitioning needed. Opt-in via env var for now.
-                    IdMapBuildResult::Ready(InternalIdMap::build_l1(&tokenizer, vocab))
+                    IdMapBuildResult::Ready(
+                        crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::combined::analyze_equivalences_l1_fast(&tokenizer, vocab)
+                    )
                 } else if std::env::var("GLRMASK_NO_PARTITION").map_or(false, |v| v == "1") {
                     // Force non-partitioned path for benchmarking.
-                    IdMapBuildResult::Ready(InternalIdMap::build(&tokenizer, vocab, &disallowed_follows, prepared_grammar.ignore_terminal))
+                    IdMapBuildResult::Ready(
+                        crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::combined::analyze_equivalences(&tokenizer, vocab, &disallowed_follows, prepared_grammar.ignore_terminal)
+                    )
                 } else {
                     let tdwa_started = Instant::now();
                     let (id_map, dwa) = crate::compiler::stages::id_map_and_terminal_dwa::build_id_map_and_terminal_dwa(

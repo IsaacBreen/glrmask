@@ -14,7 +14,7 @@ use std::hash::{BuildHasher, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use crate::compiler::stages::equivalence_analysis::disallowed_follows::normalize_disallowed_follows;
+use super::super::disallowed_follows::normalize_disallowed_follows;
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 
@@ -1931,7 +1931,7 @@ mod tests {
     use super::*;
     use crate::automata::lexer::ast::{bytes, choice};
     use crate::compiler::compile::build_tokenizer_from_exprs;
-    use crate::compiler::stages::equivalence_analysis::compat::TokenizerView;
+    use super::super::super::compat::TokenizerView;
     use std::collections::BTreeMap;
 
     #[test]

@@ -2,10 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
-use crate::compiler::stages::equivalence_analysis::{InternalIdMap, ManyToOneIdMap};
-use crate::compiler::stages::equivalence_analysis::compat::TokenizerView;
-use crate::compiler::stages::equivalence_analysis::combined_equivalence_analysis;
-use crate::compiler::stages::equivalence_analysis::combined_equivalence_analysis::hash_byte_class_seq;
+use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
+use super::compat::TokenizerView;
+use super::combined_equivalence_analysis;
+use super::combined_equivalence_analysis::hash_byte_class_seq;
 use crate::ds::bitset::BitSet;
 
 fn env_flag_enabled(name: &str) -> bool {

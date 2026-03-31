@@ -15,7 +15,7 @@ use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::stages::compact::{compact_dwa_dimensions, compact_dwa_dimensions_fast};
-use crate::compiler::stages::equivalence_analysis::{InternalIdMap, ManyToOneIdMap};
+use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::weight::Weight;
 
 use super::types::{compile_profile_enabled, debug_profile_enabled};

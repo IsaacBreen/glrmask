@@ -544,7 +544,7 @@ mod tests {
     use crate::automata::lexer::ast::{bytes, class, seq, star};
     use crate::compiler::compile::{build_tokenizer_from_exprs, compute_disallowed_follows};
     use crate::compiler::glr::analysis::AnalyzedGrammar;
-    use crate::compiler::stages::equivalence_analysis::compat::{FlatDfaState, TokenizerView};
+    use super::super::compat::{FlatDfaState, TokenizerView};
     use crate::ds::u8set::U8Set;
 
     #[test]
@@ -599,7 +599,7 @@ mod tests {
         let (tokenizer_view, disallowed_follows, initial_state, tokens) =
             build_live_minimal_tokenizer_fixture();
 
-        let fast_classes = crate::compiler::stages::equivalence_analysis::vocab::fast::find_vocab_equivalence_classes_with_follow(
+        let fast_classes = super::super::vocab::fast::find_vocab_equivalence_classes_with_follow(
             &tokenizer_view,
             &tokens,
             &[initial_state],
@@ -677,7 +677,7 @@ mod tests {
         let tokens: Vec<Vec<u8>> = vec![b"ca".to_vec(), b"cba".to_vec()];
         let states = vec![tokenizer_view.initial_state_id()];
 
-        let fast = crate::compiler::stages::equivalence_analysis::vocab::fast::find_vocab_equivalence_classes_with_follow(
+        let fast = super::super::vocab::fast::find_vocab_equivalence_classes_with_follow(
             &tokenizer_view, &tokens, &states, &disallowed,
         );
         let reference = find_equivalence_classes(&tokenizer_view, &tokens, &states, &disallowed, None);
@@ -881,7 +881,7 @@ mod tests {
         }
 
         let lark_text =
-            include_str!("../../../../tests/fixtures/github_hard_o56012_split_quotes.lark");
+            include_str!("../../../../../../tests/fixtures/github_hard_o56012_split_quotes.lark");
         let grammar = parse_lark(lark_text).expect("fixture grammar should parse");
         let (normalized, tokenizer) = prepare_grammar_for_compile(&grammar);
         let analyzed = AnalyzedGrammar::from_grammar_def(&normalized);
@@ -950,7 +950,7 @@ mod tests {
         let tokens: Vec<Vec<u8>> = vec![b"}:".to_vec(), b"}}}".to_vec()];
         let states = vec![tokenizer_view.initial_state_id()];
 
-        let fast = crate::compiler::stages::equivalence_analysis::vocab::fast::find_vocab_equivalence_classes_with_follow(
+        let fast = super::super::vocab::fast::find_vocab_equivalence_classes_with_follow(
             &tokenizer_view, &tokens, &states, &disallowed,
         );
         let reference = find_equivalence_classes(&tokenizer_view, &tokens, &states, &disallowed, None);

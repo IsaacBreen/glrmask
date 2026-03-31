@@ -8,6 +8,7 @@
 //! The only structural difference from the old code is `active_terminals`
 //! filtering: terminals not in the L2+ set are skipped during the trie walk.
 
+pub(crate) mod equivalence_analysis;
 pub(crate) mod nwa_builder;
 pub(crate) mod postprocess;
 
@@ -24,7 +25,7 @@ use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::possible_matches::{
     PossibleMatchesComputer, collect_possible_matches_by_internal_tsid,
 };
-use crate::compiler::stages::equivalence_analysis::InternalIdMap;
+use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::ds::bitset::BitSet;
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::ds::weight::Weight;
@@ -73,7 +74,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
     let total_started_at = Instant::now();
     let id_map_started_at = Instant::now();
-    let id_map = InternalIdMap::build(
+    let id_map = equivalence_analysis::combined::analyze_equivalences(
         tokenizer,
         vocab,
         disallowed_follows,

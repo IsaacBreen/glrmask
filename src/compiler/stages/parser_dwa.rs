@@ -16,7 +16,7 @@ use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar::model::TerminalID;
 #[cfg(test)]
-use crate::compiler::stages::equivalence_analysis::InternalIdMap;
+use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::compiler::stages::resolve_negatives::resolve_negative_codes_in_nwa;
 #[cfg(test)]
 use crate::compiler::stages::terminal_dwa_compat::build_terminal_dwa_for_existing_id_map;
@@ -1035,7 +1035,7 @@ mod tests {
             entries.push((i as u32, td.name().as_bytes().to_vec()));
         }
         let vocab = Vocab::new(entries, None);
-        let id_map = InternalIdMap::build(&tok, &vocab, &std::collections::BTreeMap::new(), None);
+        let id_map = crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::combined::analyze_equivalences(&tok, &vocab, &std::collections::BTreeMap::new(), None);
         (vocab, tok, id_map)
     }
 
