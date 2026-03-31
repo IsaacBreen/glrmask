@@ -219,30 +219,45 @@ fn build_dimension_compaction(
             let (tsid_merge_perm, merged_num_tsids) =
                 build_profile_merge_permutation(&tsid_merge_profiles);
             let t1 = std::time::Instant::now();
-            let merged_tsid_weights = apply_permutations_to_weight_set(
-                unique_weights,
-                &tsid_merge_perm,
-                &identity_perm(num_tokens as usize),
-            );
-            let t2 = std::time::Instant::now();
 
-            let merged_tsid_refs = weight_refs(&merged_tsid_weights);
-            let tsid_order_profiles =
-                build_tsid_context_profiles(&merged_tsid_refs, merged_num_tsids);
-            let (tsid_order_perm, ordered_num_tsids) =
-                build_profile_merge_permutation(&tsid_order_profiles);
-            let t3 = std::time::Instant::now();
-            if profile_compact {
-                eprintln!(
-                    "[glrmask/profile][compact_tsid] merge_profile_ms={:.3} apply_perm_ms={:.3} order_profile_ms={:.3} merged_tsids={}",
-                    (t1 - t0).as_secs_f64() * 1000.0,
-                    (t2 - t1).as_secs_f64() * 1000.0,
-                    (t3 - t2).as_secs_f64() * 1000.0,
-                    merged_num_tsids,
+            if skip_token_ordering {
+                // Skip tsid ordering — just use the merge permutation
+                if profile_compact {
+                    eprintln!(
+                        "[glrmask/profile][compact_tsid] merge_profile_ms={:.3} apply_perm_ms={:.3} order_profile_ms={:.3} merged_tsids={}",
+                        (t1 - t0).as_secs_f64() * 1000.0,
+                        0.0,
+                        0.0,
+                        merged_num_tsids,
+                    );
+                }
+                (tsid_merge_perm, merged_num_tsids)
+            } else {
+                let merged_tsid_weights = apply_permutations_to_weight_set(
+                    unique_weights,
+                    &tsid_merge_perm,
+                    &identity_perm(num_tokens as usize),
                 );
-            }
+                let t2 = std::time::Instant::now();
 
-            (compose_perm(&tsid_merge_perm, &tsid_order_perm), ordered_num_tsids)
+                let merged_tsid_refs = weight_refs(&merged_tsid_weights);
+                let tsid_order_profiles =
+                    build_tsid_context_profiles(&merged_tsid_refs, merged_num_tsids);
+                let (tsid_order_perm, ordered_num_tsids) =
+                    build_profile_merge_permutation(&tsid_order_profiles);
+                let t3 = std::time::Instant::now();
+                if profile_compact {
+                    eprintln!(
+                        "[glrmask/profile][compact_tsid] merge_profile_ms={:.3} apply_perm_ms={:.3} order_profile_ms={:.3} merged_tsids={}",
+                        (t1 - t0).as_secs_f64() * 1000.0,
+                        (t2 - t1).as_secs_f64() * 1000.0,
+                        (t3 - t2).as_secs_f64() * 1000.0,
+                        merged_num_tsids,
+                    );
+                }
+
+                (compose_perm(&tsid_merge_perm, &tsid_order_perm), ordered_num_tsids)
+            }
         },
         || {
             let t0 = std::time::Instant::now();
