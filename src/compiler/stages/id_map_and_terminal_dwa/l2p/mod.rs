@@ -11,6 +11,7 @@
 pub(crate) mod equivalence_analysis;
 pub(crate) mod nwa_builder;
 pub(crate) mod postprocess;
+pub(crate) mod specialized_dfa;
 
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -25,7 +26,7 @@ use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::possible_matches::{
     PossibleMatchesComputer, collect_possible_matches_by_internal_tsid,
 };
-use crate::compiler::stages::equiv_types::InternalIdMap;
+use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::bitset::BitSet;
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::ds::weight::Weight;
@@ -73,17 +74,65 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     }
 
     let total_started_at = Instant::now();
+
+    // ---- Step 0: Build quotient tokenizer and decide whether to use it ----
+    // Skip quotient for partitions with many active terminals — the quotient
+    // cost outweighs the benefit when there's little state reduction.
+    let active_count = active_terminals.iter().filter(|&&a| a).count();
+    let spec_started_at = Instant::now();
+    let spec = if active_count <= active_terminals.len() / 4 {
+        Some(specialized_dfa::build_specialized_tokenizer(tokenizer, active_terminals))
+    } else {
+        None
+    };
+    let spec_ms = spec_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    // Use the quotient if it reduces state count by at least 50%.
+    let use_quotient = spec.as_ref().map_or(false, |s| {
+        s.tokenizer.num_states() < tokenizer.num_states() / 2
+    });
+
+    let (effective_tok, original_to_quotient) = if use_quotient {
+        let s = spec.as_ref().unwrap();
+        (&s.tokenizer, Some(&s.original_to_quotient))
+    } else {
+        (tokenizer, None)
+    };
+
+    if debug_profile_enabled() {
+        let q_states = spec.as_ref().map(|s| s.tokenizer.num_states()).unwrap_or(0);
+        eprintln!(
+            "[glrmask/debug][l2p] specialized_dfa: {} original_states -> {} quotient_states in {:.3}ms ({}) active_terminals={}",
+            tokenizer.num_states(),
+            q_states,
+            spec_ms,
+            if use_quotient { "USING quotient" } else if spec.is_some() { "SKIPPED (insufficient reduction)" } else { "SKIPPED (too many active)" },
+            active_count,
+        );
+    }
+
+    // ---- Step 1: Equivalence analysis ----
     let id_map_started_at = Instant::now();
-    let id_map = equivalence_analysis::combined::analyze_equivalences(
-        tokenizer,
+    let eff_id_map = equivalence_analysis::combined::analyze_equivalences(
+        effective_tok,
         vocab,
         disallowed_follows,
         ignore_terminal,
     );
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    // ---- Step 1b: Compose id_map for original DFA states (only if using quotient) ----
+    let compose_started_at = Instant::now();
+    let composed_id_map = if let Some(o2q) = original_to_quotient {
+        compose_id_map(&eff_id_map, o2q, tokenizer.num_states() as usize)
+    } else {
+        eff_id_map.clone()
+    };
+    let compose_ms = compose_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    // ---- Step 2-3: Internal vocab + prefix tree ----
     let vocab_tree_started_at = Instant::now();
-    let internal_vocab = internal_vocab_entries(vocab, &id_map);
+    let internal_vocab = internal_vocab_entries(vocab, &eff_id_map);
     if internal_vocab.is_empty() {
         return None;
     }
@@ -95,20 +144,20 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     );
     let vocab_tree_ms = vocab_tree_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    // 3. Compute possible_matches (needed for root node seeding).
+    // ---- Step 4: Possible matches ----
     let possible_matches_started_at = Instant::now();
-    let mut pm_computer = PossibleMatchesComputer::new(tokenizer);
+    let mut pm_computer = PossibleMatchesComputer::new(effective_tok);
     let possible_matches_by_state = collect_possible_matches_by_internal_tsid(
-        tokenizer,
+        effective_tok,
         &full_tree.root,
         &mut pm_computer,
-        &id_map.tokenizer_states,
+        &eff_id_map.tokenizer_states,
     );
     let possible_matches_ms = possible_matches_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    // 4. Create NWA and seed root nodes.
+    // ---- Step 5: Create NWA and seed root nodes ----
     let seed_started_at = Instant::now();
-    let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
+    let mut nwa = NWA::new(eff_id_map.num_tsids(), eff_id_map.max_internal_token_id());
     let leaf_state = nwa.add_state();
     nwa.set_final_weight(leaf_state, Weight::all());
     let start_state = nwa.add_state();
@@ -117,24 +166,24 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let roots = seed_root_nodes(
         &mut nwa,
         start_state,
-        tokenizer,
-        &id_map,
+        effective_tok,
+        &eff_id_map,
         terminal_coloring,
         ignore_terminal,
         &possible_matches_by_state,
     );
     let seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    // 5. Trie-walk NWA build (active_terminals filtering skips non-L2+ terminals).
+    // ---- Step 6: Trie-walk NWA build ----
     let trie_build_started_at = Instant::now();
     let _build_profile = build_nwa_via_trie_walk(
-        tokenizer,
+        effective_tok,
         terminal_coloring,
         use_terminal_coloring,
         ignore_terminal,
         &mut nwa,
         leaf_state,
-        id_map.num_tsids(),
+        eff_id_map.num_tsids(),
         &full_tree.root,
         &roots,
         &mut pm_computer,
@@ -142,7 +191,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     );
     let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    // 6. Postprocess: same sequence as old code (67146d8).
+    // ---- Step 7: Postprocess ----
     let always_allowed_started_at = Instant::now();
     let always_allowed = compute_always_allowed_follows(grammar);
     let always_allowed_ms = always_allowed_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -178,7 +227,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let nwa_states_after_canonicalize = nwa.states.len();
     let postprocess_ms = always_allowed_ms + collapse_ms + disallowed_ms + prune_ms + canonicalize_ms;
 
-    // 7. Determinize → minimize.
+    // ---- Step 8: Determinize → minimize ----
     let determinize_started_at = Instant::now();
     let det = determinize(&nwa).expect("L2+ terminal NWA determinization failed");
     let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -189,10 +238,12 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
     if compile_profile_enabled() || debug_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][l2p] partition={} vocab_tokens={} tsids={} id_map_ms={:.3} vocab_tree_ms={:.3} possible_matches_ms={:.3} seed_ms={:.3} terminal_nwa_build_ms={:.3} nwa_states={}->{}->{}->{}->{} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} prune_ms={:.3} canonicalize_ms={:.3} postprocess_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} minimize_states={} total_ms={:.3}",
+            "[glrmask/profile][l2p] partition={} vocab_tokens={} tsids={} specialized_dfa_ms={:.3} compose_ms={:.3} id_map_ms={:.3} vocab_tree_ms={:.3} possible_matches_ms={:.3} seed_ms={:.3} terminal_nwa_build_ms={:.3} nwa_states={}->{}->{}->{}->{} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} prune_ms={:.3} canonicalize_ms={:.3} postprocess_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} minimize_states={} total_ms={:.3}",
             partition_label,
             vocab.entries.len(),
-            id_map.num_tsids(),
+            eff_id_map.num_tsids(),
+            spec_ms,
+            compose_ms,
             id_map_ms,
             vocab_tree_ms,
             possible_matches_ms,
@@ -216,5 +267,46 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         );
     }
 
-    Some((id_map, dwa))
+    Some((composed_id_map, dwa))
+}
+
+/// Compose the spec_id_map (quotient → TSID) with the original_to_quotient
+/// mapping (original DFA state → quotient state) to produce the final id_map
+/// (original DFA state → TSID).
+fn compose_id_map(
+    spec_id_map: &InternalIdMap,
+    original_to_quotient: &[u32],
+    num_original_states: usize,
+) -> InternalIdMap {
+    // Build original_state → TSID by composing through quotient
+    let original_to_tsid: Vec<u32> = (0..num_original_states)
+        .map(|s| {
+            let q = original_to_quotient[s] as usize;
+            spec_id_map.tokenizer_states.original_to_internal[q]
+        })
+        .collect();
+
+    let num_tsids = spec_id_map.tokenizer_states.num_internal_ids();
+
+    // Build representative_original_ids: for each TSID, pick the smallest
+    // original state that maps to it
+    let mut representative_original_ids = vec![u32::MAX; num_tsids as usize];
+    for (orig, &tsid) in original_to_tsid.iter().enumerate() {
+        if (tsid as usize) < representative_original_ids.len()
+            && representative_original_ids[tsid as usize] == u32::MAX
+        {
+            representative_original_ids[tsid as usize] = orig as u32;
+        }
+    }
+
+    let tokenizer_states = ManyToOneIdMap::from_original_to_internal_with_representatives(
+        original_to_tsid,
+        num_tsids,
+        representative_original_ids,
+    );
+
+    InternalIdMap {
+        tokenizer_states,
+        vocab_tokens: spec_id_map.vocab_tokens.clone(),
+    }
 }
