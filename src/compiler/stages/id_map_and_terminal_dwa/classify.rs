@@ -10,7 +10,8 @@ use crate::Vocab;
 use super::types::TerminalPathLength;
 
 /// Classifies a token's bytes by character type for vocab partitioning.
-/// Returns 0 (pure non-alnum), 1 (mixed), or 2 (alnum, optionally with leading space).
+/// Returns 0 (pure non-alnum), 1 (mixed), 2 (alnum with ≥1 alpha, optionally with leading space),
+/// or 3 (pure digit, optionally with leading space).
 pub(crate) fn classify_vocab_char_type(bytes: &[u8]) -> u8 {
     if bytes.is_empty() {
         return 0;
@@ -25,7 +26,10 @@ pub(crate) fn classify_vocab_char_type(bytes: &[u8]) -> u8 {
         return 0; // Just a space marker → non-alnum
     }
     if content.iter().all(|b| b.is_ascii_alphanumeric()) {
-        return 2; // Alnum (optionally with leading space)
+        if content.iter().any(|b| b.is_ascii_alphabetic()) {
+            return 2; // Alnum with at least one alpha (optionally with leading space)
+        }
+        return 3; // Pure digit (optionally with leading space)
     }
     if bytes.iter().all(|b| !b.is_ascii_alphanumeric()) {
         return 0; // Pure non-alnum
@@ -115,6 +119,11 @@ pub(crate) fn classify_terminal_path_lengths(
     // 3. Mark terminals that may participate in paths of length ≥ 2.
     let mut is_two_plus = BitSet::new(nt);
 
+    // Debug: collect the actual contributing pairs
+    let debug = super::types::debug_profile_enabled();
+    let mut l2p_pairs: Vec<(usize, usize)> = Vec::new();
+    let mut all_l2p_pairs: Vec<(usize, usize)> = Vec::new();
+
     for t1 in 0..nt {
         if last_bytes[t1].is_disjoint(&vocab_bytes) {
             continue;
@@ -129,8 +138,55 @@ pub(crate) fn classify_terminal_path_lengths(
                     continue;
                 }
             }
+            if debug {
+                all_l2p_pairs.push((t1, t2));
+                if !is_two_plus.contains(t1) {
+                    l2p_pairs.push((t1, t2));
+                }
+            }
             is_two_plus.set(t1);
             is_two_plus.set(t2);
+        }
+    }
+
+    if debug {
+        // Dump L2+ terminals with their byte overlaps
+        for t in 0..nt {
+            if is_two_plus.contains(t) {
+                let fb_overlap: Vec<u8> = (0..=255u8).filter(|b| first_bytes[t].contains(*b) && vocab_bytes.contains(*b)).collect();
+                let lb_overlap: Vec<u8> = (0..=255u8).filter(|b| last_bytes[t].contains(*b) && vocab_bytes.contains(*b)).collect();
+                let fb_str: String = fb_overlap.iter().map(|b| {
+                    if b.is_ascii_graphic() || *b == b' ' { format!("{}", *b as char) } else { format!("\\x{:02x}", b) }
+                }).collect::<Vec<_>>().join("");
+                let lb_str: String = lb_overlap.iter().map(|b| {
+                    if b.is_ascii_graphic() || *b == b' ' { format!("{}", *b as char) } else { format!("\\x{:02x}", b) }
+                }).collect::<Vec<_>>().join("");
+                eprintln!("[glrmask/debug][classify_l2p] terminal={} first_bytes_overlap=[{}] last_bytes_overlap=[{}]", t, fb_str, lb_str);
+            }
+        }
+        // Dump the contributing pairs (first occurrence for each t1)
+        for (t1, t2) in &l2p_pairs {
+            let fb2: Vec<u8> = (0..=255u8).filter(|b| first_bytes[*t2].contains(*b) && vocab_bytes.contains(*b)).collect();
+            let lb1: Vec<u8> = (0..=255u8).filter(|b| last_bytes[*t1].contains(*b) && vocab_bytes.contains(*b)).collect();
+            let fb2_str: String = fb2.iter().map(|b| {
+                if b.is_ascii_graphic() || *b == b' ' { format!("{}", *b as char) } else { format!("\\x{:02x}", b) }
+            }).collect::<Vec<_>>().join("");
+            let lb1_str: String = lb1.iter().map(|b| {
+                if b.is_ascii_graphic() || *b == b' ' { format!("{}", *b as char) } else { format!("\\x{:02x}", b) }
+            }).collect::<Vec<_>>().join("");
+            eprintln!("[glrmask/debug][classify_l2p_pair] t1={} t2={} last_bytes_t1=[{}] first_bytes_t2=[{}]", t1, t2, lb1_str, fb2_str);
+        }
+        // Dump ALL contributing pairs (not just first per t1)
+        for (t1, t2) in &all_l2p_pairs {
+            let fb2: Vec<u8> = (0..=255u8).filter(|b| first_bytes[*t2].contains(*b) && vocab_bytes.contains(*b)).collect();
+            let lb1: Vec<u8> = (0..=255u8).filter(|b| last_bytes[*t1].contains(*b) && vocab_bytes.contains(*b)).collect();
+            let fb2_str: String = fb2.iter().map(|b| {
+                if b.is_ascii_graphic() || *b == b' ' { format!("{}", *b as char) } else { format!("\\x{:02x}", b) }
+            }).collect::<Vec<_>>().join("");
+            let lb1_str: String = lb1.iter().map(|b| {
+                if b.is_ascii_graphic() || *b == b' ' { format!("{}", *b as char) } else { format!("\\x{:02x}", b) }
+            }).collect::<Vec<_>>().join("");
+            eprintln!("[glrmask/debug][classify_l2p_pair_all] t1={} t2={} last_bytes_t1=[{}] first_bytes_t2=[{}]", t1, t2, lb1_str, fb2_str);
         }
     }
 

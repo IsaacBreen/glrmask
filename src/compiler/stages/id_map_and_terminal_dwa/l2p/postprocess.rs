@@ -332,6 +332,50 @@ pub(crate) fn prune_non_coreachable_states(nwa: &mut NWA) -> bool {
 
 // ─── Collapse always-allowed ─────────────────────────────────────────────────
 
+fn propagate_incoming_labels(
+    nwa: &NWA,
+    terminals_count: usize,
+) -> Vec<HashSet<TerminalID>> {
+    let mut incoming = vec![HashSet::new(); nwa.states.len()];
+    let mut queue = VecDeque::new();
+    let mut in_queue = vec![false; nwa.states.len()];
+
+    for &start in &nwa.start_states {
+        queue.push_back(start);
+        in_queue[start as usize] = true;
+    }
+
+    while let Some(state_id) = queue.pop_front() {
+        in_queue[state_id as usize] = false;
+        let incoming_labels = incoming[state_id as usize].clone();
+
+        let state = &nwa.states[state_id as usize];
+
+        for (dst, _) in &state.epsilons {
+            let labels_before = incoming[*dst as usize].len();
+            incoming[*dst as usize].extend(incoming_labels.iter().copied());
+            if incoming[*dst as usize].len() != labels_before && !in_queue[*dst as usize] {
+                in_queue[*dst as usize] = true;
+                queue.push_back(*dst);
+            }
+        }
+
+        for (&label, targets) in &state.transitions {
+            if label < 0 || (label as usize) >= terminals_count {
+                continue;
+            }
+            for (dst, _) in targets {
+                if incoming[*dst as usize].insert(label as TerminalID) && !in_queue[*dst as usize] {
+                    in_queue[*dst as usize] = true;
+                    queue.push_back(*dst);
+                }
+            }
+        }
+    }
+
+    incoming
+}
+
 fn propagate_collapse_context(
     nwa: &NWA,
     terminals_count: usize,
@@ -514,18 +558,59 @@ pub(crate) fn collapse_always_allowed(
         return false;
     }
 
+    // Early exit: if no terminal has any always-allowed followers, nothing to collapse.
+    if always_allowed_by_label.iter().all(|v| v.is_empty()) {
+        return false;
+    }
+
+    let topo_started_at = std::time::Instant::now();
     let topo_order = topological_order(nwa);
     if topo_order.is_empty() {
         return false;
     }
+    let topo_ms = topo_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let (incoming, domain) = propagate_collapse_context(nwa, terminals_count);
-    let allowed_by_state = allowed_labels_by_state(&incoming, always_allowed_by_label);
+    // Lightweight check: propagate only incoming labels (no Weight arithmetic)
+    // and check if any state has exactly 1 allowed label before doing expensive
+    // domain propagation.
+    let labels_started_at = std::time::Instant::now();
+    let incoming_labels = propagate_incoming_labels(nwa, terminals_count);
+    let labels_ms = labels_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let allowed_started_at = std::time::Instant::now();
+    let allowed_by_state = allowed_labels_by_state(&incoming_labels, always_allowed_by_label);
+    let allowed_ms = allowed_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let any_singleton = allowed_by_state.iter().any(|s| s.len() == 1);
+    if !any_singleton {
+        if crate::compiler::stages::id_map_and_terminal_dwa::types::debug_profile_enabled() {
+            eprintln!(
+                "[glrmask/debug][collapse] early_exit=no_singletons topo_ms={:.3} labels_ms={:.3} allowed_ms={:.3}",
+                topo_ms, labels_ms, allowed_ms,
+            );
+        }
+        return false;
+    }
+
+    // Full propagation: compute domains (Weight arithmetic) only when needed.
+    let propagate_started_at = std::time::Instant::now();
+    let (_, domain) = propagate_collapse_context(nwa, terminals_count);
+    let propagate_ms = propagate_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let collapse_started_at = std::time::Instant::now();
     let mut changed =
         collapse_single_allowed_transitions(nwa, &topo_order, &domain, &allowed_by_state, terminals_count);
+    let collapse_inner_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
 
     if prune_unreachable_states(nwa) {
         changed = true;
+    }
+
+    if crate::compiler::stages::id_map_and_terminal_dwa::types::debug_profile_enabled() {
+        eprintln!(
+            "[glrmask/debug][collapse] changed={} topo_ms={:.3} propagate_ms={:.3} allowed_ms={:.3} collapse_ms={:.3}",
+            changed, topo_ms, propagate_ms, allowed_ms, collapse_inner_ms,
+        );
     }
 
     changed

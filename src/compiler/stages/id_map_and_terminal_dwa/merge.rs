@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
+use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
 
@@ -13,9 +14,11 @@ use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::NWA;
-use crate::compiler::stages::compact::compact_dwa_dimensions;
+use crate::compiler::stages::compact::{compact_dwa_dimensions, compact_dwa_dimensions_fast};
 use crate::compiler::stages::equivalence_analysis::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::weight::Weight;
+
+use super::types::{compile_profile_enabled, debug_profile_enabled};
 
 /// Merge multiple `(InternalIdMap, DWA)` pairs into a single pair.
 ///
@@ -27,23 +30,38 @@ use crate::ds::weight::Weight;
 /// 4. Runs dimension compaction.
 /// 5. Returns the merged `(InternalIdMap, DWA)`.
 pub(crate) fn merge_id_maps_and_terminal_dwas(
+    label: &str,
     inputs: Vec<(InternalIdMap, DWA)>,
     num_tokenizer_states: usize,
     max_token_id: u32,
 ) -> (InternalIdMap, DWA) {
     assert!(!inputs.is_empty(), "merge_id_maps_and_terminal_dwas called with empty inputs");
 
+    let total_started_at = Instant::now();
+
     if inputs.len() == 1 {
         let (mut id_map, mut dwa) = inputs.into_iter().next().unwrap();
-        compact_dwa_dimensions(&mut dwa, &mut id_map, false);
+        let compact_started_at = Instant::now();
+        compact_dwa_dimensions_fast(&mut dwa, &mut id_map);
+        if compile_profile_enabled() || debug_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][merge] label={} inputs=1 build_global_id_map_ms=0.000 remap_union_ms=0.000 determinize_ms=0.000 minimize_ms=0.000 compact_ms={:.3} total_ms={:.3}",
+                label,
+                compact_started_at.elapsed().as_secs_f64() * 1000.0,
+                total_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
         return (id_map, dwa);
     }
 
     // 1. Build global id_map via composite-key refinement.
+    let global_id_map_started_at = Instant::now();
     let id_map_refs: Vec<&InternalIdMap> = inputs.iter().map(|(m, _)| m).collect();
     let global_id_map = build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
+    let global_id_map_ms = global_id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // 2. Convert each DWA → NWA, remap to global space, union.
+    let remap_union_started_at = Instant::now();
     let mut global_nwa = NWA::new(
         global_id_map.num_tsids(),
         global_id_map.max_internal_token_id(),
@@ -63,15 +81,37 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
         global_body = global_nwa.union_in_place(&nwa, &global_body);
     }
     global_nwa.start_states = global_body.start_states;
+    let remap_union_ms = remap_union_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // 3. Determinize + minimize.
+    let determinize_started_at = Instant::now();
     let det = determinize(&global_nwa)
         .expect("merge terminal NWA determinization failed");
+    let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let minimize_started_at = Instant::now();
     let mut dwa = minimize(&det);
+    let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // 4. Compact.
     let mut global = global_id_map;
+    let compact_started_at = Instant::now();
     compact_dwa_dimensions(&mut dwa, &mut global, false);
+    let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    if compile_profile_enabled() || debug_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][merge] label={} inputs={} build_global_id_map_ms={:.3} remap_union_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} compact_ms={:.3} total_ms={:.3}",
+            label,
+            inputs.len(),
+            global_id_map_ms,
+            remap_union_ms,
+            determinize_ms,
+            minimize_ms,
+            compact_ms,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
 
     (global, dwa)
 }

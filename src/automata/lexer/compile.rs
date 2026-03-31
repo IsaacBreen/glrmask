@@ -1136,14 +1136,21 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
             avg_modal_distance,
             adjacent_modal_ratio,
         );
-        for (group_id, alive_states) in live_state_counts.iter().enumerate() {
+        let mut top_alive_groups: Vec<(usize, u64)> = live_state_counts
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, alive_states)| *alive_states > 0)
+            .collect();
+        top_alive_groups.sort_unstable_by(|left, right| right.1.cmp(&left.1));
+        for (group_id, alive_states) in top_alive_groups.into_iter().take(5) {
             let alive_ratio = if processed_product_states == 0 {
                 0.0
             } else {
-                *alive_states as f64 / processed_product_states as f64
+                alive_states as f64 / processed_product_states as f64
             };
             eprintln!(
-                "[glrmask/debug][product] group={} alive_states={} alive_ratio={:.4}",
+                "[glrmask/debug][product] top_alive_group group={} alive_states={} alive_ratio={:.4}",
                 group_id,
                 alive_states,
                 alive_ratio,

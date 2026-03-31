@@ -98,9 +98,13 @@ where
 #[derive(Debug, Default)]
 pub(crate) struct CompilePhaseProfile {
     pub(crate) prepare_ms: f64,
+    pub(crate) tokenizer_build_ms: f64,
     pub(crate) analyze_grammar_ms: f64,
     pub(crate) glr_table_ms: f64,
+    pub(crate) terminal_coloring_ms: f64,
     pub(crate) disallowed_follows_ms: f64,
+    pub(crate) analysis_wall_ms: f64,
+    pub(crate) classify_ms: f64,
     pub(crate) id_map_ms: f64,
     pub(crate) terminal_dwa_ms: f64,
     pub(crate) templates_ms: f64,
@@ -128,13 +132,17 @@ pub(crate) fn emit_compile_profile_summary(
         .unwrap_or_default();
 
     eprintln!(
-        "[glrmask/profile][compile] source={}{} prepare_ms={:.3} analyze_grammar_ms={:.3} glr_table_ms={:.3} disallowed_follows_ms={:.3} id_map_ms={:.3} terminal_dwa_ms={:.3} templates_ms={:.3} compact_ms={:.3} permute_possible_matches_ms={:.3} internal_token_bytes_ms={:.3} parser_dwa_ms={:.3} finalize_ms={:.3} compile_ms={:.3} total_ms={:.3}",
+        "[glrmask/profile][compile] source={}{} prepare_ms={:.3} tokenizer_build_ms={:.3} analyze_grammar_ms={:.3} glr_table_ms={:.3} terminal_coloring_ms={:.3} disallowed_follows_ms={:.3} analysis_wall_ms={:.3} classify_ms={:.3} id_map_ms={:.3} terminal_dwa_ms={:.3} templates_ms={:.3} compact_ms={:.3} permute_possible_matches_ms={:.3} internal_token_bytes_ms={:.3} parser_dwa_ms={:.3} finalize_ms={:.3} compile_ms={:.3} total_ms={:.3}",
         source,
         import_fragment,
         profile.prepare_ms,
+        profile.tokenizer_build_ms,
         profile.analyze_grammar_ms,
         profile.glr_table_ms,
+        profile.terminal_coloring_ms,
         profile.disallowed_follows_ms,
+        profile.analysis_wall_ms,
+        profile.classify_ms,
         profile.id_map_ms,
         profile.terminal_dwa_ms,
         profile.templates_ms,
@@ -343,15 +351,16 @@ fn compile_prepared_with_profile(
         // Tokenizer build (~70ms) runs in parallel with analysis (~46ms), saving ~46ms.
         let analysis_started_at = Instant::now();
         let (
-            tokenizer,
+            (tokenizer, tokenizer_build_ms),
             (analyzed_grammar, analyze_grammar_ms, table, glr_table_ms,
-             terminal_coloring, terminal_coloring_enabled,
+             terminal_coloring, terminal_coloring_enabled, terminal_coloring_ms,
              disallowed_follows, disallowed_follows_ms),
         ) = rayon::join(
             || {
+                let tok_started = Instant::now();
                 let mut tokenizer = build_tokenizer(&prepared_grammar);
                 tokenizer.isolate_start_state_and_drain_nullable_terminals();
-                tokenizer
+                (tokenizer, elapsed_ms(tok_started))
             },
             || {
                 let analyze_grammar_started_at = Instant::now();
@@ -367,26 +376,31 @@ fn compile_prepared_with_profile(
                 let table = GLRTable::build(&analyzed_grammar);
                 let glr_table_ms = elapsed_ms(table_started_at);
 
+                let terminal_coloring_started_at = Instant::now();
                 let terminal_coloring_enabled = !env_flag_enabled("GLRMASK_DISABLE_TERMINAL_COLORING");
                 let terminal_coloring = if terminal_coloring_enabled {
                     compute_terminal_coloring(&table)
                 } else {
                     TerminalColoring::identity(table.num_terminals as usize)
                 };
+                let terminal_coloring_ms = elapsed_ms(terminal_coloring_started_at);
 
                 let disallowed_follows_started_at = Instant::now();
                 let disallowed_follows = compute_disallowed_follows(&analyzed_grammar);
                 let disallowed_follows_ms = elapsed_ms(disallowed_follows_started_at);
 
                 (analyzed_grammar, analyze_grammar_ms, table, glr_table_ms,
-                 terminal_coloring, terminal_coloring_enabled,
+                 terminal_coloring, terminal_coloring_enabled, terminal_coloring_ms,
                  disallowed_follows, disallowed_follows_ms)
             },
         );
 
+        profile.tokenizer_build_ms = tokenizer_build_ms;
         profile.analyze_grammar_ms = analyze_grammar_ms;
         profile.glr_table_ms = glr_table_ms;
+        profile.terminal_coloring_ms = terminal_coloring_ms;
         profile.disallowed_follows_ms = disallowed_follows_ms;
+        profile.analysis_wall_ms = elapsed_ms(analysis_started_at);
 
         let debug_profile = std::env::var("GLRMASK_DEBUG_PROFILE")
             .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
@@ -447,12 +461,14 @@ fn compile_prepared_with_profile(
         } else {
             disallowed_follows.clone()
         };
+        let classify_started_at = Instant::now();
         let terminal_path_lengths = classify_terminal_path_lengths(
             &tokenizer,
             vocab,
             &adjusted_disallowed_for_classification,
             analyzed_grammar.num_terminals,
         );
+        profile.classify_ms = elapsed_ms(classify_started_at);
         if compile_profile_enabled() {
             use crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalPathLength;
             let n0 = terminal_path_lengths.iter().filter(|l| **l == TerminalPathLength::Zero).count();

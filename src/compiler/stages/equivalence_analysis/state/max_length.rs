@@ -134,18 +134,8 @@ fn find_state_equivalence_classes_kstep(
         .collect();
     let (outgoing_targets, mut prev_hashes): (Vec<_>, Vec<_>) = state_shapes.into_iter().unzip();
 
-    // Count initial unique hashes among the subset of states we care about.
-    let count_unique = |hashes: &[u64], states: &[usize]| -> usize {
-        let mut seen = rustc_hash::FxHashSet::default();
-        for &s in states {
-            seen.insert(hashes[s]);
-        }
-        seen.len()
-    };
-    let mut prev_unique = count_unique(&prev_hashes, states);
-
     let mut next_hashes = vec![0u64; dfa.states.len()];
-    for _step in 0..k {
+    for _ in 0..k {
         next_hashes
             .par_iter_mut()
             .enumerate()
@@ -156,14 +146,6 @@ fn find_state_equivalence_classes_kstep(
                 );
             });
         std::mem::swap(&mut prev_hashes, &mut next_hashes);
-
-        // Early termination: if no new equivalence classes formed, further
-        // iterations won't help (hash propagation has converged).
-        let curr_unique = count_unique(&prev_hashes, states);
-        if curr_unique == prev_unique {
-            break;
-        }
-        prev_unique = curr_unique;
     }
 
     build_subset_mapping(states, &prev_hashes)
@@ -191,28 +173,6 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
     tokens: &[S],
     states: &[usize],
 ) -> Vec<usize> {
-    if states.is_empty() {
-        return Vec::new();
-    }
-
-    // Fast precheck: compute cheap hashes (no HashMap allocation per state)
-    // and check if all states in the subset are already unique.
-    // If so, no equivalences are possible and we can skip the expensive
-    // build_state_shape + kstep iteration entirely.
-    let dfa = tokenizer.dfa();
-    let cheap_hashes: Vec<u64> = dfa
-        .states
-        .par_iter()
-        .map(cheap_state_hash)
-        .collect();
-    let mut seen = rustc_hash::FxHashSet::default();
-    let all_unique = states.iter().all(|&s| seen.insert(cheap_hashes[s]));
-    if all_unique {
-        return states.to_vec();
-    }
-    drop(seen);
-    drop(cheap_hashes);
-
     let max_len = tokens.iter().map(|token| token.as_ref().len()).max().unwrap_or(0);
     let mapping = find_state_equivalence_classes_kstep(tokenizer, states, max_len);
 
