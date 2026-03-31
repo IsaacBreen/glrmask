@@ -14,19 +14,15 @@ use crate::compiler::grammar::model::{GrammarDef, Terminal};
 #[cfg(test)]
 use crate::compiler::grammar::transforms::prepare_grammar_for_compile;
 use crate::compiler::grammar::transforms::prepare_grammar_transforms_only;
-use crate::compiler::stages::equivalence_analysis::{InternalIdMap, refine_partition_id_maps};
+use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 use crate::compiler::stages::parser_dwa::build_parser_dwa_from_terminal_dwa_with_precomputed_templates;
 use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::characterize_terminals;
 use crate::compiler::stages::templates::compile_dfa::emit_template_profile_summary;
 use crate::compiler::stages::terminal_dwa::{
-    build_terminal_dwa_from_partition_id_maps_with_possible_matches_and_coloring,
     build_terminal_dwa_with_possible_matches_and_coloring,
-    build_partition_with_split_id_maps,
-    merge_partition_builds_to_terminal_dwa,
     compute_terminal_coloring,
     compute_ever_allowed_follows,
-    classify_vocab_char_type,
     classify_terminal_path_lengths,
     TerminalColoring,
 };
@@ -477,16 +473,10 @@ fn compile_prepared_with_profile(
 
         enum IdMapBuildResult {
             Ready(InternalIdMap),
-            Partitioned {
-                global: InternalIdMap,
-                partition_vocabs: Vec<Vocab>,
-                partition_maps: Vec<InternalIdMap>,
-            },
-            /// 6-stream split: id_maps + terminal DWA built together.
+            /// Id_map + terminal DWA already built (and compacted).
             SplitComplete {
                 global: InternalIdMap,
                 terminal_dwa: crate::automata::weighted::dwa::DWA,
-                possible_matches: crate::compiler::possible_matches::PossibleMatchesByState,
                 terminal_dwa_ms: f64,
             },
         }
@@ -548,65 +538,16 @@ fn compile_prepared_with_profile(
                     // Force non-partitioned path for benchmarking.
                     IdMapBuildResult::Ready(InternalIdMap::build(&tokenizer, vocab, &disallowed_follows, prepared_grammar.ignore_terminal))
                 } else {
-                    let mut partition_vocabs: [Vec<(u32, Vec<u8>)>; 3] =
-                        [Vec::new(), Vec::new(), Vec::new()];
-                    for (&token_id, bytes) in &vocab.entries {
-                        let idx = classify_vocab_char_type(bytes) as usize;
-                        partition_vocabs[idx].push((token_id, bytes.clone()));
-                    }
-                    let sub_vocabs: Vec<Vocab> = partition_vocabs
-                        .into_iter()
-                        .map(|entries| Vocab::new(entries, None))
-                        .collect();
-
-                    let disallowed_ref = &adjusted_disallowed_for_classification;
-                    let ignore = prepared_grammar.ignore_terminal;
-                    let tok_ref = &tokenizer;
-                    let num_terminals = analyzed_grammar.num_terminals as u32;
-                    let tc_ref = &terminal_coloring;
-                    let tc_enabled = terminal_coloring_enabled;
-                    let grammar_ref = &analyzed_grammar;
-
-                    // Build 3 partition streams in parallel: each builds
-                    // separate L1/L2+ id_maps, then L1/L2+ sub-NWAs,
-                    // then merges them into a per-partition (id_map, NWA).
-                    let ((map_a, build_a), ((map_b, build_b), (map_c, build_c))) = rayon::join(
-                        || build_partition_with_split_id_maps(
-                            tok_ref, &sub_vocabs[0], tc_ref, tc_enabled,
-                            ignore, disallowed_ref, num_terminals, 0, grammar_ref,
-                        ),
-                        || rayon::join(
-                            || build_partition_with_split_id_maps(
-                                tok_ref, &sub_vocabs[1], tc_ref, tc_enabled,
-                                ignore, disallowed_ref, num_terminals, 1, grammar_ref,
-                            ),
-                            || build_partition_with_split_id_maps(
-                                tok_ref, &sub_vocabs[2], tc_ref, tc_enabled,
-                                ignore, disallowed_ref, num_terminals, 2, grammar_ref,
-                            ),
-                        ),
+                    let tdwa_started = Instant::now();
+                    let (id_map, dwa) = crate::compiler::stages::id_map_and_terminal_dwa::build_id_map_and_terminal_dwa(
+                        &tokenizer, vocab, &terminal_coloring, terminal_coloring_enabled,
+                        prepared_grammar.ignore_terminal, &analyzed_grammar,
+                        &adjusted_disallowed_for_classification,
                     );
-
-                    let partition_maps = vec![map_a, map_b, map_c];
-                    let builds = vec![build_a, build_b, build_c];
-
-                    let num_states = tok_ref.num_states() as usize;
-                    let max_token = vocab.max_token_id();
-                    let global = refine_partition_id_maps(&partition_maps, num_states, max_token);
-
-                    // Merge partition NWAs → terminal DWA.
-                    let terminal_dwa_started = Instant::now();
-                    let (terminal_dwa, possible_matches) = merge_partition_builds_to_terminal_dwa(
-                        grammar_ref, tok_ref, vocab, builds,
-                        &partition_maps, &global, tc_ref, terminal_dwa_started,
-                    );
-                    let terminal_dwa_ms = elapsed_ms(terminal_dwa_started);
-
                     IdMapBuildResult::SplitComplete {
-                        global,
-                        terminal_dwa,
-                        possible_matches,
-                        terminal_dwa_ms,
+                        global: id_map,
+                        terminal_dwa: dwa,
+                        terminal_dwa_ms: elapsed_ms(tdwa_started),
                     }
                 };
                 (result, elapsed_ms(id_map_started_at))
@@ -630,39 +571,22 @@ fn compile_prepared_with_profile(
         );
         let (mut internal_ids, prebuilt_terminal_dwa) = match id_map_build_result {
             IdMapBuildResult::Ready(id_map) => (id_map, None),
-            IdMapBuildResult::Partitioned {
-                global,
-                partition_vocabs,
-                partition_maps,
-            } => {
-                // Legacy path: build terminal DWA from pre-built partition id_maps
-                let t0 = Instant::now();
-                let (dwa, pm) = build_terminal_dwa_from_partition_id_maps_with_possible_matches_and_coloring(
-                    &analyzed_grammar, &tokenizer, vocab,
-                    &partition_vocabs, &partition_maps, &global,
-                    &terminal_coloring, terminal_coloring_enabled,
-                    prepared_grammar.ignore_terminal, &adjusted_disallowed_for_classification,
-                );
-                let ms = elapsed_ms(t0);
-                (global, Some((dwa, pm, ms)))
-            }
             IdMapBuildResult::SplitComplete {
                 global,
                 terminal_dwa,
-                possible_matches,
                 terminal_dwa_ms,
-            } => (global, Some((terminal_dwa, possible_matches, terminal_dwa_ms))),
+            } => (global, Some((terminal_dwa, terminal_dwa_ms))),
         };
         profile.id_map_ms = id_map_ms;
         profile.templates_ms = templates_ms;
         let token_bytes = vocab.entries.clone();
 
-        let (mut terminal_dwa, mut possible_matches) = if let Some((dwa, pm, tdwa_ms)) = prebuilt_terminal_dwa {
+        let (mut terminal_dwa, already_compacted) = if let Some((dwa, tdwa_ms)) = prebuilt_terminal_dwa {
             profile.terminal_dwa_ms = tdwa_ms;
-            (dwa, pm)
+            (dwa, true) // SplitComplete: already compacted by merge::f4
         } else {
             let terminal_dwa_started_at = Instant::now();
-            let result = build_terminal_dwa_with_possible_matches_and_coloring(
+            let (dwa, _pm) = build_terminal_dwa_with_possible_matches_and_coloring(
                 &analyzed_grammar,
                 &tokenizer,
                 vocab,
@@ -673,35 +597,36 @@ fn compile_prepared_with_profile(
                 Some(&adjusted_disallowed_for_classification),
             );
             profile.terminal_dwa_ms = elapsed_ms(terminal_dwa_started_at);
-            result
+            (dwa, false)
         };
 
-        let compact_started_at = Instant::now();
-        let compact_report = crate::compiler::stages::compact::compact_dwa_dimensions(
-            &mut terminal_dwa,
-            &mut internal_ids,
-            compile_profile_summary_enabled(),
-        );
-        profile.compact_ms = elapsed_ms(compact_started_at);
-        if let Some(stats) = compact_report.profile_stats {
-            eprintln!(
-                "[glrmask/profile][compact] tsids={}=>{} tokens={}=>{} weight_ranges={}=>{} token_ranges={}=>{} total_ranges={}=>{}",
-                stats.tsids_before,
-                stats.tsids_after,
-                stats.tokens_before,
-                stats.tokens_after,
-                stats.weight_ranges_before,
-                stats.weight_ranges_after,
-                stats.token_ranges_before,
-                stats.token_ranges_after,
-                stats.total_ranges_before(),
-                stats.total_ranges_after(),
+        if !already_compacted {
+            let compact_started_at = Instant::now();
+            let compact_report = crate::compiler::stages::compact::compact_dwa_dimensions(
+                &mut terminal_dwa,
+                &mut internal_ids,
+                compile_profile_summary_enabled(),
             );
+            profile.compact_ms = elapsed_ms(compact_started_at);
+            if let Some(stats) = compact_report.profile_stats {
+                eprintln!(
+                    "[glrmask/profile][compact] tsids={}=>{} tokens={}=>{} weight_ranges={}=>{} token_ranges={}=>{} total_ranges={}=>{}",
+                    stats.tsids_before,
+                    stats.tsids_after,
+                    stats.tokens_before,
+                    stats.tokens_after,
+                    stats.weight_ranges_before,
+                    stats.weight_ranges_after,
+                    stats.token_ranges_before,
+                    stats.token_ranges_after,
+                    stats.total_ranges_before(),
+                    stats.total_ranges_after(),
+                );
+            }
         }
 
         // Oracle dump: save post-compact mappings for two-pass experiment
         if let Ok(dump_path) = std::env::var("GLRMASK_ORACLE_DUMP") {
-            // Canonical representatives: min original ID in each class
             let mut canonical_state_reps = vec![u32::MAX; internal_ids.num_tsids() as usize];
             for (orig, &class) in internal_ids.tokenizer_states.original_to_internal.iter().enumerate() {
                 let orig = orig as u32;
@@ -729,11 +654,16 @@ fn compile_prepared_with_profile(
             eprintln!("[glrmask/oracle] dumped post-compact mappings to {dump_path}");
         }
 
-        // Overlap parser_dwa build with possible_matches permutation + internal_token_bytes.
-        // Parser_dwa (~300ms) does not depend on possible_matches or internal_token_bytes.
+        // Build internal_token_bytes (needed for possible_matches and Constraint).
+        let internal_token_bytes_started_at = Instant::now();
+        let internal_token_bytes = build_internal_token_bytes(vocab, &internal_ids);
+        let internal_token_bytes_ms = elapsed_ms(internal_token_bytes_started_at);
+
+        // Build possible_matches from scratch in post-compact space, and
+        // parser_dwa in parallel.
         let (
             (parser_dwa, parser_dwa_ms),
-            (permute_possible_matches_ms, internal_token_bytes, internal_token_bytes_ms),
+            (possible_matches, permute_possible_matches_ms),
         ) = rayon::join(
             || {
                 let parser_dwa_started_at = Instant::now();
@@ -746,22 +676,29 @@ fn compile_prepared_with_profile(
                 (parser_dwa, elapsed_ms(parser_dwa_started_at))
             },
             || {
-                let permute_possible_matches_started_at = Instant::now();
-                crate::compiler::possible_matches::permute_possible_match_state_ids_in_place(
-                    &mut possible_matches,
-                    &compact_report.tsid_perm,
+                let pm_started_at = Instant::now();
+                let pm = crate::compiler::possible_matches::build_possible_matches_by_state(
+                    &tokenizer,
+                    &internal_token_bytes,
                 );
-                crate::compiler::possible_matches::permute_possible_matches_in_place(
-                    &mut possible_matches,
-                    &compact_report.token_perm,
-                );
-                let permute_possible_matches_ms = elapsed_ms(permute_possible_matches_started_at);
-
-                let internal_token_bytes_started_at = Instant::now();
-                let internal_token_bytes = build_internal_token_bytes(vocab, &internal_ids);
-                let internal_token_bytes_ms = elapsed_ms(internal_token_bytes_started_at);
-
-                (permute_possible_matches_ms, internal_token_bytes, internal_token_bytes_ms)
+                // Remap original state keys → post-compact internal TSIDs.
+                let mut pm_by_tsid: std::collections::BTreeMap<
+                    u32,
+                    std::collections::BTreeMap<u32, range_set_blaze::RangeSetBlaze<u32>>,
+                > = std::collections::BTreeMap::new();
+                for (orig_state, terminals) in pm {
+                    let tsid = internal_ids.tokenizer_states.original_to_internal[orig_state as usize];
+                    let entry = pm_by_tsid.entry(tsid).or_default();
+                    for (terminal_id, token_set) in terminals {
+                        entry
+                            .entry(terminal_id)
+                            .and_modify(|ex: &mut range_set_blaze::RangeSetBlaze<u32>| {
+                                *ex |= &token_set
+                            })
+                            .or_insert(token_set);
+                    }
+                }
+                (pm_by_tsid, elapsed_ms(pm_started_at))
             },
         );
         profile.permute_possible_matches_ms = permute_possible_matches_ms;
