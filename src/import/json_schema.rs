@@ -4144,9 +4144,30 @@ impl<'a> SchemaCtx<'a> {
             }
             if pattern_all_branches_anchored(&pattern) {
                 // Every branch is ^…$, so json_wrapped_pattern produces no
-                // <string_tail> padding — safe from DFA explosion. Length
-                // bounds are implicitly enforced by the anchored regex itself.
-                return Ok(json_wrapped_pattern(&pattern));
+                // <string_tail> padding — safe from DFA explosion.
+                // Check whether the pruned pattern's minimum match length
+                // already satisfies minLength.  If so, the pattern alone is
+                // sufficient.  Otherwise, intersect with a length regex to
+                // enforce minLength (e.g. pattern ^(.*)$ can match "").
+                let pattern_min = pattern_min_char_count(&pattern).unwrap_or(0);
+                if pattern_min >= min_len {
+                    return Ok(json_wrapped_pattern(&pattern));
+                }
+                // Pattern can produce strings shorter than minLength.
+                // Intersect with a minimum-length regex.  Use {min,} to
+                // keep the length DFA small (avoids explosion from large
+                // maxLength values).
+                let search_regex = string_value_body_regex(&json_search_pattern(&pattern));
+                let search_dfa = build_regex(&[parse_regex(&search_regex, true)]).dfa;
+                let length_inner = match max_len {
+                    Some(ml) if ml <= 100 => format!(r#"(?:{}){{{},{}}}"#, JSON_STRING_CHAR_PATTERN, min_len, ml),
+                    _ => format!(r#"(?:{}){{{},}}"#, JSON_STRING_CHAR_PATTERN, min_len),
+                };
+                let length_regex = string_value_body_regex(&length_inner);
+                let length_dfa = build_regex(&[parse_regex(&length_regex, true)]).dfa;
+                let intersected = Self::intersect_lexer_dfa(&search_dfa, &length_dfa);
+                let body = self.build_lexer_dfa_expr(&intersected, "JSON_STRING_PATTERN_ANCHORED_BOUNDED");
+                return Ok(wrap_string_value_terminal(body));
             }
             if min_len > 0 || max_len.is_some() {
                 // Unanchored pattern with length bounds. For reasonably small
