@@ -364,6 +364,20 @@ fn build_dfa(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     byte_to_class_override: Option<&[u8; 256]>,
 ) -> Dfa {
+    build_dfa_with_group_filter(tokenizer, disallowed_follows, byte_to_class_override, None)
+}
+
+/// Build the analysis DFA, optionally filtering to only active groups.
+///
+/// When `active_groups` is provided, only groups marked `true` are included
+/// in finalizers and possible_future_groups. This is used for L2+-only
+/// equivalence analysis where L1 terminal groups are excluded.
+fn build_dfa_with_group_filter(
+    tokenizer: &TokenizerView,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    byte_to_class_override: Option<&[u8; 256]>,
+    active_groups: Option<&[bool]>,
+) -> Dfa {
     let profile_compile = compile_profile_enabled();
     let build_started_at = Instant::now();
     let dfa = tokenizer.dfa();
@@ -389,11 +403,19 @@ fn build_dfa(
     let mut self_loop_bytes = Vec::with_capacity(dfa.states.len());
 
     for (state_idx, state) in dfa.states.iter().enumerate() {
-        finalizers.push(state.finalizers.iter().copied().collect());
+        let filtered_finalizers: SmallVec<[usize; 4]> = if let Some(ag) = active_groups {
+            state.finalizers.iter().copied().filter(|&gid| ag.get(gid).copied().unwrap_or(false)).collect()
+        } else {
+            state.finalizers.iter().copied().collect()
+        };
+        finalizers.push(filtered_finalizers);
 
-        is_dead_end.push(state.possible_future_group_ids.is_empty());
-        let future_groups: SmallVec<[usize; 4]> =
-            state.possible_future_group_ids.iter().copied().collect();
+        let future_groups: SmallVec<[usize; 4]> = if let Some(ag) = active_groups {
+            state.possible_future_group_ids.iter().copied().filter(|&gid| ag.get(gid).copied().unwrap_or(false)).collect()
+        } else {
+            state.possible_future_group_ids.iter().copied().collect()
+        };
+        is_dead_end.push(future_groups.is_empty());
         completion_hash.push(hash_group_list(future_groups.iter().copied()));
         possible_future_groups.push(future_groups);
 
@@ -1670,11 +1692,28 @@ pub fn find_vocab_equivalence_classes_with_follow_and_byte_classes<S: AsRef<[u8]
     disallowed_follows: &BTreeMap<u32, BitSet>,
     byte_to_class: Option<&[u8; 256]>,
 ) -> VocabEquivalenceResult {
+    find_vocab_equivalence_classes_with_group_filter(
+        tokenizer, strings, initial_states, disallowed_follows, byte_to_class, None,
+    )
+}
+
+/// Vocab equivalence with optional group filtering.
+///
+/// When `active_groups` is provided, the DFA only tracks groups marked `true`.
+/// L1 terminal groups can be excluded this way for a L2+-only analysis.
+pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
+    tokenizer: &TokenizerView,
+    strings: &[S],
+    initial_states: &[usize],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    byte_to_class: Option<&[u8; 256]>,
+    active_groups: Option<&[bool]>,
+) -> VocabEquivalenceResult {
     let profile_compile = compile_profile_enabled();
     let reachable_states = vocab_reachability_profile_enabled()
         .then(|| reachable_state_count(tokenizer, initial_states));
     let build_dfa_started_at = Instant::now();
-    let dfa = build_dfa(tokenizer, disallowed_follows, byte_to_class);
+    let dfa = build_dfa_with_group_filter(tokenizer, disallowed_follows, byte_to_class, active_groups);
     let build_dfa_ms = elapsed_ms(build_dfa_started_at);
     let order_states_started_at = Instant::now();
     let ordered_states = if diversity_state_order_enabled() {
