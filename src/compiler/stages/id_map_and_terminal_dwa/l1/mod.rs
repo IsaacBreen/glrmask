@@ -90,7 +90,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     Some((id_map, dwa))
 }
 
-fn build_l1_id_map(tokenizer: &Tokenizer, vocab: &Vocab) -> (InternalIdMap, Vec<(u32, Vec<u8>)>, L1IdMapProfile) {
+fn build_l1_id_map<'a>(tokenizer: &Tokenizer, vocab: &'a Vocab) -> (InternalIdMap, Vec<(u32, &'a [u8])>, L1IdMapProfile) {
     let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
 
     // Identity state mapping: each state is its own class.
@@ -123,11 +123,6 @@ fn build_l1_id_map(tokenizer: &Tokenizer, vocab: &Vocab) -> (InternalIdMap, Vec<
             original_id
         })
         .collect();
-    // Build the sorted entries list for downstream use (avoids BTreeMap lookups later)
-    let sorted_entries: Vec<(u32, Vec<u8>)> = token_id_bytes
-        .into_iter()
-        .map(|(id, bytes)| (id, bytes.to_vec()))
-        .collect();
     let token_identity_map_ms = token_identity_started_at.elapsed().as_secs_f64() * 1000.0;
 
     (
@@ -143,7 +138,7 @@ fn build_l1_id_map(tokenizer: &Tokenizer, vocab: &Vocab) -> (InternalIdMap, Vec<
                 token_ids_sorted,
             ),
         },
-        sorted_entries,
+        token_id_bytes,
         L1IdMapProfile {
             state_equiv_ms,
             token_identity_map_ms,
@@ -153,7 +148,7 @@ fn build_l1_id_map(tokenizer: &Tokenizer, vocab: &Vocab) -> (InternalIdMap, Vec<
 
 fn build_l1_terminal_dwa(
     tokenizer: &Tokenizer,
-    sorted_entries: Vec<(u32, Vec<u8>)>,
+    sorted_entries: Vec<(u32, &[u8])>,
     id_map: &InternalIdMap,
     num_terminals: u32,
     active_terminals: &[bool],
@@ -162,10 +157,10 @@ fn build_l1_terminal_dwa(
 
     // Internal vocab is already in DFS (byte-sorted) order from build_l1_id_map
     let internal_vocab_started_at = Instant::now();
-    let internal_vocab: Vec<(usize, Vec<u8>)> = sorted_entries
-        .into_iter()
+    let internal_vocab: Vec<(usize, &[u8])> = sorted_entries
+        .iter()
         .enumerate()
-        .map(|(internal_token_id, (_original_id, bytes))| (internal_token_id, bytes))
+        .map(|(internal_token_id, &(_original_id, bytes))| (internal_token_id, bytes))
         .collect();
     let internal_vocab_ms = internal_vocab_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -174,7 +169,7 @@ fn build_l1_terminal_dwa(
     }
 
     let vocab_tree_started_at = Instant::now();
-    let tree = VocabPrefixTree::build_presorted(internal_vocab);
+    let tree = VocabPrefixTree::build_presorted(&internal_vocab);
     let vocab_tree_build_ms = vocab_tree_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let state_seed_started_at = Instant::now();

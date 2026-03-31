@@ -224,7 +224,7 @@ impl VocabPrefixTree {
     }
 
     fn build_children(
-        entries: &[(usize, Vec<u8>)],
+        entries: &[(usize, &[u8])],
         parent_prefix_len: usize,
     ) -> Vec<VocabPrefixTreeNode> {
         let mut children = Vec::new();
@@ -243,11 +243,12 @@ impl VocabPrefixTree {
 
     pub fn build_owned(mut tokens: Vec<(usize, Vec<u8>)>) -> Self {
         Self::sort_and_dedup_tokens(&mut tokens);
-        Self::build_presorted(tokens)
+        let refs: Vec<(usize, &[u8])> = tokens.iter().map(|(id, bytes)| (*id, bytes.as_slice())).collect();
+        Self::build_presorted(&refs)
     }
 
     /// Build from tokens that are already sorted by byte content and deduplicated.
-    pub fn build_presorted(tokens: Vec<(usize, Vec<u8>)>) -> Self {
+    pub fn build_presorted(tokens: &[(usize, &[u8])]) -> Self {
         let mut tree = Self::new();
         tree.max_token_id = tokens.iter().map(|(id, _)| *id).max().unwrap_or(0);
 
@@ -296,11 +297,11 @@ impl VocabPrefixTree {
         i
     }
 
-    fn build_subtree(entries: &[(usize, Vec<u8>)], parent_prefix_len: usize) -> VocabPrefixTreeNode {
+    fn build_subtree(entries: &[(usize, &[u8])], parent_prefix_len: usize) -> VocabPrefixTreeNode {
         debug_assert!(!entries.is_empty());
 
-        let first = entries.first().unwrap().1.as_slice();
-        let last = entries.last().unwrap().1.as_slice();
+        let first = entries.first().unwrap().1;
+        let last = entries.last().unwrap().1;
 
         // For lexicographically sorted entries, the common prefix of first and last
         // is the common prefix of the entire group.
