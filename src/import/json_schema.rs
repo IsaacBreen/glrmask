@@ -1284,7 +1284,10 @@ fn split_close_quote() -> bool {
 }
 
 fn split_colon_space() -> bool {
-    env_flag("GLRMASK_SPLIT_COLON_SPACE")
+    // Default to true: colon-space is split unless explicitly disabled
+    std::env::var("GLRMASK_SPLIT_COLON_SPACE")
+        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off"))
+        .unwrap_or(true)
 }
 
 fn split_colon_from_space() -> bool {
@@ -6767,10 +6770,11 @@ mod tests {
             "additionalProperties": {"type": "string"}
         }"#).unwrap();
         let grammar = schema_to_named_grammar(&schema).unwrap();
-        // After opening-quote separation, the key literal is split:
-        // literal_expr(b"\"") + literal_expr(b"opacity\": ")
-        assert!(named_grammar_has_literal(&grammar, b"opacity\": "));
-        assert!(!named_grammar_has_split_separator(&grammar, b":", b" "));
+        // With colon-space splitting (default), the key body includes the close
+        // quote but the colon-space suffix is a separate literal:
+        // literal_expr(b"\"") + literal_expr(b"opacity\"") + literal_expr(b": ")
+        assert!(named_grammar_has_literal(&grammar, b"opacity\""));
+        assert!(named_grammar_has_literal(&grammar, b": "));
     }
 
     #[test]
@@ -6783,7 +6787,9 @@ mod tests {
             "additionalProperties": {"type": "string"}
         }"#).unwrap();
         let grammar = schema_to_named_grammar(&schema).unwrap();
-        assert!(!named_nonterminal_has_ref_then_literal(&grammar, b": "));
+        // With colon-space splitting (default), the ": " suffix appears as a
+        // separate literal in the grammar — that is expected.
+        assert!(named_grammar_has_literal(&grammar, b": "));
     }
 
     #[test]
@@ -6810,8 +6816,9 @@ mod tests {
             }
         }"#).unwrap();
         let grammar = schema_to_named_grammar(&schema).unwrap();
-        assert!(!named_grammar_has_split_separator(&grammar, b":", b" "));
-        assert!(!named_nonterminal_has_ref_then_literal(&grammar, b": "));
+        // With colon-space splitting (default), the ": " suffix is a
+        // separate literal in the grammar.
+        assert!(named_grammar_has_literal(&grammar, b": "));
     }
 
     #[test]
@@ -6827,7 +6834,8 @@ mod tests {
             "additionalProperties": {"type": "string"}
         }"#).unwrap();
         let grammar = schema_to_named_grammar(&schema).unwrap();
-        assert!(!named_nonterminal_has_ref_then_literal(&grammar, b": "));
+        // With colon-space splitting (default), ": " is a separate literal.
+        assert!(named_grammar_has_literal(&grammar, b": "));
     }
 
     #[test]

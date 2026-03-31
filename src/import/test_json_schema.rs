@@ -694,8 +694,8 @@ fn test_conversion_merges_property_key_and_colon() {
         "CFA-style lowering should include a shared JSON_KEY_COLON_BODY terminal rule"
     );
     assert!(
-        named.rules.iter().any(|r| contains_literal(&r.expr, b"name\": ")),
-        "Known object properties should use merged key+colon body literals (without opening quote)"
+        named.rules.iter().any(|r| contains_literal(&r.expr, b"name\"")),
+        "Known object properties should use merged key+close-quote body literals (without colon-space)"
     );
 }
 
@@ -717,11 +717,11 @@ fn test_conversion_supports_definitions_ref() {
     let named = named_grammar_from_schema(schema);
 
     assert!(
-        named.rules.iter().any(|r| contains_literal(&r.expr, b"x\": ")),
+        named.rules.iter().any(|r| contains_literal(&r.expr, b"x\"")),
         "Resolved definitions ref should contribute merged body literal for x"
     );
     assert!(
-        named.rules.iter().any(|r| contains_literal(&r.expr, b"y\": ")),
+        named.rules.iter().any(|r| contains_literal(&r.expr, b"y\"")),
         "Resolved definitions ref should contribute merged body literal for y"
     );
 }
@@ -750,11 +750,11 @@ fn test_conversion_allof_merges_object_properties() {
     let named = named_grammar_from_schema(schema);
 
     assert!(
-        named.rules.iter().any(|r| contains_literal(&r.expr, b"a\": ")),
+        named.rules.iter().any(|r| contains_literal(&r.expr, b"a\"")),
         "allOf merge should preserve property a body literal"
     );
     assert!(
-        named.rules.iter().any(|r| contains_literal(&r.expr, b"b\": ")),
+        named.rules.iter().any(|r| contains_literal(&r.expr, b"b\"")),
         "allOf merge should preserve property b body literal"
     );
 }
