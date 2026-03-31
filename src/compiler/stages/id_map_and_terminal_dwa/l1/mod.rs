@@ -2,25 +2,22 @@
 //!
 //! Since L1 terminals never co-occur with another terminal in a single token,
 //! the DWA can be built by walking each token from each state and checking
-//! which terminal matches at the end.
+//! which terminal matches at the end. No full NWA trie-walk pipeline needed.
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
-use crate::automata::weighted::determinize::determinize;
-use crate::automata::weighted::minimize::minimize_fast;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
-use crate::compiler::stages::terminal_dwa::TerminalColoring;
+use crate::compiler::stages::terminal_dwa::{self, TerminalColoring};
 use crate::Vocab;
 
 /// Build an L1 id_map and terminal DWA for the given vocab and terminal set.
 ///
-/// Builds its own id_map via `InternalIdMap::build_l1` (fast fingerprint-based
-/// equivalence, no DFA walk). Then builds the terminal DWA using the L1 direct
-/// path that walks (token, state) pairs without the full NWA trie-walk pipeline.
+/// 1. Build id_map via `InternalIdMap::build_l1` (fast fingerprint-based equiv).
+/// 2. Build L1 terminal DWA via the direct walk path (no trie-walk NWA).
 ///
-/// Returns `None` if the vocab is empty.
+/// Returns `None` if the vocab is empty or no terminal matches exist.
 pub(crate) fn build_l1_id_map_and_terminal_dwa(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -34,24 +31,21 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
         return None;
     }
 
+    // 1. Build L1 id_map (fast fingerprint-based equivalence, no DFA walk).
     let id_map = InternalIdMap::build_l1(tokenizer, vocab);
-    let num_terminals = grammar.num_terminals as u32;
 
-    let build = crate::compiler::stages::terminal_dwa::build_partition_terminal_nwa_l1_direct_filtered(
+    // 2. Build L1 terminal DWA via direct walk.
+    //    Walks all (token, representative_state) pairs, builds a 2-state NWA,
+    //    then determinizes + minimizes internally.
+    let num_terminals = grammar.num_terminals as u32;
+    let dwa = terminal_dwa::build_l1_terminal_dwa(
         tokenizer,
         vocab,
         &id_map,
         ignore_terminal,
         num_terminals,
-        0, // partition_index (not meaningful here)
         Some(active_terminals),
-    );
-
-    let nwa = build.nwa?;
-    // The NWA came from dwa.to_nwa() inside the L1 direct builder, so
-    // re-determinizing is essentially a no-op. We need a DWA though.
-    let det = determinize(&nwa).expect("L1 terminal NWA determinization failed");
-    let dwa = minimize_fast(&det);
+    )?;
 
     Some((id_map, dwa))
 }

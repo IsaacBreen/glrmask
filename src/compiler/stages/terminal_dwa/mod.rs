@@ -213,7 +213,7 @@ pub(crate) fn compute_ever_allowed_follows(grammar: &AnalyzedGrammar) -> Vec<Vec
         .collect()
 }
 
-fn compute_always_allowed_follows(grammar: &AnalyzedGrammar) -> Vec<Vec<TerminalID>> {
+pub(crate) fn compute_always_allowed_follows(grammar: &AnalyzedGrammar) -> Vec<Vec<TerminalID>> {
     let mut always_allowed = vec![None::<BTreeSet<TerminalID>>; grammar.num_terminals as usize];
 
     for rule in &grammar.rules {
@@ -329,7 +329,7 @@ fn hash_weight(weight: &Weight, hasher: &mut impl std::hash::Hasher) {
     }
 }
 
-fn canonicalize_acyclic_nwa(nwa: &mut NWA) {
+pub(crate) fn canonicalize_acyclic_nwa(nwa: &mut NWA) {
     if nwa.states.len() <= 1 {
         return;
     }
@@ -594,7 +594,7 @@ fn compute_coreachable_nwa(nwa: &NWA) -> Vec<bool> {
     coreachable
 }
 
-fn prune_non_coreachable_states(nwa: &mut NWA) -> bool {
+pub(crate) fn prune_non_coreachable_states(nwa: &mut NWA) -> bool {
     if nwa.states.is_empty() {
         return false;
     }
@@ -775,7 +775,7 @@ fn collapse_single_allowed_transitions(
     changed
 }
 
-fn collapse_always_allowed(
+pub(crate) fn collapse_always_allowed(
     nwa: &mut NWA,
     always_allowed_by_label: &[Vec<TerminalID>],
     terminals_count: usize,
@@ -898,8 +898,8 @@ fn all_token_weight(internal_tsid: u32, max_token_id: u32) -> Weight {
 }
 
 #[derive(Clone)]
-struct NodesByTokenizerState {
-    entries: FxHashMap<TokenizerState, Vec<NwaState>>,
+pub(crate) struct NodesByTokenizerState {
+    pub(crate) entries: FxHashMap<TokenizerState, Vec<NwaState>>,
 }
 
 impl NodesByTokenizerState {
@@ -1757,7 +1757,7 @@ pub(crate) fn internal_vocab_entries(vocab: &Vocab, id_map: &InternalIdMap) -> V
         .collect()
 }
 
-fn seed_root_nodes(
+pub(crate) fn seed_root_nodes(
     nwa: &mut NWA,
     start_state: u32,
     tokenizer: &Tokenizer,
@@ -1805,7 +1805,7 @@ fn seed_root_nodes(
     roots_by_tokenizer_state
 }
 
-fn apply_disallowed_follow_constraints(nwa: &mut NWA, grammar: &AnalyzedGrammar) {
+pub(crate) fn apply_disallowed_follow_constraints(nwa: &mut NWA, grammar: &AnalyzedGrammar) {
     let disallowed_follows = compute_disallowed_follows(grammar);
     let normalized = normalize_disallowed_follows(grammar.num_terminals as usize, &disallowed_follows);
     if normalized.iter().all(|bits| bits.is_zero()) {
@@ -2111,6 +2111,29 @@ pub(crate) fn build_partition_terminal_nwa_l1_direct(
     build_partition_terminal_nwa_l1_direct_filtered(
         tokenizer, vocab, id_map, ignore_terminal, num_terminals, partition_index, None,
     )
+}
+
+/// Build L1 terminal DWA directly — returns just the DWA without wrapping.
+///
+/// This is the recommended interface for the new `id_map_and_terminal_dwa` pipeline.
+/// Internally delegates to the full L1 direct builder, then extracts and
+/// re-determinizes+minimizes the result (essentially a no-op since the inner
+/// builder already does det+min).
+pub(crate) fn build_l1_terminal_dwa(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    id_map: &InternalIdMap,
+    ignore_terminal: Option<TerminalID>,
+    num_terminals: u32,
+    active_terminals: Option<&[bool]>,
+) -> Option<DWA> {
+    let build = build_partition_terminal_nwa_l1_direct_filtered(
+        tokenizer, vocab, id_map, ignore_terminal, num_terminals, 0, active_terminals,
+    );
+    build.nwa.map(|nwa| {
+        let det = determinize(&nwa).expect("L1 terminal NWA determinize failed");
+        minimize_fast(&det)
+    })
 }
 
 /// Direct L1 NWA construction with optional terminal filtering.
@@ -2697,6 +2720,61 @@ pub(crate) fn build_partition_with_split_id_maps(
 }
 
 /// Build an L2+-only terminal NWA for a single partition.
+/// Build NWA transitions by walking a vocab prefix trie.
+///
+/// This encapsulates the `TerminalNwaBuilder` struct creation, trie walk,
+/// and flush into a single call. Used by `id_map_and_terminal_dwa/l2p`
+/// to keep the builder internals private.
+///
+/// The caller must have already:
+/// 1. Created the NWA and added start/leaf states
+/// 2. Called `seed_root_nodes` to set up root nodes and epsilon transitions
+///
+/// After this returns, the NWA is populated with transitions but has NOT
+/// been postprocessed (no always_allowed, disallowed, prune, canonicalize).
+pub(crate) fn build_nwa_via_trie_walk<'a>(
+    tokenizer: &'a Tokenizer,
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
+    ignore_terminal: Option<TerminalID>,
+    nwa: &mut NWA,
+    leaf_state: u32,
+    num_tsids: u32,
+    vocab_tree_root: &VocabPrefixTreeNode,
+    roots: &NodesByTokenizerState,
+    possible_matches: &mut PossibleMatchesComputer<'a>,
+    active_terminals: Option<&[bool]>,
+) -> TerminalDwaBuildProfile {
+    let num_tokenizer_states = tokenizer.num_states() as usize;
+    let mut builder = TerminalNwaBuilder {
+        tokenizer,
+        terminal_coloring: terminal_coloring.clone(),
+        possible_future_terminals: FxHashMap::default(),
+        future_terminal_color_groups: FxHashMap::default(),
+        possible_matches,
+        nwa,
+        num_tsids,
+        leaf_state,
+        ignore_terminal,
+        use_terminal_coloring,
+        terminal_path_lengths: None,
+        active_terminals: active_terminals.map(|a| a.to_vec()),
+        self_loop_bytes: FxHashMap::default(),
+        leaf_token_ids_buffer: Vec::new(),
+        future_leaf_buffer: FxHashMap::default(),
+        reachable_weight_cache: HashMap::new(),
+        pruned_weight_cache: HashMap::new(),
+        leaf_weight_cache: HashMap::new(),
+        transition_buffer: FxHashMap::default(),
+        epsilon_buffer: FxHashMap::default(),
+        profile: TerminalDwaBuildProfile::default(),
+        flat_transitions: vec![None; num_tokenizer_states],
+    };
+    builder.build_from_trie(vocab_tree_root, roots);
+    builder.flush_transition_buffer();
+    builder.profile
+}
+
 ///
 /// Follows the same structure as the pre-partition/path-length code
 /// (commit 67146d8): build vocab trie → compute possible_matches →

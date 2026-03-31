@@ -1,8 +1,6 @@
 pub mod equivalence_analysis;
 pub mod compact;
 pub mod id_map_and_terminal_dwa;
-pub mod l1;
-pub mod l2p;
 pub mod templates;
 pub mod terminal_dwa;
 pub mod parser_dwa;

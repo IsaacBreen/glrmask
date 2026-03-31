@@ -11,14 +11,30 @@
 use std::collections::BTreeMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
-use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::determinize::determinize;
+use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::minimize;
+use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::grammar::model::TerminalID;
+use crate::compiler::possible_matches::{
+    PossibleMatchesComputer, collect_possible_matches_by_internal_tsid,
+};
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
-use crate::compiler::stages::terminal_dwa::TerminalColoring;
+use crate::compiler::stages::terminal_dwa::{
+    TerminalColoring,
+    build_nwa_via_trie_walk,
+    canonicalize_acyclic_nwa,
+    collapse_always_allowed,
+    apply_disallowed_follow_constraints,
+    compute_always_allowed_follows,
+    internal_vocab_entries,
+    prune_non_coreachable_states,
+    seed_root_nodes,
+};
 use crate::ds::bitset::BitSet;
+use crate::ds::vocab_prefix_tree::VocabPrefixTree;
+use crate::ds::weight::Weight;
 use crate::Vocab;
 
 /// Build an L2+ id_map and terminal DWA for the given vocab and terminal set.
@@ -26,7 +42,17 @@ use crate::Vocab;
 /// Builds its own id_map via `InternalIdMap::build_with_group_filter` (full DFA-
 /// based equivalence analysis restricted to L2+ terminal groups). Then builds
 /// the terminal DWA using the old-shaped trie-walk NWA pipeline matching the
-/// 67146d8 code shape.
+/// 67146d8 code shape:
+///
+/// 1. Build internal vocab entries
+/// 2. Build vocab prefix trie
+/// 3. Compute possible_matches (for root node seeding)
+/// 4. Create NWA, seed root nodes
+/// 5. Trie-walk NWA build
+/// 6. Postprocess: always_allowed → collapse → disallowed → prune → canonicalize
+/// 7. Determinize → minimize
+///
+/// `disallowed_follows` is threaded explicitly for id_map building.
 ///
 /// Returns `None` if the vocab is empty.
 pub(crate) fn build_l2p_id_map_and_terminal_dwa(
@@ -43,6 +69,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         return None;
     }
 
+    // 1. Build L2+ id_map with group filter.
     let id_map = InternalIdMap::build_with_group_filter(
         tokenizer,
         vocab,
@@ -51,21 +78,67 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         Some(active_terminals),
     );
 
-    let build = crate::compiler::stages::terminal_dwa::build_l2p_partition_terminal_nwa(
+    // 2. Build internal vocab entries and prefix trie.
+    let internal_vocab = internal_vocab_entries(vocab, &id_map);
+    if internal_vocab.is_empty() {
+        return None;
+    }
+    let full_tree = VocabPrefixTree::build_owned(
+        internal_vocab
+            .iter()
+            .map(|(token_id, bytes)| (*token_id as usize, bytes.clone()))
+            .collect(),
+    );
+
+    // 3. Compute possible_matches (needed for root node seeding).
+    let mut pm_computer = PossibleMatchesComputer::new(tokenizer);
+    let possible_matches_by_state = collect_possible_matches_by_internal_tsid(
         tokenizer,
-        vocab,
+        &full_tree.root,
+        &mut pm_computer,
+        &id_map.tokenizer_states,
+    );
+
+    // 4. Create NWA and seed root nodes.
+    let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
+    let leaf_state = nwa.add_state();
+    nwa.set_final_weight(leaf_state, Weight::all());
+    let start_state = nwa.add_state();
+    nwa.start_states.push(start_state);
+
+    let roots = seed_root_nodes(
+        &mut nwa,
+        start_state,
+        tokenizer,
         &id_map,
+        terminal_coloring,
+        ignore_terminal,
+        &possible_matches_by_state,
+    );
+
+    // 5. Trie-walk NWA build (active_terminals filtering skips non-L2+ terminals).
+    let _build_profile = build_nwa_via_trie_walk(
+        tokenizer,
         terminal_coloring,
         use_terminal_coloring,
         ignore_terminal,
-        grammar,
-        active_terminals,
-        0, // partition_index (not meaningful here)
+        &mut nwa,
+        leaf_state,
+        id_map.num_tsids(),
+        &full_tree.root,
+        &roots,
+        &mut pm_computer,
+        Some(active_terminals),
     );
 
-    let nwa = build.nwa?;
-    // The NWA came from dwa.to_nwa() inside the L2+ builder (which already
-    // did postprocess + det + min). Re-determinizing is essentially a no-op.
+    // 6. Postprocess: same sequence as old code (67146d8).
+    let always_allowed = compute_always_allowed_follows(grammar);
+    collapse_always_allowed(&mut nwa, &always_allowed, grammar.num_terminals as usize);
+    apply_disallowed_follow_constraints(&mut nwa, grammar);
+    prune_non_coreachable_states(&mut nwa);
+    canonicalize_acyclic_nwa(&mut nwa);
+
+    // 7. Determinize → minimize.
     let det = determinize(&nwa).expect("L2+ terminal NWA determinization failed");
     let dwa = minimize(&det);
 
