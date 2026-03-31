@@ -11,7 +11,7 @@ use crate::automata::lexer::tokenizer::{Tokenizer, TokenizerMatch};
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::{minimize, minimize_fast};
-use crate::automata::weighted::nwa::{NWA, NWAState as NWAStateType};
+use crate::automata::weighted::nwa::{NWA, NWAState as NWAStateType, NwaBody};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::analysis::EOF;
 use crate::compiler::glr::table::GLRTable;
@@ -2400,6 +2400,198 @@ pub(crate) fn build_partition_terminal_nwa(
     )
 }
 
+/// Build a partition terminal NWA by splitting into L1 and L2+ sub-builds.
+///
+/// For partitions that are all-L1 or all-L2+, delegates to the appropriate
+/// single-path builder. For mixed partitions, builds both sub-NWAs in parallel
+/// and unions the results.
+pub(crate) fn build_partition_terminal_nwa_split(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    id_map: &InternalIdMap,
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
+    ignore_terminal: Option<TerminalID>,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    num_terminals: u32,
+    partition_index: usize,
+    grammar: &AnalyzedGrammar,
+) -> PartitionTerminalNwaBuild {
+    let terminal_path_lengths = classify_terminal_path_lengths(
+        tokenizer,
+        vocab,
+        disallowed_follows,
+        num_terminals,
+    );
+
+    let mut l1_mask = vec![false; num_terminals as usize];
+    let mut l2p_mask = vec![false; num_terminals as usize];
+    let mut has_l1 = false;
+    let mut has_l2p = false;
+    for (i, len) in terminal_path_lengths.iter().enumerate() {
+        match len {
+            TerminalPathLength::Zero | TerminalPathLength::One => {
+                l1_mask[i] = true;
+                has_l1 = true;
+            }
+            TerminalPathLength::TwoPlus => {
+                l2p_mask[i] = true;
+                has_l2p = true;
+            }
+        }
+    }
+
+    if !has_l2p {
+        // All L1: use the fast direct path
+        return build_partition_terminal_nwa_l1_direct_filtered(
+            tokenizer,
+            vocab,
+            id_map,
+            ignore_terminal,
+            num_terminals,
+            partition_index,
+            Some(&l1_mask),
+        );
+    }
+
+    if !has_l1 {
+        // All L2+: use the full trie-walk path
+        return build_partition_terminal_nwa_filtered(
+            tokenizer,
+            vocab,
+            id_map,
+            terminal_coloring,
+            use_terminal_coloring,
+            ignore_terminal,
+            disallowed_follows,
+            num_terminals,
+            partition_index,
+            grammar,
+            Some(&l2p_mask),
+        );
+    }
+
+    // Mixed: build L1 and L2+ sub-NWAs in parallel, then union
+    let (l1_build, l2p_build) = rayon::join(
+        || {
+            build_partition_terminal_nwa_l1_direct_filtered(
+                tokenizer,
+                vocab,
+                id_map,
+                ignore_terminal,
+                num_terminals,
+                partition_index,
+                Some(&l1_mask),
+            )
+        },
+        || {
+            build_partition_terminal_nwa_filtered(
+                tokenizer,
+                vocab,
+                id_map,
+                terminal_coloring,
+                use_terminal_coloring,
+                ignore_terminal,
+                disallowed_follows,
+                num_terminals,
+                partition_index,
+                grammar,
+                Some(&l2p_mask),
+            )
+        },
+    );
+
+    // Union the two sub-NWAs
+    let (l1_nwa, l2p_nwa) = match (l1_build.nwa, l2p_build.nwa) {
+        (Some(l1), Some(l2p)) => (l1, l2p),
+        (Some(l1), None) => {
+            return PartitionTerminalNwaBuild {
+                nwa: Some(l1),
+                possible_matches_by_state: l1_build.possible_matches_by_state,
+                build_profile: l1_build.build_profile,
+                possible_matches_profile: l1_build.possible_matches_profile,
+                internal_vocab_len: l1_build.internal_vocab_len,
+                roots_count: l1_build.roots_count,
+            };
+        }
+        (None, Some(l2p)) => {
+            return PartitionTerminalNwaBuild {
+                nwa: Some(l2p),
+                possible_matches_by_state: l2p_build.possible_matches_by_state,
+                build_profile: l2p_build.build_profile,
+                possible_matches_profile: l2p_build.possible_matches_profile,
+                internal_vocab_len: l2p_build.internal_vocab_len,
+                roots_count: l2p_build.roots_count,
+            };
+        }
+        (None, None) => return PartitionTerminalNwaBuild::default(),
+    };
+
+    let mut merged_nwa = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
+    let body1 = merged_nwa.append_with_body(&l1_nwa);
+    let body2 = merged_nwa.append_with_body(&l2p_nwa);
+    merged_nwa.start_states = NwaBody::union(&body1, &body2).start_states;
+
+    // Merge possible_matches: union of both sub-NWAs
+    let mut merged_pm = l1_build.possible_matches_by_state;
+    for (tsid, terminal_map) in &l2p_build.possible_matches_by_state {
+        let entry = merged_pm.entry(*tsid).or_insert_with(BTreeMap::new);
+        for (terminal_id, token_set) in terminal_map {
+            entry
+                .entry(*terminal_id)
+                .and_modify(|existing| *existing |= token_set)
+                .or_insert_with(|| token_set.clone());
+        }
+    }
+
+    if debug_profile_enabled() {
+        let l1_count = l1_mask.iter().filter(|&&b| b).count();
+        let l2p_count = l2p_mask.iter().filter(|&&b| b).count();
+        eprintln!(
+            "[glrmask/debug][terminal_dwa] partition_split[{}] l1_terminals={} l2p_terminals={} l1_nwa_states={} l2p_nwa_states={} merged_states={}",
+            partition_index, l1_count, l2p_count,
+            l1_nwa.num_states(), l2p_nwa.num_states(), merged_nwa.num_states(),
+        );
+    }
+
+    PartitionTerminalNwaBuild {
+        nwa: Some(merged_nwa),
+        possible_matches_by_state: merged_pm,
+        build_profile: TerminalDwaBuildProfile {
+            future_terminal_additions: l1_build.build_profile.future_terminal_additions
+                + l2p_build.build_profile.future_terminal_additions,
+            match_transition_additions: l1_build.build_profile.match_transition_additions
+                + l2p_build.build_profile.match_transition_additions,
+        },
+        possible_matches_profile: PossibleMatchesProfile {
+            cache_hits: l1_build.possible_matches_profile.cache_hits
+                + l2p_build.possible_matches_profile.cache_hits,
+            cache_misses: l1_build.possible_matches_profile.cache_misses
+                + l2p_build.possible_matches_profile.cache_misses,
+            reachable_cache_hits: l1_build.possible_matches_profile.reachable_cache_hits
+                + l2p_build.possible_matches_profile.reachable_cache_hits,
+            reachable_cache_misses: l1_build.possible_matches_profile.reachable_cache_misses
+                + l2p_build.possible_matches_profile.reachable_cache_misses,
+            child_segments_visited: l1_build.possible_matches_profile.child_segments_visited
+                + l2p_build.possible_matches_profile.child_segments_visited,
+            byte_steps: l1_build.possible_matches_profile.byte_steps
+                + l2p_build.possible_matches_profile.byte_steps,
+            blocked_segments: l1_build.possible_matches_profile.blocked_segments
+                + l2p_build.possible_matches_profile.blocked_segments,
+            recursive_descents: l1_build.possible_matches_profile.recursive_descents
+                + l2p_build.possible_matches_profile.recursive_descents,
+            terminal_insertions: l1_build.possible_matches_profile.terminal_insertions
+                + l2p_build.possible_matches_profile.terminal_insertions,
+            cache_entries: l1_build.possible_matches_profile.cache_entries
+                + l2p_build.possible_matches_profile.cache_entries,
+            reachable_cache_entries: l1_build.possible_matches_profile.reachable_cache_entries
+                + l2p_build.possible_matches_profile.reachable_cache_entries,
+        },
+        internal_vocab_len: l1_build.internal_vocab_len.max(l2p_build.internal_vocab_len),
+        roots_count: l1_build.roots_count + l2p_build.roots_count,
+    }
+}
+
 /// Build a partition terminal NWA with optional terminal filtering.
 ///
 /// When `active_terminals` is Some, only terminals marked `true` will have
@@ -2832,7 +3024,7 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
 
     let builds: Vec<PartitionTerminalNwaBuild> = match partition_vocabs.len() {
         0 => Vec::new(),
-        1 => vec![build_partition_terminal_nwa(
+        1 => vec![build_partition_terminal_nwa_split(
             tokenizer,
             &partition_vocabs[0],
             &partition_id_maps[0],
@@ -2846,7 +3038,7 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
         )],
         2 => {
             let (left, right) = rayon::join(
-                || build_partition_terminal_nwa(
+                || build_partition_terminal_nwa_split(
                     tokenizer,
                     &partition_vocabs[0],
                     &partition_id_maps[0],
@@ -2858,7 +3050,7 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
                     0,
                     grammar,
                 ),
-                || build_partition_terminal_nwa(
+                || build_partition_terminal_nwa_split(
                     tokenizer,
                     &partition_vocabs[1],
                     &partition_id_maps[1],
@@ -2875,7 +3067,7 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
         }
         _ => {
             let (left, (middle, right)) = rayon::join(
-                || build_partition_terminal_nwa(
+                || build_partition_terminal_nwa_split(
                     tokenizer,
                     &partition_vocabs[0],
                     &partition_id_maps[0],
@@ -2888,7 +3080,7 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
                     grammar,
                 ),
                 || rayon::join(
-                    || build_partition_terminal_nwa(
+                    || build_partition_terminal_nwa_split(
                         tokenizer,
                         &partition_vocabs[1],
                         &partition_id_maps[1],
@@ -2900,7 +3092,7 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
                         1,
                         grammar,
                     ),
-                    || build_partition_terminal_nwa(
+                    || build_partition_terminal_nwa_split(
                         tokenizer,
                         &partition_vocabs[2],
                         &partition_id_maps[2],
@@ -2916,7 +3108,7 @@ pub(crate) fn build_terminal_dwa_from_partition_id_maps_with_possible_matches_an
             );
             let mut results = vec![left, middle, right];
             for index in 3..partition_vocabs.len() {
-                results.push(build_partition_terminal_nwa(
+                results.push(build_partition_terminal_nwa_split(
                     tokenizer,
                     &partition_vocabs[index],
                     &partition_id_maps[index],
