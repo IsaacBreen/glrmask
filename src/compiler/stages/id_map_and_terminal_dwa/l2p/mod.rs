@@ -19,7 +19,7 @@ use std::time::Instant;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
-use crate::automata::weighted::minimize::minimize;
+use crate::automata::weighted::minimize::minimize_with_threshold;
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::grammar::model::TerminalID;
@@ -233,7 +233,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let minimize_started_at = Instant::now();
-    let dwa = minimize(&det);
+    let dwa = minimize_with_threshold(&det, 50);
     let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
 
     if compile_profile_enabled() || debug_profile_enabled() {

@@ -12,9 +12,9 @@ use range_set_blaze::RangeSetBlaze;
 
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
-use crate::automata::weighted::minimize::minimize;
+use crate::automata::weighted::minimize::{minimize, minimize_with_threshold};
 use crate::automata::weighted::nwa::NWA;
-use crate::compiler::stages::compact::{compact_dwa_dimensions, compact_dwa_dimensions_fast};
+use crate::compiler::stages::compact::compact_dwa_dimensions_fast;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::weight::Weight;
 
@@ -90,13 +90,17 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let minimize_started_at = Instant::now();
-    let mut dwa = minimize(&det);
+    let mut dwa = if label == "global" {
+        minimize_with_threshold(&det, 50)
+    } else {
+        minimize(&det)
+    };
     let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // 4. Compact.
     let mut global = global_id_map;
     let compact_started_at = Instant::now();
-    compact_dwa_dimensions(&mut dwa, &mut global, false);
+    compact_dwa_dimensions_fast(&mut dwa, &mut global);
     let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
 
     if compile_profile_enabled() || debug_profile_enabled() {
