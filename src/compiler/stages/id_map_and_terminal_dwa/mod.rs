@@ -4,10 +4,14 @@
 //! `(InternalIdMap, DWA)` for each via f1, then merges the 3 results via f4
 //! to produce the final `(InternalIdMap, DWA)`.
 
+pub(crate) mod classify;
+pub(crate) mod grammar_helpers;
 pub(crate) mod l1;
 pub(crate) mod l2p;
 pub(crate) mod merge;
+pub(crate) mod monolithic;
 pub(crate) mod partition;
+pub(crate) mod types;
 
 use std::collections::BTreeMap;
 
@@ -16,9 +20,11 @@ use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::stages::equivalence_analysis::{InternalIdMap, ManyToOneIdMap};
-use crate::compiler::stages::terminal_dwa::{classify_vocab_char_type, TerminalColoring};
 use crate::ds::bitset::BitSet;
 use crate::Vocab;
+
+use classify::classify_vocab_char_type;
+use types::TerminalColoring;
 
 /// Build the global `(InternalIdMap, DWA)` for the full vocabulary.
 ///

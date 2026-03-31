@@ -19,13 +19,11 @@ use crate::compiler::stages::parser_dwa::build_parser_dwa_from_terminal_dwa_with
 use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::characterize_terminals;
 use crate::compiler::stages::templates::compile_dfa::emit_template_profile_summary;
-use crate::compiler::stages::terminal_dwa::{
-    build_terminal_dwa_with_possible_matches_and_coloring,
-    compute_terminal_coloring,
-    compute_ever_allowed_follows,
-    classify_terminal_path_lengths,
-    TerminalColoring,
-};
+use crate::compiler::stages::id_map_and_terminal_dwa::monolithic::build_terminal_dwa_with_possible_matches_and_coloring;
+use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::compute_terminal_coloring;
+use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::compute_ever_allowed_follows;
+use crate::compiler::stages::id_map_and_terminal_dwa::classify::classify_terminal_path_lengths;
+use crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalColoring;
 use crate::ds::bitset::BitSet;
 use crate::runtime::Constraint;
 
@@ -456,7 +454,7 @@ fn compile_prepared_with_profile(
             analyzed_grammar.num_terminals,
         );
         if compile_profile_enabled() {
-            use crate::compiler::stages::terminal_dwa::TerminalPathLength;
+            use crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalPathLength;
             let n0 = terminal_path_lengths.iter().filter(|l| **l == TerminalPathLength::Zero).count();
             let n1 = terminal_path_lengths.iter().filter(|l| **l == TerminalPathLength::One).count();
             let n2 = terminal_path_lengths.iter().filter(|l| **l == TerminalPathLength::TwoPlus).count();
@@ -467,7 +465,7 @@ fn compile_prepared_with_profile(
         }
 
         let all_l1 = {
-            use crate::compiler::stages::terminal_dwa::TerminalPathLength;
+            use crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalPathLength;
             terminal_path_lengths.iter().all(|l| matches!(l, TerminalPathLength::Zero | TerminalPathLength::One))
         };
 

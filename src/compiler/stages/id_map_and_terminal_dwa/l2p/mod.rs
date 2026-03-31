@@ -8,6 +8,9 @@
 //! The only structural difference from the old code is `active_terminals`
 //! filtering: terminals not in the L2+ set are skipped during the trie walk.
 
+pub(crate) mod nwa_builder;
+pub(crate) mod postprocess;
+
 use std::collections::BTreeMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -21,21 +24,18 @@ use crate::compiler::possible_matches::{
     PossibleMatchesComputer, collect_possible_matches_by_internal_tsid,
 };
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
-use crate::compiler::stages::terminal_dwa::{
-    TerminalColoring,
-    build_nwa_via_trie_walk,
-    canonicalize_acyclic_nwa,
-    collapse_always_allowed,
-    apply_disallowed_follow_constraints,
-    compute_always_allowed_follows,
-    internal_vocab_entries,
-    prune_non_coreachable_states,
-    seed_root_nodes,
-};
 use crate::ds::bitset::BitSet;
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::ds::weight::Weight;
 use crate::Vocab;
+
+use super::grammar_helpers::compute_always_allowed_follows;
+use super::types::TerminalColoring;
+use nwa_builder::{build_nwa_via_trie_walk, internal_vocab_entries, seed_root_nodes};
+use postprocess::{
+    apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
+    prune_non_coreachable_states,
+};
 
 /// Build an L2+ id_map and terminal DWA for the given vocab and terminal set.
 ///

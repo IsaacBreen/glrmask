@@ -19,7 +19,7 @@ use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
 use crate::compiler::stages::resolve_negatives::resolve_negative_codes_in_nwa;
 #[cfg(test)]
-use crate::compiler::stages::terminal_dwa::build_terminal_dwa;
+use crate::compiler::stages::id_map_and_terminal_dwa::monolithic::build_terminal_dwa;
 use crate::compiler::stages::templates::Templates;
 #[cfg(test)]
 use crate::compiler::stages::templates::characterize::characterize_terminals;

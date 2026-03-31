@@ -11,8 +11,9 @@ use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::stages::equivalence_analysis::InternalIdMap;
-use crate::compiler::stages::terminal_dwa::{
-    classify_terminal_path_lengths, TerminalColoring, TerminalPathLength,
+use crate::compiler::stages::id_map_and_terminal_dwa::classify::classify_terminal_path_lengths;
+use crate::compiler::stages::id_map_and_terminal_dwa::types::{
+    TerminalColoring, TerminalPathLength,
 };
 use crate::ds::bitset::BitSet;
 use crate::Vocab;

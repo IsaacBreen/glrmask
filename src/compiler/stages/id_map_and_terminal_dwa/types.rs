@@ -1,0 +1,63 @@
+//! Shared types used across the terminal DWA build pipeline.
+
+use crate::compiler::grammar::model::TerminalID;
+
+/// Color identifier (index into graph-coloring partition).
+pub(crate) type ColorId = u32;
+
+/// Terminal coloring: maps each terminal to a color based on GLR table row
+/// adjacency. Terminals with the same color never appear in the same action
+/// row, so they can share NWA transitions.
+#[derive(Debug, Clone)]
+pub(crate) struct TerminalColoring {
+    pub(crate) terminal_to_color: Vec<ColorId>,
+    pub(crate) num_colors: usize,
+}
+
+impl TerminalColoring {
+    pub(crate) fn identity(num_terminals: usize) -> Self {
+        Self {
+            terminal_to_color: (0..num_terminals as ColorId).collect(),
+            num_colors: num_terminals,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn color_for(&self, terminal_id: TerminalID) -> ColorId {
+        self.terminal_to_color
+            .get(terminal_id as usize)
+            .copied()
+            .unwrap_or(terminal_id)
+    }
+}
+
+/// Per-partition build profile counters.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct TerminalDwaBuildProfile {
+    pub(crate) future_terminal_additions: u64,
+    pub(crate) match_transition_additions: u64,
+}
+
+/// Terminal path length classification for L1/L2+ split.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TerminalPathLength {
+    /// Terminal's first-byte bitset is disjoint from vocab byte bitset – ignorable.
+    Zero,
+    /// Single-step paths only – fast special case for id_map/DWA.
+    One,
+    /// Multi-terminal token paths possible – full treatment required.
+    TwoPlus,
+}
+
+pub(crate) fn terminal_dwa_profile_enabled() -> bool {
+    std::env::var_os("GLRMASK_PROFILE_TERMINAL_DWA").is_some()
+}
+
+pub(crate) fn debug_profile_enabled() -> bool {
+    std::env::var("GLRMASK_DEBUG_PROFILE")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(false)
+}
