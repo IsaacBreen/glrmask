@@ -2093,6 +2093,24 @@ pub(crate) fn build_partition_terminal_nwa_l1_direct(
     num_terminals: u32,
     partition_index: usize,
 ) -> PartitionTerminalNwaBuild {
+    build_partition_terminal_nwa_l1_direct_filtered(
+        tokenizer, vocab, id_map, ignore_terminal, num_terminals, partition_index, None,
+    )
+}
+
+/// Direct L1 NWA construction with optional terminal filtering.
+///
+/// When `active_terminals` is provided, only terminals marked `true` get
+/// NWA transitions. Others are skipped entirely.
+pub(crate) fn build_partition_terminal_nwa_l1_direct_filtered(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    id_map: &InternalIdMap,
+    ignore_terminal: Option<TerminalID>,
+    num_terminals: u32,
+    partition_index: usize,
+    active_terminals: Option<&[bool]>,
+) -> PartitionTerminalNwaBuild {
     let partition_total_start = std::time::Instant::now();
     let internal_vocab = internal_vocab_entries(vocab, id_map);
     if internal_vocab.is_empty() {
@@ -2239,6 +2257,12 @@ pub(crate) fn build_partition_terminal_nwa_l1_direct(
 
     let mut num_transitions = 0u32;
     for terminal_id in 0..num_term {
+        // Skip terminals not in the active set (L1/L2+ filtering).
+        if let Some(active) = active_terminals {
+            if !active.get(terminal_id).copied().unwrap_or(false) {
+                continue;
+            }
+        }
         let is_ignored = ignore_terminal == Some(terminal_id as TerminalID);
         let direct_map = &mut tokens_direct_by_rep[terminal_id];
         let future_map = &mut tokens_future_by_rep[terminal_id];
@@ -2340,7 +2364,7 @@ pub(crate) fn build_partition_terminal_nwa_l1_direct(
     }
 }
 
-fn build_partition_terminal_nwa(
+pub(crate) fn build_partition_terminal_nwa(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     id_map: &InternalIdMap,
