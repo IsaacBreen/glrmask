@@ -14,7 +14,7 @@ use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::stages::compact::compact_dwa_dimensions_fast;
 use crate::compiler::stages::equivalence_analysis::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::u8set::U8Set;
-use crate::ds::weight::Weight;
+use crate::ds::weight::{Weight, shared_rangeset};
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::Vocab;
 
@@ -210,7 +210,7 @@ fn build_l1_terminal_dwa(
         .into_iter()
         .map(|m| {
             m.into_iter()
-                .map(|(tsid, rsb)| (tsid, Arc::new(rsb)))
+                .map(|(tsid, rsb)| (tsid, shared_rangeset(rsb)))
                 .collect()
         })
         .collect();
@@ -238,91 +238,85 @@ fn build_l1_terminal_dwa(
     }
     let inverse_map_ms = inverse_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    // Per-terminal distribution: collect deferred entries, sort by tsid,
-    // merge per-tsid using Arc sharing for single-source, build Weight.
+    // Per-terminal distribution: collect deferred entries into per-tsid slots,
+    // sort occupied tsids, merge per-tsid, build Weight.
     let merge_started_at = Instant::now();
+
+    let num_tsids = id_map.num_tsids() as usize;
+    let mut tsid_ranges: Vec<Vec<(u32, u32)>> = (0..num_tsids).map(|_| Vec::new()).collect();
+    let mut tsid_single_arc: Vec<Option<Arc<RangeSetBlaze<u32>>>> = vec![None; num_tsids];
+    let mut occupied_tsids: Vec<u32> = Vec::new();
+    let mut weight_entries: Vec<(u32, Arc<RangeSetBlaze<u32>>)> = Vec::new();
+
     let mut dwa = DWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
     let end_state = dwa.add_state();
     dwa.set_final_weight(end_state, Weight::all());
-
     let mut num_transitions = 0usize;
-    let mut num_distribution_ops = 0usize;
-    let mut num_single_source = 0usize;
-    let mut num_multi_source = 0usize;
-    let mut entries_buf: Vec<(u32, *const Arc<RangeSetBlaze<u32>>)> = Vec::new();
-    let mut range_buf: Vec<(u32, u32)> = Vec::new();
 
     for (tid, active_states) in terminal_to_active_states.iter().enumerate() {
         if active_states.is_empty() {
             continue;
         }
 
-        // Collect (tsid, Arc ref) from deferred at active states
-        entries_buf.clear();
+        occupied_tsids.clear();
         for &state in active_states {
-            for entry in &deferred_arced[state as usize] {
-                entries_buf.push((entry.0, &entry.1 as *const _));
+            for &(tsid, ref arc) in &deferred_arced[state as usize] {
+                let tsid_idx = tsid as usize;
+                if tsid_ranges[tsid_idx].is_empty() && tsid_single_arc[tsid_idx].is_none() {
+                    tsid_single_arc[tsid_idx] = Some(Arc::clone(arc));
+                    occupied_tsids.push(tsid);
+                } else if let Some(first_arc) = tsid_single_arc[tsid_idx].take() {
+                    for r in first_arc.ranges() {
+                        tsid_ranges[tsid_idx].push((*r.start(), *r.end()));
+                    }
+                    for r in arc.ranges() {
+                        tsid_ranges[tsid_idx].push((*r.start(), *r.end()));
+                    }
+                } else {
+                    for r in arc.ranges() {
+                        tsid_ranges[tsid_idx].push((*r.start(), *r.end()));
+                    }
+                }
             }
         }
-        if entries_buf.is_empty() {
+
+        if occupied_tsids.is_empty() {
             continue;
         }
 
-        // Sort by tsid for grouping
-        entries_buf.sort_unstable_by_key(|&(tsid, _)| tsid);
+        occupied_tsids.sort_unstable();
 
-        // Group by tsid: single-source → Arc::clone, multi-source → range merge
-        let mut weight_entries: Vec<(u32, Arc<RangeSetBlaze<u32>>)> = Vec::new();
-        let mut i = 0;
-        while i < entries_buf.len() {
-            let tsid = entries_buf[i].0;
-            let mut j = i + 1;
-            while j < entries_buf.len() && entries_buf[j].0 == tsid {
-                j += 1;
-            }
-            num_distribution_ops += j - i;
-
-            // SAFETY: pointers are valid references into deferred_arced which outlives this loop
-            if j == i + 1 {
-                // Single source: just share the Arc
-                let arc = unsafe { &*entries_buf[i].1 };
-                weight_entries.push((tsid, Arc::clone(arc)));
-                num_single_source += 1;
+        weight_entries.clear();
+        for &tsid in &occupied_tsids {
+            let tsid_idx = tsid as usize;
+            if let Some(arc) = tsid_single_arc[tsid_idx].take() {
+                weight_entries.push((tsid, arc));
             } else {
-                // Multi source: extract ranges, sort, consolidate, build once
-                // Avoids expensive RangeSetBlaze clone + |= chain
-                range_buf.clear();
-                for k in i..j {
-                    let src = unsafe { &*entries_buf[k].1 };
-                    for r in src.ranges() {
-                        range_buf.push((*r.start(), *r.end()));
-                    }
-                }
-                range_buf.sort_unstable();
-                // In-place consolidation of overlapping/adjacent ranges
-                if !range_buf.is_empty() {
+                let slot = &mut tsid_ranges[tsid_idx];
+                slot.sort_unstable();
+                if !slot.is_empty() {
                     let mut write = 0;
-                    for read in 1..range_buf.len() {
-                        if range_buf[read].0 <= range_buf[write].1.saturating_add(1) {
-                            range_buf[write].1 = range_buf[write].1.max(range_buf[read].1);
+                    for read in 1..slot.len() {
+                        if slot[read].0 <= slot[write].1.saturating_add(1) {
+                            slot[write].1 = slot[write].1.max(slot[read].1);
                         } else {
                             write += 1;
-                            range_buf[write] = range_buf[read];
+                            slot[write] = slot[read];
                         }
                     }
-                    range_buf.truncate(write + 1);
+                    slot.truncate(write + 1);
                 }
-                let merged: RangeSetBlaze<u32> = range_buf
-                    .iter()
+                let merged: RangeSetBlaze<u32> = slot.iter()
                     .map(|&(s, e)| s..=e)
                     .collect();
-                weight_entries.push((tsid, Arc::new(merged)));
-                num_multi_source += 1;
+                weight_entries.push((tsid, shared_rangeset(merged)));
+                slot.clear();
             }
-            i = j;
         }
 
-        let weight = Weight::from_per_tsid_shared(weight_entries.into_iter());
+        let weight = Weight::from_per_tsid_shared(
+            weight_entries.iter().map(|(tsid, arc)| (*tsid, Arc::clone(arc))),
+        );
         if weight.is_empty() {
             continue;
         }
@@ -342,7 +336,7 @@ fn build_l1_terminal_dwa(
 
     if debug_profile_enabled() {
         eprintln!(
-            "[glrmask/debug][terminal_dwa] partition_build_l1_assoc vocab={} tsids={} tree_nodes={} token_nodes={} segment_execs={} live_segments={} terminal_hits={} states_at_token_nodes={} total_tsids_at_token_nodes={} max_tsids_per_state={} self_loop_skipped_subtrees={} self_loop_skipped_tokens={} distribution_ops={} single_source={} multi_source={} transitions={} traversal_ms={:.1} arc_wrap_ms={:.1} inverse_map_ms={:.1} merge_ms={:.1} distribute_ms={:.1} total_ms={:.1}",
+            "[glrmask/debug][terminal_dwa] partition_build_l1_assoc vocab={} tsids={} tree_nodes={} token_nodes={} segment_execs={} live_segments={} terminal_hits={} states_at_token_nodes={} total_tsids_at_token_nodes={} max_tsids_per_state={} self_loop_skipped_subtrees={} self_loop_skipped_tokens={} transitions={} traversal_ms={:.1} arc_wrap_ms={:.1} inverse_map_ms={:.1} merge_ms={:.1} distribute_ms={:.1} total_ms={:.1}",
             tree.root.reachable_token_ids().len(),
             id_map.num_tsids(),
             profile.tree_nodes,
@@ -355,9 +349,6 @@ fn build_l1_terminal_dwa(
             profile.max_tsids_per_state,
             profile.self_loop_skipped_subtrees,
             profile.self_loop_skipped_tokens,
-            num_distribution_ops,
-            num_single_source,
-            num_multi_source,
             num_transitions,
             traversal_ms,
             arc_wrap_ms,
