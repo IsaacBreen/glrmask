@@ -346,6 +346,9 @@ fn build_l1_terminal_dwa(
     let phase1_wall_ms: f64;
     let skipped_walks = std::sync::atomic::AtomicUsize::new(0);
     let skipped_tokens = std::sync::atomic::AtomicUsize::new(0);
+    let p2_collect_ns = std::sync::atomic::AtomicU64::new(0);
+    let p2_build_ns = std::sync::atomic::AtomicU64::new(0);
+    let p2_total_ranges = std::sync::atomic::AtomicU64::new(0);
     let per_thread_results: Vec<Vec<(u32, u32, PreHashedRanges)>> = {
         // Walk cache: compute once per unique (first_byte, target) and cache
         // the raw merged ranges. Self-loop optimization: if the target state
@@ -452,79 +455,123 @@ fn build_l1_terminal_dwa(
         let phase1_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0;
         phase1_wall_ms = phase1_ms;
 
-        // Debug: count unique transition signatures among start_states.
-        // Signature = sorted Vec of (first_byte, target) for non-dead transitions.
+        // Precompute unique end_reps and dense index for Phase 2.
+        // This allows replacing HashMap with a flat array.
+        let mut all_end_reps: Vec<u32> = walk_cache.values()
+            .flat_map(|results| results.iter().map(|(end_rep, _)| *end_rep))
+            .collect();
+        // Also include all state_to_rep values for states in start_states_list
+        // (needed for empty token handling).
+        for (&start_state, _) in &states_to_initial_tsids {
+            all_end_reps.push(state_to_rep[start_state as usize]);
+        }
+        all_end_reps.sort_unstable();
+        all_end_reps.dedup();
+        let n_end_reps = all_end_reps.len();
+        // Dense mapping: end_rep → index in [0..n_end_reps)
+        let mut end_rep_to_idx = vec![usize::MAX; num_dfa_states];
+        for (i, &rep) in all_end_reps.iter().enumerate() {
+            end_rep_to_idx[rep as usize] = i;
+        }
+
+        // Also precompute walk_cache results indexed by (byte, target) → Vec of
+        // (end_rep_idx, ranges_slice_ref) for faster Phase 2 access.
+        // Convert walk_cache to use end_rep_idx instead of end_rep.
+        let indexed_walk_cache: FxHashMap<(u8, u32), Vec<(usize, &[(u32, u32)])>> = walk_cache
+            .iter()
+            .map(|(&key, results)| {
+                let indexed: Vec<(usize, &[(u32, u32)])> = results
+                    .iter()
+                    .map(|(end_rep, ranges)| (end_rep_to_idx[*end_rep as usize], ranges.as_slice()))
+                    .collect();
+                (key, indexed)
+            })
+            .collect();
+
         if debug_profile_enabled() {
-            let dead2 = u32::MAX;
-            let mut sig_counts: FxHashMap<Vec<(u8, u32)>, usize> = FxHashMap::default();
-            for (&start_state, _) in &states_to_initial_tsids {
-                let mut sig: Vec<(u8, u32)> = Vec::new();
-                for (byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
-                    if token_ids.is_empty() { continue; }
-                    let target = flat_trans[start_state as usize * 256 + byte];
-                    if target != dead2 {
-                        sig.push((byte as u8, target));
-                    }
-                }
-                *sig_counts.entry(sig).or_default() += 1;
-            }
-            let unique_sigs = sig_counts.len();
-            let max_group = sig_counts.values().max().copied().unwrap_or(0);
-            let groups_gt1: usize = sig_counts.values().filter(|&&v| v > 1).count();
             eprintln!(
-                "[glrmask/debug][l1_signatures] total_start_states={} unique_signatures={} max_group_size={} groups_with_multiple={}",
-                start_states_list.len(), unique_sigs, max_group, groups_gt1
+                "[glrmask/debug][l1_phase2_setup] unique_end_reps={} walk_cache_entries={}",
+                n_end_reps, walk_cache.len()
             );
         }
 
         // Phase 2: For each start_state, collect cached walk results across all
-        // first bytes, merge per end_rep, build PreHashedRanges.
-        // Token IDs are assigned in byte-sorted order and we iterate
-        // first bytes 0→255, so accumulated ranges per end_rep are
-        // already sorted. We skip the sort and only do the linear merge.
+        // first bytes, merge per end_rep into flat array, build PreHashedRanges.
+        // Uses merge-during-extend: when appending ranges to an end_rep's Vec,
+        // merge with the last range if adjacent. This eliminates the separate
+        // merge pass and reduces total memory traffic.
         start_states_list
             .par_iter()
             .map(|&(&start_state, ref initial_tsids)| {
-                let mut end_rep_token_ranges = FxHashMap::<u32, Vec<(u32, u32)>>::default();
+                let collect_start = Instant::now();
+                // Flat array indexed by end_rep_idx. No HashMap overhead.
+                let mut ranges_by_end: Vec<Vec<(u32, u32)>> = (0..n_end_reps).map(|_| Vec::new()).collect();
 
                 // Empty tokens: end_rep = start_rep
-                // (Empty byte sequences sort first, so these IDs are smallest)
                 let start_rep = state_to_rep[start_state as usize];
+                let start_rep_idx = end_rep_to_idx[start_rep as usize];
                 for &internal_token_id in &empty_token_indices {
                     append_token_id_range(
-                        end_rep_token_ranges.entry(start_rep).or_default(),
+                        &mut ranges_by_end[start_rep_idx],
                         internal_token_id as u32,
                     );
                 }
 
                 // Collect cached walk results in byte order (0→255).
+                // Since token IDs are byte-sorted, ranges from successive
+                // first bytes are already in sorted order. We merge during
+                // extend: append each range, merging with the last if adjacent.
                 for (byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
                     if token_ids.is_empty() { continue; }
                     let target = flat_trans[start_state as usize * 256 + byte];
                     if target == dead { continue; }
-                    if let Some(results) = walk_cache.get(&(byte as u8, target)) {
-                        for (end_rep, ranges) in results {
-                            end_rep_token_ranges.entry(*end_rep).or_default()
-                                .extend_from_slice(ranges);
+                    if let Some(results) = indexed_walk_cache.get(&(byte as u8, target)) {
+                        for &(end_rep_idx, ranges) in results {
+                            let dest = &mut ranges_by_end[end_rep_idx];
+                            for &(s, e) in ranges {
+                                if let Some(last) = dest.last_mut() {
+                                    if s <= last.1.saturating_add(1) {
+                                        last.1 = last.1.max(e);
+                                        continue;
+                                    }
+                                }
+                                dest.push((s, e));
+                            }
                         }
                     }
                 }
+                p2_collect_ns.fetch_add(collect_start.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
 
                 // Build one entry per (end_rep, tsid).
+                // Ranges are already merged from the extend step.
+                let build_start = Instant::now();
                 let mut result: Vec<(u32, u32, PreHashedRanges)> = Vec::new();
-                for (end_rep, mut token_ranges) in end_rep_token_ranges {
-                    merge_sorted_ranges_in_place(&mut token_ranges);
+                for (idx, token_ranges) in ranges_by_end.into_iter().enumerate() {
+                    if token_ranges.is_empty() { continue; }
+                    p2_total_ranges.fetch_add(token_ranges.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                    let end_rep = all_end_reps[idx];
                     let prehashed_key = PreHashedRanges::new(token_ranges);
                     for &tsid in initial_tsids.iter() {
                         result.push((end_rep, tsid, prehashed_key.clone()));
                     }
                 }
+                p2_build_ns.fetch_add(build_start.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
                 result
             })
             .collect()
     };
 
     let phase2_wall_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0 - phase1_wall_ms;
+
+    if debug_profile_enabled() {
+        eprintln!(
+            "[glrmask/debug][l1_phase2_detail] collect_thread_ms={:.1} build_thread_ms={:.1} total_ranges={} wall_ms={:.1}",
+            p2_collect_ns.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1_000_000.0,
+            p2_build_ns.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1_000_000.0,
+            p2_total_ranges.load(std::sync::atomic::Ordering::Relaxed),
+            phase2_wall_ms,
+        );
+    }
 
     // Sort-based intern: sort entries by hash, find hash-group boundaries,
     // then verify and build Arcs in parallel.
