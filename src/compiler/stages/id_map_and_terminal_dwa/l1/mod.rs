@@ -432,101 +432,136 @@ fn build_l1_terminal_dwa(
     }
     let inverse_map_ms = inverse_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    // Per-terminal distribution: collect deferred entries into per-tsid slots,
-    // sort occupied tsids, merge per-tsid, build Weight.
-    // Parallelized across terminals using rayon.
+    // Pre-compute per-TSID full token set unions and contributing end_reps.
+    // For each terminal, TSIDs whose contributing end_reps are all active reuse
+    // the precomputed Arc; only TSIDs with some inactive end_reps are recomputed.
     let merge_started_at = Instant::now();
 
     let num_tsids = id_map.num_tsids() as usize;
 
-    // Compute per-terminal weights in parallel
-    let terminal_weights: Vec<(usize, Weight)> = terminal_to_active_states
+    // Build per-TSID: full ranges union + list of contributing end_reps
+    let mut tsid_full_ranges: Vec<Vec<(u32, u32)>> = (0..num_tsids).map(|_| Vec::new()).collect();
+    let mut tsid_end_reps: Vec<Vec<u32>> = (0..num_tsids).map(|_| Vec::new()).collect();
+    for (end_rep, entries) in deferred_arced.iter().enumerate() {
+        for &(tsid, ref arc) in entries {
+            tsid_end_reps[tsid as usize].push(end_rep as u32);
+            for r in arc.ranges() {
+                tsid_full_ranges[tsid as usize].push((*r.start(), *r.end()));
+            }
+        }
+    }
+    for reps in &mut tsid_end_reps {
+        reps.sort_unstable();
+        reps.dedup();
+    }
+    // Sort/merge ranges per TSID → full union Arcs (parallel)
+    let tsid_full_arcs: Vec<Option<Arc<RangeSetBlaze<u32>>>> = tsid_full_ranges
+        .par_iter_mut()
+        .map(|ranges| {
+            if ranges.is_empty() { return None; }
+            ranges.sort_unstable();
+            let mut w = 0;
+            for r in 1..ranges.len() {
+                if ranges[r].0 <= ranges[w].1.saturating_add(1) {
+                    ranges[w].1 = ranges[w].1.max(ranges[r].1);
+                } else { w += 1; ranges[w] = ranges[r]; }
+            }
+            ranges.truncate(w + 1);
+            Some(shared_rangeset(ranges.iter().map(|&(s, e)| s..=e).collect()))
+        })
+        .collect();
+    drop(tsid_full_ranges);
+
+    // Group terminals by active_states to deduplicate identical computation
+    let mut active_tids: Vec<usize> = (0..terminal_to_active_states.len())
+        .filter(|&i| !terminal_to_active_states[i].is_empty())
+        .collect();
+    active_tids.sort_unstable_by(|&a, &b|
+        terminal_to_active_states[a].cmp(&terminal_to_active_states[b]));
+    let mut unique_groups: Vec<Vec<usize>> = Vec::new();
+    for &tid in &active_tids {
+        if let Some(last) = unique_groups.last_mut() {
+            if terminal_to_active_states[last[0]] == terminal_to_active_states[tid] {
+                last.push(tid); continue;
+            }
+        }
+        unique_groups.push(vec![tid]);
+    }
+
+    // Compute weights per unique group in parallel
+    let group_results: Vec<Option<(Vec<usize>, Weight)>> = unique_groups
         .par_iter()
-        .enumerate()
-        .filter_map(|(tid, active_states)| {
-            if active_states.is_empty() {
-                return None;
-            }
-
-            // Thread-local buffers for this terminal
-            let mut tsid_ranges: Vec<Vec<(u32, u32)>> = (0..num_tsids).map(|_| Vec::new()).collect();
-            let mut tsid_single_arc: Vec<Option<Arc<RangeSetBlaze<u32>>>> = vec![None; num_tsids];
-            let mut occupied_tsids: Vec<u32> = Vec::new();
-
-            for &state in active_states {
-                for &(tsid, ref arc) in &deferred_arced[state as usize] {
-                    let tsid_idx = tsid as usize;
-                    if tsid_ranges[tsid_idx].is_empty() && tsid_single_arc[tsid_idx].is_none() {
-                        tsid_single_arc[tsid_idx] = Some(Arc::clone(arc));
-                        occupied_tsids.push(tsid);
-                    } else if let Some(first_arc) = tsid_single_arc[tsid_idx].take() {
-                        for r in first_arc.ranges() {
-                            tsid_ranges[tsid_idx].push((*r.start(), *r.end()));
-                        }
-                        for r in arc.ranges() {
-                            tsid_ranges[tsid_idx].push((*r.start(), *r.end()));
-                        }
-                    } else {
-                        for r in arc.ranges() {
-                            tsid_ranges[tsid_idx].push((*r.start(), *r.end()));
-                        }
-                    }
-                }
-            }
-
-            if occupied_tsids.is_empty() {
-                return None;
-            }
-
-            occupied_tsids.sort_unstable();
+        .map(|tids| {
+            let active_states = &terminal_to_active_states[tids[0]];
+            let active_set: rustc_hash::FxHashSet<u32> =
+                active_states.iter().copied().collect();
 
             let mut weight_entries: Vec<(u32, Arc<RangeSetBlaze<u32>>)> = Vec::new();
-            for &tsid in &occupied_tsids {
-                let tsid_idx = tsid as usize;
-                if let Some(arc) = tsid_single_arc[tsid_idx].take() {
-                    weight_entries.push((tsid, arc));
-                } else {
-                    let slot = &mut tsid_ranges[tsid_idx];
-                    slot.sort_unstable();
-                    if !slot.is_empty() {
-                        let mut write = 0;
-                        for read in 1..slot.len() {
-                            if slot[read].0 <= slot[write].1.saturating_add(1) {
-                                slot[write].1 = slot[write].1.max(slot[read].1);
-                            } else {
-                                write += 1;
-                                slot[write] = slot[read];
-                            }
-                        }
-                        slot.truncate(write + 1);
+            let mut affected_tsids: Vec<u32> = Vec::new();
+
+            for tsid in 0..num_tsids as u32 {
+                let reps = &tsid_end_reps[tsid as usize];
+                if reps.is_empty() { continue; }
+                if reps.iter().all(|r| active_set.contains(r)) {
+                    if let Some(ref arc) = tsid_full_arcs[tsid as usize] {
+                        weight_entries.push((tsid, Arc::clone(arc)));
                     }
-                    let merged: RangeSetBlaze<u32> = slot.iter()
-                        .map(|&(s, e)| s..=e)
-                        .collect();
-                    weight_entries.push((tsid, shared_rangeset(merged)));
+                } else if reps.iter().any(|r| active_set.contains(r)) {
+                    affected_tsids.push(tsid);
                 }
             }
 
-            let weight = Weight::from_per_tsid_shared(
-                weight_entries.iter().map(|(tsid, arc)| (*tsid, Arc::clone(arc))),
-            );
-            if weight.is_empty() {
-                return None;
+            // Recompute affected TSIDs from active end_reps only
+            if !affected_tsids.is_empty() {
+                let affected_set: rustc_hash::FxHashSet<u32> =
+                    affected_tsids.iter().copied().collect();
+                let mut tsid_ranges: Vec<Vec<(u32, u32)>> =
+                    (0..num_tsids).map(|_| Vec::new()).collect();
+                for &state in active_states {
+                    for &(tsid, ref arc) in &deferred_arced[state as usize] {
+                        if !affected_set.contains(&tsid) { continue; }
+                        for r in arc.ranges() {
+                            tsid_ranges[tsid as usize].push((*r.start(), *r.end()));
+                        }
+                    }
+                }
+                for &tsid in &affected_tsids {
+                    let slot = &mut tsid_ranges[tsid as usize];
+                    if slot.is_empty() { continue; }
+                    slot.sort_unstable();
+                    let mut w = 0;
+                    for r in 1..slot.len() {
+                        if slot[r].0 <= slot[w].1.saturating_add(1) {
+                            slot[w].1 = slot[w].1.max(slot[r].1);
+                        } else { w += 1; slot[w] = slot[r]; }
+                    }
+                    slot.truncate(w + 1);
+                    weight_entries.push((tsid, shared_rangeset(
+                        slot.iter().map(|&(s, e)| s..=e).collect())));
+                }
+                weight_entries.sort_unstable_by_key(|&(t, _)| t);
             }
 
-            Some((tid, weight))
+            if weight_entries.is_empty() { return None; }
+            let weight = Weight::from_per_tsid_shared(
+                weight_entries.iter().map(|(t, a)| (*t, Arc::clone(a))));
+            if weight.is_empty() { return None; }
+            Some((tids.clone(), weight))
         })
         .collect();
 
-    // Sequential DWA construction from parallel results
+    // Sequential DWA construction from grouped results
     let mut dwa = DWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
     let end_state = dwa.add_state();
     dwa.set_final_weight(end_state, Weight::all());
     let mut num_transitions = 0usize;
 
-    for (tid, weight) in terminal_weights {
-        dwa.add_transition(dwa.start_state, tid as i32, end_state, weight);
-        num_transitions += 1;
+    for result in group_results.into_iter().flatten() {
+        let (tids, weight) = result;
+        for &tid in &tids {
+            dwa.add_transition(dwa.start_state, tid as i32, end_state, weight.clone());
+            num_transitions += 1;
+        }
     }
 
     if num_transitions == 0 {
