@@ -85,6 +85,11 @@ When working on performance targets (e.g., `make test-js`):
 
 If a target is too slow, optimize the real code path or propose a sanctioned fast‑mode that preserves correctness guarantees.
 
+## Threshold Policy
+
+- **Avoid arbitrary or measured thresholds** that switch between code paths (e.g., "if state count > N, use algorithm A instead of B").
+- Such thresholds create hidden performance cliffs and case-dependent regressions — a schema that's fast at N−1 states can become catastrophically slow at N+1.
+- Prefer algorithmic improvements that scale smoothly over gated fallbacks.
 
 ---
 
