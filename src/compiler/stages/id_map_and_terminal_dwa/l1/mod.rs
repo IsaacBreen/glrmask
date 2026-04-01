@@ -331,39 +331,122 @@ fn build_l1_terminal_dwa(
         }
     }
 
-    let per_thread_results: Vec<Vec<(u32, u32, PreHashedRanges, Arc<RangeSetBlaze<u32>>)>> = start_states_list
-        .par_iter()
-        .map(|&(&start_state, ref initial_tsids)| {
-            let mut end_rep_token_ranges = FxHashMap::<u32, Vec<(u32, u32)>>::default();
-            collect_l1_root_ranges_by_first_byte_lcp(
-                start_state,
-                &sorted_entries,
-                &empty_token_indices,
-                &token_indices_by_first_byte,
-                &flat_trans,
-                state_to_rep,
-                &mut end_rep_token_ranges,
-            );
+    let per_thread_results: Vec<Vec<(u32, u32, PreHashedRanges, Arc<RangeSetBlaze<u32>>)>> = {
+        // Walk cache: when multiple start states share the same (first_byte →
+        // target_state) transition, their suffix walks are identical. Compute
+        // the walk once per unique (first_byte, target) and cache the raw merged
+        // ranges. Each start_state then collects from the cache, re-merges per
+        // end_rep (different first bytes may contribute to the same end_rep),
+        // and builds Arcs.
+        let dead = u32::MAX;
 
-            // Phase 2: Build Arc'd RangeSets per (end_rep, tsid).
-            // Pre-compute content hash in parallel so the sequential interning
-            // can do O(1) hash lookups instead of re-hashing each ranges Vec.
-            let mut result: Vec<(u32, u32, PreHashedRanges, Arc<RangeSetBlaze<u32>>)> = Vec::new();
-            for (end_rep, mut token_ranges) in end_rep_token_ranges {
-                merge_ranges_in_place(&mut token_ranges);
-                let prehashed_key = PreHashedRanges::new(token_ranges.clone());
-                let range_set: Arc<RangeSetBlaze<u32>> = Arc::new(
-                    token_ranges.into_iter().map(|(start, end)| start..=end).collect(),
-                );
-
-                for &tsid in initial_tsids.iter() {
-                    result.push((end_rep, tsid, prehashed_key.clone(), Arc::clone(&range_set)));
+        // Phase 1: Identify unique (first_byte, target) pairs
+        let mut unique_targets: FxHashMap<(u8, u32), ()> = FxHashMap::default();
+        for (&start_state, _) in &states_to_initial_tsids {
+            for (byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
+                if token_ids.is_empty() { continue; }
+                let target = flat_trans[start_state as usize * 256 + byte];
+                if target != dead {
+                    unique_targets.entry((byte as u8, target)).or_default();
                 }
             }
+        }
+        let unique_walk_keys: Vec<(u8, u32)> = unique_targets.into_keys().collect();
 
-            result
-        })
-        .collect();
+        // Parallel walk per unique (first_byte, target). Store raw merged ranges.
+        let walk_cache: FxHashMap<(u8, u32), Vec<(u32, Vec<(u32, u32)>)>> = unique_walk_keys
+            .par_iter()
+            .map(|&(first_byte, first_target)| {
+                let token_ids = &token_indices_by_first_byte[first_byte as usize];
+                let mut end_rep_token_ranges = FxHashMap::<u32, Vec<(u32, u32)>>::default();
+
+                let mut previous_suffix: &[u8] = &[];
+                let mut suffix_states: Vec<u32> = vec![first_target];
+                for &internal_token_id in token_ids {
+                    let token_bytes = sorted_entries[internal_token_id].1;
+                    let suffix_bytes = &token_bytes[1..];
+                    let lcp_len = common_prefix_len(previous_suffix, suffix_bytes);
+                    suffix_states.truncate(lcp_len + 1);
+                    let mut state = *suffix_states.last().unwrap();
+                    if state == dead {
+                        suffix_states.resize(suffix_bytes.len() + 1, dead);
+                    } else {
+                        for &byte in &suffix_bytes[lcp_len..] {
+                            state = flat_trans[state as usize * 256 + byte as usize];
+                            suffix_states.push(state);
+                            if state == dead {
+                                suffix_states.resize(suffix_bytes.len() + 1, dead);
+                                break;
+                            }
+                        }
+                    }
+                    let final_state = suffix_states[suffix_bytes.len()];
+                    if final_state != dead {
+                        let end_rep = state_to_rep[final_state as usize];
+                        append_token_id_range(
+                            end_rep_token_ranges.entry(end_rep).or_default(),
+                            internal_token_id as u32,
+                        );
+                    }
+                    previous_suffix = suffix_bytes;
+                }
+
+                let results: Vec<(u32, Vec<(u32, u32)>)> = end_rep_token_ranges
+                    .into_iter()
+                    .map(|(end_rep, mut ranges)| {
+                        merge_ranges_in_place(&mut ranges);
+                        (end_rep, ranges)
+                    })
+                    .collect();
+                ((first_byte, first_target), results)
+            })
+            .collect();
+
+        // Phase 2: For each start_state, collect cached walk results across all
+        // first bytes, merge per end_rep, build PreHashedRanges + Arc.
+        start_states_list
+            .par_iter()
+            .map(|&(&start_state, ref initial_tsids)| {
+                let mut end_rep_token_ranges = FxHashMap::<u32, Vec<(u32, u32)>>::default();
+
+                // Empty tokens: end_rep = start_rep
+                let start_rep = state_to_rep[start_state as usize];
+                for &internal_token_id in &empty_token_indices {
+                    append_token_id_range(
+                        end_rep_token_ranges.entry(start_rep).or_default(),
+                        internal_token_id as u32,
+                    );
+                }
+
+                // Collect cached walk results
+                for (byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
+                    if token_ids.is_empty() { continue; }
+                    let target = flat_trans[start_state as usize * 256 + byte];
+                    if target == dead { continue; }
+                    if let Some(results) = walk_cache.get(&(byte as u8, target)) {
+                        for (end_rep, ranges) in results {
+                            end_rep_token_ranges.entry(*end_rep).or_default()
+                                .extend_from_slice(ranges);
+                        }
+                    }
+                }
+
+                // Build Arcs per end_rep (re-merge after combining multiple bytes)
+                let mut result: Vec<(u32, u32, PreHashedRanges, Arc<RangeSetBlaze<u32>>)> = Vec::new();
+                for (end_rep, mut token_ranges) in end_rep_token_ranges {
+                    merge_ranges_in_place(&mut token_ranges);
+                    let prehashed_key = PreHashedRanges::new(token_ranges.clone());
+                    let range_set: Arc<RangeSetBlaze<u32>> = Arc::new(
+                        token_ranges.into_iter().map(|(start, end)| start..=end).collect(),
+                    );
+                    for &tsid in initial_tsids.iter() {
+                        result.push((end_rep, tsid, prehashed_key.clone(), Arc::clone(&range_set)));
+                    }
+                }
+                result
+            })
+            .collect()
+    };
 
     // Canonicalize identical token sets across start groups so later stages can
     // key off shared Arc identity instead of rebuilding content-based keys.
