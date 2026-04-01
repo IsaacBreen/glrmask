@@ -33,7 +33,7 @@ const JSON_BOOL_RULE: &str = "JSON_BOOL";
 const JSON_NULL_RULE: &str = "JSON_NULL";
 const JSON_KEY_COLON_RULE: &str = "json_key_colon";
 const JSON_KEY_COLON_BODY_RULE: &str = "JSON_KEY_COLON_BODY";
-const JSON_STRING_REPEAT_CHUNK: usize = 1024;
+const JSON_STRING_REPEAT_CHUNK: usize = 128;
 
 const JSON_STRING_BODY_REGEX: &str =
     r#"([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*""#;
@@ -6536,10 +6536,10 @@ mod tests {
         assert!(!split_rule.is_terminal, "expected large bounded string to lower through a nonterminal rule");
 
         assert!(grammar.rules.iter().any(|rule| {
-            rule.is_terminal && rule.name.starts_with("JSON_STRING_CHAR_EXACT_1024")
+            rule.is_terminal && rule.name.starts_with("JSON_STRING_CHAR_EXACT_128")
         }));
         assert!(grammar.rules.iter().any(|rule| {
-            rule.is_terminal && rule.name.starts_with("JSON_STRING_CHAR_UPTO_1024")
+            rule.is_terminal && rule.name.starts_with("JSON_STRING_CHAR_UPTO_128")
         }));
     }
 
