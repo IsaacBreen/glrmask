@@ -3,12 +3,46 @@
 
 pub(crate) mod max_length;
 
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
+
+/// Ranges key with pre-computed hash for O(1) HashMap lookups.
+/// The hash is computed in the parallel traversal phase so the sequential
+/// interning loop avoids re-hashing large range vectors.
+#[derive(Clone)]
+struct PreHashedRanges {
+    hash: u64,
+    ranges: Vec<(u32, u32)>,
+}
+
+impl PreHashedRanges {
+    fn new(ranges: Vec<(u32, u32)>) -> Self {
+        let mut h: u64 = ranges.len() as u64;
+        for &(s, e) in &ranges {
+            h = h.wrapping_mul(0x517cc1b727220a95) ^ ((s as u64) | ((e as u64) << 32));
+        }
+        Self { hash: h, ranges }
+    }
+}
+
+impl PartialEq for PreHashedRanges {
+    fn eq(&self, other: &Self) -> bool {
+        self.hash == other.hash && self.ranges == other.ranges
+    }
+}
+
+impl Eq for PreHashedRanges {}
+
+impl Hash for PreHashedRanges {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.hash);
+    }
+}
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
@@ -297,7 +331,7 @@ fn build_l1_terminal_dwa(
         }
     }
 
-    let per_thread_results: Vec<Vec<(u32, u32, Vec<(u32, u32)>, Arc<RangeSetBlaze<u32>>)>> = start_states_list
+    let per_thread_results: Vec<Vec<(u32, u32, PreHashedRanges, Arc<RangeSetBlaze<u32>>)>> = start_states_list
         .par_iter()
         .map(|&(&start_state, ref initial_tsids)| {
             let mut end_rep_token_ranges = FxHashMap::<u32, Vec<(u32, u32)>>::default();
@@ -312,17 +346,18 @@ fn build_l1_terminal_dwa(
             );
 
             // Phase 2: Build Arc'd RangeSets per (end_rep, tsid).
-            // Arc::clone is ~5ns vs deep clone ~200ns.
-            let mut result: Vec<(u32, u32, Vec<(u32, u32)>, Arc<RangeSetBlaze<u32>>)> = Vec::new();
+            // Pre-compute content hash in parallel so the sequential interning
+            // can do O(1) hash lookups instead of re-hashing each ranges Vec.
+            let mut result: Vec<(u32, u32, PreHashedRanges, Arc<RangeSetBlaze<u32>>)> = Vec::new();
             for (end_rep, mut token_ranges) in end_rep_token_ranges {
                 merge_ranges_in_place(&mut token_ranges);
-                let canonical_key = token_ranges.clone();
+                let prehashed_key = PreHashedRanges::new(token_ranges.clone());
                 let range_set: Arc<RangeSetBlaze<u32>> = Arc::new(
                     token_ranges.into_iter().map(|(start, end)| start..=end).collect(),
                 );
 
                 for &tsid in initial_tsids.iter() {
-                    result.push((end_rep, tsid, canonical_key.clone(), Arc::clone(&range_set)));
+                    result.push((end_rep, tsid, prehashed_key.clone(), Arc::clone(&range_set)));
                 }
             }
 
@@ -332,8 +367,9 @@ fn build_l1_terminal_dwa(
 
     // Canonicalize identical token sets across start groups so later stages can
     // key off shared Arc identity instead of rebuilding content-based keys.
+    // Uses pre-computed hashes from the parallel phase for O(1) hash lookups.
     let token_set_intern_started_at = Instant::now();
-    let mut interned_arc_by_ranges = FxHashMap::<Vec<(u32, u32)>, Arc<RangeSetBlaze<u32>>>::default();
+    let mut interned_arc_by_ranges = FxHashMap::<PreHashedRanges, Arc<RangeSetBlaze<u32>>>::default();
 
     // Concatenate per-thread results. No merge needed since each (end_rep, tsid)
     // pair appears in exactly one thread.
