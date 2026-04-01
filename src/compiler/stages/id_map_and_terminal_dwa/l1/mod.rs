@@ -512,12 +512,35 @@ fn build_l1_terminal_dwa(
             .par_iter()
             .map(|&(&start_state, ref initial_tsids)| {
                 let collect_start = Instant::now();
-                // Flat array indexed by end_rep_idx. No HashMap overhead.
-                let mut ranges_by_end: Vec<Vec<(u32, u32)>> = (0..n_end_reps).map(|_| Vec::new()).collect();
+
+                // Single pass over indexed_walk_cache: collect work items and
+                // count ranges per end_rep for exact pre-allocation.
+                let mut work_items: Vec<(usize, &[(u32, u32)])> = Vec::new();
+                let mut caps: Vec<usize> = vec![0; n_end_reps];
 
                 // Empty tokens: end_rep = start_rep
                 let start_rep = state_to_rep[start_state as usize];
                 let start_rep_idx = end_rep_to_idx[start_rep as usize];
+                caps[start_rep_idx] += empty_token_indices.len();
+
+                for (byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
+                    if token_ids.is_empty() { continue; }
+                    let target = flat_trans[start_state as usize * 256 + byte];
+                    if target == dead { continue; }
+                    if let Some(results) = indexed_walk_cache.get(&(byte as u8, target)) {
+                        for &(end_rep_idx, ranges) in results {
+                            caps[end_rep_idx] += ranges.len();
+                            work_items.push((end_rep_idx, ranges));
+                        }
+                    }
+                }
+
+                // Pre-allocate with exact capacity (no reallocations during extend).
+                let mut ranges_by_end: Vec<Vec<(u32, u32)>> = caps.into_iter()
+                    .map(|c| Vec::with_capacity(c))
+                    .collect();
+
+                // Empty tokens
                 for &internal_token_id in &empty_token_indices {
                     append_token_id_range(
                         &mut ranges_by_end[start_rep_idx],
@@ -525,31 +548,23 @@ fn build_l1_terminal_dwa(
                     );
                 }
 
-                // Collect cached walk results in byte order (0→255).
-                // Merge-during-extend: check adjacency with last range on append.
-                for (byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
-                    if token_ids.is_empty() { continue; }
-                    let target = flat_trans[start_state as usize * 256 + byte];
-                    if target == dead { continue; }
-                    if let Some(results) = indexed_walk_cache.get(&(byte as u8, target)) {
-                        for &(end_rep_idx, ranges) in results {
-                            let dest = &mut ranges_by_end[end_rep_idx];
-                            // Walk_cache ranges are sorted & non-overlapping.
-                            // Only the first range can merge with dest's tail.
-                            // Rest appended via fast memcpy (extend_from_slice).
-                            if let Some((&first, rest)) = ranges.split_first() {
-                                if let Some(last) = dest.last_mut() {
-                                    if first.0 <= last.1.saturating_add(1) {
-                                        last.1 = last.1.max(first.1);
-                                    } else {
-                                        dest.push(first);
-                                    }
-                                } else {
-                                    dest.push(first);
-                                }
-                                dest.extend_from_slice(rest);
+                // Extend from work items (no HashMap lookups, no reallocations).
+                for &(end_rep_idx, ranges) in &work_items {
+                    let dest = &mut ranges_by_end[end_rep_idx];
+                    // Walk_cache ranges are sorted & non-overlapping.
+                    // Only the first range can merge with dest's tail.
+                    // Rest appended via fast memcpy (extend_from_slice).
+                    if let Some((&first, rest)) = ranges.split_first() {
+                        if let Some(last) = dest.last_mut() {
+                            if first.0 <= last.1.saturating_add(1) {
+                                last.1 = last.1.max(first.1);
+                            } else {
+                                dest.push(first);
                             }
+                        } else {
+                            dest.push(first);
                         }
+                        dest.extend_from_slice(rest);
                     }
                 }
                 p2_collect_ns.fetch_add(collect_start.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
