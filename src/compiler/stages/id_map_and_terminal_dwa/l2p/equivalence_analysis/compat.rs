@@ -86,6 +86,43 @@ impl FlatDfa {
         }
     }
 
+    /// Build a FlatDfa filtering finalizers and futures to only active groups.
+    /// States that differ only by inactive-group data become equivalent.
+    pub fn from_tokenizer_filtered(tokenizer: &Tokenizer, active_groups: &[bool]) -> Self {
+        let dfa = &tokenizer.dfa;
+        let dfa_states = dfa.states();
+        let start_state = tokenizer.start_state() as usize;
+        let num_groups = active_groups.len();
+        let states: Vec<FlatDfaState> = dfa_states
+            .iter()
+            .enumerate()
+            .map(|(i, state)| {
+                let transitions = build_transition_table(
+                    state.transitions.iter().map(|(byte, &target)| (byte, target)),
+                );
+                let finalizers: Vec<usize> = state.finalizers.iter()
+                    .filter(|&gid| gid < num_groups && active_groups[gid])
+                    .collect();
+                let possible_future_group_ids: Vec<usize> = dfa
+                    .possible_future_group_ids(i as u32)
+                    .iter()
+                    .filter(|&gid| gid < num_groups && active_groups[gid])
+                    .collect();
+
+                FlatDfaState {
+                    transitions,
+                    finalizers,
+                    possible_future_group_ids,
+                }
+            })
+            .collect();
+
+        FlatDfa {
+            states,
+            start_state,
+        }
+    }
+
     #[cfg(test)]
     pub fn num_states(&self) -> usize {
         self.states.len()
@@ -116,6 +153,13 @@ impl TokenizerView {
     pub fn new(tokenizer: &Tokenizer) -> Self {
         TokenizerView {
             flat_dfa: FlatDfa::from_tokenizer(tokenizer),
+        }
+    }
+
+    /// Build a view that filters finalizers and futures to only active groups.
+    pub fn new_filtered(tokenizer: &Tokenizer, active_groups: &[bool]) -> Self {
+        TokenizerView {
+            flat_dfa: FlatDfa::from_tokenizer_filtered(tokenizer, active_groups),
         }
     }
 

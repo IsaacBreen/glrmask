@@ -46,7 +46,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
 
     let total_started_at = Instant::now();
     let id_map_started_at = Instant::now();
-    let (mut id_map, sorted_entries, state_to_rep, id_map_profile) = build_l1_id_map(tokenizer, vocab);
+    let (mut id_map, sorted_entries, state_to_rep, id_map_profile) = build_l1_id_map(tokenizer, vocab, active_terminals);
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
     let num_terminals = grammar.num_terminals as u32;
     let dwa_started_at = Instant::now();
@@ -95,15 +95,15 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     Some((id_map, dwa))
 }
 
-fn build_l1_id_map<'a>(tokenizer: &Tokenizer, vocab: &'a Vocab) -> (InternalIdMap, Vec<(u32, &'a [u8])>, Vec<u32>, L1IdMapProfile) {
+fn build_l1_id_map<'a>(tokenizer: &Tokenizer, vocab: &'a Vocab, active_terminals: &[bool]) -> (InternalIdMap, Vec<(u32, &'a [u8])>, Vec<u32>, L1IdMapProfile) {
     let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
 
     // Max-length bounded state equivalence: merge DFA states that behave
     // identically when only tokens up to the max vocab token length are
-    // considered. This dramatically reduces the effective number of states
-    // for large counting DFAs (e.g. json_string_char{1,256}).
+    // considered. Filtering by active_terminals lets us also merge states
+    // that differ only by inactive terminal finalizers/futures.
     let state_equiv_started_at = Instant::now();
-    let tokenizer_view = TokenizerView::new(tokenizer);
+    let tokenizer_view = TokenizerView::new_filtered(tokenizer, active_terminals);
     let token_bytes: Vec<&[u8]> = vocab
         .entries
         .values()
