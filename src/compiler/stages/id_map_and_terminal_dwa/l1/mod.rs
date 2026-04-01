@@ -452,6 +452,31 @@ fn build_l1_terminal_dwa(
         let phase1_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0;
         phase1_wall_ms = phase1_ms;
 
+        // Debug: count unique transition signatures among start_states.
+        // Signature = sorted Vec of (first_byte, target) for non-dead transitions.
+        if debug_profile_enabled() {
+            let dead2 = u32::MAX;
+            let mut sig_counts: FxHashMap<Vec<(u8, u32)>, usize> = FxHashMap::default();
+            for (&start_state, _) in &states_to_initial_tsids {
+                let mut sig: Vec<(u8, u32)> = Vec::new();
+                for (byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
+                    if token_ids.is_empty() { continue; }
+                    let target = flat_trans[start_state as usize * 256 + byte];
+                    if target != dead2 {
+                        sig.push((byte as u8, target));
+                    }
+                }
+                *sig_counts.entry(sig).or_default() += 1;
+            }
+            let unique_sigs = sig_counts.len();
+            let max_group = sig_counts.values().max().copied().unwrap_or(0);
+            let groups_gt1: usize = sig_counts.values().filter(|&&v| v > 1).count();
+            eprintln!(
+                "[glrmask/debug][l1_signatures] total_start_states={} unique_signatures={} max_group_size={} groups_with_multiple={}",
+                start_states_list.len(), unique_sigs, max_group, groups_gt1
+            );
+        }
+
         // Phase 2: For each start_state, collect cached walk results across all
         // first bytes, merge per end_rep, build PreHashedRanges.
         // Token IDs are assigned in byte-sorted order and we iterate
@@ -501,34 +526,95 @@ fn build_l1_terminal_dwa(
 
     let phase2_wall_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0 - phase1_wall_ms;
 
-    // Canonicalize identical token sets and build Arc<RangeSetBlaze> only for
-    // unique range sets. Full equality comparison via PreHashedRanges.
+    // Sort-based intern: sort entries by hash, find hash-group boundaries,
+    // then verify and build Arcs in parallel.
     let token_set_intern_started_at = Instant::now();
-    let mut interned_arc_by_ranges = FxHashMap::<PreHashedRanges, Arc<RangeSetBlaze<u32>>>::default();
 
-    let mut deferred_arced: Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>> =
-        vec![Vec::new(); num_dfa_states];
-    for thread_result in per_thread_results {
-        for (end_rep, tsid, ranges_key) in thread_result {
-            let canonical_arc = if let Some(arc) = interned_arc_by_ranges.get(&ranges_key) {
-                arc.clone()
-            } else {
-                let arc: Arc<RangeSetBlaze<u32>> = Arc::new(
-                    ranges_key.ranges.iter().map(|&(s, e)| s..=e).collect(),
-                );
-                interned_arc_by_ranges.insert(ranges_key, arc.clone());
-                arc
-            };
-            deferred_arced[end_rep as usize].push((tsid, canonical_arc));
+    // Flatten all thread results into a single Vec.
+    let mut all_entries: Vec<(u32, u32, PreHashedRanges)> =
+        per_thread_results.into_iter().flatten().collect();
+
+    // Sort by hash (fast u64 comparison). Equal hashes → same group candidate.
+    all_entries.sort_unstable_by_key(|entry| entry.2.hash);
+
+    // Find hash-group boundaries (sequential, fast — u64 comparison only).
+    let mut hash_group_starts: Vec<usize> = vec![0];
+    for k in 1..all_entries.len() {
+        if all_entries[k].2.hash != all_entries[k - 1].2.hash {
+            hash_group_starts.push(k);
         }
     }
+    hash_group_starts.push(all_entries.len());
+
+    // Process hash groups in parallel. For each group, verify ranges equality
+    // (handles hash collisions), build Arc, and collect (end_rep, tsid, Arc).
+    let group_results: Vec<Vec<(usize, u32, Arc<RangeSetBlaze<u32>>)>> = hash_group_starts
+        .par_windows(2)
+        .map(|w| {
+            let start = w[0];
+            let end = w[1];
+            let mut out = Vec::new();
+            // Within [start..end): same hash. Sub-group by ranges for correctness.
+            let mut sub_start = start;
+            while sub_start < end {
+                let mut sub_end = sub_start + 1;
+                while sub_end < end
+                    && all_entries[sub_end].2.ranges == all_entries[sub_start].2.ranges
+                {
+                    sub_end += 1;
+                }
+                let arc: Arc<RangeSetBlaze<u32>> = Arc::new(
+                    all_entries[sub_start]
+                        .2
+                        .ranges
+                        .iter()
+                        .map(|&(s, e)| s..=e)
+                        .collect(),
+                );
+                for k in sub_start..sub_end {
+                    out.push((
+                        all_entries[k].0 as usize,
+                        all_entries[k].1,
+                        arc.clone(),
+                    ));
+                }
+                sub_start = sub_end;
+            }
+            out
+        })
+        .collect();
+
+    // Merge parallel results into deferred_arced (sequential).
+    let mut deferred_arced: Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>> =
+        vec![Vec::new(); num_dfa_states];
+    // Count unique range sets: each distinct Arc pointer = one unique set.
+    let unique_range_set_count;
+    {
+        let mut seen_arcs: rustc_hash::FxHashSet<usize> = rustc_hash::FxHashSet::default();
+        for result in &group_results {
+            for &(_, _, ref arc) in result {
+                seen_arcs.insert(Arc::as_ptr(arc) as usize);
+            }
+        }
+        unique_range_set_count = seen_arcs.len();
+    }
+    for result in group_results {
+        for (end_rep, tsid, arc) in result {
+            deferred_arced[end_rep].push((tsid, arc));
+        }
+    }
+
     let token_set_intern_ms = token_set_intern_started_at.elapsed().as_secs_f64() * 1000.0;
     let traversal_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0;
     if debug_profile_enabled() {
         eprintln!(
+            "[glrmask/debug][l1_intern_detail] entries={} unique_sets={} hash_groups={} intern_ms={:.1}",
+            all_entries.len(), unique_range_set_count, hash_group_starts.len() - 1, token_set_intern_ms,
+        );
+        eprintln!(
             "[glrmask/debug][l1_traversal] start_states={} phase1_walk_ms={:.1} phase2_assembly_ms={:.1} intern_ms={:.1} unique_range_sets={} skipped_walks={} skipped_tokens={} total_vt_ms={:.1}",
             start_states_list.len(), phase1_wall_ms, phase2_wall_ms, token_set_intern_ms,
-            interned_arc_by_ranges.len(),
+            unique_range_set_count,
             skipped_walks.load(std::sync::atomic::Ordering::Relaxed),
             skipped_tokens.load(std::sync::atomic::Ordering::Relaxed),
             traversal_ms,
