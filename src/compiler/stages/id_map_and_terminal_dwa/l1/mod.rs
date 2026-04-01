@@ -34,6 +34,11 @@ use super::types::{TerminalColoring, compile_profile_enabled, debug_profile_enab
 /// than L2P's NWA-based approach.
 pub(crate) const MAX_L1_TSIDS: usize = 50;
 
+/// The trie walk with self-loop subtree skipping pays off on smaller tokenizer
+/// DFAs, but on very large tokenizers the trie construction and recursive walk
+/// can outweigh the skip wins.
+const MAX_L1_TRIE_TOKENIZER_STATES: usize = 5_000;
+
 /// Quickly count L1 equivalence classes for the given active terminals.
 ///
 /// Used by the partition builder to decide whether L1 should be attempted
@@ -264,10 +269,18 @@ fn build_l1_terminal_dwa(
         return None;
     }
 
-    let vocab_tree_started_at = Instant::now();
     let (grouped_entries, group_internal_ranges) = group_sorted_entries_by_bytes(&sorted_entries);
-    let vocab_tree = VocabPrefixTree::build_presorted(&grouped_entries);
-    let vocab_tree_build_ms = vocab_tree_started_at.elapsed().as_secs_f64() * 1000.0;
+    let use_trie_traversal = tokenizer.num_states() as usize <= MAX_L1_TRIE_TOKENIZER_STATES;
+    let (vocab_tree, vocab_tree_build_ms) = if use_trie_traversal {
+        let vocab_tree_started_at = Instant::now();
+        let vocab_tree = VocabPrefixTree::build_presorted(&grouped_entries);
+        (
+            Some(vocab_tree),
+            vocab_tree_started_at.elapsed().as_secs_f64() * 1000.0,
+        )
+    } else {
+        (None, 0.0)
+    };
 
     let state_seed_started_at = Instant::now();
     let mut states_to_initial_tsids = FxHashMap::<u32, Vec<u32>>::default();
@@ -298,19 +311,30 @@ fn build_l1_terminal_dwa(
         .par_iter()
         .map(|&(&start_state, ref initial_tsids)| {
             let mut end_rep_ranges = FxHashMap::<u32, Vec<(u32, u32)>>::default();
-            let mut self_loop_bytes = FxHashMap::<u32, U8Set>::default();
             let mut traversal_profile = L1TrieTraversalProfile::default();
-            collect_l1_end_rep_ranges_from_root(
-                &vocab_tree.root,
-                start_state,
-                &flat_trans,
-                state_to_rep,
-                &group_internal_ranges,
-                tokenizer,
-                &mut self_loop_bytes,
-                &mut end_rep_ranges,
-                &mut traversal_profile,
-            );
+            if let Some(vocab_tree) = vocab_tree.as_ref() {
+                let mut self_loop_bytes = FxHashMap::<u32, U8Set>::default();
+                collect_l1_end_rep_ranges_from_root(
+                    &vocab_tree.root,
+                    start_state,
+                    &flat_trans,
+                    state_to_rep,
+                    &group_internal_ranges,
+                    tokenizer,
+                    &mut self_loop_bytes,
+                    &mut end_rep_ranges,
+                    &mut traversal_profile,
+                );
+            } else {
+                collect_l1_end_rep_ranges_flat(
+                    &grouped_entries,
+                    start_state,
+                    &flat_trans,
+                    state_to_rep,
+                    &group_internal_ranges,
+                    &mut end_rep_ranges,
+                );
+            }
 
             // Phase 2: Build Arc'd RangeSets per (end_rep, tsid).
             // Arc::clone is ~5ns vs deep clone ~200ns.
@@ -778,6 +802,70 @@ fn collect_l1_end_rep_ranges_for_node(
             end_rep_ranges,
             profile,
         );
+    }
+}
+
+fn collect_l1_end_rep_ranges_flat(
+    grouped_entries: &[(usize, &[u8])],
+    start_state: u32,
+    flat_trans: &[u32],
+    state_to_rep: &[u32],
+    group_internal_ranges: &[(u32, u32)],
+    end_rep_ranges: &mut FxHashMap<u32, Vec<(u32, u32)>>,
+) {
+    let mut empty_group_ids = Vec::<usize>::new();
+    let mut group_ids_by_first_byte = vec![Vec::<usize>::new(); 256];
+
+    for &(group_id, token_bytes) in grouped_entries {
+        if let Some(&first_byte) = token_bytes.first() {
+            group_ids_by_first_byte[first_byte as usize].push(group_id);
+        } else {
+            empty_group_ids.push(group_id);
+        }
+    }
+
+    let start_rep = state_to_rep[start_state as usize];
+    for group_id in empty_group_ids {
+        append_group_token_range(
+            end_rep_ranges.entry(start_rep).or_default(),
+            group_internal_ranges,
+            group_id,
+        );
+    }
+
+    for (first_byte, group_ids) in group_ids_by_first_byte.iter().enumerate() {
+        if group_ids.is_empty() {
+            continue;
+        }
+
+        let first_target = flat_trans[start_state as usize * 256 + first_byte];
+        if first_target == u32::MAX {
+            continue;
+        }
+
+        for &group_id in group_ids {
+            let token_bytes = grouped_entries[group_id].1;
+            let mut state = first_target;
+            let mut blocked = false;
+            for &byte in &token_bytes[1..] {
+                let next_state = flat_trans[state as usize * 256 + byte as usize];
+                if next_state == u32::MAX {
+                    blocked = true;
+                    break;
+                }
+                state = next_state;
+            }
+            if blocked {
+                continue;
+            }
+
+            let end_rep = state_to_rep[state as usize];
+            append_group_token_range(
+                end_rep_ranges.entry(end_rep).or_default(),
+                group_internal_ranges,
+                group_id,
+            );
+        }
     }
 }
 
