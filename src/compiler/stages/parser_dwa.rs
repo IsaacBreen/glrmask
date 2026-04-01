@@ -151,11 +151,38 @@ fn build_state_summaries(
         pending_branches_by_state.push(pending_branches);
     }
 
+    if parser_dwa_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][parser_dwa_bundles] terminal_dwa_states={} unique_bundles={} total_branches={}",
+            terminal_dwa.states.len(),
+            unique_bundles.len(),
+            pending_branches_by_state.iter().map(|b| b.len()).sum::<usize>(),
+        );
+        for (i, bundle) in unique_bundles.iter().enumerate() {
+            let terminals: Vec<_> = bundle.keys().collect();
+            if terminals.len() > 5 || bundle.values().any(|w| !w.is_empty()) {
+                eprintln!(
+                    "[glrmask/profile][parser_dwa_bundles] bundle={} num_terminals={}",
+                    i, terminals.len(),
+                );
+            }
+        }
+    }
+
     let built_bundles: Vec<Arc<NWA>> = {
         use rayon::prelude::*;
         unique_bundles
             .par_iter()
-            .map(|bundle| Arc::new(templates.build_bundle(bundle)))
+            .map(|bundle| {
+                let nwa = Arc::new(templates.build_bundle(bundle));
+                if parser_dwa_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][parser_dwa_bundle_built] bundle_terminals={} nwa_states={}",
+                        bundle.len(), nwa.states.len(),
+                    );
+                }
+                nwa
+            })
             .collect()
     };
 

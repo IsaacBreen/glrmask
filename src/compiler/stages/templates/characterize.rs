@@ -196,7 +196,7 @@ pub(crate) fn characterize_terminals(
 
 fn characterize_terminal(
     table: &GLRTable,
-    grammar: &AnalyzedGrammar,
+    _grammar: &AnalyzedGrammar,
     terminal: TerminalID,
 ) -> TerminalCharacterization {
     let mut shifts = BTreeSet::new();
@@ -227,12 +227,24 @@ fn characterize_terminal(
         }
     }
 
+    let mut referenced_nts = BTreeSet::new();
+    for &(_, _, nt) in &reduces {
+        referenced_nts.insert(nt);
+    }
+    for &(src_nt, _, _, _) in &nt_escapes {
+        referenced_nts.insert(src_nt);
+    }
+    for &(src_nt, _, _, target_nt) in &nt_rereduces {
+        referenced_nts.insert(src_nt);
+        referenced_nts.insert(target_nt);
+    }
+
     let characterization = TerminalCharacterization {
         shifts: shifts.into_iter().collect(),
         reduces: reduces.into_iter().collect(),
         nt_escapes: nt_escapes.into_iter().collect(),
         nt_rereduces: nt_rereduces.into_iter().collect(),
-        all_nts: (0..grammar.num_nonterminals).collect(),
+        all_nts: referenced_nts,
     };
 
     if let Some(cycle) = characterization.find_cycle() {
