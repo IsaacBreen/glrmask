@@ -10,6 +10,7 @@ use rustc_hash::FxHashMap;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
+use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 
 pub(crate) type PossibleMatchesByState = BTreeMap<u32, BTreeMap<TerminalID, RangeSetBlaze<u32>>>;
@@ -34,6 +35,7 @@ pub(crate) struct PossibleMatchesProfile {
     pub(crate) byte_steps: u64,
     pub(crate) blocked_segments: u64,
     pub(crate) recursive_descents: u64,
+    pub(crate) self_loop_subtrees_skipped: u64,
     pub(crate) terminal_insertions: u64,
     pub(crate) cache_entries: usize,
     pub(crate) reachable_cache_entries: usize,
@@ -86,6 +88,7 @@ pub(crate) struct PossibleMatchesComputer<'a> {
     tokenizer: &'a Tokenizer,
     cache: FxHashMap<(usize, u32), Rc<PossibleMatchMap>>,
     reachable_cache: FxHashMap<usize, Rc<RangeSetBlaze<u32>>>,
+    self_loop_bytes: FxHashMap<u32, U8Set>,
     profile: PossibleMatchesProfile,
 }
 
@@ -95,6 +98,7 @@ impl<'a> PossibleMatchesComputer<'a> {
             tokenizer,
             cache: FxHashMap::default(),
             reachable_cache: FxHashMap::default(),
+            self_loop_bytes: FxHashMap::default(),
             profile: PossibleMatchesProfile::default(),
         }
     }
@@ -118,6 +122,24 @@ impl<'a> PossibleMatchesComputer<'a> {
         let reachable = Rc::new(reachable_u32(node));
         self.reachable_cache.insert(cache_key, Rc::clone(&reachable));
         reachable
+    }
+
+    fn can_skip_self_loop_subtree(
+        &mut self,
+        node: &VocabPrefixTreeNode,
+        tokenizer_state: u32,
+    ) -> bool {
+        let self_loop_bytes = self.self_loop_bytes.entry(tokenizer_state).or_insert_with(|| {
+            let state = &self.tokenizer.dfa.states()[tokenizer_state as usize];
+            let mut bytes = U8Set::empty();
+            for (byte, &target) in state.transitions.iter() {
+                if target == tokenizer_state {
+                    bytes.insert(byte);
+                }
+            }
+            bytes
+        });
+        U8Set::from_words(*node.subtree_bytes()).is_subset(self_loop_bytes)
     }
 
     pub(crate) fn possible_matches_for_node(
@@ -169,6 +191,10 @@ impl<'a> PossibleMatchesComputer<'a> {
                 self.profile.blocked_segments += 1;
             }
             if !segment_blocked && !self.tokenizer.is_end(current_state) {
+                if self.can_skip_self_loop_subtree(child, current_state) {
+                    self.profile.self_loop_subtrees_skipped += 1;
+                    continue;
+                }
                 self.profile.recursive_descents += 1;
                 let child_matches = self.possible_matches_for_node(child, current_state);
                 merge_possible_match_maps(&mut result, child_matches.as_ref());
@@ -275,7 +301,7 @@ fn collect_possible_matches_by_keys(
         if debug_profile && ((states_done % 100_000 == 0) || states_done == total_keys) {
             let profile = computer.profile();
             eprintln!(
-                "[glrmask/debug][possible_matches] states_done={} total_states={} elapsed_ms={:.3} cache_entries={} reachable_cache_entries={} cache_hits={} cache_misses={} child_segments={} byte_steps={} recursive_descents={} terminal_insertions={}",
+                "[glrmask/debug][possible_matches] states_done={} total_states={} elapsed_ms={:.3} cache_entries={} reachable_cache_entries={} cache_hits={} cache_misses={} child_segments={} byte_steps={} recursive_descents={} self_loop_subtrees_skipped={} terminal_insertions={}",
                 states_done,
                 total_keys,
                 started_at.elapsed().as_secs_f64() * 1000.0,
@@ -286,6 +312,7 @@ fn collect_possible_matches_by_keys(
                 profile.child_segments_visited,
                 profile.byte_steps,
                 profile.recursive_descents,
+                profile.self_loop_subtrees_skipped,
                 profile.terminal_insertions,
             );
         }
@@ -337,7 +364,7 @@ pub(crate) fn permute_possible_match_state_ids_in_place(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automata::lexer::ast::bytes;
+    use crate::automata::lexer::ast::{byte, bytes, star};
     use crate::compiler::compile::build_tokenizer_from_exprs;
     use range_set_blaze::RangeSetBlaze;
 
@@ -360,5 +387,34 @@ mod tests {
             start_matches.get(&1),
             Some(&RangeSetBlaze::from_iter([0u32..=0u32]))
         );
+    }
+
+    #[test]
+    fn test_possible_matches_self_loop_subtree_skip_preserves_descendants() {
+        let tokenizer = build_tokenizer_from_exprs(&[star(byte(b'a'))]);
+        let token_entries = vec![
+            (0u32, b"a".to_vec()),
+            (1u32, b"aa".to_vec()),
+            (2u32, b"aaa".to_vec()),
+        ];
+
+        let trie = VocabPrefixTree::build_owned(
+            token_entries
+                .into_iter()
+                .map(|(token_id, bytes)| (token_id as usize, bytes))
+                .collect(),
+        );
+        let mut computer = PossibleMatchesComputer::new(&tokenizer);
+        let possible_matches = collect_possible_matches_by_state(&tokenizer, &trie.root, &mut computer);
+
+        let start_matches = possible_matches
+            .get(&tokenizer.initial_state())
+            .expect("start state should have possible matches");
+
+        assert_eq!(
+            start_matches.get(&0),
+            Some(&RangeSetBlaze::from_iter([0u32..=2u32]))
+        );
+        assert!(computer.profile().self_loop_subtrees_skipped > 0);
     }
 }
