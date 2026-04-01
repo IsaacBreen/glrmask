@@ -20,13 +20,21 @@ struct PreHashedRanges {
     ranges: Vec<(u32, u32)>,
 }
 
+/// Hash contribution of a single (start, end) range.
+#[inline(always)]
+fn range_hash_val(s: u32, e: u32) -> u64 {
+    let v = (s as u64) | ((e as u64) << 32);
+    v.wrapping_mul(0x517cc1b727220a95)
+}
+
 impl PreHashedRanges {
     fn new(ranges: Vec<(u32, u32)>) -> Self {
-        let mut h: u64 = ranges.len() as u64;
+        let mut h: u64 = 0;
         for &(s, e) in &ranges {
-            h = h.wrapping_mul(0x517cc1b727220a95) ^ ((s as u64) | ((e as u64) << 32));
+            h = h.wrapping_add(range_hash_val(s, e));
         }
-        Self { hash: h, ranges }
+        let hash = (ranges.len() as u64).wrapping_add(h);
+        Self { hash, ranges }
     }
 }
 
@@ -498,8 +506,8 @@ fn build_l1_terminal_dwa(
         // Phase 2: For each start_state, collect cached walk results across all
         // first bytes, merge per end_rep into flat array, build PreHashedRanges.
         // Uses merge-during-extend: when appending ranges to an end_rep's Vec,
-        // merge with the last range if adjacent. This eliminates the separate
-        // merge pass and reduces total memory traffic.
+        // merge with the last range if adjacent. Hash computed at finalization
+        // using commutative add-of-multiply (independent per range, no data dependency chain).
         start_states_list
             .par_iter()
             .map(|&(&start_state, ref initial_tsids)| {
@@ -518,9 +526,7 @@ fn build_l1_terminal_dwa(
                 }
 
                 // Collect cached walk results in byte order (0→255).
-                // Since token IDs are byte-sorted, ranges from successive
-                // first bytes are already in sorted order. We merge during
-                // extend: append each range, merging with the last if adjacent.
+                // Merge-during-extend: check adjacency with last range on append.
                 for (byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
                     if token_ids.is_empty() { continue; }
                     let target = flat_trans[start_state as usize * 256 + byte];
@@ -528,14 +534,20 @@ fn build_l1_terminal_dwa(
                     if let Some(results) = indexed_walk_cache.get(&(byte as u8, target)) {
                         for &(end_rep_idx, ranges) in results {
                             let dest = &mut ranges_by_end[end_rep_idx];
-                            for &(s, e) in ranges {
+                            // Walk_cache ranges are sorted & non-overlapping.
+                            // Only the first range can merge with dest's tail.
+                            // Rest appended via fast memcpy (extend_from_slice).
+                            if let Some((&first, rest)) = ranges.split_first() {
                                 if let Some(last) = dest.last_mut() {
-                                    if s <= last.1.saturating_add(1) {
-                                        last.1 = last.1.max(e);
-                                        continue;
+                                    if first.0 <= last.1.saturating_add(1) {
+                                        last.1 = last.1.max(first.1);
+                                    } else {
+                                        dest.push(first);
                                     }
+                                } else {
+                                    dest.push(first);
                                 }
-                                dest.push((s, e));
+                                dest.extend_from_slice(rest);
                             }
                         }
                     }
@@ -544,6 +556,8 @@ fn build_l1_terminal_dwa(
 
                 // Build one entry per (end_rep, tsid).
                 // Ranges are already merged from the extend step.
+                // Move the last TSID entry instead of cloning to avoid
+                // unnecessary Vec allocation for the common 1-TSID case.
                 let build_start = Instant::now();
                 let mut result: Vec<(u32, u32, PreHashedRanges)> = Vec::new();
                 for (idx, token_ranges) in ranges_by_end.into_iter().enumerate() {
@@ -551,9 +565,12 @@ fn build_l1_terminal_dwa(
                     p2_total_ranges.fetch_add(token_ranges.len() as u64, std::sync::atomic::Ordering::Relaxed);
                     let end_rep = all_end_reps[idx];
                     let prehashed_key = PreHashedRanges::new(token_ranges);
-                    for &tsid in initial_tsids.iter() {
-                        result.push((end_rep, tsid, prehashed_key.clone()));
+                    if initial_tsids.len() > 1 {
+                        for &tsid in &initial_tsids[..initial_tsids.len() - 1] {
+                            result.push((end_rep, tsid, prehashed_key.clone()));
+                        }
                     }
+                    result.push((end_rep, *initial_tsids.last().unwrap(), prehashed_key));
                 }
                 p2_build_ns.fetch_add(build_start.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
                 result
