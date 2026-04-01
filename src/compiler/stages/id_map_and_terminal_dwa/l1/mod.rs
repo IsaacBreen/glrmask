@@ -280,15 +280,7 @@ fn build_l1_terminal_dwa(
 
     let traversal_started_at = Instant::now();
 
-    // Build flat transition table for O(1) DFA step lookups.
-    let dead = u32::MAX;
-    let mut flat_trans = vec![dead; num_dfa_states * 256];
-    for (state_idx, dfa_state) in tokenizer.dfa.states().iter().enumerate() {
-        let base = state_idx * 256;
-        for (byte, &target) in dfa_state.transitions.iter() {
-            flat_trans[base + byte as usize] = target;
-        }
-    }
+    let flat_trans = build_flat_transition_table(tokenizer);
 
     // Parallel traversal: each start_state processed independently.
     // Each (end_rep, tsid) pair is unique across start groups since TSIDs
@@ -305,60 +297,32 @@ fn build_l1_terminal_dwa(
         }
     }
 
-    let per_thread_results: Vec<Vec<(u32, u32, Arc<RangeSetBlaze<u32>>)>> = start_states_list
+    let per_thread_results: Vec<Vec<(u32, u32, Vec<(u32, u32)>, Arc<RangeSetBlaze<u32>>)>> = start_states_list
         .par_iter()
         .map(|&(&start_state, ref initial_tsids)| {
-            let mut end_rep_tokens = FxHashMap::<u32, Vec<u32>>::default();
-
-            // Phase 1: Simulate all tokens from this start state.
-            for &internal_token_id in &empty_token_indices {
-                let end_rep = state_to_rep[start_state as usize];
-                end_rep_tokens
-                    .entry(end_rep)
-                    .or_default()
-                    .push(internal_token_id as u32);
-            }
-
-            for (first_byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
-                if token_ids.is_empty() {
-                    continue;
-                }
-                let first_target = flat_trans[start_state as usize * 256 + first_byte];
-                if first_target == dead {
-                    continue;
-                }
-
-                for &internal_token_id in token_ids {
-                    let token_bytes = sorted_entries[internal_token_id].1;
-                    let mut state = first_target;
-                    for &byte in &token_bytes[1..] {
-                        let next = flat_trans[state as usize * 256 + byte as usize];
-                        if next == dead {
-                            state = dead;
-                            break;
-                        }
-                        state = next;
-                    }
-                    if state != dead {
-                        let end_rep = state_to_rep[state as usize];
-                        end_rep_tokens
-                            .entry(end_rep)
-                            .or_default()
-                            .push(internal_token_id as u32);
-                    }
-                }
-            }
+            let mut end_rep_token_ranges = FxHashMap::<u32, Vec<(u32, u32)>>::default();
+            collect_l1_root_ranges_by_first_byte_lcp(
+                start_state,
+                &sorted_entries,
+                &empty_token_indices,
+                &token_indices_by_first_byte,
+                &flat_trans,
+                state_to_rep,
+                &mut end_rep_token_ranges,
+            );
 
             // Phase 2: Build Arc'd RangeSets per (end_rep, tsid).
             // Arc::clone is ~5ns vs deep clone ~200ns.
-            let mut result: Vec<(u32, u32, Arc<RangeSetBlaze<u32>>)> = Vec::new();
-            for (end_rep, token_ids) in end_rep_tokens {
+            let mut result: Vec<(u32, u32, Vec<(u32, u32)>, Arc<RangeSetBlaze<u32>>)> = Vec::new();
+            for (end_rep, mut token_ranges) in end_rep_token_ranges {
+                merge_ranges_in_place(&mut token_ranges);
+                let canonical_key = token_ranges.clone();
                 let range_set: Arc<RangeSetBlaze<u32>> = Arc::new(
-                    token_ids.into_iter().map(|x| x..=x).collect(),
+                    token_ranges.into_iter().map(|(start, end)| start..=end).collect(),
                 );
 
                 for &tsid in initial_tsids.iter() {
-                    result.push((end_rep, tsid, Arc::clone(&range_set)));
+                    result.push((end_rep, tsid, canonical_key.clone(), Arc::clone(&range_set)));
                 }
             }
 
@@ -369,7 +333,6 @@ fn build_l1_terminal_dwa(
     // Canonicalize identical token sets across start groups so later stages can
     // key off shared Arc identity instead of rebuilding content-based keys.
     let token_set_intern_started_at = Instant::now();
-    let mut interned_arc_by_ptr = FxHashMap::<usize, Arc<RangeSetBlaze<u32>>>::default();
     let mut interned_arc_by_ranges = FxHashMap::<Vec<(u32, u32)>, Arc<RangeSetBlaze<u32>>>::default();
 
     // Concatenate per-thread results. No merge needed since each (end_rep, tsid)
@@ -377,22 +340,11 @@ fn build_l1_terminal_dwa(
     let mut deferred_arced: Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>> =
         vec![Vec::new(); num_dfa_states];
     for thread_result in per_thread_results {
-        for (end_rep, tsid, arc) in thread_result {
-            let arc_ptr = Arc::as_ptr(&arc) as usize;
-            let canonical_arc = if let Some(existing) = interned_arc_by_ptr.get(&arc_ptr) {
-                Arc::clone(existing)
-            } else {
-                let ranges: Vec<(u32, u32)> = arc
-                    .ranges()
-                    .map(|range| (*range.start(), *range.end()))
-                    .collect();
-                let canonical = interned_arc_by_ranges
-                    .entry(ranges)
-                    .or_insert_with(|| Arc::clone(&arc))
-                    .clone();
-                interned_arc_by_ptr.insert(arc_ptr, Arc::clone(&canonical));
-                canonical
-            };
+        for (end_rep, tsid, ranges, arc) in thread_result {
+            let canonical_arc = interned_arc_by_ranges
+                .entry(ranges)
+                .or_insert_with(|| Arc::clone(&arc))
+                .clone();
             deferred_arced[end_rep as usize].push((tsid, canonical_arc));
         }
     }
@@ -581,6 +533,119 @@ fn build_l1_terminal_dwa(
     ))
 }
 
+fn build_flat_transition_table(tokenizer: &Tokenizer) -> Vec<u32> {
+    let dead = u32::MAX;
+    let mut flat_trans = vec![dead; tokenizer.num_states() as usize * 256];
+    for (state_idx, dfa_state) in tokenizer.dfa.states().iter().enumerate() {
+        let base = state_idx * 256;
+        for (byte, &target) in dfa_state.transitions.iter() {
+            flat_trans[base + byte as usize] = target;
+        }
+    }
+    flat_trans
+}
+
+fn common_prefix_len(left: &[u8], right: &[u8]) -> usize {
+    let limit = left.len().min(right.len());
+    let mut index = 0usize;
+    while index < limit && left[index] == right[index] {
+        index += 1;
+    }
+    index
+}
+
+fn append_token_id_range(token_ranges: &mut Vec<(u32, u32)>, token_id: u32) {
+    if let Some((_, end)) = token_ranges.last_mut() {
+        if end.saturating_add(1) == token_id {
+            *end = token_id;
+            return;
+        }
+    }
+    token_ranges.push((token_id, token_id));
+}
+
+fn collect_l1_root_ranges_by_first_byte_lcp(
+    start_state: u32,
+    sorted_entries: &[(u32, &[u8])],
+    empty_token_indices: &[usize],
+    token_indices_by_first_byte: &[Vec<usize>],
+    flat_trans: &[u32],
+    state_to_rep: &[u32],
+    end_rep_token_ranges: &mut FxHashMap<u32, Vec<(u32, u32)>>,
+) {
+    let dead = u32::MAX;
+    let start_rep = state_to_rep[start_state as usize];
+    for &internal_token_id in empty_token_indices {
+        append_token_id_range(
+            end_rep_token_ranges.entry(start_rep).or_default(),
+            internal_token_id as u32,
+        );
+    }
+
+    for (first_byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
+        if token_ids.is_empty() {
+            continue;
+        }
+
+        let first_target = flat_trans[start_state as usize * 256 + first_byte];
+        if first_target == dead {
+            continue;
+        }
+
+        let mut previous_suffix: &[u8] = &[];
+        let mut suffix_states = vec![first_target];
+        for &internal_token_id in token_ids {
+            let token_bytes = sorted_entries[internal_token_id].1;
+            let suffix_bytes = &token_bytes[1..];
+            let lcp_len = common_prefix_len(previous_suffix, suffix_bytes);
+            suffix_states.truncate(lcp_len + 1);
+
+            let mut state = *suffix_states.last().unwrap_or(&first_target);
+            if state == dead {
+                suffix_states.resize(suffix_bytes.len() + 1, dead);
+            } else {
+                for &byte in &suffix_bytes[lcp_len..] {
+                    state = flat_trans[state as usize * 256 + byte as usize];
+                    suffix_states.push(state);
+                    if state == dead {
+                        suffix_states.resize(suffix_bytes.len() + 1, dead);
+                        break;
+                    }
+                }
+            }
+
+            let final_state = suffix_states[suffix_bytes.len()];
+            if final_state != dead {
+                let end_rep = state_to_rep[final_state as usize];
+                append_token_id_range(
+                    end_rep_token_ranges.entry(end_rep).or_default(),
+                    internal_token_id as u32,
+                );
+            }
+
+            previous_suffix = suffix_bytes;
+        }
+    }
+}
+
+fn merge_ranges_in_place(ranges: &mut Vec<(u32, u32)>) {
+    if ranges.is_empty() {
+        return;
+    }
+
+    ranges.sort_unstable();
+    let mut write_index = 0usize;
+    for read_index in 1..ranges.len() {
+        if ranges[read_index].0 <= ranges[write_index].1.saturating_add(1) {
+            ranges[write_index].1 = ranges[write_index].1.max(ranges[read_index].1);
+        } else {
+            write_index += 1;
+            ranges[write_index] = ranges[read_index];
+        }
+    }
+    ranges.truncate(write_index + 1);
+}
+
 fn merge_deferred_equivalent_tsids(
     id_map: &mut InternalIdMap,
     deferred_arced: &mut [Vec<(u32, Arc<RangeSetBlaze<u32>>)>],
@@ -736,4 +801,97 @@ struct L1TerminalBuildProfile {
     tsid_profile_merge_after: usize,
     vocab_tree_traversal_ms: f64,
     direct_terminal_dwa_ms: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::automata::lexer::ast::{byte, star};
+    use crate::compiler::compile::build_tokenizer_from_exprs;
+
+    fn naive_end_rep_sets(
+        tokenizer: &Tokenizer,
+        sorted_entries: &[(u32, &[u8])],
+        start_state: u32,
+        state_to_rep: &[u32],
+    ) -> BTreeMap<u32, RangeSetBlaze<u32>> {
+        let mut out = BTreeMap::new();
+        for (internal_token_id, &(_original_id, token_bytes)) in sorted_entries.iter().enumerate() {
+            let mut state = start_state;
+            let mut blocked = false;
+            for &byte in token_bytes {
+                let Some(next_state) = tokenizer.step(state, byte) else {
+                    blocked = true;
+                    break;
+                };
+                state = next_state;
+            }
+            if !blocked {
+                out.entry(state_to_rep[state as usize])
+                    .or_insert_with(RangeSetBlaze::new)
+                    .insert(internal_token_id as u32);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_l1_lexicographic_root_traversal_matches_naive_simulation() {
+        let tokenizer = build_tokenizer_from_exprs(&[star(byte(b'a'))]);
+        let mut token_entries = vec![
+            (10u32, b"a".to_vec()),
+            (11u32, b"a".to_vec()),
+            (12u32, b"aa".to_vec()),
+            (13u32, b"aaa".to_vec()),
+            (14u32, b"b".to_vec()),
+        ];
+        token_entries.sort_unstable_by(|left, right| left.1.cmp(&right.1));
+        let sorted_entries: Vec<(u32, &[u8])> = token_entries
+            .iter()
+            .map(|(token_id, bytes)| (*token_id, bytes.as_slice()))
+            .collect();
+
+        let flat_trans = build_flat_transition_table(&tokenizer);
+        let state_to_rep: Vec<u32> = (0..tokenizer.num_states()).collect();
+        let mut end_rep_ranges = FxHashMap::<u32, Vec<(u32, u32)>>::default();
+        let mut empty_token_indices = Vec::<usize>::new();
+        let mut token_indices_by_first_byte = vec![Vec::<usize>::new(); 256];
+        for (internal_token_id, &(_original_id, token_bytes)) in sorted_entries.iter().enumerate() {
+            if let Some(&first_byte) = token_bytes.first() {
+                token_indices_by_first_byte[first_byte as usize].push(internal_token_id);
+            } else {
+                empty_token_indices.push(internal_token_id);
+            }
+        }
+
+        collect_l1_root_ranges_by_first_byte_lcp(
+            tokenizer.initial_state(),
+            &sorted_entries,
+            &empty_token_indices,
+            &token_indices_by_first_byte,
+            &flat_trans,
+            &state_to_rep,
+            &mut end_rep_ranges,
+        );
+
+        let actual: BTreeMap<u32, RangeSetBlaze<u32>> = end_rep_ranges
+            .into_iter()
+            .map(|(end_rep, ranges)| {
+                (
+                    end_rep,
+                    ranges.into_iter().map(|(start, end)| start..=end).collect(),
+                )
+            })
+            .collect();
+        let expected = naive_end_rep_sets(
+            &tokenizer,
+            &sorted_entries,
+            tokenizer.initial_state(),
+            &state_to_rep,
+        );
+
+        assert_eq!(actual, expected);
+    }
 }
