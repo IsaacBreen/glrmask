@@ -364,14 +364,17 @@ fn build_l1_terminal_dwa(
         // state and the walk can be skipped entirely.
         let dead = u32::MAX;
 
-        // Phase 1: Identify unique (first_byte, target) pairs
+        // Phase 1: Identify unique (first_byte, rep_target) pairs.
+        // Equivalent states (same state_to_rep) have identical walk results,
+        // so we merge by rep(target) to reduce walk count.
         let mut unique_targets: FxHashMap<(u8, u32), ()> = FxHashMap::default();
         for (&start_state, _) in &states_to_initial_tsids {
             for (byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
                 if token_ids.is_empty() { continue; }
                 let target = flat_trans[start_state as usize * 256 + byte];
                 if target != dead {
-                    unique_targets.entry((byte as u8, target)).or_default();
+                    let rep_target = state_to_rep[target as usize];
+                    unique_targets.entry((byte as u8, rep_target)).or_default();
                 }
             }
         }
@@ -392,7 +395,9 @@ fn build_l1_terminal_dwa(
             });
         }
 
-        // Parallel walk per unique (first_byte, target). Store raw merged ranges.
+        // Parallel walk per unique (first_byte, rep_target). Store raw merged ranges.
+        // Walking from the representative state produces the same result as walking
+        // from any equivalent state, since k-step equivalence covers all token suffixes.
         let walk_cache: FxHashMap<(u8, u32), Vec<(u32, Vec<(u32, u32)>)>> = unique_walk_keys
             .par_iter()
             .map(|&(first_byte, first_target)| {
@@ -531,7 +536,8 @@ fn build_l1_terminal_dwa(
                     if token_ids.is_empty() { continue; }
                     let target = flat_trans[start_state as usize * 256 + byte];
                     if target == dead { continue; }
-                    if let Some(results) = indexed_walk_cache.get(&(byte as u8, target)) {
+                    let rep_target = state_to_rep[target as usize];
+                    if let Some(results) = indexed_walk_cache.get(&(byte as u8, rep_target)) {
                         for &(end_rep_idx, ranges) in results {
                             caps[end_rep_idx] += ranges.len();
                             work_items.push((end_rep_idx, ranges));
