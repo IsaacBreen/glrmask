@@ -90,7 +90,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     let (mut dwa, terminal_profile) = build_l1_terminal_dwa(
         tokenizer,
         sorted_entries,
-        &id_map,
+        &mut id_map,
         &state_to_rep,
         num_terminals,
         active_terminals,
@@ -126,7 +126,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
             )
         };
         eprintln!(
-            "[glrmask/profile][l1] partition={} vocab_tokens={} tsids={} state_equiv_ms={:.3} token_identity_map_ms={:.3} id_map_ms={:.3} internal_vocab_ms={:.3} vocab_tree_build_ms={:.3} state_seed_ms={:.3} vocab_tree_traversal_ms={:.3} direct_terminal_dwa_ms={:.3} terminal_build_ms={:.3} compact_ms={:.3} determinize=none minimize=none prune=none total_ms={:.3}{}",
+            "[glrmask/profile][l1] partition={} vocab_tokens={} tsids={} state_equiv_ms={:.3} token_identity_map_ms={:.3} id_map_ms={:.3} internal_vocab_ms={:.3} vocab_tree_build_ms={:.3} state_seed_ms={:.3} token_set_intern_ms={:.3} tsid_profile_merge_ms={:.3} tsid_profile_merge_before={} tsid_profile_merge_after={} vocab_tree_traversal_ms={:.3} direct_terminal_dwa_ms={:.3} terminal_build_ms={:.3} compact_ms={:.3} determinize=none minimize=none prune=none total_ms={:.3}{}",
             partition_label,
             vocab.entries.len(),
             id_map.num_tsids(),
@@ -136,6 +136,10 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
             terminal_profile.internal_vocab_ms,
             terminal_profile.vocab_tree_build_ms,
             terminal_profile.state_seed_ms,
+            terminal_profile.token_set_intern_ms,
+            terminal_profile.tsid_profile_merge_ms,
+            terminal_profile.tsid_profile_merge_before,
+            terminal_profile.tsid_profile_merge_after,
             terminal_profile.vocab_tree_traversal_ms,
             terminal_profile.direct_terminal_dwa_ms,
             terminal_build_ms,
@@ -245,7 +249,7 @@ fn build_l1_id_map<'a>(tokenizer: &Tokenizer, vocab: &'a Vocab, active_terminals
 fn build_l1_terminal_dwa(
     tokenizer: &Tokenizer,
     sorted_entries: Vec<(u32, &[u8])>,
-    id_map: &InternalIdMap,
+    id_map: &mut InternalIdMap,
     state_to_rep: &[u32],
     num_terminals: u32,
     active_terminals: &[bool],
@@ -362,16 +366,57 @@ fn build_l1_terminal_dwa(
         })
         .collect();
 
+    // Canonicalize identical token sets across start groups so later stages can
+    // key off shared Arc identity instead of rebuilding content-based keys.
+    let token_set_intern_started_at = Instant::now();
+    let mut interned_arc_by_ptr = FxHashMap::<usize, Arc<RangeSetBlaze<u32>>>::default();
+    let mut interned_arc_by_ranges = FxHashMap::<Vec<(u32, u32)>, Arc<RangeSetBlaze<u32>>>::default();
+
     // Concatenate per-thread results. No merge needed since each (end_rep, tsid)
     // pair appears in exactly one thread.
     let mut deferred_arced: Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>> =
         vec![Vec::new(); num_dfa_states];
     for thread_result in per_thread_results {
         for (end_rep, tsid, arc) in thread_result {
-            deferred_arced[end_rep as usize].push((tsid, arc));
+            let arc_ptr = Arc::as_ptr(&arc) as usize;
+            let canonical_arc = if let Some(existing) = interned_arc_by_ptr.get(&arc_ptr) {
+                Arc::clone(existing)
+            } else {
+                let ranges: Vec<(u32, u32)> = arc
+                    .ranges()
+                    .map(|range| (*range.start(), *range.end()))
+                    .collect();
+                let canonical = interned_arc_by_ranges
+                    .entry(ranges)
+                    .or_insert_with(|| Arc::clone(&arc))
+                    .clone();
+                interned_arc_by_ptr.insert(arc_ptr, Arc::clone(&canonical));
+                canonical
+            };
+            deferred_arced[end_rep as usize].push((tsid, canonical_arc));
         }
     }
+    let token_set_intern_ms = token_set_intern_started_at.elapsed().as_secs_f64() * 1000.0;
     let traversal_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let tsid_profile_merge_started_at = Instant::now();
+    let tsid_profile_merge_before = id_map.num_tsids() as usize;
+    let tsid_profile_merge_report = merge_deferred_equivalent_tsids(id_map, &mut deferred_arced);
+    let tsid_profile_merge_after = tsid_profile_merge_report.tsids_after;
+    let tsid_profile_merge_ms = tsid_profile_merge_started_at.elapsed().as_secs_f64() * 1000.0;
+    if debug_profile_enabled() {
+        eprintln!(
+            "[glrmask/debug][l1_tsid_profile_merge] before={} after={} unique_arc_token_sets={} unique_range_token_sets={} profile_build_ms={:.3} group_ms={:.3} remap_ms={:.3} total_ms={:.3}",
+            tsid_profile_merge_before,
+            tsid_profile_merge_after,
+            tsid_profile_merge_report.unique_arc_token_sets,
+            tsid_profile_merge_report.unique_range_token_sets,
+            tsid_profile_merge_report.profile_build_ms,
+            tsid_profile_merge_report.group_ms,
+            tsid_profile_merge_report.remap_ms,
+            tsid_profile_merge_ms,
+        );
+    }
 
     let distribute_started_at = Instant::now();
     let arc_wrap_ms = 0.0; // Arc wrapping is now done inside the traversal
@@ -526,10 +571,145 @@ fn build_l1_terminal_dwa(
             internal_vocab_ms,
             vocab_tree_build_ms,
             state_seed_ms,
+            token_set_intern_ms,
+            tsid_profile_merge_ms,
+            tsid_profile_merge_before,
+            tsid_profile_merge_after,
             vocab_tree_traversal_ms,
             direct_terminal_dwa_ms,
         },
     ))
+}
+
+fn merge_deferred_equivalent_tsids(
+    id_map: &mut InternalIdMap,
+    deferred_arced: &mut [Vec<(u32, Arc<RangeSetBlaze<u32>>)>],
+) -> L1TsidProfileMergeReport {
+    let num_tsids = id_map.num_tsids() as usize;
+    if num_tsids <= 1 {
+        return L1TsidProfileMergeReport {
+            tsids_after: num_tsids,
+            unique_arc_token_sets: 0,
+            unique_range_token_sets: 0,
+            profile_build_ms: 0.0,
+            group_ms: 0.0,
+            remap_ms: 0.0,
+        };
+    }
+
+    let profile_build_started_at = Instant::now();
+    let mut profiles = vec![Vec::<(u32, u32)>::new(); num_tsids];
+    let mut token_ctx_by_arc = FxHashMap::<usize, u32>::default();
+    let mut next_token_ctx = 0u32;
+    for (end_rep, entries) in deferred_arced.iter().enumerate() {
+        for &(tsid, ref token_set) in entries {
+            let arc_ptr = Arc::as_ptr(token_set) as usize;
+            let token_ctx = *token_ctx_by_arc.entry(arc_ptr).or_insert_with(|| {
+                let ctx = next_token_ctx;
+                next_token_ctx += 1;
+                ctx
+            });
+            profiles[tsid as usize].push((end_rep as u32, token_ctx));
+        }
+    }
+    let profile_build_ms = profile_build_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let group_started_at = Instant::now();
+    let mut sorted_tsids: Vec<usize> = (0..num_tsids).collect();
+    sorted_tsids.sort_by(|&left, &right| profiles[left].cmp(&profiles[right]));
+
+    let mut tsid_perm = vec![0u32; num_tsids];
+    let mut new_count = 1usize;
+    tsid_perm[sorted_tsids[0]] = 0;
+    for pair in sorted_tsids.windows(2) {
+        let previous = pair[0];
+        let current = pair[1];
+        if profiles[previous] != profiles[current] {
+            new_count += 1;
+        }
+        tsid_perm[current] = (new_count - 1) as u32;
+    }
+    let group_ms = group_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    if new_count == num_tsids {
+        return L1TsidProfileMergeReport {
+            tsids_after: num_tsids,
+            unique_arc_token_sets: token_ctx_by_arc.len(),
+            unique_range_token_sets: token_ctx_by_arc.len(),
+            profile_build_ms,
+            group_ms,
+            remap_ms: 0.0,
+        };
+    }
+
+    let remap_started_at = Instant::now();
+    apply_tsid_perm_to_id_map(&mut id_map.tokenizer_states, &tsid_perm, new_count);
+    remap_deferred_arced_tsids(deferred_arced, &tsid_perm);
+    let remap_ms = remap_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    L1TsidProfileMergeReport {
+        tsids_after: new_count,
+        unique_arc_token_sets: token_ctx_by_arc.len(),
+        unique_range_token_sets: token_ctx_by_arc.len(),
+        profile_build_ms,
+        group_ms,
+        remap_ms,
+    }
+}
+
+fn remap_deferred_arced_tsids(
+    deferred_arced: &mut [Vec<(u32, Arc<RangeSetBlaze<u32>>)>],
+    tsid_perm: &[u32],
+) {
+    for entries in deferred_arced {
+        if entries.is_empty() {
+            continue;
+        }
+
+        let mut remapped: Vec<(u32, Arc<RangeSetBlaze<u32>>)> = std::mem::take(entries)
+            .into_iter()
+            .map(|(tsid, token_set)| (tsid_perm[tsid as usize], token_set))
+            .collect();
+        remapped.sort_unstable_by_key(|(tsid, _)| *tsid);
+
+        let mut merged_entries = Vec::with_capacity(remapped.len());
+        let mut idx = 0usize;
+        while idx < remapped.len() {
+            let tsid = remapped[idx].0;
+            let token_set = Arc::clone(&remapped[idx].1);
+            idx += 1;
+            while idx < remapped.len() && remapped[idx].0 == tsid {
+                idx += 1;
+            }
+            merged_entries.push((tsid, token_set));
+        }
+
+        *entries = merged_entries;
+    }
+}
+
+fn apply_tsid_perm_to_id_map(id_map: &mut ManyToOneIdMap, perm: &[u32], new_count: usize) {
+    let old_internal_to_originals = std::mem::take(&mut id_map.internal_to_originals);
+    let old_representatives = std::mem::take(&mut id_map.representative_original_ids);
+
+    for internal in &mut id_map.original_to_internal {
+        if *internal != u32::MAX {
+            *internal = perm[*internal as usize];
+        }
+    }
+
+    let mut new_internal_to_originals = vec![Vec::new(); new_count];
+    let mut new_representatives = vec![u32::MAX; new_count];
+    for (old_internal, originals) in old_internal_to_originals.into_iter().enumerate() {
+        let new_internal = perm[old_internal] as usize;
+        new_internal_to_originals[new_internal].extend(originals);
+        if new_representatives[new_internal] == u32::MAX {
+            new_representatives[new_internal] = old_representatives[old_internal];
+        }
+    }
+
+    id_map.internal_to_originals = new_internal_to_originals;
+    id_map.representative_original_ids = new_representatives;
 }
 
 struct L1IdMapProfile {
@@ -537,10 +717,23 @@ struct L1IdMapProfile {
     token_identity_map_ms: f64,
 }
 
+struct L1TsidProfileMergeReport {
+    tsids_after: usize,
+    unique_arc_token_sets: usize,
+    unique_range_token_sets: usize,
+    profile_build_ms: f64,
+    group_ms: f64,
+    remap_ms: f64,
+}
+
 struct L1TerminalBuildProfile {
     internal_vocab_ms: f64,
     vocab_tree_build_ms: f64,
     state_seed_ms: f64,
+    token_set_intern_ms: f64,
+    tsid_profile_merge_ms: f64,
+    tsid_profile_merge_before: usize,
+    tsid_profile_merge_after: usize,
     vocab_tree_traversal_ms: f64,
     direct_terminal_dwa_ms: f64,
 }
