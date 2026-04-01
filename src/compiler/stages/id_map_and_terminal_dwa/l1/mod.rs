@@ -331,13 +331,26 @@ fn build_l1_terminal_dwa(
         }
     }
 
+    // Compute suffix_subtree_bytes per first_byte: the set of all bytes
+    // appearing in suffixes (bytes[1..]) of tokens starting with that byte.
+    // Used for self-loop optimization in the walk cache.
+    let mut suffix_subtree_bytes: Vec<[u64; 4]> = vec![[0u64; 4]; 256];
+    for &(_original_id, token_bytes) in &sorted_entries {
+        if let Some(&first) = token_bytes.first() {
+            for &byte in &token_bytes[1..] {
+                suffix_subtree_bytes[first as usize][byte as usize >> 6] |= 1u64 << (byte & 63);
+            }
+        }
+    }
+
+    let phase1_wall_ms: f64;
+    let skipped_walks = std::sync::atomic::AtomicUsize::new(0);
+    let skipped_tokens = std::sync::atomic::AtomicUsize::new(0);
     let per_thread_results: Vec<Vec<(u32, u32, PreHashedRanges)>> = {
-        // Walk cache: when multiple start states share the same (first_byte →
-        // target_state) transition, their suffix walks are identical. Compute
-        // the walk once per unique (first_byte, target) and cache the raw merged
-        // ranges. Each start_state then collects from the cache, re-merges per
-        // end_rep (different first bytes may contribute to the same end_rep),
-        // and builds Arcs.
+        // Walk cache: compute once per unique (first_byte, target) and cache
+        // the raw merged ranges. Self-loop optimization: if the target state
+        // has self-loops on all suffix bytes, all tokens end at the target
+        // state and the walk can be skipped entirely.
         let dead = u32::MAX;
 
         // Phase 1: Identify unique (first_byte, target) pairs
@@ -353,11 +366,45 @@ fn build_l1_terminal_dwa(
         }
         let unique_walk_keys: Vec<(u8, u32)> = unique_targets.into_keys().collect();
 
+        // Precompute self-loop mask per target state.
+        let mut self_loop_masks: FxHashMap<u32, [u64; 4]> = FxHashMap::default();
+        for &(_, target) in &unique_walk_keys {
+            self_loop_masks.entry(target).or_insert_with(|| {
+                let mut mask = [0u64; 4];
+                let base = target as usize * 256;
+                for byte in 0..=255u8 {
+                    if flat_trans[base + byte as usize] == target {
+                        mask[byte as usize >> 6] |= 1u64 << (byte & 63);
+                    }
+                }
+                mask
+            });
+        }
+
         // Parallel walk per unique (first_byte, target). Store raw merged ranges.
         let walk_cache: FxHashMap<(u8, u32), Vec<(u32, Vec<(u32, u32)>)>> = unique_walk_keys
             .par_iter()
             .map(|&(first_byte, first_target)| {
                 let token_ids = &token_indices_by_first_byte[first_byte as usize];
+
+                // Self-loop skip: if the target state has self-loops on all
+                // suffix bytes for this first_byte, all tokens end at first_target.
+                let mask = &self_loop_masks[&first_target];
+                let subtree = &suffix_subtree_bytes[first_byte as usize];
+                let can_skip = (subtree[0] & !mask[0]) == 0
+                    && (subtree[1] & !mask[1]) == 0
+                    && (subtree[2] & !mask[2]) == 0
+                    && (subtree[3] & !mask[3]) == 0;
+
+                if can_skip {
+                    skipped_walks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    skipped_tokens.fetch_add(token_ids.len(), std::sync::atomic::Ordering::Relaxed);
+                    let end_rep = state_to_rep[first_target as usize];
+                    let first = *token_ids.first().unwrap() as u32;
+                    let last = *token_ids.last().unwrap() as u32;
+                    return ((first_byte, first_target), vec![(end_rep, vec![(first, last)])]);
+                }
+
                 let mut end_rep_token_ranges = FxHashMap::<u32, Vec<(u32, u32)>>::default();
 
                 let mut previous_suffix: &[u8] = &[];
@@ -402,14 +449,21 @@ fn build_l1_terminal_dwa(
             })
             .collect();
 
+        let phase1_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0;
+        phase1_wall_ms = phase1_ms;
+
         // Phase 2: For each start_state, collect cached walk results across all
-        // first bytes, merge per end_rep, build PreHashedRanges + Arc.
+        // first bytes, merge per end_rep, build PreHashedRanges.
+        // Token IDs are assigned in byte-sorted order and we iterate
+        // first bytes 0→255, so accumulated ranges per end_rep are
+        // already sorted. We skip the sort and only do the linear merge.
         start_states_list
             .par_iter()
             .map(|&(&start_state, ref initial_tsids)| {
                 let mut end_rep_token_ranges = FxHashMap::<u32, Vec<(u32, u32)>>::default();
 
                 // Empty tokens: end_rep = start_rep
+                // (Empty byte sequences sort first, so these IDs are smallest)
                 let start_rep = state_to_rep[start_state as usize];
                 for &internal_token_id in &empty_token_indices {
                     append_token_id_range(
@@ -418,7 +472,7 @@ fn build_l1_terminal_dwa(
                     );
                 }
 
-                // Collect cached walk results
+                // Collect cached walk results in byte order (0→255).
                 for (byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
                     if token_ids.is_empty() { continue; }
                     let target = flat_trans[start_state as usize * 256 + byte];
@@ -431,11 +485,10 @@ fn build_l1_terminal_dwa(
                     }
                 }
 
-                // Defer Arc<RangeSetBlaze> construction to interning phase where
-                // only unique range sets are materialized (typically ~200 vs ~20K).
+                // Build one entry per (end_rep, tsid).
                 let mut result: Vec<(u32, u32, PreHashedRanges)> = Vec::new();
                 for (end_rep, mut token_ranges) in end_rep_token_ranges {
-                    merge_ranges_in_place(&mut token_ranges);
+                    merge_sorted_ranges_in_place(&mut token_ranges);
                     let prehashed_key = PreHashedRanges::new(token_ranges);
                     for &tsid in initial_tsids.iter() {
                         result.push((end_rep, tsid, prehashed_key.clone()));
@@ -446,9 +499,10 @@ fn build_l1_terminal_dwa(
             .collect()
     };
 
+    let phase2_wall_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0 - phase1_wall_ms;
+
     // Canonicalize identical token sets and build Arc<RangeSetBlaze> only for
-    // unique range sets. This amortizes the expensive B-tree construction across
-    // all entries sharing the same ranges.
+    // unique range sets. Full equality comparison via PreHashedRanges.
     let token_set_intern_started_at = Instant::now();
     let mut interned_arc_by_ranges = FxHashMap::<PreHashedRanges, Arc<RangeSetBlaze<u32>>>::default();
 
@@ -470,6 +524,16 @@ fn build_l1_terminal_dwa(
     }
     let token_set_intern_ms = token_set_intern_started_at.elapsed().as_secs_f64() * 1000.0;
     let traversal_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0;
+    if debug_profile_enabled() {
+        eprintln!(
+            "[glrmask/debug][l1_traversal] start_states={} phase1_walk_ms={:.1} phase2_assembly_ms={:.1} intern_ms={:.1} unique_range_sets={} skipped_walks={} skipped_tokens={} total_vt_ms={:.1}",
+            start_states_list.len(), phase1_wall_ms, phase2_wall_ms, token_set_intern_ms,
+            interned_arc_by_ranges.len(),
+            skipped_walks.load(std::sync::atomic::Ordering::Relaxed),
+            skipped_tokens.load(std::sync::atomic::Ordering::Relaxed),
+            traversal_ms,
+        );
+    }
 
     let tsid_profile_merge_started_at = Instant::now();
     let tsid_profile_merge_before = id_map.num_tsids() as usize;
@@ -789,6 +853,24 @@ fn merge_ranges_in_place(ranges: &mut Vec<(u32, u32)>) {
     }
 
     ranges.sort_unstable();
+    let mut write_index = 0usize;
+    for read_index in 1..ranges.len() {
+        if ranges[read_index].0 <= ranges[write_index].1.saturating_add(1) {
+            ranges[write_index].1 = ranges[write_index].1.max(ranges[read_index].1);
+        } else {
+            write_index += 1;
+            ranges[write_index] = ranges[read_index];
+        }
+    }
+    ranges.truncate(write_index + 1);
+}
+
+/// Like merge_ranges_in_place but assumes the input is already sorted.
+/// Used in Phase 2 assembly where byte-order iteration guarantees sorted IDs.
+fn merge_sorted_ranges_in_place(ranges: &mut Vec<(u32, u32)>) {
+    if ranges.len() <= 1 {
+        return;
+    }
     let mut write_index = 0usize;
     for read_index in 1..ranges.len() {
         if ranges[read_index].0 <= ranges[write_index].1.saturating_add(1) {
