@@ -331,7 +331,7 @@ fn build_l1_terminal_dwa(
         }
     }
 
-    let per_thread_results: Vec<Vec<(u32, u32, PreHashedRanges, Arc<RangeSetBlaze<u32>>)>> = {
+    let per_thread_results: Vec<Vec<(u32, u32, PreHashedRanges)>> = {
         // Walk cache: when multiple start states share the same (first_byte →
         // target_state) transition, their suffix walks are identical. Compute
         // the walk once per unique (first_byte, target) and cache the raw merged
@@ -431,16 +431,14 @@ fn build_l1_terminal_dwa(
                     }
                 }
 
-                // Build Arcs per end_rep (re-merge after combining multiple bytes)
-                let mut result: Vec<(u32, u32, PreHashedRanges, Arc<RangeSetBlaze<u32>>)> = Vec::new();
+                // Defer Arc<RangeSetBlaze> construction to interning phase where
+                // only unique range sets are materialized (typically ~200 vs ~20K).
+                let mut result: Vec<(u32, u32, PreHashedRanges)> = Vec::new();
                 for (end_rep, mut token_ranges) in end_rep_token_ranges {
                     merge_ranges_in_place(&mut token_ranges);
-                    let prehashed_key = PreHashedRanges::new(token_ranges.clone());
-                    let range_set: Arc<RangeSetBlaze<u32>> = Arc::new(
-                        token_ranges.into_iter().map(|(start, end)| start..=end).collect(),
-                    );
+                    let prehashed_key = PreHashedRanges::new(token_ranges);
                     for &tsid in initial_tsids.iter() {
-                        result.push((end_rep, tsid, prehashed_key.clone(), Arc::clone(&range_set)));
+                        result.push((end_rep, tsid, prehashed_key.clone()));
                     }
                 }
                 result
@@ -448,22 +446,25 @@ fn build_l1_terminal_dwa(
             .collect()
     };
 
-    // Canonicalize identical token sets across start groups so later stages can
-    // key off shared Arc identity instead of rebuilding content-based keys.
-    // Uses pre-computed hashes from the parallel phase for O(1) hash lookups.
+    // Canonicalize identical token sets and build Arc<RangeSetBlaze> only for
+    // unique range sets. This amortizes the expensive B-tree construction across
+    // all entries sharing the same ranges.
     let token_set_intern_started_at = Instant::now();
     let mut interned_arc_by_ranges = FxHashMap::<PreHashedRanges, Arc<RangeSetBlaze<u32>>>::default();
 
-    // Concatenate per-thread results. No merge needed since each (end_rep, tsid)
-    // pair appears in exactly one thread.
     let mut deferred_arced: Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>> =
         vec![Vec::new(); num_dfa_states];
     for thread_result in per_thread_results {
-        for (end_rep, tsid, ranges, arc) in thread_result {
-            let canonical_arc = interned_arc_by_ranges
-                .entry(ranges)
-                .or_insert_with(|| Arc::clone(&arc))
-                .clone();
+        for (end_rep, tsid, ranges_key) in thread_result {
+            let canonical_arc = if let Some(arc) = interned_arc_by_ranges.get(&ranges_key) {
+                arc.clone()
+            } else {
+                let arc: Arc<RangeSetBlaze<u32>> = Arc::new(
+                    ranges_key.ranges.iter().map(|&(s, e)| s..=e).collect(),
+                );
+                interned_arc_by_ranges.insert(ranges_key, arc.clone());
+                arc
+            };
             deferred_arced[end_rep as usize].push((tsid, canonical_arc));
         }
     }
