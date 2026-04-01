@@ -43,14 +43,17 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
 
     let total_started_at = Instant::now();
     let num_terminals = grammar.num_terminals as u32;
-    let force_all_l2p = std::env::var("GLRMASK_FORCE_ALL_L2P").map_or(false, |v| v == "1");
+    // L2P/NWA handles all terminal types efficiently. L1 simulation is slower
+    // for large DFAs because it walks every token through every start state.
+    // Force L1 path only when explicitly requested via the env var.
+    let force_l1_split = std::env::var("GLRMASK_FORCE_L1_SPLIT").map_or(false, |v| v == "1");
 
     // Classify terminal path lengths to determine L1 vs L2+ split.
     let classify_started_at = Instant::now();
-    let terminal_path_lengths = if force_all_l2p {
-        vec![TerminalPathLength::TwoPlus; num_terminals as usize]
-    } else {
+    let terminal_path_lengths = if force_l1_split {
         classify_terminal_path_lengths(tokenizer, vocab, disallowed_follows, num_terminals)
+    } else {
+        vec![TerminalPathLength::TwoPlus; num_terminals as usize]
     };
     let classify_ms = classify_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -96,29 +99,6 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
             "[glrmask/debug][partition_classify] label={} l1_terminal_ids={:?} l2p_terminal_ids={:?} zero_terminal_ids={:?}",
             partition_label, l1_ids, l2p_ids, zero_ids,
         );
-    }
-
-    // Pre-check: if L1 would have too many equivalence classes, merge L1
-    // terminals into L2+ before launching the parallel build. This avoids
-    // building L2P twice (once normally, then again with the combined mask).
-    if has_l1 {
-        let tsid_count = super::l1::count_l1_equivalence_classes(tokenizer, vocab, &l1_mask);
-        if tsid_count > super::l1::MAX_L1_TSIDS {
-            if compile_profile_enabled() || debug_profile_enabled() {
-                eprintln!(
-                    "[glrmask/profile][l1] partition={} SKIPPED: tsids={} exceeds threshold ({}), falling back to L2+",
-                    partition_label, tsid_count, super::l1::MAX_L1_TSIDS,
-                );
-            }
-            for i in 0..num_terminals as usize {
-                if l1_mask[i] {
-                    l2p_mask[i] = true;
-                    l1_mask[i] = false;
-                }
-            }
-            has_l1 = false;
-            has_l2p = true;
-        }
     }
 
     // Build L1 and L2+ terminal DWAs in parallel.

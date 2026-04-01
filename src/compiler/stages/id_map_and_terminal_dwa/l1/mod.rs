@@ -7,17 +7,16 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::grammar::model::TerminalID;
-use crate::compiler::stages::compact::compact_dwa_dimensions_fast;
+use crate::compiler::stages::compact::{compact_dwa_dimensions, compact_dwa_dimensions_fast};
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
-use crate::ds::u8set::U8Set;
 use crate::ds::weight::{Weight, shared_rangeset};
-use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::Vocab;
 
 use super::l2p::equivalence_analysis::compat::TokenizerView;
@@ -95,13 +94,36 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     )?;
     let terminal_build_ms = dwa_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    let profiling = compile_profile_enabled() || debug_profile_enabled();
+    let tsids_before_compact = id_map.num_tsids();
+    let tokens_before_compact = id_map.num_internal_tokens();
+
     let compact_started_at = Instant::now();
-    compact_dwa_dimensions_fast(&mut dwa, &mut id_map);
+    let compact_report = if profiling {
+        compact_dwa_dimensions(&mut dwa, &mut id_map, true)
+    } else {
+        compact_dwa_dimensions_fast(&mut dwa, &mut id_map)
+    };
     let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    if compile_profile_enabled() || debug_profile_enabled() {
+    if profiling {
+        let stats_str = if let Some(stats) = compact_report.profile_stats {
+            format!(
+                " compact_tsids_before={} compact_tsids_after={} compact_tokens_before={} compact_tokens_after={} compact_weight_ranges_before={} compact_weight_ranges_after={} compact_token_ranges_before={} compact_token_ranges_after={}",
+                stats.tsids_before, stats.tsids_after,
+                stats.tokens_before, stats.tokens_after,
+                stats.weight_ranges_before, stats.weight_ranges_after,
+                stats.token_ranges_before, stats.token_ranges_after,
+            )
+        } else {
+            format!(
+                " compact_tsids_before={} compact_tsids_after={} compact_tokens_before={} compact_tokens_after={}",
+                tsids_before_compact, id_map.num_tsids(),
+                tokens_before_compact, id_map.num_internal_tokens(),
+            )
+        };
         eprintln!(
-            "[glrmask/profile][l1] partition={} vocab_tokens={} tsids={} state_equiv_ms={:.3} token_identity_map_ms={:.3} id_map_ms={:.3} internal_vocab_ms={:.3} vocab_tree_build_ms={:.3} state_seed_ms={:.3} vocab_tree_traversal_ms={:.3} direct_terminal_dwa_ms={:.3} terminal_build_ms={:.3} compact_ms={:.3} determinize=none minimize=none prune=none total_ms={:.3}",
+            "[glrmask/profile][l1] partition={} vocab_tokens={} tsids={} state_equiv_ms={:.3} token_identity_map_ms={:.3} id_map_ms={:.3} internal_vocab_ms={:.3} vocab_tree_build_ms={:.3} state_seed_ms={:.3} vocab_tree_traversal_ms={:.3} direct_terminal_dwa_ms={:.3} terminal_build_ms={:.3} compact_ms={:.3} determinize=none minimize=none prune=none total_ms={:.3}{}",
             partition_label,
             vocab.entries.len(),
             id_map.num_tsids(),
@@ -116,6 +138,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
             terminal_build_ms,
             compact_ms,
             total_started_at.elapsed().as_secs_f64() * 1000.0,
+            stats_str,
         );
     }
 
@@ -221,23 +244,13 @@ fn build_l1_terminal_dwa(
     active_terminals: &[bool],
 ) -> Option<(DWA, L1TerminalBuildProfile)> {
     let total_started_at = std::time::Instant::now();
+    let internal_vocab_ms = 0.0;
 
-    // Internal vocab is already in DFS (byte-sorted) order from build_l1_id_map
-    let internal_vocab_started_at = Instant::now();
-    let internal_vocab: Vec<(usize, &[u8])> = sorted_entries
-        .iter()
-        .enumerate()
-        .map(|(internal_token_id, &(_original_id, bytes))| (internal_token_id, bytes))
-        .collect();
-    let internal_vocab_ms = internal_vocab_started_at.elapsed().as_secs_f64() * 1000.0;
-
-    if internal_vocab.is_empty() {
+    if sorted_entries.is_empty() {
         return None;
     }
 
-    let vocab_tree_started_at = Instant::now();
-    let tree = VocabPrefixTree::build_presorted(&internal_vocab);
-    let vocab_tree_build_ms = vocab_tree_started_at.elapsed().as_secs_f64() * 1000.0;
+    let vocab_tree_build_ms = 0.0;
 
     let state_seed_started_at = Instant::now();
     let mut states_to_initial_tsids = FxHashMap::<u32, Vec<u32>>::default();
@@ -249,40 +262,87 @@ fn build_l1_terminal_dwa(
     }
     let state_seed_ms = state_seed_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let mut profile = L1BuildProfile::default();
-    let mut self_loop_cache = FxHashMap::<u32, U8Set>::default();
-
-    // Fully deferred accumulation: end_state → (tsid → token_ids).
-    // Both token nodes and self-loop subtrees accumulate here.
-    // Terminal distribution happens once at the end via grouping.
+    // Batch simulation: for each unique start state, simulate all tokens through
+    // the DFA and accumulate end_state_rep → (tsid → token_ids).
+    // Parallelized across start states using rayon.
     let num_dfa_states = tokenizer.num_states() as usize;
-    let mut deferred: Vec<FxHashMap<u32, RangeSetBlaze<u32>>> =
-        vec![FxHashMap::default(); num_dfa_states];
 
     let traversal_started_at = Instant::now();
-    collect_terminal_weights(
-        tokenizer,
-        &tree.root,
-        &states_to_initial_tsids,
-        &mut deferred,
-        &mut self_loop_cache,
-        state_to_rep,
-        &mut profile,
-    );
-    let traversal_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    // Pre-wrap deferred entries in Arc to enable cheap sharing during distribution.
-    // Single-source (terminal, tsid) pairs just Arc::clone (~5ns) vs full clone (~200ns).
-    let distribute_started_at = Instant::now();
-    let deferred_arced: Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>> = deferred
-        .into_iter()
-        .map(|m| {
-            m.into_iter()
-                .map(|(tsid, rsb)| (tsid, shared_rangeset(rsb)))
-                .collect()
+    // Build flat transition table for O(1) DFA step lookups.
+    let dead = u32::MAX;
+    let mut flat_trans = vec![dead; num_dfa_states * 256];
+    for (state_idx, dfa_state) in tokenizer.dfa.states().iter().enumerate() {
+        let base = state_idx * 256;
+        for (byte, &target) in dfa_state.transitions.iter() {
+            flat_trans[base + byte as usize] = target;
+        }
+    }
+
+    // Parallel traversal: each start_state processed independently.
+    // Each (end_rep, tsid) pair is unique across start groups since TSIDs
+    // partition deterministically into start groups. We exploit this by using
+    // Arc from the start and skipping merging entirely.
+    let start_states_list: Vec<(&u32, &Vec<u32>)> = states_to_initial_tsids.iter().collect();
+
+    let per_thread_results: Vec<Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>>> = start_states_list
+        .par_iter()
+        .map(|&(&start_state, ref initial_tsids)| {
+            let mut end_rep_tokens: Vec<Vec<u32>> = vec![Vec::new(); num_dfa_states];
+            let mut dirty_reps: Vec<u32> = Vec::new();
+
+            // Phase 1: Simulate all tokens from this start state
+            for (internal_token_id, &(_original_id, token_bytes)) in sorted_entries.iter().enumerate() {
+                let mut state = start_state;
+                for &byte in token_bytes {
+                    let next = flat_trans[state as usize * 256 + byte as usize];
+                    if next == dead {
+                        state = dead;
+                        break;
+                    }
+                    state = next;
+                }
+                if state != dead {
+                    let end_rep = state_to_rep[state as usize];
+                    let bucket = &mut end_rep_tokens[end_rep as usize];
+                    if bucket.is_empty() {
+                        dirty_reps.push(end_rep);
+                    }
+                    bucket.push(internal_token_id as u32);
+                }
+            }
+
+            // Phase 2: Build Arc'd RangeSets per (end_rep, tsid).
+            // Arc::clone is ~5ns vs deep clone ~200ns.
+            let mut result: Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>> = vec![Vec::new(); num_dfa_states];
+            for &end_rep in &dirty_reps {
+                let token_ids = std::mem::take(&mut end_rep_tokens[end_rep as usize]);
+                let range_set: Arc<RangeSetBlaze<u32>> = Arc::new(
+                    token_ids.into_iter().map(|x| x..=x).collect(),
+                );
+
+                for &tsid in initial_tsids.iter() {
+                    result[end_rep as usize].push((tsid, Arc::clone(&range_set)));
+                }
+            }
+
+            result
         })
         .collect();
-    let arc_wrap_ms = distribute_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    // Concatenate per-thread results. No merge needed since each (end_rep, tsid)
+    // pair appears in exactly one thread.
+    let mut deferred_arced: Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>> =
+        vec![Vec::new(); num_dfa_states];
+    for thread_result in per_thread_results {
+        for (end_rep, entries) in thread_result.into_iter().enumerate() {
+            deferred_arced[end_rep].extend(entries);
+        }
+    }
+    let traversal_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let distribute_started_at = Instant::now();
+    let arc_wrap_ms = 0.0; // Arc wrapping is now done inside the traversal
 
     // Build terminal → sorted deduped set of active DFA states (mapped to representatives)
     let inverse_started_at = Instant::now();
@@ -309,87 +369,97 @@ fn build_l1_terminal_dwa(
 
     // Per-terminal distribution: collect deferred entries into per-tsid slots,
     // sort occupied tsids, merge per-tsid, build Weight.
+    // Parallelized across terminals using rayon.
     let merge_started_at = Instant::now();
 
     let num_tsids = id_map.num_tsids() as usize;
-    let mut tsid_ranges: Vec<Vec<(u32, u32)>> = (0..num_tsids).map(|_| Vec::new()).collect();
-    let mut tsid_single_arc: Vec<Option<Arc<RangeSetBlaze<u32>>>> = vec![None; num_tsids];
-    let mut occupied_tsids: Vec<u32> = Vec::new();
-    let mut weight_entries: Vec<(u32, Arc<RangeSetBlaze<u32>>)> = Vec::new();
 
+    // Compute per-terminal weights in parallel
+    let terminal_weights: Vec<(usize, Weight)> = terminal_to_active_states
+        .par_iter()
+        .enumerate()
+        .filter_map(|(tid, active_states)| {
+            if active_states.is_empty() {
+                return None;
+            }
+
+            // Thread-local buffers for this terminal
+            let mut tsid_ranges: Vec<Vec<(u32, u32)>> = (0..num_tsids).map(|_| Vec::new()).collect();
+            let mut tsid_single_arc: Vec<Option<Arc<RangeSetBlaze<u32>>>> = vec![None; num_tsids];
+            let mut occupied_tsids: Vec<u32> = Vec::new();
+
+            for &state in active_states {
+                for &(tsid, ref arc) in &deferred_arced[state as usize] {
+                    let tsid_idx = tsid as usize;
+                    if tsid_ranges[tsid_idx].is_empty() && tsid_single_arc[tsid_idx].is_none() {
+                        tsid_single_arc[tsid_idx] = Some(Arc::clone(arc));
+                        occupied_tsids.push(tsid);
+                    } else if let Some(first_arc) = tsid_single_arc[tsid_idx].take() {
+                        for r in first_arc.ranges() {
+                            tsid_ranges[tsid_idx].push((*r.start(), *r.end()));
+                        }
+                        for r in arc.ranges() {
+                            tsid_ranges[tsid_idx].push((*r.start(), *r.end()));
+                        }
+                    } else {
+                        for r in arc.ranges() {
+                            tsid_ranges[tsid_idx].push((*r.start(), *r.end()));
+                        }
+                    }
+                }
+            }
+
+            if occupied_tsids.is_empty() {
+                return None;
+            }
+
+            occupied_tsids.sort_unstable();
+
+            let mut weight_entries: Vec<(u32, Arc<RangeSetBlaze<u32>>)> = Vec::new();
+            for &tsid in &occupied_tsids {
+                let tsid_idx = tsid as usize;
+                if let Some(arc) = tsid_single_arc[tsid_idx].take() {
+                    weight_entries.push((tsid, arc));
+                } else {
+                    let slot = &mut tsid_ranges[tsid_idx];
+                    slot.sort_unstable();
+                    if !slot.is_empty() {
+                        let mut write = 0;
+                        for read in 1..slot.len() {
+                            if slot[read].0 <= slot[write].1.saturating_add(1) {
+                                slot[write].1 = slot[write].1.max(slot[read].1);
+                            } else {
+                                write += 1;
+                                slot[write] = slot[read];
+                            }
+                        }
+                        slot.truncate(write + 1);
+                    }
+                    let merged: RangeSetBlaze<u32> = slot.iter()
+                        .map(|&(s, e)| s..=e)
+                        .collect();
+                    weight_entries.push((tsid, shared_rangeset(merged)));
+                }
+            }
+
+            let weight = Weight::from_per_tsid_shared(
+                weight_entries.iter().map(|(tsid, arc)| (*tsid, Arc::clone(arc))),
+            );
+            if weight.is_empty() {
+                return None;
+            }
+
+            Some((tid, weight))
+        })
+        .collect();
+
+    // Sequential DWA construction from parallel results
     let mut dwa = DWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
     let end_state = dwa.add_state();
     dwa.set_final_weight(end_state, Weight::all());
     let mut num_transitions = 0usize;
 
-    for (tid, active_states) in terminal_to_active_states.iter().enumerate() {
-        if active_states.is_empty() {
-            continue;
-        }
-
-        occupied_tsids.clear();
-        for &state in active_states {
-            for &(tsid, ref arc) in &deferred_arced[state as usize] {
-                let tsid_idx = tsid as usize;
-                if tsid_ranges[tsid_idx].is_empty() && tsid_single_arc[tsid_idx].is_none() {
-                    tsid_single_arc[tsid_idx] = Some(Arc::clone(arc));
-                    occupied_tsids.push(tsid);
-                } else if let Some(first_arc) = tsid_single_arc[tsid_idx].take() {
-                    for r in first_arc.ranges() {
-                        tsid_ranges[tsid_idx].push((*r.start(), *r.end()));
-                    }
-                    for r in arc.ranges() {
-                        tsid_ranges[tsid_idx].push((*r.start(), *r.end()));
-                    }
-                } else {
-                    for r in arc.ranges() {
-                        tsid_ranges[tsid_idx].push((*r.start(), *r.end()));
-                    }
-                }
-            }
-        }
-
-        if occupied_tsids.is_empty() {
-            continue;
-        }
-
-        occupied_tsids.sort_unstable();
-
-        weight_entries.clear();
-        for &tsid in &occupied_tsids {
-            let tsid_idx = tsid as usize;
-            if let Some(arc) = tsid_single_arc[tsid_idx].take() {
-                weight_entries.push((tsid, arc));
-            } else {
-                let slot = &mut tsid_ranges[tsid_idx];
-                slot.sort_unstable();
-                if !slot.is_empty() {
-                    let mut write = 0;
-                    for read in 1..slot.len() {
-                        if slot[read].0 <= slot[write].1.saturating_add(1) {
-                            slot[write].1 = slot[write].1.max(slot[read].1);
-                        } else {
-                            write += 1;
-                            slot[write] = slot[read];
-                        }
-                    }
-                    slot.truncate(write + 1);
-                }
-                let merged: RangeSetBlaze<u32> = slot.iter()
-                    .map(|&(s, e)| s..=e)
-                    .collect();
-                weight_entries.push((tsid, shared_rangeset(merged)));
-                slot.clear();
-            }
-        }
-
-        let weight = Weight::from_per_tsid_shared(
-            weight_entries.iter().map(|(tsid, arc)| (*tsid, Arc::clone(arc))),
-        );
-        if weight.is_empty() {
-            continue;
-        }
-
+    for (tid, weight) in terminal_weights {
         dwa.add_transition(dwa.start_state, tid as i32, end_state, weight);
         num_transitions += 1;
     }
@@ -405,19 +475,9 @@ fn build_l1_terminal_dwa(
 
     if debug_profile_enabled() {
         eprintln!(
-            "[glrmask/debug][terminal_dwa] partition_build_l1_assoc vocab={} tsids={} tree_nodes={} token_nodes={} segment_execs={} live_segments={} terminal_hits={} states_at_token_nodes={} total_tsids_at_token_nodes={} max_tsids_per_state={} self_loop_skipped_subtrees={} self_loop_skipped_tokens={} transitions={} traversal_ms={:.1} arc_wrap_ms={:.1} inverse_map_ms={:.1} merge_ms={:.1} distribute_ms={:.1} total_ms={:.1}",
-            tree.root.reachable_token_ids().len(),
+            "[glrmask/debug][terminal_dwa] partition_build_l1_batch vocab={} tsids={} transitions={} traversal_ms={:.1} arc_wrap_ms={:.1} inverse_map_ms={:.1} merge_ms={:.1} distribute_ms={:.1} total_ms={:.1}",
+            sorted_entries.len(),
             id_map.num_tsids(),
-            profile.tree_nodes,
-            profile.token_nodes,
-            profile.segment_execs,
-            profile.live_segments,
-            profile.terminal_hits,
-            profile.states_at_token_nodes,
-            profile.total_tsids_at_token_nodes,
-            profile.max_tsids_per_state,
-            profile.self_loop_skipped_subtrees,
-            profile.self_loop_skipped_tokens,
             num_transitions,
             traversal_ms,
             arc_wrap_ms,
@@ -451,172 +511,4 @@ struct L1TerminalBuildProfile {
     state_seed_ms: f64,
     vocab_tree_traversal_ms: f64,
     direct_terminal_dwa_ms: f64,
-}
-
-#[derive(Default)]
-struct L1BuildProfile {
-    tree_nodes: usize,
-    segment_execs: usize,
-    live_segments: usize,
-    terminal_hits: usize,
-    token_nodes: usize,
-    states_at_token_nodes: usize,
-    max_tsids_per_state: usize,
-    total_tsids_at_token_nodes: usize,
-    self_loop_skipped_subtrees: usize,
-    self_loop_skipped_tokens: usize,
-}
-
-/// Compute the set of byte values that are self-loops for a DFA state.
-fn compute_self_loop_bytes(tokenizer: &Tokenizer, state: u32) -> U8Set {
-    let dfa_state = &tokenizer.dfa.states()[state as usize];
-    let mut bytes = U8Set::empty();
-    for (byte, &target) in dfa_state.transitions.iter() {
-        if target == state {
-            bytes.insert(byte);
-        }
-    }
-    bytes
-}
-
-/// Compute equivalence-space self-loops: bytes where transitioning stays
-/// in the same equivalence class (not necessarily the same DFA state).
-fn compute_equiv_self_loop_bytes(tokenizer: &Tokenizer, state: u32, state_to_rep: &[u32]) -> U8Set {
-    let dfa_state = &tokenizer.dfa.states()[state as usize];
-    let rep = state_to_rep[state as usize];
-    let mut bytes = U8Set::empty();
-    for (byte, &target) in dfa_state.transitions.iter() {
-        if target != u32::MAX && state_to_rep[target as usize] == rep {
-            bytes.insert(byte);
-        }
-    }
-    bytes
-}
-
-/// Check if all bytes in a subtree are self-loops for the given state.
-fn is_self_loop_subtree(
-    self_loop_cache: &mut FxHashMap<u32, U8Set>,
-    tokenizer: &Tokenizer,
-    node: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
-    state: u32,
-) -> bool {
-    let self_loop_bytes = self_loop_cache
-        .entry(state)
-        .or_insert_with(|| compute_self_loop_bytes(tokenizer, state));
-    U8Set::from_words(*node.subtree_bytes()).is_subset(self_loop_bytes)
-}
-
-fn collect_terminal_weights(
-    tokenizer: &Tokenizer,
-    node: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
-    states_to_initial_tsids: &FxHashMap<u32, Vec<u32>>,
-    deferred: &mut Vec<FxHashMap<u32, RangeSetBlaze<u32>>>,
-    self_loop_cache: &mut FxHashMap<u32, U8Set>,
-    state_to_rep: &[u32],
-    profile: &mut L1BuildProfile,
-) {
-    profile.tree_nodes += 1;
-
-    if node.has_token() {
-        let internal_token_id = node.token_id() as u32;
-        profile.token_nodes += 1;
-        profile.states_at_token_nodes += states_to_initial_tsids.len();
-        for (&end_state, initial_tsids) in states_to_initial_tsids {
-            profile.total_tsids_at_token_nodes += initial_tsids.len();
-            if initial_tsids.len() > profile.max_tsids_per_state {
-                profile.max_tsids_per_state = initial_tsids.len();
-            }
-            // Accumulate into deferred structure — no terminal iteration here
-            let state_entry = &mut deferred[end_state as usize];
-            for &initial_tsid in initial_tsids {
-                state_entry.entry(initial_tsid).or_default().insert(internal_token_id);
-            }
-            profile.terminal_hits += initial_tsids.len();
-        }
-    }
-
-    for (segment, child) in node.iter_children() {
-        let mut child_states_to_initial_tsids = FxHashMap::<u32, Vec<u32>>::default();
-        let mut self_loop_states = FxHashMap::<u32, Vec<u32>>::default();
-
-        // Pre-compute reachable_u32 once per child for self-loop optimization
-        let reachable_u32: Option<RangeSetBlaze<u32>> = {
-            let reachable = child.reachable_token_ids();
-            if reachable.is_empty() {
-                None
-            } else {
-                Some(
-                    reachable
-                        .ranges()
-                        .map(|r| (*r.start() as u32)..=(*r.end() as u32))
-                        .collect(),
-                )
-            }
-        };
-        // Pre-compute child's subtree byte set once (avoids repeated U8Set::from_words per state)
-        let child_subtree_bytes = if reachable_u32.is_some() {
-            Some(U8Set::from_words(*child.subtree_bytes()))
-        } else {
-            None
-        };
-
-        for (&start_state, initial_tsids) in states_to_initial_tsids {
-            profile.segment_execs += 1;
-            let Some(end_state) = tokenizer.execute_from_state_end_only(segment, start_state) else {
-                continue;
-            };
-            profile.live_segments += 1;
-
-            // Collapse end_state to its equivalence class representative
-            let end_state_rep = state_to_rep[end_state as usize];
-
-            let is_self_loop = child_subtree_bytes.as_ref().map_or(false, |csb| {
-                let self_loop_bytes = self_loop_cache
-                    .entry(end_state_rep)
-                    .or_insert_with(|| compute_equiv_self_loop_bytes(tokenizer, end_state_rep, state_to_rep));
-                csb.is_subset(self_loop_bytes)
-            });
-
-            if is_self_loop {
-                self_loop_states
-                    .entry(end_state_rep)
-                    .or_default()
-                    .extend(initial_tsids.iter().copied());
-            } else {
-                child_states_to_initial_tsids
-                    .entry(end_state_rep)
-                    .or_default()
-                    .extend(initial_tsids.iter().copied());
-            }
-        }
-
-        // Self-loop optimization: accumulate into the same deferred structure
-        if let Some(ref reachable_u32) = reachable_u32 {
-            if !self_loop_states.is_empty() {
-                profile.self_loop_skipped_subtrees += self_loop_states.len();
-
-                for (&end_state, initial_tsids) in &self_loop_states {
-                    profile.self_loop_skipped_tokens += reachable_u32.len() as usize * initial_tsids.len();
-                    let state_entry = &mut deferred[end_state as usize];
-                    for &initial_tsid in initial_tsids {
-                        *state_entry.entry(initial_tsid).or_default() |= reachable_u32;
-                    }
-                }
-            }
-        }
-
-        if child_states_to_initial_tsids.is_empty() {
-            continue;
-        }
-
-        collect_terminal_weights(
-            tokenizer,
-            child,
-            &child_states_to_initial_tsids,
-            deferred,
-            self_loop_cache,
-            state_to_rep,
-            profile,
-        );
-    }
 }
