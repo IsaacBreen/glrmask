@@ -16,6 +16,9 @@ use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::stages::compact::{compact_dwa_dimensions, compact_dwa_dimensions_fast};
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
+use crate::compiler::stages::id_map_and_terminal_dwa::merge::{
+    LocalIdMapTerminalDwa, identity_original_to_local_state,
+};
 use crate::ds::weight::{Weight, shared_rangeset};
 use crate::Vocab;
 
@@ -72,7 +75,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     _ignore_terminal: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
     active_terminals: &[bool],
-) -> Option<(InternalIdMap, DWA)> {
+) -> Option<LocalIdMapTerminalDwa> {
     if vocab.is_empty() {
         return None;
     }
@@ -150,7 +153,11 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
         }
     }
 
-    Some((id_map, dwa))
+    Some(LocalIdMapTerminalDwa {
+        id_map,
+        dwa,
+        original_to_local_state: identity_original_to_local_state(tokenizer.num_states() as usize),
+    })
 }
 
 fn build_l1_id_map<'a>(tokenizer: &Tokenizer, vocab: &'a Vocab, active_terminals: &[bool]) -> (InternalIdMap, Vec<(u32, &'a [u8])>, Vec<u32>, L1IdMapProfile) {
@@ -284,45 +291,70 @@ fn build_l1_terminal_dwa(
     // partition deterministically into start groups. We exploit this by using
     // Arc from the start and skipping merging entirely.
     let start_states_list: Vec<(&u32, &Vec<u32>)> = states_to_initial_tsids.iter().collect();
+    let mut empty_token_indices = Vec::<usize>::new();
+    let mut token_indices_by_first_byte = vec![Vec::<usize>::new(); 256];
+    for (internal_token_id, &(_original_id, token_bytes)) in sorted_entries.iter().enumerate() {
+        if let Some(&first_byte) = token_bytes.first() {
+            token_indices_by_first_byte[first_byte as usize].push(internal_token_id);
+        } else {
+            empty_token_indices.push(internal_token_id);
+        }
+    }
 
-    let per_thread_results: Vec<Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>>> = start_states_list
+    let per_thread_results: Vec<Vec<(u32, u32, Arc<RangeSetBlaze<u32>>)>> = start_states_list
         .par_iter()
         .map(|&(&start_state, ref initial_tsids)| {
-            let mut end_rep_tokens: Vec<Vec<u32>> = vec![Vec::new(); num_dfa_states];
-            let mut dirty_reps: Vec<u32> = Vec::new();
+            let mut end_rep_tokens = FxHashMap::<u32, Vec<u32>>::default();
 
-            // Phase 1: Simulate all tokens from this start state
-            for (internal_token_id, &(_original_id, token_bytes)) in sorted_entries.iter().enumerate() {
-                let mut state = start_state;
-                for &byte in token_bytes {
-                    let next = flat_trans[state as usize * 256 + byte as usize];
-                    if next == dead {
-                        state = dead;
-                        break;
-                    }
-                    state = next;
+            // Phase 1: Simulate all tokens from this start state.
+            for &internal_token_id in &empty_token_indices {
+                let end_rep = state_to_rep[start_state as usize];
+                end_rep_tokens
+                    .entry(end_rep)
+                    .or_default()
+                    .push(internal_token_id as u32);
+            }
+
+            for (first_byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
+                if token_ids.is_empty() {
+                    continue;
                 }
-                if state != dead {
-                    let end_rep = state_to_rep[state as usize];
-                    let bucket = &mut end_rep_tokens[end_rep as usize];
-                    if bucket.is_empty() {
-                        dirty_reps.push(end_rep);
+                let first_target = flat_trans[start_state as usize * 256 + first_byte];
+                if first_target == dead {
+                    continue;
+                }
+
+                for &internal_token_id in token_ids {
+                    let token_bytes = sorted_entries[internal_token_id].1;
+                    let mut state = first_target;
+                    for &byte in &token_bytes[1..] {
+                        let next = flat_trans[state as usize * 256 + byte as usize];
+                        if next == dead {
+                            state = dead;
+                            break;
+                        }
+                        state = next;
                     }
-                    bucket.push(internal_token_id as u32);
+                    if state != dead {
+                        let end_rep = state_to_rep[state as usize];
+                        end_rep_tokens
+                            .entry(end_rep)
+                            .or_default()
+                            .push(internal_token_id as u32);
+                    }
                 }
             }
 
             // Phase 2: Build Arc'd RangeSets per (end_rep, tsid).
             // Arc::clone is ~5ns vs deep clone ~200ns.
-            let mut result: Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>> = vec![Vec::new(); num_dfa_states];
-            for &end_rep in &dirty_reps {
-                let token_ids = std::mem::take(&mut end_rep_tokens[end_rep as usize]);
+            let mut result: Vec<(u32, u32, Arc<RangeSetBlaze<u32>>)> = Vec::new();
+            for (end_rep, token_ids) in end_rep_tokens {
                 let range_set: Arc<RangeSetBlaze<u32>> = Arc::new(
                     token_ids.into_iter().map(|x| x..=x).collect(),
                 );
 
                 for &tsid in initial_tsids.iter() {
-                    result[end_rep as usize].push((tsid, Arc::clone(&range_set)));
+                    result.push((end_rep, tsid, Arc::clone(&range_set)));
                 }
             }
 
@@ -335,8 +367,8 @@ fn build_l1_terminal_dwa(
     let mut deferred_arced: Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>> =
         vec![Vec::new(); num_dfa_states];
     for thread_result in per_thread_results {
-        for (end_rep, entries) in thread_result.into_iter().enumerate() {
-            deferred_arced[end_rep].extend(entries);
+        for (end_rep, tsid, arc) in thread_result {
+            deferred_arced[end_rep as usize].push((tsid, arc));
         }
     }
     let traversal_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0;

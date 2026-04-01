@@ -20,6 +20,105 @@ use crate::ds::weight::Weight;
 
 use super::types::{compile_profile_enabled, debug_profile_enabled};
 
+#[derive(Debug, Clone)]
+pub(crate) struct LocalIdMapTerminalDwa {
+    pub(crate) id_map: InternalIdMap,
+    pub(crate) dwa: DWA,
+    pub(crate) original_to_local_state: Vec<u32>,
+}
+
+pub(crate) fn identity_original_to_local_state(num_tokenizer_states: usize) -> Vec<u32> {
+    (0..num_tokenizer_states as u32).collect()
+}
+
+pub(crate) fn merge_local_id_maps_and_terminal_dwas(
+    label: &str,
+    inputs: Vec<LocalIdMapTerminalDwa>,
+    num_tokenizer_states: usize,
+    max_token_id: u32,
+) -> (InternalIdMap, DWA) {
+    assert!(!inputs.is_empty(), "merge_local_id_maps_and_terminal_dwas called with empty inputs");
+
+    let total_started_at = Instant::now();
+
+    if inputs.len() == 1 {
+        let mut input = inputs.into_iter().next().unwrap();
+        input.id_map = expand_local_id_map_to_original_space(&input, num_tokenizer_states);
+        let compact_started_at = Instant::now();
+        compact_dwa_dimensions_fast(&mut input.dwa, &mut input.id_map);
+        if compile_profile_enabled() || debug_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][merge] label={} inputs=1 build_global_id_map_ms=0.000 remap_union_ms=0.000 determinize_ms=0.000 minimize_ms=0.000 compact_ms={:.3} total_ms={:.3}",
+                label,
+                compact_started_at.elapsed().as_secs_f64() * 1000.0,
+                total_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        return (input.id_map, input.dwa);
+    }
+
+    let global_id_map_started_at = Instant::now();
+    let input_refs: Vec<&LocalIdMapTerminalDwa> = inputs.iter().collect();
+    let global_id_map = build_unified_global_id_map_from_local_inputs(
+        &input_refs,
+        num_tokenizer_states,
+        max_token_id,
+    );
+    let global_id_map_ms = global_id_map_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let remap_union_started_at = Instant::now();
+    let mut global_nwa = NWA::new(
+        global_id_map.num_tsids(),
+        global_id_map.max_internal_token_id(),
+    );
+    let mut global_body = global_nwa.body();
+
+    for local in &inputs {
+        let mut nwa = local.dwa.to_nwa();
+        let tsid_map = build_local_to_global_tsid_map_from_local_input(local, &global_id_map);
+        let token_map = build_local_to_global_token_map(&local.id_map, &global_id_map);
+        remap_nwa_with_maps(
+            &mut nwa,
+            &tsid_map,
+            &token_map,
+            global_id_map.num_tsids() as usize,
+        );
+        global_body = global_nwa.union_in_place(&nwa, &global_body);
+    }
+    global_nwa.start_states = global_body.start_states;
+    let remap_union_ms = remap_union_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let determinize_started_at = Instant::now();
+    let det = determinize(&global_nwa)
+        .expect("merge terminal NWA determinization failed");
+    let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let minimize_started_at = Instant::now();
+    let mut dwa = minimize(&det);
+    let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let mut global = global_id_map;
+    let compact_started_at = Instant::now();
+    compact_dwa_dimensions_fast(&mut dwa, &mut global);
+    let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    if compile_profile_enabled() || debug_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][merge] label={} inputs={} build_global_id_map_ms={:.3} remap_union_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} compact_ms={:.3} total_ms={:.3}",
+            label,
+            inputs.len(),
+            global_id_map_ms,
+            remap_union_ms,
+            determinize_ms,
+            minimize_ms,
+            compact_ms,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    (global, dwa)
+}
+
 /// Merge multiple `(InternalIdMap, DWA)` pairs into a single pair.
 ///
 /// 1. Builds a global `InternalIdMap` as the finest common refinement of all
@@ -206,6 +305,120 @@ fn build_unified_global_id_map(
     }
 }
 
+fn expand_local_id_map_to_original_space(
+    input: &LocalIdMapTerminalDwa,
+    num_tokenizer_states: usize,
+) -> InternalIdMap {
+    let num_internal = input.id_map.num_tsids() as usize;
+    let mut state_o2i = vec![0u32; num_tokenizer_states];
+    let mut state_i2o = vec![Vec::new(); num_internal.max(1)];
+    let mut state_reps = vec![0u32; num_internal.max(1)];
+    let mut seen_rep = vec![false; num_internal.max(1)];
+
+    for original_state in 0..num_tokenizer_states {
+        let local_state = input.original_to_local_state[original_state];
+        let internal = if local_state == u32::MAX {
+            0
+        } else {
+            input.id_map.tokenizer_states.original_to_internal[local_state as usize]
+        } as usize;
+        state_o2i[original_state] = internal as u32;
+        state_i2o[internal].push(original_state as u32);
+        if !seen_rep[internal] {
+            state_reps[internal] = original_state as u32;
+            seen_rep[internal] = true;
+        }
+    }
+
+    InternalIdMap {
+        tokenizer_states: ManyToOneIdMap {
+            original_to_internal: state_o2i,
+            internal_to_originals: state_i2o,
+            representative_original_ids: state_reps,
+        },
+        vocab_tokens: input.id_map.vocab_tokens.clone(),
+    }
+}
+
+fn build_unified_global_id_map_from_local_inputs(
+    inputs: &[&LocalIdMapTerminalDwa],
+    num_tokenizer_states: usize,
+    max_token_id: u32,
+) -> InternalIdMap {
+    let mut composite_to_class: HashMap<Vec<u32>, u32> = HashMap::new();
+    let mut state_o2i = vec![0u32; num_tokenizer_states];
+    let mut state_i2o: Vec<Vec<u32>> = Vec::new();
+    let mut state_reps: Vec<u32> = Vec::new();
+
+    for state in 0..num_tokenizer_states {
+        let composite: Vec<u32> = inputs
+            .iter()
+            .map(|input| {
+                let local_state = input.original_to_local_state[state];
+                if local_state == u32::MAX {
+                    u32::MAX
+                } else {
+                    input.id_map.tokenizer_states.original_to_internal[local_state as usize]
+                }
+            })
+            .collect();
+        let next_id = state_i2o.len() as u32;
+        let class = *composite_to_class.entry(composite).or_insert_with(|| {
+            state_i2o.push(Vec::new());
+            state_reps.push(state as u32);
+            next_id
+        });
+        state_o2i[state] = class;
+        state_i2o[class as usize].push(state as u32);
+    }
+
+    let mut token_composite_to_class: HashMap<Vec<u32>, u32> = HashMap::new();
+    let mut token_o2i = vec![u32::MAX; max_token_id as usize + 1];
+    let mut token_i2o: Vec<Vec<u32>> = Vec::new();
+    let mut token_reps: Vec<u32> = Vec::new();
+
+    for token_id in 0..=max_token_id {
+        let composite: Vec<u32> = inputs
+            .iter()
+            .map(|input| {
+                input
+                    .id_map
+                    .vocab_tokens
+                    .original_to_internal
+                    .get(token_id as usize)
+                    .copied()
+                    .unwrap_or(u32::MAX)
+            })
+            .collect();
+        if composite.iter().all(|&c| c == u32::MAX) {
+            continue;
+        }
+        let next_id = token_i2o.len() as u32;
+        let class = *token_composite_to_class
+            .entry(composite)
+            .or_insert_with(|| {
+                token_i2o.push(Vec::new());
+                token_reps.push(token_id);
+                next_id
+            });
+        token_o2i[token_id as usize] = class;
+        token_i2o[class as usize].push(token_id);
+    }
+
+    InternalIdMap {
+        tokenizer_states: ManyToOneIdMap {
+            original_to_internal: state_o2i,
+            internal_to_originals: state_i2o,
+            representative_original_ids: state_reps,
+        },
+        vocab_tokens: ManyToOneIdMap {
+            original_to_internal: token_o2i,
+            internal_to_originals: token_i2o,
+            representative_original_ids: token_reps,
+        },
+    }
+}
+
 /// Map local TSIDs to global TSIDs via original-state lookup.
 fn build_local_to_global_tsid_map(
     local_id_map: &InternalIdMap,
@@ -220,6 +433,28 @@ fn build_local_to_global_tsid_map(
         .iter()
         .enumerate()
     {
+        let global_tsid = global_id_map.tokenizer_states.original_to_internal[state];
+        local_to_global[local_tsid as usize].insert(global_tsid);
+    }
+
+    local_to_global
+        .into_iter()
+        .map(|s| s.into_iter().collect())
+        .collect()
+}
+
+fn build_local_to_global_tsid_map_from_local_input(
+    local: &LocalIdMapTerminalDwa,
+    global_id_map: &InternalIdMap,
+) -> Vec<Vec<u32>> {
+    let num_local = local.id_map.num_tsids() as usize;
+    let mut local_to_global = vec![BTreeSet::new(); num_local];
+
+    for (state, &local_state) in local.original_to_local_state.iter().enumerate() {
+        if local_state == u32::MAX {
+            continue;
+        }
+        let local_tsid = local.id_map.tokenizer_states.original_to_internal[local_state as usize];
         let global_tsid = global_id_map.tokenizer_states.original_to_internal[state];
         local_to_global[local_tsid as usize].insert(global_tsid);
     }

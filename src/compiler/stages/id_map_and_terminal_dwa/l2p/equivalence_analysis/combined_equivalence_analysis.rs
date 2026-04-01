@@ -305,7 +305,7 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
     let pre_state_reps = if skip_max_length {
         initial_states.to_vec()
     } else {
-        super::state::max_length::find_state_equivalence_classes(
+        super::state::max_length::find_state_equivalence_classes_byte_restricted(
             tokenizer,
             &dedup.representative_token_bytes,
             initial_states,

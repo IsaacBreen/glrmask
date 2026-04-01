@@ -13,6 +13,7 @@ use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::classify_terminal_path_lengths;
+use crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_local_id_maps_and_terminal_dwas;
 use crate::compiler::stages::id_map_and_terminal_dwa::types::{
     TerminalColoring, TerminalPathLength, compile_profile_enabled, debug_profile_enabled,
 };
@@ -144,7 +145,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     let (l2p_pair, l2p_ms) = l2p_result;
 
     // Collect non-None results and merge.
-    let mut pairs: Vec<(InternalIdMap, DWA)> = Vec::new();
+    let mut pairs = Vec::new();
     if let Some(l1) = l1_pair {
         pairs.push(l1);
     }
@@ -159,7 +160,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     let num_tokenizer_states = tokenizer.num_states() as usize;
     let max_token_id = vocab.max_token_id();
     let merge_started_at = Instant::now();
-    let merged = super::merge::merge_id_maps_and_terminal_dwas(
+    let merged = merge_local_id_maps_and_terminal_dwas(
         &format!("partition:{partition_label}"),
         pairs,
         num_tokenizer_states,

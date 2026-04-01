@@ -17,7 +17,6 @@ use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::determinize::determinize;
-use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::minimize_with_threshold;
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
@@ -25,7 +24,7 @@ use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::possible_matches::{
     PossibleMatchesComputer, collect_possible_matches_by_internal_tsid,
 };
-use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
+use crate::compiler::stages::id_map_and_terminal_dwa::merge::LocalIdMapTerminalDwa;
 use crate::ds::bitset::BitSet;
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::ds::weight::Weight;
@@ -67,7 +66,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     grammar: &AnalyzedGrammar,
     active_terminals: &[bool],
     disallowed_follows: &BTreeMap<u32, BitSet>,
-) -> Option<(InternalIdMap, DWA)> {
+) -> Option<LocalIdMapTerminalDwa> {
     if vocab.is_empty() {
         return None;
     }
@@ -212,49 +211,12 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let dwa = minimize_with_threshold(&det, 50);
     let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    // ---- Step 9: Compose state mapping back to original tokenizer states ----
-    // The equiv analysis produced an id_map for simplified states.
-    // Compose with orig→simplified to get the caller's expected mapping.
-    let num_internal = simplified_id_map.tokenizer_states.num_internal_ids();
-    let composed_o2i: Vec<u32> = (0..num_original_states)
-        .map(|orig| {
-            let simplified = orig_to_simplified[orig];
-            if simplified == u32::MAX {
-                0 // unreachable states get class 0
-            } else {
-                simplified_id_map.tokenizer_states.original_to_internal[simplified as usize]
-            }
-        })
-        .collect();
-
-    // Find a representative original state for each internal class.
-    let mut representative_ids = vec![0u32; num_internal as usize];
-    let mut found = vec![false; num_internal as usize];
-    for (orig, &class) in composed_o2i.iter().enumerate() {
-        let c = class as usize;
-        if c < num_internal as usize && !found[c] {
-            representative_ids[c] = orig as u32;
-            found[c] = true;
-        }
-    }
-
-    let composed_state_map = ManyToOneIdMap::from_original_to_internal_with_representatives(
-        composed_o2i,
-        num_internal,
-        representative_ids,
-    );
-
-    let id_map = InternalIdMap {
-        tokenizer_states: composed_state_map,
-        vocab_tokens: simplified_id_map.vocab_tokens,
-    };
-
     if compile_profile_enabled() || debug_profile_enabled() {
         eprintln!(
             "[glrmask/profile][l2p] partition={} vocab_tokens={} tsids={} simplify_ms={:.3} simplified_states={} id_map_ms={:.3} vocab_tree_ms={:.3} possible_matches_ms={:.3} seed_ms={:.3} terminal_nwa_build_ms={:.3} nwa_states={}->{}->{}->{}->{} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} prune_ms={:.3} canonicalize_ms={:.3} postprocess_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} minimize_states={} total_ms={:.3}",
             partition_label,
             vocab.entries.len(),
-            id_map.num_tsids(),
+            simplified_id_map.num_tsids(),
             simplify_ms,
             simplified_tok.num_states(),
             id_map_ms,
@@ -280,5 +242,9 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         );
     }
 
-    Some((id_map, dwa))
+    Some(LocalIdMapTerminalDwa {
+        id_map: simplified_id_map,
+        dwa,
+        original_to_local_state: orig_to_simplified,
+    })
 }
