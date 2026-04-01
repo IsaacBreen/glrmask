@@ -451,8 +451,12 @@ fn build_l1_terminal_dwa(
 
                 let results: Vec<(u32, Vec<(u32, u32)>)> = end_rep_token_ranges
                     .into_iter()
-                    .map(|(end_rep, mut ranges)| {
-                        merge_ranges_in_place(&mut ranges);
+                    .map(|(end_rep, ranges)| {
+                        // Token IDs are monotonically increasing (indices into
+                        // sorted_entries), so append_token_id_range already
+                        // produces sorted, non-overlapping, merged ranges.
+                        debug_assert!(ranges.windows(2).all(|w| w[0].1 < w[1].0),
+                            "Phase 1 ranges should be sorted and non-overlapping");
                         (end_rep, ranges)
                     })
                     .collect();
