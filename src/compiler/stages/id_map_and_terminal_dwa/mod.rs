@@ -196,7 +196,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
         );
     }
 
-    if debug_profile_enabled() {
+    if std::env::var("GLRMASK_DEBUG_DWA_DUMP").map_or(false, |v| v == "1") {
         emit_merged_token_map(&merged.1, vocab, &merged.0);
         emit_merged_dwa_dump(&merged.1);
     }

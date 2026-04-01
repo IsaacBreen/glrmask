@@ -478,7 +478,7 @@ pub(crate) fn build_terminal_dwa_for_existing_id_map_with_possible_matches_and_c
         );
     }
 
-    if debug_profile {
+    if std::env::var("GLRMASK_DEBUG_DWA_DUMP").map_or(false, |v| v == "1") {
         emit_terminal_dwa_token_map(&dwa, vocab, id_map);
         emit_terminal_dwa_debug_dump(&dwa);
     }

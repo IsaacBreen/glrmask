@@ -43,17 +43,15 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
 
     let total_started_at = Instant::now();
     let num_terminals = grammar.num_terminals as u32;
-    // L2P/NWA handles all terminal types efficiently. L1 simulation is slower
-    // for large DFAs because it walks every token through every start state.
-    // Force L1 path only when explicitly requested via the env var.
-    let force_l1_split = std::env::var("GLRMASK_FORCE_L1_SPLIT").map_or(false, |v| v == "1");
+    // Classify terminals into L1 (single-byte paths) vs L2+ by default.
+    // Set GLRMASK_FORCE_ALL_L2P=1 to skip L1 and route everything through L2P.
+    let force_all_l2p = std::env::var("GLRMASK_FORCE_ALL_L2P").map_or(false, |v| v == "1");
 
-    // Classify terminal path lengths to determine L1 vs L2+ split.
     let classify_started_at = Instant::now();
-    let terminal_path_lengths = if force_l1_split {
-        classify_terminal_path_lengths(tokenizer, vocab, disallowed_follows, num_terminals)
-    } else {
+    let terminal_path_lengths = if force_all_l2p {
         vec![TerminalPathLength::TwoPlus; num_terminals as usize]
+    } else {
+        classify_terminal_path_lengths(tokenizer, vocab, disallowed_follows, num_terminals)
     };
     let classify_ms = classify_started_at.elapsed().as_secs_f64() * 1000.0;
 
