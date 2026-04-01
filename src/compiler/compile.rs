@@ -695,27 +695,18 @@ fn compile_prepared_with_profile(
             },
             || {
                 let pm_started_at = Instant::now();
-                let pm = crate::compiler::possible_matches::build_possible_matches_by_state(
+                let token_entries: Vec<(usize, Vec<u8>)> = internal_token_bytes
+                    .iter()
+                    .map(|(&id, bytes)| (id as usize, bytes.clone()))
+                    .collect();
+                let trie = crate::ds::vocab_prefix_tree::VocabPrefixTree::build_owned(token_entries);
+                let mut computer = crate::compiler::possible_matches::PossibleMatchesComputer::new(&tokenizer);
+                let pm_by_tsid = crate::compiler::possible_matches::collect_possible_matches_by_internal_tsid(
                     &tokenizer,
-                    &internal_token_bytes,
+                    &trie.root,
+                    &mut computer,
+                    &internal_ids.tokenizer_states,
                 );
-                // Remap original state keys → post-compact internal TSIDs.
-                let mut pm_by_tsid: std::collections::BTreeMap<
-                    u32,
-                    std::collections::BTreeMap<u32, range_set_blaze::RangeSetBlaze<u32>>,
-                > = std::collections::BTreeMap::new();
-                for (orig_state, terminals) in pm {
-                    let tsid = internal_ids.tokenizer_states.original_to_internal[orig_state as usize];
-                    let entry = pm_by_tsid.entry(tsid).or_default();
-                    for (terminal_id, token_set) in terminals {
-                        entry
-                            .entry(terminal_id)
-                            .and_modify(|ex: &mut range_set_blaze::RangeSetBlaze<u32>| {
-                                *ex |= &token_set
-                            })
-                            .or_insert(token_set);
-                    }
-                }
                 (pm_by_tsid, elapsed_ms(pm_started_at))
             },
         );
