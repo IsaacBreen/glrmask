@@ -19,6 +19,8 @@ use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::compiler::stages::id_map_and_terminal_dwa::merge::{
     LocalIdMapTerminalDwa, identity_original_to_local_state,
 };
+use crate::ds::u8set::U8Set;
+use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::ds::weight::{Weight, shared_rangeset};
 use crate::Vocab;
 
@@ -126,7 +128,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
             )
         };
         eprintln!(
-            "[glrmask/profile][l1] partition={} vocab_tokens={} tsids={} state_equiv_ms={:.3} token_identity_map_ms={:.3} id_map_ms={:.3} internal_vocab_ms={:.3} vocab_tree_build_ms={:.3} state_seed_ms={:.3} token_set_intern_ms={:.3} tsid_profile_merge_ms={:.3} tsid_profile_merge_before={} tsid_profile_merge_after={} vocab_tree_traversal_ms={:.3} direct_terminal_dwa_ms={:.3} terminal_build_ms={:.3} compact_ms={:.3} determinize=none minimize=none prune=none total_ms={:.3}{}",
+            "[glrmask/profile][l1] partition={} vocab_tokens={} tsids={} state_equiv_ms={:.3} token_identity_map_ms={:.3} id_map_ms={:.3} internal_vocab_ms={:.3} vocab_tree_build_ms={:.3} state_seed_ms={:.3} token_set_intern_ms={:.3} tsid_profile_merge_ms={:.3} tsid_profile_merge_before={} tsid_profile_merge_after={} vocab_tree_traversal_ms={:.3} self_loop_subtrees_skipped={} direct_terminal_dwa_ms={:.3} terminal_build_ms={:.3} compact_ms={:.3} determinize=none minimize=none prune=none total_ms={:.3}{}",
             partition_label,
             vocab.entries.len(),
             id_map.num_tsids(),
@@ -141,6 +143,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
             terminal_profile.tsid_profile_merge_before,
             terminal_profile.tsid_profile_merge_after,
             terminal_profile.vocab_tree_traversal_ms,
+            terminal_profile.self_loop_subtrees_skipped,
             terminal_profile.direct_terminal_dwa_ms,
             terminal_build_ms,
             compact_ms,
@@ -261,7 +264,10 @@ fn build_l1_terminal_dwa(
         return None;
     }
 
-    let vocab_tree_build_ms = 0.0;
+    let vocab_tree_started_at = Instant::now();
+    let (grouped_entries, group_internal_ranges) = group_sorted_entries_by_bytes(&sorted_entries);
+    let vocab_tree = VocabPrefixTree::build_presorted(&grouped_entries);
+    let vocab_tree_build_ms = vocab_tree_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let state_seed_started_at = Instant::now();
     let mut states_to_initial_tsids = FxHashMap::<u32, Vec<u32>>::default();
@@ -280,81 +286,39 @@ fn build_l1_terminal_dwa(
 
     let traversal_started_at = Instant::now();
 
-    // Build flat transition table for O(1) DFA step lookups.
-    let dead = u32::MAX;
-    let mut flat_trans = vec![dead; num_dfa_states * 256];
-    for (state_idx, dfa_state) in tokenizer.dfa.states().iter().enumerate() {
-        let base = state_idx * 256;
-        for (byte, &target) in dfa_state.transitions.iter() {
-            flat_trans[base + byte as usize] = target;
-        }
-    }
+    let flat_trans = build_flat_transition_table(tokenizer);
 
     // Parallel traversal: each start_state processed independently.
     // Each (end_rep, tsid) pair is unique across start groups since TSIDs
     // partition deterministically into start groups. We exploit this by using
     // Arc from the start and skipping merging entirely.
     let start_states_list: Vec<(&u32, &Vec<u32>)> = states_to_initial_tsids.iter().collect();
-    let mut empty_token_indices = Vec::<usize>::new();
-    let mut token_indices_by_first_byte = vec![Vec::<usize>::new(); 256];
-    for (internal_token_id, &(_original_id, token_bytes)) in sorted_entries.iter().enumerate() {
-        if let Some(&first_byte) = token_bytes.first() {
-            token_indices_by_first_byte[first_byte as usize].push(internal_token_id);
-        } else {
-            empty_token_indices.push(internal_token_id);
-        }
-    }
 
-    let per_thread_results: Vec<Vec<(u32, u32, Arc<RangeSetBlaze<u32>>)>> = start_states_list
+    let per_thread_results: Vec<(Vec<(u32, u32, Arc<RangeSetBlaze<u32>>)>, L1TrieTraversalProfile)> = start_states_list
         .par_iter()
         .map(|&(&start_state, ref initial_tsids)| {
-            let mut end_rep_tokens = FxHashMap::<u32, Vec<u32>>::default();
-
-            // Phase 1: Simulate all tokens from this start state.
-            for &internal_token_id in &empty_token_indices {
-                let end_rep = state_to_rep[start_state as usize];
-                end_rep_tokens
-                    .entry(end_rep)
-                    .or_default()
-                    .push(internal_token_id as u32);
-            }
-
-            for (first_byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
-                if token_ids.is_empty() {
-                    continue;
-                }
-                let first_target = flat_trans[start_state as usize * 256 + first_byte];
-                if first_target == dead {
-                    continue;
-                }
-
-                for &internal_token_id in token_ids {
-                    let token_bytes = sorted_entries[internal_token_id].1;
-                    let mut state = first_target;
-                    for &byte in &token_bytes[1..] {
-                        let next = flat_trans[state as usize * 256 + byte as usize];
-                        if next == dead {
-                            state = dead;
-                            break;
-                        }
-                        state = next;
-                    }
-                    if state != dead {
-                        let end_rep = state_to_rep[state as usize];
-                        end_rep_tokens
-                            .entry(end_rep)
-                            .or_default()
-                            .push(internal_token_id as u32);
-                    }
-                }
-            }
+            let mut end_rep_ranges = FxHashMap::<u32, Vec<(u32, u32)>>::default();
+            let mut self_loop_bytes = FxHashMap::<u32, U8Set>::default();
+            let mut traversal_profile = L1TrieTraversalProfile::default();
+            collect_l1_end_rep_ranges_from_root(
+                &vocab_tree.root,
+                start_state,
+                &flat_trans,
+                state_to_rep,
+                &group_internal_ranges,
+                tokenizer,
+                &mut self_loop_bytes,
+                &mut end_rep_ranges,
+                &mut traversal_profile,
+            );
 
             // Phase 2: Build Arc'd RangeSets per (end_rep, tsid).
             // Arc::clone is ~5ns vs deep clone ~200ns.
             let mut result: Vec<(u32, u32, Arc<RangeSetBlaze<u32>>)> = Vec::new();
-            for (end_rep, token_ids) in end_rep_tokens {
+            for (end_rep, mut token_ranges) in end_rep_ranges {
+                merge_ranges_in_place(&mut token_ranges);
                 let range_set: Arc<RangeSetBlaze<u32>> = Arc::new(
-                    token_ids.into_iter().map(|x| x..=x).collect(),
+                    token_ranges.into_iter().map(|(start, end)| start..=end).collect(),
                 );
 
                 for &tsid in initial_tsids.iter() {
@@ -362,9 +326,11 @@ fn build_l1_terminal_dwa(
                 }
             }
 
-            result
+            (result, traversal_profile)
         })
         .collect();
+
+    let mut traversal_profile = L1TrieTraversalProfile::default();
 
     // Canonicalize identical token sets across start groups so later stages can
     // key off shared Arc identity instead of rebuilding content-based keys.
@@ -376,7 +342,12 @@ fn build_l1_terminal_dwa(
     // pair appears in exactly one thread.
     let mut deferred_arced: Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>> =
         vec![Vec::new(); num_dfa_states];
-    for thread_result in per_thread_results {
+    for (thread_result, thread_profile) in per_thread_results {
+        traversal_profile.child_segments_visited += thread_profile.child_segments_visited;
+        traversal_profile.byte_steps += thread_profile.byte_steps;
+        traversal_profile.blocked_segments += thread_profile.blocked_segments;
+        traversal_profile.recursive_descents += thread_profile.recursive_descents;
+        traversal_profile.self_loop_subtrees_skipped += thread_profile.self_loop_subtrees_skipped;
         for (end_rep, tsid, arc) in thread_result {
             let arc_ptr = Arc::as_ptr(&arc) as usize;
             let canonical_arc = if let Some(existing) = interned_arc_by_ptr.get(&arc_ptr) {
@@ -552,10 +523,14 @@ fn build_l1_terminal_dwa(
 
     if debug_profile_enabled() {
         eprintln!(
-            "[glrmask/debug][terminal_dwa] partition_build_l1_batch vocab={} tsids={} transitions={} traversal_ms={:.1} arc_wrap_ms={:.1} inverse_map_ms={:.1} merge_ms={:.1} distribute_ms={:.1} total_ms={:.1}",
+            "[glrmask/debug][terminal_dwa] partition_build_l1_batch vocab={} tsids={} transitions={} child_segments={} byte_steps={} recursive_descents={} self_loop_subtrees_skipped={} traversal_ms={:.1} arc_wrap_ms={:.1} inverse_map_ms={:.1} merge_ms={:.1} distribute_ms={:.1} total_ms={:.1}",
             sorted_entries.len(),
             id_map.num_tsids(),
             num_transitions,
+            traversal_profile.child_segments_visited,
+            traversal_profile.byte_steps,
+            traversal_profile.recursive_descents,
+            traversal_profile.self_loop_subtrees_skipped,
             traversal_ms,
             arc_wrap_ms,
             inverse_map_ms,
@@ -576,9 +551,252 @@ fn build_l1_terminal_dwa(
             tsid_profile_merge_before,
             tsid_profile_merge_after,
             vocab_tree_traversal_ms,
+            self_loop_subtrees_skipped: traversal_profile.self_loop_subtrees_skipped,
             direct_terminal_dwa_ms,
         },
     ))
+}
+
+fn build_flat_transition_table(tokenizer: &Tokenizer) -> Vec<u32> {
+    let dead = u32::MAX;
+    let mut flat_trans = vec![dead; tokenizer.num_states() as usize * 256];
+    for (state_idx, dfa_state) in tokenizer.dfa.states().iter().enumerate() {
+        let base = state_idx * 256;
+        for (byte, &target) in dfa_state.transitions.iter() {
+            flat_trans[base + byte as usize] = target;
+        }
+    }
+    flat_trans
+}
+
+fn group_sorted_entries_by_bytes<'a>(
+    sorted_entries: &[(u32, &'a [u8])],
+) -> (Vec<(usize, &'a [u8])>, Vec<(u32, u32)>) {
+    let mut grouped_entries = Vec::new();
+    let mut group_internal_ranges = Vec::new();
+    let mut index = 0usize;
+
+    while index < sorted_entries.len() {
+        let bytes = sorted_entries[index].1;
+        let start = index as u32;
+        index += 1;
+        while index < sorted_entries.len() && sorted_entries[index].1 == bytes {
+            index += 1;
+        }
+        let end = index as u32 - 1;
+        let group_id = group_internal_ranges.len();
+        grouped_entries.push((group_id, bytes));
+        group_internal_ranges.push((start, end));
+    }
+
+    (grouped_entries, group_internal_ranges)
+}
+
+fn append_group_span(
+    token_ranges: &mut Vec<(u32, u32)>,
+    group_internal_ranges: &[(u32, u32)],
+    start_group_id: usize,
+    end_group_id: usize,
+) {
+    if start_group_id > end_group_id {
+        return;
+    }
+    token_ranges.push((
+        group_internal_ranges[start_group_id].0,
+        group_internal_ranges[end_group_id].1,
+    ));
+}
+
+fn append_group_token_range(
+    token_ranges: &mut Vec<(u32, u32)>,
+    group_internal_ranges: &[(u32, u32)],
+    group_id: usize,
+) {
+    let (start, end) = group_internal_ranges[group_id];
+    token_ranges.push((start, end));
+}
+
+fn append_reachable_group_ranges_excluding(
+    token_ranges: &mut Vec<(u32, u32)>,
+    node: &VocabPrefixTreeNode,
+    group_internal_ranges: &[(u32, u32)],
+    exclude_group_id: Option<usize>,
+) {
+    for group_range in node.reachable_token_ids().ranges() {
+        let start_group_id = *group_range.start();
+        let end_group_id = *group_range.end();
+        if let Some(exclude_group_id) = exclude_group_id {
+            if start_group_id <= exclude_group_id && exclude_group_id <= end_group_id {
+                if start_group_id < exclude_group_id {
+                    append_group_span(
+                        token_ranges,
+                        group_internal_ranges,
+                        start_group_id,
+                        exclude_group_id - 1,
+                    );
+                }
+                if exclude_group_id < end_group_id {
+                    append_group_span(
+                        token_ranges,
+                        group_internal_ranges,
+                        exclude_group_id + 1,
+                        end_group_id,
+                    );
+                }
+                continue;
+            }
+        }
+        append_group_span(
+            token_ranges,
+            group_internal_ranges,
+            start_group_id,
+            end_group_id,
+        );
+    }
+}
+
+fn can_skip_self_loop_subtree(
+    tokenizer: &Tokenizer,
+    node: &VocabPrefixTreeNode,
+    tokenizer_state: u32,
+    self_loop_bytes: &mut FxHashMap<u32, U8Set>,
+) -> bool {
+    let self_loop_bytes = self_loop_bytes.entry(tokenizer_state).or_insert_with(|| {
+        let state = &tokenizer.dfa.states()[tokenizer_state as usize];
+        let mut bytes = U8Set::empty();
+        for (byte, &target) in state.transitions.iter() {
+            if target == tokenizer_state {
+                bytes.insert(byte);
+            }
+        }
+        bytes
+    });
+    U8Set::from_words(*node.subtree_bytes()).is_subset(self_loop_bytes)
+}
+
+fn collect_l1_end_rep_ranges_from_root(
+    root: &VocabPrefixTreeNode,
+    start_state: u32,
+    flat_trans: &[u32],
+    state_to_rep: &[u32],
+    group_internal_ranges: &[(u32, u32)],
+    tokenizer: &Tokenizer,
+    self_loop_bytes: &mut FxHashMap<u32, U8Set>,
+    end_rep_ranges: &mut FxHashMap<u32, Vec<(u32, u32)>>,
+    profile: &mut L1TrieTraversalProfile,
+) {
+    collect_l1_end_rep_ranges_for_node(
+        root,
+        start_state,
+        flat_trans,
+        state_to_rep,
+        group_internal_ranges,
+        tokenizer,
+        self_loop_bytes,
+        end_rep_ranges,
+        profile,
+    );
+}
+
+fn collect_l1_end_rep_ranges_for_node(
+    node: &VocabPrefixTreeNode,
+    tokenizer_state: u32,
+    flat_trans: &[u32],
+    state_to_rep: &[u32],
+    group_internal_ranges: &[(u32, u32)],
+    tokenizer: &Tokenizer,
+    self_loop_bytes: &mut FxHashMap<u32, U8Set>,
+    end_rep_ranges: &mut FxHashMap<u32, Vec<(u32, u32)>>,
+    profile: &mut L1TrieTraversalProfile,
+) {
+    if node.has_token() {
+        let end_rep = state_to_rep[tokenizer_state as usize];
+        append_group_token_range(
+            end_rep_ranges.entry(end_rep).or_default(),
+            group_internal_ranges,
+            node.token_id(),
+        );
+    }
+
+    for (segment_bytes, child) in node.iter_children() {
+        profile.child_segments_visited += 1;
+        let mut current_state = tokenizer_state;
+        let mut segment_blocked = false;
+
+        for &byte in segment_bytes {
+            profile.byte_steps += 1;
+            let next_state = flat_trans[current_state as usize * 256 + byte as usize];
+            if next_state == u32::MAX {
+                segment_blocked = true;
+                break;
+            }
+            current_state = next_state;
+        }
+
+        if segment_blocked {
+            profile.blocked_segments += 1;
+            continue;
+        }
+
+        if child.children().is_empty() {
+            if child.has_token() {
+                let end_rep = state_to_rep[current_state as usize];
+                append_group_token_range(
+                    end_rep_ranges.entry(end_rep).or_default(),
+                    group_internal_ranges,
+                    child.token_id(),
+                );
+            }
+            continue;
+        }
+
+        if can_skip_self_loop_subtree(tokenizer, child, current_state, self_loop_bytes) {
+            let end_rep = state_to_rep[current_state as usize];
+            let token_ranges = end_rep_ranges.entry(end_rep).or_default();
+            if child.has_token() {
+                append_group_token_range(token_ranges, group_internal_ranges, child.token_id());
+            }
+            append_reachable_group_ranges_excluding(
+                token_ranges,
+                child,
+                group_internal_ranges,
+                child.has_token().then_some(child.token_id()),
+            );
+            profile.self_loop_subtrees_skipped += 1;
+            continue;
+        }
+
+        profile.recursive_descents += 1;
+        collect_l1_end_rep_ranges_for_node(
+            child,
+            current_state,
+            flat_trans,
+            state_to_rep,
+            group_internal_ranges,
+            tokenizer,
+            self_loop_bytes,
+            end_rep_ranges,
+            profile,
+        );
+    }
+}
+
+fn merge_ranges_in_place(ranges: &mut Vec<(u32, u32)>) {
+    if ranges.is_empty() {
+        return;
+    }
+
+    ranges.sort_unstable();
+    let mut write_index = 0usize;
+    for read_index in 1..ranges.len() {
+        if ranges[read_index].0 <= ranges[write_index].1.saturating_add(1) {
+            ranges[write_index].1 = ranges[write_index].1.max(ranges[read_index].1);
+        } else {
+            write_index += 1;
+            ranges[write_index] = ranges[read_index];
+        }
+    }
+    ranges.truncate(write_index + 1);
 }
 
 fn merge_deferred_equivalent_tsids(
@@ -735,5 +953,106 @@ struct L1TerminalBuildProfile {
     tsid_profile_merge_before: usize,
     tsid_profile_merge_after: usize,
     vocab_tree_traversal_ms: f64,
+    self_loop_subtrees_skipped: u64,
     direct_terminal_dwa_ms: f64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct L1TrieTraversalProfile {
+    child_segments_visited: u64,
+    byte_steps: u64,
+    blocked_segments: u64,
+    recursive_descents: u64,
+    self_loop_subtrees_skipped: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::automata::lexer::ast::{byte, star};
+    use crate::compiler::compile::build_tokenizer_from_exprs;
+
+    fn naive_end_rep_sets(
+        tokenizer: &Tokenizer,
+        sorted_entries: &[(u32, &[u8])],
+        start_state: u32,
+        state_to_rep: &[u32],
+    ) -> BTreeMap<u32, RangeSetBlaze<u32>> {
+        let mut out = BTreeMap::new();
+        for (internal_token_id, &(_original_id, token_bytes)) in sorted_entries.iter().enumerate() {
+            let mut state = start_state;
+            let mut blocked = false;
+            for &byte in token_bytes {
+                let Some(next_state) = tokenizer.step(state, byte) else {
+                    blocked = true;
+                    break;
+                };
+                state = next_state;
+            }
+            if !blocked {
+                out.entry(state_to_rep[state as usize])
+                    .or_insert_with(RangeSetBlaze::new)
+                    .insert(internal_token_id as u32);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_l1_trie_traversal_matches_flat_simulation_with_duplicate_bytes() {
+        let tokenizer = build_tokenizer_from_exprs(&[star(byte(b'a'))]);
+        let mut token_entries = vec![
+            (10u32, b"a".to_vec()),
+            (11u32, b"a".to_vec()),
+            (12u32, b"aa".to_vec()),
+            (13u32, b"aaa".to_vec()),
+            (14u32, b"b".to_vec()),
+        ];
+        token_entries.sort_unstable_by(|left, right| left.1.cmp(&right.1));
+        let sorted_entries: Vec<(u32, &[u8])> = token_entries
+            .iter()
+            .map(|(token_id, bytes)| (*token_id, bytes.as_slice()))
+            .collect();
+
+        let (grouped_entries, group_internal_ranges) = group_sorted_entries_by_bytes(&sorted_entries);
+        let vocab_tree = VocabPrefixTree::build_presorted(&grouped_entries);
+        let flat_trans = build_flat_transition_table(&tokenizer);
+        let state_to_rep: Vec<u32> = (0..tokenizer.num_states()).collect();
+
+        let mut end_rep_ranges = FxHashMap::<u32, Vec<(u32, u32)>>::default();
+        let mut self_loop_bytes = FxHashMap::<u32, U8Set>::default();
+        let mut profile = L1TrieTraversalProfile::default();
+        collect_l1_end_rep_ranges_from_root(
+            &vocab_tree.root,
+            tokenizer.initial_state(),
+            &flat_trans,
+            &state_to_rep,
+            &group_internal_ranges,
+            &tokenizer,
+            &mut self_loop_bytes,
+            &mut end_rep_ranges,
+            &mut profile,
+        );
+
+        let actual: BTreeMap<u32, RangeSetBlaze<u32>> = end_rep_ranges
+            .into_iter()
+            .map(|(end_rep, ranges)| {
+                (
+                    end_rep,
+                    ranges.into_iter().map(|(start, end)| start..=end).collect(),
+                )
+            })
+            .collect();
+        let expected = naive_end_rep_sets(
+            &tokenizer,
+            &sorted_entries,
+            tokenizer.initial_state(),
+            &state_to_rep,
+        );
+
+        assert_eq!(actual, expected);
+        assert!(profile.self_loop_subtrees_skipped > 0);
+    }
 }
