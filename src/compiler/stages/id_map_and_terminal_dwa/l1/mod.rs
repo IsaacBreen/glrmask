@@ -46,7 +46,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
 
     let total_started_at = Instant::now();
     let id_map_started_at = Instant::now();
-    let (mut id_map, sorted_entries, id_map_profile) = build_l1_id_map(tokenizer, vocab);
+    let (mut id_map, sorted_entries, state_to_rep, id_map_profile) = build_l1_id_map(tokenizer, vocab);
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
     let num_terminals = grammar.num_terminals as u32;
     let dwa_started_at = Instant::now();
@@ -54,6 +54,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
         tokenizer,
         sorted_entries,
         &id_map,
+        &state_to_rep,
         num_terminals,
         active_terminals,
     )?;
@@ -94,7 +95,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     Some((id_map, dwa))
 }
 
-fn build_l1_id_map<'a>(tokenizer: &Tokenizer, vocab: &'a Vocab) -> (InternalIdMap, Vec<(u32, &'a [u8])>, L1IdMapProfile) {
+fn build_l1_id_map<'a>(tokenizer: &Tokenizer, vocab: &'a Vocab) -> (InternalIdMap, Vec<(u32, &'a [u8])>, Vec<u32>, L1IdMapProfile) {
     let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
 
     // Max-length bounded state equivalence: merge DFA states that behave
@@ -125,6 +126,11 @@ fn build_l1_id_map<'a>(tokenizer: &Tokenizer, vocab: &'a Vocab) -> (InternalIdMa
             id
         });
         state_original_to_internal[state_id] = internal_id;
+    }
+    // Build state_to_rep: original_state → representative_state (for trie traversal)
+    let mut state_to_rep = vec![0u32; states.len()];
+    for (i, &rep) in equiv_mapping.iter().enumerate() {
+        state_to_rep[states[i]] = rep as u32;
     }
     let state_equiv_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -163,6 +169,7 @@ fn build_l1_id_map<'a>(tokenizer: &Tokenizer, vocab: &'a Vocab) -> (InternalIdMa
             ),
         },
         token_id_bytes,
+        state_to_rep,
         L1IdMapProfile {
             state_equiv_ms,
             token_identity_map_ms,
@@ -174,6 +181,7 @@ fn build_l1_terminal_dwa(
     tokenizer: &Tokenizer,
     sorted_entries: Vec<(u32, &[u8])>,
     id_map: &InternalIdMap,
+    state_to_rep: &[u32],
     num_terminals: u32,
     active_terminals: &[bool],
 ) -> Option<(DWA, L1TerminalBuildProfile)> {
@@ -223,6 +231,7 @@ fn build_l1_terminal_dwa(
         &states_to_initial_tsids,
         &mut deferred,
         &mut self_loop_cache,
+        state_to_rep,
         &mut profile,
     );
     let traversal_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -240,19 +249,20 @@ fn build_l1_terminal_dwa(
         .collect();
     let arc_wrap_ms = distribute_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    // Build terminal → sorted deduped set of active DFA states
+    // Build terminal → sorted deduped set of active DFA states (mapped to representatives)
     let inverse_started_at = Instant::now();
     let mut terminal_to_active_states: Vec<Vec<u32>> = vec![Vec::new(); num_terminals as usize];
     for state in 0..num_dfa_states {
         let state_u32 = state as u32;
+        let rep = state_to_rep[state];
         for tid in tokenizer.dfa.finalizers(state_u32).iter() {
             if active_terminals.get(tid).copied().unwrap_or(false) {
-                terminal_to_active_states[tid].push(state_u32);
+                terminal_to_active_states[tid].push(rep);
             }
         }
         for tid in tokenizer.tokens_accessible_from_state(state_u32).iter() {
             if active_terminals.get(tid).copied().unwrap_or(false) {
-                terminal_to_active_states[tid].push(state_u32);
+                terminal_to_active_states[tid].push(rep);
             }
         }
     }
@@ -434,6 +444,20 @@ fn compute_self_loop_bytes(tokenizer: &Tokenizer, state: u32) -> U8Set {
     bytes
 }
 
+/// Compute equivalence-space self-loops: bytes where transitioning stays
+/// in the same equivalence class (not necessarily the same DFA state).
+fn compute_equiv_self_loop_bytes(tokenizer: &Tokenizer, state: u32, state_to_rep: &[u32]) -> U8Set {
+    let dfa_state = &tokenizer.dfa.states()[state as usize];
+    let rep = state_to_rep[state as usize];
+    let mut bytes = U8Set::empty();
+    for (byte, &target) in dfa_state.transitions.iter() {
+        if target != u32::MAX && state_to_rep[target as usize] == rep {
+            bytes.insert(byte);
+        }
+    }
+    bytes
+}
+
 /// Check if all bytes in a subtree are self-loops for the given state.
 fn is_self_loop_subtree(
     self_loop_cache: &mut FxHashMap<u32, U8Set>,
@@ -453,6 +477,7 @@ fn collect_terminal_weights(
     states_to_initial_tsids: &FxHashMap<u32, Vec<u32>>,
     deferred: &mut Vec<FxHashMap<u32, RangeSetBlaze<u32>>>,
     self_loop_cache: &mut FxHashMap<u32, U8Set>,
+    state_to_rep: &[u32],
     profile: &mut L1BuildProfile,
 ) {
     profile.tree_nodes += 1;
@@ -507,21 +532,24 @@ fn collect_terminal_weights(
             };
             profile.live_segments += 1;
 
+            // Collapse end_state to its equivalence class representative
+            let end_state_rep = state_to_rep[end_state as usize];
+
             let is_self_loop = child_subtree_bytes.as_ref().map_or(false, |csb| {
                 let self_loop_bytes = self_loop_cache
-                    .entry(end_state)
-                    .or_insert_with(|| compute_self_loop_bytes(tokenizer, end_state));
+                    .entry(end_state_rep)
+                    .or_insert_with(|| compute_equiv_self_loop_bytes(tokenizer, end_state_rep, state_to_rep));
                 csb.is_subset(self_loop_bytes)
             });
 
             if is_self_loop {
                 self_loop_states
-                    .entry(end_state)
+                    .entry(end_state_rep)
                     .or_default()
                     .extend(initial_tsids.iter().copied());
             } else {
                 child_states_to_initial_tsids
-                    .entry(end_state)
+                    .entry(end_state_rep)
                     .or_default()
                     .extend(initial_tsids.iter().copied());
             }
@@ -552,6 +580,7 @@ fn collect_terminal_weights(
             &child_states_to_initial_tsids,
             deferred,
             self_loop_cache,
+            state_to_rep,
             profile,
         );
     }
