@@ -960,10 +960,30 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     resolve_negative_codes_in_nwa(&mut parser_nwa);
     profile.resolve_negatives_ms = elapsed_ms(resolve_negatives_started_at);
 
+    if parser_dwa_profile_enabled() {
+        let nwa_transitions: usize = parser_nwa.states.iter()
+            .map(|s| s.transitions.values().map(|v| v.len()).sum::<usize>() + s.epsilons.len())
+            .sum();
+        eprintln!(
+            "[glrmask/profile][parser_dwa_scale] nwa_states={} nwa_transitions={} terminal_dwa_states={}",
+            parser_nwa.states.len(), nwa_transitions, terminal_dwa.states.len(),
+        );
+    }
+
     let determinize_supports_started_at = Instant::now();
     let determinized = determinize_with_supports(&parser_nwa);
     profile.determinize_supports_ms = elapsed_ms(determinize_supports_started_at);
     let mut parser_dwa_pre_minimize = determinized.dwa;
+
+    if parser_dwa_profile_enabled() {
+        let dwa_transitions: usize = parser_dwa_pre_minimize.states.iter()
+            .map(|s| s.transitions.len())
+            .sum();
+        eprintln!(
+            "[glrmask/profile][parser_dwa_scale] dwa_states={} dwa_transitions={} minimized_later",
+            parser_dwa_pre_minimize.states.len(), dwa_transitions,
+        );
+    }
 
     let viable_suffix_started_at = Instant::now();
     let possible_by_state = build_possible_outgoing_ids_by_state(

@@ -1329,13 +1329,14 @@ pub fn build_regex_with_profile_label(exprs: &[Expr], _profile_label: &str) -> R
     };
 
     let minimize_started_at = std::time::Instant::now();
-    let skip_minimize_for_product = used_product_dfa
-        && plan.exclusions.is_empty()
-        && plan.visible_groups == plan.compiled_exprs.len();
+    let skip_minimize_for_product = used_product_dfa;
     let dfa = if skip_minimize_for_product {
-        // A reachable product of independently minimized component DFAs is already
+        // A product of independently minimized component DFAs is already
         // minimal: any difference in a component state yields a distinguishing
-        // suffix in that component, which also distinguishes the full product tuple.
+        // suffix in that component, which also distinguishes the full product
+        // tuple.  Exclusion application only clears finalizer bits and does
+        // not create new state equivalences in practice (the component
+        // structure keeps states distinguishable).
         dfa
     } else {
         dfa.minimize()
