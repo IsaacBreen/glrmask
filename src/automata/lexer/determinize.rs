@@ -23,6 +23,15 @@ fn debug_profile_enabled() -> bool {
         .unwrap_or(false)
 }
 
+fn debug_verbose_enabled() -> bool {
+    std::env::var("GLRMASK_DEBUG_VERBOSE")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(false)
+}
+
 fn elapsed_ms(started_at: Instant) -> f64 {
     started_at.elapsed().as_secs_f64() * 1000.0
 }
@@ -524,7 +533,7 @@ fn expand_transition_closure(
 
 impl NFA {
     pub fn to_dfa(&self) -> DFA {
-        let debug_profile = debug_profile_enabled();
+        let debug_verbose = debug_verbose_enabled();
         let total_started_at = Instant::now();
         let group_count = self
             .states
@@ -548,7 +557,7 @@ impl NFA {
         if deterministic_no_epsilon {
             let fast_started_at = Instant::now();
             let dfa = determinize_epsilon_free_deterministic(self, group_count, &reachable_groups);
-            if debug_profile {
+            if debug_verbose {
                 eprintln!(
                     "[glrmask/debug][determinize] states={} epsilon_edges={} fast_path=epsilon_free_deterministic reachable_ms={:.3} fast_ms={:.3} total_ms={:.3} dfa_states={}",
                     self.states.len(),
@@ -691,7 +700,7 @@ impl NFA {
             used_classes.clear();
         }
 
-        if debug_profile {
+        if debug_verbose {
             let avg_subset_words = if processed_subsets == 0 {
                 0.0
             } else {

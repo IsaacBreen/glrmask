@@ -844,6 +844,7 @@ fn compile_product_component(
 }
 
 fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -> DFA {
+    let debug_verbose = debug_verbose_enabled();
     let product_total_started_at = std::time::Instant::now();
     let parallel_results: Vec<(usize, ProductComponent, usize, f64)> = exprs
         .par_iter()
@@ -859,7 +860,7 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
     let mut component_build_stats = Vec::<(usize, usize, f64)>::with_capacity(exprs.len());
     let mut components = Vec::with_capacity(exprs.len());
     for (group_id, component, state_count, group_ms) in parallel_results {
-        if debug_profile {
+        if debug_verbose {
             eprintln!(
                 "[glrmask/debug][product] group={} dfa_states={} compile_ms={:.3}",
                 group_id,
@@ -1103,13 +1104,15 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
             product_walk_ms,
             product_total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
-        for (group_id, state_count, compile_ms) in top_groups.into_iter().take(5) {
-            eprintln!(
-                "[glrmask/debug][product] slow_group group={} dfa_states={} compile_ms={:.3}",
-                group_id,
-                state_count,
-                compile_ms,
-            );
+        if debug_verbose {
+            for (group_id, state_count, compile_ms) in top_groups.into_iter().take(5) {
+                eprintln!(
+                    "[glrmask/debug][product] slow_group group={} dfa_states={} compile_ms={:.3}",
+                    group_id,
+                    state_count,
+                    compile_ms,
+                );
+            }
         }
         eprintln!(
             "[glrmask/debug][product] walk_breakdown transition_scatter_ms={:.3} state_lookup_ms={:.3} state_insert_ms={:.3} metadata_ms={:.3} transition_expand_ms={:.3} transition_assign_ms={:.3} state_add_ms={:.3} worklist_push_ms={:.3} bucket_take_ms={:.3}",
@@ -1143,18 +1146,20 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
             .filter(|(_, alive_states)| *alive_states > 0)
             .collect();
         top_alive_groups.sort_unstable_by(|left, right| right.1.cmp(&left.1));
-        for (group_id, alive_states) in top_alive_groups.into_iter().take(5) {
-            let alive_ratio = if processed_product_states == 0 {
-                0.0
-            } else {
-                alive_states as f64 / processed_product_states as f64
-            };
-            eprintln!(
-                "[glrmask/debug][product] top_alive_group group={} alive_states={} alive_ratio={:.4}",
-                group_id,
-                alive_states,
-                alive_ratio,
-            );
+        if debug_verbose {
+            for (group_id, alive_states) in top_alive_groups.into_iter().take(5) {
+                let alive_ratio = if processed_product_states == 0 {
+                    0.0
+                } else {
+                    alive_states as f64 / processed_product_states as f64
+                };
+                eprintln!(
+                    "[glrmask/debug][product] top_alive_group group={} alive_states={} alive_ratio={:.4}",
+                    group_id,
+                    alive_states,
+                    alive_ratio,
+                );
+            }
         }
     }
 
@@ -1250,12 +1255,8 @@ fn refine_u8_partitions(partitions: Vec<U8Set>, split: U8Set) -> Vec<U8Set> {
 }
 
 pub fn build_regex_with_profile_label(exprs: &[Expr], _profile_label: &str) -> Regex {
-    let debug_profile = std::env::var("GLRMASK_DEBUG_PROFILE")
-        .map(|value| {
-            let normalized = value.trim().to_ascii_lowercase();
-            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
-        })
-        .unwrap_or(false);
+    let debug_profile = debug_profile_enabled();
+    let debug_verbose = debug_verbose_enabled();
     let total_started_at = std::time::Instant::now();
     let plan = build_exclusion_compile_plan(exprs);
     let group_sets: Vec<U8Set> = plan
@@ -1274,7 +1275,7 @@ pub fn build_regex_with_profile_label(exprs: &[Expr], _profile_label: &str) -> R
             let mut nfa = build_regex_nfa(&plan.compiled_exprs);
             let build_nfa_ms = build_nfa_started_at.elapsed().as_secs_f64() * 1000.0;
             let nfa_states_after_build = nfa.states.len();
-            if debug_profile {
+            if debug_verbose {
                 eprintln!(
                     "[glrmask/debug][prepare_regex] label={} stage=build_nfa num_exprs={} ms={:.3} nfa_states={}",
                     _profile_label,
@@ -1288,7 +1289,7 @@ pub fn build_regex_with_profile_label(exprs: &[Expr], _profile_label: &str) -> R
             nfa.condense_epsilon_sccs();
             let condense_ms = condense_started_at.elapsed().as_secs_f64() * 1000.0;
             let nfa_states_after_condense = nfa.states.len();
-            if debug_profile {
+            if debug_verbose {
                 eprintln!(
                     "[glrmask/debug][prepare_regex] label={} stage=condense num_exprs={} ms={:.3} nfa_states={}",
                     _profile_label,
@@ -1303,7 +1304,7 @@ pub fn build_regex_with_profile_label(exprs: &[Expr], _profile_label: &str) -> R
 
     let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
     let dfa_states_after_determinize = dfa.num_states();
-    if debug_profile {
+    if debug_verbose {
         eprintln!(
             "[glrmask/debug][prepare_regex] label={} stage=determinize num_exprs={} ms={:.3} dfa_states={}",
             _profile_label,
@@ -1346,7 +1347,7 @@ pub fn build_regex_with_profile_label(exprs: &[Expr], _profile_label: &str) -> R
     } else {
         minimize_started_at.elapsed().as_secs_f64() * 1000.0
     };
-    if debug_profile {
+    if debug_verbose {
         eprintln!(
             "[glrmask/debug][prepare_regex] label={} stage=minimize num_exprs={} ms={:.3} dfa_states={}",
             _profile_label,
@@ -1356,7 +1357,7 @@ pub fn build_regex_with_profile_label(exprs: &[Expr], _profile_label: &str) -> R
         );
     }
 
-    if debug_profile {
+    if debug_verbose {
         eprintln!(
             "[glrmask/debug][prepare_regex] label={} build_nfa_ms={:.3} nfa_states_build={} condense_ms={:.3} nfa_states_condensed={} determinize_ms={:.3} dfa_states_determinized={} minimize_ms={:.3} dfa_states_minimized={} total_ms={:.3}",
             _profile_label,
@@ -1384,6 +1385,15 @@ fn debug_profile_enabled() -> bool {
         .unwrap_or(false)
 }
 
+fn debug_verbose_enabled() -> bool {
+    std::env::var("GLRMASK_DEBUG_VERBOSE")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(false)
+}
+
 /// Compile multiple expressions into a single NFA (without determinization).
 ///
 /// Each expression's index becomes its group ID.
@@ -1394,7 +1404,7 @@ pub fn build_regex_nfa(exprs: &[Expr]) -> NFA {
 fn build_regex_nfa_impl(exprs: &[Expr], probe_single_exprs: bool) -> NFA {
     let optimized_exprs: Vec<Expr> = exprs.iter().cloned().map(Expr::optimize).collect();
 
-    if probe_single_exprs && debug_profile_enabled() {
+    if probe_single_exprs && debug_verbose_enabled() {
         for (index, expr) in optimized_exprs.iter().enumerate() {
             let single_nfa = build_regex_nfa_impl(std::slice::from_ref(expr), false);
             eprintln!(

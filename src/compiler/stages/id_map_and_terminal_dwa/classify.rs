@@ -120,7 +120,9 @@ pub(crate) fn classify_terminal_path_lengths(
     let mut is_two_plus = BitSet::new(nt);
 
     // Debug: collect the actual contributing pairs
-    let debug = super::types::debug_profile_enabled();
+    let debug_profile = super::types::debug_profile_enabled();
+    let debug_verbose = super::types::debug_verbose_enabled();
+    let collect_debug_pairs = debug_profile || debug_verbose;
     let mut l2p_pairs: Vec<(usize, usize)> = Vec::new();
     let mut all_l2p_pairs: Vec<(usize, usize)> = Vec::new();
 
@@ -138,7 +140,7 @@ pub(crate) fn classify_terminal_path_lengths(
                     continue;
                 }
             }
-            if debug {
+            if collect_debug_pairs {
                 all_l2p_pairs.push((t1, t2));
                 if !is_two_plus.contains(t1) {
                     l2p_pairs.push((t1, t2));
@@ -149,7 +151,17 @@ pub(crate) fn classify_terminal_path_lengths(
         }
     }
 
-    if debug {
+    if debug_profile {
+        let two_plus_count = (0..nt).filter(|&t| is_two_plus.contains(t)).count();
+        eprintln!(
+            "[glrmask/debug][classify_l2p] terminals_two_plus={} first_hit_pairs={} all_pairs={}",
+            two_plus_count,
+            l2p_pairs.len(),
+            all_l2p_pairs.len(),
+        );
+    }
+
+    if debug_verbose {
         // Dump L2+ terminals with their byte overlaps
         for t in 0..nt {
             if is_two_plus.contains(t) {

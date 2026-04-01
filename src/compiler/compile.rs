@@ -44,6 +44,10 @@ pub(crate) fn compile_profile_enabled() -> bool {
     env_flag_enabled("GLRMASK_PROFILE_COMPILE") || compile_profile_summary_enabled()
 }
 
+fn debug_verbose_enabled() -> bool {
+    env_flag_enabled("GLRMASK_DEBUG_VERBOSE")
+}
+
 fn elapsed_ms(started_at: Instant) -> f64 {
     started_at.elapsed().as_secs_f64() * 1000.0
 }
@@ -180,13 +184,7 @@ pub(crate) fn compute_disallowed_follows(grammar: &AnalyzedGrammar) -> BTreeMap<
 }
 
 pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
-    if std::env::var("GLRMASK_DEBUG_PROFILE")
-        .map(|value| {
-            let normalized = value.trim().to_ascii_lowercase();
-            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
-        })
-        .unwrap_or(false)
-    {
+    if debug_verbose_enabled() {
         for (index, _) in grammar.terminals.iter().enumerate() {
             eprintln!(
                 "[glrmask/debug][tokenizer_terminal] expr={} name={}",
