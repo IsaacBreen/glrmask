@@ -98,6 +98,29 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
         );
     }
 
+    // Pre-check: if L1 would have too many equivalence classes, merge L1
+    // terminals into L2+ before launching the parallel build. This avoids
+    // building L2P twice (once normally, then again with the combined mask).
+    if has_l1 {
+        let tsid_count = super::l1::count_l1_equivalence_classes(tokenizer, vocab, &l1_mask);
+        if tsid_count > super::l1::MAX_L1_TSIDS {
+            if compile_profile_enabled() || debug_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][l1] partition={} SKIPPED: tsids={} exceeds threshold ({}), falling back to L2+",
+                    partition_label, tsid_count, super::l1::MAX_L1_TSIDS,
+                );
+            }
+            for i in 0..num_terminals as usize {
+                if l1_mask[i] {
+                    l2p_mask[i] = true;
+                    l1_mask[i] = false;
+                }
+            }
+            has_l1 = false;
+            has_l2p = true;
+        }
+    }
+
     // Build L1 and L2+ terminal DWAs in parallel.
     let (l1_result, l2p_result) = rayon::join(
         || {

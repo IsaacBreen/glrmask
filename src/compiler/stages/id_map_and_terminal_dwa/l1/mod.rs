@@ -23,6 +23,38 @@ use crate::Vocab;
 use super::l2p::equivalence_analysis::compat::TokenizerView;
 use super::types::{TerminalColoring, compile_profile_enabled, debug_profile_enabled};
 
+/// Maximum L1 equivalence class count before falling back to L2+.
+///
+/// When the tokenizer DFA has more than this many distinct equivalence classes
+/// for the active L1 terminals, the L1 trie traversal becomes more expensive
+/// than L2P's NWA-based approach.
+pub(crate) const MAX_L1_TSIDS: usize = 50;
+
+/// Quickly count L1 equivalence classes for the given active terminals.
+///
+/// Used by the partition builder to decide whether L1 should be attempted
+/// *before* launching the parallel L1/L2P build, avoiding a wasteful
+/// L2P double-build when L1 would be skipped.
+pub(crate) fn count_l1_equivalence_classes(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    active_terminals: &[bool],
+) -> usize {
+    let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
+    let tokenizer_view = TokenizerView::new_filtered(tokenizer, active_terminals);
+    let token_bytes: Vec<&[u8]> = vocab.entries.values().map(|b| b.as_slice()).collect();
+    let equiv_mapping = max_length::find_state_equivalence_classes_byte_restricted(
+        &tokenizer_view,
+        &token_bytes,
+        &states,
+    );
+    let mut seen = rustc_hash::FxHashSet::default();
+    for &rep in &equiv_mapping {
+        seen.insert(rep);
+    }
+    seen.len()
+}
+
 /// Build an L1 id_map and terminal DWA for the given vocab and terminal set.
 ///
 /// Uses max-length state equivalence and an identity vocab map, then traverses
@@ -30,6 +62,8 @@ use super::types::{TerminalColoring, compile_profile_enabled, debug_profile_enab
 /// 2-state DWA directly.
 ///
 /// Returns `None` if the vocab is empty or no terminal matches exist.
+/// The caller should pre-check `count_l1_equivalence_classes()` and merge
+/// L1 terminals into L2+ when the count exceeds `MAX_L1_TSIDS`.
 pub(crate) fn build_l1_id_map_and_terminal_dwa(
     partition_label: &str,
     tokenizer: &Tokenizer,
@@ -48,6 +82,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     let id_map_started_at = Instant::now();
     let (mut id_map, sorted_entries, state_to_rep, id_map_profile) = build_l1_id_map(tokenizer, vocab, active_terminals);
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
+
     let num_terminals = grammar.num_terminals as u32;
     let dwa_started_at = Instant::now();
     let (mut dwa, terminal_profile) = build_l1_terminal_dwa(
