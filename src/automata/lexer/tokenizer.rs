@@ -218,16 +218,44 @@ impl Tokenizer {
         &self,
         input: &[u8],
         start: u32,
-        matches: &mut R,
+        mut matches: &mut R,
         mut record_matches: impl FnMut(&Self, &mut R, u32, usize),
     ) -> Option<u32> {
         let mut state = start;
         for (index, &byte) in input.iter().enumerate() {
             let next = self.step(state, byte)?;
             state = next;
-            record_matches(self, matches, state, index + 1);
+            record_matches(self, &mut matches, state, index + 1);
         }
         Some(state)
+    }
+
+    /// Create a simplified tokenizer that only knows about `active_terminals`.
+    ///
+    /// Non-active terminal bits are cleared from all finalizers, then the DFA
+    /// is minimized (states that only differed by non-active terminal info
+    /// merge). Returns `(simplified_tokenizer, original_to_simplified_state_map)`.
+    /// Unreachable original states map to `u32::MAX`.
+    pub fn simplify_for_terminals(&self, active_terminals: &[bool]) -> (Tokenizer, Vec<u32>) {
+        let mut dfa = self.dfa.clone();
+
+        // Clear finalizer bits for non-active terminals.
+        for state in dfa.states_mut() {
+            for (terminal_id, active) in active_terminals.iter().enumerate() {
+                if !active && terminal_id < state.finalizers.len() {
+                    state.finalizers.clear(terminal_id);
+                }
+            }
+        }
+
+        let (minimized, state_mapping) = dfa.minimize_with_state_mapping();
+
+        let simplified = Tokenizer {
+            dfa: minimized,
+            num_terminals: self.num_terminals,
+        };
+
+        (simplified, state_mapping)
     }
 }
 

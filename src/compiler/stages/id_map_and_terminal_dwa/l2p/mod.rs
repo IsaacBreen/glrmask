@@ -25,7 +25,7 @@ use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::possible_matches::{
     PossibleMatchesComputer, collect_possible_matches_by_internal_tsid,
 };
-use crate::compiler::stages::equiv_types::InternalIdMap;
+use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::bitset::BitSet;
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::ds::weight::Weight;
@@ -73,10 +73,30 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     }
 
     let total_started_at = Instant::now();
+    let num_original_states = tokenizer.num_states() as usize;
 
-    // ---- Step 1: Equivalence analysis ----
+    // ---- Step 0: Simplify tokenizer for active terminals ----
+    // Strip non-active terminal bits from finalizers and minimize.
+    // This merges states that only differed by non-active terminal info,
+    // reducing the state count for equivalence analysis and NWA building.
+    let simplify_started_at = Instant::now();
+    let (simplified_tok, orig_to_simplified) =
+        tokenizer.simplify_for_terminals(active_terminals);
+    let simplify_ms = simplify_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    if debug_profile_enabled() {
+        eprintln!(
+            "[glrmask/debug][l2p_simplify] partition={} original_states={} simplified_states={}",
+            partition_label, num_original_states, simplified_tok.num_states(),
+        );
+    }
+
+    // From here on, use the simplified tokenizer for all operations.
+    let tokenizer = &simplified_tok;
+
+    // ---- Step 1: Equivalence analysis (on simplified tokenizer) ----
     let id_map_started_at = Instant::now();
-    let id_map = equivalence_analysis::combined::analyze_equivalences(
+    let simplified_id_map = equivalence_analysis::combined::analyze_equivalences(
         tokenizer,
         vocab,
         disallowed_follows,
@@ -86,7 +106,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
     // ---- Step 2-3: Internal vocab + prefix tree ----
     let vocab_tree_started_at = Instant::now();
-    let internal_vocab = internal_vocab_entries(vocab, &id_map);
+    let internal_vocab = internal_vocab_entries(vocab, &simplified_id_map);
     if internal_vocab.is_empty() {
         return None;
     }
@@ -105,13 +125,13 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         tokenizer,
         &full_tree.root,
         &mut pm_computer,
-        &id_map.tokenizer_states,
+        &simplified_id_map.tokenizer_states,
     );
     let possible_matches_ms = possible_matches_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // ---- Step 5: Create NWA and seed root nodes ----
     let seed_started_at = Instant::now();
-    let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
+    let mut nwa = NWA::new(simplified_id_map.num_tsids(), simplified_id_map.max_internal_token_id());
     let leaf_state = nwa.add_state();
     nwa.set_final_weight(leaf_state, Weight::all());
     let start_state = nwa.add_state();
@@ -121,7 +141,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         &mut nwa,
         start_state,
         tokenizer,
-        &id_map,
+        &simplified_id_map,
         terminal_coloring,
         ignore_terminal,
         &possible_matches_by_state,
@@ -129,6 +149,8 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // ---- Step 6: Trie-walk NWA build ----
+    // active_terminals filtering is no longer needed — the simplified tokenizer
+    // only reports active terminals in its finalizers.
     let trie_build_started_at = Instant::now();
     let _build_profile = build_nwa_via_trie_walk(
         tokenizer,
@@ -137,11 +159,11 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         ignore_terminal,
         &mut nwa,
         leaf_state,
-        id_map.num_tsids(),
+        simplified_id_map.num_tsids(),
         &full_tree.root,
         &roots,
         &mut pm_computer,
-        Some(active_terminals),
+        None,
     );
     let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -190,12 +212,51 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let dwa = minimize_with_threshold(&det, 50);
     let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    // ---- Step 9: Compose state mapping back to original tokenizer states ----
+    // The equiv analysis produced an id_map for simplified states.
+    // Compose with orig→simplified to get the caller's expected mapping.
+    let num_internal = simplified_id_map.tokenizer_states.num_internal_ids();
+    let composed_o2i: Vec<u32> = (0..num_original_states)
+        .map(|orig| {
+            let simplified = orig_to_simplified[orig];
+            if simplified == u32::MAX {
+                0 // unreachable states get class 0
+            } else {
+                simplified_id_map.tokenizer_states.original_to_internal[simplified as usize]
+            }
+        })
+        .collect();
+
+    // Find a representative original state for each internal class.
+    let mut representative_ids = vec![0u32; num_internal as usize];
+    let mut found = vec![false; num_internal as usize];
+    for (orig, &class) in composed_o2i.iter().enumerate() {
+        let c = class as usize;
+        if c < num_internal as usize && !found[c] {
+            representative_ids[c] = orig as u32;
+            found[c] = true;
+        }
+    }
+
+    let composed_state_map = ManyToOneIdMap::from_original_to_internal_with_representatives(
+        composed_o2i,
+        num_internal,
+        representative_ids,
+    );
+
+    let id_map = InternalIdMap {
+        tokenizer_states: composed_state_map,
+        vocab_tokens: simplified_id_map.vocab_tokens,
+    };
+
     if compile_profile_enabled() || debug_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][l2p] partition={} vocab_tokens={} tsids={} id_map_ms={:.3} vocab_tree_ms={:.3} possible_matches_ms={:.3} seed_ms={:.3} terminal_nwa_build_ms={:.3} nwa_states={}->{}->{}->{}->{} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} prune_ms={:.3} canonicalize_ms={:.3} postprocess_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} minimize_states={} total_ms={:.3}",
+            "[glrmask/profile][l2p] partition={} vocab_tokens={} tsids={} simplify_ms={:.3} simplified_states={} id_map_ms={:.3} vocab_tree_ms={:.3} possible_matches_ms={:.3} seed_ms={:.3} terminal_nwa_build_ms={:.3} nwa_states={}->{}->{}->{}->{} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} prune_ms={:.3} canonicalize_ms={:.3} postprocess_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} minimize_states={} total_ms={:.3}",
             partition_label,
             vocab.entries.len(),
             id_map.num_tsids(),
+            simplify_ms,
+            simplified_tok.num_states(),
             id_map_ms,
             vocab_tree_ms,
             possible_matches_ms,

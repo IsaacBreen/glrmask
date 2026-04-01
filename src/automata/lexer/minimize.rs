@@ -405,17 +405,30 @@ impl DFA {
     /// Minimize this DFA using Hopcroft's algorithm.
     /// Returns a new, minimized DFA.  State 0 remains the start state.
     pub fn minimize(&self) -> DFA {
-        if self.states().is_empty() {
-            return self.clone();
+        self.minimize_impl().0
+    }
+
+    /// Minimize this DFA and return the mapping from original states to
+    /// minimized states.  `mapping[old_state] = new_state`.
+    /// Unreachable original states map to `u32::MAX`.
+    pub fn minimize_with_state_mapping(&self) -> (DFA, Vec<u32>) {
+        self.minimize_impl()
+    }
+
+    fn minimize_impl(&self) -> (DFA, Vec<u32>) {
+        let orig_n = self.states().len();
+        if orig_n == 0 {
+            return (self.clone(), Vec::new());
         }
 
         let mut working = self.clone();
-        working.remove_unreachable_states();
+        let unreachable_map = working.remove_unreachable_states_with_mapping();
         let n = working.states().len();
 
         if n <= 1 {
             working.recompute_possible_futures();
-            return working;
+            // Compose: original → (after unreachable removal) → identity
+            return (working, unreachable_map);
         }
 
         let (partition, blocks) = partition_by_finalizers(&working);
@@ -423,7 +436,9 @@ impl DFA {
 
         match topology_prerefine_partition(&working, &partition) {
             TopologyPrerefine::AlreadyMinimal(blocks) => {
-                return working.rebuild_from_blocks(blocks);
+                let (result, block_map) = working.rebuild_from_blocks_with_mapping(blocks);
+                let composed = compose_mappings(&unreachable_map, &block_map);
+                return (result, composed);
             }
             TopologyPrerefine::Refined { blocks: refined_blocks, .. } => {
                 minimality_check_blocks = refined_blocks;
@@ -432,16 +447,26 @@ impl DFA {
         }
 
         if minimality_check_blocks.iter().all(|block| block.len() <= 1) {
-            return working.rebuild_from_blocks(minimality_check_blocks);
+            let (result, block_map) = working.rebuild_from_blocks_with_mapping(minimality_check_blocks);
+            let composed = compose_mappings(&unreachable_map, &block_map);
+            return (result, composed);
         }
 
         let blocks = hopcroft_refine_partition(&working, partition, blocks);
 
-        working.rebuild_from_blocks(blocks)
+        let (result, block_map) = working.rebuild_from_blocks_with_mapping(blocks);
+        let composed = compose_mappings(&unreachable_map, &block_map);
+        (result, composed)
     }
 
     /// Remove states not reachable from state 0.
     fn remove_unreachable_states(&mut self) {
+        self.remove_unreachable_states_with_mapping();
+    }
+
+    /// Remove unreachable states, returning old→new mapping.
+    /// Unreachable states map to `u32::MAX`.
+    fn remove_unreachable_states_with_mapping(&mut self) -> Vec<u32> {
         let n = self.states().len();
         let mut reachable = vec![false; n];
         let mut queue = vec![0usize];
@@ -457,11 +482,15 @@ impl DFA {
             }
         }
 
+        let mut state_mapping = vec![u32::MAX; n];
         if reachable.iter().all(|&is_reachable| is_reachable) {
-            return;
+            // All reachable — identity mapping.
+            for i in 0..n {
+                state_mapping[i] = i as u32;
+            }
+            return state_mapping;
         }
 
-        let mut state_mapping = vec![0u32; n];
         let mut new_index: u32 = 0;
         for (old_index, &is_reachable) in reachable.iter().enumerate() {
             if is_reachable {
@@ -486,6 +515,7 @@ impl DFA {
         }
 
         *self.states_mut() = new_states;
+        state_mapping
     }
 
     /// Recompute `possible_future_group_ids` for all states via fixpoint.
@@ -594,7 +624,12 @@ impl DFA {
     /// Rebuild DFA from partition blocks.
     /// Ensures state 0 in the new DFA corresponds to the block
     /// containing old state 0.
-    fn rebuild_from_blocks(&self, mut partition_blocks: Vec<Vec<u32>>) -> DFA {
+    fn rebuild_from_blocks(&self, partition_blocks: Vec<Vec<u32>>) -> DFA {
+        self.rebuild_from_blocks_with_mapping(partition_blocks).0
+    }
+
+    /// Like `rebuild_from_blocks` but also returns old→new state mapping.
+    fn rebuild_from_blocks_with_mapping(&self, mut partition_blocks: Vec<Vec<u32>>) -> (DFA, Vec<u32>) {
         let n = self.states().len();
         let mut state_mapping = vec![0u32; n];
 
@@ -638,6 +673,21 @@ impl DFA {
         }
 
         result.recompute_possible_futures();
-        result
+        (result, state_mapping)
     }
+}
+
+/// Compose two state mappings: first[i] → second[first[i]].
+/// Entries with `u32::MAX` in `first` stay as `u32::MAX`.
+fn compose_mappings(first: &[u32], second: &[u32]) -> Vec<u32> {
+    first
+        .iter()
+        .map(|&f| {
+            if f == u32::MAX {
+                u32::MAX
+            } else {
+                second[f as usize]
+            }
+        })
+        .collect()
 }
