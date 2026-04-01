@@ -20,6 +20,7 @@ use crate::ds::weight::{Weight, shared_rangeset};
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::Vocab;
 
+use super::l2p::equivalence_analysis::compat::TokenizerView;
 use super::types::{TerminalColoring, compile_profile_enabled, debug_profile_enabled};
 
 /// Build an L1 id_map and terminal DWA for the given vocab and terminal set.
@@ -96,13 +97,34 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
 fn build_l1_id_map<'a>(tokenizer: &Tokenizer, vocab: &'a Vocab) -> (InternalIdMap, Vec<(u32, &'a [u8])>, L1IdMapProfile) {
     let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
 
-    // Identity state mapping: each state is its own class.
+    // Max-length bounded state equivalence: merge DFA states that behave
+    // identically when only tokens up to the max vocab token length are
+    // considered. This dramatically reduces the effective number of states
+    // for large counting DFAs (e.g. json_string_char{1,256}).
     let state_equiv_started_at = Instant::now();
+    let tokenizer_view = TokenizerView::new(tokenizer);
+    let token_bytes: Vec<&[u8]> = vocab
+        .entries
+        .values()
+        .map(|b| b.as_slice())
+        .collect();
+    let equiv_mapping = max_length::find_state_equivalence_classes_byte_restricted(
+        &tokenizer_view,
+        &token_bytes,
+        &states,
+    );
+    // Build representative → internal_id mapping
+    let mut rep_to_internal: FxHashMap<usize, u32> = FxHashMap::default();
     let mut state_original_to_internal = vec![u32::MAX; states.len()];
     let mut state_representatives = Vec::new();
-    for &state_id in &states {
-        state_original_to_internal[state_id] = state_representatives.len() as u32;
-        state_representatives.push(state_id as u32);
+    for (i, &rep) in equiv_mapping.iter().enumerate() {
+        let state_id = states[i];
+        let internal_id = *rep_to_internal.entry(rep).or_insert_with(|| {
+            let id = state_representatives.len() as u32;
+            state_representatives.push(rep as u32);
+            id
+        });
+        state_original_to_internal[state_id] = internal_id;
     }
     let state_equiv_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
 

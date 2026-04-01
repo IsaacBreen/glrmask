@@ -2500,11 +2500,9 @@ impl<'a> SchemaCtx<'a> {
         if min_len > JSON_STRING_REPEAT_CHUNK {
             return true;
         }
-
-        min_len == 0
-            && max_len
-                .map(|value| value > JSON_STRING_REPEAT_CHUNK)
-                .unwrap_or(false)
+        max_len
+            .map(|value| value > JSON_STRING_REPEAT_CHUNK)
+            .unwrap_or(false)
     }
 
     fn build_split_json_string_exact_expr(&mut self, count: usize) -> GrammarExpr {
@@ -4204,12 +4202,16 @@ impl<'a> SchemaCtx<'a> {
         if self.should_split_bounded_string(min_len, max_len) {
             let open = split_open_quote();
             let close = split_close_quote();
-            let prefix = if open { None } else { Some(literal_expr(b"\"")) };
+            // When min_len > 0 the exact-part terminal must start with the
+            // opening quote so the tokenizer DFA cannot conflate it with
+            // JSON_STRING_BODY (which also follows a standalone '"' terminal).
+            let actually_split_open = open && min_len == 0;
+            let prefix = if actually_split_open { None } else { Some(literal_expr(b"\"")) };
             let suffix = if close { None } else { Some(literal_expr(b"\"")) };
             let body = self.build_split_json_string_body_wrapped(min_len, max_len, prefix, suffix);
 
             let mut result_parts = Vec::new();
-            if open {
+            if actually_split_open {
                 result_parts.push(literal_expr(b"\""));
             }
             result_parts.push(body);
