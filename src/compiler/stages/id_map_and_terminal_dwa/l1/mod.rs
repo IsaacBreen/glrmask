@@ -48,7 +48,7 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::grammar::model::TerminalID;
-use crate::compiler::stages::compact::{compact_dwa_dimensions, compact_dwa_dimensions_fast};
+use crate::compiler::stages::compact::{compact_dwa_dimensions_fast, compact_dwa_dimensions_fast_with_stats};
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::compiler::stages::id_map_and_terminal_dwa::merge::{
     LocalIdMapTerminalDwa, identity_original_to_local_state,
@@ -137,7 +137,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
 
     let compact_started_at = Instant::now();
     let compact_report = if profiling {
-        compact_dwa_dimensions(&mut dwa, &mut id_map, true)
+        compact_dwa_dimensions_fast_with_stats(&mut dwa, &mut id_map)
     } else {
         compact_dwa_dimensions_fast(&mut dwa, &mut id_map)
     };

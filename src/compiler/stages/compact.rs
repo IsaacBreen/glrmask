@@ -137,6 +137,13 @@ pub fn compact_dwa_dimensions_fast(
     compact_dwa_dimensions_inner(dwa, id_map, false, true)
 }
 
+pub fn compact_dwa_dimensions_fast_with_stats(
+    dwa: &mut DWA,
+    id_map: &mut InternalIdMap,
+) -> CompactReport {
+    compact_dwa_dimensions_inner(dwa, id_map, true, true)
+}
+
 fn compact_dwa_dimensions_inner(
     dwa: &mut DWA,
     id_map: &mut InternalIdMap,
