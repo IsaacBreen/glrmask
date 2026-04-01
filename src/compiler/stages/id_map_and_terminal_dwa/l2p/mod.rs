@@ -76,11 +76,16 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let total_started_at = Instant::now();
 
     // ---- Step 0: Build quotient tokenizer and decide whether to use it ----
-    // Skip quotient for partitions with many active terminals — the quotient
-    // cost outweighs the benefit when there's little state reduction.
+    // Skip quotient when:
+    // - Many active terminals (> 25% of total) — little state reduction expected
+    // - Large DFA with moderate active terminals — partition refinement is O(states * 256)
+    //   and unlikely to give >50% reduction when the DFA is large and many terminals active
     let active_count = active_terminals.iter().filter(|&&a| a).count();
+    let num_states = tokenizer.num_states() as usize;
     let spec_started_at = Instant::now();
-    let spec = if active_count <= active_terminals.len() / 4 {
+    let try_quotient = active_count <= active_terminals.len() / 4
+        && (num_states as u64) * (active_count as u64) <= 30_000;
+    let spec = if try_quotient {
         Some(specialized_dfa::build_specialized_tokenizer(tokenizer, active_terminals))
     } else {
         None

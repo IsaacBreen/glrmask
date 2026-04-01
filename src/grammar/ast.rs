@@ -207,6 +207,10 @@ struct Lowerer {
     generated_nonterminal_counter: u32,
     terminal_names: BTreeMap<TerminalID, String>,
     internal_terminal_names: HashSet<String>,
+    /// Shared cache for repeat-exact nonterminals, keyed by (symbol, count).
+    repeat_exact_cache: BTreeMap<(Symbol, usize), NonterminalID>,
+    /// Shared cache for repeat-range nonterminals, keyed by (symbol, min, max).
+    repeat_range_cache: BTreeMap<(Symbol, usize, usize), NonterminalID>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -282,6 +286,8 @@ impl Lowerer {
             generated_nonterminal_counter: 0,
             terminal_names: BTreeMap::new(),
             internal_terminal_names: HashSet::new(),
+            repeat_exact_cache: BTreeMap::new(),
+            repeat_range_cache: BTreeMap::new(),
         }
     }
 
@@ -332,14 +338,14 @@ impl Lowerer {
         symbol: &Symbol,
         count: usize,
         shape: RepeatTreeShape,
-        cache: &mut BTreeMap<usize, NonterminalID>,
     ) -> NonterminalID {
-        if let Some(&nonterminal) = cache.get(&count) {
+        let key = (symbol.clone(), count);
+        if let Some(&nonterminal) = self.repeat_exact_cache.get(&key) {
             return nonterminal;
         }
 
         let (_, nonterminal) = self.fresh_nonterminal("repeat_exact");
-        cache.insert(count, nonterminal);
+        self.repeat_exact_cache.insert(key, nonterminal);
         match count {
             0 => self.rules.push(Rule {
                 lhs: nonterminal,
@@ -352,9 +358,9 @@ impl Lowerer {
             _ => {
                 let (left, right) = exact_repeat_split(count, shape);
                 let left_nonterminal =
-                    self.repeat_exact_nonterminal(symbol, left, shape, cache);
+                    self.repeat_exact_nonterminal(symbol, left, shape);
                 let right_nonterminal =
-                    self.repeat_exact_nonterminal(symbol, right, shape, cache);
+                    self.repeat_exact_nonterminal(symbol, right, shape);
                 self.rules.push(Rule {
                     lhs: nonterminal,
                     rhs: vec![
@@ -373,25 +379,24 @@ impl Lowerer {
         min: usize,
         max: usize,
         shape: RepeatTreeShape,
-        exact_cache: &mut BTreeMap<usize, NonterminalID>,
-        range_cache: &mut BTreeMap<(usize, usize), NonterminalID>,
     ) -> NonterminalID {
         debug_assert!(min <= max);
         if min == max {
-            return self.repeat_exact_nonterminal(symbol, min, shape, exact_cache);
+            return self.repeat_exact_nonterminal(symbol, min, shape);
         }
-        if let Some(&nonterminal) = range_cache.get(&(min, max)) {
+        let key = (symbol.clone(), min, max);
+        if let Some(&nonterminal) = self.repeat_range_cache.get(&key) {
             return nonterminal;
         }
 
         let (_, nonterminal) = self.fresh_nonterminal("repeat_range");
-        range_cache.insert((min, max), nonterminal);
+        self.repeat_range_cache.insert(key, nonterminal);
         match shape {
             RepeatTreeShape::Right if (max - min + 1) > RIGHT_REPEAT_RANGE_FRONT_BUCKET => {
                 let cutoff = (min + RIGHT_REPEAT_RANGE_FRONT_BUCKET - 1).min(max);
                 for count in min..=cutoff {
                     let exact_nonterminal =
-                        self.repeat_exact_nonterminal(symbol, count, shape, exact_cache);
+                        self.repeat_exact_nonterminal(symbol, count, shape);
                     self.rules.push(Rule {
                         lhs: nonterminal,
                         rhs: vec![Symbol::Nonterminal(exact_nonterminal)],
@@ -403,8 +408,6 @@ impl Lowerer {
                         cutoff + 1,
                         max,
                         shape,
-                        exact_cache,
-                        range_cache,
                     );
                     self.rules.push(Rule {
                         lhs: nonterminal,
@@ -421,8 +424,6 @@ impl Lowerer {
                         min,
                         cutoff - 1,
                         shape,
-                        exact_cache,
-                        range_cache,
                     );
                     self.rules.push(Rule {
                         lhs: nonterminal,
@@ -431,7 +432,7 @@ impl Lowerer {
                 }
                 for count in cutoff..=max {
                     let exact_nonterminal =
-                        self.repeat_exact_nonterminal(symbol, count, shape, exact_cache);
+                        self.repeat_exact_nonterminal(symbol, count, shape);
                     self.rules.push(Rule {
                         lhs: nonterminal,
                         rhs: vec![Symbol::Nonterminal(exact_nonterminal)],
@@ -447,16 +448,12 @@ impl Lowerer {
             min,
             split,
             shape,
-            exact_cache,
-            range_cache,
         );
         let right_nonterminal = self.repeat_range_nonterminal(
             symbol,
             split + 1,
             max,
             shape,
-            exact_cache,
-            range_cache,
         );
         self.rules.push(Rule {
             lhs: nonterminal,
@@ -479,15 +476,11 @@ impl Lowerer {
         debug_assert!(min <= max);
         let symbol = self.lower_expr_terminalish(inner)?;
         let shape = repeat_tree_shape();
-        let mut exact_cache = BTreeMap::new();
-        let mut range_cache = BTreeMap::new();
         let range_nonterminal = self.repeat_range_nonterminal(
             &symbol,
             min,
             max,
             shape,
-            &mut exact_cache,
-            &mut range_cache,
         );
         self.rules.push(Rule {
             lhs,
