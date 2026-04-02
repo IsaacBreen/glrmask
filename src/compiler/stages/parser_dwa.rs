@@ -375,6 +375,12 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
         entries
     }
 
+    /// Cheap key for subset_map: uses Arc pointer address instead of full weight hashing.
+    /// Safe because weights are interned, so pointer equality ↔ content equality.
+    fn subset_key(entries: &[(u32, Weight)]) -> Vec<(u32, usize)> {
+        entries.iter().map(|(sid, w)| (*sid, w.ptr_key())).collect()
+    }
+
     fn epsilon_closure(nwa: &NWA, seed: FxHashMap<u32, Weight>) -> FxHashMap<u32, Weight> {
         // Fast path: single-state seed with no epsilon transitions
         if seed.len() == 1 {
@@ -428,16 +434,16 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
     let start_entries = canonicalize(&start_subset);
     supports[0] = start_entries.iter().map(|(state_id, _)| *state_id).collect();
 
-    let mut subset_map: FxHashMap<Vec<(u32, Weight)>, u32> = FxHashMap::default();
-    let mut worklist: VecDeque<(Vec<(u32, Weight)>, Vec<(u32, Weight)>)> = VecDeque::new();
-    let start_key = start_entries.clone();
-    subset_map.insert(start_key.clone(), dwa.start_state);
-    worklist.push_back((start_key, start_entries));
+    // Use pointer-based keys for O(1) hashing instead of iterating Weight ranges
+    let mut subset_map: FxHashMap<Vec<(u32, usize)>, u32> = FxHashMap::default();
+    let mut worklist: VecDeque<Vec<(u32, Weight)>> = VecDeque::new();
+    subset_map.insert(subset_key(&start_entries), dwa.start_state);
+    worklist.push_back(start_entries);
 
     let mut raw_targets: FxHashMap<i32, FxHashMap<u32, Vec<Weight>>> = FxHashMap::default();
 
-    while let Some((subset_key, subset_entries)) = worklist.pop_front() {
-        let from_state = subset_map[&subset_key];
+    while let Some(subset_entries) = worklist.pop_front() {
+        let from_state = subset_map[&subset_key(&subset_entries)];
 
         let mut final_weight = Weight::empty();
         for (nwa_state_id, path_weight) in &subset_entries {
@@ -510,12 +516,13 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
 
             let next_support: Vec<u32> = next_entries.iter().map(|(state_id, _)| *state_id).collect();
 
-            let to_state = if let Some(existing) = subset_map.get(&next_entries).copied() {
+            let next_key = subset_key(&next_entries);
+            let to_state = if let Some(existing) = subset_map.get(&next_key).copied() {
                 existing
             } else {
                 let new_state = dwa.add_state();
-                subset_map.insert(next_entries.clone(), new_state);
-                worklist.push_back((next_entries.clone(), next_entries));
+                subset_map.insert(next_key, new_state);
+                worklist.push_back(next_entries);
                 supports.push(next_support);
                 new_state
             };
