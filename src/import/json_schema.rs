@@ -6554,7 +6554,7 @@ mod tests {
             .unwrap();
         assert!(!split_rule.is_terminal, "expected large bounded string to lower through a nonterminal rule");
 
-        let chunk = JSON_STRING_REPEAT_CHUNK;
+        let chunk = json_string_repeat_chunk();
         let exact_prefix = format!("JSON_STRING_CHAR_EXACT_{chunk}");
         let upto_prefix = format!("JSON_STRING_CHAR_UPTO_{chunk}");
         assert!(grammar.rules.iter().any(|rule| {
