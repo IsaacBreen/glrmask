@@ -90,6 +90,39 @@ fn accepting_nwa(final_weight: &Weight) -> Option<NWA> {
     Some(nwa)
 }
 
+fn leaf_continuation_final_weight(states: &[StateSummary], state_id: u32) -> Option<Weight> {
+    let state = states.get(state_id as usize)?;
+    if !state.branches.is_empty() {
+        return None;
+    }
+    state.final_weight.clone().filter(|weight| !weight.is_empty())
+}
+
+fn build_leaf_specialized_bundle(bundle: &NWA, leaf_final_weight: &Weight) -> Option<NWA> {
+    let mut specialized = bundle.clone();
+    let mut has_live_final = false;
+
+    for state in &mut specialized.states {
+        let Some(final_weight) = state.final_weight.as_ref() else {
+            continue;
+        };
+        let combined = final_weight.intersection(leaf_final_weight);
+        if combined.is_empty() {
+            state.final_weight = None;
+        } else {
+            state.final_weight = Some(combined);
+            has_live_final = true;
+        }
+    }
+
+    if !has_live_final {
+        return None;
+    }
+
+    resolve_negative_codes_in_nwa(&mut specialized);
+    Some(specialized)
+}
+
 fn group_terminal_edges_by_target(
     terminal_dwa: &DWA,
     grammar: &AnalyzedGrammar,
@@ -151,12 +184,36 @@ fn build_state_summaries(
         pending_branches_by_state.push(pending_branches);
     }
 
+    let leaf_targets: Vec<bool> = pending_branches_by_state
+        .iter()
+        .enumerate()
+        .map(|(state_id, branches)| {
+            branches.is_empty()
+                && terminal_dwa
+                    .states
+                    .get(state_id)
+                    .and_then(|state| state.final_weight.as_ref())
+                    .is_some_and(|weight| !weight.is_empty())
+        })
+        .collect();
+    let branches_to_leaf_targets = pending_branches_by_state
+        .iter()
+        .flat_map(|branches| branches.iter())
+        .filter(|pending| leaf_targets.get(pending.target as usize).copied().unwrap_or(false))
+        .count();
+
     if parser_dwa_profile_enabled() {
         eprintln!(
             "[glrmask/profile][parser_dwa_bundles] terminal_dwa_states={} unique_bundles={} total_branches={}",
             terminal_dwa.states.len(),
             unique_bundles.len(),
             pending_branches_by_state.iter().map(|b| b.len()).sum::<usize>(),
+        );
+        eprintln!(
+            "[glrmask/profile][parser_dwa_leaf_targets] leaf_states={} branches_to_leaf_targets={} states_with_branches={}",
+            leaf_targets.iter().filter(|&&is_leaf| is_leaf).count(),
+            branches_to_leaf_targets,
+            pending_branches_by_state.iter().filter(|branches| !branches.is_empty()).count(),
         );
         for (i, bundle) in unique_bundles.iter().enumerate() {
             let terminals: Vec<_> = bundle.keys().collect();
@@ -233,20 +290,25 @@ fn compose_state(
         .map(|accepting| arena.append_with_body(&accepting));
 
     for branch in &state.branches {
-        let Some(continuation) = compose_state(
-            branch.target,
-            states,
-            arena,
-            body_memo,
-            concatenated_branches,
-        ) else {
-            continue;
-        };
-
         let concat_key = (branch.bundle_id, branch.target);
         let branch_with_continuation = if let Some(cached) = concatenated_branches.get(&concat_key) {
             cached.clone()
+        } else if let Some(leaf_final_weight) = leaf_continuation_final_weight(states, branch.target) {
+            let built = build_leaf_specialized_bundle(branch.bundle.as_ref(), &leaf_final_weight)
+                .map(|specialized| arena.append_with_body(&specialized));
+            concatenated_branches.insert(concat_key, built.clone());
+            built
         } else {
+            let Some(continuation) = compose_state(
+                branch.target,
+                states,
+                arena,
+                body_memo,
+                concatenated_branches,
+            ) else {
+                continue;
+            };
+
             let built = Some(arena.concatenate_in_place(branch.bundle.as_ref(), &continuation));
             concatenated_branches.insert(concat_key, built.clone());
             built
