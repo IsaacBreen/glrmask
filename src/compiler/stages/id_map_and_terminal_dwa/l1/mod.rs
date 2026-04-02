@@ -878,23 +878,8 @@ fn build_l1_terminal_dwa(
         reps.sort_unstable();
         reps.dedup();
     }
-    // Sort/merge ranges per TSID → full union Arcs (parallel)
-    let tsid_full_arcs: Vec<Option<Arc<RangeSetBlaze<u32>>>> = tsid_full_ranges
-        .par_iter_mut()
-        .map(|ranges| {
-            if ranges.is_empty() { return None; }
-            ranges.sort_unstable();
-            let mut w = 0;
-            for r in 1..ranges.len() {
-                if ranges[r].0 <= ranges[w].1.saturating_add(1) {
-                    ranges[w].1 = ranges[w].1.max(ranges[r].1);
-                } else { w += 1; ranges[w] = ranges[r]; }
-            }
-            ranges.truncate(w + 1);
-            Some(shared_rangeset(ranges.iter().map(|&(s, e)| s..=e).collect()))
-        })
-        .collect();
-    drop(tsid_full_ranges);
+    let tsid_full_arc_cache: Vec<std::sync::OnceLock<Option<Arc<RangeSetBlaze<u32>>>>> =
+        (0..num_tsids).map(|_| std::sync::OnceLock::new()).collect();
 
     // Group terminals by active_states to deduplicate identical computation
     let mut active_tids: Vec<usize> = (0..terminal_to_active_states.len())
@@ -927,7 +912,14 @@ fn build_l1_terminal_dwa(
                 let reps = &tsid_end_reps[tsid as usize];
                 if reps.is_empty() { continue; }
                 if reps.iter().all(|r| active_set.contains(r)) {
-                    if let Some(ref arc) = tsid_full_arcs[tsid as usize] {
+                    if let Some(arc) = tsid_full_arc_cache[tsid as usize]
+                        .get_or_init(|| {
+                            shared_rangeset_from_unsorted_pairs(
+                                tsid_full_ranges[tsid as usize].as_slice(),
+                            )
+                        })
+                        .as_ref()
+                    {
                         weight_entries.push((tsid, Arc::clone(arc)));
                     }
                 } else if reps.iter().any(|r| active_set.contains(r)) {
@@ -1157,6 +1149,20 @@ fn merge_sorted_ranges_in_place(ranges: &mut Vec<(u32, u32)>) {
         }
     }
     ranges.truncate(write_index + 1);
+}
+
+fn shared_rangeset_from_unsorted_pairs(
+    ranges: &[(u32, u32)],
+) -> Option<Arc<RangeSetBlaze<u32>>> {
+    if ranges.is_empty() {
+        return None;
+    }
+
+    let mut merged = ranges.to_vec();
+    merge_ranges_in_place(&mut merged);
+    Some(shared_rangeset(
+        merged.iter().map(|&(start, end)| start..=end).collect(),
+    ))
 }
 
 fn merge_deferred_equivalent_tsids(
