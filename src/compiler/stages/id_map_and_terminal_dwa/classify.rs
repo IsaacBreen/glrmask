@@ -26,26 +26,58 @@ pub type SharedClassifyCache = std::sync::OnceLock<SharedClassifyBytesets>;
 
 impl SharedClassifyBytesets {
     /// Scan the DFA to compute per-terminal byte sets.
+    ///
+    /// Merges the reachable_bytes and last_bytes scans into a single parallel
+    /// pass over all DFA transitions, eliminating the intermediate
+    /// per-state incoming_bytes array.
     pub fn build(tokenizer: &Tokenizer, num_terminals: u32) -> Self {
+        use rayon::prelude::*;
+
         let nt = num_terminals as usize;
         let initial = tokenizer.start_state();
         let dfa_states = tokenizer.dfa.states();
-        let num_states = tokenizer.num_states() as usize;
 
-        let mut reachable_bytes = vec![U8Set::empty(); nt];
-        for state in dfa_states {
-            for (byte, target) in state.transitions.iter() {
-                let target = *target;
-                let finalizers = tokenizer.dfa.finalizers(target);
-                let futures = tokenizer.dfa.possible_future_group_ids(target);
-                for t in finalizers.iter().chain(futures.iter()) {
-                    if t < nt {
-                        reachable_bytes[t].insert(byte);
+        // Single parallel pass: compute reachable_bytes and last_bytes together.
+        // reachable_bytes[t] = all bytes b where some transition (_, b, target) exists
+        //   and target has terminal t in finalizers or possible_future_group_ids.
+        // last_bytes[t] = all bytes b where some transition (_, b, target) exists
+        //   and target has terminal t in finalizers.
+        let (reachable_bytes, last_bytes) = dfa_states
+            .par_iter()
+            .fold(
+                || (vec![U8Set::empty(); nt], vec![U8Set::empty(); nt]),
+                |(mut reachable, mut last), state| {
+                    for (byte, target) in state.transitions.iter() {
+                        let target = *target;
+                        let finalizers = tokenizer.dfa.finalizers(target);
+                        let futures = tokenizer.dfa.possible_future_group_ids(target);
+                        for t in finalizers.iter() {
+                            if t < nt {
+                                reachable[t].insert(byte);
+                                last[t].insert(byte);
+                            }
+                        }
+                        for t in futures.iter() {
+                            if t < nt {
+                                reachable[t].insert(byte);
+                            }
+                        }
                     }
-                }
-            }
-        }
+                    (reachable, last)
+                },
+            )
+            .reduce(
+                || (vec![U8Set::empty(); nt], vec![U8Set::empty(); nt]),
+                |(mut ra, mut la), (rb, lb)| {
+                    for i in 0..nt {
+                        ra[i] = ra[i].union(&rb[i]);
+                        la[i] = la[i].union(&lb[i]);
+                    }
+                    (ra, la)
+                },
+            );
 
+        // first_bytes: only from initial state (single state, no parallelism needed).
         let mut first_bytes = vec![U8Set::empty(); nt];
         for (byte, target) in dfa_states[initial as usize].transitions.iter() {
             let target = *target;
@@ -54,23 +86,6 @@ impl SharedClassifyBytesets {
             for t in finalizers.iter().chain(futures.iter()) {
                 if t < nt {
                     first_bytes[t].insert(byte);
-                }
-            }
-        }
-
-        let mut incoming_bytes = vec![U8Set::empty(); num_states];
-        for state in dfa_states {
-            for (byte, target) in state.transitions.iter() {
-                incoming_bytes[*target as usize].insert(byte);
-            }
-        }
-
-        let mut last_bytes = vec![U8Set::empty(); nt];
-        for (state_idx, _) in dfa_states.iter().enumerate() {
-            let finalizers = tokenizer.dfa.finalizers(state_idx as u32);
-            for t in finalizers.iter() {
-                if t < nt {
-                    last_bytes[t] = last_bytes[t].union(&incoming_bytes[state_idx]);
                 }
             }
         }
