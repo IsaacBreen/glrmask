@@ -18,17 +18,32 @@ use crate::compiler::stages::compact::compact_dwa_dimensions_fast;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::weight::Weight;
 
-use super::types::{compile_profile_enabled, debug_profile_enabled};
+use super::types::{TerminalDwaPhaseProfile, compile_profile_enabled, debug_profile_enabled};
 
 #[derive(Debug, Clone)]
 pub(crate) struct LocalIdMapTerminalDwa {
     pub(crate) id_map: InternalIdMap,
     pub(crate) dwa: DWA,
     pub(crate) original_to_local_state: Vec<u32>,
+    pub(crate) profile: TerminalDwaPhaseProfile,
 }
 
 pub(crate) fn identity_original_to_local_state(num_tokenizer_states: usize) -> Vec<u32> {
     (0..num_tokenizer_states as u32).collect()
+}
+
+fn merge_phase_profile(
+    global_id_map_ms: f64,
+    remap_union_ms: f64,
+    determinize_ms: f64,
+    minimize_ms: f64,
+    compact_ms: f64,
+) -> TerminalDwaPhaseProfile {
+    TerminalDwaPhaseProfile {
+        id_map_ms: global_id_map_ms,
+        terminal_dwa_ms: remap_union_ms + determinize_ms + minimize_ms,
+        compact_ms,
+    }
 }
 
 pub(crate) fn merge_local_id_maps_and_terminal_dwas(
@@ -36,7 +51,7 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
     inputs: Vec<LocalIdMapTerminalDwa>,
     num_tokenizer_states: usize,
     max_token_id: u32,
-) -> (InternalIdMap, DWA) {
+) -> LocalIdMapTerminalDwa {
     assert!(!inputs.is_empty(), "merge_local_id_maps_and_terminal_dwas called with empty inputs");
 
     let total_started_at = Instant::now();
@@ -46,15 +61,21 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
         input.id_map = expand_local_id_map_to_original_space(&input, num_tokenizer_states);
         let compact_started_at = Instant::now();
         compact_dwa_dimensions_fast(&mut input.dwa, &mut input.id_map);
+        let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
         if compile_profile_enabled() || debug_profile_enabled() {
             eprintln!(
                 "[glrmask/profile][merge] label={} inputs=1 build_global_id_map_ms=0.000 remap_union_ms=0.000 determinize_ms=0.000 minimize_ms=0.000 compact_ms={:.3} total_ms={:.3}",
                 label,
-                compact_started_at.elapsed().as_secs_f64() * 1000.0,
+                compact_ms,
                 total_started_at.elapsed().as_secs_f64() * 1000.0,
             );
         }
-        return (input.id_map, input.dwa);
+        input.profile = TerminalDwaPhaseProfile {
+            id_map_ms: 0.0,
+            terminal_dwa_ms: 0.0,
+            compact_ms,
+        };
+        return input;
     }
 
     let global_id_map_started_at = Instant::now();
@@ -101,6 +122,13 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
     let compact_started_at = Instant::now();
     compact_dwa_dimensions_fast(&mut dwa, &mut global);
     let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
+    let profile = merge_phase_profile(
+        global_id_map_ms,
+        remap_union_ms,
+        determinize_ms,
+        minimize_ms,
+        compact_ms,
+    );
 
     if compile_profile_enabled() || debug_profile_enabled() {
         eprintln!(
@@ -116,7 +144,12 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
         );
     }
 
-    (global, dwa)
+    LocalIdMapTerminalDwa {
+        id_map: global,
+        dwa,
+        original_to_local_state: identity_original_to_local_state(num_tokenizer_states),
+        profile,
+    }
 }
 
 /// Merge multiple `(InternalIdMap, DWA)` pairs into a single pair.
@@ -130,32 +163,38 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
 /// 5. Returns the merged `(InternalIdMap, DWA)`.
 pub(crate) fn merge_id_maps_and_terminal_dwas(
     label: &str,
-    inputs: Vec<(InternalIdMap, DWA)>,
+    inputs: Vec<LocalIdMapTerminalDwa>,
     num_tokenizer_states: usize,
     max_token_id: u32,
-) -> (InternalIdMap, DWA) {
+) -> LocalIdMapTerminalDwa {
     assert!(!inputs.is_empty(), "merge_id_maps_and_terminal_dwas called with empty inputs");
 
     let total_started_at = Instant::now();
 
     if inputs.len() == 1 {
-        let (mut id_map, mut dwa) = inputs.into_iter().next().unwrap();
+        let mut input = inputs.into_iter().next().unwrap();
         let compact_started_at = Instant::now();
-        compact_dwa_dimensions_fast(&mut dwa, &mut id_map);
+        compact_dwa_dimensions_fast(&mut input.dwa, &mut input.id_map);
+        let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
         if compile_profile_enabled() || debug_profile_enabled() {
             eprintln!(
                 "[glrmask/profile][merge] label={} inputs=1 build_global_id_map_ms=0.000 remap_union_ms=0.000 determinize_ms=0.000 minimize_ms=0.000 compact_ms={:.3} total_ms={:.3}",
                 label,
-                compact_started_at.elapsed().as_secs_f64() * 1000.0,
+                compact_ms,
                 total_started_at.elapsed().as_secs_f64() * 1000.0,
             );
         }
-        return (id_map, dwa);
+        input.profile = TerminalDwaPhaseProfile {
+            id_map_ms: 0.0,
+            terminal_dwa_ms: 0.0,
+            compact_ms,
+        };
+        return input;
     }
 
     // 1. Build global id_map via composite-key refinement.
     let global_id_map_started_at = Instant::now();
-    let id_map_refs: Vec<&InternalIdMap> = inputs.iter().map(|(m, _)| m).collect();
+    let id_map_refs: Vec<&InternalIdMap> = inputs.iter().map(|input| &input.id_map).collect();
     let global_id_map = build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
     let global_id_map_ms = global_id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -167,10 +206,10 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     );
     let mut global_body = global_nwa.body();
 
-    for (local_id_map, dwa) in &inputs {
-        let mut nwa = dwa.to_nwa();
-        let tsid_map = build_local_to_global_tsid_map(local_id_map, &global_id_map);
-        let token_map = build_local_to_global_token_map(local_id_map, &global_id_map);
+    for input in &inputs {
+        let mut nwa = input.dwa.to_nwa();
+        let tsid_map = build_local_to_global_tsid_map(&input.id_map, &global_id_map);
+        let token_map = build_local_to_global_token_map(&input.id_map, &global_id_map);
         remap_nwa_with_maps(
             &mut nwa,
             &tsid_map,
@@ -203,6 +242,13 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
         compact_dwa_dimensions_fast(&mut dwa, &mut global);
     }
     let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
+    let profile = merge_phase_profile(
+        global_id_map_ms,
+        remap_union_ms,
+        determinize_ms,
+        minimize_ms,
+        compact_ms,
+    );
 
     if compile_profile_enabled() || debug_profile_enabled() {
         eprintln!(
@@ -218,7 +264,12 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
         );
     }
 
-    (global, dwa)
+    LocalIdMapTerminalDwa {
+        id_map: global,
+        dwa,
+        original_to_local_state: identity_original_to_local_state(num_tokenizer_states),
+        profile,
+    }
 }
 
 // ---------------------------------------------------------------------------

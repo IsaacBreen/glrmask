@@ -38,6 +38,25 @@ pub(crate) struct TerminalDwaBuildProfile {
     pub(crate) match_transition_additions: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct TerminalDwaPhaseProfile {
+    pub(crate) id_map_ms: f64,
+    pub(crate) terminal_dwa_ms: f64,
+    pub(crate) compact_ms: f64,
+}
+
+impl TerminalDwaPhaseProfile {
+    pub(crate) fn total_ms(self) -> f64 {
+        self.id_map_ms + self.terminal_dwa_ms + self.compact_ms
+    }
+
+    pub(crate) fn add_assign(&mut self, other: Self) {
+        self.id_map_ms += other.id_map_ms;
+        self.terminal_dwa_ms += other.terminal_dwa_ms;
+        self.compact_ms += other.compact_ms;
+    }
+}
+
 /// Terminal path length classification for L1/L2+ split.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TerminalPathLength {

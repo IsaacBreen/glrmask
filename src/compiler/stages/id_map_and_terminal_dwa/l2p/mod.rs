@@ -31,7 +31,7 @@ use crate::ds::weight::Weight;
 use crate::Vocab;
 
 use super::grammar_helpers::compute_always_allowed_follows;
-use super::types::{TerminalColoring, compile_profile_enabled, debug_profile_enabled};
+use super::types::{TerminalColoring, TerminalDwaPhaseProfile, compile_profile_enabled, debug_profile_enabled};
 use nwa_builder::{build_nwa_via_trie_walk, internal_vocab_entries, seed_root_nodes};
 use postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
@@ -246,5 +246,16 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         id_map: simplified_id_map,
         dwa,
         original_to_local_state: orig_to_simplified,
+        profile: TerminalDwaPhaseProfile {
+            id_map_ms: simplify_ms + id_map_ms,
+            terminal_dwa_ms: vocab_tree_ms
+                + possible_matches_ms
+                + seed_ms
+                + trie_build_ms
+                + postprocess_ms
+                + determinize_ms
+                + minimize_ms,
+            compact_ms: 0.0,
+        },
     })
 }

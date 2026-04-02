@@ -153,7 +153,7 @@ use crate::ds::weight::{Weight, shared_rangeset};
 use crate::Vocab;
 
 use super::l2p::equivalence_analysis::compat::TokenizerView;
-use super::types::{TerminalColoring, compile_profile_enabled, debug_profile_enabled};
+use super::types::{TerminalColoring, TerminalDwaPhaseProfile, compile_profile_enabled, debug_profile_enabled};
 
 /// Maximum L1 equivalence class count before falling back to L2+.
 ///
@@ -293,6 +293,11 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
         id_map,
         dwa,
         original_to_local_state: identity_original_to_local_state(tokenizer.num_states() as usize),
+        profile: TerminalDwaPhaseProfile {
+            id_map_ms,
+            terminal_dwa_ms: terminal_build_ms,
+            compact_ms,
+        },
     })
 }
 

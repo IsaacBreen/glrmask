@@ -8,12 +8,10 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
-use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::grammar::model::TerminalID;
-use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::classify_terminal_path_lengths;
-use crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_local_id_maps_and_terminal_dwas;
+use crate::compiler::stages::id_map_and_terminal_dwa::merge::{LocalIdMapTerminalDwa, merge_local_id_maps_and_terminal_dwas};
 use crate::compiler::stages::id_map_and_terminal_dwa::types::{
     TerminalColoring, TerminalPathLength, compile_profile_enabled, debug_profile_enabled,
 };
@@ -38,7 +36,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     grammar: &AnalyzedGrammar,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     flat_trans: &[u32],
-) -> Option<(InternalIdMap, DWA)> {
+) -> Option<LocalIdMapTerminalDwa> {
     if vocab.is_empty() {
         return None;
     }
@@ -145,6 +143,14 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
 
     let (l1_pair, l1_ms) = l1_result;
     let (l2p_pair, l2p_ms) = l2p_result;
+    let dominant_branch_profile = match (l1_pair.as_ref(), l2p_pair.as_ref()) {
+        (Some(l1), Some(l2p)) => {
+            if l1_ms >= l2p_ms { l1.profile } else { l2p.profile }
+        }
+        (Some(l1), None) => l1.profile,
+        (None, Some(l2p)) => l2p.profile,
+        (None, None) => return None,
+    };
 
     // Collect non-None results and merge.
     let mut pairs = Vec::new();
@@ -155,24 +161,22 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
         pairs.push(l2p);
     }
 
-    if pairs.is_empty() {
-        return None;
-    }
-
     let num_tokenizer_states = tokenizer.num_states() as usize;
     let max_token_id = vocab.max_token_id();
     let merge_started_at = Instant::now();
-    let merged = merge_local_id_maps_and_terminal_dwas(
+    let mut merged = merge_local_id_maps_and_terminal_dwas(
         &format!("partition:{partition_label}"),
         pairs,
         num_tokenizer_states,
         max_token_id,
     );
+    merged.profile.add_assign(dominant_branch_profile);
+    merged.profile.id_map_ms += classify_ms;
     let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
 
     if compile_profile_enabled() || debug_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][partition] label={} vocab_tokens={} length0={} length1={} length2plus={} classify_ms={:.3} l1_ms={:.3} l2p_ms={:.3} merge_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][partition] label={} vocab_tokens={} length0={} length1={} length2plus={} classify_ms={:.3} l1_ms={:.3} l2p_ms={:.3} merge_ms={:.3} accounted_id_map_ms={:.3} accounted_terminal_dwa_ms={:.3} accounted_compact_ms={:.3} accounted_total_ms={:.3} total_ms={:.3}",
             partition_label,
             vocab.entries.len(),
             num_zero,
@@ -182,6 +186,10 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
             l1_ms,
             l2p_ms,
             merge_ms,
+            merged.profile.id_map_ms,
+            merged.profile.terminal_dwa_ms,
+            merged.profile.compact_ms,
+            merged.profile.total_ms(),
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }

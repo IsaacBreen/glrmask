@@ -484,16 +484,19 @@ fn compile_prepared_with_profile(
         };
 
         enum IdMapBuildResult {
-            Ready(InternalIdMap),
+            Ready {
+                global: InternalIdMap,
+                phase_profile: crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalDwaPhaseProfile,
+            },
             /// Id_map + terminal DWA already built (and compacted).
             SplitComplete {
                 global: InternalIdMap,
                 terminal_dwa: crate::automata::weighted::dwa::DWA,
-                terminal_dwa_ms: f64,
+                phase_profile: crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalDwaPhaseProfile,
             },
         }
 
-        let ((id_map_build_result, id_map_ms), (templates, templates_ms)) = rayon::join(
+        let ((id_map_build_result, _id_map_wall_ms), (templates, templates_ms)) = rayon::join(
             || {
                 let id_map_started_at = Instant::now();
                 let result = if let Ok(load_path) = std::env::var("GLRMASK_ORACLE_LOAD") {
@@ -530,32 +533,48 @@ fn compile_prepared_with_profile(
                     eprintln!(
                         "[glrmask/oracle] loaded from {load_path}: {num_state_classes} state classes, {num_token_classes} token classes"
                     );
-                    IdMapBuildResult::Ready(InternalIdMap {
-                        tokenizer_states: crate::compiler::stages::equiv_types::ManyToOneIdMap::from_original_to_internal_with_representatives(
-                            state_map,
-                            num_state_classes,
-                            state_reps,
-                        ),
-                        vocab_tokens: crate::compiler::stages::equiv_types::ManyToOneIdMap::from_original_to_internal_with_representatives(
-                            token_map,
-                            num_token_classes,
-                            token_reps,
-                        ),
-                    })
+                    IdMapBuildResult::Ready {
+                        global: InternalIdMap {
+                            tokenizer_states: crate::compiler::stages::equiv_types::ManyToOneIdMap::from_original_to_internal_with_representatives(
+                                state_map,
+                                num_state_classes,
+                                state_reps,
+                            ),
+                            vocab_tokens: crate::compiler::stages::equiv_types::ManyToOneIdMap::from_original_to_internal_with_representatives(
+                                token_map,
+                                num_token_classes,
+                                token_reps,
+                            ),
+                        },
+                        phase_profile: crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalDwaPhaseProfile {
+                            id_map_ms: elapsed_ms(id_map_started_at),
+                            terminal_dwa_ms: 0.0,
+                            compact_ms: 0.0,
+                        },
+                    }
                 } else if all_l1 && std::env::var("GLRMASK_L1_IDMAP").map_or(false, |v| v == "1") {
                     // L1 fast path: direct fingerprint-based equivalence,
                     // no partitioning needed. Opt-in via env var for now.
-                    IdMapBuildResult::Ready(
-                        crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::combined::analyze_equivalences_l1_fast(&tokenizer, vocab)
-                    )
+                    IdMapBuildResult::Ready {
+                        global: crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::combined::analyze_equivalences_l1_fast(&tokenizer, vocab),
+                        phase_profile: crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalDwaPhaseProfile {
+                            id_map_ms: elapsed_ms(id_map_started_at),
+                            terminal_dwa_ms: 0.0,
+                            compact_ms: 0.0,
+                        },
+                    }
                 } else if std::env::var("GLRMASK_NO_PARTITION").map_or(false, |v| v == "1") {
                     // Force non-partitioned path for benchmarking.
-                    IdMapBuildResult::Ready(
-                        crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::combined::analyze_equivalences(&tokenizer, vocab, &disallowed_follows, prepared_grammar.ignore_terminal)
-                    )
+                    IdMapBuildResult::Ready {
+                        global: crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::combined::analyze_equivalences(&tokenizer, vocab, &disallowed_follows, prepared_grammar.ignore_terminal),
+                        phase_profile: crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalDwaPhaseProfile {
+                            id_map_ms: elapsed_ms(id_map_started_at),
+                            terminal_dwa_ms: 0.0,
+                            compact_ms: 0.0,
+                        },
+                    }
                 } else {
-                    let tdwa_started = Instant::now();
-                    let (id_map, dwa) = crate::compiler::stages::id_map_and_terminal_dwa::build_id_map_and_terminal_dwa(
+                    let (id_map, dwa, phase_profile) = crate::compiler::stages::id_map_and_terminal_dwa::build_id_map_and_terminal_dwa(
                         &tokenizer, vocab, &terminal_coloring, terminal_coloring_enabled,
                         prepared_grammar.ignore_terminal, &analyzed_grammar,
                         &adjusted_disallowed_for_classification,
@@ -563,7 +582,7 @@ fn compile_prepared_with_profile(
                     IdMapBuildResult::SplitComplete {
                         global: id_map,
                         terminal_dwa: dwa,
-                        terminal_dwa_ms: elapsed_ms(tdwa_started),
+                        phase_profile,
                     }
                 };
                 (result, elapsed_ms(id_map_started_at))
@@ -585,20 +604,18 @@ fn compile_prepared_with_profile(
                 }
             },
         );
-        let (mut internal_ids, prebuilt_terminal_dwa) = match id_map_build_result {
-            IdMapBuildResult::Ready(id_map) => (id_map, None),
+        let (mut internal_ids, prebuilt_terminal_dwa, mut terminal_phase_profile) = match id_map_build_result {
+            IdMapBuildResult::Ready { global, phase_profile } => (global, None, phase_profile),
             IdMapBuildResult::SplitComplete {
                 global,
                 terminal_dwa,
-                terminal_dwa_ms,
-            } => (global, Some((terminal_dwa, terminal_dwa_ms))),
+                phase_profile,
+            } => (global, Some(terminal_dwa), phase_profile),
         };
-        profile.id_map_ms = id_map_ms;
         profile.templates_ms = templates_ms;
         let token_bytes = vocab.entries.clone();
 
-        let (mut terminal_dwa, already_compacted) = if let Some((dwa, tdwa_ms)) = prebuilt_terminal_dwa {
-            profile.terminal_dwa_ms = tdwa_ms;
+        let (mut terminal_dwa, already_compacted) = if let Some(dwa) = prebuilt_terminal_dwa {
             (dwa, true) // SplitComplete: already compacted by merge::f4
         } else {
             let terminal_dwa_started_at = Instant::now();
@@ -612,7 +629,7 @@ fn compile_prepared_with_profile(
                 prepared_grammar.ignore_terminal,
                 Some(&adjusted_disallowed_for_classification),
             );
-            profile.terminal_dwa_ms = elapsed_ms(terminal_dwa_started_at);
+            terminal_phase_profile.terminal_dwa_ms += elapsed_ms(terminal_dwa_started_at);
             (dwa, false)
         };
 
@@ -623,7 +640,7 @@ fn compile_prepared_with_profile(
                 &mut internal_ids,
                 compile_profile_summary_enabled(),
             );
-            profile.compact_ms = elapsed_ms(compact_started_at);
+            let compact_ms = elapsed_ms(compact_started_at);
             if let Some(stats) = compact_report.profile_stats {
                 eprintln!(
                     "[glrmask/profile][compact] tsids={}=>{} tokens={}=>{} weight_ranges={}=>{} token_ranges={}=>{} total_ranges={}=>{}",
@@ -639,7 +656,11 @@ fn compile_prepared_with_profile(
                     stats.total_ranges_after(),
                 );
             }
+            terminal_phase_profile.compact_ms += compact_ms;
         }
+        profile.id_map_ms = terminal_phase_profile.id_map_ms;
+        profile.terminal_dwa_ms = terminal_phase_profile.terminal_dwa_ms;
+        profile.compact_ms = terminal_phase_profile.compact_ms;
 
         // Oracle dump: save post-compact mappings for two-pass experiment
         if let Ok(dump_path) = std::env::var("GLRMASK_ORACLE_DUMP") {

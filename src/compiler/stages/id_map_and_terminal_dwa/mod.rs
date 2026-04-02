@@ -24,7 +24,7 @@ use crate::ds::bitset::BitSet;
 use crate::Vocab;
 
 use classify::classify_vocab_char_type;
-use types::{TerminalColoring, compile_profile_enabled, debug_profile_enabled};
+use types::{TerminalColoring, TerminalDwaPhaseProfile, compile_profile_enabled, debug_profile_enabled};
 
 /// Build the global `(InternalIdMap, DWA)` for the full vocabulary.
 ///
@@ -40,9 +40,10 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     ignore_terminal: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
     disallowed_follows: &BTreeMap<u32, BitSet>,
-) -> (InternalIdMap, DWA) {
+) -> (InternalIdMap, DWA, TerminalDwaPhaseProfile) {
     let total_started_at = Instant::now();
     let force_all_l2p = std::env::var("GLRMASK_FORCE_ALL_L2P").map_or(false, |v| v == "1");
+    let mut profile = TerminalDwaPhaseProfile::default();
 
     // Split vocab into 4 partitions by character type (or single partition if forced).
     let partition_vocab_started_at = Instant::now();
@@ -60,9 +61,12 @@ pub(crate) fn build_id_map_and_terminal_dwa(
         .map(|entries| Vocab::new(entries, None))
         .collect();
     let partition_vocab_ms = partition_vocab_started_at.elapsed().as_secs_f64() * 1000.0;
+    profile.id_map_ms += partition_vocab_ms;
 
     // Build flat DFA transition table once (shared across all partitions).
+    let flat_trans_started_at = Instant::now();
     let flat_trans = l1::build_flat_transition_table(tokenizer);
+    profile.terminal_dwa_ms += flat_trans_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // Build each partition in parallel.
     let ((p0, p1), (p2, p3)) = rayon::join(
@@ -136,9 +140,20 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     let p1_ms = p1.as_ref().map(|(_, ms)| *ms).unwrap_or(0.0);
     let p2_ms = p2.as_ref().map(|(_, ms)| *ms).unwrap_or(0.0);
     let p3_ms = p3.as_ref().map(|(_, ms)| *ms).unwrap_or(0.0);
+    let dominant_partition_profile = [
+        p0.as_ref().map(|(pair, ms)| (pair.profile, *ms)),
+        p1.as_ref().map(|(pair, ms)| (pair.profile, *ms)),
+        p2.as_ref().map(|(pair, ms)| (pair.profile, *ms)),
+        p3.as_ref().map(|(pair, ms)| (pair.profile, *ms)),
+    ]
+    .into_iter()
+    .flatten()
+    .max_by(|(_, left_ms), (_, right_ms)| left_ms.total_cmp(right_ms))
+    .map(|(phase_profile, _)| phase_profile)
+    .unwrap_or_default();
 
     // Collect non-None results.
-    let mut pairs: Vec<(InternalIdMap, DWA)> = Vec::new();
+    let mut pairs: Vec<merge::LocalIdMapTerminalDwa> = Vec::new();
     if let Some((pair, _)) = p0 {
         pairs.push(pair);
     }
@@ -166,29 +181,33 @@ pub(crate) fn build_id_map_and_terminal_dwa(
                 representative_original_ids: Vec::new(),
             },
         };
-        return (empty_map, DWA::new(1, 0));
+        return (empty_map, DWA::new(1, 0), profile);
     }
 
     let num_tokenizer_states = tokenizer.num_states() as usize;
     let max_token_id = vocab.max_token_id();
 
     let merge_started_at = Instant::now();
-    let merged = if pairs.len() == 1 {
+    let (merged, global_merge_profile) = if pairs.len() == 1 {
         // Single partition — already compacted by partition merge. Skip redundant global compact.
-        pairs.into_iter().next().unwrap()
+        (pairs.into_iter().next().unwrap(), TerminalDwaPhaseProfile::default())
     } else {
-        merge::merge_id_maps_and_terminal_dwas(
+        let merged = merge::merge_id_maps_and_terminal_dwas(
             "global",
             pairs,
             num_tokenizer_states,
             max_token_id,
-        )
+        );
+        let global_merge_profile = merged.profile;
+        (merged, global_merge_profile)
     };
     let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
+    profile.add_assign(dominant_partition_profile);
+    profile.add_assign(global_merge_profile);
 
     if compile_profile_enabled() || debug_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][split_terminal_dwa] partition_vocab_ms={:.3} p0_tokens={} p0_ms={:.3} p1_tokens={} p1_ms={:.3} p2_tokens={} p2_ms={:.3} p3_tokens={} p3_ms={:.3} global_merge_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][split_terminal_dwa] partition_vocab_ms={:.3} p0_tokens={} p0_ms={:.3} p1_tokens={} p1_ms={:.3} p2_tokens={} p2_ms={:.3} p3_tokens={} p3_ms={:.3} global_merge_ms={:.3} accounted_id_map_ms={:.3} accounted_terminal_dwa_ms={:.3} accounted_compact_ms={:.3} accounted_total_ms={:.3} total_ms={:.3}",
             partition_vocab_ms,
             sub_vocabs[0].entries.len(),
             p0_ms,
@@ -199,16 +218,20 @@ pub(crate) fn build_id_map_and_terminal_dwa(
             sub_vocabs[3].entries.len(),
             p3_ms,
             merge_ms,
+            profile.id_map_ms,
+            profile.terminal_dwa_ms,
+            profile.compact_ms,
+            profile.total_ms(),
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
 
     if std::env::var("GLRMASK_DEBUG_DWA_DUMP").map_or(false, |v| v == "1") {
-        emit_merged_token_map(&merged.1, vocab, &merged.0);
-        emit_merged_dwa_dump(&merged.1);
+        emit_merged_token_map(&merged.dwa, vocab, &merged.id_map);
+        emit_merged_dwa_dump(&merged.dwa);
     }
 
-    merged
+    (merged.id_map, merged.dwa, profile)
 }
 
 fn emit_merged_token_map(dwa: &DWA, vocab: &Vocab, id_map: &InternalIdMap) {
