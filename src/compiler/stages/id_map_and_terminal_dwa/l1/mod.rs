@@ -912,22 +912,23 @@ fn build_l1_terminal_dwa(
         unique_groups.push(vec![tid]);
     }
 
-    let end_rep_group_indices =
-        build_end_rep_group_indices(&terminal_to_active_states, deferred_arced.len());
+    let num_groups = unique_groups.len();
+    let (end_rep_group_masks, words_per_mask) = build_end_rep_group_masks(
+        &unique_groups,
+        &terminal_to_active_states,
+        deferred_arced.len(),
+    );
 
     let mut tsid_group_contributions: Vec<Vec<(usize, Arc<RangeSetBlaze<u32>>)>> =
         (0..num_tsids).map(|_| Vec::new()).collect();
     for (end_rep, entries) in deferred_arced.iter().enumerate() {
-        let group_indices = &end_rep_group_indices[end_rep];
-        if group_indices.is_empty() {
+        let mask_offset = end_rep * words_per_mask;
+        let mask_slice = &end_rep_group_masks[mask_offset..mask_offset + words_per_mask];
+        if mask_slice.iter().all(|&w| w == 0) {
             continue;
         }
         for &(tsid, ref arc) in entries {
-            let contributions = &mut tsid_group_contributions[tsid as usize];
-            contributions.reserve(group_indices.len());
-            for &group_idx in group_indices {
-                contributions.push((group_idx, Arc::clone(arc)));
-            }
+            tsid_group_contributions[tsid as usize].push((end_rep, Arc::clone(arc)));
         }
     }
 
@@ -940,18 +941,28 @@ fn build_l1_terminal_dwa(
                     return Vec::new();
                 }
 
-                let mut group_counts = vec![0usize; unique_groups.len()];
+                let mut group_counts = vec![0usize; num_groups];
                 let mut group_ranges: Vec<Vec<(u32, u32)>> =
-                    (0..unique_groups.len()).map(|_| Vec::new()).collect();
+                    (0..num_groups).map(|_| Vec::new()).collect();
                 let mut touched_groups: Vec<usize> = Vec::new();
 
-                for &(group_idx, ref arc) in contributions {
-                    if group_counts[group_idx] == 0 {
-                        touched_groups.push(group_idx);
-                    }
-                    group_counts[group_idx] += 1;
-                    for r in arc.ranges() {
-                        group_ranges[group_idx].push((*r.start(), *r.end()));
+                for &(end_rep, ref arc) in contributions {
+                    let mask_offset = end_rep * words_per_mask;
+                    let mask_slice = &end_rep_group_masks[mask_offset..mask_offset + words_per_mask];
+                    for (word_idx, &word) in mask_slice.iter().enumerate() {
+                        let mut remaining = word;
+                        while remaining != 0 {
+                            let bit_idx = remaining.trailing_zeros() as usize;
+                            remaining &= remaining - 1;
+                            let group_idx = word_idx * 64 + bit_idx;
+                            if group_counts[group_idx] == 0 {
+                                touched_groups.push(group_idx);
+                            }
+                            group_counts[group_idx] += 1;
+                            for r in arc.ranges() {
+                                group_ranges[group_idx].push((*r.start(), *r.end()));
+                            }
+                        }
                     }
                 }
 
@@ -1209,36 +1220,24 @@ fn shared_rangeset_from_unsorted_pairs(
     ))
 }
 
-fn build_end_rep_group_indices(
+fn build_end_rep_group_masks(
+    unique_groups: &[Vec<usize>],
     terminal_to_active_states: &[Vec<u32>],
     num_end_reps: usize,
-) -> Vec<Vec<usize>> {
-    let mut active_tids: Vec<usize> = (0..terminal_to_active_states.len())
-        .filter(|&i| !terminal_to_active_states[i].is_empty())
-        .collect();
-    active_tids.sort_unstable_by(|&a, &b| {
-        terminal_to_active_states[a].cmp(&terminal_to_active_states[b])
-    });
+) -> (Vec<u64>, usize) {
+    let num_groups = unique_groups.len();
+    let words_per_mask = num_groups.div_ceil(64);
+    let mut end_rep_group_masks = vec![0u64; num_end_reps * words_per_mask];
 
-    let mut unique_groups: Vec<Vec<usize>> = Vec::new();
-    for &tid in &active_tids {
-        if let Some(last) = unique_groups.last_mut() {
-            if terminal_to_active_states[last[0]] == terminal_to_active_states[tid] {
-                last.push(tid);
-                continue;
-            }
-        }
-        unique_groups.push(vec![tid]);
-    }
-
-    let mut end_rep_groups = vec![Vec::new(); num_end_reps];
     for (group_idx, tids) in unique_groups.iter().enumerate() {
+        let word = group_idx / 64;
+        let bit = 1u64 << (group_idx % 64);
         for &state in &terminal_to_active_states[tids[0]] {
-            end_rep_groups[state as usize].push(group_idx);
+            end_rep_group_masks[state as usize * words_per_mask + word] |= bit;
         }
     }
 
-    end_rep_groups
+    (end_rep_group_masks, words_per_mask)
 }
 
 fn merge_deferred_equivalent_tsids(
@@ -1491,12 +1490,21 @@ mod tests {
     }
 
     #[test]
-    fn test_end_rep_group_indices_handle_more_than_32_groups() {
-        let terminal_to_active_states: Vec<Vec<u32>> = (0..33).map(|i| vec![i as u32]).collect();
-        let end_rep_groups = build_end_rep_group_indices(&terminal_to_active_states, 33);
+    fn test_end_rep_group_masks_handle_more_than_32_groups() {
+        let terminal_to_active_states: Vec<Vec<u32>> = (0..65).map(|i| vec![i as u32]).collect();
+        let unique_groups: Vec<Vec<usize>> = (0..65).map(|i| vec![i]).collect();
+        let (end_rep_group_masks, words_per_mask) =
+            build_end_rep_group_masks(&unique_groups, &terminal_to_active_states, 65);
 
-        for group_idx in 0..33 {
-            assert_eq!(end_rep_groups[group_idx], vec![group_idx]);
+        assert_eq!(words_per_mask, 2);
+        for group_idx in 0..65 {
+            let base = group_idx * words_per_mask;
+            let word = group_idx / 64;
+            let bit = 1u64 << (group_idx % 64);
+            for word_idx in 0..words_per_mask {
+                let expected = if word_idx == word { bit } else { 0 };
+                assert_eq!(end_rep_group_masks[base + word_idx], expected);
+            }
         }
     }
 }
