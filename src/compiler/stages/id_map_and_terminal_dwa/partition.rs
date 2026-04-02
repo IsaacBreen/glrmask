@@ -37,6 +37,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     ignore_terminal: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
     disallowed_follows: &BTreeMap<u32, BitSet>,
+    flat_trans: &[u32],
 ) -> Option<(InternalIdMap, DWA)> {
     if vocab.is_empty() {
         return None;
@@ -114,6 +115,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                     ignore_terminal,
                     grammar,
                     &l1_mask,
+                    flat_trans,
                 );
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
             } else {

@@ -61,6 +61,9 @@ pub(crate) fn build_id_map_and_terminal_dwa(
         .collect();
     let partition_vocab_ms = partition_vocab_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    // Build flat DFA transition table once (shared across all partitions).
+    let flat_trans = l1::build_flat_transition_table(tokenizer);
+
     // Build each partition in parallel.
     let ((p0, p1), (p2, p3)) = rayon::join(
         || {
@@ -76,6 +79,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
                         ignore_terminal,
                         grammar,
                         disallowed_follows,
+                        &flat_trans,
                     ).map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0))
                 },
                 || {
@@ -89,6 +93,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
                         ignore_terminal,
                         grammar,
                         disallowed_follows,
+                        &flat_trans,
                     ).map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0))
                 },
             )
@@ -106,6 +111,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
                         ignore_terminal,
                         grammar,
                         disallowed_follows,
+                        &flat_trans,
                     ).map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0))
                 },
                 || {
@@ -119,6 +125,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
                         ignore_terminal,
                         grammar,
                         disallowed_follows,
+                        &flat_trans,
                     ).map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0))
                 },
             )

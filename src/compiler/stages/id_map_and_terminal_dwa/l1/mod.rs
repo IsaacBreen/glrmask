@@ -205,6 +205,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     _ignore_terminal: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
     active_terminals: &[bool],
+    flat_trans: &[u32],
 ) -> Option<LocalIdMapTerminalDwa> {
     if vocab.is_empty() {
         return None;
@@ -224,6 +225,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
         &state_to_rep,
         num_terminals,
         active_terminals,
+        flat_trans,
     )?;
     let terminal_build_ms = dwa_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -383,6 +385,7 @@ fn build_l1_terminal_dwa(
     state_to_rep: &[u32],
     num_terminals: u32,
     active_terminals: &[bool],
+    flat_trans: &[u32],
 ) -> Option<(DWA, L1TerminalBuildProfile)> {
     let total_started_at = std::time::Instant::now();
     let internal_vocab_ms = 0.0;
@@ -409,8 +412,6 @@ fn build_l1_terminal_dwa(
     let num_dfa_states = tokenizer.num_states() as usize;
 
     let traversal_started_at = Instant::now();
-
-    let flat_trans = build_flat_transition_table(tokenizer);
 
     // Parallel traversal: each start_state processed independently.
     // Each (end_rep, tsid) pair is unique across start groups since TSIDs
@@ -1032,7 +1033,7 @@ fn build_l1_terminal_dwa(
     ))
 }
 
-fn build_flat_transition_table(tokenizer: &Tokenizer) -> Vec<u32> {
+pub(crate) fn build_flat_transition_table(tokenizer: &Tokenizer) -> Vec<u32> {
     let dead = u32::MAX;
     let mut flat_trans = vec![dead; tokenizer.num_states() as usize * 256];
     for (state_idx, dfa_state) in tokenizer.dfa.states().iter().enumerate() {
