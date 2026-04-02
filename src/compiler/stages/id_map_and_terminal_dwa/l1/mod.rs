@@ -227,7 +227,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
         active_terminals,
         flat_trans,
     )?;
-    let dwa_stats = dwa.stats();
+    let dwa_stats_before_compact = dwa.stats();
     let terminal_build_ms = dwa_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let profiling = compile_profile_enabled() || debug_profile_enabled();
@@ -241,6 +241,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
         compact_dwa_dimensions_fast(&mut dwa, &mut id_map)
     };
     let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
+    let dwa_stats_after_compact = dwa.stats();
 
     if profiling {
         let stats_str = if let Some(stats) = compact_report.profile_stats {
@@ -259,7 +260,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
             )
         };
         eprintln!(
-            "[glrmask/profile][l1] partition={} vocab_tokens={} tsids={} state_equiv_ms={:.3} token_identity_map_ms={:.3} id_map_ms={:.3} internal_vocab_ms={:.3} vocab_tree_build_ms={:.3} state_seed_ms={:.3} token_set_intern_ms={:.3} tsid_profile_merge_ms={:.3} tsid_profile_merge_before={} tsid_profile_merge_after={} vocab_tree_traversal_ms={:.3} direct_terminal_dwa_ms={:.3} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges={} terminal_build_ms={:.3} compact_ms={:.3} determinize=none minimize=none prune=none total_ms={:.3}{}",
+            "[glrmask/profile][l1] partition={} vocab_tokens={} tsids={} state_equiv_ms={:.3} token_identity_map_ms={:.3} id_map_ms={:.3} internal_vocab_ms={:.3} vocab_tree_build_ms={:.3} state_seed_ms={:.3} token_set_intern_ms={:.3} tsid_profile_merge_ms={:.3} tsid_profile_merge_before={} tsid_profile_merge_after={} vocab_tree_traversal_ms={:.3} direct_terminal_dwa_ms={:.3} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} terminal_build_ms={:.3} compact_ms={:.3} determinize=none minimize=none prune=none total_ms={:.3}{}",
             partition_label,
             vocab.entries.len(),
             id_map.num_tsids(),
@@ -275,10 +276,11 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
             terminal_profile.tsid_profile_merge_after,
             terminal_profile.vocab_tree_traversal_ms,
             terminal_profile.direct_terminal_dwa_ms,
-            dwa_stats.states,
-            dwa_stats.transitions,
-            dwa_stats.transition_pairs,
-            dwa_stats.interned_ranges,
+            dwa_stats_before_compact.states,
+            dwa_stats_before_compact.transitions,
+            dwa_stats_before_compact.transition_pairs,
+            dwa_stats_before_compact.interned_ranges,
+            dwa_stats_after_compact.interned_ranges,
             terminal_build_ms,
             compact_ms,
             total_started_at.elapsed().as_secs_f64() * 1000.0,

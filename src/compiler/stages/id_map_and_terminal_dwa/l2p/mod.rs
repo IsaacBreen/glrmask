@@ -212,11 +212,12 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let minimize_started_at = Instant::now();
     let dwa = minimize_with_threshold(&det, 50);
     let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
-    let dwa_stats = dwa.stats();
+    let dwa_stats_before_compact = dwa.stats();
+    let dwa_stats_after_compact = dwa.stats();
 
     if compile_profile_enabled() || debug_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][l2p] partition={} vocab_tokens={} tsids={} simplify_ms={:.3} simplified_states={} id_map_ms={:.3} vocab_tree_ms={:.3} possible_matches_ms={:.3} seed_ms={:.3} terminal_nwa_build_ms={:.3} nwa_states={}->{}->{}->{}->{} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} prune_ms={:.3} canonicalize_ms={:.3} postprocess_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} minimize_states={} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges={} total_ms={:.3}",
+            "[glrmask/profile][l2p] partition={} vocab_tokens={} tsids={} simplify_ms={:.3} simplified_states={} id_map_ms={:.3} vocab_tree_ms={:.3} possible_matches_ms={:.3} seed_ms={:.3} terminal_nwa_build_ms={:.3} nwa_states={}->{}->{}->{}->{} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} prune_ms={:.3} canonicalize_ms={:.3} postprocess_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} minimize_states={} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} total_ms={:.3}",
             partition_label,
             vocab.entries.len(),
             simplified_id_map.num_tsids(),
@@ -240,11 +241,12 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             postprocess_ms,
             determinize_ms,
             minimize_ms,
-            dwa_stats.states,
-            dwa_stats.states,
-            dwa_stats.transitions,
-            dwa_stats.transition_pairs,
-            dwa_stats.interned_ranges,
+            dwa_stats_before_compact.states,
+            dwa_stats_before_compact.states,
+            dwa_stats_before_compact.transitions,
+            dwa_stats_before_compact.transition_pairs,
+            dwa_stats_before_compact.interned_ranges,
+            dwa_stats_after_compact.interned_ranges,
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
