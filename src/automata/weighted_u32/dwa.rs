@@ -18,6 +18,14 @@ pub struct DWA {
     pub start_state: u32,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct DwaStats {
+    pub states: usize,
+    pub transitions: usize,
+    pub transition_pairs: usize,
+    pub interned_ranges: usize,
+}
+
 // --- Two-level weight-pool serde for DWA ---
 // Level 1: Pool unique RangeSetBlaze<u32> (token sets) by Arc pointer
 // Level 2: Pool unique Weight (RangeMapBlaze) by Arc pointer, referencing token set indices
@@ -224,6 +232,52 @@ impl DWA {
 
     pub fn num_transitions(&self) -> usize {
         self.states.iter().map(|state| state.transitions.len()).sum()
+    }
+
+    pub fn stats(&self) -> DwaStats {
+        let mut transition_pairs = 0usize;
+        let mut dsts = BTreeSet::new();
+        for state in &self.states {
+            dsts.clear();
+            for (dst, _) in state.transitions.values() {
+                dsts.insert(*dst);
+            }
+            transition_pairs += dsts.len();
+        }
+
+        let mut seen_weight_ptrs = BTreeSet::new();
+        let mut seen_rangeset_ptrs = BTreeSet::new();
+        let mut total_outer_ranges = 0usize;
+        let mut total_inner_ranges = 0usize;
+
+        let mut process_weight = |weight: &Weight| {
+            let weight_ptr = std::sync::Arc::as_ptr(&weight.0) as usize;
+            if seen_weight_ptrs.insert(weight_ptr) {
+                total_outer_ranges += weight.0.range_values().count();
+            }
+            for (_, tokens) in weight.0.range_values() {
+                let token_ptr = std::sync::Arc::as_ptr(tokens) as usize;
+                if seen_rangeset_ptrs.insert(token_ptr) {
+                    total_inner_ranges += tokens.ranges().count();
+                }
+            }
+        };
+
+        for state in &self.states {
+            if let Some(final_weight) = &state.final_weight {
+                process_weight(final_weight);
+            }
+            for (_, weight) in state.transitions.values() {
+                process_weight(weight);
+            }
+        }
+
+        DwaStats {
+            states: self.states.len(),
+            transitions: self.num_transitions(),
+            transition_pairs,
+            interned_ranges: total_outer_ranges + total_inner_ranges,
+        }
     }
 
     pub fn set_final_weight(&mut self, state: u32, weight: Weight) {

@@ -227,6 +227,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
         active_terminals,
         flat_trans,
     )?;
+    let dwa_stats = dwa.stats();
     let terminal_build_ms = dwa_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let profiling = compile_profile_enabled() || debug_profile_enabled();
@@ -258,7 +259,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
             )
         };
         eprintln!(
-            "[glrmask/profile][l1] partition={} vocab_tokens={} tsids={} state_equiv_ms={:.3} token_identity_map_ms={:.3} id_map_ms={:.3} internal_vocab_ms={:.3} vocab_tree_build_ms={:.3} state_seed_ms={:.3} token_set_intern_ms={:.3} tsid_profile_merge_ms={:.3} tsid_profile_merge_before={} tsid_profile_merge_after={} vocab_tree_traversal_ms={:.3} direct_terminal_dwa_ms={:.3} terminal_build_ms={:.3} compact_ms={:.3} determinize=none minimize=none prune=none total_ms={:.3}{}",
+            "[glrmask/profile][l1] partition={} vocab_tokens={} tsids={} state_equiv_ms={:.3} token_identity_map_ms={:.3} id_map_ms={:.3} internal_vocab_ms={:.3} vocab_tree_build_ms={:.3} state_seed_ms={:.3} token_set_intern_ms={:.3} tsid_profile_merge_ms={:.3} tsid_profile_merge_before={} tsid_profile_merge_after={} vocab_tree_traversal_ms={:.3} direct_terminal_dwa_ms={:.3} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges={} terminal_build_ms={:.3} compact_ms={:.3} determinize=none minimize=none prune=none total_ms={:.3}{}",
             partition_label,
             vocab.entries.len(),
             id_map.num_tsids(),
@@ -274,6 +275,10 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
             terminal_profile.tsid_profile_merge_after,
             terminal_profile.vocab_tree_traversal_ms,
             terminal_profile.direct_terminal_dwa_ms,
+            dwa_stats.states,
+            dwa_stats.transitions,
+            dwa_stats.transition_pairs,
+            dwa_stats.interned_ranges,
             terminal_build_ms,
             compact_ms,
             total_started_at.elapsed().as_secs_f64() * 1000.0,
@@ -1017,6 +1022,8 @@ fn build_l1_terminal_dwa(
         return None;
     }
 
+    let dwa_stats = dwa.stats();
+
     let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
     let direct_terminal_dwa_ms = merge_ms;
     let distribute_ms = distribute_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -1024,10 +1031,13 @@ fn build_l1_terminal_dwa(
 
     if debug_profile_enabled() {
         eprintln!(
-            "[glrmask/debug][terminal_dwa] partition_build_l1_batch vocab={} tsids={} transitions={} traversal_ms={:.1} arc_wrap_ms={:.1} inverse_map_ms={:.1} merge_ms={:.1} distribute_ms={:.1} total_ms={:.1}",
+            "[glrmask/debug][terminal_dwa] partition_build_l1_batch vocab={} tsids={} states={} transitions={} transition_pairs={} interned_ranges={} traversal_ms={:.1} arc_wrap_ms={:.1} inverse_map_ms={:.1} merge_ms={:.1} distribute_ms={:.1} total_ms={:.1}",
             sorted_entries.len(),
             id_map.num_tsids(),
-            num_transitions,
+            dwa_stats.states,
+            dwa_stats.transitions,
+            dwa_stats.transition_pairs,
+            dwa_stats.interned_ranges,
             traversal_ms,
             arc_wrap_ms,
             inverse_map_ms,
