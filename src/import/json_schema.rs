@@ -5364,14 +5364,9 @@ impl<'a> SchemaCtx<'a> {
         fixed_literal_keys.extend(required_list.iter().cloned());
 
         // Additional properties are emitted only after the fixed object tree.
-        // Required keys therefore do not need to be subtracted from the
-        // additional-properties key recognizer; only optional declared keys must
-        // still be excluded there.
-        let additional_excluded_literal_keys = properties
-            .keys()
-            .filter(|key| !required_keys.contains(*key))
-            .cloned()
-            .collect::<BTreeSet<_>>();
+        // Exclude all declared keys (both required and optional) so that a key
+        // already handled by the tree cannot also appear as an additional property.
+        let additional_excluded_literal_keys = fixed_literal_keys.clone();
 
         let mut ordered: Vec<(String, GrammarExpr, bool)> = Vec::new();
 
