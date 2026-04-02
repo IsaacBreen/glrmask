@@ -9,6 +9,80 @@ use crate::Vocab;
 
 use super::types::TerminalPathLength;
 
+/// DFA-derived byte sets for terminal classification, identical across partitions.
+///
+/// `classify_terminal_path_lengths` scans the full DFA to compute per-terminal
+/// byte sets. Since all partitions share the same tokenizer and terminal count,
+/// this scan is redundant after the first call. Caching these byte sets via
+/// `OnceLock` eliminates ~35ms of repeated DFA scanning per extra partition.
+pub struct SharedClassifyBytesets {
+    reachable_bytes: Vec<U8Set>,
+    first_bytes: Vec<U8Set>,
+    last_bytes: Vec<U8Set>,
+}
+
+/// Cache type for lazy `SharedClassifyBytesets` initialization across partitions.
+pub type SharedClassifyCache = std::sync::OnceLock<SharedClassifyBytesets>;
+
+impl SharedClassifyBytesets {
+    /// Scan the DFA to compute per-terminal byte sets.
+    pub fn build(tokenizer: &Tokenizer, num_terminals: u32) -> Self {
+        let nt = num_terminals as usize;
+        let initial = tokenizer.start_state();
+        let dfa_states = tokenizer.dfa.states();
+        let num_states = tokenizer.num_states() as usize;
+
+        let mut reachable_bytes = vec![U8Set::empty(); nt];
+        for state in dfa_states {
+            for (byte, target) in state.transitions.iter() {
+                let target = *target;
+                let finalizers = tokenizer.dfa.finalizers(target);
+                let futures = tokenizer.dfa.possible_future_group_ids(target);
+                for t in finalizers.iter().chain(futures.iter()) {
+                    if t < nt {
+                        reachable_bytes[t].insert(byte);
+                    }
+                }
+            }
+        }
+
+        let mut first_bytes = vec![U8Set::empty(); nt];
+        for (byte, target) in dfa_states[initial as usize].transitions.iter() {
+            let target = *target;
+            let finalizers = tokenizer.dfa.finalizers(target);
+            let futures = tokenizer.dfa.possible_future_group_ids(target);
+            for t in finalizers.iter().chain(futures.iter()) {
+                if t < nt {
+                    first_bytes[t].insert(byte);
+                }
+            }
+        }
+
+        let mut incoming_bytes = vec![U8Set::empty(); num_states];
+        for state in dfa_states {
+            for (byte, target) in state.transitions.iter() {
+                incoming_bytes[*target as usize].insert(byte);
+            }
+        }
+
+        let mut last_bytes = vec![U8Set::empty(); nt];
+        for (state_idx, _) in dfa_states.iter().enumerate() {
+            let finalizers = tokenizer.dfa.finalizers(state_idx as u32);
+            for t in finalizers.iter() {
+                if t < nt {
+                    last_bytes[t] = last_bytes[t].union(&incoming_bytes[state_idx]);
+                }
+            }
+        }
+
+        SharedClassifyBytesets {
+            reachable_bytes,
+            first_bytes,
+            last_bytes,
+        }
+    }
+}
+
 /// Classifies a token's bytes by character type for vocab partitioning.
 /// Returns 0 (pure non-alnum), 1 (mixed), 2 (alnum with ≥1 alpha, optionally with leading space),
 /// or 3 (pure digit, optionally with leading space).
@@ -51,6 +125,7 @@ pub(crate) fn classify_terminal_path_lengths(
     vocab: &Vocab,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     num_terminals: u32,
+    shared_classify_cache: Option<&SharedClassifyCache>,
 ) -> Vec<TerminalPathLength> {
     let nt = num_terminals as usize;
 
@@ -62,59 +137,17 @@ pub(crate) fn classify_terminal_path_lengths(
         }
     }
 
-    // 2. Byte bitsets per terminal.
-    let num_states = tokenizer.num_states() as usize;
-    let initial = tokenizer.start_state();
-    let dfa_states = tokenizer.dfa.states();
-
-    // reachable_bytes[t]: bytes from ANY state that lead towards matching
-    // terminal t (finalized or in possible_future).  Used for L0 check.
-    let mut reachable_bytes = vec![U8Set::empty(); nt];
-    for state in dfa_states {
-        for (byte, target) in state.transitions.iter() {
-            let target = *target;
-            let finalizers = tokenizer.dfa.finalizers(target);
-            let futures = tokenizer.dfa.possible_future_group_ids(target);
-            for t in finalizers.iter().chain(futures.iter()) {
-                if t < nt {
-                    reachable_bytes[t].insert(byte);
-                }
-            }
-        }
-    }
-
-    // first_bytes[t]: bytes from the INITIAL state leading towards terminal t.
-    // After a terminal match the tokenizer resets to initial, so this is the
-    // relevant set for "can t2 start after t1?".
-    let mut first_bytes = vec![U8Set::empty(); nt];
-    for (byte, target) in dfa_states[initial as usize].transitions.iter() {
-        let target = *target;
-        let finalizers = tokenizer.dfa.finalizers(target);
-        let futures = tokenizer.dfa.possible_future_group_ids(target);
-        for t in finalizers.iter().chain(futures.iter()) {
-            if t < nt {
-                first_bytes[t].insert(byte);
-            }
-        }
-    }
-
-    // last_bytes[t]: bytes on transitions arriving at states that finalize t.
-    let mut incoming_bytes = vec![U8Set::empty(); num_states];
-    for state in dfa_states {
-        for (byte, target) in state.transitions.iter() {
-            incoming_bytes[*target as usize].insert(byte);
-        }
-    }
-
-    let mut last_bytes = vec![U8Set::empty(); nt];
-    for (state_idx, _) in dfa_states.iter().enumerate() {
-        let finalizers = tokenizer.dfa.finalizers(state_idx as u32);
-        for t in finalizers.iter() {
-            if t < nt {
-                last_bytes[t] = last_bytes[t].union(&incoming_bytes[state_idx]);
-            }
-        }
-    }
+    // 2. Byte bitsets per terminal — use cache if available.
+    let owned_bytesets: Option<SharedClassifyBytesets>;
+    let bytesets: &SharedClassifyBytesets = if let Some(cache) = shared_classify_cache {
+        cache.get_or_init(|| SharedClassifyBytesets::build(tokenizer, num_terminals))
+    } else {
+        owned_bytesets = Some(SharedClassifyBytesets::build(tokenizer, num_terminals));
+        owned_bytesets.as_ref().unwrap()
+    };
+    let reachable_bytes = &bytesets.reachable_bytes;
+    let first_bytes = &bytesets.first_bytes;
+    let last_bytes = &bytesets.last_bytes;
 
     // 3. Mark terminals that may participate in paths of length ≥ 2.
     let mut is_two_plus = BitSet::new(nt);

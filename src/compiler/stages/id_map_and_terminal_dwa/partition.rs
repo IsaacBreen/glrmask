@@ -37,6 +37,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     flat_trans: &[u32],
     shared_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
+    shared_classify_cache: Option<&super::classify::SharedClassifyCache>,
 ) -> Option<LocalIdMapTerminalDwa> {
     if vocab.is_empty() {
         return None;
@@ -52,7 +53,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     let terminal_path_lengths = if force_all_l2p {
         vec![TerminalPathLength::TwoPlus; num_terminals as usize]
     } else {
-        classify_terminal_path_lengths(tokenizer, vocab, disallowed_follows, num_terminals)
+        classify_terminal_path_lengths(tokenizer, vocab, disallowed_follows, num_terminals, shared_classify_cache)
     };
     let classify_ms = classify_started_at.elapsed().as_secs_f64() * 1000.0;
 

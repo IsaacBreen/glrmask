@@ -74,6 +74,11 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     // without changing transitions, the cached base is valid for all partitions.
     let shared_vocab_dfa_cache = l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
 
+    // Shared cache for terminal classification byte sets. The DFA scanning
+    // (reachable_bytes, first_bytes, last_bytes) is identical across partitions;
+    // only the vocab-dependent classification differs. Cached by first partition.
+    let shared_classify_cache = classify::SharedClassifyCache::new();
+
     // Build each partition in parallel.
     let ((p0, p1), (p2, p3)) = rayon::join(
         || {
@@ -91,6 +96,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
                         disallowed_follows,
                         &flat_trans,
                         Some(&shared_vocab_dfa_cache),
+                        Some(&shared_classify_cache),
                     ).map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0))
                 },
                 || {
@@ -106,6 +112,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
                         disallowed_follows,
                         &flat_trans,
                         Some(&shared_vocab_dfa_cache),
+                        Some(&shared_classify_cache),
                     ).map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0))
                 },
             )
@@ -125,6 +132,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
                         disallowed_follows,
                         &flat_trans,
                         Some(&shared_vocab_dfa_cache),
+                        Some(&shared_classify_cache),
                     ).map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0))
                 },
                 || {
@@ -140,6 +148,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
                         disallowed_follows,
                         &flat_trans,
                         Some(&shared_vocab_dfa_cache),
+                        Some(&shared_classify_cache),
                     ).map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0))
                 },
             )

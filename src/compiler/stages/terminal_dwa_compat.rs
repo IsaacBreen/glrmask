@@ -197,6 +197,7 @@ pub(crate) fn build_terminal_dwa_for_existing_id_map_with_possible_matches_and_c
         vocab,
         effective_disallowed,
         grammar.num_terminals,
+        None,
     );
     let all_l1 = terminal_path_lengths.iter().all(|l| matches!(l, TerminalPathLength::Zero | TerminalPathLength::One));
 

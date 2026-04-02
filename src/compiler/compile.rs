@@ -465,6 +465,7 @@ fn compile_prepared_with_profile(
             vocab,
             &adjusted_disallowed_for_classification,
             analyzed_grammar.num_terminals,
+            None,
         );
         profile.classify_ms = elapsed_ms(classify_started_at);
         if compile_profile_enabled() {
