@@ -863,20 +863,16 @@ fn build_l1_terminal_dwa(
 
     let num_tsids = id_map.num_tsids() as usize;
 
-    // Build per-TSID: full ranges union + list of contributing end_reps
+    // Build per-TSID: full ranges union + contributing end_rep count.
     let mut tsid_full_ranges: Vec<Vec<(u32, u32)>> = (0..num_tsids).map(|_| Vec::new()).collect();
-    let mut tsid_end_reps: Vec<Vec<u32>> = (0..num_tsids).map(|_| Vec::new()).collect();
-    for (end_rep, entries) in deferred_arced.iter().enumerate() {
+    let mut tsid_total_rep_counts = vec![0usize; num_tsids];
+    for entries in &deferred_arced {
         for &(tsid, ref arc) in entries {
-            tsid_end_reps[tsid as usize].push(end_rep as u32);
+            tsid_total_rep_counts[tsid as usize] += 1;
             for r in arc.ranges() {
                 tsid_full_ranges[tsid as usize].push((*r.start(), *r.end()));
             }
         }
-    }
-    for reps in &mut tsid_end_reps {
-        reps.sort_unstable();
-        reps.dedup();
     }
     let tsid_full_arc_cache: Vec<std::sync::OnceLock<Option<Arc<RangeSetBlaze<u32>>>>> =
         (0..num_tsids).map(|_| std::sync::OnceLock::new()).collect();
@@ -897,68 +893,100 @@ fn build_l1_terminal_dwa(
         unique_groups.push(vec![tid]);
     }
 
-    // Compute weights per unique group in parallel
-    let group_results: Vec<Option<(Vec<usize>, Weight)>> = unique_groups
-        .par_iter()
-        .map(|tids| {
-            let active_states = &terminal_to_active_states[tids[0]];
-            let active_set: rustc_hash::FxHashSet<u32> =
-                active_states.iter().copied().collect();
+    debug_assert!(unique_groups.len() <= u32::BITS as usize);
 
-            let mut weight_entries: Vec<(u32, Arc<RangeSetBlaze<u32>>)> = Vec::new();
-            let mut affected_tsids: Vec<u32> = Vec::new();
+    let mut end_rep_group_masks = vec![0u32; deferred_arced.len()];
+    for (group_idx, tids) in unique_groups.iter().enumerate() {
+        let bit = 1u32 << group_idx;
+        for &state in &terminal_to_active_states[tids[0]] {
+            end_rep_group_masks[state as usize] |= bit;
+        }
+    }
 
-            for tsid in 0..num_tsids as u32 {
-                let reps = &tsid_end_reps[tsid as usize];
-                if reps.is_empty() { continue; }
-                if reps.iter().all(|r| active_set.contains(r)) {
-                    if let Some(arc) = tsid_full_arc_cache[tsid as usize]
-                        .get_or_init(|| {
-                            shared_rangeset_from_unsorted_pairs(
-                                tsid_full_ranges[tsid as usize].as_slice(),
-                            )
-                        })
-                        .as_ref()
-                    {
-                        weight_entries.push((tsid, Arc::clone(arc)));
-                    }
-                } else if reps.iter().any(|r| active_set.contains(r)) {
-                    affected_tsids.push(tsid);
+    let mut tsid_group_contributions: Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>> =
+        (0..num_tsids).map(|_| Vec::new()).collect();
+    for (end_rep, entries) in deferred_arced.iter().enumerate() {
+        let group_mask = end_rep_group_masks[end_rep];
+        if group_mask == 0 {
+            continue;
+        }
+        for &(tsid, ref arc) in entries {
+            tsid_group_contributions[tsid as usize].push((group_mask, Arc::clone(arc)));
+        }
+    }
+
+    let per_tsid_group_entries: Vec<Vec<(usize, u32, Arc<RangeSetBlaze<u32>>)>> =
+        tsid_group_contributions
+            .par_iter()
+            .enumerate()
+            .map(|(tsid, contributions)| {
+                if contributions.is_empty() {
+                    return Vec::new();
                 }
-            }
 
-            // Recompute affected TSIDs from active end_reps only
-            if !affected_tsids.is_empty() {
-                let affected_set: rustc_hash::FxHashSet<u32> =
-                    affected_tsids.iter().copied().collect();
-                let mut tsid_ranges: Vec<Vec<(u32, u32)>> =
-                    (0..num_tsids).map(|_| Vec::new()).collect();
-                for &state in active_states {
-                    for &(tsid, ref arc) in &deferred_arced[state as usize] {
-                        if !affected_set.contains(&tsid) { continue; }
+                let mut group_counts = vec![0usize; unique_groups.len()];
+                let mut group_ranges: Vec<Vec<(u32, u32)>> =
+                    (0..unique_groups.len()).map(|_| Vec::new()).collect();
+                let mut touched_groups: Vec<usize> = Vec::new();
+
+                for &(group_mask, ref arc) in contributions {
+                    let mut remaining = group_mask;
+                    while remaining != 0 {
+                        let group_idx = remaining.trailing_zeros() as usize;
+                        remaining &= remaining - 1;
+                        if group_counts[group_idx] == 0 {
+                            touched_groups.push(group_idx);
+                        }
+                        group_counts[group_idx] += 1;
                         for r in arc.ranges() {
-                            tsid_ranges[tsid as usize].push((*r.start(), *r.end()));
+                            group_ranges[group_idx].push((*r.start(), *r.end()));
                         }
                     }
                 }
-                for &tsid in &affected_tsids {
-                    let slot = &mut tsid_ranges[tsid as usize];
-                    if slot.is_empty() { continue; }
-                    slot.sort_unstable();
-                    let mut w = 0;
-                    for r in 1..slot.len() {
-                        if slot[r].0 <= slot[w].1.saturating_add(1) {
-                            slot[w].1 = slot[w].1.max(slot[r].1);
-                        } else { w += 1; slot[w] = slot[r]; }
-                    }
-                    slot.truncate(w + 1);
-                    weight_entries.push((tsid, shared_rangeset(
-                        slot.iter().map(|&(s, e)| s..=e).collect())));
-                }
-                weight_entries.sort_unstable_by_key(|&(t, _)| t);
-            }
 
-            if weight_entries.is_empty() { return None; }
+                touched_groups.sort_unstable();
+
+                let mut out: Vec<(usize, u32, Arc<RangeSetBlaze<u32>>)> = Vec::new();
+                out.reserve(touched_groups.len());
+                for group_idx in touched_groups {
+                    let shared = if group_counts[group_idx] == tsid_total_rep_counts[tsid] {
+                        tsid_full_arc_cache[tsid]
+                            .get_or_init(|| {
+                                shared_rangeset_from_unsorted_pairs(
+                                    tsid_full_ranges[tsid].as_slice(),
+                                )
+                            })
+                            .clone()
+                    } else {
+                        shared_rangeset_from_unsorted_pairs(group_ranges[group_idx].as_slice())
+                    };
+                    if let Some(tokens) = shared {
+                        out.push((group_idx, tsid as u32, tokens));
+                    }
+                }
+                out
+            })
+            .collect();
+
+    let mut group_weight_entries: Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>> =
+        (0..unique_groups.len()).map(|_| Vec::new()).collect();
+    for entries in per_tsid_group_entries {
+        for (group_idx, tsid, tokens) in entries {
+            group_weight_entries[group_idx].push((tsid, tokens));
+        }
+    }
+    for entries in &mut group_weight_entries {
+        entries.sort_unstable_by_key(|&(tsid, _)| tsid);
+    }
+
+    let group_results: Vec<Option<(Vec<usize>, Weight)>> = unique_groups
+        .iter()
+        .enumerate()
+        .map(|(group_idx, tids)| {
+            let weight_entries = &group_weight_entries[group_idx];
+            if weight_entries.is_empty() {
+                return None;
+            }
             let weight = Weight::from_per_tsid_shared(
                 weight_entries.iter().map(|(t, a)| (*t, Arc::clone(a))));
             if weight.is_empty() { return None; }
