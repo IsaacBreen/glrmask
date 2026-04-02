@@ -428,7 +428,11 @@ fn build_l1_terminal_dwa(
     let state_original_to_internal = &id_map.tokenizer_states.original_to_internal;
     let dead = u32::MAX;
     let dead_internal = u32::MAX;
-    let mut rep_flat_trans = vec![dead_internal; representative_states.len() * 256];
+    // Extra sentinel row at the end: all entries map to dead_internal.
+    // This allows branchless dead-state lookups in the batched walk by
+    // substituting sentinel_internal for dead_internal before indexing.
+    let sentinel_internal = representative_states.len() as u32;
+    let mut rep_flat_trans = vec![dead_internal; (representative_states.len() + 1) * 256];
     for (internal_state, &rep_state) in representative_states.iter().enumerate() {
         let base = rep_state as usize * 256;
         let out_base = internal_state * 256;
@@ -529,6 +533,32 @@ fn build_l1_terminal_dwa(
         }
         let unique_walk_keys: Vec<(u8, u32)> = unique_targets.into_keys().collect();
 
+        if debug_profile_enabled() {
+            // Count walks per first_byte and tokens per first_byte for work distribution.
+            let mut walks_per_byte = [0u32; 256];
+            for &(byte, _) in &unique_walk_keys {
+                walks_per_byte[byte as usize] += 1;
+            }
+            let mut total_token_iterations = 0u64;
+            let mut max_walks_for_byte = 0u32;
+            let mut max_tokens_per_byte = 0usize;
+            let mut active_bytes = 0u32;
+            for byte in 0..256 {
+                let w = walks_per_byte[byte];
+                let t = token_indices_by_first_byte[byte].len();
+                if t > 0 {
+                    active_bytes += 1;
+                    total_token_iterations += w as u64 * t as u64;
+                    max_walks_for_byte = max_walks_for_byte.max(w);
+                    max_tokens_per_byte = max_tokens_per_byte.max(t);
+                }
+            }
+            eprintln!(
+                "[glrmask/debug][l1_walk_distrib] unique_walks={} active_bytes={} max_walks_per_byte={} max_tokens_per_byte={} total_token_iterations={}",
+                unique_walk_keys.len(), active_bytes, max_walks_for_byte, max_tokens_per_byte, total_token_iterations,
+            );
+        }
+
         // Precompute self-loop mask per target state.
         let mut self_loop_masks: FxHashMap<u32, [u64; 4]> = FxHashMap::default();
         for &(_, target) in &unique_walk_keys {
@@ -544,120 +574,177 @@ fn build_l1_terminal_dwa(
             });
         }
 
-        // Parallel walk per unique (first_byte, target). Store raw merged ranges.
-        let walk_cache: FxHashMap<(u8, u32), Vec<(u32, Vec<(u32, u32)>)>> = unique_walk_keys
-            .par_iter()
-            .map(|&(first_byte, first_target_internal)| {
-                let bucket_idx = first_byte as usize;
-                let token_ids = &token_indices_by_first_byte[bucket_idx];
-                let suffixes = &suffixes_by_first_byte[bucket_idx];
-                let suffix_lcps = &suffix_lcps_by_first_byte[bucket_idx];
-                let mut local_transition_steps = 0u64;
-                let mut local_successful_tokens = 0u64;
-                let mut local_same_end_rep_hits = 0u64;
+        // Parallel walk batched by first_byte: all targets for the same byte
+        // are walked simultaneously in one pass over the token list.
+        // This breaks the serial dependency chain across targets, enabling
+        // memory-level parallelism (independent L2 accesses can overlap).
+        let walk_cache: FxHashMap<(u8, u32), Vec<(u32, Vec<(u32, u32)>)>> = {
+            // Group unique walk keys by first_byte.
+            let mut walks_by_byte: FxHashMap<u8, Vec<u32>> = FxHashMap::default();
+            for &(byte, target) in &unique_walk_keys {
+                walks_by_byte.entry(byte).or_default().push(target);
+            }
+            let byte_groups: Vec<(u8, Vec<u32>)> = walks_by_byte.into_iter().collect();
 
-                // Self-loop skip: if the target state has self-loops on all
-                // suffix bytes for this first_byte, all tokens end at first_target.
-                let mask = &self_loop_masks[&first_target_internal];
-                let subtree = &suffix_subtree_bytes[first_byte as usize];
-                let can_skip = (subtree[0] & !mask[0]) == 0
-                    && (subtree[1] & !mask[1]) == 0
-                    && (subtree[2] & !mask[2]) == 0
-                    && (subtree[3] & !mask[3]) == 0;
+            let all_batches: Vec<Vec<((u8, u32), Vec<(u32, Vec<(u32, u32)>)>)>> = byte_groups
+                .par_iter()
+                .map(|(first_byte, all_targets)| {
+                    let byte = *first_byte;
+                    let bucket_idx = byte as usize;
+                    let token_ids = &token_indices_by_first_byte[bucket_idx];
+                    let suffixes = &suffixes_by_first_byte[bucket_idx];
+                    let suffix_lcps = &suffix_lcps_by_first_byte[bucket_idx];
+                    let subtree = &suffix_subtree_bytes[byte as usize];
 
-                if can_skip {
-                    skipped_walks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    skipped_tokens.fetch_add(token_ids.len(), std::sync::atomic::Ordering::Relaxed);
-                    let end_rep = representative_states[first_target_internal as usize];
-                    let first = *token_ids.first().unwrap() as u32;
-                    let last = *token_ids.last().unwrap() as u32;
-                    return ((first_byte, first_target_internal), vec![(end_rep, vec![(first, last)])]);
-                }
+                    // Separate self-loop targets from targets that need walking.
+                    let mut selfloop_targets: Vec<u32> = Vec::new();
+                    let mut walk_targets: Vec<u32> = Vec::new();
+                    for &target in all_targets {
+                        let mask = &self_loop_masks[&target];
+                        let can_skip = (subtree[0] & !mask[0]) == 0
+                            && (subtree[1] & !mask[1]) == 0
+                            && (subtree[2] & !mask[2]) == 0
+                            && (subtree[3] & !mask[3]) == 0;
+                        if can_skip {
+                            selfloop_targets.push(target);
+                        } else {
+                            walk_targets.push(target);
+                        }
+                    }
 
-                let mut end_rep_token_ranges = FxHashMap::<u32, Vec<(u32, u32)>>::default();
+                    let mut results: Vec<((u8, u32), Vec<(u32, Vec<(u32, u32)>)>)> = Vec::new();
 
-                let mut suffix_states: Vec<u32> = vec![first_target_internal];
-                let mut previous_end_rep = None;
-                let mut current_run_end_rep = None;
-                let mut current_run_start = 0u32;
-                let mut current_run_end = 0u32;
-                for (bucket_pos, &internal_token_id) in token_ids.iter().enumerate() {
-                    let suffix_bytes = suffixes[bucket_pos];
-                    let lcp_len = suffix_lcps[bucket_pos];
-                    suffix_states.truncate(lcp_len + 1);
-                    let mut state = *suffix_states.last().unwrap();
-                    if state == dead_internal {
-                        suffix_states.resize(suffix_bytes.len() + 1, dead_internal);
-                    } else {
-                        for &byte in &suffix_bytes[lcp_len..] {
-                            local_transition_steps += 1;
-                            state = rep_flat_trans[state as usize * 256 + byte as usize];
-                            suffix_states.push(state);
-                            if state == dead_internal {
-                                suffix_states.resize(suffix_bytes.len() + 1, dead_internal);
-                                break;
+                    // Handle self-loop targets.
+                    if !selfloop_targets.is_empty() {
+                        skipped_walks.fetch_add(selfloop_targets.len(), std::sync::atomic::Ordering::Relaxed);
+                        skipped_tokens.fetch_add(selfloop_targets.len() * token_ids.len(), std::sync::atomic::Ordering::Relaxed);
+                        let first = *token_ids.first().unwrap() as u32;
+                        let last = *token_ids.last().unwrap() as u32;
+                        for &target in &selfloop_targets {
+                            let end_rep = representative_states[target as usize];
+                            results.push(((byte, target), vec![(end_rep, vec![(first, last)])]));
+                        }
+                    }
+
+                    if walk_targets.is_empty() {
+                        return results;
+                    }
+
+                    let num_walk = walk_targets.len();
+                    let mut local_transition_steps = 0u64;
+                    let mut local_successful_tokens = 0u64;
+
+                    // suffix_states: flat [pos * num_walk + target_idx]
+                    // Position 0 = initial target states (before any suffix bytes).
+                    let mut suffix_states: Vec<u32> = walk_targets.clone();
+
+                    // Per-target run-flush state.
+                    let mut run_end_reps: Vec<u32> = vec![u32::MAX; num_walk];
+                    let mut run_starts: Vec<u32> = vec![0; num_walk];
+                    let mut run_ends: Vec<u32> = vec![0; num_walk];
+                    let mut end_rep_maps: Vec<FxHashMap<u32, Vec<(u32, u32)>>> =
+                        (0..num_walk).map(|_| FxHashMap::default()).collect();
+
+                    for (bucket_pos, &internal_token_id) in token_ids.iter().enumerate() {
+                        let suffix_bytes = suffixes[bucket_pos];
+                        let lcp_len = suffix_lcps[bucket_pos];
+
+                        // Truncate all targets to lcp_len + 1 positions.
+                        suffix_states.truncate((lcp_len + 1) * num_walk);
+
+                        // Walk remaining suffix bytes with all targets in parallel.
+                        for byte_pos in lcp_len..suffix_bytes.len() {
+                            let b = suffix_bytes[byte_pos];
+                            let base = byte_pos * num_walk;
+                            for t in 0..num_walk {
+                                let prev_state = suffix_states[base + t];
+                                // Sentinel substitution: dead_internal → sentinel row
+                                // (returns dead_internal), avoiding bounds issues.
+                                let safe = if prev_state == dead_internal { sentinel_internal } else { prev_state };
+                                let next_state = rep_flat_trans[safe as usize * 256 + b as usize];
+                                suffix_states.push(next_state);
+                                local_transition_steps += (prev_state != dead_internal) as u64;
+                            }
+                        }
+
+                        // Record final states for each target.
+                        let end_base = suffix_bytes.len() * num_walk;
+                        let token_id = internal_token_id as u32;
+                        for t in 0..num_walk {
+                            let final_state = suffix_states[end_base + t];
+                            if final_state != dead_internal {
+                                let end_rep = representative_states[final_state as usize];
+                                local_successful_tokens += 1;
+                                if run_end_reps[t] == end_rep
+                                    && run_ends[t].wrapping_add(1) == token_id
+                                {
+                                    run_ends[t] = token_id;
+                                } else {
+                                    // Flush previous run for this target.
+                                    if run_end_reps[t] != u32::MAX {
+                                        end_rep_maps[t]
+                                            .entry(run_end_reps[t])
+                                            .or_default()
+                                            .push((run_starts[t], run_ends[t]));
+                                    }
+                                    run_end_reps[t] = end_rep;
+                                    run_starts[t] = token_id;
+                                    run_ends[t] = token_id;
+                                }
+                            } else {
+                                // Dead: flush current run for this target.
+                                if run_end_reps[t] != u32::MAX {
+                                    end_rep_maps[t]
+                                        .entry(run_end_reps[t])
+                                        .or_default()
+                                        .push((run_starts[t], run_ends[t]));
+                                    run_end_reps[t] = u32::MAX;
+                                }
                             }
                         }
                     }
-                    let final_state = suffix_states[suffix_bytes.len()];
-                    if final_state != dead_internal {
-                        let end_rep = representative_states[final_state as usize];
-                        local_successful_tokens += 1;
-                        if previous_end_rep == Some(end_rep) {
-                            local_same_end_rep_hits += 1;
+
+                    // Flush remaining runs.
+                    for t in 0..num_walk {
+                        if run_end_reps[t] != u32::MAX {
+                            end_rep_maps[t]
+                                .entry(run_end_reps[t])
+                                .or_default()
+                                .push((run_starts[t], run_ends[t]));
                         }
-                        previous_end_rep = Some(end_rep);
-                        let token_id = internal_token_id as u32;
-                        if current_run_end_rep == Some(end_rep)
-                            && current_run_end.saturating_add(1) == token_id
-                        {
-                            current_run_end = token_id;
-                        } else {
-                            flush_end_rep_run(
-                                &mut end_rep_token_ranges,
-                                &mut current_run_end_rep,
-                                &mut current_run_start,
-                                &mut current_run_end,
-                            );
-                            current_run_end_rep = Some(end_rep);
-                            current_run_start = token_id;
-                            current_run_end = token_id;
-                        }
-                    } else {
-                        previous_end_rep = None;
-                        flush_end_rep_run(
-                            &mut end_rep_token_ranges,
-                            &mut current_run_end_rep,
-                            &mut current_run_start,
-                            &mut current_run_end,
-                        );
                     }
+
+                    phase1_transition_steps.fetch_add(local_transition_steps, std::sync::atomic::Ordering::Relaxed);
+                    phase1_successful_tokens.fetch_add(local_successful_tokens, std::sync::atomic::Ordering::Relaxed);
+
+                    // Package per-target results.
+                    for (t, map) in end_rep_maps.into_iter().enumerate() {
+                        let target = walk_targets[t];
+                        let entries: Vec<(u32, Vec<(u32, u32)>)> = map
+                            .into_iter()
+                            .map(|(end_rep, ranges)| {
+                                debug_assert!(
+                                    ranges.windows(2).all(|w| w[0].1 < w[1].0),
+                                    "Phase 1 ranges should be sorted and non-overlapping"
+                                );
+                                (end_rep, ranges)
+                            })
+                            .collect();
+                        results.push(((byte, target), entries));
+                    }
+
+                    results
+                })
+                .collect();
+
+            let mut cache: FxHashMap<(u8, u32), Vec<(u32, Vec<(u32, u32)>)>> = FxHashMap::default();
+            for batch in all_batches {
+                for (key, value) in batch {
+                    cache.insert(key, value);
                 }
-                flush_end_rep_run(
-                    &mut end_rep_token_ranges,
-                    &mut current_run_end_rep,
-                    &mut current_run_start,
-                    &mut current_run_end,
-                );
-
-                phase1_transition_steps.fetch_add(local_transition_steps, std::sync::atomic::Ordering::Relaxed);
-                phase1_successful_tokens.fetch_add(local_successful_tokens, std::sync::atomic::Ordering::Relaxed);
-                phase1_same_end_rep_hits.fetch_add(local_same_end_rep_hits, std::sync::atomic::Ordering::Relaxed);
-
-                let results: Vec<(u32, Vec<(u32, u32)>)> = end_rep_token_ranges
-                    .into_iter()
-                    .map(|(end_rep, ranges)| {
-                        // Token IDs are monotonically increasing (indices into
-                        // sorted_entries), so append_token_id_range already
-                        // produces sorted, non-overlapping, merged ranges.
-                        debug_assert!(ranges.windows(2).all(|w| w[0].1 < w[1].0),
-                            "Phase 1 ranges should be sorted and non-overlapping");
-                        (end_rep, ranges)
-                    })
-                    .collect();
-                ((first_byte, first_target_internal), results)
-            })
-            .collect();
+            }
+            cache
+        };
 
         let phase1_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0;
         let phase1_wall_ms = phase1_ms;
