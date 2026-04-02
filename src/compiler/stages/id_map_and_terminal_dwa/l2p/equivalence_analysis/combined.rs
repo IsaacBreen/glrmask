@@ -674,7 +674,10 @@ fn analyze_equivalences_impl(
     let adjust_ms = elapsed_ms(adjust_started_at);
 
     let tokenizer_view_started_at = std::time::Instant::now();
-    let tokenizer_view = TokenizerView::new(tokenizer);
+    let tokenizer_view = match active_groups {
+        Some(active_groups) => TokenizerView::new_filtered(tokenizer, active_groups),
+        None => TokenizerView::new(tokenizer),
+    };
     let tokenizer_view_ms = elapsed_ms(tokenizer_view_started_at);
 
     // Extract vocab tokens as byte slices, ordered by token ID.
