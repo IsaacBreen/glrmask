@@ -24,6 +24,7 @@ const TOKEN_ORDER_FINISH_ITERS: usize = 20000;
 const TOKEN_ORDER_FINISH_SEED: u64 = 7;
 const TOKEN_ORDER_FINISH_PATIENCE_MIN: usize = 256;
 const TOKEN_ORDER_FINISH_PATIENCE_FACTOR: usize = 16;
+const FAST_TOKEN_ORDER_MAX_GROUPS: usize = 64;
 
 pub struct CompactReport {
     pub tsid_perm: Vec<u32>,
@@ -274,16 +275,26 @@ fn build_dimension_compaction(
                 // Range-aware sweep: avoids expanding ranges element-by-element
                 let result = build_token_merge_permutation_ranged(&original_weight_refs, num_tokens);
                 let t1 = std::time::Instant::now();
+                let (token_perm, collect_sets_ms, optimize_order_ms) =
+                    maybe_optimize_fast_token_group_order(
+                        unique_weights,
+                        num_tsids,
+                        result.0,
+                        result.1,
+                        profile_compact,
+                    );
+                let t2 = std::time::Instant::now();
                 if profile_compact {
                     eprintln!(
                         "[glrmask/profile][compact_token] merge_profile_ms={:.3} collect_sets_ms={:.3} optimize_order_ms={:.3} merged_tokens={}",
                         (t1 - t0).as_secs_f64() * 1000.0,
-                        0.0,
-                        0.0,
+                        collect_sets_ms,
+                        optimize_order_ms,
                         result.1,
                     );
                 }
-                result
+                debug_assert!((t2 - t1).as_secs_f64() * 1000.0 + 1e-6 >= collect_sets_ms + optimize_order_ms);
+                (token_perm, result.1)
             } else {
                 let token_profiles = build_token_profiles(&original_weight_refs, num_tokens);
                 let (token_group_perm, ordered_num_tokens) =
@@ -716,6 +727,124 @@ fn optimize_token_group_order(
         .into_iter()
         .map(|group| group_positions[group as usize])
         .collect()
+}
+
+fn optimize_token_group_order_local_only(
+    merged_unique_token_sets: &[RangeSetBlaze<u32>],
+    initial_token_perm: Vec<u32>,
+    new_num_tokens: usize,
+) -> Vec<u32> {
+    if new_num_tokens < 2 || merged_unique_token_sets.is_empty() {
+        return initial_token_perm;
+    }
+
+    let scorer = TokenOrderScorer::new(merged_unique_token_sets, new_num_tokens);
+    let mut layout: Vec<u32> = (0..new_num_tokens as u32).collect();
+    let mut current_score = scorer.score_layout(&layout);
+    improve_layout_with_adjacent_swaps(&scorer, &mut layout, &mut current_score);
+
+    let group_positions = layout_to_group_positions(&layout);
+    initial_token_perm
+        .into_iter()
+        .map(|group| group_positions[group as usize])
+        .collect()
+}
+
+fn maybe_optimize_fast_token_group_order(
+    unique_weights: &[Weight],
+    num_tsids: usize,
+    initial_token_perm: Vec<u32>,
+    new_num_tokens: usize,
+    profile_compact: bool,
+) -> (Vec<u32>, f64, f64) {
+    if new_num_tokens < 2 || new_num_tokens > FAST_TOKEN_ORDER_MAX_GROUPS {
+        return (initial_token_perm, 0.0, 0.0);
+    }
+
+    let collect_started_at = std::time::Instant::now();
+    let merged_unique_token_sets =
+        collect_token_sets_after_permutation(unique_weights, &initial_token_perm);
+    let collect_ms = collect_started_at.elapsed().as_secs_f64() * 1000.0;
+    if merged_unique_token_sets.is_empty() {
+        return (initial_token_perm, collect_ms, 0.0);
+    }
+
+    let optimize_started_at = std::time::Instant::now();
+    let optimized_token_perm = optimize_token_group_order_local_only(
+        &merged_unique_token_sets,
+        initial_token_perm.clone(),
+        new_num_tokens,
+    );
+    let optimize_ms = optimize_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    if profile_compact {
+        emit_fast_token_order_gap_profile(
+            unique_weights,
+            num_tsids,
+            &initial_token_perm,
+            &optimized_token_perm,
+            &merged_unique_token_sets,
+            new_num_tokens,
+            optimize_ms,
+        );
+    }
+
+    (optimized_token_perm, collect_ms, optimize_ms)
+}
+
+fn emit_fast_token_order_gap_profile(
+    unique_weights: &[Weight],
+    num_tsids: usize,
+    initial_token_perm: &[u32],
+    optimized_token_perm: &[u32],
+    merged_unique_token_sets: &[RangeSetBlaze<u32>],
+    new_num_tokens: usize,
+    optimize_ms: f64,
+) {
+    let scorer = TokenOrderScorer::new(merged_unique_token_sets, new_num_tokens);
+    let baseline_layout: Vec<u32> = (0..new_num_tokens as u32).collect();
+    let baseline_proxy_ranges = scorer.score_layout(&baseline_layout);
+
+    let mut optimized_group_positions = vec![u32::MAX; new_num_tokens];
+    for (&group, &position) in initial_token_perm.iter().zip(optimized_token_perm.iter()) {
+        let slot = &mut optimized_group_positions[group as usize];
+        if *slot == u32::MAX {
+            *slot = position;
+        }
+    }
+    if optimized_group_positions.iter().any(|&position| position == u32::MAX) {
+        return;
+    }
+
+    let mut optimized_layout = vec![0u32; new_num_tokens];
+    for (group, &position) in optimized_group_positions.iter().enumerate() {
+        optimized_layout[position as usize] = group as u32;
+    }
+    let optimized_proxy_ranges = scorer.score_layout(&optimized_layout);
+
+    let identity_tsid_perm = identity_perm(num_tsids);
+    let baseline_storage = count_unique_storage_for_weights(&apply_permutations_to_weight_set(
+        unique_weights,
+        &identity_tsid_perm,
+        initial_token_perm,
+    ));
+    let optimized_storage = count_unique_storage_for_weights(&apply_permutations_to_weight_set(
+        unique_weights,
+        &identity_tsid_perm,
+        &optimized_token_perm,
+    ));
+
+    eprintln!(
+        "[glrmask/profile][compact_token_gap] merged_tokens={} optimize_ms={:.3} proxy_token_ranges={}=>{} actual_token_ranges={}=>{} actual_total_ranges={}=>{}",
+        new_num_tokens,
+        optimize_ms,
+        baseline_proxy_ranges,
+        optimized_proxy_ranges,
+        baseline_storage.token_ranges,
+        optimized_storage.token_ranges,
+        baseline_storage.total_ranges(),
+        optimized_storage.total_ranges(),
+    );
 }
 
 /// Apply tsid and token permutations (possibly many-to-one) to every weight.
