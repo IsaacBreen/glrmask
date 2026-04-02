@@ -912,25 +912,28 @@ fn build_l1_terminal_dwa(
         unique_groups.push(vec![tid]);
     }
 
-    debug_assert!(unique_groups.len() <= u32::BITS as usize);
+    let num_groups = unique_groups.len();
+    let words_per_mask = (num_groups + 63) / 64;
 
-    let mut end_rep_group_masks = vec![0u32; deferred_arced.len()];
+    let mut end_rep_group_masks = vec![0u64; deferred_arced.len() * words_per_mask];
     for (group_idx, tids) in unique_groups.iter().enumerate() {
-        let bit = 1u32 << group_idx;
+        let word = group_idx / 64;
+        let bit = 1u64 << (group_idx % 64);
         for &state in &terminal_to_active_states[tids[0]] {
-            end_rep_group_masks[state as usize] |= bit;
+            end_rep_group_masks[state as usize * words_per_mask + word] |= bit;
         }
     }
 
-    let mut tsid_group_contributions: Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>> =
+    let mut tsid_group_contributions: Vec<Vec<(usize, Arc<RangeSetBlaze<u32>>)>> =
         (0..num_tsids).map(|_| Vec::new()).collect();
     for (end_rep, entries) in deferred_arced.iter().enumerate() {
-        let group_mask = end_rep_group_masks[end_rep];
-        if group_mask == 0 {
+        let mask_offset = end_rep * words_per_mask;
+        let mask_slice = &end_rep_group_masks[mask_offset..mask_offset + words_per_mask];
+        if mask_slice.iter().all(|&w| w == 0) {
             continue;
         }
         for &(tsid, ref arc) in entries {
-            tsid_group_contributions[tsid as usize].push((group_mask, Arc::clone(arc)));
+            tsid_group_contributions[tsid as usize].push((end_rep, Arc::clone(arc)));
         }
     }
 
@@ -943,22 +946,27 @@ fn build_l1_terminal_dwa(
                     return Vec::new();
                 }
 
-                let mut group_counts = vec![0usize; unique_groups.len()];
+                let mut group_counts = vec![0usize; num_groups];
                 let mut group_ranges: Vec<Vec<(u32, u32)>> =
-                    (0..unique_groups.len()).map(|_| Vec::new()).collect();
+                    (0..num_groups).map(|_| Vec::new()).collect();
                 let mut touched_groups: Vec<usize> = Vec::new();
 
-                for &(group_mask, ref arc) in contributions {
-                    let mut remaining = group_mask;
-                    while remaining != 0 {
-                        let group_idx = remaining.trailing_zeros() as usize;
-                        remaining &= remaining - 1;
-                        if group_counts[group_idx] == 0 {
-                            touched_groups.push(group_idx);
-                        }
-                        group_counts[group_idx] += 1;
-                        for r in arc.ranges() {
-                            group_ranges[group_idx].push((*r.start(), *r.end()));
+                for &(end_rep, ref arc) in contributions {
+                    let mask_offset = end_rep * words_per_mask;
+                    let mask_slice = &end_rep_group_masks[mask_offset..mask_offset + words_per_mask];
+                    for (word_idx, &word) in mask_slice.iter().enumerate() {
+                        let mut remaining = word;
+                        while remaining != 0 {
+                            let bit_idx = remaining.trailing_zeros() as usize;
+                            remaining &= remaining - 1;
+                            let group_idx = word_idx * 64 + bit_idx;
+                            if group_counts[group_idx] == 0 {
+                                touched_groups.push(group_idx);
+                            }
+                            group_counts[group_idx] += 1;
+                            for r in arc.ranges() {
+                                group_ranges[group_idx].push((*r.start(), *r.end()));
+                            }
                         }
                     }
                 }
