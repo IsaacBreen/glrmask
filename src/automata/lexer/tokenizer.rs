@@ -257,6 +257,15 @@ impl Tokenizer {
 
         (simplified, state_mapping)
     }
+
+    pub fn filter_for_terminals(&self, active_terminals: &[bool]) -> Tokenizer {
+        let mut dfa = self.dfa.clone();
+        dfa.filter_groups_in_place(active_terminals);
+        Tokenizer {
+            dfa,
+            num_terminals: self.num_terminals,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

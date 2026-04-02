@@ -24,7 +24,9 @@ use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::possible_matches::{
     PossibleMatchesComputer, collect_possible_matches_by_internal_tsid,
 };
-use crate::compiler::stages::id_map_and_terminal_dwa::merge::LocalIdMapTerminalDwa;
+use crate::compiler::stages::id_map_and_terminal_dwa::merge::{
+    LocalIdMapTerminalDwa, identity_original_to_local_state,
+};
 use crate::ds::bitset::BitSet;
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::ds::weight::Weight;
@@ -79,13 +81,13 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // This merges states that only differed by non-active terminal info,
     // reducing the state count for equivalence analysis and NWA building.
     let simplify_started_at = Instant::now();
-    let (simplified_tok, orig_to_simplified) =
-        tokenizer.simplify_for_terminals(active_terminals);
+    let simplified_tok = tokenizer.filter_for_terminals(active_terminals);
+    let orig_to_simplified = identity_original_to_local_state(num_original_states);
     let simplify_ms = simplify_started_at.elapsed().as_secs_f64() * 1000.0;
 
     if debug_profile_enabled() {
         eprintln!(
-            "[glrmask/debug][l2p_simplify] partition={} original_states={} simplified_states={}",
+            "[glrmask/debug][l2p_simplify] partition={} mode=filtered original_states={} simplified_states={}",
             partition_label, num_original_states, simplified_tok.num_states(),
         );
     }
