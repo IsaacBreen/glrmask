@@ -50,8 +50,15 @@ const USE_SLOW_VOCAB_EQUIV_ENV: &str = "GLRMASK_USE_SLOW_VOCAB_EQUIV";
 const FORCE_PRE_VOCAB_STATE_REDUCTION_ENV: &str = "GLRMASK_FORCE_PRE_VOCAB_STATE_REDUCTION";
 const DISABLE_PRE_VOCAB_STATE_REDUCTION_ENV: &str = "GLRMASK_DISABLE_PRE_VOCAB_STATE_REDUCTION";
 const SKIP_MAX_LENGTH_SMALL_STATE_THRESHOLD: usize = 128;
-const PRE_VOCAB_STATE_REDUCTION_MIN_STATES: usize = 2000;
-const PRE_VOCAB_STATE_REDUCTION_MAX_GROUPS: usize = 16;
+const PRE_VOCAB_STATE_REDUCTION_MIN_STATES: usize = 200;
+const PRE_VOCAB_STATE_REDUCTION_MAX_GROUPS: usize = 64;
+/// Only run pre-vocab state reduction when the deduped token count is high
+/// enough that the vocab signature pass is expensive. With few tokens, the
+/// vocab pass is already cheap and pre-reduction adds overhead.
+const PRE_VOCAB_STATE_REDUCTION_MIN_TOKENS: usize = 5000;
+/// When the deduped token count exceeds this, limit state reduction to a single
+/// batch (5000 tokens) to avoid the cost of processing the full token set.
+const PRE_VOCAB_STATE_REDUCTION_MAX_FULL_TOKENS: usize = 5000;
 
 /// Result of combined equivalence analysis.
 pub struct CombinedEquivalenceResult {
@@ -337,6 +344,7 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
         !skip_token_state
             && pre_reduced_states.len() >= PRE_VOCAB_STATE_REDUCTION_MIN_STATES
             && tokenizer_num_groups <= PRE_VOCAB_STATE_REDUCTION_MAX_GROUPS
+            && dedup.representative_token_bytes.len() >= PRE_VOCAB_STATE_REDUCTION_MIN_TOKENS
     };
     let vocab_states = if use_pre_vocab_state_reduction {
         let pre_vocab_state_started_at = std::time::Instant::now();
@@ -346,10 +354,19 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
         // the FIRST match in a sequence. Skipping them would incorrectly merge
         // states that differ in first-match behavior. Context-dependent filtering
         // (per-parent-edge) would be correct but prohibitively expensive.
-        let reduced_state_reps = state_equivalence_analysis::find_state_equivalence_classes(
+        let num_dedup_tokens = dedup.representative_token_bytes.len();
+        let max_batches = if num_dedup_tokens > PRE_VOCAB_STATE_REDUCTION_MAX_FULL_TOKENS {
+            Some(1)
+        } else {
+            None
+        };
+        let reduced_state_reps = state_equivalence_analysis::find_state_equivalence_classes_ex(
             tokenizer,
             &dedup.representative_token_bytes,
             &pre_reduced_states,
+            &[], // skip_groups
+            max_batches,
+            None, // default batch_size
         );
         let vocab_states = collect_representative_states(&reduced_state_reps);
         if profile_compile {

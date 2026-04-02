@@ -22,7 +22,7 @@ use crate::compiler::stages::templates::characterize::characterize_terminals;
 use crate::compiler::stages::templates::compile_dfa::emit_template_profile_summary;
 use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::compute_terminal_coloring;
 use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::compute_ever_allowed_follows;
-use crate::compiler::stages::id_map_and_terminal_dwa::classify::classify_terminal_path_lengths;
+use crate::compiler::stages::id_map_and_terminal_dwa::classify::{classify_terminal_path_lengths, SharedClassifyCache};
 use crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalColoring;
 use crate::ds::bitset::BitSet;
 use crate::runtime::Constraint;
@@ -459,13 +459,14 @@ fn compile_prepared_with_profile(
         } else {
             disallowed_follows.clone()
         };
+        let shared_classify_cache = SharedClassifyCache::new();
         let classify_started_at = Instant::now();
         let terminal_path_lengths = classify_terminal_path_lengths(
             &tokenizer,
             vocab,
             &adjusted_disallowed_for_classification,
             analyzed_grammar.num_terminals,
-            None,
+            Some(&shared_classify_cache),
         );
         profile.classify_ms = elapsed_ms(classify_started_at);
         if compile_profile_enabled() {
@@ -579,6 +580,7 @@ fn compile_prepared_with_profile(
                         &tokenizer, vocab, &terminal_coloring, terminal_coloring_enabled,
                         prepared_grammar.ignore_terminal, &analyzed_grammar,
                         &adjusted_disallowed_for_classification,
+                        Some(&shared_classify_cache),
                     );
                     IdMapBuildResult::SplitComplete {
                         global: id_map,

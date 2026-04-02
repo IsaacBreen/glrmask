@@ -40,6 +40,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     ignore_terminal: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
     disallowed_follows: &BTreeMap<u32, BitSet>,
+    external_classify_cache: Option<&classify::SharedClassifyCache>,
 ) -> (InternalIdMap, DWA, TerminalDwaPhaseProfile) {
     let total_started_at = Instant::now();
     let force_all_l2p = std::env::var("GLRMASK_FORCE_ALL_L2P").map_or(false, |v| v == "1");
@@ -76,8 +77,11 @@ pub(crate) fn build_id_map_and_terminal_dwa(
 
     // Shared cache for terminal classification byte sets. The DFA scanning
     // (reachable_bytes, first_bytes, last_bytes) is identical across partitions;
-    // only the vocab-dependent classification differs. Cached by first partition.
-    let shared_classify_cache = classify::SharedClassifyCache::new();
+    // only the vocab-dependent classification differs. Reuse external cache if
+    // provided (already populated by compile.rs pre-classification), otherwise
+    // create a fresh one for partition sharing.
+    let owned_classify_cache = classify::SharedClassifyCache::new();
+    let shared_classify_cache = external_classify_cache.unwrap_or(&owned_classify_cache);
 
     // Build each partition in parallel.
     let ((p0, p1), (p2, p3)) = rayon::join(
