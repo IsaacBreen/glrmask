@@ -456,14 +456,18 @@ fn build_l1_terminal_dwa(
     // state and the walk can be skipped entirely.
         let dead = u32::MAX;
 
-        // Phase 1: Identify unique (first_byte, target) pairs
+        // Phase 1: Identify unique (first_byte, target_rep) pairs.
+        // Equivalent post-byte target states produce identical suffix walks,
+        // so canonicalize on the representative to avoid duplicate work.
         let mut unique_targets: FxHashMap<(u8, u32), ()> = FxHashMap::default();
         for (&start_state, _) in &states_to_initial_tsids {
             for (byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
                 if token_ids.is_empty() { continue; }
                 let target = flat_trans[start_state as usize * 256 + byte];
                 if target != dead {
-                    unique_targets.entry((byte as u8, target)).or_default();
+                    unique_targets
+                        .entry((byte as u8, state_to_rep[target as usize]))
+                        .or_default();
                 }
             }
         }
@@ -487,12 +491,12 @@ fn build_l1_terminal_dwa(
         // Parallel walk per unique (first_byte, target). Store raw merged ranges.
         let walk_cache: FxHashMap<(u8, u32), Vec<(u32, Vec<(u32, u32)>)>> = unique_walk_keys
             .par_iter()
-            .map(|&(first_byte, first_target)| {
+            .map(|&(first_byte, first_target_rep)| {
                 let token_ids = &token_indices_by_first_byte[first_byte as usize];
 
                 // Self-loop skip: if the target state has self-loops on all
                 // suffix bytes for this first_byte, all tokens end at first_target.
-                let mask = &self_loop_masks[&first_target];
+                let mask = &self_loop_masks[&first_target_rep];
                 let subtree = &suffix_subtree_bytes[first_byte as usize];
                 let can_skip = (subtree[0] & !mask[0]) == 0
                     && (subtree[1] & !mask[1]) == 0
@@ -502,16 +506,16 @@ fn build_l1_terminal_dwa(
                 if can_skip {
                     skipped_walks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     skipped_tokens.fetch_add(token_ids.len(), std::sync::atomic::Ordering::Relaxed);
-                    let end_rep = state_to_rep[first_target as usize];
+                    let end_rep = first_target_rep;
                     let first = *token_ids.first().unwrap() as u32;
                     let last = *token_ids.last().unwrap() as u32;
-                    return ((first_byte, first_target), vec![(end_rep, vec![(first, last)])]);
+                    return ((first_byte, first_target_rep), vec![(end_rep, vec![(first, last)])]);
                 }
 
                 let mut end_rep_token_ranges = FxHashMap::<u32, Vec<(u32, u32)>>::default();
 
                 let mut previous_suffix: &[u8] = &[];
-                let mut suffix_states: Vec<u32> = vec![first_target];
+                let mut suffix_states: Vec<u32> = vec![first_target_rep];
                 for &internal_token_id in token_ids {
                     let token_bytes = sorted_entries[internal_token_id].1;
                     let suffix_bytes = &token_bytes[1..];
@@ -552,7 +556,7 @@ fn build_l1_terminal_dwa(
                         (end_rep, ranges)
                     })
                     .collect();
-                ((first_byte, first_target), results)
+                ((first_byte, first_target_rep), results)
             })
             .collect();
 
@@ -653,7 +657,8 @@ fn build_l1_terminal_dwa(
                     if token_ids.is_empty() { continue; }
                     let target = flat_trans[start_state as usize * 256 + byte];
                     if target == dead { continue; }
-                    if let Some(results) = indexed_walk_cache.get(&(byte as u8, target)) {
+                    let target_rep = state_to_rep[target as usize];
+                    if let Some(results) = indexed_walk_cache.get(&(byte as u8, target_rep)) {
                         for &(end_rep_idx, ranges, entry_hash, entry_mc) in results {
                             end_rep_refs[end_rep_idx].push(ranges);
                             len_accum[end_rep_idx] += entry_mc;
