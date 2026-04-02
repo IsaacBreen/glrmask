@@ -810,8 +810,9 @@ mod tests {
         compact_unused_terminals,
         expand_nullable_terminals,
         inline_single_use_nonterminals,
+        prepare_owned_grammar_for_compile,
     };
-    use crate::compiler::stages::equivalence_analysis::combined::analyze_equivalences;
+    use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::combined::analyze_equivalences;
     use crate::import::json_schema::json_schema_to_grammar;
     use std::fs;
     use std::path::{Path, PathBuf};
