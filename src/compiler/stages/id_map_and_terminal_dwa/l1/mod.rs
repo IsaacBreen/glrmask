@@ -424,6 +424,23 @@ fn build_l1_terminal_dwa(
             .push(internal_tsid as u32);
     }
     let state_seed_ms = state_seed_started_at.elapsed().as_secs_f64() * 1000.0;
+    let representative_states = &id_map.tokenizer_states.representative_original_ids;
+    let state_original_to_internal = &id_map.tokenizer_states.original_to_internal;
+    let dead = u32::MAX;
+    let dead_internal = u32::MAX;
+    let mut rep_flat_trans = vec![dead_internal; representative_states.len() * 256];
+    for (internal_state, &rep_state) in representative_states.iter().enumerate() {
+        let base = rep_state as usize * 256;
+        let out_base = internal_state * 256;
+        for byte in 0..256usize {
+            let next = flat_trans[base + byte];
+            rep_flat_trans[out_base + byte] = if next == dead {
+                dead_internal
+            } else {
+                state_original_to_internal[next as usize]
+            };
+        }
+    }
 
     // Batch simulation: for each unique start state, simulate all tokens through
     // the DFA and accumulate end_state_rep → (tsid → token_ids).
@@ -447,6 +464,28 @@ fn build_l1_terminal_dwa(
         }
     }
 
+    let mut suffixes_by_first_byte = vec![Vec::<&[u8]>::new(); 256];
+    let mut suffix_lcps_by_first_byte = vec![Vec::<usize>::new(); 256];
+    for first_byte in 0..256 {
+        let token_ids = &token_indices_by_first_byte[first_byte];
+        if token_ids.is_empty() {
+            continue;
+        }
+
+        let suffixes = &mut suffixes_by_first_byte[first_byte];
+        let lcps = &mut suffix_lcps_by_first_byte[first_byte];
+        suffixes.reserve(token_ids.len());
+        lcps.reserve(token_ids.len());
+
+        let mut previous_suffix: &[u8] = &[];
+        for &internal_token_id in token_ids {
+            let suffix_bytes = &sorted_entries[internal_token_id].1[1..];
+            lcps.push(common_prefix_len(previous_suffix, suffix_bytes));
+            suffixes.push(suffix_bytes);
+            previous_suffix = suffix_bytes;
+        }
+    }
+
     // Compute suffix_subtree_bytes per first_byte: the set of all bytes
     // appearing in suffixes (bytes[1..]) of tokens starting with that byte.
     // Used for self-loop optimization in the walk cache.
@@ -461,6 +500,9 @@ fn build_l1_terminal_dwa(
 
     let skipped_walks = std::sync::atomic::AtomicUsize::new(0);
     let skipped_tokens = std::sync::atomic::AtomicUsize::new(0);
+    let phase1_transition_steps = std::sync::atomic::AtomicU64::new(0);
+    let phase1_successful_tokens = std::sync::atomic::AtomicU64::new(0);
+    let phase1_same_end_rep_hits = std::sync::atomic::AtomicU64::new(0);
     let p2_collect_ns = std::sync::atomic::AtomicU64::new(0);
     let p2_build_ns = std::sync::atomic::AtomicU64::new(0);
     let p2_total_ranges = std::sync::atomic::AtomicU64::new(0);
@@ -468,19 +510,19 @@ fn build_l1_terminal_dwa(
     // the raw merged ranges. Self-loop optimization: if the target state
     // has self-loops on all suffix bytes, all tokens end at the target
     // state and the walk can be skipped entirely.
-        let dead = u32::MAX;
-
         // Phase 1: Identify unique (first_byte, target_rep) pairs.
         // Equivalent post-byte target states produce identical suffix walks,
         // so canonicalize on the representative to avoid duplicate work.
         let mut unique_targets: FxHashMap<(u8, u32), ()> = FxHashMap::default();
         for (&start_state, _) in &states_to_initial_tsids {
+            let start_internal = state_original_to_internal[start_state as usize];
+            let base = start_internal as usize * 256;
             for (byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
                 if token_ids.is_empty() { continue; }
-                let target = flat_trans[start_state as usize * 256 + byte];
-                if target != dead {
+                let target_internal = rep_flat_trans[base + byte];
+                if target_internal != dead_internal {
                     unique_targets
-                        .entry((byte as u8, state_to_rep[target as usize]))
+                        .entry((byte as u8, target_internal))
                         .or_default();
                 }
             }
@@ -494,7 +536,7 @@ fn build_l1_terminal_dwa(
                 let mut mask = [0u64; 4];
                 let base = target as usize * 256;
                 for byte in 0..=255u8 {
-                    if flat_trans[base + byte as usize] == target {
+                    if rep_flat_trans[base + byte as usize] == target {
                         mask[byte as usize >> 6] |= 1u64 << (byte & 63);
                     }
                 }
@@ -505,12 +547,18 @@ fn build_l1_terminal_dwa(
         // Parallel walk per unique (first_byte, target). Store raw merged ranges.
         let walk_cache: FxHashMap<(u8, u32), Vec<(u32, Vec<(u32, u32)>)>> = unique_walk_keys
             .par_iter()
-            .map(|&(first_byte, first_target_rep)| {
-                let token_ids = &token_indices_by_first_byte[first_byte as usize];
+            .map(|&(first_byte, first_target_internal)| {
+                let bucket_idx = first_byte as usize;
+                let token_ids = &token_indices_by_first_byte[bucket_idx];
+                let suffixes = &suffixes_by_first_byte[bucket_idx];
+                let suffix_lcps = &suffix_lcps_by_first_byte[bucket_idx];
+                let mut local_transition_steps = 0u64;
+                let mut local_successful_tokens = 0u64;
+                let mut local_same_end_rep_hits = 0u64;
 
                 // Self-loop skip: if the target state has self-loops on all
                 // suffix bytes for this first_byte, all tokens end at first_target.
-                let mask = &self_loop_masks[&first_target_rep];
+                let mask = &self_loop_masks[&first_target_internal];
                 let subtree = &suffix_subtree_bytes[first_byte as usize];
                 let can_skip = (subtree[0] & !mask[0]) == 0
                     && (subtree[1] & !mask[1]) == 0
@@ -520,44 +568,81 @@ fn build_l1_terminal_dwa(
                 if can_skip {
                     skipped_walks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     skipped_tokens.fetch_add(token_ids.len(), std::sync::atomic::Ordering::Relaxed);
-                    let end_rep = first_target_rep;
+                    let end_rep = representative_states[first_target_internal as usize];
                     let first = *token_ids.first().unwrap() as u32;
                     let last = *token_ids.last().unwrap() as u32;
-                    return ((first_byte, first_target_rep), vec![(end_rep, vec![(first, last)])]);
+                    return ((first_byte, first_target_internal), vec![(end_rep, vec![(first, last)])]);
                 }
 
                 let mut end_rep_token_ranges = FxHashMap::<u32, Vec<(u32, u32)>>::default();
 
-                let mut previous_suffix: &[u8] = &[];
-                let mut suffix_states: Vec<u32> = vec![first_target_rep];
-                for &internal_token_id in token_ids {
-                    let token_bytes = sorted_entries[internal_token_id].1;
-                    let suffix_bytes = &token_bytes[1..];
-                    let lcp_len = common_prefix_len(previous_suffix, suffix_bytes);
+                let mut suffix_states: Vec<u32> = vec![first_target_internal];
+                let mut previous_end_rep = None;
+                let mut current_run_end_rep = None;
+                let mut current_run_start = 0u32;
+                let mut current_run_end = 0u32;
+                for (bucket_pos, &internal_token_id) in token_ids.iter().enumerate() {
+                    let suffix_bytes = suffixes[bucket_pos];
+                    let lcp_len = suffix_lcps[bucket_pos];
                     suffix_states.truncate(lcp_len + 1);
                     let mut state = *suffix_states.last().unwrap();
-                    if state == dead {
-                        suffix_states.resize(suffix_bytes.len() + 1, dead);
+                    if state == dead_internal {
+                        suffix_states.resize(suffix_bytes.len() + 1, dead_internal);
                     } else {
                         for &byte in &suffix_bytes[lcp_len..] {
-                            state = flat_trans[state as usize * 256 + byte as usize];
+                            local_transition_steps += 1;
+                            state = rep_flat_trans[state as usize * 256 + byte as usize];
                             suffix_states.push(state);
-                            if state == dead {
-                                suffix_states.resize(suffix_bytes.len() + 1, dead);
+                            if state == dead_internal {
+                                suffix_states.resize(suffix_bytes.len() + 1, dead_internal);
                                 break;
                             }
                         }
                     }
                     let final_state = suffix_states[suffix_bytes.len()];
-                    if final_state != dead {
-                        let end_rep = state_to_rep[final_state as usize];
-                        append_token_id_range(
-                            end_rep_token_ranges.entry(end_rep).or_default(),
-                            internal_token_id as u32,
+                    if final_state != dead_internal {
+                        let end_rep = representative_states[final_state as usize];
+                        local_successful_tokens += 1;
+                        if previous_end_rep == Some(end_rep) {
+                            local_same_end_rep_hits += 1;
+                        }
+                        previous_end_rep = Some(end_rep);
+                        let token_id = internal_token_id as u32;
+                        if current_run_end_rep == Some(end_rep)
+                            && current_run_end.saturating_add(1) == token_id
+                        {
+                            current_run_end = token_id;
+                        } else {
+                            flush_end_rep_run(
+                                &mut end_rep_token_ranges,
+                                &mut current_run_end_rep,
+                                &mut current_run_start,
+                                &mut current_run_end,
+                            );
+                            current_run_end_rep = Some(end_rep);
+                            current_run_start = token_id;
+                            current_run_end = token_id;
+                        }
+                    } else {
+                        previous_end_rep = None;
+                        flush_end_rep_run(
+                            &mut end_rep_token_ranges,
+                            &mut current_run_end_rep,
+                            &mut current_run_start,
+                            &mut current_run_end,
                         );
                     }
-                    previous_suffix = suffix_bytes;
                 }
+                flush_end_rep_run(
+                    &mut end_rep_token_ranges,
+                    &mut current_run_end_rep,
+                    &mut current_run_start,
+                    &mut current_run_end,
+                );
+
+                phase1_transition_steps.fetch_add(local_transition_steps, std::sync::atomic::Ordering::Relaxed);
+                phase1_successful_tokens.fetch_add(local_successful_tokens, std::sync::atomic::Ordering::Relaxed);
+                phase1_same_end_rep_hits.fetch_add(local_same_end_rep_hits, std::sync::atomic::Ordering::Relaxed);
 
                 let results: Vec<(u32, Vec<(u32, u32)>)> = end_rep_token_ranges
                     .into_iter()
@@ -570,7 +655,7 @@ fn build_l1_terminal_dwa(
                         (end_rep, ranges)
                     })
                     .collect();
-                ((first_byte, first_target_rep), results)
+                ((first_byte, first_target_internal), results)
             })
             .collect();
 
@@ -650,6 +735,7 @@ fn build_l1_terminal_dwa(
             .par_iter()
             .map(|&(&start_state, ref initial_tsids)| {
                 let collect_start = Instant::now();
+                let start_internal = state_original_to_internal[start_state as usize];
 
                 // Build per-end_rep ref lists + additive precomputed hash.
                 // Phase 1 precomputed per-entry hashes so Phase 2 combines
@@ -669,10 +755,9 @@ fn build_l1_terminal_dwa(
 
                 for (byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
                     if token_ids.is_empty() { continue; }
-                    let target = flat_trans[start_state as usize * 256 + byte];
-                    if target == dead { continue; }
-                    let target_rep = state_to_rep[target as usize];
-                    if let Some(results) = indexed_walk_cache.get(&(byte as u8, target_rep)) {
+                    let target_internal = rep_flat_trans[start_internal as usize * 256 + byte];
+                    if target_internal == dead_internal { continue; }
+                    if let Some(results) = indexed_walk_cache.get(&(byte as u8, target_internal)) {
                         for &(end_rep_idx, ranges, entry_hash, entry_mc) in results {
                             end_rep_refs[end_rep_idx].push(ranges);
                             len_accum[end_rep_idx] += entry_mc;
@@ -819,6 +904,19 @@ fn build_l1_terminal_dwa(
         eprintln!(
             "[glrmask/debug][l1_intern_detail] entries={} unique_sets={} hash_groups={} intern_ms={:.1}",
             all_entries.len(), unique_range_set_count, hash_group_starts.len() - 1, token_set_intern_ms,
+        );
+        let successful_tokens = phase1_successful_tokens.load(std::sync::atomic::Ordering::Relaxed);
+        let same_end_rep_hits = phase1_same_end_rep_hits.load(std::sync::atomic::Ordering::Relaxed);
+        eprintln!(
+            "[glrmask/debug][l1_phase1_ops] transition_steps={} successful_tokens={} same_end_rep_hits={} same_end_rep_rate={:.3}",
+            phase1_transition_steps.load(std::sync::atomic::Ordering::Relaxed),
+            successful_tokens,
+            same_end_rep_hits,
+            if successful_tokens == 0 {
+                0.0
+            } else {
+                same_end_rep_hits as f64 / successful_tokens as f64
+            },
         );
         eprintln!(
             "[glrmask/debug][l1_traversal] start_states={} phase1_walk_ms={:.1} phase2_assembly_ms={:.1} intern_ms={:.1} unique_range_sets={} skipped_walks={} skipped_tokens={} total_vt_ms={:.1}",
@@ -1097,13 +1195,32 @@ fn common_prefix_len(left: &[u8], right: &[u8]) -> usize {
 }
 
 fn append_token_id_range(token_ranges: &mut Vec<(u32, u32)>, token_id: u32) {
-    if let Some((_, end)) = token_ranges.last_mut() {
-        if end.saturating_add(1) == token_id {
-            *end = token_id;
+    append_token_id_span(token_ranges, token_id, token_id);
+}
+
+fn append_token_id_span(token_ranges: &mut Vec<(u32, u32)>, start: u32, end: u32) {
+    if let Some((_, last_end)) = token_ranges.last_mut() {
+        if start <= last_end.saturating_add(1) {
+            *last_end = (*last_end).max(end);
             return;
         }
     }
-    token_ranges.push((token_id, token_id));
+    token_ranges.push((start, end));
+}
+
+fn flush_end_rep_run(
+    end_rep_token_ranges: &mut FxHashMap<u32, Vec<(u32, u32)>>,
+    current_run_end_rep: &mut Option<u32>,
+    current_run_start: &mut u32,
+    current_run_end: &mut u32,
+) {
+    if let Some(end_rep) = current_run_end_rep.take() {
+        append_token_id_span(
+            end_rep_token_ranges.entry(end_rep).or_default(),
+            *current_run_start,
+            *current_run_end,
+        );
+    }
 }
 
 fn collect_l1_root_ranges_by_first_byte_lcp(
