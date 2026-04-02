@@ -1103,7 +1103,6 @@ fn build_l1_terminal_dwa(
         &terminal_to_active_states,
         deferred_arced.len(),
     );
-
     let mut tsid_group_contributions: Vec<Vec<(usize, Arc<RangeSetBlaze<u32>>)>> =
         (0..num_tsids).map(|_| Vec::new()).collect();
     for (end_rep, entries) in deferred_arced.iter().enumerate() {
