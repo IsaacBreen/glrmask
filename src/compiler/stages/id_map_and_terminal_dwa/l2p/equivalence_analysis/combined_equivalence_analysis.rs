@@ -328,6 +328,7 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
             tokenizer,
             &dedup.representative_token_bytes,
             initial_states,
+            Some(&byte_to_class),
         )
     };
     let max_length_ms = elapsed_ms(max_length_started_at);

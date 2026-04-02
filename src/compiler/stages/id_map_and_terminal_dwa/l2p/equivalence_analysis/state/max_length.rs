@@ -239,11 +239,76 @@ fn build_state_shape_restricted(state: &FlatDfaState, relevant_bytes: &[bool; 25
     (targets, hash_transition_labels(&label_hashes))
 }
 
+/// Build a state shape using precomputed byte-class representatives.
+///
+/// Each entry in `active_classes` is `(representative_byte, combined_hash)`.
+/// All bytes in a byte class have identical transitions from every state,
+/// so we only need to look up one representative byte per class.
+fn build_state_shape_by_class(
+    state: &FlatDfaState,
+    active_classes: &[(u8, u64)],
+) -> (Vec<usize>, u64) {
+    let mut targets: Vec<usize> = Vec::new();
+    let mut label_hashes: Vec<u64> = Vec::new();
+    let mut index_by_target: HashMap<usize, usize> = HashMap::new();
+
+    for &(rep_byte, class_hash) in active_classes {
+        let target = state.transitions[rep_byte as usize];
+        if target == u32::MAX {
+            continue;
+        }
+        let target = target as usize;
+
+        if let Some(&index) = index_by_target.get(&target) {
+            label_hashes[index] = label_hashes[index].wrapping_add(class_hash);
+        } else {
+            index_by_target.insert(target, targets.len());
+            targets.push(target);
+            label_hashes.push(class_hash);
+        }
+    }
+
+    (targets, hash_transition_labels(&label_hashes))
+}
+
+/// Precompute active byte classes: for each DFA byte class that contains at
+/// least one relevant byte, compute a representative byte (for transition
+/// lookup) and the combined hash of all relevant bytes in that class.
+fn precompute_active_classes(
+    byte_to_class: &[u8; 256],
+    relevant_bytes: &[bool; 256],
+) -> Vec<(u8, u64)> {
+    let num_classes = *byte_to_class.iter().max().unwrap_or(&0) as usize + 1;
+    let mut class_rep: Vec<Option<u8>> = vec![None; num_classes];
+    let mut class_hash: Vec<u64> = vec![0u64; num_classes];
+
+    for byte in 0..256u16 {
+        let b = byte as u8;
+        if !relevant_bytes[b as usize] {
+            continue;
+        }
+        let class = byte_to_class[b as usize] as usize;
+        if class_rep[class].is_none() {
+            class_rep[class] = Some(b);
+        }
+        class_hash[class] = class_hash[class].wrapping_add(
+            mix_u64((b as u64) ^ 0xD6E8_FD93_5E6C_A271),
+        );
+    }
+
+    (0..num_classes)
+        .filter_map(|c| {
+            class_rep[c].map(|rep| (rep, class_hash[c]))
+        })
+        .collect()
+}
+
 fn find_state_equivalence_classes_kstep_restricted(
     tokenizer: &TokenizerView,
     states: &[usize],
     k: usize,
     relevant_bytes: &[bool; 256],
+    byte_to_class: Option<&[u8; 256]>,
 ) -> Vec<usize> {
     if states.is_empty() {
         return Vec::new();
@@ -256,11 +321,16 @@ fn find_state_equivalence_classes_kstep_restricted(
 
     let dfa = tokenizer.dfa();
     let num_relevant = relevant_bytes.iter().filter(|&&b| b).count();
+    let active_classes = byte_to_class.map(|btc| precompute_active_classes(btc, relevant_bytes));
     let state_shapes: Vec<(Vec<usize>, u64)> = dfa
         .states
         .par_iter()
         .map(|state| {
-            let (targets, transition_label_hash) = build_state_shape_restricted(state, relevant_bytes);
+            let (targets, transition_label_hash) = if let Some(ref classes) = active_classes {
+                build_state_shape_by_class(state, classes)
+            } else {
+                build_state_shape_restricted(state, relevant_bytes)
+            };
             (targets, mix_u64(hash_state_label(state) ^ transition_label_hash))
         })
         .collect();
@@ -314,6 +384,7 @@ pub fn find_state_equivalence_classes_byte_restricted<S: AsRef<[u8]>>(
     tokenizer: &TokenizerView,
     tokens: &[S],
     states: &[usize],
+    byte_to_class: Option<&[u8; 256]>,
 ) -> Vec<usize> {
     let max_len = tokens.iter().map(|token| token.as_ref().len()).max().unwrap_or(0);
 
@@ -324,5 +395,5 @@ pub fn find_state_equivalence_classes_byte_restricted<S: AsRef<[u8]>>(
         }
     }
 
-    find_state_equivalence_classes_kstep_restricted(tokenizer, states, max_len, &relevant_bytes)
+    find_state_equivalence_classes_kstep_restricted(tokenizer, states, max_len, &relevant_bytes, byte_to_class)
 }
