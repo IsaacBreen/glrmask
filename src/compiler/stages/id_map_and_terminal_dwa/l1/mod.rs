@@ -347,16 +347,23 @@ fn build_l1_id_map<'a>(tokenizer: &Tokenizer, vocab: &'a Vocab, active_terminals
     }
     let state_equiv_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    // Sort token IDs by byte content so internal IDs follow DFS traversal order
-    // in the VocabPrefixTree. This makes reachable_token_ids() contiguous ranges,
-    // enabling O(1) RangeSetBlaze unions during self-loop optimization.
+    // Sort token IDs first by first byte, then by length, then lexicographically.
+    // Keeping first-byte buckets contiguous preserves cheap whole-bucket unions,
+    // while length-major order can reduce fragmentation for length-sensitive
+    // token sets before the later compact pass.
     let token_identity_started_at = Instant::now();
     let mut token_id_bytes: Vec<(u32, &[u8])> = vocab
         .entries
         .iter()
         .map(|(&id, bytes)| (id, bytes.as_slice()))
         .collect();
-    token_id_bytes.sort_unstable_by(|(_, a), (_, b)| a.cmp(b));
+    token_id_bytes.sort_unstable_by(|(_, left_bytes), (_, right_bytes)| {
+        left_bytes
+            .first()
+            .cmp(&right_bytes.first())
+            .then(left_bytes.len().cmp(&right_bytes.len()))
+            .then(left_bytes.cmp(right_bytes))
+    });
     let mut token_original_to_internal = vec![u32::MAX; vocab.max_token_id() as usize + 1];
     let token_ids_sorted: Vec<u32> = token_id_bytes
         .iter()
