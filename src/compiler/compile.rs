@@ -566,7 +566,7 @@ fn compile_prepared_with_profile(
                 } else if std::env::var("GLRMASK_NO_PARTITION").map_or(false, |v| v == "1") {
                     // Force non-partitioned path for benchmarking.
                     IdMapBuildResult::Ready {
-                        global: crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::combined::analyze_equivalences(&tokenizer, vocab, &disallowed_follows, prepared_grammar.ignore_terminal),
+                        global: crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::combined::analyze_equivalences(&tokenizer, vocab, &disallowed_follows, prepared_grammar.ignore_terminal, None),
                         phase_profile: crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalDwaPhaseProfile {
                             id_map_ms: elapsed_ms(id_map_started_at),
                             terminal_dwa_ms: 0.0,

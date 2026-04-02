@@ -62,6 +62,84 @@ struct Dfa {
     disallowed_follows: Vec<BitSet>,
 }
 
+/// Precomputed transition-only data that is identical across partitions.
+///
+/// `filter_for_terminals` only changes finalizers and possible_future_group_ids,
+/// not transitions. So `trans_by_class`, `byte_to_class`, and `self_loop_bytes`
+/// can be computed once and shared across all partition vocab equivalence calls.
+pub struct SharedVocabDfaBase {
+    byte_to_class: [u8; 256],
+    pub num_classes: usize,
+    trans_by_class: Vec<u32>,
+    self_loop_bytes: Vec<U8Set>,
+    none_completion_hash: u64,
+}
+
+impl SharedVocabDfaBase {
+    /// Build from a FlatDfa. Called lazily via OnceLock on first use.
+    pub fn build_from_dfa(dfa: &super::super::compat::FlatDfa) -> Self {
+        let num_dfa_states = dfa.states.len();
+        let byte_to_class = compute_byte_classes(dfa);
+        let num_classes = byte_to_class
+            .iter()
+            .copied()
+            .max()
+            .map_or(0usize, |max_class| max_class as usize + 1);
+
+        let mut class_repr = vec![0u8; num_classes];
+        let mut class_seen = vec![false; num_classes];
+        for b in 0..=255u8 {
+            let class = byte_to_class[b as usize] as usize;
+            if !class_seen[class] {
+                class_seen[class] = true;
+                class_repr[class] = b;
+            }
+        }
+
+        let mut trans_by_class = vec![NONE; num_classes * num_dfa_states];
+        for c in 0..num_classes {
+            let repr = class_repr[c] as usize;
+            let base = c * num_dfa_states;
+            for s in 0..num_dfa_states {
+                trans_by_class[base + s] = dfa.states[s].transitions[repr];
+            }
+        }
+
+        let mut self_loop_bytes = Vec::with_capacity(num_dfa_states);
+        for (state_idx, state) in dfa.states.iter().enumerate() {
+            let mut bits = U8Set::empty();
+            for (byte_idx, &target) in state.transitions.iter().enumerate() {
+                if target == state_idx as u32 {
+                    bits.insert(byte_idx as u8);
+                }
+            }
+            self_loop_bytes.push(bits);
+        }
+
+        let none_completion_hash = {
+            let mut h = new_hasher();
+            h.write_u8(0);
+            h.finish()
+        };
+
+        SharedVocabDfaBase {
+            byte_to_class,
+            num_classes,
+            trans_by_class,
+            self_loop_bytes,
+            none_completion_hash,
+        }
+    }
+
+    /// Return the precomputed byte-to-class mapping.
+    pub fn byte_to_class(&self) -> [u8; 256] {
+        self.byte_to_class
+    }
+}
+
+/// Cache type for lazy SharedVocabDfaBase initialization across partitions.
+pub type SharedVocabDfaCache = std::sync::OnceLock<SharedVocabDfaBase>;
+
 impl Dfa {
     /// Get completion hash for a state (or none_completion_hash for STATE_NONE).
     #[inline]
@@ -364,7 +442,7 @@ fn build_dfa(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     byte_to_class_override: Option<&[u8; 256]>,
 ) -> Dfa {
-    build_dfa_with_group_filter(tokenizer, disallowed_follows, byte_to_class_override, None)
+    build_dfa_with_group_filter(tokenizer, disallowed_follows, byte_to_class_override, None, None)
 }
 
 /// Build the analysis DFA, optionally filtering to only active groups.
@@ -372,16 +450,26 @@ fn build_dfa(
 /// When `active_groups` is provided, only groups marked `true` are included
 /// in finalizers and possible_future_groups. This is used for L2+-only
 /// equivalence analysis where L1 terminal groups are excluded.
+///
+/// When `shared_cache` is provided, lazily initializes a SharedVocabDfaBase on
+/// first call and reuses it for subsequent calls. This avoids redundant
+/// computation of transition tables and self-loop bytes across partitions.
 fn build_dfa_with_group_filter(
     tokenizer: &TokenizerView,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     byte_to_class_override: Option<&[u8; 256]>,
     active_groups: Option<&[bool]>,
+    shared_cache: Option<&SharedVocabDfaCache>,
 ) -> Dfa {
     let profile_compile = compile_profile_enabled();
     let build_started_at = Instant::now();
     let dfa = tokenizer.dfa();
     assert!(dfa.states.len() <= u32::MAX as usize, "DFA too large");
+
+    // Lazily initialize the shared base from this TokenizerView's DFA.
+    let shared_base: Option<&SharedVocabDfaBase> = shared_cache.map(|cache| {
+        cache.get_or_init(|| SharedVocabDfaBase::build_from_dfa(dfa))
+    });
 
     // Compute num_groups from all group IDs referenced in the DFA
     let num_groups = dfa
@@ -400,9 +488,8 @@ fn build_dfa_with_group_filter(
     let mut is_dead_end = Vec::with_capacity(dfa.states.len());
     let mut possible_future_groups = Vec::with_capacity(dfa.states.len());
     let mut completion_hash = Vec::with_capacity(dfa.states.len());
-    let mut self_loop_bytes = Vec::with_capacity(dfa.states.len());
 
-    for (state_idx, state) in dfa.states.iter().enumerate() {
+    for (_state_idx, state) in dfa.states.iter().enumerate() {
         let filtered_finalizers: SmallVec<[usize; 4]> = if let Some(ag) = active_groups {
             state.finalizers.iter().copied().filter(|&gid| ag.get(gid).copied().unwrap_or(false)).collect()
         } else {
@@ -418,64 +505,86 @@ fn build_dfa_with_group_filter(
         is_dead_end.push(future_groups.is_empty());
         completion_hash.push(hash_group_list(future_groups.iter().copied()));
         possible_future_groups.push(future_groups);
-
-        let mut bits = U8Set::empty();
-        for (byte_idx, &target) in state.transitions.iter().enumerate() {
-            if target == state_idx as u32 {
-                bits.insert(byte_idx as u8);
-            }
-        }
-        self_loop_bytes.push(bits);
     }
     let state_scan_ms = elapsed_ms(state_scan_started_at);
 
-    let none_completion_hash = {
-        let mut h = new_hasher();
-        h.write_u8(0);
-        h.finish()
-    };
-
-    // Compute byte equivalence classes: group bytes with identical transitions across all states.
-    let byte_classes_started_at = Instant::now();
     let num_dfa_states = dfa.states.len();
-    let byte_to_class = byte_to_class_override.copied().unwrap_or_else(|| compute_byte_classes(dfa));
+
+    // Use shared base if available, otherwise compute from scratch.
+    let (byte_to_class, trans_by_class, self_loop_bytes, none_completion_hash, byte_classes_ms, transpose_ms) =
+        if let Some(base) = shared_base {
+            assert_eq!(base.trans_by_class.len(), base.num_classes * num_dfa_states,
+                "SharedVocabDfaBase state count mismatch");
+            assert_eq!(base.self_loop_bytes.len(), num_dfa_states,
+                "SharedVocabDfaBase self_loop_bytes count mismatch");
+            let btc = byte_to_class_override.copied().unwrap_or(base.byte_to_class);
+            (btc, base.trans_by_class.clone(), base.self_loop_bytes.clone(), base.none_completion_hash, 0.0, 0.0)
+        } else {
+            let byte_classes_started_at = Instant::now();
+            let btc = byte_to_class_override.copied().unwrap_or_else(|| compute_byte_classes(dfa));
+            let num_classes = btc
+                .iter()
+                .copied()
+                .max()
+                .map_or(0usize, |max_class| max_class as usize + 1);
+            let mut class_repr = vec![0u8; num_classes];
+            let mut class_seen = vec![false; num_classes];
+            for b in 0..=255u8 {
+                let class = btc[b as usize] as usize;
+                if !class_seen[class] {
+                    class_seen[class] = true;
+                    class_repr[class] = b;
+                }
+            }
+            let byte_classes_ms = elapsed_ms(byte_classes_started_at);
+
+            let transpose_started_at = Instant::now();
+            let mut tbc = vec![NONE; num_classes * num_dfa_states];
+            for c in 0..num_classes {
+                let repr = class_repr[c] as usize;
+                let bbase = c * num_dfa_states;
+                for s in 0..num_dfa_states {
+                    tbc[bbase + s] = dfa.states[s].transitions[repr];
+                }
+            }
+            let transpose_ms = elapsed_ms(transpose_started_at);
+
+            let mut slb = Vec::with_capacity(num_dfa_states);
+            for (state_idx, state) in dfa.states.iter().enumerate() {
+                let mut bits = U8Set::empty();
+                for (byte_idx, &target) in state.transitions.iter().enumerate() {
+                    if target == state_idx as u32 {
+                        bits.insert(byte_idx as u8);
+                    }
+                }
+                slb.push(bits);
+            }
+
+            let nch = {
+                let mut h = new_hasher();
+                h.write_u8(0);
+                h.finish()
+            };
+
+            (btc, tbc, slb, nch, byte_classes_ms, transpose_ms)
+        };
+
     let num_classes = byte_to_class
         .iter()
         .copied()
         .max()
         .map_or(0usize, |max_class| max_class as usize + 1);
-    let mut class_repr = vec![0u8; num_classes];
-    let mut class_seen = vec![false; num_classes];
-    for b in 0..=255u8 {
-        let class = byte_to_class[b as usize] as usize;
-        if !class_seen[class] {
-            class_seen[class] = true;
-            class_repr[class] = b;
-        }
-    }
-    let byte_classes_ms = elapsed_ms(byte_classes_started_at);
-
-    // Build transposed transition table: trans_by_class[class * num_states + state]
-    let transpose_started_at = Instant::now();
-    let mut trans_by_class = vec![NONE; num_classes * num_dfa_states];
-    for c in 0..num_classes {
-        let repr = class_repr[c] as usize;
-        let base = c * num_dfa_states;
-        for s in 0..num_dfa_states {
-            trans_by_class[base + s] = dfa.states[s].transitions[repr];
-        }
-    }
-    let transpose_ms = elapsed_ms(transpose_started_at);
 
     if profile_compile {
         eprintln!(
-            "[glrmask/profile][vocab_build_dfa] dfa_states={} num_groups={} byte_classes={} state_scan_ms={:.3} byte_classes_ms={:.3} transpose_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][vocab_build_dfa] dfa_states={} num_groups={} byte_classes={} state_scan_ms={:.3} byte_classes_ms={:.3} transpose_ms={:.3} shared_base={} total_ms={:.3}",
             num_dfa_states,
             num_groups,
             num_classes,
             state_scan_ms,
             byte_classes_ms,
             transpose_ms,
+            shared_base.is_some(),
             elapsed_ms(build_started_at),
         );
     }
@@ -1693,7 +1802,7 @@ pub fn find_vocab_equivalence_classes_with_follow_and_byte_classes<S: AsRef<[u8]
     byte_to_class: Option<&[u8; 256]>,
 ) -> VocabEquivalenceResult {
     find_vocab_equivalence_classes_with_group_filter(
-        tokenizer, strings, initial_states, disallowed_follows, byte_to_class, None,
+        tokenizer, strings, initial_states, disallowed_follows, byte_to_class, None, None,
     )
 }
 
@@ -1708,12 +1817,13 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     byte_to_class: Option<&[u8; 256]>,
     active_groups: Option<&[bool]>,
+    shared_cache: Option<&SharedVocabDfaCache>,
 ) -> VocabEquivalenceResult {
     let profile_compile = compile_profile_enabled();
     let reachable_states = vocab_reachability_profile_enabled()
         .then(|| reachable_state_count(tokenizer, initial_states));
     let build_dfa_started_at = Instant::now();
-    let dfa = build_dfa_with_group_filter(tokenizer, disallowed_follows, byte_to_class, active_groups);
+    let dfa = build_dfa_with_group_filter(tokenizer, disallowed_follows, byte_to_class, active_groups, shared_cache);
     let build_dfa_ms = elapsed_ms(build_dfa_started_at);
     let order_states_started_at = Instant::now();
     let ordered_states = if diversity_state_order_enabled() {

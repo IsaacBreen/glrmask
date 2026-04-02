@@ -637,8 +637,9 @@ pub(crate) fn analyze_equivalences(
     vocab: &Vocab,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<u32>,
+    shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
 ) -> InternalIdMap {
-    analyze_equivalences_impl(tokenizer, vocab, disallowed_follows, ignore_terminal, None)
+    analyze_equivalences_impl(tokenizer, vocab, disallowed_follows, ignore_terminal, None, shared_vocab_dfa_cache)
 }
 
 pub(crate) fn analyze_equivalences_with_group_filter(
@@ -647,8 +648,9 @@ pub(crate) fn analyze_equivalences_with_group_filter(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<u32>,
     active_groups: Option<&[bool]>,
+    shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
 ) -> InternalIdMap {
-    analyze_equivalences_impl(tokenizer, vocab, disallowed_follows, ignore_terminal, active_groups)
+    analyze_equivalences_impl(tokenizer, vocab, disallowed_follows, ignore_terminal, active_groups, shared_vocab_dfa_cache)
 }
 
 /// Combined equivalence analysis over a flattened tokenizer DFA.
@@ -661,6 +663,7 @@ fn analyze_equivalences_impl(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<u32>,
     active_groups: Option<&[bool]>,
+    shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
 ) -> InternalIdMap {
     let profile_compile = compile_profile_enabled();
     let total_started_at = std::time::Instant::now();
@@ -698,6 +701,7 @@ fn analyze_equivalences_impl(
         effective_disallowed,
         ignore_terminal,
         active_groups,
+        shared_vocab_dfa_cache,
     );
     let combined_ms = elapsed_ms(combined_started_at);
 
@@ -763,7 +767,7 @@ mod tests {
             ],
             None,
         );
-        let id_map = analyze_equivalences(&tok, &vocab, &BTreeMap::new(), None);
+        let id_map = analyze_equivalences(&tok, &vocab, &BTreeMap::new(), None, None);
 
         assert!(id_map.num_tsids() >= 1);
         assert_eq!(id_map.max_token_id(), 2);
@@ -791,7 +795,7 @@ mod tests {
             .map(|(i, s)| (i as u32, s.as_bytes().to_vec()))
             .collect();
         let vocab = Vocab::new(vocab_entries, None);
-        let id_map = analyze_equivalences(&tok, &vocab, &BTreeMap::new(), None);
+        let id_map = analyze_equivalences(&tok, &vocab, &BTreeMap::new(), None, None);
         let classes = &id_map.vocab_tokens.internal_to_originals;
         let expected: Vec<Vec<usize>> = vec![
             vec![0],
@@ -844,7 +848,7 @@ mod tests {
         let tok = build_tokenizer(&grammar);
         let vocab_entries = vec![(0, b"{".to_vec()), (1, b"}".to_vec())];
         let vocab = Vocab::new(vocab_entries, None);
-        let id_map = analyze_equivalences(&tok, &vocab, &BTreeMap::new(), None);
+        let id_map = analyze_equivalences(&tok, &vocab, &BTreeMap::new(), None, None);
         let classes = &id_map.vocab_tokens.internal_to_originals;
         let expected = vec![vec![0], vec![1]];
         let mut expected_sorted: Vec<Vec<usize>> = expected

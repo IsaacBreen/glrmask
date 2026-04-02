@@ -36,6 +36,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     grammar: &AnalyzedGrammar,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     flat_trans: &[u32],
+    shared_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
 ) -> Option<LocalIdMapTerminalDwa> {
     if vocab.is_empty() {
         return None;
@@ -133,6 +134,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                     grammar,
                     &l2p_mask,
                     disallowed_follows,
+                    shared_vocab_dfa_cache,
                 );
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
             } else {

@@ -1082,7 +1082,7 @@ mod tests {
             entries.push((i as u32, td.name().as_bytes().to_vec()));
         }
         let vocab = Vocab::new(entries, None);
-        let id_map = crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::combined::analyze_equivalences(&tok, &vocab, &std::collections::BTreeMap::new(), None);
+        let id_map = crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::combined::analyze_equivalences(&tok, &vocab, &std::collections::BTreeMap::new(), None, None);
         (vocab, tok, id_map)
     }
 

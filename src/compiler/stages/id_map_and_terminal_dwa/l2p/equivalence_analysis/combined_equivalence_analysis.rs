@@ -274,7 +274,7 @@ pub fn compute_combined_equivalence<S: AsRef<[u8]> + Sync>(
     ignore_terminal: Option<u32>,
 ) -> CombinedEquivalenceResult {
     compute_combined_equivalence_with_group_filter(
-        tokenizer, tokens, initial_states, disallowed_follows, ignore_terminal, None,
+        tokenizer, tokens, initial_states, disallowed_follows, ignore_terminal, None, None,
     )
 }
 
@@ -285,6 +285,7 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<u32>,
     active_groups: Option<&[bool]>,
+    shared_vocab_dfa_cache: Option<&vocab_equivalence_analysis::SharedVocabDfaCache>,
 ) -> CombinedEquivalenceResult {
     let skip_max_length = env_flag_enabled(SKIP_MAX_LENGTH_STATE_EQUIV_ENV)
         || initial_states.len() <= SKIP_MAX_LENGTH_SMALL_STATE_THRESHOLD;
@@ -293,11 +294,22 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
     let debug_profile = debug_profile_enabled();
     let combined_started_at = std::time::Instant::now();
 
+    // Eagerly initialize the shared DFA cache (if provided) so that both
+    // the dedup and build_dfa steps can reuse byte_to_class, trans_by_class,
+    // and self_loop_bytes. Since filter_for_terminals preserves transitions,
+    // the first partition's cache is valid for all.
+    if let Some(cache) = shared_vocab_dfa_cache {
+        cache.get_or_init(|| vocab_equivalence_analysis::SharedVocabDfaBase::build_from_dfa(tokenizer.dfa()));
+    }
+
     // Deduplicate tokens by byte-class sequence. Tokens whose bytes map
     // to the same DFA byte-class sequence behave identically from every
     // starting state, so we only need to analyze one representative.
     let dedup_started_at = std::time::Instant::now();
-    let byte_to_class = super::compat::compute_byte_classes(tokenizer.dfa());
+    let byte_to_class = shared_vocab_dfa_cache
+        .and_then(|cache| cache.get())
+        .map(|base| base.byte_to_class())
+        .unwrap_or_else(|| super::compat::compute_byte_classes(tokenizer.dfa()));
     let dedup = deduplicate_tokens_by_byte_class(tokens, &byte_to_class);
     let dedup_ms = elapsed_ms(dedup_started_at);
 
@@ -372,6 +384,7 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
             disallowed_follows,
             Some(&byte_to_class),
             active_groups,
+            shared_vocab_dfa_cache,
         )
     };
     let vocab_ms = elapsed_ms(vocab_started_at);

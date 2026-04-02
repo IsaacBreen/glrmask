@@ -68,6 +68,12 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     let flat_trans = l1::build_flat_transition_table(tokenizer);
     profile.terminal_dwa_ms += flat_trans_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    // Shared cache for vocab DFA base (byte classes, transition table, self-loop
+    // bytes). Lazily initialized by the first partition's equivalence analysis.
+    // Since filter_for_terminals only modifies finalizers/possible_future_group_ids
+    // without changing transitions, the cached base is valid for all partitions.
+    let shared_vocab_dfa_cache = l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
+
     // Build each partition in parallel.
     let ((p0, p1), (p2, p3)) = rayon::join(
         || {
@@ -84,6 +90,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
                         grammar,
                         disallowed_follows,
                         &flat_trans,
+                        Some(&shared_vocab_dfa_cache),
                     ).map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0))
                 },
                 || {
@@ -98,6 +105,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
                         grammar,
                         disallowed_follows,
                         &flat_trans,
+                        Some(&shared_vocab_dfa_cache),
                     ).map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0))
                 },
             )
@@ -116,6 +124,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
                         grammar,
                         disallowed_follows,
                         &flat_trans,
+                        Some(&shared_vocab_dfa_cache),
                     ).map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0))
                 },
                 || {
@@ -130,6 +139,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
                         grammar,
                         disallowed_follows,
                         &flat_trans,
+                        Some(&shared_vocab_dfa_cache),
                     ).map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0))
                 },
             )
