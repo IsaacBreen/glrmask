@@ -114,6 +114,14 @@ fn build_subset_mapping(states: &[usize], hashes: &[u64]) -> Vec<usize> {
     mapping
 }
 
+fn count_distinct_hashes(hashes: &[u64]) -> usize {
+    let mut seen = std::collections::HashSet::with_capacity(hashes.len());
+    for &h in hashes {
+        seen.insert(h);
+    }
+    seen.len()
+}
+
 fn find_state_equivalence_classes_kstep(
     tokenizer: &TokenizerView,
     states: &[usize],
@@ -134,8 +142,10 @@ fn find_state_equivalence_classes_kstep(
         .collect();
     let (outgoing_targets, mut prev_hashes): (Vec<_>, Vec<_>) = state_shapes.into_iter().unzip();
 
+    let check_interval = 16.min(k);
+    let mut prev_distinct = 0usize;
     let mut next_hashes = vec![0u64; dfa.states.len()];
-    for _ in 0..k {
+    for step in 0..k {
         next_hashes
             .par_iter_mut()
             .enumerate()
@@ -146,6 +156,13 @@ fn find_state_equivalence_classes_kstep(
                 );
             });
         std::mem::swap(&mut prev_hashes, &mut next_hashes);
+        if (step + 1) % check_interval == 0 {
+            let distinct = count_distinct_hashes(&prev_hashes);
+            if distinct == prev_distinct {
+                break;
+            }
+            prev_distinct = distinct;
+        }
     }
 
     build_subset_mapping(states, &prev_hashes)
@@ -243,8 +260,10 @@ fn find_state_equivalence_classes_kstep_restricted(
         .collect();
     let (outgoing_targets, mut prev_hashes): (Vec<_>, Vec<_>) = state_shapes.into_iter().unzip();
 
+    let check_interval = 16.min(k);
+    let mut prev_distinct = 0usize;
     let mut next_hashes = vec![0u64; dfa.states.len()];
-    for _ in 0..k {
+    for step in 0..k {
         next_hashes
             .par_iter_mut()
             .enumerate()
@@ -255,6 +274,13 @@ fn find_state_equivalence_classes_kstep_restricted(
                 );
             });
         std::mem::swap(&mut prev_hashes, &mut next_hashes);
+        if (step + 1) % check_interval == 0 {
+            let distinct = count_distinct_hashes(&prev_hashes);
+            if distinct == prev_distinct {
+                break;
+            }
+            prev_distinct = distinct;
+        }
     }
 
     build_subset_mapping(states, &prev_hashes)

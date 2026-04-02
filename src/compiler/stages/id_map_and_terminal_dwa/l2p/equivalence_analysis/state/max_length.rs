@@ -114,6 +114,14 @@ fn build_subset_mapping(states: &[usize], hashes: &[u64]) -> Vec<usize> {
     mapping
 }
 
+fn count_distinct_hashes(hashes: &[u64]) -> usize {
+    let mut seen = std::collections::HashSet::with_capacity(hashes.len());
+    for &h in hashes {
+        seen.insert(h);
+    }
+    seen.len()
+}
+
 fn find_state_equivalence_classes_kstep(
     tokenizer: &TokenizerView,
     states: &[usize],
@@ -134,8 +142,10 @@ fn find_state_equivalence_classes_kstep(
         .collect();
     let (outgoing_targets, mut prev_hashes): (Vec<_>, Vec<_>) = state_shapes.into_iter().unzip();
 
+    let check_interval = 16.min(k);
+    let mut prev_distinct = 0usize;
     let mut next_hashes = vec![0u64; dfa.states.len()];
-    for _ in 0..k {
+    for step in 0..k {
         next_hashes
             .par_iter_mut()
             .enumerate()
@@ -146,6 +156,13 @@ fn find_state_equivalence_classes_kstep(
                 );
             });
         std::mem::swap(&mut prev_hashes, &mut next_hashes);
+        if (step + 1) % check_interval == 0 {
+            let distinct = count_distinct_hashes(&prev_hashes);
+            if distinct == prev_distinct {
+                break;
+            }
+            prev_distinct = distinct;
+        }
     }
 
     build_subset_mapping(states, &prev_hashes)
@@ -232,7 +249,13 @@ fn find_state_equivalence_classes_kstep_restricted(
         return Vec::new();
     }
 
+    let profile = std::env::var("GLRMASK_PROFILE_COMPILE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let shapes_start = std::time::Instant::now();
+
     let dfa = tokenizer.dfa();
+    let num_relevant = relevant_bytes.iter().filter(|&&b| b).count();
     let state_shapes: Vec<(Vec<usize>, u64)> = dfa
         .states
         .par_iter()
@@ -243,8 +266,14 @@ fn find_state_equivalence_classes_kstep_restricted(
         .collect();
     let (outgoing_targets, mut prev_hashes): (Vec<_>, Vec<_>) = state_shapes.into_iter().unzip();
 
+    let shapes_ms = shapes_start.elapsed().as_secs_f64() * 1000.0;
+    let kstep_start = std::time::Instant::now();
+
+    let check_interval = 16.min(k);
+    let mut prev_distinct = 0usize;
+    let mut converged_at = k;
     let mut next_hashes = vec![0u64; dfa.states.len()];
-    for _ in 0..k {
+    for step in 0..k {
         next_hashes
             .par_iter_mut()
             .enumerate()
@@ -255,6 +284,22 @@ fn find_state_equivalence_classes_kstep_restricted(
                 );
             });
         std::mem::swap(&mut prev_hashes, &mut next_hashes);
+        if (step + 1) % check_interval == 0 {
+            let distinct = count_distinct_hashes(&prev_hashes);
+            if distinct == prev_distinct {
+                converged_at = step + 1;
+                break;
+            }
+            prev_distinct = distinct;
+        }
+    }
+
+    if profile {
+        let kstep_ms = kstep_start.elapsed().as_secs_f64() * 1000.0;
+        eprintln!(
+            "[glrmask/profile][max_length_kstep] dfa_states={} k={} converged_at={} relevant_bytes={} distinct={} shapes_ms={:.3} kstep_ms={:.3}",
+            dfa.states.len(), k, converged_at, num_relevant, prev_distinct, shapes_ms, kstep_ms,
+        );
     }
 
     build_subset_mapping(states, &prev_hashes)
