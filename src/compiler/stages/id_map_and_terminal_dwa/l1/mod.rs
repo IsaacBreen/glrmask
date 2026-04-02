@@ -52,6 +52,94 @@ impl Hash for PreHashedRanges {
     }
 }
 
+/// Lazy range representation: stores references to walk_cache range slices
+/// instead of copying. Hash is computed over all referenced ranges using the
+/// same commutative scheme as PreHashedRanges, so it matches the hash of the
+/// fully-merged range set exactly when no inter-ref adjacency merges occur.
+/// For interning, equality is checked via ref identity (ptr + len) — safe
+/// because each walk_cache entry's Vec has a unique address and different
+/// entry sets always produce different token ID sets.
+#[derive(Clone)]
+struct LazyRanges<'a> {
+    refs: Vec<&'a [(u32, u32)]>,
+    hash: u64,
+    total_len: usize,
+}
+
+impl<'a> LazyRanges<'a> {
+    fn new(refs: Vec<&'a [(u32, u32)]>) -> Self {
+        // Compute hash over MERGED ranges by streaming through refs.
+        // This produces the same hash as hashing the fully materialized
+        // merged output, enabling correct interning across different
+        // contributing entry sets that merge to the same result.
+        let mut h: u64 = 0;
+        let mut total_len: usize = 0;
+        let mut merged_count: usize = 0;
+        let mut current: Option<(u32, u32)> = None;
+
+        for &slice in &refs {
+            total_len += slice.len();
+            for &(s, e) in slice {
+                if let Some((cs, ref mut ce)) = current {
+                    if s <= ce.saturating_add(1) {
+                        *ce = (*ce).max(e);
+                    } else {
+                        h = h.wrapping_add(range_hash_val(cs, *ce));
+                        merged_count += 1;
+                        current = Some((s, e));
+                    }
+                } else {
+                    current = Some((s, e));
+                }
+            }
+        }
+        if let Some((s, e)) = current {
+            h = h.wrapping_add(range_hash_val(s, e));
+            merged_count += 1;
+        }
+        let hash = (merged_count as u64).wrapping_add(h);
+        Self { refs, hash, total_len }
+    }
+
+    /// Materialize into merged ranges.
+    fn materialize(&self) -> Vec<(u32, u32)> {
+        let mut merged: Vec<(u32, u32)> = Vec::with_capacity(self.total_len);
+        for &slice in &self.refs {
+            if let Some((&first, rest)) = slice.split_first() {
+                if let Some(last) = merged.last_mut() {
+                    if first.0 <= last.1.saturating_add(1) {
+                        last.1 = last.1.max(first.1);
+                    } else {
+                        merged.push(first);
+                    }
+                } else {
+                    merged.push(first);
+                }
+                merged.extend_from_slice(rest);
+            }
+        }
+        merged
+    }
+}
+
+impl<'a> PartialEq for LazyRanges<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        if self.hash != other.hash { return false; }
+        // First try fast path: identical ref lists always produce identical output.
+        if self.refs.len() == other.refs.len()
+            && self.refs.iter().zip(other.refs.iter()).all(|(&a, &b)| {
+                std::ptr::eq(a.as_ptr(), b.as_ptr()) && a.len() == b.len()
+            })
+        {
+            return true;
+        }
+        // Slow path: streaming merged-range comparison.
+        self.materialize() == other.materialize()
+    }
+}
+
+impl<'a> Eq for LazyRanges<'a> {}
+
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
@@ -351,17 +439,15 @@ fn build_l1_terminal_dwa(
         }
     }
 
-    let phase1_wall_ms: f64;
     let skipped_walks = std::sync::atomic::AtomicUsize::new(0);
     let skipped_tokens = std::sync::atomic::AtomicUsize::new(0);
     let p2_collect_ns = std::sync::atomic::AtomicU64::new(0);
     let p2_build_ns = std::sync::atomic::AtomicU64::new(0);
     let p2_total_ranges = std::sync::atomic::AtomicU64::new(0);
-    let per_thread_results: Vec<Vec<(u32, u32, PreHashedRanges)>> = {
-        // Walk cache: compute once per unique (first_byte, target) and cache
-        // the raw merged ranges. Self-loop optimization: if the target state
-        // has self-loops on all suffix bytes, all tokens end at the target
-        // state and the walk can be skipped entirely.
+    // Walk cache: compute once per unique (first_byte, target) and cache
+    // the raw merged ranges. Self-loop optimization: if the target state
+    // has self-loops on all suffix bytes, all tokens end at the target
+    // state and the walk can be skipped entirely.
         let dead = u32::MAX;
 
         // Phase 1: Identify unique (first_byte, target) pairs
@@ -465,7 +551,7 @@ fn build_l1_terminal_dwa(
             .collect();
 
         let phase1_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0;
-        phase1_wall_ms = phase1_ms;
+        let phase1_wall_ms = phase1_ms;
 
         // Precompute unique end_reps and dense index for Phase 2.
         // This allows replacing HashMap with a flat array.
@@ -486,9 +572,7 @@ fn build_l1_terminal_dwa(
             end_rep_to_idx[rep as usize] = i;
         }
 
-        // Also precompute walk_cache results indexed by (byte, target) → Vec of
-        // (end_rep_idx, ranges_slice_ref) for faster Phase 2 access.
-        // Convert walk_cache to use end_rep_idx instead of end_rep.
+        // Build indexed walk_cache: (byte, target) → Vec of (end_rep_idx, &ranges).
         let indexed_walk_cache: FxHashMap<(u8, u32), Vec<(usize, &[(u32, u32)])>> = walk_cache
             .iter()
             .map(|(&key, results)| {
@@ -507,25 +591,51 @@ fn build_l1_terminal_dwa(
             );
         }
 
-        // Phase 2: For each start_state, collect cached walk results across all
-        // first bytes, merge per end_rep into flat array, build PreHashedRanges.
-        // Uses merge-during-extend: when appending ranges to an end_rep's Vec,
-        // merge with the last range if adjacent. Hash computed at finalization
-        // using commutative add-of-multiply (independent per range, no data dependency chain).
-        start_states_list
+        // Phase 2: For each start_state, collect walk_cache references per
+        // end_rep and build LazyRanges. Instead of copying 25M+ ranges into
+        // per-start-state Vecs, store references to walk_cache range slices.
+        // Materialization deferred to interning (only ~463 unique sets).
+
+        // Pre-build empty token ranges (shared across all start_states).
+        let empty_token_ranges: Vec<(u32, u32)> = {
+            let mut ranges = Vec::new();
+            for &internal_token_id in &empty_token_indices {
+                append_token_id_range(&mut ranges, internal_token_id as u32);
+            }
+            ranges
+        };
+
+        let per_thread_results: Vec<Vec<(u32, u32, LazyRanges<'_>)>> = start_states_list
             .par_iter()
             .map(|&(&start_state, ref initial_tsids)| {
                 let collect_start = Instant::now();
 
-                // Single pass over indexed_walk_cache: collect work items and
-                // count ranges per end_rep for exact pre-allocation.
-                let mut work_items: Vec<(usize, &[(u32, u32)])> = Vec::new();
-                let mut caps: Vec<usize> = vec![0; n_end_reps];
+                // Build per-end_rep ref lists + streaming merge hash.
+                // Hash is computed inline during collection so walk_cache data
+                // is hot in cache from the HashMap lookup.
+                let mut end_rep_refs: Vec<Vec<&[(u32, u32)]>> = vec![Vec::new(); n_end_reps];
+                let mut hash_accum: Vec<u64> = vec![0; n_end_reps];
+                let mut merge_last: Vec<Option<(u32, u32)>> = vec![None; n_end_reps];
+                let mut len_accum: Vec<usize> = vec![0; n_end_reps];
+                let mut merged_count: Vec<usize> = vec![0; n_end_reps];
 
                 // Empty tokens: end_rep = start_rep
-                let start_rep = state_to_rep[start_state as usize];
-                let start_rep_idx = end_rep_to_idx[start_rep as usize];
-                caps[start_rep_idx] += empty_token_indices.len();
+                if !empty_token_ranges.is_empty() {
+                    let start_rep = state_to_rep[start_state as usize];
+                    let start_rep_idx = end_rep_to_idx[start_rep as usize];
+                    end_rep_refs[start_rep_idx].push(empty_token_ranges.as_slice());
+                    for &(s, e) in &empty_token_ranges {
+                        if let Some((cs, ref mut ce)) = merge_last[start_rep_idx] {
+                            if s <= ce.saturating_add(1) { *ce = (*ce).max(e); }
+                            else {
+                                hash_accum[start_rep_idx] = hash_accum[start_rep_idx].wrapping_add(range_hash_val(cs, *ce));
+                                merged_count[start_rep_idx] += 1;
+                                merge_last[start_rep_idx] = Some((s, e));
+                            }
+                        } else { merge_last[start_rep_idx] = Some((s, e)); }
+                    }
+                    len_accum[start_rep_idx] += empty_token_ranges.len();
+                }
 
                 for (byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
                     if token_ids.is_empty() { continue; }
@@ -533,69 +643,51 @@ fn build_l1_terminal_dwa(
                     if target == dead { continue; }
                     if let Some(results) = indexed_walk_cache.get(&(byte as u8, target)) {
                         for &(end_rep_idx, ranges) in results {
-                            caps[end_rep_idx] += ranges.len();
-                            work_items.push((end_rep_idx, ranges));
-                        }
-                    }
-                }
-
-                // Pre-allocate with exact capacity (no reallocations during extend).
-                let mut ranges_by_end: Vec<Vec<(u32, u32)>> = caps.into_iter()
-                    .map(|c| Vec::with_capacity(c))
-                    .collect();
-
-                // Empty tokens
-                for &internal_token_id in &empty_token_indices {
-                    append_token_id_range(
-                        &mut ranges_by_end[start_rep_idx],
-                        internal_token_id as u32,
-                    );
-                }
-
-                // Extend from work items (no HashMap lookups, no reallocations).
-                for &(end_rep_idx, ranges) in &work_items {
-                    let dest = &mut ranges_by_end[end_rep_idx];
-                    // Walk_cache ranges are sorted & non-overlapping.
-                    // Only the first range can merge with dest's tail.
-                    // Rest appended via fast memcpy (extend_from_slice).
-                    if let Some((&first, rest)) = ranges.split_first() {
-                        if let Some(last) = dest.last_mut() {
-                            if first.0 <= last.1.saturating_add(1) {
-                                last.1 = last.1.max(first.1);
-                            } else {
-                                dest.push(first);
+                            end_rep_refs[end_rep_idx].push(ranges);
+                            len_accum[end_rep_idx] += ranges.len();
+                            // Inline streaming merge hash
+                            for &(s, e) in ranges {
+                                if let Some((cs, ref mut ce)) = merge_last[end_rep_idx] {
+                                    if s <= ce.saturating_add(1) { *ce = (*ce).max(e); }
+                                    else {
+                                        hash_accum[end_rep_idx] = hash_accum[end_rep_idx].wrapping_add(range_hash_val(cs, *ce));
+                                        merged_count[end_rep_idx] += 1;
+                                        merge_last[end_rep_idx] = Some((s, e));
+                                    }
+                                } else { merge_last[end_rep_idx] = Some((s, e)); }
                             }
-                        } else {
-                            dest.push(first);
                         }
-                        dest.extend_from_slice(rest);
                     }
                 }
                 p2_collect_ns.fetch_add(collect_start.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
 
-                // Build one entry per (end_rep, tsid).
-                // Ranges are already merged from the extend step.
-                // Move the last TSID entry instead of cloning to avoid
-                // unnecessary Vec allocation for the common 1-TSID case.
+                // Finalize hashes and build LazyRanges entries.
                 let build_start = Instant::now();
-                let mut result: Vec<(u32, u32, PreHashedRanges)> = Vec::new();
-                for (idx, token_ranges) in ranges_by_end.into_iter().enumerate() {
-                    if token_ranges.is_empty() { continue; }
-                    p2_total_ranges.fetch_add(token_ranges.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                let mut result: Vec<(u32, u32, LazyRanges)> = Vec::new();
+                for (idx, refs) in end_rep_refs.into_iter().enumerate() {
+                    if refs.is_empty() { continue; }
+                    let mut h = hash_accum[idx];
+                    let mut mc = merged_count[idx];
+                    if let Some((s, e)) = merge_last[idx] {
+                        h = h.wrapping_add(range_hash_val(s, e));
+                        mc += 1;
+                    }
+                    let hash = (mc as u64).wrapping_add(h);
+                    let total_len = len_accum[idx];
+                    p2_total_ranges.fetch_add(total_len as u64, std::sync::atomic::Ordering::Relaxed);
                     let end_rep = all_end_reps[idx];
-                    let prehashed_key = PreHashedRanges::new(token_ranges);
+                    let lazy = LazyRanges { refs, hash, total_len };
                     if initial_tsids.len() > 1 {
                         for &tsid in &initial_tsids[..initial_tsids.len() - 1] {
-                            result.push((end_rep, tsid, prehashed_key.clone()));
+                            result.push((end_rep, tsid, lazy.clone()));
                         }
                     }
-                    result.push((end_rep, *initial_tsids.last().unwrap(), prehashed_key));
+                    result.push((end_rep, *initial_tsids.last().unwrap(), lazy));
                 }
                 p2_build_ns.fetch_add(build_start.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
                 result
             })
-            .collect()
-    };
+            .collect();
 
     let phase2_wall_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0 - phase1_wall_ms;
 
@@ -610,11 +702,13 @@ fn build_l1_terminal_dwa(
     }
 
     // Sort-based intern: sort entries by hash, find hash-group boundaries,
-    // then verify and build Arcs in parallel.
+    // then verify and build Arcs in parallel. LazyRanges are compared by
+    // ref identity (fast pointer comparison) and materialized only for
+    // unique groups.
     let token_set_intern_started_at = Instant::now();
 
     // Flatten all thread results into a single Vec.
-    let mut all_entries: Vec<(u32, u32, PreHashedRanges)> =
+    let mut all_entries: Vec<(u32, u32, LazyRanges<'_>)> =
         per_thread_results.into_iter().flatten().collect();
 
     // Sort by hash (fast u64 comparison). Equal hashes → same group candidate.
@@ -629,27 +723,44 @@ fn build_l1_terminal_dwa(
     }
     hash_group_starts.push(all_entries.len());
 
-    // Process hash groups in parallel. For each group, verify ranges equality
-    // (handles hash collisions), build Arc, and collect (end_rep, tsid, Arc).
+    // Process hash groups in parallel. Within each group, sub-group by
+    // range equality. Cache the representative's materialization to avoid
+    // re-materializing it for every comparison.
     let group_results: Vec<Vec<(usize, u32, Arc<RangeSetBlaze<u32>>)>> = hash_group_starts
         .par_windows(2)
         .map(|w| {
             let start = w[0];
             let end = w[1];
             let mut out = Vec::new();
-            // Within [start..end): same hash. Sub-group by ranges for correctness.
             let mut sub_start = start;
             while sub_start < end {
+                // Materialize the sub-group representative once.
+                let rep_materialized = all_entries[sub_start].2.materialize();
                 let mut sub_end = sub_start + 1;
-                while sub_end < end
-                    && all_entries[sub_end].2.ranges == all_entries[sub_start].2.ranges
-                {
-                    sub_end += 1;
+                while sub_end < end {
+                    // Fast path: ref pointer identity.
+                    let candidate = &all_entries[sub_end].2;
+                    let representative = &all_entries[sub_start].2;
+                    let fast_match = candidate.refs.len() == representative.refs.len()
+                        && candidate.refs.iter().zip(representative.refs.iter()).all(
+                            |(&a, &b)| {
+                                std::ptr::eq(a.as_ptr(), b.as_ptr())
+                                    && a.len() == b.len()
+                            },
+                        );
+                    if fast_match {
+                        sub_end += 1;
+                        continue;
+                    }
+                    // Slow path: materialize candidate, compare with cached rep.
+                    if candidate.materialize() == rep_materialized {
+                        sub_end += 1;
+                    } else {
+                        break;
+                    }
                 }
                 let arc: Arc<RangeSetBlaze<u32>> = Arc::new(
-                    all_entries[sub_start]
-                        .2
-                        .ranges
+                    rep_materialized
                         .iter()
                         .map(|&(s, e)| s..=e)
                         .collect(),
