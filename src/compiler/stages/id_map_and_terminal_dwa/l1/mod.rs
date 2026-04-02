@@ -573,13 +573,22 @@ fn build_l1_terminal_dwa(
             end_rep_to_idx[rep as usize] = i;
         }
 
-        // Build indexed walk_cache: (byte, target) → Vec of (end_rep_idx, &ranges).
-        let indexed_walk_cache: FxHashMap<(u8, u32), Vec<(usize, &[(u32, u32)])>> = walk_cache
+        // Build indexed walk_cache: (byte, target) → Vec of (end_rep_idx, &ranges, entry_hash, entry_range_count).
+        // entry_hash is precomputed from the ranges so Phase 2 can combine hashes
+        // in O(entries) instead of O(ranges).
+        let indexed_walk_cache: FxHashMap<(u8, u32), Vec<(usize, &[(u32, u32)], u64, usize)>> = walk_cache
             .iter()
             .map(|(&key, results)| {
-                let indexed: Vec<(usize, &[(u32, u32)])> = results
+                let indexed: Vec<(usize, &[(u32, u32)], u64, usize)> = results
                     .iter()
-                    .map(|(end_rep, ranges)| (end_rep_to_idx[*end_rep as usize], ranges.as_slice()))
+                    .map(|(end_rep, ranges)| {
+                        let mut h: u64 = 0;
+                        for &(s, e) in ranges.as_slice() {
+                            h = h.wrapping_add(range_hash_val(s, e));
+                        }
+                        let entry_hash = (ranges.len() as u64).wrapping_add(h);
+                        (end_rep_to_idx[*end_rep as usize], ranges.as_slice(), entry_hash, ranges.len())
+                    })
                     .collect();
                 (key, indexed)
             })
@@ -605,36 +614,33 @@ fn build_l1_terminal_dwa(
             }
             ranges
         };
+        // Precompute hash for empty token ranges.
+        let empty_token_hash: u64 = {
+            let mut h: u64 = 0;
+            for &(s, e) in &empty_token_ranges {
+                h = h.wrapping_add(range_hash_val(s, e));
+            }
+            (empty_token_ranges.len() as u64).wrapping_add(h)
+        };
 
         let per_thread_results: Vec<Vec<(u32, u32, LazyRanges<'_>)>> = start_states_list
             .par_iter()
             .map(|&(&start_state, ref initial_tsids)| {
                 let collect_start = Instant::now();
 
-                // Build per-end_rep ref lists + streaming merge hash.
-                // Hash is computed inline during collection so walk_cache data
-                // is hot in cache from the HashMap lookup.
+                // Build per-end_rep ref lists + additive precomputed hash.
+                // Phase 1 precomputed per-entry hashes so Phase 2 combines
+                // hashes in O(entries) instead of iterating O(ranges).
                 let mut end_rep_refs: Vec<Vec<&[(u32, u32)]>> = vec![Vec::new(); n_end_reps];
                 let mut hash_accum: Vec<u64> = vec![0; n_end_reps];
-                let mut merge_last: Vec<Option<(u32, u32)>> = vec![None; n_end_reps];
                 let mut len_accum: Vec<usize> = vec![0; n_end_reps];
-                let mut merged_count: Vec<usize> = vec![0; n_end_reps];
 
                 // Empty tokens: end_rep = start_rep
                 if !empty_token_ranges.is_empty() {
                     let start_rep = state_to_rep[start_state as usize];
                     let start_rep_idx = end_rep_to_idx[start_rep as usize];
                     end_rep_refs[start_rep_idx].push(empty_token_ranges.as_slice());
-                    for &(s, e) in &empty_token_ranges {
-                        if let Some((cs, ref mut ce)) = merge_last[start_rep_idx] {
-                            if s <= ce.saturating_add(1) { *ce = (*ce).max(e); }
-                            else {
-                                hash_accum[start_rep_idx] = hash_accum[start_rep_idx].wrapping_add(range_hash_val(cs, *ce));
-                                merged_count[start_rep_idx] += 1;
-                                merge_last[start_rep_idx] = Some((s, e));
-                            }
-                        } else { merge_last[start_rep_idx] = Some((s, e)); }
-                    }
+                    hash_accum[start_rep_idx] = hash_accum[start_rep_idx].wrapping_add(empty_token_hash);
                     len_accum[start_rep_idx] += empty_token_ranges.len();
                 }
 
@@ -643,20 +649,10 @@ fn build_l1_terminal_dwa(
                     let target = flat_trans[start_state as usize * 256 + byte];
                     if target == dead { continue; }
                     if let Some(results) = indexed_walk_cache.get(&(byte as u8, target)) {
-                        for &(end_rep_idx, ranges) in results {
+                        for &(end_rep_idx, ranges, entry_hash, entry_mc) in results {
                             end_rep_refs[end_rep_idx].push(ranges);
-                            len_accum[end_rep_idx] += ranges.len();
-                            // Inline streaming merge hash
-                            for &(s, e) in ranges {
-                                if let Some((cs, ref mut ce)) = merge_last[end_rep_idx] {
-                                    if s <= ce.saturating_add(1) { *ce = (*ce).max(e); }
-                                    else {
-                                        hash_accum[end_rep_idx] = hash_accum[end_rep_idx].wrapping_add(range_hash_val(cs, *ce));
-                                        merged_count[end_rep_idx] += 1;
-                                        merge_last[end_rep_idx] = Some((s, e));
-                                    }
-                                } else { merge_last[end_rep_idx] = Some((s, e)); }
-                            }
+                            len_accum[end_rep_idx] += entry_mc;
+                            hash_accum[end_rep_idx] = hash_accum[end_rep_idx].wrapping_add(entry_hash);
                         }
                     }
                 }
@@ -667,13 +663,7 @@ fn build_l1_terminal_dwa(
                 let mut result: Vec<(u32, u32, LazyRanges)> = Vec::new();
                 for (idx, refs) in end_rep_refs.into_iter().enumerate() {
                     if refs.is_empty() { continue; }
-                    let mut h = hash_accum[idx];
-                    let mut mc = merged_count[idx];
-                    if let Some((s, e)) = merge_last[idx] {
-                        h = h.wrapping_add(range_hash_val(s, e));
-                        mc += 1;
-                    }
-                    let hash = (mc as u64).wrapping_add(h);
+                    let hash = hash_accum[idx];
                     let total_len = len_accum[idx];
                     p2_total_ranges.fetch_add(total_len as u64, std::sync::atomic::Ordering::Relaxed);
                     let end_rep = all_end_reps[idx];
