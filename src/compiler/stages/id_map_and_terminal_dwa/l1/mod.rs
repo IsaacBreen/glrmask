@@ -912,25 +912,22 @@ fn build_l1_terminal_dwa(
         unique_groups.push(vec![tid]);
     }
 
-    debug_assert!(unique_groups.len() <= u32::BITS as usize);
+    let end_rep_group_indices =
+        build_end_rep_group_indices(&terminal_to_active_states, deferred_arced.len());
 
-    let mut end_rep_group_masks = vec![0u32; deferred_arced.len()];
-    for (group_idx, tids) in unique_groups.iter().enumerate() {
-        let bit = 1u32 << group_idx;
-        for &state in &terminal_to_active_states[tids[0]] {
-            end_rep_group_masks[state as usize] |= bit;
-        }
-    }
-
-    let mut tsid_group_contributions: Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>> =
+    let mut tsid_group_contributions: Vec<Vec<(usize, Arc<RangeSetBlaze<u32>>)>> =
         (0..num_tsids).map(|_| Vec::new()).collect();
     for (end_rep, entries) in deferred_arced.iter().enumerate() {
-        let group_mask = end_rep_group_masks[end_rep];
-        if group_mask == 0 {
+        let group_indices = &end_rep_group_indices[end_rep];
+        if group_indices.is_empty() {
             continue;
         }
         for &(tsid, ref arc) in entries {
-            tsid_group_contributions[tsid as usize].push((group_mask, Arc::clone(arc)));
+            let contributions = &mut tsid_group_contributions[tsid as usize];
+            contributions.reserve(group_indices.len());
+            for &group_idx in group_indices {
+                contributions.push((group_idx, Arc::clone(arc)));
+            }
         }
     }
 
@@ -948,18 +945,13 @@ fn build_l1_terminal_dwa(
                     (0..unique_groups.len()).map(|_| Vec::new()).collect();
                 let mut touched_groups: Vec<usize> = Vec::new();
 
-                for &(group_mask, ref arc) in contributions {
-                    let mut remaining = group_mask;
-                    while remaining != 0 {
-                        let group_idx = remaining.trailing_zeros() as usize;
-                        remaining &= remaining - 1;
-                        if group_counts[group_idx] == 0 {
-                            touched_groups.push(group_idx);
-                        }
-                        group_counts[group_idx] += 1;
-                        for r in arc.ranges() {
-                            group_ranges[group_idx].push((*r.start(), *r.end()));
-                        }
+                for &(group_idx, ref arc) in contributions {
+                    if group_counts[group_idx] == 0 {
+                        touched_groups.push(group_idx);
+                    }
+                    group_counts[group_idx] += 1;
+                    for r in arc.ranges() {
+                        group_ranges[group_idx].push((*r.start(), *r.end()));
                     }
                 }
 
@@ -1217,6 +1209,38 @@ fn shared_rangeset_from_unsorted_pairs(
     ))
 }
 
+fn build_end_rep_group_indices(
+    terminal_to_active_states: &[Vec<u32>],
+    num_end_reps: usize,
+) -> Vec<Vec<usize>> {
+    let mut active_tids: Vec<usize> = (0..terminal_to_active_states.len())
+        .filter(|&i| !terminal_to_active_states[i].is_empty())
+        .collect();
+    active_tids.sort_unstable_by(|&a, &b| {
+        terminal_to_active_states[a].cmp(&terminal_to_active_states[b])
+    });
+
+    let mut unique_groups: Vec<Vec<usize>> = Vec::new();
+    for &tid in &active_tids {
+        if let Some(last) = unique_groups.last_mut() {
+            if terminal_to_active_states[last[0]] == terminal_to_active_states[tid] {
+                last.push(tid);
+                continue;
+            }
+        }
+        unique_groups.push(vec![tid]);
+    }
+
+    let mut end_rep_groups = vec![Vec::new(); num_end_reps];
+    for (group_idx, tids) in unique_groups.iter().enumerate() {
+        for &state in &terminal_to_active_states[tids[0]] {
+            end_rep_groups[state as usize].push(group_idx);
+        }
+    }
+
+    end_rep_groups
+}
+
 fn merge_deferred_equivalent_tsids(
     id_map: &mut InternalIdMap,
     deferred_arced: &mut [Vec<(u32, Arc<RangeSetBlaze<u32>>)>],
@@ -1464,5 +1488,15 @@ mod tests {
         );
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_end_rep_group_indices_handle_more_than_32_groups() {
+        let terminal_to_active_states: Vec<Vec<u32>> = (0..33).map(|i| vec![i as u32]).collect();
+        let end_rep_groups = build_end_rep_group_indices(&terminal_to_active_states, 33);
+
+        for group_idx in 0..33 {
+            assert_eq!(end_rep_groups[group_idx], vec![group_idx]);
+        }
     }
 }
