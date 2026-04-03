@@ -13,7 +13,64 @@ use crate::ds::weight::Weight;
 type QueryKey = (u32, i32);
 type CancellationTask = (u32, u32, i32);
 type QueryWeights = Vec<Option<FxHashMap<QueryKey, Weight>>>;
+type QueuedQueries = Vec<SmallQueuedQueries>;
 type DerivedEpsilons = Vec<Option<FxHashMap<u32, Weight>>>;
+
+#[derive(Clone, Default)]
+enum SmallQueuedQueries {
+    #[default]
+    Empty,
+    One(QueryKey),
+    Many(FxHashSet<QueryKey>),
+}
+
+impl SmallQueuedQueries {
+    fn insert(&mut self, query_key: QueryKey) -> bool {
+        match self {
+            Self::Empty => {
+                *self = Self::One(query_key);
+                true
+            }
+            Self::One(existing) => {
+                if *existing == query_key {
+                    false
+                } else {
+                    let previous = *existing;
+                    let mut entries = FxHashSet::default();
+                    entries.insert(previous);
+                    entries.insert(query_key);
+                    *self = Self::Many(entries);
+                    true
+                }
+            }
+            Self::Many(entries) => entries.insert(query_key),
+        }
+    }
+
+    fn remove(&mut self, query_key: &QueryKey) {
+        match self {
+            Self::Empty => {}
+            Self::One(existing) => {
+                if existing == query_key {
+                    *self = Self::Empty;
+                }
+            }
+            Self::Many(entries) => {
+                if !entries.remove(query_key) {
+                    return;
+                }
+                match entries.len() {
+                    0 => *self = Self::Empty,
+                    1 => {
+                        let remaining = *entries.iter().next().unwrap();
+                        *self = Self::One(remaining);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
 
 fn merge_weight(entry: &mut Weight, add: Weight) -> bool {
     if add.is_empty() {
@@ -74,13 +131,13 @@ fn full_state_range(nwa: &NWA) -> std::ops::Range<u32> {
 
 fn enqueue_cancellation_task(
     worklist: &mut VecDeque<CancellationTask>,
-    queued: &mut FxHashSet<CancellationTask>,
+    queued: &mut QueuedQueries,
     state: u32,
     source_state: u32,
     positive_label: i32,
 ) {
     let task = (state, source_state, positive_label);
-    if queued.insert(task) {
+    if queued[state as usize].insert((source_state, positive_label)) {
         worklist.push_back(task);
     }
 }
@@ -101,7 +158,7 @@ fn record_query_weight(
 fn queue_query_weight(
     query_weights: &mut QueryWeights,
     worklist: &mut VecDeque<CancellationTask>,
-    queued: &mut FxHashSet<CancellationTask>,
+    queued: &mut QueuedQueries,
     state: u32,
     source_state: u32,
     positive_label: i32,
@@ -120,7 +177,7 @@ fn propagate_query_through_derived_epsilons(
     positive_label: i32,
     query_weights: &mut QueryWeights,
     worklist: &mut VecDeque<CancellationTask>,
-    queued: &mut FxHashSet<CancellationTask>,
+    queued: &mut QueuedQueries,
     derived_epsilons: &DerivedEpsilons,
 ) {
     let Some(derived_from_current) = derived_epsilons[current_state as usize].as_ref() else {
@@ -156,7 +213,7 @@ fn extend_derived_epsilons(
     edge_weight: &Weight,
     query_weights: &mut QueryWeights,
     worklist: &mut VecDeque<CancellationTask>,
-    queued: &mut FxHashSet<CancellationTask>,
+    queued: &mut QueuedQueries,
     derived_epsilons: &mut DerivedEpsilons,
 ) {
     let new_derived_weight = intersect_with_single_weight_hint(
@@ -228,7 +285,7 @@ pub(crate) fn compute_cancellations_range(
 
     let mut query_weights: QueryWeights = vec![None; state_count as usize];
     let mut worklist = VecDeque::<CancellationTask>::new();
-    let mut queued: FxHashSet<CancellationTask> = FxHashSet::default();
+    let mut queued: QueuedQueries = vec![SmallQueuedQueries::Empty; state_count as usize];
     let mut derived_epsilons: DerivedEpsilons = vec![None; state_count as usize];
 
     for source_state in range {
@@ -261,7 +318,7 @@ pub(crate) fn compute_cancellations_range(
     }
 
     while let Some((current_state, source_state, positive_label)) = worklist.pop_front() {
-        queued.remove(&(current_state, source_state, positive_label));
+        queued[current_state as usize].remove(&(source_state, positive_label));
         let Some(query_weight_to_current) = query_weights[current_state as usize]
             .as_ref()
             .and_then(|weights| weights.get(&(source_state, positive_label)))
