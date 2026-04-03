@@ -115,23 +115,19 @@ impl NWA {
 
     pub fn append_with_body(&mut self, other: &NWA) -> NwaBody {
         let offset = self.states.len() as u32;
-        for _ in &other.states {
-            self.add_state();
-        }
+        self.states.reserve(other.states.len());
 
-        for (state_id, state) in other.states.iter().enumerate() {
-            let dst_state = offset + state_id as u32;
-            if let Some(final_weight) = state.final_weight.clone() {
-                self.set_final_weight(dst_state, final_weight);
-            }
-            for (&label, targets) in &state.transitions {
-                for (target, weight) in targets {
-                    self.add_transition(dst_state, label, offset + *target, weight.clone());
+        for state in &other.states {
+            let mut appended = state.clone();
+            for targets in appended.transitions.values_mut() {
+                for (target, _) in targets.iter_mut() {
+                    *target += offset;
                 }
             }
-            for (target, weight) in &state.epsilons {
-                self.add_epsilon(dst_state, offset + *target, weight.clone());
+            for (target, _) in appended.epsilons.iter_mut() {
+                *target += offset;
             }
+            self.states.push(appended);
         }
 
         NwaBody {
