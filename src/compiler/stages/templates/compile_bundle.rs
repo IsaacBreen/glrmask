@@ -21,25 +21,23 @@ fn empty_bundle_nwa() -> NWA {
     nwa
 }
 
-fn template_to_weighted_nwa(template: &UnweightedDfa, weight: &Weight) -> NWA {
-    let states = template
-        .states
-        .iter()
-        .map(|state| NWAState {
-            final_weight: state.is_accepting.then(|| weight.clone()),
-            transitions: state
-                .transitions
-                .iter()
-                .map(|(&label, &target)| (label, vec![(target, weight.clone())]))
-                .collect(),
-            epsilons: Vec::new(),
-        })
-        .collect();
-
-    NWA {
-        states,
-        start_states: vec![template.start_state],
+fn instantiate_weighted_nwa_from_skeleton(skeleton: &NWA, weight: &Weight) -> NWA {
+    let mut bundle = skeleton.clone();
+    for state in &mut bundle.states {
+        if state.final_weight.is_some() {
+            state.final_weight = Some(weight.clone());
+        }
+        for targets in state.transitions.values_mut() {
+            for (_, edge_weight) in targets {
+                *edge_weight = weight.clone();
+            }
+        }
+        for (_, epsilon_weight) in &mut state.epsilons {
+            *epsilon_weight = weight.clone();
+        }
     }
+
+    bundle
 }
 
 fn compute_effective_group_weights(alive_groups: &[usize], normalized_weights: &[Weight]) -> Vec<Weight> {
@@ -75,9 +73,9 @@ impl Templates {
             return Some(empty_bundle_nwa());
         }
         Some(
-            self.by_terminal
+            self.by_terminal_nwa
                 .get(&terminal)
-                .map(|template| template_to_weighted_nwa(template, weight))
+                .map(|template_nwa| instantiate_weighted_nwa_from_skeleton(template_nwa, weight))
                 .unwrap_or_else(empty_bundle_nwa),
         )
     }

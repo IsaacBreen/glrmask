@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
+use crate::automata::weighted::nwa::{NWA, NWAState};
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::unweighted_u32::determinize::determinize;
 use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic as minimize_dfa;
@@ -14,6 +15,7 @@ use crate::automata::unweighted_u32::nfa::NFA;
 use crate::compiler::glr::labels::{encode_negative_label, encode_positive_label, DEFAULT_LABEL};
 use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::stages::templates::characterize::TerminalCharacterization;
+use crate::ds::weight::Weight;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct TemplateCompileProfile {
@@ -122,9 +124,30 @@ fn dfa_size(dfa: &UnweightedDfa) -> (usize, usize) {
     (dfa.states.len(), transitions)
 }
 
+fn dfa_to_nwa_skeleton(dfa: &UnweightedDfa) -> NWA {
+    let states = dfa
+        .states
+        .iter()
+        .map(|state| NWAState {
+            final_weight: state.is_accepting.then(Weight::empty),
+            transitions: state
+                .transitions
+                .iter()
+                .map(|(&label, &target)| (label, vec![(target, Weight::empty())]))
+                .collect(),
+            epsilons: Vec::new(),
+        })
+        .collect();
+
+    NWA {
+        states,
+        start_states: vec![dfa.start_state],
+    }
+}
+
 fn compile_template_with_profile(
     characterization: &TerminalCharacterization,
-) -> (UnweightedDfa, TemplateCompilationSample) {
+) -> (UnweightedDfa, NWA, TemplateCompilationSample) {
     let build_nfa_started_at = Instant::now();
     let nfa = build_template_nfa(characterization);
     let build_nfa_ms = elapsed_ms(build_nfa_started_at);
@@ -139,8 +162,11 @@ fn compile_template_with_profile(
     let minimize_ms = elapsed_ms(minimize_started_at);
     let (dfa_states, dfa_transitions) = dfa_size(&dfa);
 
+    let skeleton = dfa_to_nwa_skeleton(&dfa);
+
     (
         dfa,
+        skeleton,
         TemplateCompilationSample {
             build_nfa_ms,
             determinize_ms,
@@ -182,6 +208,7 @@ pub(crate) fn emit_template_profile_summary(
 #[derive(Debug, Clone, Default)]
 pub struct Templates {
     pub by_terminal: BTreeMap<TerminalID, UnweightedDfa>,
+    pub by_terminal_nwa: BTreeMap<TerminalID, NWA>,
 }
 
 impl Templates {
@@ -190,16 +217,27 @@ impl Templates {
     ) -> Self {
         use rayon::prelude::*;
 
-        let by_terminal: BTreeMap<TerminalID, UnweightedDfa> = characterizations
+        let compiled: Vec<(TerminalID, UnweightedDfa, NWA)> = characterizations
             .par_iter()
             .map(|(&terminal, characterization)| {
                 let nfa = build_template_nfa(characterization);
                 let dfa = minimize_dfa(&determinize(&nfa));
-                (terminal, dfa)
+                let skeleton = dfa_to_nwa_skeleton(&dfa);
+                (terminal, dfa, skeleton)
             })
             .collect();
 
-        Self { by_terminal }
+        let mut by_terminal = BTreeMap::new();
+        let mut by_terminal_nwa = BTreeMap::new();
+        for (terminal, dfa, skeleton) in compiled {
+            by_terminal.insert(terminal, dfa);
+            by_terminal_nwa.insert(terminal, skeleton);
+        }
+
+        Self {
+            by_terminal,
+            by_terminal_nwa,
+        }
     }
 
     pub(crate) fn from_characterizations_profiled(
@@ -212,12 +250,12 @@ impl Templates {
             *multiplicities.entry(characterization).or_default() += 1;
         }
 
-        let compiled: Vec<(TerminalID, UnweightedDfa, TemplateCompilationSample)> =
+        let compiled: Vec<(TerminalID, UnweightedDfa, NWA, TemplateCompilationSample)> =
             characterizations
                 .par_iter()
                 .map(|(&terminal, characterization)| {
-                    let (dfa, sample) = compile_template_with_profile(characterization);
-                    (terminal, dfa, sample)
+                    let (dfa, skeleton, sample) = compile_template_with_profile(characterization);
+                    (terminal, dfa, skeleton, sample)
                 })
                 .collect();
 
@@ -227,15 +265,21 @@ impl Templates {
             ..TemplateCompileProfile::default()
         };
 
-        let by_terminal = compiled
-            .into_iter()
-            .map(|(terminal, dfa, sample)| {
-                profile.observe_compilation(&sample);
-                (terminal, dfa)
-            })
-            .collect();
+        let mut by_terminal = BTreeMap::new();
+        let mut by_terminal_nwa = BTreeMap::new();
+        for (terminal, dfa, skeleton, sample) in compiled {
+            profile.observe_compilation(&sample);
+            by_terminal.insert(terminal, dfa);
+            by_terminal_nwa.insert(terminal, skeleton);
+        }
 
-        (Self { by_terminal }, profile)
+        (
+            Self {
+                by_terminal,
+                by_terminal_nwa,
+            },
+            profile,
+        )
     }
 }
 
