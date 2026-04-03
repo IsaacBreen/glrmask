@@ -278,7 +278,6 @@ pub(crate) fn build_terminal_dwa_for_existing_id_map_with_possible_matches_and_c
         terminal_coloring,
         ignore_terminal,
         &possible_matches_by_state,
-        None,
     );
     let seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
     let template_state_count = nwa.num_states();

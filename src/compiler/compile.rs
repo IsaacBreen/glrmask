@@ -1994,7 +1994,13 @@ mod tests {
             std::env::set_var("GLRMASK_PROFILE_COMPILE", "1");
         }
         let equivalence_started_at = Instant::now();
-        let id_map = analyze_equivalences(&tokenizer, &vocab, &std::collections::BTreeMap::new(), None);
+        let id_map = analyze_equivalences(
+            &tokenizer,
+            &vocab,
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+        );
         let equivalence_ms = elapsed_ms(equivalence_started_at);
         eprintln!(
             "[kb814] tokenizer_state_classes={} vocab_classes={} equivalence_ms={:.3}",

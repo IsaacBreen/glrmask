@@ -77,27 +77,32 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let total_started_at = Instant::now();
     let num_original_states = tokenizer.num_states() as usize;
 
-    // ---- Step 0: Reuse the original tokenizer, but keep an explicit
-    // original-state mapping for the downstream merge code.
+    // ---- Step 0: Simplify tokenizer for active terminals ----
+    // Strip non-active terminal bits from finalizers and minimize.
+    // This merges states that only differed by non-active terminal info,
+    // reducing the state count for equivalence analysis and NWA building.
     let simplify_started_at = Instant::now();
+    let simplified_tok = tokenizer.filter_for_terminals(active_terminals);
     let orig_to_simplified = identity_original_to_local_state(num_original_states);
     let simplify_ms = simplify_started_at.elapsed().as_secs_f64() * 1000.0;
 
     if debug_profile_enabled() {
         eprintln!(
             "[glrmask/debug][l2p_simplify] partition={} mode=filtered original_states={} simplified_states={}",
-            partition_label, num_original_states, tokenizer.num_states(),
+            partition_label, num_original_states, simplified_tok.num_states(),
         );
     }
 
+    // From here on, use the simplified tokenizer for all operations.
+    let tokenizer = &simplified_tok;
+
     // ---- Step 1: Equivalence analysis (on simplified tokenizer) ----
     let id_map_started_at = Instant::now();
-    let simplified_id_map = equivalence_analysis::combined::analyze_equivalences_with_group_filter(
+    let simplified_id_map = equivalence_analysis::combined::analyze_equivalences(
         tokenizer,
         vocab,
         disallowed_follows,
         ignore_terminal,
-        Some(active_terminals),
         shared_vocab_dfa_cache,
     );
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -143,7 +148,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         terminal_coloring,
         ignore_terminal,
         &possible_matches_by_state,
-        Some(active_terminals),
     );
     let seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -162,7 +166,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         &full_tree.root,
         &roots,
         &mut pm_computer,
-        Some(active_terminals),
+        None,
     );
     let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -220,7 +224,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             vocab.entries.len(),
             simplified_id_map.num_tsids(),
             simplify_ms,
-            tokenizer.num_states(),
+            simplified_tok.num_states(),
             id_map_ms,
             vocab_tree_ms,
             possible_matches_ms,

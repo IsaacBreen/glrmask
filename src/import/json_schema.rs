@@ -1,6 +1,5 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
-use once_cell::sync::Lazy;
 use serde_json::{Map, Value};
 use crate::GlrMaskError;
 use crate::automata::lexer::ast::Expr as LexerExpr;
@@ -34,21 +33,7 @@ const JSON_BOOL_RULE: &str = "JSON_BOOL";
 const JSON_NULL_RULE: &str = "JSON_NULL";
 const JSON_KEY_COLON_RULE: &str = "json_key_colon";
 const JSON_KEY_COLON_BODY_RULE: &str = "JSON_KEY_COLON_BODY";
-const JSON_STRING_REPEAT_CHUNK_DEFAULT: usize = 1024;
-const JSON_STRING_REPEAT_CHUNK_ENV: &str = "GLRMASK_JSON_STRING_REPEAT_CHUNK";
-
-static JSON_STRING_REPEAT_CHUNK: Lazy<usize> = Lazy::new(|| {
-    std::env::var(JSON_STRING_REPEAT_CHUNK_ENV)
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(JSON_STRING_REPEAT_CHUNK_DEFAULT)
-});
-
-#[inline]
-fn json_string_repeat_chunk() -> usize {
-    *JSON_STRING_REPEAT_CHUNK
-}
+const JSON_STRING_REPEAT_CHUNK: usize = 1024;
 
 const JSON_STRING_BODY_REGEX: &str =
     r#"([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*""#;
@@ -2512,7 +2497,7 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn should_split_bounded_string(&self, min_len: usize, max_len: Option<usize>) -> bool {
-        let chunk = json_string_repeat_chunk();
+        let chunk = JSON_STRING_REPEAT_CHUNK;
         min_len > chunk
             || max_len
                 .map(|value| value > chunk)
@@ -2520,7 +2505,7 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn build_split_json_string_exact_expr(&mut self, count: usize) -> GrammarExpr {
-        let chunk = json_string_repeat_chunk();
+        let chunk = JSON_STRING_REPEAT_CHUNK;
         if count == 0 {
             return empty_expr();
         }
@@ -2547,7 +2532,7 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn build_split_json_string_upto_expr(&mut self, max: usize) -> GrammarExpr {
-        let chunk = json_string_repeat_chunk();
+        let chunk = JSON_STRING_REPEAT_CHUNK;
         if max == 0 {
             return empty_expr();
         }
@@ -2655,7 +2640,7 @@ impl<'a> SchemaCtx<'a> {
         max: usize,
         suffix: GrammarExpr,
     ) -> GrammarExpr {
-        let chunk = json_string_repeat_chunk();
+        let chunk = JSON_STRING_REPEAT_CHUNK;
         if max == 0 {
             return suffix;
         }
@@ -2716,7 +2701,7 @@ impl<'a> SchemaCtx<'a> {
         count: usize,
         suffix: GrammarExpr,
     ) -> GrammarExpr {
-        let chunk = json_string_repeat_chunk();
+        let chunk = JSON_STRING_REPEAT_CHUNK;
         if count == 0 {
             return suffix;
         }
@@ -2777,7 +2762,7 @@ impl<'a> SchemaCtx<'a> {
         count: usize,
         prefix: GrammarExpr,
     ) -> GrammarExpr {
-        let chunk = json_string_repeat_chunk();
+        let chunk = JSON_STRING_REPEAT_CHUNK;
         if count == 0 {
             return prefix;
         }
@@ -2820,7 +2805,7 @@ impl<'a> SchemaCtx<'a> {
         max: usize,
         prefix: GrammarExpr,
     ) -> GrammarExpr {
-        let chunk = json_string_repeat_chunk();
+        let chunk = JSON_STRING_REPEAT_CHUNK;
         if max == 0 {
             return prefix;
         }
@@ -2895,7 +2880,7 @@ impl<'a> SchemaCtx<'a> {
         prefix: GrammarExpr,
         suffix: GrammarExpr,
     ) -> GrammarExpr {
-        let chunk = json_string_repeat_chunk();
+        let chunk = JSON_STRING_REPEAT_CHUNK;
         if max == 0 {
             return sequence_or_single(vec![prefix, suffix]);
         }
@@ -3084,7 +3069,7 @@ impl<'a> SchemaCtx<'a> {
         prefix: GrammarExpr,
         suffix: GrammarExpr,
     ) -> GrammarExpr {
-        let chunk = json_string_repeat_chunk();
+        let chunk = JSON_STRING_REPEAT_CHUNK;
         if count == 0 {
             return sequence_or_single(vec![prefix, suffix]);
         }
@@ -4350,6 +4335,126 @@ impl<'a> SchemaCtx<'a> {
         wrap_key_colon_terminal(body)
     }
 
+    fn build_merged_literal_key_value_expr(
+        &self,
+        leading_literal: &[u8],
+        key: &str,
+        value_expr: GrammarExpr,
+    ) -> GrammarExpr {
+        let key_expr = self.json_key_colon_literal(key);
+        let mut parts = match key_expr {
+            GrammarExpr::Sequence(parts) => parts,
+            other => vec![other],
+        };
+
+        if let Some(GrammarExpr::Literal(first)) = parts.first_mut() {
+            let mut merged = Vec::with_capacity(leading_literal.len() + first.len());
+            merged.extend_from_slice(leading_literal);
+            merged.extend_from_slice(first);
+            *first = merged;
+        } else {
+            parts.insert(0, literal_expr(leading_literal));
+        }
+
+        let value_expr = if let Some(GrammarExpr::Literal(last)) = parts.last_mut() {
+            match value_expr {
+                GrammarExpr::Literal(mut bytes)
+                    if matches!(bytes.first(), Some(b'{') | Some(b'[')) =>
+                {
+                    last.push(bytes.remove(0));
+                    if bytes.is_empty() {
+                        empty_expr()
+                    } else {
+                        literal_expr(&bytes)
+                    }
+                }
+                GrammarExpr::Sequence(mut value_parts) => {
+                    if let Some(GrammarExpr::Literal(bytes)) = value_parts.first_mut() {
+                        if let Some(&first) = bytes.first() {
+                            if matches!(first, b'{' | b'[') {
+                                last.push(first);
+                                bytes.remove(0);
+                                if bytes.is_empty() {
+                                    value_parts.remove(0);
+                                }
+                            }
+                        }
+                    }
+                    sequence_or_single(value_parts)
+                }
+                other => other,
+            }
+        } else {
+            value_expr
+        };
+
+        parts.push(value_expr);
+        sequence_or_single(parts)
+    }
+
+    fn build_required_ordered_object_body_expr(
+        &self,
+        ordered: &[(String, GrammarExpr, bool)],
+        trailing_literal: Option<&[u8]>,
+    ) -> GrammarExpr {
+        let mut parts = Vec::new();
+
+        for (index, (key, value_expr, _)) in ordered.iter().enumerate() {
+            let mut leading_literal = if index == 0 {
+                b"{".to_vec()
+            } else {
+                JSON_ITEM_SEPARATOR.to_vec()
+            };
+            if index > 0 {
+                if let Some(GrammarExpr::Sequence(prev_parts)) = parts.last_mut() {
+                    if let Some(GrammarExpr::Literal(prev_last)) = prev_parts.last_mut() {
+                        if matches!(prev_last.last(), Some(b'}') | Some(b']')) {
+                            prev_last.extend_from_slice(&leading_literal);
+                            leading_literal.clear();
+                        }
+                    }
+                } else if let Some(GrammarExpr::Literal(prev_last)) = parts.last_mut() {
+                    if matches!(prev_last.last(), Some(b'}') | Some(b']')) {
+                        prev_last.extend_from_slice(&leading_literal);
+                        leading_literal.clear();
+                    }
+                }
+            }
+            parts.push(self.build_merged_literal_key_value_expr(
+                &leading_literal,
+                key,
+                value_expr.clone(),
+            ));
+        }
+
+        if let Some(trailing_literal) = trailing_literal {
+            if let Some(GrammarExpr::Sequence(last_parts)) = parts.last_mut() {
+                if let Some(GrammarExpr::Literal(last_literal)) = last_parts.last_mut() {
+                    if matches!(last_literal.last(), Some(b'}') | Some(b']')) {
+                        last_literal.extend_from_slice(trailing_literal);
+                        return sequence_or_single(parts);
+                    }
+                }
+            } else if let Some(GrammarExpr::Literal(last_literal)) = parts.last_mut() {
+                if matches!(last_literal.last(), Some(b'}') | Some(b']')) {
+                    last_literal.extend_from_slice(trailing_literal);
+                    return sequence_or_single(parts);
+                }
+            }
+
+            parts.push(literal_expr(trailing_literal));
+        }
+
+        sequence_or_single(parts)
+    }
+
+    fn build_closed_required_ordered_object_expr(
+        &self,
+        ordered: &[(String, GrammarExpr, bool)],
+    ) -> GrammarExpr {
+        self.build_required_ordered_object_body_expr(ordered, Some(b"}"))
+    }
+
     fn json_item_separator_expr(&self) -> GrammarExpr {
         literal_expr(JSON_ITEM_SEPARATOR)
     }
@@ -5542,6 +5647,7 @@ impl<'a> SchemaCtx<'a> {
         }
 
         let mut additional_pair_exprs = Vec::<GrammarExpr>::new();
+        let has_additional_properties = additional_properties_schema.is_some();
         if let Some(schema) = additional_properties_schema {
             let additional_key_expr = if ap_key_any_string() {
                 // Skip key exclusion — AP keys accept any JSON string.
@@ -5595,6 +5701,14 @@ impl<'a> SchemaCtx<'a> {
             GrammarExpr::Ref(additional_c.clone()),
         );
 
+        if !ordered.is_empty()
+            && ordered.iter().all(|(_, _, required)| *required)
+            && pattern_properties.is_empty()
+            && !has_additional_properties
+        {
+            return Ok(self.build_closed_required_ordered_object_expr(&ordered));
+        }
+
         if ordered.is_empty() {
             return Ok(sequence_or_single(vec![
                 literal_expr(b"{"),
@@ -5633,7 +5747,7 @@ impl<'a> SchemaCtx<'a> {
     ) -> Result<(GrammarExpr, bool), GlrMaskError> {
         if items.len() == 1 {
             let (key, value_expr, is_required) = &items[0];
-            let kv_expr = sequence_or_single(vec![self.json_key_colon_literal(key), value_expr.clone()]);
+            let kv_expr = self.build_merged_literal_key_value_expr(b"", key, value_expr.clone());
             if *is_required {
                 return Ok((kv_expr, false));
             }
@@ -6087,8 +6201,28 @@ mod tests {
             .any(|rule| expr_has_split_separator(&rule.expr, left_bytes, right_bytes))
     }
 
+    fn expr_has_literal_prefix(expr: &GrammarExpr, prefix: &[u8]) -> bool {
+        match expr {
+            GrammarExpr::Literal(bytes) => bytes.starts_with(prefix),
+            GrammarExpr::Sequence(parts) => parts.iter().any(|part| expr_has_literal_prefix(part, prefix)),
+            GrammarExpr::Choice(options) => options.iter().any(|part| expr_has_literal_prefix(part, prefix)),
+            GrammarExpr::Optional(inner)
+            | GrammarExpr::Repeat(inner)
+            | GrammarExpr::RepeatOne(inner)
+            | GrammarExpr::RepeatRange { expr: inner, .. } => expr_has_literal_prefix(inner, prefix),
+            _ => false,
+        }
+    }
+
     fn named_grammar_has_literal(grammar: &NamedGrammar, expected: &[u8]) -> bool {
         grammar.rules.iter().any(|rule| expr_has_literal(&rule.expr, expected))
+    }
+
+    fn named_grammar_has_literal_prefix(grammar: &NamedGrammar, prefix: &[u8]) -> bool {
+        grammar
+            .rules
+            .iter()
+            .any(|rule| expr_has_literal_prefix(&rule.expr, prefix))
     }
 
     fn named_nonterminal_has_ref_then_literal(grammar: &NamedGrammar, literal: &[u8]) -> bool {
@@ -6554,7 +6688,7 @@ mod tests {
             .unwrap();
         assert!(!split_rule.is_terminal, "expected large bounded string to lower through a nonterminal rule");
 
-        let chunk = json_string_repeat_chunk();
+        let chunk = JSON_STRING_REPEAT_CHUNK;
         let exact_prefix = format!("JSON_STRING_CHAR_EXACT_{chunk}");
         let upto_prefix = format!("JSON_STRING_CHAR_UPTO_{chunk}");
         assert!(grammar.rules.iter().any(|rule| {
@@ -6845,6 +6979,52 @@ mod tests {
             "additionalProperties": {"type": "string"}
         }"#;
         assert!(accepts_sequence(schema, &[b"{\"extra\": \"x\"}"]));
+    }
+
+    #[test]
+    fn test_closed_required_object_merges_outer_literals_into_key_prefixes() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "status": {"enum": ["ok", "fail"]},
+                "kind": {"enum": ["A", "B"]}
+            },
+            "required": ["status", "kind"],
+            "additionalProperties": false
+        }"#;
+        let grammar = schema_to_named_grammar(&serde_json::from_str(schema).unwrap()).unwrap();
+
+        assert!(named_grammar_has_literal_prefix(&grammar, b"{\""));
+        assert!(named_grammar_has_literal_prefix(&grammar, b", \""));
+        assert!(accepts_sequence(schema, &[b"{\"status\": \"ok\", \"kind\": \"A\"}"]));
+    }
+
+    #[test]
+    fn test_nested_closed_object_merges_open_brace_into_parent_key_suffix() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "user": {
+                    "type": "object",
+                    "properties": {
+                        "role": {"enum": ["admin", "guest"]},
+                        "tier": {"enum": ["free", "pro"]}
+                    },
+                    "required": ["role", "tier"],
+                    "additionalProperties": false
+                }
+            },
+            "required": ["user"],
+            "additionalProperties": false
+        }"#;
+        let grammar = schema_to_named_grammar(&serde_json::from_str(schema).unwrap()).unwrap();
+
+        assert!(named_grammar_has_literal(&grammar, b" {"));
+        assert!(named_grammar_has_literal(&grammar, b"}}"));
+        assert!(accepts_sequence(
+            schema,
+            &[b"{\"user\": {\"role\": \"admin\", \"tier\": \"pro\"}}"],
+        ));
     }
 
     #[test]

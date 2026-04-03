@@ -30,8 +30,6 @@ type TerminalBundle = BTreeMap<TerminalID, Weight>;
 type BundleSignature = Vec<(TerminalID, Weight)>;
 type ComposeMemo = Vec<Option<Option<NwaBody>>>;
 type ConcatMemo = HashMap<(usize, u32), Option<NwaBody>>;
-type WeightedSubsetEntries = Vec<(u32, Weight)>;
-type WeightedSubsetKey = Vec<(u32, usize)>;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct ParserDwaPhaseProfile {
@@ -90,39 +88,6 @@ fn accepting_nwa(final_weight: &Weight) -> Option<NWA> {
     nwa.start_states.push(start);
     nwa.set_final_weight(start, final_weight.clone());
     Some(nwa)
-}
-
-fn leaf_continuation_final_weight(states: &[StateSummary], state_id: u32) -> Option<Weight> {
-    let state = states.get(state_id as usize)?;
-    if !state.branches.is_empty() {
-        return None;
-    }
-    state.final_weight.clone().filter(|weight| !weight.is_empty())
-}
-
-fn build_leaf_specialized_bundle(bundle: &NWA, leaf_final_weight: &Weight) -> Option<NWA> {
-    let mut specialized = bundle.clone();
-    let mut has_live_final = false;
-
-    for state in &mut specialized.states {
-        let Some(final_weight) = state.final_weight.as_ref() else {
-            continue;
-        };
-        let combined = final_weight.intersection(leaf_final_weight);
-        if combined.is_empty() {
-            state.final_weight = None;
-        } else {
-            state.final_weight = Some(combined);
-            has_live_final = true;
-        }
-    }
-
-    if !has_live_final {
-        return None;
-    }
-
-    resolve_negative_codes_in_nwa(&mut specialized);
-    Some(specialized)
 }
 
 fn group_terminal_edges_by_target(
@@ -186,36 +151,12 @@ fn build_state_summaries(
         pending_branches_by_state.push(pending_branches);
     }
 
-    let leaf_targets: Vec<bool> = pending_branches_by_state
-        .iter()
-        .enumerate()
-        .map(|(state_id, branches)| {
-            branches.is_empty()
-                && terminal_dwa
-                    .states
-                    .get(state_id)
-                    .and_then(|state| state.final_weight.as_ref())
-                    .is_some_and(|weight| !weight.is_empty())
-        })
-        .collect();
-    let branches_to_leaf_targets = pending_branches_by_state
-        .iter()
-        .flat_map(|branches| branches.iter())
-        .filter(|pending| leaf_targets.get(pending.target as usize).copied().unwrap_or(false))
-        .count();
-
     if parser_dwa_profile_enabled() {
         eprintln!(
             "[glrmask/profile][parser_dwa_bundles] terminal_dwa_states={} unique_bundles={} total_branches={}",
             terminal_dwa.states.len(),
             unique_bundles.len(),
             pending_branches_by_state.iter().map(|b| b.len()).sum::<usize>(),
-        );
-        eprintln!(
-            "[glrmask/profile][parser_dwa_leaf_targets] leaf_states={} branches_to_leaf_targets={} states_with_branches={}",
-            leaf_targets.iter().filter(|&&is_leaf| is_leaf).count(),
-            branches_to_leaf_targets,
-            pending_branches_by_state.iter().filter(|branches| !branches.is_empty()).count(),
         );
         for (i, bundle) in unique_bundles.iter().enumerate() {
             let terminals: Vec<_> = bundle.keys().collect();
@@ -292,25 +233,20 @@ fn compose_state(
         .map(|accepting| arena.append_with_body(&accepting));
 
     for branch in &state.branches {
+        let Some(continuation) = compose_state(
+            branch.target,
+            states,
+            arena,
+            body_memo,
+            concatenated_branches,
+        ) else {
+            continue;
+        };
+
         let concat_key = (branch.bundle_id, branch.target);
         let branch_with_continuation = if let Some(cached) = concatenated_branches.get(&concat_key) {
             cached.clone()
-        } else if let Some(leaf_final_weight) = leaf_continuation_final_weight(states, branch.target) {
-            let built = build_leaf_specialized_bundle(branch.bundle.as_ref(), &leaf_final_weight)
-                .map(|specialized| arena.append_with_body(&specialized));
-            concatenated_branches.insert(concat_key, built.clone());
-            built
         } else {
-            let Some(continuation) = compose_state(
-                branch.target,
-                states,
-                arena,
-                body_memo,
-                concatenated_branches,
-            ) else {
-                continue;
-            };
-
             let built = Some(arena.concatenate_in_place(branch.bundle.as_ref(), &continuation));
             concatenated_branches.insert(concat_key, built.clone());
             built
@@ -429,13 +365,6 @@ fn build_possible_outgoing_ids_by_state(
         .collect()
 }
 
-fn weighted_subset_key(entries: &[(u32, Weight)]) -> WeightedSubsetKey {
-    entries
-        .iter()
-        .map(|(state_id, weight)| (*state_id, weight.ptr_key()))
-        .collect()
-}
-
 fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
     fn canonicalize(subset: &FxHashMap<u32, Weight>) -> Vec<(u32, Weight)> {
         let mut entries: Vec<_> = subset
@@ -446,8 +375,11 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
         entries
     }
 
+    fn subset_key(entries: &[(u32, Weight)]) -> Vec<(u32, usize)> {
+        entries.iter().map(|(sid, w)| (*sid, w.ptr_key())).collect()
+    }
+
     fn epsilon_closure(nwa: &NWA, seed: FxHashMap<u32, Weight>) -> FxHashMap<u32, Weight> {
-        // Fast path: single-state seed with no epsilon transitions
         if seed.len() == 1 {
             let (&state_id, _) = seed.iter().next().unwrap();
             if let Some(state) = nwa.states.get(state_id as usize) {
@@ -499,16 +431,15 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
     let start_entries = canonicalize(&start_subset);
     supports[0] = start_entries.iter().map(|(state_id, _)| *state_id).collect();
 
-    let mut subset_map: FxHashMap<WeightedSubsetKey, u32> = FxHashMap::default();
-    let mut worklist: VecDeque<(WeightedSubsetKey, WeightedSubsetEntries)> = VecDeque::new();
-    let start_key = weighted_subset_key(&start_entries);
-    subset_map.insert(start_key.clone(), dwa.start_state);
-    worklist.push_back((start_key, start_entries));
+    let mut subset_map: FxHashMap<Vec<(u32, usize)>, u32> = FxHashMap::default();
+    let mut worklist: VecDeque<Vec<(u32, Weight)>> = VecDeque::new();
+    subset_map.insert(subset_key(&start_entries), dwa.start_state);
+    worklist.push_back(start_entries);
 
     let mut raw_targets: FxHashMap<i32, FxHashMap<u32, Vec<Weight>>> = FxHashMap::default();
 
-    while let Some((subset_key, subset_entries)) = worklist.pop_front() {
-        let from_state = subset_map[&subset_key];
+    while let Some(subset_entries) = worklist.pop_front() {
+        let from_state = subset_map[&subset_key(&subset_entries)];
 
         let mut final_weight = Weight::empty();
         for (nwa_state_id, path_weight) in &subset_entries {
@@ -580,13 +511,14 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
             }
 
             let next_support: Vec<u32> = next_entries.iter().map(|(state_id, _)| *state_id).collect();
-            let next_key = weighted_subset_key(&next_entries);
+
+            let next_key = subset_key(&next_entries);
             let to_state = if let Some(existing) = subset_map.get(&next_key).copied() {
                 existing
             } else {
                 let new_state = dwa.add_state();
-                subset_map.insert(next_key.clone(), new_state);
-                worklist.push_back((next_key, next_entries));
+                subset_map.insert(next_key, new_state);
+                worklist.push_back(next_entries);
                 supports.push(next_support);
                 new_state
             };
@@ -598,10 +530,6 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
     DeterminizedDwaWithSupports { dwa, supports }
 }
 
-/// Apply default-transition optimization directly on a DWA, avoiding the
-/// DWA→NWA→optimize→determinize round-trip. This replaces repeated per-parser-state
-/// transitions (all going to the same target) with a single DEFAULT_LABEL transition,
-/// lifts final weights from the default target, and subtracts covered weights.
 fn optimize_parser_dwa_defaults(
     dwa: &mut DWA,
     possible_by_state: &[BitSet],
@@ -610,8 +538,6 @@ fn optimize_parser_dwa_defaults(
     loop {
         let mut changed = false;
 
-        // Phase 1: Identify states where all possible parser-state labels go to the same
-        // target and create a DEFAULT_LABEL entry with the intersection weight.
         for (state_id, possible_ids) in possible_by_state.iter().enumerate() {
             if possible_ids.is_empty() || possible_ids.count_ones() < 2 {
                 continue;
@@ -619,7 +545,6 @@ fn optimize_parser_dwa_defaults(
 
             let state = &dwa.states[state_id];
 
-            // Check that every possible parser_state label is present
             let mut actual_positive = BitSet::new(num_parser_states as usize);
             for &label in state.transitions.keys() {
                 if let Some(ps) = parser_state_label(label, num_parser_states) {
@@ -630,7 +555,6 @@ fn optimize_parser_dwa_defaults(
                 continue;
             }
 
-            // Check all parser-state transitions share the same target
             let mut shared_target: Option<u32> = None;
             let mut default_weight: Option<Weight> = None;
             let mut valid = true;
@@ -661,7 +585,6 @@ fn optimize_parser_dwa_defaults(
                 continue;
             }
 
-            // Add or union DEFAULT_LABEL transition
             let state = &mut dwa.states[state_id];
             let entry = state.transitions.entry(DEFAULT_LABEL);
             match entry {
@@ -674,7 +597,6 @@ fn optimize_parser_dwa_defaults(
                             changed = true;
                         }
                     }
-                    // Different target — skip (cannot merge in DWA)
                 }
                 std::collections::btree_map::Entry::Vacant(vac) => {
                     vac.insert((target, default_weight));
@@ -683,7 +605,6 @@ fn optimize_parser_dwa_defaults(
             }
         }
 
-        // Phase 2: Lift final weights from default targets to source states.
         for state_id in 0..dwa.states.len() {
             let Some((default_target, default_weight)) =
                 dwa.states[state_id].transitions.get(&DEFAULT_LABEL).cloned()
@@ -698,12 +619,10 @@ fn optimize_parser_dwa_defaults(
                 continue;
             }
 
-            // Union lifted final weight into source state
             if union_final_weight(&mut dwa.states[state_id].final_weight, lifted.clone()) {
                 changed = true;
             }
 
-            // Subtract lifted weight from all outgoing transitions of this state
             let state = &mut dwa.states[state_id];
             let mut to_remove = Vec::new();
             for (&label, (_, weight)) in state.transitions.iter_mut() {
@@ -721,8 +640,6 @@ fn optimize_parser_dwa_defaults(
             }
         }
 
-        // Phase 3: For each state with DEFAULT_LABEL, subtract default weight from
-        // explicit transitions that share the same target.
         for state_id in 0..dwa.states.len() {
             let Some(&(default_target, ref default_weight)) =
                 dwa.states[state_id].transitions.get(&DEFAULT_LABEL)
@@ -761,7 +678,6 @@ fn optimize_parser_dwa_defaults(
     }
 }
 
-/// Subtract final weights from all outgoing transitions (DWA version).
 fn subtract_final_weights_from_outgoing_dwa(dwa: &mut DWA) {
     for state_id in 0..dwa.states.len() {
         let Some(final_weight) = dwa.states[state_id].final_weight.clone() else {
@@ -1103,7 +1019,6 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     subtract_final_weights_from_outgoing_dwa(&mut parser_dwa_pre_minimize);
     profile.subtract_final_ms = elapsed_ms(subtract_final_started_at);
 
-    // determinize_after_defaults is no longer needed — optimization is done directly on the DWA
     profile.determinize_after_defaults_ms = 0.0;
 
     let minimize_started_at = Instant::now();
