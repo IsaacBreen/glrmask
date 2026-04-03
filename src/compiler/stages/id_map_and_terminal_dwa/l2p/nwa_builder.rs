@@ -514,18 +514,29 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
 
         let future_buf_count = self.future_leaf_buffer.len();
         let flush_future_start = std::time::Instant::now();
-        for ((source, tokenizer_state, color), buffered) in
-            std::mem::take(&mut self.future_leaf_buffer)
-        {
+        let buffer = std::mem::take(&mut self.future_leaf_buffer);
+
+        // Pre-compute terminal lookups to avoid repeated clone+find_map (157K→~100 unique keys)
+        let mut terminal_cache: FxHashMap<(TokenizerState, ColorId), SmallVec<[TerminalID; 4]>> =
+            FxHashMap::default();
+        for &(_, tokenizer_state, color) in buffer.keys() {
+            terminal_cache
+                .entry((tokenizer_state, color))
+                .or_insert_with(|| {
+                    let groups = self.future_terminal_color_groups_for_state(tokenizer_state);
+                    groups
+                        .iter()
+                        .find_map(|(gc, ts)| (*gc == color).then_some(ts.clone()))
+                        .unwrap_or_default()
+                });
+        }
+
+        for ((source, tokenizer_state, color), buffered) in buffer {
             if buffered.token_ids.is_empty() && buffered.weight.as_ref().map_or(true, |w| w.is_empty()) {
                 continue;
             }
-            let color_groups = self.future_terminal_color_groups_for_state(tokenizer_state);
-            let terminals = color_groups
-                .iter()
-                .find_map(|(group_color, terminals)| (*group_color == color).then_some(terminals.to_vec()))
-                .unwrap_or_default();
-            for terminal_id in terminals {
+            let terminals = &terminal_cache[&(tokenizer_state, color)];
+            for &terminal_id in terminals {
                 let entry = leaf_transition_buckets[source as usize]
                     .entry(terminal_id as i32)
                     .or_default();
