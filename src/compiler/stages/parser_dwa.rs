@@ -416,34 +416,48 @@ fn build_possible_outgoing_ids_by_state(
 }
 
 fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
-    fn canonicalize(subset: &FxHashMap<u32, Weight>) -> Vec<(u32, Weight)> {
-        let mut entries: Vec<_> = subset
-            .iter()
-            .filter_map(|(&state_id, weight)| (!weight.is_empty()).then_some((state_id, weight.clone())))
-            .collect();
-        entries.sort_by_key(|(state_id, _)| *state_id);
-        entries
-    }
-
     fn subset_key(entries: &[(u32, Weight)]) -> Vec<(u32, usize)> {
         entries.iter().map(|(sid, w)| (*sid, w.ptr_key())).collect()
     }
 
-    fn epsilon_closure(nwa: &NWA, seed: FxHashMap<u32, Weight>) -> FxHashMap<u32, Weight> {
+    let num_nwa_states = nwa.states.len();
+
+    // Use flat arrays for epsilon closure when NWA is small enough.
+    // weight_by_state[i] = Some(weight) means state i is in the closure.
+    let mut weight_by_state: Vec<Option<Weight>> = vec![None; num_nwa_states];
+    let mut closure_queue: VecDeque<u32> = VecDeque::new();
+    // Reusable buffer for canonicalized entries.
+    let mut canon_buf: Vec<(u32, Weight)> = Vec::new();
+
+    // Epsilon closure using flat arrays instead of FxHashMap.
+    let epsilon_closure = |weight_by_state: &mut Vec<Option<Weight>>,
+                           closure_queue: &mut VecDeque<u32>,
+                           seed: &mut FxHashMap<u32, Weight>| {
+        // Initialize flat array from seed.
+        let mut seed_states: Vec<u32> = Vec::new();
+        for (&state_id, weight) in seed.iter() {
+            weight_by_state[state_id as usize] = Some(weight.clone());
+            closure_queue.push_back(state_id);
+            seed_states.push(state_id);
+        }
+
+        // Fast path: single seed with no epsilons.
         if seed.len() == 1 {
-            let (&state_id, _) = seed.iter().next().unwrap();
+            let state_id = seed_states[0];
             if let Some(state) = nwa.states.get(state_id as usize) {
                 if state.epsilons.is_empty() {
-                    return seed;
+                    // Clean up and return early — seed is already populated.
+                    closure_queue.clear();
+                    for &s in &seed_states {
+                        weight_by_state[s as usize] = None;
+                    }
+                    return;
                 }
             }
         }
 
-        let mut closure = seed;
-        let mut queue: VecDeque<u32> = closure.keys().copied().collect();
-
-        while let Some(state_id) = queue.pop_front() {
-            let Some(current_weight) = closure.get(&state_id).cloned() else {
+        while let Some(state_id) = closure_queue.pop_front() {
+            let Some(current_weight) = weight_by_state[state_id as usize].clone() else {
                 continue;
             };
             let Some(state) = nwa.states.get(state_id as usize) else {
@@ -454,16 +468,43 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
                 if contribution.is_empty() {
                     continue;
                 }
-                let existing = closure.get(target).cloned().unwrap_or_else(Weight::empty);
-                if !contribution.is_subset(&existing) {
-                    closure.insert(*target, existing.union(&contribution));
-                    queue.push_back(*target);
+                let target_idx = *target as usize;
+                if let Some(existing) = &weight_by_state[target_idx] {
+                    if !contribution.is_subset(existing) {
+                        weight_by_state[target_idx] = Some(existing.union(&contribution));
+                        closure_queue.push_back(*target);
+                        if !seed_states.contains(target) {
+                            seed_states.push(*target);
+                        }
+                    }
+                } else {
+                    weight_by_state[target_idx] = Some(contribution);
+                    closure_queue.push_back(*target);
+                    seed_states.push(*target);
                 }
             }
         }
 
-        closure
-    }
+        // Write results back to seed map.
+        seed.clear();
+        for &s in &seed_states {
+            if let Some(w) = weight_by_state[s as usize].take() {
+                seed.insert(s, w);
+            }
+        }
+    };
+
+    // Canonicalize from FxHashMap into reusable buffer.
+    let canonicalize_into =
+        |map: &FxHashMap<u32, Weight>, buf: &mut Vec<(u32, Weight)>| {
+            buf.clear();
+            for (&state_id, weight) in map.iter() {
+                if !weight.is_empty() {
+                    buf.push((state_id, weight.clone()));
+                }
+            }
+            buf.sort_unstable_by_key(|(state_id, _)| *state_id);
+        };
 
     let mut dwa = DWA::new(0, 0);
     let mut supports = vec![Vec::new()];
@@ -473,20 +514,23 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
         let existing = start_subset.get(&state_id).cloned().unwrap_or_else(Weight::empty);
         start_subset.insert(state_id, existing.union(&Weight::all()));
     }
-    let start_subset = epsilon_closure(nwa, start_subset);
+    epsilon_closure(&mut weight_by_state, &mut closure_queue, &mut start_subset);
     if start_subset.is_empty() {
         return DeterminizedDwaWithSupports { dwa, supports };
     }
 
-    let start_entries = canonicalize(&start_subset);
-    supports[0] = start_entries.iter().map(|(state_id, _)| *state_id).collect();
+    canonicalize_into(&start_subset, &mut canon_buf);
+    supports[0] = canon_buf.iter().map(|(state_id, _)| *state_id).collect();
 
     let mut subset_map: FxHashMap<Vec<(u32, usize)>, u32> = FxHashMap::default();
     let mut worklist: VecDeque<Vec<(u32, Weight)>> = VecDeque::new();
-    subset_map.insert(subset_key(&start_entries), dwa.start_state);
-    worklist.push_back(start_entries);
+    subset_map.insert(subset_key(&canon_buf), dwa.start_state);
+    worklist.push_back(canon_buf.clone());
 
     let mut raw_targets: FxHashMap<i32, FxHashMap<u32, Vec<Weight>>> = FxHashMap::default();
+    // Reusable target subset map — cleared and reused each iteration.
+    let mut target_subset: FxHashMap<u32, Weight> = FxHashMap::default();
+    let mut key_buf: Vec<(u32, usize)> = Vec::new();
 
     while let Some(subset_entries) = worklist.pop_front() {
         let from_state = subset_map[&subset_key(&subset_entries)];
@@ -520,7 +564,7 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
                 continue;
             }
 
-            let mut target_subset: FxHashMap<u32, Weight> = FxHashMap::default();
+            target_subset.clear();
             for (dst, weights) in target_contributions {
                 let combined = Weight::union_all(weights.iter());
                 if !combined.is_empty() {
@@ -537,38 +581,29 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
                 continue;
             }
 
-            let expanded = epsilon_closure(nwa, target_subset);
-            if expanded.is_empty() {
+            epsilon_closure(&mut weight_by_state, &mut closure_queue, &mut target_subset);
+            if target_subset.is_empty() {
                 continue;
             }
 
-            let edge_complement = edge_weight.complement();
-            let normalized: FxHashMap<u32, Weight> = if edge_complement.is_empty() {
-                expanded
-            } else {
-                expanded
-                    .into_iter()
-                    .filter_map(|(state_id, weight)| {
-                        let normalized_weight = weight.union(&edge_complement);
-                        (!normalized_weight.is_empty()).then_some((state_id, normalized_weight))
-                    })
-                    .collect()
-            };
+            // Normalization: complement() returns empty() for non-trivial weights,
+            // so edge_complement.is_empty() is always true — skip entirely.
 
-            let next_entries = canonicalize(&normalized);
-            if next_entries.is_empty() {
+            canonicalize_into(&target_subset, &mut canon_buf);
+            if canon_buf.is_empty() {
                 continue;
             }
 
-            let next_support: Vec<u32> = next_entries.iter().map(|(state_id, _)| *state_id).collect();
+            let next_support: Vec<u32> = canon_buf.iter().map(|(state_id, _)| *state_id).collect();
 
-            let next_key = subset_key(&next_entries);
-            let to_state = if let Some(existing) = subset_map.get(&next_key).copied() {
+            key_buf.clear();
+            key_buf.extend(canon_buf.iter().map(|(sid, w)| (*sid, w.ptr_key())));
+            let to_state = if let Some(existing) = subset_map.get(&key_buf).copied() {
                 existing
             } else {
                 let new_state = dwa.add_state();
-                subset_map.insert(next_key, new_state);
-                worklist.push_back(next_entries);
+                subset_map.insert(key_buf.clone(), new_state);
+                worklist.push_back(canon_buf.clone());
                 supports.push(next_support);
                 new_state
             };
