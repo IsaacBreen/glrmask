@@ -149,6 +149,7 @@ fn merge_possible_match_maps(into: &mut PossibleMatchMap, other: &PossibleMatchM
 
 pub(crate) struct PossibleMatchesComputer<'a> {
     tokenizer: &'a Tokenizer,
+    active_terminals: Option<&'a [bool]>,
     cache: FxHashMap<(usize, u32), Rc<PossibleMatchMap>>,
     reachable_cache: FxHashMap<usize, Rc<RangeSetBlaze<u32>>>,
     self_loop_bytes: FxHashMap<u32, U8Set>,
@@ -160,6 +161,19 @@ impl<'a> PossibleMatchesComputer<'a> {
     pub(crate) fn new(tokenizer: &'a Tokenizer) -> Self {
         Self {
             tokenizer,
+            active_terminals: None,
+            cache: FxHashMap::default(),
+            reachable_cache: FxHashMap::default(),
+            self_loop_bytes: FxHashMap::default(),
+            summary_profile_enabled: profile_summary_enabled(),
+            profile: PossibleMatchesProfile::default(),
+        }
+    }
+
+    pub(crate) fn new_filtered(tokenizer: &'a Tokenizer, active_terminals: &'a [bool]) -> Self {
+        Self {
+            tokenizer,
+            active_terminals: Some(active_terminals),
             cache: FxHashMap::default(),
             reachable_cache: FxHashMap::default(),
             self_loop_bytes: FxHashMap::default(),
@@ -173,6 +187,14 @@ impl<'a> PossibleMatchesComputer<'a> {
             cache_entries: self.cache.len(),
             reachable_cache_entries: self.reachable_cache.len(),
             ..self.profile
+        }
+    }
+
+    #[inline]
+    fn is_terminal_active(&self, terminal: TerminalID) -> bool {
+        match self.active_terminals {
+            Some(active) => active.get(terminal as usize).copied().unwrap_or(false),
+            None => true,
         }
     }
 
@@ -240,6 +262,9 @@ impl<'a> PossibleMatchesComputer<'a> {
             let insert_started_at = self.summary_profile_enabled.then(Instant::now);
             let token_id = node.token_id() as u32;
             for terminal in self.tokenizer.matched_terminals_iter(tokenizer_state) {
+                if !self.is_terminal_active(terminal) {
+                    continue;
+                }
                 result.entry(terminal).or_default().insert(token_id);
                 self.profile.terminal_insertions += 1;
             }
@@ -263,6 +288,9 @@ impl<'a> PossibleMatchesComputer<'a> {
                 };
                 current_state = next_state;
                 for terminal in self.tokenizer.matched_terminals_iter(current_state) {
+                    if !self.is_terminal_active(terminal) {
+                        continue;
+                    }
                     let existing = result.entry(terminal).or_default();
                     merge_token_ids(existing, reachable.as_ref());
                     self.profile.terminal_insertions += 1;
