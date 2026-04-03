@@ -4,8 +4,6 @@
 //! Each later depth only mixes in the previous hashes of that state's unique
 //! outgoing destinations.
 
-use std::collections::HashMap;
-
 use rayon::prelude::*;
 
 use super::super::compat::{FlatDfaState, TokenizerView};
@@ -54,19 +52,9 @@ fn hash_transition_labels(label_hashes: &[u64]) -> u64 {
     hash
 }
 
-#[inline(always)]
-fn hash_transition_targets(targets: &[usize], prev_hashes: &[u64]) -> u64 {
-    let mut hash = mix_u64((targets.len() as u64) ^ 0xA5A5_A5A5_5A5A_5A5A);
-    for &target in targets {
-        hash = mix_u64(hash ^ prev_hashes[target].rotate_left(17));
-    }
-    hash
-}
-
 fn build_state_shape(state: &FlatDfaState) -> (Vec<usize>, u64) {
     let mut targets: Vec<usize> = Vec::new();
     let mut label_hashes: Vec<u64> = Vec::new();
-    let mut index_by_target: HashMap<usize, usize> = HashMap::new();
 
     for (byte, &target) in state.transitions.iter().enumerate() {
         if target == u32::MAX {
@@ -76,10 +64,9 @@ fn build_state_shape(state: &FlatDfaState) -> (Vec<usize>, u64) {
         let byte_hash = mix_u64((byte as u64) ^ 0xD6E8_FD93_5E6C_A271);
         let target = target as usize;
 
-        if let Some(&index) = index_by_target.get(&target) {
+        if let Some(index) = targets.iter().position(|&t| t == target) {
             label_hashes[index] = label_hashes[index].wrapping_add(byte_hash);
         } else {
-            index_by_target.insert(target, targets.len());
             targets.push(target);
             label_hashes.push(byte_hash);
         }
@@ -114,12 +101,100 @@ fn build_subset_mapping(states: &[usize], hashes: &[u64]) -> Vec<usize> {
     mapping
 }
 
+/// Flattened outgoing targets for all states in contiguous memory.
+/// `targets_flat[offsets[i]..offsets[i+1]]` gives the outgoing targets for state `i`.
+struct FlatTargets {
+    targets: Vec<usize>,
+    offsets: Vec<u32>,
+}
+
+impl FlatTargets {
+    fn from_vec_of_vecs(per_state: Vec<Vec<usize>>) -> Self {
+        let n = per_state.len();
+        let total: usize = per_state.iter().map(|v| v.len()).sum();
+        let mut targets = Vec::with_capacity(total);
+        let mut offsets = Vec::with_capacity(n + 1);
+        for v in per_state {
+            offsets.push(targets.len() as u32);
+            targets.extend_from_slice(&v);
+        }
+        offsets.push(targets.len() as u32);
+        Self { targets, offsets }
+    }
+
+    #[inline(always)]
+    fn targets_for(&self, state: usize) -> &[usize] {
+        let start = self.offsets[state] as usize;
+        let end = self.offsets[state + 1] as usize;
+        &self.targets[start..end]
+    }
+}
+
+#[allow(dead_code)]
+#[inline(always)]
+fn hash_transition_targets_flat(targets: &[usize], prev_hashes: &[u64]) -> u64 {
+    let mut hash = mix_u64((targets.len() as u64) ^ 0xA5A5_A5A5_5A5A_5A5A);
+    for &target in targets {
+        hash = mix_u64(hash ^ prev_hashes[target].rotate_left(17));
+    }
+    hash
+}
+
+/// Fast commutative hash of target hashes for the kstep inner loop.
+///
+/// Unlike `hash_transition_targets_flat` which has a serial dependency chain
+/// (each mix_u64 depends on the previous), this uses commutative accumulation
+/// so all target loads can be issued and completed in parallel by the CPU.
+/// The serial chain in hash_transition_targets_flat is:
+///   mix(mix(mix(... ^ load[0]) ^ load[1]) ^ load[2])
+/// requiring ~8 cycles per target (mix latency). With 10 targets, that's ~80 cycles.
+///
+/// This version issues all loads independently and accumulates with wrapping_add,
+/// then finalizes with a single mix. Total: ~load_latency + ~6 cycles.
+#[inline(always)]
+fn hash_transition_targets_fast(targets: &[usize], prev_hashes: &[u64]) -> u64 {
+    let mut acc: u64 = 0;
+    for &target in targets {
+        acc = acc.wrapping_add(prev_hashes[target]);
+    }
+    mix_u64(acc ^ (targets.len() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+}
+
 fn count_distinct_hashes(hashes: &[u64]) -> usize {
     let mut seen = std::collections::HashSet::with_capacity(hashes.len());
     for &h in hashes {
         seen.insert(h);
     }
     seen.len()
+}
+
+/// Run kstep hash propagation.
+///
+/// Each iteration refines hash signatures across all states.
+/// Uses fast commutative target hashing for CPU load pipelining.
+fn run_kstep_parallel(
+    flat: &FlatTargets,
+    prev_hashes: &mut Vec<u64>,
+    k: usize,
+) -> usize {
+    let n = prev_hashes.len();
+    if n == 0 || k == 0 {
+        return 0;
+    }
+
+    let mut next_hashes = vec![0u64; n];
+
+    for _step in 0..k {
+        for state_id in 0..n {
+            next_hashes[state_id] = mix_u64(
+                prev_hashes[state_id]
+                    ^ hash_transition_targets_fast(flat.targets_for(state_id), prev_hashes),
+            );
+        }
+        std::mem::swap(prev_hashes, &mut next_hashes);
+    }
+
+    k
 }
 
 fn find_state_equivalence_classes_kstep(
@@ -140,33 +215,10 @@ fn find_state_equivalence_classes_kstep(
             (targets, mix_u64(hash_state_label(state) ^ transition_label_hash))
         })
         .collect();
-    let (outgoing_targets, mut prev_hashes): (Vec<_>, Vec<_>) = state_shapes.into_iter().unzip();
+    let (outgoing_targets_vec, mut prev_hashes): (Vec<_>, Vec<_>) = state_shapes.into_iter().unzip();
+    let flat = FlatTargets::from_vec_of_vecs(outgoing_targets_vec);
 
-    let check_interval = 16.min(k);
-    let mut prev_distinct = 0usize;
-    let mut next_hashes = vec![0u64; dfa.states.len()];
-    for step in 0..k {
-        next_hashes
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(state_id, next_hash)| {
-                *next_hash = mix_u64(
-                    prev_hashes[state_id]
-                        ^ hash_transition_targets(&outgoing_targets[state_id], &prev_hashes),
-                );
-            });
-        if next_hashes == prev_hashes {
-            break;
-        }
-        std::mem::swap(&mut prev_hashes, &mut next_hashes);
-        if (step + 1) % check_interval == 0 {
-            let distinct = count_distinct_hashes(&prev_hashes);
-            if distinct == prev_distinct {
-                break;
-            }
-            prev_distinct = distinct;
-        }
-    }
+    run_kstep_parallel(&flat, &mut prev_hashes, k);
 
     build_subset_mapping(states, &prev_hashes)
 }
@@ -220,7 +272,6 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
 fn build_state_shape_restricted(state: &FlatDfaState, relevant_bytes: &[bool; 256]) -> (Vec<usize>, u64) {
     let mut targets: Vec<usize> = Vec::new();
     let mut label_hashes: Vec<u64> = Vec::new();
-    let mut index_by_target: HashMap<usize, usize> = HashMap::new();
 
     for (byte, &target) in state.transitions.iter().enumerate() {
         if target == u32::MAX || !relevant_bytes[byte] {
@@ -230,10 +281,9 @@ fn build_state_shape_restricted(state: &FlatDfaState, relevant_bytes: &[bool; 25
         let byte_hash = mix_u64((byte as u64) ^ 0xD6E8_FD93_5E6C_A271);
         let target = target as usize;
 
-        if let Some(&index) = index_by_target.get(&target) {
+        if let Some(index) = targets.iter().position(|&t| t == target) {
             label_hashes[index] = label_hashes[index].wrapping_add(byte_hash);
         } else {
-            index_by_target.insert(target, targets.len());
             targets.push(target);
             label_hashes.push(byte_hash);
         }
@@ -253,7 +303,6 @@ fn build_state_shape_by_class(
 ) -> (Vec<usize>, u64) {
     let mut targets: Vec<usize> = Vec::new();
     let mut label_hashes: Vec<u64> = Vec::new();
-    let mut index_by_target: HashMap<usize, usize> = HashMap::new();
 
     for &(rep_byte, class_hash) in active_classes {
         let target = state.transitions[rep_byte as usize];
@@ -262,10 +311,10 @@ fn build_state_shape_by_class(
         }
         let target = target as usize;
 
-        if let Some(&index) = index_by_target.get(&target) {
+        // Linear search for target — faster than HashMap for small target counts
+        if let Some(index) = targets.iter().position(|&t| t == target) {
             label_hashes[index] = label_hashes[index].wrapping_add(class_hash);
         } else {
-            index_by_target.insert(target, targets.len());
             targets.push(target);
             label_hashes.push(class_hash);
         }
@@ -337,44 +386,20 @@ fn find_state_equivalence_classes_kstep_restricted(
             (targets, mix_u64(hash_state_label(state) ^ transition_label_hash))
         })
         .collect();
-    let (outgoing_targets, mut prev_hashes): (Vec<_>, Vec<_>) = state_shapes.into_iter().unzip();
+    let (outgoing_targets_vec, mut prev_hashes): (Vec<_>, Vec<_>) = state_shapes.into_iter().unzip();
+    let flat = FlatTargets::from_vec_of_vecs(outgoing_targets_vec);
 
     let shapes_ms = shapes_start.elapsed().as_secs_f64() * 1000.0;
     let kstep_start = std::time::Instant::now();
 
-    let check_interval = 16.min(k);
-    let mut prev_distinct = 0usize;
-    let mut converged_at = k;
-    let mut next_hashes = vec![0u64; dfa.states.len()];
-    for step in 0..k {
-        next_hashes
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(state_id, next_hash)| {
-                *next_hash = mix_u64(
-                    prev_hashes[state_id]
-                        ^ hash_transition_targets(&outgoing_targets[state_id], &prev_hashes),
-                );
-            });
-        if next_hashes == prev_hashes {
-            break;
-        }
-        std::mem::swap(&mut prev_hashes, &mut next_hashes);
-        if (step + 1) % check_interval == 0 {
-            let distinct = count_distinct_hashes(&prev_hashes);
-            if distinct == prev_distinct {
-                converged_at = step + 1;
-                break;
-            }
-            prev_distinct = distinct;
-        }
-    }
+    let converged_at = run_kstep_parallel(&flat, &mut prev_hashes, k);
 
     if profile {
         let kstep_ms = kstep_start.elapsed().as_secs_f64() * 1000.0;
+        let distinct = count_distinct_hashes(&prev_hashes);
         eprintln!(
             "[glrmask/profile][max_length_kstep] dfa_states={} k={} converged_at={} relevant_bytes={} distinct={} shapes_ms={:.3} kstep_ms={:.3}",
-            dfa.states.len(), k, converged_at, num_relevant, prev_distinct, shapes_ms, kstep_ms,
+            dfa.states.len(), k, converged_at, num_relevant, distinct, shapes_ms, kstep_ms,
         );
     }
 
@@ -393,6 +418,7 @@ pub fn find_state_equivalence_classes_byte_restricted<S: AsRef<[u8]>>(
     byte_to_class: Option<&[u8; 256]>,
 ) -> Vec<usize> {
     let max_len = tokens.iter().map(|token| token.as_ref().len()).max().unwrap_or(0);
+    let k = max_len;
 
     let mut relevant_bytes = [false; 256];
     for token in tokens {
@@ -401,5 +427,5 @@ pub fn find_state_equivalence_classes_byte_restricted<S: AsRef<[u8]>>(
         }
     }
 
-    find_state_equivalence_classes_kstep_restricted(tokenizer, states, max_len, &relevant_bytes, byte_to_class)
+    find_state_equivalence_classes_kstep_restricted(tokenizer, states, k, &relevant_bytes, byte_to_class)
 }

@@ -25,7 +25,7 @@ use crate::ds::weight::Weight;
 
 use crate::compiler::stages::id_map_and_terminal_dwa::types::{
     ColorId, TerminalColoring, TerminalDwaBuildProfile, TerminalPathLength,
-    debug_profile_enabled,
+    compile_profile_enabled, debug_profile_enabled,
 };
 
 /// NWA state identifier (index into `NWA.states`).
@@ -601,9 +601,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         }
         let flush_weight_ms = flush_weight_start.elapsed().as_secs_f64() * 1000.0;
 
-        if debug_profile_enabled() {
+        if debug_profile_enabled() || compile_profile_enabled() {
             eprintln!(
-                "[glrmask/debug][flush] leaf_buf={} future_buf={} flush_leaf_ms={:.1} flush_future_ms={:.1} flush_weight_ms={:.1}",
+                "[glrmask/profile][flush] leaf_buf={} future_buf={} flush_leaf_ms={:.1} flush_future_ms={:.1} flush_weight_ms={:.1}",
                 leaf_buf_count, future_buf_count, flush_leaf_ms, flush_future_ms, flush_weight_ms,
             );
         }
@@ -1061,7 +1061,25 @@ pub(crate) fn build_nwa_via_trie_walk<'a>(
         active_terminals.map(|a| a.to_vec()),
         num_tokenizer_states,
     );
+    let trie_start = std::time::Instant::now();
     builder.build_from_trie(vocab_tree_root, roots);
+    let trie_ms = trie_start.elapsed().as_secs_f64() * 1000.0;
+
+    let flush_start = std::time::Instant::now();
     builder.flush_transition_buffer();
-    builder.profile
+    let flush_ms = flush_start.elapsed().as_secs_f64() * 1000.0;
+
+    let profile = builder.profile;
+    // Drop builder to release the mutable borrow on nwa before reading nwa.states.
+    drop(builder);
+
+    if compile_profile_enabled() || debug_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][nwa_build] trie_walk_ms={:.3} flush_ms={:.3} total_ms={:.3} nwa_states={} future_additions={} match_additions={}",
+            trie_ms, flush_ms, trie_ms + flush_ms, nwa.states.len(),
+            profile.future_terminal_additions, profile.match_transition_additions,
+        );
+    }
+
+    profile
 }
