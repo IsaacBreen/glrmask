@@ -96,20 +96,18 @@ impl SharedVocabDfaBase {
             }
         }
 
+        // Fused row-major construction: one pass over DFA states instead of
+        // 51 column-major passes for trans_by_class + 1 pass for self_loop_bytes.
         let mut trans_by_class = vec![NONE; num_classes * num_dfa_states];
-        for c in 0..num_classes {
-            let repr = class_repr[c] as usize;
-            let base = c * num_dfa_states;
-            for s in 0..num_dfa_states {
-                trans_by_class[base + s] = dfa.states[s].transitions[repr];
-            }
-        }
-
         let mut self_loop_bytes = Vec::with_capacity(num_dfa_states);
-        for (state_idx, state) in dfa.states.iter().enumerate() {
+        for (s, state) in dfa.states.iter().enumerate() {
+            for c in 0..num_classes {
+                trans_by_class[c * num_dfa_states + s] =
+                    state.transitions[class_repr[c] as usize];
+            }
             let mut bits = U8Set::empty();
             for (byte_idx, &target) in state.transitions.iter().enumerate() {
-                if target == state_idx as u32 {
+                if target == s as u32 {
                     bits.insert(byte_idx as u8);
                 }
             }

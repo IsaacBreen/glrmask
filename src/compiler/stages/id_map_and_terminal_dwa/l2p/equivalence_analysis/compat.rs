@@ -3,8 +3,6 @@
 #[cfg(test)]
 use std::collections::BTreeMap;
 
-use hashbrown::HashMap;
-
 use crate::automata::lexer::tokenizer::Tokenizer;
 
 fn build_transition_table(
@@ -41,16 +39,56 @@ pub struct FlatDfa {
 }
 
 pub(crate) fn compute_byte_classes(dfa: &FlatDfa) -> [u8; 256] {
-    let num_states = dfa.states.len();
-    let mut byte_to_class = [0u8; 256];
-    let mut class_map: HashMap<Vec<u32>, u8> = HashMap::new();
+    // Hash each byte's transition column using row-major access for cache efficiency.
+    // This avoids allocating 256 Vec<u32> of N elements each (was ~35MB for N=34888).
+    let mut column_hashes = [0u64; 256];
+    for state in &dfa.states {
+        for (b, &target) in state.transitions.iter().enumerate() {
+            column_hashes[b] = column_hashes[b]
+                .wrapping_mul(0x517cc1b727220a95)
+                .wrapping_add(target as u64);
+        }
+    }
 
-    for b in 0..=255u8 {
-        let transitions: Vec<u32> = (0..num_states)
-            .map(|s| dfa.states[s].transitions[b as usize])
-            .collect();
-        let next_class = class_map.len() as u8;
-        byte_to_class[b as usize] = *class_map.entry(transitions).or_insert(next_class);
+    // Sort bytes by hash to find equivalence classes.
+    let mut sorted_indices: [u8; 256] = std::array::from_fn(|i| i as u8);
+    sorted_indices.sort_unstable_by_key(|&b| column_hashes[b as usize]);
+
+    let mut byte_to_class = [0u8; 256];
+    let mut next_class = 0u8;
+    byte_to_class[sorted_indices[0] as usize] = 0;
+
+    for i in 1..256 {
+        let curr = sorted_indices[i];
+        let h = column_hashes[curr as usize];
+
+        if h != column_hashes[sorted_indices[i - 1] as usize] {
+            // Different hash → different class.
+            next_class += 1;
+            byte_to_class[curr as usize] = next_class;
+        } else {
+            // Same hash → verify by comparing transition columns.
+            // Check all prior bytes with the same hash (handles rare collisions).
+            let mut assigned = false;
+            for j in (0..i).rev() {
+                let prev = sorted_indices[j];
+                if column_hashes[prev as usize] != h {
+                    break;
+                }
+                let same = dfa.states.iter().all(|state| {
+                    state.transitions[curr as usize] == state.transitions[prev as usize]
+                });
+                if same {
+                    byte_to_class[curr as usize] = byte_to_class[prev as usize];
+                    assigned = true;
+                    break;
+                }
+            }
+            if !assigned {
+                next_class += 1;
+                byte_to_class[curr as usize] = next_class;
+            }
+        }
     }
 
     byte_to_class

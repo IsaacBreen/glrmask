@@ -176,12 +176,11 @@ pub(crate) fn analyze_equivalences_l1_fast(
         }
     }
     // trans_by_class[class * num_states + state] = next_state (or u32::MAX for dead)
+    // Row-major construction: one pass over states instead of num_byte_classes passes.
     let mut trans_by_class: Vec<u32> = vec![u32::MAX; num_byte_classes * num_states];
-    for c in 0..num_byte_classes {
-        let repr_b = class_repr_byte[c] as usize;
-        let base = c * num_states;
-        for s in 0..num_states {
-            trans_by_class[base + s] = dfa.states[s].transitions[repr_b];
+    for (s, state) in dfa.states.iter().enumerate() {
+        for c in 0..num_byte_classes {
+            trans_by_class[c * num_states + s] = state.transitions[class_repr_byte[c] as usize];
         }
     }
     let build_dfa_ms = elapsed_ms(build_dfa_started_at);
