@@ -70,10 +70,20 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     profile.terminal_dwa_ms += flat_trans_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // Shared cache for vocab DFA base (byte classes, transition table, self-loop
-    // bytes). Lazily initialized by the first partition's equivalence analysis.
+    // bytes). Eagerly initialized before partitions start to avoid all 4 partition
+    // threads blocking on OnceLock during parallel execution.
     // Since filter_for_terminals only modifies finalizers/possible_future_group_ids
     // without changing transitions, the cached base is valid for all partitions.
     let shared_vocab_dfa_cache = l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
+    {
+        let all_active: Vec<bool> = vec![true; grammar.num_terminals as usize];
+        let temp_view = l2p::equivalence_analysis::compat::TokenizerView::new_filtered_from_flat_trans(
+            &flat_trans, tokenizer, &all_active,
+        );
+        shared_vocab_dfa_cache.get_or_init(|| {
+            l2p::equivalence_analysis::vocab::fast::SharedVocabDfaBase::build_from_dfa(temp_view.dfa())
+        });
+    }
 
     // Shared cache for terminal classification byte sets. The DFA scanning
     // (reachable_bytes, first_bytes, last_bytes) is identical across partitions;
