@@ -178,9 +178,9 @@ pub(crate) fn analyze_equivalences_l1_fast(
     // trans_by_class[class * num_states + state] = next_state (or u32::MAX for dead)
     // Row-major construction: one pass over states instead of num_byte_classes passes.
     let mut trans_by_class: Vec<u32> = vec![u32::MAX; num_byte_classes * num_states];
-    for (s, state) in dfa.states.iter().enumerate() {
+    for s in 0..num_states {
         for c in 0..num_byte_classes {
-            trans_by_class[c * num_states + s] = state.transitions[class_repr_byte[c] as usize];
+            trans_by_class[c * num_states + s] = dfa.trans(s, class_repr_byte[c] as usize);
         }
     }
     let build_dfa_ms = elapsed_ms(build_dfa_started_at);
@@ -648,7 +648,7 @@ pub(crate) fn analyze_equivalences_with_group_filter(
     ignore_terminal: Option<u32>,
     active_groups: Option<&[bool]>,
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
-    flat_trans: Option<&[u32]>,
+    flat_trans: Option<&std::sync::Arc<[u32]>>,
 ) -> InternalIdMap {
     analyze_equivalences_impl(tokenizer, vocab, disallowed_follows, ignore_terminal, active_groups, shared_vocab_dfa_cache, flat_trans)
 }
@@ -664,7 +664,7 @@ fn analyze_equivalences_impl(
     ignore_terminal: Option<u32>,
     active_groups: Option<&[bool]>,
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
-    flat_trans: Option<&[u32]>,
+    flat_trans: Option<&std::sync::Arc<[u32]>>,
 ) -> InternalIdMap {
     let profile_compile = compile_profile_enabled();
     let total_started_at = std::time::Instant::now();

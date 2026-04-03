@@ -5,6 +5,7 @@
 //! single `(InternalIdMap, DWA)` for the partition.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -35,7 +36,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     ignore_terminal: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
     disallowed_follows: &BTreeMap<u32, BitSet>,
-    flat_trans: &[u32],
+    flat_trans: &Arc<[u32]>,
     shared_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
     shared_classify_cache: Option<&super::classify::SharedClassifyCache>,
 ) -> Option<LocalIdMapTerminalDwa> {
@@ -115,7 +116,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                     ignore_terminal,
                     grammar,
                     &l1_mask,
-                    flat_trans,
+                    &**flat_trans,
                 );
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
             } else {

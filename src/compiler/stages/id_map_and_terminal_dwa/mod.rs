@@ -13,6 +13,7 @@ pub(crate) mod partition;
 pub(crate) mod types;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -66,7 +67,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
 
     // Build flat DFA transition table once (shared across all partitions).
     let flat_trans_started_at = Instant::now();
-    let flat_trans = l1::build_flat_transition_table(tokenizer);
+    let flat_trans: Arc<[u32]> = Arc::from(l1::build_flat_transition_table(tokenizer));
     profile.terminal_dwa_ms += flat_trans_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // Shared cache for vocab DFA base (byte classes, transition table, self-loop

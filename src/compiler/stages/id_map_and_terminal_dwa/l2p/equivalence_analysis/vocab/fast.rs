@@ -100,13 +100,13 @@ impl SharedVocabDfaBase {
         // 51 column-major passes for trans_by_class + 1 pass for self_loop_bytes.
         let mut trans_by_class = vec![NONE; num_classes * num_dfa_states];
         let mut self_loop_bytes = Vec::with_capacity(num_dfa_states);
-        for (s, state) in dfa.states.iter().enumerate() {
+        for s in 0..dfa.states.len() {
             for c in 0..num_classes {
                 trans_by_class[c * num_dfa_states + s] =
-                    state.transitions[class_repr[c] as usize];
+                    dfa.trans(s, class_repr[c] as usize);
             }
             let mut bits = U8Set::empty();
-            for (byte_idx, &target) in state.transitions.iter().enumerate() {
+            for (byte_idx, &target) in dfa.transitions_for(s).iter().enumerate() {
                 if target == s as u32 {
                     bits.insert(byte_idx as u8);
                 }
@@ -361,7 +361,7 @@ fn reachable_state_count(tokenizer: &TokenizerView, initial_states: &[usize]) ->
     let mut count = 0usize;
     while let Some(state) = queue.pop_front() {
         count += 1;
-        for &target in &dfa.states[state].transitions {
+        for &target in dfa.transitions_for(state) {
             if target == NONE {
                 continue;
             }
@@ -542,16 +542,16 @@ fn build_dfa_with_group_filter(
                 let repr = class_repr[c] as usize;
                 let bbase = c * num_dfa_states;
                 for s in 0..num_dfa_states {
-                    tbc[bbase + s] = dfa.states[s].transitions[repr];
+                    tbc[bbase + s] = dfa.trans(s, repr);
                 }
             }
             let transpose_ms = elapsed_ms(transpose_started_at);
 
             let mut slb = Vec::with_capacity(num_dfa_states);
-            for (state_idx, state) in dfa.states.iter().enumerate() {
+            for s in 0..dfa.states.len() {
                 let mut bits = U8Set::empty();
-                for (byte_idx, &target) in state.transitions.iter().enumerate() {
-                    if target == state_idx as u32 {
+                for (byte_idx, &target) in dfa.transitions_for(s).iter().enumerate() {
+                    if target == s as u32 {
                         bits.insert(byte_idx as u8);
                     }
                 }

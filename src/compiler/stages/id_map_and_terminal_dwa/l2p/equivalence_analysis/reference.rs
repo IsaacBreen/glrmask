@@ -154,7 +154,7 @@ fn walk_tokenizer_dfa(
         if done {
             break;
         }
-        let next_state = dfa.states[current_state].transitions[byte as usize];
+        let next_state = dfa.trans(current_state, byte as usize);
         if next_state == NONE {
             done = true;
             break;
@@ -721,18 +721,17 @@ mod tests {
             ranges: &[(usize, usize, u32)],
             finalizers: &[usize],
             pfg: &[usize],
-        ) -> FlatDfaState {
+        ) -> (FlatDfaState, [u32; 256]) {
             let mut transitions = [u32::MAX; 256];
             for &(start, end, target) in ranges {
                 for b in start..=end {
                     transitions[b] = target;
                 }
             }
-            FlatDfaState {
-                transitions,
+            (FlatDfaState {
                 finalizers: finalizers.to_vec(),
                 possible_future_group_ids: pfg.to_vec(),
-            }
+            }, transitions)
         }
 
         // Helper: insert a disallowed_follows entry.
@@ -748,7 +747,7 @@ mod tests {
 
         // 6 states: minimal subset of the full 1167-state DFA that covers both
         // token traces. Transitions to states outside this set map to dead (u32::MAX).
-        let flat_states = vec![
+        let state_data: Vec<(FlatDfaState, [u32; 256])> = vec![
             // State 0 (original 0): tokenizer start state. Only bytes 49 ('1') and 97 ('a')
             // have targets in this pruned set; all other bytes are dead.
             s(0, &[(49, 49, 1), (97, 97, 2)], &[], &(0..ng).collect::<Vec<_>>()),
@@ -763,7 +762,9 @@ mod tests {
             // State 5 (original 1114): second hop, self-loop on printable ASCII.
             s(5, &[(32, 33, 5), (35, 91, 5), (93, 127, 5)], &[1], &[1]),
         ];
-        let dfa = FlatDfa { states: flat_states, start_state: 0 };
+        let (flat_states, trans_arrays): (Vec<_>, Vec<_>) = state_data.into_iter().unzip();
+        let flat_trans: Vec<u32> = trans_arrays.into_iter().flat_map(|a| a.into_iter()).collect();
+        let dfa = FlatDfa { states: flat_states, transitions: std::sync::Arc::from(flat_trans), start_state: 0 };
 
         // Disallowed follows from witness.json. 110 groups with 6 unique patterns:
         //   Pattern A: groups {0}         → disallow {2..=5, 8, 11}

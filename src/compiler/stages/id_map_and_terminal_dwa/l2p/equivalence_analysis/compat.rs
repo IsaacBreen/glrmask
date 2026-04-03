@@ -3,6 +3,8 @@
 #[cfg(test)]
 use std::collections::BTreeMap;
 
+use std::sync::Arc;
+
 use crate::automata::lexer::tokenizer::Tokenizer;
 
 fn build_transition_table(
@@ -19,11 +21,10 @@ fn collect_group_ids(groups: impl Iterator<Item = usize>) -> Vec<usize> {
     groups.collect()
 }
 
-/// Pre-extracted DFA state data in analysis-compatible format.
+/// Per-state metadata: finalizers and reachable groups.
+/// Transitions are stored separately in `FlatDfa::transitions` for sharing.
 #[derive(Debug, Clone)]
 pub struct FlatDfaState {
-    /// Transition table: `transitions[byte]` = target state index, or `usize::MAX` for no transition.
-    pub transitions: [u32; 256],
     /// Sorted list of group IDs that finalize at this state.
     pub finalizers: Vec<usize>,
     /// Sorted list of group IDs reachable from this state.
@@ -31,22 +32,27 @@ pub struct FlatDfaState {
 }
 
 /// Pre-extracted DFA in the format used by equivalence analysis.
-/// The analysis passes only depend on this struct, not on live glrmask types.
+/// Transitions are stored contiguously in a flat table (`transitions[state * 256 + byte]`),
+/// separated from per-state metadata to enable zero-copy sharing across partitions via `Arc`.
 #[derive(Debug, Clone)]
 pub struct FlatDfa {
     pub states: Vec<FlatDfaState>,
     pub start_state: usize,
+    /// Flat transition table: `transitions[state * 256 + byte] = target_state`.
+    /// Shared via `Arc` to avoid 35MB duplication per partition.
+    pub transitions: Arc<[u32]>,
 }
 
 pub(crate) fn compute_byte_classes(dfa: &FlatDfa) -> [u8; 256] {
     // Hash each byte's transition column using row-major access for cache efficiency.
-    // This avoids allocating 256 Vec<u32> of N elements each (was ~35MB for N=34888).
     let mut column_hashes = [0u64; 256];
-    for state in &dfa.states {
-        for (b, &target) in state.transitions.iter().enumerate() {
+    let num_states = dfa.states.len();
+    for s in 0..num_states {
+        let base = s * 256;
+        for b in 0..256 {
             column_hashes[b] = column_hashes[b]
                 .wrapping_mul(0x517cc1b727220a95)
-                .wrapping_add(target as u64);
+                .wrapping_add(dfa.transitions[base + b] as u64);
         }
     }
 
@@ -63,20 +69,18 @@ pub(crate) fn compute_byte_classes(dfa: &FlatDfa) -> [u8; 256] {
         let h = column_hashes[curr as usize];
 
         if h != column_hashes[sorted_indices[i - 1] as usize] {
-            // Different hash → different class.
             next_class += 1;
             byte_to_class[curr as usize] = next_class;
         } else {
-            // Same hash → verify by comparing transition columns.
-            // Check all prior bytes with the same hash (handles rare collisions).
             let mut assigned = false;
             for j in (0..i).rev() {
                 let prev = sorted_indices[j];
                 if column_hashes[prev as usize] != h {
                     break;
                 }
-                let same = dfa.states.iter().all(|state| {
-                    state.transitions[curr as usize] == state.transitions[prev as usize]
+                let same = (0..num_states).all(|s| {
+                    let base = s * 256;
+                    dfa.transitions[base + curr as usize] == dfa.transitions[base + prev as usize]
                 });
                 if same {
                     byte_to_class[curr as usize] = byte_to_class[prev as usize];
@@ -95,23 +99,37 @@ pub(crate) fn compute_byte_classes(dfa: &FlatDfa) -> [u8; 256] {
 }
 
 impl FlatDfa {
+    /// Get the transition target for a given state and byte.
+    #[inline]
+    pub fn trans(&self, state: usize, byte: usize) -> u32 {
+        self.transitions[state * 256 + byte]
+    }
+
+    /// Get the 256-entry transition slice for a given state.
+    #[inline]
+    pub fn transitions_for(&self, state: usize) -> &[u32] {
+        let base = state * 256;
+        &self.transitions[base..base + 256]
+    }
     pub fn from_tokenizer(tokenizer: &Tokenizer) -> Self {
         let dfa = &tokenizer.dfa;
         let dfa_states = dfa.states();
         let start_state = tokenizer.start_state() as usize;
+        let num_states = dfa_states.len();
+        let mut transitions = vec![u32::MAX; num_states * 256];
         let states: Vec<FlatDfaState> = dfa_states
             .iter()
             .enumerate()
             .map(|(i, state)| {
-                let transitions = build_transition_table(
-                    state.transitions.iter().map(|(byte, &target)| (byte, target)),
-                );
+                let base = i * 256;
+                for (byte, &target) in state.transitions.iter() {
+                    transitions[base + byte as usize] = target;
+                }
                 let finalizers = collect_group_ids(state.finalizers.iter());
                 let possible_future_group_ids =
                     collect_group_ids(dfa.possible_future_group_ids(i as u32).iter());
 
                 FlatDfaState {
-                    transitions,
                     finalizers,
                     possible_future_group_ids,
                 }
@@ -121,23 +139,26 @@ impl FlatDfa {
         FlatDfa {
             states,
             start_state,
+            transitions: Arc::from(transitions),
         }
     }
 
     /// Build a FlatDfa filtering finalizers and futures to only active groups.
-    /// States that differ only by inactive-group data become equivalent.
     pub fn from_tokenizer_filtered(tokenizer: &Tokenizer, active_groups: &[bool]) -> Self {
         let dfa = &tokenizer.dfa;
         let dfa_states = dfa.states();
         let start_state = tokenizer.start_state() as usize;
         let num_groups = active_groups.len();
+        let num_states = dfa_states.len();
+        let mut transitions = vec![u32::MAX; num_states * 256];
         let states: Vec<FlatDfaState> = dfa_states
             .iter()
             .enumerate()
             .map(|(i, state)| {
-                let transitions = build_transition_table(
-                    state.transitions.iter().map(|(byte, &target)| (byte, target)),
-                );
+                let base = i * 256;
+                for (byte, &target) in state.transitions.iter() {
+                    transitions[base + byte as usize] = target;
+                }
                 let finalizers: Vec<usize> = state.finalizers.iter()
                     .filter(|&gid| gid < num_groups && active_groups[gid])
                     .collect();
@@ -148,7 +169,6 @@ impl FlatDfa {
                     .collect();
 
                 FlatDfaState {
-                    transitions,
                     finalizers,
                     possible_future_group_ids,
                 }
@@ -158,14 +178,14 @@ impl FlatDfa {
         FlatDfa {
             states,
             start_state,
+            transitions: Arc::from(transitions),
         }
     }
 
-    /// Build a FlatDfa using a pre-built flat transition table (state-major layout:
-    /// `flat_trans[state * 256 + byte] = target`), filtering finalizers/futures
-    /// to only active groups. Avoids re-iterating CharTransitions per state.
+    /// Build a FlatDfa using a pre-built flat transition table, sharing the
+    /// transition data via Arc. Only finalizers/futures are allocated per partition.
     pub fn from_flat_trans_filtered(
-        flat_trans: &[u32],
+        flat_trans: &Arc<[u32]>,
         tokenizer: &Tokenizer,
         active_groups: &[bool],
     ) -> Self {
@@ -177,9 +197,6 @@ impl FlatDfa {
             .iter()
             .enumerate()
             .map(|(i, state)| {
-                let base = i * 256;
-                let mut transitions = [u32::MAX; 256];
-                transitions.copy_from_slice(&flat_trans[base..base + 256]);
                 let finalizers: Vec<usize> = state.finalizers.iter()
                     .filter(|&gid| gid < num_groups && active_groups[gid])
                     .collect();
@@ -189,13 +206,12 @@ impl FlatDfa {
                     .filter(|&gid| gid < num_groups && active_groups[gid])
                     .collect();
                 FlatDfaState {
-                    transitions,
                     finalizers,
                     possible_future_group_ids,
                 }
             })
             .collect();
-        FlatDfa { states, start_state }
+        FlatDfa { states, start_state, transitions: Arc::clone(flat_trans) }
     }
 
     #[cfg(test)]
@@ -238,10 +254,10 @@ impl TokenizerView {
         }
     }
 
-    /// Build a filtered view using a pre-built flat transition table.
-    /// Avoids re-iterating CharTransitions — just copies from flat_trans.
+    /// Build a filtered view using a pre-built shared flat transition table.
+    /// Shares transition data via Arc — zero-copy per partition.
     pub fn new_filtered_from_flat_trans(
-        flat_trans: &[u32],
+        flat_trans: &Arc<[u32]>,
         tokenizer: &Tokenizer,
         active_groups: &[bool],
     ) -> Self {
@@ -277,7 +293,7 @@ impl TokenizerView {
             .collect();
 
         for (pos, &byte) in input.iter().enumerate() {
-            let next = dfa.states[current].transitions[byte as usize];
+            let next = dfa.trans(current, byte as usize);
             if next == u32::MAX {
                 return execution_result(&match_positions, None);
             }
@@ -295,14 +311,14 @@ impl TokenizerView {
 
         execution_result(
             &match_positions,
-            (!state_is_done(&dfa.states[current])).then_some(current),
+            (!state_is_done(dfa, current)).then_some(current),
         )
     }
 }
 
 #[cfg(test)]
-fn state_is_done(state: &FlatDfaState) -> bool {
-    state.transitions.iter().all(|&target| target == u32::MAX)
+fn state_is_done(dfa: &FlatDfa, state: usize) -> bool {
+    dfa.transitions_for(state).iter().all(|&target| target == u32::MAX)
 }
 
 #[cfg(test)]

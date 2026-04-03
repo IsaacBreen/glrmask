@@ -6,7 +6,7 @@
 
 use rayon::prelude::*;
 
-use super::super::compat::{FlatDfaState, TokenizerView};
+use super::super::compat::{FlatDfa, FlatDfaState, TokenizerView};
 
 fn debug_max_length_enabled() -> bool {
     std::env::var("GLRMASK_DEBUG_MAX_LENGTH")
@@ -52,11 +52,12 @@ fn hash_transition_labels(label_hashes: &[u64]) -> u64 {
     hash
 }
 
-fn build_state_shape(state: &FlatDfaState) -> (Vec<usize>, u64) {
+fn build_state_shape(dfa: &FlatDfa, state_idx: usize) -> (Vec<usize>, u64) {
     let mut targets: Vec<usize> = Vec::new();
     let mut label_hashes: Vec<u64> = Vec::new();
+    let trans = dfa.transitions_for(state_idx);
 
-    for (byte, &target) in state.transitions.iter().enumerate() {
+    for (byte, &target) in trans.iter().enumerate() {
         if target == u32::MAX {
             continue;
         }
@@ -207,12 +208,11 @@ fn find_state_equivalence_classes_kstep(
     }
 
     let dfa = tokenizer.dfa();
-    let state_shapes: Vec<(Vec<usize>, u64)> = dfa
-        .states
-        .par_iter()
-        .map(|state| {
-            let (targets, transition_label_hash) = build_state_shape(state);
-            (targets, mix_u64(hash_state_label(state) ^ transition_label_hash))
+    let state_shapes: Vec<(Vec<usize>, u64)> = (0..dfa.states.len())
+        .into_par_iter()
+        .map(|s| {
+            let (targets, transition_label_hash) = build_state_shape(dfa, s);
+            (targets, mix_u64(hash_state_label(&dfa.states[s]) ^ transition_label_hash))
         })
         .collect();
     let (outgoing_targets_vec, mut prev_hashes): (Vec<_>, Vec<_>) = state_shapes.into_iter().unzip();
@@ -227,10 +227,11 @@ fn find_state_equivalence_classes_kstep(
 /// This is used as a fast precheck: if all states have unique cheap hashes,
 /// the expensive `build_state_shape` + kstep iteration can be skipped entirely.
 #[inline]
-fn cheap_state_hash(state: &FlatDfaState) -> u64 {
-    let label = hash_state_label(state);
+fn cheap_state_hash(dfa: &FlatDfa, state_idx: usize) -> u64 {
+    let label = hash_state_label(&dfa.states[state_idx]);
     let mut transition_hash: u64 = 0;
-    for (byte, &target) in state.transitions.iter().enumerate() {
+    let trans = dfa.transitions_for(state_idx);
+    for (byte, &target) in trans.iter().enumerate() {
         if target != u32::MAX {
             transition_hash = transition_hash.wrapping_add(
                 mix_u64((byte as u64) ^ ((target as u64) << 16) ^ 0xD6E8_FD93_5E6C_A271),
@@ -269,11 +270,12 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
 /// This is used for pre-vocab state reduction: tokens in a given partition
 /// only contain a subset of bytes (e.g. alnum tokens use only a-z, A-Z, 0-9).
 /// States that differ only on transitions for irrelevant bytes can be merged.
-fn build_state_shape_restricted(state: &FlatDfaState, relevant_bytes: &[bool; 256]) -> (Vec<usize>, u64) {
+fn build_state_shape_restricted(dfa: &FlatDfa, state_idx: usize, relevant_bytes: &[bool; 256]) -> (Vec<usize>, u64) {
     let mut targets: Vec<usize> = Vec::new();
     let mut label_hashes: Vec<u64> = Vec::new();
+    let trans = dfa.transitions_for(state_idx);
 
-    for (byte, &target) in state.transitions.iter().enumerate() {
+    for (byte, &target) in trans.iter().enumerate() {
         if target == u32::MAX || !relevant_bytes[byte] {
             continue;
         }
@@ -298,14 +300,15 @@ fn build_state_shape_restricted(state: &FlatDfaState, relevant_bytes: &[bool; 25
 /// All bytes in a byte class have identical transitions from every state,
 /// so we only need to look up one representative byte per class.
 fn build_state_shape_by_class(
-    state: &FlatDfaState,
+    dfa: &FlatDfa,
+    state_idx: usize,
     active_classes: &[(u8, u64)],
 ) -> (Vec<usize>, u64) {
     let mut targets: Vec<usize> = Vec::new();
     let mut label_hashes: Vec<u64> = Vec::new();
 
     for &(rep_byte, class_hash) in active_classes {
-        let target = state.transitions[rep_byte as usize];
+        let target = dfa.trans(state_idx, rep_byte as usize);
         if target == u32::MAX {
             continue;
         }
@@ -374,16 +377,15 @@ fn find_state_equivalence_classes_kstep_restricted(
     let dfa = tokenizer.dfa();
     let num_relevant = relevant_bytes.iter().filter(|&&b| b).count();
     let active_classes = byte_to_class.map(|btc| precompute_active_classes(btc, relevant_bytes));
-    let state_shapes: Vec<(Vec<usize>, u64)> = dfa
-        .states
-        .par_iter()
-        .map(|state| {
+    let state_shapes: Vec<(Vec<usize>, u64)> = (0..dfa.states.len())
+        .into_par_iter()
+        .map(|s| {
             let (targets, transition_label_hash) = if let Some(ref classes) = active_classes {
-                build_state_shape_by_class(state, classes)
+                build_state_shape_by_class(dfa, s, classes)
             } else {
-                build_state_shape_restricted(state, relevant_bytes)
+                build_state_shape_restricted(dfa, s, relevant_bytes)
             };
-            (targets, mix_u64(hash_state_label(state) ^ transition_label_hash))
+            (targets, mix_u64(hash_state_label(&dfa.states[s]) ^ transition_label_hash))
         })
         .collect();
     let (outgoing_targets_vec, mut prev_hashes): (Vec<_>, Vec<_>) = state_shapes.into_iter().unzip();

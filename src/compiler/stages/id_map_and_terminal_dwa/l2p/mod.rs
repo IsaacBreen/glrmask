@@ -69,7 +69,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     active_terminals: &[bool],
     disallowed_follows: &BTreeMap<u32, BitSet>,
     shared_vocab_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
-    flat_trans: Option<&[u32]>,
+    flat_trans: Option<&std::sync::Arc<[u32]>>,
 ) -> Option<LocalIdMapTerminalDwa> {
     if vocab.is_empty() {
         return None;

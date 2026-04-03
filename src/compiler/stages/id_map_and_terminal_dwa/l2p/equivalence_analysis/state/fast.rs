@@ -128,7 +128,7 @@ fn build_strided_batches(total_tokens: usize, target_batch_size: usize) -> Vec<V
 fn build_start_state_suffix_hashes(
     token: &[u8],
     tokenizer_start: usize,
-    dfa_transitions: &[[u32; 256]],
+    dfa_transitions: &[u32],
     dfa_finalizers: &[Vec<usize>],
     dfa_future_groups: &[Vec<usize>],
     future_group_hashes: &[u128],
@@ -149,7 +149,7 @@ fn build_start_state_suffix_hashes(
             if done {
                 break;
             }
-            let next = dfa_transitions[current][byte as usize];
+            let next = dfa_transitions[current * 256 + byte as usize];
             if next == u32::MAX {
                 done = true;
                 break;
@@ -244,17 +244,8 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     let dfa = tokenizer.dfa();
 
     const NONE_STATE: u32 = u32::MAX;
-    let dfa_transitions: Vec<[u32; 256]> = dfa
-        .states
-        .iter()
-        .map(|state| {
-            let mut table = [NONE_STATE; 256];
-            for (byte_idx, &target) in state.transitions.iter().enumerate() {
-                table[byte_idx] = target;
-            }
-            table
-        })
-        .collect();
+    // Use transitions directly from FlatDfa (shared via Arc, no redundant copy).
+    let dfa_transitions: &[u32] = &dfa.transitions;
 
     let dfa_finalizers: Vec<Vec<usize>> = dfa
         .states
@@ -297,7 +288,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
             build_start_state_suffix_hashes(
                 token,
                 tokenizer_start,
-                &dfa_transitions,
+                dfa_transitions,
                 &dfa_finalizers,
                 &dfa_future_groups,
                 &future_group_hashes,
@@ -407,7 +398,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                 |scratch, &state_idx| {
                     let state = states[state_idx] as u32;
                     let mut hash_delta: u128 = 0;
-                    let state_transitions = &dfa_transitions[state as usize];
+                    let state_trans_base = (state as usize) * 256;
 
                     let mut live_ranges: Vec<(usize, usize)> = Vec::new();
 
@@ -421,7 +412,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                             continue;
                         }
 
-                        if state_transitions[byte] == NONE_STATE {
+                        if dfa_transitions[state_trans_base + byte] == NONE_STATE {
                             let weight_sum =
                                 batch_weight_prefix[range_end].wrapping_sub(batch_weight_prefix[range_start]);
                             hash_delta = hash_delta
@@ -502,7 +493,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                                         dead_at_depth = Some(prefix_len + offset);
                                         break;
                                     }
-                                    let next = dfa_transitions[current as usize][byte as usize];
+                                    let next = dfa_transitions[current as usize * 256 + byte as usize];
                                     if next == NONE_STATE {
                                         dead_at_depth = Some(prefix_len + offset + 1);
                                         walk_frames.push(WalkFrame {

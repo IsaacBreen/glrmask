@@ -152,9 +152,9 @@ fn build_dfa(tokenizer: &TokenizerView, disallowed_follows: &BTreeMap<u32, BitSe
     let mut possible_future_groups = Vec::with_capacity(dfa.states.len());
     let mut completion_hash = Vec::with_capacity(dfa.states.len());
 
-    for state in &dfa.states {
+    for (s, state) in dfa.states.iter().enumerate() {
         let mut table = [NONE; 256];
-        for (byte_idx, &target) in state.transitions.iter().enumerate() {
+        for (byte_idx, &target) in dfa.transitions_for(s).iter().enumerate() {
             table[byte_idx] = target;
         }
         transitions.push(table);
