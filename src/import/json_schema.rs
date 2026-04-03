@@ -60,6 +60,8 @@ const JSON_DIRECT_UTF8_PATTERN: &str =
     r#"(?:[\xC2-\xDF][\x80-\xBF]|[\xE0][\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC][\x80-\xBF][\x80-\xBF]|[\xED][\x80-\x9F][\x80-\xBF]|[\xEE-\xEF][\x80-\xBF][\x80-\xBF]|[\xF0][\x90-\xBF][\x80-\xBF][\x80-\xBF]|[\xF1-\xF3][\x80-\xBF][\x80-\xBF][\x80-\xBF]|[\xF4][\x80-\x8F][\x80-\xBF][\x80-\xBF])"#;
 const JSON_ITEM_SEPARATOR: &[u8] = b", ";
 const JSON_KEY_SEPARATOR: &[u8] = b": ";
+const CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_ALTS: usize = 128;
+const CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_TOTAL_BYTES: usize = 64 * 1024;
 const UNTYPED_OBJECT_KEYWORD_KEYS: &[&str] = &[
     "properties",
     "required",
@@ -307,6 +309,107 @@ fn type_allows_value(type_name: &str, value: &Value) -> bool {
 
 fn empty_expr() -> GrammarExpr {
     GrammarExpr::Sequence(Vec::new())
+}
+
+fn dedup_literal_alternatives(mut alts: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    if alts.len() > 1 {
+        alts.sort();
+        alts.dedup();
+    }
+    alts
+}
+
+fn finite_literal_alternatives(
+    expr: &GrammarExpr,
+    max_alts: usize,
+) -> Option<Vec<Vec<u8>>> {
+    let alts = match expr {
+        GrammarExpr::Literal(bytes) => vec![bytes.clone()],
+        GrammarExpr::Sequence(parts) => {
+            let mut acc = vec![Vec::new()];
+            for part in parts {
+                let part_alts = finite_literal_alternatives(part, max_alts)?;
+                let max_product = acc.len().checked_mul(part_alts.len())?;
+                if max_product > max_alts {
+                    return None;
+                }
+
+                let mut next = Vec::with_capacity(max_product);
+                for prefix in &acc {
+                    for suffix in &part_alts {
+                        let mut bytes = Vec::with_capacity(prefix.len() + suffix.len());
+                        bytes.extend_from_slice(prefix);
+                        bytes.extend_from_slice(suffix);
+                        next.push(bytes);
+                    }
+                }
+                acc = dedup_literal_alternatives(next);
+                if acc.len() > max_alts {
+                    return None;
+                }
+            }
+            acc
+        }
+        GrammarExpr::Choice(options) => {
+            let mut out = Vec::new();
+            for option in options {
+                out.extend(finite_literal_alternatives(option, max_alts)?);
+                out = dedup_literal_alternatives(out);
+                if out.len() > max_alts {
+                    return None;
+                }
+            }
+            out
+        }
+        GrammarExpr::Optional(inner) => {
+            let mut out = vec![Vec::new()];
+            out.extend(finite_literal_alternatives(inner, max_alts)?);
+            dedup_literal_alternatives(out)
+        }
+        GrammarExpr::Ref(_)
+        | GrammarExpr::TerminalExpr(_)
+        | GrammarExpr::Exclude { .. }
+        | GrammarExpr::Repeat(_)
+        | GrammarExpr::RepeatOne(_)
+        | GrammarExpr::RepeatRange { .. }
+        | GrammarExpr::CharClass { .. }
+        | GrammarExpr::RawRegex(_)
+        | GrammarExpr::AnyByte => return None,
+    };
+
+    let total_bytes = alts.iter().map(Vec::len).sum::<usize>();
+    if alts.len() > max_alts || total_bytes > CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_TOTAL_BYTES {
+        return None;
+    }
+
+    Some(alts)
+}
+
+fn maybe_fuse_finite_literal_expr(expr: GrammarExpr, context: &str) -> GrammarExpr {
+    let Some(alts) = finite_literal_alternatives(&expr, CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_ALTS) else {
+        return expr;
+    };
+    if alts.len() < 2 {
+        return expr;
+    }
+
+    if std::env::var("GLRMASK_PROFILE_OBJECT_FUSION").is_ok() {
+        let total_bytes = alts.iter().map(Vec::len).sum::<usize>();
+        let max_bytes = alts.iter().map(Vec::len).max().unwrap_or(0);
+        eprintln!(
+            "[glrmask/profile][object_fusion] context={} alts={} total_bytes={} max_bytes={}",
+            context,
+            alts.len(),
+            total_bytes,
+            max_bytes,
+        );
+    }
+
+    choice_or_single(
+        alts.into_iter()
+            .map(GrammarExpr::Literal)
+            .collect(),
+    )
 }
 
 fn json_format_pattern(format_name: &str) -> Option<&'static str> {
@@ -4464,7 +4567,10 @@ impl<'a> SchemaCtx<'a> {
         &self,
         ordered: &[(String, GrammarExpr, bool)],
     ) -> GrammarExpr {
-        self.build_required_ordered_object_body_expr(ordered, Some(b"}"))
+        maybe_fuse_finite_literal_expr(
+            self.build_required_ordered_object_body_expr(ordered, Some(b"}")),
+            &format!("closed_required_ordered_object:items={}", ordered.len()),
+        )
     }
 
     fn json_item_separator_expr(&self) -> GrammarExpr {
@@ -5721,6 +5827,15 @@ impl<'a> SchemaCtx<'a> {
             return Ok(self.build_closed_required_ordered_object_expr(&ordered));
         }
 
+        if !ordered.is_empty() && ordered.iter().all(|(_, _, required)| *required) {
+            let prefix = self.build_required_ordered_object_body_expr(&ordered, None);
+            return Ok(sequence_or_single(vec![
+                prefix,
+                GrammarExpr::Ref(free_c.clone()),
+                literal_expr(b"}"),
+            ]));
+        }
+
         if ordered.is_empty() {
             return Ok(sequence_or_single(vec![
                 literal_expr(b"{"),
@@ -5732,23 +5847,25 @@ impl<'a> SchemaCtx<'a> {
         let mut next_tree_rule_index = 0usize;
         let (tree_expr, tree_can_be_empty) =
             self.build_object_tree(&base_name, &ordered, &mut next_tree_rule_index)?;
-
-        let top_nc = format!("{base_name}_0_nc");
-        let top_expr = if tree_can_be_empty {
-            choice_or_single(vec![
-                sequence_or_single(vec![tree_expr, GrammarExpr::Ref(free_c.clone())]),
-                GrammarExpr::Ref(free_nc.clone()),
-            ])
-        } else {
-            sequence_or_single(vec![tree_expr, GrammarExpr::Ref(free_c.clone())])
-        };
-        self.insert_rule(top_nc.clone(), top_expr);
-
-        Ok(sequence_or_single(vec![
-            literal_expr(b"{"),
-            GrammarExpr::Ref(top_nc),
+        let tree_prefix = sequence_or_single(vec![literal_expr(b"{"), tree_expr]);
+        let with_tree_prefix = sequence_or_single(vec![
+            tree_prefix,
+            GrammarExpr::Ref(free_c.clone()),
             literal_expr(b"}"),
-        ]))
+        ]);
+
+        if tree_can_be_empty {
+            return Ok(choice_or_single(vec![
+                with_tree_prefix,
+                sequence_or_single(vec![
+                    literal_expr(b"{"),
+                    GrammarExpr::Ref(free_nc),
+                    literal_expr(b"}"),
+                ]),
+            ]));
+        }
+
+        Ok(with_tree_prefix)
     }
 
     fn build_object_tree(
@@ -7006,8 +7123,10 @@ mod tests {
         }"#;
         let grammar = schema_to_named_grammar(&serde_json::from_str(schema).unwrap()).unwrap();
 
-        assert!(named_grammar_has_literal(&grammar, b"{"));
-        assert!(named_grammar_has_literal_prefix(&grammar, b", \""));
+        assert!(named_grammar_has_literal(
+            &grammar,
+            b"{\"status\": \"ok\", \"kind\": \"A\"}"
+        ));
         assert!(accepts_sequence(schema, &[b"{\"status\": \"ok\", \"kind\": \"A\"}"]));
     }
 
@@ -7031,11 +7150,29 @@ mod tests {
         }"#;
         let grammar = schema_to_named_grammar(&serde_json::from_str(schema).unwrap()).unwrap();
 
-        assert!(named_grammar_has_literal(&grammar, b": {"));
-        assert!(named_grammar_has_literal(&grammar, b"}}"));
+        assert!(named_grammar_has_literal(
+            &grammar,
+            b"{\"user\": {\"role\": \"admin\", \"tier\": \"pro\"}}"
+        ));
         assert!(accepts_sequence(
             schema,
             &[b"{\"user\": {\"role\": \"admin\", \"tier\": \"pro\"}}"],
+        ));
+    }
+
+    #[test]
+    fn test_required_open_object_still_accepts_finite_required_prefix() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "status": {"enum": ["ok", "fail"]},
+                "kind": {"enum": ["A", "B"]}
+            },
+            "required": ["status", "kind"]
+        }"#;
+        assert!(accepts_sequence(
+            schema,
+            &[b"{\"status\": \"ok\", \"kind\": \"A\", \"extra\": 1}"],
         ));
     }
 
