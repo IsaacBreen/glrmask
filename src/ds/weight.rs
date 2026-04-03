@@ -6,6 +6,7 @@ use rustc_hash::FxHashMap;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 #[derive(Debug, Clone)]
@@ -288,10 +289,16 @@ struct WeightOpMemoEntry {
     right_operand: Weak<WeightMap>,
 }
 
+/// Global generation counter. Incremented by `clear_weight_op_caches()` so
+/// that every thread's thread-local memo detects the invalidation on next access.
+static WEIGHT_OP_MEMO_GENERATION: AtomicU64 = AtomicU64::new(0);
+
 #[derive(Default)]
 struct WeightOpMemo {
     results: FxHashMap<WeightOpKey, WeightOpMemoEntry>,
     inserts_since_cleanup: usize,
+    /// The generation this memo was last synchronised with.
+    generation: u64,
 }
 
 impl WeightOpMemo {
@@ -339,6 +346,11 @@ thread_local! {
 fn with_weight_op_memo<R>(f: impl FnOnce(&mut WeightOpMemo) -> R) -> R {
     WEIGHT_OP_MEMO.with(|memo| {
         let mut memo = memo.borrow_mut();
+        let current_gen = WEIGHT_OP_MEMO_GENERATION.load(Ordering::Acquire);
+        if memo.generation != current_gen {
+            memo.clear_all();
+            memo.generation = current_gen;
+        }
         f(&mut memo)
     })
 }
@@ -353,9 +365,12 @@ pub fn clear_stale_weights() {
     with_interner(|interner| interner.clear_stale());
 }
 
-/// Clear the current thread's weight-operation memo caches.
+/// Clear weight-operation memo caches on **all** threads.
+///
+/// Increments the global generation counter so that every thread's
+/// thread-local memo is lazily cleared on its next access.
 pub fn clear_weight_op_caches() {
-    with_weight_op_memo(|memo| memo.clear_all());
+    WEIGHT_OP_MEMO_GENERATION.fetch_add(1, Ordering::Release);
 }
 
 /// Compatibility wrapper retaining the previous behavior.
@@ -1674,8 +1689,8 @@ mod tests {
         let live_right = Weight::from_compact_ranges(vec![(0..=0, vec![4..=4])]);
         let lookup_key = WeightOpKey::new(WeightOpKind::Union, live_left.ptr_key(), live_right.ptr_key());
 
-        WEIGHT_OP_MEMO.with(|memo| {
-            let mut memo = memo.borrow_mut();
+        // Sync the thread-local generation before direct insertion.
+        with_weight_op_memo(|memo| {
             memo.results.insert(
                 lookup_key,
                 WeightOpMemoEntry {
@@ -1688,8 +1703,8 @@ mod tests {
 
         assert!(lookup_memoized_weight_op(WeightOpKind::Union, &live_left, &live_right).is_none());
 
-        WEIGHT_OP_MEMO.with(|memo| {
-            assert!(!memo.borrow().results.contains_key(&lookup_key));
+        with_weight_op_memo(|memo| {
+            assert!(!memo.results.contains_key(&lookup_key));
         });
     }
 
@@ -1757,14 +1772,15 @@ mod tests {
         let right = Weight::from_compact_ranges(vec![(0..=0, vec![2..=2])]);
         let _ = left.union(&right);
 
-        WEIGHT_OP_MEMO.with(|memo| {
-            assert!(!memo.borrow().results.is_empty());
+        with_weight_op_memo(|memo| {
+            assert!(!memo.results.is_empty());
         });
 
         clear_weight_op_caches();
 
-        WEIGHT_OP_MEMO.with(|memo| {
-            assert!(memo.borrow().results.is_empty());
+        // After clear, next access should find empty memo (lazy invalidation).
+        with_weight_op_memo(|memo| {
+            assert!(memo.results.is_empty());
         });
     }
 
