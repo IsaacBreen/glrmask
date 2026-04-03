@@ -153,6 +153,7 @@ pub(crate) struct PossibleMatchesComputer<'a> {
     cache: FxHashMap<(usize, u32), Rc<PossibleMatchMap>>,
     reachable_cache: FxHashMap<usize, Rc<RangeSetBlaze<u32>>>,
     self_loop_bytes: FxHashMap<u32, U8Set>,
+    flat_transitions: Vec<Option<Box<[u32; 256]>>>,
     summary_profile_enabled: bool,
     profile: PossibleMatchesProfile,
 }
@@ -165,6 +166,7 @@ impl<'a> PossibleMatchesComputer<'a> {
             cache: FxHashMap::default(),
             reachable_cache: FxHashMap::default(),
             self_loop_bytes: FxHashMap::default(),
+            flat_transitions: vec![None; tokenizer.num_states() as usize],
             summary_profile_enabled: profile_summary_enabled(),
             profile: PossibleMatchesProfile::default(),
         }
@@ -177,6 +179,7 @@ impl<'a> PossibleMatchesComputer<'a> {
             cache: FxHashMap::default(),
             reachable_cache: FxHashMap::default(),
             self_loop_bytes: FxHashMap::default(),
+            flat_transitions: vec![None; tokenizer.num_states() as usize],
             summary_profile_enabled: profile_summary_enabled(),
             profile: PossibleMatchesProfile::default(),
         }
@@ -196,6 +199,21 @@ impl<'a> PossibleMatchesComputer<'a> {
             Some(active) => active.get(terminal as usize).copied().unwrap_or(false),
             None => true,
         }
+    }
+
+    #[inline]
+    fn fast_step(&mut self, state: u32, byte: u8) -> Option<u32> {
+        let state_idx = state as usize;
+        if self.flat_transitions[state_idx].is_none() {
+            let dfa_state = &self.tokenizer.dfa.states()[state_idx];
+            let mut flat = Box::new([u32::MAX; 256]);
+            for (b, &target) in dfa_state.transitions.iter() {
+                flat[b as usize] = target;
+            }
+            self.flat_transitions[state_idx] = Some(flat);
+        }
+        let next = self.flat_transitions[state_idx].as_ref().unwrap()[byte as usize];
+        if next == u32::MAX { None } else { Some(next) }
     }
 
     fn reachable_for_node(&mut self, node: &VocabPrefixTreeNode) -> Rc<RangeSetBlaze<u32>> {
@@ -282,7 +300,7 @@ impl<'a> PossibleMatchesComputer<'a> {
             let segment_walk_started_at = self.summary_profile_enabled.then(Instant::now);
             for &byte in segment_bytes {
                 self.profile.byte_steps += 1;
-                let Some(next_state) = self.tokenizer.step(current_state, byte) else {
+                let Some(next_state) = self.fast_step(current_state, byte) else {
                     segment_blocked = true;
                     break;
                 };
