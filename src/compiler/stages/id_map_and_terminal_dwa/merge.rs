@@ -230,7 +230,11 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     let minimize_started_at = Instant::now();
     let mut dwa = if label == "global" {
         let first = minimize_with_threshold(&det, 50);
-        minimize(&first)
+        if first.states.len() <= 20 {
+            first
+        } else {
+            minimize(&first)
+        }
     } else {
         minimize(&det)
     };
