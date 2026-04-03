@@ -721,7 +721,10 @@ fn compile_prepared_with_profile(
                     .iter()
                     .map(|(&id, bytes)| (id as usize, bytes.clone()))
                     .collect();
+                let trie_build_started_at = Instant::now();
                 let trie = crate::ds::vocab_prefix_tree::VocabPrefixTree::build_owned(token_entries);
+                let trie_build_ms = elapsed_ms(trie_build_started_at);
+                let collect_started_at = Instant::now();
                 let mut computer = crate::compiler::possible_matches::PossibleMatchesComputer::new(&tokenizer);
                 let pm_by_tsid = crate::compiler::possible_matches::collect_possible_matches_by_internal_tsid(
                     &tokenizer,
@@ -729,12 +732,21 @@ fn compile_prepared_with_profile(
                     &mut computer,
                     &internal_ids.tokenizer_states,
                 );
+                let collect_ms = elapsed_ms(collect_started_at);
+                crate::compiler::possible_matches::emit_possible_matches_profile_summary(
+                    "internal_tsid",
+                    internal_token_bytes.len(),
+                    internal_ids.tokenizer_states.num_internal_ids(),
+                    trie_build_ms,
+                    collect_ms,
+                    &computer.profile(),
+                );
                 (pm_by_tsid, elapsed_ms(pm_started_at))
             },
         );
+        profile.parser_dwa_ms = parser_dwa_ms;
         profile.permute_possible_matches_ms = permute_possible_matches_ms;
         profile.internal_token_bytes_ms = internal_token_bytes_ms;
-        profile.parser_dwa_ms = parser_dwa_ms;
 
         let finalize_started_at = Instant::now();
         let constraint = finalize_constraint(Constraint {
