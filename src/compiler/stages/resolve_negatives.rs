@@ -115,10 +115,10 @@ fn intersect_or_clone_right_if_subset(left: &Weight, right: &Weight) -> Weight {
     }
 }
 
-#[derive(Clone)]
-struct PredEdge {
+#[derive(Clone, Copy)]
+struct PredEdge<'a> {
     from: usize,
-    weight: Weight,
+    weight: &'a Weight,
 }
 
 pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
@@ -234,15 +234,21 @@ fn extend_derived_epsilons(
     }
     let derived_weight = derived_weight.clone();
 
-    let Some(existing_queries) = query_weights[source_state as usize].clone() else {
+    let Some(existing_queries) = query_weights[source_state as usize].as_ref() else {
         return;
     };
 
+    let mut propagated_updates = Vec::with_capacity(existing_queries.len());
+
     for ((upstream_source_state, upstream_label), upstream_weight) in existing_queries {
-        let propagated = intersect_or_clone_right_if_subset(&upstream_weight, &derived_weight);
+        let propagated = intersect_or_clone_right_if_subset(upstream_weight, &derived_weight);
         if propagated.is_empty() {
             continue;
         }
+        propagated_updates.push((*upstream_source_state, *upstream_label, propagated));
+    }
+
+    for (upstream_source_state, upstream_label, propagated) in propagated_updates {
         queue_query_weight(
             query_weights,
             worklist,
@@ -293,10 +299,7 @@ pub(crate) fn compute_cancellations_range(
             continue;
         }
 
-        for (&label, targets) in &nwa.states[source_state as usize].transitions {
-            if !is_negative_label(label) {
-                continue;
-            }
+        for (&label, targets) in nwa.states[source_state as usize].transitions.range(..0) {
             let positive_label = negative_to_positive_label(label);
 
             for (target_state, weight) in targets {
@@ -468,26 +471,46 @@ fn for_each_live_finality_edge(
     }
 }
 
-fn build_finality_preds_and_outdegree(nwa: &NWA) -> (Vec<Vec<PredEdge>>, Vec<usize>) {
+fn build_finality_preds_and_outdegree<'a>(nwa: &'a NWA) -> (Vec<Vec<PredEdge<'a>>>, Vec<usize>) {
     let state_count = nwa.states.len();
-    let mut preds = vec![Vec::<PredEdge>::new(); state_count];
+    let mut preds = vec![Vec::<PredEdge<'a>>::new(); state_count];
     let mut outdegree = vec![0usize; state_count];
 
     for (from_state, state) in nwa.states.iter().enumerate() {
-        for_each_live_finality_edge(state, state_count, |target_state, weight| {
-            preds[target_state].push(PredEdge {
+        for (target_state, weight) in &state.epsilons {
+            if !is_live_finality_edge(*target_state, weight, state_count) {
+                continue;
+            }
+            preds[*target_state as usize].push(PredEdge {
                 from: from_state,
-                weight: weight.clone(),
+                weight,
             });
             outdegree[from_state] += 1;
-        });
+        }
+
+        for (&label, targets) in &state.transitions {
+            if label != DEFAULT_LABEL && !is_negative_label(label) {
+                continue;
+            }
+
+            for (target_state, weight) in targets {
+                if !is_live_finality_edge(*target_state, weight, state_count) {
+                    continue;
+                }
+                preds[*target_state as usize].push(PredEdge {
+                    from: from_state,
+                    weight,
+                });
+                outdegree[from_state] += 1;
+            }
+        }
     }
 
     (preds, outdegree)
 }
 
 fn build_finality_reverse_topo_order(
-    preds: &[Vec<PredEdge>],
+    preds: &[Vec<PredEdge<'_>>],
     mut outdegree: Vec<usize>,
 ) -> Option<Vec<usize>> {
     let state_count = preds.len();
@@ -527,7 +550,7 @@ fn write_final_weights(nwa: &mut NWA, reachable_final_weights: Vec<Option<Weight
 }
 
 fn propagate_final_weights_to_predecessors(
-    preds: &[Vec<PredEdge>],
+    preds: &[Vec<PredEdge<'_>>],
     reachable_final_weights: &mut [Option<Weight>],
     state_id: usize,
     mut on_change: impl FnMut(usize),
@@ -546,7 +569,7 @@ fn propagate_final_weights_to_predecessors(
 
 fn apply_finality_fixpoint_worklist(
     nwa: &NWA,
-    preds: &[Vec<PredEdge>],
+    preds: &[Vec<PredEdge<'_>>],
     reachable_final_weights: &mut [Option<Weight>],
 ) {
     let n = nwa.states.len();
@@ -579,7 +602,7 @@ fn apply_finality_fixpoint_worklist(
 }
 
 fn apply_finality_fixpoint_acyclic(
-    preds: &[Vec<PredEdge>],
+    preds: &[Vec<PredEdge<'_>>],
     reachable_final_weights: &mut [Option<Weight>],
     reverse_topo_order: &[usize],
 ) {
@@ -929,7 +952,7 @@ mod tests {
             return;
         }
 
-        let mut preds = vec![Vec::<PredEdge>::new(); n];
+        let mut preds = vec![Vec::<PredEdge<'_>>::new(); n];
         for (from, state) in nwa.states.iter().enumerate() {
             for (target, weight) in &state.epsilons {
                 if *target as usize >= n || weight.is_empty() {
@@ -937,7 +960,7 @@ mod tests {
                 }
                 preds[*target as usize].push(PredEdge {
                     from,
-                    weight: weight.clone(),
+                    weight,
                 });
             }
             for (&label, targets) in &state.transitions {
@@ -950,7 +973,7 @@ mod tests {
                     }
                     preds[*target as usize].push(PredEdge {
                         from,
-                        weight: weight.clone(),
+                        weight,
                     });
                 }
             }
