@@ -323,44 +323,94 @@ fn parser_state_label(label: i32, num_parser_states: u32) -> Option<u32> {
     }
 }
 
+enum PossibleOutgoingIds {
+    Empty,
+    All,
+    Some(BitSet),
+}
+
 fn build_possible_outgoing_ids_by_state(
     parser_nwa: &NWA,
     state_supports: &[Vec<u32>],
     num_parser_states: u32,
-) -> Vec<BitSet> {
+) -> Vec<PossibleOutgoingIds> {
+    enum OutgoingIds {
+        Empty,
+        All,
+        Some(Vec<u32>),
+    }
+
     let num_parser_states = num_parser_states as usize;
     let all_parser_states = BitSet::all(num_parser_states);
-    let state_outgoing_ids: Vec<BitSet> = parser_nwa
+    let state_outgoing_ids: Vec<OutgoingIds> = parser_nwa
         .states
         .iter()
         .map(|state| {
-            let mut ids = BitSet::new(num_parser_states);
+            let mut ids = Vec::new();
             for &label in state.transitions.keys() {
                 if label == DEFAULT_LABEL {
-                    return all_parser_states.clone();
+                    return OutgoingIds::All;
                 }
                 if let Some(parser_state_id) = parser_state_label(label, num_parser_states as u32) {
-                    ids.set(parser_state_id as usize);
+                    ids.push(parser_state_id);
                 }
             }
-            ids
+            if ids.is_empty() {
+                OutgoingIds::Empty
+            } else {
+                OutgoingIds::Some(ids)
+            }
         })
         .collect();
 
     state_supports
         .iter()
         .map(|support| {
+            if support.len() == 1 {
+                let state_id = support[0] as usize;
+                return match state_outgoing_ids.get(state_id) {
+                    Some(OutgoingIds::Empty) => PossibleOutgoingIds::Empty,
+                    Some(OutgoingIds::All) => PossibleOutgoingIds::All,
+                    Some(OutgoingIds::Some(ids)) => {
+                        let mut bitset = BitSet::new(num_parser_states);
+                        for &parser_state_id in ids {
+                            bitset.set(parser_state_id as usize);
+                        }
+                        if bitset == all_parser_states {
+                            PossibleOutgoingIds::All
+                        } else {
+                            PossibleOutgoingIds::Some(bitset)
+                        }
+                    }
+                    None => PossibleOutgoingIds::Empty,
+                };
+            }
+
             let mut ids = BitSet::new(num_parser_states);
             for &state_id in support {
                 let Some(state_ids) = state_outgoing_ids.get(state_id as usize) else {
                     continue;
                 };
-                ids.union_with(state_ids);
-                if ids == all_parser_states {
-                    break;
+                match state_ids {
+                    OutgoingIds::Empty => {}
+                    OutgoingIds::All => return PossibleOutgoingIds::All,
+                    OutgoingIds::Some(state_ids) => {
+                        for &parser_state_id in state_ids {
+                            ids.set(parser_state_id as usize);
+                        }
+                        if ids == all_parser_states {
+                            break;
+                        }
+                    }
                 }
             }
-            ids
+            if ids.is_empty() {
+                PossibleOutgoingIds::Empty
+            } else if ids == all_parser_states {
+                PossibleOutgoingIds::All
+            } else {
+                PossibleOutgoingIds::Some(ids)
+            }
         })
         .collect()
 }
@@ -532,14 +582,19 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
 
 fn optimize_parser_dwa_defaults(
     dwa: &mut DWA,
-    possible_by_state: &[BitSet],
+    possible_by_state: &[PossibleOutgoingIds],
     num_parser_states: u32,
 ) {
     loop {
         let mut changed = false;
 
         for (state_id, possible_ids) in possible_by_state.iter().enumerate() {
-            if possible_ids.is_empty() || possible_ids.count_ones() < 2 {
+            let possible_count = match possible_ids {
+                PossibleOutgoingIds::Empty => 0,
+                PossibleOutgoingIds::All => num_parser_states as usize,
+                PossibleOutgoingIds::Some(ids) => ids.count_ones(),
+            };
+            if possible_count < 2 {
                 continue;
             }
 
@@ -551,32 +606,68 @@ fn optimize_parser_dwa_defaults(
                     actual_positive.set(ps as usize);
                 }
             }
-            if actual_positive != *possible_ids {
-                continue;
+            match possible_ids {
+                PossibleOutgoingIds::Empty => continue,
+                PossibleOutgoingIds::All => {
+                    if actual_positive.count_ones() != num_parser_states as usize {
+                        continue;
+                    }
+                }
+                PossibleOutgoingIds::Some(ids) => {
+                    if actual_positive != *ids {
+                        continue;
+                    }
+                }
             }
 
             let mut shared_target: Option<u32> = None;
             let mut default_weight: Option<Weight> = None;
             let mut valid = true;
 
-            for ps in possible_ids.iter_ones() {
-                let label = ps as i32;
-                let Some((target, weight)) = state.transitions.get(&label) else {
-                    valid = false;
-                    break;
-                };
-                match shared_target {
-                    Some(existing) if existing != *target => {
-                        valid = false;
-                        break;
+            match possible_ids {
+                PossibleOutgoingIds::Empty => continue,
+                PossibleOutgoingIds::All => {
+                    for ps in 0..num_parser_states {
+                        let label = ps as i32;
+                        let Some((target, weight)) = state.transitions.get(&label) else {
+                            valid = false;
+                            break;
+                        };
+                        match shared_target {
+                            Some(existing) if existing != *target => {
+                                valid = false;
+                                break;
+                            }
+                            None => shared_target = Some(*target),
+                            _ => {}
+                        }
+                        default_weight = Some(match default_weight {
+                            Some(existing) => existing.intersection(weight),
+                            None => weight.clone(),
+                        });
                     }
-                    None => shared_target = Some(*target),
-                    _ => {}
                 }
-                default_weight = Some(match default_weight {
-                    Some(existing) => existing.intersection(weight),
-                    None => weight.clone(),
-                });
+                PossibleOutgoingIds::Some(ids) => {
+                    for ps in ids.iter_ones() {
+                        let label = ps as i32;
+                        let Some((target, weight)) = state.transitions.get(&label) else {
+                            valid = false;
+                            break;
+                        };
+                        match shared_target {
+                            Some(existing) if existing != *target => {
+                                valid = false;
+                                break;
+                            }
+                            None => shared_target = Some(*target),
+                            _ => {}
+                        }
+                        default_weight = Some(match default_weight {
+                            Some(existing) => existing.intersection(weight),
+                            None => weight.clone(),
+                        });
+                    }
+                }
             }
 
             let Some(target) = shared_target else { continue };
@@ -726,17 +817,13 @@ fn dwa_to_nwa(dwa: &DWA) -> NWA {
 
 fn optimize_parser_default_transitions(
     nwa: &mut NWA,
-    possible_by_state: &[BitSet],
+    possible_by_state: &[PossibleOutgoingIds],
     num_parser_states: u32,
 ) -> bool {
     fn subtract_weight_from_outgoing(
         state: &mut crate::automata::weighted::nwa::NWAState,
         weight_to_subtract: &Weight,
     ) -> bool {
-        if weight_to_subtract.is_empty() {
-            return false;
-        }
-
         let mut changed = false;
         for (_, edge_weight) in &mut state.epsilons {
             let new_weight = edge_weight.difference(weight_to_subtract);
@@ -766,10 +853,12 @@ fn optimize_parser_default_transitions(
         let mut changed = false;
 
         for (state_id, possible_ids) in possible_by_state.iter().enumerate() {
-            if possible_ids.is_empty() {
-                continue;
-            }
-            if possible_ids.count_ones() < 2 {
+            let possible_count = match possible_ids {
+                PossibleOutgoingIds::Empty => 0,
+                PossibleOutgoingIds::All => num_parser_states as usize,
+                PossibleOutgoingIds::Some(ids) => ids.count_ones(),
+            };
+            if possible_count < 2 {
                 continue;
             }
 
@@ -779,38 +868,80 @@ fn optimize_parser_default_transitions(
                     actual_positive.set(parser_state_id as usize);
                 }
             }
-            if actual_positive != *possible_ids {
-                continue;
+            match possible_ids {
+                PossibleOutgoingIds::Empty => continue,
+                PossibleOutgoingIds::All => {
+                    if actual_positive.count_ones() != num_parser_states as usize {
+                        continue;
+                    }
+                }
+                PossibleOutgoingIds::Some(ids) => {
+                    if actual_positive != *ids {
+                        continue;
+                    }
+                }
             }
 
             let mut shared_target: Option<u32> = None;
             let mut default_weight: Option<Weight> = None;
             let mut valid = true;
 
-            for parser_state_id in possible_ids.iter_ones().map(|state_id| state_id as i32) {
-                let Some(targets) = nwa.states[state_id].transitions.get(&parser_state_id) else {
-                    valid = false;
-                    break;
-                };
-                if targets.len() != 1 {
-                    valid = false;
-                    break;
-                }
+            match possible_ids {
+                PossibleOutgoingIds::Empty => continue,
+                PossibleOutgoingIds::All => {
+                    for parser_state_id in 0..num_parser_states as i32 {
+                        let Some(targets) = nwa.states[state_id].transitions.get(&parser_state_id) else {
+                            valid = false;
+                            break;
+                        };
+                        if targets.len() != 1 {
+                            valid = false;
+                            break;
+                        }
 
-                let (target, weight) = &targets[0];
-                match shared_target {
-                    Some(existing) if existing != *target => {
-                        valid = false;
-                        break;
+                        let (target, weight) = &targets[0];
+                        match shared_target {
+                            Some(existing) if existing != *target => {
+                                valid = false;
+                                break;
+                            }
+                            None => shared_target = Some(*target),
+                            _ => {}
+                        }
+
+                        default_weight = Some(match default_weight {
+                            Some(existing) => existing.intersection(weight),
+                            None => weight.clone(),
+                        });
                     }
-                    None => shared_target = Some(*target),
-                    _ => {}
                 }
+                PossibleOutgoingIds::Some(ids) => {
+                    for parser_state_id in ids.iter_ones().map(|state_id| state_id as i32) {
+                        let Some(targets) = nwa.states[state_id].transitions.get(&parser_state_id) else {
+                            valid = false;
+                            break;
+                        };
+                        if targets.len() != 1 {
+                            valid = false;
+                            break;
+                        }
 
-                default_weight = Some(match default_weight {
-                    Some(existing) => existing.intersection(weight),
-                    None => weight.clone(),
-                });
+                        let (target, weight) = &targets[0];
+                        match shared_target {
+                            Some(existing) if existing != *target => {
+                                valid = false;
+                                break;
+                            }
+                            None => shared_target = Some(*target),
+                            _ => {}
+                        }
+
+                        default_weight = Some(match default_weight {
+                            Some(existing) => existing.intersection(weight),
+                            None => weight.clone(),
+                        });
+                    }
+                }
             }
 
             let Some(target) = shared_target else {
@@ -1105,7 +1236,10 @@ mod tests {
         let mut start_ids = BitSet::new(2);
         start_ids.set(0);
         start_ids.set(1);
-        let possible_by_state = vec![start_ids, BitSet::new(2)];
+        let possible_by_state = vec![
+            PossibleOutgoingIds::Some(start_ids),
+            PossibleOutgoingIds::Empty,
+        ];
 
         assert!(optimize_parser_default_transitions(&mut nwa, &possible_by_state, 2));
 
@@ -1132,7 +1266,7 @@ mod tests {
             .push((1, token_weight(&[1, 2])));
         nwa.states[1].final_weight = Some(token_weight(&[2, 3]));
 
-        let possible_by_state = vec![BitSet::new(4), BitSet::new(4)];
+        let possible_by_state = vec![PossibleOutgoingIds::Empty, PossibleOutgoingIds::Empty];
 
         assert!(optimize_parser_default_transitions(&mut nwa, &possible_by_state, 4));
 
