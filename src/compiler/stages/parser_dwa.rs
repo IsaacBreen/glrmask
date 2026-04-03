@@ -375,14 +375,11 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
         entries
     }
 
-    /// Cheap key for subset_map: uses Arc pointer address instead of full weight hashing.
-    /// Safe because weights are interned, so pointer equality ↔ content equality.
     fn subset_key(entries: &[(u32, Weight)]) -> Vec<(u32, usize)> {
         entries.iter().map(|(sid, w)| (*sid, w.ptr_key())).collect()
     }
 
     fn epsilon_closure(nwa: &NWA, seed: FxHashMap<u32, Weight>) -> FxHashMap<u32, Weight> {
-        // Fast path: single-state seed with no epsilon transitions
         if seed.len() == 1 {
             let (&state_id, _) = seed.iter().next().unwrap();
             if let Some(state) = nwa.states.get(state_id as usize) {
@@ -434,7 +431,6 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
     let start_entries = canonicalize(&start_subset);
     supports[0] = start_entries.iter().map(|(state_id, _)| *state_id).collect();
 
-    // Use pointer-based keys for O(1) hashing instead of iterating Weight ranges
     let mut subset_map: FxHashMap<Vec<(u32, usize)>, u32> = FxHashMap::default();
     let mut worklist: VecDeque<Vec<(u32, Weight)>> = VecDeque::new();
     subset_map.insert(subset_key(&start_entries), dwa.start_state);
@@ -534,10 +530,6 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
     DeterminizedDwaWithSupports { dwa, supports }
 }
 
-/// Apply default-transition optimization directly on a DWA, avoiding the
-/// DWA→NWA→optimize→determinize round-trip. This replaces repeated per-parser-state
-/// transitions (all going to the same target) with a single DEFAULT_LABEL transition,
-/// lifts final weights from the default target, and subtracts covered weights.
 fn optimize_parser_dwa_defaults(
     dwa: &mut DWA,
     possible_by_state: &[BitSet],
@@ -546,8 +538,6 @@ fn optimize_parser_dwa_defaults(
     loop {
         let mut changed = false;
 
-        // Phase 1: Identify states where all possible parser-state labels go to the same
-        // target and create a DEFAULT_LABEL entry with the intersection weight.
         for (state_id, possible_ids) in possible_by_state.iter().enumerate() {
             if possible_ids.is_empty() || possible_ids.count_ones() < 2 {
                 continue;
@@ -555,7 +545,6 @@ fn optimize_parser_dwa_defaults(
 
             let state = &dwa.states[state_id];
 
-            // Check that every possible parser_state label is present
             let mut actual_positive = BitSet::new(num_parser_states as usize);
             for &label in state.transitions.keys() {
                 if let Some(ps) = parser_state_label(label, num_parser_states) {
@@ -566,7 +555,6 @@ fn optimize_parser_dwa_defaults(
                 continue;
             }
 
-            // Check all parser-state transitions share the same target
             let mut shared_target: Option<u32> = None;
             let mut default_weight: Option<Weight> = None;
             let mut valid = true;
@@ -597,7 +585,6 @@ fn optimize_parser_dwa_defaults(
                 continue;
             }
 
-            // Add or union DEFAULT_LABEL transition
             let state = &mut dwa.states[state_id];
             let entry = state.transitions.entry(DEFAULT_LABEL);
             match entry {
@@ -610,7 +597,6 @@ fn optimize_parser_dwa_defaults(
                             changed = true;
                         }
                     }
-                    // Different target — skip (cannot merge in DWA)
                 }
                 std::collections::btree_map::Entry::Vacant(vac) => {
                     vac.insert((target, default_weight));
@@ -619,7 +605,6 @@ fn optimize_parser_dwa_defaults(
             }
         }
 
-        // Phase 2: Lift final weights from default targets to source states.
         for state_id in 0..dwa.states.len() {
             let Some((default_target, default_weight)) =
                 dwa.states[state_id].transitions.get(&DEFAULT_LABEL).cloned()
@@ -634,12 +619,10 @@ fn optimize_parser_dwa_defaults(
                 continue;
             }
 
-            // Union lifted final weight into source state
             if union_final_weight(&mut dwa.states[state_id].final_weight, lifted.clone()) {
                 changed = true;
             }
 
-            // Subtract lifted weight from all outgoing transitions of this state
             let state = &mut dwa.states[state_id];
             let mut to_remove = Vec::new();
             for (&label, (_, weight)) in state.transitions.iter_mut() {
@@ -657,8 +640,6 @@ fn optimize_parser_dwa_defaults(
             }
         }
 
-        // Phase 3: For each state with DEFAULT_LABEL, subtract default weight from
-        // explicit transitions that share the same target.
         for state_id in 0..dwa.states.len() {
             let Some(&(default_target, ref default_weight)) =
                 dwa.states[state_id].transitions.get(&DEFAULT_LABEL)
@@ -697,7 +678,6 @@ fn optimize_parser_dwa_defaults(
     }
 }
 
-/// Subtract final weights from all outgoing transitions (DWA version).
 fn subtract_final_weights_from_outgoing_dwa(dwa: &mut DWA) {
     for state_id in 0..dwa.states.len() {
         let Some(final_weight) = dwa.states[state_id].final_weight.clone() else {
@@ -1039,7 +1019,6 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     subtract_final_weights_from_outgoing_dwa(&mut parser_dwa_pre_minimize);
     profile.subtract_final_ms = elapsed_ms(subtract_final_started_at);
 
-    // determinize_after_defaults is no longer needed — optimization is done directly on the DWA
     profile.determinize_after_defaults_ms = 0.0;
 
     let minimize_started_at = Instant::now();

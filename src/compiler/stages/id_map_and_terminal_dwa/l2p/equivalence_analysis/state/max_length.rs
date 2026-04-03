@@ -155,6 +155,9 @@ fn find_state_equivalence_classes_kstep(
                         ^ hash_transition_targets(&outgoing_targets[state_id], &prev_hashes),
                 );
             });
+        if next_hashes == prev_hashes {
+            break;
+        }
         std::mem::swap(&mut prev_hashes, &mut next_hashes);
         if (step + 1) % check_interval == 0 {
             let distinct = count_distinct_hashes(&prev_hashes);
@@ -353,6 +356,9 @@ fn find_state_equivalence_classes_kstep_restricted(
                         ^ hash_transition_targets(&outgoing_targets[state_id], &prev_hashes),
                 );
             });
+        if next_hashes == prev_hashes {
+            break;
+        }
         std::mem::swap(&mut prev_hashes, &mut next_hashes);
         if (step + 1) % check_interval == 0 {
             let distinct = count_distinct_hashes(&prev_hashes);

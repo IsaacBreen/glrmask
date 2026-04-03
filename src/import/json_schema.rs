@@ -2497,30 +2497,30 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn should_split_bounded_string(&self, min_len: usize, max_len: Option<usize>) -> bool {
-        if min_len > JSON_STRING_REPEAT_CHUNK {
-            return true;
-        }
-        max_len
-            .map(|value| value > JSON_STRING_REPEAT_CHUNK)
-            .unwrap_or(false)
+        let chunk = JSON_STRING_REPEAT_CHUNK;
+        min_len > chunk
+            || max_len
+                .map(|value| value > chunk)
+                .unwrap_or(false)
     }
 
     fn build_split_json_string_exact_expr(&mut self, count: usize) -> GrammarExpr {
+        let chunk = JSON_STRING_REPEAT_CHUNK;
         if count == 0 {
             return empty_expr();
         }
-        if count <= JSON_STRING_REPEAT_CHUNK {
+        if count <= chunk {
             return self.json_string_char_exact_ref(count);
         }
 
-        let full_chunks = count / JSON_STRING_REPEAT_CHUNK;
-        let remainder = count % JSON_STRING_REPEAT_CHUNK;
+        let full_chunks = count / chunk;
+        let remainder = count % chunk;
         let mut parts = Vec::new();
         if full_chunks == 1 {
-            parts.push(self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK));
+            parts.push(self.json_string_char_exact_ref(chunk));
         } else if full_chunks > 1 {
             parts.push(repeat_expr(
-                self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK),
+                self.json_string_char_exact_ref(chunk),
                 full_chunks,
                 Some(full_chunks),
             ));
@@ -2532,33 +2532,34 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn build_split_json_string_upto_expr(&mut self, max: usize) -> GrammarExpr {
+        let chunk = JSON_STRING_REPEAT_CHUNK;
         if max == 0 {
             return empty_expr();
         }
-        if max <= JSON_STRING_REPEAT_CHUNK {
+        if max <= chunk {
             return self.json_string_char_upto_ref(max);
         }
 
-        let full_chunks = max / JSON_STRING_REPEAT_CHUNK;
-        let remainder = max % JSON_STRING_REPEAT_CHUNK;
+        let full_chunks = max / chunk;
+        let remainder = max % chunk;
         let mut options = Vec::new();
 
         if full_chunks == 1 {
-            options.push(self.json_string_char_upto_ref(JSON_STRING_REPEAT_CHUNK));
+            options.push(self.json_string_char_upto_ref(chunk));
         } else {
             options.push(sequence_or_single(vec![
                 repeat_expr(
-                    self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK),
+                    self.json_string_char_exact_ref(chunk),
                     0,
                     Some(full_chunks - 1),
                 ),
-                self.json_string_char_upto_ref(JSON_STRING_REPEAT_CHUNK),
+                self.json_string_char_upto_ref(chunk),
             ]));
         }
 
         if remainder > 0 {
             options.push(sequence_or_single(vec![
-                self.build_split_json_string_exact_expr(full_chunks * JSON_STRING_REPEAT_CHUNK),
+                self.build_split_json_string_exact_expr(full_chunks * chunk),
                 self.json_string_char_upto_ref(remainder),
             ]));
         }
@@ -2639,10 +2640,11 @@ impl<'a> SchemaCtx<'a> {
         max: usize,
         suffix: GrammarExpr,
     ) -> GrammarExpr {
+        let chunk = JSON_STRING_REPEAT_CHUNK;
         if max == 0 {
             return suffix;
         }
-        if max <= JSON_STRING_REPEAT_CHUNK {
+        if max <= chunk {
             let upto = self.json_string_char_upto_ref(max);
             return self.extract_terminal_rule(
                 sequence_or_single(vec![upto, suffix]),
@@ -2650,12 +2652,12 @@ impl<'a> SchemaCtx<'a> {
             );
         }
 
-        let full_chunks = max / JSON_STRING_REPEAT_CHUNK;
-        let remainder = max % JSON_STRING_REPEAT_CHUNK;
+        let full_chunks = max / chunk;
+        let remainder = max % chunk;
         let mut options = Vec::new();
 
         let upto_chunk_close = {
-            let upto = self.json_string_char_upto_ref(JSON_STRING_REPEAT_CHUNK);
+            let upto = self.json_string_char_upto_ref(chunk);
             self.extract_terminal_rule(
                 sequence_or_single(vec![upto, suffix.clone()]),
                 "JSON_STRING_CHAR_UPTO_CLOSE",
@@ -2667,7 +2669,7 @@ impl<'a> SchemaCtx<'a> {
         } else {
             options.push(sequence_or_single(vec![
                 repeat_expr(
-                    self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK),
+                    self.json_string_char_exact_ref(chunk),
                     0,
                     Some(full_chunks - 1),
                 ),
@@ -2684,7 +2686,7 @@ impl<'a> SchemaCtx<'a> {
                 )
             };
             options.push(sequence_or_single(vec![
-                self.build_split_json_string_exact_expr(full_chunks * JSON_STRING_REPEAT_CHUNK),
+                self.build_split_json_string_exact_expr(full_chunks * chunk),
                 upto_rem_close,
             ]));
         }
@@ -2699,10 +2701,11 @@ impl<'a> SchemaCtx<'a> {
         count: usize,
         suffix: GrammarExpr,
     ) -> GrammarExpr {
+        let chunk = JSON_STRING_REPEAT_CHUNK;
         if count == 0 {
             return suffix;
         }
-        if count <= JSON_STRING_REPEAT_CHUNK {
+        if count <= chunk {
             let exact = self.json_string_char_exact_ref(count);
             return self.extract_terminal_rule(
                 sequence_or_single(vec![exact, suffix]),
@@ -2710,16 +2713,16 @@ impl<'a> SchemaCtx<'a> {
             );
         }
 
-        let full_chunks = count / JSON_STRING_REPEAT_CHUNK;
-        let remainder = count % JSON_STRING_REPEAT_CHUNK;
+        let full_chunks = count / chunk;
+        let remainder = count % chunk;
         let mut parts = Vec::new();
 
         if remainder > 0 {
             if full_chunks == 1 {
-                parts.push(self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK));
+                parts.push(self.json_string_char_exact_ref(chunk));
             } else {
                 parts.push(repeat_expr(
-                    self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK),
+                    self.json_string_char_exact_ref(chunk),
                     full_chunks,
                     Some(full_chunks),
                 ));
@@ -2731,18 +2734,18 @@ impl<'a> SchemaCtx<'a> {
             ));
         } else {
             if full_chunks == 1 {
-                let exact = self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK);
+                let exact = self.json_string_char_exact_ref(chunk);
                 return self.extract_terminal_rule(
                     sequence_or_single(vec![exact, suffix]),
                     "JSON_STRING_CHAR_EXACT_CLOSE",
                 );
             }
             parts.push(repeat_expr(
-                self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK),
+                self.json_string_char_exact_ref(chunk),
                 full_chunks - 1,
                 Some(full_chunks - 1),
             ));
-            let exact_last = self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK);
+            let exact_last = self.json_string_char_exact_ref(chunk);
             parts.push(self.extract_terminal_rule(
                 sequence_or_single(vec![exact_last, suffix]),
                 "JSON_STRING_CHAR_EXACT_CLOSE",
@@ -2759,10 +2762,11 @@ impl<'a> SchemaCtx<'a> {
         count: usize,
         prefix: GrammarExpr,
     ) -> GrammarExpr {
+        let chunk = JSON_STRING_REPEAT_CHUNK;
         if count == 0 {
             return prefix;
         }
-        if count <= JSON_STRING_REPEAT_CHUNK {
+        if count <= chunk {
             let exact = self.json_string_char_exact_ref(count);
             return self.extract_terminal_rule(
                 sequence_or_single(vec![prefix, exact]),
@@ -2770,10 +2774,10 @@ impl<'a> SchemaCtx<'a> {
             );
         }
 
-        let full_chunks = count / JSON_STRING_REPEAT_CHUNK;
-        let remainder = count % JSON_STRING_REPEAT_CHUNK;
+        let full_chunks = count / chunk;
+        let remainder = count % chunk;
 
-        let first_exact = self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK);
+        let first_exact = self.json_string_char_exact_ref(chunk);
         let first_open = self.extract_terminal_rule(
             sequence_or_single(vec![prefix, first_exact]),
             "JSON_STRING_CHAR_EXACT_OPEN",
@@ -2782,7 +2786,7 @@ impl<'a> SchemaCtx<'a> {
         let mut parts = vec![first_open];
         if full_chunks > 1 {
             parts.push(repeat_expr(
-                self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK),
+                self.json_string_char_exact_ref(chunk),
                 full_chunks - 1,
                 Some(full_chunks - 1),
             ));
@@ -2801,10 +2805,11 @@ impl<'a> SchemaCtx<'a> {
         max: usize,
         prefix: GrammarExpr,
     ) -> GrammarExpr {
+        let chunk = JSON_STRING_REPEAT_CHUNK;
         if max == 0 {
             return prefix;
         }
-        if max <= JSON_STRING_REPEAT_CHUNK {
+        if max <= chunk {
             let upto = self.json_string_char_upto_ref(max);
             return self.extract_terminal_rule(
                 sequence_or_single(vec![prefix, upto]),
@@ -2812,12 +2817,12 @@ impl<'a> SchemaCtx<'a> {
             );
         }
 
-        let full_chunks = max / JSON_STRING_REPEAT_CHUNK;
-        let remainder = max % JSON_STRING_REPEAT_CHUNK;
+        let full_chunks = max / chunk;
+        let remainder = max % chunk;
         let mut options = Vec::new();
 
         // Subcase: 0 exact reps → just upto_1024 with prefix
-        let upto_chunk = self.json_string_char_upto_ref(JSON_STRING_REPEAT_CHUNK);
+        let upto_chunk = self.json_string_char_upto_ref(chunk);
         let upto_chunk_open = self.extract_terminal_rule(
             sequence_or_single(vec![prefix.clone(), upto_chunk]),
             "JSON_STRING_CHAR_UPTO_OPEN",
@@ -2829,7 +2834,7 @@ impl<'a> SchemaCtx<'a> {
             // 0 reps → prefix + upto_1024
             options.push(upto_chunk_open);
             // 1+ reps → exact_1024_open + Repeat(exact_1024, 0, N-2) + upto_1024
-            let exact_chunk = self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK);
+            let exact_chunk = self.json_string_char_exact_ref(chunk);
             let exact_open = self.extract_terminal_rule(
                 sequence_or_single(vec![prefix.clone(), exact_chunk]),
                 "JSON_STRING_CHAR_EXACT_OPEN",
@@ -2837,17 +2842,17 @@ impl<'a> SchemaCtx<'a> {
             let mut subparts = vec![exact_open];
             if full_chunks > 2 {
                 subparts.push(repeat_expr(
-                    self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK),
+                    self.json_string_char_exact_ref(chunk),
                     0,
                     Some(full_chunks - 2),
                 ));
             }
-            subparts.push(self.json_string_char_upto_ref(JSON_STRING_REPEAT_CHUNK));
+            subparts.push(self.json_string_char_upto_ref(chunk));
             options.push(sequence_or_single(subparts));
         }
 
         if remainder > 0 {
-            let exact_chunk = self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK);
+            let exact_chunk = self.json_string_char_exact_ref(chunk);
             let exact_open = self.extract_terminal_rule(
                 sequence_or_single(vec![prefix.clone(), exact_chunk]),
                 "JSON_STRING_CHAR_EXACT_OPEN",
@@ -2855,7 +2860,7 @@ impl<'a> SchemaCtx<'a> {
             let mut subparts = vec![exact_open];
             if full_chunks > 1 {
                 subparts.push(repeat_expr(
-                    self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK),
+                    self.json_string_char_exact_ref(chunk),
                     full_chunks - 1,
                     Some(full_chunks - 1),
                 ));
@@ -2875,10 +2880,11 @@ impl<'a> SchemaCtx<'a> {
         prefix: GrammarExpr,
         suffix: GrammarExpr,
     ) -> GrammarExpr {
+        let chunk = JSON_STRING_REPEAT_CHUNK;
         if max == 0 {
             return sequence_or_single(vec![prefix, suffix]);
         }
-        if max <= JSON_STRING_REPEAT_CHUNK {
+        if max <= chunk {
             let upto = self.json_string_char_upto_ref(max);
             return self.extract_terminal_rule(
                 sequence_or_single(vec![prefix, upto, suffix]),
@@ -2886,12 +2892,12 @@ impl<'a> SchemaCtx<'a> {
             );
         }
 
-        let full_chunks = max / JSON_STRING_REPEAT_CHUNK;
-        let remainder = max % JSON_STRING_REPEAT_CHUNK;
+        let full_chunks = max / chunk;
+        let remainder = max % chunk;
         let mut options = Vec::new();
 
         // Subcase: 0 exact reps → prefix + upto_1024 + suffix
-        let upto_chunk = self.json_string_char_upto_ref(JSON_STRING_REPEAT_CHUNK);
+        let upto_chunk = self.json_string_char_upto_ref(chunk);
         let upto_wrapped = self.extract_terminal_rule(
             sequence_or_single(vec![prefix.clone(), upto_chunk, suffix.clone()]),
             "JSON_STRING_CHAR_UPTO_WRAPPED",
@@ -2903,12 +2909,12 @@ impl<'a> SchemaCtx<'a> {
             options.push(upto_wrapped);
 
             // 1+ reps → exact_open + middle + upto_close
-            let exact_chunk = self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK);
+            let exact_chunk = self.json_string_char_exact_ref(chunk);
             let exact_open = self.extract_terminal_rule(
                 sequence_or_single(vec![prefix.clone(), exact_chunk]),
                 "JSON_STRING_CHAR_EXACT_OPEN",
             );
-            let upto_chunk2 = self.json_string_char_upto_ref(JSON_STRING_REPEAT_CHUNK);
+            let upto_chunk2 = self.json_string_char_upto_ref(chunk);
             let upto_close = self.extract_terminal_rule(
                 sequence_or_single(vec![upto_chunk2, suffix.clone()]),
                 "JSON_STRING_CHAR_UPTO_CLOSE",
@@ -2916,7 +2922,7 @@ impl<'a> SchemaCtx<'a> {
             let mut subparts = vec![exact_open];
             if full_chunks > 2 {
                 subparts.push(repeat_expr(
-                    self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK),
+                    self.json_string_char_exact_ref(chunk),
                     0,
                     Some(full_chunks - 2),
                 ));
@@ -2926,7 +2932,7 @@ impl<'a> SchemaCtx<'a> {
         }
 
         if remainder > 0 {
-            let exact_chunk = self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK);
+            let exact_chunk = self.json_string_char_exact_ref(chunk);
             let exact_open = self.extract_terminal_rule(
                 sequence_or_single(vec![prefix.clone(), exact_chunk]),
                 "JSON_STRING_CHAR_EXACT_OPEN",
@@ -2939,7 +2945,7 @@ impl<'a> SchemaCtx<'a> {
             let mut subparts = vec![exact_open];
             if full_chunks > 1 {
                 subparts.push(repeat_expr(
-                    self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK),
+                    self.json_string_char_exact_ref(chunk),
                     full_chunks - 1,
                     Some(full_chunks - 1),
                 ));
@@ -3063,10 +3069,11 @@ impl<'a> SchemaCtx<'a> {
         prefix: GrammarExpr,
         suffix: GrammarExpr,
     ) -> GrammarExpr {
+        let chunk = JSON_STRING_REPEAT_CHUNK;
         if count == 0 {
             return sequence_or_single(vec![prefix, suffix]);
         }
-        if count <= JSON_STRING_REPEAT_CHUNK {
+        if count <= chunk {
             let exact = self.json_string_char_exact_ref(count);
             return self.extract_terminal_rule(
                 sequence_or_single(vec![prefix, exact, suffix]),
@@ -3074,10 +3081,10 @@ impl<'a> SchemaCtx<'a> {
             );
         }
 
-        let full_chunks = count / JSON_STRING_REPEAT_CHUNK;
-        let remainder = count % JSON_STRING_REPEAT_CHUNK;
+        let full_chunks = count / chunk;
+        let remainder = count % chunk;
 
-        let first_exact = self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK);
+        let first_exact = self.json_string_char_exact_ref(chunk);
         let first_open = self.extract_terminal_rule(
             sequence_or_single(vec![prefix, first_exact]),
             "JSON_STRING_CHAR_EXACT_OPEN",
@@ -3088,7 +3095,7 @@ impl<'a> SchemaCtx<'a> {
         if remainder > 0 {
             if full_chunks > 1 {
                 parts.push(repeat_expr(
-                    self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK),
+                    self.json_string_char_exact_ref(chunk),
                     full_chunks - 1,
                     Some(full_chunks - 1),
                 ));
@@ -3101,12 +3108,12 @@ impl<'a> SchemaCtx<'a> {
         } else {
             if full_chunks > 2 {
                 parts.push(repeat_expr(
-                    self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK),
+                    self.json_string_char_exact_ref(chunk),
                     full_chunks - 2,
                     Some(full_chunks - 2),
                 ));
             }
-            let last_exact = self.json_string_char_exact_ref(JSON_STRING_REPEAT_CHUNK);
+            let last_exact = self.json_string_char_exact_ref(chunk);
             parts.push(self.extract_terminal_rule(
                 sequence_or_single(vec![last_exact, suffix]),
                 "JSON_STRING_CHAR_EXACT_CLOSE",
@@ -4328,6 +4335,126 @@ impl<'a> SchemaCtx<'a> {
         wrap_key_colon_terminal(body)
     }
 
+    fn build_merged_literal_key_value_expr(
+        &self,
+        leading_literal: &[u8],
+        key: &str,
+        value_expr: GrammarExpr,
+    ) -> GrammarExpr {
+        let key_expr = self.json_key_colon_literal(key);
+        let mut parts = match key_expr {
+            GrammarExpr::Sequence(parts) => parts,
+            other => vec![other],
+        };
+
+        if let Some(GrammarExpr::Literal(first)) = parts.first_mut() {
+            let mut merged = Vec::with_capacity(leading_literal.len() + first.len());
+            merged.extend_from_slice(leading_literal);
+            merged.extend_from_slice(first);
+            *first = merged;
+        } else {
+            parts.insert(0, literal_expr(leading_literal));
+        }
+
+        let value_expr = if let Some(GrammarExpr::Literal(last)) = parts.last_mut() {
+            match value_expr {
+                GrammarExpr::Literal(mut bytes)
+                    if matches!(bytes.first(), Some(b'{') | Some(b'[')) =>
+                {
+                    last.push(bytes.remove(0));
+                    if bytes.is_empty() {
+                        empty_expr()
+                    } else {
+                        literal_expr(&bytes)
+                    }
+                }
+                GrammarExpr::Sequence(mut value_parts) => {
+                    if let Some(GrammarExpr::Literal(bytes)) = value_parts.first_mut() {
+                        if let Some(&first) = bytes.first() {
+                            if matches!(first, b'{' | b'[') {
+                                last.push(first);
+                                bytes.remove(0);
+                                if bytes.is_empty() {
+                                    value_parts.remove(0);
+                                }
+                            }
+                        }
+                    }
+                    sequence_or_single(value_parts)
+                }
+                other => other,
+            }
+        } else {
+            value_expr
+        };
+
+        parts.push(value_expr);
+        sequence_or_single(parts)
+    }
+
+    fn build_required_ordered_object_body_expr(
+        &self,
+        ordered: &[(String, GrammarExpr, bool)],
+        trailing_literal: Option<&[u8]>,
+    ) -> GrammarExpr {
+        let mut parts = Vec::new();
+
+        for (index, (key, value_expr, _)) in ordered.iter().enumerate() {
+            let mut leading_literal = if index == 0 {
+                b"{".to_vec()
+            } else {
+                JSON_ITEM_SEPARATOR.to_vec()
+            };
+            if index > 0 {
+                if let Some(GrammarExpr::Sequence(prev_parts)) = parts.last_mut() {
+                    if let Some(GrammarExpr::Literal(prev_last)) = prev_parts.last_mut() {
+                        if matches!(prev_last.last(), Some(b'}') | Some(b']')) {
+                            prev_last.extend_from_slice(&leading_literal);
+                            leading_literal.clear();
+                        }
+                    }
+                } else if let Some(GrammarExpr::Literal(prev_last)) = parts.last_mut() {
+                    if matches!(prev_last.last(), Some(b'}') | Some(b']')) {
+                        prev_last.extend_from_slice(&leading_literal);
+                        leading_literal.clear();
+                    }
+                }
+            }
+            parts.push(self.build_merged_literal_key_value_expr(
+                &leading_literal,
+                key,
+                value_expr.clone(),
+            ));
+        }
+
+        if let Some(trailing_literal) = trailing_literal {
+            if let Some(GrammarExpr::Sequence(last_parts)) = parts.last_mut() {
+                if let Some(GrammarExpr::Literal(last_literal)) = last_parts.last_mut() {
+                    if matches!(last_literal.last(), Some(b'}') | Some(b']')) {
+                        last_literal.extend_from_slice(trailing_literal);
+                        return sequence_or_single(parts);
+                    }
+                }
+            } else if let Some(GrammarExpr::Literal(last_literal)) = parts.last_mut() {
+                if matches!(last_literal.last(), Some(b'}') | Some(b']')) {
+                    last_literal.extend_from_slice(trailing_literal);
+                    return sequence_or_single(parts);
+                }
+            }
+
+            parts.push(literal_expr(trailing_literal));
+        }
+
+        sequence_or_single(parts)
+    }
+
+    fn build_closed_required_ordered_object_expr(
+        &self,
+        ordered: &[(String, GrammarExpr, bool)],
+    ) -> GrammarExpr {
+        self.build_required_ordered_object_body_expr(ordered, Some(b"}"))
+    }
+
     fn json_item_separator_expr(&self) -> GrammarExpr {
         literal_expr(JSON_ITEM_SEPARATOR)
     }
@@ -5520,6 +5647,7 @@ impl<'a> SchemaCtx<'a> {
         }
 
         let mut additional_pair_exprs = Vec::<GrammarExpr>::new();
+        let has_additional_properties = additional_properties_schema.is_some();
         if let Some(schema) = additional_properties_schema {
             let additional_key_expr = if ap_key_any_string() {
                 // Skip key exclusion — AP keys accept any JSON string.
@@ -5573,6 +5701,14 @@ impl<'a> SchemaCtx<'a> {
             GrammarExpr::Ref(additional_c.clone()),
         );
 
+        if !ordered.is_empty()
+            && ordered.iter().all(|(_, _, required)| *required)
+            && pattern_properties.is_empty()
+            && !has_additional_properties
+        {
+            return Ok(self.build_closed_required_ordered_object_expr(&ordered));
+        }
+
         if ordered.is_empty() {
             return Ok(sequence_or_single(vec![
                 literal_expr(b"{"),
@@ -5611,7 +5747,7 @@ impl<'a> SchemaCtx<'a> {
     ) -> Result<(GrammarExpr, bool), GlrMaskError> {
         if items.len() == 1 {
             let (key, value_expr, is_required) = &items[0];
-            let kv_expr = sequence_or_single(vec![self.json_key_colon_literal(key), value_expr.clone()]);
+            let kv_expr = self.build_merged_literal_key_value_expr(b"", key, value_expr.clone());
             if *is_required {
                 return Ok((kv_expr, false));
             }
@@ -6065,8 +6201,28 @@ mod tests {
             .any(|rule| expr_has_split_separator(&rule.expr, left_bytes, right_bytes))
     }
 
+    fn expr_has_literal_prefix(expr: &GrammarExpr, prefix: &[u8]) -> bool {
+        match expr {
+            GrammarExpr::Literal(bytes) => bytes.starts_with(prefix),
+            GrammarExpr::Sequence(parts) => parts.iter().any(|part| expr_has_literal_prefix(part, prefix)),
+            GrammarExpr::Choice(options) => options.iter().any(|part| expr_has_literal_prefix(part, prefix)),
+            GrammarExpr::Optional(inner)
+            | GrammarExpr::Repeat(inner)
+            | GrammarExpr::RepeatOne(inner)
+            | GrammarExpr::RepeatRange { expr: inner, .. } => expr_has_literal_prefix(inner, prefix),
+            _ => false,
+        }
+    }
+
     fn named_grammar_has_literal(grammar: &NamedGrammar, expected: &[u8]) -> bool {
         grammar.rules.iter().any(|rule| expr_has_literal(&rule.expr, expected))
+    }
+
+    fn named_grammar_has_literal_prefix(grammar: &NamedGrammar, prefix: &[u8]) -> bool {
+        grammar
+            .rules
+            .iter()
+            .any(|rule| expr_has_literal_prefix(&rule.expr, prefix))
     }
 
     fn named_nonterminal_has_ref_then_literal(grammar: &NamedGrammar, literal: &[u8]) -> bool {
@@ -6823,6 +6979,52 @@ mod tests {
             "additionalProperties": {"type": "string"}
         }"#;
         assert!(accepts_sequence(schema, &[b"{\"extra\": \"x\"}"]));
+    }
+
+    #[test]
+    fn test_closed_required_object_merges_outer_literals_into_key_prefixes() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "status": {"enum": ["ok", "fail"]},
+                "kind": {"enum": ["A", "B"]}
+            },
+            "required": ["status", "kind"],
+            "additionalProperties": false
+        }"#;
+        let grammar = schema_to_named_grammar(&serde_json::from_str(schema).unwrap()).unwrap();
+
+        assert!(named_grammar_has_literal_prefix(&grammar, b"{\""));
+        assert!(named_grammar_has_literal_prefix(&grammar, b", \""));
+        assert!(accepts_sequence(schema, &[b"{\"status\": \"ok\", \"kind\": \"A\"}"]));
+    }
+
+    #[test]
+    fn test_nested_closed_object_merges_open_brace_into_parent_key_suffix() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "user": {
+                    "type": "object",
+                    "properties": {
+                        "role": {"enum": ["admin", "guest"]},
+                        "tier": {"enum": ["free", "pro"]}
+                    },
+                    "required": ["role", "tier"],
+                    "additionalProperties": false
+                }
+            },
+            "required": ["user"],
+            "additionalProperties": false
+        }"#;
+        let grammar = schema_to_named_grammar(&serde_json::from_str(schema).unwrap()).unwrap();
+
+        assert!(named_grammar_has_literal(&grammar, b" {"));
+        assert!(named_grammar_has_literal(&grammar, b"}}"));
+        assert!(accepts_sequence(
+            schema,
+            &[b"{\"user\": {\"role\": \"admin\", \"tier\": \"pro\"}}"],
+        ));
     }
 
     #[test]

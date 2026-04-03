@@ -810,12 +810,93 @@ mod tests {
         compact_unused_terminals,
         expand_nullable_terminals,
         inline_single_use_nonterminals,
+        prepare_owned_grammar_for_compile,
     };
+    use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::combined::analyze_equivalences;
+    use crate::import::json_schema::json_schema_to_grammar;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::Instant;
 
     fn mask_has_token(mask: &[u32], token: u32) -> bool {
         let word = token as usize / 32;
         let bit = token as usize % 32;
         word < mask.len() && (mask[word] & (1u32 << bit)) != 0
+    }
+
+    fn kb814_normalized_schema_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/kb814_normalized_schema.json")
+    }
+
+    fn kb814_prepared_terminals_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/kb814_prepared_terminals.json")
+    }
+
+    fn gpt2_vocab_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../grammars2024/benchmarking/gpt2_vocab.json")
+    }
+
+    fn gpt2_token_str_to_bytes(token_str: &str) -> Vec<u8> {
+        token_str.chars().map(unicode_char_to_byte).collect()
+    }
+
+    fn unicode_char_to_byte(ch: char) -> u8 {
+        if let Some(byte) = printable_byte(ch) {
+            return byte;
+        }
+
+        let codepoint = ch as u32;
+        let offset = codepoint
+            .checked_sub(256)
+            .expect("unsupported GPT-2 vocab char");
+        for byte in 0u16..=255 {
+            if printable_byte(char::from_u32(byte as u32).unwrap()).is_none() {
+                let candidate_offset = non_printable_rank(byte as u8);
+                if candidate_offset == offset as usize {
+                    return byte as u8;
+                }
+            }
+        }
+        panic!("unable to decode GPT-2 vocab char: {ch:?}");
+    }
+
+    fn printable_byte(ch: char) -> Option<u8> {
+        let codepoint = ch as u32;
+        if (33..=126).contains(&codepoint)
+            || (161..=172).contains(&codepoint)
+            || (174..=255).contains(&codepoint)
+        {
+            Some(codepoint as u8)
+        } else {
+            None
+        }
+    }
+
+    fn non_printable_rank(target: u8) -> usize {
+        let mut rank = 0usize;
+        for byte in 0u16..target as u16 {
+            let byte = byte as u8;
+            if printable_byte(char::from_u32(byte as u32).unwrap()).is_none() {
+                rank += 1;
+            }
+        }
+        rank
+    }
+
+    fn load_gpt2_vocab() -> Vocab {
+        let vocab_path = gpt2_vocab_path();
+        let vocab_json = fs::read_to_string(&vocab_path)
+            .unwrap_or_else(|err| panic!("failed to read GPT-2 vocab at {}: {err}", vocab_path.display()));
+        let vocab_map: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&vocab_json).expect("parse GPT-2 vocab json");
+        let entries = vocab_map
+            .into_iter()
+            .map(|(token_str, token_id)| {
+                let token_id = token_id.as_u64().expect("token id must be integer") as u32;
+                (token_id, gpt2_token_str_to_bytes(&token_str))
+            })
+            .collect();
+        Vocab::new(entries, None)
     }
 
     #[test]
@@ -1859,6 +1940,74 @@ mod tests {
             lhs: 2,
             rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1)],
         }));
+    }
+
+    #[test]
+    #[ignore = "fixture generation for kb814 tokenizer/equivalence benchmarking"]
+    fn test_write_kb814_prepared_terminals_fixture() {
+        let schema_path = kb814_normalized_schema_path();
+        let schema_json = fs::read_to_string(&schema_path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", schema_path.display()));
+        let grammar = json_schema_to_grammar(&schema_json).expect("kb814 schema should import");
+        let (prepared_grammar, _tokenizer) = prepare_owned_grammar_for_compile(grammar);
+
+        let terminals_path = kb814_prepared_terminals_path();
+        let payload = serde_json::to_vec(&prepared_grammar.terminals)
+            .expect("serialize prepared terminals");
+        fs::write(&terminals_path, payload)
+            .unwrap_or_else(|err| panic!("failed to write {}: {err}", terminals_path.display()));
+
+        eprintln!(
+            "[kb814] wrote_prepared_terminals path={} terminals={}",
+            terminals_path.display(),
+            prepared_grammar.terminals.len(),
+        );
+    }
+
+    #[test]
+    #[ignore = "kb814 tokenizer/equivalence timing benchmark"]
+    fn test_kb814_prepared_terminals_gpt2_timings() {
+        let terminals_path = kb814_prepared_terminals_path();
+        let terminals_json = fs::read_to_string(&terminals_path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", terminals_path.display()));
+        let terminals: Vec<Terminal> = serde_json::from_str(&terminals_json)
+            .expect("parse prepared terminals json");
+        let vocab = load_gpt2_vocab();
+        let grammar = GrammarDef {
+            terminals,
+            ..Default::default()
+        };
+
+        let tokenizer_started_at = Instant::now();
+        let tokenizer = build_tokenizer(&grammar);
+        let tokenizer_ms = elapsed_ms(tokenizer_started_at);
+        eprintln!(
+            "[kb814] terminals_file={} vocab_file={} terminals={} tokenizer_states={} build_tokenizer_ms={:.3}",
+            terminals_path.display(),
+            gpt2_vocab_path().display(),
+            grammar.terminals.len(),
+            tokenizer.num_states(),
+            tokenizer_ms,
+        );
+
+        unsafe {
+            std::env::set_var("GLRMASK_PROFILE_COMPILE", "1");
+        }
+        let equivalence_started_at = Instant::now();
+        let id_map = analyze_equivalences(
+            &tokenizer,
+            &vocab,
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+        );
+        let equivalence_ms = elapsed_ms(equivalence_started_at);
+        eprintln!(
+            "[kb814] tokenizer_state_classes={} vocab_classes={} equivalence_ms={:.3}",
+            id_map.tokenizer_states.internal_to_originals.len(),
+            id_map.vocab_tokens.internal_to_originals.len(),
+            equivalence_ms,
+        );
     }
 
 }
