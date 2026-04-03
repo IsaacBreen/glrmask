@@ -13,7 +13,11 @@ use crate::runtime::state::ConstraintState;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 type ParserStatesByTokenizer = FxHashMap<u32, ParserGSS>;
-type AdvanceResultCache = FxHashMap<(usize, u32), ParserGSS>;
+
+/// Cache for `advance_stacks` results, keyed by (GSS pointer, terminal).
+/// Stores the key GSS alongside the result to keep its Arc alive and prevent
+/// address reuse (ABA problem) within a single `commit_bytes_impl` call.
+type AdvanceResultCache = FxHashMap<(usize, u32), (ParserGSS, ParserGSS)>;
 
 struct InitialCommitScan {
     exec_results: FxHashMap<u32, TokenizerExecResult>,
@@ -229,18 +233,18 @@ fn advance_terminal_match(
     }
 
     let advance_cache_key = (gss_at_offset.ptr_key(), terminal);
-    let advanced = if let Some(cached) = advance_result_cache.get(&advance_cache_key) {
+    let advanced = if let Some((_, cached)) = advance_result_cache.get(&advance_cache_key) {
         cached.clone()
     } else {
         if !stack_may_advance_on(&constraint.table, gss_at_offset, terminal) {
             let empty = ParserGSS::empty();
-            advance_result_cache.insert(advance_cache_key, empty.clone());
+            advance_result_cache.insert(advance_cache_key, (gss_at_offset.clone(), empty.clone()));
             terminal_result_cache.insert(terminal, empty);
             return None;
         }
 
         let advanced = advance_stacks(&constraint.table, gss_at_offset, terminal);
-        advance_result_cache.insert(advance_cache_key, advanced.clone());
+        advance_result_cache.insert(advance_cache_key, (gss_at_offset.clone(), advanced.clone()));
         advanced
     };
 
