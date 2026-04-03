@@ -161,6 +161,43 @@ impl FlatDfa {
         }
     }
 
+    /// Build a FlatDfa using a pre-built flat transition table (state-major layout:
+    /// `flat_trans[state * 256 + byte] = target`), filtering finalizers/futures
+    /// to only active groups. Avoids re-iterating CharTransitions per state.
+    pub fn from_flat_trans_filtered(
+        flat_trans: &[u32],
+        tokenizer: &Tokenizer,
+        active_groups: &[bool],
+    ) -> Self {
+        let dfa = &tokenizer.dfa;
+        let dfa_states = dfa.states();
+        let start_state = tokenizer.start_state() as usize;
+        let num_groups = active_groups.len();
+        let states: Vec<FlatDfaState> = dfa_states
+            .iter()
+            .enumerate()
+            .map(|(i, state)| {
+                let base = i * 256;
+                let mut transitions = [u32::MAX; 256];
+                transitions.copy_from_slice(&flat_trans[base..base + 256]);
+                let finalizers: Vec<usize> = state.finalizers.iter()
+                    .filter(|&gid| gid < num_groups && active_groups[gid])
+                    .collect();
+                let possible_future_group_ids: Vec<usize> = dfa
+                    .possible_future_group_ids(i as u32)
+                    .iter()
+                    .filter(|&gid| gid < num_groups && active_groups[gid])
+                    .collect();
+                FlatDfaState {
+                    transitions,
+                    finalizers,
+                    possible_future_group_ids,
+                }
+            })
+            .collect();
+        FlatDfa { states, start_state }
+    }
+
     #[cfg(test)]
     pub fn num_states(&self) -> usize {
         self.states.len()
@@ -198,6 +235,18 @@ impl TokenizerView {
     pub fn new_filtered(tokenizer: &Tokenizer, active_groups: &[bool]) -> Self {
         TokenizerView {
             flat_dfa: FlatDfa::from_tokenizer_filtered(tokenizer, active_groups),
+        }
+    }
+
+    /// Build a filtered view using a pre-built flat transition table.
+    /// Avoids re-iterating CharTransitions — just copies from flat_trans.
+    pub fn new_filtered_from_flat_trans(
+        flat_trans: &[u32],
+        tokenizer: &Tokenizer,
+        active_groups: &[bool],
+    ) -> Self {
+        TokenizerView {
+            flat_dfa: FlatDfa::from_flat_trans_filtered(flat_trans, tokenizer, active_groups),
         }
     }
 

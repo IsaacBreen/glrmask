@@ -69,6 +69,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     active_terminals: &[bool],
     disallowed_follows: &BTreeMap<u32, BitSet>,
     shared_vocab_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
+    flat_trans: Option<&[u32]>,
 ) -> Option<LocalIdMapTerminalDwa> {
     if vocab.is_empty() {
         return None;
@@ -100,6 +101,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         ignore_terminal,
         Some(active_terminals),
         shared_vocab_dfa_cache,
+        flat_trans,
     );
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 

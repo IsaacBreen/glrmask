@@ -638,7 +638,7 @@ pub(crate) fn analyze_equivalences(
     ignore_terminal: Option<u32>,
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
 ) -> InternalIdMap {
-    analyze_equivalences_impl(tokenizer, vocab, disallowed_follows, ignore_terminal, None, shared_vocab_dfa_cache)
+    analyze_equivalences_impl(tokenizer, vocab, disallowed_follows, ignore_terminal, None, shared_vocab_dfa_cache, None)
 }
 
 pub(crate) fn analyze_equivalences_with_group_filter(
@@ -648,8 +648,9 @@ pub(crate) fn analyze_equivalences_with_group_filter(
     ignore_terminal: Option<u32>,
     active_groups: Option<&[bool]>,
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
+    flat_trans: Option<&[u32]>,
 ) -> InternalIdMap {
-    analyze_equivalences_impl(tokenizer, vocab, disallowed_follows, ignore_terminal, active_groups, shared_vocab_dfa_cache)
+    analyze_equivalences_impl(tokenizer, vocab, disallowed_follows, ignore_terminal, active_groups, shared_vocab_dfa_cache, flat_trans)
 }
 
 /// Combined equivalence analysis over a flattened tokenizer DFA.
@@ -663,6 +664,7 @@ fn analyze_equivalences_impl(
     ignore_terminal: Option<u32>,
     active_groups: Option<&[bool]>,
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
+    flat_trans: Option<&[u32]>,
 ) -> InternalIdMap {
     let profile_compile = compile_profile_enabled();
     let total_started_at = std::time::Instant::now();
@@ -673,9 +675,10 @@ fn analyze_equivalences_impl(
     let adjust_ms = elapsed_ms(adjust_started_at);
 
     let tokenizer_view_started_at = std::time::Instant::now();
-    let tokenizer_view = match active_groups {
-        Some(active_groups) => TokenizerView::new_filtered(tokenizer, active_groups),
-        None => TokenizerView::new(tokenizer),
+    let tokenizer_view = match (active_groups, flat_trans) {
+        (Some(active_groups), Some(ft)) => TokenizerView::new_filtered_from_flat_trans(ft, tokenizer, active_groups),
+        (Some(active_groups), None) => TokenizerView::new_filtered(tokenizer, active_groups),
+        _ => TokenizerView::new(tokenizer),
     };
     let tokenizer_view_ms = elapsed_ms(tokenizer_view_started_at);
 
