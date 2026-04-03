@@ -4409,11 +4409,11 @@ impl<'a> SchemaCtx<'a> {
         ordered: &[(String, GrammarExpr, bool)],
         trailing_literal: Option<&[u8]>,
     ) -> GrammarExpr {
-        let mut parts = Vec::new();
+        let mut parts = vec![literal_expr(b"{")];
 
         for (index, (key, value_expr, _)) in ordered.iter().enumerate() {
             let mut leading_literal = if index == 0 {
-                b"{".to_vec()
+                Vec::new()
             } else {
                 JSON_ITEM_SEPARATOR.to_vec()
             };
@@ -7006,7 +7006,7 @@ mod tests {
         }"#;
         let grammar = schema_to_named_grammar(&serde_json::from_str(schema).unwrap()).unwrap();
 
-        assert!(named_grammar_has_literal_prefix(&grammar, b"{\""));
+        assert!(named_grammar_has_literal(&grammar, b"{"));
         assert!(named_grammar_has_literal_prefix(&grammar, b", \""));
         assert!(accepts_sequence(schema, &[b"{\"status\": \"ok\", \"kind\": \"A\"}"]));
     }
@@ -7655,6 +7655,157 @@ mod tests {
         assert_eq!(pattern_min_char_count("\\p{L}+"), None);
         // Named backreference
         assert_eq!(pattern_min_char_count("(?P<n>a)\\k<n>"), None);
+    }
+
+    /// Regression test: the full string should also be accepted.
+    #[test]
+    fn test_structural_nested_object_array_full_string_accepted() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "a": {"type": "string", "maxLength": 10},
+                            "b": {"type": "string", "maxLength": 10}
+                        },
+                        "required": ["a", "b"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["items"],
+            "additionalProperties": false
+        }"#;
+        assert!(accepts_sequence(schema, &[b"{\"items\": [{\"a\": \"x\", \"b\": \"y\"}]}"]));
+    }
+
+    /// Regression test: mask and commit must agree for every token at every step.
+    #[test]
+    fn test_structural_import_mask_commit_consistency() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "a": {"type": "string", "maxLength": 10},
+                            "b": {"type": "string", "maxLength": 10}
+                        },
+                        "required": ["a", "b"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["items"],
+            "additionalProperties": false
+        }"#;
+
+        // The sequence that should be parseable with structural tokens
+        let entries: Vec<(u32, Vec<u8>)> = vec![
+            (0, b"{".to_vec()),
+            (1, b"{\"".to_vec()),
+            (2, b"items\"".to_vec()),
+            (3, b": ".to_vec()),
+            (4, b"[".to_vec()),
+            (5, b"]".to_vec()),
+            (6, b"}".to_vec()),
+            (7, b"\"".to_vec()),
+            (8, b", \"".to_vec()),
+            (9, b"a\"".to_vec()),
+            (10, b"b\"".to_vec()),
+            (11, b"x".to_vec()),
+        ];
+        let vocab = Vocab::new(entries.clone(), None);
+        let c = crate::Constraint::from_json_schema(schema, &vocab).unwrap();
+        let state = c.start();
+        let mask = state.mask();
+
+        // For every token the mask says is valid, commit_token must succeed.
+        for (id, bytes) in &entries {
+            let wi = *id as usize / 32;
+            let bi = *id as usize % 32;
+            let allowed = wi < mask.len() && (mask[wi] >> bi) & 1 != 0;
+            if allowed {
+                let bytes_str = String::from_utf8_lossy(bytes);
+                let mut state_clone = state.clone();
+                let commit_result = state_clone.commit_token(*id);
+                assert!(
+                    commit_result.is_ok(),
+                    "mask allows token {} ({:?}) but commit_token failed: {:?}",
+                    id, bytes_str, commit_result.err()
+                );
+            }
+        }
+    }
+
+    /// Regression test for o76439: cross-token terminal matching when `,` ends
+    /// one token and ` {"` starts the next. The structural import creates
+    /// terminal `, ` (comma-space) which spans this token boundary.
+    #[test]
+    fn test_structural_cross_token_comma_space_brace_quote() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "a": {"type": "string", "maxLength": 10},
+                            "b": {"type": "string", "maxLength": 10}
+                        },
+                        "required": ["a", "b"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["items"],
+            "additionalProperties": false
+        }"#;
+        // Split so `,` ends one token and ` {"` starts the next (cross-token terminal matching).
+        assert!(accepts_sequence(schema, &[
+            b"{\"items\": [{\"a\": \"x\", \"b\": \"y\"},",
+            b" {\"a\": \"z\", \"b\": \"w\"}]}",
+        ]));
+    }
+
+    /// Same test as above but with the actual o76439 schema shape (not all
+    /// outer properties required).
+    #[test]
+    fn test_o76439_cross_token_array_separator() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "severity": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high"]
+                },
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string", "maxLength": 512},
+                            "note": {"type": "string", "maxLength": 512}
+                        },
+                        "required": ["id", "note"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["severity"],
+            "additionalProperties": false
+        }"#;
+        // The comma at the end of the first token spans across to the space at the start of the second.
+        assert!(accepts_sequence(schema, &[
+            b"{\"severity\": \"low\", \"items\": [{\"id\": \"a\", \"note\": \"b\"},",
+            b" {\"id\": \"c\", \"note\": \"d\"}]}",
+        ]));
     }
 
 }

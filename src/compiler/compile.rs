@@ -2010,4 +2010,65 @@ mod tests {
         );
     }
 
+    /// Regression test for o76439: structural import with nested closed objects
+    /// must accept cross-token terminal matches (e.g., ` {"` after `,`).
+    #[test]
+    fn test_o76439_gpt2_vocab_false_negative() {
+        let vocab = load_gpt2_vocab();
+
+        // Actual o76439 schema
+        let schema = r#"{
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": {
+                "ignoreSevertiesAtOrBelow": {
+                    "type": "string",
+                    "enum": ["negligible", "Negligible", "low", "Low",
+                             "medium", "Medium", "high", "High"]
+                },
+                "vulnerabilities": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "cveId": {"type": "string", "minLength": 1, "maxLength": 512},
+                            "rationale": {"type": "string", "minLength": 1, "maxLength": 512}
+                        },
+                        "required": ["cveId", "rationale"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["ignoreSevertiesAtOrBelow"],
+            "additionalProperties": false
+        }"#;
+
+        let c = crate::Constraint::from_json_schema(schema, &vocab).unwrap();
+        let mut state = c.start();
+
+        // Commit the prefix (token positions 0..49 from the mismatch report)
+        let prefix = b"{\"ignoreSevertiesAtOrBelow\": \"Medium\", \"vulnerabilities\": [{\"cveId\": \"CVE-2022-1234\", \"rationale\": \"This vulnerability is not applicable to our system.\"},";
+        state.commit_bytes(prefix).expect("prefix should commit");
+
+        let mut state_clone = state.clone();
+        state_clone
+            .commit_bytes(b" {\"")
+            .expect("token bytes ` {\"` should commit after the array-item separator");
+
+        let target_bytes = b" {\"";
+        let target_token_id = vocab
+            .entries
+            .iter()
+            .find(|(_, bytes)| bytes.as_slice() == target_bytes)
+            .map(|(&id, _)| id)
+            .expect("GPT-2 vocab must contain ` {\"`");
+
+        let mask = state.mask();
+        assert!(
+            mask_has_token(&mask, target_token_id),
+            "token {} (` {{\"`) must be in the mask — false negative regression (o76439)",
+            target_token_id
+        );
+    }
+
 }
