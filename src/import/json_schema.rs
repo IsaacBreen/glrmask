@@ -4368,19 +4368,27 @@ impl<'a> SchemaCtx<'a> {
                         literal_expr(&bytes)
                     }
                 }
-                GrammarExpr::Sequence(mut value_parts) => {
-                    if let Some(GrammarExpr::Literal(bytes)) = value_parts.first_mut() {
+                GrammarExpr::Sequence(value_parts) => {
+                    // Flatten nested Sequences so we can reach the leading Literal
+                    let mut flat = Vec::new();
+                    for part in value_parts {
+                        match part {
+                            GrammarExpr::Sequence(inner) => flat.extend(inner),
+                            other => flat.push(other),
+                        }
+                    }
+                    if let Some(GrammarExpr::Literal(bytes)) = flat.first_mut() {
                         if let Some(&first) = bytes.first() {
                             if matches!(first, b'{' | b'[') {
                                 last.push(first);
                                 bytes.remove(0);
                                 if bytes.is_empty() {
-                                    value_parts.remove(0);
+                                    flat.remove(0);
                                 }
                             }
                         }
                     }
-                    sequence_or_single(value_parts)
+                    sequence_or_single(flat)
                 }
                 other => other,
             }
@@ -4388,7 +4396,11 @@ impl<'a> SchemaCtx<'a> {
             value_expr
         };
 
-        parts.push(value_expr);
+        // Flatten the value into parts to avoid nested Sequences
+        match value_expr {
+            GrammarExpr::Sequence(inner) => parts.extend(inner),
+            other => parts.push(other),
+        }
         sequence_or_single(parts)
     }
 
@@ -7019,7 +7031,7 @@ mod tests {
         }"#;
         let grammar = schema_to_named_grammar(&serde_json::from_str(schema).unwrap()).unwrap();
 
-        assert!(named_grammar_has_literal(&grammar, b" {"));
+        assert!(named_grammar_has_literal(&grammar, b": {"));
         assert!(named_grammar_has_literal(&grammar, b"}}"));
         assert!(accepts_sequence(
             schema,
