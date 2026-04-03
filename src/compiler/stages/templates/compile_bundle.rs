@@ -9,7 +9,7 @@ use crate::automata::unweighted_u32::determinize::determinize as unweighted_dete
 use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic as unweighted_minimize;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::minimize_fast;
-use crate::automata::weighted::nwa::NWA;
+use crate::automata::weighted::nwa::{NWA, NWAState};
 use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::stages::templates::compile_dfa::Templates;
 use crate::ds::weight::Weight;
@@ -22,20 +22,24 @@ fn empty_bundle_nwa() -> NWA {
 }
 
 fn template_to_weighted_nwa(template: &UnweightedDfa, weight: &Weight) -> NWA {
-    let mut nwa = NWA::new(0, 0);
-    for _ in &template.states {
-        nwa.add_state();
+    let states = template
+        .states
+        .iter()
+        .map(|state| NWAState {
+            final_weight: state.is_accepting.then(|| weight.clone()),
+            transitions: state
+                .transitions
+                .iter()
+                .map(|(&label, &target)| (label, vec![(target, weight.clone())]))
+                .collect(),
+            epsilons: Vec::new(),
+        })
+        .collect();
+
+    NWA {
+        states,
+        start_states: vec![template.start_state],
     }
-    nwa.start_states.push(template.start_state);
-    for (state_id, state) in template.states.iter().enumerate() {
-        if state.is_accepting {
-            nwa.set_final_weight(state_id as u32, weight.clone());
-        }
-        for (&label, &target) in &state.transitions {
-            nwa.add_transition(state_id as u32, label, target, weight.clone());
-        }
-    }
-    nwa
 }
 
 fn compute_effective_group_weights(alive_groups: &[usize], normalized_weights: &[Weight]) -> Vec<Weight> {
@@ -291,20 +295,22 @@ fn union_unweighted_dfas<'a>(dfas: impl Iterator<Item = &'a UnweightedDfa>) -> U
 }
 
 fn dwa_to_nwa(dwa: &DWA) -> NWA {
-    let mut nwa = NWA::new(0, 0);
-    for _ in &dwa.states {
-        nwa.add_state();
-    }
+    let states = dwa
+        .states
+        .iter()
+        .map(|state| NWAState {
+            final_weight: state.final_weight.clone(),
+            transitions: state
+                .transitions
+                .iter()
+                .map(|(&label, (target, weight))| (label, vec![(*target, weight.clone())]))
+                .collect(),
+            epsilons: Vec::new(),
+        })
+        .collect();
 
-    nwa.start_states.push(dwa.start_state);
-    for (state_id, state) in dwa.states.iter().enumerate() {
-        if let Some(final_weight) = state.final_weight.clone() {
-            nwa.set_final_weight(state_id as u32, final_weight);
-        }
-        for (&label, (target, weight)) in &state.transitions {
-            nwa.add_transition(state_id as u32, label, *target, weight.clone());
-        }
+    NWA {
+        states,
+        start_states: vec![dwa.start_state],
     }
-
-    nwa
 }
