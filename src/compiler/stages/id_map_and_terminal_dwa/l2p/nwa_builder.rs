@@ -91,6 +91,8 @@ pub(crate) struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     terminal_coloring: TerminalColoring,
     possible_future_terminals: FxHashMap<TokenizerState, Vec<TerminalID>>,
     future_terminal_color_groups: FxHashMap<TokenizerState, FutureTerminalColorGroups>,
+    future_terminal_colors: FxHashMap<TokenizerState, SmallVec<[ColorId; 8]>>,
+    ignore_terminal_possible: FxHashMap<TokenizerState, bool>,
     possible_matches: &'pm mut PossibleMatchesComputer<'tok>,
     nwa: &'nwa mut NWA,
     num_tsids: u32,
@@ -136,6 +138,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             terminal_coloring,
             possible_future_terminals: FxHashMap::default(),
             future_terminal_color_groups: FxHashMap::default(),
+            future_terminal_colors: FxHashMap::default(),
+            ignore_terminal_possible: FxHashMap::default(),
             possible_matches,
             nwa,
             num_tsids,
@@ -203,26 +207,66 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             .clone()
     }
 
+    fn populate_future_terminal_color_cache(&mut self, tokenizer_state: TokenizerState) {
+        if self.future_terminal_color_groups.contains_key(&tokenizer_state) {
+            return;
+        }
+
+        let mut groups = BTreeMap::<ColorId, SmallVec<[TerminalID; 4]>>::new();
+        let mut colors = SmallVec::<[ColorId; 8]>::new();
+        let mut ignore_present = false;
+
+        for terminal_id in self.tokenizer.possible_future_terminals_iter(tokenizer_state) {
+            if Some(terminal_id) == self.ignore_terminal {
+                ignore_present = true;
+                continue;
+            }
+            let color = self.terminal_coloring.color_for(terminal_id);
+            let entry = groups.entry(color).or_default();
+            if entry.is_empty() {
+                colors.push(color);
+            }
+            entry.push(terminal_id);
+        }
+
+        self.future_terminal_color_groups
+            .insert(tokenizer_state, groups.into_iter().collect());
+        self.future_terminal_colors.insert(tokenizer_state, colors);
+        self.ignore_terminal_possible
+            .insert(tokenizer_state, ignore_present);
+    }
+
+    fn ignore_terminal_possible_for_state(&mut self, tokenizer_state: TokenizerState) -> bool {
+        if self.ignore_terminal.is_none() {
+            return false;
+        }
+        self.populate_future_terminal_color_cache(tokenizer_state);
+        self.ignore_terminal_possible
+            .get(&tokenizer_state)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    fn future_terminal_colors_for_state(
+        &mut self,
+        tokenizer_state: TokenizerState,
+    ) -> SmallVec<[ColorId; 8]> {
+        self.populate_future_terminal_color_cache(tokenizer_state);
+        self.future_terminal_colors
+            .get(&tokenizer_state)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     fn future_terminal_color_groups_for_state(
         &mut self,
         tokenizer_state: TokenizerState,
     ) -> FutureTerminalColorGroups {
+        self.populate_future_terminal_color_cache(tokenizer_state);
         self.future_terminal_color_groups
-            .entry(tokenizer_state)
-            .or_insert_with(|| {
-                let mut groups = BTreeMap::<ColorId, SmallVec<[TerminalID; 4]>>::new();
-                for terminal_id in self.tokenizer.possible_future_terminals_iter(tokenizer_state) {
-                    if Some(terminal_id) == self.ignore_terminal {
-                        continue;
-                    }
-                    groups
-                        .entry(self.terminal_coloring.color_for(terminal_id))
-                        .or_default()
-                        .push(terminal_id);
-                }
-                groups.into_iter().collect()
-            })
-            .clone()
+            .get(&tokenizer_state)
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn buffer_future_leaf_token_id(
@@ -257,20 +301,14 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         }
 
         if let Some(ignore_terminal) = self.ignore_terminal {
-            if self
-                .possible_future_terminals_for_state(tokenizer_state)
-                .contains(&ignore_terminal)
-            {
+            if self.ignore_terminal_possible_for_state(tokenizer_state) {
                 self.profile.future_terminal_additions += sources.len() as u64;
                 self.add_leaf_token_from_sources(sources, ignore_terminal, internal_token_id);
             }
         }
 
-        let color_groups = self.future_terminal_color_groups_for_state(tokenizer_state);
-        for (color, terminals) in color_groups {
-            if terminals.is_empty() {
-                continue;
-            }
+        let colors = self.future_terminal_colors_for_state(tokenizer_state);
+        for color in colors {
             for &source in sources {
                 self.buffer_future_leaf_token_id(source, tokenizer_state, color, internal_token_id);
             }
@@ -294,18 +332,15 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         }
 
         if let Some(ignore_terminal) = self.ignore_terminal {
-            if self
-                .possible_future_terminals_for_state(tokenizer_state)
-                .contains(&ignore_terminal)
-            {
+            if self.ignore_terminal_possible_for_state(tokenizer_state) {
                 self.profile.future_terminal_additions += sources.len() as u64;
                 self.add_match_from_sources(sources, ignore_terminal, self.leaf_state, weight);
             }
         }
 
-        let color_groups = self.future_terminal_color_groups_for_state(tokenizer_state);
-        for (color, terminals) in color_groups {
-            if terminals.is_empty() || weight.is_empty() {
+        let colors = self.future_terminal_colors_for_state(tokenizer_state);
+        for color in colors {
+            if weight.is_empty() {
                 continue;
             }
             for &source in sources {
