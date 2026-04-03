@@ -189,27 +189,51 @@ pub(crate) fn characterize_terminals(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
 ) -> BTreeMap<TerminalID, TerminalCharacterization> {
-    (0..grammar.num_terminals)
-        .map(|terminal| (terminal, characterize_terminal(table, grammar, terminal)))
+    let initial_actions = collect_initial_actions_by_terminal(table, grammar.num_terminals);
+
+    initial_actions
+        .into_iter()
+        .enumerate()
+        .map(|(terminal, (shifts, reduces))| {
+            let terminal = terminal as TerminalID;
+            (
+                terminal,
+                characterize_terminal_with_initial(table, grammar, terminal, shifts, reduces),
+            )
+        })
         .collect()
 }
 
-fn characterize_terminal(
+fn collect_initial_actions_by_terminal(
+    table: &GLRTable,
+    num_terminals: u32,
+) -> Vec<(BTreeSet<InitialShift>, BTreeSet<InitialReduce>)> {
+    let mut per_terminal = vec![(BTreeSet::new(), BTreeSet::new()); num_terminals as usize];
+
+    for state in 0..table.num_states {
+        let Some(action_row) = table.action.get(state as usize) else {
+            continue;
+        };
+        for (&terminal, action) in action_row {
+            let Some((shifts, reduces)) = per_terminal.get_mut(terminal as usize) else {
+                continue;
+            };
+            record_initial_action(table, state, action, shifts, reduces);
+        }
+    }
+
+    per_terminal
+}
+
+fn characterize_terminal_with_initial(
     table: &GLRTable,
     _grammar: &AnalyzedGrammar,
     terminal: TerminalID,
+    shifts: BTreeSet<InitialShift>,
+    reduces: BTreeSet<InitialReduce>,
 ) -> TerminalCharacterization {
-    let mut shifts = BTreeSet::new();
-    let mut reduces = BTreeSet::new();
     let mut nt_escapes = BTreeSet::new();
     let mut nt_rereduces = BTreeSet::new();
-
-    for state in 0..table.num_states {
-        let Some(action) = table.action(state, terminal) else {
-            continue;
-        };
-        record_initial_action(table, state, action, &mut shifts, &mut reduces);
-    }
 
     for revealed_state in 0..table.num_states {
         if let Some(gotos) = table.goto.get(revealed_state as usize) {
