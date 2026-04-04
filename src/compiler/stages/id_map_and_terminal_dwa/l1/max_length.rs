@@ -289,6 +289,10 @@ fn find_state_equivalence_classes_kstep_restricted(
 ///
 /// This is much more effective than unrestricted k-step when the partition
 /// tokens use a small alphabet (e.g. only alphanumeric bytes).
+///
+/// DO NOT cap or reduce k below `max_len`.  See the L2P variant's doc
+/// comment for the full rationale: kstep merges are permanent and no
+/// downstream stage re-splits them.
 pub fn find_state_equivalence_classes_byte_restricted<S: AsRef<[u8]>>(
     tokenizer: &TokenizerView,
     tokens: &[S],

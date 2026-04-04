@@ -5,6 +5,7 @@
 //! outgoing destinations.
 
 use rayon::prelude::*;
+use rustc_hash::FxHashSet;
 
 use super::super::compat::{FlatDfa, FlatDfaState, TokenizerView};
 
@@ -162,17 +163,21 @@ fn hash_transition_targets_fast(targets: &[usize], prev_hashes: &[u64]) -> u64 {
 }
 
 fn count_distinct_hashes(hashes: &[u64]) -> usize {
-    let mut seen = std::collections::HashSet::with_capacity(hashes.len());
+    let mut seen = FxHashSet::with_capacity_and_hasher(hashes.len(), Default::default());
     for &h in hashes {
         seen.insert(h);
     }
     seen.len()
 }
 
-/// Run kstep hash propagation.
+/// Run kstep hash propagation with early convergence detection.
 ///
 /// Each iteration refines hash signatures across all states.
 /// Uses fast commutative target hashing for CPU load pipelining.
+///
+/// Stops early when the partition (grouping by hash) stabilizes — i.e.,
+/// when no iteration changes which states share the same hash.
+/// Returns the iteration at which convergence was reached.
 fn run_kstep_parallel(
     flat: &FlatTargets,
     prev_hashes: &mut Vec<u64>,
@@ -183,9 +188,17 @@ fn run_kstep_parallel(
         return 0;
     }
 
+    let debug = debug_max_length_enabled();
     let mut next_hashes = vec![0u64; n];
+    // Check convergence every STRIDE iterations to amortize the cost of
+    // counting distinct hashes (O(n) HashSet inserts per check).
+    const STRIDE: usize = 32;
+    let mut prev_distinct = count_distinct_hashes(prev_hashes);
+    if debug {
+        eprintln!("[glrmask/debug][kstep] k=0 distinct={}", prev_distinct);
+    }
 
-    for _step in 0..k {
+    for step in 0..k {
         for state_id in 0..n {
             next_hashes[state_id] = mix_u64(
                 prev_hashes[state_id]
@@ -193,6 +206,17 @@ fn run_kstep_parallel(
             );
         }
         std::mem::swap(prev_hashes, &mut next_hashes);
+
+        if debug || (step + 1) % STRIDE == 0 || step + 1 == k {
+            let distinct = count_distinct_hashes(prev_hashes);
+            if debug {
+                eprintln!("[glrmask/debug][kstep] k={} distinct={}", step + 1, distinct);
+            }
+            if distinct == prev_distinct {
+                return step + 1;
+            }
+            prev_distinct = distinct;
+        }
     }
 
     k
@@ -413,6 +437,14 @@ fn find_state_equivalence_classes_kstep_restricted(
 ///
 /// This is much more effective than unrestricted k-step when the partition
 /// tokens use a small alphabet (e.g. only alphanumeric bytes).
+///
+/// DO NOT cap or reduce k below `max_len`.  The kstep analysis feeds
+/// directly into equivalence classes that terminal coloring and downstream
+/// stages treat as permanent — no later stage re-splits classes that kstep
+/// merged.  Any cap that appears safe on tested grammars can silently
+/// produce incorrect masks on untested ones.  A lower k causes states at
+/// different distances from a counting-chain boundary to be merged; the
+/// resulting mask may then allow tokens it should reject (or vice versa).
 pub fn find_state_equivalence_classes_byte_restricted<S: AsRef<[u8]>>(
     tokenizer: &TokenizerView,
     tokens: &[S],
