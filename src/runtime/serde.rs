@@ -36,20 +36,26 @@ fn decode_terminal_ranges(
 }
 
 pub(in crate::runtime) mod serde_btreemap_rangeset {
-    use range_set_blaze::RangeSetBlaze;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::collections::BTreeMap;
 
     type EncodedPossibleMatches = BTreeMap<u32, BTreeMap<u32, super::EncodedRanges>>;
 
     pub(in crate::runtime) fn serialize<S: Serializer>(
-        value: &BTreeMap<u32, BTreeMap<u32, RangeSetBlaze<u32>>>,
+        value: &BTreeMap<u32, BTreeMap<u32, Box<[u64]>>>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         let encoded: EncodedPossibleMatches = value
             .iter()
             .map(|(&tokenizer_state, terminal_map)| {
-                (tokenizer_state, super::encode_terminal_ranges(terminal_map))
+                let encoded_terminals: BTreeMap<u32, super::EncodedRanges> = terminal_map
+                    .iter()
+                    .map(|(&terminal, bitmap)| {
+                        let rangeset = super::super::constraint::bitmap_to_rangeset(bitmap);
+                        (terminal, super::encode_ranges(&rangeset))
+                    })
+                    .collect();
+                (tokenizer_state, encoded_terminals)
             })
             .collect();
         encoded.serialize(serializer)
@@ -57,12 +63,25 @@ pub(in crate::runtime) mod serde_btreemap_rangeset {
 
     pub(in crate::runtime) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
-    ) -> Result<BTreeMap<u32, BTreeMap<u32, RangeSetBlaze<u32>>>, D::Error> {
+    ) -> Result<BTreeMap<u32, BTreeMap<u32, Box<[u64]>>>, D::Error> {
         let encoded = EncodedPossibleMatches::deserialize(deserializer)?;
         Ok(encoded
             .into_iter()
             .map(|(tokenizer_state, terminal_map)| {
-                (tokenizer_state, super::decode_terminal_ranges(terminal_map))
+                let decoded: BTreeMap<u32, Box<[u64]>> = terminal_map
+                    .into_iter()
+                    .map(|(terminal, ranges)| {
+                        let rangeset = super::decode_ranges(ranges);
+                        let max_id = rangeset.last().unwrap_or(0);
+                        let num_words = (max_id as usize / 64) + 1;
+                        let mut words = vec![0u64; num_words];
+                        for id in rangeset.iter() {
+                            words[id as usize / 64] |= 1u64 << (id % 64);
+                        }
+                        (terminal, words.into_boxed_slice())
+                    })
+                    .collect();
+                (tokenizer_state, decoded)
             })
             .collect())
     }
@@ -106,8 +125,8 @@ mod tests {
         let internal_matches: std::collections::BTreeSet<u32> = loaded
             .possible_matches_for_state_internal(tokenizer_state)
             .into_iter()
-            .flat_map(|m| m.values())
-            .flat_map(|token_ids| token_ids.iter())
+            .flat_map(|m| m.into_values())
+            .flat_map(|token_ids| token_ids.into_iter())
             .collect();
         assert_eq!(internal_matches, std::collections::BTreeSet::from([internal_token]));
 

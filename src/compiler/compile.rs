@@ -725,12 +725,11 @@ fn compile_prepared_with_profile(
                 let trie = crate::ds::vocab_prefix_tree::VocabPrefixTree::build_owned(token_entries);
                 let trie_build_ms = elapsed_ms(trie_build_started_at);
                 let collect_started_at = Instant::now();
-                let mut computer = crate::compiler::possible_matches::PossibleMatchesComputer::new(&tokenizer);
-                let pm_by_tsid = crate::compiler::possible_matches::collect_possible_matches_by_internal_tsid(
+                let (pm_by_tsid, dense_profile) = crate::compiler::possible_matches::collect_possible_matches_by_internal_tsid_dense(
                     &tokenizer,
                     &trie.root,
-                    &mut computer,
                     &internal_ids.tokenizer_states,
+                    internal_ids.vocab_tokens.num_internal_ids(),
                 );
                 let collect_ms = elapsed_ms(collect_started_at);
                 crate::compiler::possible_matches::emit_possible_matches_profile_summary(
@@ -739,7 +738,7 @@ fn compile_prepared_with_profile(
                     internal_ids.tokenizer_states.num_internal_ids(),
                     trie_build_ms,
                     collect_ms,
-                    &computer.profile(),
+                    &dense_profile,
                 );
                 (pm_by_tsid, elapsed_ms(pm_started_at))
             },
@@ -1048,8 +1047,8 @@ mod tests {
         let internal_matches: std::collections::BTreeSet<u32> = constraint
             .possible_matches_for_state_internal(tokenizer_state)
             .into_iter()
-            .flat_map(|m| m.values())
-            .flat_map(|token_ids| token_ids.iter())
+            .flat_map(|m| m.into_values())
+            .flat_map(|token_ids| token_ids.into_iter())
             .collect();
         assert_eq!(internal_matches, std::collections::BTreeSet::from([internal_token]));
 

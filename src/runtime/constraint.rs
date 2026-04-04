@@ -13,8 +13,30 @@ use crate::ds::weight::Weight;
 use super::state::ConstraintState;
 
 pub(crate) type TokenizerStateID = u32;
+
+pub(crate) fn bitmap_to_rangeset(words: &[u64]) -> RangeSetBlaze<u32> {
+    let mut result = RangeSetBlaze::new();
+    for (word_idx, &word) in words.iter().enumerate() {
+        if word == 0 { continue; }
+        let base = (word_idx as u32) * 64;
+        let mut w = word;
+        let mut pos = 0u32;
+        while w != 0 {
+            let zeros = w.trailing_zeros();
+            pos += zeros;
+            w >>= zeros;
+            let ones = if w == u64::MAX { 64 - pos % 64 } else { (!w).trailing_zeros() };
+            let run_start = base + pos;
+            let run_end = base + pos + ones - 1;
+            pos += ones;
+            if ones < 64 { w >>= ones; } else { w = 0; }
+            result.ranges_insert(run_start..=run_end);
+        }
+    }
+    result
+}
 pub(crate) type PossibleMatchesByState =
-    BTreeMap<TokenizerStateID, BTreeMap<TerminalID, RangeSetBlaze<u32>>>;
+    BTreeMap<TokenizerStateID, BTreeMap<TerminalID, Box<[u64]>>>;
 type DenseWords = Box<[u64]>;
 type InternalTokenBufMasks = Vec<(u16, u32)>;
 type DenseWeightMaskCache = FxHashMap<usize, DenseWords>;
@@ -333,7 +355,15 @@ impl Constraint {
         let internal_tsid = self.internal_tsid_for_state(tokenizer_state);
         self.possible_matches
             .get(&internal_tsid)
-            .map(|possible_matches| self.expand_possible_matches(possible_matches))
+            .map(|terminals| {
+                terminals
+                    .iter()
+                    .map(|(&terminal, bitmap)| {
+                        let internal_tokens = bitmap_to_rangeset(bitmap);
+                        (terminal, self.expand_internal_token_set(&internal_tokens))
+                    })
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -378,9 +408,14 @@ impl Constraint {
     pub(crate) fn possible_matches_for_state_internal(
         &self,
         tokenizer_state: u32,
-    ) -> Option<&BTreeMap<TerminalID, RangeSetBlaze<u32>>> {
+    ) -> Option<BTreeMap<TerminalID, RangeSetBlaze<u32>>> {
         let internal_tsid = self.internal_tsid_for_state(tokenizer_state);
-        self.possible_matches.get(&internal_tsid)
+        self.possible_matches.get(&internal_tsid).map(|terminals| {
+            terminals
+                .iter()
+                .map(|(&terminal, bitmap)| (terminal, bitmap_to_rangeset(bitmap)))
+                .collect()
+        })
     }
 
     fn build_internal_token_buf_mask(originals: &[u32]) -> InternalTokenBufMasks {
@@ -400,10 +435,10 @@ impl Constraint {
     fn build_seed_terminal_dense_masks(&self) -> SeedTerminalDenseMasks {
         let mut terminal_masks = SeedTerminalDenseMasks::default();
         for (&internal_tsid, terminals) in &self.possible_matches {
-            for (&terminal_id, internal_tokens) in terminals {
+            for (&terminal_id, bitmap) in terminals {
                 terminal_masks.insert(
                     (internal_tsid, terminal_id),
-                    self.dense_words_from_internal_set(internal_tokens),
+                    bitmap.clone(),
                 );
             }
         }
@@ -429,18 +464,6 @@ impl Constraint {
         let initial_tok_state = self.tokenizer.initial_state();
         let parser_gss = ParserGSS::from_stacks(&[(vec![0u32], BTreeMap::new())]);
         BTreeMap::from([(initial_tok_state, parser_gss)])
-    }
-
-    fn expand_possible_matches(
-        &self,
-        possible_matches: &BTreeMap<TerminalID, RangeSetBlaze<u32>>,
-    ) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
-        possible_matches
-            .iter()
-            .map(|(&terminal, internal_tokens)| {
-                (terminal, self.expand_internal_token_set(internal_tokens))
-            })
-            .collect()
     }
 
     fn collect_original_token_ids(&self, internal_tokens: &RangeSetBlaze<u32>) -> Vec<u32> {
