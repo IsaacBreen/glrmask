@@ -5,7 +5,7 @@
 //! placed adjacently. This reduces the number of ranges in the underlying
 //! `RangeMapBlaze` / `RangeSetBlaze` structures.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use rand::{Rng, SeedableRng};
@@ -503,6 +503,7 @@ fn build_token_merge_permutation_ranged(weights: &[&Weight], num_tokens: u32) ->
 
     // Collect boundary events: (position, is_addition, ctx)
     let mut events: Vec<(u32, bool, u32)> = Vec::new();
+    let mut max_ctx = 0u32;
     let mut ctx = 0u32;
     for w in weights {
         for (_tsid_range, token_set) in w.0.range_values() {
@@ -517,6 +518,7 @@ fn build_token_merge_permutation_ranged(weights: &[&Weight], num_tokens: u32) ->
                     }
                 }
             }
+            max_ctx = ctx;
             ctx += 1;
         }
     }
@@ -524,17 +526,29 @@ fn build_token_merge_permutation_ranged(weights: &[&Weight], num_tokens: u32) ->
     // Sort: by position, removals before additions at the same position
     events.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
 
-    // Sweep to assign group IDs
+    // Pre-compute random Zobrist keys for each context
+    let num_ctx = (max_ctx + 1) as usize;
+    let zobrist_keys: Vec<u128> = (0..num_ctx)
+        .map(|i| {
+            // Deterministic pseudo-random keys from context index
+            let seed = i as u128;
+            let h = seed.wrapping_mul(0x9E3779B97F4A7C15_u128.wrapping_shl(64) | 0xF39CC0605CEDC835)
+                .wrapping_add(0x6A09E667F3BCC908_u128.wrapping_shl(64) | 0xBB67AE8584CAA73B);
+            h ^ (h >> 61) ^ (h >> 37)
+        })
+        .collect();
+
+    // Sweep to assign group IDs using Zobrist hash
     let mut perm = vec![0u32; n];
-    let mut active: BTreeSet<u32> = BTreeSet::new();
-    let mut profile_to_group: HashMap<Vec<u32>, u32> = HashMap::new();
+    let mut hash_to_group: HashMap<u128, u32> = HashMap::new();
     let mut num_groups = 0u32;
 
-    // Assign group for the empty profile (tokens before any range)
+    // Assign group for the empty profile (hash=0)
+    let mut current_hash: u128 = 0;
     let empty_group = {
         let g = num_groups;
         num_groups += 1;
-        profile_to_group.insert(Vec::new(), g);
+        hash_to_group.insert(0u128, g);
         g
     };
     let mut current_group = empty_group;
@@ -553,20 +567,16 @@ fn build_token_merge_permutation_ranged(weights: &[&Weight], num_tokens: u32) ->
         }
         prev_pos = boundary;
 
-        // Process all events at this boundary
+        // Process all events at this boundary, updating hash incrementally
         while event_idx < events.len() && events[event_idx].0 == boundary {
-            let (_, is_start, c) = events[event_idx];
-            if is_start {
-                active.insert(c);
-            } else {
-                active.remove(&c);
-            }
+            let (_, _is_start, c) = events[event_idx];
+            // XOR toggles: add and remove are the same operation
+            current_hash ^= zobrist_keys[c as usize];
             event_idx += 1;
         }
 
-        // Determine group for the new active set
-        let profile: Vec<u32> = active.iter().copied().collect();
-        current_group = *profile_to_group.entry(profile).or_insert_with(|| {
+        // Determine group for the new active set (O(1) lookup)
+        current_group = *hash_to_group.entry(current_hash).or_insert_with(|| {
             let g = num_groups;
             num_groups += 1;
             g
