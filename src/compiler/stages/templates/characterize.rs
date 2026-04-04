@@ -267,6 +267,11 @@ fn characterize_terminal_with_initial(
     for revealed_state in 0..table.num_states {
         if let Some(gotos) = table.goto.get(revealed_state as usize) {
             for (&nonterminal, &goto_state) in gotos {
+                // Skip traversals where the goto target has no action for this
+                // terminal — the BFS would immediately return with no effect.
+                if table.action(goto_state, terminal).is_none() {
+                    continue;
+                }
                 explore_from_goto(
                     table,
                     terminal,
