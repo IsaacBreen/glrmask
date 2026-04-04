@@ -52,6 +52,8 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
         ));
     }
 
+    let profile = std::env::var("GLRMASK_PROFILE_DETERMINIZE").map(|v| v == "1").unwrap_or(false);
+
     fn canonicalize(subset: &FxHashMap<u32, Weight>) -> Vec<(u32, Weight)> {
         let mut entries: Vec<_> = subset
             .iter()
@@ -192,6 +194,21 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
 
             dwa.add_transition(from_state, label, to_state, edge_weight);
         }
+    }
+
+    if profile {
+        let max_weight_dim = dwa.states.iter()
+            .filter_map(|s| s.final_weight.as_ref())
+            .map(|w| w.0.ranges_len())
+            .max()
+            .unwrap_or(0);
+        eprintln!(
+            "[glrmask/profile][determinize] nwa_states={} dwa_states={} subset_map_entries={} max_weight_dim={}",
+            nwa.states.len(),
+            dwa.states.len(),
+            subset_map.len(),
+            max_weight_dim,
+        );
     }
 
     Ok(dwa)
