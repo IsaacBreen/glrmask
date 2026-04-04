@@ -183,6 +183,31 @@ impl FlatDfa {
     }
 
     /// Build a FlatDfa using a pre-built flat transition table, sharing the
+    /// transition data via Arc. Copies all finalizers/futures without filtering.
+    pub fn from_flat_trans(
+        flat_trans: &Arc<[u32]>,
+        tokenizer: &Tokenizer,
+    ) -> Self {
+        let dfa = &tokenizer.dfa;
+        let dfa_states = dfa.states();
+        let start_state = tokenizer.start_state() as usize;
+        let states: Vec<FlatDfaState> = dfa_states
+            .iter()
+            .enumerate()
+            .map(|(i, state)| {
+                let finalizers = collect_group_ids(state.finalizers.iter());
+                let possible_future_group_ids =
+                    collect_group_ids(dfa.possible_future_group_ids(i as u32).iter());
+                FlatDfaState {
+                    finalizers,
+                    possible_future_group_ids,
+                }
+            })
+            .collect();
+        FlatDfa { states, start_state, transitions: Arc::clone(flat_trans) }
+    }
+
+    /// Build a FlatDfa using a pre-built flat transition table, sharing the
     /// transition data via Arc. Only finalizers/futures are allocated per partition.
     pub fn from_flat_trans_filtered(
         flat_trans: &Arc<[u32]>,
@@ -251,6 +276,17 @@ impl TokenizerView {
     pub fn new_filtered(tokenizer: &Tokenizer, active_groups: &[bool]) -> Self {
         TokenizerView {
             flat_dfa: FlatDfa::from_tokenizer_filtered(tokenizer, active_groups),
+        }
+    }
+
+    /// Build a view using a pre-built shared flat transition table (no group filtering).
+    /// Shares transition data via Arc — zero-copy.
+    pub fn new_from_flat_trans(
+        flat_trans: &Arc<[u32]>,
+        tokenizer: &Tokenizer,
+    ) -> Self {
+        TokenizerView {
+            flat_dfa: FlatDfa::from_flat_trans(flat_trans, tokenizer),
         }
     }
 

@@ -678,6 +678,7 @@ fn analyze_equivalences_impl(
     let tokenizer_view = match (active_groups, flat_trans) {
         (Some(active_groups), Some(ft)) => TokenizerView::new_filtered_from_flat_trans(ft, tokenizer, active_groups),
         (Some(active_groups), None) => TokenizerView::new_filtered(tokenizer, active_groups),
+        (None, Some(ft)) => TokenizerView::new_from_flat_trans(ft, tokenizer),
         _ => TokenizerView::new(tokenizer),
     };
     let tokenizer_view_ms = elapsed_ms(tokenizer_view_started_at);

@@ -205,7 +205,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     _ignore_terminal: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
     active_terminals: &[bool],
-    flat_trans: &[u32],
+    flat_trans: &Arc<[u32]>,
 ) -> Option<LocalIdMapTerminalDwa> {
     if vocab.is_empty() {
         return None;
@@ -213,7 +213,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
 
     let total_started_at = Instant::now();
     let id_map_started_at = Instant::now();
-    let (mut id_map, sorted_entries, state_to_rep, id_map_profile) = build_l1_id_map(tokenizer, vocab, active_terminals);
+    let (mut id_map, sorted_entries, state_to_rep, id_map_profile) = build_l1_id_map(tokenizer, vocab, active_terminals, flat_trans);
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let num_terminals = grammar.num_terminals as u32;
@@ -225,7 +225,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
         &state_to_rep,
         num_terminals,
         active_terminals,
-        flat_trans,
+        flat_trans.as_ref(),
     )?;
     let dwa_stats_before_compact = dwa.stats();
     let terminal_build_ms = dwa_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -310,7 +310,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     })
 }
 
-fn build_l1_id_map<'a>(tokenizer: &Tokenizer, vocab: &'a Vocab, active_terminals: &[bool]) -> (InternalIdMap, Vec<(u32, &'a [u8])>, Vec<u32>, L1IdMapProfile) {
+fn build_l1_id_map<'a>(tokenizer: &Tokenizer, vocab: &'a Vocab, active_terminals: &[bool], flat_trans: &Arc<[u32]>) -> (InternalIdMap, Vec<(u32, &'a [u8])>, Vec<u32>, L1IdMapProfile) {
     let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
 
     // Max-length bounded state equivalence: merge DFA states that behave
@@ -318,7 +318,7 @@ fn build_l1_id_map<'a>(tokenizer: &Tokenizer, vocab: &'a Vocab, active_terminals
     // considered. Filtering by active_terminals lets us also merge states
     // that differ only by inactive terminal finalizers/futures.
     let state_equiv_started_at = Instant::now();
-    let tokenizer_view = TokenizerView::new_filtered(tokenizer, active_terminals);
+    let tokenizer_view = TokenizerView::new_filtered_from_flat_trans(flat_trans, tokenizer, active_terminals);
     let token_bytes: Vec<&[u8]> = vocab
         .entries
         .values()

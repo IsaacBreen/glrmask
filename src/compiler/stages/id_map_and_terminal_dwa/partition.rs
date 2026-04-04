@@ -116,7 +116,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                     ignore_terminal,
                     grammar,
                     &l1_mask,
-                    &**flat_trans,
+                    flat_trans,
                 );
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
             } else {
