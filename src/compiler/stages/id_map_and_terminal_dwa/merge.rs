@@ -243,9 +243,7 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     // 4. Compact.
     let mut global = global_id_map;
     let compact_started_at = Instant::now();
-    if label != "global" {
-        compact_dwa_dimensions_fast(&mut dwa, &mut global);
-    }
+    compact_dwa_dimensions_fast(&mut dwa, &mut global);
     let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
     let profile = merge_phase_profile(
         global_id_map_ms,
@@ -633,8 +631,38 @@ fn remap_weight_general(
     local_to_global_tokens: &[Vec<u32>],
     global_tsid_count: usize,
 ) -> Weight {
-    if weight.is_empty() || weight.is_full() {
+    if weight.is_empty() {
         return weight.clone();
+    }
+
+    if weight.is_full() {
+        let mut all_global_tokens = RangeSetBlaze::new();
+        for globals in local_to_global_tokens {
+            for &global_token in globals {
+                all_global_tokens.insert(global_token);
+            }
+        }
+        if all_global_tokens.is_empty() {
+            return Weight::empty();
+        }
+
+        let mut all_global_tsids = BTreeSet::new();
+        for globals in local_to_global_tsids {
+            for &global_tsid in globals {
+                if (global_tsid as usize) < global_tsid_count {
+                    all_global_tsids.insert(global_tsid);
+                }
+            }
+        }
+        if all_global_tsids.is_empty() {
+            return Weight::empty();
+        }
+
+        return Weight::from_per_tsid_token_sets(
+            all_global_tsids
+                .into_iter()
+                .map(|global_tsid| (global_tsid, all_global_tokens.clone())),
+        );
     }
 
     let Some(entries) = weight.compact_entries() else {
@@ -735,4 +763,36 @@ fn remap_weight_general(
     }
 
     finalize_weight_map(map)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remap_weight_general;
+    use crate::ds::weight::Weight;
+    use range_set_blaze::RangeSetBlaze;
+
+    #[test]
+    fn remap_full_weight_is_bounded_to_mapped_space() {
+        let remapped = remap_weight_general(
+            &Weight::all(),
+            &[vec![1, 3], vec![2], vec![]],
+            &[vec![10, 11], vec![12], vec![]],
+            5,
+        );
+
+        let expected_tokens: RangeSetBlaze<u32> = [10..=12].into_iter().collect();
+        let expected = Weight::from_per_tsid_token_sets([
+            (1, expected_tokens.clone()),
+            (2, expected_tokens.clone()),
+            (3, expected_tokens),
+        ]);
+
+        assert_eq!(remapped, expected);
+    }
+
+    #[test]
+    fn remap_full_weight_without_mappings_is_empty() {
+        let remapped = remap_weight_general(&Weight::all(), &[vec![]], &[vec![]], 4);
+        assert!(remapped.is_empty());
+    }
 }
