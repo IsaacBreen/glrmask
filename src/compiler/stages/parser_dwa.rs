@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
 #[cfg(test)]
 use crate::Vocab;
@@ -420,6 +421,17 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
         entries.iter().map(|(sid, w)| (*sid, w.ptr_key())).collect()
     }
 
+    let profile_enabled = parser_dwa_profile_enabled();
+    let mut prof_iterations: u64 = 0;
+    let mut prof_total_subset_entries: u64 = 0;
+    let mut prof_max_subset_size: usize = 0;
+    let mut prof_intersection_calls: u64 = 0;
+    let mut prof_eps_closure_calls: u64 = 0;
+    let mut prof_labels_processed: u64 = 0;
+    let mut prof_eps_closure_ns: u64 = 0;
+    let mut prof_intersection_ns: u64 = 0;
+    let mut prof_target_build_ns: u64 = 0;
+
     let num_nwa_states = nwa.states.len();
 
     // Use flat arrays for epsilon closure when NWA is small enough.
@@ -531,24 +543,45 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
     // Reusable target subset map — cleared and reused each iteration.
     let mut target_subset: FxHashMap<u32, Weight> = FxHashMap::default();
     let mut key_buf: Vec<(u32, usize)> = Vec::new();
+    let mut prof_final_weight_ns: u64 = 0;
+    let mut prof_subset_key_ns: u64 = 0;
+    let mut prof_total_raw_target_entries: u64 = 0;
+
+    // Deferred final weight computation: store subset entries for each DWA state
+    // and compute final weights in parallel after the main loop.
+    let mut deferred_final_entries: Vec<(u32, Vec<(u32, Weight)>)> = Vec::new();
 
     while let Some(subset_entries) = worklist.pop_front() {
+        let t_sk = std::time::Instant::now();
         let from_state = subset_map[&subset_key(&subset_entries)];
+        if profile_enabled { prof_subset_key_ns += t_sk.elapsed().as_nanos() as u64; }
 
-        let mut final_weight = Weight::empty();
-        for (nwa_state_id, path_weight) in &subset_entries {
-            if let Some(state_final) = nwa.states[*nwa_state_id as usize].final_weight.as_ref() {
-                final_weight = final_weight.union(&path_weight.intersection(state_final));
+        if profile_enabled {
+            prof_iterations += 1;
+            prof_total_subset_entries += subset_entries.len() as u64;
+            if subset_entries.len() > prof_max_subset_size {
+                prof_max_subset_size = subset_entries.len();
             }
         }
-        if !final_weight.is_empty() {
-            dwa.set_final_weight(from_state, final_weight);
-        }
 
+        // Save subset entries for deferred parallel final weight computation.
+        // Only save entries whose NWA states have final weights.
+        let t_fw = std::time::Instant::now();
+        let has_finals: Vec<(u32, Weight)> = subset_entries.iter()
+            .filter(|(nwa_state_id, _)| nwa.states[*nwa_state_id as usize].final_weight.is_some())
+            .map(|(id, w)| (*id, w.clone()))
+            .collect();
+        if !has_finals.is_empty() {
+            deferred_final_entries.push((from_state, has_finals));
+        }
+        if profile_enabled { prof_final_weight_ns += t_fw.elapsed().as_nanos() as u64; }
+
+        let t_intersect = std::time::Instant::now();
         for (nwa_state_id, path_weight) in &subset_entries {
             let state = &nwa.states[*nwa_state_id as usize];
             for (&label, targets) in &state.transitions {
                 for (target, transition_weight) in targets {
+                    if profile_enabled { prof_intersection_calls += 1; }
                     let next_weight = path_weight.intersection(transition_weight);
                     if next_weight.is_empty() {
                         continue;
@@ -558,7 +591,9 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
                 }
             }
         }
+        if profile_enabled { prof_intersection_ns += t_intersect.elapsed().as_nanos() as u64; }
 
+        let t_target = std::time::Instant::now();
         for (label, target_contributions) in raw_targets.drain() {
             if target_contributions.is_empty() {
                 continue;
@@ -566,6 +601,7 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
 
             target_subset.clear();
             for (dst, weights) in target_contributions {
+                if profile_enabled { prof_total_raw_target_entries += weights.len() as u64; }
                 let combined = Weight::union_all(weights.iter());
                 if !combined.is_empty() {
                     target_subset.insert(dst, combined);
@@ -581,7 +617,13 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
                 continue;
             }
 
+            if profile_enabled {
+                prof_labels_processed += 1;
+                prof_eps_closure_calls += 1;
+            }
+            let t_eps = std::time::Instant::now();
             epsilon_closure(&mut weight_by_state, &mut closure_queue, &mut target_subset);
+            if profile_enabled { prof_eps_closure_ns += t_eps.elapsed().as_nanos() as u64; }
             if target_subset.is_empty() {
                 continue;
             }
@@ -610,6 +652,62 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
 
             dwa.add_transition(from_state, label, to_state, edge_weight);
         }
+        if profile_enabled { prof_target_build_ns += t_target.elapsed().as_nanos() as u64; }
+    }
+
+    // Compute final weights in parallel using rayon.
+    let t_parallel_fw = std::time::Instant::now();
+    {
+        use rayon::prelude::*;
+        let final_weights: Vec<(u32, Weight)> = deferred_final_entries
+            .par_iter()
+            .filter_map(|(state_id, entries)| {
+                // Group by final weight pointer to leverage distributivity.
+                let mut final_groups: SmallVec<[(usize, &Weight, SmallVec<[&Weight; 4]>); 4]> = SmallVec::new();
+                for (nwa_state_id, path_weight) in entries {
+                    if let Some(state_final) = nwa.states[*nwa_state_id as usize].final_weight.as_ref() {
+                        let key = state_final.ptr_key();
+                        if let Some(group) = final_groups.iter_mut().find(|(k, _, _)| *k == key) {
+                            group.2.push(path_weight);
+                        } else {
+                            let mut pws = SmallVec::new();
+                            pws.push(path_weight);
+                            final_groups.push((key, state_final, pws));
+                        }
+                    }
+                }
+                let final_contributions: SmallVec<[Weight; 4]> = final_groups.into_iter()
+                    .filter_map(|(_, final_w, path_weights)| {
+                        let pw_union = Weight::union_all(path_weights.into_iter());
+                        let contribution = pw_union.intersection(final_w);
+                        if contribution.is_empty() { None } else { Some(contribution) }
+                    })
+                    .collect();
+                let final_weight = Weight::union_all(final_contributions.iter());
+                if final_weight.is_empty() { None } else { Some((*state_id, final_weight)) }
+            })
+            .collect();
+        for (state_id, weight) in final_weights {
+            dwa.set_final_weight(state_id, weight);
+        }
+    }
+    let parallel_fw_ms = t_parallel_fw.elapsed().as_millis();
+
+    if profile_enabled {
+        let avg_subset = if prof_iterations > 0 { prof_total_subset_entries as f64 / prof_iterations as f64 } else { 0.0 };
+        eprintln!(
+            "[glrmask/profile][determinize_supports] iterations={} total_subset_entries={} avg_subset_size={:.1} max_subset_size={} intersection_calls={} eps_closure_calls={} labels_processed={} raw_target_entries={} deferred_finals={} parallel_final_weight_ms={} subset_key_ms={:.1} collect_finals_ms={:.1} intersection_ms={:.1} eps_closure_ms={:.1} target_build_ms={:.1}",
+            prof_iterations, prof_total_subset_entries, avg_subset, prof_max_subset_size,
+            prof_intersection_calls, prof_eps_closure_calls, prof_labels_processed,
+            prof_total_raw_target_entries,
+            deferred_final_entries.len(),
+            parallel_fw_ms,
+            prof_subset_key_ns as f64 / 1_000_000.0,
+            prof_final_weight_ns as f64 / 1_000_000.0,
+            prof_intersection_ns as f64 / 1_000_000.0,
+            prof_eps_closure_ns as f64 / 1_000_000.0,
+            prof_target_build_ns as f64 / 1_000_000.0,
+        );
     }
 
     DeterminizedDwaWithSupports { dwa, supports }
