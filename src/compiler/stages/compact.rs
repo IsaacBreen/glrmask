@@ -32,6 +32,60 @@ pub struct CompactReport {
     pub profile_stats: Option<CompactProfileStats>,
 }
 
+/// Controls DWA dimension compaction behavior.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompactMode {
+    /// Skip compaction entirely.
+    None,
+    /// Merge equivalent IDs but skip token reordering.
+    Fast,
+    /// Full compaction with token reordering.
+    Full,
+}
+
+impl CompactMode {
+    /// Parse from an env var value. Unrecognized values fall back to `default`.
+    fn from_env_str(s: &str, default: CompactMode) -> CompactMode {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "none" | "0" | "off" | "skip" => CompactMode::None,
+            "fast" => CompactMode::Fast,
+            "full" | "1" | "on" => CompactMode::Full,
+            _ => default,
+        }
+    }
+}
+
+/// Run compaction according to the env var `env_var`, falling back to `default`.
+pub fn compact_from_env(
+    dwa: &mut DWA,
+    id_map: &mut InternalIdMap,
+    env_var: &str,
+    default: CompactMode,
+    collect_profile_stats: bool,
+) -> CompactReport {
+    let mode = std::env::var(env_var)
+        .ok()
+        .map(|v| CompactMode::from_env_str(&v, default))
+        .unwrap_or(default);
+    match mode {
+        CompactMode::None => {
+            let n_tsids = id_map.num_tsids() as usize;
+            let n_tokens = id_map.num_internal_tokens() as usize;
+            CompactReport {
+                tsid_perm: (0..n_tsids as u32).collect(),
+                token_perm: (0..n_tokens as u32).collect(),
+                profile_stats: None,
+            }
+        }
+        CompactMode::Fast => {
+            compact_dwa_dimensions_inner(dwa, id_map, collect_profile_stats, true)
+        }
+        CompactMode::Full => {
+            compact_dwa_dimensions_inner(dwa, id_map, collect_profile_stats, false)
+        }
+    }
+}
+
 struct DimensionCompaction {
     tsid_perm: Vec<u32>,
     ordered_num_tsids: usize,

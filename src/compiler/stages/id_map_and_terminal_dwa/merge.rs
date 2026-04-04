@@ -14,7 +14,7 @@ use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::{minimize, minimize_from_env, minimize_with_threshold};
 use crate::automata::weighted::nwa::NWA;
-use crate::compiler::stages::compact::compact_dwa_dimensions_fast;
+use crate::compiler::stages::compact::{compact_from_env, CompactMode};
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::weight::Weight;
 
@@ -60,7 +60,7 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
         let mut input = inputs.into_iter().next().unwrap();
         input.id_map = expand_local_id_map_to_original_space(&input, num_tokenizer_states);
         let compact_started_at = Instant::now();
-        compact_dwa_dimensions_fast(&mut input.dwa, &mut input.id_map);
+        compact_from_env(&mut input.dwa, &mut input.id_map, "GLRMASK_COMPACT_MERGE", CompactMode::Fast, false);
         let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
         if compile_profile_enabled() || debug_profile_enabled() {
             eprintln!(
@@ -120,7 +120,7 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
 
     let mut global = global_id_map;
     let compact_started_at = Instant::now();
-    compact_dwa_dimensions_fast(&mut dwa, &mut global);
+    compact_from_env(&mut dwa, &mut global, "GLRMASK_COMPACT_MERGE", CompactMode::Fast, false);
     let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
     let profile = merge_phase_profile(
         global_id_map_ms,
@@ -153,14 +153,6 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
 }
 
 /// Merge multiple `(InternalIdMap, DWA)` pairs into a single pair.
-///
-/// 1. Builds a global `InternalIdMap` as the finest common refinement of all
-///    input id_maps (for states) and a unified token mapping.
-/// 2. Converts each DWA to an NWA, remaps it to the global space, and unions
-///    all NWAs together.
-/// 3. Determinizes and minimizes the union.
-/// 4. Runs dimension compaction.
-/// 5. Returns the merged `(InternalIdMap, DWA)`.
 pub(crate) fn merge_id_maps_and_terminal_dwas(
     label: &str,
     inputs: Vec<LocalIdMapTerminalDwa>,
@@ -174,7 +166,7 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     if inputs.len() == 1 {
         let mut input = inputs.into_iter().next().unwrap();
         let compact_started_at = Instant::now();
-        compact_dwa_dimensions_fast(&mut input.dwa, &mut input.id_map);
+        compact_from_env(&mut input.dwa, &mut input.id_map, "GLRMASK_COMPACT_MERGE_GLOBAL", CompactMode::Fast, false);
         let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
         if compile_profile_enabled() || debug_profile_enabled() {
             eprintln!(
@@ -245,7 +237,7 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     // 4. Compact.
     let mut global = global_id_map;
     let compact_started_at = Instant::now();
-    compact_dwa_dimensions_fast(&mut dwa, &mut global);
+    compact_from_env(&mut dwa, &mut global, "GLRMASK_COMPACT_MERGE_GLOBAL", CompactMode::Fast, false);
     let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
     let profile = merge_phase_profile(
         global_id_map_ms,

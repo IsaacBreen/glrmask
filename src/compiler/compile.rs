@@ -638,9 +638,11 @@ fn compile_prepared_with_profile(
 
         if !already_compacted {
             let compact_started_at = Instant::now();
-            let compact_report = crate::compiler::stages::compact::compact_dwa_dimensions(
+            let compact_report = crate::compiler::stages::compact::compact_from_env(
                 &mut terminal_dwa,
                 &mut internal_ids,
+                "GLRMASK_COMPACT_FINAL",
+                crate::compiler::stages::compact::CompactMode::Full,
                 compile_profile_summary_enabled(),
             );
             let compact_ms = elapsed_ms(compact_started_at);
