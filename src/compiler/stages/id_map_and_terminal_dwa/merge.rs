@@ -219,6 +219,7 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
         .expect("merge terminal NWA determinization failed");
     let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    let det_states = det.states.len();
     let minimize_started_at = Instant::now();
     let mut dwa = if label == "global" {
         minimize_from_env(&det, "GLRMASK_MINIMIZE_MERGE_GLOBAL", minimize)
@@ -226,6 +227,7 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
         minimize_from_env(&det, "GLRMASK_MINIMIZE_MERGE", minimize)
     };
     let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
+    let min_states = dwa.states.len();
 
     // 4. Compact.
     let mut global = global_id_map;
@@ -242,13 +244,15 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
 
     if compile_profile_enabled() || debug_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][merge] label={} inputs={} build_global_id_map_ms={:.3} remap_union_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} compact_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][merge] label={} inputs={} build_global_id_map_ms={:.3} remap_union_ms={:.3} determinize_ms={:.3} det_states={} minimize_ms={:.3} min_states={} compact_ms={:.3} total_ms={:.3}",
             label,
             inputs.len(),
             global_id_map_ms,
             remap_union_ms,
             determinize_ms,
+            det_states,
             minimize_ms,
+            min_states,
             compact_ms,
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
@@ -346,7 +350,7 @@ fn build_unified_global_id_map(
     }
 }
 
-fn expand_local_id_map_to_original_space(
+pub(crate) fn expand_local_id_map_to_original_space(
     input: &LocalIdMapTerminalDwa,
     num_tokenizer_states: usize,
 ) -> InternalIdMap {

@@ -871,6 +871,7 @@ fn compute_state_signature(
 /// Color candidates using signature-based deduplication and a strategy that
 /// adapts based on the bucket: greedy-without-graph for smaller sets, and
 /// sparse overlap graph + greedy coloring for larger sets.
+#[allow(dead_code)]
 fn build_and_color_with_signature_dedup(
     dwa: &DWA,
     candidates: &[usize],
@@ -899,6 +900,13 @@ fn build_and_color_with_signature_dedup(
     }
 
     let rep_candidates: Vec<usize> = unique_indices.iter().map(|&i| candidates[i]).collect();
+
+    // If signature dedup didn't reduce enough, use hybrid approach:
+    // partition refinement to get classes, then graph coloring among class reps.
+    const HYBRID_THRESHOLD: usize = 200;
+    if rep_candidates.len() > HYBRID_THRESHOLD {
+        return build_and_color_hybrid(dwa, candidates, needed, old_to_new, productive_transitions);
+    }
 
     // Build incompatibility graph and greedy-color it.
     let t1 = if debug { std::time::Instant::now() } else { t0 };
@@ -934,6 +942,107 @@ fn build_and_color_with_signature_dedup(
     for (idx, &sig) in signatures.iter().enumerate() {
         let rep = sig_to_rep_idx[&sig];
         coloring[idx] = rep_coloring[rep];
+    }
+
+    coloring
+}
+
+/// Hybrid coloring: partition refinement to reduce candidates into classes,
+/// then graph coloring among class representatives.
+///
+/// States within the same partition-refinement class have identical transition
+/// structure (same labels, mapped targets, weights) and are guaranteed compatible.
+/// We only need to check pairwise compatibility among classes, reducing O(N²) to O(K²)
+/// where K is the number of classes (typically K << N).
+///
+/// To ensure correctness, we compute the union of needed sets for each class
+/// and use those when checking inter-class compatibility. This guarantees that
+/// if two class representatives are deemed compatible, ALL pairs across the
+/// two classes are compatible (since transitions/weights are identical within
+/// a class, only the needed-set overlap domain varies).
+fn build_and_color_hybrid(
+    dwa: &DWA,
+    candidates: &[usize],
+    needed: &[Weight],
+    old_to_new: &[u32],
+    productive_transitions: &[Vec<ProductiveTransition>],
+) -> Vec<usize> {
+    let debug = debug_profile_enabled();
+    let t0 = std::time::Instant::now();
+
+    // Step 1: Partition refinement to get fine-grained classes.
+    let class_coloring = partition_refine_coloring(
+        candidates, dwa, needed, old_to_new, productive_transitions,
+    );
+    let num_classes = class_coloring.iter().max().map(|&c| c + 1).unwrap_or(0);
+    let refine_ms = if debug { t0.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
+
+    if num_classes <= 1 {
+        return class_coloring;
+    }
+
+    // Step 2: Pick one representative state per class and compute the union
+    // of needed sets for each class. Using the union ensures that compatibility
+    // checks between representatives cover ALL possible overlap domains that
+    // any pair of states across the two classes could produce.
+    let mut class_rep_state: Vec<usize> = vec![usize::MAX; num_classes];
+    let mut class_needed_union: Vec<Weight> = Vec::with_capacity(num_classes);
+    class_needed_union.resize_with(num_classes, Weight::empty);
+    for (idx, &class) in class_coloring.iter().enumerate() {
+        let state_id = candidates[idx];
+        if class_rep_state[class] == usize::MAX {
+            class_rep_state[class] = state_id;
+        }
+        class_needed_union[class] = class_needed_union[class].union(&needed[state_id]);
+    }
+
+    // Build a modified needed array for the representative states,
+    // replacing each rep's needed set with its class's needed union.
+    let mut needed_for_reps = needed.to_vec();
+    for (class, &rep_state) in class_rep_state.iter().enumerate() {
+        needed_for_reps[rep_state] = class_needed_union[class].clone();
+    }
+
+    // Step 3: Build incompatibility graph among class representatives
+    // using the unioned needed sets.
+    let t1 = if debug { std::time::Instant::now() } else { t0 };
+    let class_adj = build_incompatibility_graph_sparse(
+        dwa,
+        &class_rep_state,
+        &needed_for_reps,
+        old_to_new,
+        productive_transitions,
+    )
+    .unwrap_or_else(|| {
+        build_incompatibility_graph(
+            dwa,
+            &class_rep_state,
+            &needed_for_reps,
+            old_to_new,
+            productive_transitions,
+        )
+    });
+    let graph_ms = if debug { t1.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
+
+    // Step 4: Greedy color the class graph.
+    let t2 = if debug { std::time::Instant::now() } else { t0 };
+    let class_colors = greedy_coloring(&class_adj);
+    let color_ms = if debug { t2.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
+
+    if debug {
+        let num_colors = class_colors.iter().max().map(|c| c + 1).unwrap_or(0);
+        let total_edges: usize = class_adj.iter().map(|a| a.len()).sum::<usize>() / 2;
+        eprintln!(
+            "[glrmask/debug][minimize_hybrid] candidates={} classes={} refine_ms={:.1} graph_ms={:.1} edges={} color_ms={:.1} colors={}",
+            candidates.len(), num_classes, refine_ms, graph_ms, total_edges, color_ms, num_colors
+        );
+    }
+
+    // Step 5: Map each candidate through class → merged color.
+    let nc = candidates.len();
+    let mut coloring = vec![0usize; nc];
+    for (idx, &class) in class_coloring.iter().enumerate() {
+        coloring[idx] = class_colors[class];
     }
 
     coloring
@@ -1440,7 +1549,7 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
 /// Like [`minimize_acyclic`], but switches from the O(n²) incompatibility
 /// graph to partition-refinement coloring when a height bucket has more than
 /// `partition_refine_threshold` candidates.
-pub fn minimize_acyclic_with_threshold(dwa: &DWA, partition_refine_threshold: usize) -> DWA {
+pub fn minimize_acyclic_with_threshold(dwa: &DWA, _partition_refine_threshold: usize) -> DWA {
     if dwa.states.is_empty() {
         return dwa.clone();
     }
@@ -1524,28 +1633,17 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, partition_refine_threshold: us
             continue;
         }
 
-        // Build incompatibility graph and color it.
-        // Uses signature-based deduplication: candidates with identical
-        // (final_weight_on_needed, mapped transitions, weights) share a
-        // signature and are guaranteed compatible, so we only build the
-        // O(K²) graph among unique-signature representatives (K << N).
-        let coloring = if candidates.len() > partition_refine_threshold {
-            partition_refine_coloring(
-                candidates,
-                &pushed,
-                &needed,
-                &old_to_new,
-                &productive_transitions,
-            )
-        } else {
-            build_and_color_with_signature_dedup(
-                &pushed,
-                candidates,
-                &needed,
-                &old_to_new,
-                &productive_transitions,
-            )
-        };
+        // Hybrid coloring: partition refinement to reduce candidates into
+        // equivalence classes, then graph coloring among class representatives.
+        // This is O(n log n + k²) where k ≤ n, always at least as fast as
+        // direct O(n²) graph coloring.
+        let coloring = build_and_color_hybrid(
+            &pushed,
+            candidates,
+            &needed,
+            &old_to_new,
+            &productive_transitions,
+        );
 
         let base_new_id = new_states.len() as u32;
         let num_colors = coloring.iter().max().map(|&c| c + 1).unwrap_or(0);
