@@ -264,50 +264,18 @@ fn characterize_terminal_with_initial(
     let mut nt_escapes = BTreeSet::new();
     let mut nt_rereduces = BTreeSet::new();
 
-    let num_states = table.num_states as usize;
-    let mut visited = vec![false; num_states];
-    let mut visited_stack: Vec<u32> = Vec::new();
-    let mut worklist = VecDeque::new();
-
     for revealed_state in 0..table.num_states {
         if let Some(gotos) = table.goto.get(revealed_state as usize) {
             for (&nonterminal, &goto_state) in gotos {
-                // Early termination: skip if terminal has no action at goto_state
-                if table.action(goto_state, terminal).is_none() {
-                    continue;
-                }
-
-                // Inline BFS (reusing allocations)
-                debug_assert!(worklist.is_empty());
-                if (goto_state as usize) < num_states {
-                    visited[goto_state as usize] = true;
-                    visited_stack.push(goto_state);
-                    worklist.push_back(goto_state);
-                }
-
-                while let Some(current_state) = worklist.pop_front() {
-                    let Some(action) = table.action(current_state, terminal) else {
-                        continue;
-                    };
-                    record_goto_action_fast(
-                        table,
-                        nonterminal,
-                        revealed_state,
-                        current_state,
-                        action,
-                        &mut visited,
-                        &mut visited_stack,
-                        &mut worklist,
-                        &mut nt_escapes,
-                        &mut nt_rereduces,
-                    );
-                }
-
-                // Reset visited for next BFS
-                for &s in &visited_stack {
-                    visited[s as usize] = false;
-                }
-                visited_stack.clear();
+                explore_from_goto(
+                    table,
+                    terminal,
+                    nonterminal,
+                    revealed_state,
+                    goto_state,
+                    &mut nt_escapes,
+                    &mut nt_rereduces,
+                );
             }
         }
     }

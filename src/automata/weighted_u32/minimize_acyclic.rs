@@ -971,9 +971,7 @@ fn build_and_color_hybrid(
     let t0 = std::time::Instant::now();
 
     // Step 1: Partition refinement to get fine-grained classes.
-    let class_coloring = partition_refine_coloring(
-        candidates, dwa, needed, old_to_new, productive_transitions,
-    );
+    let class_coloring = partition_refine_coloring_raw(candidates, dwa, old_to_new);
     let num_classes = class_coloring.iter().max().map(|&c| c + 1).unwrap_or(0);
     let refine_ms = if debug { t0.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
 
@@ -982,9 +980,7 @@ fn build_and_color_hybrid(
     }
 
     // Step 2: Pick one representative state per class and compute the union
-    // of needed sets for each class. Using the union ensures that compatibility
-    // checks between representatives cover ALL possible overlap domains that
-    // any pair of states across the two classes could produce.
+    // of needed sets for each class.
     let mut class_rep_state: Vec<usize> = vec![usize::MAX; num_classes];
     let mut class_needed_union: Vec<Weight> = Vec::with_capacity(num_classes);
     class_needed_union.resize_with(num_classes, Weight::empty);
@@ -996,53 +992,183 @@ fn build_and_color_hybrid(
         class_needed_union[class] = class_needed_union[class].union(&needed[state_id]);
     }
 
-    // Build a modified needed array for the representative states,
-    // replacing each rep's needed set with its class's needed union.
-    let mut needed_for_reps = needed.to_vec();
-    for (class, &rep_state) in class_rep_state.iter().enumerate() {
-        needed_for_reps[rep_state] = class_needed_union[class].clone();
+    // Step 3: Greedy merge of classes, handling both disjoint and overlapping
+    // needed sets. Instead of building an O(K²) incompatibility graph, we check
+    // each class against only the small number of existing groups (~14 for kb_684).
+    //
+    // For overlapping classes, we maintain "merged weights" per group — the union
+    // of all members' weights. Since all group members were verified compatible
+    // when added, they agree on overlapping TSIDs, so the union weight is a
+    // valid consensus for checking new candidates.
+    let t1 = if debug { std::time::Instant::now() } else { t0 };
+
+    struct OverlapMergeGroup {
+        needed_union: Weight,
+        target_map: rustc_hash::FxHashMap<i32, u32>,
+        merged_final_weight: Option<Weight>,
+        merged_transition_weights: rustc_hash::FxHashMap<i32, Weight>,
+        member_classes: Vec<usize>,
     }
 
-    // Step 3: Build incompatibility graph among class representatives
-    // using the unioned needed sets.
-    let t1 = if debug { std::time::Instant::now() } else { t0 };
-    let class_adj = build_incompatibility_graph_sparse(
-        dwa,
-        &class_rep_state,
-        &needed_for_reps,
-        old_to_new,
-        productive_transitions,
-    )
-    .unwrap_or_else(|| {
-        build_incompatibility_graph(
-            dwa,
-            &class_rep_state,
-            &needed_for_reps,
-            old_to_new,
-            productive_transitions,
-        )
-    });
-    let graph_ms = if debug { t1.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
+    let mut groups: Vec<OverlapMergeGroup> = Vec::new();
 
-    // Step 4: Greedy color the class graph.
-    let t2 = if debug { std::time::Instant::now() } else { t0 };
-    let class_colors = greedy_coloring(&class_adj);
-    let color_ms = if debug { t2.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
+    for class in 0..num_classes {
+        let rep = class_rep_state[class];
+        let cn = &class_needed_union[class];
+
+        // Build this class's target profile
+        let tp: Vec<(i32, u32)> = productive_transitions[rep]
+            .iter()
+            .filter_map(|pt| {
+                mapped_target(old_to_new, pt.target).map(|mt| (pt.label, mt))
+            })
+            .collect();
+
+        let mut placed = false;
+        for g in &mut groups {
+            // Check target compatibility: no shared label maps to different targets
+            let mut target_compat = true;
+            for &(label, target) in &tp {
+                if let Some(&existing_target) = g.target_map.get(&label) {
+                    if existing_target != target {
+                        target_compat = false;
+                        break;
+                    }
+                }
+            }
+            if !target_compat {
+                continue;
+            }
+
+            let is_disjoint = cn.is_disjoint(&g.needed_union);
+
+            if !is_disjoint {
+                // Check weight compatibility on the overlap domain.
+                let overlap = cn.intersection(&g.needed_union);
+
+                // Check final weights on overlap
+                let fw_class = dwa.states[rep].final_weight.as_ref();
+                let weight_ok = match (fw_class, &g.merged_final_weight) {
+                    (Some(fw), Some(gfw)) => weights_equal_on_domain(fw, gfw, &overlap),
+                    (Some(fw), None) => fw.is_disjoint(&overlap),
+                    (None, Some(gfw)) => gfw.is_disjoint(&overlap),
+                    (None, None) => true,
+                };
+                if !weight_ok {
+                    continue;
+                }
+
+                // Check transition weights on overlap.
+                // Labels present in the class:
+                let mut trans_compat = true;
+                let trans = &productive_transitions[rep];
+                for pt in trans {
+                    if let Some(gw) = g.merged_transition_weights.get(&pt.label) {
+                        // Both have this label — check weights agree on overlap
+                        if &pt.weight == gw {
+                            continue;
+                        }
+                        let c_disj = pt.weight.is_disjoint(&overlap);
+                        let g_disj = gw.is_disjoint(&overlap);
+                        if c_disj && g_disj {
+                            continue;
+                        }
+                        if c_disj != g_disj {
+                            trans_compat = false;
+                            break;
+                        }
+                        if !weights_equal_on_domain(&pt.weight, gw, &overlap) {
+                            trans_compat = false;
+                            break;
+                        }
+                    } else {
+                        // Only class has this label — weight must not touch overlap
+                        if !pt.weight.is_disjoint(&overlap) {
+                            trans_compat = false;
+                            break;
+                        }
+                    }
+                }
+                if trans_compat {
+                    // Labels present in group but not in class
+                    for (label, gw) in &g.merged_transition_weights {
+                        if trans.iter().any(|pt| pt.label == *label) {
+                            continue;
+                        }
+                        if !gw.is_disjoint(&overlap) {
+                            trans_compat = false;
+                            break;
+                        }
+                    }
+                }
+                if !trans_compat {
+                    continue;
+                }
+            }
+
+            // Compatible — merge into this group
+            g.needed_union = g.needed_union.union(cn);
+            for &(label, target) in &tp {
+                g.target_map.insert(label, target);
+            }
+            if let Some(fw) = &dwa.states[rep].final_weight {
+                g.merged_final_weight = Some(match g.merged_final_weight.take() {
+                    Some(existing) => existing.union(fw),
+                    None => fw.clone(),
+                });
+            }
+            for pt in &productive_transitions[rep] {
+                let entry = g.merged_transition_weights
+                    .entry(pt.label)
+                    .or_insert_with(Weight::empty);
+                *entry = entry.union(&pt.weight);
+            }
+            g.member_classes.push(class);
+            placed = true;
+            break;
+        }
+
+        if !placed {
+            let mut target_map = rustc_hash::FxHashMap::default();
+            for &(label, target) in &tp {
+                target_map.insert(label, target);
+            }
+            let merged_final_weight = dwa.states[rep].final_weight.clone();
+            let mut merged_transition_weights = rustc_hash::FxHashMap::default();
+            for pt in &productive_transitions[rep] {
+                merged_transition_weights.insert(pt.label, pt.weight.clone());
+            }
+            groups.push(OverlapMergeGroup {
+                needed_union: cn.clone(),
+                target_map,
+                merged_final_weight,
+                merged_transition_weights,
+                member_classes: vec![class],
+            });
+        }
+    }
+
+    let merge_ms = if debug { t1.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
 
     if debug {
-        let num_colors = class_colors.iter().max().map(|c| c + 1).unwrap_or(0);
-        let total_edges: usize = class_adj.iter().map(|a| a.len()).sum::<usize>() / 2;
+        let num_colors = groups.len();
         eprintln!(
-            "[glrmask/debug][minimize_hybrid] candidates={} classes={} refine_ms={:.1} graph_ms={:.1} edges={} color_ms={:.1} colors={}",
-            candidates.len(), num_classes, refine_ms, graph_ms, total_edges, color_ms, num_colors
+            "[glrmask/debug][minimize_hybrid] candidates={} classes={} refine_ms={:.1} merge_ms={:.1} colors={}",
+            candidates.len(), num_classes, refine_ms, merge_ms, num_colors
         );
     }
 
-    // Step 5: Map each candidate through class → merged color.
+    // Step 4: Map each candidate through class → merged color.
+    let mut class_to_group = vec![0usize; num_classes];
+    for (gid, g) in groups.iter().enumerate() {
+        for &c in &g.member_classes {
+            class_to_group[c] = gid;
+        }
+    }
     let nc = candidates.len();
     let mut coloring = vec![0usize; nc];
     for (idx, &class) in class_coloring.iter().enumerate() {
-        coloring[idx] = class_colors[class];
+        coloring[idx] = class_to_group[class];
     }
 
     coloring
