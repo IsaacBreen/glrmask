@@ -4,6 +4,13 @@
 //! unchanged and handled by the caller.
 use super::dwa::DWA;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MinimizeStrategy {
+    Full,
+    Fast,
+    Threshold(usize),
+}
+
 fn should_skip_minimization(dwa: &DWA) -> bool {
     dwa.states.is_empty() || !dwa.is_acyclic()
 }
@@ -39,30 +46,45 @@ pub fn minimize_fast(dwa: &DWA) -> DWA {
     minimize_if_acyclic(dwa, super::minimize_acyclic::minimize_acyclic_fast)
 }
 
-/// Returns the configured partition-refine threshold from
-/// `GLRMASK_MINIMIZE_THRESHOLD`. Default: `default`.
-pub fn configured_threshold(default: usize) -> usize {
-    std::env::var("GLRMASK_MINIMIZE_THRESHOLD")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+fn parse_minimize_strategy(env_var_name: &str) -> Option<MinimizeStrategy> {
+    let value = match std::env::var(env_var_name) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("{env_var_name} must be valid UTF-8")
+        }
+    };
+
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("full") {
+        return Some(MinimizeStrategy::Full);
+    }
+    if value.eq_ignore_ascii_case("fast") {
+        return Some(MinimizeStrategy::Fast);
+    }
+    if let Some(rest) = value.strip_prefix("threshold:") {
+        let threshold = rest.parse::<usize>().unwrap_or_else(|_| {
+            panic!(
+                "{env_var_name} must be one of: full, fast, threshold:<n>; got {value}"
+            )
+        });
+        return Some(MinimizeStrategy::Threshold(threshold));
+    }
+
+    panic!(
+        "{env_var_name} must be one of: full, fast, threshold:<n>; got {value}"
+    );
 }
 
-/// Returns true if `GLRMASK_FORCE_FULL_MINIMIZE=1`.
-pub fn force_full_minimize() -> bool {
-    std::env::var("GLRMASK_FORCE_FULL_MINIMIZE").map_or(false, |v| v == "1")
-}
-
-/// Minimize with env-var-configured strategy.
-///
-/// - `GLRMASK_FORCE_FULL_MINIMIZE=1`: always use full O(n²) graph-coloring minimize.
-/// - `GLRMASK_MINIMIZE_THRESHOLD=<n>`: override the default partition-refine threshold.
-///   Set to 0 to always use partition refinement (fast path).
-pub fn minimize_configured(dwa: &DWA, default_threshold: usize) -> DWA {
-    if force_full_minimize() {
-        minimize(dwa)
-    } else {
-        let threshold = configured_threshold(default_threshold);
-        minimize_with_threshold(dwa, threshold)
+pub fn minimize_from_env(
+    dwa: &DWA,
+    env_var_name: &str,
+    default_behavior: impl FnOnce(&DWA) -> DWA,
+) -> DWA {
+    match parse_minimize_strategy(env_var_name) {
+        Some(MinimizeStrategy::Full) => minimize(dwa),
+        Some(MinimizeStrategy::Fast) => minimize_fast(dwa),
+        Some(MinimizeStrategy::Threshold(threshold)) => minimize_with_threshold(dwa, threshold),
+        None => default_behavior(dwa),
     }
 }

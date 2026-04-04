@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::determinize::determinize;
-use crate::automata::weighted::minimize::minimize_configured;
+use crate::automata::weighted::minimize::{minimize_from_env, minimize_with_threshold};
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::grammar::model::TerminalID;
@@ -210,7 +210,9 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let minimize_started_at = Instant::now();
-    let dwa = minimize_configured(&det, 50);
+    let dwa = minimize_from_env(&det, "GLRMASK_MINIMIZE_L2P", |dwa| {
+        minimize_with_threshold(dwa, 50)
+    });
     let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
     let dwa_stats_before_compact = dwa.stats();
     let dwa_stats_after_compact = dwa.stats();

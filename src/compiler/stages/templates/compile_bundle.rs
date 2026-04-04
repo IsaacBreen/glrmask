@@ -8,7 +8,7 @@ use crate::automata::unweighted_u32::nfa::NFA as UnweightedNfa;
 use crate::automata::unweighted_u32::determinize::determinize as unweighted_determinize;
 use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic as unweighted_minimize;
 use crate::automata::weighted::dwa::DWA;
-use crate::automata::weighted::minimize::minimize_fast;
+use crate::automata::weighted::minimize::{minimize_fast, minimize_from_env};
 use crate::automata::weighted::nwa::{NWA, NWAState};
 use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::stages::templates::compile_dfa::Templates;
@@ -133,7 +133,7 @@ impl Templates {
         let bundle_dwa = determinize_bundle_groups(&group_dfas);
 
         let minimized = if num_groups > 1 {
-            minimize_fast(&bundle_dwa)
+            minimize_from_env(&bundle_dwa, "GLRMASK_MINIMIZE_BUNDLE", minimize_fast)
         } else {
             bundle_dwa
         };

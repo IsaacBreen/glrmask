@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
+use crate::automata::weighted::minimize::{minimize, minimize_from_env};
 use crate::automata::weighted::nwa::{NWA, NWAState as NWAStateType};
 use crate::compiler::compile::compute_disallowed_follows;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
@@ -423,7 +424,7 @@ pub(crate) fn build_terminal_dwa_for_existing_id_map_with_possible_matches_and_c
     let determinized_transitions = determinized.num_transitions();
 
     let minimize_started_at = std::time::Instant::now();
-    let dwa = crate::automata::weighted::minimize::minimize(&determinized);
+    let dwa = minimize_from_env(&determinized, "GLRMASK_MINIMIZE_MERGE", minimize);
     let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
 
     if profile_enabled {
