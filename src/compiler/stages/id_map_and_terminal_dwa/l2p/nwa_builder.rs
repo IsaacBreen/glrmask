@@ -989,7 +989,6 @@ fn root_combined_signature(
     terminal_coloring: &TerminalColoring,
     ignore_terminal: Option<TerminalID>,
     possible_matches_by_state: &PossibleMatchesByState,
-    active_terminals: Option<&[bool]>,
 ) -> u64 {
     use std::hash::Hasher;
 
@@ -997,11 +996,6 @@ fn root_combined_signature(
     for terminal_id in tokenizer.possible_future_terminals_iter(representative_state) {
         if Some(terminal_id) == ignore_terminal {
             continue;
-        }
-        if let Some(active) = active_terminals {
-            if !active.get(terminal_id as usize).copied().unwrap_or(false) {
-                continue;
-            }
         }
         future_groups
             .entry(terminal_coloring.color_for(terminal_id))
@@ -1046,7 +1040,6 @@ pub(crate) fn seed_root_nodes(
     terminal_coloring: &TerminalColoring,
     ignore_terminal: Option<TerminalID>,
     possible_matches_by_state: &PossibleMatchesByState,
-    active_terminals: Option<&[bool]>,
 ) -> NodesByTokenizerState {
     let mut roots_by_tokenizer_state = NodesByTokenizerState::new();
     let mut roots_by_signature = HashMap::<u64, NwaState>::new();
@@ -1064,7 +1057,6 @@ pub(crate) fn seed_root_nodes(
             terminal_coloring,
             ignore_terminal,
             possible_matches_by_state,
-            active_terminals,
         );
 
         let root = *roots_by_signature

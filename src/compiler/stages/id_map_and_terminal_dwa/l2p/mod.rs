@@ -78,28 +78,33 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let total_started_at = Instant::now();
     let num_original_states = tokenizer.num_states() as usize;
 
-    // No DFA clone needed — active_terminals filtering is applied lazily
-    // in TokenizerView::new_filtered (for equiv analysis) and at point-of-use
-    // in the NWA builder, seed_root_nodes, and PossibleMatchesComputer.
+    // ---- Step 0: Simplify tokenizer for active terminals ----
+    // Strip non-active terminal bits from finalizers and minimize.
+    // This merges states that only differed by non-active terminal info,
+    // reducing the state count for equivalence analysis and NWA building.
     let simplify_started_at = Instant::now();
+    let simplified_tok = tokenizer.filter_for_terminals(active_terminals);
     let orig_to_simplified = identity_original_to_local_state(num_original_states);
     let simplify_ms = simplify_started_at.elapsed().as_secs_f64() * 1000.0;
 
     if debug_profile_enabled() {
         eprintln!(
-            "[glrmask/debug][l2p_simplify] partition={} mode=lazy_filter original_states={} simplified_states={}",
-            partition_label, num_original_states, tokenizer.num_states(),
+            "[glrmask/debug][l2p_simplify] partition={} mode=filtered original_states={} simplified_states={}",
+            partition_label, num_original_states, simplified_tok.num_states(),
         );
     }
 
-    // ---- Step 1: Equivalence analysis (with active group filtering) ----
+    // From here on, use the simplified tokenizer for all operations.
+    let tokenizer = &simplified_tok;
+
+    // ---- Step 1: Equivalence analysis (on simplified tokenizer) ----
     let id_map_started_at = Instant::now();
     let simplified_id_map = equivalence_analysis::combined::analyze_equivalences_with_group_filter(
         tokenizer,
         vocab,
         disallowed_follows,
         ignore_terminal,
-        Some(active_terminals),
+        None,
         shared_vocab_dfa_cache,
         flat_trans,
     );
@@ -121,7 +126,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
     // ---- Step 4: Possible matches ----
     let possible_matches_started_at = Instant::now();
-    let mut pm_computer = PossibleMatchesComputer::new_filtered(tokenizer, active_terminals);
+    let mut pm_computer = PossibleMatchesComputer::new(tokenizer);
     let possible_matches_by_state = collect_possible_matches_by_internal_tsid(
         tokenizer,
         &full_tree.root,
@@ -146,12 +151,12 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         terminal_coloring,
         ignore_terminal,
         &possible_matches_by_state,
-        Some(active_terminals),
     );
     let seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // ---- Step 6: Trie-walk NWA build ----
-    // active_terminals filtering is applied at point-of-use in the NWA builder.
+    // active_terminals filtering is no longer needed — the simplified tokenizer
+    // only reports active terminals in its finalizers.
     let trie_build_started_at = Instant::now();
     let _build_profile = build_nwa_via_trie_walk(
         tokenizer,
@@ -164,7 +169,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         &full_tree.root,
         &roots,
         &mut pm_computer,
-        Some(active_terminals),
+        None,
     );
     let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -224,7 +229,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             vocab.entries.len(),
             simplified_id_map.num_tsids(),
             simplify_ms,
-            tokenizer.num_states(),
+            simplified_tok.num_states(),
             id_map_ms,
             vocab_tree_ms,
             possible_matches_ms,

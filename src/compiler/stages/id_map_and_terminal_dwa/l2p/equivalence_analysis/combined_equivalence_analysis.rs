@@ -305,11 +305,9 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
     // the dedup and build_dfa steps can reuse byte_to_class, trans_by_class,
     // and self_loop_bytes. Since filter_for_terminals preserves transitions,
     // the first partition's cache is valid for all.
-    let cache_init_started_at = std::time::Instant::now();
     if let Some(cache) = shared_vocab_dfa_cache {
         cache.get_or_init(|| vocab_equivalence_analysis::SharedVocabDfaBase::build_from_dfa(tokenizer.dfa()));
     }
-    let cache_init_ms = elapsed_ms(cache_init_started_at);
 
     // Deduplicate tokens by byte-class sequence. Tokens whose bytes map
     // to the same DFA byte-class sequence behave identically from every
@@ -465,8 +463,7 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
 
     if profile_compile {
         eprintln!(
-            "[glrmask/profile][equiv] cache_init_ms={:.3} dedup_ms={:.3} tokens={}->{} max_length_ms={:.3} pre_states={} pre_reduced_states={} token_state_ms={:.3} reduced_states={} vocab_ms={:.3} state_classes={} vocab_classes={} total_ms={:.3}",
-            cache_init_ms,
+            "[glrmask/profile][equiv] dedup_ms={:.3} tokens={}->{} max_length_ms={:.3} pre_states={} pre_reduced_states={} token_state_ms={:.3} reduced_states={} vocab_ms={:.3} state_classes={} vocab_classes={} total_ms={:.3}",
             dedup_ms,
             tokens.len(),
             dedup.representative_token_bytes.len(),
