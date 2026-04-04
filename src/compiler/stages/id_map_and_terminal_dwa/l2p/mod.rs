@@ -22,7 +22,7 @@ use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::grammar::model::TerminalID;
 use crate::compiler::possible_matches::{
-    PossibleMatchesComputer, collect_possible_matches_by_internal_tsid,
+    PossibleMatchesComputer,
 };
 use crate::compiler::stages::id_map_and_terminal_dwa::merge::{
     LocalIdMapTerminalDwa, identity_original_to_local_state,
@@ -125,15 +125,11 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let vocab_tree_ms = vocab_tree_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // ---- Step 4: Possible matches ----
-    let possible_matches_started_at = Instant::now();
+    // Possible matches are consumed lazily during the trie walk via
+    // `PossibleMatchesComputer`; eager full-state materialization here just
+    // prewarmed caches without affecting the constructed NWA.
     let mut pm_computer = PossibleMatchesComputer::new(tokenizer);
-    let _possible_matches_by_state = collect_possible_matches_by_internal_tsid(
-        tokenizer,
-        &full_tree.root,
-        &mut pm_computer,
-        &simplified_id_map.tokenizer_states,
-    );
-    let possible_matches_ms = possible_matches_started_at.elapsed().as_secs_f64() * 1000.0;
+    let possible_matches_ms = 0.0;
 
     // ---- Step 5: Create NWA and seed root nodes ----
     let seed_started_at = Instant::now();
