@@ -1575,7 +1575,13 @@ fn additional_properties_default_false() -> bool {
 }
 
 fn ap_key_any_string() -> bool {
-    env_flag("GLRMASK_AP_KEY_ANY_STRING")
+    env_flag("GLRMASK_AP_KEY_ANY_STRING") || env_flag("GLRMASK_ADDPROP_NO_EXCLUSIONS")
+}
+
+fn max_string_length_cap() -> Option<usize> {
+    std::env::var("GLRMASK_MAX_STRING_LENGTH_CAP")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
 }
 
 fn json_wrapped_pattern(pattern: &str) -> GrammarExpr {
@@ -4230,15 +4236,30 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn build_string_expr(&mut self, schema: &Map<String, Value>) -> Result<GrammarExpr, GlrMaskError> {
-        let min_len = schema
-            .get("minLength")
-            .and_then(Value::as_u64)
-            .map(|value| value as usize)
-            .unwrap_or(0);
-        let max_len = schema
-            .get("maxLength")
-            .and_then(Value::as_u64)
-            .map(|value| value as usize);
+        let cap = max_string_length_cap();
+        let min_len = {
+            let raw = schema
+                .get("minLength")
+                .and_then(Value::as_u64)
+                .map(|value| value as usize)
+                .unwrap_or(0);
+            match cap {
+                // If raw exceeds cap, remove the constraint entirely (→ 0).
+                Some(c) if raw > c => 0,
+                _ => raw,
+            }
+        };
+        let max_len = {
+            let raw = schema
+                .get("maxLength")
+                .and_then(Value::as_u64)
+                .map(|value| value as usize);
+            match (cap, raw) {
+                // If maxLength exceeds cap, remove it entirely (→ None/unbounded).
+                (Some(c), Some(ml)) if ml > c => None,
+                _ => raw,
+            }
+        };
 
         if let Some(pattern) = schema.get("pattern").and_then(Value::as_str) {
             let Some(pattern) = prune_pattern_branches_for_min_length(pattern, min_len) else {
