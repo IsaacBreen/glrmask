@@ -33,7 +33,14 @@ const JSON_BOOL_RULE: &str = "JSON_BOOL";
 const JSON_NULL_RULE: &str = "JSON_NULL";
 const JSON_KEY_COLON_RULE: &str = "json_key_colon";
 const JSON_KEY_COLON_BODY_RULE: &str = "JSON_KEY_COLON_BODY";
-const JSON_STRING_REPEAT_CHUNK: usize = 1024;
+const JSON_STRING_REPEAT_CHUNK_DEFAULT: usize = 256;
+
+fn json_string_repeat_chunk() -> usize {
+    std::env::var("GLRMASK_STRING_REPEAT_CHUNK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(JSON_STRING_REPEAT_CHUNK_DEFAULT)
+}
 
 const JSON_STRING_BODY_REGEX: &str =
     r#"([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*""#;
@@ -2606,7 +2613,7 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn should_split_bounded_string(&self, min_len: usize, max_len: Option<usize>) -> bool {
-        let chunk = JSON_STRING_REPEAT_CHUNK;
+        let chunk = json_string_repeat_chunk();
         min_len > chunk
             || max_len
                 .map(|value| value > chunk)
@@ -2614,7 +2621,7 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn build_split_json_string_exact_expr(&mut self, count: usize) -> GrammarExpr {
-        let chunk = JSON_STRING_REPEAT_CHUNK;
+        let chunk = json_string_repeat_chunk();
         if count == 0 {
             return empty_expr();
         }
@@ -2641,7 +2648,7 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn build_split_json_string_upto_expr(&mut self, max: usize) -> GrammarExpr {
-        let chunk = JSON_STRING_REPEAT_CHUNK;
+        let chunk = json_string_repeat_chunk();
         if max == 0 {
             return empty_expr();
         }
@@ -2749,7 +2756,7 @@ impl<'a> SchemaCtx<'a> {
         max: usize,
         suffix: GrammarExpr,
     ) -> GrammarExpr {
-        let chunk = JSON_STRING_REPEAT_CHUNK;
+        let chunk = json_string_repeat_chunk();
         if max == 0 {
             return suffix;
         }
@@ -2810,7 +2817,7 @@ impl<'a> SchemaCtx<'a> {
         count: usize,
         suffix: GrammarExpr,
     ) -> GrammarExpr {
-        let chunk = JSON_STRING_REPEAT_CHUNK;
+        let chunk = json_string_repeat_chunk();
         if count == 0 {
             return suffix;
         }
@@ -2871,7 +2878,7 @@ impl<'a> SchemaCtx<'a> {
         count: usize,
         prefix: GrammarExpr,
     ) -> GrammarExpr {
-        let chunk = JSON_STRING_REPEAT_CHUNK;
+        let chunk = json_string_repeat_chunk();
         if count == 0 {
             return prefix;
         }
@@ -2914,7 +2921,7 @@ impl<'a> SchemaCtx<'a> {
         max: usize,
         prefix: GrammarExpr,
     ) -> GrammarExpr {
-        let chunk = JSON_STRING_REPEAT_CHUNK;
+        let chunk = json_string_repeat_chunk();
         if max == 0 {
             return prefix;
         }
@@ -2989,7 +2996,7 @@ impl<'a> SchemaCtx<'a> {
         prefix: GrammarExpr,
         suffix: GrammarExpr,
     ) -> GrammarExpr {
-        let chunk = JSON_STRING_REPEAT_CHUNK;
+        let chunk = json_string_repeat_chunk();
         if max == 0 {
             return sequence_or_single(vec![prefix, suffix]);
         }
@@ -3178,7 +3185,7 @@ impl<'a> SchemaCtx<'a> {
         prefix: GrammarExpr,
         suffix: GrammarExpr,
     ) -> GrammarExpr {
-        let chunk = JSON_STRING_REPEAT_CHUNK;
+        let chunk = json_string_repeat_chunk();
         if count == 0 {
             return sequence_or_single(vec![prefix, suffix]);
         }
@@ -6838,7 +6845,7 @@ mod tests {
             .unwrap();
         assert!(!split_rule.is_terminal, "expected large bounded string to lower through a nonterminal rule");
 
-        let chunk = JSON_STRING_REPEAT_CHUNK;
+        let chunk = json_string_repeat_chunk();
         let exact_prefix = format!("JSON_STRING_CHAR_EXACT_{chunk}");
         let upto_prefix = format!("JSON_STRING_CHAR_UPTO_{chunk}");
         assert!(grammar.rules.iter().any(|rule| {
