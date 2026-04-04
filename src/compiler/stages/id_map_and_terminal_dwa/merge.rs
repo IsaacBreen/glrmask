@@ -12,7 +12,7 @@ use range_set_blaze::RangeSetBlaze;
 
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
-use crate::automata::weighted::minimize::{minimize, minimize_with_threshold};
+use crate::automata::weighted::minimize::{minimize, minimize_configured};
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::stages::compact::compact_dwa_dimensions_fast;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
@@ -228,15 +228,18 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let minimize_started_at = Instant::now();
-    let mut dwa = if label == "global" {
-        let first = minimize_with_threshold(&det, 50);
+    let force_full = crate::automata::weighted::minimize::force_full_minimize();
+    let mut dwa = if force_full {
+        minimize(&det)
+    } else if label == "global" {
+        let first = minimize_configured(&det, 50);
         if first.states.len() <= 20 {
             first
         } else {
             minimize(&first)
         }
     } else {
-        minimize(&det)
+        minimize_configured(&det, usize::MAX)
     };
     let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
 
