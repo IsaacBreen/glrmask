@@ -12,7 +12,7 @@ use range_set_blaze::RangeSetBlaze;
 
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
-use crate::automata::weighted::minimize::{minimize, minimize_fast, minimize_from_env};
+use crate::automata::weighted::minimize::{minimize, minimize_from_env};
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::stages::compact::{compact_from_env, CompactMode};
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
@@ -221,7 +221,7 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
 
     let minimize_started_at = Instant::now();
     let mut dwa = if label == "global" {
-        minimize_from_env(&det, "GLRMASK_MINIMIZE_MERGE_GLOBAL", minimize_fast)
+        minimize_from_env(&det, "GLRMASK_MINIMIZE_MERGE_GLOBAL", minimize)
     } else {
         minimize_from_env(&det, "GLRMASK_MINIMIZE_MERGE", minimize)
     };
