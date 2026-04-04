@@ -189,17 +189,46 @@ pub(crate) fn characterize_terminals(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
 ) -> BTreeMap<TerminalID, TerminalCharacterization> {
+    let debug = std::env::var("GLRMASK_DEBUG_PROFILE").is_ok();
     let initial_actions = collect_initial_actions_by_terminal(table, grammar.num_terminals);
+
+    if debug {
+        let total_gotos: usize = table.goto.iter().map(|g| g.len()).sum();
+        eprintln!(
+            "[glrmask/debug][characterize] glr_states={} total_gotos={} num_terminals={}",
+            table.num_states, total_gotos, grammar.num_terminals
+        );
+    }
 
     initial_actions
         .into_iter()
         .enumerate()
         .map(|(terminal, (shifts, reduces))| {
             let terminal = terminal as TerminalID;
-            (
-                terminal,
-                characterize_terminal_with_initial(table, grammar, terminal, shifts, reduces),
-            )
+            let t0 = std::time::Instant::now();
+            let characterization =
+                characterize_terminal_with_initial(table, grammar, terminal, shifts, reduces);
+            if debug {
+                let ms = t0.elapsed().as_secs_f64() * 1000.0;
+                let total_entries = characterization.shifts.len()
+                    + characterization.reduces.len()
+                    + characterization.nt_escapes.len()
+                    + characterization.nt_rereduces.len();
+                if ms > 1.0 || total_entries > 500 {
+                    eprintln!(
+                        "[glrmask/debug][characterize_terminal] terminal={} shifts={} reduces={} escapes={} rereduces={} nts={} total={} ms={:.1}",
+                        terminal,
+                        characterization.shifts.len(),
+                        characterization.reduces.len(),
+                        characterization.nt_escapes.len(),
+                        characterization.nt_rereduces.len(),
+                        characterization.all_nts.len(),
+                        total_entries,
+                        ms,
+                    );
+                }
+            }
+            (terminal, characterization)
         })
         .collect()
 }
@@ -235,18 +264,50 @@ fn characterize_terminal_with_initial(
     let mut nt_escapes = BTreeSet::new();
     let mut nt_rereduces = BTreeSet::new();
 
+    let num_states = table.num_states as usize;
+    let mut visited = vec![false; num_states];
+    let mut visited_stack: Vec<u32> = Vec::new();
+    let mut worklist = VecDeque::new();
+
     for revealed_state in 0..table.num_states {
         if let Some(gotos) = table.goto.get(revealed_state as usize) {
             for (&nonterminal, &goto_state) in gotos {
-                explore_from_goto(
-                    table,
-                    terminal,
-                    nonterminal,
-                    revealed_state,
-                    goto_state,
-                    &mut nt_escapes,
-                    &mut nt_rereduces,
-                );
+                // Early termination: skip if terminal has no action at goto_state
+                if table.action(goto_state, terminal).is_none() {
+                    continue;
+                }
+
+                // Inline BFS (reusing allocations)
+                debug_assert!(worklist.is_empty());
+                if (goto_state as usize) < num_states {
+                    visited[goto_state as usize] = true;
+                    visited_stack.push(goto_state);
+                    worklist.push_back(goto_state);
+                }
+
+                while let Some(current_state) = worklist.pop_front() {
+                    let Some(action) = table.action(current_state, terminal) else {
+                        continue;
+                    };
+                    record_goto_action_fast(
+                        table,
+                        nonterminal,
+                        revealed_state,
+                        current_state,
+                        action,
+                        &mut visited,
+                        &mut visited_stack,
+                        &mut worklist,
+                        &mut nt_escapes,
+                        &mut nt_rereduces,
+                    );
+                }
+
+                // Reset visited for next BFS
+                for &s in &visited_stack {
+                    visited[s as usize] = false;
+                }
+                visited_stack.clear();
             }
         }
     }
@@ -280,6 +341,87 @@ fn characterize_terminal_with_initial(
     }
 
     characterization
+}
+
+fn record_goto_action_fast(
+    table: &GLRTable,
+    stack_nt: NonterminalID,
+    revealed_state: u32,
+    current_state: u32,
+    action: &Action,
+    visited: &mut [bool],
+    visited_stack: &mut Vec<u32>,
+    worklist: &mut VecDeque<u32>,
+    nt_escapes: &mut BTreeSet<NtEscape>,
+    nt_rereduces: &mut BTreeSet<NtRereduce>,
+) {
+    match action {
+        Action::Shift(shift_state) => {
+            nt_escapes.insert((stack_nt, revealed_state, current_state, *shift_state));
+        }
+        Action::Reduce(rule_id) => {
+            let (rule_len, lhs) = reduce_rule_info(table, *rule_id);
+            handle_reduce_fast(
+                table,
+                stack_nt,
+                revealed_state,
+                rule_len,
+                lhs,
+                visited,
+                visited_stack,
+                worklist,
+                nt_rereduces,
+            );
+        }
+        Action::Split {
+            shift,
+            reduces: split_reduces,
+            ..
+        } => {
+            if let Some(shift_state) = shift {
+                nt_escapes.insert((stack_nt, revealed_state, current_state, *shift_state));
+            }
+            for &rule_id in split_reduces {
+                let (rule_len, lhs) = reduce_rule_info(table, rule_id);
+                handle_reduce_fast(
+                    table,
+                    stack_nt,
+                    revealed_state,
+                    rule_len,
+                    lhs,
+                    visited,
+                    visited_stack,
+                    worklist,
+                    nt_rereduces,
+                );
+            }
+        }
+        Action::Accept => {}
+    }
+}
+
+fn handle_reduce_fast(
+    table: &GLRTable,
+    stack_nt: NonterminalID,
+    revealed_state: u32,
+    len: usize,
+    reduce_nt: NonterminalID,
+    visited: &mut [bool],
+    visited_stack: &mut Vec<u32>,
+    worklist: &mut VecDeque<u32>,
+    nt_rereduces: &mut BTreeSet<NtRereduce>,
+) {
+    if len == 1 {
+        if let Some(next_goto_state) = table.goto_target(revealed_state, reduce_nt) {
+            if (next_goto_state as usize) < visited.len() && !visited[next_goto_state as usize] {
+                visited[next_goto_state as usize] = true;
+                visited_stack.push(next_goto_state);
+                worklist.push_back(next_goto_state);
+            }
+        }
+    } else if len > 1 {
+        nt_rereduces.insert((stack_nt, revealed_state, len - 2, reduce_nt));
+    }
 }
 
 fn explore_from_goto(
