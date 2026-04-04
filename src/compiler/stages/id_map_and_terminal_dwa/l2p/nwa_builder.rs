@@ -4,7 +4,6 @@
 //! and constructs NWA transitions for each (byte, tokenizer-state) pair.
 
 use std::collections::{BTreeMap, HashMap};
-use std::hash::Hash;
 
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
@@ -14,10 +13,7 @@ use crate::Vocab;
 use crate::automata::lexer::tokenizer::{Tokenizer, TokenizerMatch};
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::grammar::model::TerminalID;
-use crate::compiler::possible_matches::{
-    PossibleMatchesByState,
-    PossibleMatchesComputer,
-};
+use crate::compiler::possible_matches::PossibleMatchesComputer;
 use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
@@ -982,99 +978,22 @@ pub(crate) fn internal_vocab_entries(vocab: &Vocab, id_map: &InternalIdMap) -> V
         .collect()
 }
 
-fn root_combined_signature(
-    tokenizer: &Tokenizer,
-    representative_state: u32,
-    internal_tsid: u32,
-    terminal_coloring: &TerminalColoring,
-    ignore_terminal: Option<TerminalID>,
-    possible_matches_by_state: &PossibleMatchesByState,
-) -> u64 {
-    use std::hash::Hasher;
-
-    let mut future_groups = BTreeMap::<ColorId, smallvec::SmallVec<[TerminalID; 4]>>::new();
-    for terminal_id in tokenizer.possible_future_terminals_iter(representative_state) {
-        if Some(terminal_id) == ignore_terminal {
-            continue;
-        }
-        future_groups
-            .entry(terminal_coloring.color_for(terminal_id))
-            .or_default()
-            .push(terminal_id);
-    }
-
-    let mut future_hasher = std::collections::hash_map::DefaultHasher::new();
-    for (color, terminals) in future_groups {
-        color.hash(&mut future_hasher);
-        terminals.len().hash(&mut future_hasher);
-        for terminal_id in terminals {
-            terminal_id.hash(&mut future_hasher);
-        }
-    }
-    let future_sig = future_hasher.finish();
-
-    let mut possible_matches_hasher = std::collections::hash_map::DefaultHasher::new();
-    if let Some(matches_by_terminal) = possible_matches_by_state.get(&internal_tsid) {
-        for (terminal_id, token_ids) in matches_by_terminal {
-            terminal_id.hash(&mut possible_matches_hasher);
-            for range in token_ids.ranges() {
-                range.start().hash(&mut possible_matches_hasher);
-                range.end().hash(&mut possible_matches_hasher);
-            }
-        }
-    }
-    let possible_matches_sig = possible_matches_hasher.finish();
-
-    let mut combined_hasher = std::collections::hash_map::DefaultHasher::new();
-    representative_state.hash(&mut combined_hasher);
-    future_sig.hash(&mut combined_hasher);
-    possible_matches_sig.hash(&mut combined_hasher);
-    combined_hasher.finish()
-}
-
 pub(crate) fn seed_root_nodes(
     nwa: &mut NWA,
     start_state: u32,
-    tokenizer: &Tokenizer,
     id_map: &InternalIdMap,
-    terminal_coloring: &TerminalColoring,
-    ignore_terminal: Option<TerminalID>,
-    possible_matches_by_state: &PossibleMatchesByState,
 ) -> NodesByTokenizerState {
     let mut roots_by_tokenizer_state = NodesByTokenizerState::new();
-    let mut roots_by_signature = HashMap::<u64, NwaState>::new();
-    let mut start_weights_by_root = HashMap::<NwaState, Weight>::new();
 
     for (internal_tsid, representative_state) in id_map
         .tokenizer_states
         .iter_representative_ids()
         .enumerate()
     {
-        let combined_sig = root_combined_signature(
-            tokenizer,
-            representative_state,
-            internal_tsid as u32,
-            terminal_coloring,
-            ignore_terminal,
-            possible_matches_by_state,
-        );
-
-        let root = *roots_by_signature
-            .entry(combined_sig)
-            .or_insert_with(|| nwa.add_state());
+        let root = nwa.add_state();
         let start_weight = all_token_weight(internal_tsid as u32, id_map.max_internal_token_id());
-        start_weights_by_root
-            .entry(root)
-            .and_modify(|existing| *existing = existing.union(&start_weight))
-            .or_insert(start_weight);
-
+        nwa.add_epsilon(start_state, root, start_weight);
         roots_by_tokenizer_state.merge(representative_state, &[root]);
-    }
-
-    let mut start_weight_entries: Vec<(NwaState, Weight)> = start_weights_by_root.into_iter().collect();
-    start_weight_entries.sort_unstable_by_key(|(root, _)| *root);
-    for (root, weight) in start_weight_entries {
-        nwa.add_epsilon(start_state, root, weight);
     }
 
     roots_by_tokenizer_state

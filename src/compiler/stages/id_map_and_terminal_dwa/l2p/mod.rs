@@ -127,7 +127,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // ---- Step 4: Possible matches ----
     let possible_matches_started_at = Instant::now();
     let mut pm_computer = PossibleMatchesComputer::new(tokenizer);
-    let possible_matches_by_state = collect_possible_matches_by_internal_tsid(
+    let _possible_matches_by_state = collect_possible_matches_by_internal_tsid(
         tokenizer,
         &full_tree.root,
         &mut pm_computer,
@@ -146,11 +146,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let roots = seed_root_nodes(
         &mut nwa,
         start_state,
-        tokenizer,
         &simplified_id_map,
-        terminal_coloring,
-        ignore_terminal,
-        &possible_matches_by_state,
     );
     let seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
 
