@@ -60,6 +60,20 @@ fn dict_to_vocab(token_to_id: &Bound<'_, PyDict>) -> PyResult<glrmask::Vocab> {
     Ok(glrmask::Vocab::new(entries, None))
 }
 
+fn id_to_bytes_dict_to_vocab(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<glrmask::Vocab> {
+    let mut entries = Vec::with_capacity(id_to_bytes.len());
+    for (key, value) in id_to_bytes.iter() {
+        let token_id: u32 = key.extract()?;
+        let token_bytes = value
+            .downcast::<PyBytes>()
+            .map_err(|_| PyValueError::new_err("vocab values must be Python bytes"))?
+            .as_bytes()
+            .to_vec();
+        entries.push((token_id, token_bytes));
+    }
+    Ok(glrmask::Vocab::new(entries, None))
+}
+
 fn constraint_result<T>(result: glrmask::Result<T>) -> PyResult<T> {
     result.map_err(|e| PyValueError::new_err(format!("{e}")))
 }
@@ -83,6 +97,12 @@ impl PyVocab {
     #[staticmethod]
     fn from_dict(token_to_id: &Bound<'_, PyDict>) -> PyResult<Self> {
         let vocab = dict_to_vocab(token_to_id)?;
+        Ok(Self { inner: vocab })
+    }
+
+    #[staticmethod]
+    fn from_id_to_bytes(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<Self> {
+        let vocab = id_to_bytes_dict_to_vocab(id_to_bytes)?;
         Ok(Self { inner: vocab })
     }
 }
