@@ -25,6 +25,7 @@ bincode = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
 
 rayon = "1"
+dashmap = "6"
 rand = "0.8"
 thiserror = "1"
 

@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
@@ -557,51 +558,189 @@ pub(crate) fn collect_possible_matches_by_internal_tsid_dense(
     tokenizer_state_ids: &ManyToOneIdMap,
     num_internal_tokens: u32,
 ) -> (BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>, PossibleMatchesProfile) {
+    // For small workloads, the serial path with FxHashMap cache is faster
+    // (avoids DashMap overhead and flat_transitions pre-computation).
+    // Threshold chosen empirically: ~5000 TSIDs is where parallel starts winning.
+    if tokenizer_state_ids.num_internal_ids() < 5000 {
+        return collect_possible_matches_dense_serial(
+            tokenizer, root, tokenizer_state_ids, num_internal_tokens,
+        );
+    }
+    collect_possible_matches_dense_parallel(
+        tokenizer, root, tokenizer_state_ids, num_internal_tokens,
+    )
+}
+
+fn collect_possible_matches_dense_serial(
+    tokenizer: &Tokenizer,
+    root: &VocabPrefixTreeNode,
+    tokenizer_state_ids: &ManyToOneIdMap,
+    num_internal_tokens: u32,
+) -> (BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>, PossibleMatchesProfile) {
     let mut computer = DensePossibleMatchesComputer::new(tokenizer, num_internal_tokens);
     let mut possible_matches_by_state: BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>> = BTreeMap::new();
-    let summary_profile = computer.summary_profile_enabled;
-    let debug_profile = debug_profile_enabled();
-    let total_keys = tokenizer_state_ids.num_internal_ids();
     let root_key = root as *const VocabPrefixTreeNode as usize;
-    let started_at = Instant::now();
 
     for (internal_tsid, representative_state) in tokenizer_state_ids
         .iter_representative_ids()
         .enumerate()
         .map(|(i, s)| (i as u32, s))
     {
-        let cache_key = (root_key, representative_state);
-        let root_compute_started_at = summary_profile.then(Instant::now);
         let _ = computer.possible_matches_for_node(root, representative_state);
-        if let Some(started_at) = root_compute_started_at {
-            computer.profile.root_compute_ms += elapsed_ms(started_at);
-        }
-        let materialize_started_at = summary_profile.then(Instant::now);
         let matches_for_state = computer
             .cache
-            .remove(&cache_key)
+            .remove(&(root_key, representative_state))
             .expect("root possible-match map should be cached");
         let map = match Rc::try_unwrap(matches_for_state) {
             Ok(map) => map,
             Err(shared) => (*shared).clone(),
         };
         possible_matches_by_state.insert(internal_tsid, map);
-        if let Some(started_at) = materialize_started_at {
-            computer.profile.materialize_output_ms += elapsed_ms(started_at);
-        }
-
-        let states_done = internal_tsid + 1;
-        if debug_profile && ((states_done % 100_000 == 0) || states_done == total_keys) {
-            let profile = computer.profile();
-            eprintln!(
-                "[glrmask/debug][possible_matches_dense] states_done={} total_states={} elapsed_ms={:.3} cache_entries={} reachable_cache_entries={}",
-                states_done, total_keys, started_at.elapsed().as_secs_f64() * 1000.0,
-                profile.cache_entries, profile.reachable_cache_entries,
-            );
-        }
     }
 
     (possible_matches_by_state, computer.profile())
+}
+
+fn collect_possible_matches_dense_parallel(
+    tokenizer: &Tokenizer,
+    root: &VocabPrefixTreeNode,
+    tokenizer_state_ids: &ManyToOneIdMap,
+    num_internal_tokens: u32,
+) -> (BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>, PossibleMatchesProfile) {
+    use dashmap::DashMap;
+    use rayon::prelude::*;
+
+    let num_words = (num_internal_tokens as usize + 63) / 64;
+
+    // Pre-compute flat transitions for all DFA states (shared read-only).
+    let flat_transitions: Vec<[u32; 256]> = (0..tokenizer.num_states() as usize)
+        .map(|state_idx| {
+            let dfa_state = &tokenizer.dfa.states()[state_idx];
+            let mut flat = [u32::MAX; 256];
+            for (b, &target) in dfa_state.transitions.iter() {
+                flat[b as usize] = target;
+            }
+            flat
+        })
+        .collect();
+
+    // Pre-compute self-loop bytes for all DFA states (shared read-only).
+    let self_loop_bytes: Vec<U8Set> = (0..tokenizer.num_states() as usize)
+        .map(|state_idx| {
+            let dfa_state = &tokenizer.dfa.states()[state_idx];
+            let mut bytes = U8Set::empty();
+            for (byte, &target) in dfa_state.transitions.iter() {
+                if target == state_idx as u32 {
+                    bytes.insert(byte);
+                }
+            }
+            bytes
+        })
+        .collect();
+
+    // Shared concurrent caches.
+    let cache: DashMap<(usize, u32), Arc<DensePossibleMatchMap>> = DashMap::new();
+    let reachable_cache: DashMap<usize, Arc<Vec<u64>>> = DashMap::new();
+
+    let entries: Vec<(u32, u32)> = tokenizer_state_ids
+        .iter_representative_ids()
+        .enumerate()
+        .map(|(i, s)| (i as u32, s))
+        .collect();
+
+    let results: Vec<(u32, DensePossibleMatchMap)> = entries
+        .par_iter()
+        .map(|&(internal_tsid, representative_state)| {
+            let result = possible_matches_for_node_concurrent(
+                tokenizer, root, representative_state,
+                num_words, &flat_transitions, &self_loop_bytes,
+                &cache, &reachable_cache,
+            );
+            let map = Arc::try_unwrap(result).unwrap_or_else(|arc| (*arc).clone());
+            (internal_tsid, map)
+        })
+        .collect();
+
+    let possible_matches_by_state: BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>> =
+        results.into_iter().collect();
+
+    (possible_matches_by_state, PossibleMatchesProfile::default())
+}
+
+/// Recursive possible-matches computation using a shared DashMap cache.
+/// Multiple threads may call this concurrently; duplicate computation on
+/// cache misses is benign since results are deterministic.
+fn possible_matches_for_node_concurrent(
+    tokenizer: &Tokenizer,
+    node: &VocabPrefixTreeNode,
+    tokenizer_state: u32,
+    num_words: usize,
+    flat_transitions: &[[u32; 256]],
+    self_loop_bytes: &[U8Set],
+    cache: &dashmap::DashMap<(usize, u32), Arc<DensePossibleMatchMap>>,
+    reachable_cache: &dashmap::DashMap<usize, Arc<Vec<u64>>>,
+) -> Arc<DensePossibleMatchMap> {
+    let cache_key = (node as *const VocabPrefixTreeNode as usize, tokenizer_state);
+
+    if let Some(cached) = cache.get(&cache_key) {
+        return Arc::clone(cached.value());
+    }
+
+    let mut result = DensePossibleMatchMap::default();
+
+    if node.has_token() {
+        let token_id = node.token_id() as u32;
+        for terminal in tokenizer.matched_terminals_iter(tokenizer_state) {
+            let entry = result.entry(terminal).or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
+            entry[token_id as usize / 64] |= 1u64 << (token_id % 64);
+        }
+    }
+
+    for (segment_bytes, child) in node.iter_children() {
+        let mut current_state = tokenizer_state;
+        let mut segment_blocked = false;
+
+        let reachable_key = child as *const VocabPrefixTreeNode as usize;
+        let reachable = if let Some(r) = reachable_cache.get(&reachable_key) {
+            Arc::clone(r.value())
+        } else {
+            let r = Arc::new(reachable_bitmap(child, num_words));
+            reachable_cache.insert(reachable_key, Arc::clone(&r));
+            r
+        };
+
+        for &byte in segment_bytes {
+            let next = flat_transitions[current_state as usize][byte as usize];
+            if next == u32::MAX {
+                segment_blocked = true;
+                break;
+            }
+            current_state = next;
+            for terminal in tokenizer.matched_terminals_iter(current_state) {
+                let existing = result.entry(terminal).or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
+                merge_bitmaps(existing, reachable.as_ref());
+            }
+        }
+
+        if segment_blocked {
+            continue;
+        }
+        if !tokenizer.is_end(current_state) {
+            if U8Set::from_words(*child.subtree_bytes()).is_subset(&self_loop_bytes[current_state as usize]) {
+                continue;
+            }
+            let child_matches = possible_matches_for_node_concurrent(
+                tokenizer, child, current_state,
+                num_words, flat_transitions, self_loop_bytes,
+                cache, reachable_cache,
+            );
+            merge_dense_maps(&mut result, child_matches.as_ref(), num_words);
+        }
+    }
+
+    let result = Arc::new(result);
+    cache.insert(cache_key, Arc::clone(&result));
+    result
 }
 
 pub(crate) fn build_possible_matches_by_state(
