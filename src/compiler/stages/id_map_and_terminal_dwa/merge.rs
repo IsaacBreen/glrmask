@@ -187,7 +187,7 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     // 1. Build global id_map via composite-key refinement.
     let global_id_map_started_at = Instant::now();
     let id_map_refs: Vec<&InternalIdMap> = inputs.iter().map(|input| &input.id_map).collect();
-    let global_id_map = build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
+    let mut global_id_map = build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
     let global_id_map_ms = global_id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // 2. Convert each DWA → NWA, remap to global space, union.
@@ -212,6 +212,11 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     }
     global_nwa.start_states = global_body.start_states;
     let remap_union_ms = remap_union_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    // 2b. Optimize ID ordering to minimize weight range fragmentation.
+    let reorder_started_at = Instant::now();
+    optimize_nwa_id_ordering(&mut global_nwa, &mut global_id_map);
+    let reorder_ms = reorder_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // 3. Determinize + minimize.
     let determinize_started_at = Instant::now();
@@ -244,11 +249,12 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
 
     if compile_profile_enabled() || debug_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][merge] label={} inputs={} build_global_id_map_ms={:.3} remap_union_ms={:.3} determinize_ms={:.3} det_states={} minimize_ms={:.3} min_states={} compact_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][merge] label={} inputs={} build_global_id_map_ms={:.3} remap_union_ms={:.3} reorder_ms={:.3} determinize_ms={:.3} det_states={} minimize_ms={:.3} min_states={} compact_ms={:.3} total_ms={:.3}",
             label,
             inputs.len(),
             global_id_map_ms,
             remap_union_ms,
+            reorder_ms,
             determinize_ms,
             det_states,
             minimize_ms,
@@ -853,6 +859,254 @@ fn remap_weight_general(
     }
 
     finalize_weight_map(map)
+}
+
+/// Optimize NWA ID ordering for both TSID and token dimensions.
+///
+/// Computes "signature" for each ID based on which NWA weights cover it,
+/// then sorts IDs by signature so IDs with identical coverage are adjacent.
+/// This minimizes range fragmentation in weights during determinize/minimize.
+fn optimize_nwa_id_ordering(
+    nwa: &mut NWA,
+    id_map: &mut InternalIdMap,
+) {
+    let num_tsids = id_map.num_tsids() as usize;
+    let num_tokens = (id_map.max_internal_token_id() + 1) as usize;
+    if num_tsids <= 1 && num_tokens <= 1 {
+        return;
+    }
+
+    // 1. Collect all unique weights and token sets from the NWA.
+    let mut weight_ptrs: HashMap<usize, usize> = HashMap::new();
+    let mut weight_entries_list: Vec<Vec<(u32, u32, Arc<RangeSetBlaze<u32>>)>> = Vec::new();
+    let mut token_set_ptrs: HashMap<usize, usize> = HashMap::new();
+    let mut token_set_list: Vec<Arc<RangeSetBlaze<u32>>> = Vec::new();
+
+    let mut register_weight = |w: &Weight| {
+        let ptr = Arc::as_ptr(&w.0) as usize;
+        if weight_ptrs.contains_key(&ptr) {
+            return;
+        }
+        let idx = weight_entries_list.len();
+        weight_ptrs.insert(ptr, idx);
+        if let Some(entries) = w.compact_entries() {
+            for &(_, _, ref ts) in &entries {
+                let ts_ptr = Arc::as_ptr(ts) as usize;
+                token_set_ptrs.entry(ts_ptr).or_insert_with(|| {
+                    let i = token_set_list.len();
+                    token_set_list.push(Arc::clone(ts));
+                    i
+                });
+            }
+            weight_entries_list.push(entries);
+        } else {
+            weight_entries_list.push(Vec::new());
+        }
+    };
+
+    for state in &nwa.states {
+        if let Some(ref w) = state.final_weight {
+            register_weight(w);
+        }
+        for targets in state.transitions.values() {
+            for (_, w) in targets {
+                register_weight(w);
+            }
+        }
+        for (_, w) in &state.epsilons {
+            register_weight(w);
+        }
+    }
+
+    // 2. Compute TSID signatures: for each TSID, which weight indices cover it.
+    let tsid_perm = if num_tsids > 1 {
+        let mut tsid_sigs: Vec<Vec<usize>> = vec![Vec::new(); num_tsids];
+        for (idx, entries) in weight_entries_list.iter().enumerate() {
+            for &(start, end, _) in entries {
+                for tsid in start..=end {
+                    if (tsid as usize) < num_tsids {
+                        tsid_sigs[tsid as usize].push(idx);
+                    }
+                }
+            }
+        }
+        compute_permutation_from_signatures(tsid_sigs)
+    } else {
+        vec![0u32; num_tsids]
+    };
+
+    // 3. Compute token signatures: for each token, which token set indices cover it.
+    let token_perm = if num_tokens > 1 {
+        let mut token_sigs: Vec<Vec<usize>> = vec![Vec::new(); num_tokens];
+        for (idx, ts) in token_set_list.iter().enumerate() {
+            for token_id in ts.iter() {
+                if (token_id as usize) < num_tokens {
+                    token_sigs[token_id as usize].push(idx);
+                }
+            }
+        }
+        compute_permutation_from_signatures(token_sigs)
+    } else {
+        vec![0u32; num_tokens]
+    };
+
+    // 4. Apply permutations to NWA weights.
+    let mut weight_cache: HashMap<usize, Weight> = HashMap::new();
+    for state in &mut nwa.states {
+        if let Some(ref w) = state.final_weight {
+            let remapped = remap_weight_with_permutation(w, &tsid_perm, &token_perm, &mut weight_cache);
+            if remapped.is_empty() {
+                state.final_weight = None;
+            } else {
+                state.final_weight = Some(remapped);
+            }
+        }
+        for targets in state.transitions.values_mut() {
+            for (_, w) in targets.iter_mut() {
+                *w = remap_weight_with_permutation(w, &tsid_perm, &token_perm, &mut weight_cache);
+            }
+            targets.retain(|(_, w)| !w.is_empty());
+        }
+        state.transitions.retain(|_, targets| !targets.is_empty());
+        for (_, w) in state.epsilons.iter_mut() {
+            *w = remap_weight_with_permutation(w, &tsid_perm, &token_perm, &mut weight_cache);
+        }
+        state.epsilons.retain(|(_, w)| !w.is_empty());
+    }
+
+    // 5. Apply permutations to id_map.
+    apply_permutation_to_many_to_one(&mut id_map.tokenizer_states, &tsid_perm);
+    apply_permutation_to_many_to_one_with_sentinel(&mut id_map.vocab_tokens, &token_perm, u32::MAX);
+
+    if compile_profile_enabled() || debug_profile_enabled() {
+        let old_tsid_is_identity = tsid_perm.iter().enumerate().all(|(i, &v)| v == i as u32);
+        let old_token_is_identity = token_perm.iter().enumerate().all(|(i, &v)| v == i as u32);
+        eprintln!(
+            "[glrmask/debug][reorder_ids] num_tsids={} num_tokens={} tsid_changed={} token_changed={}",
+            num_tsids,
+            num_tokens,
+            !old_tsid_is_identity,
+            !old_token_is_identity,
+        );
+    }
+}
+
+/// Compute permutation from signatures: sort IDs by their signature vectors.
+/// Returns perm[old_id] = new_id.
+fn compute_permutation_from_signatures(signatures: Vec<Vec<usize>>) -> Vec<u32> {
+    let n = signatures.len();
+    // Sort indices by their signatures
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| signatures[a].cmp(&signatures[b]));
+    // Build old→new permutation
+    let mut perm = vec![0u32; n];
+    for (new_pos, &old_id) in order.iter().enumerate() {
+        perm[old_id] = new_pos as u32;
+    }
+    perm
+}
+
+/// Remap a Weight using TSID and token permutations.
+fn remap_weight_with_permutation(
+    weight: &Weight,
+    tsid_perm: &[u32],
+    token_perm: &[u32],
+    cache: &mut HashMap<usize, Weight>,
+) -> Weight {
+    let ptr = Arc::as_ptr(&weight.0) as usize;
+    if let Some(cached) = cache.get(&ptr) {
+        return cached.clone();
+    }
+
+    let result = if weight.is_empty() || weight.is_full() {
+        weight.clone()
+    } else if let Some(entries) = weight.compact_entries() {
+        // Cache remapped token sets.
+        let mut token_cache: HashMap<usize, Arc<RangeSetBlaze<u32>>> = HashMap::new();
+
+        // Collect (new_tsid, remapped_token_set) pairs.
+        let mut pairs: Vec<(u32, Arc<RangeSetBlaze<u32>>)> = Vec::new();
+        for (start, end, tokens) in entries {
+            let ts_ptr = Arc::as_ptr(&tokens) as usize;
+            let remapped_tokens = token_cache
+                .entry(ts_ptr)
+                .or_insert_with(|| {
+                    let mut new_set = RangeSetBlaze::new();
+                    for old_token in tokens.iter() {
+                        if let Some(&new_token) = token_perm.get(old_token as usize) {
+                            new_set.insert(new_token);
+                        }
+                    }
+                    Arc::new(new_set)
+                })
+                .clone();
+
+            for old_tsid in start..=end {
+                if let Some(&new_tsid) = tsid_perm.get(old_tsid as usize) {
+                    pairs.push((new_tsid, remapped_tokens.clone()));
+                }
+            }
+        }
+
+        // Sort by new_tsid and build Weight via CompactRangeBuilder pattern.
+        pairs.sort_by_key(|p| p.0);
+
+        // Build using from_per_tsid_shared which merges adjacent TSIDs with same token set.
+        Weight::from_per_tsid_shared(
+            pairs.into_iter().map(|(tsid, ts)| (tsid, ts)),
+        )
+    } else {
+        weight.clone()
+    };
+
+    cache.insert(ptr, result.clone());
+    result
+}
+
+/// Apply a permutation to a ManyToOneIdMap.
+/// perm[old_internal] = new_internal
+fn apply_permutation_to_many_to_one(
+    map: &mut ManyToOneIdMap,
+    perm: &[u32],
+) {
+    let n = map.internal_to_originals.len();
+    // Update original_to_internal
+    for val in map.original_to_internal.iter_mut() {
+        *val = perm[*val as usize];
+    }
+    // Rebuild internal_to_originals and representative_original_ids
+    let mut new_i2o = vec![Vec::new(); n];
+    let mut new_reps = vec![0u32; n];
+    for old in 0..n {
+        let new = perm[old] as usize;
+        new_i2o[new] = std::mem::take(&mut map.internal_to_originals[old]);
+        new_reps[new] = map.representative_original_ids[old];
+    }
+    map.internal_to_originals = new_i2o;
+    map.representative_original_ids = new_reps;
+}
+
+/// Apply a permutation to a ManyToOneIdMap, skipping sentinel values.
+fn apply_permutation_to_many_to_one_with_sentinel(
+    map: &mut ManyToOneIdMap,
+    perm: &[u32],
+    sentinel: u32,
+) {
+    let n = map.internal_to_originals.len();
+    for val in map.original_to_internal.iter_mut() {
+        if *val != sentinel {
+            *val = perm[*val as usize];
+        }
+    }
+    let mut new_i2o = vec![Vec::new(); n];
+    let mut new_reps = vec![0u32; n];
+    for old in 0..n {
+        let new = perm[old] as usize;
+        new_i2o[new] = std::mem::take(&mut map.internal_to_originals[old]);
+        new_reps[new] = map.representative_original_ids[old];
+    }
+    map.internal_to_originals = new_i2o;
+    map.representative_original_ids = new_reps;
 }
 
 #[cfg(test)]
