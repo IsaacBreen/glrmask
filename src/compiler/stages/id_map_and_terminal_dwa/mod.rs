@@ -67,10 +67,11 @@ pub(crate) fn build_id_map_and_terminal_dwa(
         let all_entries: Vec<(u32, Vec<u8>)> = vocab.entries.iter().map(|(&id, bytes)| (id, bytes.clone())).collect();
         vec![Vocab::new(all_entries, None)]
     } else {
-        // Default 6-partition scheme:
+        // Default 7-partition scheme:
         // P0=structural non-alnum, P1=mixed, P2=ASCII-alpha, P3=digit,
-        // P4=Unicode-only-alpha, P5=auxiliary non-alnum
-        let mut partition_entries: Vec<Vec<(u32, Vec<u8>)>> = (0..6).map(|_| Vec::new()).collect();
+        // P4=Unicode-only-alpha, P5=short auxiliary non-alnum (≤8B),
+        // P6=long auxiliary non-alnum (>8B)
+        let mut partition_entries: Vec<Vec<(u32, Vec<u8>)>> = (0..7).map(|_| Vec::new()).collect();
         for (&token_id, bytes) in &vocab.entries {
             let idx = classify_vocab_char_type(bytes) as usize;
             partition_entries[idx].push((token_id, bytes.clone()));

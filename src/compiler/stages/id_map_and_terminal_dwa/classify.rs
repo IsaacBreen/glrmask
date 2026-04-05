@@ -115,8 +115,9 @@ const P5_REPEATED_CHARS: &[u8] = b"\n:{ ,";
 /// - 3: pure digit, optionally with leading space
 /// - 4: Unicode-only alpha (non-ASCII alphanumeric, e.g. CJK, Cyrillic,
 ///       Arabic, Hangul), optionally with leading space
-/// - 5: non-alnum auxiliary (no JSON structural, or single-char repeated,
-///       or length 1)
+/// - 5: non-alnum auxiliary short (no JSON structural, or single-char repeated,
+///       or length 1; ≤ 8 bytes)
+/// - 6: non-alnum auxiliary long (same criteria as 5, but > 8 bytes)
 ///
 /// Uses Unicode-aware classification so that non-Latin scripts are separated
 /// into their own partition (4) instead of being lumped with ASCII punctuation (0)
@@ -174,22 +175,23 @@ pub(crate) fn classify_vocab_char_type(bytes: &[u8]) -> u8 {
     1 // Mixed
 }
 
-/// Sub-classify a non-alphanumeric token into P0 (structural) or P5 (auxiliary).
+/// Sub-classify a non-alphanumeric token into P0 (structural), P5 (short auxiliary),
+/// or P6 (long auxiliary).
 ///
-/// P5 if: (a) no JSON structural char, (b) single repeated char from
-/// `\n:{ ,`, or (c) length 1.
+/// P5/P6 if: (a) no JSON structural char, (b) single repeated char from
+/// `\n:{ ,`, or (c) length 1. Within that group, tokens > 8 bytes go to P6.
 fn classify_nonalnum(bytes: &[u8]) -> u8 {
     // Length 1 → P5
     if bytes.len() <= 1 {
         return 5;
     }
-    // Single repeated char from P5_REPEATED_CHARS → P5
+    // Single repeated char from P5_REPEATED_CHARS → P5/P6
     if bytes.iter().all(|b| *b == bytes[0]) && P5_REPEATED_CHARS.contains(&bytes[0]) {
-        return 5;
+        return if bytes.len() > 8 { 6 } else { 5 };
     }
-    // No JSON structural char → P5
+    // No JSON structural char → P5/P6
     if !bytes.iter().any(|b| JSON_STRUCTURAL.contains(b)) {
-        return 5;
+        return if bytes.len() > 8 { 6 } else { 5 };
     }
     0 // Structural non-alnum → P0
 }
