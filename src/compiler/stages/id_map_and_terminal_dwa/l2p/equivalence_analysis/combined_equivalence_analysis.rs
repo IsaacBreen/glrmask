@@ -44,6 +44,7 @@ impl Default for PreHashedU128Hasher {
 type PreHashedU128BuildHasher = std::hash::BuildHasherDefault<PreHashedU128Hasher>;
 
 const REFERENCE_EQUIV_VERIFICATION_ENV: &str = "REFERENCE_EQUIV_VERIFICATION";
+const USE_REFERENCE_EQUIV_ENV: &str = "GLRMASK_USE_REFERENCE_EQUIV";
 const SKIP_MAX_LENGTH_STATE_EQUIV_ENV: &str = "GLRMASK_SKIP_MAX_LENGTH_STATE_EQUIV";
 const SKIP_TOKEN_STATE_EQUIV_ENV: &str = "GLRMASK_SKIP_TOKEN_STATE_EQUIV";
 const USE_SLOW_VOCAB_EQUIV_ENV: &str = "GLRMASK_USE_SLOW_VOCAB_EQUIV";
@@ -116,8 +117,59 @@ fn verify_vocab_partition_reference(
     fast_vocab_classes: &VocabEquivalenceResult,
     reference_vocab_classes: &VocabEquivalenceResult,
 ) {
-    assert!(
-        partition_is_at_least_as_fine(fast_vocab_classes, reference_vocab_classes),
+    if partition_is_at_least_as_fine(fast_vocab_classes, reference_vocab_classes) {
+        return;
+    }
+
+    // Find which fast classes incorrectly merge tokens from different reference classes
+    // Build reverse map: token -> reference class index
+    let mut token_to_ref_class: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    for (ref_class_idx, ref_class) in reference_vocab_classes.iter().enumerate() {
+        for &token_idx in ref_class {
+            token_to_ref_class.insert(token_idx, ref_class_idx);
+        }
+    }
+
+    let mut bad_classes_count = 0;
+    for (fast_class_idx, fast_class) in fast_vocab_classes.iter().enumerate() {
+        let ref_classes_in_fast: BTreeSet<usize> = fast_class
+            .iter()
+            .filter_map(|t| token_to_ref_class.get(t).copied())
+            .collect();
+        if ref_classes_in_fast.len() > 1 {
+            bad_classes_count += 1;
+            if bad_classes_count <= 5 {
+                eprintln!(
+                    "[verify_vocab] Fast class {} (size={}) spans {} reference classes: {:?}",
+                    fast_class_idx,
+                    fast_class.len(),
+                    ref_classes_in_fast.len(),
+                    ref_classes_in_fast,
+                );
+                // Show first few tokens from each reference class
+                for &ref_class_idx in &ref_classes_in_fast {
+                    let tokens_in_this_ref: Vec<usize> = fast_class
+                        .iter()
+                        .filter(|t| token_to_ref_class.get(t) == Some(&ref_class_idx))
+                        .copied()
+                        .collect();
+                    eprintln!(
+                        "  ref_class {}: {} tokens, first 5: {:?}",
+                        ref_class_idx,
+                        tokens_in_this_ref.len(),
+                        &tokens_in_this_ref[..tokens_in_this_ref.len().min(5)],
+                    );
+                }
+            }
+        }
+    }
+    eprintln!(
+        "[verify_vocab] Total bad fast classes: {} / {}",
+        bad_classes_count,
+        fast_vocab_classes.len(),
+    );
+
+    panic!(
         "Fast vocab equivalence merged tokens that reference kept separate!\n\
          Fast classes: {}\n\
          Reference classes: {}",
@@ -448,6 +500,20 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
         initial_states,
         &representative_states,
     );
+
+    if env_flag_enabled(USE_REFERENCE_EQUIV_ENV) {
+        let reference = super::reference::find_equivalence_classes(
+            tokenizer,
+            tokens,
+            initial_states,
+            disallowed_follows,
+            ignore_terminal.map(|terminal| terminal as usize),
+        );
+        return CombinedEquivalenceResult {
+            vocab_classes: reference.vocab_classes,
+            state_classes: reference.state_classes,
+        };
+    }
 
     if env_flag_enabled(REFERENCE_EQUIV_VERIFICATION_ENV) {
         let reference = super::reference::find_equivalence_classes(
