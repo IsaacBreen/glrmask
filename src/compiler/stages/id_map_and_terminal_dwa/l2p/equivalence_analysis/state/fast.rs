@@ -735,7 +735,7 @@ mod tests {
         ];
         let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
 
-        let direct = find_state_equivalence_classes_token_based(&tokenizer_view, &tokens, &states, &[], None, None);
+        let direct = find_state_equivalence_classes_token_based(&tokenizer_view, &tokens, &states, &[], None, None, None);
         let actual = find_state_equivalence_classes(&tokenizer_view, &tokens, &states);
 
         assert_eq!(
