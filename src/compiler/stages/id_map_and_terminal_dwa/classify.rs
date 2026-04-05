@@ -99,8 +99,18 @@ impl SharedClassifyBytesets {
 }
 
 /// Classifies a token's bytes by character type for vocab partitioning.
-/// Returns 0 (pure non-alnum), 1 (mixed), 2 (alnum with ≥1 alpha, optionally with leading space),
-/// or 3 (pure digit, optionally with leading space).
+///
+/// Returns:
+/// - 0: pure non-alnum (punctuation, symbols, whitespace)
+/// - 1: mixed (contains both alnum and non-alnum)
+/// - 2: ASCII alnum with ≥1 alpha, optionally with leading space
+/// - 3: pure digit, optionally with leading space
+/// - 4: Unicode-only alpha (non-ASCII alphanumeric, e.g. CJK, Cyrillic,
+///       Arabic, Hangul), optionally with leading space
+///
+/// Uses Unicode-aware classification so that non-Latin scripts are separated
+/// into their own partition (4) instead of being lumped with ASCII punctuation (0)
+/// or bloating the ASCII alpha partition (2).
 pub(crate) fn classify_vocab_char_type(bytes: &[u8]) -> u8 {
     if bytes.is_empty() {
         return 0;
@@ -114,14 +124,38 @@ pub(crate) fn classify_vocab_char_type(bytes: &[u8]) -> u8 {
     if content.is_empty() {
         return 0; // Just a space marker → non-alnum
     }
+    // Try to decode as UTF-8 for Unicode-aware classification.
+    if let Ok(s) = std::str::from_utf8(content) {
+        let all_alnum = s.chars().all(|c| c.is_alphanumeric());
+        if all_alnum {
+            let has_alpha = s.chars().any(|c| c.is_alphabetic());
+            if has_alpha {
+                // Distinguish ASCII-only alpha from Unicode alpha.
+                let has_ascii_alpha = content.iter().any(|b| b.is_ascii_alphabetic());
+                if has_ascii_alpha {
+                    return 2; // ASCII alpha (may also contain non-ASCII alpha)
+                }
+                return 4; // Unicode-only alpha (CJK, Cyrillic, Arabic, etc.)
+            }
+            return 3; // Pure digit
+        }
+        // Check non-alphanumeric.
+        if let Ok(full) = std::str::from_utf8(bytes) {
+            if full.chars().all(|c| !c.is_alphanumeric()) {
+                return 0; // Pure non-alnum
+            }
+        }
+        return 1; // Mixed
+    }
+    // Fallback: byte-level ASCII checks for invalid UTF-8.
     if content.iter().all(|b| b.is_ascii_alphanumeric()) {
         if content.iter().any(|b| b.is_ascii_alphabetic()) {
-            return 2; // Alnum with at least one alpha (optionally with leading space)
+            return 2;
         }
-        return 3; // Pure digit (optionally with leading space)
+        return 3;
     }
     if bytes.iter().all(|b| !b.is_ascii_alphanumeric()) {
-        return 0; // Pure non-alnum
+        return 0;
     }
     1 // Mixed
 }
