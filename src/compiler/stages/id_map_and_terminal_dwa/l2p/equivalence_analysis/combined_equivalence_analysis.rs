@@ -421,9 +421,28 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
         // the FIRST match in a sequence. Skipping them would incorrectly merge
         // states that differ in first-match behavior. Context-dependent filtering
         // (per-parent-edge) would be correct but prohibitively expensive.
+        // When there are many dedup tokens, subsample a strided subset for
+        // pre-vocab state reduction.  This avoids walking all 60K+ tokens
+        // through the DFA while still covering diverse byte patterns via
+        // strided sampling.  Pre-vocab state reduction only needs to be
+        // "good enough" — any states it fails to distinguish will be caught
+        // by the vocab equiv pass (which processes all tokens anyway).
+        let dedup_token_count = dedup.representative_token_bytes.len();
+        let pre_vocab_tokens: Vec<&[u8]>;
+        let pre_vocab_token_ref: &[&[u8]] = if dedup_token_count > PRE_VOCAB_STATE_REDUCTION_MAX_FULL_TOKENS {
+            let stride = dedup_token_count / PRE_VOCAB_STATE_REDUCTION_MAX_FULL_TOKENS;
+            pre_vocab_tokens = dedup.representative_token_bytes.iter()
+                .copied()
+                .step_by(stride.max(1))
+                .take(PRE_VOCAB_STATE_REDUCTION_MAX_FULL_TOKENS)
+                .collect();
+            &pre_vocab_tokens
+        } else {
+            &dedup.representative_token_bytes
+        };
         let reduced_state_reps = state_equivalence_analysis::find_state_equivalence_classes_ex(
             tokenizer,
-            &dedup.representative_token_bytes,
+            pre_vocab_token_ref,
             &pre_reduced_states,
             &[], // skip_groups
             None, // no batch limit — process until convergence
