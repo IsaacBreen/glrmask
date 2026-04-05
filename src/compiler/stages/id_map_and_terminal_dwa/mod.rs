@@ -86,21 +86,9 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     let flat_trans: Arc<[u32]> = Arc::from(l1::build_flat_transition_table(tokenizer));
     profile.terminal_dwa_ms += flat_trans_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    // Shared cache for vocab DFA base (byte classes, transition table, self-loop
-    // bytes). Eagerly initialized before partitions start to avoid all 4 partition
-    // threads blocking on OnceLock during parallel execution.
-    // Since filter_for_terminals only modifies finalizers/possible_future_group_ids
-    // without changing transitions, the cached base is valid for all partitions.
-    let shared_vocab_dfa_cache = l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
-    {
-        let all_active: Vec<bool> = vec![true; grammar.num_terminals as usize];
-        let temp_view = l2p::equivalence_analysis::compat::TokenizerView::new_filtered_from_flat_trans(
-            &flat_trans, tokenizer, &all_active,
-        );
-        shared_vocab_dfa_cache.get_or_init(|| {
-            l2p::equivalence_analysis::vocab::fast::SharedVocabDfaBase::build_from_dfa(temp_view.dfa())
-        });
-    }
+    // SharedVocabDfaCache is disabled: simplify_for_terminals minimizes the DFA
+    // differently per partition (changing state counts and transitions), so a
+    // cache built from the original tokenizer is invalid.
 
     // Shared cache for terminal classification byte sets. The DFA scanning
     // (reachable_bytes, first_bytes, last_bytes) is identical across partitions;
@@ -128,7 +116,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
                 grammar,
                 disallowed_follows,
                 &flat_trans,
-                Some(&shared_vocab_dfa_cache),
+                None, // shared_vocab_dfa_cache disabled (simplify_for_terminals changes DFA per partition)
                 Some(&shared_classify_cache),
             ).map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0));
             (result, idx)
