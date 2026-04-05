@@ -4,6 +4,7 @@
 
 use std::collections::{VecDeque, hash_map::Entry as HashMapEntry};
 
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use super::dwa::DWA;
@@ -121,10 +122,8 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     while let Some((subset_key, subset_entries)) = worklist.pop_front() {
         let from_state = subset_map[&subset_key];
 
-        let final_weight = subset_final_weight(nwa, &subset_entries);
-        if !final_weight.is_empty() {
-            dwa.set_final_weight(from_state, final_weight);
-        }
+        // Final weight computation is deferred to after the main loop
+        // and parallelized across all states.
 
         for (nwa_state_id, path_weight) in &subset_entries {
             let state = &nwa.states[*nwa_state_id as usize];
@@ -194,6 +193,19 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
 
             dwa.add_transition(from_state, label, to_state, edge_weight);
         }
+    }
+
+    // Compute final weights in parallel after the main loop.
+    // The subset_map already stores all (entries, state_id) pairs.
+    let final_weights: Vec<(u32, Weight)> = subset_map
+        .par_iter()
+        .filter_map(|(entries, &state_id)| {
+            let fw = subset_final_weight(nwa, entries);
+            (!fw.is_empty()).then_some((state_id, fw))
+        })
+        .collect();
+    for (state_id, fw) in final_weights {
+        dwa.set_final_weight(state_id, fw);
     }
 
     if profile {
