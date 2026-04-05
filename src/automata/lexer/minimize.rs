@@ -441,6 +441,17 @@ impl DFA {
                 return (result, composed);
             }
             TopologyPrerefine::Refined { blocks: refined_blocks, .. } => {
+                // If topology found the DFA is nearly minimal (>90% unique
+                // signatures) AND the DFA is large enough that Hopcroft is
+                // expensive, skip the O(n·|Σ|·log n) minimize.
+                // For small DFAs (≤4000 states), Hopcroft is cheap (<50ms)
+                // and transitive merges can provide large reductions.
+                if n > 4000 && refined_blocks.len() > n * 9 / 10 {
+                    working.recompute_possible_futures();
+                    let identity: Vec<u32> = (0..n as u32).collect();
+                    let composed = compose_mappings(&unreachable_map, &identity);
+                    return (working, composed);
+                }
                 minimality_check_blocks = refined_blocks;
             }
             TopologyPrerefine::Skip => {}
