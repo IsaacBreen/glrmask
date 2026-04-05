@@ -866,7 +866,7 @@ fn remap_weight_general(
 /// Computes "signature" for each ID based on which NWA weights cover it,
 /// then sorts IDs by signature so IDs with identical coverage are adjacent.
 /// This minimizes range fragmentation in weights during determinize/minimize.
-fn optimize_nwa_id_ordering(
+pub(crate) fn optimize_nwa_id_ordering(
     nwa: &mut NWA,
     id_map: &mut InternalIdMap,
 ) {

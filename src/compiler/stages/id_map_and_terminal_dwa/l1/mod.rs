@@ -319,6 +319,7 @@ fn build_l1_id_map<'a>(tokenizer: &Tokenizer, vocab: &'a Vocab, active_terminals
     // that differ only by inactive terminal finalizers/futures.
     let state_equiv_started_at = Instant::now();
     let tokenizer_view = TokenizerView::new_filtered_from_flat_trans(flat_trans, tokenizer, active_terminals);
+    let view_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
     let token_bytes: Vec<&[u8]> = vocab
         .entries
         .values()
@@ -329,6 +330,7 @@ fn build_l1_id_map<'a>(tokenizer: &Tokenizer, vocab: &'a Vocab, active_terminals
         &token_bytes,
         &states,
     );
+    let equiv_algo_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0 - view_ms;
     // Build representative → internal_id mapping
     let mut rep_to_internal: FxHashMap<usize, u32> = FxHashMap::default();
     let mut state_original_to_internal = vec![u32::MAX; states.len()];
@@ -348,6 +350,18 @@ fn build_l1_id_map<'a>(tokenizer: &Tokenizer, vocab: &'a Vocab, active_terminals
         state_to_rep[states[i]] = rep as u32;
     }
     let state_equiv_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
+    if debug_profile_enabled() {
+        eprintln!(
+            "[glrmask/debug][l1_id_map] state_equiv breakdown: view={:.1}ms equiv_algo={:.1}ms mapping={:.1}ms total={:.1}ms tokens={} dfa_states={} reps={}",
+            view_ms,
+            equiv_algo_ms,
+            state_equiv_ms - view_ms - equiv_algo_ms,
+            state_equiv_ms,
+            vocab.entries.len(),
+            states.len(),
+            state_representatives.len(),
+        );
+    }
 
     // Sort token IDs first by first byte, then by length, then lexicographically.
     // Keeping first-byte buckets contiguous preserves cheap whole-bucket unions,
