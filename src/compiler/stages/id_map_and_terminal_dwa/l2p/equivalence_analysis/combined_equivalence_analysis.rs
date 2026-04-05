@@ -113,9 +113,11 @@ fn verify_state_partition_reference(
     );
 }
 
-fn verify_vocab_partition_reference(
+fn verify_vocab_partition_reference_with_tokens<S: AsRef<[u8]>>(
     fast_vocab_classes: &VocabEquivalenceResult,
     reference_vocab_classes: &VocabEquivalenceResult,
+    tokens: &[S],
+    original_to_repr: &[usize],
 ) {
     if partition_is_at_least_as_fine(fast_vocab_classes, reference_vocab_classes) {
         return;
@@ -159,6 +161,18 @@ fn verify_vocab_partition_reference(
                         tokens_in_this_ref.len(),
                         &tokens_in_this_ref[..tokens_in_this_ref.len().min(5)],
                     );
+                    // Show token bytes and dedup representatives for diagnosis
+                    for &tok_idx in &tokens_in_this_ref[..tokens_in_this_ref.len().min(5)] {
+                        let bytes = tokens[tok_idx].as_ref();
+                        let repr_idx = original_to_repr[tok_idx];
+                        eprintln!(
+                            "    token[{}]: bytes={:?} repr_idx={} str={:?}",
+                            tok_idx,
+                            bytes,
+                            repr_idx,
+                            String::from_utf8_lossy(bytes),
+                        );
+                    }
                 }
             }
         }
@@ -490,7 +504,7 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
 
     // Expand dedup vocab classes back to original token indices.
     let vocab_classes = expand_vocab_classes(
-        dedup_vocab_classes,
+        dedup_vocab_classes.clone(),
         &dedup.original_to_repr,
         dedup.representative_token_bytes.len(),
     );
@@ -524,7 +538,104 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
             ignore_terminal.map(|terminal| terminal as usize),
         );
         verify_state_partition_reference(&state_classes, &reference.state_classes);
-        verify_vocab_partition_reference(&vocab_classes, &reference.vocab_classes);
+
+        // Before checking expanded classes, diagnose at dedup level
+        // Build reference on original tokens, then check if dedup expansion introduces errors
+        let ref_token_to_class: std::collections::HashMap<usize, usize> = reference.vocab_classes
+            .iter()
+            .enumerate()
+            .flat_map(|(ci, class)| class.iter().map(move |&ti| (ti, ci)))
+            .collect();
+
+        // Check for dedup hash collisions: tokens mapped to the same repr but in different ref classes
+        let mut repr_ref_classes: std::collections::HashMap<usize, BTreeSet<usize>> = std::collections::HashMap::new();
+        for (orig_idx, &repr_idx) in dedup.original_to_repr.iter().enumerate() {
+            if let Some(&ref_class) = ref_token_to_class.get(&orig_idx) {
+                repr_ref_classes.entry(repr_idx).or_default().insert(ref_class);
+            }
+        }
+        let collision_reprs: Vec<(usize, BTreeSet<usize>)> = repr_ref_classes.iter()
+            .filter(|(_, ref_classes)| ref_classes.len() > 1)
+            .map(|(&k, v)| (k, v.clone()))
+            .collect();
+        if !collision_reprs.is_empty() {
+            eprintln!("[verify_dedup] DEDUP HASH COLLISION: {} representatives span multiple reference classes!", collision_reprs.len());
+            for (repr_idx, ref_classes) in &collision_reprs {
+                let repr_bytes = dedup.representative_token_bytes[*repr_idx];
+                eprintln!("  repr[{}] bytes={:?} str={:?} spans ref_classes {:?}", repr_idx, repr_bytes, String::from_utf8_lossy(repr_bytes), ref_classes);
+                // Show all original tokens mapped to this repr
+                for (orig_idx, &r) in dedup.original_to_repr.iter().enumerate() {
+                    if r == *repr_idx {
+                        let orig_bytes = tokens[orig_idx].as_ref();
+                        let orig_ref = ref_token_to_class.get(&orig_idx);
+                        let orig_hash = hash_byte_class_seq(orig_bytes, &byte_to_class);
+                        let repr_hash = hash_byte_class_seq(repr_bytes, &byte_to_class);
+                        eprintln!("    orig[{}] bytes={:?} str={:?} ref_class={:?} hash={:#x} repr_hash={:#x} hash_match={}",
+                            orig_idx, orig_bytes, String::from_utf8_lossy(orig_bytes), orig_ref, orig_hash, repr_hash, orig_hash == repr_hash);
+                    }
+                }
+            }
+        } else {
+            eprintln!("[verify_dedup] No dedup hash collisions found — bug is in vocab signature");
+            
+            // Diagnose: find two representative tokens that are in the same fast dedup class
+            // but different reference classes
+            let ref_token_to_ref_class: std::collections::HashMap<usize, usize> = reference.vocab_classes.iter()
+                .enumerate()
+                .flat_map(|(ci, class)| class.iter().map(move |&ti| (ti, ci)))
+                .collect();
+            
+            // Build repr→dedup_class mapping
+            let mut repr_to_dedup_class: Vec<usize> = vec![usize::MAX; dedup.representative_token_bytes.len()];
+            for (class_idx, dedup_class) in dedup_vocab_classes.iter().enumerate() {
+                for &dedup_idx in dedup_class {
+                    repr_to_dedup_class[dedup_idx] = class_idx;
+                }
+            }
+            
+            // Find two reprs in same dedup class but with original tokens in different ref classes
+            'outer: for dedup_class in &dedup_vocab_classes {
+                if dedup_class.len() < 2 { continue; }
+                // Map each repr to the set of ref classes it represents (through original tokens)
+                let mut repr_ref_map: Vec<(usize, BTreeSet<usize>)> = Vec::new();
+                for &repr_idx in dedup_class {
+                    let mut ref_classes = BTreeSet::new();
+                    for (orig_idx, &r) in dedup.original_to_repr.iter().enumerate() {
+                        if r == repr_idx {
+                            if let Some(&rc) = ref_token_to_ref_class.get(&orig_idx) {
+                                ref_classes.insert(rc);
+                            }
+                        }
+                    }
+                    repr_ref_map.push((repr_idx, ref_classes));
+                }
+                // Check if the dedup class spans multiple ref classes
+                let all_ref_classes: BTreeSet<usize> = repr_ref_map.iter().flat_map(|(_, rcs)| rcs.iter().copied()).collect();
+                if all_ref_classes.len() > 1 {
+                    // Found it! Pick one repr from each ref class and run detailed comparison
+                    let first_ref_class = *all_ref_classes.iter().next().unwrap();
+                    let second_ref_class = *all_ref_classes.iter().nth(1).unwrap();
+                    let repr_a = repr_ref_map.iter().find(|(_, rcs)| rcs.contains(&first_ref_class)).unwrap().0;
+                    let repr_b = repr_ref_map.iter().find(|(_, rcs)| rcs.contains(&second_ref_class)).unwrap().0;
+                    let bytes_a = dedup.representative_token_bytes[repr_a];
+                    let bytes_b = dedup.representative_token_bytes[repr_b];
+                    eprintln!("[verify_dedup] Running debug_compare for repr {} vs {} in dedup_class",
+                        repr_a, repr_b);
+                    vocab_equivalence_analysis::debug_compare_token_signatures(
+                        tokenizer,
+                        bytes_a,
+                        bytes_b,
+                        &vocab_states,
+                        disallowed_follows,
+                        active_groups,
+                        shared_vocab_dfa_cache,
+                    );
+                    break 'outer;
+                }
+            }
+        }
+
+        verify_vocab_partition_reference_with_tokens(&vocab_classes, &reference.vocab_classes, tokens, &dedup.original_to_repr);
     }
 
     if profile_compile {

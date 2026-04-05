@@ -1065,18 +1065,8 @@ fn hash_suffixes(
         let pos = scratch.dag_queue[idx];
         let edges = scratch.dag[&pos].edges.clone();
 
-        let first_hop_target = edges.iter().map(|&(_, t)| t).min();
-        let first_hop_blocked = first_hop_target.is_some_and(|ft| {
-            edges.iter()
-                .filter(|&&(_, t)| t == ft)
-                .all(|&(gid, _)| node_disallows_gid(scratch, pos, gid))
-        });
-
         for &(gid, target) in &edges {
             if node_disallows_gid(scratch, pos, gid) {
-                continue;
-            }
-            if first_hop_blocked && Some(target) != first_hop_target {
                 continue;
             }
             if target < len {
@@ -1097,24 +1087,8 @@ fn hash_suffixes(
         let mut h = new_hasher();
         h.write_u64(dfa.completion_with_disallowed(end_state, scratch.dag_disallowed.get(&pos)));
 
-        // Multi-segment edge fix: the earliest-target edges represent
-        // "first hop" (single-segment) choices from this position.
-        // Edges at later positions represent multi-segment paths that
-        // necessarily pass through the first hop's segment. If ALL
-        // first-hop groups are disallowed, later edges are unreachable.
-        let first_hop_target = edges.iter().map(|&(_, t)| t).min();
-        let first_hop_blocked = first_hop_target.is_some_and(|ft| {
-            edges.iter()
-                .filter(|&&(_, t)| t == ft)
-                .all(|&(gid, _)| node_disallows_gid(scratch, pos, gid))
-        });
-
         for &(gid, target) in &edges {
             if node_disallows_gid(scratch, pos, gid) {
-                continue;
-            }
-            // Skip later-hop edges when ALL first-hop edges are disallowed
-            if first_hop_blocked && Some(target) != first_hop_target {
                 continue;
             }
             h.write_u64(gid as u64);
@@ -1245,24 +1219,13 @@ fn try_hash_single_target_suffix(
         return None;
     }
 
-    let first_hop_target = edges.iter().map(|&(_, target)| target).min();
-    let first_hop_blocked = first_hop_target.is_some_and(|target| {
-        edges
-            .iter()
-            .filter(|&&(_, edge_target)| edge_target == target)
-            .all(|&(gid, _)| root_disallowed.contains(gid))
-    });
-
     let mut h = new_hasher();
     h.write_u64(dfa.completion_with_disallowed(
         end_state.unwrap_or(STATE_NONE),
         Some(&root_disallowed),
     ));
-    for &(gid, target) in &edges {
+    for &(gid, _target) in &edges {
         if root_disallowed.contains(gid) {
-            continue;
-        }
-        if first_hop_blocked && Some(target) != first_hop_target {
             continue;
         }
         h.write_u64(gid as u64);
@@ -2032,6 +1995,163 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
     }
 
     result
+}
+
+/// Debug function: compute and compare per-state signatures for two tokens.
+/// Used to diagnose incorrectly merged tokens in vocab equivalence.
+pub fn debug_compare_token_signatures(
+    tokenizer: &TokenizerView,
+    token_a: &[u8],
+    token_b: &[u8],
+    initial_states: &[usize],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    active_groups: Option<&[bool]>,
+    shared_cache: Option<&SharedVocabDfaCache>,
+) {
+    let byte_to_class_arr = super::super::compat::compute_byte_classes(tokenizer.dfa());
+    let dfa = build_dfa_with_group_filter(tokenizer, disallowed_follows, Some(&byte_to_class_arr), active_groups, shared_cache);
+    let num_groups = dfa.num_groups;
+    let state_group_size = initial_states.len();
+    
+    eprintln!("[debug_compare] token_a bytes={:?} str={:?}", token_a, String::from_utf8_lossy(token_a));
+    eprintln!("[debug_compare] token_b bytes={:?} str={:?}", token_b, String::from_utf8_lossy(token_b));
+    eprintln!("[debug_compare] num_groups={} num_states={}", num_groups, initial_states.len());
+    
+    let mut scratch_a = Scratch::new(initial_states.len(), num_groups);
+    let mut scratch_b = Scratch::new(initial_states.len(), num_groups);
+    
+    let sig_a = token_signature(&dfa, token_a, initial_states, state_group_size, &mut scratch_a, false);
+    let sig_b = token_signature(&dfa, token_b, initial_states, state_group_size, &mut scratch_b, false);
+    
+    eprintln!("[debug_compare] sig_a={:#018x} sig_b={:#018x} match={}", sig_a, sig_b, sig_a == sig_b);
+    
+    // Now compute per-state details
+    // Re-run to inspect internals
+    let mut scratch_a2 = Scratch::new(initial_states.len(), num_groups);
+    let mut scratch_b2 = Scratch::new(initial_states.len(), num_groups);
+    
+    run_batch(&dfa, &mut scratch_a2, token_a, initial_states, state_group_size, false);
+    run_batch(&dfa, &mut scratch_b2, token_b, initial_states, state_group_size, false);
+    
+    eprintln!("[debug_compare] targets_a={:?}", scratch_a2.targets);
+    eprintln!("[debug_compare] targets_b={:?}", scratch_b2.targets);
+    eprintln!("[debug_compare] target_gids_a={:?}", scratch_a2.target_gids);
+    eprintln!("[debug_compare] target_gids_b={:?}", scratch_b2.target_gids);
+    eprintln!("[debug_compare] single_target_pos_a={}", scratch_a2.single_target_pos);
+    eprintln!("[debug_compare] single_target_pos_b={}", scratch_b2.single_target_pos);
+    eprintln!("[debug_compare] single_target_gids_a={:?}", scratch_a2.single_target_gids.as_slice());
+    eprintln!("[debug_compare] single_target_gids_b={:?}", scratch_b2.single_target_gids.as_slice());
+    
+    // Per-state end states and match positions
+    let mut differing_states = Vec::new();
+    for (i, &start_state) in initial_states.iter().enumerate() {
+        let end_a = scratch_a2.current_states[i];
+        let end_b = scratch_b2.current_states[i];
+        let dirty_a = scratch_a2.dirty_state_flags[i];
+        let dirty_b = scratch_b2.dirty_state_flags[i];
+        let base = i * num_groups;
+        
+        let mut match_diffs = Vec::new();
+        for gid in 0..num_groups {
+            let ma = scratch_a2.match_positions[base + gid];
+            let mb = scratch_b2.match_positions[base + gid];
+            if ma != mb {
+                match_diffs.push((gid, ma, mb));
+            }
+        }
+        
+        if end_a != end_b || dirty_a != dirty_b || !match_diffs.is_empty() {
+            differing_states.push(i);
+            if differing_states.len() <= 10 {
+                eprintln!("[debug_compare] state[{}] start={} end_a={} end_b={} dirty_a={} dirty_b={} match_diffs={:?}",
+                    i, start_state, end_a, end_b, dirty_a, dirty_b, match_diffs);
+            }
+        }
+    }
+    
+    if differing_states.is_empty() {
+        eprintln!("[debug_compare] NO differing states found for all {} states — tokens are identical from DFA perspective", initial_states.len());
+    } else {
+        eprintln!("[debug_compare] {} differing states out of {}: {:?}", differing_states.len(), initial_states.len(), 
+            &differing_states[..differing_states.len().min(20)]);
+    }
+    
+    // Now compare suffix DAG hashes
+    let mut scratch_s1 = Scratch::new(initial_states.len(), num_groups);
+    let mut scratch_s2 = Scratch::new(initial_states.len(), num_groups);
+    run_batch(&dfa, &mut scratch_s1, token_a, initial_states, state_group_size, false);
+    run_batch(&dfa, &mut scratch_s2, token_b, initial_states, state_group_size, false);
+    
+    // Hash suffixes for both (only if targets exist)
+    let _len_a = token_a.len();
+    let _len_b = token_b.len();
+    
+    if !scratch_s1.targets.is_empty() {
+        let target_count_a = scratch_s1.targets.len();
+        if target_count_a == 1 {
+            let _ = try_hash_single_target_suffix(&dfa, token_a, &mut scratch_s1);
+        }
+        if scratch_s1.single_target_hash_pos == usize::MAX {
+            ensure_target_gids_map(
+                &mut scratch_s1.target_gids,
+                scratch_s1.single_target_pos,
+                scratch_s1.single_target_gids.as_slice(),
+            );
+            hash_suffixes(&dfa, token_a, &mut scratch_s1, false);
+        }
+    }
+    if !scratch_s2.targets.is_empty() {
+        let target_count_b = scratch_s2.targets.len();
+        if target_count_b == 1 {
+            let _ = try_hash_single_target_suffix(&dfa, token_b, &mut scratch_s2);
+        }
+        if scratch_s2.single_target_hash_pos == usize::MAX {
+            ensure_target_gids_map(
+                &mut scratch_s2.target_gids,
+                scratch_s2.single_target_pos,
+                scratch_s2.single_target_gids.as_slice(),
+            );
+            hash_suffixes(&dfa, token_b, &mut scratch_s2, false);
+        }
+    }
+    
+    eprintln!("[debug_compare] single_target_hash_a: pos={} hash={:#018x}", scratch_s1.single_target_hash_pos, scratch_s1.single_target_hash);
+    eprintln!("[debug_compare] single_target_hash_b: pos={} hash={:#018x}", scratch_s2.single_target_hash_pos, scratch_s2.single_target_hash);
+    
+    // Dump DAG entries
+    for &pos in &[1usize, 2, 3, 4] {
+        let dag_a = scratch_s1.dag.get(&pos);
+        let dag_b = scratch_s2.dag.get(&pos);
+        if dag_a.is_some() || dag_b.is_some() {
+            let hash_a = dag_a.map(|n| n.hash).unwrap_or(0);
+            let hash_b = dag_b.map(|n| n.hash).unwrap_or(0);
+            let edges_a = dag_a.map(|n| &n.edges).cloned().unwrap_or_default();
+            let edges_b = dag_b.map(|n| &n.edges).cloned().unwrap_or_default();
+            let end_a = dag_a.map(|n| n.end_state).unwrap_or(STATE_NONE);
+            let end_b = dag_b.map(|n| n.end_state).unwrap_or(STATE_NONE);
+            let disallowed_a = scratch_s1.dag_disallowed.get(&pos);
+            let disallowed_b = scratch_s2.dag_disallowed.get(&pos);
+            eprintln!("[debug_compare] DAG pos={}: hash_a={:#018x} hash_b={:#018x} match={} edges_a={:?} edges_b={:?} end_a={} end_b={}",
+                pos, hash_a, hash_b, hash_a == hash_b, edges_a.as_slice(), edges_b.as_slice(), end_a, end_b);
+            
+            // Check which edges would be skipped due to disallowed
+            for label in ["a", "b"] {
+                let edges = if label == "a" { &edges_a } else { &edges_b };
+                let disallowed = if label == "a" { disallowed_a } else { disallowed_b };
+                if edges.is_empty() { continue; }
+                for &(gid, target) in edges.iter() {
+                    let disallowed_flag = disallowed.map_or(false, |bits| bits.contains(gid));
+                    eprintln!("[debug_compare]   token_{} pos={} edge=({}, {}) disallowed={} skip={}",
+                        label, pos, gid, target, disallowed_flag, disallowed_flag);
+                }
+                // Print the full disallowed bitset
+                if let Some(bits) = disallowed {
+                    let disallowed_gids: Vec<usize> = (0..num_groups).filter(|&g| bits.contains(g)).collect();
+                    eprintln!("[debug_compare]   token_{} pos={} disallowed_gids={:?}", label, pos, disallowed_gids);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
