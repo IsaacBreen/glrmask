@@ -47,9 +47,9 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     let force_all_l2p = std::env::var("GLRMASK_FORCE_ALL_L2P").map_or(false, |v| v == "1");
     let mut profile = TerminalDwaPhaseProfile::default();
 
-    // Split vocab into 4 partitions by character type (or single partition if forced).
+    // Split vocab into 5 partitions by character type (or single partition if forced).
     let partition_vocab_started_at = Instant::now();
-    let mut partition_entries: [Vec<(u32, Vec<u8>)>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    let mut partition_entries: [Vec<(u32, Vec<u8>)>; 5] = [Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()];
     for (&token_id, bytes) in &vocab.entries {
         if force_all_l2p {
             partition_entries[0].push((token_id, bytes.clone()));
@@ -95,7 +95,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     let shared_classify_cache = external_classify_cache.unwrap_or(&owned_classify_cache);
 
     // Build each partition in parallel.
-    let ((p0, p1), (p2, p3)) = rayon::join(
+    let ((p0, p1), (p2, (p3, p4))) = rayon::join(
         || {
             rayon::join(
                 || {
@@ -151,20 +151,40 @@ pub(crate) fn build_id_map_and_terminal_dwa(
                     ).map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0))
                 },
                 || {
-                    let started_at = Instant::now();
-                    partition::build_partition_id_map_and_terminal_dwa(
-                        "p3",
-                        tokenizer,
-                        &sub_vocabs[3],
-                        terminal_coloring,
-                        use_terminal_coloring,
-                        ignore_terminal,
-                        grammar,
-                        disallowed_follows,
-                        &flat_trans,
-                        Some(&shared_vocab_dfa_cache),
-                        Some(&shared_classify_cache),
-                    ).map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0))
+                    rayon::join(
+                        || {
+                            let started_at = Instant::now();
+                            partition::build_partition_id_map_and_terminal_dwa(
+                                "p3",
+                                tokenizer,
+                                &sub_vocabs[3],
+                                terminal_coloring,
+                                use_terminal_coloring,
+                                ignore_terminal,
+                                grammar,
+                                disallowed_follows,
+                                &flat_trans,
+                                Some(&shared_vocab_dfa_cache),
+                                Some(&shared_classify_cache),
+                            ).map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0))
+                        },
+                        || {
+                            let started_at = Instant::now();
+                            partition::build_partition_id_map_and_terminal_dwa(
+                                "p4",
+                                tokenizer,
+                                &sub_vocabs[4],
+                                terminal_coloring,
+                                use_terminal_coloring,
+                                ignore_terminal,
+                                grammar,
+                                disallowed_follows,
+                                &flat_trans,
+                                Some(&shared_vocab_dfa_cache),
+                                Some(&shared_classify_cache),
+                            ).map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0))
+                        },
+                    )
                 },
             )
         },
@@ -174,11 +194,13 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     let p1_ms = p1.as_ref().map(|(_, ms)| *ms).unwrap_or(0.0);
     let p2_ms = p2.as_ref().map(|(_, ms)| *ms).unwrap_or(0.0);
     let p3_ms = p3.as_ref().map(|(_, ms)| *ms).unwrap_or(0.0);
+    let p4_ms = p4.as_ref().map(|(_, ms)| *ms).unwrap_or(0.0);
     let dominant_partition_profile = [
         p0.as_ref().map(|(pair, ms)| (pair.profile, *ms)),
         p1.as_ref().map(|(pair, ms)| (pair.profile, *ms)),
         p2.as_ref().map(|(pair, ms)| (pair.profile, *ms)),
         p3.as_ref().map(|(pair, ms)| (pair.profile, *ms)),
+        p4.as_ref().map(|(pair, ms)| (pair.profile, *ms)),
     ]
     .into_iter()
     .flatten()
@@ -198,6 +220,9 @@ pub(crate) fn build_id_map_and_terminal_dwa(
         pairs.push(pair);
     }
     if let Some((pair, _)) = p3 {
+        pairs.push(pair);
+    }
+    if let Some((pair, _)) = p4 {
         pairs.push(pair);
     }
 
@@ -241,7 +266,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
 
     if compile_profile_enabled() || debug_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][split_terminal_dwa] partition_vocab_ms={:.3} p0_tokens={} p0_ms={:.3} p1_tokens={} p1_ms={:.3} p2_tokens={} p2_ms={:.3} p3_tokens={} p3_ms={:.3} global_merge_ms={:.3} accounted_id_map_ms={:.3} accounted_terminal_dwa_ms={:.3} accounted_compact_ms={:.3} accounted_total_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][split_terminal_dwa] partition_vocab_ms={:.3} p0_tokens={} p0_ms={:.3} p1_tokens={} p1_ms={:.3} p2_tokens={} p2_ms={:.3} p3_tokens={} p3_ms={:.3} p4_tokens={} p4_ms={:.3} global_merge_ms={:.3} accounted_id_map_ms={:.3} accounted_terminal_dwa_ms={:.3} accounted_compact_ms={:.3} accounted_total_ms={:.3} total_ms={:.3}",
             partition_vocab_ms,
             sub_vocabs[0].entries.len(),
             p0_ms,
@@ -251,6 +276,8 @@ pub(crate) fn build_id_map_and_terminal_dwa(
             p2_ms,
             sub_vocabs[3].entries.len(),
             p3_ms,
+            sub_vocabs[4].entries.len(),
+            p4_ms,
             merge_ms,
             profile.id_map_ms,
             profile.terminal_dwa_ms,

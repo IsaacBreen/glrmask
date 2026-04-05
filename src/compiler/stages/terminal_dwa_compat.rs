@@ -39,8 +39,8 @@ use super::id_map_and_terminal_dwa::classify::classify_vocab_char_type;
 
 fn partition_internal_vocab(
     entries: Vec<(u32, Vec<u8>)>,
-) -> [Vec<(usize, Vec<u8>)>; 4] {
-    let mut partitions: [Vec<(usize, Vec<u8>)>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+) -> [Vec<(usize, Vec<u8>)>; 5] {
+    let mut partitions: [Vec<(usize, Vec<u8>)>; 5] = [Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()];
     for (token_id, bytes) in entries {
         let idx = classify_vocab_char_type(&bytes) as usize;
         partitions[idx].push((token_id as usize, bytes));
@@ -212,10 +212,10 @@ pub(crate) fn build_terminal_dwa_for_existing_id_map_with_possible_matches_and_c
         );
     }
 
-    let partition_sizes: [usize; 3];
+    let partition_sizes: [usize; 5];
     let partition_trees: Vec<VocabPrefixTree>;
     if all_l1 {
-        partition_sizes = [0, 0, 0];
+        partition_sizes = [0, 0, 0, 0, 0];
         partition_trees = Vec::new();
     } else {
         let partitions = partition_internal_vocab(std::mem::take(&mut internal_vocab));
@@ -223,6 +223,8 @@ pub(crate) fn build_terminal_dwa_for_existing_id_map_with_possible_matches_and_c
             partitions[0].len(),
             partitions[1].len(),
             partitions[2].len(),
+            partitions[3].len(),
+            partitions[4].len(),
         ];
         partition_trees = partitions
             .into_iter()
@@ -236,7 +238,7 @@ pub(crate) fn build_terminal_dwa_for_existing_id_map_with_possible_matches_and_c
 
     if debug_profile {
         eprintln!(
-            "[glrmask/debug][terminal_dwa] start grammar_rules={} grammar_terminals={} grammar_nonterminals={} tokenizer_states={} internal_tokenizer_states={} vocab_entries={} partitions=[{},{},{}] setup_ms={:.3}",
+            "[glrmask/debug][terminal_dwa] start grammar_rules={} grammar_terminals={} grammar_nonterminals={} tokenizer_states={} internal_tokenizer_states={} vocab_entries={} partitions=[{},{},{},{},{}] setup_ms={:.3}",
             grammar.rules.len(),
             grammar.num_terminals,
             grammar.num_nonterminals,
@@ -246,6 +248,8 @@ pub(crate) fn build_terminal_dwa_for_existing_id_map_with_possible_matches_and_c
             partition_sizes[0],
             partition_sizes[1],
             partition_sizes[2],
+            partition_sizes[3],
+            partition_sizes[4],
             setup_ms,
         );
     }
