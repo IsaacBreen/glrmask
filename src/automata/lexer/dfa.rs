@@ -174,22 +174,6 @@ impl DFA {
         &mut self.states
     }
 
-    pub(crate) fn filter_groups_in_place(&mut self, active_groups: &[bool]) {
-        for state in &mut self.states {
-            for (group_id, active) in active_groups.iter().enumerate() {
-                if *active {
-                    continue;
-                }
-                if group_id < state.finalizers.len() {
-                    state.finalizers.clear(group_id);
-                }
-                if group_id < state.possible_future_group_ids.len() {
-                    state.possible_future_group_ids.clear(group_id);
-                }
-            }
-        }
-    }
-
     pub(super) fn num_groups(&self) -> usize {
         self.group_id_to_u8set.len()
     }
