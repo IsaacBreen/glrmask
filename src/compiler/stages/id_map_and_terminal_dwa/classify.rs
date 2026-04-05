@@ -98,22 +98,36 @@ impl SharedClassifyBytesets {
     }
 }
 
+/// JSON structural characters used to keep tokens in the core non-alnum
+/// partition (P0) rather than splitting them into the auxiliary P5.
+const JSON_STRUCTURAL: &[u8] = b"\":[]{},";
+
+/// Characters whose sole repetition qualifies a non-alnum token for the
+/// auxiliary P5 partition even if the token contains a structural byte.
+const P5_REPEATED_CHARS: &[u8] = b"\n:{ ,";
+
 /// Classifies a token's bytes by character type for vocab partitioning.
 ///
 /// Returns:
-/// - 0: pure non-alnum (punctuation, symbols, whitespace)
+/// - 0: non-alnum with JSON structural chars (multi-byte, not single-repeated)
 /// - 1: mixed (contains both alnum and non-alnum)
 /// - 2: ASCII alnum with ≥1 alpha, optionally with leading space
 /// - 3: pure digit, optionally with leading space
 /// - 4: Unicode-only alpha (non-ASCII alphanumeric, e.g. CJK, Cyrillic,
 ///       Arabic, Hangul), optionally with leading space
+/// - 5: non-alnum auxiliary (no JSON structural, or single-char repeated,
+///       or length 1)
 ///
 /// Uses Unicode-aware classification so that non-Latin scripts are separated
 /// into their own partition (4) instead of being lumped with ASCII punctuation (0)
 /// or bloating the ASCII alpha partition (2).
+///
+/// P0/P5 split: non-alnum tokens containing JSON structural characters
+/// (`":[]{},`) stay in P0 for efficient L2+ terminal processing, while
+/// tokens without structural chars (or trivial single-char tokens) go to P5.
 pub(crate) fn classify_vocab_char_type(bytes: &[u8]) -> u8 {
     if bytes.is_empty() {
-        return 0;
+        return 5;
     }
     // Strip optional leading ASCII space (GPT-2 BPE decodes Ġ → 0x20 before we see it)
     let content = if bytes[0] == b' ' {
@@ -122,7 +136,7 @@ pub(crate) fn classify_vocab_char_type(bytes: &[u8]) -> u8 {
         bytes
     };
     if content.is_empty() {
-        return 0; // Just a space marker → non-alnum
+        return 5; // Just a space marker → auxiliary non-alnum
     }
     // Try to decode as UTF-8 for Unicode-aware classification.
     if let Ok(s) = std::str::from_utf8(content) {
@@ -142,7 +156,7 @@ pub(crate) fn classify_vocab_char_type(bytes: &[u8]) -> u8 {
         // Check non-alphanumeric.
         if let Ok(full) = std::str::from_utf8(bytes) {
             if full.chars().all(|c| !c.is_alphanumeric()) {
-                return 0; // Pure non-alnum
+                return classify_nonalnum(bytes);
             }
         }
         return 1; // Mixed
@@ -155,9 +169,29 @@ pub(crate) fn classify_vocab_char_type(bytes: &[u8]) -> u8 {
         return 3;
     }
     if bytes.iter().all(|b| !b.is_ascii_alphanumeric()) {
-        return 0;
+        return classify_nonalnum(bytes);
     }
     1 // Mixed
+}
+
+/// Sub-classify a non-alphanumeric token into P0 (structural) or P5 (auxiliary).
+///
+/// P5 if: (a) no JSON structural char, (b) single repeated char from
+/// `\n:{ ,`, or (c) length 1.
+fn classify_nonalnum(bytes: &[u8]) -> u8 {
+    // Length 1 → P5
+    if bytes.len() <= 1 {
+        return 5;
+    }
+    // Single repeated char from P5_REPEATED_CHARS → P5
+    if bytes.iter().all(|b| *b == bytes[0]) && P5_REPEATED_CHARS.contains(&bytes[0]) {
+        return 5;
+    }
+    // No JSON structural char → P5
+    if !bytes.iter().any(|b| JSON_STRUCTURAL.contains(b)) {
+        return 5;
+    }
+    0 // Structural non-alnum → P0
 }
 
 /// Classifies each terminal by the longest token-path length it can participate in.
