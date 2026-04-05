@@ -99,13 +99,11 @@ impl SharedClassifyBytesets {
 }
 
 /// Classifies a token's bytes by character type for vocab partitioning.
-/// Returns 0 (non-alnum with structural JSON chars), 1 (mixed),
-/// 2 (alnum with ≥1 alpha, optionally with leading space),
-/// 3 (pure digit, optionally with leading space),
-/// or 4 (simple non-alnum: no structural JSON chars, single-char-repeated structural, or length 1).
+/// Returns 0 (pure non-alnum), 1 (mixed), 2 (alnum with ≥1 alpha, optionally with leading space),
+/// or 3 (pure digit, optionally with leading space).
 pub(crate) fn classify_vocab_char_type(bytes: &[u8]) -> u8 {
     if bytes.is_empty() {
-        return 4;
+        return 0;
     }
     // Strip optional leading ASCII space (GPT-2 BPE decodes Ġ → 0x20 before we see it)
     let content = if bytes[0] == b' ' {
@@ -114,7 +112,7 @@ pub(crate) fn classify_vocab_char_type(bytes: &[u8]) -> u8 {
         bytes
     };
     if content.is_empty() {
-        return 4; // Just a space marker → simple non-alnum
+        return 0; // Just a space marker → non-alnum
     }
     if content.iter().all(|b| b.is_ascii_alphanumeric()) {
         if content.iter().any(|b| b.is_ascii_alphabetic()) {
@@ -123,20 +121,7 @@ pub(crate) fn classify_vocab_char_type(bytes: &[u8]) -> u8 {
         return 3; // Pure digit (optionally with leading space)
     }
     if bytes.iter().all(|b| !b.is_ascii_alphanumeric()) {
-        // Pure non-alnum — split into simple (4) vs complex (0).
-        // Simple: length 1, lacks structural JSON chars, or single-char-repeated structural.
-        if bytes.len() == 1 {
-            return 4;
-        }
-        let has_structural = bytes.iter().any(|b| matches!(b, b':' | b'[' | b']' | b'{' | b'}' | b','));
-        if !has_structural {
-            return 4;
-        }
-        // Single structural char repeated (e.g., ":::", "{{{", ",,,")
-        if bytes.iter().all(|b| *b == bytes[0]) && matches!(bytes[0], b':' | b'{' | b',') {
-            return 4;
-        }
-        return 0; // Complex non-alnum with structural JSON chars
+        return 0; // Pure non-alnum
     }
     1 // Mixed
 }
