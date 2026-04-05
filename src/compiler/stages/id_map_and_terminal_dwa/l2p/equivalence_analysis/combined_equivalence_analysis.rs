@@ -421,19 +421,14 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
         // the FIRST match in a sequence. Skipping them would incorrectly merge
         // states that differ in first-match behavior. Context-dependent filtering
         // (per-parent-edge) would be correct but prohibitively expensive.
-        let num_dedup_tokens = dedup.representative_token_bytes.len();
-        let max_batches = if num_dedup_tokens > PRE_VOCAB_STATE_REDUCTION_MAX_FULL_TOKENS {
-            Some(1)
-        } else {
-            None
-        };
         let reduced_state_reps = state_equivalence_analysis::find_state_equivalence_classes_ex(
             tokenizer,
             &dedup.representative_token_bytes,
             &pre_reduced_states,
             &[], // skip_groups
-            max_batches,
+            None, // no batch limit — process until convergence
             None, // default batch_size
+            Some(true), // early_stop: halt once classes stabilize for 2 batches
         );
         let vocab_states = collect_representative_states(&reduced_state_reps);
         if profile_compile {

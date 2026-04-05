@@ -186,7 +186,7 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]> + Sync>(
     tokens: &[S],
     states: &[usize],
 ) -> Vec<usize> {
-    find_state_equivalence_classes_ex(tokenizer, tokens, states, &[], None, None)
+    find_state_equivalence_classes_ex(tokenizer, tokens, states, &[], None, None, None)
 }
 
 /// Find state equivalence classes with optional disallowed-follows filtering
@@ -204,6 +204,7 @@ pub fn find_state_equivalence_classes_ex<S: AsRef<[u8]> + Sync>(
     skip_groups: &[bool],
     max_batches: Option<usize>,
     batch_size: Option<usize>,
+    early_stop_override: Option<bool>,
 ) -> Vec<usize> {
     let profile_equivalence = profile_equivalence_enabled();
 
@@ -212,7 +213,7 @@ pub fn find_state_equivalence_classes_ex<S: AsRef<[u8]> + Sync>(
     }
 
     let refinement_started_at = std::time::Instant::now();
-    let mapping = find_state_equivalence_classes_token_based(tokenizer, tokens, states, skip_groups, max_batches, batch_size);
+    let mapping = find_state_equivalence_classes_token_based(tokenizer, tokens, states, skip_groups, max_batches, batch_size, early_stop_override);
     let refinement_time = refinement_started_at.elapsed();
 
     if profile_equivalence {
@@ -238,6 +239,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     skip_groups: &[bool],
     max_batches: Option<usize>,
     custom_batch_size: Option<usize>,
+    early_stop_override: Option<bool>,
 ) -> Vec<usize> {
     use std::collections::{hash_map::Entry, HashMap};
 
@@ -307,9 +309,11 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
         i
     };
 
-    let early_stop = std::env::var("STATE_EQUIV_EARLY_STOP")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let early_stop = early_stop_override.unwrap_or_else(|| {
+        std::env::var("STATE_EQUIV_EARLY_STOP")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    });
     let batch_size = custom_batch_size.unwrap_or(5000);
     let batches = build_strided_batches(total_tokens, batch_size);
     let dead_positions = vec![-1i32; num_groups];
@@ -656,7 +660,10 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
             }
         }
 
-        if early_stop && tokens_tested * 2 >= total_tokens {
+        // When early_stop is from override (explicit), check immediately.
+        // When from env var, require 50% of tokens processed first.
+        let min_tokens_met = early_stop_override.is_some() || tokens_tested * 2 >= total_tokens;
+        if early_stop && min_tokens_met {
             if num_groups == prev_groups {
                 stable_batches += 1;
             } else {
