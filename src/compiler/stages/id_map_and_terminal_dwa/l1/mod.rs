@@ -826,20 +826,27 @@ fn build_l1_terminal_dwa(
                 let collect_start = Instant::now();
                 let start_internal = state_original_to_internal[start_state as usize];
 
-                // Build per-end_rep ref lists + additive precomputed hash.
-                // Phase 1 precomputed per-entry hashes so Phase 2 combines
-                // hashes in O(entries) instead of iterating O(ranges).
-                let mut end_rep_refs: Vec<Vec<&[(u32, u32)]>> = vec![Vec::new(); n_end_reps];
-                let mut hash_accum: Vec<u64> = vec![0; n_end_reps];
-                let mut len_accum: Vec<usize> = vec![0; n_end_reps];
+                // Track only touched end_reps for this start state instead of
+                // allocating n_end_reps buckets every time.
+                let mut touched_positions: FxHashMap<usize, usize> = FxHashMap::default();
+                let mut touched_end_reps: Vec<(usize, Vec<&[(u32, u32)]>, u64, usize)> = Vec::new();
 
                 // Empty tokens: end_rep = start_rep
                 if !empty_token_ranges.is_empty() {
                     let start_rep = state_to_rep[start_state as usize];
                     let start_rep_idx = end_rep_to_idx[start_rep as usize];
-                    end_rep_refs[start_rep_idx].push(empty_token_ranges.as_slice());
-                    hash_accum[start_rep_idx] = hash_accum[start_rep_idx].wrapping_add(empty_token_hash);
-                    len_accum[start_rep_idx] += empty_token_ranges.len();
+                    let position = if let Some(&position) = touched_positions.get(&start_rep_idx) {
+                        position
+                    } else {
+                        let position = touched_end_reps.len();
+                        touched_positions.insert(start_rep_idx, position);
+                        touched_end_reps.push((start_rep_idx, Vec::new(), 0, 0));
+                        position
+                    };
+                    let (_, refs, hash_accum, len_accum) = &mut touched_end_reps[position];
+                    refs.push(empty_token_ranges.as_slice());
+                    *hash_accum = hash_accum.wrapping_add(empty_token_hash);
+                    *len_accum += empty_token_ranges.len();
                 }
 
                 for (byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
@@ -848,9 +855,18 @@ fn build_l1_terminal_dwa(
                     if target_internal == dead_internal { continue; }
                     if let Some(results) = indexed_walk_cache.get(&(byte as u8, target_internal)) {
                         for &(end_rep_idx, ranges, entry_hash, entry_mc) in results {
-                            end_rep_refs[end_rep_idx].push(ranges);
-                            len_accum[end_rep_idx] += entry_mc;
-                            hash_accum[end_rep_idx] = hash_accum[end_rep_idx].wrapping_add(entry_hash);
+                            let position = if let Some(&position) = touched_positions.get(&end_rep_idx) {
+                                position
+                            } else {
+                                let position = touched_end_reps.len();
+                                touched_positions.insert(end_rep_idx, position);
+                                touched_end_reps.push((end_rep_idx, Vec::new(), 0, 0));
+                                position
+                            };
+                            let (_, refs, hash_accum, len_accum) = &mut touched_end_reps[position];
+                            refs.push(ranges);
+                            *hash_accum = hash_accum.wrapping_add(entry_hash);
+                            *len_accum += entry_mc;
                         }
                     }
                 }
@@ -859,10 +875,7 @@ fn build_l1_terminal_dwa(
                 // Finalize hashes and build LazyRanges entries.
                 let build_start = Instant::now();
                 let mut result: Vec<(u32, u32, LazyRanges)> = Vec::new();
-                for (idx, refs) in end_rep_refs.into_iter().enumerate() {
-                    if refs.is_empty() { continue; }
-                    let hash = hash_accum[idx];
-                    let total_len = len_accum[idx];
+                for (idx, refs, hash, total_len) in touched_end_reps.into_iter() {
                     p2_total_ranges.fetch_add(total_len as u64, std::sync::atomic::Ordering::Relaxed);
                     let end_rep = all_end_reps[idx];
                     let lazy = LazyRanges { refs, hash, total_len };
