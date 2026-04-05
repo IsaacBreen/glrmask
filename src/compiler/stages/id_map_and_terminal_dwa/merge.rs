@@ -272,6 +272,80 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
 
 /// Build a unified global InternalIdMap from multiple inputs.
 ///
+/// Re-order class IDs so that composite keys are in lexicographic order.
+/// This groups classes by partition: for disjoint partitions, all classes from
+/// the same partition get consecutive global IDs, minimizing range fragmentation
+/// in weights during determinize/minimize.
+fn reorder_classes(
+    composite_to_class: HashMap<Vec<u32>, u32>,
+    o2i: &mut [u32],
+    i2o: &mut Vec<Vec<u32>>,
+    reps: &mut Vec<u32>,
+) {
+    let num_classes = i2o.len();
+    if num_classes <= 1 {
+        return;
+    }
+
+    let mut sorted: Vec<(Vec<u32>, u32)> = composite_to_class.into_iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut old_to_new = vec![0u32; num_classes];
+    for (new_id, (_, old_id)) in sorted.iter().enumerate() {
+        old_to_new[*old_id as usize] = new_id as u32;
+    }
+
+    for val in o2i.iter_mut() {
+        *val = old_to_new[*val as usize];
+    }
+
+    let mut new_i2o = vec![Vec::new(); num_classes];
+    let mut new_reps = vec![0u32; num_classes];
+    for (new_id, (_, old_id)) in sorted.iter().enumerate() {
+        new_i2o[new_id] = std::mem::take(&mut i2o[*old_id as usize]);
+        new_reps[new_id] = reps[*old_id as usize];
+    }
+    *i2o = new_i2o;
+    *reps = new_reps;
+}
+
+/// Like `reorder_classes`, but skips elements in `o2i` that equal `sentinel`.
+fn reorder_classes_with_sentinel(
+    composite_to_class: HashMap<Vec<u32>, u32>,
+    o2i: &mut [u32],
+    i2o: &mut Vec<Vec<u32>>,
+    reps: &mut Vec<u32>,
+    sentinel: u32,
+) {
+    let num_classes = i2o.len();
+    if num_classes <= 1 {
+        return;
+    }
+
+    let mut sorted: Vec<(Vec<u32>, u32)> = composite_to_class.into_iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut old_to_new = vec![0u32; num_classes];
+    for (new_id, (_, old_id)) in sorted.iter().enumerate() {
+        old_to_new[*old_id as usize] = new_id as u32;
+    }
+
+    for val in o2i.iter_mut() {
+        if *val != sentinel {
+            *val = old_to_new[*val as usize];
+        }
+    }
+
+    let mut new_i2o = vec![Vec::new(); num_classes];
+    let mut new_reps = vec![0u32; num_classes];
+    for (new_id, (_, old_id)) in sorted.iter().enumerate() {
+        new_i2o[new_id] = std::mem::take(&mut i2o[*old_id as usize]);
+        new_reps[new_id] = reps[*old_id as usize];
+    }
+    *i2o = new_i2o;
+    *reps = new_reps;
+}
+
 /// State refinement: composite key `(class_in_0, class_in_1, ...)`.
 /// Token refinement: composite key `(class_in_0_or_MAX, class_in_1_or_MAX, ...)`.
 ///
@@ -304,6 +378,11 @@ fn build_unified_global_id_map(
         state_i2o[class as usize].push(state as u32);
     }
 
+    // Re-order state classes so composite keys are in lexicographic order.
+    // This groups classes by partition, keeping related TSIDs contiguous and
+    // minimizing range fragmentation in weights during determinize.
+    reorder_classes(composite_to_class, &mut state_o2i, &mut state_i2o, &mut state_reps);
+
     // --- Token refinement ---
     let mut token_composite_to_class: HashMap<Vec<u32>, u32> = HashMap::new();
     let mut token_o2i = vec![u32::MAX; max_token_id as usize + 1];
@@ -335,6 +414,16 @@ fn build_unified_global_id_map(
         token_o2i[token_id as usize] = class;
         token_i2o[class as usize].push(token_id);
     }
+
+    // Re-order token classes the same way. For disjoint partitions, this ensures
+    // all tokens from the same partition get consecutive global IDs.
+    reorder_classes_with_sentinel(
+        token_composite_to_class,
+        &mut token_o2i,
+        &mut token_i2o,
+        &mut token_reps,
+        u32::MAX,
+    );
 
     InternalIdMap {
         tokenizer_states: ManyToOneIdMap {
@@ -417,6 +506,8 @@ fn build_unified_global_id_map_from_local_inputs(
         state_i2o[class as usize].push(state as u32);
     }
 
+    reorder_classes(composite_to_class, &mut state_o2i, &mut state_i2o, &mut state_reps);
+
     let mut token_composite_to_class: HashMap<Vec<u32>, u32> = HashMap::new();
     let mut token_o2i = vec![u32::MAX; max_token_id as usize + 1];
     let mut token_i2o: Vec<Vec<u32>> = Vec::new();
@@ -449,6 +540,14 @@ fn build_unified_global_id_map_from_local_inputs(
         token_o2i[token_id as usize] = class;
         token_i2o[class as usize].push(token_id);
     }
+
+    reorder_classes_with_sentinel(
+        token_composite_to_class,
+        &mut token_o2i,
+        &mut token_i2o,
+        &mut token_reps,
+        u32::MAX,
+    );
 
     InternalIdMap {
         tokenizer_states: ManyToOneIdMap {
