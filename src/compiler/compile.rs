@@ -789,9 +789,21 @@ pub(crate) fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
 }
 
 pub(crate) fn compile_owned(grammar: GrammarDef, vocab: &Vocab) -> Constraint {
-    if compile_profile_enabled() {
+    if compile_profile_enabled() || env_flag_enabled("GLRMASK_PROFILE_PHASES") {
         let (constraint, profile) = compile_owned_profiled(grammar, vocab);
-        emit_compile_profile_summary(None, None, &profile);
+        if compile_profile_summary_enabled() {
+            emit_compile_profile_summary(None, None, &profile);
+        } else {
+            // Lightweight phases-only summary (no sub-phase profiling overhead)
+            eprintln!(
+                "[glrmask/profile][phases] prepare={:.1} analysis_wall={:.1} classify={:.1} id_map={:.1} terminal_dwa={:.1} templates={:.1} compact={:.1} possible_matches={:.1} internal_token_bytes={:.1} parser_dwa={:.1} finalize={:.1} compile={:.1} total={:.1}",
+                profile.prepare_ms, profile.analysis_wall_ms, profile.classify_ms,
+                profile.id_map_ms, profile.terminal_dwa_ms, profile.templates_ms,
+                profile.compact_ms, profile.permute_possible_matches_ms,
+                profile.internal_token_bytes_ms, profile.parser_dwa_ms,
+                profile.finalize_ms, profile.compile_ms, profile.total_ms,
+            );
+        }
         return constraint;
     }
 
