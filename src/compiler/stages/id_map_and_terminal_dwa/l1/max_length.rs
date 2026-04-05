@@ -244,55 +244,152 @@ fn find_state_equivalence_classes_kstep_restricted(
 
     let t0 = std::time::Instant::now();
     let dfa = tokenizer.dfa();
-    let state_shapes: Vec<(Vec<usize>, u64)> = (0..dfa.states.len())
-        .into_par_iter()
-        .map(|s| {
-            let (targets, transition_label_hash) = build_state_shape_restricted(dfa, s, relevant_bytes);
-            (targets, mix_u64(hash_state_label(&dfa.states[s]) ^ transition_label_hash))
-        })
-        .collect();
-    let (outgoing_targets, mut prev_hashes): (Vec<_>, Vec<_>) = state_shapes.into_iter().unzip();
-    let shape_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let num_states = dfa.states.len();
+
+    // ── Reachability: only process states reachable from any state in `states`
+    //    via the restricted byte set within k transitions.
+    let relevant_byte_list: Vec<u8> = (0..=255u8).filter(|&b| relevant_bytes[b as usize]).collect();
+    let mut reachable = vec![false; num_states];
+    let mut frontier: Vec<usize> = Vec::new();
+    for &s in states {
+        if s < num_states && !reachable[s] {
+            reachable[s] = true;
+            frontier.push(s);
+        }
+    }
+    for _depth in 0..k {
+        let mut next_frontier = Vec::new();
+        for &state in &frontier {
+            for &byte in &relevant_byte_list {
+                let target = dfa.trans(state, byte as usize);
+                if target != u32::MAX {
+                    let t = target as usize;
+                    if !reachable[t] {
+                        reachable[t] = true;
+                        next_frontier.push(t);
+                    }
+                }
+            }
+        }
+        if next_frontier.is_empty() {
+            break;
+        }
+        frontier = next_frontier;
+    }
+
+    // Collect reachable state indices and build dense mapping.
+    let mut reachable_indices: Vec<usize> = Vec::new();
+    // sparse_to_dense[original_state] = index in reachable_indices (or u32::MAX)
+    let mut sparse_to_dense = vec![u32::MAX; num_states];
+    for s in 0..num_states {
+        if reachable[s] {
+            sparse_to_dense[s] = reachable_indices.len() as u32;
+            reachable_indices.push(s);
+        }
+    }
+    let n_reachable = reachable_indices.len();
+    let reachability_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    // ── Build shapes for reachable states only, using CSR (flat) target storage.
+    // Targets are stored as dense indices into `reachable_indices`.
+    // Unreachable targets are mapped to a sentinel dense index.
+    let unreachable_sentinel = n_reachable; // one past the last valid dense index
+    let mut target_data: Vec<u32> = Vec::new();
+    let mut target_offsets: Vec<u32> = Vec::with_capacity(n_reachable + 1);
+    let mut dense_hashes: Vec<u64> = Vec::with_capacity(n_reachable);
+
+    for &s in &reachable_indices {
+        target_offsets.push(target_data.len() as u32);
+
+        let mut targets_local: Vec<u32> = Vec::new();
+        let mut label_hashes_local: Vec<u64> = Vec::new();
+
+        for (byte, &target) in dfa.transitions_for(s).iter().enumerate() {
+            if target == u32::MAX || !relevant_bytes[byte] {
+                continue;
+            }
+            let byte_hash = mix_u64((byte as u64) ^ 0xD6E8_FD93_5E6C_A271);
+            let dense_target = if reachable[target as usize] {
+                sparse_to_dense[target as usize]
+            } else {
+                unreachable_sentinel as u32
+            };
+
+            if let Some(pos) = targets_local.iter().position(|&t| t == dense_target) {
+                label_hashes_local[pos] = label_hashes_local[pos].wrapping_add(byte_hash);
+            } else {
+                targets_local.push(dense_target);
+                label_hashes_local.push(byte_hash);
+            }
+        }
+
+        let transition_label_hash = hash_transition_labels(&label_hashes_local);
+        target_data.extend_from_slice(&targets_local);
+        dense_hashes.push(mix_u64(hash_state_label(&dfa.states[s]) ^ transition_label_hash));
+    }
+    target_offsets.push(target_data.len() as u32);
+
+    let shape_ms = t0.elapsed().as_secs_f64() * 1000.0 - reachability_ms;
+
+    // ── kstep iteration on dense reachable set + one sentinel slot.
+    // prev_hashes has n_reachable + 1 slots: [0..n_reachable) for reachable states,
+    // [n_reachable] = sentinel hash for all unreachable targets.
+    let sentinel_hash: u64 = 0;
+    let mut prev_dense_hashes = dense_hashes;
+    prev_dense_hashes.push(sentinel_hash);
+    let mut next_dense_hashes = vec![0u64; n_reachable + 1];
 
     let check_interval = 16.min(k);
     let mut prev_distinct = 0usize;
-    let mut next_hashes = vec![0u64; dfa.states.len()];
     let mut actual_steps = 0usize;
     for step in 0..k {
-        next_hashes
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(state_id, next_hash)| {
-                *next_hash = mix_u64(
-                    prev_hashes[state_id]
-                        ^ hash_transition_targets(&outgoing_targets[state_id], &prev_hashes),
-                );
-            });
-        std::mem::swap(&mut prev_hashes, &mut next_hashes);
+        // Single-threaded iteration is faster for typical reachable set sizes
+        // (avoids rayon scheduling overhead across 128 iterations).
+        for dense_id in 0..n_reachable {
+            let start = target_offsets[dense_id] as usize;
+            let end = target_offsets[dense_id + 1] as usize;
+            let targets = &target_data[start..end];
+            let mut target_hash: u64 = mix_u64((targets.len() as u64) ^ 0xA5A5_A5A5_5A5A_5A5A);
+            for &t in targets {
+                target_hash = mix_u64(target_hash ^ prev_dense_hashes[t as usize].rotate_left(17));
+            }
+            next_dense_hashes[dense_id] = mix_u64(prev_dense_hashes[dense_id] ^ target_hash);
+        }
+        next_dense_hashes[n_reachable] = sentinel_hash; // sentinel unchanged
+        std::mem::swap(&mut prev_dense_hashes, &mut next_dense_hashes);
         actual_steps = step + 1;
         if (step + 1) % check_interval == 0 {
-            let distinct = count_distinct_hashes(&prev_hashes);
+            let distinct = count_distinct_hashes(&prev_dense_hashes[..n_reachable]);
             if distinct == prev_distinct {
                 break;
             }
             prev_distinct = distinct;
         }
     }
-    let iter_ms = t0.elapsed().as_secs_f64() * 1000.0 - shape_ms;
+    let iter_ms = t0.elapsed().as_secs_f64() * 1000.0 - reachability_ms - shape_ms;
 
-    let result = build_subset_mapping(states, &prev_hashes);
+    // ── Map dense hashes back to sparse and build result.
+    // All unreachable states get the sentinel hash (ensuring they form one class).
+    let mut full_hashes = vec![sentinel_hash; num_states];
+    for (dense_id, &orig_state) in reachable_indices.iter().enumerate() {
+        full_hashes[orig_state] = prev_dense_hashes[dense_id];
+    }
+
+    let result = build_subset_mapping(states, &full_hashes);
     let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
     if debug_max_length_enabled() {
         let relevant_count = relevant_bytes.iter().filter(|&&b| b).count();
         eprintln!(
-            "[glrmask/debug][kstep_restricted] shape={:.1}ms iter={:.1}ms mapping={:.1}ms total={:.1}ms k={} actual_steps={} dfa_states={} relevant_bytes={}",
+            "[glrmask/debug][kstep_restricted] reachability={:.1}ms shape={:.1}ms iter={:.1}ms mapping={:.1}ms total={:.1}ms k={} actual_steps={} dfa_states={} reachable={} relevant_bytes={}",
+            reachability_ms,
             shape_ms,
             iter_ms,
-            total_ms - shape_ms - iter_ms,
+            total_ms - reachability_ms - shape_ms - iter_ms,
             total_ms,
             k,
             actual_steps,
-            dfa.states.len(),
+            num_states,
+            n_reachable,
             relevant_count,
         );
     }
