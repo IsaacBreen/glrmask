@@ -1540,6 +1540,42 @@ fn dfs_backtrack(
     }
 }
 
+/// Fast token signature when no dirty flags are set (no targets).
+/// Uses 4-way loop unrolling to break the serial multiply-add dependency chain
+/// in the original `finish_token_signature_no_cleanup`, reducing latency from
+/// ~4 cycles/element to ~1 cycle/element on pipelined CPUs.
+#[inline(never)]
+fn finish_token_signature_clean(
+    dfa: &Dfa,
+    num_initial_states: usize,
+    scratch: &Scratch,
+) -> u64 {
+    let c = HASH_SEED1;
+    let c2 = c.wrapping_mul(c);
+    let c3 = c2.wrapping_mul(c);
+    let c4 = c3.wrapping_mul(c);
+    let mut sig: u64 = HASH_SEED3;
+    let n4 = (num_initial_states / 4) * 4;
+    for i in (0..n4).step_by(4) {
+        let x0 = dfa.completion(scratch.current_states[i]);
+        let x1 = dfa.completion(scratch.current_states[i + 1]);
+        let x2 = dfa.completion(scratch.current_states[i + 2]);
+        let x3 = dfa.completion(scratch.current_states[i + 3]);
+        let term = x0
+            .wrapping_mul(c3)
+            .wrapping_add(x1.wrapping_mul(c2))
+            .wrapping_add(x2.wrapping_mul(c))
+            .wrapping_add(x3);
+        sig = sig.wrapping_mul(c4).wrapping_add(term);
+    }
+    for i in n4..num_initial_states {
+        sig = sig
+            .wrapping_mul(c)
+            .wrapping_add(dfa.completion(scratch.current_states[i]));
+    }
+    sig
+}
+
 /// Compute token signature without modifying scratch state (no cleanup).
 /// Uses multi-word bitmask dirty tracking for any number of groups.
 fn finish_token_signature_no_cleanup(
@@ -1628,6 +1664,9 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
 
     let mut current_depth: usize = 0;
     let mut prev_token: &[u8] = &[];
+    // Track number of dirty states across the DFS walk.
+    // dirty_state_flag_changes records states that transition 0→1 at each depth.
+    let mut dirty_count: usize = 0;
 
     for &token_idx in chunk {
         let token = strings[token_idx].as_ref();
@@ -1640,64 +1679,74 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
             .take_while(|(a, b)| a == b)
             .count();
 
-        // Backtrack to LCP depth
+        // Backtrack to LCP depth, adjusting dirty_count
         if current_depth > lcp {
+            for depth in (lcp..current_depth).rev() {
+                dirty_count -= trie.depth_logs[depth].dirty_state_flag_changes.len();
+            }
             dfs_backtrack(scratch, trie, current_depth, lcp);
         }
 
-        // Walk forward from LCP to token end
+        // Walk forward from LCP to token end, adjusting dirty_count
         for d in lcp..token_len {
             dfs_step(dfa, scratch, trie, token[d], d, batch_len);
+            dirty_count += trie.depth_logs[d].dirty_state_flag_changes.len();
         }
         current_depth = token_len;
 
-        // Collect targets across all state groups
-        scratch.targets.clear();
-        scratch.target_gids.clear();
-        scratch.single_target_pos = usize::MAX;
-        scratch.single_target_gids.clear();
-        scratch.single_target_hash_pos = usize::MAX;
-        scratch.single_target_hash = 0;
-
-        if state_group_size >= batch_len {
-            collect_targets(
-                scratch,
-                num_groups,
-                token_len,
-                0,
-                batch_len,
-            );
+        // Fast path: when no dirty states exist, there are no targets.
+        // Skip collect_targets and use the 4-way unrolled signature.
+        let (sig, target_count) = if dirty_count == 0 {
+            (finish_token_signature_clean(dfa, batch_len, scratch), 0)
         } else {
-            for state_offset in (0..batch_len).step_by(state_group_size) {
-                let group_len =
-                    (state_offset + state_group_size).min(batch_len) - state_offset;
+            // Collect targets across all state groups
+            scratch.targets.clear();
+            scratch.target_gids.clear();
+            scratch.single_target_pos = usize::MAX;
+            scratch.single_target_gids.clear();
+            scratch.single_target_hash_pos = usize::MAX;
+            scratch.single_target_hash = 0;
+
+            if state_group_size >= batch_len {
                 collect_targets(
                     scratch,
                     num_groups,
                     token_len,
-                    state_offset,
-                    group_len,
+                    0,
+                    batch_len,
                 );
+            } else {
+                for state_offset in (0..batch_len).step_by(state_group_size) {
+                    let group_len =
+                        (state_offset + state_group_size).min(batch_len) - state_offset;
+                    collect_targets(
+                        scratch,
+                        num_groups,
+                        token_len,
+                        state_offset,
+                        group_len,
+                    );
+                }
             }
-        }
 
-        // Hash suffixes
-        let target_count = scratch.targets.len();
-        if target_count == 1 {
-            if try_hash_single_target_suffix(dfa, token, scratch).is_none() {
-                ensure_target_gids_map(
-                    &mut scratch.target_gids,
-                    scratch.single_target_pos,
-                    scratch.single_target_gids.as_slice(),
-                );
+            // Hash suffixes
+            let target_count = scratch.targets.len();
+            if target_count == 1 {
+                if try_hash_single_target_suffix(dfa, token, scratch).is_none() {
+                    ensure_target_gids_map(
+                        &mut scratch.target_gids,
+                        scratch.single_target_pos,
+                        scratch.single_target_gids.as_slice(),
+                    );
+                    hash_suffixes(dfa, token, scratch, profile);
+                }
+            } else if target_count > 0 {
                 hash_suffixes(dfa, token, scratch, profile);
             }
-        } else if target_count > 0 {
-            hash_suffixes(dfa, token, scratch, profile);
-        }
 
-        // Compute signature without cleanup (DFS backtrack handles state restoration)
-        let sig = finish_token_signature_no_cleanup(dfa, batch_len, scratch);
+            // Compute full signature
+            (finish_token_signature_no_cleanup(dfa, batch_len, scratch), target_count)
+        };
 
         if profile {
             let totals = &*VOCAB_SIGNATURE_PROFILE_TOTALS;
