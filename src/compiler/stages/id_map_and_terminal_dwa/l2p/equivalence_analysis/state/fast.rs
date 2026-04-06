@@ -206,6 +206,31 @@ pub fn find_state_equivalence_classes_ex<S: AsRef<[u8]> + Sync>(
     batch_size: Option<usize>,
     early_stop_override: Option<bool>,
 ) -> Vec<usize> {
+    find_state_equivalence_classes_ex_inner(tokenizer, tokens, states, skip_groups, max_batches, batch_size, early_stop_override, false)
+}
+
+pub fn find_state_equivalence_classes_ex_with_rep_confirmation<S: AsRef<[u8]> + Sync>(
+    tokenizer: &TokenizerView,
+    tokens: &[S],
+    states: &[usize],
+    skip_groups: &[bool],
+    max_batches: Option<usize>,
+    batch_size: Option<usize>,
+    early_stop_override: Option<bool>,
+) -> Vec<usize> {
+    find_state_equivalence_classes_ex_inner(tokenizer, tokens, states, skip_groups, max_batches, batch_size, early_stop_override, true)
+}
+
+fn find_state_equivalence_classes_ex_inner<S: AsRef<[u8]> + Sync>(
+    tokenizer: &TokenizerView,
+    tokens: &[S],
+    states: &[usize],
+    skip_groups: &[bool],
+    max_batches: Option<usize>,
+    batch_size: Option<usize>,
+    early_stop_override: Option<bool>,
+    rep_only_confirmation: bool,
+) -> Vec<usize> {
     let profile_equivalence = profile_equivalence_enabled();
 
     if states.is_empty() {
@@ -213,7 +238,7 @@ pub fn find_state_equivalence_classes_ex<S: AsRef<[u8]> + Sync>(
     }
 
     let refinement_started_at = std::time::Instant::now();
-    let mapping = find_state_equivalence_classes_token_based(tokenizer, tokens, states, skip_groups, max_batches, batch_size, early_stop_override);
+    let mapping = find_state_equivalence_classes_token_based(tokenizer, tokens, states, skip_groups, max_batches, batch_size, early_stop_override, rep_only_confirmation);
     let refinement_time = refinement_started_at.elapsed();
 
     if profile_equivalence {
@@ -240,6 +265,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     max_batches: Option<usize>,
     custom_batch_size: Option<usize>,
     early_stop_override: Option<bool>,
+    rep_only_confirmation: bool,
 ) -> Vec<usize> {
     use std::collections::{hash_map::Entry, HashMap};
 
@@ -669,6 +695,29 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
             } else {
                 stable_batches = 0;
             }
+
+            // Rep-only confirmation: after the first stable batch, collapse
+            // active_indices to one representative per group. The next batch
+            // walks only these ~N reps instead of all ~K active states. Since
+            // each rep is in a distinct group, the refinement trivially
+            // confirms stability, giving stable_batches=2 cheaply.
+            //
+            // This saves one full batch of K×batch_size walks (e.g. 2462×5000
+            // = 12.3M walks) at the cost of a single cheap N×batch_size batch
+            // (e.g. 19×5000 = 95K walks).
+            if rep_only_confirmation && stable_batches == 1 {
+                let mut seen_groups: Vec<bool> = vec![false; group_sizes.len()];
+                let mut rep_indices: Vec<usize> = Vec::with_capacity(num_groups);
+                for &state_idx in &active_indices {
+                    let gid = group_ids[state_idx];
+                    if !seen_groups[gid] {
+                        seen_groups[gid] = true;
+                        rep_indices.push(state_idx);
+                    }
+                }
+                active_indices = rep_indices;
+            }
+
             if stable_batches >= 2 {
                 break;
             }
@@ -735,7 +784,7 @@ mod tests {
         ];
         let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
 
-        let direct = find_state_equivalence_classes_token_based(&tokenizer_view, &tokens, &states, &[], None, None, None);
+        let direct = find_state_equivalence_classes_token_based(&tokenizer_view, &tokens, &states, &[], None, None, None, false);
         let actual = find_state_equivalence_classes(&tokenizer_view, &tokens, &states);
 
         assert_eq!(

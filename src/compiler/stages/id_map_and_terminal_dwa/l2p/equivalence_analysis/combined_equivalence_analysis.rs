@@ -421,14 +421,20 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
         // the FIRST match in a sequence. Skipping them would incorrectly merge
         // states that differ in first-match behavior. Context-dependent filtering
         // (per-parent-edge) would be correct but prohibitively expensive.
-        let reduced_state_reps = state_equivalence_analysis::find_state_equivalence_classes_ex(
+
+        // Rep-only confirmation: after groups stabilize (first stable batch),
+        // the second confirmation batch walks only one representative per group
+        // instead of all ~2462 active states. This saves one full batch of walks
+        // (e.g. 2462×5000 = 12.3M walks → 19×5000 = 95K walks for just the
+        // confirmation step). Convergence batches still walk all states.
+        let reduced_state_reps = state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation(
             tokenizer,
             &dedup.representative_token_bytes,
             &pre_reduced_states,
             &[], // skip_groups
-            None, // no batch limit — process until convergence
-            None, // default batch_size
-            Some(true), // early_stop: halt once classes stabilize for 2 batches
+            None,
+            None,
+            Some(true), // early_stop
         );
         let vocab_states = collect_representative_states(&reduced_state_reps);
         if profile_compile {
