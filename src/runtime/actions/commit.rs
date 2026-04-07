@@ -10,6 +10,7 @@ use crate::compiler::glr::parser::{
     stack_may_advance_on,
     stack_may_advance_on_any,
 };
+use crate::compiler::glr::table::Action;
 use crate::runtime::constraint::Constraint;
 use crate::runtime::state::ConstraintState;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -323,57 +324,64 @@ fn commit_bytes_fast_path(
     let mut sole_terminal: Option<u32> = None;
     for matched in &exec_result.matches {
         if matched.width != bytes.len() {
-            // Partial match — need queue processing
             return None;
         }
         if is_ignored_terminal(ignore_terminal, matched.id) {
-            // Ignored terminal — need general path
             return None;
         }
         if !stack_may_advance_on(&constraint.table, gss, matched.id) {
             continue;
         }
         if sole_terminal.is_some() {
-            // Multiple valid matches — need general path
             return None;
         }
         sole_terminal = Some(matched.id);
     }
     let terminal = sole_terminal?;
 
-    // Check if end_state needs processing (continuation of a longer match)
-    let has_viable_end_state = if let Some(end_state) = exec_result.end_state {
+    // Check if end_state needs processing
+    if let Some(end_state) = exec_result.end_state {
         let future_terminals = constraint.tokenizer.possible_future_terminals(end_state);
         if stack_may_advance_on_any(&constraint.table, gss, future_terminals) {
-            // End state has viable future — need general path
             return None;
         }
-        // End state exists but isn't viable — still need to remap tokenizer states
-        true
-    } else {
-        false
-    };
+    }
 
-    // Skip prune entirely when all accumulators are empty and no end_state to remap.
-    // This is the common case after prior fast-path commits.
-    let pruned_gss = if !has_viable_end_state && exec_result.end_state.is_none()
-        && gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty())
-    {
+    let no_end_state = exec_result.end_state.is_none();
+    let all_accs_empty = no_end_state
+        && gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty());
+
+    // Ultra-fast path: single Interface, empty accs, no end_state, pure shift.
+    // Inlines the entire advance + prune + fuse to avoid all function call overhead.
+    if all_accs_empty {
+        if let Some(top_state) = gss.single_exclusive_top_value() {
+            if let Some(Action::Shift(target)) = constraint.table.action(top_state, terminal) {
+                // Single state, single terminal, no end_state, empty accs, pure shift.
+                // Prune is identity (empty accs → nothing disallowed, no remap).
+                // advance_stacks → push(target).
+                // fuse(1) on push result → identity (Interface, no multi-depth slots).
+                // apply_future_terminal_disallow → identity (no end_state).
+                let shifted = gss.push(*target);
+                state.clear();
+                state.insert(constraint.tokenizer.initial_state(), shifted);
+                return Some(Ok(()));
+            }
+        }
+    }
+
+    // Standard fast path: skip prune when accumulators are empty.
+    let pruned_gss = if all_accs_empty {
         gss.clone()
     } else {
-        // Full prune: check if terminals_disallowed would block this terminal,
-        // and remap tokenizer states in accumulators.
         let pruned = gss.apply_and_prune_no_promote(|td: &TerminalsDisallowed| {
             if td.is_empty() {
                 return Some(TerminalsDisallowed::new());
             }
-            // Check if this terminal is fully blocked
             if let Some(disallowed) = td.get(&tokenizer_state) {
                 if disallowed.contains(&terminal) {
                     return None;
                 }
             }
-            // Remap tokenizer states
             let mut remapped = BTreeMap::new();
             if let Some(end_state) = exec_result.end_state {
                 if let Some(d) = td.get(&tokenizer_state) {
