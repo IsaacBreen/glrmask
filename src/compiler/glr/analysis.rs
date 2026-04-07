@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::compiler::grammar::model::{GrammarDef, NonterminalID, Rule, Symbol, TerminalID};
 
@@ -878,75 +878,202 @@ pub(crate) fn merge_identical_nonterminals(
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
-    // Sentinel for normalizing self-references when comparing isomorphic NTs.
-    let self_sentinel: NonterminalID = u32::MAX;
-
+    // Build rhs_by_lhs: the set of productions for each nonterminal.
     let mut rhs_by_lhs = BTreeMap::<NonterminalID, BTreeSet<Vec<Symbol>>>::new();
     for rule in rules {
-        rhs_by_lhs.entry(rule.lhs).or_default().insert(rule.rhs.clone());
+        rhs_by_lhs
+            .entry(rule.lhs)
+            .or_default()
+            .insert(rule.rhs.clone());
     }
 
-    // Normalize a production set by replacing self-references with a sentinel.
-    // This allows detecting isomorphic self-referencing nonterminals like:
-    //   NT_A: { [T1], [NT_A, T1] }  and  NT_B: { [T1], [NT_B, T1] }
-    let normalize_rhs_set =
-        |nt: NonterminalID, rhs_set: &BTreeSet<Vec<Symbol>>| -> BTreeSet<Vec<Symbol>> {
-            rhs_set
-                .iter()
-                .map(|rhs| {
-                    rhs.iter()
-                        .map(|sym| match sym {
-                            Symbol::Nonterminal(n) if *n == nt => {
-                                Symbol::Nonterminal(self_sentinel)
-                            }
-                            other => other.clone(),
-                        })
-                        .collect()
-                })
-                .collect()
-        };
+    if rhs_by_lhs.len() <= 1 {
+        return rules.to_vec();
+    }
 
-    let compute_hash = |nt: NonterminalID, rhs_set: &BTreeSet<Vec<Symbol>>| -> u64 {
-        let normalized = normalize_rhs_set(nt, rhs_set);
-        let mut hasher = DefaultHasher::new();
-        for rhs in &normalized {
-            rhs.hash(&mut hasher);
+    let nts: Vec<NonterminalID> = rhs_by_lhs.keys().copied().collect();
+
+    // Fast O(1) lookup from NT ID → index, replacing BTreeMap (which is
+    // O(log n) and dominates the hot loop when there are millions of
+    // lookups across refinement iterations).
+    let max_nt_id = *nts.last().unwrap() as usize;
+    let mut nt_to_idx_fast = vec![u32::MAX; max_nt_id + 1];
+    for (i, &nt) in nts.iter().enumerate() {
+        nt_to_idx_fast[nt as usize] = i as u32;
+    }
+
+    // Pre-index production sets for O(1) access by NT index.
+    let rhs_by_idx: Vec<&BTreeSet<Vec<Symbol>>> =
+        nts.iter().map(|nt| &rhs_by_lhs[nt]).collect();
+
+    // ── Partition refinement (top-down) ──────────────────────────────────
+    //
+    // Instead of the classical bottom-up "find-one-merge, re-scan" loop
+    // (which cascades for O(chain_length) iterations), we use partition
+    // refinement: start with the *coarsest* partition consistent with
+    // terminal structure, then iteratively refine by incorporating the
+    // partition classes of referenced nonterminals.  This discovers all
+    // transitively-isomorphic nonterminals in O(refinement_depth) passes,
+    // with O(n) work per pass.
+    //
+    // Each refinement hashes each NT's normalised production set (with
+    // self-refs → sentinel, other NT refs → current class ID), then
+    // normalises the resulting class IDs by order of first appearance so
+    // that the convergence check is stable.
+
+    const SELF_SENTINEL: u64 = u64::MAX;
+    const GENERIC_NT: u64 = u64::MAX - 1;
+
+    // Hash a single NT's production set given current class assignments.
+    // Uses commutative accumulation (wrapping_add of rotated hashes) to
+    // avoid Vec allocation and sorting.
+    let hash_nt = |nt_idx: usize, class_of: &[u64]| -> u64 {
+        let nt = nts[nt_idx];
+        let mut sig: u64 = 0;
+        for rhs in rhs_by_idx[nt_idx].iter() {
+            let mut h = DefaultHasher::new();
+            for s in rhs {
+                match s {
+                    Symbol::Terminal(t) => {
+                        0u8.hash(&mut h);
+                        t.hash(&mut h);
+                    }
+                    Symbol::Nonterminal(n) if *n == nt => {
+                        1u8.hash(&mut h);
+                        SELF_SENTINEL.hash(&mut h);
+                    }
+                    Symbol::Nonterminal(n) => {
+                        let ni = *n as usize;
+                        if ni <= max_nt_id && nt_to_idx_fast[ni] != u32::MAX {
+                            1u8.hash(&mut h);
+                            class_of[nt_to_idx_fast[ni] as usize].hash(&mut h);
+                        } else {
+                            2u8.hash(&mut h);
+                            n.hash(&mut h);
+                        }
+                    }
+                }
+            }
+            // Commutative combine: wrapping_add of scrambled prod hash.
+            let ph = h.finish();
+            sig = sig.wrapping_add(ph.wrapping_mul(0x9E3779B97F4A7C15));
         }
-        hasher.finish()
+        sig
     };
 
-    let mut hash_buckets = BTreeMap::<u64, Vec<NonterminalID>>::new();
-    for (&lhs, rhs_set) in &rhs_by_lhs {
-        hash_buckets
-            .entry(compute_hash(lhs, rhs_set))
-            .or_default()
-            .push(lhs);
+    // Normalise returns (normalised_vec, n_distinct_classes).
+    let normalise_counted = |raw: &[u64]| -> (Vec<u64>, usize) {
+        let mut map = HashMap::<u64, u64>::with_capacity(raw.len());
+        let mut nc: u64 = 0;
+        let v: Vec<u64> = raw
+            .iter()
+            .map(|&v| {
+                *map.entry(v).or_insert_with(|| {
+                    let c = nc;
+                    nc += 1;
+                    c
+                })
+            })
+            .collect();
+        (v, nc as usize)
+    };
+
+    // Quick pre-check: hash with REAL NT IDs (no GENERIC_NT). If every
+    // NT already has a unique signature, there are no isomorphisms and
+    // we can skip the expensive partition refinement entirely. This
+    // handles the common "confirmatory call" case in O(n).
+    {
+        let real_classes: Vec<u64> = (0..nts.len())
+            .map(|i| {
+                // Use the NT's own index as its class (finest partition).
+                let nt = nts[i];
+                let mut sig: u64 = 0;
+                for rhs in rhs_by_idx[i].iter() {
+                    let mut h = DefaultHasher::new();
+                    for s in rhs {
+                        match s {
+                            Symbol::Terminal(t) => {
+                                0u8.hash(&mut h);
+                                t.hash(&mut h);
+                            }
+                            Symbol::Nonterminal(n) if *n == nt => {
+                                1u8.hash(&mut h);
+                                SELF_SENTINEL.hash(&mut h);
+                            }
+                            Symbol::Nonterminal(n) => {
+                                2u8.hash(&mut h);
+                                n.hash(&mut h);
+                            }
+                        }
+                    }
+                    let ph = h.finish();
+                    sig = sig.wrapping_add(ph.wrapping_mul(0x9E3779B97F4A7C15));
+                }
+                sig
+            })
+            .collect();
+        let mut seen = HashSet::with_capacity(real_classes.len());
+        if real_classes.iter().all(|h| seen.insert(*h)) {
+            // Every NT has a unique raw-ID signature → no merges possible.
+            return rules.to_vec();
+        }
     }
 
-    let mut merge_map = BTreeMap::<NonterminalID, NonterminalID>::new();
-    for nts in hash_buckets.values() {
-        if nts.len() < 2 {
-            continue;
+    // Initial partition: all NT refs → GENERIC_NT.
+    let initial_classes: Vec<u64> = {
+        let init = vec![GENERIC_NT; nts.len()];
+        (0..nts.len()).map(|i| hash_nt(i, &init)).collect()
+    };
+    let (mut class_of, mut n_classes) = normalise_counted(&initial_classes);
+
+    // If every NT is already in its own class, no merges are possible.
+    if n_classes == nts.len() {
+        return rules.to_vec();
+    }
+
+    // Refine until stable.
+    let debug = std::env::var("GLRMASK_DEBUG_PROFILE").map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") }).unwrap_or(false);
+    let mut iters = 0u32;
+    loop {
+        iters += 1;
+        let raw: Vec<u64> = (0..nts.len()).map(|i| hash_nt(i, &class_of)).collect();
+        let (new_class_of, nc) = normalise_counted(&raw);
+        if new_class_of == class_of {
+            break;
         }
-        for i in 0..nts.len() {
-            if merge_map.contains_key(&nts[i]) {
-                continue;
+        // Early termination: every NT is in its own class → no merges.
+        if nc == nts.len() {
+            if debug {
+                eprintln!("[glrmask/debug][merge_nt] nts={} rules={} iters={} classes={} (early-exit)", nts.len(), rules.len(), iters, nc);
             }
-            let norm_i = normalize_rhs_set(nts[i], &rhs_by_lhs[&nts[i]]);
-            for j in (i + 1)..nts.len() {
-                if merge_map.contains_key(&nts[j]) {
-                    continue;
-                }
-                let norm_j = normalize_rhs_set(nts[j], &rhs_by_lhs[&nts[j]]);
-                if norm_i == norm_j {
-                    let (keep, remove) = if nts[j] == start {
-                        (nts[j], nts[i])
-                    } else {
-                        (nts[i], nts[j])
-                    };
-                    merge_map.insert(remove, keep);
-                }
-            }
+            return rules.to_vec();
+        }
+        n_classes = nc;
+        class_of = new_class_of;
+    }
+    if debug {
+        eprintln!("[glrmask/debug][merge_nt] nts={} rules={} iters={} classes={}", nts.len(), rules.len(), iters, n_classes);
+    }
+
+    // ── Build merge map from final partition ─────────────────────────────
+    // Within each equivalence class, pick a representative (prefer start,
+    // otherwise lowest NT ID — which is naturally first since `nts` is
+    // sorted from a BTreeMap).
+
+    let mut class_to_rep: BTreeMap<u64, NonterminalID> = BTreeMap::new();
+    for (idx, &nt) in nts.iter().enumerate() {
+        let class = class_of[idx];
+        let rep = class_to_rep.entry(class).or_insert(nt);
+        if nt == start {
+            *rep = start;
+        }
+    }
+
+    let mut merge_map: BTreeMap<NonterminalID, NonterminalID> = BTreeMap::new();
+    for (idx, &nt) in nts.iter().enumerate() {
+        let rep = class_to_rep[&class_of[idx]];
+        if nt != rep {
+            merge_map.insert(nt, rep);
         }
     }
 
@@ -954,18 +1081,21 @@ pub(crate) fn merge_identical_nonterminals(
         return rules.to_vec();
     }
 
-    let apply_merge = |nt: NonterminalID| merge_map.get(&nt).copied().unwrap_or(nt);
+    // Apply merge map to produce the deduplicated rule set.
+    let apply = |nt: NonterminalID| -> NonterminalID {
+        *merge_map.get(&nt).unwrap_or(&nt)
+    };
 
     let mut result = Vec::new();
     let mut seen = HashSet::with_capacity(rules.len());
     for rule in rules {
-        let lhs = apply_merge(rule.lhs);
+        let lhs = apply(rule.lhs);
         let rhs: Vec<Symbol> = rule
             .rhs
             .iter()
             .map(|symbol| match symbol {
                 Symbol::Terminal(terminal) => Symbol::Terminal(*terminal),
-                Symbol::Nonterminal(nonterminal) => Symbol::Nonterminal(apply_merge(*nonterminal)),
+                Symbol::Nonterminal(nonterminal) => Symbol::Nonterminal(apply(*nonterminal)),
             })
             .collect();
         let merged = Rule { lhs, rhs };
