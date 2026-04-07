@@ -177,6 +177,21 @@ impl PyConstraint {
     fn mask_len(&self) -> usize {
         self.inner.mask_len()
     }
+
+    /// Temporary diagnostic: return the original→internal token mapping as a list.
+    fn _debug_token_map(&self) -> Vec<u32> {
+        self.inner.debug_original_token_to_internal()
+    }
+
+    /// Temporary diagnostic: return internal→originals mapping.
+    fn _debug_internal_to_tokens(&self) -> Vec<Vec<u32>> {
+        self.inner.debug_internal_token_to_tokens()
+    }
+
+    /// Walk bytes through DFA from every state. Returns list of (final_state, finalizers, futures).
+    fn _debug_walk_dfa(&self, token_bytes: Vec<u8>) -> Vec<(u32, Vec<u32>, Vec<u32>)> {
+        self.inner.debug_walk_dfa(&token_bytes)
+    }
 }
 
 // ---------------------------------------------------------------------------

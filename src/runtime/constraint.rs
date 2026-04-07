@@ -503,4 +503,43 @@ impl Constraint {
         ranges.push(start..=end);
         RangeSetBlaze::from_iter(ranges)
     }
+
+    // Temporary diagnostics
+    pub fn debug_original_token_to_internal(&self) -> Vec<u32> {
+        self.original_token_to_internal.clone()
+    }
+
+    pub fn debug_internal_token_to_tokens(&self) -> Vec<Vec<u32>> {
+        self.internal_token_to_tokens.clone()
+    }
+
+    /// Walk a byte sequence through the raw tokenizer DFA from every state.
+    /// Returns a Vec indexed by initial state. Each entry is (final_state, finalizers, possible_futures).
+    /// finalizers and possible_futures are Vec<u32> of group IDs that are set.
+    pub fn debug_walk_dfa(&self, token_bytes: &[u8]) -> Vec<(u32, Vec<u32>, Vec<u32>)> {
+        let dfa = &self.tokenizer.dfa;
+        let num_states = dfa.states().len();
+        let mut results = Vec::with_capacity(num_states);
+        for initial_state in 0..num_states {
+            let mut state = initial_state as u32;
+            let mut dead = false;
+            for &byte in token_bytes {
+                let next = dfa.states()[state as usize].transitions.get(byte);
+                if let Some(&ns) = next {
+                    state = ns;
+                } else {
+                    dead = true;
+                    break;
+                }
+            }
+            if dead {
+                results.push((u32::MAX, vec![], vec![]));
+            } else {
+                let finalizers: Vec<u32> = dfa.finalizers(state).iter().map(|x| x as u32).collect();
+                let futures: Vec<u32> = dfa.possible_future_group_ids(state).iter().map(|x| x as u32).collect();
+                results.push((state, finalizers, futures));
+            }
+        }
+        results
+    }
 }
