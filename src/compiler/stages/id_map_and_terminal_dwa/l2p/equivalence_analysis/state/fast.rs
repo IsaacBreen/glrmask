@@ -686,9 +686,8 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
             }
         }
 
-        // When early_stop is from override (explicit), check immediately.
-        // When from env var, require 50% of tokens processed first.
-        let min_tokens_met = early_stop_override.is_some() || tokens_tested * 2 >= total_tokens;
+        // All tokens must be processed before early-stop convergence is trusted.
+        let min_tokens_met = tokens_tested >= total_tokens;
         if early_stop && min_tokens_met {
             if num_groups == prev_groups {
                 stable_batches += 1;
@@ -790,6 +789,72 @@ mod tests {
         assert_eq!(
             actual, direct,
             "full refinement should be determined solely by direct token-based analysis"
+        );
+    }
+
+    /// Regression test for kb_949: early_stop short-circuiting in
+    /// `find_state_equivalence_classes_token_based` could allow convergence
+    /// before all tokens were processed, missing a distinguishing token in
+    /// a later strided batch and incorrectly merging distinct states.
+    ///
+    /// This test constructs a DFA where two states agree on many tokens
+    /// but differ for exactly one token placed in a later batch. With
+    /// early_stop=true, the old code would converge after 2 stable batches
+    /// without ever processing the distinguishing token.
+    #[test]
+    fn early_stop_must_not_skip_distinguishing_token() {
+        // Build a tokenizer with two groups that differ on specific tokens.
+        // "ax" matches group 0, "bx" matches group 1, "cx" matches group 0
+        // via a different path. After "a" we're in one state, after "b" in
+        // another. Token "x" distinguishes them (finalizes different groups).
+        let exprs = vec![
+            seq(vec![bytes(b"a"), bytes(b"x")]),  // group 0
+            seq(vec![bytes(b"b"), bytes(b"x")]),  // group 1
+            seq(vec![bytes(b"c"), bytes(b"x")]),  // group 0 (same as first)
+        ];
+        let tokenizer = build_tokenizer_from_exprs(&exprs);
+        let tokenizer_view = TokenizerView::new(&tokenizer);
+        let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
+
+        // Many filler tokens that don't distinguish states, plus "x" which does.
+        // With batch_size=2 and 7 tokens, we get 4 batches (strided).
+        // "x" needs to be in a later batch to trigger the bug.
+        let tokens: Vec<Vec<u8>> = vec![
+            b"aa".to_vec(),
+            b"bb".to_vec(),
+            b"cc".to_vec(),
+            b"dd".to_vec(),
+            b"ee".to_vec(),
+            b"ff".to_vec(),
+            b"x".to_vec(), // the distinguishing token — must be in later batch
+        ];
+
+        // Ground truth: no early stop, all tokens processed
+        let ground_truth = find_state_equivalence_classes_token_based(
+            &tokenizer_view, &tokens, &states, &[], None, Some(2), None, false,
+        );
+
+        // With early_stop: must match ground truth (fix ensures all tokens processed)
+        let early_stop_result = find_state_equivalence_classes_token_based(
+            &tokenizer_view, &tokens, &states, &[], None, Some(2), Some(true), true,
+        );
+
+        // Count distinct classes
+        let gt_classes: std::collections::BTreeSet<usize> = ground_truth.iter().copied().collect();
+        let es_classes: std::collections::BTreeSet<usize> = early_stop_result.iter().copied().collect();
+
+        assert_eq!(
+            gt_classes.len(), es_classes.len(),
+            "Early-stop result has {} classes but ground truth has {} classes. \
+             The early_stop optimization incorrectly merged states by converging \
+             before all tokens (including the distinguishing one) were processed.",
+            es_classes.len(), gt_classes.len(),
+        );
+
+        // Stronger: the actual groupings must match
+        assert_eq!(
+            ground_truth, early_stop_result,
+            "Early-stop and ground-truth state equivalence classes must match.",
         );
     }
 }
