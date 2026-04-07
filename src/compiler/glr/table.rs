@@ -20,8 +20,8 @@ pub enum Action {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GLRTable {
-    pub action: Vec<BTreeMap<TerminalID, Action>>,
-    pub goto: Vec<BTreeMap<NonterminalID, u32>>,
+    pub action: Vec<FxHashMap<TerminalID, Action>>,
+    pub goto: Vec<FxHashMap<NonterminalID, u32>>,
     pub num_states: u32,
     pub num_terminals: u32,
     pub num_rules: u32,
@@ -141,8 +141,8 @@ impl GLRTable {
 }
 
 fn row_key(
-    action_row: &BTreeMap<TerminalID, Action>,
-    goto_row: &BTreeMap<NonterminalID, u32>,
+    action_row: &FxHashMap<TerminalID, Action>,
+    goto_row: &FxHashMap<NonterminalID, u32>,
 ) -> TableRowKey {
     TableRowKey {
         action: action_row
@@ -326,12 +326,12 @@ fn initialize_pending_and_goto(
     transitions: &[BTreeMap<Symbol, u32>],
 ) -> (
     Vec<BTreeMap<TerminalID, PendingAction>>,
-    Vec<BTreeMap<NonterminalID, u32>>,
+    Vec<FxHashMap<NonterminalID, u32>>,
 ) {
     let mut pending = std::iter::repeat_with(BTreeMap::<TerminalID, PendingAction>::new)
         .take(transitions.len())
         .collect::<Vec<_>>();
-    let mut goto = vec![BTreeMap::<NonterminalID, u32>::new(); transitions.len()];
+    let mut goto: Vec<FxHashMap<NonterminalID, u32>> = (0..transitions.len()).map(|_| FxHashMap::default()).collect();
 
     for (state_id, by_symbol) in transitions.iter().enumerate() {
         for (symbol, &target) in by_symbol {
@@ -355,9 +355,9 @@ fn initialize_pending_and_goto(
 fn finish_table(
     grammar: &AnalyzedGrammar,
     pending: Vec<BTreeMap<TerminalID, PendingAction>>,
-    goto: Vec<BTreeMap<NonterminalID, u32>>,
+    goto: Vec<FxHashMap<NonterminalID, u32>>,
 ) -> GLRTable {
-    let action: Vec<BTreeMap<TerminalID, Action>> = pending
+    let action: Vec<FxHashMap<TerminalID, Action>> = pending
         .into_iter()
         .map(|by_terminal| {
             by_terminal
