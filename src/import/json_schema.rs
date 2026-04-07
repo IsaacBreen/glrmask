@@ -2111,6 +2111,7 @@ fn has_structural_keywords(schema: &Map<String, Value>) -> bool {
     const STRUCTURAL: &[&str] = &[
         "type",
         "properties",
+        "required",
         "additionalProperties",
         "patternProperties",
         "items",
