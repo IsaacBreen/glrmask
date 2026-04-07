@@ -231,27 +231,27 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
     let mut current = stack.clone();
     let mut processed = FxHashSet::<u32>::default();
 
+    // Collect initial unprocessed states from the GSS top values
+    let mut new_states = SmallVec::<[u32; 8]>::new();
+    if let Some(state) = current.single_top_value() {
+        new_states.push(state);
+    } else {
+        current.for_each_top_value(|state| {
+            new_states.push(state);
+        });
+    }
+
     loop {
-        let mut new_states = SmallVec::<[u32; 8]>::new();
-        if let Some(state) = current.single_top_value() {
-            if !processed.contains(&state) {
-                new_states.push(state);
-            }
-        } else {
-            current.for_each_top_value(|state| {
-                if !processed.contains(&state) {
-                    new_states.push(state);
-                }
-            });
-        }
         if new_states.is_empty() {
             break;
         }
 
         let mut any_reduced = false;
         let mut pending_bases_by_target = SmallVec::<[(u32, ParserGSS); 8]>::new();
-        for state in new_states {
-            processed.insert(state);
+        for state in new_states.drain(..) {
+            if !processed.insert(state) {
+                continue;
+            }
             let reduce_rules: &[u32] = match table.action(state, token) {
                 Some(Action::Reduce(rule_id)) => std::slice::from_ref(rule_id),
                 Some(Action::Split { reduces, .. }) => reduces.as_slice(),
@@ -303,8 +303,10 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
         if !any_reduced {
             break;
         }
+        // Absorb results and use goto targets directly as next iteration's new_states
         for (target, base) in pending_bases_by_target {
             current = current.absorb_push_same_acc(target, &base);
+            new_states.push(target);
         }
     }
 
@@ -403,28 +405,28 @@ pub(crate) fn advance_stacks_profiled(
     let mut current = stack.clone();
     let mut processed = FxHashSet::<u32>::default();
 
+    // Collect initial unprocessed states from the GSS top values
+    let mut new_states = SmallVec::<[u32; 8]>::new();
+    if let Some(state) = current.single_top_value() {
+        new_states.push(state);
+    } else {
+        current.for_each_top_value(|state| {
+            new_states.push(state);
+        });
+    }
+
     loop {
         profile.n_loop_iters += 1;
-        let mut new_states = SmallVec::<[u32; 8]>::new();
-        if let Some(state) = current.single_top_value() {
-            if !processed.contains(&state) {
-                new_states.push(state);
-            }
-        } else {
-            current.for_each_top_value(|state| {
-                if !processed.contains(&state) {
-                    new_states.push(state);
-                }
-            });
-        }
         if new_states.is_empty() {
             break;
         }
 
         let mut any_reduced = false;
         let mut pending_bases_by_target = SmallVec::<[(u32, ParserGSS); 8]>::new();
-        for state in new_states {
-            processed.insert(state);
+        for state in new_states.drain(..) {
+            if !processed.insert(state) {
+                continue;
+            }
             let reduce_rules: &[u32] = match table.action(state, token) {
                 Some(Action::Reduce(rule_id)) => std::slice::from_ref(rule_id),
                 Some(Action::Split { reduces, .. }) => reduces.as_slice(),
@@ -485,10 +487,12 @@ pub(crate) fn advance_stacks_profiled(
         if !any_reduced {
             break;
         }
+        // Absorb results and use goto targets directly as next iteration's new_states
         for (target, base) in pending_bases_by_target {
             let t0 = Instant::now();
             current = current.absorb_push_same_acc(target, &base);
             profile.absorb_push_ns += t0.elapsed().as_nanos() as u64;
+            new_states.push(target);
         }
     }
 
