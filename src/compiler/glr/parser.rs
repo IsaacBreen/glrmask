@@ -3,7 +3,6 @@ use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::sync::Arc;
 
-use rustc_hash::FxHashSet;
 use super::analysis::EOF;
 use super::table::{Action, GLRTable};
 use crate::compiler::grammar::model::TerminalID;
@@ -274,7 +273,10 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
     }
 
     let mut current = stack.clone();
-    let mut processed = FxHashSet::<u32>::default();
+
+    // Use SmallVec for processed states — linear scan is faster than FxHashSet
+    // for the typical case of ≤16 unique states in the reduce closure.
+    let mut processed = SmallVec::<[u32; 16]>::new();
 
     // Collect initial unprocessed states from the GSS top values
     let mut new_states = SmallVec::<[u32; 8]>::new();
@@ -286,61 +288,42 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
         });
     }
 
+    let mut pending_bases_by_target = SmallVec::<[(u32, ParserGSS); 8]>::new();
+
     loop {
         if new_states.is_empty() {
             break;
         }
 
         let mut any_reduced = false;
-        let mut pending_bases_by_target = SmallVec::<[(u32, ParserGSS); 8]>::new();
+        pending_bases_by_target.clear();
         for state in new_states.drain(..) {
-            if !processed.insert(state) {
+            if processed.contains(&state) {
                 continue;
             }
+            processed.push(state);
             let reduce_rules: &[u32] = match table.action(state, token) {
                 Some(Action::Reduce(rule_id)) => std::slice::from_ref(rule_id),
                 Some(Action::Split { reduces, .. }) => reduces.as_slice(),
                 _ => &[],
             };
-            let mut base_cache = SmallVec::<[((usize, u32), ParserGSS); 4]>::new();
             for &rule_id in reduce_rules {
                 let rule = &table.rules[rule_id as usize];
                 let rhs_len = rule.rhs.len();
-                let popped = current.isolate_popn(state, rhs_len as isize);
-                if popped.is_empty() {
-                    continue;
-                }
+                let lhs = rule.lhs;
 
-                let mut handle_goto_from = |goto_from: u32| {
-                    if let Some(target) = table.goto_target(goto_from, rule.lhs) {
-                        let base = if let Some((_, cached)) = base_cache.iter().find(
-                            |((cached_rhs_len, cached_goto_from), _)| {
-                                *cached_rhs_len == rhs_len && *cached_goto_from == goto_from
-                            },
-                        ) {
-                            cached.clone()
-                        } else {
-                            let isolated = popped.isolate(Some(goto_from));
-                            base_cache.push(((rhs_len, goto_from), isolated.clone()));
-                            isolated
-                        };
+                let bases = current.isolate_popn_bases(state, rhs_len as isize);
+                for (goto_from, base) in bases {
+                    if let Some(target) = table.goto_target(goto_from, lhs) {
                         if let Some((_, existing)) = pending_bases_by_target
                             .iter_mut()
-                            .find(|(existing_target, _)| *existing_target == target)
+                            .find(|(t, _)| *t == target)
                         {
                             *existing = existing.merge(&base);
                         } else {
                             pending_bases_by_target.push((target, base));
                         }
                         any_reduced = true;
-                    }
-                };
-
-                if let Some(goto_from) = popped.single_top_value() {
-                    handle_goto_from(goto_from);
-                } else {
-                    for goto_from in popped.peek_values() {
-                        handle_goto_from(goto_from);
                     }
                 }
             }
@@ -349,23 +332,23 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
             break;
         }
         // Absorb results and use goto targets directly as next iteration's new_states
-        for (target, base) in pending_bases_by_target {
+        for (target, base) in pending_bases_by_target.drain(..) {
             current = current.absorb_push_same_acc(target, &base);
             new_states.push(target);
         }
     }
 
     let mut shift_pairs = SmallVec::<[(u32, u32); 8]>::new();
-    let mut handle_shift_state = |state: u32| {
+    if let Some(state) = current.single_top_value() {
         if let Some(target) = shift_target(table.action(state, token)) {
             shift_pairs.push((state, target));
         }
-    };
-
-    if let Some(state) = current.single_top_value() {
-        handle_shift_state(state);
     } else {
-        current.for_each_top_value(|state| handle_shift_state(state));
+        current.for_each_top_value(|state| {
+            if let Some(target) = shift_target(table.action(state, token)) {
+                shift_pairs.push((state, target));
+            }
+        });
     }
     current.shift_top_values(shift_pairs)
 }
@@ -448,7 +431,7 @@ pub(crate) fn advance_stacks_profiled(
     }
 
     let mut current = stack.clone();
-    let mut processed = FxHashSet::<u32>::default();
+    let mut processed = SmallVec::<[u32; 16]>::new();
 
     // Collect initial unprocessed states from the GSS top values
     let mut new_states = SmallVec::<[u32; 8]>::new();
@@ -460,6 +443,8 @@ pub(crate) fn advance_stacks_profiled(
         });
     }
 
+    let mut pending_bases_by_target = SmallVec::<[(u32, ParserGSS); 8]>::new();
+
     loop {
         profile.n_loop_iters += 1;
         if new_states.is_empty() {
@@ -467,48 +452,31 @@ pub(crate) fn advance_stacks_profiled(
         }
 
         let mut any_reduced = false;
-        let mut pending_bases_by_target = SmallVec::<[(u32, ParserGSS); 8]>::new();
+        pending_bases_by_target.clear();
         for state in new_states.drain(..) {
-            if !processed.insert(state) {
+            if processed.contains(&state) {
                 continue;
             }
+            processed.push(state);
             let reduce_rules: &[u32] = match table.action(state, token) {
                 Some(Action::Reduce(rule_id)) => std::slice::from_ref(rule_id),
                 Some(Action::Split { reduces, .. }) => reduces.as_slice(),
                 _ => &[],
             };
-            let mut base_cache = SmallVec::<[((usize, u32), ParserGSS); 4]>::new();
             for &rule_id in reduce_rules {
                 profile.n_reduces += 1;
                 let rule = &table.rules[rule_id as usize];
                 let rhs_len = rule.rhs.len();
+                let lhs = rule.lhs;
                 let t0 = Instant::now();
-                let popped = current.isolate_popn(state, rhs_len as isize);
+                let bases = current.isolate_popn_bases(state, rhs_len as isize);
                 profile.isolate_ns += t0.elapsed().as_nanos() as u64;
-                if popped.is_empty() {
-                    continue;
-                }
 
-                let mut handle_goto_from = |goto_from: u32,
-                                            base_cache: &mut SmallVec<[((usize, u32), ParserGSS); 4]>,
-                                            profile: &mut AdvanceProfile| {
-                    if let Some(target) = table.goto_target(goto_from, rule.lhs) {
-                        let base = if let Some((_, cached)) = base_cache.iter().find(
-                            |((cached_rhs_len, cached_goto_from), _)| {
-                                *cached_rhs_len == rhs_len && *cached_goto_from == goto_from
-                            },
-                        ) {
-                            cached.clone()
-                        } else {
-                            let t0 = Instant::now();
-                            let isolated = popped.isolate(Some(goto_from));
-                            profile.base_isolate_ns += t0.elapsed().as_nanos() as u64;
-                            base_cache.push(((rhs_len, goto_from), isolated.clone()));
-                            isolated
-                        };
+                for (goto_from, base) in bases {
+                    if let Some(target) = table.goto_target(goto_from, lhs) {
                         if let Some((_, existing)) = pending_bases_by_target
                             .iter_mut()
-                            .find(|(existing_target, _)| *existing_target == target)
+                            .find(|(t, _)| *t == target)
                         {
                             let t0 = Instant::now();
                             *existing = existing.merge(&base);
@@ -518,14 +486,6 @@ pub(crate) fn advance_stacks_profiled(
                         }
                         any_reduced = true;
                     }
-                };
-
-                if let Some(goto_from) = popped.single_top_value() {
-                    handle_goto_from(goto_from, &mut base_cache, &mut profile);
-                } else {
-                    for goto_from in popped.peek_values() {
-                        handle_goto_from(goto_from, &mut base_cache, &mut profile);
-                    }
                 }
             }
         }
@@ -533,7 +493,7 @@ pub(crate) fn advance_stacks_profiled(
             break;
         }
         // Absorb results and use goto targets directly as next iteration's new_states
-        for (target, base) in pending_bases_by_target {
+        for (target, base) in pending_bases_by_target.drain(..) {
             let t0 = Instant::now();
             current = current.absorb_push_same_acc(target, &base);
             profile.absorb_push_ns += t0.elapsed().as_nanos() as u64;
@@ -542,16 +502,16 @@ pub(crate) fn advance_stacks_profiled(
     }
 
     let mut shift_pairs = SmallVec::<[(u32, u32); 8]>::new();
-    let mut handle_shift_state = |state: u32| {
+    if let Some(state) = current.single_top_value() {
         if let Some(target) = shift_target(table.action(state, token)) {
             shift_pairs.push((state, target));
         }
-    };
-
-    if let Some(state) = current.single_top_value() {
-        handle_shift_state(state);
     } else {
-        current.for_each_top_value(|state| handle_shift_state(state));
+        current.for_each_top_value(|state| {
+            if let Some(target) = shift_target(table.action(state, token)) {
+                shift_pairs.push((state, target));
+            }
+        });
     }
     let t0 = Instant::now();
     let result = current.shift_top_values(shift_pairs);

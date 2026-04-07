@@ -1,5 +1,5 @@
 use im::{HashMap as IHashMap, OrdMap};
-use smallvec::SmallVec;
+use smallvec::{SmallVec, smallvec};
 use std::collections::{HashMap as StdHashMap, HashSet, VecDeque};
 #[cfg(test)]
 use std::collections::BTreeMap;
@@ -459,12 +459,16 @@ impl<T: Clone + Eq + Hash> Lower<T> {
     /// Ensure this Lower is in General form, converting from Chain if necessary.
     /// Returns mutable references to children and max_depth for in-place mutation.
     fn ensure_general(&mut self) {
-        if let Lower::Chain { children, empty, max_depth, .. } = self {
-            *self = Lower::General {
-                children: children.clone(),
-                empty: *empty,
-                max_depth: *max_depth,
-            };
+        if matches!(self, Lower::Chain { .. }) {
+            // Use mem::replace to move children instead of cloning them.
+            let old = std::mem::replace(self, Lower::General {
+                children: CompactMap::new(),
+                empty: false,
+                max_depth: 0,
+            });
+            if let Lower::Chain { children, empty, max_depth, .. } = old {
+                *self = Lower::General { children, empty, max_depth };
+            }
         }
     }
 
@@ -2359,6 +2363,82 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
         // Fallback to separate isolate + popn
         self.isolate(Some(value)).popn(n)
+    }
+
+    /// Combined isolate_popn + enumerate top values and their isolated bases.
+    /// Returns (top_value, base_GSS) pairs where base_GSS = popped.isolate(Some(top_value)).
+    /// This avoids creating the intermediate "popped" GSS for the common case.
+    pub fn isolate_popn_bases(&self, value: T, n: isize) -> SmallVec<[(T, Self); 4]> {
+        if self.is_empty() {
+            return SmallVec::new();
+        }
+        // Fast path for Interface variant with depth 1 and single child
+        if n == 1 {
+            if let Upper::Interface(interface) = &*self.inner {
+                if let Some(kids) = interface.inner.children_get(&value) {
+                    if kids.len() == 1 {
+                        let (_, child) = kids.iter().next().unwrap();
+                        // child is Arc<Lower> — the popped result's inner lower.
+                        // The popped GSS would be Interface { inner: child, acc: acc }
+                        // popped.single_top_value() returns the single key in child's children.
+                        // popped.isolate(key) returns popped itself (since single key).
+                        //
+                        // So the base is Interface { inner: child, acc: acc } and the top value
+                        // is child's single key (if chain) or all keys.
+                        if child.children_len() == 0 {
+                            // No children below — popped is terminal (empty flag only)
+                            return SmallVec::new();
+                        }
+                        if child.children_len() == 1 {
+                            // Single child in the popped lower — single goto_from
+                            let goto_from = match &**child {
+                                Lower::Chain { .. } => child.chain_value().clone(),
+                                Lower::General { children, .. } => {
+                                    children.keys().next().unwrap().clone()
+                                }
+                            };
+                            // Base is the popped GSS itself (isolate with single key is identity)
+                            let base = Self {
+                                inner: new_interface(child.clone(), interface.acc.clone()),
+                            };
+                            return smallvec![(goto_from, base)];
+                        }
+                        // Multiple children — need to split
+                        let acc = &interface.acc;
+                        let mut result = SmallVec::new();
+                        for (k, ordmap) in child.children_ref().iter() {
+                            let filtered = CompactMap::unit(k.clone(), ordmap.clone());
+                            let new_lower = new_lower(filtered, false);
+                            let base = Self {
+                                inner: new_interface(new_lower, acc.clone()),
+                            };
+                            result.push((k.clone(), base));
+                        }
+                        return result;
+                    }
+                    // Multiple depth entries for this value
+                    // Fall through to general path
+                } else {
+                    return SmallVec::new();
+                }
+            }
+        }
+        // General fallback: use isolate_popn then iterate
+        let popped = self.isolate_popn(value, n);
+        if popped.is_empty() {
+            return SmallVec::new();
+        }
+        if let Some(v) = popped.single_top_value() {
+            // Single top value: isolate is identity, base = popped
+            return smallvec![(v, popped)];
+        }
+        let top_vals = popped.peek_values();
+        let mut result = SmallVec::new();
+        for v in top_vals {
+            let base = popped.isolate(Some(v.clone()));
+            result.push((v, base));
+        }
+        result
     }
 
     pub fn popn(&self, n: isize) -> Self {
