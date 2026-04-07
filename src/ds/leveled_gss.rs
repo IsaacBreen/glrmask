@@ -2154,29 +2154,35 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     where
         I: IntoIterator<Item = (T, T)>,
     {
-        let pairs: Vec<(T, T)> = shifts.into_iter().collect();
+        let pairs: SmallVec<[(T, T); 8]> = shifts.into_iter().collect();
         if pairs.is_empty() {
             return Self::empty();
         }
         if pairs.len() == 1 {
-            let (from, to) = pairs[0].clone();
-            if self.single_exclusive_top_value().as_ref() == Some(&from) {
-                return self.push(to);
+            let (ref from, ref to) = pairs[0];
+            if self.single_exclusive_top_value().as_ref() == Some(from) {
+                return self.push(to.clone());
             }
         }
 
         match &*self.inner {
             Upper::Interface(i) => {
-                let mut children_by_target = StdHashMap::<T, Children<T, Lower<T>>>::new();
+                // Use SmallVec instead of HashMap for grouping by target.
+                // Linear scan is faster than HashMap for typical ≤8 shift pairs.
+                let mut children_by_target: SmallVec<[(T, Children<T, Lower<T>>); 4]> = SmallVec::new();
 
                 let inner_children = i.inner.children_ref();
-                for (from, to) in pairs {
+                for (from, to) in pairs.iter().cloned() {
                     let Some(kids) = inner_children.get(&from) else {
                         continue;
                     };
-                    let target_children = children_by_target
-                        .entry(to)
-                        .or_insert_with(CompactMap::new);
+                    // Find or create the target entry
+                    let target_children = if let Some(pos) = children_by_target.iter().position(|(t, _)| *t == to) {
+                        &mut children_by_target[pos].1
+                    } else {
+                        children_by_target.push((to, CompactMap::new()));
+                        &mut children_by_target.last_mut().unwrap().1
+                    };
                     match target_children.get(&from) {
                         Some(existing_kids) => {
                             let mut merged_kids = existing_kids.clone();

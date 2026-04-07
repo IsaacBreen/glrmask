@@ -220,6 +220,16 @@ fn valid_terminals_for_stack_vectors(
 }
 
 pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> ParserGSS {
+    advance_stacks_core(table, stack.clone(), token)
+}
+
+/// Like `advance_stacks` but takes ownership of the GSS, avoiding an
+/// unnecessary Arc clone when the caller doesn't need the original.
+pub(crate) fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> ParserGSS {
+    advance_stacks_core(table, stack, token)
+}
+
+fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> ParserGSS {
     if let Some(state) = stack.single_exclusive_top_value() {
         match table.action(state, token) {
             Some(Action::Shift(target)) => return stack.push(*target),
@@ -272,7 +282,8 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
         return stack.shift_top_values(pure_shift_targets);
     }
 
-    let mut current = stack.clone();
+    // Owned: no clone needed. First Arc::make_mut won't clone if refcount == 1.
+    let mut current = stack;
 
     // Use SmallVec for processed states — linear scan is faster than FxHashSet
     // for the typical case of ≤16 unique states in the reduce closure.

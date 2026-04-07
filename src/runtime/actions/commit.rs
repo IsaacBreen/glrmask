@@ -6,6 +6,7 @@ use crate::compiler::glr::parser::{
     ParserGSS,
     TerminalsDisallowed,
     advance_stacks,
+    advance_stacks_owned,
     advance_stacks_profiled,
     stack_may_advance_on,
     stack_may_advance_on_any,
@@ -356,11 +357,6 @@ fn commit_bytes_fast_path(
     if all_accs_empty {
         if let Some(top_state) = gss.single_exclusive_top_value() {
             if let Some(Action::Shift(target)) = constraint.table.action(top_state, terminal) {
-                // Single state, single terminal, no end_state, empty accs, pure shift.
-                // Prune is identity (empty accs → nothing disallowed, no remap).
-                // advance_stacks → push(target).
-                // fuse(1) on push result → identity (Interface, no multi-depth slots).
-                // apply_future_terminal_disallow → identity (no end_state).
                 let shifted = gss.push(*target);
                 state.clear();
                 state.insert(constraint.tokenizer.initial_state(), shifted);
@@ -369,11 +365,15 @@ fn commit_bytes_fast_path(
         }
     }
 
+    // Take ownership of the GSS for the standard fast path.
+    // This allows advance_stacks_owned to avoid cloning the inner Arc.
+    let (_, gss_owned) = state.pop_first().unwrap();
+
     // Standard fast path: skip prune when accumulators are empty.
     let pruned_gss = if all_accs_empty {
-        gss.clone()
+        gss_owned
     } else {
-        let pruned = gss.apply_and_prune_no_promote(|td: &TerminalsDisallowed| {
+        let pruned = gss_owned.apply_and_prune_no_promote(|td: &TerminalsDisallowed| {
             if td.is_empty() {
                 return Some(TerminalsDisallowed::new());
             }
@@ -402,8 +402,8 @@ fn commit_bytes_fast_path(
         pruned
     };
 
-    // Advance the parser
-    let advanced = advance_stacks(&constraint.table, &pruned_gss, terminal);
+    // Advance the parser — use owned variant to avoid initial Arc clone
+    let advanced = advance_stacks_owned(&constraint.table, pruned_gss, terminal);
     if advanced.is_empty() {
         return Some(Err(
             "commit rejected: no valid parser states remain".to_string(),
@@ -420,7 +420,6 @@ fn commit_bytes_fast_path(
         ));
     }
 
-    state.clear();
     state.insert(constraint.tokenizer.initial_state(), fused);
     Some(Ok(()))
 }
