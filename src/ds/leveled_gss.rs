@@ -191,7 +191,192 @@ impl<'a, K: Clone + Eq + Hash, V: Clone> IntoIterator for &'a CompactMap<K, V> {
     }
 }
 
-type Children<T, N> = CompactMap<T, OrdMap<u32, Arc<N>>>;
+/// A map optimized for small sizes (≤2 entries) keyed by u32 (depth).
+/// Replaces `OrdMap<u32, Arc<N>>` in the GSS children maps.
+/// Typical GSS paths have 1 entry; this avoids B-tree overhead.
+#[derive(Clone)]
+enum CompactOrdMap<V: Clone> {
+    Inline(SmallVec<[(u32, V); 2]>),
+    Large(OrdMap<u32, V>),
+}
+
+impl<V: Clone> CompactOrdMap<V> {
+    #[inline(always)]
+    fn new() -> Self {
+        CompactOrdMap::Inline(SmallVec::new())
+    }
+
+    #[inline(always)]
+    fn unit(key: u32, value: V) -> Self {
+        let mut sv = SmallVec::new();
+        sv.push((key, value));
+        CompactOrdMap::Inline(sv)
+    }
+
+    #[inline(always)]
+    fn len(&self) -> usize {
+        match self {
+            CompactOrdMap::Inline(sv) => sv.len(),
+            CompactOrdMap::Large(m) => m.len(),
+        }
+    }
+
+    #[inline(always)]
+    fn is_empty(&self) -> bool {
+        match self {
+            CompactOrdMap::Inline(sv) => sv.is_empty(),
+            CompactOrdMap::Large(m) => m.is_empty(),
+        }
+    }
+
+    #[inline(always)]
+    fn get(&self, key: &u32) -> Option<&V> {
+        match self {
+            CompactOrdMap::Inline(sv) => sv.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+            CompactOrdMap::Large(m) => m.get(key),
+        }
+    }
+
+    fn insert(&mut self, key: u32, value: V) -> Option<V> {
+        match self {
+            CompactOrdMap::Inline(sv) => {
+                for entry in sv.iter_mut() {
+                    if entry.0 == key {
+                        let old = std::mem::replace(&mut entry.1, value);
+                        return Some(old);
+                    }
+                }
+                if sv.len() < 2 {
+                    sv.push((key, value));
+                    None
+                } else {
+                    // Promote to Large
+                    let mut m = OrdMap::new();
+                    for (k, v) in sv.drain(..) {
+                        m.insert(k, v);
+                    }
+                    let result = m.insert(key, value);
+                    *self = CompactOrdMap::Large(m);
+                    result
+                }
+            }
+            CompactOrdMap::Large(m) => m.insert(key, value),
+        }
+    }
+
+    fn keys(&self) -> CompactOrdMapKeys<'_, V> {
+        match self {
+            CompactOrdMap::Inline(sv) => CompactOrdMapKeys::Inline(sv.iter()),
+            CompactOrdMap::Large(m) => CompactOrdMapKeys::Large(m.keys()),
+        }
+    }
+
+    fn get_max(&self) -> Option<(&u32, &V)> {
+        match self {
+            CompactOrdMap::Inline(sv) => {
+                sv.iter().max_by_key(|(k, _)| *k).map(|(k, v)| (k, v))
+            }
+            CompactOrdMap::Large(m) => m.get_max().map(|(k, v)| (k, v)),
+        }
+    }
+
+    fn iter(&self) -> CompactOrdMapIter<'_, V> {
+        match self {
+            CompactOrdMap::Inline(sv) => CompactOrdMapIter::Inline(sv.iter()),
+            CompactOrdMap::Large(m) => CompactOrdMapIter::Large(m.iter()),
+        }
+    }
+
+    fn values(&self) -> CompactOrdMapValues<'_, V> {
+        match self {
+            CompactOrdMap::Inline(sv) => CompactOrdMapValues::Inline(sv.iter()),
+            CompactOrdMap::Large(m) => CompactOrdMapValues::Large(m.values()),
+        }
+    }
+}
+
+enum CompactOrdMapIter<'a, V> {
+    Inline(std::slice::Iter<'a, (u32, V)>),
+    Large(im::ordmap::Iter<'a, u32, V>),
+}
+
+impl<'a, V: Clone> Iterator for CompactOrdMapIter<'a, V> {
+    type Item = (&'a u32, &'a V);
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            CompactOrdMapIter::Inline(it) => it.next().map(|(k, v)| (k, v)),
+            CompactOrdMapIter::Large(it) => it.next(),
+        }
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            CompactOrdMapIter::Inline(it) => it.size_hint(),
+            CompactOrdMapIter::Large(it) => it.size_hint(),
+        }
+    }
+}
+
+enum CompactOrdMapValues<'a, V> {
+    Inline(std::slice::Iter<'a, (u32, V)>),
+    Large(im::ordmap::Values<'a, u32, V>),
+}
+
+impl<'a, V: Clone> Iterator for CompactOrdMapValues<'a, V> {
+    type Item = &'a V;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            CompactOrdMapValues::Inline(it) => it.next().map(|(_, v)| v),
+            CompactOrdMapValues::Large(it) => it.next(),
+        }
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            CompactOrdMapValues::Inline(it) => it.size_hint(),
+            CompactOrdMapValues::Large(it) => it.size_hint(),
+        }
+    }
+}
+
+impl<V: Clone> std::iter::FromIterator<(u32, V)> for CompactOrdMap<V> {
+    fn from_iter<I: IntoIterator<Item = (u32, V)>>(iter: I) -> Self {
+        let mut map = CompactOrdMap::new();
+        for (k, v) in iter {
+            map.insert(k, v);
+        }
+        map
+    }
+}
+
+enum CompactOrdMapKeys<'a, V> {
+    Inline(std::slice::Iter<'a, (u32, V)>),
+    Large(im::ordmap::Keys<'a, u32, V>),
+}
+
+impl<'a, V> Iterator for CompactOrdMapKeys<'a, V> {
+    type Item = &'a u32;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            CompactOrdMapKeys::Inline(it) => it.next().map(|(k, _)| k),
+            CompactOrdMapKeys::Large(it) => it.next(),
+        }
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            CompactOrdMapKeys::Inline(it) => it.size_hint(),
+            CompactOrdMapKeys::Large(it) => it.size_hint(),
+        }
+    }
+}
+
+impl<'a, V: Clone> IntoIterator for &'a CompactOrdMap<V> {
+    type Item = (&'a u32, &'a V);
+    type IntoIter = CompactOrdMapIter<'a, V>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+type Children<T, N> = CompactMap<T, CompactOrdMap<Arc<N>>>;
 
 #[derive(Clone)]
 enum Lower<T: Clone + Eq + Hash> {
@@ -251,7 +436,7 @@ impl<T: Clone + Eq + Hash> Lower<T> {
     }
 
     /// Look up children for a given key value.
-    fn children_get(&self, key: &T) -> Option<&OrdMap<u32, Arc<Lower<T>>>> {
+    fn children_get(&self, key: &T) -> Option<&CompactOrdMap<Arc<Lower<T>>>> {
         match self {
             Lower::General { children, .. } | Lower::Chain { children, .. } => children.get(key),
         }
@@ -323,7 +508,7 @@ impl<T: Clone + Eq + Hash> Lower<T> {
     /// For Chain variant, get the OrdMap for the single child key.
     /// Panics if called on General.
     #[inline(always)]
-    fn chain_kids(&self) -> &OrdMap<u32, Arc<Lower<T>>> {
+    fn chain_kids(&self) -> &CompactOrdMap<Arc<Lower<T>>> {
         match self {
             Lower::Chain { children, .. } => children.values().next().unwrap(),
             Lower::General { .. } => panic!("chain_kids called on General"),
@@ -575,7 +760,7 @@ fn filter_lower<T: Clone + Eq + Hash>(
 
     if current_depth < max_d {
         for (v, kids) in node.children().iter() {
-            let mut new_kids: OrdMap<u32, Arc<Lower<T>>> = OrdMap::new();
+            let mut new_kids: CompactOrdMap<Arc<Lower<T>>> = CompactOrdMap::new();
             let mut same_kids = true;
             let mut count = 0usize;
             for (orig_depth, child) in kids.iter() {
@@ -641,7 +826,7 @@ where
             let mut children_identical = true;
             if current_depth < max_d {
                 for (v, kids) in b.children.iter() {
-                    let mut new_kids: OrdMap<u32, Arc<Upper<T, A>>> = OrdMap::new();
+                    let mut new_kids: CompactOrdMap<Arc<Upper<T, A>>> = CompactOrdMap::new();
                     let mut same_kids = true;
                     let mut count = 0usize;
                     for (orig_depth, child) in kids.iter() {
@@ -689,7 +874,7 @@ where
             let mut children_identical = true;
             if current_depth < max_d {
                 for (v, kids) in i.inner.children().iter() {
-                    let mut new_kids: OrdMap<u32, Arc<Lower<T>>> = OrdMap::new();
+                    let mut new_kids: CompactOrdMap<Arc<Lower<T>>> = CompactOrdMap::new();
                     let mut same_kids = true;
                     let mut count = 0usize;
                     for (orig_depth, child) in kids.iter() {
@@ -757,7 +942,7 @@ fn truncate_lower<T: Clone + Eq + Hash>(
     let mut children_identical = true;
 
     for (v, kids) in node.children_ref().iter() {
-        let mut new_kids_map = OrdMap::new();
+        let mut new_kids_map = CompactOrdMap::new();
         let mut kids_identical = true;
         for (depth, child) in kids.iter() {
             if let Some(new_child) = truncate_lower(child, current_depth + 1, max_len, memo) {
@@ -828,7 +1013,7 @@ where
             let mut children_identical = true;
 
             for (v, kids) in b.children.iter() {
-                let mut new_kids_map = OrdMap::new();
+                let mut new_kids_map = CompactOrdMap::new();
                 let mut kids_identical = true;
                 for (depth, child) in kids.iter() {
                     if let Some(new_child) =
@@ -962,7 +1147,7 @@ where
 {
     let mut children: Children<T, Upper<T, A>> = CompactMap::new();
     for (v, kids) in it.inner.children_ref().iter() {
-        let mut v_map: OrdMap<u32, Arc<Upper<T, A>>> = OrdMap::new();
+        let mut v_map: CompactOrdMap<Arc<Upper<T, A>>> = CompactOrdMap::new();
         for lchild in kids.values() {
             let ci = new_interface(lchild.clone(), it.acc.clone());
             v_map.insert(ci.max_depth(), ci);
@@ -1080,7 +1265,7 @@ where
                 
                 let mut l_children: Children<T, Lower<T>> = CompactMap::new();
                 for (v, kids) in b.children.iter() {
-                    let mut v_map: OrdMap<u32, Arc<Lower<T>>> = OrdMap::new();
+                    let mut v_map: CompactOrdMap<Arc<Lower<T>>> = CompactOrdMap::new();
                     for child in kids.values() {
                         if let Upper::Interface(ci) = &**child {
                             let lower = ci.inner.clone();
@@ -1380,7 +1565,7 @@ where
 
     let mut new_children: Children<T, Lower<T>> = CompactMap::new();
     for (v, items) in edges_raw {
-        let mut ord: OrdMap<u32, Arc<Lower<T>>> = OrdMap::new();
+        let mut ord: CompactOrdMap<Arc<Lower<T>>> = CompactOrdMap::new();
         for (_, carc) in items {
             let d = carc.max_depth();
             if let Some(prev) = ord.get(&d) {
@@ -1464,7 +1649,7 @@ where
 
             let mut new_children: Children<T, Upper<T, A>> = CompactMap::new();
             for (v, items) in &edges_raw {
-                let mut ord: OrdMap<u32, Arc<Upper<T, A>>> = OrdMap::new();
+                let mut ord: CompactOrdMap<Arc<Upper<T, A>>> = CompactOrdMap::new();
                 for (_, carc) in items {
                     let d = carc.max_depth();
                     if let Some(prev) = ord.get(&d) {
@@ -1721,7 +1906,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     build_lower(&e.sub).children_ref().clone()
                 };
                 let node_for_v = new_lower(sub_children, e.end.is_some());
-                l_children.insert(v.clone(), OrdMap::unit(node_for_v.max_depth(), node_for_v));
+                l_children.insert(v.clone(), CompactOrdMap::unit(node_for_v.max_depth(), node_for_v));
             }
             new_lower(l_children, false)
         }
@@ -1743,7 +1928,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     nodes_for_v.push(build_upper(&e.sub, None));
                 }
                 if !nodes_for_v.is_empty() {
-                    let mut kids_map: OrdMap<u32, Arc<Upper<T, A>>> = OrdMap::new();
+                    let mut kids_map: CompactOrdMap<Arc<Upper<T, A>>> = CompactOrdMap::new();
                     for n in nodes_for_v.iter() {
                         kids_map.insert(n.max_depth(), n.clone());
                     }
@@ -1942,7 +2127,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         let new_inner = match &*self.inner {
             Upper::Interface(i) => {
                 let mut new_children: Children<T, Lower<T>> = CompactMap::new();
-                new_children.insert(value, OrdMap::unit(i.inner.max_depth(), i.inner.clone()));
+                new_children.insert(value, CompactOrdMap::unit(i.inner.max_depth(), i.inner.clone()));
                 let new_lower_root = new_lower(new_children, false);
                 new_interface(new_lower_root, i.acc.clone())
             }
@@ -1950,7 +2135,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 let mut new_children: Children<T, Upper<T, A>> = CompactMap::new();
                 new_children.insert(
                     value,
-                    OrdMap::unit(self.inner.max_depth(), self.inner.clone()),
+                    CompactOrdMap::unit(self.inner.max_depth(), self.inner.clone()),
                 );
                 new_branch(new_children, None)
             }
@@ -2013,7 +2198,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 let mut shifted_children: Children<T, Lower<T>> = CompactMap::new();
                 for (to, lower_children) in children_by_target {
                     let lower = new_lower(lower_children, false);
-                    shifted_children.insert(to, OrdMap::unit(lower.max_depth(), lower));
+                    shifted_children.insert(to, CompactOrdMap::unit(lower.max_depth(), lower));
                 }
 
                 let shifted_root = new_lower(shifted_children, false);
@@ -2103,7 +2288,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                             children.insert(value, new_ordmap);
                         }
                         None => {
-                            children.insert(value, OrdMap::unit(child_depth, child_node));
+                            children.insert(value, CompactOrdMap::unit(child_depth, child_node));
                         }
                     }
 
@@ -2830,7 +3015,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     let new_empty = b.empty.as_ref().map(|e| map_acc(e, memo_acc, f));
                     let mut new_children: Children<T, Upper<T, B>> = CompactMap::new();
                     for (v, kids) in b.children.iter() {
-                        let mut new_kids: OrdMap<u32, Arc<Upper<T, B>>> = OrdMap::new();
+                        let mut new_kids: CompactOrdMap<Arc<Upper<T, B>>> = CompactOrdMap::new();
                         for child in kids.values() {
                             let new_child = transform::<T, A, B, F>(child, memo_acc, f);
                             new_kids.insert(new_child.max_depth(), new_child);
@@ -2896,7 +3081,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     let mut new_children: Children<T, Upper<T, A>> = CompactMap::new();
                     let mut children_identical = true;
                     for (v, kids) in b.children.iter() {
-                        let mut new_kids: OrdMap<u32, Arc<Upper<T, A>>> = OrdMap::new();
+                        let mut new_kids: CompactOrdMap<Arc<Upper<T, A>>> = CompactOrdMap::new();
                         let mut same_kids = true;
                         let mut count = 0usize;
                         for (orig_depth, child) in kids.iter() {
@@ -2998,7 +3183,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     let new_empty_opt = b.empty.as_ref().and_then(|e| mutate_acc(e, memo, m));
                     let mut new_children: Children<T, Upper<T, B>> = CompactMap::new();
                     for (v, kids) in b.children.iter() {
-                        let mut new_kids: OrdMap<u32, Arc<Upper<T, B>>> = OrdMap::new();
+                        let mut new_kids: CompactOrdMap<Arc<Upper<T, B>>> = CompactOrdMap::new();
                         for child in kids.values() {
                             if let Some(nc) = transform::<T, A, B, M>(child, memo, m) {
                                 new_kids.insert(nc.max_depth(), nc);
@@ -3081,7 +3266,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         if kids.len() == 1 {
                             let child = kids.values().next().unwrap();
                             if let Some(nc) = transform_td::<T, A, B, M>(child, memo, m) {
-                                let new_kids = OrdMap::unit(nc.max_depth(), nc);
+                                let new_kids = CompactOrdMap::unit(nc.max_depth(), nc);
                                 let new_children = CompactMap::unit(v.clone(), new_kids);
                                 return Some(new_branch(new_children, None));
                             } else {
@@ -3091,7 +3276,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     }
                     let mut new_children: Children<T, Upper<T, B>> = CompactMap::new();
                     for (v, kids) in b.children.iter() {
-                        let new_kids: OrdMap<u32, Arc<Upper<T, B>>> = kids.values()
+                        let new_kids: CompactOrdMap<Arc<Upper<T, B>>> = kids.values()
                             .filter_map(|child| transform_td::<T, A, B, M>(child, memo, m))
                             .map(|nc| (nc.max_depth(), nc))
                             .collect();
@@ -3228,7 +3413,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         if kids.len() == 1 {
                             let child = kids.values().next().unwrap();
                             if let Some(nc) = transform_np::<T, A, M>(child, memo, m) {
-                                let new_kids = OrdMap::unit(nc.max_depth(), nc);
+                                let new_kids = CompactOrdMap::unit(nc.max_depth(), nc);
                                 let new_children = CompactMap::unit(v.clone(), new_kids);
                                 return Some(new_branch(new_children, None));
                             } else {
@@ -3238,7 +3423,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     }
                     let mut new_children: Children<T, Upper<T, A>> = CompactMap::new();
                     for (v, kids) in b.children.iter() {
-                        let new_kids: OrdMap<u32, Arc<Upper<T, A>>> = kids.values()
+                        let new_kids: CompactOrdMap<Arc<Upper<T, A>>> = kids.values()
                             .filter_map(|child| transform_np::<T, A, M>(child, memo, m))
                             .map(|nc| (nc.max_depth(), nc))
                             .collect();
@@ -3351,7 +3536,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 let mut it = fused_kids.into_iter();
                 let first = it.next().unwrap();
                 let merged_child = it.fold(first, |acc, next| merge_lower(&acc, &next));
-                final_children.insert(v, OrdMap::unit(merged_child.max_depth(), merged_child));
+                final_children.insert(v, CompactOrdMap::unit(merged_child.max_depth(), merged_child));
             }
 
             let res = new_lower(final_children, node.empty());
@@ -3425,7 +3610,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         let first = it.next().unwrap();
                         let merged_child = it.fold(first, |acc, next| merge_upper(&acc, &next));
                         final_children
-                            .insert(v, OrdMap::unit(merged_child.max_depth(), merged_child));
+                            .insert(v, CompactOrdMap::unit(merged_child.max_depth(), merged_child));
                     }
                     let new_b = new_branch(final_children, b.empty.clone());
                     try_promote(&new_b)
@@ -4722,12 +4907,12 @@ mod tests {
         let l_terminal = new_lower::<i32>(CompactMap::new(), true);
 
         let l_500_parent = new_lower(
-            CompactMap::unit(500, OrdMap::unit(l_terminal.max_depth(), l_terminal.clone())),
+            CompactMap::unit(500, CompactOrdMap::unit(l_terminal.max_depth(), l_terminal.clone())),
             false,
         );
 
         let i_54_inner = new_lower(
-            CompactMap::unit(569, OrdMap::unit(l_500_parent.max_depth(), l_500_parent.clone())),
+            CompactMap::unit(569, CompactOrdMap::unit(l_500_parent.max_depth(), l_500_parent.clone())),
             false,
         );
         let i_54 = new_interface(i_54_inner, IntAcc::new(&[54]));
@@ -4741,16 +4926,16 @@ mod tests {
         let edge_vals = vec![419, 437, 66, 477, 531, 541, 556, 558, 560, 562];
         let mut children_101 = CompactMap::new();
         for (edge, interface) in edge_vals.iter().zip(interfaces_10.iter()) {
-            children_101.insert(*edge, OrdMap::unit(interface.max_depth(), interface.clone()));
+            children_101.insert(*edge, CompactOrdMap::unit(interface.max_depth(), interface.clone()));
         }
         let ub_101 = new_branch(children_101, None);
 
         let ub_295_d4 = new_branch(
-            CompactMap::unit(101, OrdMap::unit(ub_101.max_depth(), ub_101)),
+            CompactMap::unit(101, CompactOrdMap::unit(ub_101.max_depth(), ub_101)),
             None,
         );
 
-        let mut children_295 = OrdMap::new();
+        let mut children_295 = CompactOrdMap::new();
         children_295.insert(i_54.max_depth(), i_54);
         children_295.insert(ub_295_d4.max_depth(), ub_295_d4);
         let root_children = CompactMap::unit(295, children_295);
