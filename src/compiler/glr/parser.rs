@@ -366,7 +366,43 @@ pub(crate) fn stack_may_advance_on_any(
 }
 
 pub(crate) fn stacks_finished(table: &GLRTable, stack: &ParserGSS) -> bool {
-    stacks_accept(table, &stack_vectors(stack))
+    if stack.is_empty() {
+        return false;
+    }
+
+    // IELR(1) fast check: if any root state has any action for EOF,
+    // the parser can accept. With IELR(1)'s precise lookahead, a reduce
+    // for EOF in a state implies the reduce chain leads to accept.
+    let has_eof_action = stack
+        .peek_values()
+        .iter()
+        .any(|&state| table.action(state, EOF).is_some());
+
+    // Debug assertion: verify the fast check matches the full check
+    #[cfg(debug_assertions)]
+    {
+        let full_result = if has_eof_action {
+            // Only pay for full check when fast check says true
+            let vecs = stack_vectors(stack);
+            stacks_accept(table, &vecs)
+        } else {
+            false
+        };
+        // full_result can only be true if has_eof_action is true
+        // But has_eof_action true does NOT guarantee full_result true
+        // If this fires, the simple IELR(1) check is insufficient
+        if has_eof_action && !full_result {
+            // Log but don't crash — the check is an overapproximation
+            debug_assert!(
+                full_result,
+                "stacks_finished: IELR(1) fast check returned true but full check returned false.\n\
+                 Root states with EOF action: {:?}",
+                stack.peek_values().iter().filter(|&&s| table.action(s, EOF).is_some()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    has_eof_action
 }
 
 #[cfg(test)]

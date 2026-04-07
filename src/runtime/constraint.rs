@@ -71,6 +71,14 @@ pub struct Constraint {
     /// for all original tokens that map to internal token `i`.
     #[serde(default)]
     pub(crate) internal_token_buf_masks: Vec<InternalTokenBufMasks>,
+    /// Precomputed combined buf output for each group of 64 internal tokens.
+    /// `word_group_buf_masks[w]` is the combined mask for internal tokens [w*64 .. (w+1)*64).
+    /// Used as a fast path in `or_to_buf` when a dense word is all-ones (!0u64).
+    #[serde(skip)]
+    pub(crate) word_group_buf_masks: Vec<Box<[u32]>>,
+    /// Precomputed buf output for the full internal token universe (OR of all word_group_buf_masks).
+    #[serde(skip)]
+    pub(crate) all_tokens_buf_mask: Box<[u32]>,
     #[serde(skip)]
     pub(crate) internal_token_dense_words: usize,
     #[serde(skip)]
@@ -101,6 +109,8 @@ impl Constraint {
         );
 
         self.internal_token_buf_masks = internal_token_buf_masks;
+        self.word_group_buf_masks = self.compute_word_group_buf_masks();
+        self.all_tokens_buf_mask = self.compute_all_tokens_buf_mask();
         self.token_bytes_dense = Vec::new();
         self.internal_token_dense_words = dense_mask_words;
         self.weight_token_dense_masks = dense_masks;
@@ -117,6 +127,37 @@ impl Constraint {
             .iter()
             .map(|originals| Self::build_internal_token_buf_mask(originals))
             .collect()
+    }
+
+    fn compute_word_group_buf_masks(&self) -> Vec<Box<[u32]>> {
+        if self.internal_token_buf_masks.is_empty() {
+            return Vec::new();
+        }
+        let buf_words = self.mask_len();
+        let n_groups = self.internal_token_buf_masks.len().div_ceil(64);
+        let mut groups = Vec::with_capacity(n_groups);
+        for group_start in (0..self.internal_token_buf_masks.len()).step_by(64) {
+            let mut combined = vec![0u32; buf_words];
+            let group_end = (group_start + 64).min(self.internal_token_buf_masks.len());
+            for token_masks in &self.internal_token_buf_masks[group_start..group_end] {
+                for &(word_idx, mask) in token_masks {
+                    combined[word_idx as usize] |= mask;
+                }
+            }
+            groups.push(combined.into_boxed_slice());
+        }
+        groups
+    }
+
+    fn compute_all_tokens_buf_mask(&self) -> Box<[u32]> {
+        let buf_words = self.mask_len();
+        let mut combined = vec![0u32; buf_words];
+        for group in &self.word_group_buf_masks {
+            for (i, &mask) in group.iter().enumerate() {
+                combined[i] |= mask;
+            }
+        }
+        combined.into_boxed_slice()
     }
 
     fn compute_dense_token_bytes(&self) -> Vec<Option<Box<[u8]>>> {
@@ -171,6 +212,8 @@ impl Constraint {
     /// Build precomputed bitmask fragments for each internal token.
     pub(crate) fn build_buf_masks(&mut self) {
         self.internal_token_buf_masks = self.compute_buf_masks();
+        self.word_group_buf_masks = self.compute_word_group_buf_masks();
+        self.all_tokens_buf_mask = self.compute_all_tokens_buf_mask();
     }
 
     pub(crate) fn build_dense_token_bytes(&mut self) {
@@ -248,12 +291,25 @@ impl Constraint {
         for (word_index, (&left_word, &right_word)) in
             left_words.iter().zip(right_words.iter()).enumerate()
         {
-            let mut overlap = left_word & right_word;
-            while overlap != 0 {
-                let bit = overlap.trailing_zeros() as usize;
+            let overlap = left_word & right_word;
+            if overlap == 0 {
+                continue;
+            }
+            // Fast path: all 64 tokens in this word set → use precomputed group mask.
+            if overlap == !0u64 {
+                if let Some(group) = self.word_group_buf_masks.get(word_index) {
+                    for (i, &mask) in group.iter().enumerate() {
+                        buf[i] |= mask;
+                    }
+                    continue;
+                }
+            }
+            let mut bits = overlap;
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
                 let internal_token = word_index * 64 + bit;
                 self.or_internal_token_masks_to_buf(internal_token, buf);
-                overlap &= overlap - 1;
+                bits &= bits - 1;
             }
         }
     }

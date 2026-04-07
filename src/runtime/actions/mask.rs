@@ -189,8 +189,42 @@ impl DenseMaskAcc {
         constraint: &crate::runtime::constraint::Constraint,
         buf: &mut [u32],
     ) {
+        let word_groups = &constraint.word_group_buf_masks;
+        let all_mask = &constraint.all_tokens_buf_mask;
         for dense in self.0.values() {
+            // Super-fast path: check if entire dense matches full universe.
+            // If all words are !0u64 (or at expected count), OR the all_tokens_buf_mask once.
+            let n_full_groups = word_groups.len().saturating_sub(1);
+            if !all_mask.is_empty()
+                && dense.len() == word_groups.len()
+                && dense[..n_full_groups].iter().all(|&w| w == !0u64)
+            {
+                let last_expected = if constraint.internal_token_buf_masks.len() % 64 == 0 {
+                    !0u64
+                } else {
+                    (1u64 << (constraint.internal_token_buf_masks.len() % 64)) - 1
+                };
+                if dense[n_full_groups] == last_expected {
+                    for (i, &mask) in all_mask.iter().enumerate() {
+                        buf[i] |= mask;
+                    }
+                    continue;
+                }
+            }
             for (wi, &w) in dense.iter().enumerate() {
+                if w == 0 {
+                    continue;
+                }
+                // Fast path: all 64 internal tokens in this word are set.
+                if w == !0u64 {
+                    if let Some(group) = word_groups.get(wi) {
+                        for (i, &mask) in group.iter().enumerate() {
+                            buf[i] |= mask;
+                        }
+                        continue;
+                    }
+                }
+                // Slow path: iterate individual bits.
                 let mut bits = w;
                 while bits != 0 {
                     let bit = bits.trailing_zeros() as usize;
@@ -462,5 +496,90 @@ impl<'a> ConstraintState<'a> {
         }
 
         update_eos_mask(buf, self.constraint.eos_token_id, self.is_complete());
+    }
+
+    /// Like `fill_mask` but returns detailed profiling stats.
+    /// Returns a tuple of 10 u64 values:
+    /// (total_ns, seed_ns, bfs_ns, final_weight_ns, decompose_ns, enqueue_ns,
+    ///  n_depth_buckets, n_dwa_visits, n_decompose_ops, n_final_weight_ops)
+    pub fn fill_mask_profiled(&self, buf: &mut [u32]) -> (u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) {
+        use std::time::Instant;
+        let t_total = Instant::now();
+
+        buf.fill(0);
+
+        let parser_dwa = self.constraint.parser_dwa();
+        if self.state.is_empty() || parser_dwa.states.is_empty() {
+            return (t_total.elapsed().as_nanos() as u64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        }
+
+        let precomputed = &self.constraint.weight_token_dense_masks;
+        let mut queue = MaskQueue::new();
+
+        let start_state = parser_dwa.start_state;
+        let start_dwa_state = &parser_dwa.states[start_state as usize];
+        let start_fast_trans = &self.constraint.dwa_fast_transitions[start_state as usize];
+
+        let t_seed = Instant::now();
+        self.seed_mask_queue(
+            start_dwa_state.final_weight.as_ref(),
+            start_fast_trans,
+            precomputed,
+            &mut queue,
+            buf,
+        );
+        let seed_ns = t_seed.elapsed().as_nanos() as u64;
+
+        let t_bfs = Instant::now();
+        let mut n_depth_buckets: u64 = 0;
+        let mut n_dwa_visits: u64 = 0;
+        let mut n_decompose_ops: u64 = 0;
+        let mut n_final_weight_ops: u64 = 0;
+        let mut final_weight_ns: u64 = 0;
+        let mut decompose_ns: u64 = 0;
+        let mut enqueue_ns: u64 = 0;
+
+        while let Some((_depth, states_at_depth)) = queue.pop_last() {
+            n_depth_buckets += 1;
+            let items: Vec<(u32, DenseMaskGSS)> = states_at_depth.into_iter().collect();
+            for (wa_state, gss) in items {
+                n_dwa_visits += 1;
+                let dwa_state = &parser_dwa.states[wa_state as usize];
+                let fast_trans = &self.constraint.dwa_fast_transitions[wa_state as usize];
+
+                if let Some(final_weight) = &dwa_state.final_weight {
+                    n_final_weight_ops += 1;
+                    let t = Instant::now();
+                    self.or_final_weight_for_gss(final_weight, &gss, precomputed, buf);
+                    final_weight_ns += t.elapsed().as_nanos() as u64;
+                }
+
+                let t = Instant::now();
+                let decomposed = gss.decompose_and_pop();
+                decompose_ns += t.elapsed().as_nanos() as u64;
+                n_decompose_ops += decomposed.len() as u64;
+
+                let t = Instant::now();
+                for (parser_state, popped) in &decomposed {
+                    enqueue_parser_state_transitions(
+                        &mut queue,
+                        fast_trans,
+                        *parser_state,
+                        popped,
+                        precomputed,
+                    );
+                }
+                enqueue_ns += t.elapsed().as_nanos() as u64;
+            }
+        }
+        let bfs_ns = t_bfs.elapsed().as_nanos() as u64;
+
+        let t_eoscheck = Instant::now();
+        update_eos_mask(buf, self.constraint.eos_token_id, self.is_complete());
+        let is_complete_ns = t_eoscheck.elapsed().as_nanos() as u64;
+
+        let total_ns = t_total.elapsed().as_nanos() as u64;
+        (total_ns, seed_ns, bfs_ns, final_weight_ns, decompose_ns, enqueue_ns,
+         is_complete_ns, n_depth_buckets, n_dwa_visits, n_decompose_ops, n_final_weight_ops)
     }
 }
