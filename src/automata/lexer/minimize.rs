@@ -4,8 +4,9 @@
 //! Uses topology-aware pre-refinement before the final Hopcroft pass.
 
 use std::collections::VecDeque;
+use std::hash::{Hash, Hasher};
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ds::bitset::BitSet;
 use crate::ds::char_transitions::CharTransitions;
@@ -143,6 +144,82 @@ fn has_self_loops(dfa: &DFA) -> bool {
             .iter()
             .any(|(_, &target)| target as usize == state_idx)
     })
+}
+
+/// Fast iterative partition refinement.
+///
+/// Starting from an initial partition (e.g. by finalizers), iteratively refine
+/// by computing a signature for each state = (block_id, [(byte, target_block_id)])
+/// and re-partitioning by signature. Converges in O(depth) iterations where
+/// depth is the DFA's longest shortest path. Each iteration is O(n * avg_degree).
+///
+/// This is semantically equivalent to Hopcroft but much faster when the DFA
+/// is large and the result has few equivalence classes (common after clearing
+/// many terminal groups).
+fn iterative_signature_refine(dfa: &DFA, initial_blocks: Vec<Vec<u32>>, max_iterations: u32) -> Option<Vec<Vec<u32>>> {
+    let n = dfa.states().len();
+    let mut partition = vec![0u32; n];
+    for (block_id, block) in initial_blocks.iter().enumerate() {
+        for &state in block {
+            partition[state as usize] = block_id as u32;
+        }
+    }
+    let mut num_blocks = initial_blocks.len() as u32;
+
+    let mut label_map: FxHashMap<u64, u32> = FxHashMap::default();
+    let mut iterations = 0u32;
+
+    loop {
+        if iterations >= max_iterations {
+            // Did not converge — caller should fall back
+            if std::env::var("GLRMASK_PROFILE_COMPILE").map(|v| !v.is_empty() && v != "0").unwrap_or(false) {
+                eprintln!("[glrmask/debug][iterative_refine] states={} iterations={} blocks={} NOT_CONVERGED", n, iterations, num_blocks);
+            }
+            return None;
+        }
+
+        label_map.clear();
+        let mut next_label = 0u32;
+        let mut new_partition = vec![0u32; n];
+
+        for (state_idx, state) in dfa.states().iter().enumerate() {
+            // Build signature: (current_block, [(byte, target_block)])
+            // Use FxHash for speed instead of full signature comparison.
+            let mut hasher = rustc_hash::FxHasher::default();
+            partition[state_idx].hash(&mut hasher);
+            state.transitions.len().hash(&mut hasher);
+            for (byte, &target) in state.transitions.iter() {
+                byte.hash(&mut hasher);
+                partition[target as usize].hash(&mut hasher);
+            }
+            let sig_hash = hasher.finish();
+
+            let label = *label_map.entry(sig_hash).or_insert_with(|| {
+                let l = next_label;
+                next_label += 1;
+                l
+            });
+            new_partition[state_idx] = label;
+        }
+
+        if next_label == num_blocks {
+            // Converged — no new splits
+            if std::env::var("GLRMASK_PROFILE_COMPILE").map(|v| !v.is_empty() && v != "0").unwrap_or(false) {
+                eprintln!("[glrmask/debug][iterative_refine] states={} iterations={} final_blocks={}", n, iterations, num_blocks);
+            }
+            break;
+        }
+        num_blocks = next_label;
+        partition = new_partition;
+        iterations += 1;
+    }
+
+    // Build final blocks
+    let mut blocks = vec![Vec::new(); num_blocks as usize];
+    for (state_idx, &block_id) in partition.iter().enumerate() {
+        blocks[block_id as usize].push(state_idx as u32);
+    }
+    Some(blocks)
 }
 
 fn topology_prerefine_partition(dfa: &DFA, partition: &[u32]) -> TopologyPrerefine {
@@ -402,20 +479,89 @@ fn compute_tarjan_scc_ids(adj: &[Vec<usize>]) -> (Vec<u32>, u32) {
 }
 
 impl DFA {
+    /// Quick check: are all states unique by (transitions, finalizers)?
+    ///
+    /// If every state has a unique fingerprint, DFA minimization cannot merge
+    /// any states and can be skipped entirely. This runs in O(n) time with
+    /// hashing, much cheaper than the full minimize pipeline.
+    ///
+    /// Note: this ignores `possible_future_group_ids` because minimization
+    /// partitions by finalizers, not futures. Futures are recomputed after
+    /// minimization anyway.
+    pub(crate) fn quick_all_states_unique(&self) -> bool {
+        let n = self.states().len();
+        self.distinct_fingerprint_count() == n
+    }
+
+    /// Count distinct (transitions, finalizers) fingerprints via FxHasher.
+    /// This is a LOWER bound on the number of truly distinct states (hash
+    /// collisions can only reduce the count). Useful for predicting whether
+    /// minimize would produce any reduction.
+    pub(crate) fn distinct_fingerprint_count(&self) -> usize {
+        let n = self.states().len();
+        if n <= 1 {
+            return n;
+        }
+
+        let states = self.states();
+        let mut seen = FxHashSet::default();
+        seen.reserve(n);
+        for state in states {
+            let mut hasher = rustc_hash::FxHasher::default();
+            for (byte, &target) in state.transitions.iter() {
+                hasher.write_u8(byte);
+                hasher.write_u32(target);
+            }
+            hasher.write_u8(0xFF);
+            hasher.write_usize(state.transitions.len());
+            state.finalizers.hash(&mut hasher);
+            seen.insert(hasher.finish());
+        }
+
+        seen.len()
+    }
+
     /// Minimize this DFA using Hopcroft's algorithm.
     /// Returns a new, minimized DFA.  State 0 remains the start state.
     pub fn minimize(&self) -> DFA {
-        self.minimize_impl().0
+        self.minimize_impl(false).0
     }
 
     /// Minimize this DFA and return the mapping from original states to
     /// minimized states.  `mapping[old_state] = new_state`.
     /// Unreachable original states map to `u32::MAX`.
     pub fn minimize_with_state_mapping(&self) -> (DFA, Vec<u32>) {
-        self.minimize_impl()
+        self.minimize_impl(false)
     }
 
-    fn minimize_impl(&self) -> (DFA, Vec<u32>) {
+    /// Try fast iterative signature refinement to minimize this DFA.
+    /// Returns `None` if refinement doesn't converge within a few iterations
+    /// (indicating a deep DFA where minimize won't help much).
+    /// Does NOT clone the DFA until convergence is confirmed, so the
+    /// not-converged path is very cheap.
+    pub fn try_minimize_full_with_state_mapping(&self) -> Option<(DFA, Vec<u32>)> {
+        const MAX_REFINE_ITERATIONS: u32 = 6;
+
+        let n = self.states().len();
+        if n == 0 {
+            return Some((self.clone(), Vec::new()));
+        }
+        if n <= 1 {
+            let mut result = self.clone();
+            result.recompute_possible_futures();
+            return Some((result, vec![0]));
+        }
+
+        // Compute partition on the ORIGINAL DFA (read-only, no clone needed).
+        let (_, blocks) = partition_by_finalizers(self);
+        let blocks = iterative_signature_refine(self, blocks, MAX_REFINE_ITERATIONS)?;
+
+        // Convergence confirmed — now rebuild (this clones internally).
+        let (result, block_map) = self.rebuild_from_blocks_with_mapping(blocks);
+        Some((result, block_map))
+    }
+
+    fn minimize_impl(&self, force_hopcroft: bool) -> (DFA, Vec<u32>) {
         let orig_n = self.states().len();
         if orig_n == 0 {
             return (self.clone(), Vec::new());
@@ -436,9 +582,12 @@ impl DFA {
 
         match topology_prerefine_partition(&working, &partition) {
             TopologyPrerefine::AlreadyMinimal(blocks) => {
-                let (result, block_map) = working.rebuild_from_blocks_with_mapping(blocks);
-                let composed = compose_mappings(&unreachable_map, &block_map);
-                return (result, composed);
+                if !force_hopcroft {
+                    let (result, block_map) = working.rebuild_from_blocks_with_mapping(blocks);
+                    let composed = compose_mappings(&unreachable_map, &block_map);
+                    return (result, composed);
+                }
+                minimality_check_blocks = blocks;
             }
             TopologyPrerefine::Refined { blocks: refined_blocks, .. } => {
                 // If topology found the DFA is nearly minimal (>90% unique
@@ -446,7 +595,7 @@ impl DFA {
                 // expensive, skip the O(n·|Σ|·log n) minimize.
                 // For small DFAs (≤1000 states), Hopcroft is cheap and
                 // transitive merges can provide large reductions.
-                if n > 1000 && refined_blocks.len() > n * 9 / 10 {
+                if !force_hopcroft && n > 1000 && refined_blocks.len() > n * 9 / 10 {
                     working.recompute_possible_futures();
                     let identity: Vec<u32> = (0..n as u32).collect();
                     let composed = compose_mappings(&unreachable_map, &identity);

@@ -262,10 +262,11 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
             )
         };
         eprintln!(
-            "[glrmask/profile][l1] partition={} vocab_tokens={} tsids={} state_equiv_ms={:.3} token_identity_map_ms={:.3} id_map_ms={:.3} internal_vocab_ms={:.3} vocab_tree_build_ms={:.3} state_seed_ms={:.3} token_set_intern_ms={:.3} tsid_profile_merge_ms={:.3} tsid_profile_merge_before={} tsid_profile_merge_after={} vocab_tree_traversal_ms={:.3} direct_terminal_dwa_ms={:.3} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} terminal_build_ms={:.3} compact_ms={:.3} determinize=none minimize=none prune=none total_ms={:.3}{}",
+            "[glrmask/profile][l1] partition={} vocab_tokens={} tsids={} rep_states={} state_equiv_ms={:.3} token_identity_map_ms={:.3} id_map_ms={:.3} internal_vocab_ms={:.3} vocab_tree_build_ms={:.3} state_seed_ms={:.3} token_set_intern_ms={:.3} tsid_profile_merge_ms={:.3} tsid_profile_merge_before={} tsid_profile_merge_after={} vocab_tree_traversal_ms={:.3} direct_terminal_dwa_ms={:.3} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} terminal_build_ms={:.3} compact_ms={:.3} determinize=none minimize=none prune=none total_ms={:.3}{}",
             partition_label,
             vocab.entries.len(),
             id_map.num_tsids(),
+            id_map.tokenizer_states.representative_original_ids.len(),
             id_map_profile.state_equiv_ms,
             id_map_profile.token_identity_map_ms,
             id_map_ms,
@@ -448,13 +449,17 @@ fn build_l1_terminal_dwa(
     // This allows branchless dead-state lookups in the batched walk by
     // substituting sentinel_internal for dead_internal before indexing.
     let sentinel_internal = representative_states.len() as u32;
-    let mut rep_flat_trans = vec![dead_internal; (representative_states.len() + 1) * 256];
+    // Transposed layout: rep_flat_trans[byte * stride + state] instead of
+    // [state * 256 + byte]. When walking all targets for the same byte,
+    // accesses become sequential instead of stride-256, and each byte
+    // column (stride * 4 bytes) fits in L1 cache.
+    let stride = representative_states.len() + 1;
+    let mut rep_flat_trans = vec![dead_internal; stride * 256];
     for (internal_state, &rep_state) in representative_states.iter().enumerate() {
         let base = rep_state as usize * 256;
-        let out_base = internal_state * 256;
         for byte in 0..256usize {
             let next = flat_trans[base + byte];
-            rep_flat_trans[out_base + byte] = if next == dead {
+            rep_flat_trans[byte * stride + internal_state] = if next == dead {
                 dead_internal
             } else {
                 state_original_to_internal[next as usize]
@@ -536,10 +541,9 @@ fn build_l1_terminal_dwa(
         let mut unique_targets: FxHashMap<(u8, u32), ()> = FxHashMap::default();
         for (&start_state, _) in &states_to_initial_tsids {
             let start_internal = state_original_to_internal[start_state as usize];
-            let base = start_internal as usize * 256;
             for (byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
                 if token_ids.is_empty() { continue; }
-                let target_internal = rep_flat_trans[base + byte];
+                let target_internal = rep_flat_trans[byte * stride + start_internal as usize];
                 if target_internal != dead_internal {
                     unique_targets
                         .entry((byte as u8, target_internal))
@@ -580,9 +584,8 @@ fn build_l1_terminal_dwa(
         for &(_, target) in &unique_walk_keys {
             self_loop_masks.entry(target).or_insert_with(|| {
                 let mut mask = [0u64; 4];
-                let base = target as usize * 256;
                 for byte in 0..=255u8 {
-                    if rep_flat_trans[base + byte as usize] == target {
+                    if rep_flat_trans[byte as usize * stride + target as usize] == target {
                         mask[byte as usize >> 6] |= 1u64 << (byte & 63);
                     }
                 }
@@ -672,12 +675,13 @@ fn build_l1_terminal_dwa(
                         for byte_pos in lcp_len..suffix_bytes.len() {
                             let b = suffix_bytes[byte_pos];
                             let base = byte_pos * num_walk;
+                            let col_base = b as usize * stride;
                             for t in 0..num_walk {
                                 let prev_state = suffix_states[base + t];
                                 // Sentinel substitution: dead_internal → sentinel row
                                 // (returns dead_internal), avoiding bounds issues.
                                 let safe = if prev_state == dead_internal { sentinel_internal } else { prev_state };
-                                let next_state = rep_flat_trans[safe as usize * 256 + b as usize];
+                                let next_state = rep_flat_trans[col_base + safe as usize];
                                 suffix_states.push(next_state);
                                 local_transition_steps += (prev_state != dead_internal) as u64;
                             }
@@ -865,7 +869,7 @@ fn build_l1_terminal_dwa(
 
                 for (byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
                     if token_ids.is_empty() { continue; }
-                    let target_internal = rep_flat_trans[start_internal as usize * 256 + byte];
+                    let target_internal = rep_flat_trans[byte * stride + start_internal as usize];
                     if target_internal == dead_internal { continue; }
                     if let Some(results) = indexed_walk_cache.get(&(byte as u8, target_internal)) {
                         for &(end_rep_idx, ranges, entry_hash, entry_mc) in results {

@@ -94,7 +94,7 @@ impl BitSet {
         out
     }
 
-    fn intersect_with(&mut self, other: &BitSet) {
+    pub(crate) fn intersect_with(&mut self, other: &BitSet) {
         self.assert_same_len(other);
         for (lhs, rhs) in self.words.iter_mut().zip(&other.words) {
             *lhs &= *rhs;

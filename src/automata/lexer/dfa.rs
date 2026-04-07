@@ -183,7 +183,12 @@ impl DFA {
             entry.possible_future_group_ids = ids;
         }
     }
-
+    /// Mask all states' possible_future_group_ids with the given bitset.
+    pub(crate) fn mask_possible_futures(&mut self, mask: &BitSet) {
+        for state in &mut self.states {
+            state.possible_future_group_ids.intersect_with(mask);
+        }
+    }
     /// Create a clone of an existing state (transitions, finalizers,
     /// possible_future_group_ids) and return the new state's id.
     pub(super) fn clone_state(&mut self, source: u32) -> u32 {

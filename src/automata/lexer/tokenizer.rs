@@ -237,18 +237,127 @@ impl Tokenizer {
     /// merge). Returns `(simplified_tokenizer, original_to_simplified_state_map)`.
     /// Unreachable original states map to `u32::MAX`.
     pub fn simplify_for_terminals(&self, active_terminals: &[bool]) -> (Tokenizer, Vec<u32>) {
-        let mut dfa = self.dfa.clone();
+        let compile_profile = std::env::var("GLRMASK_PROFILE_COMPILE")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false);
 
-        // Clear finalizer bits for non-active terminals.
-        for state in dfa.states_mut() {
-            for (terminal_id, active) in active_terminals.iter().enumerate() {
-                if !active && terminal_id < state.finalizers.len() {
-                    state.finalizers.clear(terminal_id);
-                }
+        let t_start = std::time::Instant::now();
+        let mut dfa = self.dfa.clone();
+        let t_clone = t_start.elapsed();
+
+        // Build active-groups BitSet for masking possible_future_group_ids.
+        let num_groups = self.num_terminals as usize;
+        let mut active_bitset = crate::ds::bitset::BitSet::new(num_groups);
+        for (tid, &active) in active_terminals.iter().enumerate() {
+            if active {
+                active_bitset.set(tid);
             }
         }
 
-        let (minimized, state_mapping) = dfa.minimize_with_state_mapping();
+        // Clear finalizer bits for non-active terminals.
+        let mut any_cleared = false;
+        for state in dfa.states_mut() {
+            for (terminal_id, active) in active_terminals.iter().enumerate() {
+                if !active && terminal_id < state.finalizers.len() && state.finalizers.contains(terminal_id) {
+                    state.finalizers.clear(terminal_id);
+                    any_cleared = true;
+                }
+            }
+        }
+        let t_clear = t_start.elapsed();
+
+        if !any_cleared {
+            // No finalizer bits changed — possible_futures are already correct.
+            let n = dfa.num_states();
+            let identity: Vec<u32> = (0..n as u32).collect();
+            if compile_profile {
+                eprintln!(
+                    "[glrmask/profile][simplify_detail] states={} no_bits_cleared clone_ms={:.1} clear_ms={:.1}",
+                    n, t_clone.as_secs_f64()*1000.0, (t_clear - t_clone).as_secs_f64()*1000.0,
+                );
+            }
+            return (Tokenizer { dfa, num_terminals: self.num_terminals }, identity);
+        }
+
+        let pre_minimize_states = dfa.num_states();
+        
+        // For large DFAs, check if minimize would early-return with zero
+        // reduction. minimize_impl skips Hopcroft when topology_prerefine
+        // finds >90% of blocks are unique. We can predict this cheaply using
+        // fingerprints: if >90% of (transitions, finalizers) fingerprints are
+        // distinct, minimize will certainly early-return unchanged.
+        //
+        // EXCEPTION: when the number of active groups is very small (≤16),
+        // many groups were cleared and iterative refinement can discover deep
+        // equivalences that fingerprints miss. With few groups the reduction
+        // is typically massive (49K→30), justifying the minimize cost.
+        let num_active = active_terminals.iter().filter(|&&b| b).count();
+        if pre_minimize_states > 1000 && num_active > 16 {
+            let distinct = dfa.distinct_fingerprint_count();
+            let n = pre_minimize_states;
+            if distinct > n * 9 / 10 {
+                // minimize would early-return with no reduction. Skip the
+                // expensive clone + SCC + partition work.
+                // Instead of recompute_possible_futures (which does full SCC),
+                // just mask existing possible_futures with active_groups.
+                // This is correct because clearing finalizer bits doesn't
+                // change transitions, so active groups' reachability is
+                // unchanged.
+                dfa.mask_possible_futures(&active_bitset);
+                let identity: Vec<u32> = (0..n as u32).collect();
+                if compile_profile {
+                    let total = t_start.elapsed();
+                    eprintln!(
+                        "[glrmask/profile][simplify_detail] states={} active={} clone_ms={:.1} clear_ms={:.1} skip_minimize(distinct={}/{}) total_ms={:.1}",
+                        n, num_active, t_clone.as_secs_f64()*1000.0, (t_clear - t_clone).as_secs_f64()*1000.0,
+                        distinct, n, total.as_secs_f64()*1000.0,
+                    );
+                }
+                return (Tokenizer { dfa, num_terminals: self.num_terminals }, identity);
+            }
+        }
+
+        let t_pre_min = std::time::Instant::now();
+        // When few groups are active, try fast iterative refinement to
+        // discover deep equivalences. Falls back to masking if the DFA
+        // has deep chain structure (doesn't converge quickly).
+        let (minimized, state_mapping) = if num_active <= 16 {
+            match dfa.try_minimize_full_with_state_mapping() {
+                Some(result) => result,
+                None => {
+                    // Iterative refinement didn't converge — fall back to masking
+                    dfa.mask_possible_futures(&active_bitset);
+                    let n = pre_minimize_states;
+                    let identity: Vec<u32> = (0..n as u32).collect();
+                    if compile_profile {
+                        let total = t_start.elapsed();
+                        eprintln!(
+                            "[glrmask/profile][simplify_detail] states={} active={} clone_ms={:.1} clear_ms={:.1} minimize_bail_ms={:.1} total_ms={:.1}",
+                            n, num_active, t_clone.as_secs_f64()*1000.0, (t_clear - t_clone).as_secs_f64()*1000.0,
+                            t_pre_min.elapsed().as_secs_f64()*1000.0, total.as_secs_f64()*1000.0,
+                        );
+                    }
+                    return (Tokenizer { dfa, num_terminals: self.num_terminals }, identity);
+                }
+            }
+        } else {
+            dfa.minimize_with_state_mapping()
+        };
+        let t_minimize = t_pre_min.elapsed();
+        let post_minimize_states = minimized.num_states();
+        
+        if compile_profile {
+            let total = t_start.elapsed();
+            eprintln!(
+                "[glrmask/profile][simplify_detail] states={} active={} clone_ms={:.1} clear_ms={:.1} minimize_ms={:.1} total_ms={:.1} pre={} post={} reduction={}",
+                pre_minimize_states, num_active,
+                t_clone.as_secs_f64()*1000.0,
+                (t_clear - t_clone).as_secs_f64()*1000.0,
+                t_minimize.as_secs_f64()*1000.0,
+                total.as_secs_f64()*1000.0,
+                pre_minimize_states, post_minimize_states, pre_minimize_states - post_minimize_states,
+            );
+        }
 
         let simplified = Tokenizer {
             dfa: minimized,
