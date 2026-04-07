@@ -306,20 +306,17 @@ fn advance_terminal_match_profiled(
 ///
 /// Returns `Some(Ok(()))` on success, `Some(Err(...))` on rejection,
 /// or `None` to fall through to the general path.
+///
+/// `exec_result` is the pre-computed tokenizer output for the single state.
 fn commit_bytes_fast_path(
     constraint: &Constraint,
     state: &mut BTreeMap<u32, ParserGSS>,
     bytes: &[u8],
+    tokenizer_state: u32,
+    exec_result: &TokenizerExecResult,
 ) -> Option<Result<(), String>> {
-    if bytes.is_empty() || state.len() != 1 {
-        return None;
-    }
-
-    let (&tokenizer_state, gss) = state.iter().next().unwrap();
+    let gss = state.values().next().unwrap();
     let ignore_terminal = constraint.ignore_terminal;
-
-    // Execute tokenizer once
-    let exec_result = constraint.tokenizer.execute_from_state(bytes, tokenizer_state);
 
     // Find exactly 1 non-ignored, actionable terminal match consuming all bytes
     let mut sole_terminal: Option<u32> = None;
@@ -434,19 +431,24 @@ fn commit_bytes_impl(
         return Ok(());
     }
 
-    // Try the fast path first (single tokenizer state, single terminal match)
-    if let Some(result) = commit_bytes_fast_path(constraint, state, bytes) {
-        return result;
-    }
-
-    bufs.clear_all();
-
     let ignore_terminal = constraint.ignore_terminal;
 
-    // Inline InitialCommitScan logic using reusable buffers
-    for (&tokenizer_state, parser_gss) in state.iter() {
-        let actionable_terminals = ActionableTerminals::from_gss(constraint, parser_gss);
+    // Single tokenizer state: execute tokenizer ONCE, try fast path, reuse result
+    if state.len() == 1 {
+        let (&tokenizer_state, _) = state.iter().next().unwrap();
         let exec_result = constraint.tokenizer.execute_from_state(bytes, tokenizer_state);
+
+        // Try fast path with pre-computed exec_result
+        if let Some(result) = commit_bytes_fast_path(
+            constraint, state, bytes, tokenizer_state, &exec_result,
+        ) {
+            return result;
+        }
+
+        // Fast path failed — build scan data from already-computed exec_result
+        bufs.clear_all();
+        let parser_gss = state.values().next().unwrap();
+        let actionable_terminals = ActionableTerminals::from_gss(constraint, parser_gss);
 
         if let Some(end_state) = exec_result.end_state {
             bufs.remapped_tokenizer_states.insert(tokenizer_state, end_state);
@@ -470,6 +472,36 @@ fn commit_bytes_impl(
         }
 
         bufs.exec_results.insert(tokenizer_state, exec_result);
+    } else {
+        bufs.clear_all();
+
+        for (&tokenizer_state, parser_gss) in state.iter() {
+            let actionable_terminals = ActionableTerminals::from_gss(constraint, parser_gss);
+            let exec_result = constraint.tokenizer.execute_from_state(bytes, tokenizer_state);
+
+            if let Some(end_state) = exec_result.end_state {
+                bufs.remapped_tokenizer_states.insert(tokenizer_state, end_state);
+            }
+
+            for matched in &exec_result.matches {
+                if is_ignored_terminal(ignore_terminal, matched.id)
+                    || !is_actionable_terminal(
+                        actionable_terminals.as_ref(),
+                        constraint,
+                        matched.id,
+                    )
+                {
+                    continue;
+                }
+
+                bufs.accepted_terminals
+                    .entry(tokenizer_state)
+                    .or_default()
+                    .insert(matched.id);
+            }
+
+            bufs.exec_results.insert(tokenizer_state, exec_result);
+        }
     }
 
     prune_initial_states(
