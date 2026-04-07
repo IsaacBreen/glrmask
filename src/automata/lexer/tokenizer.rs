@@ -319,25 +319,24 @@ impl Tokenizer {
 
         let t_pre_min = std::time::Instant::now();
         // When few groups are active, try fast iterative refinement to
-        // discover deep equivalences. Falls back to masking if the DFA
-        // has deep chain structure (doesn't converge quickly).
-        let (minimized, state_mapping) = if num_active <= 16 {
+        // discover deep equivalences. For very large DFAs (>20K states),
+        // iterative refinement rarely converges in the 6-iteration budget
+        // due to deep chain structure, so go straight to Hopcroft minimize
+        // which converges regardless. For smaller DFAs, try iterative first
+        // (fast when it converges) and fall through to Hopcroft if it doesn't.
+        let (minimized, state_mapping) = if num_active <= 16 && pre_minimize_states <= 20_000 {
             match dfa.try_minimize_full_with_state_mapping() {
                 Some(result) => result,
                 None => {
-                    // Iterative refinement didn't converge — fall back to masking
-                    dfa.mask_possible_futures(&active_bitset);
-                    let n = pre_minimize_states;
-                    let identity: Vec<u32> = (0..n as u32).collect();
+                    // Iterative refinement didn't converge — use full minimize.
                     if compile_profile {
-                        let total = t_start.elapsed();
                         eprintln!(
-                            "[glrmask/profile][simplify_detail] states={} active={} clone_ms={:.1} clear_ms={:.1} minimize_bail_ms={:.1} total_ms={:.1}",
-                            n, num_active, t_clone.as_secs_f64()*1000.0, (t_clear - t_clone).as_secs_f64()*1000.0,
-                            t_pre_min.elapsed().as_secs_f64()*1000.0, total.as_secs_f64()*1000.0,
+                            "[glrmask/profile][simplify_detail] states={} active={} iterative_bail_ms={:.1} falling_through_to_hopcroft",
+                            pre_minimize_states, num_active,
+                            t_pre_min.elapsed().as_secs_f64()*1000.0,
                         );
                     }
-                    return (Tokenizer { dfa, num_terminals: self.num_terminals }, identity);
+                    dfa.minimize_with_state_mapping()
                 }
             }
         } else {
