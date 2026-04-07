@@ -467,7 +467,13 @@ fn prepare_grammar_transforms_impl(
     let inline_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
     let t3 = std::time::Instant::now();
-    normalized.rules = merge_identical_nonterminals(&normalized.rules, normalized.start);
+    loop {
+        let prev_len = normalized.rules.len();
+        normalized.rules = merge_identical_nonterminals(&normalized.rules, normalized.start);
+        if normalized.rules.len() == prev_len {
+            break;
+        }
+    }
     let merge1_ms = t3.elapsed().as_secs_f64() * 1000.0;
 
     let t4 = std::time::Instant::now();
@@ -475,7 +481,13 @@ fn prepare_grammar_transforms_impl(
     let bound_ms = t4.elapsed().as_secs_f64() * 1000.0;
 
     let t5 = std::time::Instant::now();
-    normalized.rules = merge_identical_nonterminals(&normalized.rules, normalized.start);
+    loop {
+        let prev_len = normalized.rules.len();
+        normalized.rules = merge_identical_nonterminals(&normalized.rules, normalized.start);
+        if normalized.rules.len() == prev_len {
+            break;
+        }
+    }
     let merge2_ms = t5.elapsed().as_secs_f64() * 1000.0;
 
     let t6 = std::time::Instant::now();

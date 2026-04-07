@@ -878,14 +878,38 @@ pub(crate) fn merge_identical_nonterminals(
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
+    // Sentinel for normalizing self-references when comparing isomorphic NTs.
+    let self_sentinel: NonterminalID = u32::MAX;
+
     let mut rhs_by_lhs = BTreeMap::<NonterminalID, BTreeSet<Vec<Symbol>>>::new();
     for rule in rules {
         rhs_by_lhs.entry(rule.lhs).or_default().insert(rule.rhs.clone());
     }
 
-    let compute_hash = |rhs_set: &BTreeSet<Vec<Symbol>>| -> u64 {
+    // Normalize a production set by replacing self-references with a sentinel.
+    // This allows detecting isomorphic self-referencing nonterminals like:
+    //   NT_A: { [T1], [NT_A, T1] }  and  NT_B: { [T1], [NT_B, T1] }
+    let normalize_rhs_set =
+        |nt: NonterminalID, rhs_set: &BTreeSet<Vec<Symbol>>| -> BTreeSet<Vec<Symbol>> {
+            rhs_set
+                .iter()
+                .map(|rhs| {
+                    rhs.iter()
+                        .map(|sym| match sym {
+                            Symbol::Nonterminal(n) if *n == nt => {
+                                Symbol::Nonterminal(self_sentinel)
+                            }
+                            other => other.clone(),
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+
+    let compute_hash = |nt: NonterminalID, rhs_set: &BTreeSet<Vec<Symbol>>| -> u64 {
+        let normalized = normalize_rhs_set(nt, rhs_set);
         let mut hasher = DefaultHasher::new();
-        for rhs in rhs_set {
+        for rhs in &normalized {
             rhs.hash(&mut hasher);
         }
         hasher.finish()
@@ -893,7 +917,10 @@ pub(crate) fn merge_identical_nonterminals(
 
     let mut hash_buckets = BTreeMap::<u64, Vec<NonterminalID>>::new();
     for (&lhs, rhs_set) in &rhs_by_lhs {
-        hash_buckets.entry(compute_hash(rhs_set)).or_default().push(lhs);
+        hash_buckets
+            .entry(compute_hash(lhs, rhs_set))
+            .or_default()
+            .push(lhs);
     }
 
     let mut merge_map = BTreeMap::<NonterminalID, NonterminalID>::new();
@@ -905,11 +932,13 @@ pub(crate) fn merge_identical_nonterminals(
             if merge_map.contains_key(&nts[i]) {
                 continue;
             }
+            let norm_i = normalize_rhs_set(nts[i], &rhs_by_lhs[&nts[i]]);
             for j in (i + 1)..nts.len() {
                 if merge_map.contains_key(&nts[j]) {
                     continue;
                 }
-                if rhs_by_lhs.get(&nts[i]) == rhs_by_lhs.get(&nts[j]) {
+                let norm_j = normalize_rhs_set(nts[j], &rhs_by_lhs[&nts[j]]);
+                if norm_i == norm_j {
                     let (keep, remove) = if nts[j] == start {
                         (nts[j], nts[i])
                     } else {
