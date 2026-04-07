@@ -13,7 +13,7 @@ use crate::compiler::glr::parser::{
 };
 use crate::compiler::glr::table::Action;
 use crate::runtime::constraint::Constraint;
-use crate::runtime::state::ConstraintState;
+use crate::runtime::state::{ConstraintState, CommitBuffers};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 type ParserStatesByTokenizer = FxHashMap<u32, ParserGSS>;
@@ -428,6 +428,7 @@ fn commit_bytes_impl(
     constraint: &Constraint,
     state: &mut BTreeMap<u32, ParserGSS>,
     bytes: &[u8],
+    bufs: &mut CommitBuffers,
 ) -> Result<(), String> {
     if bytes.is_empty() {
         return Ok(());
@@ -438,18 +439,47 @@ fn commit_bytes_impl(
         return result;
     }
 
+    bufs.clear_all();
+
     let ignore_terminal = constraint.ignore_terminal;
-    let mut initial_scan = InitialCommitScan::collect(constraint, state, bytes);
+
+    // Inline InitialCommitScan logic using reusable buffers
+    for (&tokenizer_state, parser_gss) in state.iter() {
+        let actionable_terminals = ActionableTerminals::from_gss(constraint, parser_gss);
+        let exec_result = constraint.tokenizer.execute_from_state(bytes, tokenizer_state);
+
+        if let Some(end_state) = exec_result.end_state {
+            bufs.remapped_tokenizer_states.insert(tokenizer_state, end_state);
+        }
+
+        for matched in &exec_result.matches {
+            if is_ignored_terminal(ignore_terminal, matched.id)
+                || !is_actionable_terminal(
+                    actionable_terminals.as_ref(),
+                    constraint,
+                    matched.id,
+                )
+            {
+                continue;
+            }
+
+            bufs.accepted_terminals
+                .entry(tokenizer_state)
+                .or_default()
+                .insert(matched.id);
+        }
+
+        bufs.exec_results.insert(tokenizer_state, exec_result);
+    }
+
     prune_initial_states(
         state,
-        &initial_scan.accepted_terminals,
-        &initial_scan.remapped_tokenizer_states,
+        &bufs.accepted_terminals,
+        &bufs.remapped_tokenizer_states,
     );
 
     state.retain(|_, parser_state| !parser_state.is_empty());
 
-    let mut pending_state = ParserStatesByTokenizer::default();
-    let mut advance_result_cache = AdvanceResultCache::default();
     let mut processing_queue: Vec<ParserStatesByTokenizer> =
         (0..=bytes.len()).map(|_| ParserStatesByTokenizer::default()).collect();
     processing_queue[0] = std::mem::take(state).into_iter().collect();
@@ -465,7 +495,7 @@ fn commit_bytes_impl(
         for (tokenizer_state, gss_at_offset) in states_to_process {
             let actionable_terminals = ActionableTerminals::from_gss(constraint, &gss_at_offset);
             let exec_result = if offset == 0 {
-                initial_scan.take_exec_result(tokenizer_state).unwrap_or_else(|| {
+                bufs.exec_results.remove(&tokenizer_state).unwrap_or_else(|| {
                     constraint
                         .tokenizer
                         .execute_from_state(&bytes[offset..], tokenizer_state)
@@ -476,8 +506,8 @@ fn commit_bytes_impl(
                     .execute_from_state(&bytes[offset..], tokenizer_state)
             };
 
-            let mut seen_matches = FxHashSet::default();
-            let mut terminal_result_cache = FxHashMap::<u32, ParserGSS>::default();
+            bufs.seen_matches.clear();
+            bufs.terminal_result_cache.clear();
 
             for matched in &exec_result.matches {
                 let new_offset = offset + matched.width;
@@ -492,14 +522,14 @@ fn commit_bytes_impl(
                 {
                     continue;
                 }
-                if !seen_matches.insert((matched.width, matched.id)) {
+                if !bufs.seen_matches.insert((matched.width, matched.id)) {
                     continue;
                 }
 
                 if ignored {
                     queue_parser_state(
                         &mut processing_queue,
-                        &mut pending_state,
+                        &mut bufs.pending_state,
                         new_offset,
                         bytes.len(),
                         constraint.tokenizer.initial_state(),
@@ -513,15 +543,15 @@ fn commit_bytes_impl(
                     &gss_at_offset,
                     matched.id,
                     &exec_result,
-                    &mut advance_result_cache,
-                    &mut terminal_result_cache,
+                    &mut bufs.advance_result_cache,
+                    &mut bufs.terminal_result_cache,
                 ) else {
                     continue;
                 };
 
                 queue_parser_state(
                     &mut processing_queue,
-                    &mut pending_state,
+                    &mut bufs.pending_state,
                     new_offset,
                     bytes.len(),
                     constraint.tokenizer.initial_state(),
@@ -538,7 +568,7 @@ fn commit_bytes_impl(
 
                 queue_parser_state(
                     &mut processing_queue,
-                    &mut pending_state,
+                    &mut bufs.pending_state,
                     bytes.len(),
                     bytes.len(),
                     end_state,
@@ -548,7 +578,7 @@ fn commit_bytes_impl(
         }
     }
 
-    let mut new_state: BTreeMap<u32, ParserGSS> = pending_state.into_iter().collect();
+    let mut new_state: BTreeMap<u32, ParserGSS> = bufs.pending_state.drain().collect();
     for parser_state in new_state.values_mut() {
         *parser_state = parser_state.fuse(Some(1));
     }
@@ -730,7 +760,7 @@ impl<'a> ConstraintState<'a> {
             .ok_or_else(|| {
                 format!("commit_token: token_id {token_id} not in vocabulary")
             })?;
-        commit_bytes_impl(constraint, &mut self.state, bytes)
+        commit_bytes_impl(constraint, &mut self.state, bytes, &mut self.buffers)
     }
 
     /// Like commit_token but returns profiling stats.
@@ -748,7 +778,7 @@ impl<'a> ConstraintState<'a> {
     }
 
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
-        commit_bytes_impl(self.constraint, &mut self.state, bytes)
+        commit_bytes_impl(self.constraint, &mut self.state, bytes, &mut self.buffers)
     }
 
     pub fn commit_tokens(&mut self, tokens: &[u32]) -> Result<(), String> {
