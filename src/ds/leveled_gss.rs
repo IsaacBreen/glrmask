@@ -10,7 +10,188 @@ pub trait Merge: Clone {
     fn merge(&self, other: &Self) -> Self;
 }
 
-type Children<T, N> = IHashMap<T, OrdMap<u32, Arc<N>>>;
+/// A map optimized for small sizes (≤4 entries). Uses inline SmallVec storage
+/// for small maps and falls back to im::HashMap for larger ones.
+/// Drop-in replacement for im::HashMap in GSS children maps.
+#[derive(Clone)]
+enum CompactMap<K: Clone + Eq + Hash, V: Clone> {
+    Inline(SmallVec<[(K, V); 4]>),
+    Large(IHashMap<K, V>),
+}
+
+impl<K: Clone + Eq + Hash, V: Clone> CompactMap<K, V> {
+    #[inline(always)]
+    fn new() -> Self {
+        CompactMap::Inline(SmallVec::new())
+    }
+
+    #[inline(always)]
+    fn unit(key: K, value: V) -> Self {
+        let mut sv = SmallVec::new();
+        sv.push((key, value));
+        CompactMap::Inline(sv)
+    }
+
+    #[inline(always)]
+    fn len(&self) -> usize {
+        match self {
+            CompactMap::Inline(sv) => sv.len(),
+            CompactMap::Large(m) => m.len(),
+        }
+    }
+
+    #[inline(always)]
+    fn is_empty(&self) -> bool {
+        match self {
+            CompactMap::Inline(sv) => sv.is_empty(),
+            CompactMap::Large(m) => m.is_empty(),
+        }
+    }
+
+    #[inline(always)]
+    fn get(&self, key: &K) -> Option<&V> {
+        match self {
+            CompactMap::Inline(sv) => sv.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+            CompactMap::Large(m) => m.get(key),
+        }
+    }
+
+    fn insert(&mut self, key: K, value: V) -> Option<V> {
+        match self {
+            CompactMap::Inline(sv) => {
+                for entry in sv.iter_mut() {
+                    if entry.0 == key {
+                        let old = std::mem::replace(&mut entry.1, value);
+                        return Some(old);
+                    }
+                }
+                if sv.len() < 4 {
+                    sv.push((key, value));
+                    None
+                } else {
+                    // Promote to Large
+                    let mut m = IHashMap::new();
+                    for (k, v) in sv.drain(..) {
+                        m.insert(k, v);
+                    }
+                    let result = m.insert(key, value);
+                    *self = CompactMap::Large(m);
+                    result
+                }
+            }
+            CompactMap::Large(m) => m.insert(key, value),
+        }
+    }
+
+    #[inline(always)]
+    fn contains_key(&self, key: &K) -> bool {
+        match self {
+            CompactMap::Inline(sv) => sv.iter().any(|(k, _)| k == key),
+            CompactMap::Large(m) => m.contains_key(key),
+        }
+    }
+
+    fn keys(&self) -> CompactMapKeys<'_, K, V> {
+        match self {
+            CompactMap::Inline(sv) => CompactMapKeys::Inline(sv.iter()),
+            CompactMap::Large(m) => CompactMapKeys::Large(m.keys()),
+        }
+    }
+
+    fn ptr_eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (CompactMap::Large(a), CompactMap::Large(b)) => a.ptr_eq(b),
+            _ => false,
+        }
+    }
+
+    fn values(&self) -> CompactMapValues<'_, K, V> {
+        match self {
+            CompactMap::Inline(sv) => CompactMapValues::Inline(sv.iter()),
+            CompactMap::Large(m) => CompactMapValues::Large(m.values()),
+        }
+    }
+
+    fn iter(&self) -> CompactMapIter<'_, K, V> {
+        match self {
+            CompactMap::Inline(sv) => CompactMapIter::Inline(sv.iter()),
+            CompactMap::Large(m) => CompactMapIter::Large(m.iter()),
+        }
+    }
+}
+
+enum CompactMapKeys<'a, K, V> {
+    Inline(std::slice::Iter<'a, (K, V)>),
+    Large(im::hashmap::Keys<'a, K, V>),
+}
+
+impl<'a, K: Clone, V> Iterator for CompactMapKeys<'a, K, V> {
+    type Item = &'a K;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            CompactMapKeys::Inline(it) => it.next().map(|(k, _)| k),
+            CompactMapKeys::Large(it) => it.next(),
+        }
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            CompactMapKeys::Inline(it) => it.size_hint(),
+            CompactMapKeys::Large(it) => it.size_hint(),
+        }
+    }
+}
+
+enum CompactMapValues<'a, K, V> {
+    Inline(std::slice::Iter<'a, (K, V)>),
+    Large(im::hashmap::Values<'a, K, V>),
+}
+
+impl<'a, K, V> Iterator for CompactMapValues<'a, K, V> {
+    type Item = &'a V;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            CompactMapValues::Inline(it) => it.next().map(|(_, v)| v),
+            CompactMapValues::Large(it) => it.next(),
+        }
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            CompactMapValues::Inline(it) => it.size_hint(),
+            CompactMapValues::Large(it) => it.size_hint(),
+        }
+    }
+}
+
+enum CompactMapIter<'a, K, V> {
+    Inline(std::slice::Iter<'a, (K, V)>),
+    Large(im::hashmap::Iter<'a, K, V>),
+}
+
+impl<'a, K: Clone, V: Clone> Iterator for CompactMapIter<'a, K, V> {
+    type Item = (&'a K, &'a V);
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            CompactMapIter::Inline(it) => it.next().map(|(k, v)| (k, v)),
+            CompactMapIter::Large(it) => it.next(),
+        }
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            CompactMapIter::Inline(it) => it.size_hint(),
+            CompactMapIter::Large(it) => it.size_hint(),
+        }
+    }
+}
+
+impl<'a, K: Clone + Eq + Hash, V: Clone> IntoIterator for &'a CompactMap<K, V> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = CompactMapIter<'a, K, V>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+type Children<T, N> = CompactMap<T, OrdMap<u32, Arc<N>>>;
 
 #[derive(Clone)]
 enum Lower<T: Clone + Eq + Hash> {
@@ -370,7 +551,7 @@ where
     T: Clone + Eq + Hash,
     A: Merge + Clone + Eq + Hash,
 {
-    new_branch(IHashMap::new(), None)
+    new_branch(CompactMap::new(), None)
 }
 
 #[cfg(test)]
@@ -389,7 +570,7 @@ fn filter_lower<T: Clone + Eq + Hash>(
 
     let keep_empty = node.empty() && current_depth >= min_d;
 
-    let mut new_children: Children<T, Lower<T>> = IHashMap::new();
+    let mut new_children: Children<T, Lower<T>> = CompactMap::new();
     let mut children_identical = true;
 
     if current_depth < max_d {
@@ -456,7 +637,7 @@ where
             let keep_empty = b.empty.is_some() && current_depth >= min_d;
             let new_empty = if keep_empty { b.empty.clone() } else { None };
 
-            let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
+            let mut new_children: Children<T, Upper<T, A>> = CompactMap::new();
             let mut children_identical = true;
             if current_depth < max_d {
                 for (v, kids) in b.children.iter() {
@@ -504,7 +685,7 @@ where
         Upper::Interface(i) => {
             let keep_empty = i.inner.empty() && current_depth >= min_d;
 
-            let mut new_children: Children<T, Lower<T>> = IHashMap::new();
+            let mut new_children: Children<T, Lower<T>> = CompactMap::new();
             let mut children_identical = true;
             if current_depth < max_d {
                 for (v, kids) in i.inner.children().iter() {
@@ -564,7 +745,7 @@ fn truncate_lower<T: Clone + Eq + Hash>(
 
     if current_depth == max_len {
         let res = if node.empty() || !node.children_is_empty() {
-            Some(new_lower(IHashMap::new(), true))
+            Some(new_lower(CompactMap::new(), true))
         } else {
             None
         };
@@ -572,7 +753,7 @@ fn truncate_lower<T: Clone + Eq + Hash>(
         return res;
     }
 
-    let mut new_children: Children<T, Lower<T>> = IHashMap::new();
+    let mut new_children: Children<T, Lower<T>> = CompactMap::new();
     let mut children_identical = true;
 
     for (v, kids) in node.children_ref().iter() {
@@ -631,7 +812,7 @@ where
             inner: node.clone(),
         };
         let res = if let Some(acc) = sub_gss.reduce_acc() {
-            let terminal_lower = new_lower(IHashMap::new(), true);
+            let terminal_lower = new_lower(CompactMap::new(), true);
             Some(new_interface(terminal_lower, acc))
         } else {
             None
@@ -643,7 +824,7 @@ where
     let res = match &**node {
         Upper::Branch(b) => {
             let new_empty = b.empty.clone();
-            let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
+            let mut new_children: Children<T, Upper<T, A>> = CompactMap::new();
             let mut children_identical = true;
 
             for (v, kids) in b.children.iter() {
@@ -779,7 +960,7 @@ where
     T: Clone + Eq + Hash,
     A: Merge + Clone + Eq + Hash,
 {
-    let mut children: Children<T, Upper<T, A>> = IHashMap::new();
+    let mut children: Children<T, Upper<T, A>> = CompactMap::new();
     for (v, kids) in it.inner.children_ref().iter() {
         let mut v_map: OrdMap<u32, Arc<Upper<T, A>>> = OrdMap::new();
         for lchild in kids.values() {
@@ -877,7 +1058,7 @@ where
 
         if !has_children {
             if let Some(empty) = &b.empty {
-                let lower_root = new_lower(IHashMap::new(), true);
+                let lower_root = new_lower(CompactMap::new(), true);
                 return new_interface(lower_root, empty.clone());
             }
             return node.clone();
@@ -897,7 +1078,7 @@ where
         if accs.len() <= 1 {
             if let Some(the_acc) = accs.into_iter().next() {
                 
-                let mut l_children: Children<T, Lower<T>> = IHashMap::new();
+                let mut l_children: Children<T, Lower<T>> = CompactMap::new();
                 for (v, kids) in b.children.iter() {
                     let mut v_map: OrdMap<u32, Arc<Lower<T>>> = OrdMap::new();
                     for child in kids.values() {
@@ -1197,7 +1378,7 @@ where
         }
     }
 
-    let mut new_children: Children<T, Lower<T>> = IHashMap::new();
+    let mut new_children: Children<T, Lower<T>> = CompactMap::new();
     for (v, items) in edges_raw {
         let mut ord: OrdMap<u32, Arc<Lower<T>>> = OrdMap::new();
         for (_, carc) in items {
@@ -1281,7 +1462,7 @@ where
                 }
             }
 
-            let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
+            let mut new_children: Children<T, Upper<T, A>> = CompactMap::new();
             for (v, items) in &edges_raw {
                 let mut ord: OrdMap<u32, Arc<Upper<T, A>>> = OrdMap::new();
                 for (_, carc) in items {
@@ -1532,10 +1713,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         fn build_lower<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
             d: &StdHashMap<T, Entry<T, A>>,
         ) -> Arc<Lower<T>> {
-            let mut l_children: Children<T, Lower<T>> = IHashMap::new();
+            let mut l_children: Children<T, Lower<T>> = CompactMap::new();
             for (v, e) in d.iter() {
                 let sub_children = if e.sub.is_empty() {
-                    IHashMap::new()
+                    CompactMap::new()
                 } else {
                     build_lower(&e.sub).children_ref().clone()
                 };
@@ -1549,13 +1730,13 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             d: &StdHashMap<T, Entry<T, A>>,
             root_empty: Option<A>,
         ) -> Arc<Upper<T, A>> {
-            let mut children: Children<T, Upper<T, A>> = IHashMap::new();
+            let mut children: Children<T, Upper<T, A>> = CompactMap::new();
             let mut all_child_nodes: Vec<Arc<Upper<T, A>>> = Vec::new();
 
             for (v, e) in d.iter() {
                 let mut nodes_for_v: Vec<Arc<Upper<T, A>>> = Vec::new();
                 if let Some(end_acc) = &e.end {
-                    let leaf = new_branch(IHashMap::new(), Some(end_acc.clone()));
+                    let leaf = new_branch(CompactMap::new(), Some(end_acc.clone()));
                     nodes_for_v.push(try_promote(&leaf));
                 }
                 if !e.sub.is_empty() {
@@ -1760,13 +1941,13 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
         let new_inner = match &*self.inner {
             Upper::Interface(i) => {
-                let mut new_children: Children<T, Lower<T>> = IHashMap::new();
+                let mut new_children: Children<T, Lower<T>> = CompactMap::new();
                 new_children.insert(value, OrdMap::unit(i.inner.max_depth(), i.inner.clone()));
                 let new_lower_root = new_lower(new_children, false);
                 new_interface(new_lower_root, i.acc.clone())
             }
             Upper::Branch(_) => {
-                let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
+                let mut new_children: Children<T, Upper<T, A>> = CompactMap::new();
                 new_children.insert(
                     value,
                     OrdMap::unit(self.inner.max_depth(), self.inner.clone()),
@@ -1806,7 +1987,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     };
                     let target_children = children_by_target
                         .entry(to)
-                        .or_insert_with(IHashMap::new);
+                        .or_insert_with(CompactMap::new);
                     match target_children.get(&from) {
                         Some(existing_kids) => {
                             let mut merged_kids = existing_kids.clone();
@@ -1829,7 +2010,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     return Self::empty();
                 }
 
-                let mut shifted_children: Children<T, Lower<T>> = IHashMap::new();
+                let mut shifted_children: Children<T, Lower<T>> = CompactMap::new();
                 for (to, lower_children) in children_by_target {
                     let lower = new_lower(lower_children, false);
                     shifted_children.insert(to, OrdMap::unit(lower.max_depth(), lower));
@@ -1968,7 +2149,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                             // The isolated level had an empty marker — at depth 1 pop
                             // this means we include the empty terminal
                             if remaining == 0 {
-                                let terminal = new_lower(IHashMap::new(), true);
+                                let terminal = new_lower(CompactMap::new(), true);
                                 result = merge_lower(&result, &terminal);
                             }
                         }
@@ -2038,10 +2219,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 m
             };
 
-            let mut res = merged.unwrap_or_else(|| new_lower(IHashMap::new(), false));
+            let mut res = merged.unwrap_or_else(|| new_lower(CompactMap::new(), false));
 
             if node.empty() && k == 1 {
-                let terminal_node = new_lower(IHashMap::new(), true);
+                let terminal_node = new_lower(CompactMap::new(), true);
                 res = merge_lower(&res, &terminal_node);
             }
 
@@ -2078,7 +2259,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
                     if let Some(acc) = &b.empty {
                         if k == 1 {
-                            let terminal_lower = new_lower(IHashMap::new(), true);
+                            let terminal_lower = new_lower(CompactMap::new(), true);
                             let terminal_upper = new_interface(terminal_lower, acc.clone());
                             merged = Some(match merged {
                                 Some(current) => merge_upper(&current, &terminal_upper),
@@ -2137,9 +2318,9 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
             if remaining == 1 {
                 let mut result = next_child
-                    .unwrap_or_else(|| new_lower(IHashMap::new(), false));
+                    .unwrap_or_else(|| new_lower(CompactMap::new(), false));
                 if current.empty() {
-                    let terminal = new_lower(IHashMap::new(), true);
+                    let terminal = new_lower(CompactMap::new(), true);
                     result = merge_lower(&result, &terminal);
                 }
 
@@ -2208,7 +2389,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 .collect();
 
             let res = if all_children.is_empty() {
-                new_lower(IHashMap::new(), false)
+                new_lower(CompactMap::new(), false)
             } else {
                 let popped_children: Vec<_> = all_children
                     .into_iter()
@@ -2478,8 +2659,8 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     let filtered_children = b
                         .children
                         .get(&val)
-                        .map(|kids| IHashMap::unit(val.clone(), kids.clone()))
-                        .unwrap_or_else(IHashMap::new);
+                        .map(|kids| CompactMap::unit(val.clone(), kids.clone()))
+                        .unwrap_or_else(CompactMap::new);
                     let max_depth = b
                         .children
                         .get(&val)
@@ -2508,7 +2689,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                             empty_upper_inner()
                         }
                     } else if let Some(kids) = i.inner.children_get(&val) {
-                        let filtered_children = IHashMap::unit(val.clone(), kids.clone());
+                        let filtered_children = CompactMap::unit(val.clone(), kids.clone());
                         let new_lower_root = new_lower(filtered_children, false);
                         new_interface(new_lower_root, i.acc.clone())
                     } else {
@@ -2527,7 +2708,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     }
                 }
             };
-            let new_b = new_branch(IHashMap::new(), empty_acc);
+            let new_b = new_branch(CompactMap::new(), empty_acc);
             try_promote(&new_b)
         };
         LeveledGSS { inner: new_inner }
@@ -2568,7 +2749,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 } else {
                     None
                 };
-                let mut filtered_children: Children<T, Upper<T, A>> = IHashMap::new();
+                let mut filtered_children: Children<T, Upper<T, A>> = CompactMap::new();
                 for (v, kids) in b.children.iter() {
                     if values_set.contains(&Some(v.clone())) {
                         filtered_children.insert(v.clone(), kids.clone());
@@ -2579,7 +2760,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             }
             Upper::Interface(i) => {
                 let keep_empty = values_set.contains(&None) && i.inner.empty();
-                let mut filtered_children: Children<T, Lower<T>> = IHashMap::new();
+                let mut filtered_children: Children<T, Lower<T>> = CompactMap::new();
                 for (v, kids) in i.inner.children().iter() {
                     if values_set.contains(&Some(v.clone())) {
                         filtered_children.insert(v.clone(), kids.clone());
@@ -2589,7 +2770,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     let new_lower_root = new_lower(filtered_children, keep_empty);
                     new_interface(new_lower_root, i.acc.clone())
                 } else {
-                    new_branch(IHashMap::new(), None)
+                    new_branch(CompactMap::new(), None)
                 }
             }
         };
@@ -2647,7 +2828,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 }
                 Upper::Branch(b) => {
                     let new_empty = b.empty.as_ref().map(|e| map_acc(e, memo_acc, f));
-                    let mut new_children: Children<T, Upper<T, B>> = IHashMap::new();
+                    let mut new_children: Children<T, Upper<T, B>> = CompactMap::new();
                     for (v, kids) in b.children.iter() {
                         let mut new_kids: OrdMap<u32, Arc<Upper<T, B>>> = OrdMap::new();
                         for child in kids.values() {
@@ -2712,7 +2893,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         .as_ref()
                         .and_then(|e| if test_acc(e, acc_memo, p) { Some(e.clone()) } else { None });
 
-                    let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
+                    let mut new_children: Children<T, Upper<T, A>> = CompactMap::new();
                     let mut children_identical = true;
                     for (v, kids) in b.children.iter() {
                         let mut new_kids: OrdMap<u32, Arc<Upper<T, A>>> = OrdMap::new();
@@ -2815,7 +2996,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 }
                 Upper::Branch(b) => {
                     let new_empty_opt = b.empty.as_ref().and_then(|e| mutate_acc(e, memo, m));
-                    let mut new_children: Children<T, Upper<T, B>> = IHashMap::new();
+                    let mut new_children: Children<T, Upper<T, B>> = CompactMap::new();
                     for (v, kids) in b.children.iter() {
                         let mut new_kids: OrdMap<u32, Arc<Upper<T, B>>> = OrdMap::new();
                         for child in kids.values() {
@@ -2901,14 +3082,14 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                             let child = kids.values().next().unwrap();
                             if let Some(nc) = transform_td::<T, A, B, M>(child, memo, m) {
                                 let new_kids = OrdMap::unit(nc.max_depth(), nc);
-                                let new_children = IHashMap::unit(v.clone(), new_kids);
+                                let new_children = CompactMap::unit(v.clone(), new_kids);
                                 return Some(new_branch(new_children, None));
                             } else {
                                 return None;
                             }
                         }
                     }
-                    let mut new_children: Children<T, Upper<T, B>> = IHashMap::new();
+                    let mut new_children: Children<T, Upper<T, B>> = CompactMap::new();
                     for (v, kids) in b.children.iter() {
                         let new_kids: OrdMap<u32, Arc<Upper<T, B>>> = kids.values()
                             .filter_map(|child| transform_td::<T, A, B, M>(child, memo, m))
@@ -3048,14 +3229,14 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                             let child = kids.values().next().unwrap();
                             if let Some(nc) = transform_np::<T, A, M>(child, memo, m) {
                                 let new_kids = OrdMap::unit(nc.max_depth(), nc);
-                                let new_children = IHashMap::unit(v.clone(), new_kids);
+                                let new_children = CompactMap::unit(v.clone(), new_kids);
                                 return Some(new_branch(new_children, None));
                             } else {
                                 return None;
                             }
                         }
                     }
-                    let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
+                    let mut new_children: Children<T, Upper<T, A>> = CompactMap::new();
                     for (v, kids) in b.children.iter() {
                         let new_kids: OrdMap<u32, Arc<Upper<T, A>>> = kids.values()
                             .filter_map(|child| transform_np::<T, A, M>(child, memo, m))
@@ -3162,7 +3343,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 return node.clone();
             }
 
-            let mut final_children: Children<T, Lower<T>> = IHashMap::new();
+            let mut final_children: Children<T, Lower<T>> = CompactMap::new();
             for (v, fused_kids) in new_children_by_value {
                 if fused_kids.is_empty() {
                     continue;
@@ -3235,7 +3416,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         return node.clone();
                     }
 
-                    let mut final_children: Children<T, Upper<T, A>> = IHashMap::new();
+                    let mut final_children: Children<T, Upper<T, A>> = CompactMap::new();
                     for (v, fused_kids) in new_children_by_value {
                         if fused_kids.is_empty() {
                             continue;
@@ -4521,15 +4702,15 @@ mod tests {
     fn test_normalization_sharing_factor_regression() {
         type TestGSSInt = LeveledGSS<i32, IntAcc>;
 
-        let l_terminal = new_lower::<i32>(IHashMap::new(), true);
+        let l_terminal = new_lower::<i32>(CompactMap::new(), true);
 
         let l_500_parent = new_lower(
-            IHashMap::unit(500, OrdMap::unit(l_terminal.max_depth(), l_terminal.clone())),
+            CompactMap::unit(500, OrdMap::unit(l_terminal.max_depth(), l_terminal.clone())),
             false,
         );
 
         let i_54_inner = new_lower(
-            IHashMap::unit(569, OrdMap::unit(l_500_parent.max_depth(), l_500_parent.clone())),
+            CompactMap::unit(569, OrdMap::unit(l_500_parent.max_depth(), l_500_parent.clone())),
             false,
         );
         let i_54 = new_interface(i_54_inner, IntAcc::new(&[54]));
@@ -4541,21 +4722,21 @@ mod tests {
             .collect();
 
         let edge_vals = vec![419, 437, 66, 477, 531, 541, 556, 558, 560, 562];
-        let mut children_101 = IHashMap::new();
+        let mut children_101 = CompactMap::new();
         for (edge, interface) in edge_vals.iter().zip(interfaces_10.iter()) {
             children_101.insert(*edge, OrdMap::unit(interface.max_depth(), interface.clone()));
         }
         let ub_101 = new_branch(children_101, None);
 
         let ub_295_d4 = new_branch(
-            IHashMap::unit(101, OrdMap::unit(ub_101.max_depth(), ub_101)),
+            CompactMap::unit(101, OrdMap::unit(ub_101.max_depth(), ub_101)),
             None,
         );
 
         let mut children_295 = OrdMap::new();
         children_295.insert(i_54.max_depth(), i_54);
         children_295.insert(ub_295_d4.max_depth(), ub_295_d4);
-        let root_children = IHashMap::unit(295, children_295);
+        let root_children = CompactMap::unit(295, children_295);
         let root_inner = new_branch(root_children, None);
 
         let gss = TestGSSInt { inner: root_inner };
