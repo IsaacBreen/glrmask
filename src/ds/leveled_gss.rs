@@ -366,7 +366,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Upper<T, A> {
         }
     }
 
-    fn children_keys(&self) -> Vec<T> {
+    fn children_keys(&self) -> SmallVec<[T; 8]> {
         match self {
             Upper::Branch(branch) => branch.children.keys().cloned().collect(),
             Upper::Interface(interface) => interface.inner.children_ref().keys().cloned().collect(),
@@ -3469,8 +3469,25 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         self.inner.children_keys().into_iter().collect()
     }
 
-    pub fn peek_values(&self) -> Vec<T> {
+    pub fn peek_values(&self) -> SmallVec<[T; 8]> {
         self.inner.children_keys()
+    }
+
+    /// Iterate over top values without allocating a Vec. 
+    /// Calls `f` for each top-level value in the GSS.
+    pub fn for_each_top_value<F: FnMut(T)>(&self, mut f: F) {
+        match &*self.inner {
+            Upper::Branch(branch) => {
+                for k in branch.children.keys() {
+                    f(k.clone());
+                }
+            }
+            Upper::Interface(interface) => {
+                for k in interface.inner.children_ref().keys() {
+                    f(k.clone());
+                }
+            }
+        }
     }
 
     pub fn single_top_value(&self) -> Option<T> {

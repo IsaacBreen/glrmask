@@ -238,12 +238,11 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
                 new_states.push(state);
             }
         } else {
-            new_states.extend(
-                current
-                    .peek_values()
-                    .into_iter()
-                    .filter(|&state| !processed.contains(&state)),
-            );
+            current.for_each_top_value(|state| {
+                if !processed.contains(&state) {
+                    new_states.push(state);
+                }
+            });
         }
         if new_states.is_empty() {
             break;
@@ -319,9 +318,7 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
     if let Some(state) = current.single_top_value() {
         handle_shift_state(state);
     } else {
-        for state in current.peek_values() {
-            handle_shift_state(state);
-        }
+        current.for_each_top_value(|state| handle_shift_state(state));
     }
     current.shift_top_values(shift_pairs)
 }
@@ -414,12 +411,11 @@ pub(crate) fn advance_stacks_profiled(
                 new_states.push(state);
             }
         } else {
-            new_states.extend(
-                current
-                    .peek_values()
-                    .into_iter()
-                    .filter(|&state| !processed.contains(&state)),
-            );
+            current.for_each_top_value(|state| {
+                if !processed.contains(&state) {
+                    new_states.push(state);
+                }
+            });
         }
         if new_states.is_empty() {
             break;
@@ -506,9 +502,7 @@ pub(crate) fn advance_stacks_profiled(
     if let Some(state) = current.single_top_value() {
         handle_shift_state(state);
     } else {
-        for state in current.peek_values() {
-            handle_shift_state(state);
-        }
+        current.for_each_top_value(|state| handle_shift_state(state));
     }
     let t0 = Instant::now();
     let result = current.shift_top_values(shift_pairs);
