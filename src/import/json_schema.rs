@@ -1281,8 +1281,9 @@ fn shorthand_class_bytes(class: u8) -> BTreeSet<u8> {
 /// Unlike `jsonified_char_class_fragment(_, true)`, this produces a compact
 /// fragment that avoids DFA explosion when combined with bounded repetition
 /// like `{0,99}`. It includes single-byte ASCII chars, named JSON escape
-/// sequences, and direct multi-byte UTF-8 patterns. It omits `\\uXXXX`
-/// encodings to keep the resulting DFA small.
+/// sequences, direct multi-byte UTF-8 patterns, and `\\uXXXX` encodings
+/// (as an over-approximation — all `\\uXXXX` values are accepted regardless
+/// of whether the encoded codepoint is in the excluded set).
 fn compact_negated_json_class(excluded: &BTreeSet<u8>, exclude_nbsp: bool) -> String {
     let direct_ascii_all = json_direct_ascii_bytes();
     let mut parts = Vec::new();
@@ -1311,6 +1312,10 @@ fn compact_negated_json_class(excluded: &BTreeSet<u8>, exclude_nbsp: bool) -> St
             parts.push(String::from(escape_pattern));
         }
     }
+
+    // JSON \uXXXX escape sequences (over-approximation: accepts all
+    // codepoints, not just those outside the excluded set).
+    parts.push(String::from(r#"\x5Cu[0-9A-Fa-f]{4}"#));
 
     // Multi-byte UTF-8 character patterns.
     if exclude_nbsp {
@@ -4325,7 +4330,20 @@ impl<'a> SchemaCtx<'a> {
                         return Ok(wrap_string_value_terminal(body));
                     }
                 }
-                // maxLength is too large or absent — drop pattern, use length only
+                // maxLength is too large for exact intersection — apply pattern
+                // with minLength enforcement only (drop maxLength to avoid
+                // DFA explosion).
+                if min_len > 0 {
+                    let search_regex = string_value_body_regex(&json_search_pattern(&pattern));
+                    let search_dfa = build_regex(&[parse_regex(&search_regex, true)]).dfa;
+                    let length_inner = format!(r#"(?:{}){{{},}}"#, JSON_STRING_CHAR_PATTERN, min_len);
+                    let length_regex = string_value_body_regex(&length_inner);
+                    let length_dfa = build_regex(&[parse_regex(&length_regex, true)]).dfa;
+                    let intersected = Self::intersect_lexer_dfa(&search_dfa, &length_dfa);
+                    let body = self.build_lexer_dfa_expr(&intersected, "JSON_STRING_PATTERN_MINLEN");
+                    return Ok(wrap_string_value_terminal(body));
+                }
+                return Ok(json_wrapped_pattern(&pattern));
             } else {
                 return Ok(json_wrapped_pattern(&pattern));
             }
