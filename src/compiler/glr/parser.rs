@@ -380,6 +380,36 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
             break;
         }
 
+        // Fast path: single state with single Reduce action.
+        // Process immediately without collecting into pending_bases_by_target,
+        // avoiding Arc reference retention that causes expensive clones in make_mut.
+        if new_states.len() == 1 {
+            let state = new_states[0];
+            if !processed.contains(&state) {
+                if let Some(Action::Reduce(rule_id)) = table.action(state, token) {
+                    processed.push(state);
+                    let rule = &table.rules[*rule_id as usize];
+                    let rhs_len = rule.rhs.len();
+                    let lhs = rule.lhs;
+
+                    let bases = current.isolate_popn_bases(state, rhs_len as isize);
+                    new_states.clear();
+                    let mut any_reduced = false;
+                    for (goto_from, base) in bases {
+                        if let Some(target) = table.goto_target(goto_from, lhs) {
+                            current = current.absorb_push_same_acc(target, &base);
+                            new_states.push(target);
+                            any_reduced = true;
+                        }
+                    }
+                    if any_reduced {
+                        continue;
+                    }
+                    break;
+                }
+            }
+        }
+
         let mut any_reduced = false;
         pending_bases_by_target.clear();
         for state in new_states.drain(..) {
