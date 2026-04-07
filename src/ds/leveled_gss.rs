@@ -3561,6 +3561,22 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             }
         }
 
+        // Fast path for fuse(Some(1)): children see remain=0 → identity.
+        // So fuse is a no-op iff the top node has no multi-depth slots.
+        if levels == Some(1) {
+            let no_multi_depth = match &*self.inner {
+                Upper::Interface(i) => {
+                    !i.inner.children_ref().values().any(|kids| kids.len() > 1)
+                }
+                Upper::Branch(b) => {
+                    !b.children.values().any(|kids| kids.len() > 1)
+                }
+            };
+            if no_multi_depth {
+                return self.clone();
+            }
+        }
+
         let mut memo_upper: StdHashMap<(usize, Option<isize>), Arc<Upper<T, A>>> = StdHashMap::new();
         let mut memo_lower: StdHashMap<(usize, Option<isize>), Arc<Lower<T>>> = StdHashMap::new();
 
@@ -3962,6 +3978,36 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
         let mut visited = VisitedPtrs::new();
         walk(&self.inner, &mut visited, &mut f);
+    }
+
+    /// Returns true if all accumulators in the upper tree satisfy the predicate.
+    /// Short-circuits on the first accumulator that doesn't.
+    /// For a single Interface node (common case), this is O(1).
+    pub fn all_accs_satisfy(&self, pred: impl Fn(&A) -> bool) -> bool {
+        fn check<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
+            node: &Arc<Upper<T, A>>,
+            pred: &impl Fn(&A) -> bool,
+        ) -> bool {
+            match &**node {
+                Upper::Interface(iface) => pred(&iface.acc),
+                Upper::Branch(b) => {
+                    if let Some(acc) = &b.empty {
+                        if !pred(acc) {
+                            return false;
+                        }
+                    }
+                    for kids in b.children.values() {
+                        for child in kids.values() {
+                            if !check(child, pred) {
+                                return false;
+                            }
+                        }
+                    }
+                    true
+                }
+            }
+        }
+        check(&self.inner, &pred)
     }
 
     pub fn truncate(&self, max_len: isize) -> Self {

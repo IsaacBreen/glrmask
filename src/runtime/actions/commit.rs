@@ -342,52 +342,57 @@ fn commit_bytes_fast_path(
     let terminal = sole_terminal?;
 
     // Check if end_state needs processing (continuation of a longer match)
-    if let Some(end_state) = exec_result.end_state {
+    let has_viable_end_state = if let Some(end_state) = exec_result.end_state {
         let future_terminals = constraint.tokenizer.possible_future_terminals(end_state);
         if stack_may_advance_on_any(&constraint.table, gss, future_terminals) {
             // End state has viable future — need general path
             return None;
         }
-    }
+        // End state exists but isn't viable — still need to remap tokenizer states
+        true
+    } else {
+        false
+    };
 
-    // Inline prune: check if terminals_disallowed would block this terminal.
-    // For the single-terminal case, prune removes GSS paths where the sole
-    // terminal IS disallowed AND there are no other matched terminals.
-    // Remap tokenizer states in accumulators as well.
-    let pruned_gss = gss.apply_and_prune_no_promote(|td: &TerminalsDisallowed| {
-        if td.is_empty() {
-            // Fast path: empty disallow → keep path, remap to empty
-            if exec_result.end_state.is_some() {
-                // Remap tokenizer_state → end_state (preserving empty set)
+    // Skip prune entirely when all accumulators are empty and no end_state to remap.
+    // This is the common case after prior fast-path commits.
+    let pruned_gss = if !has_viable_end_state && exec_result.end_state.is_none()
+        && gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty())
+    {
+        gss.clone()
+    } else {
+        // Full prune: check if terminals_disallowed would block this terminal,
+        // and remap tokenizer states in accumulators.
+        let pruned = gss.apply_and_prune_no_promote(|td: &TerminalsDisallowed| {
+            if td.is_empty() {
                 return Some(TerminalsDisallowed::new());
             }
-            return Some(TerminalsDisallowed::new());
-        }
-        // Check if this terminal is fully blocked
-        if let Some(disallowed) = td.get(&tokenizer_state) {
-            if disallowed.contains(&terminal) {
-                // The only matched terminal is disallowed — prune this path
-                return None;
+            // Check if this terminal is fully blocked
+            if let Some(disallowed) = td.get(&tokenizer_state) {
+                if disallowed.contains(&terminal) {
+                    return None;
+                }
             }
-        }
-        // Remap tokenizer states
-        let mut remapped = BTreeMap::new();
-        if let Some(end_state) = exec_result.end_state {
-            if let Some(d) = td.get(&tokenizer_state) {
-                remapped
-                    .entry(end_state)
-                    .or_insert_with(BTreeSet::new)
-                    .extend(d.iter().copied());
+            // Remap tokenizer states
+            let mut remapped = BTreeMap::new();
+            if let Some(end_state) = exec_result.end_state {
+                if let Some(d) = td.get(&tokenizer_state) {
+                    remapped
+                        .entry(end_state)
+                        .or_insert_with(BTreeSet::new)
+                        .extend(d.iter().copied());
+                }
             }
-        }
-        Some(TerminalsDisallowed(std::sync::Arc::new(remapped)))
-    });
+            Some(TerminalsDisallowed(std::sync::Arc::new(remapped)))
+        });
 
-    if pruned_gss.is_empty() {
-        return Some(Err(
-            "commit rejected: no valid parser states remain".to_string(),
-        ));
-    }
+        if pruned.is_empty() {
+            return Some(Err(
+                "commit rejected: no valid parser states remain".to_string(),
+            ));
+        }
+        pruned
+    };
 
     // Advance the parser
     let advanced = advance_stacks(&constraint.table, &pruned_gss, terminal);
