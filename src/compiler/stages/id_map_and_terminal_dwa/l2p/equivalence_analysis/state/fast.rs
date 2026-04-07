@@ -272,8 +272,47 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     let dfa = tokenizer.dfa();
 
     const NONE_STATE: u32 = u32::MAX;
-    // Use transitions directly from FlatDfa (shared via Arc, no redundant copy).
-    let dfa_transitions: &[u32] = &dfa.transitions;
+
+    // Build byte-class compressed transition table for cache efficiency when the DFA
+    // is large enough. With 54K+ states, the raw table (state*256*4 bytes) can be 56MB,
+    // causing severe cache thrashing. Byte-class compression typically reduces 256
+    // columns to ~60, fitting the table in L2/L3 cache. For smaller DFAs (<16K states,
+    // <16MB table), the raw table already fits in cache and compression overhead
+    // outweighs the benefit.
+    const COMPACT_THRESHOLD_STATES: usize = 16_000;
+    let num_dfa_states = dfa.states.len();
+    let use_compact = num_dfa_states >= COMPACT_THRESHOLD_STATES;
+    let identity_byte_class: [u8; 256] = std::array::from_fn(|i| i as u8);
+    let computed_byte_class: [u8; 256];
+    let byte_to_class: &[u8; 256];
+    let num_bc: usize;
+    let compact_transitions_owned: Vec<u32>;
+    let compact_transitions: &[u32];
+    if use_compact {
+        computed_byte_class = super::super::compat::compute_byte_classes(dfa);
+        byte_to_class = &computed_byte_class;
+        num_bc = *computed_byte_class.iter().max().unwrap_or(&0) as usize + 1;
+        compact_transitions_owned = {
+            let mut ct = vec![NONE_STATE; num_dfa_states * num_bc];
+            let raw = &dfa.transitions;
+            for s in 0..num_dfa_states {
+                let raw_base = s * 256;
+                let ct_base = s * num_bc;
+                for b in 0..256u16 {
+                    let cls = computed_byte_class[b as usize] as usize;
+                    ct[ct_base + cls] = raw[raw_base + b as usize];
+                }
+            }
+            ct
+        };
+        compact_transitions = &compact_transitions_owned;
+    } else {
+        byte_to_class = &identity_byte_class;
+        num_bc = 256;
+        compact_transitions_owned = Vec::new();
+        let _ = &compact_transitions_owned; // keep borrow alive
+        compact_transitions = &dfa.transitions;
+    };
 
     let dfa_finalizers: Vec<Vec<usize>> = dfa
         .states
@@ -310,13 +349,14 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     let total_tokens = sorted_tokens.len();
 
     let tokenizer_start = tokenizer.initial_state_id();
+    let raw_transitions: &[u32] = &dfa.transitions;
     let suffix_hashes_by_token: Vec<Vec<u128>> = sorted_tokens
         .par_iter()
         .map(|token| {
             build_start_state_suffix_hashes(
                 token,
                 tokenizer_start,
-                dfa_transitions,
+                raw_transitions,
                 &dfa_finalizers,
                 &dfa_future_groups,
                 &future_group_hashes,
@@ -428,7 +468,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                 |scratch, &state_idx| {
                     let state = states[state_idx] as u32;
                     let mut hash_delta: u128 = 0;
-                    let state_trans_base = (state as usize) * 256;
+                    let state_ct_base = (state as usize) * num_bc;
 
                     let mut live_ranges: Vec<(usize, usize)> = Vec::new();
 
@@ -442,7 +482,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                             continue;
                         }
 
-                        if dfa_transitions[state_trans_base + byte] == NONE_STATE {
+                        if compact_transitions[state_ct_base + byte_to_class[byte] as usize] == NONE_STATE {
                             let weight_sum =
                                 batch_weight_prefix[range_end].wrapping_sub(batch_weight_prefix[range_start]);
                             hash_delta = hash_delta
@@ -523,7 +563,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                                         dead_at_depth = Some(prefix_len + offset);
                                         break;
                                     }
-                                    let next = dfa_transitions[current as usize * 256 + byte as usize];
+                                    let next = compact_transitions[current as usize * num_bc + byte_to_class[byte as usize] as usize];
                                     if next == NONE_STATE {
                                         dead_at_depth = Some(prefix_len + offset + 1);
                                         walk_frames.push(WalkFrame {
