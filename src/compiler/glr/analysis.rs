@@ -1031,14 +1031,135 @@ pub(crate) fn merge_identical_nonterminals(
         return rules.to_vec();
     }
 
-    // Refine until stable.
+    // ── Compute processing order: ascending "depth" in the reference DAG ──
+    //
+    // NTs at depth 0 have no references to other NTs (leaves). Depth d means
+    // the longest path to a leaf is d hops. Processing in ascending depth
+    // with in-place updates (Gauss-Seidel) propagates chain information in
+    // ONE pass instead of one-per-chain-link. For purely acyclic chains of
+    // depth D, this reduces D iterations to ~1.
+    //
+    // We compute exact depths via SCC condensation (Kosaraju's) + DAG depth,
+    // which handles cycles correctly (NTs in the same SCC share a depth) and
+    // works for arbitrarily deep chains.
+    let processing_order: Vec<usize> = {
+        let n = nts.len();
+
+        // Build adjacency: for each NT index, which other NT indices does it reference?
+        let mut refs_of: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (i, &nt) in nts.iter().enumerate() {
+            for rhs in rhs_by_idx[i].iter() {
+                for s in rhs {
+                    if let Symbol::Nonterminal(r) = s {
+                        if *r != nt {
+                            let ri = *r as usize;
+                            if ri <= max_nt_id && nt_to_idx_fast[ri] != u32::MAX {
+                                refs_of[i].push(nt_to_idx_fast[ri] as usize);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Kosaraju's SCC algorithm (O(V+E), iterative) ──
+
+        // Step 1: iterative DFS on original graph → finish order.
+        let mut visited = vec![false; n];
+        let mut finish_order = Vec::with_capacity(n);
+        for start in 0..n {
+            if visited[start] { continue; }
+            let mut stk: Vec<(usize, usize)> = vec![(start, 0)];
+            visited[start] = true;
+            while let Some((v, ni)) = stk.last_mut() {
+                if *ni < refs_of[*v].len() {
+                    let w = refs_of[*v][*ni];
+                    *ni += 1;
+                    if !visited[w] {
+                        visited[w] = true;
+                        stk.push((w, 0));
+                    }
+                } else {
+                    finish_order.push(*v);
+                    stk.pop();
+                }
+            }
+        }
+
+        // Step 2: reverse graph + DFS in reverse finish order → SCC IDs.
+        // Kosaraju's numbers SCCs in topological order (sources first in the
+        // original dependent→dependency edge direction).
+        let mut rev_refs: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (i, neighbors) in refs_of.iter().enumerate() {
+            for &j in neighbors {
+                rev_refs[j].push(i);
+            }
+        }
+        let mut scc_id = vec![0u32; n];
+        let mut next_scc = 0u32;
+        visited.fill(false);
+        for &start in finish_order.iter().rev() {
+            if visited[start] { continue; }
+            let mut stk = vec![start];
+            visited[start] = true;
+            while let Some(v) = stk.pop() {
+                scc_id[v] = next_scc;
+                for &w in &rev_refs[v] {
+                    if !visited[w] {
+                        visited[w] = true;
+                        stk.push(w);
+                    }
+                }
+            }
+            next_scc += 1;
+        }
+        let num_sccs = next_scc as usize;
+
+        // Step 3: condensed DAG depth (longest path to a sink = leaf depth 0).
+        // Build inter-SCC edges, deduplicate, then compute depth in reverse
+        // topological order (SCCs numbered source-first, so iterate high→low).
+        let mut scc_edges: Vec<Vec<u32>> = vec![Vec::new(); num_sccs];
+        for (i, neighbors) in refs_of.iter().enumerate() {
+            for &j in neighbors {
+                if scc_id[i] != scc_id[j] {
+                    scc_edges[scc_id[i] as usize].push(scc_id[j]);
+                }
+            }
+        }
+        for edges in &mut scc_edges {
+            edges.sort_unstable();
+            edges.dedup();
+        }
+        let mut scc_depth = vec![0u32; num_sccs];
+        for s in (0..num_sccs).rev() {
+            for &dst in &scc_edges[s] {
+                scc_depth[s] = scc_depth[s].max(scc_depth[dst as usize] + 1);
+            }
+        }
+
+        // Map SCC depth back to NTs, sort by ascending depth (leaves first).
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_unstable_by_key(|&i| scc_depth[scc_id[i] as usize]);
+        order
+    };
+
+    // Refine until stable, using depth-ordered in-place (Gauss-Seidel) updates.
     let debug = std::env::var("GLRMASK_DEBUG_PROFILE").map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") }).unwrap_or(false);
     let mut iters = 0u32;
     loop {
         iters += 1;
-        let raw: Vec<u64> = (0..nts.len()).map(|i| hash_nt(i, &class_of)).collect();
+        let prev_class_of = class_of.clone();
+        // In-place update: process NTs in depth order so that deeper NTs
+        // (which depend on shallower ones) see already-updated classes.
+        let mut raw = vec![0u64; nts.len()];
+        for &i in &processing_order {
+            raw[i] = hash_nt(i, &class_of);
+            // Update class_of in-place for Gauss-Seidel propagation.
+            class_of[i] = raw[i];
+        }
         let (new_class_of, nc) = normalise_counted(&raw);
-        if new_class_of == class_of {
+        class_of = new_class_of;
+        if class_of == prev_class_of {
             break;
         }
         // Early termination: every NT is in its own class → no merges.
@@ -1049,7 +1170,6 @@ pub(crate) fn merge_identical_nonterminals(
             return rules.to_vec();
         }
         n_classes = nc;
-        class_of = new_class_of;
     }
     if debug {
         eprintln!("[glrmask/debug][merge_nt] nts={} rules={} iters={} classes={}", nts.len(), rules.len(), iters, n_classes);
