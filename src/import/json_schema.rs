@@ -5880,6 +5880,35 @@ impl<'a> SchemaCtx<'a> {
             }
         }
 
+        // Split optional named properties out of the ordered tree and into the
+        // continuation chain ONLY when there is a non-trivial continuation (i.e.,
+        // pattern properties or additional properties exist). This avoids LR(2)
+        // conflicts where `, ` after an optional tree leaf is ambiguous between
+        // continuing to the next tree property vs the continuation chain.
+        // For closed objects with no continuation, keep optionals in the tree to
+        // preserve property ordering.
+        let has_continuation = !additional_pair_exprs.is_empty() || !pattern_pair_exprs.is_empty();
+        let optional_pair_exprs: Vec<GrammarExpr> = if has_continuation {
+            ordered
+                .iter()
+                .filter(|(_, _, required)| !*required)
+                .map(|(key, value_expr, _)| {
+                    let key_expr = self.json_key_colon_literal(key);
+                    sequence_or_single(vec![key_expr, value_expr.clone()])
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let ordered: Vec<(String, GrammarExpr, bool)> = if has_continuation {
+            ordered
+                .into_iter()
+                .filter(|(_, _, required)| *required)
+                .collect()
+        } else {
+            ordered
+        };
+
         let (additional_nc, additional_c) = self.build_object_pair_tail(
             &base_name,
             "ap",
@@ -5887,10 +5916,12 @@ impl<'a> SchemaCtx<'a> {
             empty_expr(),
             empty_expr(),
         );
+        let mut free_pair_exprs = pattern_pair_exprs;
+        free_pair_exprs.extend(optional_pair_exprs);
         let (free_nc, free_c) = self.build_object_pair_tail(
             &base_name,
             "free",
-            pattern_pair_exprs,
+            free_pair_exprs,
             GrammarExpr::Ref(additional_nc.clone()),
             GrammarExpr::Ref(additional_c.clone()),
         );
