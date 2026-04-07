@@ -2811,6 +2811,88 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
+    /// Extract the chain of state values from a single-path chain GSS.
+    /// Returns `None` if the GSS is not a pure single-path chain (e.g.,
+    /// has branches, General nodes with multiple children, or Branch upper).
+    /// The returned SmallVec has bottom-of-stack at index 0 and top at the end.
+    pub fn try_extract_chain_states(&self) -> Option<SmallVec<[T; 16]>> {
+        let interface = match &*self.inner {
+            Upper::Interface(iface) => iface,
+            _ => return None,
+        };
+
+        let mut states = SmallVec::<[T; 16]>::new();
+        let mut current: &Lower<T> = &interface.inner;
+
+        loop {
+            match current {
+                Lower::Chain { .. } => {
+                    states.push(current.chain_value().clone());
+                    let next = current.chain_next();
+                    current = &**next;
+                }
+                Lower::General { children, empty, .. } => {
+                    if children.is_empty() && *empty {
+                        // Terminal node — end of chain
+                        break;
+                    }
+                    if children.len() == 1 && !*empty {
+                        // General with single child — treat as chain
+                        let key = children.keys().next().unwrap().clone();
+                        let ordmap = children.values().next().unwrap();
+                        if ordmap.len() == 1 {
+                            states.push(key);
+                            let (_, next) = ordmap.iter().next().unwrap();
+                            current = &**next;
+                            continue;
+                        }
+                    }
+                    return None; // Multi-child or multi-depth node
+                }
+            }
+        }
+
+        if states.is_empty() {
+            return None;
+        }
+
+        states.reverse(); // Convert from top-first to bottom-first
+        Some(states)
+    }
+
+    /// Build a single-path chain GSS from a bottom-first list of state values.
+    /// Uses the accumulator from `template` (which should be the original GSS).
+    pub fn from_chain_states(states: &[T], template: &Self) -> Self {
+        if states.is_empty() {
+            return Self::empty();
+        }
+        let acc = match &*template.inner {
+            Upper::Interface(iface) => iface.acc.clone(),
+            _ => return Self::empty(),
+        };
+
+        // Build from bottom to top
+        let mut current: Arc<Lower<T>> = Arc::new(Lower::General {
+            children: CompactMap::new(),
+            empty: true,
+            max_depth: 0,
+        });
+        for state in states.iter() {
+            let depth = current.max_depth();
+            let mut children: Children<T, Lower<T>> = CompactMap::new();
+            children.insert(state.clone(), CompactOrdMap::unit(depth, current));
+            current = Arc::new(Lower::Chain {
+                children,
+                empty: false,
+                max_depth: depth + 1,
+            });
+        }
+
+        LeveledGSS {
+            inner: new_interface(current, acc),
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         match &*self.inner {
             Upper::Branch(b) => b.children.is_empty() && b.empty.is_none(),

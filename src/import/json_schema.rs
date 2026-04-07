@@ -4739,22 +4739,51 @@ impl<'a> SchemaCtx<'a> {
         }
 
         let pair_expr = choice_or_single(pair_exprs);
+
+        // Use left-recursive repetition instead of right-recursive tail.
+        // Old (right-recursive):
+        //   c_name → ", " pair c_name | next_c
+        // New (left-recursive):
+        //   items → ε | items ", " pair
+        //   c_name → items next_c
+        //
+        // This reduces O(N) cascading reduces at closing brace to O(1).
+        let items_name = format!("{base_name}_{suffix}_lr");
+        self.insert_rule(
+            items_name.clone(),
+            choice_or_single(vec![
+                empty_expr(),
+                sequence_or_single(vec![
+                    GrammarExpr::Ref(items_name.clone()),
+                    self.json_item_separator_expr(),
+                    pair_expr.clone(),
+                ]),
+            ]),
+        );
+
+        // c_name → items next_c (or just items if next_c is empty)
+        let next_c_is_empty = matches!(&next_c, GrammarExpr::Sequence(s) if s.is_empty());
+        if next_c_is_empty {
+            self.insert_rule(
+                c_name.clone(),
+                GrammarExpr::Ref(items_name),
+            );
+        } else {
+            self.insert_rule(
+                c_name.clone(),
+                sequence_or_single(vec![
+                    GrammarExpr::Ref(items_name),
+                    next_c,
+                ]),
+            );
+        }
+
+        // nc_name → pair c_name | next_nc (unchanged structure)
         self.insert_rule(
             nc_name.clone(),
             choice_or_single(vec![
-                sequence_or_single(vec![pair_expr.clone(), GrammarExpr::Ref(c_name.clone())]),
+                sequence_or_single(vec![pair_expr, GrammarExpr::Ref(c_name.clone())]),
                 next_nc,
-            ]),
-        );
-        self.insert_rule(
-            c_name.clone(),
-            choice_or_single(vec![
-                sequence_or_single(vec![
-                    self.json_item_separator_expr(),
-                    pair_expr,
-                    GrammarExpr::Ref(c_name.clone()),
-                ]),
-                next_c,
             ]),
         );
 

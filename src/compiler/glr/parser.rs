@@ -229,6 +229,71 @@ pub(crate) fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: Te
     advance_stacks_core(table, stack, token)
 }
 
+/// Apply a chain of reduces followed by a final shift on a flat stack.
+/// Returns `None` if the chain encounters a Split or Accept action
+/// (which require the full GSS machinery). The `stack` parameter is
+/// bottom-first (index 0 = deepest state, last = top).
+fn advance_chain_reduce_shift(
+    stack: &mut SmallVec<[u32; 16]>,
+    table: &GLRTable,
+    token: TerminalID,
+) -> Option<SmallVec<[u32; 16]>> {
+    loop {
+        let &top = stack.last()?;
+        match table.action(top, token) {
+            Some(Action::Reduce(rule_id)) => {
+                let rule = &table.rules[*rule_id as usize];
+                let pop_count = rule.rhs.len();
+                if stack.len() <= pop_count {
+                    // Not enough states to pop — dead path
+                    return Some(SmallVec::new());
+                }
+                stack.truncate(stack.len() - pop_count);
+                let &goto_from = stack.last()?;
+                let target = table.goto_target(goto_from, rule.lhs)?;
+                stack.push(target);
+            }
+            Some(Action::Shift(target)) => {
+                stack.push(*target);
+                return Some(stack.clone());
+            }
+            Some(Action::Split {
+                shift: Some(target),
+                reduces,
+                accept,
+            }) if reduces.is_empty() && !*accept => {
+                // Pure shift disguised as Split
+                stack.push(*target);
+                return Some(stack.clone());
+            }
+            Some(Action::Split { shift, reduces, accept }) => {
+                // Handle splits with only reduces (no shift, no accept)
+                if shift.is_none() && !*accept && reduces.len() == 1 {
+                    // Single reduce in split — equivalent to plain Reduce
+                    let rule_id = reduces[0];
+                    let rule = &table.rules[rule_id as usize];
+                    let pop_count = rule.rhs.len();
+                    if stack.len() <= pop_count {
+                        return Some(SmallVec::new());
+                    }
+                    stack.truncate(stack.len() - pop_count);
+                    let &goto_from = stack.last()?;
+                    let target = table.goto_target(goto_from, rule.lhs)?;
+                    stack.push(target);
+                    continue;
+                }
+                return None; // Can't handle multi-reduce splits in flat path
+            }
+            Some(Action::Accept) => {
+                return None;
+            }
+            None => {
+                return Some(SmallVec::new()); // Dead path
+            }
+        }
+    }
+}
+
 fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> ParserGSS {
     if let Some(state) = stack.single_exclusive_top_value() {
         match table.action(state, token) {
@@ -280,6 +345,15 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
     }
     if pure_shift_only && !pure_shift_targets.is_empty() {
         return stack.shift_top_values(pure_shift_targets);
+    }
+
+    // Chain fast path: for single-path chain GSS, apply reduces as flat stack
+    // operations. Avoids all intermediate Arc/GSS manipulation.
+    if let Some(mut chain_states) = stack.try_extract_chain_states() {
+        if let Some(result) = advance_chain_reduce_shift(&mut chain_states, table, token) {
+            return ParserGSS::from_chain_states(&result, &stack);
+        }
+        // Fall through: chain had splits/accept, use general path
     }
 
     // Owned: no clone needed. First Arc::make_mut won't clone if refcount == 1.
