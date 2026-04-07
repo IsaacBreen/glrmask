@@ -60,6 +60,11 @@ const PRE_VOCAB_STATE_REDUCTION_MIN_TOKENS: usize = 5000;
 /// When the deduped token count exceeds this, limit state reduction to a single
 /// batch (5000 tokens) to avoid the cost of processing the full token set.
 const PRE_VOCAB_STATE_REDUCTION_MAX_FULL_TOKENS: usize = 5000;
+/// Skip pre_vocab state reduction for very large tokenizer DFAs. With 50K+
+/// states, walking all tokens through thousands of pre-reduced states costs
+/// more than the downstream savings from state reduction. The vocab pass works
+/// correctly on the larger (unreduced) state set, just slightly slower.
+const PRE_VOCAB_STATE_REDUCTION_MAX_DFA_STATES: usize = 16_000;
 
 /// Result of combined equivalence analysis.
 pub struct CombinedEquivalenceResult {
@@ -401,6 +406,7 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
 
     let pre_reduced_states = collect_representative_states(&pre_state_reps);
     let tokenizer_num_groups = tokenizer_group_count(tokenizer);
+    let num_dfa_states = tokenizer.dfa().states.len();
     let force_pre_vocab_state_reduction = env_flag_enabled(FORCE_PRE_VOCAB_STATE_REDUCTION_ENV);
     let disable_pre_vocab_state_reduction = env_flag_enabled(DISABLE_PRE_VOCAB_STATE_REDUCTION_ENV);
     let use_pre_vocab_state_reduction = if force_pre_vocab_state_reduction {
@@ -412,6 +418,11 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
             && pre_reduced_states.len() >= PRE_VOCAB_STATE_REDUCTION_MIN_STATES
             && tokenizer_num_groups <= PRE_VOCAB_STATE_REDUCTION_MAX_GROUPS
             && dedup.representative_token_bytes.len() >= PRE_VOCAB_STATE_REDUCTION_MIN_TOKENS
+            // Skip pre_vocab for very large DFAs where the cost of walking
+            // all tokens through thousands of states exceeds the downstream
+            // savings. The vocab pass handles the larger state set correctly,
+            // just slightly slower.
+            && num_dfa_states < PRE_VOCAB_STATE_REDUCTION_MAX_DFA_STATES
     };
     let vocab_states = if use_pre_vocab_state_reduction {
         let pre_vocab_state_started_at = std::time::Instant::now();
