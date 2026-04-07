@@ -5,7 +5,7 @@ use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
-use crate::compiler::glr::parser::ParserGSS;
+use crate::compiler::glr::parser::{ParserGSS, TerminalsDisallowed};
 use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar_def::TerminalID;
 use crate::ds::weight::Weight;
@@ -522,7 +522,7 @@ impl Constraint {
 
     fn initial_state_map(&self) -> BTreeMap<u32, ParserGSS> {
         let initial_tok_state = self.tokenizer.initial_state();
-        let parser_gss = ParserGSS::from_stacks(&[(vec![0u32], BTreeMap::new())]);
+        let parser_gss = ParserGSS::from_stacks(&[(vec![0u32], TerminalsDisallowed::new())]);
         BTreeMap::from([(initial_tok_state, parser_gss)])
     }
 

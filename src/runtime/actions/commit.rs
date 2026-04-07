@@ -161,7 +161,7 @@ fn prune_initial_states(
                             .extend(disallowed.iter().copied());
                     }
                 }
-                Some(remapped)
+                Some(TerminalsDisallowed(std::sync::Arc::new(remapped)))
             },
         );
     }
@@ -216,9 +216,7 @@ fn apply_future_terminal_disallow(
     }
 
     gss.apply(|terminals_disallowed: &TerminalsDisallowed| {
-        let mut updated = terminals_disallowed.clone();
-        updated.entry(end_state).or_default().insert(terminal);
-        updated
+        terminals_disallowed.with_insert(end_state, terminal)
     })
 }
 
