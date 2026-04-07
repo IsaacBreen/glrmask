@@ -2831,13 +2831,16 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     let next = current.chain_next();
                     current = &**next;
                 }
-                Lower::General { children, empty, .. } => {
-                    if children.is_empty() && *empty {
-                        // Terminal node — end of chain
+                Lower::General { children, .. } => {
+                    if children.is_empty() {
+                        // Terminal node — end of chain (may or may not have empty)
                         break;
                     }
-                    if children.len() == 1 && !*empty {
+                    if children.len() == 1 {
                         // General with single child — treat as chain
+                        // (empty flag at intermediate nodes is OK; if a reduce
+                        // pops deeper than the chain, the fast path will
+                        // bail out at runtime)
                         let key = children.keys().next().unwrap().clone();
                         let ordmap = children.values().next().unwrap();
                         if ordmap.len() == 1 {
