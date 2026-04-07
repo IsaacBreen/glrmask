@@ -2468,6 +2468,7 @@ struct SchemaCtx<'a> {
     json_string_exact_cache: HashMap<usize, String>,
     json_string_upto_cache: HashMap<usize, String>,
     draft_stack: Vec<JsonSchemaDraft>,
+    convert_depth: usize,
 }
 
 impl<'a> SchemaCtx<'a> {
@@ -2485,6 +2486,7 @@ impl<'a> SchemaCtx<'a> {
             json_string_exact_cache: HashMap::new(),
             json_string_upto_cache: HashMap::new(),
             draft_stack: vec![DEFAULT_JSON_SCHEMA_DRAFT],
+            convert_depth: 0,
         };
         ctx.ensure_base_rules();
         ctx
@@ -3615,6 +3617,19 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn convert_schema(&mut self, schema: &Value) -> Result<GrammarExpr, GlrMaskError> {
+        const MAX_CONVERT_DEPTH: usize = 128;
+        if self.convert_depth >= MAX_CONVERT_DEPTH {
+            return Err(GlrMaskError::GrammarParse(
+                "schema conversion exceeded maximum recursion depth (likely circular $ref)".into(),
+            ));
+        }
+        self.convert_depth += 1;
+        let result = self.convert_schema_inner(schema);
+        self.convert_depth -= 1;
+        result
+    }
+
+    fn convert_schema_inner(&mut self, schema: &Value) -> Result<GrammarExpr, GlrMaskError> {
         if schema == &Value::Bool(false) {
             return Err(unsat_schema_error());
         }
