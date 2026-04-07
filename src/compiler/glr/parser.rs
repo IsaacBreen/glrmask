@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use rustc_hash::FxHashSet;
 use super::analysis::EOF;
 use super::table::{Action, GLRTable};
 use crate::compiler::grammar::model::TerminalID;
@@ -228,12 +229,12 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
     }
 
     let mut current = stack.clone();
-    let mut processed = vec![false; table.num_states as usize];
+    let mut processed = FxHashSet::<u32>::default();
 
     loop {
         let mut new_states = SmallVec::<[u32; 8]>::new();
         if let Some(state) = current.single_top_value() {
-            if !processed[state as usize] {
+            if !processed.contains(&state) {
                 new_states.push(state);
             }
         } else {
@@ -241,7 +242,7 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
                 current
                     .peek_values()
                     .into_iter()
-                    .filter(|&state| !processed[state as usize]),
+                    .filter(|&state| !processed.contains(&state)),
             );
         }
         if new_states.is_empty() {
@@ -251,18 +252,17 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
         let mut any_reduced = false;
         let mut pending_bases_by_target = SmallVec::<[(u32, ParserGSS); 8]>::new();
         for state in new_states {
-            processed[state as usize] = true;
+            processed.insert(state);
             let reduce_rules: &[u32] = match table.action(state, token) {
                 Some(Action::Reduce(rule_id)) => std::slice::from_ref(rule_id),
                 Some(Action::Split { reduces, .. }) => reduces.as_slice(),
                 _ => &[],
             };
-            let subtree = current.isolate(Some(state));
             let mut base_cache = SmallVec::<[((usize, u32), ParserGSS); 4]>::new();
             for &rule_id in reduce_rules {
                 let rule = &table.rules[rule_id as usize];
                 let rhs_len = rule.rhs.len();
-                let popped = subtree.popn(rhs_len as isize);
+                let popped = current.isolate_popn(state, rhs_len as isize);
                 if popped.is_empty() {
                     continue;
                 }
@@ -305,7 +305,7 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
             break;
         }
         for (target, base) in pending_bases_by_target {
-            current = current.absorb_push(target, &base);
+            current = current.absorb_push_same_acc(target, &base);
         }
     }
 
@@ -324,6 +324,275 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
         }
     }
     current.shift_top_values(shift_pairs)
+}
+
+/// Profiled version of `advance_stacks` that returns timing breakdown.
+#[derive(Debug, Default)]
+pub struct AdvanceProfile {
+    pub isolate_ns: u64,
+    pub popn_ns: u64,
+    pub base_isolate_ns: u64,
+    pub merge_ns: u64,
+    pub absorb_push_ns: u64,
+    pub shift_ns: u64,
+    pub n_loop_iters: u32,
+    pub n_reduces: u32,
+}
+
+pub(crate) fn advance_stacks_profiled(
+    table: &GLRTable,
+    stack: &ParserGSS,
+    token: TerminalID,
+) -> (ParserGSS, AdvanceProfile) {
+    use std::time::Instant;
+    let mut profile = AdvanceProfile::default();
+
+    // Single-state fast paths (no profiling needed since they're trivially fast)
+    if let Some(state) = stack.single_top_value() {
+        match table.action(state, token) {
+            Some(Action::Shift(target)) => return (stack.push(*target), profile),
+            Some(Action::Split {
+                shift: Some(target),
+                reduces,
+                accept,
+            }) if reduces.is_empty() && !*accept => return (stack.push(*target), profile),
+            Some(Action::Reduce(_)) | Some(Action::Accept) | Some(Action::Split { .. }) => {}
+            None => return (ParserGSS::empty(), profile),
+        }
+    }
+
+    let frontier = stack.peek_values();
+    if frontier.is_empty() {
+        return (ParserGSS::empty(), profile);
+    }
+
+    let mut pure_shift_targets = SmallVec::<[(u32, u32); 8]>::new();
+    let mut pure_shift_only = true;
+    let mut any_action = false;
+    for state in frontier.iter().copied() {
+        match table.action(state, token) {
+            Some(Action::Shift(target)) => {
+                any_action = true;
+                pure_shift_targets.push((state, *target));
+            }
+            Some(Action::Split {
+                shift: Some(target),
+                reduces,
+                accept,
+            }) if reduces.is_empty() && !*accept => {
+                any_action = true;
+                pure_shift_targets.push((state, *target));
+            }
+            Some(Action::Reduce(_))
+            | Some(Action::Accept)
+            | Some(Action::Split { .. }) => {
+                any_action = true;
+                pure_shift_only = false;
+                break;
+            }
+            None => {}
+        }
+    }
+    if !any_action {
+        return (ParserGSS::empty(), profile);
+    }
+    if pure_shift_only && !pure_shift_targets.is_empty() {
+        let t0 = Instant::now();
+        let result = stack.shift_top_values(pure_shift_targets);
+        profile.shift_ns = t0.elapsed().as_nanos() as u64;
+        return (result, profile);
+    }
+
+    let mut current = stack.clone();
+    let mut processed = FxHashSet::<u32>::default();
+
+    loop {
+        profile.n_loop_iters += 1;
+        let mut new_states = SmallVec::<[u32; 8]>::new();
+        if let Some(state) = current.single_top_value() {
+            if !processed.contains(&state) {
+                new_states.push(state);
+            }
+        } else {
+            new_states.extend(
+                current
+                    .peek_values()
+                    .into_iter()
+                    .filter(|&state| !processed.contains(&state)),
+            );
+        }
+        if new_states.is_empty() {
+            break;
+        }
+
+        let mut any_reduced = false;
+        let mut pending_bases_by_target = SmallVec::<[(u32, ParserGSS); 8]>::new();
+        for state in new_states {
+            processed.insert(state);
+            let reduce_rules: &[u32] = match table.action(state, token) {
+                Some(Action::Reduce(rule_id)) => std::slice::from_ref(rule_id),
+                Some(Action::Split { reduces, .. }) => reduces.as_slice(),
+                _ => &[],
+            };
+            let mut base_cache = SmallVec::<[((usize, u32), ParserGSS); 4]>::new();
+            for &rule_id in reduce_rules {
+                profile.n_reduces += 1;
+                let rule = &table.rules[rule_id as usize];
+                let rhs_len = rule.rhs.len();
+                let t0 = Instant::now();
+                let popped = current.isolate_popn(state, rhs_len as isize);
+                profile.isolate_ns += t0.elapsed().as_nanos() as u64;
+                if popped.is_empty() {
+                    continue;
+                }
+
+                let mut handle_goto_from = |goto_from: u32,
+                                            base_cache: &mut SmallVec<[((usize, u32), ParserGSS); 4]>,
+                                            profile: &mut AdvanceProfile| {
+                    if let Some(target) = table.goto_target(goto_from, rule.lhs) {
+                        let base = if let Some((_, cached)) = base_cache.iter().find(
+                            |((cached_rhs_len, cached_goto_from), _)| {
+                                *cached_rhs_len == rhs_len && *cached_goto_from == goto_from
+                            },
+                        ) {
+                            cached.clone()
+                        } else {
+                            let t0 = Instant::now();
+                            let isolated = popped.isolate(Some(goto_from));
+                            profile.base_isolate_ns += t0.elapsed().as_nanos() as u64;
+                            base_cache.push(((rhs_len, goto_from), isolated.clone()));
+                            isolated
+                        };
+                        if let Some((_, existing)) = pending_bases_by_target
+                            .iter_mut()
+                            .find(|(existing_target, _)| *existing_target == target)
+                        {
+                            let t0 = Instant::now();
+                            *existing = existing.merge(&base);
+                            profile.merge_ns += t0.elapsed().as_nanos() as u64;
+                        } else {
+                            pending_bases_by_target.push((target, base));
+                        }
+                        any_reduced = true;
+                    }
+                };
+
+                if let Some(goto_from) = popped.single_top_value() {
+                    handle_goto_from(goto_from, &mut base_cache, &mut profile);
+                } else {
+                    for goto_from in popped.peek_values() {
+                        handle_goto_from(goto_from, &mut base_cache, &mut profile);
+                    }
+                }
+            }
+        }
+        if !any_reduced {
+            break;
+        }
+        for (target, base) in pending_bases_by_target {
+            let t0 = Instant::now();
+            current = current.absorb_push_same_acc(target, &base);
+            profile.absorb_push_ns += t0.elapsed().as_nanos() as u64;
+        }
+    }
+
+    let mut shift_pairs = SmallVec::<[(u32, u32); 8]>::new();
+    let mut handle_shift_state = |state: u32| {
+        if let Some(target) = shift_target(table.action(state, token)) {
+            shift_pairs.push((state, target));
+        }
+    };
+
+    if let Some(state) = current.single_top_value() {
+        handle_shift_state(state);
+    } else {
+        for state in current.peek_values() {
+            handle_shift_state(state);
+        }
+    }
+    let t0 = Instant::now();
+    let result = current.shift_top_values(shift_pairs);
+    profile.shift_ns = t0.elapsed().as_nanos() as u64;
+    (result, profile)
+}
+
+/// Flat-stack alternative to `advance_stacks` for small GSSs.
+///
+/// Converts the GSS to flat Vec stacks, applies reduce closure + shift using
+/// simple Vec operations, and rebuilds via `from_stacks`. This avoids the
+/// overhead of LeveledGSS operations (Arc, HashMap, recursive structure)
+/// which dominates runtime for small GSSs.
+///
+/// Returns `None` if the GSS has more paths than `max_paths`, in which case
+/// the caller should fall back to the standard `advance_stacks`.
+pub(crate) fn advance_stacks_flat(
+    table: &GLRTable,
+    stack: &ParserGSS,
+    token: TerminalID,
+    max_paths: usize,
+) -> Option<ParserGSS> {
+    let flat = stack.to_stacks_bounded(max_paths)?;
+    if flat.is_empty() {
+        return Some(ParserGSS::empty());
+    }
+
+    // Reduce closure on flat stacks.
+    // Each stack is (Vec<u32>, TerminalsDisallowed). The annotation is carried
+    // along unchanged through reduces (it's associated with the stack prefix
+    // that doesn't change during reduce closure).
+    let mut visited: std::collections::HashSet<Vec<u32>> = std::collections::HashSet::new();
+    let mut queue: VecDeque<(Vec<u32>, TerminalsDisallowed)> = VecDeque::new();
+
+    for (s, a) in &flat {
+        if visited.insert(s.clone()) {
+            queue.push_back((s.clone(), a.clone()));
+        }
+    }
+
+    let mut shifted: Vec<(Vec<u32>, TerminalsDisallowed)> = Vec::new();
+
+    while let Some((s, ann)) = queue.pop_front() {
+        let Some(&state) = s.last() else { continue };
+
+        // Check for shift action
+        if let Some(target) = shift_target(table.action(state, token)) {
+            let mut shifted_stack = s.clone();
+            shifted_stack.push(target);
+            shifted.push((shifted_stack, ann.clone()));
+        }
+
+        // Apply reduce rules
+        let reduce_rule_ids: &[u32] = match table.action(state, token) {
+            Some(Action::Reduce(rule_id)) => std::slice::from_ref(rule_id),
+            Some(Action::Split { reduces, .. }) => reduces.as_slice(),
+            _ => &[],
+        };
+
+        for &rule_id in reduce_rule_ids {
+            let rule = &table.rules[rule_id as usize];
+            let rhs_len = rule.rhs.len();
+            if s.len() < rhs_len + 1 {
+                continue;
+            }
+            let keep_len = s.len() - rhs_len;
+            let goto_from = s[keep_len - 1];
+            if let Some(target) = table.goto_target(goto_from, rule.lhs) {
+                let mut reduced = s[..keep_len].to_vec();
+                reduced.push(target);
+                if visited.insert(reduced.clone()) {
+                    // Carry annotation from the prefix (it's associated with the
+                    // lower part of the stack which is preserved through reduces)
+                    queue.push_back((reduced, ann.clone()));
+                }
+            }
+        }
+    }
+
+    if shifted.is_empty() {
+        Some(ParserGSS::empty())
+    } else {
+        Some(ParserGSS::from_stacks(&shifted))
+    }
 }
 
 pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {

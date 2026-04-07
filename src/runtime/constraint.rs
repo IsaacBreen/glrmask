@@ -400,6 +400,10 @@ impl Constraint {
             .unwrap_or(0)
     }
 
+    pub fn num_parser_states(&self) -> u32 {
+        self.table.num_states
+    }
+
     pub(crate) fn parser_dwa(&self) -> &DWA {
         &self.parser_dwa
     }

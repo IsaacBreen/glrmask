@@ -22,4 +22,12 @@ impl<'a> ConstraintState<'a> {
     pub fn is_finished(&self) -> bool {
         self.is_complete()
     }
+
+    pub fn parser_root_count(&self) -> usize {
+        self.state.values().map(|gss| gss.peek_values().len()).sum()
+    }
+
+    pub fn parser_path_count(&self, limit: usize) -> usize {
+        self.state.values().map(|gss| gss.path_count_at_most(limit)).sum::<usize>().min(limit)
+    }
 }

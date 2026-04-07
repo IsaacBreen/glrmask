@@ -178,6 +178,11 @@ impl PyConstraint {
         self.inner.mask_len()
     }
 
+    /// Return the number of GLR parser states.
+    fn num_parser_states(&self) -> u32 {
+        self.inner.num_parser_states()
+    }
+
     /// Temporary diagnostic: return the original→internal token mapping as a list.
     fn _debug_token_map(&self) -> Vec<u32> {
         self.inner.debug_original_token_to_internal()
@@ -268,6 +273,47 @@ impl PyConstraintState {
     fn commit_tokens(&mut self, token_ids: Vec<u32>) -> PyResult<()> {
         self.inner
             .with_dependent_mut(|_owner, state| string_result(state.commit_tokens(&token_ids)))
+    }
+
+    /// Like commit_token but returns profiling stats as a dict.
+    fn commit_token_profiled<'py>(&mut self, py: Python<'py>, token_id: u32) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let (total_ns, scan_ns, prune_ns, queue_ns, fuse_ns, exec_ns, advance_ns, actionable_ns, may_advance_ns, n_tokenizer_states, n_queue_entries, n_advances,
+             adv_isolate_ns, adv_popn_ns, adv_base_isolate_ns, adv_merge_ns, adv_absorb_push_ns, adv_shift_ns, adv_n_loop_iters, adv_n_reduces) =
+            self.inner.with_dependent_mut(|_owner, state| {
+                state.commit_token_profiled(token_id).map_err(|e| PyValueError::new_err(e))
+            })?;
+        let dict = pyo3::types::PyDict::new(py);
+        dict.set_item("total_ns", total_ns)?;
+        dict.set_item("scan_ns", scan_ns)?;
+        dict.set_item("prune_ns", prune_ns)?;
+        dict.set_item("queue_ns", queue_ns)?;
+        dict.set_item("fuse_ns", fuse_ns)?;
+        dict.set_item("exec_ns", exec_ns)?;
+        dict.set_item("advance_ns", advance_ns)?;
+        dict.set_item("actionable_ns", actionable_ns)?;
+        dict.set_item("may_advance_ns", may_advance_ns)?;
+        dict.set_item("n_tokenizer_states", n_tokenizer_states)?;
+        dict.set_item("n_queue_entries", n_queue_entries)?;
+        dict.set_item("n_advances", n_advances)?;
+        dict.set_item("adv_isolate_ns", adv_isolate_ns)?;
+        dict.set_item("adv_popn_ns", adv_popn_ns)?;
+        dict.set_item("adv_base_isolate_ns", adv_base_isolate_ns)?;
+        dict.set_item("adv_merge_ns", adv_merge_ns)?;
+        dict.set_item("adv_absorb_push_ns", adv_absorb_push_ns)?;
+        dict.set_item("adv_shift_ns", adv_shift_ns)?;
+        dict.set_item("adv_n_loop_iters", adv_n_loop_iters)?;
+        dict.set_item("adv_n_reduces", adv_n_reduces)?;
+        Ok(dict)
+    }
+
+    /// Return total parser GSS root count across all tokenizer states.
+    fn parser_root_count(&self) -> usize {
+        self.inner.with_dependent(|_owner, state| state.parser_root_count())
+    }
+
+    /// Return parser path count (capped at limit).
+    fn parser_path_count(&self, limit: usize) -> usize {
+        self.inner.with_dependent(|_owner, state| state.parser_path_count(limit))
     }
 
     fn commit_bytes(&mut self, data: &[u8]) -> PyResult<()> {

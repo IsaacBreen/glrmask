@@ -1669,6 +1669,91 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         res
     }
 
+    /// Like `to_stacks`, but returns `None` if the path count exceeds `limit`.
+    /// Avoids enumerating all paths when the GSS is too large.
+    pub fn to_stacks_bounded(&self, limit: usize) -> Option<Vec<(Vec<T>, A)>> {
+        let mut res: Vec<(Vec<T>, A)> = Vec::new();
+
+        fn dfs_lower_bounded<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
+            l: &Lower<T>,
+            pref: &mut Vec<T>,
+            acc: &A,
+            out: &mut Vec<(Vec<T>, A)>,
+            limit: usize,
+        ) -> bool {
+            if l.empty() {
+                let mut stack = pref.clone();
+                stack.reverse();
+                out.push((stack, acc.clone()));
+                if out.len() > limit { return false; }
+            }
+            for (v, kids) in l.children_ref().iter() {
+                for child in kids.values() {
+                    pref.push(v.clone());
+                    if !dfs_lower_bounded(child, pref, acc, out, limit) {
+                        pref.pop();
+                        return false;
+                    }
+                    pref.pop();
+                }
+            }
+            true
+        }
+
+        fn dfs_upper_bounded<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
+            u: &Upper<T, A>,
+            pref: &mut Vec<T>,
+            out: &mut Vec<(Vec<T>, A)>,
+            limit: usize,
+        ) -> bool {
+            match u {
+                Upper::Branch(b) => {
+                    if let Some(e) = &b.empty {
+                        let mut stack = pref.clone();
+                        stack.reverse();
+                        out.push((stack, e.clone()));
+                        if out.len() > limit { return false; }
+                    }
+                    for (v, kids) in b.children.iter() {
+                        for child in kids.values() {
+                            pref.push(v.clone());
+                            if !dfs_upper_bounded(child, pref, out, limit) {
+                                pref.pop();
+                                return false;
+                            }
+                            pref.pop();
+                        }
+                    }
+                }
+                Upper::Interface(i) => {
+                    if i.inner.empty() {
+                        let mut stack = pref.clone();
+                        stack.reverse();
+                        out.push((stack, i.acc.clone()));
+                        if out.len() > limit { return false; }
+                    }
+                    for (v, kids) in i.inner.children_ref().iter() {
+                        for child in kids.values() {
+                            pref.push(v.clone());
+                            if !dfs_lower_bounded(child, pref, &i.acc, out, limit) {
+                                pref.pop();
+                                return false;
+                            }
+                            pref.pop();
+                        }
+                    }
+                }
+            }
+            true
+        }
+
+        if dfs_upper_bounded(&self.inner, &mut vec![], &mut res, limit) {
+            Some(res)
+        } else {
+            None
+        }
+    }
+
     pub fn push(&self, value: T) -> Self {
         if self.is_empty() {
             return self.clone();
@@ -1767,7 +1852,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     /// Equivalent to `self.merge(&base.push(value))` but avoids intermediate
     /// allocations by directly inserting into self's structure via Arc::make_mut.
     /// Falls back to the standard path for non-Interface cases.
-    pub fn absorb_push(mut self, value: T, base: &Self) -> Self {
+    pub fn absorb_push(self, value: T, base: &Self) -> Self {
         if base.is_empty() {
             return self;
         }
@@ -1779,48 +1864,135 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             (&*base.inner, &*self.inner)
         {
             if self_iface.acc == base_iface.acc {
-                let child_depth = base_iface.inner.max_depth();
-                let child_node = base_iface.inner.clone();
-
-                let inner_mut = Arc::make_mut(&mut self.inner);
-                if let Upper::Interface(self_iface_arc) = inner_mut {
-                    let iface_mut = Arc::make_mut(self_iface_arc);
-                    let lower_mut = Arc::make_mut(&mut iface_mut.inner);
-                    // Always convert to General for in-place mutation
-                    lower_mut.ensure_general();
-                    match lower_mut {
-                        Lower::General { children, max_depth, .. } => {
-                            match children.get(&value) {
-                                Some(existing_ordmap) => {
-                                    let mut new_ordmap = existing_ordmap.clone();
-                                    match new_ordmap.get(&child_depth) {
-                                        Some(existing_child) => {
-                                            new_ordmap.insert(child_depth, merge_lower(existing_child, &child_node));
-                                        }
-                                        None => {
-                                            new_ordmap.insert(child_depth, child_node);
-                                        }
-                                    }
-                                    children.insert(value, new_ordmap);
-                                }
-                                None => {
-                                    children.insert(value, OrdMap::unit(child_depth, child_node));
-                                }
-                            }
-
-                            if child_depth + 1 > *max_depth {
-                                *max_depth = child_depth + 1;
-                            }
-                        }
-                        Lower::Chain { .. } => unreachable!(),
-                    }
-
-                    return self;
-                }
+                return self.absorb_push_interface_inplace(value, base_iface);
             }
         }
         // Fallback
         self.merge(&base.push(value))
+    }
+
+    /// Like `absorb_push` but assumes the caller has already verified that
+    /// both `self` and `base` are Interface variants with identical `acc`
+    /// values. This avoids an expensive O(n) annotation equality check.
+    ///
+    /// # Safety contract
+    /// Caller must guarantee that both `self` and `base` have Interface
+    /// inner variants with equal `acc` annotations.
+    pub fn absorb_push_same_acc(self, value: T, base: &Self) -> Self {
+        if base.is_empty() {
+            return self;
+        }
+        if self.is_empty() {
+            return base.push(value);
+        }
+        if let Upper::Interface(base_iface) = &*base.inner {
+            return self.absorb_push_interface_inplace(value, base_iface);
+        }
+        // Fallback (shouldn't happen if caller's guarantee holds)
+        self.merge(&base.push(value))
+    }
+
+    fn absorb_push_interface_inplace(
+        mut self,
+        value: T,
+        base_iface: &Arc<Interface<T, A>>,
+    ) -> Self {
+        let child_depth = base_iface.inner.max_depth();
+        let child_node = base_iface.inner.clone();
+
+        let inner_mut = Arc::make_mut(&mut self.inner);
+        if let Upper::Interface(self_iface_arc) = inner_mut {
+            let iface_mut = Arc::make_mut(self_iface_arc);
+            let lower_mut = Arc::make_mut(&mut iface_mut.inner);
+            // Always convert to General for in-place mutation
+            lower_mut.ensure_general();
+            match lower_mut {
+                Lower::General { children, max_depth, .. } => {
+                    match children.get(&value) {
+                        Some(existing_ordmap) => {
+                            let mut new_ordmap = existing_ordmap.clone();
+                            match new_ordmap.get(&child_depth) {
+                                Some(existing_child) => {
+                                    new_ordmap.insert(child_depth, merge_lower(existing_child, &child_node));
+                                }
+                                None => {
+                                    new_ordmap.insert(child_depth, child_node);
+                                }
+                            }
+                            children.insert(value, new_ordmap);
+                        }
+                        None => {
+                            children.insert(value, OrdMap::unit(child_depth, child_node));
+                        }
+                    }
+
+                    if child_depth + 1 > *max_depth {
+                        *max_depth = child_depth + 1;
+                    }
+                }
+                Lower::Chain { .. } => unreachable!(),
+            }
+
+            return self;
+        }
+        // Fallback
+        self.merge(&LeveledGSS { inner: Arc::new(Upper::Interface(base_iface.clone())) })
+    }
+
+    /// Combined `isolate(Some(value)).popn(n)` that avoids creating the
+    /// intermediate isolated GSS. For Interface variants with a single
+    /// interface path at `value`, walks directly down `n` levels without
+    /// any intermediate allocations.
+    pub fn isolate_popn(&self, value: T, n: isize) -> Self {
+        if n <= 0 {
+            return self.isolate(Some(value));
+        }
+        if self.is_empty() {
+            return Self::empty();
+        }
+        // Fast path for Interface variant
+        if let Upper::Interface(interface) = &*self.inner {
+            // Get children for the isolated value
+            if let Some(kids) = interface.inner.children_get(&value) {
+                // kids is OrdMap<usize, Arc<Lower<T>>>
+                // For single-path case: exactly one entry in kids
+                if kids.len() == 1 {
+                    let (_, child) = kids.iter().next().unwrap();
+                    // Now walk down n-1 more levels (we already descended 1 level by isolating)
+                    let remaining = n - 1;
+                    if remaining <= 0 {
+                        // We need to return the child wrapped as a GSS
+                        // Handle empty flag on the original lower level
+                        let mut result = child.clone();
+                        if interface.inner.empty() {
+                            // The isolated level had an empty marker — at depth 1 pop
+                            // this means we include the empty terminal
+                            if remaining == 0 {
+                                let terminal = new_lower(IHashMap::new(), true);
+                                result = merge_lower(&result, &terminal);
+                            }
+                        }
+                        if result.children_is_empty() && !result.empty() {
+                            return Self::empty();
+                        }
+                        return Self {
+                            inner: new_interface(result, interface.acc.clone()),
+                        };
+                    }
+                    // Walk down remaining levels using the child directly
+                    let temp = Self {
+                        inner: new_interface(child.clone(), interface.acc.clone()),
+                    };
+                    if let Some(fast) = temp.popn_single_interface_path(remaining) {
+                        return fast;
+                    }
+                }
+            } else {
+                return Self::empty();
+            }
+        }
+        // Fallback to separate isolate + popn
+        self.isolate(Some(value)).popn(n)
     }
 
     pub fn popn(&self, n: isize) -> Self {

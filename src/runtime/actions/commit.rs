@@ -2,9 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::automata::lexer::tokenizer::TokenizerExecResult;
 use crate::compiler::glr::parser::{
+    AdvanceProfile,
     ParserGSS,
     TerminalsDisallowed,
     advance_stacks,
+    advance_stacks_profiled,
     stack_may_advance_on,
     stack_may_advance_on_any,
 };
@@ -253,6 +255,48 @@ fn advance_terminal_match(
     (!advanced.is_empty()).then_some(advanced)
 }
 
+fn advance_terminal_match_profiled(
+    constraint: &Constraint,
+    gss_at_offset: &ParserGSS,
+    terminal: u32,
+    exec_result: &TokenizerExecResult,
+    advance_result_cache: &mut AdvanceResultCache,
+    terminal_result_cache: &mut FxHashMap<u32, ParserGSS>,
+    adv_profile: &mut AdvanceProfile,
+) -> Option<ParserGSS> {
+    if let Some(cached) = terminal_result_cache.get(&terminal) {
+        return (!cached.is_empty()).then(|| cached.clone());
+    }
+
+    let advance_cache_key = (gss_at_offset.ptr_key(), terminal);
+    let advanced = if let Some((_, cached)) = advance_result_cache.get(&advance_cache_key) {
+        cached.clone()
+    } else {
+        if !stack_may_advance_on(&constraint.table, gss_at_offset, terminal) {
+            let empty = ParserGSS::empty();
+            advance_result_cache.insert(advance_cache_key, (gss_at_offset.clone(), empty.clone()));
+            terminal_result_cache.insert(terminal, empty);
+            return None;
+        }
+
+        let (advanced, profile) = advance_stacks_profiled(&constraint.table, gss_at_offset, terminal);
+        adv_profile.isolate_ns += profile.isolate_ns;
+        adv_profile.popn_ns += profile.popn_ns;
+        adv_profile.base_isolate_ns += profile.base_isolate_ns;
+        adv_profile.merge_ns += profile.merge_ns;
+        adv_profile.absorb_push_ns += profile.absorb_push_ns;
+        adv_profile.shift_ns += profile.shift_ns;
+        adv_profile.n_loop_iters += profile.n_loop_iters;
+        adv_profile.n_reduces += profile.n_reduces;
+        advance_result_cache.insert(advance_cache_key, (gss_at_offset.clone(), advanced.clone()));
+        advanced
+    };
+
+    let advanced = apply_future_terminal_disallow(constraint, exec_result, terminal, advanced);
+    terminal_result_cache.insert(terminal, advanced.clone());
+    (!advanced.is_empty()).then_some(advanced)
+}
+
 fn commit_bytes_impl(
     constraint: &Constraint,
     state: &mut BTreeMap<u32, ParserGSS>,
@@ -386,6 +430,154 @@ fn commit_bytes_impl(
     Ok(())
 }
 
+fn commit_bytes_impl_profiled(
+    constraint: &Constraint,
+    state: &mut BTreeMap<u32, ParserGSS>,
+    bytes: &[u8],
+) -> Result<(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64), String> {
+    use std::time::Instant;
+    let t_total = Instant::now();
+
+    if bytes.is_empty() {
+        let total_ns = t_total.elapsed().as_nanos() as u64;
+        return Ok((total_ns, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+    }
+
+    let ignore_terminal = constraint.ignore_terminal;
+    let n_tokenizer_states = state.len() as u64;
+
+    let t_scan = Instant::now();
+    let mut initial_scan = InitialCommitScan::collect(constraint, state, bytes);
+    let scan_ns = t_scan.elapsed().as_nanos() as u64;
+
+    let t_prune = Instant::now();
+    prune_initial_states(
+        state,
+        &initial_scan.accepted_terminals,
+        &initial_scan.remapped_tokenizer_states,
+    );
+    state.retain(|_, parser_state| !parser_state.is_empty());
+    let prune_ns = t_prune.elapsed().as_nanos() as u64;
+
+    let t_queue = Instant::now();
+    let mut pending_state = ParserStatesByTokenizer::default();
+    let mut advance_result_cache = AdvanceResultCache::default();
+    let mut processing_queue: Vec<ParserStatesByTokenizer> =
+        (0..=bytes.len()).map(|_| ParserStatesByTokenizer::default()).collect();
+    processing_queue[0] = std::mem::take(state).into_iter().collect();
+
+    let mut n_queue_entries: u64 = 0;
+    let mut exec_ns: u64 = 0;
+    let mut advance_ns: u64 = 0;
+    let mut actionable_ns: u64 = 0;
+    let mut may_advance_ns: u64 = 0;
+    let mut n_advances: u64 = 0;
+    let mut adv_profile = AdvanceProfile::default();
+    let mut offset = 0usize;
+    while offset < processing_queue.len() {
+        if processing_queue[offset].is_empty() {
+            offset += 1;
+            continue;
+        }
+
+        let states_to_process = std::mem::take(&mut processing_queue[offset]);
+        for (tokenizer_state, gss_at_offset) in states_to_process {
+            n_queue_entries += 1;
+            let t_act = Instant::now();
+            let actionable_terminals = ActionableTerminals::from_gss(constraint, &gss_at_offset);
+            actionable_ns += t_act.elapsed().as_nanos() as u64;
+            let t_exec = Instant::now();
+            let exec_result = if offset == 0 {
+                initial_scan.take_exec_result(tokenizer_state).unwrap_or_else(|| {
+                    constraint.tokenizer.execute_from_state(&bytes[offset..], tokenizer_state)
+                })
+            } else {
+                constraint.tokenizer.execute_from_state(&bytes[offset..], tokenizer_state)
+            };
+            exec_ns += t_exec.elapsed().as_nanos() as u64;
+
+            let mut seen_matches = FxHashSet::default();
+            let mut terminal_result_cache = FxHashMap::<u32, ParserGSS>::default();
+
+            for matched in &exec_result.matches {
+                let new_offset = offset + matched.width;
+                let ignored = is_ignored_terminal(ignore_terminal, matched.id);
+
+                if !ignored
+                    && !is_actionable_terminal(actionable_terminals.as_ref(), constraint, matched.id)
+                {
+                    continue;
+                }
+                if !seen_matches.insert((matched.width, matched.id)) {
+                    continue;
+                }
+
+                if ignored {
+                    queue_parser_state(
+                        &mut processing_queue, &mut pending_state, new_offset, bytes.len(),
+                        constraint.tokenizer.initial_state(), gss_at_offset.clone(),
+                    );
+                    continue;
+                }
+
+                let t_adv = Instant::now();
+                let advance_result = advance_terminal_match_profiled(
+                    constraint, &gss_at_offset, matched.id, &exec_result,
+                    &mut advance_result_cache, &mut terminal_result_cache,
+                    &mut adv_profile,
+                );
+                advance_ns += t_adv.elapsed().as_nanos() as u64;
+                n_advances += 1;
+
+                let Some(gss) = advance_result else {
+                    continue;
+                };
+
+                queue_parser_state(
+                    &mut processing_queue, &mut pending_state, new_offset, bytes.len(),
+                    constraint.tokenizer.initial_state(), gss,
+                );
+            }
+
+            if let Some(end_state) = exec_result.end_state {
+                let future_terminals = constraint.tokenizer.possible_future_terminals(end_state);
+                let t_may = Instant::now();
+                let may_advance = stack_may_advance_on_any(&constraint.table, &gss_at_offset, future_terminals);
+                may_advance_ns += t_may.elapsed().as_nanos() as u64;
+                if !may_advance {
+                    continue;
+                }
+                queue_parser_state(
+                    &mut processing_queue, &mut pending_state, bytes.len(), bytes.len(),
+                    end_state, gss_at_offset,
+                );
+            }
+        }
+    }
+    let queue_ns = t_queue.elapsed().as_nanos() as u64;
+
+    let t_fuse = Instant::now();
+    let mut new_state: BTreeMap<u32, ParserGSS> = pending_state.into_iter().collect();
+    for parser_state in new_state.values_mut() {
+        *parser_state = parser_state.fuse(Some(1));
+    }
+    new_state.retain(|_, parser_state| !parser_state.is_empty());
+    let fuse_ns = t_fuse.elapsed().as_nanos() as u64;
+
+    *state = new_state;
+    if state.is_empty() {
+        return Err("commit rejected: no valid parser states remain".to_string());
+    }
+
+    let total_ns = t_total.elapsed().as_nanos() as u64;
+    Ok((total_ns, scan_ns, prune_ns, queue_ns, fuse_ns, exec_ns, advance_ns,
+        actionable_ns, may_advance_ns,
+        n_tokenizer_states, n_queue_entries, n_advances,
+        adv_profile.isolate_ns, adv_profile.popn_ns, adv_profile.base_isolate_ns,
+        adv_profile.merge_ns, adv_profile.absorb_push_ns, adv_profile.shift_ns,
+        adv_profile.n_loop_iters as u64, adv_profile.n_reduces as u64))
+}
+
 impl<'a> ConstraintState<'a> {
     /// Commit a sampled token, advancing the constraint state.
     ///
@@ -407,6 +599,20 @@ impl<'a> ConstraintState<'a> {
                 format!("commit_token: token_id {token_id} not in vocabulary")
             })?;
         commit_bytes_impl(constraint, &mut self.state, bytes)
+    }
+
+    /// Like commit_token but returns profiling stats.
+    /// Returns 20-tuple with timing and count metrics.
+    pub fn commit_token_profiled(
+        &mut self,
+        token_id: u32,
+    ) -> Result<(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64), String> {
+        let constraint = self.constraint;
+        let bytes = token_bytes_for_id(constraint, token_id)
+            .ok_or_else(|| {
+                format!("commit_token: token_id {token_id} not in vocabulary")
+            })?;
+        commit_bytes_impl_profiled(constraint, &mut self.state, bytes)
     }
 
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
