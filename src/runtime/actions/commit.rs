@@ -295,6 +295,123 @@ fn advance_terminal_match_profiled(
     (!advanced.is_empty()).then_some(advanced)
 }
 
+/// Fast path for the common case: exactly 1 tokenizer state, the tokenizer
+/// produces exactly 1 non-ignored terminal match that consumes all bytes,
+/// and no pending end-state needs to be queued. This avoids:
+/// - FxHashMap allocations (InitialCommitScan, seen_matches, caches)
+/// - Processing queue allocation
+/// - Prune iteration (when terminals_disallowed is empty)
+///
+/// Returns `Some(Ok(()))` on success, `Some(Err(...))` on rejection,
+/// or `None` to fall through to the general path.
+fn commit_bytes_fast_path(
+    constraint: &Constraint,
+    state: &mut BTreeMap<u32, ParserGSS>,
+    bytes: &[u8],
+) -> Option<Result<(), String>> {
+    if bytes.is_empty() || state.len() != 1 {
+        return None;
+    }
+
+    let (&tokenizer_state, gss) = state.iter().next().unwrap();
+    let ignore_terminal = constraint.ignore_terminal;
+
+    // Execute tokenizer once
+    let exec_result = constraint.tokenizer.execute_from_state(bytes, tokenizer_state);
+
+    // Find exactly 1 non-ignored, actionable terminal match consuming all bytes
+    let mut sole_terminal: Option<u32> = None;
+    for matched in &exec_result.matches {
+        if matched.width != bytes.len() {
+            // Partial match — need queue processing
+            return None;
+        }
+        if is_ignored_terminal(ignore_terminal, matched.id) {
+            // Ignored terminal — need general path
+            return None;
+        }
+        if !stack_may_advance_on(&constraint.table, gss, matched.id) {
+            continue;
+        }
+        if sole_terminal.is_some() {
+            // Multiple valid matches — need general path
+            return None;
+        }
+        sole_terminal = Some(matched.id);
+    }
+    let terminal = sole_terminal?;
+
+    // Check if end_state needs processing (continuation of a longer match)
+    if let Some(end_state) = exec_result.end_state {
+        let future_terminals = constraint.tokenizer.possible_future_terminals(end_state);
+        if stack_may_advance_on_any(&constraint.table, gss, future_terminals) {
+            // End state has viable future — need general path
+            return None;
+        }
+    }
+
+    // Inline prune: check if terminals_disallowed would block this terminal.
+    // For the single-terminal case, prune removes GSS paths where the sole
+    // terminal IS disallowed AND there are no other matched terminals.
+    // Remap tokenizer states in accumulators as well.
+    let pruned_gss = gss.apply_and_prune_no_promote(|td: &TerminalsDisallowed| {
+        if td.is_empty() {
+            // Fast path: empty disallow → keep path, remap to empty
+            if exec_result.end_state.is_some() {
+                // Remap tokenizer_state → end_state (preserving empty set)
+                return Some(TerminalsDisallowed::new());
+            }
+            return Some(TerminalsDisallowed::new());
+        }
+        // Check if this terminal is fully blocked
+        if let Some(disallowed) = td.get(&tokenizer_state) {
+            if disallowed.contains(&terminal) {
+                // The only matched terminal is disallowed — prune this path
+                return None;
+            }
+        }
+        // Remap tokenizer states
+        let mut remapped = BTreeMap::new();
+        if let Some(end_state) = exec_result.end_state {
+            if let Some(d) = td.get(&tokenizer_state) {
+                remapped
+                    .entry(end_state)
+                    .or_insert_with(BTreeSet::new)
+                    .extend(d.iter().copied());
+            }
+        }
+        Some(TerminalsDisallowed(std::sync::Arc::new(remapped)))
+    });
+
+    if pruned_gss.is_empty() {
+        return Some(Err(
+            "commit rejected: no valid parser states remain".to_string(),
+        ));
+    }
+
+    // Advance the parser
+    let advanced = advance_stacks(&constraint.table, &pruned_gss, terminal);
+    if advanced.is_empty() {
+        return Some(Err(
+            "commit rejected: no valid parser states remain".to_string(),
+        ));
+    }
+
+    let advanced =
+        apply_future_terminal_disallow(constraint, &exec_result, terminal, advanced);
+    let fused = advanced.fuse(Some(1));
+
+    if fused.is_empty() {
+        return Some(Err(
+            "commit rejected: no valid parser states remain".to_string(),
+        ));
+    }
+
+    state.clear();
+    state.insert(constraint.tokenizer.initial_state(), fused);
+    Some(Ok(()))
+}
+
 fn commit_bytes_impl(
     constraint: &Constraint,
     state: &mut BTreeMap<u32, ParserGSS>,
@@ -302,6 +419,11 @@ fn commit_bytes_impl(
 ) -> Result<(), String> {
     if bytes.is_empty() {
         return Ok(());
+    }
+
+    // Try the fast path first (single tokenizer state, single terminal match)
+    if let Some(result) = commit_bytes_fast_path(constraint, state, bytes) {
+        return result;
     }
 
     let ignore_terminal = constraint.ignore_terminal;
