@@ -561,6 +561,100 @@ impl Constraint {
         }
     }
 
+    /// Convert a merged internal token dense bitmap to the output buffer.
+    /// Uses the same complement/group/per-bit paths as `or_to_buf` in DenseMaskAcc.
+    pub(crate) fn or_internal_dense_to_buf(&self, dense: &[u64], buf: &mut [u32]) {
+        let word_groups = &self.word_group_buf_masks;
+        let all_mask = &self.all_tokens_buf_mask;
+        let internal_masks = &self.internal_token_buf_masks;
+
+        // Super-fast path: entire dense matches full universe.
+        let n_full_groups = word_groups.len().saturating_sub(1);
+        if !all_mask.is_empty()
+            && dense.len() == word_groups.len()
+            && n_full_groups > 0
+            && dense[..n_full_groups].iter().all(|&w| w == !0u64)
+        {
+            let last_expected = if internal_masks.len() % 64 == 0 {
+                !0u64
+            } else {
+                (1u64 << (internal_masks.len() % 64)) - 1
+            };
+            if dense[n_full_groups] == last_expected {
+                for (i, &mask) in all_mask.iter().enumerate() {
+                    buf[i] |= mask;
+                }
+                return;
+            }
+        }
+
+        // Complement path: when most words are full, start from all_tokens
+        // and subtract the few missing tokens.
+        let n_full = dense.iter().filter(|&&w| w == !0u64).count();
+        let n_non_full = dense.len() - n_full;
+        if !all_mask.is_empty()
+            && dense.len() == word_groups.len()
+            && n_full > 0
+            && n_non_full < n_full
+        {
+            let mut temp: Vec<u32> = all_mask.to_vec();
+            let n_internal = internal_masks.len();
+            for (wi, &w) in dense.iter().enumerate() {
+                if w == !0u64 {
+                    continue;
+                }
+                if w == 0 {
+                    if let Some(group) = word_groups.get(wi) {
+                        for (i, &mask) in group.iter().enumerate() {
+                            temp[i] &= !mask;
+                        }
+                    }
+                } else {
+                    let missing = !w;
+                    let mut bits = missing;
+                    while bits != 0 {
+                        let bit = bits.trailing_zeros() as usize;
+                        let internal_token = wi * 64 + bit;
+                        if internal_token < n_internal {
+                            for &(buf_word, mask) in &internal_masks[internal_token] {
+                                temp[buf_word as usize] &= !mask;
+                            }
+                        }
+                        bits &= bits - 1;
+                    }
+                }
+            }
+            for (i, &mask) in temp.iter().enumerate() {
+                buf[i] |= mask;
+            }
+            return;
+        }
+
+        // Normal path: iterate each word.
+        for (wi, &w) in dense.iter().enumerate() {
+            if w == 0 {
+                continue;
+            }
+            if w == !0u64 {
+                if let Some(group) = word_groups.get(wi) {
+                    for (i, &mask) in group.iter().enumerate() {
+                        buf[i] |= mask;
+                    }
+                    continue;
+                }
+            }
+            let mut bits = w;
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                let internal_token = wi * 64 + bit;
+                if internal_token < internal_masks.len() {
+                    self.or_internal_token_masks_to_buf(internal_token, buf);
+                }
+                bits &= bits - 1;
+            }
+        }
+    }
+
     fn or_original_token_to_buf(&self, token_id: u32, buf: &mut [u32]) {
         let word = token_id as usize / 32;
         let bit = token_id as usize % 32;

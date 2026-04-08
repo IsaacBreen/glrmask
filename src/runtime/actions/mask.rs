@@ -183,6 +183,50 @@ impl DenseMaskAcc {
         }
     }
 
+    /// OR this accumulator's internal tokens into a merged dense bitmap.
+    fn or_into_merged(&self, merged: &mut [u64]) {
+        for dense in self.0.values() {
+            let n = dense.len().min(merged.len());
+            for i in 0..n {
+                merged[i] |= dense[i];
+            }
+        }
+    }
+
+    /// OR (accumulator ∩ final_weight) into a merged dense bitmap.
+    fn or_intersection_into_merged(
+        &self,
+        final_weight: &Weight,
+        precomputed: &rustc_hash::FxHashMap<usize, Box<[u64]>>,
+        merged: &mut [u64],
+    ) {
+        for (&tsid, dense) in &self.0 {
+            let Some(token_set) = final_weight.0.get(tsid) else {
+                continue;
+            };
+            let key = Arc::as_ptr(token_set) as usize;
+            if let Some(other_dense) = precomputed.get(&key) {
+                let n = dense.len().min(other_dense.len()).min(merged.len());
+                for i in 0..n {
+                    merged[i] |= dense[i] & other_dense[i];
+                }
+            } else {
+                // Fallback: compute intersection via Weight API.
+                let tokens = Self::dense_to_tokens(dense);
+                let result_weight = final_weight.intersect_single_parts(tsid, tsid, &Arc::new(tokens));
+                if let Some((_, _, result_tokens)) = result_weight.single_compact_entry_parts() {
+                    for t in result_tokens.iter() {
+                        let w = t as usize / 64;
+                        let b = t as usize % 64;
+                        if w < merged.len() {
+                            merged[w] |= 1u64 << b;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// OR all tokens in this accumulator into the output buffer.
     fn or_to_buf(
         &self,
@@ -414,6 +458,116 @@ impl<'a> ConstraintState<'a> {
         });
     }
 
+    /// Merge final_weight contribution into internal token bitmap instead of buf.
+    fn merge_final_weight_to_internal(
+        &self,
+        final_weight: &Weight,
+        acc: &DenseMaskAcc,
+        precomputed: &DenseTokenMaskCache,
+        merged: &mut [u64],
+    ) {
+        if final_weight.is_full() {
+            acc.or_into_merged(merged);
+        } else {
+            acc.or_intersection_into_merged(final_weight, precomputed, merged);
+        }
+    }
+
+    fn merge_final_weight_for_accs(
+        &self,
+        final_weight: &Weight,
+        accs: &[DenseMaskAcc],
+        precomputed: &DenseTokenMaskCache,
+        merged: &mut [u64],
+    ) {
+        for acc in accs {
+            self.merge_final_weight_to_internal(final_weight, acc, precomputed, merged);
+        }
+    }
+
+    fn merge_final_weight_for_gss(
+        &self,
+        final_weight: &Weight,
+        gss: &DenseMaskGSS,
+        precomputed: &DenseTokenMaskCache,
+        merged: &mut [u64],
+    ) {
+        gss.for_each_acc(|acc| {
+            self.merge_final_weight_to_internal(final_weight, acc, precomputed, merged);
+        });
+    }
+
+    /// Seed the mask queue, merging FW contributions into internal token bitmap.
+    fn seed_mask_queue_merged(
+        &self,
+        start_final_weight: Option<&Weight>,
+        start_fast_trans: &FxHashMap<i32, (u32, Weight)>,
+        precomputed: &DenseTokenMaskCache,
+        queue: &mut MaskQueue,
+        merged: &mut [u64],
+    ) {
+        for (&tokenizer_state, gss) in &self.state {
+            if gss.is_empty() {
+                continue;
+            }
+
+            let internal_tsid = self.constraint.internal_tsid_for_state(tokenizer_state);
+            let universe = &self.constraint.seed_universe_dense;
+            let terminal_masks = &self.constraint.seed_terminal_dense;
+
+            let (decomposed, root_accs) = gss.apply_transform_and_decompose(|terminals_disallowed| {
+                if terminals_disallowed.is_empty()
+                    || terminals_disallowed.values().all(|disallowed| disallowed.is_empty())
+                {
+                    if universe.iter().all(|&word| word == 0) {
+                        return None;
+                    }
+                    let dense: Arc<[u64]> = Arc::from(&**universe);
+                    return Some(DenseMaskAcc(BTreeMap::from([(internal_tsid, dense)])));
+                }
+
+                let mut dense: Vec<u64> = universe.to_vec();
+                for (&orig_tokenizer_state, disallowed_in_state) in terminals_disallowed.iter() {
+                    let internal_tsid = self.constraint.internal_tsid_for_state(orig_tokenizer_state);
+                    for &terminal_id in disallowed_in_state {
+                        if let Some(mask) = terminal_masks.get(&(internal_tsid, terminal_id)) {
+                            for (dense_word, mask_word) in dense.iter_mut().zip(mask.iter()) {
+                                *dense_word &= !mask_word;
+                            }
+                        }
+                    }
+                }
+
+                if dense.iter().all(|&word| word == 0) {
+                    None
+                } else {
+                    Some(DenseMaskAcc(BTreeMap::from([(internal_tsid, dense.into())])))
+                }
+            });
+
+            if decomposed.is_empty() && root_accs.is_empty() {
+                continue;
+            }
+
+            if let Some(final_weight) = start_final_weight {
+                self.merge_final_weight_for_accs(final_weight, &root_accs, precomputed, merged);
+                for (_, sub_gss) in &decomposed {
+                    self.merge_final_weight_for_gss(final_weight, sub_gss, precomputed, merged);
+                }
+            }
+
+            for (parser_state, popped) in &decomposed {
+                enqueue_parser_state_transitions(
+                    queue,
+                    start_fast_trans,
+                    *parser_state,
+                    popped,
+                    precomputed,
+                );
+            }
+        }
+    }
+
     fn seed_mask_queue(
         &self,
         start_final_weight: Option<&Weight>,
@@ -499,21 +653,24 @@ impl<'a> ConstraintState<'a> {
         }
 
         let precomputed = &self.constraint.weight_token_dense_masks;
+        let dense_words = self.constraint.internal_token_dense_words;
 
-        // Depth buckets let us pop the deepest frontier without rescanning or
-        // linearly searching for matching (depth, state) entries on enqueue.
+        // Merged internal token bitmap: collect all FW contributions here,
+        // then convert to buf once at the end to avoid redundant complement-path passes.
+        let mut merged = vec![0u64; dense_words];
+
         let mut queue = MaskQueue::new();
 
         let start_state = parser_dwa.start_state;
         let start_dwa_state = &parser_dwa.states[start_state as usize];
         let start_fast_trans = &self.constraint.dwa_fast_transitions[start_state as usize];
 
-        self.seed_mask_queue(
+        self.seed_mask_queue_merged(
             start_dwa_state.final_weight.as_ref(),
             start_fast_trans,
             precomputed,
             &mut queue,
-            buf,
+            &mut merged,
         );
 
         // Process DWA states depth-first.
@@ -523,9 +680,9 @@ impl<'a> ConstraintState<'a> {
                 let dwa_state = &parser_dwa.states[wa_state as usize];
                 let fast_trans = &self.constraint.dwa_fast_transitions[wa_state as usize];
 
-                // Final weight → OR allowed tokens into buf.
+                // Merge final weight contribution into internal token bitmap.
                 if let Some(final_weight) = &dwa_state.final_weight {
-                    self.or_final_weight_for_gss(final_weight, &gss, precomputed, buf);
+                    self.merge_final_weight_for_gss(final_weight, &gss, precomputed, &mut merged);
                 }
 
                 // Advance through DWA transitions for each parser state.
@@ -541,6 +698,9 @@ impl<'a> ConstraintState<'a> {
                 }
             }
         }
+
+        // Convert merged internal token bitmap to output buffer in a single pass.
+        self.constraint.or_internal_dense_to_buf(&merged, buf);
 
         update_eos_mask(buf, self.constraint.eos_token_id, self.is_complete());
     }
