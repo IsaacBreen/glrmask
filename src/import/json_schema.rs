@@ -108,6 +108,7 @@ const EXACT_CLOSED_OBJECT_UNION_MAX_VARIANTS: usize = 8;
 const EXACT_CLOSED_OBJECT_UNION_MAX_KEYS: usize = 16;
 const EXACT_CLOSED_OBJECT_SINGLE_MAX_KEYS: usize = 12;
 const EXACT_CLOSED_OBJECT_UNION_MAX_STATES: usize = 128;
+const FACTORED_OPEN_OBJECT_MAX_KEYS: usize = 64;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 enum JsonSchemaDraft {
@@ -3679,6 +3680,18 @@ impl<'a> SchemaCtx<'a> {
             .unwrap_or(false)
     }
 
+    /// Returns true when the factored-DFA path for closed objects with
+    /// optional keys is enabled.  Off by default; opt-in via
+    /// `GLRMASK_ENABLE_FACTORED_CLOSED_OBJECT=1`.
+    fn factored_closed_object_enabled() -> bool {
+        std::env::var("GLRMASK_ENABLE_FACTORED_CLOSED_OBJECT")
+            .map(|v| {
+                let n = v.trim().to_ascii_lowercase();
+                !matches!(n.as_str(), "" | "0" | "false" | "no" | "off")
+            })
+            .unwrap_or(false)
+    }
+
     fn collect_ordered_closed_object_schema_variant(
         &mut self,
         variant: &Map<String, Value>,
@@ -3982,6 +3995,170 @@ impl<'a> SchemaCtx<'a> {
             key_exprs,
             StructuralBranchMode::AnyOf,
         )
+    }
+
+    /// Build a factored DFA for an open object with ordered known keys and
+    /// an additional-properties continuation.  The DFA eliminates the O(log N)
+    /// path duplication of the binary tree approach, reducing max_paths from
+    /// ~log2(N)+1 to ~2 (known-key vs AP during key parsing only).
+    ///
+    /// Grammar structure:
+    ///   Object → "{" body[0] "}" | "{" free_nc "}"   (when all-optional)
+    ///   body[j] → KV(k_i) after[i+1]  for each legal key k_i from state j
+    ///   after[j] → Ref(free_c)         (if close allowed — ε or AP cont.)
+    ///            | "," body[j]         (if transitions exist)
+    fn try_build_factored_ordered_object(
+        &mut self,
+        ordered: &[(String, GrammarExpr, bool)],
+        free_c: &str,
+        free_nc: &str,
+    ) -> Result<Option<GrammarExpr>, GlrMaskError> {
+        if ordered.is_empty() || ordered.len() > FACTORED_OPEN_OBJECT_MAX_KEYS {
+            return Ok(None);
+        }
+
+        let key_exprs: HashMap<String, GrammarExpr> = ordered
+            .iter()
+            .map(|(key, value_expr, _)| (key.clone(), value_expr.clone()))
+            .collect();
+        let variant = OrderedClosedObjectVariant {
+            items: ordered
+                .iter()
+                .map(|(key, value_expr, required)| OrderedClosedObjectItem {
+                    key: key.clone(),
+                    value_expr: value_expr.clone(),
+                    required: *required,
+                })
+                .collect(),
+        };
+        let variants = vec![variant];
+        let mode = StructuralBranchMode::AnyOf;
+
+        // Build the DFA (same state machine as exact closed objects).
+        let start_state: Vec<OrderedSubsetCursor> = vec![OrderedSubsetCursor {
+            variant_idx: 0,
+            cursor: 0,
+        }];
+        let mut states = vec![start_state.clone()];
+        let mut transitions: Vec<Vec<(String, usize)>> = vec![Vec::new()];
+        let mut state_to_idx = HashMap::new();
+        state_to_idx.insert(start_state, 0usize);
+        let mut queue = VecDeque::from([0usize]);
+
+        while let Some(state_idx) = queue.pop_front() {
+            let state = states[state_idx].clone();
+            let mut edges = Vec::new();
+            for key in Self::ordered_subset_legal_next_keys(&variants, &state) {
+                let next_state = Self::ordered_subset_transition(&variants, &state, &key);
+                if next_state.is_empty() {
+                    continue;
+                }
+                let next_idx = if let Some(&idx) = state_to_idx.get(&next_state) {
+                    idx
+                } else {
+                    let idx = states.len();
+                    if idx >= EXACT_CLOSED_OBJECT_UNION_MAX_STATES {
+                        return Ok(None);
+                    }
+                    states.push(next_state.clone());
+                    transitions.push(Vec::new());
+                    state_to_idx.insert(next_state, idx);
+                    queue.push_back(idx);
+                    idx
+                };
+                edges.push((key, next_idx));
+            }
+            transitions[state_idx] = edges;
+        }
+
+        // Generate rule names.
+        let mut base_index = self.generated_object_rule_counter;
+        let base_name = loop {
+            let candidate = format!("obj_fac_{base_index}");
+            if !self.used_rule_names.contains(&format!("{candidate}_s0")) {
+                break candidate;
+            }
+            base_index += 1;
+        };
+        self.generated_object_rule_counter = base_index + 1;
+
+        let body_rule_names: Vec<String> = (0..states.len())
+            .map(|idx| format!("{base_name}_s{idx}"))
+            .collect();
+        let after_rule_names: Vec<String> = (0..states.len())
+            .map(|idx| format!("{base_name}_a{idx}"))
+            .collect();
+
+        // Emit body rules: KV alternatives only (no ε — close is handled
+        // by the after-rules via free_c, and the empty-body case is handled
+        // by the top-level "{" free_nc "}" alternative).
+        for state_idx in 0..states.len() {
+            let mut alts = Vec::new();
+            for (key, next_idx) in &transitions[state_idx] {
+                let Some(value_expr) = key_exprs.get(key).cloned() else {
+                    return Ok(None);
+                };
+                let kv_expr = self.build_merged_literal_key_value_expr(b"", key, value_expr);
+                alts.push(sequence_or_single(vec![
+                    kv_expr,
+                    GrammarExpr::Ref(after_rule_names[*next_idx].clone()),
+                ]));
+            }
+            let expr = if alts.is_empty() {
+                never_expr()
+            } else {
+                choice_or_single(alts)
+            };
+            self.insert_rule(body_rule_names[state_idx].clone(), expr);
+        }
+
+        // Emit after rules: Ref(free_c) when close is allowed (handles both
+        // close-immediately via ε and AP continuation via ", " AP_pair ...),
+        // plus "," body[j] to continue with more known keys.
+        for state_idx in 0..states.len() {
+            let state = &states[state_idx];
+            let mut alts = Vec::new();
+
+            if Self::ordered_subset_close_allowed(mode, &variants, state) {
+                alts.push(GrammarExpr::Ref(free_c.to_string()));
+            }
+            if !transitions[state_idx].is_empty() {
+                alts.push(sequence_or_single(vec![
+                    self.json_item_separator_expr(),
+                    GrammarExpr::Ref(body_rule_names[state_idx].clone()),
+                ]));
+            }
+
+            let expr = if alts.is_empty() {
+                never_expr()
+            } else {
+                choice_or_single(alts)
+            };
+            self.insert_rule(after_rule_names[state_idx].clone(), expr);
+        }
+
+        // Top-level expression.
+        let all_optional = ordered.iter().all(|(_, _, required)| !*required);
+        let body_expr = sequence_or_single(vec![
+            literal_expr(b"{"),
+            GrammarExpr::Ref(body_rule_names[0].clone()),
+            literal_expr(b"}"),
+        ]);
+
+        if all_optional {
+            // When all keys are optional, the object can also be empty or
+            // AP-only, handled by free_nc.
+            Ok(Some(choice_or_single(vec![
+                body_expr,
+                sequence_or_single(vec![
+                    literal_expr(b"{"),
+                    GrammarExpr::Ref(free_nc.to_string()),
+                    literal_expr(b"}"),
+                ]),
+            ])))
+        } else {
+            Ok(Some(body_expr))
+        }
     }
 
     fn try_build_exact_closed_object_union(
@@ -6844,6 +7021,29 @@ impl<'a> SchemaCtx<'a> {
                 GrammarExpr::Ref(free_nc),
                 literal_expr(b"}"),
             ]));
+        }
+
+        // Try the factored DFA approach for ordered optional keys in
+        // closed objects.  This replaces the binary tree with a sequential
+        // state machine, reducing max_paths from O(log N) to O(1).
+        // Restricted to closed objects (no additionalProperties) because
+        // the AP left-recursive continuation interacts poorly with the
+        // DFA body rules, causing build-time regressions on open objects.
+        // Off by default; opt-in via GLRMASK_ENABLE_FACTORED_CLOSED_OBJECT=1.
+        if Self::factored_closed_object_enabled()
+            && !Self::exact_closed_object_disabled()
+            && !has_additional_properties
+            && ordered.iter().any(|(_, _, required)| !*required)
+            && pattern_properties.is_empty()
+            && property_names.is_none()
+        {
+            if let Some(expr) = self.try_build_factored_ordered_object(
+                &ordered,
+                &free_c,
+                &free_nc,
+            )? {
+                return Ok(expr);
+            }
         }
 
         let mut next_tree_rule_index = 0usize;
