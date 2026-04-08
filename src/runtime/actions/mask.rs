@@ -726,6 +726,99 @@ impl<'a> ConstraintState<'a> {
         });
     }
 
+    /// Like `fill_mask` (merged path, no cache) but returns detailed timing breakdown.
+    /// Returns: (total_ns, seed_ns, bfs_decompose_ns, bfs_enqueue_ns, bfs_fw_merge_ns,
+    ///           convert_ns, cache_update_ns, n_dwa_visits, n_decompose_ops, n_fw_ops, n_enqueue_calls)
+    pub fn fill_mask_timed(&self, buf: &mut [u32]) -> (u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) {
+        use std::time::Instant;
+        let t_total = Instant::now();
+
+        buf.fill(0);
+
+        let parser_dwa = self.constraint.parser_dwa();
+        if self.state.is_empty() || parser_dwa.states.is_empty() {
+            let total = t_total.elapsed().as_nanos() as u64;
+            return (total, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        }
+
+        let precomputed = &self.constraint.weight_token_dense_masks;
+        let dense_words = self.constraint.internal_token_dense_words;
+        let mut merged = vec![0u64; dense_words];
+        let mut queue = MaskQueue::new();
+
+        let start_state = parser_dwa.start_state;
+        let start_dwa_state = &parser_dwa.states[start_state as usize];
+        let start_fast_trans = &self.constraint.dwa_fast_transitions[start_state as usize];
+
+        let t_seed = Instant::now();
+        self.seed_mask_queue_merged(
+            start_dwa_state.final_weight.as_ref(),
+            start_fast_trans,
+            precomputed,
+            &mut queue,
+            &mut merged,
+        );
+        let seed_ns = t_seed.elapsed().as_nanos() as u64;
+
+        let mut decompose_ns: u64 = 0;
+        let mut enqueue_ns: u64 = 0;
+        let mut fw_merge_ns: u64 = 0;
+        let mut n_dwa_visits: u64 = 0;
+        let mut n_decompose_ops: u64 = 0;
+        let mut n_fw_ops: u64 = 0;
+        let mut n_enqueue_calls: u64 = 0;
+
+        while let Some((_depth, states_at_depth)) = queue.pop_last() {
+            let items: Vec<(u32, DenseMaskGSS)> = states_at_depth.into_iter().collect();
+            for (wa_state, gss) in items {
+                n_dwa_visits += 1;
+                let dwa_state = &parser_dwa.states[wa_state as usize];
+                let fast_trans = &self.constraint.dwa_fast_transitions[wa_state as usize];
+
+                if let Some(final_weight) = &dwa_state.final_weight {
+                    n_fw_ops += 1;
+                    let t = Instant::now();
+                    self.merge_final_weight_for_gss(final_weight, &gss, precomputed, &mut merged);
+                    fw_merge_ns += t.elapsed().as_nanos() as u64;
+                }
+
+                let t = Instant::now();
+                let decomposed = gss.decompose_and_pop();
+                n_decompose_ops += decomposed.len() as u64;
+                decompose_ns += t.elapsed().as_nanos() as u64;
+
+                let t = Instant::now();
+                for (parser_state, popped) in &decomposed {
+                    n_enqueue_calls += 1;
+                    enqueue_parser_state_transitions(
+                        &mut queue,
+                        fast_trans,
+                        *parser_state,
+                        popped,
+                        precomputed,
+                    );
+                }
+                enqueue_ns += t.elapsed().as_nanos() as u64;
+            }
+        }
+
+        let t_convert = Instant::now();
+        self.constraint.or_internal_dense_to_buf(&merged, buf);
+        update_eos_mask(buf, self.constraint.eos_token_id, self.is_complete());
+        let convert_ns = t_convert.elapsed().as_nanos() as u64;
+
+        let t_cache = Instant::now();
+        *self.mask_cache.lock().unwrap() = Some(crate::runtime::state::MaskCacheData {
+            state_snapshot: self.state.clone(),
+            mask: buf.to_vec(),
+        });
+        let cache_update_ns = t_cache.elapsed().as_nanos() as u64;
+
+        let total_ns = t_total.elapsed().as_nanos() as u64;
+        (total_ns, seed_ns, decompose_ns, enqueue_ns, fw_merge_ns,
+         convert_ns, cache_update_ns, n_dwa_visits, n_decompose_ops, n_fw_ops, n_enqueue_calls)
+    }
+
     /// Like `fill_mask` but returns detailed profiling stats.
     /// Returns a tuple of 10 u64 values:
     /// (total_ns, seed_ns, bfs_ns, final_weight_ns, decompose_ns, enqueue_ns,

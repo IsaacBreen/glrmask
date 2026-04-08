@@ -95,6 +95,10 @@ pub struct Constraint {
     /// Built from parser_dwa.states at load/build time.
     #[serde(skip)]
     pub(crate) dwa_fast_transitions: FastDwaTransitions,
+    /// Dense buf masks for "heavy" internal tokens (those with many buf entries).
+    /// Indexed by internal token ID; None for light tokens.
+    #[serde(skip)]
+    pub(crate) heavy_token_dense_masks: Vec<Option<Box<[u32]>>>,
 }
 
 impl Constraint {
@@ -112,6 +116,7 @@ impl Constraint {
         self.internal_token_buf_masks = internal_token_buf_masks;
         self.word_group_buf_masks = self.compute_word_group_buf_masks();
         self.all_tokens_buf_mask = self.compute_all_tokens_buf_mask();
+        self.heavy_token_dense_masks = self.compute_heavy_token_dense_masks();
         self.token_bytes_dense = Vec::new();
         self.internal_token_dense_words = dense_mask_words;
         self.weight_token_dense_masks = dense_masks;
@@ -159,6 +164,34 @@ impl Constraint {
             }
         }
         combined.into_boxed_slice()
+    }
+
+    /// Build dense buf masks for internal tokens with many sparse entries.
+    /// A token with >THRESHOLD entries benefits from a sequential 16KB scan
+    /// instead of thousands of indexed read-modify-writes.
+    fn compute_heavy_token_dense_masks(&self) -> Vec<Option<Box<[u32]>>> {
+        let buf_words = self.mask_len();
+        if buf_words == 0 {
+            return Vec::new();
+        }
+        // Threshold: use dense when sparse entries > buf_words / 4.
+        // Dense OR costs ~buf_words ops; sparse OR costs ~n_entries ops.
+        // Dense has better cache behavior (sequential), so threshold < buf_words.
+        let threshold = buf_words / 4;
+        self.internal_token_buf_masks
+            .iter()
+            .map(|sparse| {
+                if sparse.len() > threshold {
+                    let mut dense = vec![0u32; buf_words];
+                    for &(word_idx, mask) in sparse {
+                        dense[word_idx as usize] |= mask;
+                    }
+                    Some(dense.into_boxed_slice())
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     fn compute_dense_token_bytes(&self) -> Vec<Option<Box<[u8]>>> {
@@ -563,95 +596,146 @@ impl Constraint {
     }
 
     /// Convert a merged internal token dense bitmap to the output buffer.
-    /// Uses the same complement/group/per-bit paths as `or_to_buf` in DenseMaskAcc.
+    /// Uses sparse per-token writes to keep buf hot in L1 cache, avoiding
+    /// 16KB word_group scans that cause L1 cache evictions.
     pub(crate) fn or_internal_dense_to_buf(&self, dense: &[u64], buf: &mut [u32]) {
-        let word_groups = &self.word_group_buf_masks;
         let all_mask = &self.all_tokens_buf_mask;
         let internal_masks = &self.internal_token_buf_masks;
+        let n_internal = internal_masks.len();
 
-        // Super-fast path: entire dense matches full universe.
-        let n_full_groups = word_groups.len().saturating_sub(1);
-        if !all_mask.is_empty()
-            && dense.len() == word_groups.len()
-            && n_full_groups > 0
-            && dense[..n_full_groups].iter().all(|&w| w == !0u64)
-        {
-            let last_expected = if internal_masks.len() % 64 == 0 {
-                !0u64
-            } else {
-                (1u64 << (internal_masks.len() % 64)) - 1
-            };
-            if dense[n_full_groups] == last_expected {
-                for (i, &mask) in all_mask.iter().enumerate() {
-                    buf[i] |= mask;
-                }
-                return;
-            }
+        if n_internal == 0 || dense.is_empty() {
+            return;
         }
 
-        // Complement path: when most words are full, start from all_tokens
-        // and subtract the few missing tokens.
-        let n_full = dense.iter().filter(|&&w| w == !0u64).count();
-        let n_non_full = dense.len() - n_full;
-        if !all_mask.is_empty()
-            && dense.len() == word_groups.len()
-            && n_full > 0
-            && n_non_full < n_full
-        {
-            let mut temp: Vec<u32> = all_mask.to_vec();
-            let n_internal = internal_masks.len();
-            for (wi, &w) in dense.iter().enumerate() {
-                if w == !0u64 {
-                    continue;
-                }
-                if w == 0 {
-                    if let Some(group) = word_groups.get(wi) {
-                        for (i, &mask) in group.iter().enumerate() {
-                            temp[i] &= !mask;
-                        }
-                    }
-                } else {
-                    let missing = !w;
-                    let mut bits = missing;
-                    while bits != 0 {
-                        let bit = bits.trailing_zeros() as usize;
-                        let internal_token = wi * 64 + bit;
-                        if internal_token < n_internal {
-                            for &(buf_word, mask) in &internal_masks[internal_token] {
-                                temp[buf_word as usize] &= !mask;
-                            }
-                        }
-                        bits &= bits - 1;
-                    }
-                }
-            }
-            for (i, &mask) in temp.iter().enumerate() {
+        // Count set bits to choose path.
+        let n_set: usize = dense.iter().map(|w| w.count_ones() as usize).sum();
+
+        // Super-fast path: all internal tokens set → OR all_tokens_buf_mask.
+        if n_set >= n_internal && !all_mask.is_empty() {
+            for (i, &mask) in all_mask.iter().enumerate() {
                 buf[i] |= mask;
             }
             return;
         }
 
-        // Normal path: iterate each word.
-        for (wi, &w) in dense.iter().enumerate() {
-            if w == 0 {
-                continue;
+        if n_set == 0 {
+            return;
+        }
+
+        // Count total sparse entries for set vs missing tokens to pick the cheaper path.
+        // Heavy tokens use dense masks — count them at dense cost (buf.len() per token).
+        let heavy = &self.heavy_token_dense_masks;
+        let buf_len = buf.len();
+        let mut total_set_cost: usize = 0;
+        let mut total_all_cost: usize = 0;
+        for (idx, mask_entries) in internal_masks.iter().enumerate() {
+            let cost = if idx < heavy.len() && heavy[idx].is_some() { buf_len } else { mask_entries.len() };
+            total_all_cost += cost;
+            let wi = idx / 64;
+            let bit = idx % 64;
+            if wi < dense.len() && dense[wi] & (1u64 << bit) != 0 {
+                total_set_cost += cost;
             }
-            if w == !0u64 {
-                if let Some(group) = word_groups.get(wi) {
-                    for (i, &mask) in group.iter().enumerate() {
-                        buf[i] |= mask;
+        }
+        let total_missing_cost = total_all_cost - total_set_cost;
+        // Complement path overhead: 16KB all_mask copy ≈ buf.len() entry-equivalent writes.
+        let copy_overhead = buf_len;
+
+        if !all_mask.is_empty() && total_missing_cost + copy_overhead < total_set_cost {
+            // Complement-sparse path: start from all_tokens, subtract missing tokens.
+            // buf stays hot in L1 after the initial sequential fill.
+            for (i, &mask) in all_mask.iter().enumerate() {
+                buf[i] |= mask;
+            }
+            // Process light missing tokens first (sparse AND-NOT, buf hot in L1).
+            for (wi, &w) in dense.iter().enumerate() {
+                if wi * 64 >= n_internal {
+                    break;
+                }
+                let remaining = n_internal - wi * 64;
+                let valid_mask = if remaining >= 64 { !0u64 } else { (1u64 << remaining) - 1 };
+                let missing = !w & valid_mask;
+                let mut bits = missing;
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    let internal_token = wi * 64 + bit;
+                    if internal_token < heavy.len() {
+                        if heavy[internal_token].is_some() {
+                            // Heavy token: defer to sequential pass below.
+                            bits &= bits - 1;
+                            continue;
+                        }
                     }
+                    for &(buf_word, mask) in &internal_masks[internal_token] {
+                        buf[buf_word as usize] &= !mask;
+                    }
+                    bits &= bits - 1;
+                }
+            }
+            // Process heavy missing tokens last (sequential 16KB AND-NOT scans).
+            for (wi, &w) in dense.iter().enumerate() {
+                if wi * 64 >= n_internal {
+                    break;
+                }
+                let remaining = n_internal - wi * 64;
+                let valid_mask = if remaining >= 64 { !0u64 } else { (1u64 << remaining) - 1 };
+                let missing = !w & valid_mask;
+                let mut bits = missing;
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    let internal_token = wi * 64 + bit;
+                    if internal_token < heavy.len() {
+                        if let Some(ref dense_mask) = heavy[internal_token] {
+                            for (i, &m) in dense_mask.iter().enumerate() {
+                                buf[i] &= !m;
+                            }
+                        }
+                    }
+                    bits &= bits - 1;
+                }
+            }
+        } else {
+            // Normal path: process light tokens first (sparse OR), then heavy (dense OR).
+            // Light tokens keep buf entries hot in L1 for subsequent sparse writes.
+            for (wi, &w) in dense.iter().enumerate() {
+                if w == 0 {
                     continue;
                 }
-            }
-            let mut bits = w;
-            while bits != 0 {
-                let bit = bits.trailing_zeros() as usize;
-                let internal_token = wi * 64 + bit;
-                if internal_token < internal_masks.len() {
-                    self.or_internal_token_masks_to_buf(internal_token, buf);
+                let mut bits = w;
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    let internal_token = wi * 64 + bit;
+                    if internal_token < n_internal {
+                        if internal_token < heavy.len() && heavy[internal_token].is_some() {
+                            // Defer heavy tokens.
+                            bits &= bits - 1;
+                            continue;
+                        }
+                        for &(buf_word, mask) in &internal_masks[internal_token] {
+                            buf[buf_word as usize] |= mask;
+                        }
+                    }
+                    bits &= bits - 1;
                 }
-                bits &= bits - 1;
+            }
+            // Heavy tokens: sequential 16KB OR scans.
+            for (wi, &w) in dense.iter().enumerate() {
+                if w == 0 {
+                    continue;
+                }
+                let mut bits = w;
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    let internal_token = wi * 64 + bit;
+                    if internal_token < heavy.len() {
+                        if let Some(ref dense_mask) = heavy[internal_token] {
+                            for (i, &m) in dense_mask.iter().enumerate() {
+                                buf[i] |= m;
+                            }
+                        }
+                    }
+                    bits &= bits - 1;
+                }
             }
         }
     }

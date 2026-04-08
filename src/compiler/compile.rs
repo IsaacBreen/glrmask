@@ -772,6 +772,7 @@ fn compile_prepared_with_profile(
             seed_terminal_dense: rustc_hash::FxHashMap::default(),
             seed_universe_dense: Box::new([]),
             dwa_fast_transitions: Vec::new(),
+            heavy_token_dense_masks: Vec::new(),
         });
         profile.finalize_ms = elapsed_ms(finalize_started_at);
         profile.compile_ms = elapsed_ms(compile_started_at);
