@@ -235,11 +235,24 @@ impl PyConstraintState {
     fn mask<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
         let words = self.inner.with_dependent(|_owner, state| state.mask());
         let n = (self.max_token + 1) as usize;
+        let n_full_words = n / 32;
+        let remainder = n % 32;
         let mut bools = vec![false; n];
-        for i in 0..n {
-            let (wi, bi) = (i / 32, i % 32);
-            if wi < words.len() && (words[wi] >> bi) & 1 != 0 {
-                bools[i] = true;
+        // Expand full 32-bit words in bulk — avoids per-element division/modulo.
+        for (wi, &word) in words[..n_full_words].iter().enumerate() {
+            let base = wi * 32;
+            let mut w = word;
+            for b in bools[base..base + 32].iter_mut() {
+                *b = w & 1 != 0;
+                w >>= 1;
+            }
+        }
+        if remainder > 0 && n_full_words < words.len() {
+            let base = n_full_words * 32;
+            let mut w = words[n_full_words];
+            for b in bools[base..].iter_mut() {
+                *b = w & 1 != 0;
+                w >>= 1;
             }
         }
         Ok(PyArray1::from_vec(py, bools))
