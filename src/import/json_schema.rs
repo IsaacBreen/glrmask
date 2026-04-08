@@ -3700,9 +3700,12 @@ impl<'a> SchemaCtx<'a> {
         &mut self,
         variant: &Map<String, Value>,
     ) -> Result<Option<OrderedClosedObjectSchemaVariant>, GlrMaskError> {
-        let is_object = variant.get("type").and_then(Value::as_str) == Some("object")
-            || variant.contains_key("properties");
-        if !is_object {
+        // Require explicit "type": "object".  Without it, object keywords
+        // like properties/additionalProperties only constrain *if* the value
+        // is an object; non-object values (string, array, etc.) remain valid.
+        // The exact closed-object path emits object-only grammar, so it must
+        // not intercept schemas that also allow non-object values.
+        if variant.get("type").and_then(Value::as_str) != Some("object") {
             return Ok(None);
         }
         match variant.get("additionalProperties") {
@@ -4278,12 +4281,10 @@ impl<'a> SchemaCtx<'a> {
             })
             .collect();
 
-        // Guard 1: every variant must be a plain object with
-        //          additionalProperties: false, no patternProperties.
+        // Guard 1: every variant must be a plain object with explicit
+        //          "type": "object", additionalProperties: false, no patternProperties.
         for v in &resolved {
-            let is_object = v.get("type").and_then(Value::as_str) == Some("object")
-                || v.contains_key("properties");
-            if !is_object {
+            if v.get("type").and_then(Value::as_str) != Some("object") {
                 return Ok(None);
             }
             match v.get("additionalProperties") {
