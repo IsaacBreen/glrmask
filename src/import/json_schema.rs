@@ -2606,6 +2606,9 @@ struct SchemaCtx<'a> {
     shared_ap_key_rule_cache: HashMap<Vec<String>, String>,
     draft_stack: Vec<JsonSchemaDraft>,
     convert_depth: usize,
+    /// Cache for `convert_schema`: identical sub-schemas produce the same
+    /// grammar expression, avoiding duplicate rule generation.
+    schema_convert_cache: HashMap<String, GrammarExpr>,
 }
 
 impl<'a> SchemaCtx<'a> {
@@ -2627,6 +2630,7 @@ impl<'a> SchemaCtx<'a> {
             shared_ap_key_rule_cache: HashMap::new(),
             draft_stack: vec![DEFAULT_JSON_SCHEMA_DRAFT],
             convert_depth: 0,
+            schema_convert_cache: HashMap::new(),
         };
         ctx.ensure_base_rules();
         ctx
@@ -4613,9 +4617,28 @@ impl<'a> SchemaCtx<'a> {
                 "schema conversion exceeded maximum recursion depth (likely circular $ref)".into(),
             ));
         }
+
+        // Schema-level dedup: reuse the expression produced by an earlier
+        // identical sub-schema instead of generating duplicate rules.
+        // The cache key includes the current draft so that draft-sensitive
+        // behavior is preserved.
+        let cache_key = format!(
+            "{:?}|{}",
+            self.current_draft(),
+            serde_json::to_string(schema).unwrap_or_default()
+        );
+        if let Some(cached) = self.schema_convert_cache.get(&cache_key) {
+            return Ok(cached.clone());
+        }
+
         self.convert_depth += 1;
         let result = self.convert_schema_inner(schema);
         self.convert_depth -= 1;
+
+        if let Ok(ref expr) = result {
+            self.schema_convert_cache
+                .insert(cache_key, expr.clone());
+        }
         result
     }
 
