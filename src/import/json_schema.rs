@@ -488,17 +488,12 @@ fn split_top_level_regex_branches(pattern: &str) -> Vec<&str> {
         }
         i += 1;
     }
-
     branches.push(&pattern[start..]);
     branches
 }
 
 fn strip_single_outer_group(branch: &str) -> Option<&str> {
     let bytes = branch.as_bytes();
-    if bytes.first().copied() != Some(b'(') || bytes.last().copied() != Some(b')') {
-        return None;
-    }
-
     let inner_start = match bytes.get(1).copied() {
         Some(b'?') => {
             if bytes.get(2).copied() == Some(b':') {
@@ -540,11 +535,6 @@ fn strip_single_outer_group(branch: &str) -> Option<&str> {
 }
 
 fn strip_branch_outer_anchors(branch: &str) -> (bool, bool, &str) {
-    let mut branch = branch;
-    while let Some(inner) = strip_single_outer_group(branch) {
-        branch = inner;
-    }
-
     let anchored_start = branch.as_bytes().first().copied() == Some(b'^');
     let mut end_index = branch.len();
     let mut anchored_end = false;
@@ -1590,6 +1580,70 @@ fn ap_key_any_string() -> bool {
     env_flag("GLRMASK_AP_KEY_ANY_STRING") || env_flag("GLRMASK_ADDPROP_NO_EXCLUSIONS")
 }
 
+fn shared_ap_key_exclusions_enabled() -> bool {
+    env_flag("GLRMASK_AP_SHARED_EXCLUSIONS")
+}
+
+fn collect_shared_ap_literal_keys(root: &Value) -> BTreeSet<String> {
+    let mut collected = BTreeSet::new();
+    let mut queue = VecDeque::from([root]);
+
+    while let Some(node) = queue.pop_front() {
+        let Some(object) = node.as_object() else {
+            continue;
+        };
+
+        let additional_properties = object.get("additionalProperties");
+        let allows_additional_properties = !matches!(additional_properties, Some(Value::Bool(false)));
+        if allows_additional_properties {
+            if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+                collected.extend(properties.keys().cloned());
+            }
+            if let Some(required) = object.get("required").and_then(Value::as_array) {
+                collected.extend(required.iter().filter_map(Value::as_str).map(String::from));
+            }
+        }
+
+        if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+            queue.extend(properties.values());
+        }
+        if let Some(pattern_properties) = object.get("patternProperties").and_then(Value::as_object) {
+            queue.extend(pattern_properties.values());
+        }
+
+        for keyword in [
+            "additionalProperties",
+            "propertyNames",
+            "items",
+            "additionalItems",
+            "contains",
+            "unevaluatedProperties",
+            "if",
+            "then",
+            "else",
+            "not",
+        ] {
+            if let Some(value) = object.get(keyword) {
+                queue.push_back(value);
+            }
+        }
+
+        for keyword in ["prefixItems", "allOf", "anyOf", "oneOf"] {
+            if let Some(values) = object.get(keyword).and_then(Value::as_array) {
+                queue.extend(values);
+            }
+        }
+
+        for keyword in ["$defs", "definitions", "dependentSchemas"] {
+            if let Some(values) = object.get(keyword).and_then(Value::as_object) {
+                queue.extend(values.values());
+            }
+        }
+    }
+
+    collected
+}
+
 fn max_string_length_cap() -> Option<usize> {
     std::env::var("GLRMASK_MAX_STRING_LENGTH_CAP")
         .ok()
@@ -2467,6 +2521,9 @@ struct SchemaCtx<'a> {
     expr_dedup_cache: HashMap<String, String>,
     json_string_exact_cache: HashMap<usize, String>,
     json_string_upto_cache: HashMap<usize, String>,
+    shared_ap_literal_keys: BTreeSet<String>,
+    shared_ap_key_colon_expr: Option<GrammarExpr>,
+    shared_ap_key_rule_cache: HashMap<Vec<String>, String>,
     draft_stack: Vec<JsonSchemaDraft>,
     convert_depth: usize,
 }
@@ -2485,6 +2542,9 @@ impl<'a> SchemaCtx<'a> {
             expr_dedup_cache: HashMap::new(),
             json_string_exact_cache: HashMap::new(),
             json_string_upto_cache: HashMap::new(),
+            shared_ap_literal_keys: collect_shared_ap_literal_keys(root),
+            shared_ap_key_colon_expr: None,
+            shared_ap_key_rule_cache: HashMap::new(),
             draft_stack: vec![DEFAULT_JSON_SCHEMA_DRAFT],
             convert_depth: 0,
         };
@@ -5314,6 +5374,61 @@ impl<'a> SchemaCtx<'a> {
         wrap_key_colon_terminal(self.extract_terminal_rule(expr, prefix))
     }
 
+    fn shared_additional_key_colon_expr(&mut self) -> Result<GrammarExpr, GlrMaskError> {
+        if let Some(expr) = &self.shared_ap_key_colon_expr {
+            return Ok(expr.clone());
+        }
+
+        let expr = if self.shared_ap_literal_keys.is_empty() {
+            self.json_key_colon_ref()
+        } else {
+            let key_dfa = Self::scoped_key_colon_dfa(None)?;
+            let shared_excluded_dfa = Self::literal_key_colon_union_dfa(&self.shared_ap_literal_keys);
+            let mut excluded_dfas: Vec<&LexerDfa> = Vec::new();
+            if let Some(ref dfa) = shared_excluded_dfa {
+                excluded_dfas.push(dfa);
+            }
+            self.build_excluding_key_colon_dfa_expr(
+                &key_dfa,
+                &excluded_dfas,
+                "AP_SHARED_KEY_COLON",
+            )
+        };
+
+        self.shared_ap_key_colon_expr = Some(expr.clone());
+        Ok(expr)
+    }
+
+    fn build_shared_additional_key_choice_expr(
+        &mut self,
+        excluded_literal_keys: &BTreeSet<String>,
+        prefix: &str,
+    ) -> Result<GrammarExpr, GlrMaskError> {
+        let allowed_back_keys: Vec<String> = self
+            .shared_ap_literal_keys
+            .iter()
+            .filter(|key| !excluded_literal_keys.contains(*key))
+            .cloned()
+            .collect();
+
+        if allowed_back_keys.is_empty() {
+            return self.shared_additional_key_colon_expr();
+        }
+
+        if let Some(rule_name) = self.shared_ap_key_rule_cache.get(&allowed_back_keys) {
+            return Ok(GrammarExpr::Ref(rule_name.clone()));
+        }
+
+        let mut options = Vec::with_capacity(1 + allowed_back_keys.len());
+        options.push(self.shared_additional_key_colon_expr()?);
+        options.extend(allowed_back_keys.iter().map(|key| self.json_key_colon_literal(key)));
+
+        let rule_name = self.fresh_rule_name(prefix);
+        self.insert_rule(rule_name.clone(), choice_or_single(options));
+        self.shared_ap_key_rule_cache.insert(allowed_back_keys, rule_name.clone());
+        Ok(GrammarExpr::Ref(rule_name))
+    }
+
     fn build_object_expr(&mut self, schema: &Map<String, Value>) -> Result<GrammarExpr, GlrMaskError> {
         let properties = schema.get("properties").and_then(Value::as_object);
         let required_list = schema
@@ -5668,6 +5783,17 @@ impl<'a> SchemaCtx<'a> {
                         &full_key_dfa,
                         &format!("{}_KEY_COLON", base_name.to_uppercase()),
                     ),
+                    extra_value_expr,
+                ]))
+            } else if shared_ap_key_exclusions_enabled() {
+                let mut excluded_literal_keys = BTreeSet::<String>::new();
+                excluded_literal_keys.extend(properties.keys().cloned());
+                excluded_literal_keys.extend(required_list.iter().cloned());
+                Some(sequence_or_single(vec![
+                    self.build_shared_additional_key_choice_expr(
+                        &excluded_literal_keys,
+                        &format!("{base_name}_ap_key"),
+                    )?,
                     extra_value_expr,
                 ]))
             } else {
@@ -6125,6 +6251,14 @@ impl<'a> SchemaCtx<'a> {
                     &full_key_dfa,
                     &format!("{}_AP_KEY", base_name.to_uppercase()),
                 ))
+            } else if shared_ap_key_exclusions_enabled()
+                && pattern_properties.is_empty()
+                && property_names.is_none()
+            {
+                Some(self.build_shared_additional_key_choice_expr(
+                    &additional_excluded_literal_keys,
+                    &format!("{base_name}_ap_key"),
+                )?)
             } else if key_dfa_needed {
                 let additional_key_dfa = base_key_colon_dfa
                     .as_ref()

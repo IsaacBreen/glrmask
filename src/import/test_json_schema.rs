@@ -8,6 +8,7 @@ use crate::import::json_schema::schema_to_named_grammar;
 use crate::runtime::{Constraint, ConstraintState};
 use crate::Vocab;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 /// Build a byte-level vocabulary: token 0 = [0x00], token 1 = [0x01], ..., 255 = [0xFF].
 fn byte_vocab() -> Vocab {
@@ -167,6 +168,58 @@ fn contains_repeat_range(expr: &GrammarExpr) -> bool {
     }
 }
 
+fn contains_ref(expr: &GrammarExpr, target: &str) -> bool {
+    match expr {
+        GrammarExpr::Ref(name) => name == target,
+        GrammarExpr::Sequence(parts) => parts.iter().any(|part| contains_ref(part, target)),
+        GrammarExpr::Choice(options) => options.iter().any(|option| contains_ref(option, target)),
+        GrammarExpr::Exclude { expr, exclude } => {
+            contains_ref(expr, target) || contains_ref(exclude, target)
+        }
+        GrammarExpr::Optional(inner)
+        | GrammarExpr::Repeat(inner)
+        | GrammarExpr::RepeatOne(inner)
+        | GrammarExpr::RepeatRange { expr: inner, .. } => contains_ref(inner, target),
+        _ => false,
+    }
+}
+
+fn contains_literal_prefix(expr: &GrammarExpr, prefix: &[u8]) -> bool {
+    match expr {
+        GrammarExpr::Literal(bytes) => bytes.starts_with(prefix),
+        GrammarExpr::Sequence(parts) => parts.iter().any(|part| contains_literal_prefix(part, prefix)),
+        GrammarExpr::Choice(options) => options.iter().any(|option| contains_literal_prefix(option, prefix)),
+        GrammarExpr::Exclude { expr, exclude } => {
+            contains_literal_prefix(expr, prefix) || contains_literal_prefix(exclude, prefix)
+        }
+        GrammarExpr::Optional(inner)
+        | GrammarExpr::Repeat(inner)
+        | GrammarExpr::RepeatOne(inner)
+        | GrammarExpr::RepeatRange { expr: inner, .. } => contains_literal_prefix(inner, prefix),
+        _ => false,
+    }
+}
+
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn with_env_var<T>(key: &str, value: Option<&str>, f: impl FnOnce() -> T) -> T {
+    let _guard = env_lock().lock().expect("env lock should not be poisoned");
+    let old = std::env::var_os(key);
+    match value {
+        Some(val) => unsafe { std::env::set_var(key, val) },
+        None => unsafe { std::env::remove_var(key) },
+    }
+    let result = f();
+    match old {
+        Some(val) => unsafe { std::env::set_var(key, val) },
+        None => unsafe { std::env::remove_var(key) },
+    }
+    result
+}
+
 /// Adapted from `test_ebnf_ws_nullable`.
 ///
 /// Whitespace rule is nullable via `(…)*`; after committing `{`, the `}`
@@ -203,6 +256,69 @@ fn test_bounded_array_uses_repeat_range_ast() {
         named.rules.iter().any(|rule| contains_repeat_range(&rule.expr)),
         "bounded arrays should preserve a RepeatRange node instead of desugaring to an optional ladder"
     );
+}
+
+#[test]
+fn test_shared_additional_properties_key_exclusions_are_off_by_default() {
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "left": {
+                "type": "object",
+                "properties": {"a": {"type": "string"}},
+                "additionalProperties": {"type": "string"}
+            },
+            "right": {
+                "type": "object",
+                "properties": {"b": {"type": "string"}},
+                "additionalProperties": {"type": "string"}
+            }
+        },
+        "additionalProperties": false
+    }"#;
+
+    let grammar = with_env_var("GLRMASK_AP_SHARED_EXCLUSIONS", None, || named_grammar_from_schema(schema));
+    assert!(grammar.rules.iter().all(|rule| !rule.name.starts_with("AP_SHARED_KEY_COLON_")));
+}
+
+#[test]
+fn test_shared_additional_properties_key_exclusions_create_shared_terminal_and_allow_back_rules() {
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "left": {
+                "type": "object",
+                "properties": {"a": {"type": "string"}},
+                "additionalProperties": {"type": "string"}
+            },
+            "right": {
+                "type": "object",
+                "properties": {"b": {"type": "string"}},
+                "additionalProperties": {"type": "string"}
+            }
+        },
+        "additionalProperties": false
+    }"#;
+
+    let grammar = with_env_var("GLRMASK_AP_SHARED_EXCLUSIONS", Some("1"), || named_grammar_from_schema(schema));
+
+    let shared_rules: Vec<_> = grammar
+        .rules
+        .iter()
+        .filter(|rule| rule.name.starts_with("AP_SHARED_KEY_COLON_"))
+        .collect();
+    assert_eq!(shared_rules.len(), 1, "expected exactly one shared additional-properties key terminal");
+
+    let shared_rule_name = shared_rules[0].name.as_str();
+    let ap_key_rules: Vec<_> = grammar
+        .rules
+        .iter()
+        .filter(|rule| rule.name.contains("_ap_key_") && !rule.is_terminal)
+        .collect();
+    assert!(!ap_key_rules.is_empty(), "expected object-specific allow-back nonterminal rules");
+    assert!(ap_key_rules.iter().all(|rule| contains_ref(&rule.expr, shared_rule_name)));
+    assert!(ap_key_rules.iter().any(|rule| contains_literal_prefix(&rule.expr, b"a\"")));
+    assert!(ap_key_rules.iter().any(|rule| contains_literal_prefix(&rule.expr, b"b\"")));
 }
 
 /// Adapted from `test_ebnf_object_member_after_brace`.
