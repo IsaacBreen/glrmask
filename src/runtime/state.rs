@@ -1,9 +1,16 @@
+use std::sync::Mutex;
 use std::collections::BTreeMap;
 
 use crate::compiler::glr::parser::{ParserGSS, stacks_finished};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::constraint::Constraint;
+
+/// Cached fill_mask result, keyed on an exact snapshot of the parser state.
+pub(crate) struct MaskCacheData {
+    pub state_snapshot: BTreeMap<u32, ParserGSS>,
+    pub mask: Vec<u32>,
+}
 
 /// Reusable scratch buffers for `commit_bytes_impl`, retained between calls
 /// to avoid repeated heap allocation.
@@ -37,11 +44,33 @@ impl CommitBuffers {
     }
 }
 
-#[derive(Debug, Clone)]
 pub struct ConstraintState<'a> {
     pub(crate) constraint: &'a Constraint,
     pub(crate) state: BTreeMap<u32, ParserGSS>,
     pub(crate) buffers: CommitBuffers,
+    /// Cached fill_mask result: returned directly when state matches cached snapshot.
+    /// Not cloned — clone starts with empty cache.
+    pub(crate) mask_cache: Mutex<Option<MaskCacheData>>,
+}
+
+impl<'a> Clone for ConstraintState<'a> {
+    fn clone(&self) -> Self {
+        ConstraintState {
+            constraint: self.constraint,
+            state: self.state.clone(),
+            buffers: self.buffers.clone(),
+            mask_cache: Mutex::new(None),
+        }
+    }
+}
+
+impl<'a> std::fmt::Debug for ConstraintState<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConstraintState")
+            .field("state_len", &self.state.len())
+            .field("mask_cached", &self.mask_cache.lock().unwrap().is_some())
+            .finish()
+    }
 }
 
 impl<'a> ConstraintState<'a> {

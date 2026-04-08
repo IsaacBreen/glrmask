@@ -13,7 +13,7 @@ pub trait Merge: Clone {
 /// A map optimized for small sizes (≤4 entries). Uses inline SmallVec storage
 /// for small maps and falls back to im::HashMap for larger ones.
 /// Drop-in replacement for im::HashMap in GSS children maps.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 enum CompactMap<K: Clone + Eq + Hash, V: Clone> {
     Inline(SmallVec<[(K, V); 4]>),
     Large(IHashMap<K, V>),
@@ -215,7 +215,7 @@ impl<'a, K: Clone + Eq + Hash, V: Clone> IntoIterator for &'a CompactMap<K, V> {
 /// A map optimized for small sizes (≤2 entries) keyed by u32 (depth).
 /// Replaces `OrdMap<u32, Arc<N>>` in the GSS children maps.
 /// Typical GSS paths have 1 entry; this avoids B-tree overhead.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 enum CompactOrdMap<V: Clone> {
     Inline(SmallVec<[(u32, V); 2]>),
     Large(OrdMap<u32, V>),
@@ -399,7 +399,7 @@ impl<'a, V: Clone> IntoIterator for &'a CompactOrdMap<V> {
 
 type Children<T, N> = CompactMap<T, CompactOrdMap<Arc<N>>>;
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 enum Lower<T: Clone + Eq + Hash> {
     General {
         children: Children<T, Lower<T>>,
@@ -557,20 +557,20 @@ impl<T: Clone + Eq + Hash> Lower<T> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct Interface<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
     inner: Arc<Lower<T>>,
     acc: A,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct UpperBranch<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
     children: Children<T, Upper<T, A>>,
     empty: Option<A>,
     max_depth: u32,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 enum Upper<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
     Branch(Arc<UpperBranch<T, A>>),
     Interface(Arc<Interface<T, A>>),
@@ -1778,6 +1778,14 @@ where
 pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
     inner: Arc<Upper<T, A>>,
 }
+
+impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> PartialEq for LeveledGSS<T, A> {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner) || *self.inner == *other.inner
+    }
+}
+
+impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Eq for LeveledGSS<T, A> {}
 
 impl<T: Clone + Eq + Hash + std::fmt::Debug, A: Merge + Clone + Eq + Hash + std::fmt::Debug> std::fmt::Debug for LeveledGSS<T, A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -1,3 +1,4 @@
+use std::sync::Mutex;
 use std::collections::BTreeMap;
 
 use range_set_blaze::RangeSetBlaze;
@@ -438,7 +439,7 @@ impl Constraint {
 
     pub fn start(&self) -> ConstraintState<'_> {
         let state = self.initial_state_map();
-        ConstraintState { constraint: self, state, buffers: Default::default() }
+        ConstraintState { constraint: self, state, buffers: Default::default(), mask_cache: Mutex::new(None) }
     }
 
     pub fn mask_len(&self) -> usize {

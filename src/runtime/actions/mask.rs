@@ -645,10 +645,25 @@ impl<'a> ConstraintState<'a> {
     }
 
     pub fn fill_mask(&self, buf: &mut [u32]) {
+        // Check mask cache: if parser state matches cached snapshot, reuse mask.
+        {
+            let cache = self.mask_cache.lock().unwrap();
+            if let Some(ref cache_data) = *cache {
+                if cache_data.state_snapshot == self.state {
+                    buf.copy_from_slice(&cache_data.mask);
+                    return;
+                }
+            }
+        }
+
         buf.fill(0);
 
         let parser_dwa = self.constraint.parser_dwa();
         if self.state.is_empty() || parser_dwa.states.is_empty() {
+            *self.mask_cache.lock().unwrap() = Some(crate::runtime::state::MaskCacheData {
+                state_snapshot: self.state.clone(),
+                mask: buf.to_vec(),
+            });
             return;
         }
 
@@ -703,6 +718,12 @@ impl<'a> ConstraintState<'a> {
         self.constraint.or_internal_dense_to_buf(&merged, buf);
 
         update_eos_mask(buf, self.constraint.eos_token_id, self.is_complete());
+
+        // Update mask cache with current state + computed mask.
+        *self.mask_cache.lock().unwrap() = Some(crate::runtime::state::MaskCacheData {
+            state_snapshot: self.state.clone(),
+            mask: buf.to_vec(),
+        });
     }
 
     /// Like `fill_mask` but returns detailed profiling stats.
