@@ -3531,6 +3531,256 @@ impl<'a> SchemaCtx<'a> {
             .collect()
     }
 
+    /// Try to merge anyOf/oneOf variants that are all closed objects
+    /// (additionalProperties: false) with shared + mutually-exclusive unique
+    /// properties into a single ordering tree with a one-shot unique-kv
+    /// continuation.  Returns `None` when the guard conditions are not met.
+    fn try_merge_anyof_closed_objects(
+        &mut self,
+        schema: &Map<String, Value>,
+        options: &[Value],
+    ) -> Result<Option<GrammarExpr>, GlrMaskError> {
+        if options.len() < 2 {
+            return Ok(None);
+        }
+
+        // Resolve each variant to a concrete object schema.
+        let resolved: Vec<Map<String, Value>> = options
+            .iter()
+            .map(|opt| {
+                if has_structural_keywords(schema) {
+                    let base = Self::schema_without_keys(schema, &["anyOf", "oneOf"]);
+                    self.merge_resolved_subschemas(&base, std::slice::from_ref(opt))
+                } else {
+                    self.schema_for_intersection(opt)
+                }
+            })
+            .collect();
+
+        // Guard 1: every variant must be a plain object with
+        //          additionalProperties: false, no patternProperties.
+        for v in &resolved {
+            let is_object = v.get("type").and_then(Value::as_str) == Some("object")
+                || v.contains_key("properties");
+            if !is_object {
+                return Ok(None);
+            }
+            match v.get("additionalProperties") {
+                Some(Value::Bool(false)) => {}
+                _ => return Ok(None),
+            }
+            if v.contains_key("patternProperties") {
+                return Ok(None);
+            }
+            if v.contains_key("minProperties") || v.contains_key("maxProperties") {
+                return Ok(None);
+            }
+            if v.contains_key("propertyNames") {
+                return Ok(None);
+            }
+        }
+
+        // Collect each variant's properties map and required set.
+        let mut variant_props: Vec<&Map<String, Value>> = Vec::new();
+        let mut variant_required: Vec<BTreeSet<String>> = Vec::new();
+        for v in &resolved {
+            let props = match v.get("properties").and_then(Value::as_object) {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+            variant_props.push(props);
+            let req: BTreeSet<String> = v
+                .get("required")
+                .and_then(Value::as_array)
+                .map(|arr| arr.iter().filter_map(Value::as_str).map(String::from).collect())
+                .unwrap_or_default();
+            variant_required.push(req);
+        }
+
+        // Classify every property as shared or unique.
+        // shared: present in ALL variants with identical value schemas.
+        // unique: present in exactly ONE variant.
+        let all_keys: BTreeSet<String> = variant_props
+            .iter()
+            .flat_map(|p| p.keys().cloned())
+            .collect();
+
+        let mut shared_keys: Vec<String> = Vec::new();
+        let mut unique_keys: Vec<(String, usize)> = Vec::new(); // (key, variant_index)
+
+        for key in &all_keys {
+            let present_in: Vec<usize> = variant_props
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.contains_key(key))
+                .map(|(i, _)| i)
+                .collect();
+
+            if present_in.len() == variant_props.len() {
+                // Guard: identical value schema across all variants.
+                let first_schema = &variant_props[0][key];
+                for &idx in &present_in[1..] {
+                    if &variant_props[idx][key] != first_schema {
+                        return Ok(None);
+                    }
+                }
+                shared_keys.push(key.clone());
+            } else if present_in.len() == 1 {
+                unique_keys.push((key.clone(), present_in[0]));
+            } else {
+                // Present in some but not all → cannot merge.
+                return Ok(None);
+            }
+        }
+
+        // Guard: shared-property required status must be identical across all
+        // variants.
+        for key in &shared_keys {
+            let first_req = variant_required[0].contains(key);
+            for req_set in &variant_required[1..] {
+                if req_set.contains(key) != first_req {
+                    return Ok(None);
+                }
+            }
+        }
+
+        // Guard: unique properties must not be required in their variant.
+        // (Other variants lack the property entirely, so the merged form
+        //  must keep it optional.)
+        for (key, vi) in &unique_keys {
+            if variant_required[*vi].contains(key) {
+                return Ok(None);
+            }
+        }
+
+        // ---- All guards passed; build the merged expression. ----
+
+        // 1. Shared ordered properties.
+        let shared_required: BTreeSet<&String> = shared_keys
+            .iter()
+            .filter(|k| variant_required[0].contains(*k))
+            .collect();
+        let mut ordered: Vec<(String, GrammarExpr, bool)> = Vec::new();
+        for key in &shared_keys {
+            let value_schema = &variant_props[0][key];
+            let value_expr = self.convert_schema(value_schema)?;
+            ordered.push((key.clone(), value_expr, shared_required.contains(key)));
+        }
+
+        // 2. Unique kv-pair choice (one-shot optional).
+        let unique_kv_exprs: Vec<GrammarExpr> = unique_keys
+            .iter()
+            .map(|(key, vi)| {
+                let value_schema = &variant_props[*vi][key];
+                let value_expr = self.convert_schema(value_schema)?;
+                Ok(self.build_merged_literal_key_value_expr(b"", key, value_expr))
+            })
+            .collect::<Result<Vec<_>, GlrMaskError>>()?;
+
+        // 3. Allocate an obj_ord base name.
+        let mut base_index = self.generated_object_rule_counter;
+        let base_name = loop {
+            let candidate = format!("obj_ord_{base_index}");
+            if !self.used_rule_names.contains(&format!("{candidate}_t0")) {
+                break candidate;
+            }
+            base_index += 1;
+        };
+        self.generated_object_rule_counter = base_index + 1;
+
+        // 4. Build the shared ordering tree.
+        if ordered.is_empty() && unique_kv_exprs.is_empty() {
+            return Ok(Some(sequence_or_single(vec![
+                literal_expr(b"{"),
+                literal_expr(b"}"),
+            ])));
+        }
+
+        let (tree_expr, tree_can_be_empty) = if ordered.is_empty() {
+            (empty_expr(), true)
+        } else {
+            let mut next_idx = 0usize;
+            self.build_object_tree(&base_name, &ordered, &mut next_idx)?
+        };
+
+        // Helper: wrap an object-only expression with non-object alternatives
+        // when the resolved variants don't restrict to type: "object".
+        let all_typed_object = resolved.iter().all(|v| {
+            v.get("type").and_then(Value::as_str) == Some("object")
+        });
+        let wrap_with_type_alternatives = |this: &mut Self, expr: GrammarExpr| -> GrammarExpr {
+            if all_typed_object {
+                expr
+            } else {
+                let mut alts = vec![expr];
+                alts.push(this.json_array_ref());
+                alts.push(this.json_string_ref());
+                alts.push(this.json_number_type_expr());
+                alts.push(this.json_bool_ref());
+                alts.push(this.json_null_ref());
+                choice_or_single(alts)
+            }
+        };
+
+        // 5. Compose with unique continuation.
+        if unique_kv_exprs.is_empty() {
+            // No unique properties — just the shared tree.
+            let body = sequence_or_single(vec![literal_expr(b"{"), tree_expr, literal_expr(b"}")]);
+            if tree_can_be_empty {
+                let obj_expr = choice_or_single(vec![
+                    body,
+                    sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]),
+                ]);
+                return Ok(Some(wrap_with_type_alternatives(self, obj_expr)));
+            }
+            return Ok(Some(wrap_with_type_alternatives(self, body)));
+        }
+
+        let unique_kv_choice = choice_or_single(unique_kv_exprs);
+
+        // unique_c: ", " unique_kv | ε  (after tree content)
+        let unique_c_name = format!("{base_name}_uc");
+        self.insert_rule(
+            unique_c_name.clone(),
+            choice_or_single(vec![
+                sequence_or_single(vec![
+                    self.json_item_separator_expr(),
+                    unique_kv_choice.clone(),
+                ]),
+                empty_expr(),
+            ]),
+        );
+
+        // unique_nc: unique_kv | ε  (after '{', no preceding content)
+        let unique_nc_name = format!("{base_name}_unc");
+        self.insert_rule(
+            unique_nc_name.clone(),
+            choice_or_single(vec![unique_kv_choice, empty_expr()]),
+        );
+
+        let tree_prefix = sequence_or_single(vec![literal_expr(b"{"), tree_expr]);
+        let with_tree = sequence_or_single(vec![
+            tree_prefix,
+            GrammarExpr::Ref(unique_c_name),
+            literal_expr(b"}"),
+        ]);
+
+        let object_expr = if tree_can_be_empty {
+            choice_or_single(vec![
+                with_tree,
+                sequence_or_single(vec![
+                    literal_expr(b"{"),
+                    GrammarExpr::Ref(unique_nc_name),
+                    literal_expr(b"}"),
+                ]),
+            ])
+        } else {
+            with_tree
+        };
+
+        Ok(Some(wrap_with_type_alternatives(self, object_expr)))
+    }
+
     fn convert_structural_branches(
         &mut self,
         schema: &Map<String, Value>,
@@ -3541,6 +3791,15 @@ impl<'a> SchemaCtx<'a> {
         };
         if options.is_empty() {
             return Ok(None);
+        }
+
+        // Closed-object merge optimization (experimental, disabled by default).
+        // Currently changes the accepted language (introduces false positives).
+        // Enable with GLRMASK_MERGE_ANYOF=1 for experimentation.
+        if std::env::var("GLRMASK_MERGE_ANYOF").map_or(false, |v| v == "1") {
+            if let Some(merged) = self.try_merge_anyof_closed_objects(schema, options)? {
+                return Ok(Some(merged));
+            }
         }
 
         let option_exprs = if has_structural_keywords(schema) {
