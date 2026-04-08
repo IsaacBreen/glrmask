@@ -197,6 +197,26 @@ impl PyConstraint {
     fn _debug_walk_dfa(&self, token_bytes: Vec<u8>) -> Vec<(u32, Vec<u32>, Vec<u32>)> {
         self.inner.debug_walk_dfa(&token_bytes)
     }
+
+    /// Return action table entries for a given parser state.
+    /// Returns list of (terminal_id, action_str) pairs.
+    fn _debug_actions_for_state(&self, state: u32) -> Vec<(u32, String)> {
+        self.inner.debug_actions_for_state(state)
+    }
+
+    /// Return rule info: list of (lhs_nonterminal, rhs_length, rhs_symbols_debug).
+    fn _debug_rules(&self) -> Vec<(u32, usize, String)> {
+        self.inner.debug_rules()
+    }
+
+    /// Return terminal names/mapping for the GLR table.
+    fn _debug_num_terminals(&self) -> u32 {
+        self.inner.debug_num_terminals()
+    }
+
+    fn _debug_num_states(&self) -> u32 {
+        self.inner.debug_num_states()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -314,6 +334,11 @@ impl PyConstraintState {
     /// Return parser path count (capped at limit).
     fn parser_path_count(&self, limit: usize) -> usize {
         self.inner.with_dependent(|_owner, state| state.parser_path_count(limit))
+    }
+
+    /// Return all flattened parser stacks for debugging.
+    fn debug_parser_stacks(&self) -> Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)>)> {
+        self.inner.with_dependent(|_owner, state| state.debug_parser_stacks())
     }
 
     fn commit_bytes(&mut self, data: &[u8]) -> PyResult<()> {

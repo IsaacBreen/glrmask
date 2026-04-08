@@ -64,4 +64,19 @@ impl<'a> ConstraintState<'a> {
     pub fn parser_path_count(&self, limit: usize) -> usize {
         self.state.values().map(|gss| gss.path_count_at_most(limit)).sum::<usize>().min(limit)
     }
+
+    /// Return all flattened parser stacks for debugging.
+    /// Each entry is (tokenizer_state, Vec<(stack_of_parser_states, disallowed_terminals)>).
+    pub fn debug_parser_stacks(&self) -> Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)>)> {
+        self.state.iter().map(|(&ts, gss)| {
+            let stacks = gss.to_stacks();
+            let formatted: Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)> = stacks.into_iter().map(|(stack, acc)| {
+                let disallowed: Vec<(u32, Vec<u32>)> = acc.0.iter().map(|(&k, v)| {
+                    (k, v.iter().copied().collect())
+                }).collect();
+                (stack, disallowed)
+            }).collect();
+            (ts, formatted)
+        }).collect()
+    }
 }

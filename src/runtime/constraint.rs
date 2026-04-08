@@ -651,4 +651,31 @@ impl Constraint {
         }
         results
     }
+
+    /// Return action table entries for a parser state.
+    /// Each entry is (terminal_id, action_debug_str).
+    pub fn debug_actions_for_state(&self, state: u32) -> Vec<(u32, String)> {
+        if let Some(actions) = self.table.action.get(state as usize) {
+            actions.iter().map(|(&tid, action)| {
+                (tid, format!("{:?}", action))
+            }).collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Return rule info: (lhs_nonterminal, rhs_length, rhs_debug).
+    pub fn debug_rules(&self) -> Vec<(u32, usize, String)> {
+        self.table.rules.iter().map(|r| {
+            (r.lhs, r.rhs.len(), format!("{:?}", r.rhs))
+        }).collect()
+    }
+
+    pub fn debug_num_terminals(&self) -> u32 {
+        self.table.num_terminals
+    }
+
+    pub fn debug_num_states(&self) -> u32 {
+        self.table.num_states
+    }
 }
