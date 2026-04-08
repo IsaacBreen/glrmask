@@ -373,6 +373,75 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
         });
     }
 
+    // Partial-chain batch: run reduces on a flat buffer for the shared top
+    // chain. Batches N single-reduce iterations into one isolate + push,
+    // avoiding N-1 intermediate isolate_popn_bases + absorb_push_same_acc calls.
+    if new_states.len() == 1 {
+        if let Some(orig_chain) = current.extract_top_chain_states() {
+            if orig_chain.len() >= 3 {
+                let orig_top = *orig_chain.last().unwrap();
+                let mut flat = orig_chain.clone();
+                let mut batch_processed = SmallVec::<[u32; 16]>::new();
+                let mut batch_count = 0u32;
+
+                loop {
+                    let Some(&top) = flat.last() else { break; };
+                    if batch_processed.contains(&top) { break; }
+                    match table.action(top, token) {
+                        Some(Action::Reduce(rule_id)) => {
+                            let rule = &table.rules[*rule_id as usize];
+                            let pop = rule.rhs.len();
+                            if flat.len() <= pop {
+                                break; // Would pop below the chain
+                            }
+                            batch_processed.push(top);
+                            flat.truncate(flat.len() - pop);
+                            let &goto_from = flat.last().unwrap();
+                            if let Some(target) = table.goto_target(goto_from, rule.lhs) {
+                                flat.push(target);
+                                batch_count += 1;
+                            } else {
+                                flat.clear();
+                                break;
+                            }
+                        }
+                        _ => break, // non-Reduce action: stop flat processing
+                    }
+                }
+
+                if batch_count >= 2 {
+                    if flat.is_empty() {
+                        return ParserGSS::empty();
+                    }
+                    // Compute net effect on the GSS
+                    let common_len = orig_chain.iter().zip(flat.iter())
+                        .take_while(|(a, b)| a == b).count();
+                    let net_pop = orig_chain.len() - common_len;
+                    let new_above = &flat[common_len..];
+
+                    let bases = current.isolate_popn_bases(orig_top, net_pop as isize);
+                    current = if bases.len() == 1 {
+                        bases.into_iter().next().unwrap().1
+                    } else if bases.is_empty() {
+                        return ParserGSS::empty();
+                    } else {
+                        ParserGSS::merge_many(bases.into_iter().map(|(_, b)| b))
+                    };
+                    for &s in new_above {
+                        current = current.push(s);
+                    }
+                    // Transfer batch-processed states to main processed set
+                    processed.extend(batch_processed.iter().copied());
+                    // Continue general loop from the current top state
+                    new_states.clear();
+                    if let Some(&s) = flat.last() {
+                        new_states.push(s);
+                    }
+                }
+            }
+        }
+    }
+
     let mut pending_bases_by_target = SmallVec::<[(u32, ParserGSS); 8]>::new();
 
     loop {
@@ -465,7 +534,7 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
             }
         });
     }
-    current.shift_top_values(shift_pairs)
+    current.shift_top_values_owned(shift_pairs)
 }
 
 /// Profiled version of `advance_stacks` that returns timing breakdown.
@@ -629,7 +698,7 @@ pub(crate) fn advance_stacks_profiled(
         });
     }
     let t0 = Instant::now();
-    let result = current.shift_top_values(shift_pairs);
+    let result = current.shift_top_values_owned(shift_pairs);
     profile.shift_ns = t0.elapsed().as_nanos() as u64;
     (result, profile)
 }

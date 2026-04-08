@@ -56,6 +56,14 @@ impl<K: Clone + Eq + Hash, V: Clone> CompactMap<K, V> {
         }
     }
 
+    #[inline(always)]
+    fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        match self {
+            CompactMap::Inline(sv) => sv.iter_mut().find(|(k, _)| k == key).map(|(_, v)| v),
+            CompactMap::Large(m) => m.get_mut(key),
+        }
+    }
+
     fn insert(&mut self, key: K, value: V) -> Option<V> {
         match self {
             CompactMap::Inline(sv) => {
@@ -102,6 +110,19 @@ impl<K: Clone + Eq + Hash, V: Clone> CompactMap<K, V> {
         match (self, other) {
             (CompactMap::Large(a), CompactMap::Large(b)) => a.ptr_eq(b),
             _ => false,
+        }
+    }
+
+    fn remove(&mut self, key: &K) -> Option<V> {
+        match self {
+            CompactMap::Inline(sv) => {
+                if let Some(pos) = sv.iter().position(|(k, _)| k == key) {
+                    Some(sv.swap_remove(pos).1)
+                } else {
+                    None
+                }
+            }
+            CompactMap::Large(m) => m.remove(key),
         }
     }
 
@@ -414,6 +435,14 @@ impl<T: Clone + Eq + Hash> Lower<T> {
     fn children(&self) -> Children<T, Lower<T>> {
         match self {
             Lower::General { children, .. } | Lower::Chain { children, .. } => children.clone(),
+        }
+    }
+
+    /// Consume self and return (children, empty, max_depth).
+    fn into_parts(self) -> (Children<T, Lower<T>>, bool, u32) {
+        match self {
+            Lower::General { children, empty, max_depth }
+            | Lower::Chain { children, empty, max_depth } => (children, empty, max_depth),
         }
     }
 
@@ -2225,6 +2254,105 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
+    /// Like `shift_top_values` but takes ownership, allowing extraction of
+    /// children by move instead of clone when the Arcs are uniquely owned.
+    pub fn shift_top_values_owned<I>(self, shifts: I) -> Self
+    where
+        I: IntoIterator<Item = (T, T)>,
+    {
+        let pairs: SmallVec<[(T, T); 8]> = shifts.into_iter().collect();
+        if pairs.is_empty() {
+            return Self::empty();
+        }
+        if pairs.len() == 1 {
+            let (ref from, ref to) = pairs[0];
+            if self.single_exclusive_top_value().as_ref() == Some(from) {
+                return self.push(to.clone());
+            }
+        }
+
+        // Try to extract children by move if we have unique ownership
+        let (acc, mut children) = match Arc::try_unwrap(self.inner) {
+            Ok(Upper::Interface(iface_arc)) => {
+                match Arc::try_unwrap(iface_arc) {
+                    Ok(Interface { inner: lower_arc, acc }) => {
+                        match Arc::try_unwrap(lower_arc) {
+                            Ok(lower) => {
+                                let (c, _empty, _md) = lower.into_parts();
+                                (acc, c)
+                            }
+                            Err(lower_arc) => {
+                                // Can't unwrap lower, fall back to clone path
+                                let i = Interface { inner: lower_arc, acc: acc.clone() };
+                                let gss = LeveledGSS { inner: Arc::new(Upper::Interface(Arc::new(i))) };
+                                return gss.shift_top_values(pairs);
+                            }
+                        }
+                    }
+                    Err(iface_arc) => {
+                        let gss = LeveledGSS { inner: Arc::new(Upper::Interface(iface_arc)) };
+                        return gss.shift_top_values(pairs);
+                    }
+                }
+            }
+            Ok(upper @ Upper::Branch(_)) => {
+                let gss = LeveledGSS { inner: Arc::new(upper) };
+                return gss.shift_top_values(pairs);
+            }
+            Err(arc) => {
+                let gss = LeveledGSS { inner: arc };
+                return gss.shift_top_values(pairs);
+            }
+        };
+
+        // We own `children` by value — extract entries without cloning
+        let mut children_by_target: SmallVec<[(T, Children<T, Lower<T>>); 4]> = SmallVec::new();
+
+        for (from, to) in pairs {
+            let Some(kids) = children.remove(&from) else {
+                continue;
+            };
+            let target_children = if let Some(pos) = children_by_target.iter().position(|(t, _)| *t == to) {
+                &mut children_by_target[pos].1
+            } else {
+                children_by_target.push((to, CompactMap::new()));
+                &mut children_by_target.last_mut().unwrap().1
+            };
+            match target_children.get(&from) {
+                Some(existing_kids) => {
+                    let mut merged_kids = existing_kids.clone();
+                    for (depth, child) in kids.iter() {
+                        if let Some(existing_child) = merged_kids.get(depth) {
+                            merged_kids.insert(*depth, merge_lower(existing_child, child));
+                        } else {
+                            merged_kids.insert(*depth, child.clone());
+                        }
+                    }
+                    target_children.insert(from, merged_kids);
+                }
+                None => {
+                    // Move kids directly — no clone needed
+                    target_children.insert(from, kids);
+                }
+            }
+        }
+
+        if children_by_target.is_empty() {
+            return Self::empty();
+        }
+
+        let mut shifted_children: Children<T, Lower<T>> = CompactMap::new();
+        for (to, lower_children) in children_by_target {
+            let lower = new_lower(lower_children, false);
+            shifted_children.insert(to, CompactOrdMap::unit(lower.max_depth(), lower));
+        }
+
+        let shifted_root = new_lower(shifted_children, false);
+        LeveledGSS {
+            inner: new_interface(shifted_root, acc),
+        }
+    }
+
     /// Equivalent to `self.merge(&base.push(value))` but avoids intermediate
     /// allocations by directly inserting into self's structure via Arc::make_mut.
     /// Falls back to the standard path for non-Interface cases.
@@ -2284,22 +2412,17 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             lower_mut.ensure_general();
             match lower_mut {
                 Lower::General { children, max_depth, .. } => {
-                    match children.get(&value) {
-                        Some(existing_ordmap) => {
-                            let mut new_ordmap = existing_ordmap.clone();
-                            match new_ordmap.get(&child_depth) {
-                                Some(existing_child) => {
-                                    new_ordmap.insert(child_depth, merge_lower(existing_child, &child_node));
-                                }
-                                None => {
-                                    new_ordmap.insert(child_depth, child_node);
-                                }
+                    if let Some(existing_ordmap) = children.get_mut(&value) {
+                        match existing_ordmap.get(&child_depth).cloned() {
+                            Some(existing_child) => {
+                                existing_ordmap.insert(child_depth, merge_lower(&existing_child, &child_node));
                             }
-                            children.insert(value, new_ordmap);
+                            None => {
+                                existing_ordmap.insert(child_depth, child_node);
+                            }
                         }
-                        None => {
-                            children.insert(value, CompactOrdMap::unit(child_depth, child_node));
-                        }
+                    } else {
+                        children.insert(value, CompactOrdMap::unit(child_depth, child_node));
                     }
 
                     if child_depth + 1 > *max_depth {
@@ -2378,41 +2501,60 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         if self.is_empty() {
             return SmallVec::new();
         }
-        // Fast path for Interface variant with depth 1 and single child
-        if n == 1 {
-            if let Upper::Interface(interface) = &*self.inner {
-                if let Some(kids) = interface.inner.children_get(&value) {
-                    if kids.len() == 1 {
-                        let (_, child) = kids.iter().next().unwrap();
-                        // child is Arc<Lower> — the popped result's inner lower.
-                        // The popped GSS would be Interface { inner: child, acc: acc }
-                        // popped.single_top_value() returns the single key in child's children.
-                        // popped.isolate(key) returns popped itself (since single key).
-                        //
-                        // So the base is Interface { inner: child, acc: acc } and the top value
-                        // is child's single key (if chain) or all keys.
-                        if child.children_len() == 0 {
-                            // No children below — popped is terminal (empty flag only)
+        // Fast path: walk down through single-child Interface levels
+        // without creating intermediate GSSes.
+        if let Upper::Interface(interface) = &*self.inner {
+            if let Some(kids) = interface.inner.children_get(&value) {
+                if kids.len() == 1 {
+                    let (_, first_child) = kids.iter().next().unwrap();
+
+                    // Walk down (n-1) more levels through single-child chains
+                    // without creating intermediate GSSes.
+                    let mut current: &Arc<Lower<T>> = first_child;
+                    let mut remaining = n - 1;
+                    while remaining > 0 {
+                        if current.empty() {
+                            break;
+                        }
+                        if current.is_chain() {
+                            // Chain variant: exactly 1 key, 1 depth → fast follow
+                            current = current.chain_next();
+                            remaining -= 1;
+                        } else if current.children_len() == 1 {
+                            let (_, ordmap) = current.children_ref().iter().next().unwrap();
+                            if ordmap.len() != 1 {
+                                break;
+                            }
+                            let (_, child) = ordmap.iter().next().unwrap();
+                            current = child;
+                            remaining -= 1;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    if remaining == 0 {
+                        // Successfully walked all n levels. `current` is the
+                        // base's inner Lower node.
+                        if current.children_len() == 0 {
                             return SmallVec::new();
                         }
-                        if child.children_len() == 1 {
-                            // Single child in the popped lower — single goto_from
-                            let goto_from = match &**child {
-                                Lower::Chain { .. } => child.chain_value().clone(),
+                        let acc = &interface.acc;
+                        if current.children_len() == 1 {
+                            let goto_from = match &**current {
+                                Lower::Chain { .. } => current.chain_value().clone(),
                                 Lower::General { children, .. } => {
                                     children.keys().next().unwrap().clone()
                                 }
                             };
-                            // Base is the popped GSS itself (isolate with single key is identity)
                             let base = Self {
-                                inner: new_interface(child.clone(), interface.acc.clone()),
+                                inner: new_interface(current.clone(), acc.clone()),
                             };
                             return smallvec![(goto_from, base)];
                         }
-                        // Multiple children — need to split
-                        let acc = &interface.acc;
+                        // Multiple children at the base — split
                         let mut result = SmallVec::new();
-                        for (k, ordmap) in child.children_ref().iter() {
+                        for (k, ordmap) in current.children_ref().iter() {
                             let filtered = CompactMap::unit(k.clone(), ordmap.clone());
                             let new_lower = new_lower(filtered, false);
                             let base = Self {
@@ -2422,11 +2564,12 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         }
                         return result;
                     }
-                    // Multiple depth entries for this value
-                    // Fall through to general path
-                } else {
-                    return SmallVec::new();
+                    // Chain walk couldn't reach the target depth (branching
+                    // encountered). Fall through to general path.
                 }
+                // Multiple depth entries for this value — fall through.
+            } else {
+                return SmallVec::new();
             }
         }
         // General fallback: use isolate_popn then iterate
@@ -2809,6 +2952,56 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 result
             }
         }
+    }
+
+    /// Extract the top chain of state values from the GSS.
+    /// Walks down from the top, collecting states as long as each level has
+    /// exactly 1 child (i.e., the path is unambiguous). Stops when branching
+    /// is encountered or the chain reaches an empty node.
+    /// Returns `None` if the GSS is not an Interface or the top itself branches.
+    /// The returned SmallVec has the top-of-stack at the end (bottom-first order).
+    pub fn extract_top_chain_states(&self) -> Option<SmallVec<[T; 16]>> {
+        let interface = match &*self.inner {
+            Upper::Interface(iface) => iface,
+            _ => return None,
+        };
+
+        let mut states = SmallVec::<[T; 16]>::new();
+        let mut current: &Lower<T> = &interface.inner;
+
+        loop {
+            match current {
+                Lower::Chain { .. } => {
+                    states.push(current.chain_value().clone());
+                    let next = current.chain_next();
+                    current = &**next;
+                }
+                Lower::General { children, .. } => {
+                    if children.is_empty() {
+                        break;
+                    }
+                    if children.len() == 1 {
+                        let key = children.keys().next().unwrap().clone();
+                        let ordmap = children.values().next().unwrap();
+                        if ordmap.len() == 1 {
+                            states.push(key);
+                            let (_, next) = ordmap.iter().next().unwrap();
+                            current = &**next;
+                            continue;
+                        }
+                    }
+                    // Multi-child or multi-depth: stop here (chain top ends)
+                    break;
+                }
+            }
+        }
+
+        if states.is_empty() {
+            return None;
+        }
+
+        states.reverse(); // Convert from top-first to bottom-first
+        Some(states)
     }
 
     /// Extract the chain of state values from a single-path chain GSS.
