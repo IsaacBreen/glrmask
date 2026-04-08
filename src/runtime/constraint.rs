@@ -288,6 +288,55 @@ impl Constraint {
         right_words: &[u64],
         buf: &mut [u32],
     ) {
+        let n_words = left_words.len().min(right_words.len());
+
+        // Complement path: when most overlap words are full, start from
+        // the all-tokens mask and subtract the few missing tokens.
+        let n_full = left_words.iter().zip(right_words.iter())
+            .filter(|(l, r)| **l & **r == !0u64).count();
+        let n_non_full = n_words - n_full;
+        if !self.all_tokens_buf_mask.is_empty()
+            && n_words == self.word_group_buf_masks.len()
+            && n_full > 0
+            && n_non_full < n_full
+        {
+            let mut temp: Vec<u32> = self.all_tokens_buf_mask.to_vec();
+            let n_internal = self.internal_token_buf_masks.len();
+            for (word_index, (&left_word, &right_word)) in
+                left_words.iter().zip(right_words.iter()).enumerate()
+            {
+                let overlap = left_word & right_word;
+                if overlap == !0u64 {
+                    continue;
+                }
+                if overlap == 0 {
+                    if let Some(group) = self.word_group_buf_masks.get(word_index) {
+                        for (i, &mask) in group.iter().enumerate() {
+                            temp[i] &= !mask;
+                        }
+                    }
+                } else {
+                    // Remove only the missing bits.
+                    let missing = !overlap;
+                    let mut bits = missing;
+                    while bits != 0 {
+                        let bit = bits.trailing_zeros() as usize;
+                        let internal_token = word_index * 64 + bit;
+                        if internal_token < n_internal {
+                            for &(buf_word, mask) in &self.internal_token_buf_masks[internal_token] {
+                                temp[buf_word as usize] &= !mask;
+                            }
+                        }
+                        bits &= bits - 1;
+                    }
+                }
+            }
+            for (i, &mask) in temp.iter().enumerate() {
+                buf[i] |= mask;
+            }
+            return;
+        }
+
         for (word_index, (&left_word, &right_word)) in
             left_words.iter().zip(right_words.iter()).enumerate()
         {

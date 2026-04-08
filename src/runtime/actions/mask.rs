@@ -191,18 +191,18 @@ impl DenseMaskAcc {
     ) {
         let word_groups = &constraint.word_group_buf_masks;
         let all_mask = &constraint.all_tokens_buf_mask;
+        let internal_masks = &constraint.internal_token_buf_masks;
         for dense in self.0.values() {
             // Super-fast path: check if entire dense matches full universe.
-            // If all words are !0u64 (or at expected count), OR the all_tokens_buf_mask once.
             let n_full_groups = word_groups.len().saturating_sub(1);
             if !all_mask.is_empty()
                 && dense.len() == word_groups.len()
                 && dense[..n_full_groups].iter().all(|&w| w == !0u64)
             {
-                let last_expected = if constraint.internal_token_buf_masks.len() % 64 == 0 {
+                let last_expected = if internal_masks.len() % 64 == 0 {
                     !0u64
                 } else {
-                    (1u64 << (constraint.internal_token_buf_masks.len() % 64)) - 1
+                    (1u64 << (internal_masks.len() % 64)) - 1
                 };
                 if dense[n_full_groups] == last_expected {
                     for (i, &mask) in all_mask.iter().enumerate() {
@@ -211,6 +211,53 @@ impl DenseMaskAcc {
                     continue;
                 }
             }
+
+            // Complement path: when most words are full, start from the
+            // all-tokens mask and subtract the few missing tokens.
+            // This turns O(n_full_groups × buf_len) into O(n_missing × buf_len).
+            let n_full = dense.iter().filter(|&&w| w == !0u64).count();
+            let n_non_full = dense.len() - n_full;
+            if !all_mask.is_empty()
+                && dense.len() == word_groups.len()
+                && n_full > 0
+                && n_non_full < n_full
+            {
+                // Build complement: all_mask with missing tokens removed.
+                let mut temp: Vec<u32> = all_mask.to_vec();
+                for (wi, &w) in dense.iter().enumerate() {
+                    if w == !0u64 {
+                        continue;
+                    }
+                    if w == 0 {
+                        // Remove entire group from temp.
+                        if let Some(group) = word_groups.get(wi) {
+                            for (i, &mask) in group.iter().enumerate() {
+                                temp[i] &= !mask;
+                            }
+                        }
+                    } else {
+                        // Remove only the missing bits.
+                        let missing = !w;
+                        let n_internal = internal_masks.len();
+                        let mut bits = missing;
+                        while bits != 0 {
+                            let bit = bits.trailing_zeros() as usize;
+                            let internal_token = wi * 64 + bit;
+                            if internal_token < n_internal {
+                                for &(buf_word, mask) in &internal_masks[internal_token] {
+                                    temp[buf_word as usize] &= !mask;
+                                }
+                            }
+                            bits &= bits - 1;
+                        }
+                    }
+                }
+                for (i, &mask) in temp.iter().enumerate() {
+                    buf[i] |= mask;
+                }
+                continue;
+            }
+
             for (wi, &w) in dense.iter().enumerate() {
                 if w == 0 {
                     continue;
@@ -229,7 +276,7 @@ impl DenseMaskAcc {
                 while bits != 0 {
                     let bit = bits.trailing_zeros() as usize;
                     let internal_token = wi * 64 + bit;
-                    let masks = &constraint.internal_token_buf_masks[internal_token];
+                    let masks = &internal_masks[internal_token];
                     for &(buf_word, mask) in masks {
                         buf[buf_word as usize] |= mask;
                     }
