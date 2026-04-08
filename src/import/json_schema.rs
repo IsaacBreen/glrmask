@@ -106,6 +106,7 @@ const UNTYPED_SCHEMA_APPLICABLE_TYPES: &[(&str, &[&str])] = &[
 const UNSAT_SCHEMA_ERROR: &str = "__unsat_schema__";
 const EXACT_CLOSED_OBJECT_UNION_MAX_VARIANTS: usize = 8;
 const EXACT_CLOSED_OBJECT_UNION_MAX_KEYS: usize = 16;
+const EXACT_CLOSED_OBJECT_SINGLE_MAX_KEYS: usize = 12;
 const EXACT_CLOSED_OBJECT_UNION_MAX_STATES: usize = 128;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -3957,7 +3958,7 @@ impl<'a> SchemaCtx<'a> {
         &mut self,
         ordered: &[(String, GrammarExpr, bool)],
     ) -> Result<Option<GrammarExpr>, GlrMaskError> {
-        if ordered.is_empty() || ordered.len() > EXACT_CLOSED_OBJECT_UNION_MAX_KEYS {
+        if ordered.is_empty() || ordered.len() > EXACT_CLOSED_OBJECT_SINGLE_MAX_KEYS {
             return Ok(None);
         }
 
