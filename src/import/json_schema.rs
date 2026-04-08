@@ -3669,6 +3669,15 @@ impl<'a> SchemaCtx<'a> {
             .collect()
     }
 
+    fn exact_closed_object_disabled() -> bool {
+        std::env::var("GLRMASK_DISABLE_EXACT_CLOSED_OBJECT_UNION")
+            .map(|v| {
+                let n = v.trim().to_ascii_lowercase();
+                !matches!(n.as_str(), "" | "0" | "false" | "no" | "off")
+            })
+            .unwrap_or(false)
+    }
+
     fn collect_ordered_closed_object_schema_variant(
         &mut self,
         variant: &Map<String, Value>,
@@ -3776,6 +3785,204 @@ impl<'a> SchemaCtx<'a> {
         next
     }
 
+    fn build_exact_ordered_closed_object_variants(
+        &mut self,
+        variants: Vec<OrderedClosedObjectVariant>,
+        key_exprs: HashMap<String, GrammarExpr>,
+        mode: StructuralBranchMode,
+    ) -> Result<Option<GrammarExpr>, GlrMaskError> {
+        if variants.is_empty() || variants.len() > EXACT_CLOSED_OBJECT_UNION_MAX_VARIANTS {
+            return Ok(None);
+        }
+        if key_exprs.len() > EXACT_CLOSED_OBJECT_UNION_MAX_KEYS {
+            return Ok(None);
+        }
+
+        let start_state: Vec<OrderedSubsetCursor> = (0..variants.len())
+            .map(|variant_idx| OrderedSubsetCursor {
+                variant_idx: variant_idx as u16,
+                cursor: 0,
+            })
+            .collect();
+        let mut states = vec![start_state.clone()];
+        let mut transitions: Vec<Vec<(String, usize)>> = vec![Vec::new()];
+        let mut state_to_idx = HashMap::new();
+        state_to_idx.insert(start_state, 0usize);
+        let mut queue = VecDeque::from([0usize]);
+
+        while let Some(state_idx) = queue.pop_front() {
+            let state = states[state_idx].clone();
+            let mut edges = Vec::new();
+            for key in Self::ordered_subset_legal_next_keys(&variants, &state) {
+                let next_state = Self::ordered_subset_transition(&variants, &state, &key);
+                if next_state.is_empty() {
+                    continue;
+                }
+                let next_idx = if let Some(&idx) = state_to_idx.get(&next_state) {
+                    idx
+                } else {
+                    let idx = states.len();
+                    if idx >= EXACT_CLOSED_OBJECT_UNION_MAX_STATES {
+                        return Ok(None);
+                    }
+                    states.push(next_state.clone());
+                    transitions.push(Vec::new());
+                    state_to_idx.insert(next_state, idx);
+                    queue.push_back(idx);
+                    idx
+                };
+                edges.push((key, next_idx));
+            }
+            transitions[state_idx] = edges;
+        }
+
+        let mut base_index = self.generated_object_rule_counter;
+        let base_name = loop {
+            let candidate = format!("obj_ord_q_{base_index}");
+            if !self.used_rule_names.contains(&format!("{candidate}_s0")) {
+                break candidate;
+            }
+            base_index += 1;
+        };
+        self.generated_object_rule_counter = base_index + 1;
+        if variants.len() == 1 {
+            let body_rule_names: Vec<String> = (0..states.len())
+                .map(|idx| format!("{base_name}_s{idx}"))
+                .collect();
+            let after_rule_names: Vec<String> = (0..states.len())
+                .map(|idx| format!("{base_name}_a{idx}"))
+                .collect();
+
+            for state_idx in 0..states.len() {
+                let state = &states[state_idx];
+                let mut alts = Vec::new();
+
+                if Self::ordered_subset_close_allowed(mode, &variants, state) {
+                    alts.push(empty_expr());
+                }
+
+                for (key, next_idx) in &transitions[state_idx] {
+                    let Some(value_expr) = key_exprs.get(key).cloned() else {
+                        return Ok(None);
+                    };
+                    let kv_expr = self.build_merged_literal_key_value_expr(b"", key, value_expr);
+                    alts.push(sequence_or_single(vec![
+                        kv_expr,
+                        GrammarExpr::Ref(after_rule_names[*next_idx].clone()),
+                    ]));
+                }
+
+                let expr = if alts.is_empty() {
+                    never_expr()
+                } else {
+                    choice_or_single(alts)
+                };
+                self.insert_rule(body_rule_names[state_idx].clone(), expr);
+            }
+
+            for state_idx in 0..states.len() {
+                let state = &states[state_idx];
+                let mut alts = Vec::new();
+
+                if Self::ordered_subset_close_allowed(mode, &variants, state) {
+                    alts.push(empty_expr());
+                }
+                if !transitions[state_idx].is_empty() {
+                    alts.push(sequence_or_single(vec![
+                        self.json_item_separator_expr(),
+                        GrammarExpr::Ref(body_rule_names[state_idx].clone()),
+                    ]));
+                }
+
+                let expr = if alts.is_empty() {
+                    never_expr()
+                } else {
+                    choice_or_single(alts)
+                };
+                self.insert_rule(after_rule_names[state_idx].clone(), expr);
+            }
+
+            return Ok(Some(sequence_or_single(vec![
+                literal_expr(b"{"),
+                GrammarExpr::Ref(body_rule_names[0].clone()),
+                literal_expr(b"}"),
+            ])));
+        }
+
+        let rule_names: Vec<String> = (0..states.len())
+            .map(|idx| format!("{base_name}_s{idx}"))
+            .collect();
+
+        for state_idx in 0..states.len() {
+            let state = &states[state_idx];
+            let mut alts = Vec::new();
+
+            if Self::ordered_subset_close_allowed(mode, &variants, state) {
+                alts.push(empty_expr());
+            }
+
+            for (key, next_idx) in &transitions[state_idx] {
+                let Some(value_expr) = key_exprs.get(key).cloned() else {
+                    return Ok(None);
+                };
+                let kv_expr = self.build_merged_literal_key_value_expr(b"", key, value_expr);
+                if Self::ordered_subset_close_allowed(mode, &variants, &states[*next_idx]) {
+                    alts.push(kv_expr.clone());
+                }
+                if !transitions[*next_idx].is_empty() {
+                    alts.push(sequence_or_single(vec![
+                        kv_expr,
+                        self.json_item_separator_expr(),
+                        GrammarExpr::Ref(rule_names[*next_idx].clone()),
+                    ]));
+                }
+            }
+
+            let expr = if alts.is_empty() {
+                never_expr()
+            } else {
+                choice_or_single(alts)
+            };
+            self.insert_rule(rule_names[state_idx].clone(), expr);
+        }
+
+        Ok(Some(sequence_or_single(vec![
+            literal_expr(b"{"),
+            GrammarExpr::Ref(rule_names[0].clone()),
+            literal_expr(b"}"),
+        ])))
+    }
+
+    fn try_build_exact_closed_object(
+        &mut self,
+        ordered: &[(String, GrammarExpr, bool)],
+    ) -> Result<Option<GrammarExpr>, GlrMaskError> {
+        if ordered.is_empty() || ordered.len() > EXACT_CLOSED_OBJECT_UNION_MAX_KEYS {
+            return Ok(None);
+        }
+
+        let key_exprs: HashMap<String, GrammarExpr> = ordered
+            .iter()
+            .map(|(key, value_expr, _)| (key.clone(), value_expr.clone()))
+            .collect();
+        let variant = OrderedClosedObjectVariant {
+            items: ordered
+                .iter()
+                .map(|(key, value_expr, required)| OrderedClosedObjectItem {
+                    key: key.clone(),
+                    value_expr: value_expr.clone(),
+                    required: *required,
+                })
+                .collect(),
+        };
+
+        self.build_exact_ordered_closed_object_variants(
+            vec![variant],
+            key_exprs,
+            StructuralBranchMode::AnyOf,
+        )
+    }
+
     fn try_build_exact_closed_object_union(
         &mut self,
         schema: &Map<String, Value>,
@@ -3860,96 +4067,7 @@ impl<'a> SchemaCtx<'a> {
             })
             .collect();
 
-        let start_state: Vec<OrderedSubsetCursor> = (0..variants.len())
-            .map(|variant_idx| OrderedSubsetCursor {
-                variant_idx: variant_idx as u16,
-                cursor: 0,
-            })
-            .collect();
-        let mut states = vec![start_state.clone()];
-        let mut transitions: Vec<Vec<(String, usize)>> = vec![Vec::new()];
-        let mut state_to_idx = HashMap::new();
-        state_to_idx.insert(start_state, 0usize);
-        let mut queue = VecDeque::from([0usize]);
-
-        while let Some(state_idx) = queue.pop_front() {
-            let state = states[state_idx].clone();
-            let mut edges = Vec::new();
-            for key in Self::ordered_subset_legal_next_keys(&variants, &state) {
-                let next_state = Self::ordered_subset_transition(&variants, &state, &key);
-                if next_state.is_empty() {
-                    continue;
-                }
-                let next_idx = if let Some(&idx) = state_to_idx.get(&next_state) {
-                    idx
-                } else {
-                    let idx = states.len();
-                    if idx >= EXACT_CLOSED_OBJECT_UNION_MAX_STATES {
-                        return Ok(None);
-                    }
-                    states.push(next_state.clone());
-                    transitions.push(Vec::new());
-                    state_to_idx.insert(next_state, idx);
-                    queue.push_back(idx);
-                    idx
-                };
-                edges.push((key, next_idx));
-            }
-            transitions[state_idx] = edges;
-        }
-
-        let mut base_index = self.generated_object_rule_counter;
-        let base_name = loop {
-            let candidate = format!("obj_ord_q_{base_index}");
-            if !self.used_rule_names.contains(&format!("{candidate}_s0")) {
-                break candidate;
-            }
-            base_index += 1;
-        };
-        self.generated_object_rule_counter = base_index + 1;
-        let rule_names: Vec<String> = (0..states.len())
-            .map(|idx| format!("{base_name}_s{idx}"))
-            .collect();
-
-        for state_idx in 0..states.len() {
-            let state = &states[state_idx];
-            let mut alts = Vec::new();
-
-            if Self::ordered_subset_close_allowed(mode, &variants, state) {
-                alts.push(empty_expr());
-            }
-
-            for (key, next_idx) in &transitions[state_idx] {
-                let kv_expr = self.build_merged_literal_key_value_expr(
-                    b"",
-                    key,
-                    key_exprs[key].clone(),
-                );
-                if Self::ordered_subset_close_allowed(mode, &variants, &states[*next_idx]) {
-                    alts.push(kv_expr.clone());
-                }
-                if !transitions[*next_idx].is_empty() {
-                    alts.push(sequence_or_single(vec![
-                        kv_expr,
-                        self.json_item_separator_expr(),
-                        GrammarExpr::Ref(rule_names[*next_idx].clone()),
-                    ]));
-                }
-            }
-
-            let expr = if alts.is_empty() {
-                never_expr()
-            } else {
-                choice_or_single(alts)
-            };
-            self.insert_rule(rule_names[state_idx].clone(), expr);
-        }
-
-        Ok(Some(sequence_or_single(vec![
-            literal_expr(b"{"),
-            GrammarExpr::Ref(rule_names[0].clone()),
-            literal_expr(b"}"),
-        ])))
+        self.build_exact_ordered_closed_object_variants(variants, key_exprs, mode)
     }
 
     /// Try to merge anyOf/oneOf variants that are all closed objects
@@ -4214,12 +4332,7 @@ impl<'a> SchemaCtx<'a> {
             return Ok(None);
         }
 
-        let exact_union_disabled = std::env::var("GLRMASK_DISABLE_EXACT_CLOSED_OBJECT_UNION")
-            .map(|v| {
-                let n = v.trim().to_ascii_lowercase();
-                !matches!(n.as_str(), "" | "0" | "false" | "no" | "off")
-            })
-            .unwrap_or(false);
+        let exact_union_disabled = Self::exact_closed_object_disabled();
         if !exact_union_disabled {
             let mode = match keyword {
                 "anyOf" => Some(StructuralBranchMode::AnyOf),
@@ -6694,6 +6807,18 @@ impl<'a> SchemaCtx<'a> {
             GrammarExpr::Ref(additional_nc.clone()),
             GrammarExpr::Ref(additional_c.clone()),
         );
+
+        if !Self::exact_closed_object_disabled()
+            && !ordered.is_empty()
+            && ordered.iter().any(|(_, _, required)| !*required)
+            && pattern_properties.is_empty()
+            && !has_additional_properties
+            && property_names.is_none()
+        {
+            if let Some(expr) = self.try_build_exact_closed_object(&ordered)? {
+                return Ok(expr);
+            }
+        }
 
         if !ordered.is_empty()
             && ordered.iter().all(|(_, _, required)| *required)

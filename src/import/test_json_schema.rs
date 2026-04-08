@@ -65,6 +65,22 @@ fn advance_tokens(state: &mut ConstraintState<'_>, tokens: &[u32]) {
     }
 }
 
+fn max_parser_paths_over_prefix(constraint: &Constraint, prefix: &[u8]) -> usize {
+    let mut state = constraint.start();
+    let mut max_paths = state.parser_path_count(1024);
+    for &byte in prefix {
+        let mask = state.mask();
+        assert_token_allowed(
+            &mask,
+            byte as usize,
+            &format!("prefix byte {byte:?} should be allowed"),
+        );
+        state.commit_token(byte as u32).unwrap();
+        max_paths = max_paths.max(state.parser_path_count(1024));
+    }
+    max_paths
+}
+
 fn read_fixture_schema(path: &Path) -> Option<String> {
     if !path.exists() {
         return None;
@@ -751,6 +767,7 @@ fn test_conversion_any_of() {
 
 #[test]
 fn test_closed_object_anyof_ordered_builtin_examples() {
+    let _guard = env_lock().lock().expect("env lock should not be poisoned");
     let schema = r#"{
         "anyOf": [
             {
@@ -812,6 +829,7 @@ fn test_closed_object_anyof_ordered_builtin_examples() {
 
 #[test]
 fn test_closed_object_anyof_preserves_ordered_language() {
+    let _guard = env_lock().lock().expect("env lock should not be poisoned");
     let schema = r#"{
         "anyOf": [
             {
@@ -849,6 +867,7 @@ fn test_closed_object_anyof_preserves_ordered_language() {
 
 #[test]
 fn test_closed_object_oneof_counts_accepting_variants_exactly() {
+    let _guard = env_lock().lock().expect("env lock should not be poisoned");
     let schema = r#"{
         "oneOf": [
             {
@@ -882,6 +901,74 @@ fn test_closed_object_oneof_counts_accepting_variants_exactly() {
             r#"{}"#,
             r#"{"a": "x"}"#,
         ],
+    );
+}
+
+#[test]
+fn test_closed_object_single_variant_preserves_ordered_language() {
+    let _guard = env_lock().lock().expect("env lock should not be poisoned");
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "image": {"type": "string"},
+            "structureTests": {
+                "type": "array",
+                "items": {"type": "string"}
+            }
+        },
+        "required": ["image"],
+        "additionalProperties": false
+    }"#;
+
+    schema_accepts(
+        schema,
+        &[
+            r#"{"image": "x"}"#,
+            r#"{"image": "x", "structureTests": []}"#,
+        ],
+    );
+    schema_rejects(
+        schema,
+        &[
+            r#"{}"#,
+            r#"{"structureTests": []}"#,
+            r#"{"structureTests": [], "image": "x"}"#,
+        ],
+    );
+}
+
+#[test]
+fn test_closed_object_single_variant_collapses_optional_tail_paths() {
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "image": {"type": "string"},
+            "structureTests": {
+                "type": "array",
+                "items": {"type": "string"}
+            }
+        },
+        "required": ["image"],
+        "additionalProperties": false
+    }"#;
+    let prefix = br#"{"image": "gcr.io/k8s-skaffold/example"#;
+
+    let fallback_max = with_env_var("GLRMASK_DISABLE_EXACT_CLOSED_OBJECT_UNION", Some("1"), || {
+        let constraint = schema_constraint(schema);
+        max_parser_paths_over_prefix(&constraint, prefix)
+    });
+    let exact_max = with_env_var("GLRMASK_DISABLE_EXACT_CLOSED_OBJECT_UNION", None, || {
+        let constraint = schema_constraint(schema);
+        max_parser_paths_over_prefix(&constraint, prefix)
+    });
+
+    assert!(
+        fallback_max > 1,
+        "fallback builder should retain the optional-tail split for this regression case"
+    );
+    assert_eq!(
+        exact_max, 1,
+        "exact single-variant builder should collapse the optional-tail split"
     );
 }
 
