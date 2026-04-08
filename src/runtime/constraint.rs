@@ -643,11 +643,10 @@ impl Constraint {
 
         if !all_mask.is_empty() && total_missing_cost + copy_overhead < total_set_cost {
             // Complement-sparse path: start from all_tokens, subtract missing tokens.
-            // buf stays hot in L1 after the initial sequential fill.
             for (i, &mask) in all_mask.iter().enumerate() {
                 buf[i] |= mask;
             }
-            // Process light missing tokens first (sparse AND-NOT, buf hot in L1).
+            // Process light missing tokens first (sparse AND-NOT).
             for (wi, &w) in dense.iter().enumerate() {
                 if wi * 64 >= n_internal {
                     break;
@@ -661,7 +660,6 @@ impl Constraint {
                     let internal_token = wi * 64 + bit;
                     if internal_token < heavy.len() {
                         if heavy[internal_token].is_some() {
-                            // Heavy token: defer to sequential pass below.
                             bits &= bits - 1;
                             continue;
                         }
@@ -696,7 +694,6 @@ impl Constraint {
             }
         } else {
             // Normal path: process light tokens first (sparse OR), then heavy (dense OR).
-            // Light tokens keep buf entries hot in L1 for subsequent sparse writes.
             for (wi, &w) in dense.iter().enumerate() {
                 if w == 0 {
                     continue;
@@ -707,7 +704,6 @@ impl Constraint {
                     let internal_token = wi * 64 + bit;
                     if internal_token < n_internal {
                         if internal_token < heavy.len() && heavy[internal_token].is_some() {
-                            // Defer heavy tokens.
                             bits &= bits - 1;
                             continue;
                         }

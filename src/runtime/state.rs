@@ -10,6 +10,9 @@ use super::constraint::Constraint;
 pub(crate) struct MaskCacheData {
     pub state_snapshot: BTreeMap<u32, ParserGSS>,
     pub mask: Vec<u32>,
+    /// The merged internal token dense bitmap used to compute this mask.
+    /// Enables incremental updates when the state changes slightly.
+    pub merged_dense: Vec<u64>,
 }
 
 /// Reusable scratch buffers for `commit_bytes_impl`, retained between calls

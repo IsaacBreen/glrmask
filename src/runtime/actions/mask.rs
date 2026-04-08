@@ -663,6 +663,7 @@ impl<'a> ConstraintState<'a> {
             *self.mask_cache.lock().unwrap() = Some(crate::runtime::state::MaskCacheData {
                 state_snapshot: self.state.clone(),
                 mask: buf.to_vec(),
+                merged_dense: Vec::new(),
             });
             return;
         }
@@ -714,15 +715,107 @@ impl<'a> ConstraintState<'a> {
             }
         }
 
-        // Convert merged internal token bitmap to output buffer in a single pass.
-        self.constraint.or_internal_dense_to_buf(&merged, buf);
+        // Convert merged internal token bitmap to output buffer.
+        // Try incremental update from cached mask if delta is small.
+        let did_incremental = {
+            let cache = self.mask_cache.lock().unwrap();
+            if let Some(ref cache_data) = *cache {
+                if !cache_data.merged_dense.is_empty()
+                    && cache_data.merged_dense.len() == merged.len()
+                {
+                    let internal_masks = &self.constraint.internal_token_buf_masks;
+                    let n_internal = internal_masks.len();
+
+                    // Compute delta cost (total entries for changed tokens).
+                    let mut delta_cost: usize = 0;
+                    let mut delta_tokens: usize = 0;
+                    for (wi, (&old_w, &new_w)) in cache_data
+                        .merged_dense
+                        .iter()
+                        .zip(merged.iter())
+                        .enumerate()
+                    {
+                        let delta = old_w ^ new_w;
+                        if delta == 0 {
+                            continue;
+                        }
+                        delta_tokens += delta.count_ones() as usize;
+                        let mut bits = delta;
+                        while bits != 0 {
+                            let bit = bits.trailing_zeros() as usize;
+                            let internal_token = wi * 64 + bit;
+                            if internal_token < n_internal {
+                                delta_cost += internal_masks[internal_token].len();
+                            }
+                            bits &= bits - 1;
+                        }
+                    }
+
+                    if delta_tokens > 0 && delta_cost < buf.len() * 2 {
+                        // Incremental: copy cached mask, apply delta.
+                        buf.copy_from_slice(&cache_data.mask);
+
+                        // Apply added/removed tokens.
+                        for (wi, (&old_w, &new_w)) in cache_data
+                            .merged_dense
+                            .iter()
+                            .zip(merged.iter())
+                            .enumerate()
+                        {
+                            let delta = old_w ^ new_w;
+                            if delta == 0 {
+                                continue;
+                            }
+                            // Removed tokens (was set, now not): AND-NOT
+                            let removed = old_w & delta;
+                            let mut bits = removed;
+                            while bits != 0 {
+                                let bit = bits.trailing_zeros() as usize;
+                                let internal_token = wi * 64 + bit;
+                                if internal_token < n_internal {
+                                    for &(buf_word, mask) in &internal_masks[internal_token] {
+                                        buf[buf_word as usize] &= !mask;
+                                    }
+                                }
+                                bits &= bits - 1;
+                            }
+                            // Added tokens (wasn't set, now is): OR
+                            let added = new_w & delta;
+                            let mut bits = added;
+                            while bits != 0 {
+                                let bit = bits.trailing_zeros() as usize;
+                                let internal_token = wi * 64 + bit;
+                                if internal_token < n_internal {
+                                    for &(buf_word, mask) in &internal_masks[internal_token] {
+                                        buf[buf_word as usize] |= mask;
+                                    }
+                                }
+                                bits &= bits - 1;
+                            }
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        if !did_incremental {
+            self.constraint.or_internal_dense_to_buf(&merged, buf);
+        }
 
         update_eos_mask(buf, self.constraint.eos_token_id, self.is_complete());
 
-        // Update mask cache with current state + computed mask.
+        // Update mask cache with current state + computed mask + merged bitvec.
         *self.mask_cache.lock().unwrap() = Some(crate::runtime::state::MaskCacheData {
             state_snapshot: self.state.clone(),
             mask: buf.to_vec(),
+            merged_dense: merged,
         });
     }
 
@@ -811,6 +904,7 @@ impl<'a> ConstraintState<'a> {
         *self.mask_cache.lock().unwrap() = Some(crate::runtime::state::MaskCacheData {
             state_snapshot: self.state.clone(),
             mask: buf.to_vec(),
+            merged_dense: merged,
         });
         let cache_update_ns = t_cache.elapsed().as_nanos() as u64;
 
