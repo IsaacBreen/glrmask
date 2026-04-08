@@ -542,6 +542,196 @@ fn build_bounded_repeat_with_suffix_dfa(parts: &[Expr]) -> Option<(DFA, bool)> {
     Some((dfa, false))
 }
 
+/// Builds a DFA for `Seq([Repeat{body, min, max}, suffix_exprs...])` using a
+/// product construction of body_DFA × suffix_DFA × completion_counter.
+///
+/// Handles cases where the suffix is a regex (not just bytes) and/or the body
+/// is not prefix-free, which `build_bounded_repeat_with_suffix_dfa` cannot handle.
+/// Avoids the exponential NFA→DFA blowup that occurs with unrolled bounded repeats.
+///
+/// The product state is `(body_state, suffix_state, counter)`:
+///   - body tracks progress through the repeat body expression
+///   - suffix tracks the suffix match (started at body boundaries when counter >= min)
+///   - counter tracks completed body repetitions (0..max)
+///
+/// At body completion (body transitions from accept to dead), counter increments
+/// and both body and suffix restart. If both old and fresh suffix are alive but
+/// diverge, the function falls back to None (would need NFA-like tracking).
+fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)> {
+    if parts.len() < 2 {
+        return None;
+    }
+
+    // Flatten one level of nested Seq: Seq([Seq([a, b]), c]) → [a, b, c]
+    let flat_parts: Vec<&Expr>;
+    let parts_ref: &[&Expr] = {
+        let first_unwrapped = match &parts[0] {
+            Expr::Shared(inner) => inner.as_ref(),
+            other => other,
+        };
+        if let Expr::Seq(inner_parts) = first_unwrapped {
+            flat_parts = inner_parts.iter().chain(parts[1..].iter()).collect();
+            &flat_parts
+        } else {
+            flat_parts = parts.iter().collect();
+            &flat_parts
+        }
+    };
+
+    if parts_ref.len() < 2 {
+        return None;
+    }
+
+    let first = match parts_ref[0] {
+        Expr::Shared(inner) => inner.as_ref(),
+        other => other,
+    };
+    let (repeat_expr, min, max) = match first {
+        Expr::Repeat {
+            expr,
+            min,
+            max: Some(max),
+        } => (expr.as_ref(), *min, *max),
+        _ => return None,
+    };
+    if max < DIRECT_BOUNDED_REPEAT_THRESHOLD {
+        return None;
+    }
+
+    let body_dfa = compile_expr_to_dfa(repeat_expr);
+    if body_dfa.num_states() == 0 || !body_dfa.finalizers(0).is_empty() {
+        return None;
+    }
+
+    let suffix_expr = if parts_ref.len() == 2 {
+        parts_ref[1].clone()
+    } else {
+        Expr::Seq(parts_ref[1..].iter().map(|e| (*e).clone()).collect())
+    };
+    let suffix_dfa = compile_expr_to_dfa(&suffix_expr);
+    if suffix_dfa.num_states() == 0 {
+        return None;
+    }
+
+    let max_product =
+        (body_dfa.num_states() + 1) * (suffix_dfa.num_states() + 1) * (max + 1);
+    if max_product > 500_000 {
+        return None;
+    }
+
+    let body_dead = body_dfa.num_states() as u32;
+    let suffix_dead = suffix_dfa.num_states() as u32;
+
+    let mut state_map: FxHashMap<(u32, u32, u32), u32> = FxHashMap::default();
+    let mut worklist: VecDeque<(u32, (u32, u32, u32))> = VecDeque::new();
+    let mut dfa = DFA::new(1);
+    dfa.ensure_group_capacity(1);
+
+    let start_suffix = if min == 0 { 0u32 } else { suffix_dead };
+    let start_key = (0u32, start_suffix, 0u32);
+    state_map.insert(start_key, 0);
+    worklist.push_back((0, start_key));
+
+    {
+        let is_accept = start_suffix < suffix_dead
+            && !suffix_dfa.finalizers(start_suffix).is_empty();
+        let mut finalizers = BitSet::new(1);
+        let mut future = BitSet::new(1);
+        if is_accept {
+            finalizers.set(0);
+        }
+        future.set(0);
+        dfa.overwrite_state_metadata(0, finalizers, future);
+    }
+
+    while let Some((dfa_state, (b, s, c))) = worklist.pop_front() {
+        let body_is_accept = b < body_dead && !body_dfa.finalizers(b).is_empty();
+
+        let mut transitions = Vec::new();
+        for byte_val in 0u16..=255 {
+            let x = byte_val as u8;
+
+            let b_next = if b < body_dead {
+                body_dfa.step(b, x).map_or(body_dead, |t| t)
+            } else {
+                body_dead
+            };
+
+            let (final_b, final_s, final_c) =
+                if body_is_accept && b_next == body_dead {
+                    let new_c = c + 1;
+                    let new_b = if new_c < max as u32 {
+                        body_dfa.step(0, x).map_or(body_dead, |t| t)
+                    } else {
+                        body_dead
+                    };
+                    let old_s_next = if s < suffix_dead {
+                        suffix_dfa.step(s, x).map_or(suffix_dead, |t| t)
+                    } else {
+                        suffix_dead
+                    };
+                    let fresh_s = if new_c >= min as u32 {
+                        suffix_dfa.step(0, x).map_or(suffix_dead, |t| t)
+                    } else {
+                        suffix_dead
+                    };
+                    let new_s = match (old_s_next < suffix_dead, fresh_s < suffix_dead) {
+                        (true, true) if old_s_next != fresh_s => return None,
+                        (true, _) => old_s_next,
+                        (_, true) => fresh_s,
+                        _ => suffix_dead,
+                    };
+                    (new_b, new_s, new_c)
+                } else {
+                    let s_next = if s < suffix_dead {
+                        suffix_dfa.step(s, x).map_or(suffix_dead, |t| t)
+                    } else {
+                        suffix_dead
+                    };
+                    (b_next, s_next, c)
+                };
+
+            if final_b == body_dead && final_s == suffix_dead {
+                continue;
+            }
+
+            let target_key = (final_b, final_s, final_c);
+            let target_dfa_state =
+                if let Some(&existing) = state_map.get(&target_key) {
+                    existing
+                } else {
+                    let new_state = dfa.add_state();
+                    let accept = final_s < suffix_dead
+                        && !suffix_dfa.finalizers(final_s).is_empty()
+                        && final_c >= min as u32;
+                    let has_future = final_b < body_dead || final_s < suffix_dead;
+                    let mut finalizers = BitSet::new(1);
+                    let mut future = BitSet::new(1);
+                    if accept {
+                        finalizers.set(0);
+                    }
+                    if has_future {
+                        future.set(0);
+                    }
+                    dfa.overwrite_state_metadata(new_state, finalizers, future);
+                    state_map.insert(target_key, new_state);
+                    worklist.push_back((new_state, target_key));
+                    new_state
+                };
+
+            transitions.push((x, target_dfa_state));
+        }
+
+        if transitions.len() > 1 {
+            transitions.sort_unstable_by_key(|e| e.0);
+        }
+        dfa.set_transitions_from_sorted_entries(dfa_state, transitions);
+    }
+
+    let dfa = dfa.minimize();
+    Some((dfa, false))
+}
+
 fn append_bounded_repeat_expr(expr: &Expr, min: usize, max: usize, nfa: &mut NFA, start: u32, end: u32) {
     if max < min {
         return;
@@ -761,7 +951,8 @@ fn compile_product_component_dfa_direct(expr: &Expr) -> Option<(DFA, bool)> {
             min,
             max: Some(max),
         } => build_bounded_repeat_dfa(expr, *min, *max).map(|dfa| (dfa, false)),
-        Expr::Seq(parts) => build_bounded_repeat_with_suffix_dfa(parts),
+        Expr::Seq(parts) => build_bounded_repeat_with_suffix_dfa(parts)
+            .or_else(|| build_bounded_repeat_with_regex_suffix(parts)),
         _ => None,
     }
 }
