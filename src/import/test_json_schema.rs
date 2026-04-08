@@ -749,6 +749,142 @@ fn test_conversion_any_of() {
     );
 }
 
+#[test]
+fn test_closed_object_anyof_ordered_builtin_examples() {
+    let schema = r#"{
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "context": {"type": "string"},
+                    "image": {"type": "string"},
+                    "plugin": {"type": "string"},
+                    "sync": {"type": "string"}
+                },
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "alpha": {"type": "object"},
+                    "context": {"type": "string"},
+                    "image": {"type": "string"},
+                    "plugin": {"type": "string"},
+                    "sync": {"type": "string"}
+                },
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "context": {"type": "string"},
+                    "delta": {"type": "object"},
+                    "image": {"type": "string"},
+                    "plugin": {"type": "string"},
+                    "sync": {"type": "string"}
+                },
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "context": {"type": "string"},
+                    "image": {"type": "string"},
+                    "plugin": {"type": "string"},
+                    "sync": {"type": "string"},
+                    "zeta": {"type": "object"}
+                },
+                "additionalProperties": false
+            }
+        ]
+    }"#;
+
+    schema_accepts(
+        schema,
+        &[
+            r#"{"context": "a", "image": "b", "plugin": "c", "sync": "d"}"#,
+            r#"{"alpha": {}, "context": "a", "image": "b", "plugin": "c", "sync": "d"}"#,
+            r#"{"context": "a", "delta": {}, "image": "b", "plugin": "c", "sync": "d"}"#,
+            r#"{"context": "a", "image": "b", "plugin": "c", "sync": "d", "zeta": {}}"#,
+        ],
+    );
+}
+
+#[test]
+fn test_closed_object_anyof_preserves_ordered_language() {
+    let schema = r#"{
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "context": {"type": "string"},
+                    "image": {"type": "string"},
+                    "plugin": {"type": "string"},
+                    "sync": {"type": "string"}
+                },
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "alpha": {"type": "object"},
+                    "context": {"type": "string"},
+                    "image": {"type": "string"},
+                    "plugin": {"type": "string"},
+                    "sync": {"type": "string"}
+                },
+                "additionalProperties": false
+            }
+        ]
+    }"#;
+
+    schema_rejects(
+        schema,
+        &[
+            r#"{"image": "b", "context": "a", "plugin": "c", "sync": "d"}"#,
+            r#"{"context": "a", "plugin": "c", "image": "b", "sync": "d"}"#,
+        ],
+    );
+}
+
+#[test]
+fn test_closed_object_oneof_counts_accepting_variants_exactly() {
+    let schema = r#"{
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string"}
+                },
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string"},
+                    "b": {"type": "string"}
+                },
+                "additionalProperties": false
+            }
+        ]
+    }"#;
+
+    schema_accepts(
+        schema,
+        &[
+            r#"{"b": "y"}"#,
+            r#"{"a": "x", "b": "y"}"#,
+        ],
+    );
+    schema_rejects(
+        schema,
+        &[
+            r#"{}"#,
+            r#"{"a": "x"}"#,
+        ],
+    );
+}
+
 /// Adapted from `test_conversion_enum`.
 ///
 /// Checks that an enum schema produces grammar rules containing the

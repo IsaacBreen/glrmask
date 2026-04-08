@@ -104,6 +104,9 @@ const UNTYPED_SCHEMA_APPLICABLE_TYPES: &[(&str, &[&str])] = &[
     ("number", UNTYPED_NUMBER_KEYWORD_KEYS),
 ];
 const UNSAT_SCHEMA_ERROR: &str = "__unsat_schema__";
+const EXACT_CLOSED_OBJECT_UNION_MAX_VARIANTS: usize = 8;
+const EXACT_CLOSED_OBJECT_UNION_MAX_KEYS: usize = 16;
+const EXACT_CLOSED_OBJECT_UNION_MAX_STATES: usize = 128;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 enum JsonSchemaDraft {
@@ -112,6 +115,81 @@ enum JsonSchemaDraft {
     Draft7,
     Draft201909,
     Draft202012,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StructuralBranchMode {
+    AnyOf,
+    OneOf,
+}
+
+#[derive(Debug, Clone)]
+struct OrderedClosedObjectSchemaItem {
+    key: String,
+    value_schema: Value,
+    required: bool,
+}
+
+#[derive(Debug, Clone)]
+struct OrderedClosedObjectSchemaVariant {
+    items: Vec<OrderedClosedObjectSchemaItem>,
+}
+
+#[derive(Debug, Clone)]
+struct OrderedClosedObjectItem {
+    key: String,
+    value_expr: GrammarExpr,
+    required: bool,
+}
+
+#[derive(Debug, Clone)]
+struct OrderedClosedObjectVariant {
+    items: Vec<OrderedClosedObjectItem>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct OrderedSubsetCursor {
+    variant_idx: u16,
+    cursor: u16,
+}
+
+impl OrderedClosedObjectVariant {
+    fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    fn advance_cursor(&self, cursor: usize, key: &str) -> Option<usize> {
+        let idx = self.items[cursor..]
+            .iter()
+            .position(|item| item.key == key)
+            .map(|offset| cursor + offset)?;
+        if self.items[cursor..idx].iter().any(|item| item.required) {
+            return None;
+        }
+        Some(idx + 1)
+    }
+
+    fn close_allowed(&self, cursor: usize) -> bool {
+        !self.items[cursor..].iter().any(|item| item.required)
+    }
+
+    fn legal_next_keys(&self, cursor: usize) -> Vec<&str> {
+        let mut keys = Vec::new();
+        for item in &self.items[cursor..] {
+            keys.push(item.key.as_str());
+            if item.required {
+                break;
+            }
+        }
+        keys
+    }
+
+    fn value_expr_for_key(&self, key: &str) -> Option<GrammarExpr> {
+        self.items
+            .iter()
+            .find(|item| item.key == key)
+            .map(|item| item.value_expr.clone())
+    }
 }
 
 const DEFAULT_JSON_SCHEMA_DRAFT: JsonSchemaDraft = JsonSchemaDraft::Draft202012;
@@ -3591,6 +3669,289 @@ impl<'a> SchemaCtx<'a> {
             .collect()
     }
 
+    fn collect_ordered_closed_object_schema_variant(
+        &mut self,
+        variant: &Map<String, Value>,
+    ) -> Result<Option<OrderedClosedObjectSchemaVariant>, GlrMaskError> {
+        let is_object = variant.get("type").and_then(Value::as_str) == Some("object")
+            || variant.contains_key("properties");
+        if !is_object {
+            return Ok(None);
+        }
+        match variant.get("additionalProperties") {
+            Some(Value::Bool(false)) => {}
+            _ => return Ok(None),
+        }
+        if variant.contains_key("patternProperties")
+            || variant.contains_key("propertyNames")
+            || variant.contains_key("minProperties")
+            || variant.contains_key("maxProperties")
+        {
+            return Ok(None);
+        }
+
+        let properties = variant
+            .get("properties")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let required: BTreeSet<String> = variant
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|arr| arr.iter().filter_map(Value::as_str).map(String::from).collect())
+            .unwrap_or_default();
+
+        if required.iter().any(|key| !properties.contains_key(key)) {
+            return Ok(None);
+        }
+
+        let items = properties
+            .into_iter()
+            .map(|(key, value_schema)| OrderedClosedObjectSchemaItem {
+                required: required.contains(&key),
+                key,
+                value_schema,
+            })
+            .collect();
+        Ok(Some(OrderedClosedObjectSchemaVariant { items }))
+    }
+
+    fn ordered_subset_accept_count(
+        variants: &[OrderedClosedObjectVariant],
+        state: &[OrderedSubsetCursor],
+    ) -> usize {
+        state
+            .iter()
+            .filter(|entry| {
+                variants[entry.variant_idx as usize].close_allowed(entry.cursor as usize)
+            })
+            .count()
+    }
+
+    fn ordered_subset_close_allowed(
+        mode: StructuralBranchMode,
+        variants: &[OrderedClosedObjectVariant],
+        state: &[OrderedSubsetCursor],
+    ) -> bool {
+        let accepting = Self::ordered_subset_accept_count(variants, state);
+        match mode {
+            StructuralBranchMode::AnyOf => accepting > 0,
+            StructuralBranchMode::OneOf => accepting == 1,
+        }
+    }
+
+    fn ordered_subset_legal_next_keys(
+        variants: &[OrderedClosedObjectVariant],
+        state: &[OrderedSubsetCursor],
+    ) -> Vec<String> {
+        let mut keys = BTreeSet::new();
+        for entry in state {
+            for key in variants[entry.variant_idx as usize]
+                .legal_next_keys(entry.cursor as usize)
+            {
+                keys.insert(key.to_string());
+            }
+        }
+        keys.into_iter().collect()
+    }
+
+    fn ordered_subset_transition(
+        variants: &[OrderedClosedObjectVariant],
+        state: &[OrderedSubsetCursor],
+        key: &str,
+    ) -> Vec<OrderedSubsetCursor> {
+        let mut next = Vec::new();
+        for entry in state {
+            if let Some(next_cursor) = variants[entry.variant_idx as usize]
+                .advance_cursor(entry.cursor as usize, key)
+            {
+                next.push(OrderedSubsetCursor {
+                    variant_idx: entry.variant_idx,
+                    cursor: next_cursor as u16,
+                });
+            }
+        }
+        next.sort_unstable();
+        next.dedup();
+        next
+    }
+
+    fn try_build_exact_closed_object_union(
+        &mut self,
+        schema: &Map<String, Value>,
+        options: &[Value],
+        mode: StructuralBranchMode,
+    ) -> Result<Option<GrammarExpr>, GlrMaskError> {
+        if options.len() < 2 || options.len() > EXACT_CLOSED_OBJECT_UNION_MAX_VARIANTS {
+            return Ok(None);
+        }
+
+        let resolved: Vec<Map<String, Value>> = options
+            .iter()
+            .map(|opt| {
+                if has_structural_keywords(schema) {
+                    let base = Self::schema_without_keys(schema, &["anyOf", "oneOf"]);
+                    self.merge_resolved_subschemas(&base, std::slice::from_ref(opt))
+                } else {
+                    self.schema_for_intersection(opt)
+                }
+            })
+            .collect();
+
+        let mut schema_variants = Vec::with_capacity(resolved.len());
+        for variant in &resolved {
+            let Some(ordered) = self.collect_ordered_closed_object_schema_variant(variant)? else {
+                return Ok(None);
+            };
+            schema_variants.push(ordered);
+        }
+
+        let mut key_schemas: HashMap<String, Value> = HashMap::new();
+        let mut required_by_key: HashMap<String, bool> = HashMap::new();
+        for variant in &schema_variants {
+            for item in &variant.items {
+                required_by_key
+                    .entry(item.key.clone())
+                    .and_modify(|required| *required |= item.required)
+                    .or_insert(item.required);
+                if let Some(existing) = key_schemas.get(&item.key) {
+                    if existing != &item.value_schema {
+                        return Ok(None);
+                    }
+                } else {
+                    key_schemas.insert(item.key.clone(), item.value_schema.clone());
+                }
+            }
+        }
+        if key_schemas.len() > EXACT_CLOSED_OBJECT_UNION_MAX_KEYS {
+            return Ok(None);
+        }
+
+        let mut key_exprs: HashMap<String, GrammarExpr> = HashMap::new();
+        let mut skipped_optional_keys = BTreeSet::new();
+        for (key, value_schema) in &key_schemas {
+            match self.convert_schema(value_schema) {
+                Ok(expr) => {
+                    key_exprs.insert(key.clone(), expr);
+                }
+                Err(err) if is_unsat_schema_error(&err) => {
+                    if required_by_key.get(key).copied().unwrap_or(false) {
+                        return Err(unsat_schema_error());
+                    }
+                    skipped_optional_keys.insert(key.clone());
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        let variants: Vec<OrderedClosedObjectVariant> = schema_variants
+            .into_iter()
+            .map(|variant| OrderedClosedObjectVariant {
+                items: variant
+                    .items
+                    .into_iter()
+                    .filter(|item| !skipped_optional_keys.contains(&item.key))
+                    .map(|item| OrderedClosedObjectItem {
+                        value_expr: key_exprs[&item.key].clone(),
+                        key: item.key,
+                        required: item.required,
+                    })
+                    .collect(),
+            })
+            .collect();
+
+        let start_state: Vec<OrderedSubsetCursor> = (0..variants.len())
+            .map(|variant_idx| OrderedSubsetCursor {
+                variant_idx: variant_idx as u16,
+                cursor: 0,
+            })
+            .collect();
+        let mut states = vec![start_state.clone()];
+        let mut transitions: Vec<Vec<(String, usize)>> = vec![Vec::new()];
+        let mut state_to_idx = HashMap::new();
+        state_to_idx.insert(start_state, 0usize);
+        let mut queue = VecDeque::from([0usize]);
+
+        while let Some(state_idx) = queue.pop_front() {
+            let state = states[state_idx].clone();
+            let mut edges = Vec::new();
+            for key in Self::ordered_subset_legal_next_keys(&variants, &state) {
+                let next_state = Self::ordered_subset_transition(&variants, &state, &key);
+                if next_state.is_empty() {
+                    continue;
+                }
+                let next_idx = if let Some(&idx) = state_to_idx.get(&next_state) {
+                    idx
+                } else {
+                    let idx = states.len();
+                    if idx >= EXACT_CLOSED_OBJECT_UNION_MAX_STATES {
+                        return Ok(None);
+                    }
+                    states.push(next_state.clone());
+                    transitions.push(Vec::new());
+                    state_to_idx.insert(next_state, idx);
+                    queue.push_back(idx);
+                    idx
+                };
+                edges.push((key, next_idx));
+            }
+            transitions[state_idx] = edges;
+        }
+
+        let mut base_index = self.generated_object_rule_counter;
+        let base_name = loop {
+            let candidate = format!("obj_ord_q_{base_index}");
+            if !self.used_rule_names.contains(&format!("{candidate}_s0")) {
+                break candidate;
+            }
+            base_index += 1;
+        };
+        self.generated_object_rule_counter = base_index + 1;
+        let rule_names: Vec<String> = (0..states.len())
+            .map(|idx| format!("{base_name}_s{idx}"))
+            .collect();
+
+        for state_idx in 0..states.len() {
+            let state = &states[state_idx];
+            let mut alts = Vec::new();
+
+            if Self::ordered_subset_close_allowed(mode, &variants, state) {
+                alts.push(empty_expr());
+            }
+
+            for (key, next_idx) in &transitions[state_idx] {
+                let kv_expr = self.build_merged_literal_key_value_expr(
+                    b"",
+                    key,
+                    key_exprs[key].clone(),
+                );
+                if Self::ordered_subset_close_allowed(mode, &variants, &states[*next_idx]) {
+                    alts.push(kv_expr.clone());
+                }
+                if !transitions[*next_idx].is_empty() {
+                    alts.push(sequence_or_single(vec![
+                        kv_expr,
+                        self.json_item_separator_expr(),
+                        GrammarExpr::Ref(rule_names[*next_idx].clone()),
+                    ]));
+                }
+            }
+
+            let expr = if alts.is_empty() {
+                never_expr()
+            } else {
+                choice_or_single(alts)
+            };
+            self.insert_rule(rule_names[state_idx].clone(), expr);
+        }
+
+        Ok(Some(sequence_or_single(vec![
+            literal_expr(b"{"),
+            GrammarExpr::Ref(rule_names[0].clone()),
+            literal_expr(b"}"),
+        ])))
+    }
+
     /// Try to merge anyOf/oneOf variants that are all closed objects
     /// (additionalProperties: false) with shared + mutually-exclusive unique
     /// properties into a single ordering tree with a one-shot unique-kv
@@ -3851,6 +4212,25 @@ impl<'a> SchemaCtx<'a> {
         };
         if options.is_empty() {
             return Ok(None);
+        }
+
+        let exact_union_disabled = std::env::var("GLRMASK_DISABLE_EXACT_CLOSED_OBJECT_UNION")
+            .map(|v| {
+                let n = v.trim().to_ascii_lowercase();
+                !matches!(n.as_str(), "" | "0" | "false" | "no" | "off")
+            })
+            .unwrap_or(false);
+        if !exact_union_disabled {
+            let mode = match keyword {
+                "anyOf" => Some(StructuralBranchMode::AnyOf),
+                "oneOf" => Some(StructuralBranchMode::OneOf),
+                _ => None,
+            };
+            if let Some(mode) = mode {
+                if let Some(expr) = self.try_build_exact_closed_object_union(schema, options, mode)? {
+                    return Ok(Some(expr));
+                }
+            }
         }
 
         // Closed-object merge optimization (experimental, disabled by default).
