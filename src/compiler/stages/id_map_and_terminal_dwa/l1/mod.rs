@@ -523,8 +523,27 @@ fn build_l1_terminal_dwa(
         }
     }
 
+    // Precompute suffix_first_bytes per bucket: the set of bytes appearing
+    // at position [1] (first suffix byte) of tokens in each first_byte bucket.
+    // Also track whether any single-byte tokens exist per bucket.
+    // Used for dead-walk elimination and fingerprint dedup.
+    let mut suffix_first_bytes_by_bucket: Vec<[u64; 4]> = vec![[0u64; 4]; 256];
+    let mut has_empty_suffix_by_bucket = vec![false; 256];
+    for &(_original_id, token_bytes) in &sorted_entries {
+        if let Some(&first) = token_bytes.first() {
+            if token_bytes.len() <= 1 {
+                has_empty_suffix_by_bucket[first as usize] = true;
+            } else {
+                let b = token_bytes[1];
+                suffix_first_bytes_by_bucket[first as usize][b as usize >> 6] |= 1u64 << (b & 63);
+            }
+        }
+    }
+
     let skipped_walks = std::sync::atomic::AtomicUsize::new(0);
     let skipped_tokens = std::sync::atomic::AtomicUsize::new(0);
+    let fingerprint_dedup_walks = std::sync::atomic::AtomicUsize::new(0);
+    let fingerprint_dedup_eliminated = std::sync::atomic::AtomicUsize::new(0);
     let phase1_transition_steps = std::sync::atomic::AtomicU64::new(0);
     let phase1_successful_tokens = std::sync::atomic::AtomicU64::new(0);
     let phase1_same_end_rep_hits = std::sync::atomic::AtomicU64::new(0);
@@ -649,6 +668,77 @@ fn build_l1_terminal_dwa(
                         return results;
                     }
 
+                    // Fingerprint dedup: group walk targets by their
+                    // first-suffix-byte transition pattern. Two targets that
+                    // transition to the same next-state for every first-suffix-byte
+                    // produce identical walk results (all subsequent walk steps
+                    // proceed from the same state). Targets that are dead on ALL
+                    // first-suffix-bytes produce empty results and are eliminated.
+                    // This is only valid when no single-byte tokens exist in this
+                    // bucket (empty suffix → final state = target state, which
+                    // differs between targets).
+                    let sfb = &suffix_first_bytes_by_bucket[bucket_idx];
+                    let has_empty = has_empty_suffix_by_bucket[bucket_idx];
+                    // rep_idx → list of non-representative targets in the same
+                    // fingerprint group (excludes the representative itself)
+                    let mut dedup_others: Option<Vec<Vec<u32>>> = None;
+                    if !has_empty {
+                        // Collect unique suffix first bytes for fingerprint keys
+                        let mut sfb_list: Vec<u8> = Vec::new();
+                        for w in 0..4u8 {
+                            let mut bits = sfb[w as usize];
+                            while bits != 0 {
+                                let offset = bits.trailing_zeros() as u8;
+                                sfb_list.push(w * 64 + offset);
+                                bits &= bits - 1;
+                            }
+                        }
+
+                        if !sfb_list.is_empty() {
+                            // Compute fingerprint for each target and group
+                            let mut fp_groups: FxHashMap<Vec<u32>, Vec<u32>> = FxHashMap::default();
+                            for &target in &walk_targets {
+                                let fp: Vec<u32> = sfb_list.iter()
+                                    .map(|&b| rep_flat_trans[b as usize * stride + target as usize])
+                                    .collect();
+                                fp_groups.entry(fp).or_default().push(target);
+                            }
+
+                            // Separate dead groups (all entries are dead_internal)
+                            // from live groups
+                            let mut deduped_targets: Vec<u32> = Vec::new();
+                            let mut others: Vec<Vec<u32>> = Vec::new();
+                            let mut dead_eliminated = 0usize;
+                            let mut dup_eliminated = 0usize;
+
+                            for (fp, group) in &fp_groups {
+                                let all_dead = fp.iter().all(|&s| s == dead_internal);
+                                if all_dead {
+                                    // All targets in this group produce empty walk results
+                                    dead_eliminated += group.len();
+                                    continue;
+                                }
+                                let rep = group[0];
+                                deduped_targets.push(rep);
+                                let group_others: Vec<u32> = group[1..].to_vec();
+                                dup_eliminated += group_others.len();
+                                others.push(group_others);
+                            }
+
+                            let total_eliminated = dead_eliminated + dup_eliminated;
+                            if total_eliminated > 0 {
+                                fingerprint_dedup_walks.fetch_add(walk_targets.len(), std::sync::atomic::Ordering::Relaxed);
+                                fingerprint_dedup_eliminated.fetch_add(total_eliminated, std::sync::atomic::Ordering::Relaxed);
+                                dedup_others = Some(others);
+                                walk_targets = deduped_targets;
+                            }
+                        }
+                    }
+
+                    if walk_targets.is_empty() {
+                        return results;
+                    }
+
                     let num_walk = walk_targets.len();
                     let mut local_transition_steps = 0u64;
                     let mut local_successful_tokens = 0u64;
@@ -750,6 +840,15 @@ fn build_l1_terminal_dwa(
                                 (end_rep, ranges)
                             })
                             .collect();
+
+                        // Expand results to all targets in the same fingerprint
+                        // group if fingerprint dedup was applied.
+                        if let Some(ref others) = dedup_others {
+                            for &other_target in &others[t] {
+                                results.push(((byte, other_target), entries.clone()));
+                            }
+                        }
+
                         results.push(((byte, target), entries));
                     }
 
@@ -1039,11 +1138,13 @@ fn build_l1_terminal_dwa(
             },
         );
         eprintln!(
-            "[glrmask/debug][l1_traversal] start_states={} phase1_walk_ms={:.1} phase2_assembly_ms={:.1} intern_ms={:.1} unique_range_sets={} skipped_walks={} skipped_tokens={} total_vt_ms={:.1}",
+            "[glrmask/debug][l1_traversal] start_states={} phase1_walk_ms={:.1} phase2_assembly_ms={:.1} intern_ms={:.1} unique_range_sets={} skipped_walks={} skipped_tokens={} fp_dedup_walks={} fp_dedup_eliminated={} total_vt_ms={:.1}",
             start_states_list.len(), phase1_wall_ms, phase2_wall_ms, token_set_intern_ms,
             unique_range_set_count,
             skipped_walks.load(std::sync::atomic::Ordering::Relaxed),
             skipped_tokens.load(std::sync::atomic::Ordering::Relaxed),
+            fingerprint_dedup_walks.load(std::sync::atomic::Ordering::Relaxed),
+            fingerprint_dedup_eliminated.load(std::sync::atomic::Ordering::Relaxed),
             traversal_ms,
         );
     }
