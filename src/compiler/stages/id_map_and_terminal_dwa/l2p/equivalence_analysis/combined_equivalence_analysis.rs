@@ -52,7 +52,7 @@ const FORCE_PRE_VOCAB_STATE_REDUCTION_ENV: &str = "GLRMASK_FORCE_PRE_VOCAB_STATE
 const DISABLE_PRE_VOCAB_STATE_REDUCTION_ENV: &str = "GLRMASK_DISABLE_PRE_VOCAB_STATE_REDUCTION";
 const SKIP_MAX_LENGTH_SMALL_STATE_THRESHOLD: usize = 128;
 const PRE_VOCAB_STATE_REDUCTION_MIN_STATES: usize = 200;
-const PRE_VOCAB_STATE_REDUCTION_MAX_GROUPS: usize = 64;
+const PRE_VOCAB_STATE_REDUCTION_MAX_GROUPS: usize = 256;
 /// Only run pre-vocab state reduction when the deduped token count is high
 /// enough that the vocab signature pass is expensive. With few tokens, the
 /// vocab pass is already cheap and pre-reduction adds overhead.
