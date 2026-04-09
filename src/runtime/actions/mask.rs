@@ -691,8 +691,7 @@ impl<'a> ConstraintState<'a> {
 
         // Process DWA states depth-first.
         while let Some((_depth, states_at_depth)) = queue.pop_last() {
-            let items: Vec<(u32, DenseMaskGSS)> = states_at_depth.into_iter().collect();
-            for (wa_state, gss) in items {
+            for (wa_state, gss) in states_at_depth {
                 let dwa_state = &parser_dwa.states[wa_state as usize];
                 let fast_trans = &self.constraint.dwa_fast_transitions[wa_state as usize];
 
@@ -702,16 +701,15 @@ impl<'a> ConstraintState<'a> {
                 }
 
                 // Advance through DWA transitions for each parser state.
-                let decomposed = gss.decompose_and_pop();
-                for (parser_state, popped) in &decomposed {
+                gss.for_each_decomposed(|parser_state, popped| {
                     enqueue_parser_state_transitions(
                         &mut queue,
                         fast_trans,
-                        *parser_state,
-                        popped,
+                        parser_state,
+                        &popped,
                         precomputed,
                     );
-                }
+                });
             }
         }
 
@@ -862,8 +860,7 @@ impl<'a> ConstraintState<'a> {
         let mut n_enqueue_calls: u64 = 0;
 
         while let Some((_depth, states_at_depth)) = queue.pop_last() {
-            let items: Vec<(u32, DenseMaskGSS)> = states_at_depth.into_iter().collect();
-            for (wa_state, gss) in items {
+            for (wa_state, gss) in states_at_depth {
                 n_dwa_visits += 1;
                 let dwa_state = &parser_dwa.states[wa_state as usize];
                 let fast_trans = &self.constraint.dwa_fast_transitions[wa_state as usize];
@@ -876,22 +873,26 @@ impl<'a> ConstraintState<'a> {
                 }
 
                 let t = Instant::now();
-                let decomposed = gss.decompose_and_pop();
-                n_decompose_ops += decomposed.len() as u64;
-                decompose_ns += t.elapsed().as_nanos() as u64;
-
-                let t = Instant::now();
-                for (parser_state, popped) in &decomposed {
+                let mut local_decompose = 0u64;
+                let mut local_enqueue = 0u64;
+                gss.for_each_decomposed(|parser_state, popped| {
+                    local_decompose += 1;
                     n_enqueue_calls += 1;
                     enqueue_parser_state_transitions(
                         &mut queue,
                         fast_trans,
-                        *parser_state,
-                        popped,
+                        parser_state,
+                        &popped,
                         precomputed,
                     );
-                }
-                enqueue_ns += t.elapsed().as_nanos() as u64;
+                    local_enqueue += 1;
+                });
+                let elapsed = t.elapsed().as_nanos() as u64;
+                n_decompose_ops += local_decompose;
+                // Split time proportionally between decompose and enqueue.
+                // Since for_each_decomposed interleaves them, attribute half to each.
+                decompose_ns += elapsed / 2;
+                enqueue_ns += elapsed - elapsed / 2;
             }
         }
 
@@ -956,8 +957,7 @@ impl<'a> ConstraintState<'a> {
 
         while let Some((_depth, states_at_depth)) = queue.pop_last() {
             n_depth_buckets += 1;
-            let items: Vec<(u32, DenseMaskGSS)> = states_at_depth.into_iter().collect();
-            for (wa_state, gss) in items {
+            for (wa_state, gss) in states_at_depth {
                 n_dwa_visits += 1;
                 let dwa_state = &parser_dwa.states[wa_state as usize];
                 let fast_trans = &self.constraint.dwa_fast_transitions[wa_state as usize];
@@ -970,21 +970,21 @@ impl<'a> ConstraintState<'a> {
                 }
 
                 let t = Instant::now();
-                let decomposed = gss.decompose_and_pop();
-                decompose_ns += t.elapsed().as_nanos() as u64;
-                n_decompose_ops += decomposed.len() as u64;
-
-                let t = Instant::now();
-                for (parser_state, popped) in &decomposed {
+                let mut local_decompose = 0u64;
+                gss.for_each_decomposed(|parser_state, popped| {
+                    local_decompose += 1;
                     enqueue_parser_state_transitions(
                         &mut queue,
                         fast_trans,
-                        *parser_state,
-                        popped,
+                        parser_state,
+                        &popped,
                         precomputed,
                     );
-                }
-                enqueue_ns += t.elapsed().as_nanos() as u64;
+                });
+                let elapsed = t.elapsed().as_nanos() as u64;
+                n_decompose_ops += local_decompose;
+                decompose_ns += elapsed / 2;
+                enqueue_ns += elapsed - elapsed / 2;
             }
         }
         let bfs_ns = t_bfs.elapsed().as_nanos() as u64;

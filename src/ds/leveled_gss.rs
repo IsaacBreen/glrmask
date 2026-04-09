@@ -2962,6 +2962,64 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
+    /// Like `decompose_and_pop` but invokes a callback for each (value, popped_gss) pair
+    /// instead of allocating a Vec. Avoids heap allocation for the common single-element case.
+    pub fn for_each_decomposed(&self, mut f: impl FnMut(T, Self)) {
+        match &*self.inner {
+            Upper::Branch(b) => {
+                for (val, kids) in b.children.iter() {
+                    let m = if kids.len() == 1 {
+                        kids.values().next().unwrap().clone()
+                    } else {
+                        let mut it = kids.values();
+                        let mut acc = it.next().unwrap().clone();
+                        for child in it {
+                            acc = merge_upper(&acc, child);
+                        }
+                        acc
+                    };
+                    let inner = if matches!(&*m, Upper::Interface(_)) {
+                        m
+                    } else {
+                        try_promote(&m)
+                    };
+                    let is_empty = matches!(&*inner,
+                        Upper::Branch(b) if b.children.is_empty() && b.empty.is_none());
+                    if !is_empty {
+                        f(val.clone(), LeveledGSS { inner });
+                    }
+                }
+            }
+            Upper::Interface(i) => {
+                if i.inner.is_chain() {
+                    let val = i.inner.chain_value().clone();
+                    let lower = i.inner.chain_next().clone();
+                    if !lower.children_is_empty() || lower.empty() {
+                        let upper = new_interface(lower, i.acc.clone());
+                        f(val, LeveledGSS { inner: upper });
+                    }
+                    return;
+                }
+                for (val, kids) in i.inner.children_ref().iter() {
+                    let lower = if kids.len() == 1 {
+                        kids.values().next().unwrap().clone()
+                    } else {
+                        let mut it = kids.values();
+                        let mut acc = it.next().unwrap().clone();
+                        for child in it {
+                            acc = merge_lower(&acc, child);
+                        }
+                        acc
+                    };
+                    if !lower.children_is_empty() || lower.empty() {
+                        let upper = new_interface(lower, i.acc.clone());
+                        f(val.clone(), LeveledGSS { inner: upper });
+                    }
+                }
+            }
+        }
+    }
+
     /// Extract the top chain of state values from the GSS.
     /// Walks down from the top, collecting states as long as each level has
     /// exactly 1 child (i.e., the path is unambiguous). Stops when branching
