@@ -109,6 +109,10 @@ pub struct Constraint {
     /// Length = n_internal + 1 (sentinel at end).
     #[serde(skip)]
     pub(crate) internal_token_buf_offsets: Box<[u32]>,
+    /// Pre-computed total cost (sum of entry counts) for all internal tokens.
+    /// Used to avoid O(n_internal) cost analysis in the convert phase.
+    #[serde(skip)]
+    pub(crate) total_internal_buf_cost: usize,
 }
 
 /// Dense buf OR: `buf[i] |= mask[i]` for all i in min(buf.len(), mask.len()).
@@ -168,6 +172,11 @@ impl Constraint {
         let (flat, offsets) = Self::compute_flat_buf_masks(&self.internal_token_buf_masks);
         self.internal_token_buf_flat = flat;
         self.internal_token_buf_offsets = offsets;
+        self.total_internal_buf_cost = Self::compute_total_internal_buf_cost(
+            &self.internal_token_buf_offsets,
+            &self.heavy_token_dense_masks,
+            self.mask_len(),
+        );
         self.token_bytes_dense = Vec::new();
         self.internal_token_dense_words = dense_mask_words;
         self.weight_token_dense_masks = dense_masks;
@@ -258,6 +267,25 @@ impl Constraint {
         }
         offsets.push(flat.len() as u32);
         (flat.into_boxed_slice(), offsets.into_boxed_slice())
+    }
+
+    /// Pre-compute total cost for all internal tokens (sum of entry counts,
+    /// with heavy tokens counted at buf_len).
+    fn compute_total_internal_buf_cost(
+        offsets: &[u32],
+        heavy: &[Option<Box<[u32]>>],
+        buf_len: usize,
+    ) -> usize {
+        let n_internal = if offsets.len() > 1 { offsets.len() - 1 } else { 0 };
+        let mut total: usize = 0;
+        for idx in 0..n_internal {
+            if idx < heavy.len() && heavy[idx].is_some() {
+                total += buf_len;
+            } else {
+                total += (offsets[idx + 1] - offsets[idx]) as usize;
+            }
+        }
+        total
     }
 
     fn compute_dense_token_bytes(&self) -> Vec<Option<Box<[u8]>>> {
@@ -690,25 +718,56 @@ impl Constraint {
 
         // Count total sparse entries for set vs missing tokens to pick the cheaper path.
         // Heavy tokens use dense masks — count them at dense cost (buf.len() per token).
+        // Use precomputed total and iterate only the minority (set or missing) bits.
         let heavy = &self.heavy_token_dense_masks;
         let buf_len = buf.len();
         let word_groups = &self.word_group_buf_masks;
-        let mut total_set_cost: usize = 0;
-        let mut total_all_cost: usize = 0;
-        for idx in 0..n_internal {
-            let cost = if idx < heavy.len() && heavy[idx].is_some() {
-                buf_len
-            } else {
-                (offsets[idx + 1] - offsets[idx]) as usize
-            };
-            total_all_cost += cost;
-            let wi = idx / 64;
-            let bit = idx % 64;
-            if wi < dense.len() && dense[wi] & (1u64 << bit) != 0 {
-                total_set_cost += cost;
+        let n_missing = n_internal - n_set;
+
+        // Iterate only the smaller side to compute its cost.
+        let (total_set_cost, total_missing_cost) = if n_set <= n_missing {
+            let mut set_cost: usize = 0;
+            for (wi, &w) in dense.iter().enumerate() {
+                if w == 0 { continue; }
+                let mut bits = w;
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    let idx = wi * 64 + bit;
+                    if idx < n_internal {
+                        set_cost += if idx < heavy.len() && heavy[idx].is_some() {
+                            buf_len
+                        } else {
+                            (offsets[idx + 1] - offsets[idx]) as usize
+                        };
+                    }
+                    bits &= bits - 1;
+                }
             }
-        }
-        let total_missing_cost = total_all_cost - total_set_cost;
+            (set_cost, self.total_internal_buf_cost - set_cost)
+        } else {
+            let mut missing_cost: usize = 0;
+            for (wi, &w) in dense.iter().enumerate() {
+                if wi * 64 >= n_internal { break; }
+                let remaining = n_internal - wi * 64;
+                let valid_mask = if remaining >= 64 { !0u64 } else { (1u64 << remaining) - 1 };
+                let missing = !w & valid_mask;
+                if missing == 0 { continue; }
+                let mut bits = missing;
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    let idx = wi * 64 + bit;
+                    if idx < n_internal {
+                        missing_cost += if idx < heavy.len() && heavy[idx].is_some() {
+                            buf_len
+                        } else {
+                            (offsets[idx + 1] - offsets[idx]) as usize
+                        };
+                    }
+                    bits &= bits - 1;
+                }
+            }
+            (self.total_internal_buf_cost - missing_cost, missing_cost)
+        };
         // Complement path overhead: 16KB all_mask copy ≈ buf.len() entry-equivalent writes.
         let copy_overhead = buf_len;
 
