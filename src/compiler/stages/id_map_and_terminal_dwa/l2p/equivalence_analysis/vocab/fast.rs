@@ -1927,6 +1927,160 @@ pub fn find_vocab_equivalence_classes_with_follow_and_byte_classes<S: AsRef<[u8]
 
 /// Vocab equivalence with optional group filtering.
 ///
+/// Minimum reduction ratio (compact/original) to trigger compaction.
+const COMPACT_DFA_MAX_RATIO: f64 = 0.85;
+/// Minimum number of initial states to consider compaction worthwhile.
+const COMPACT_DFA_MIN_STATES: usize = 500;
+/// Minimum work estimate (states × tokens) to justify the compaction overhead.
+const COMPACT_DFA_MIN_WORK: usize = 10_000_000;
+
+/// Build a compact DFA containing only states reachable from `initial_states`
+/// via byte classes actually used by the partition's tokens.  Returns the
+/// compact DFA and the remapped initial state indices, or None if compaction
+/// is not beneficial.
+fn compact_dfa_for_tokens<S: AsRef<[u8]>>(
+    dfa: &Dfa,
+    initial_states: &[usize],
+    strings: &[S],
+    profile: bool,
+) -> Option<(Dfa, Vec<usize>)> {
+    if initial_states.len() < COMPACT_DFA_MIN_STATES
+        || strings.is_empty()
+        || initial_states.len() * strings.len() < COMPACT_DFA_MIN_WORK
+    {
+        return None;
+    }
+
+    // Relevant byte classes from the partition's tokens.
+    let mut byte_used = [false; 256];
+    for s in strings {
+        for &b in s.as_ref() {
+            byte_used[b as usize] = true;
+        }
+    }
+    let num_classes = dfa.byte_to_class.iter().copied().max().map_or(0usize, |m| m as usize + 1);
+    let mut class_used = vec![false; num_classes];
+    for b in 0..=255u8 {
+        if byte_used[b as usize] {
+            class_used[dfa.byte_to_class[b as usize] as usize] = true;
+        }
+    }
+    let relevant_classes: Vec<usize> = class_used
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &u)| if u { Some(i) } else { None })
+        .collect();
+
+    // BFS from initial_states following only relevant-class transitions.
+    let mut visited = vec![false; dfa.num_states];
+    let mut queue = std::collections::VecDeque::new();
+    for &s in initial_states {
+        if s < dfa.num_states && !visited[s] {
+            visited[s] = true;
+            queue.push_back(s);
+        }
+    }
+    while let Some(s) = queue.pop_front() {
+        for &c in &relevant_classes {
+            let t = dfa.trans_by_class[c * dfa.num_states + s];
+            if t != NONE {
+                let t = t as usize;
+                if !visited[t] {
+                    visited[t] = true;
+                    queue.push_back(t);
+                }
+            }
+        }
+    }
+
+    let restricted_reachable = visited.iter().filter(|&&v| v).count();
+    let ratio = restricted_reachable as f64 / dfa.num_states as f64;
+    if ratio > COMPACT_DFA_MAX_RATIO {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][vocab_compact] skipped: reachable={} full={} ratio={:.3}",
+                restricted_reachable, dfa.num_states, ratio,
+            );
+        }
+        return None;
+    }
+
+    // Build state remapping.
+    let mut original_to_compact = vec![u32::MAX; dfa.num_states];
+    let mut compact_to_original = Vec::with_capacity(restricted_reachable);
+    for (i, &v) in visited.iter().enumerate() {
+        if v {
+            original_to_compact[i] = compact_to_original.len() as u32;
+            compact_to_original.push(i);
+        }
+    }
+    let compact_num = compact_to_original.len();
+
+    // Build compact transition table (all classes, compact states).
+    let mut compact_trans = vec![NONE; num_classes * compact_num];
+    for c in 0..num_classes {
+        let src_base = c * dfa.num_states;
+        let dst_base = c * compact_num;
+        for cs in 0..compact_num {
+            let orig = compact_to_original[cs];
+            let t = dfa.trans_by_class[src_base + orig];
+            if t != NONE {
+                let mapped = original_to_compact[t as usize];
+                // Only keep transition if target is in the compact set.
+                if mapped != u32::MAX {
+                    compact_trans[dst_base + cs] = mapped;
+                }
+            }
+        }
+    }
+
+    // Compact per-state arrays.
+    let compact_finalizers: Vec<SmallVec<[usize; 4]>> =
+        compact_to_original.iter().map(|&s| dfa.finalizers[s].clone()).collect();
+    let compact_is_dead_end: Vec<bool> =
+        compact_to_original.iter().map(|&s| dfa.is_dead_end[s]).collect();
+    let compact_completion_hash: Vec<u64> =
+        compact_to_original.iter().map(|&s| dfa.completion_hash[s]).collect();
+    let compact_self_loop: Vec<U8Set> =
+        compact_to_original.iter().map(|&s| dfa.self_loop_bytes[s]).collect();
+    let compact_pfg: Vec<SmallVec<[usize; 4]>> =
+        compact_to_original.iter().map(|&s| dfa.possible_future_groups[s].clone()).collect();
+
+    // Remap initial states.
+    let compact_initial: Vec<usize> = initial_states
+        .iter()
+        .map(|&s| original_to_compact[s] as usize)
+        .collect();
+
+    if profile {
+        eprintln!(
+            "[glrmask/profile][vocab_compact] compacted: reachable={} full={} ratio={:.3} relevant_classes={} initial_states={}",
+            compact_num, dfa.num_states, ratio, relevant_classes.len(), initial_states.len(),
+        );
+    }
+
+    let compact_dfa = Dfa {
+        start_state: if dfa.start_state < original_to_compact.len() && original_to_compact[dfa.start_state] != u32::MAX {
+            original_to_compact[dfa.start_state] as usize
+        } else {
+            0
+        },
+        num_states: compact_num,
+        byte_to_class: dfa.byte_to_class,
+        trans_by_class: compact_trans,
+        finalizers: compact_finalizers,
+        is_dead_end: compact_is_dead_end,
+        num_groups: dfa.num_groups,
+        possible_future_groups: compact_pfg,
+        completion_hash: compact_completion_hash,
+        none_completion_hash: dfa.none_completion_hash,
+        self_loop_bytes: compact_self_loop,
+        disallowed_follows: dfa.disallowed_follows.clone(),
+    };
+
+    Some((compact_dfa, compact_initial))
+}
+
 /// When `active_groups` is provided, the DFA only tracks groups marked `true`.
 /// L1 terminal groups can be excluded this way for a L2+-only analysis.
 pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
@@ -1944,11 +2098,24 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
     let build_dfa_started_at = Instant::now();
     let dfa = build_dfa_with_group_filter(tokenizer, disallowed_follows, byte_to_class, active_groups, shared_cache);
     let build_dfa_ms = elapsed_ms(build_dfa_started_at);
+
+    // Compact DFA: restrict to states reachable from initial_states via the
+    // partition's token bytes.  This can dramatically shrink the transition
+    // table (e.g. 77260 → 36598 for p0 of o62058) improving cache locality.
+    let compact_started_at = Instant::now();
+    let compacted = compact_dfa_for_tokens(&dfa, initial_states, strings, profile_compile);
+    let compact_ms = elapsed_ms(compact_started_at);
+    let (dfa_ref, initial_states_ref): (&Dfa, &[usize]) = if let Some((ref cdfa, ref cstates)) = compacted {
+        (cdfa, cstates)
+    } else {
+        (&dfa, initial_states)
+    };
+
     let order_states_started_at = Instant::now();
     let ordered_states = if diversity_state_order_enabled() {
-        states_by_transition_diversity(&dfa, initial_states)
+        states_by_transition_diversity(dfa_ref, initial_states_ref)
     } else {
-        initial_states.to_vec()
+        initial_states_ref.to_vec()
     };
     let order_states_ms = elapsed_ms(order_states_started_at);
     let num_tokens = strings.len();
@@ -1958,7 +2125,7 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
         return BTreeSet::from_iter(vec![(0..num_tokens).collect()]);
     }
 
-    let num_groups = dfa.num_groups;
+    let num_groups = dfa_ref.num_groups;
     // Use all states in a single batch when feasible.  A single batch avoids
     // repeated token sorting, trie walk reinitialisation, rayon sync points
     // between batches, and redundant finish_token_signature iterations.
@@ -2012,7 +2179,7 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
                     },
                     |(scratch, trie_state), chunk| {
                         trie_walk_chunk_signatures(
-                            &dfa,
+                            dfa_ref,
                             strings,
                             chunk,
                             batch,
@@ -2035,7 +2202,7 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
                         (
                             token_idx,
                             token_signature(
-                                &dfa,
+                                dfa_ref,
                                 token,
                                 batch,
                                 state_group_size,
@@ -2113,12 +2280,14 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
     if profile_compile {
         let totals = &*VOCAB_SIGNATURE_PROFILE_TOTALS;
         eprintln!(
-            "[glrmask/profile][vocab_summary] dfa_states={} reachable_states={} relevant_states={} tokens={} build_dfa_ms={:.3} order_states_ms={:.3} batch_ms={:.3} signature_ms={:.3} refine_ms={:.3} materialize_ms={:.3} classes={}",
+            "[glrmask/profile][vocab_summary] dfa_states={} compact_states={} reachable_states={} relevant_states={} tokens={} build_dfa_ms={:.3} compact_ms={:.3} order_states_ms={:.3} batch_ms={:.3} signature_ms={:.3} refine_ms={:.3} materialize_ms={:.3} classes={}",
             dfa.num_states,
+            dfa_ref.num_states,
             reachable_states.unwrap_or(0),
             num_initial_states,
             num_tokens,
             build_dfa_ms,
+            compact_ms,
             order_states_ms,
             batch_total_ms,
             signature_total_ms,
