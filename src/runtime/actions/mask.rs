@@ -379,6 +379,10 @@ fn enqueue_weighted_transition(
     weight: &Weight,
     precomputed: &DenseTokenMaskCache,
 ) {
+    if weight.is_full() {
+        enqueue_gss(queue, popped.max_depth(), target, popped.clone());
+        return;
+    }
     let pruned = popped.apply_and_prune_no_promote(|allowed| {
         allowed.intersect_with_weight(weight, precomputed)
     });
