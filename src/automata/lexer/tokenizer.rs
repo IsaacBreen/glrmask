@@ -287,12 +287,12 @@ impl Tokenizer {
         // fingerprints: if >90% of (transitions, finalizers) fingerprints are
         // distinct, minimize will certainly early-return unchanged.
         //
-        // EXCEPTION: when the number of active groups is very small (≤16),
-        // many groups were cleared and iterative refinement can discover deep
-        // equivalences that fingerprints miss. With few groups the reduction
-        // is typically massive (49K→30), justifying the minimize cost.
+        // This check applies to ALL cases (including few active groups).
+        // Counting DFAs (from maxLength constraints) have genuinely distinct
+        // transitions even with few active groups, making minimize O(n log n)
+        // on 77K+ states with 0 reduction.
         let num_active = active_terminals.iter().filter(|&&b| b).count();
-        if pre_minimize_states > 1000 && num_active > 16 {
+        if pre_minimize_states > 1000 {
             let distinct = dfa.distinct_fingerprint_count();
             let n = pre_minimize_states;
             if distinct > n * 9 / 10 {
