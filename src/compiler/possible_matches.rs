@@ -558,15 +558,14 @@ pub(crate) fn collect_possible_matches_by_internal_tsid_dense(
     tokenizer_state_ids: &ManyToOneIdMap,
     num_internal_tokens: u32,
 ) -> (BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>, PossibleMatchesProfile) {
-    // For small workloads, the serial path with FxHashMap cache is faster
-    // (avoids DashMap overhead and flat_transitions pre-computation).
-    // Threshold chosen empirically: ~5000 TSIDs is where parallel starts winning.
+    // For small workloads, the serial path with FxHashMap cache is faster.
+    // For larger workloads, the batched trie walk eliminates cache overhead.
     if tokenizer_state_ids.num_internal_ids() < 5000 {
         return collect_possible_matches_dense_serial(
             tokenizer, root, tokenizer_state_ids, num_internal_tokens,
         );
     }
-    collect_possible_matches_dense_parallel(
+    collect_possible_matches_dense_batched(
         tokenizer, root, tokenizer_state_ids, num_internal_tokens,
     )
 }
@@ -599,6 +598,181 @@ fn collect_possible_matches_dense_serial(
     }
 
     (possible_matches_by_state, computer.profile())
+}
+
+fn collect_possible_matches_dense_batched(
+    tokenizer: &Tokenizer,
+    root: &VocabPrefixTreeNode,
+    tokenizer_state_ids: &ManyToOneIdMap,
+    num_internal_tokens: u32,
+) -> (BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>, PossibleMatchesProfile) {
+    let num_words = (num_internal_tokens as usize + 63) / 64;
+
+    // Pre-compute flat transitions for all DFA states.
+    let flat_transitions: Vec<[u32; 256]> = (0..tokenizer.num_states() as usize)
+        .map(|state_idx| {
+            let dfa_state = &tokenizer.dfa.states()[state_idx];
+            let mut flat = [u32::MAX; 256];
+            for (b, &target) in dfa_state.transitions.iter() {
+                flat[b as usize] = target;
+            }
+            flat
+        })
+        .collect();
+
+    // Pre-compute self-loop bytes for all DFA states.
+    let self_loop_bytes: Vec<U8Set> = (0..tokenizer.num_states() as usize)
+        .map(|state_idx| {
+            let dfa_state = &tokenizer.dfa.states()[state_idx];
+            let mut bytes = U8Set::empty();
+            for (byte, &target) in dfa_state.transitions.iter() {
+                if target == state_idx as u32 {
+                    bytes.insert(byte);
+                }
+            }
+            bytes
+        })
+        .collect();
+
+    // Pre-compute reachable bitmaps for all trie nodes.
+    let mut reachable_bitmaps: FxHashMap<usize, Vec<u64>> = FxHashMap::default();
+    precompute_reachable_bitmaps(root, num_words, &mut reachable_bitmaps);
+
+    // Gather entries: (internal_tsid, representative_state)
+    let entries: Vec<(u32, u32)> = tokenizer_state_ids
+        .iter_representative_ids()
+        .enumerate()
+        .map(|(i, s)| (i as u32, s))
+        .collect();
+
+    let n = entries.len();
+    let mut results: Vec<DensePossibleMatchMap> = Vec::with_capacity(n);
+    for _ in 0..n {
+        results.push(DensePossibleMatchMap::default());
+    }
+
+    // Build initial live set: (entry_index, dfa_state)
+    let live: Vec<(usize, u32)> = entries
+        .iter()
+        .enumerate()
+        .map(|(i, &(_, rep))| (i, rep))
+        .collect();
+
+    batched_walk_node(
+        root,
+        &live,
+        &mut results,
+        &flat_transitions,
+        &self_loop_bytes,
+        tokenizer,
+        num_words,
+        &reachable_bitmaps,
+    );
+
+    let possible_matches_by_state: BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>> = results
+        .into_iter()
+        .enumerate()
+        .map(|(i, map)| (entries[i].0, map))
+        .collect();
+
+    (possible_matches_by_state, PossibleMatchesProfile::default())
+}
+
+fn precompute_reachable_bitmaps(
+    node: &VocabPrefixTreeNode,
+    num_words: usize,
+    cache: &mut FxHashMap<usize, Vec<u64>>,
+) {
+    let key = node as *const VocabPrefixTreeNode as usize;
+    if cache.contains_key(&key) {
+        return;
+    }
+    cache.insert(key, reachable_bitmap(node, num_words));
+    for (_, child) in node.iter_children() {
+        precompute_reachable_bitmaps(child, num_words, cache);
+    }
+}
+
+fn batched_walk_node(
+    node: &VocabPrefixTreeNode,
+    live: &[(usize, u32)],
+    results: &mut [DensePossibleMatchMap],
+    flat_trans: &[[u32; 256]],
+    self_loop: &[U8Set],
+    tokenizer: &Tokenizer,
+    num_words: usize,
+    reachable_bitmaps: &FxHashMap<usize, Vec<u64>>,
+) {
+    if live.is_empty() {
+        return;
+    }
+
+    // Handle token at this node
+    if node.has_token() {
+        let token_id = node.token_id() as u32;
+        for &(idx, state) in live {
+            for terminal in tokenizer.matched_terminals_iter(state) {
+                let entry = results[idx]
+                    .entry(terminal)
+                    .or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
+                entry[token_id as usize / 64] |= 1u64 << (token_id % 64);
+            }
+        }
+    }
+
+    // Process each child edge
+    for (segment, child) in node.iter_children() {
+        let child_key = child as *const VocabPrefixTreeNode as usize;
+        let reachable = &reachable_bitmaps[&child_key];
+
+        let subtree_bytes = U8Set::from_words(*child.subtree_bytes());
+
+        let mut child_live: Vec<(usize, u32)> = Vec::new();
+
+        for &(idx, state) in live {
+            let mut s = state;
+            let mut dead = false;
+
+            for &byte in segment {
+                let next = flat_trans[s as usize][byte as usize];
+                if next == u32::MAX {
+                    dead = true;
+                    break;
+                }
+                s = next;
+                for terminal in tokenizer.matched_terminals_iter(s) {
+                    let entry = results[idx]
+                        .entry(terminal)
+                        .or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
+                    merge_bitmaps(entry, reachable);
+                }
+            }
+
+            if dead {
+                continue;
+            }
+            if tokenizer.is_end(s) {
+                continue;
+            }
+            if subtree_bytes.is_subset(&self_loop[s as usize]) {
+                continue;
+            }
+            child_live.push((idx, s));
+        }
+
+        if !child_live.is_empty() {
+            batched_walk_node(
+                child,
+                &child_live,
+                results,
+                flat_trans,
+                self_loop,
+                tokenizer,
+                num_words,
+                reachable_bitmaps,
+            );
+        }
+    }
 }
 
 fn collect_possible_matches_dense_parallel(
