@@ -113,6 +113,16 @@ pub struct Constraint {
     /// Used to avoid O(n_internal) cost analysis in the convert phase.
     #[serde(skip)]
     pub(crate) total_internal_buf_cost: usize,
+    /// Number of heavy internal tokens (those stored as dense masks).
+    #[serde(skip)]
+    pub(crate) n_heavy_tokens: usize,
+    /// Total cost of all heavy tokens combined (n_heavy × buf_len).
+    #[serde(skip)]
+    pub(crate) heavy_total_cost: usize,
+    /// Average cost per light token: (total_cost - heavy_total) / n_light.
+    /// Pre-multiplied by 256 for fixed-point arithmetic to avoid float.
+    #[serde(skip)]
+    pub(crate) light_avg_cost_x256: usize,
 }
 
 /// Dense buf OR: `buf[i] |= mask[i]` for all i in min(buf.len(), mask.len()).
@@ -177,6 +187,20 @@ impl Constraint {
             &self.heavy_token_dense_masks,
             self.mask_len(),
         );
+
+        // Precompute heavy token stats for fast path decision in convert.
+        let buf_len = self.mask_len();
+        let n_internal = if self.internal_token_buf_offsets.len() > 1 {
+            self.internal_token_buf_offsets.len() - 1
+        } else {
+            0
+        };
+        self.n_heavy_tokens = self.heavy_token_dense_masks.iter().filter(|m| m.is_some()).count();
+        self.heavy_total_cost = self.n_heavy_tokens * buf_len;
+        let n_light = n_internal.saturating_sub(self.n_heavy_tokens);
+        let light_total = self.total_internal_buf_cost.saturating_sub(self.heavy_total_cost);
+        self.light_avg_cost_x256 = if n_light > 0 { (light_total * 256) / n_light } else { 0 };
+
         self.token_bytes_dense = Vec::new();
         self.internal_token_dense_words = dense_mask_words;
         self.weight_token_dense_masks = dense_masks;
@@ -718,64 +742,42 @@ impl Constraint {
 
         // Count total sparse entries for set vs missing tokens to pick the cheaper path.
         // Heavy tokens use dense masks — count them at dense cost (buf.len() per token).
-        // Use precomputed total and iterate only the minority (set or missing) bits.
+        // Use precomputed averages + O(n_heavy) heavy check for fast path decision.
         let heavy = &self.heavy_token_dense_masks;
         let buf_len = buf.len();
         let word_groups = &self.word_group_buf_masks;
         let n_missing = n_internal - n_set;
 
-        // Iterate only the smaller side to compute its cost.
-        let (total_set_cost, total_missing_cost) = if n_set <= n_missing {
-            let mut set_cost: usize = 0;
-            for (wi, &w) in dense.iter().enumerate() {
-                if w == 0 { continue; }
-                let mut bits = w;
-                while bits != 0 {
-                    let bit = bits.trailing_zeros() as usize;
-                    let idx = wi * 64 + bit;
-                    if idx < n_internal {
-                        set_cost += if idx < heavy.len() && heavy[idx].is_some() {
-                            buf_len
-                        } else {
-                            (offsets[idx + 1] - offsets[idx]) as usize
-                        };
+        // Fast O(n_heavy) estimation: count heavy set tokens, estimate rest from average.
+        let n_heavy_set = if self.n_heavy_tokens > 0 {
+            let n_heavy_check = heavy.len().min(n_internal);
+            let mut count = 0usize;
+            for idx in 0..n_heavy_check {
+                if heavy[idx].is_some() {
+                    let wi = idx / 64;
+                    let bit = idx % 64;
+                    if wi < dense.len() && (dense[wi] >> bit) & 1 != 0 {
+                        count += 1;
                     }
-                    bits &= bits - 1;
                 }
             }
-            (set_cost, self.total_internal_buf_cost - set_cost)
+            count
         } else {
-            let mut missing_cost: usize = 0;
-            for (wi, &w) in dense.iter().enumerate() {
-                if wi * 64 >= n_internal { break; }
-                let remaining = n_internal - wi * 64;
-                let valid_mask = if remaining >= 64 { !0u64 } else { (1u64 << remaining) - 1 };
-                let missing = !w & valid_mask;
-                if missing == 0 { continue; }
-                let mut bits = missing;
-                while bits != 0 {
-                    let bit = bits.trailing_zeros() as usize;
-                    let idx = wi * 64 + bit;
-                    if idx < n_internal {
-                        missing_cost += if idx < heavy.len() && heavy[idx].is_some() {
-                            buf_len
-                        } else {
-                            (offsets[idx + 1] - offsets[idx]) as usize
-                        };
-                    }
-                    bits &= bits - 1;
-                }
-            }
-            (self.total_internal_buf_cost - missing_cost, missing_cost)
+            0
         };
+        let n_light_set = n_set.saturating_sub(n_heavy_set);
+        let n_heavy_missing = self.n_heavy_tokens.saturating_sub(n_heavy_set);
+
+        let est_set_cost = n_heavy_set * buf_len
+            + (n_light_set * self.light_avg_cost_x256) / 256;
+        let est_missing_cost = n_heavy_missing * buf_len
+            + (n_missing.saturating_sub(n_heavy_missing) * self.light_avg_cost_x256) / 256;
         // Complement path overhead: 16KB all_mask copy ≈ buf.len() entry-equivalent writes.
         let copy_overhead = buf_len;
 
-        if !all_mask.is_empty() && total_missing_cost + copy_overhead < total_set_cost {
+        if !all_mask.is_empty() && est_missing_cost + copy_overhead < est_set_cost {
             // Complement-sparse path: start from all_tokens, subtract missing tokens.
             or_dense_buf(buf, all_mask);
-            // Collect heavy missing masks for combined processing.
-            let mut heavy_missing: Vec<&[u32]> = Vec::new();
             for (wi, &w) in dense.iter().enumerate() {
                 if wi * 64 >= n_internal {
                     break;
@@ -789,7 +791,7 @@ impl Constraint {
                     let internal_token = wi * 64 + bit;
                     if internal_token < heavy.len() {
                         if let Some(ref dense_mask) = heavy[internal_token] {
-                            heavy_missing.push(dense_mask);
+                            andnot_dense_buf(buf, dense_mask);
                             bits &= bits - 1;
                             continue;
                         }
@@ -802,20 +804,8 @@ impl Constraint {
                     bits &= bits - 1;
                 }
             }
-            // Combine heavy missing masks, then single AND-NOT pass.
-            if heavy_missing.len() == 1 {
-                andnot_dense_buf(buf, heavy_missing[0]);
-            } else if heavy_missing.len() > 1 {
-                let mut combined = vec![0u32; buf_len];
-                for mask in &heavy_missing {
-                    or_dense_buf(&mut combined, mask);
-                }
-                andnot_dense_buf(buf, &combined);
-            }
         } else {
-            // Normal path: process light tokens first (sparse OR).
-            // Collect heavy set masks for combined processing.
-            let mut heavy_set: Vec<&[u32]> = Vec::new();
+            // Normal path: process sparse light tokens and dense heavy tokens.
             for (wi, &w) in dense.iter().enumerate() {
                 if w == 0 {
                     continue;
@@ -834,7 +824,7 @@ impl Constraint {
                     if internal_token < n_internal {
                         if internal_token < heavy.len() {
                             if let Some(ref dense_mask) = heavy[internal_token] {
-                                heavy_set.push(dense_mask);
+                                or_dense_buf(buf, dense_mask);
                                 bits &= bits - 1;
                                 continue;
                             }
@@ -847,16 +837,6 @@ impl Constraint {
                     }
                     bits &= bits - 1;
                 }
-            }
-            // Combine heavy set masks, then single OR pass.
-            if heavy_set.len() == 1 {
-                or_dense_buf(buf, heavy_set[0]);
-            } else if heavy_set.len() > 1 {
-                let mut combined = vec![0u32; buf_len];
-                for mask in &heavy_set {
-                    or_dense_buf(&mut combined, mask);
-                }
-                or_dense_buf(buf, &combined);
             }
         }
     }

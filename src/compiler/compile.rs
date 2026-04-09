@@ -776,6 +776,9 @@ fn compile_prepared_with_profile(
             internal_token_buf_flat: Box::new([]),
             internal_token_buf_offsets: Box::new([]),
             total_internal_buf_cost: 0,
+            n_heavy_tokens: 0,
+            heavy_total_cost: 0,
+            light_avg_cost_x256: 0,
         });
         profile.finalize_ms = elapsed_ms(finalize_started_at);
         profile.compile_ms = elapsed_ms(compile_started_at);
