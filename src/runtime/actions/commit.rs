@@ -792,7 +792,9 @@ impl<'a> ConstraintState<'a> {
             .ok_or_else(|| {
                 format!("commit_token: token_id {token_id} not in vocabulary")
             })?;
-        commit_bytes_impl(constraint, &mut self.state, bytes, &mut self.buffers)
+        let result = commit_bytes_impl(constraint, &mut self.state, bytes, &mut self.buffers);
+        self.generation += 1;
+        result
     }
 
     /// Like commit_token but returns profiling stats.
@@ -810,7 +812,9 @@ impl<'a> ConstraintState<'a> {
     }
 
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
-        commit_bytes_impl(self.constraint, &mut self.state, bytes, &mut self.buffers)
+        let result = commit_bytes_impl(self.constraint, &mut self.state, bytes, &mut self.buffers);
+        self.generation += 1;
+        result
     }
 
     pub fn commit_tokens(&mut self, tokens: &[u32]) -> Result<(), String> {

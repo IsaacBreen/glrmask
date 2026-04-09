@@ -649,23 +649,22 @@ impl<'a> ConstraintState<'a> {
     }
 
     pub fn fill_mask(&self, buf: &mut [u32]) {
-        // Check mask cache: if parser state matches cached snapshot, reuse mask.
+        // Check mask cache: if generation matches, state hasn't changed since last fill_mask.
         {
             let cache = self.mask_cache.lock().unwrap();
             if let Some(ref cache_data) = *cache {
-                if cache_data.state_snapshot == self.state {
+                if cache_data.generation == self.generation {
                     buf.copy_from_slice(&cache_data.mask);
                     return;
                 }
             }
         }
 
-        buf.fill(0);
-
         let parser_dwa = self.constraint.parser_dwa();
         if self.state.is_empty() || parser_dwa.states.is_empty() {
+            buf.fill(0);
             *self.mask_cache.lock().unwrap() = Some(crate::runtime::state::MaskCacheData {
-                state_snapshot: self.state.clone(),
+                generation: self.generation,
                 mask: buf.to_vec(),
                 merged_dense: Vec::new(),
             });
@@ -816,7 +815,7 @@ impl<'a> ConstraintState<'a> {
                         }
                     }
 
-                    if delta_tokens > 0 && delta_cost < buf.len() * 2 {
+                    if delta_tokens > 0 && delta_cost < buf.len() {
                         // Incremental: copy cached mask, apply delta.
                         buf.copy_from_slice(&cache_data.mask);
 
@@ -875,6 +874,7 @@ impl<'a> ConstraintState<'a> {
         };
 
         if !did_incremental {
+            buf.fill(0);
             self.constraint.or_internal_dense_to_buf(&merged, buf);
         }
 
@@ -882,7 +882,7 @@ impl<'a> ConstraintState<'a> {
 
         // Update mask cache with current state + computed mask + merged bitvec.
         *self.mask_cache.lock().unwrap() = Some(crate::runtime::state::MaskCacheData {
-            state_snapshot: self.state.clone(),
+            generation: self.generation,
             mask: buf.to_vec(),
             merged_dense: merged,
         });
@@ -1040,7 +1040,7 @@ impl<'a> ConstraintState<'a> {
 
         let t_cache = Instant::now();
         *self.mask_cache.lock().unwrap() = Some(crate::runtime::state::MaskCacheData {
-            state_snapshot: self.state.clone(),
+            generation: self.generation,
             mask: buf.to_vec(),
             merged_dense: merged,
         });

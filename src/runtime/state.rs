@@ -6,9 +6,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::constraint::Constraint;
 
-/// Cached fill_mask result, keyed on an exact snapshot of the parser state.
+/// Cached fill_mask result, keyed on generation counter.
 pub(crate) struct MaskCacheData {
-    pub state_snapshot: BTreeMap<u32, ParserGSS>,
+    pub generation: u64,
     pub mask: Vec<u32>,
     /// The merged internal token dense bitmap used to compute this mask.
     /// Enables incremental updates when the state changes slightly.
@@ -51,6 +51,9 @@ pub struct ConstraintState<'a> {
     pub(crate) constraint: &'a Constraint,
     pub(crate) state: BTreeMap<u32, ParserGSS>,
     pub(crate) buffers: CommitBuffers,
+    /// Monotonically increasing counter, bumped on every commit.
+    /// Used for cheap cache invalidation in fill_mask.
+    pub(crate) generation: u64,
     /// Cached fill_mask result: returned directly when state matches cached snapshot.
     /// Not cloned — clone starts with empty cache.
     pub(crate) mask_cache: Mutex<Option<MaskCacheData>>,
@@ -62,6 +65,7 @@ impl<'a> Clone for ConstraintState<'a> {
             constraint: self.constraint,
             state: self.state.clone(),
             buffers: self.buffers.clone(),
+            generation: self.generation,
             mask_cache: Mutex::new(None),
         }
     }

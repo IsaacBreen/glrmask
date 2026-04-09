@@ -538,7 +538,7 @@ impl Constraint {
 
     pub fn start(&self) -> ConstraintState<'_> {
         let state = self.initial_state_map();
-        ConstraintState { constraint: self, state, buffers: Default::default(), mask_cache: Mutex::new(None) }
+        ConstraintState { constraint: self, state, buffers: Default::default(), generation: 0, mask_cache: Mutex::new(None) }
     }
 
     pub fn mask_len(&self) -> usize {
