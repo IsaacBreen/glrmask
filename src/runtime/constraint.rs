@@ -101,6 +101,44 @@ pub struct Constraint {
     pub(crate) heavy_token_dense_masks: Vec<Option<Box<[u32]>>>,
 }
 
+/// Dense buf OR: `buf[i] |= mask[i]` for all i in min(buf.len(), mask.len()).
+/// Processes u64 chunks for reduced loop overhead and better throughput.
+#[inline(always)]
+fn or_dense_buf(buf: &mut [u32], mask: &[u32]) {
+    let n = buf.len().min(mask.len());
+    // Process pairs of u32 as u64 for 2× fewer iterations.
+    let n_pairs = n / 2;
+    if n_pairs > 0 {
+        let buf64 = unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u64, n_pairs) };
+        let mask64 = unsafe { std::slice::from_raw_parts(mask.as_ptr() as *const u64, n_pairs) };
+        for (b, &m) in buf64.iter_mut().zip(mask64.iter()) {
+            *b |= m;
+        }
+    }
+    // Handle trailing u32.
+    if n % 2 == 1 {
+        buf[n - 1] |= mask[n - 1];
+    }
+}
+
+/// Dense buf AND-NOT: `buf[i] &= !mask[i]` for all i in min(buf.len(), mask.len()).
+/// Processes u64 chunks for reduced loop overhead and better throughput.
+#[inline(always)]
+fn andnot_dense_buf(buf: &mut [u32], mask: &[u32]) {
+    let n = buf.len().min(mask.len());
+    let n_pairs = n / 2;
+    if n_pairs > 0 {
+        let buf64 = unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u64, n_pairs) };
+        let mask64 = unsafe { std::slice::from_raw_parts(mask.as_ptr() as *const u64, n_pairs) };
+        for (b, &m) in buf64.iter_mut().zip(mask64.iter()) {
+            *b &= !m;
+        }
+    }
+    if n % 2 == 1 {
+        buf[n - 1] &= !mask[n - 1];
+    }
+}
+
 impl Constraint {
     pub(crate) fn rebuild_runtime_caches(&mut self) {
         let (internal_token_buf_masks, ((dense_mask_words, dense_masks), fast_transitions)) = rayon::join(
@@ -174,10 +212,11 @@ impl Constraint {
         if buf_words == 0 {
             return Vec::new();
         }
-        // Threshold: use dense when sparse entries > buf_words / 4.
+        // Threshold: use dense when sparse entries > buf_words / 2.
         // Dense OR costs ~buf_words ops; sparse OR costs ~n_entries ops.
-        // Dense has better cache behavior (sequential), so threshold < buf_words.
-        let threshold = buf_words / 4;
+        // With buf in L1 cache (≤16KB), sparse random writes are fast,
+        // so we only go dense when entries exceed half the buffer size.
+        let threshold = buf_words / 2;
         self.internal_token_buf_masks
             .iter()
             .map(|sparse| {
@@ -612,9 +651,7 @@ impl Constraint {
 
         // Super-fast path: all internal tokens set → OR all_tokens_buf_mask.
         if n_set >= n_internal && !all_mask.is_empty() {
-            for (i, &mask) in all_mask.iter().enumerate() {
-                buf[i] |= mask;
-            }
+            or_dense_buf(buf, all_mask);
             return;
         }
 
@@ -643,10 +680,9 @@ impl Constraint {
 
         if !all_mask.is_empty() && total_missing_cost + copy_overhead < total_set_cost {
             // Complement-sparse path: start from all_tokens, subtract missing tokens.
-            for (i, &mask) in all_mask.iter().enumerate() {
-                buf[i] |= mask;
-            }
-            // Process light missing tokens first (sparse AND-NOT).
+            or_dense_buf(buf, all_mask);
+            // Collect heavy missing masks for combined processing.
+            let mut heavy_missing: Vec<&[u32]> = Vec::new();
             for (wi, &w) in dense.iter().enumerate() {
                 if wi * 64 >= n_internal {
                     break;
@@ -659,7 +695,8 @@ impl Constraint {
                     let bit = bits.trailing_zeros() as usize;
                     let internal_token = wi * 64 + bit;
                     if internal_token < heavy.len() {
-                        if heavy[internal_token].is_some() {
+                        if let Some(ref dense_mask) = heavy[internal_token] {
+                            heavy_missing.push(dense_mask);
                             bits &= bits - 1;
                             continue;
                         }
@@ -670,30 +707,20 @@ impl Constraint {
                     bits &= bits - 1;
                 }
             }
-            // Process heavy missing tokens last (sequential 16KB AND-NOT scans).
-            for (wi, &w) in dense.iter().enumerate() {
-                if wi * 64 >= n_internal {
-                    break;
+            // Combine heavy missing masks, then single AND-NOT pass.
+            if heavy_missing.len() == 1 {
+                andnot_dense_buf(buf, heavy_missing[0]);
+            } else if heavy_missing.len() > 1 {
+                let mut combined = vec![0u32; buf_len];
+                for mask in &heavy_missing {
+                    or_dense_buf(&mut combined, mask);
                 }
-                let remaining = n_internal - wi * 64;
-                let valid_mask = if remaining >= 64 { !0u64 } else { (1u64 << remaining) - 1 };
-                let missing = !w & valid_mask;
-                let mut bits = missing;
-                while bits != 0 {
-                    let bit = bits.trailing_zeros() as usize;
-                    let internal_token = wi * 64 + bit;
-                    if internal_token < heavy.len() {
-                        if let Some(ref dense_mask) = heavy[internal_token] {
-                            for (i, &m) in dense_mask.iter().enumerate() {
-                                buf[i] &= !m;
-                            }
-                        }
-                    }
-                    bits &= bits - 1;
-                }
+                andnot_dense_buf(buf, &combined);
             }
         } else {
-            // Normal path: process light tokens first (sparse OR), then heavy (dense OR).
+            // Normal path: process light tokens first (sparse OR).
+            // Collect heavy set masks for combined processing.
+            let mut heavy_set: Vec<&[u32]> = Vec::new();
             for (wi, &w) in dense.iter().enumerate() {
                 if w == 0 {
                     continue;
@@ -703,9 +730,12 @@ impl Constraint {
                     let bit = bits.trailing_zeros() as usize;
                     let internal_token = wi * 64 + bit;
                     if internal_token < n_internal {
-                        if internal_token < heavy.len() && heavy[internal_token].is_some() {
-                            bits &= bits - 1;
-                            continue;
+                        if internal_token < heavy.len() {
+                            if let Some(ref dense_mask) = heavy[internal_token] {
+                                heavy_set.push(dense_mask);
+                                bits &= bits - 1;
+                                continue;
+                            }
                         }
                         for &(buf_word, mask) in &internal_masks[internal_token] {
                             buf[buf_word as usize] |= mask;
@@ -714,24 +744,15 @@ impl Constraint {
                     bits &= bits - 1;
                 }
             }
-            // Heavy tokens: sequential 16KB OR scans.
-            for (wi, &w) in dense.iter().enumerate() {
-                if w == 0 {
-                    continue;
+            // Combine heavy set masks, then single OR pass.
+            if heavy_set.len() == 1 {
+                or_dense_buf(buf, heavy_set[0]);
+            } else if heavy_set.len() > 1 {
+                let mut combined = vec![0u32; buf_len];
+                for mask in &heavy_set {
+                    or_dense_buf(&mut combined, mask);
                 }
-                let mut bits = w;
-                while bits != 0 {
-                    let bit = bits.trailing_zeros() as usize;
-                    let internal_token = wi * 64 + bit;
-                    if internal_token < heavy.len() {
-                        if let Some(ref dense_mask) = heavy[internal_token] {
-                            for (i, &m) in dense_mask.iter().enumerate() {
-                                buf[i] |= m;
-                            }
-                        }
-                    }
-                    bits &= bits - 1;
-                }
+                or_dense_buf(buf, &combined);
             }
         }
     }
