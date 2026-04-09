@@ -675,7 +675,14 @@ fn analyze_equivalences_impl(
     let adjust_ms = elapsed_ms(adjust_started_at);
 
     let tokenizer_view_started_at = std::time::Instant::now();
-    let tokenizer_view = match (active_groups, flat_trans) {
+    // Only use shared flat_trans when state count matches the (possibly
+    // simplified) tokenizer. If simplify_for_terminals minimized the DFA,
+    // the original flat_trans has different state numbering and must be
+    // discarded.
+    let compatible_flat_trans = flat_trans.filter(|ft| {
+        ft.len() == tokenizer.num_states() as usize * 256
+    });
+    let tokenizer_view = match (active_groups, compatible_flat_trans) {
         (Some(active_groups), Some(ft)) => TokenizerView::new_filtered_from_flat_trans(ft, tokenizer, active_groups),
         (Some(active_groups), None) => TokenizerView::new_filtered(tokenizer, active_groups),
         (None, Some(ft)) => TokenizerView::new_from_flat_trans(ft, tokenizer),

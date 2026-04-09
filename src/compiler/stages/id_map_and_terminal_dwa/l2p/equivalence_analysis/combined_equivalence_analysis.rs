@@ -382,12 +382,21 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
         cache.get_or_init(|| vocab_equivalence_analysis::SharedVocabDfaBase::build_from_dfa(tokenizer.dfa()));
     }
 
+    // Only use the cached byte_to_class when the cache was built from a DFA
+    // with the same number of states (i.e. same transitions). When
+    // simplify_for_terminals minimized the DFA, the cache may have been
+    // initialized by a partition with a different state count, making its
+    // byte_to_class invalid for this partition's DFA.
+    let num_dfa_states = tokenizer.dfa().states.len();
+    let compatible_cache = shared_vocab_dfa_cache
+        .and_then(|cache| cache.get())
+        .filter(|base| base.is_compatible_with_state_count(num_dfa_states));
+
     // Deduplicate tokens by byte-class sequence. Tokens whose bytes map
     // to the same DFA byte-class sequence behave identically from every
     // starting state, so we only need to analyze one representative.
     let dedup_started_at = std::time::Instant::now();
-    let byte_to_class = shared_vocab_dfa_cache
-        .and_then(|cache| cache.get())
+    let byte_to_class = compatible_cache
         .map(|base| base.byte_to_class())
         .unwrap_or_else(|| super::compat::compute_byte_classes(tokenizer.dfa()));
     let dedup = deduplicate_tokens_by_byte_class(tokens, &byte_to_class);

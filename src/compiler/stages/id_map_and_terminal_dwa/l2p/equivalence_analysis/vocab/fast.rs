@@ -129,9 +129,117 @@ impl SharedVocabDfaBase {
         }
     }
 
+    /// Build directly from a flat transition table (`[u32; num_states * 256]`).
+    /// Skips FlatDfa/metadata construction — only needs transition data.
+    pub fn build_from_flat_trans(flat_trans: &[u32]) -> Self {
+        let num_dfa_states = flat_trans.len() / 256;
+        assert_eq!(flat_trans.len(), num_dfa_states * 256);
+
+        // Compute byte classes using column hashing (same logic as compute_byte_classes).
+        let byte_to_class = {
+            let mut column_hashes = [0u64; 256];
+            for s in 0..num_dfa_states {
+                let base = s * 256;
+                for b in 0..256 {
+                    column_hashes[b] = column_hashes[b]
+                        .wrapping_mul(0x517cc1b727220a95)
+                        .wrapping_add(flat_trans[base + b] as u64);
+                }
+            }
+            let mut sorted_indices: [u8; 256] = std::array::from_fn(|i| i as u8);
+            sorted_indices.sort_unstable_by_key(|&b| column_hashes[b as usize]);
+            let mut btc = [0u8; 256];
+            let mut next_class = 0u8;
+            btc[sorted_indices[0] as usize] = 0;
+            for i in 1..256 {
+                let curr = sorted_indices[i];
+                let h = column_hashes[curr as usize];
+                if h != column_hashes[sorted_indices[i - 1] as usize] {
+                    next_class += 1;
+                    btc[curr as usize] = next_class;
+                } else {
+                    let mut assigned = false;
+                    for j in (0..i).rev() {
+                        let prev = sorted_indices[j];
+                        if column_hashes[prev as usize] != h {
+                            break;
+                        }
+                        let same = (0..num_dfa_states).all(|s| {
+                            let base = s * 256;
+                            flat_trans[base + curr as usize] == flat_trans[base + prev as usize]
+                        });
+                        if same {
+                            btc[curr as usize] = btc[prev as usize];
+                            assigned = true;
+                            break;
+                        }
+                    }
+                    if !assigned {
+                        next_class += 1;
+                        btc[curr as usize] = next_class;
+                    }
+                }
+            }
+            btc
+        };
+
+        let num_classes = byte_to_class
+            .iter()
+            .copied()
+            .max()
+            .map_or(0usize, |max_class| max_class as usize + 1);
+
+        let mut class_repr = vec![0u8; num_classes];
+        let mut class_seen = vec![false; num_classes];
+        for b in 0..=255u8 {
+            let class = byte_to_class[b as usize] as usize;
+            if !class_seen[class] {
+                class_seen[class] = true;
+                class_repr[class] = b;
+            }
+        }
+
+        let mut trans_by_class = vec![NONE; num_classes * num_dfa_states];
+        let mut self_loop_bytes = Vec::with_capacity(num_dfa_states);
+        for s in 0..num_dfa_states {
+            let base = s * 256;
+            for c in 0..num_classes {
+                trans_by_class[c * num_dfa_states + s] =
+                    flat_trans[base + class_repr[c] as usize];
+            }
+            let mut bits = U8Set::empty();
+            for byte_idx in 0..256 {
+                if flat_trans[base + byte_idx] == s as u32 {
+                    bits.insert(byte_idx as u8);
+                }
+            }
+            self_loop_bytes.push(bits);
+        }
+
+        let none_completion_hash = {
+            let mut h = new_hasher();
+            h.write_u8(0);
+            h.finish()
+        };
+
+        SharedVocabDfaBase {
+            byte_to_class,
+            num_classes,
+            trans_by_class,
+            self_loop_bytes,
+            none_completion_hash,
+        }
+    }
+
     /// Return the precomputed byte-to-class mapping.
     pub fn byte_to_class(&self) -> [u8; 256] {
         self.byte_to_class
+    }
+
+    /// Check if this cache was built from a DFA with the given state count.
+    pub fn is_compatible_with_state_count(&self, num_dfa_states: usize) -> bool {
+        self.trans_by_class.len() == self.num_classes * num_dfa_states
+            && self.self_loop_bytes.len() == num_dfa_states
     }
 }
 
@@ -508,13 +616,14 @@ fn build_dfa_with_group_filter(
 
     let num_dfa_states = dfa.states.len();
 
-    // Use shared base if available, otherwise compute from scratch.
+    // Use shared base if available and compatible, otherwise compute from scratch.
+    // When simplify_for_terminals minimizes the DFA (changing state count),
+    // the shared base has a different state count and must be skipped.
+    let compatible_shared_base = shared_base.filter(|base| {
+        base.is_compatible_with_state_count(num_dfa_states)
+    });
     let (byte_to_class, trans_by_class, self_loop_bytes, none_completion_hash, byte_classes_ms, transpose_ms) =
-        if let Some(base) = shared_base {
-            assert_eq!(base.trans_by_class.len(), base.num_classes * num_dfa_states,
-                "SharedVocabDfaBase state count mismatch");
-            assert_eq!(base.self_loop_bytes.len(), num_dfa_states,
-                "SharedVocabDfaBase self_loop_bytes count mismatch");
+        if let Some(base) = compatible_shared_base {
             let btc = byte_to_class_override.copied().unwrap_or(base.byte_to_class);
             (btc, base.trans_by_class.clone(), base.self_loop_bytes.clone(), base.none_completion_hash, 0.0, 0.0)
         } else {
