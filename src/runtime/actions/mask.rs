@@ -783,8 +783,9 @@ impl<'a> ConstraintState<'a> {
                 if !cache_data.merged_dense.is_empty()
                     && cache_data.merged_dense.len() == merged.len()
                 {
-                    let internal_masks = &self.constraint.internal_token_buf_masks;
-                    let n_internal = internal_masks.len();
+                    let offsets = &self.constraint.internal_token_buf_offsets;
+                    let flat = &self.constraint.internal_token_buf_flat;
+                    let n_internal = if offsets.len() > 1 { offsets.len() - 1 } else { 0 };
 
                     // Compute delta cost (total entries for changed tokens).
                     let mut delta_cost: usize = 0;
@@ -805,7 +806,7 @@ impl<'a> ConstraintState<'a> {
                             let bit = bits.trailing_zeros() as usize;
                             let internal_token = wi * 64 + bit;
                             if internal_token < n_internal {
-                                delta_cost += internal_masks[internal_token].len();
+                                delta_cost += (offsets[internal_token + 1] - offsets[internal_token]) as usize;
                             }
                             bits &= bits - 1;
                         }
@@ -833,7 +834,9 @@ impl<'a> ConstraintState<'a> {
                                 let bit = bits.trailing_zeros() as usize;
                                 let internal_token = wi * 64 + bit;
                                 if internal_token < n_internal {
-                                    for &(buf_word, mask) in &internal_masks[internal_token] {
+                                    let start = offsets[internal_token] as usize;
+                                    let end = offsets[internal_token + 1] as usize;
+                                    for &(buf_word, mask) in &flat[start..end] {
                                         buf[buf_word as usize] &= !mask;
                                     }
                                 }
@@ -846,7 +849,9 @@ impl<'a> ConstraintState<'a> {
                                 let bit = bits.trailing_zeros() as usize;
                                 let internal_token = wi * 64 + bit;
                                 if internal_token < n_internal {
-                                    for &(buf_word, mask) in &internal_masks[internal_token] {
+                                    let start = offsets[internal_token] as usize;
+                                    let end = offsets[internal_token + 1] as usize;
+                                    for &(buf_word, mask) in &flat[start..end] {
                                         buf[buf_word as usize] |= mask;
                                     }
                                 }

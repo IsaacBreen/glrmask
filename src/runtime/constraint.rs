@@ -99,6 +99,16 @@ pub struct Constraint {
     /// Indexed by internal token ID; None for light tokens.
     #[serde(skip)]
     pub(crate) heavy_token_dense_masks: Vec<Option<Box<[u32]>>>,
+    /// Flattened contiguous array of all internal token buf mask entries.
+    /// All tokens' (word_index, or_mask) pairs concatenated in token order.
+    /// Improves cache locality vs separate Vec allocations per token.
+    #[serde(skip)]
+    pub(crate) internal_token_buf_flat: Box<[(u16, u32)]>,
+    /// Offsets into `internal_token_buf_flat` for each internal token.
+    /// `internal_token_buf_flat[offsets[i]..offsets[i+1]]` gives token i's entries.
+    /// Length = n_internal + 1 (sentinel at end).
+    #[serde(skip)]
+    pub(crate) internal_token_buf_offsets: Box<[u32]>,
 }
 
 /// Dense buf OR: `buf[i] |= mask[i]` for all i in min(buf.len(), mask.len()).
@@ -155,6 +165,9 @@ impl Constraint {
         self.word_group_buf_masks = self.compute_word_group_buf_masks();
         self.all_tokens_buf_mask = self.compute_all_tokens_buf_mask();
         self.heavy_token_dense_masks = self.compute_heavy_token_dense_masks();
+        let (flat, offsets) = Self::compute_flat_buf_masks(&self.internal_token_buf_masks);
+        self.internal_token_buf_flat = flat;
+        self.internal_token_buf_offsets = offsets;
         self.token_bytes_dense = Vec::new();
         self.internal_token_dense_words = dense_mask_words;
         self.weight_token_dense_masks = dense_masks;
@@ -231,6 +244,20 @@ impl Constraint {
                 }
             })
             .collect()
+    }
+
+    /// Flatten all per-token sparse entries into a single contiguous array
+    /// with an offset table. Improves cache locality during convert phase.
+    fn compute_flat_buf_masks(masks: &[InternalTokenBufMasks]) -> (Box<[(u16, u32)]>, Box<[u32]>) {
+        let total: usize = masks.iter().map(|m| m.len()).sum();
+        let mut flat = Vec::with_capacity(total);
+        let mut offsets = Vec::with_capacity(masks.len() + 1);
+        for m in masks {
+            offsets.push(flat.len() as u32);
+            flat.extend_from_slice(m);
+        }
+        offsets.push(flat.len() as u32);
+        (flat.into_boxed_slice(), offsets.into_boxed_slice())
     }
 
     fn compute_dense_token_bytes(&self) -> Vec<Option<Box<[u8]>>> {
@@ -635,12 +662,14 @@ impl Constraint {
     }
 
     /// Convert a merged internal token dense bitmap to the output buffer.
-    /// Uses sparse per-token writes to keep buf hot in L1 cache, avoiding
-    /// 16KB word_group scans that cause L1 cache evictions.
+    /// Uses a contiguous flat entry array for cache-friendly sequential access,
+    /// with word_group fast paths for fully-set 64-bit words and heavy token
+    /// dense masks for tokens with many buf entries.
     pub(crate) fn or_internal_dense_to_buf(&self, dense: &[u64], buf: &mut [u32]) {
         let all_mask = &self.all_tokens_buf_mask;
-        let internal_masks = &self.internal_token_buf_masks;
-        let n_internal = internal_masks.len();
+        let offsets = &self.internal_token_buf_offsets;
+        let flat = &self.internal_token_buf_flat;
+        let n_internal = if offsets.len() > 1 { offsets.len() - 1 } else { 0 };
 
         if n_internal == 0 || dense.is_empty() {
             return;
@@ -663,10 +692,15 @@ impl Constraint {
         // Heavy tokens use dense masks — count them at dense cost (buf.len() per token).
         let heavy = &self.heavy_token_dense_masks;
         let buf_len = buf.len();
+        let word_groups = &self.word_group_buf_masks;
         let mut total_set_cost: usize = 0;
         let mut total_all_cost: usize = 0;
-        for (idx, mask_entries) in internal_masks.iter().enumerate() {
-            let cost = if idx < heavy.len() && heavy[idx].is_some() { buf_len } else { mask_entries.len() };
+        for idx in 0..n_internal {
+            let cost = if idx < heavy.len() && heavy[idx].is_some() {
+                buf_len
+            } else {
+                (offsets[idx + 1] - offsets[idx]) as usize
+            };
             total_all_cost += cost;
             let wi = idx / 64;
             let bit = idx % 64;
@@ -701,7 +735,9 @@ impl Constraint {
                             continue;
                         }
                     }
-                    for &(buf_word, mask) in &internal_masks[internal_token] {
+                    let start = offsets[internal_token] as usize;
+                    let end = offsets[internal_token + 1] as usize;
+                    for &(buf_word, mask) in &flat[start..end] {
                         buf[buf_word as usize] &= !mask;
                     }
                     bits &= bits - 1;
@@ -725,6 +761,13 @@ impl Constraint {
                 if w == 0 {
                     continue;
                 }
+                // Word-group fast path: all 64 internal tokens in this word are set.
+                if w == !0u64 {
+                    if let Some(group) = word_groups.get(wi) {
+                        or_dense_buf(buf, group);
+                        continue;
+                    }
+                }
                 let mut bits = w;
                 while bits != 0 {
                     let bit = bits.trailing_zeros() as usize;
@@ -737,7 +780,9 @@ impl Constraint {
                                 continue;
                             }
                         }
-                        for &(buf_word, mask) in &internal_masks[internal_token] {
+                        let start = offsets[internal_token] as usize;
+                        let end = offsets[internal_token + 1] as usize;
+                        for &(buf_word, mask) in &flat[start..end] {
                             buf[buf_word as usize] |= mask;
                         }
                     }
