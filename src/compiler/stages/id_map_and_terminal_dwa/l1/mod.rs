@@ -345,10 +345,66 @@ fn build_l1_id_map<'a>(tokenizer: &Tokenizer, vocab: &'a Vocab, active_terminals
         });
         state_original_to_internal[state_id] = internal_id;
     }
+
+    // Token-based pre-refinement for large DFAs: walk a small sample of tokens
+    // through the kstep representatives to further reduce state count before
+    // the expensive terminal DWA traversal.
+    const L1_TOKEN_REFINE_MIN_REPS: usize = 200;
+    const L1_TOKEN_REFINE_DFA_THRESHOLD: usize = 16_000;
+    const L1_TOKEN_REFINE_BATCH_SIZE: usize = 200;
+    let num_dfa_states = tokenizer.num_states() as usize;
+    if state_representatives.len() >= L1_TOKEN_REFINE_MIN_REPS
+        && num_dfa_states >= L1_TOKEN_REFINE_DFA_THRESHOLD
+    {
+        let kstep_reps: Vec<usize> = state_representatives.iter().map(|&s| s as usize).collect();
+        let pre_refine_count = kstep_reps.len();
+        let token_refine_mapping = super::l2p::equivalence_analysis::state::fast
+            ::find_state_equivalence_classes_ex_with_rep_confirmation(
+                &tokenizer_view,
+                &token_bytes,
+                &kstep_reps,
+                &[], // skip_groups
+                Some(1), // max_batches: single sample batch
+                Some(L1_TOKEN_REFINE_BATCH_SIZE),
+                Some(true), // early_stop
+            );
+        // Compose kstep → token_refine mappings
+        let mut refined_rep_to_internal: FxHashMap<usize, u32> = FxHashMap::default();
+        let mut refined_representatives = Vec::new();
+        let mut kstep_internal_to_refined = vec![0u32; kstep_reps.len()];
+        for (kstep_idx, &refined_rep) in token_refine_mapping.iter().enumerate() {
+            let internal = *refined_rep_to_internal.entry(refined_rep).or_insert_with(|| {
+                let id = refined_representatives.len() as u32;
+                refined_representatives.push(refined_rep as u32);
+                id
+            });
+            kstep_internal_to_refined[kstep_idx] = internal;
+        }
+        // Update state_original_to_internal with refined mapping
+        for sto in state_original_to_internal.iter_mut() {
+            if *sto != u32::MAX {
+                *sto = kstep_internal_to_refined[*sto as usize];
+            }
+        }
+        if compile_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][l1_token_refine] dfa_states={} kstep_reps={} refined_reps={} sample_tokens={} batch_size={}",
+                num_dfa_states,
+                pre_refine_count,
+                refined_representatives.len(),
+                token_bytes.len(),
+                L1_TOKEN_REFINE_BATCH_SIZE,
+            );
+        }
+        state_representatives = refined_representatives;
+    }
+
     // Build state_to_rep: original_state → representative_state (for trie traversal)
     let mut state_to_rep = vec![0u32; states.len()];
-    for (i, &rep) in equiv_mapping.iter().enumerate() {
-        state_to_rep[states[i]] = rep as u32;
+    for (state_id, &internal) in state_original_to_internal.iter().enumerate() {
+        if internal != u32::MAX {
+            state_to_rep[state_id] = state_representatives[internal as usize];
+        }
     }
     let state_equiv_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
     if debug_profile_enabled() {

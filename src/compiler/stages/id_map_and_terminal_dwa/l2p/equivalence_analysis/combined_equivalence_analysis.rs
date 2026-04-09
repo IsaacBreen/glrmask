@@ -60,11 +60,13 @@ const PRE_VOCAB_STATE_REDUCTION_MIN_TOKENS: usize = 5000;
 /// When the deduped token count exceeds this, limit state reduction to a single
 /// batch (5000 tokens) to avoid the cost of processing the full token set.
 const PRE_VOCAB_STATE_REDUCTION_MAX_FULL_TOKENS: usize = 5000;
-/// Skip pre_vocab state reduction for very large tokenizer DFAs. With 50K+
-/// states, walking all tokens through thousands of pre-reduced states costs
-/// more than the downstream savings from state reduction. The vocab pass works
-/// correctly on the larger (unreduced) state set, just slightly slower.
-const PRE_VOCAB_STATE_REDUCTION_MAX_DFA_STATES: usize = 16_000;
+/// For DFAs above this size, use sample-based pre-vocab state reduction
+/// (limited batches) instead of walking all tokens. Walking a small sample
+/// through many states is much cheaper while still providing effective
+/// coarsening for the downstream vocab pass.
+const PRE_VOCAB_STATE_REDUCTION_LARGE_DFA_THRESHOLD: usize = 16_000;
+/// Number of sample tokens per batch for large-DFA pre-vocab state reduction.
+const PRE_VOCAB_STATE_REDUCTION_LARGE_DFA_BATCH_SIZE: usize = 200;
 
 /// Result of combined equivalence analysis.
 pub struct CombinedEquivalenceResult {
@@ -418,11 +420,16 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
             && pre_reduced_states.len() >= PRE_VOCAB_STATE_REDUCTION_MIN_STATES
             && tokenizer_num_groups <= PRE_VOCAB_STATE_REDUCTION_MAX_GROUPS
             && dedup.representative_token_bytes.len() >= PRE_VOCAB_STATE_REDUCTION_MIN_TOKENS
-            // Skip pre_vocab for very large DFAs where the cost of walking
-            // all tokens through thousands of states exceeds the downstream
-            // savings. The vocab pass handles the larger state set correctly,
-            // just slightly slower.
-            && num_dfa_states < PRE_VOCAB_STATE_REDUCTION_MAX_DFA_STATES
+    };
+    // For large DFAs, use sample-based pre-vocab reduction: walk only a small
+    // batch of tokens through the states instead of all tokens. This avoids
+    // O(tokens × states) cost while still coarsening effectively.
+    let large_dfa = num_dfa_states >= PRE_VOCAB_STATE_REDUCTION_LARGE_DFA_THRESHOLD;
+    let pre_vocab_max_batches = if large_dfa { Some(1) } else { None };
+    let pre_vocab_batch_size = if large_dfa {
+        Some(PRE_VOCAB_STATE_REDUCTION_LARGE_DFA_BATCH_SIZE)
+    } else {
+        None
     };
     let vocab_states = if use_pre_vocab_state_reduction {
         let pre_vocab_state_started_at = std::time::Instant::now();
@@ -443,18 +450,21 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
             &dedup.representative_token_bytes,
             &pre_reduced_states,
             &[], // skip_groups
-            None,
-            None,
+            pre_vocab_max_batches,
+            pre_vocab_batch_size,
             Some(true), // early_stop
         );
         let vocab_states = collect_representative_states(&reduced_state_reps);
         if profile_compile {
             eprintln!(
-                "[glrmask/profile][pre_vocab_state_reduction] input_states={} reduced_states={} tokens={} num_groups={} ms={:.3}",
+                "[glrmask/profile][pre_vocab_state_reduction] input_states={} reduced_states={} tokens={} num_groups={} large_dfa={} max_batches={:?} batch_size={:?} ms={:.3}",
                 pre_reduced_states.len(),
                 vocab_states.len(),
                 dedup.representative_token_bytes.len(),
                 tokenizer_num_groups,
+                large_dfa,
+                pre_vocab_max_batches,
+                pre_vocab_batch_size,
                 elapsed_ms(pre_vocab_state_started_at),
             );
         }
