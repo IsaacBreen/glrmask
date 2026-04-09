@@ -3050,14 +3050,34 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         };
 
         let mut states = SmallVec::<[T; 16]>::new();
-        let mut current: &Lower<T> = &interface.inner;
+        // Walk using Arc references so we can capture the tail Arc directly.
+        // First step: get the Arc from the interface's inner.
+        let first_arc: &Arc<Lower<T>>;
+        let first_state: T;
+        match &*interface.inner {
+            Lower::Chain { .. } => {
+                first_state = interface.inner.chain_value().clone();
+                first_arc = interface.inner.chain_next();
+            }
+            Lower::General { children, .. } => {
+                if children.is_empty() { return None; }
+                if children.len() != 1 { return None; }
+                let ordmap = children.values().next().unwrap();
+                if ordmap.len() != 1 { return None; }
+                first_state = children.keys().next().unwrap().clone();
+                first_arc = ordmap.values().next().unwrap();
+            }
+        }
+        states.push(first_state);
+
+        // Now walk through Arc references, keeping the last Arc as the tail.
+        let mut current_arc: &Arc<Lower<T>> = first_arc;
 
         loop {
-            match current {
+            match &**current_arc {
                 Lower::Chain { .. } => {
-                    states.push(current.chain_value().clone());
-                    let next = current.chain_next();
-                    current = &**next;
+                    states.push(current_arc.chain_value().clone());
+                    current_arc = current_arc.chain_next();
                 }
                 Lower::General { children, .. } => {
                     if children.is_empty() {
@@ -3068,8 +3088,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         let ordmap = children.values().next().unwrap();
                         if ordmap.len() == 1 {
                             states.push(key);
-                            let (_, next) = ordmap.iter().next().unwrap();
-                            current = &**next;
+                            current_arc = ordmap.values().next().unwrap();
                             continue;
                         }
                     }
@@ -3082,27 +3101,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             return None;
         }
 
-        // `current` is now the tail Lower node
-        // Get an Arc to it by walking down again
-        let mut tail: Arc<Lower<T>> = Arc::clone(
-            if interface.inner.is_chain() {
-                interface.inner.chain_next()
-            } else {
-                let ordmap = interface.inner.children_ref().values().next().unwrap();
-                ordmap.values().next().unwrap()
-            },
-        );
-        for _ in 1..states.len() {
-            let next = if tail.is_chain() {
-                Arc::clone(tail.chain_next())
-            } else {
-                let ordmap = tail.children_ref().values().next().unwrap();
-                Arc::clone(ordmap.values().next().unwrap())
-            };
-            tail = next;
-        }
-
-        Some((states, &interface.acc, ChainTail { inner: tail }))
+        Some((states, &interface.acc, ChainTail { inner: Arc::clone(current_arc) }))
     }
 
     /// Extract the top chain of state values from the GSS.
