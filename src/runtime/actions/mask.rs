@@ -700,16 +700,78 @@ impl<'a> ConstraintState<'a> {
                     self.merge_final_weight_for_gss(final_weight, &gss, precomputed, &mut merged);
                 }
 
-                // Advance through DWA transitions for each parser state.
-                gss.for_each_decomposed(|parser_state, popped| {
-                    enqueue_parser_state_transitions(
-                        &mut queue,
-                        fast_trans,
-                        parser_state,
-                        &popped,
-                        precomputed,
-                    );
-                });
+                // Chain optimization: if the GSS has a long chain of single-path
+                // levels, walk through them directly instead of decomposing one
+                // level at a time. This avoids intermediate GSS allocations.
+                if let Some((chain_states, chain_acc, tail_lower)) = gss.extract_chain_and_tail() {
+                    let mut acc = chain_acc.clone();
+                    let mut cur_wa_state = wa_state;
+                    let mut alive = true;
+
+                    for parser_state in chain_states.iter() {
+                        let cur_fast_trans = &self.constraint.dwa_fast_transitions[cur_wa_state as usize];
+                        // Look up transition for this parser state
+                        let labels = transition_labels(*parser_state);
+                        let mut found_target = None;
+                        for label in labels {
+                            if let Some((target, weight)) = cur_fast_trans.get(&label) {
+                                if weight.is_full() {
+                                    found_target = Some(*target);
+                                } else {
+                                    match acc.intersect_with_weight(weight, precomputed) {
+                                        Some(new_acc) => {
+                                            acc = new_acc;
+                                            found_target = Some(*target);
+                                        }
+                                        None => break,
+                                    }
+                                }
+                                break;
+                            }
+                        }
+
+                        let Some(target) = found_target else {
+                            alive = false;
+                            break;
+                        };
+
+                        cur_wa_state = target;
+                        let next_dwa_state = &parser_dwa.states[cur_wa_state as usize];
+
+                        // Merge final weight at the new DWA state
+                        if let Some(final_weight) = &next_dwa_state.final_weight {
+                            self.merge_final_weight_to_internal(final_weight, &acc, precomputed, &mut merged);
+                        }
+                    }
+
+                    // Enqueue the tail if the chain walk completed successfully
+                    if alive && !acc.is_empty() {
+                        let cur_fast_trans = &self.constraint.dwa_fast_transitions[cur_wa_state as usize];
+                        let tail_gss = DenseMaskGSS::from_chain_tail_and_acc(tail_lower, acc);
+                        if !tail_gss.is_empty() {
+                            tail_gss.for_each_decomposed(|ps, popped| {
+                                enqueue_parser_state_transitions(
+                                    &mut queue,
+                                    cur_fast_trans,
+                                    ps,
+                                    &popped,
+                                    precomputed,
+                                );
+                            });
+                        }
+                    }
+                } else {
+                    // Standard path: decompose one level at a time.
+                    gss.for_each_decomposed(|parser_state, popped| {
+                        enqueue_parser_state_transitions(
+                            &mut queue,
+                            fast_trans,
+                            parser_state,
+                            &popped,
+                            precomputed,
+                        );
+                    });
+                }
             }
         }
 
@@ -875,18 +937,84 @@ impl<'a> ConstraintState<'a> {
                 let t = Instant::now();
                 let mut local_decompose = 0u64;
                 let mut local_enqueue = 0u64;
-                gss.for_each_decomposed(|parser_state, popped| {
-                    local_decompose += 1;
-                    n_enqueue_calls += 1;
-                    enqueue_parser_state_transitions(
-                        &mut queue,
-                        fast_trans,
-                        parser_state,
-                        &popped,
-                        precomputed,
-                    );
-                    local_enqueue += 1;
-                });
+
+                if let Some((chain_states, chain_acc, tail_lower)) = gss.extract_chain_and_tail() {
+                    let mut acc = chain_acc.clone();
+                    let mut cur_wa_state = wa_state;
+                    let mut alive = true;
+
+                    for parser_state in chain_states.iter() {
+                        local_decompose += 1;
+                        let cur_fast_trans = &self.constraint.dwa_fast_transitions[cur_wa_state as usize];
+                        let labels = transition_labels(*parser_state);
+                        let mut found_target = None;
+                        for label in labels {
+                            if let Some((target, weight)) = cur_fast_trans.get(&label) {
+                                if weight.is_full() {
+                                    found_target = Some(*target);
+                                } else {
+                                    match acc.intersect_with_weight(weight, precomputed) {
+                                        Some(new_acc) => {
+                                            acc = new_acc;
+                                            found_target = Some(*target);
+                                        }
+                                        None => break,
+                                    }
+                                }
+                                break;
+                            }
+                        }
+
+                        let Some(target) = found_target else {
+                            alive = false;
+                            break;
+                        };
+
+                        cur_wa_state = target;
+                        n_enqueue_calls += 1;
+                        local_enqueue += 1;
+                        let next_dwa_state = &parser_dwa.states[cur_wa_state as usize];
+
+                        if let Some(final_weight) = &next_dwa_state.final_weight {
+                            n_fw_ops += 1;
+                            let t_fw = Instant::now();
+                            self.merge_final_weight_to_internal(final_weight, &acc, precomputed, &mut merged);
+                            fw_merge_ns += t_fw.elapsed().as_nanos() as u64;
+                        }
+                    }
+
+                    if alive && !acc.is_empty() {
+                        let cur_fast_trans = &self.constraint.dwa_fast_transitions[cur_wa_state as usize];
+                        let tail_gss = DenseMaskGSS::from_chain_tail_and_acc(tail_lower, acc);
+                        if !tail_gss.is_empty() {
+                            tail_gss.for_each_decomposed(|ps, popped| {
+                                local_decompose += 1;
+                                n_enqueue_calls += 1;
+                                local_enqueue += 1;
+                                enqueue_parser_state_transitions(
+                                    &mut queue,
+                                    cur_fast_trans,
+                                    ps,
+                                    &popped,
+                                    precomputed,
+                                );
+                            });
+                        }
+                    }
+                } else {
+                    gss.for_each_decomposed(|parser_state, popped| {
+                        local_decompose += 1;
+                        n_enqueue_calls += 1;
+                        enqueue_parser_state_transitions(
+                            &mut queue,
+                            fast_trans,
+                            parser_state,
+                            &popped,
+                            precomputed,
+                        );
+                        local_enqueue += 1;
+                    });
+                }
                 let elapsed = t.elapsed().as_nanos() as u64;
                 n_decompose_ops += local_decompose;
                 // Split time proportionally between decompose and enqueue.

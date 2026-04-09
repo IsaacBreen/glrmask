@@ -1779,6 +1779,12 @@ pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
     inner: Arc<Upper<T, A>>,
 }
 
+/// Opaque handle to the tail of a chain in the GSS.
+/// Used by the chain optimization to reconstruct the GSS after walking a chain.
+pub struct ChainTail<T: Clone + Eq + Hash> {
+    inner: Arc<Lower<T>>,
+}
+
 impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> PartialEq for LeveledGSS<T, A> {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner) || *self.inner == *other.inner
@@ -1885,6 +1891,14 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
     pub fn empty() -> Self {
         empty_upper()
+    }
+
+    /// Create a GSS from a tail Lower node and an accumulator.
+    /// Used by the chain optimization to reconstruct the GSS at the bottom of a chain.
+    pub fn from_chain_tail_and_acc(tail: ChainTail<T>, acc: A) -> Self {
+        LeveledGSS {
+            inner: new_interface(tail.inner, acc),
+        }
     }
 
     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
@@ -3018,6 +3032,77 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 }
             }
         }
+    }
+
+    /// Extract the top chain of states plus the accumulator and tail.
+    ///
+    /// Returns `(chain_states_top_first, acc, tail_lower)` where:
+    /// - `chain_states_top_first`: parser states from the top of the chain downward
+    /// - `acc`: reference to the accumulator at the Interface
+    /// - `tail_lower`: the Lower node at the bottom of the chain
+    ///
+    /// Returns `None` if the GSS is not an Interface or has no chain.
+    /// The chain must have at least 2 states for this to be worthwhile.
+    pub fn extract_chain_and_tail(&self) -> Option<(SmallVec<[T; 16]>, &A, ChainTail<T>)> {
+        let interface = match &*self.inner {
+            Upper::Interface(iface) => iface,
+            _ => return None,
+        };
+
+        let mut states = SmallVec::<[T; 16]>::new();
+        let mut current: &Lower<T> = &interface.inner;
+
+        loop {
+            match current {
+                Lower::Chain { .. } => {
+                    states.push(current.chain_value().clone());
+                    let next = current.chain_next();
+                    current = &**next;
+                }
+                Lower::General { children, .. } => {
+                    if children.is_empty() {
+                        break;
+                    }
+                    if children.len() == 1 {
+                        let key = children.keys().next().unwrap().clone();
+                        let ordmap = children.values().next().unwrap();
+                        if ordmap.len() == 1 {
+                            states.push(key);
+                            let (_, next) = ordmap.iter().next().unwrap();
+                            current = &**next;
+                            continue;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        if states.len() < 2 {
+            return None;
+        }
+
+        // `current` is now the tail Lower node
+        // Get an Arc to it by walking down again
+        let mut tail: Arc<Lower<T>> = Arc::clone(
+            if interface.inner.is_chain() {
+                interface.inner.chain_next()
+            } else {
+                let ordmap = interface.inner.children_ref().values().next().unwrap();
+                ordmap.values().next().unwrap()
+            },
+        );
+        for _ in 1..states.len() {
+            let next = if tail.is_chain() {
+                Arc::clone(tail.chain_next())
+            } else {
+                let ordmap = tail.children_ref().values().next().unwrap();
+                Arc::clone(ordmap.values().next().unwrap())
+            };
+            tail = next;
+        }
+
+        Some((states, &interface.acc, ChainTail { inner: tail }))
     }
 
     /// Extract the top chain of state values from the GSS.
