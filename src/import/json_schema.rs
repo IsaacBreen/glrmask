@@ -9171,4 +9171,24 @@ mod tests {
         ]));
     }
 
+    #[test]
+    /// Regression test for closed-object pattern + boolean with rep >= 8.
+    /// Verifies the fix for incorrect flat_trans sharing across L2P partitions
+    /// (commit 17ddd1553) that caused empty masks for certain terminal patterns.
+    fn test_closed_object_pattern_with_boolean_repro() {
+        let entries: Vec<(u32, Vec<u8>)> = (0..=255u32).map(|b| (b, vec![b as u8])).collect();
+        let vocab = Vocab::new(entries, None);
+
+        for rep in [7, 8, 10, 24] {
+            let schema = format!(
+                r#"{{"type":"object","properties":{{"a":{{"type":"string","pattern":"^[a]{{{}}}$"}},"b":{{"type":"boolean"}}}},"additionalProperties":false}}"#,
+                rep
+            );
+            let c = crate::Constraint::from_json_schema(&schema, &vocab).unwrap();
+            let state = c.start();
+            let mask = state.mask();
+            let total: u32 = mask.iter().map(|w| w.count_ones()).sum();
+            assert!(total > 0, "rep={rep}: should allow at least one token at step 0, got 0");
+        }
+    }
 }

@@ -383,14 +383,13 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
     }
 
     // Only use the cached byte_to_class when the cache was built from a DFA
-    // with the same number of states (i.e. same transitions). When
+    // with identical transitions (verified via transition hash). When
     // simplify_for_terminals minimized the DFA, the cache may have been
-    // initialized by a partition with a different state count, making its
+    // initialized by a partition with different transitions, making its
     // byte_to_class invalid for this partition's DFA.
-    let num_dfa_states = tokenizer.dfa().states.len();
     let compatible_cache = shared_vocab_dfa_cache
         .and_then(|cache| cache.get())
-        .filter(|base| base.is_compatible_with_state_count(num_dfa_states));
+        .filter(|base| base.is_compatible_with_dfa(tokenizer.dfa()));
 
     // Deduplicate tokens by byte-class sequence. Tokens whose bytes map
     // to the same DFA byte-class sequence behave identically from every

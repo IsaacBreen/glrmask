@@ -73,6 +73,9 @@ pub struct SharedVocabDfaBase {
     trans_by_class: Vec<u32>,
     self_loop_bytes: Vec<U8Set>,
     none_completion_hash: u64,
+    /// Hash of the full transition table used to build this cache.
+    /// Used to detect incompatible DFAs that happen to share the same state count.
+    transition_hash: u64,
 }
 
 impl SharedVocabDfaBase {
@@ -120,12 +123,23 @@ impl SharedVocabDfaBase {
             h.finish()
         };
 
+        let transition_hash = {
+            let mut h = new_hasher();
+            for s in 0..dfa.states.len() {
+                for &t in dfa.transitions_for(s) {
+                    h.write_u32(t);
+                }
+            }
+            h.finish()
+        };
+
         SharedVocabDfaBase {
             byte_to_class,
             num_classes,
             trans_by_class,
             self_loop_bytes,
             none_completion_hash,
+            transition_hash,
         }
     }
 
@@ -222,12 +236,21 @@ impl SharedVocabDfaBase {
             h.finish()
         };
 
+        let transition_hash = {
+            let mut h = new_hasher();
+            for &t in flat_trans {
+                h.write_u32(t);
+            }
+            h.finish()
+        };
+
         SharedVocabDfaBase {
             byte_to_class,
             num_classes,
             trans_by_class,
             self_loop_bytes,
             none_completion_hash,
+            transition_hash,
         }
     }
 
@@ -236,10 +259,28 @@ impl SharedVocabDfaBase {
         self.byte_to_class
     }
 
-    /// Check if this cache was built from a DFA with the given state count.
+    /// Check if this cache was built from a DFA with the given state count
+    /// and identical transitions (verified via transition hash).
     pub fn is_compatible_with_state_count(&self, num_dfa_states: usize) -> bool {
         self.trans_by_class.len() == self.num_classes * num_dfa_states
             && self.self_loop_bytes.len() == num_dfa_states
+    }
+
+    /// Check full compatibility: state count AND transition hash must match.
+    /// Two DFAs with the same state count but different transitions (e.g. from
+    /// different simplify_for_terminals outcomes) must not share the cache.
+    pub fn is_compatible_with_dfa(&self, dfa: &super::super::compat::FlatDfa) -> bool {
+        let num_dfa_states = dfa.states.len();
+        if !self.is_compatible_with_state_count(num_dfa_states) {
+            return false;
+        }
+        let mut h = new_hasher();
+        for s in 0..num_dfa_states {
+            for &t in dfa.transitions_for(s) {
+                h.write_u32(t);
+            }
+        }
+        h.finish() == self.transition_hash
     }
 }
 
@@ -617,10 +658,10 @@ fn build_dfa_with_group_filter(
     let num_dfa_states = dfa.states.len();
 
     // Use shared base if available and compatible, otherwise compute from scratch.
-    // When simplify_for_terminals minimizes the DFA (changing state count),
-    // the shared base has a different state count and must be skipped.
+    // When simplify_for_terminals minimizes the DFA (changing transitions),
+    // the shared base may be incompatible and must be skipped.
     let compatible_shared_base = shared_base.filter(|base| {
-        base.is_compatible_with_state_count(num_dfa_states)
+        base.is_compatible_with_dfa(dfa)
     });
     let (byte_to_class, trans_by_class, self_loop_bytes, none_completion_hash, byte_classes_ms, transpose_ms) =
         if let Some(base) = compatible_shared_base {

@@ -137,7 +137,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                     &l2p_mask,
                     disallowed_follows,
                     _shared_vocab_dfa_cache,
-                    Some(flat_trans),
+                    None, // Do not share flat_trans — it's from the original tokenizer and may be incompatible with simplified DFA
                 );
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
             } else {
