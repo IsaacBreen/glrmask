@@ -155,34 +155,6 @@ impl DenseMaskAcc {
         }
     }
 
-    /// OR this accumulator's tokens (intersected with `final_weight`) into the output buffer.
-    fn or_intersection_to_buf(
-        &self,
-        constraint: &crate::runtime::constraint::Constraint,
-        final_weight: &Weight,
-        precomputed: &rustc_hash::FxHashMap<usize, Box<[u64]>>,
-        buf: &mut [u32],
-    ) {
-        for (&tsid, dense) in &self.0 {
-            let Some(token_set) = final_weight.0.get(tsid) else {
-                continue;
-            };
-            let key = Arc::as_ptr(token_set) as usize;
-            if let Some(other_dense) = precomputed.get(&key) {
-                constraint.or_dense_intersection_to_buf(dense, other_dense, buf);
-            } else {
-                let tokens = Self::dense_to_tokens(dense);
-                constraint.or_single_weight_intersection_to_buf(
-                    tsid,
-                    tsid,
-                    &Arc::new(tokens),
-                    final_weight,
-                    buf,
-                );
-            }
-        }
-    }
-
     /// OR this accumulator's internal tokens into a merged dense bitmap.
     fn or_into_merged(&self, merged: &mut [u64]) {
         for dense in self.0.values() {
@@ -222,109 +194,6 @@ impl DenseMaskAcc {
                             merged[w] |= 1u64 << b;
                         }
                     }
-                }
-            }
-        }
-    }
-
-    /// OR all tokens in this accumulator into the output buffer.
-    fn or_to_buf(
-        &self,
-        constraint: &crate::runtime::constraint::Constraint,
-        buf: &mut [u32],
-    ) {
-        let word_groups = &constraint.word_group_buf_masks;
-        let all_mask = &constraint.all_tokens_buf_mask;
-        let internal_masks = &constraint.internal_token_buf_masks;
-        for dense in self.0.values() {
-            // Super-fast path: check if entire dense matches full universe.
-            let n_full_groups = word_groups.len().saturating_sub(1);
-            if !all_mask.is_empty()
-                && dense.len() == word_groups.len()
-                && dense[..n_full_groups].iter().all(|&w| w == !0u64)
-            {
-                let last_expected = if internal_masks.len() % 64 == 0 {
-                    !0u64
-                } else {
-                    (1u64 << (internal_masks.len() % 64)) - 1
-                };
-                if dense[n_full_groups] == last_expected {
-                    for (i, &mask) in all_mask.iter().enumerate() {
-                        buf[i] |= mask;
-                    }
-                    continue;
-                }
-            }
-
-            // Complement path: when most words are full, start from the
-            // all-tokens mask and subtract the few missing tokens.
-            // This turns O(n_full_groups × buf_len) into O(n_missing × buf_len).
-            let n_full = dense.iter().filter(|&&w| w == !0u64).count();
-            let n_non_full = dense.len() - n_full;
-            if !all_mask.is_empty()
-                && dense.len() == word_groups.len()
-                && n_full > 0
-                && n_non_full < n_full
-            {
-                // Build complement: all_mask with missing tokens removed.
-                let mut temp: Vec<u32> = all_mask.to_vec();
-                for (wi, &w) in dense.iter().enumerate() {
-                    if w == !0u64 {
-                        continue;
-                    }
-                    if w == 0 {
-                        // Remove entire group from temp.
-                        if let Some(group) = word_groups.get(wi) {
-                            for (i, &mask) in group.iter().enumerate() {
-                                temp[i] &= !mask;
-                            }
-                        }
-                    } else {
-                        // Remove only the missing bits.
-                        let missing = !w;
-                        let n_internal = internal_masks.len();
-                        let mut bits = missing;
-                        while bits != 0 {
-                            let bit = bits.trailing_zeros() as usize;
-                            let internal_token = wi * 64 + bit;
-                            if internal_token < n_internal {
-                                for &(buf_word, mask) in &internal_masks[internal_token] {
-                                    temp[buf_word as usize] &= !mask;
-                                }
-                            }
-                            bits &= bits - 1;
-                        }
-                    }
-                }
-                for (i, &mask) in temp.iter().enumerate() {
-                    buf[i] |= mask;
-                }
-                continue;
-            }
-
-            for (wi, &w) in dense.iter().enumerate() {
-                if w == 0 {
-                    continue;
-                }
-                // Fast path: all 64 internal tokens in this word are set.
-                if w == !0u64 {
-                    if let Some(group) = word_groups.get(wi) {
-                        for (i, &mask) in group.iter().enumerate() {
-                            buf[i] |= mask;
-                        }
-                        continue;
-                    }
-                }
-                // Slow path: iterate individual bits.
-                let mut bits = w;
-                while bits != 0 {
-                    let bit = bits.trailing_zeros() as usize;
-                    let internal_token = wi * 64 + bit;
-                    let masks = &internal_masks[internal_token];
-                    for &(buf_word, mask) in masks {
-                        buf[buf_word as usize] |= mask;
-                    }
-                    bits &= bits - 1;
                 }
             }
         }
@@ -424,44 +293,6 @@ fn update_eos_mask(buf: &mut [u32], eos_token_id: Option<u32>, is_complete: bool
 }
 
 impl<'a> ConstraintState<'a> {
-    fn or_final_weight_to_buf(
-        &self,
-        final_weight: &Weight,
-        acc: &DenseMaskAcc,
-        precomputed: &DenseTokenMaskCache,
-        buf: &mut [u32],
-    ) {
-        if final_weight.is_full() {
-            acc.or_to_buf(&self.constraint, buf);
-        } else {
-            acc.or_intersection_to_buf(&self.constraint, final_weight, precomputed, buf);
-        }
-    }
-
-    fn or_final_weight_for_accs(
-        &self,
-        final_weight: &Weight,
-        accs: &[DenseMaskAcc],
-        precomputed: &DenseTokenMaskCache,
-        buf: &mut [u32],
-    ) {
-        for acc in accs {
-            self.or_final_weight_to_buf(final_weight, acc, precomputed, buf);
-        }
-    }
-
-    fn or_final_weight_for_gss(
-        &self,
-        final_weight: &Weight,
-        gss: &DenseMaskGSS,
-        precomputed: &DenseTokenMaskCache,
-        buf: &mut [u32],
-    ) {
-        gss.for_each_acc(|acc| {
-            self.or_final_weight_to_buf(final_weight, acc, precomputed, buf);
-        });
-    }
-
     /// Merge final_weight contribution into internal token bitmap instead of buf.
     fn merge_final_weight_to_internal(
         &self,
@@ -642,76 +473,6 @@ impl<'a> ConstraintState<'a> {
                 self.merge_final_weight_for_accs(final_weight, &root_accs, precomputed, merged);
                 for (_, sub_gss) in &decomposed {
                     self.merge_final_weight_for_gss(final_weight, sub_gss, precomputed, merged);
-                }
-            }
-
-            for (parser_state, popped) in &decomposed {
-                enqueue_parser_state_transitions(
-                    queue,
-                    start_fast_trans,
-                    *parser_state,
-                    popped,
-                    precomputed,
-                );
-            }
-        }
-    }
-
-    fn seed_mask_queue(
-        &self,
-        start_final_weight: Option<&Weight>,
-        start_fast_trans: &FxHashMap<i32, (u32, Weight)>,
-        precomputed: &DenseTokenMaskCache,
-        queue: &mut MaskQueue,
-        buf: &mut [u32],
-    ) {
-        for (&tokenizer_state, gss) in &self.state {
-            if gss.is_empty() {
-                continue;
-            }
-
-            let internal_tsid = self.constraint.internal_tsid_for_state(tokenizer_state);
-            let universe = &self.constraint.seed_universe_dense;
-            let terminal_masks = &self.constraint.seed_terminal_dense;
-
-            let (decomposed, root_accs) = gss.apply_transform_and_decompose(|terminals_disallowed| {
-                if terminals_disallowed.is_empty()
-                    || terminals_disallowed.values().all(|disallowed| disallowed.is_empty())
-                {
-                    if universe.iter().all(|&word| word == 0) {
-                        return None;
-                    }
-                    let dense: Arc<[u64]> = Arc::from(&**universe);
-                    return Some(DenseMaskAcc(BTreeMap::from([(internal_tsid, dense)])));
-                }
-
-                let mut dense: Vec<u64> = universe.to_vec();
-                for (&orig_tokenizer_state, disallowed_in_state) in terminals_disallowed.iter() {
-                    let internal_tsid = self.constraint.internal_tsid_for_state(orig_tokenizer_state);
-                    for &terminal_id in disallowed_in_state {
-                        if let Some(mask) = terminal_masks.get(&(internal_tsid, terminal_id)) {
-                            for (dense_word, mask_word) in dense.iter_mut().zip(mask.iter()) {
-                                *dense_word &= !mask_word;
-                            }
-                        }
-                    }
-                }
-
-                if dense.iter().all(|&word| word == 0) {
-                    None
-                } else {
-                    Some(DenseMaskAcc(BTreeMap::from([(internal_tsid, dense.into())])))
-                }
-            });
-
-            if decomposed.is_empty() && root_accs.is_empty() {
-                continue;
-            }
-
-            if let Some(final_weight) = start_final_weight {
-                self.or_final_weight_for_accs(final_weight, &root_accs, precomputed, buf);
-                for (_, sub_gss) in &decomposed {
-                    self.or_final_weight_for_gss(final_weight, sub_gss, precomputed, buf);
                 }
             }
 
