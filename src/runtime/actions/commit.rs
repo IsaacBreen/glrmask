@@ -253,39 +253,6 @@ fn advance_terminal_match(
     (!advanced.is_empty()).then_some(advanced)
 }
 
-fn advance_terminal_match_profiled(
-    constraint: &Constraint,
-    gss_at_offset: &ParserGSS,
-    terminal: u32,
-    exec_result: &TokenizerExecResult,
-    advance_result_cache: &mut AdvanceResultCache,
-    terminal_result_cache: &mut FxHashMap<u32, ParserGSS>,
-) -> Option<ParserGSS> {
-    if let Some(cached) = terminal_result_cache.get(&terminal) {
-        return (!cached.is_empty()).then(|| cached.clone());
-    }
-
-    let advance_cache_key = (gss_at_offset.ptr_key(), terminal);
-    let advanced = if let Some((_, cached)) = advance_result_cache.get(&advance_cache_key) {
-        cached.clone()
-    } else {
-        if !stack_may_advance_on(&constraint.table, gss_at_offset, terminal) {
-            let empty = ParserGSS::empty();
-            advance_result_cache.insert(advance_cache_key, (gss_at_offset.clone(), empty.clone()));
-            terminal_result_cache.insert(terminal, empty);
-            return None;
-        }
-
-        let advanced = advance_stacks(&constraint.table, gss_at_offset, terminal);
-        advance_result_cache.insert(advance_cache_key, (gss_at_offset.clone(), advanced.clone()));
-        advanced
-    };
-
-    let advanced = apply_future_terminal_disallow(constraint, exec_result, terminal, advanced);
-    terminal_result_cache.insert(terminal, advanced.clone());
-    (!advanced.is_empty()).then_some(advanced)
-}
-
 /// Fast path for the common case: exactly 1 tokenizer state, the tokenizer
 /// produces exactly 1 non-ignored terminal match that consumes all bytes,
 /// and no pending end-state needs to be queued. This avoids:
@@ -703,7 +670,7 @@ fn commit_bytes_impl_profiled(
                 }
 
                 let t_adv = Instant::now();
-                let advance_result = advance_terminal_match_profiled(
+                let advance_result = advance_terminal_match(
                     constraint, &gss_at_offset, matched.id, &exec_result,
                     &mut advance_result_cache, &mut terminal_result_cache,
                 );
