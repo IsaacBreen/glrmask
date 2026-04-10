@@ -347,13 +347,64 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
         return stack.shift_top_values(pure_shift_targets);
     }
 
-    // Chain fast path: for single-path chain GSS, apply reduces as flat stack
-    // operations. Avoids all intermediate Arc/GSS manipulation.
-    if let Some(mut chain_states) = stack.try_extract_chain_states() {
-        if let Some(result) = advance_chain_reduce_shift(&mut chain_states, table, token) {
-            return ParserGSS::from_chain_states(&result, &stack);
+    // Virtual stack fast path: for single-path chain GSS, apply reduces as
+    // flat stack operations via VirtualStack. Avoids all intermediate Arc/GSS
+    // manipulation.
+    if let Some(mut vstack) = stack.try_virtual_stack() {
+        let result = loop {
+            let Some(&state) = vstack.top() else {
+                break Some(ParserGSS::empty());
+            };
+            match table.action(state, token) {
+                Some(Action::Reduce(rule_id)) => {
+                    let rule = &table.rules[*rule_id as usize];
+                    if !vstack.pop(rule.rhs.len()) {
+                        break Some(ParserGSS::empty());
+                    }
+                    let Some(&goto_from) = vstack.top() else {
+                        break Some(ParserGSS::empty());
+                    };
+                    match table.goto_target(goto_from, rule.lhs) {
+                        Some(target) => vstack.push(target),
+                        None => break Some(ParserGSS::empty()),
+                    }
+                }
+                Some(Action::Shift(target)) => {
+                    vstack.push(*target);
+                    break Some(vstack.into_gss());
+                }
+                Some(Action::Split { shift: Some(target), reduces, accept })
+                    if reduces.is_empty() && !*accept =>
+                {
+                    vstack.push(*target);
+                    break Some(vstack.into_gss());
+                }
+                Some(Action::Split { shift, reduces, accept }) => {
+                    // Single-reduce split: treat as plain Reduce
+                    if shift.is_none() && !*accept && reduces.len() == 1 {
+                        let rule = &table.rules[reduces[0] as usize];
+                        if !vstack.pop(rule.rhs.len()) {
+                            break Some(ParserGSS::empty());
+                        }
+                        let Some(&goto_from) = vstack.top() else {
+                            break Some(ParserGSS::empty());
+                        };
+                        match table.goto_target(goto_from, rule.lhs) {
+                            Some(target) => vstack.push(target),
+                            None => break Some(ParserGSS::empty()),
+                        }
+                        continue;
+                    }
+                    break None; // Multi-reduce splits: fall through
+                }
+                Some(Action::Accept) => break None,
+                None => break Some(ParserGSS::empty()),
+            }
+        };
+        if let Some(result) = result {
+            return result;
         }
-        // Fall through: chain had splits/accept, use general path
+        // Fall through: had splits/accept, use general path
     }
 
     // Owned: no clone needed. First Arc::make_mut won't clone if refcount == 1.

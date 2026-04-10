@@ -399,6 +399,9 @@ impl<'a, V: Clone> IntoIterator for &'a CompactOrdMap<V> {
 
 type Children<T, N> = CompactMap<T, CompactOrdMap<Arc<N>>>;
 
+/// Maximum number of values packed into a single Segment node.
+const SEGMENT_CAP: usize = 32;
+
 #[derive(Clone, PartialEq, Eq)]
 enum Lower<T: Clone + Eq + Hash> {
     General {
@@ -406,10 +409,15 @@ enum Lower<T: Clone + Eq + Hash> {
         empty: bool,
         max_depth: u32,
     },
-    /// Single child value with one child node — stored inline for efficiency.
-    /// Known to have exactly 1 child key with 1 depth entry.
-    Chain {
-        value: T,
+    /// Linear segment of the stack: multiple values packed into one node.
+    /// `values[0]` is the deepest value (closest to `next`),
+    /// `values[last]` is the shallowest (top of stack).
+    /// Intermediate levels (all except the top) are guaranteed to have empty=false.
+    /// Replaces the old Chain variant (which was Segment with exactly 1 value).
+    /// Uses SmallVec<[T; 1]> so single-value segments have zero heap overhead
+    /// (value stored inline, same as the old Chain variant).
+    Segment {
+        values: SmallVec<[T; 1]>,
         next: Arc<Lower<T>>,
         empty: bool,
         max_depth: u32,
@@ -420,23 +428,26 @@ impl<T: Clone + Eq + Hash> Lower<T> {
     #[inline(always)]
     fn empty(&self) -> bool {
         match self {
-            Lower::General { empty, .. } | Lower::Chain { empty, .. } => *empty,
+            Lower::General { empty, .. } | Lower::Segment { empty, .. } => *empty,
         }
     }
 
     #[inline(always)]
     fn max_depth(&self) -> u32 {
         match self {
-            Lower::General { max_depth, .. } | Lower::Chain { max_depth, .. } => *max_depth,
+            Lower::General { max_depth, .. } | Lower::Segment { max_depth, .. } => *max_depth,
         }
     }
 
-    /// Get children as a general Children map (allocates for Chain).
+    /// Get children as a general Children map.
+    /// For Segment, constructs a map with the top value → rest-of-segment.
     fn children(&self) -> Children<T, Lower<T>> {
         match self {
             Lower::General { children, .. } => children.clone(),
-            Lower::Chain { value, next, .. } => {
-                CompactMap::unit(value.clone(), CompactOrdMap::unit(next.max_depth(), next.clone()))
+            Lower::Segment { values, .. } => {
+                let top_value = values.last().unwrap().clone();
+                let child = self.segment_rest_arc();
+                CompactMap::unit(top_value, CompactOrdMap::unit(child.max_depth(), child))
             }
         }
     }
@@ -445,19 +456,33 @@ impl<T: Clone + Eq + Hash> Lower<T> {
     fn into_parts(self) -> (Children<T, Lower<T>>, bool, u32) {
         match self {
             Lower::General { children, empty, max_depth } => (children, empty, max_depth),
-            Lower::Chain { value, next, empty, max_depth } => {
-                let children = CompactMap::unit(value, CompactOrdMap::unit(next.max_depth(), next));
+            Lower::Segment { values, next, empty, max_depth } => {
+                let top_value = values.last().unwrap().clone();
+                let child = if values.len() == 1 {
+                    next
+                } else {
+                    let mut rest_values = values;
+                    rest_values.pop();
+                    let rest_md = next.max_depth() + rest_values.len() as u32;
+                    Arc::new(Lower::Segment {
+                        values: rest_values,
+                        next,
+                        empty: false,
+                        max_depth: rest_md,
+                    })
+                };
+                let children = CompactMap::unit(top_value, CompactOrdMap::unit(child.max_depth(), child));
                 (children, empty, max_depth)
             }
         }
     }
 
-    /// Number of distinct child keys.
+    /// Number of distinct child keys (at the top level).
     #[inline(always)]
     fn children_len(&self) -> usize {
         match self {
             Lower::General { children, .. } => children.len(),
-            Lower::Chain { .. } => 1,
+            Lower::Segment { .. } => 1,
         }
     }
 
@@ -466,72 +491,129 @@ impl<T: Clone + Eq + Hash> Lower<T> {
     fn children_is_empty(&self) -> bool {
         match self {
             Lower::General { children, .. } => children.is_empty(),
-            Lower::Chain { .. } => false,
+            Lower::Segment { .. } => false,
         }
     }
 
-    /// Check if children contains a key.
+    /// Check if the top-level children contains a key.
     fn children_contains_key(&self, key: &T) -> bool {
         match self {
             Lower::General { children, .. } => children.contains_key(key),
-            Lower::Chain { value, .. } => value == key,
+            Lower::Segment { values, .. } => values.last().unwrap() == key,
         }
     }
 
-    /// Get children keys as a Vec.
+    /// Get top-level children keys as a Vec.
     fn children_keys_vec(&self) -> Vec<T> {
         match self {
             Lower::General { children, .. } => children.keys().cloned().collect(),
-            Lower::Chain { value, .. } => vec![value.clone()],
+            Lower::Segment { values, .. } => vec![values.last().unwrap().clone()],
         }
     }
 
-    /// Ensure this Lower is in General form, converting from Chain if necessary.
+    /// Ensure this Lower is in General form, converting from Segment if necessary.
     fn ensure_general(&mut self) {
-        if let Lower::Chain { .. } = self {
+        if let Lower::Segment { .. } = self {
             let old = std::mem::replace(self, Lower::General {
                 children: CompactMap::new(),
                 empty: false,
                 max_depth: 0,
             });
-            if let Lower::Chain { value, next, empty, max_depth } = old {
-                let children = CompactMap::unit(value, CompactOrdMap::unit(next.max_depth(), next));
+            if let Lower::Segment { values, next, empty, max_depth } = old {
+                let top_value = values.last().unwrap().clone();
+                let child = if values.len() == 1 {
+                    next
+                } else {
+                    let mut rest_values = values;
+                    rest_values.pop();
+                    let rest_md = next.max_depth() + rest_values.len() as u32;
+                    Arc::new(Lower::Segment {
+                        values: rest_values,
+                        next,
+                        empty: false,
+                        max_depth: rest_md,
+                    })
+                };
+                let children = CompactMap::unit(top_value, CompactOrdMap::unit(child.max_depth(), child));
                 *self = Lower::General { children, empty, max_depth };
             }
         }
     }
 
-    /// Get mutable access to children and max_depth. Converts Chain→General first.
+    /// Get mutable access to children and max_depth. Converts Segment→General first.
     fn children_and_depth_mut(&mut self) -> (&mut Children<T, Lower<T>>, &mut u32) {
         self.ensure_general();
         match self {
             Lower::General { children, max_depth, .. } => (children, max_depth),
-            Lower::Chain { .. } => unreachable!(),
+            Lower::Segment { .. } => unreachable!(),
         }
     }
 
-    /// Returns true if this is a Chain variant (single child key, single depth entry).
+    /// Returns true if this is a Segment variant.
     #[inline(always)]
-    fn is_chain(&self) -> bool {
-        matches!(self, Lower::Chain { .. })
+    fn is_segment(&self) -> bool {
+        matches!(self, Lower::Segment { .. })
     }
 
-    /// For Chain variant, get the single child value (key) by reference.
+    /// For Segment variant, get the shallowest (top) value by reference.
     /// Panics if called on General.
     #[inline(always)]
-    fn chain_value(&self) -> &T {
+    fn segment_top_value(&self) -> &T {
         match self {
-            Lower::Chain { value, .. } => value,
-            Lower::General { .. } => panic!("chain_value called on General"),
+            Lower::Segment { values, .. } => values.last().unwrap(),
+            Lower::General { .. } => panic!("segment_top_value called on General"),
         }
     }
 
-    /// For Chain variant, get the single child Arc<Lower> by reference.
+    /// For Segment variant, get the deep-end next pointer.
     /// Panics if called on General.
     #[inline(always)]
+    fn segment_next(&self) -> &Arc<Lower<T>> {
+        match self {
+            Lower::Segment { next, .. } => next,
+            Lower::General { .. } => panic!("segment_next called on General"),
+        }
+    }
+
+    /// For Segment variant, get the values slice.
+    /// Panics if called on General.
+    #[inline(always)]
+    fn segment_values(&self) -> &[T] {
+        match self {
+            Lower::Segment { values, .. } => values,
+            Lower::General { .. } => panic!("segment_values called on General"),
+        }
+    }
+
+    /// For Segment variant, return an Arc to the "rest" (everything below the top value).
+    /// If len==1, returns next directly. Otherwise creates a new shorter Segment.
+    fn segment_rest_arc(&self) -> Arc<Lower<T>> {
+        match self {
+            Lower::Segment { values, next, .. } if values.len() == 1 => next.clone(),
+            Lower::Segment { values, next, .. } => {
+                let rest_values: SmallVec<[T; 1]> = values[..values.len() - 1].iter().cloned().collect();
+                let rest_md = next.max_depth() + rest_values.len() as u32;
+                Arc::new(Lower::Segment {
+                    values: rest_values,
+                    next: next.clone(),
+                    empty: false, // intermediate empties are always false
+                    max_depth: rest_md,
+                })
+            }
+            Lower::General { .. } => panic!("segment_rest_arc called on General"),
+        }
+    }
+
+    // Backwards-compatible aliases for code that checks is_chain / uses chain_value / chain_next.
+    // These work on Segment treating it as a single-top-value chain.
+    #[inline(always)]
+    fn is_chain(&self) -> bool { self.is_segment() }
+    #[inline(always)]
+    fn chain_value(&self) -> &T { self.segment_top_value() }
     fn chain_next(&self) -> &Arc<Lower<T>> {
         match self {
-            Lower::Chain { next, .. } => next,
+            Lower::Segment { values, next, .. } if values.len() == 1 => next,
+            Lower::Segment { .. } => panic!("chain_next called on multi-value Segment; use segment_rest_arc()"),
             Lower::General { .. } => panic!("chain_next called on General"),
         }
     }
@@ -569,7 +651,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Upper<T, A> {
         match self {
             Upper::Branch(branch) => branch.children.keys().cloned().collect(),
             Upper::Interface(interface) => match &*interface.inner {
-                Lower::Chain { value, .. } => smallvec![value.clone()],
+                Lower::Segment { values, .. } => smallvec![values.last().unwrap().clone()],
                 Lower::General { children, .. } => children.keys().cloned().collect(),
             },
         }
@@ -587,7 +669,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Upper<T, A> {
             Upper::Interface(interface) => {
                 if interface.inner.children_len() == 1 {
                     match &*interface.inner {
-                        Lower::Chain { value, .. } => Some(value.clone()),
+                        Lower::Segment { values, .. } => Some(values.last().unwrap().clone()),
                         Lower::General { children, .. } => children.keys().next().cloned(),
                     }
                 } else {
@@ -609,7 +691,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Upper<T, A> {
             Upper::Interface(interface) => {
                 if !interface.inner.empty() && interface.inner.children_len() == 1 {
                     match &*interface.inner {
-                        Lower::Chain { value, .. } => Some(value.clone()),
+                        Lower::Segment { values, .. } => Some(values.last().unwrap().clone()),
                         Lower::General { children, .. } => children.keys().next().cloned(),
                     }
                 } else {
@@ -709,14 +791,19 @@ where
 }
 
 fn new_lower<T: Clone + Eq + Hash>(children: Children<T, Lower<T>>, empty: bool) -> Arc<Lower<T>> {
-    // Use Chain variant when there's exactly one key with one depth entry
+    // Use Segment variant when there's exactly one key with one depth entry.
+    // NOTE: We do NOT pack into existing child Segments here. Packing only happens
+    // in batch-construction paths (from_chain_states) so that incremental push/pop
+    // preserves Arc sharing (the child Arc is reused on pop).
     if children.len() == 1 {
         let (key, ord_map) = children.iter().next().unwrap();
         if ord_map.len() == 1 {
             let (_, next) = ord_map.iter().next().unwrap();
+            // Create a single-element Segment
+            let values = smallvec![key.clone()];
             let max_depth = next.max_depth() + 1;
-            return Arc::new(Lower::Chain {
-                value: key.clone(),
+            return Arc::new(Lower::Segment {
+                values,
                 next: next.clone(),
                 empty,
                 max_depth,
@@ -784,9 +871,11 @@ fn filter_lower<T: Clone + Eq + Hash>(
 
     if current_depth < max_d {
         match &**node {
-            Lower::Chain { value, next, .. } => {
-                if let Some(new_child) = filter_lower(next, current_depth + 1, min_len, max_len) {
-                    if !Arc::ptr_eq(&new_child, next) || new_child.max_depth() != next.max_depth() {
+            Lower::Segment { values, .. } => {
+                let value = values.last().unwrap();
+                let rest = node.segment_rest_arc();
+                if let Some(new_child) = filter_lower(&rest, current_depth + 1, min_len, max_len) {
+                    if !Arc::ptr_eq(&new_child, &rest) || new_child.max_depth() != rest.max_depth() {
                         children_identical = false;
                     }
                     new_children.insert(value.clone(), CompactOrdMap::unit(new_child.max_depth(), new_child));
@@ -912,9 +1001,11 @@ where
             let mut children_identical = true;
             if current_depth < max_d {
                 match &*i.inner {
-                    Lower::Chain { value, next, .. } => {
-                        if let Some(new_child) = filter_lower(next, current_depth + 1, min_len, max_len) {
-                            if !Arc::ptr_eq(&new_child, next) || new_child.max_depth() != next.max_depth() {
+                    Lower::Segment { values, .. } => {
+                        let value = values.last().unwrap();
+                        let rest = i.inner.segment_rest_arc();
+                        if let Some(new_child) = filter_lower(&rest, current_depth + 1, min_len, max_len) {
+                            if !Arc::ptr_eq(&new_child, &rest) || new_child.max_depth() != rest.max_depth() {
                                 children_identical = false;
                             }
                             new_children.insert(value.clone(), CompactOrdMap::unit(new_child.max_depth(), new_child));
@@ -994,9 +1085,11 @@ fn truncate_lower<T: Clone + Eq + Hash>(
     let mut children_identical = true;
 
     match &**node {
-        Lower::Chain { value, next, .. } => {
-            if let Some(new_child) = truncate_lower(next, current_depth + 1, max_len, memo) {
-                if !Arc::ptr_eq(next, &new_child) || next.max_depth() != new_child.max_depth() {
+        Lower::Segment { values, .. } => {
+            let value = values.last().unwrap();
+            let rest = node.segment_rest_arc();
+            if let Some(new_child) = truncate_lower(&rest, current_depth + 1, max_len, memo) {
+                if !Arc::ptr_eq(&rest, &new_child) || rest.max_depth() != new_child.max_depth() {
                     children_identical = false;
                 }
                 new_children.insert(value.clone(), CompactOrdMap::unit(new_child.max_depth(), new_child));
@@ -1202,35 +1295,42 @@ fn merge_lower<T: Clone + Eq + Hash>(l1: &Arc<Lower<T>>, l2: &Arc<Lower<T>>) -> 
         return l1.clone();
     }
     let new_empty = l1.empty() || l2.empty();
-    // Fast path: merge two Chain nodes or Chain + General without building full Children
+    // Fast path: merge two Segment nodes or Segment + General without building full Children
     let merged_children = match (&**l1, &**l2) {
-        (Lower::Chain { value: v1, next: n1, .. }, Lower::Chain { value: v2, next: n2, .. }) => {
+        (Lower::Segment { .. }, Lower::Segment { .. }) => {
+            let v1 = l1.segment_top_value();
+            let v2 = l2.segment_top_value();
+            let r1 = l1.segment_rest_arc();
+            let r2 = l2.segment_rest_arc();
             if v1 == v2 {
-                // Same key: merge the single children
-                let merged_next = merge_lower(n1, n2);
+                // Same key: merge the rests
+                let merged_next = merge_lower(&r1, &r2);
                 CompactMap::unit(v1.clone(), CompactOrdMap::unit(merged_next.max_depth(), merged_next))
             } else {
                 // Different keys: two entries
-                let mut c = CompactMap::unit(v1.clone(), CompactOrdMap::unit(n1.max_depth(), n1.clone()));
-                c.insert(v2.clone(), CompactOrdMap::unit(n2.max_depth(), n2.clone()));
+                let mut c = CompactMap::unit(v1.clone(), CompactOrdMap::unit(r1.max_depth(), r1));
+                c.insert(v2.clone(), CompactOrdMap::unit(r2.max_depth(), r2));
                 c
             }
         }
-        (Lower::Chain { value, next, .. }, Lower::General { children, .. }) |
-        (Lower::General { children, .. }, Lower::Chain { value, next, .. }) => {
+        (Lower::Segment { .. }, Lower::General { children, .. }) |
+        (Lower::General { children, .. }, Lower::Segment { .. }) => {
+            let seg = if l1.is_segment() { l1 } else { l2 };
+            let value = seg.segment_top_value();
+            let rest = seg.segment_rest_arc();
             let mut merged = children.clone();
-            let chain_kids = CompactOrdMap::unit(next.max_depth(), next.clone());
+            let seg_kids = CompactOrdMap::unit(rest.max_depth(), rest.clone());
             if let Some(existing) = merged.get(value) {
                 let mut new_map = existing.clone();
-                let depth = next.max_depth();
+                let depth = rest.max_depth();
                 if let Some(existing_child) = new_map.get(&depth) {
-                    new_map.insert(depth, merge_lower(existing_child, next));
+                    new_map.insert(depth, merge_lower(existing_child, &rest));
                 } else {
-                    new_map.insert(depth, next.clone());
+                    new_map.insert(depth, rest);
                 }
                 merged.insert(value.clone(), new_map);
             } else {
-                merged.insert(value.clone(), chain_kids);
+                merged.insert(value.clone(), seg_kids);
             }
             merged
         }
@@ -1248,8 +1348,10 @@ where
 {
     let mut children: Children<T, Upper<T, A>> = CompactMap::new();
     match &*it.inner {
-        Lower::Chain { value, next, .. } => {
-            let ci = new_interface(next.clone(), it.acc.clone());
+        Lower::Segment { values, .. } => {
+            let value = values.last().unwrap();
+            let rest = it.inner.segment_rest_arc();
+            let ci = new_interface(rest, it.acc.clone());
             let v_map = CompactOrdMap::unit(ci.max_depth(), ci);
             children.insert(value.clone(), v_map);
         }
@@ -1863,6 +1965,81 @@ pub struct ChainTail<T: Clone + Eq + Hash> {
     inner: Arc<Lower<T>>,
 }
 
+/// A mutable view of a single-path GSS as a flat stack of values.
+/// Created by [`LeveledGSS::try_virtual_stack`]. Supports push/pop
+/// operations and can be materialized back into a GSS via [`into_gss`].
+///
+/// Values are stored bottom-first: index 0 is deepest, last is top.
+pub struct VirtualStack<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+    states: SmallVec<[T; 32]>,
+    acc: A,
+}
+
+impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
+    /// The current top-of-stack value, or None if the stack is empty.
+    #[inline]
+    pub fn top(&self) -> Option<&T> {
+        self.states.last()
+    }
+
+    /// Pop `n` values from the top. Returns false if `n` exceeds the stack
+    /// depth (the stack is left unchanged in that case).
+    #[inline]
+    pub fn pop(&mut self, n: usize) -> bool {
+        if n > self.states.len() {
+            return false;
+        }
+        self.states.truncate(self.states.len() - n);
+        true
+    }
+
+    /// Push a value onto the top of the stack.
+    #[inline]
+    pub fn push(&mut self, value: T) {
+        self.states.push(value);
+    }
+
+    /// The number of values on the stack.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.states.len()
+    }
+
+    /// Check if the stack is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.states.is_empty()
+    }
+
+    /// Materialize the virtual stack back into a GSS. Uses packed Segments.
+    pub fn into_gss(self) -> LeveledGSS<T, A> {
+        if self.states.is_empty() {
+            return LeveledGSS::empty();
+        }
+        // Build from bottom to top, one Segment per value (no packing).
+        // Packing would create multi-value segments that force allocations
+        // in segment_rest_arc() on subsequent operations.
+        let base: Arc<Lower<T>> = Arc::new(Lower::General {
+            children: CompactMap::new(),
+            empty: true,
+            max_depth: 0,
+        });
+        let mut current = base;
+        for state in self.states.iter() {
+            let max_depth = current.max_depth() + 1;
+            current = Arc::new(Lower::Segment {
+                values: smallvec![state.clone()],
+                next: current,
+                empty: false,
+                max_depth,
+            });
+        }
+        LeveledGSS {
+            inner: new_interface(current, self.acc),
+        }
+    }
+}
+
 impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> PartialEq for LeveledGSS<T, A> {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner) || *self.inner == *other.inner
@@ -2119,10 +2296,15 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 out.push((stack, acc.clone()));
             }
             match l {
-                Lower::Chain { value, next, .. } => {
-                    pref.push(value.clone());
+                Lower::Segment { values, next, .. } => {
+                    // Push values top-to-bottom (reverse order since values[0]=deepest)
+                    for v in values.iter().rev() {
+                        pref.push(v.clone());
+                    }
                     dfs_lower(next, pref, acc, out);
-                    pref.pop();
+                    for _ in 0..values.len() {
+                        pref.pop();
+                    }
                 }
                 Lower::General { children, .. } => {
                     for (v, kids) in children.iter() {
@@ -2163,10 +2345,14 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         out.push((stack, i.acc.clone()));
                     }
                     match &*i.inner {
-                        Lower::Chain { value, next, .. } => {
-                            pref.push(value.clone());
+                        Lower::Segment { values, next, .. } => {
+                            for v in values.iter().rev() {
+                                pref.push(v.clone());
+                            }
                             dfs_lower(next, pref, &i.acc, out);
-                            pref.pop();
+                            for _ in 0..values.len() {
+                                pref.pop();
+                            }
                         }
                         Lower::General { children, .. } => {
                             for (v, kids) in children.iter() {
@@ -2205,13 +2391,15 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 if out.len() > limit { return false; }
             }
             match l {
-                Lower::Chain { value, next, .. } => {
-                    pref.push(value.clone());
+                Lower::Segment { values, next, .. } => {
+                    for v in values.iter().rev() {
+                        pref.push(v.clone());
+                    }
                     if !dfs_lower_bounded(next, pref, acc, out, limit) {
-                        pref.pop();
+                        for _ in 0..values.len() { pref.pop(); }
                         return false;
                     }
-                    pref.pop();
+                    for _ in 0..values.len() { pref.pop(); }
                 }
                 Lower::General { children, .. } => {
                     for (v, kids) in children.iter() {
@@ -2262,13 +2450,15 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         if out.len() > limit { return false; }
                     }
                     match &*i.inner {
-                        Lower::Chain { value, next, .. } => {
-                            pref.push(value.clone());
+                        Lower::Segment { values, next, .. } => {
+                            for v in values.iter().rev() {
+                                pref.push(v.clone());
+                            }
                             if !dfs_lower_bounded(next, pref, &i.acc, out, limit) {
-                                pref.pop();
+                                for _ in 0..values.len() { pref.pop(); }
                                 return false;
                             }
-                            pref.pop();
+                            for _ in 0..values.len() { pref.pop(); }
                         }
                         Lower::General { children, .. } => {
                             for (v, kids) in children.iter() {
@@ -2342,22 +2532,24 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 // Linear scan is faster than HashMap for typical ≤8 shift pairs.
                 let mut children_by_target: SmallVec<[(T, Children<T, Lower<T>>); 4]> = SmallVec::new();
 
-                // Build a Chain-aware lookup closure
+                // Build a Segment-aware lookup closure
                 let inner_children;
-                let chain_entry: Option<(&T, CompactOrdMap<Arc<Lower<T>>>)>;
+                let seg_entry: Option<(&T, CompactOrdMap<Arc<Lower<T>>>)>;
                 match &*i.inner {
-                    Lower::Chain { value, next, .. } => {
+                    Lower::Segment { values, .. } => {
+                        let top_val = values.last().unwrap();
+                        let rest = i.inner.segment_rest_arc();
                         inner_children = None;
-                        chain_entry = Some((value, CompactOrdMap::unit(next.max_depth(), next.clone())));
+                        seg_entry = Some((top_val, CompactOrdMap::unit(rest.max_depth(), rest)));
                     }
                     Lower::General { children, .. } => {
                         inner_children = Some(children);
-                        chain_entry = None;
+                        seg_entry = None;
                     }
                 }
 
                 for (from, to) in pairs.iter().cloned() {
-                    let kids_opt = if let Some((cv, ref ck)) = chain_entry {
+                    let kids_opt = if let Some((cv, ref ck)) = seg_entry {
                         if *cv == from { Some(ck) } else { None }
                     } else {
                         inner_children.unwrap().get(&from)
@@ -2589,7 +2781,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         *max_depth = child_depth + 1;
                     }
                 }
-                Lower::Chain { .. } => unreachable!(),
+                Lower::Segment { .. } => unreachable!(),
             }
 
             return self;
@@ -2611,10 +2803,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
         // Fast path for Interface variant
         if let Upper::Interface(interface) = &*self.inner {
-            // Get children for the isolated value — handle Chain directly
-            let child_opt = if interface.inner.is_chain() {
-                if interface.inner.chain_value() == &value {
-                    Some(interface.inner.chain_next().clone())
+            // Get children for the isolated value — handle Segment directly
+            let child_opt = if interface.inner.is_segment() {
+                if interface.inner.segment_top_value() == &value {
+                    Some(interface.inner.segment_rest_arc())
                 } else {
                     None
                 }
@@ -2676,10 +2868,12 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         // Fast path: walk down through single-child Interface levels
         // without creating intermediate GSSes.
         if let Upper::Interface(interface) = &*self.inner {
-            // Get first child for this value — handle Chain directly
-            let first_child_opt = if interface.inner.is_chain() {
-                if interface.inner.chain_value() == &value {
-                    Some(interface.inner.chain_next())
+            // Get first child for this value — handle Segment directly
+            let rest_storage;
+            let first_child_opt: Option<&Arc<Lower<T>>> = if interface.inner.is_segment() {
+                if interface.inner.segment_top_value() == &value {
+                    rest_storage = interface.inner.segment_rest_arc();
+                    Some(&rest_storage)
                 } else {
                     None
                 }
@@ -2705,24 +2899,29 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         if current.empty() {
                             break;
                         }
-                        if current.is_chain() {
-                            // Chain variant: exactly 1 key, 1 depth → fast follow
-                            current = current.chain_next();
-                            remaining -= 1;
-                        } else if current.children_len() == 1 {
-                            if let Lower::General { children, .. } = &**current {
-                                let ordmap = children.values().next().unwrap();
-                                if ordmap.len() != 1 {
+                        match &**current {
+                            Lower::Segment { values, next, .. } => {
+                                let seg_len = values.len() as isize;
+                                if remaining >= seg_len {
+                                    current = next;
+                                    remaining -= seg_len;
+                                } else {
+                                    break; // Would land inside segment — fall to slow path
+                                }
+                            }
+                            Lower::General { children, .. } => {
+                                if children.len() == 1 {
+                                    let ordmap = children.values().next().unwrap();
+                                    if ordmap.len() != 1 {
+                                        break;
+                                    }
+                                    let (_, child) = ordmap.iter().next().unwrap();
+                                    current = child;
+                                    remaining -= 1;
+                                } else {
                                     break;
                                 }
-                                let (_, child) = ordmap.iter().next().unwrap();
-                                current = child;
-                                remaining -= 1;
-                            } else {
-                                break;
                             }
-                        } else {
-                            break;
                         }
                     }
 
@@ -2735,7 +2934,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         let acc = &interface.acc;
                         if current.children_len() == 1 {
                             let goto_from = match &**current {
-                                Lower::Chain { value, .. } => value.clone(),
+                                Lower::Segment { values, .. } => values.last().unwrap().clone(),
                                 Lower::General { children, .. } => {
                                     children.keys().next().unwrap().clone()
                                 }
@@ -2810,10 +3009,27 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 return cached.clone();
             }
 
-            // Chain fast path: single child, directly recurse
-            let merged: Option<Arc<Lower<T>>> = if node.is_chain() {
-                let popped = popn_lower::<T, A>(node.chain_next(), k - 1, memo_lower);
-                Some(popped)
+            // Segment fast path: pop through the whole segment at once
+            let merged: Option<Arc<Lower<T>>> = if node.is_segment() {
+                let values = node.segment_values();
+                let seg_len = values.len() as isize;
+                if k >= seg_len {
+                    // Pop past entire segment
+                    let popped = popn_lower::<T, A>(node.segment_next(), k - seg_len, memo_lower);
+                    Some(popped)
+                } else {
+                    // Pop within segment: create shorter segment with remaining values
+                    let keep = (seg_len - k) as usize;
+                    let new_values: SmallVec<[T; 1]> = values[..keep].iter().cloned().collect();
+                    let next = node.segment_next();
+                    let md = next.max_depth() + new_values.len() as u32;
+                    Some(Arc::new(Lower::Segment {
+                        values: new_values,
+                        next: next.clone(),
+                        empty: false,
+                        max_depth: md,
+                    }))
+                }
             } else {
                 let mut m: Option<Arc<Lower<T>>> = None;
                 if let Lower::General { children, .. } = &**node {
@@ -2909,8 +3125,16 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         let mut current = interface.inner.clone();
         let mut remaining = n;
         while remaining > 0 {
-            let next_child = if current.is_chain() {
-                Some(current.chain_next().clone())
+            let next_child = if current.is_segment() {
+                let values = current.segment_values();
+                if values.len() as isize <= remaining {
+                    // Decrement by (len-1) here; the loop bottom adds the final -1
+                    remaining -= values.len() as isize - 1;
+                    Some(current.segment_next().clone())
+                } else {
+                    // Would land inside segment — can't use this fast path
+                    return None;
+                }
             } else {
                 match current.children_len() {
                     0 => None,
@@ -3120,10 +3344,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 result
             }
             Upper::Interface(i) => {
-                // Chain fast path: single child, no iteration needed
-                if i.inner.is_chain() {
-                    let val = i.inner.chain_value().clone();
-                    let lower = i.inner.chain_next().clone();
+                // Segment fast path: single child, no iteration needed
+                if i.inner.is_segment() {
+                    let val = i.inner.segment_top_value().clone();
+                    let lower = i.inner.segment_rest_arc();
                     if !lower.children_is_empty() || lower.empty() {
                         let upper = new_interface(lower, i.acc.clone());
                         return vec![(val, LeveledGSS { inner: upper })];
@@ -3184,9 +3408,9 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 }
             }
             Upper::Interface(i) => {
-                if i.inner.is_chain() {
-                    let val = i.inner.chain_value().clone();
-                    let lower = i.inner.chain_next().clone();
+                if i.inner.is_segment() {
+                    let val = i.inner.segment_top_value().clone();
+                    let lower = i.inner.segment_rest_arc();
                     if !lower.children_is_empty() || lower.empty() {
                         let upper = new_interface(lower, i.acc.clone());
                         f(val, LeveledGSS { inner: upper });
@@ -3236,9 +3460,13 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         let first_arc: &Arc<Lower<T>>;
         let first_state: T;
         match &*interface.inner {
-            Lower::Chain { .. } => {
-                first_state = interface.inner.chain_value().clone();
-                first_arc = interface.inner.chain_next();
+            Lower::Segment { values, next, .. } => {
+                // Push all segment values top-first
+                for v in values.iter().rev() {
+                    states.push(v.clone());
+                }
+                first_arc = next;
+                // Skip the first_state/first_arc pattern — already handled
             }
             Lower::General { children, .. } => {
                 if children.is_empty() { return None; }
@@ -3247,18 +3475,20 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 if ordmap.len() != 1 { return None; }
                 first_state = children.keys().next().unwrap().clone();
                 first_arc = ordmap.values().next().unwrap();
+                states.push(first_state);
             }
         }
-        states.push(first_state);
 
         // Now walk through Arc references, keeping the last Arc as the tail.
         let mut current_arc: &Arc<Lower<T>> = first_arc;
 
         loop {
             match &**current_arc {
-                Lower::Chain { .. } => {
-                    states.push(current_arc.chain_value().clone());
-                    current_arc = current_arc.chain_next();
+                Lower::Segment { values, next, .. } => {
+                    for v in values.iter().rev() {
+                        states.push(v.clone());
+                    }
+                    current_arc = next;
                 }
                 Lower::General { children, .. } => {
                     if children.is_empty() {
@@ -3302,9 +3532,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
         loop {
             match current {
-                Lower::Chain { .. } => {
-                    states.push(current.chain_value().clone());
-                    let next = current.chain_next();
+                Lower::Segment { values, next, .. } => {
+                    for v in values.iter().rev() {
+                        states.push(v.clone());
+                    }
                     current = &**next;
                 }
                 Lower::General { children, .. } => {
@@ -3350,9 +3581,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
         loop {
             match current {
-                Lower::Chain { .. } => {
-                    states.push(current.chain_value().clone());
-                    let next = current.chain_next();
+                Lower::Segment { values, next, .. } => {
+                    for v in values.iter().rev() {
+                        states.push(v.clone());
+                    }
                     current = &**next;
                 }
                 Lower::General { children, .. } => {
@@ -3387,6 +3619,58 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         Some(states)
     }
 
+    /// Try to view this GSS as a flat virtual stack. Succeeds when the GSS
+    /// is a single-path chain (Interface over a chain of Segment/single-child
+    /// General nodes). The returned [`VirtualStack`] supports push/pop and
+    /// can be materialized back into a GSS via [`VirtualStack::into_gss`].
+    pub fn try_virtual_stack(&self) -> Option<VirtualStack<T, A>> {
+        let interface = match &*self.inner {
+            Upper::Interface(iface) => iface,
+            _ => return None,
+        };
+
+        let mut states = SmallVec::<[T; 32]>::new();
+        let mut current: &Lower<T> = &interface.inner;
+
+        loop {
+            match current {
+                Lower::Segment { values, next, .. } => {
+                    // Push values top-first (will reverse later)
+                    for v in values.iter().rev() {
+                        states.push(v.clone());
+                    }
+                    current = &**next;
+                }
+                Lower::General { children, .. } => {
+                    if children.is_empty() {
+                        break;
+                    }
+                    if children.len() == 1 {
+                        let key = children.keys().next().unwrap().clone();
+                        let ordmap = children.values().next().unwrap();
+                        if ordmap.len() == 1 {
+                            states.push(key);
+                            let (_, next) = ordmap.iter().next().unwrap();
+                            current = &**next;
+                            continue;
+                        }
+                    }
+                    return None; // Multi-child or multi-depth: not a single path
+                }
+            }
+        }
+
+        if states.is_empty() {
+            return None;
+        }
+
+        states.reverse(); // Bottom-first
+        Some(VirtualStack {
+            states,
+            acc: interface.acc.clone(),
+        })
+    }
+
     /// Build a single-path chain GSS from a bottom-first list of state values.
     /// Uses the accumulator from `template` (which should be the original GSS).
     pub fn from_chain_states(states: &[T], template: &Self) -> Self {
@@ -3398,16 +3682,20 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             _ => return Self::empty(),
         };
 
-        // Build from bottom to top
-        let mut current: Arc<Lower<T>> = Arc::new(Lower::General {
+        // Build from bottom to top — pack into Segments
+        let base: Arc<Lower<T>> = Arc::new(Lower::General {
             children: CompactMap::new(),
             empty: true,
             max_depth: 0,
         });
-        for state in states.iter() {
-            let max_depth = current.max_depth() + 1;
-            current = Arc::new(Lower::Chain {
-                value: state.clone(),
+        // States are bottom-first, which matches our values ordering (deepest at index 0).
+        // Pack into Segment chunks of SEGMENT_CAP.
+        let mut current = base;
+        for chunk in states.chunks(SEGMENT_CAP) {
+            let values: SmallVec<[T; 1]> = chunk.iter().cloned().collect();
+            let max_depth = current.max_depth() + values.len() as u32;
+            current = Arc::new(Lower::Segment {
+                values,
                 next: current,
                 empty: false,
                 max_depth,
@@ -3483,8 +3771,8 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             }
             lower_nodes += 1;
             match &*node {
-                Lower::Chain { next, .. } => {
-                    total_edges += 1;
+                Lower::Segment { values, next, .. } => {
+                    total_edges += values.len();
                     lower_queue.push_back(next.clone());
                 }
                 Lower::General { children, .. } => {
@@ -3561,17 +3849,14 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     try_promote(&new_b)
                 }
                 Upper::Interface(i) => {
-                    // Fast path for Chain: if isolating the chain's value, return self
-                    // (already checked above). If different value, return empty.
-                    if i.inner.is_chain() {
-                        if i.inner.chain_value() == &val {
-                            // Chain has exactly this value — reconstruct
-                            let new_lower_root = Arc::new(Lower::Chain {
-                                value: i.inner.chain_value().clone(),
-                                next: i.inner.chain_next().clone(),
-                                empty: false,
-                                max_depth: i.inner.max_depth(),
-                            });
+                    // Fast path for Segment: if isolating the top value, reconstruct
+                    if i.inner.is_segment() {
+                        if i.inner.segment_top_value() == &val {
+                            let rest = i.inner.segment_rest_arc();
+                            let new_lower_root = new_lower(
+                                CompactMap::unit(val.clone(), CompactOrdMap::unit(rest.max_depth(), rest)),
+                                false,
+                            );
                             new_interface(new_lower_root, i.acc.clone())
                         } else {
                             empty_upper_inner()
@@ -4009,9 +4294,11 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 };
                 let mut result = Vec::with_capacity(i.inner.children_len());
                 match &*i.inner {
-                    Lower::Chain { value, next, .. } => {
-                        if !next.children_is_empty() || next.empty() {
-                            let upper = new_interface(next.clone(), new_acc.clone());
+                    Lower::Segment { values, .. } => {
+                        let value = values.last().unwrap();
+                        let rest = i.inner.segment_rest_arc();
+                        if !rest.children_is_empty() || rest.empty() {
+                            let upper = new_interface(rest, new_acc.clone());
                             result.push((value.clone(), LeveledGSS { inner: upper }));
                         }
                     }
@@ -4204,7 +4491,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             let no_multi_depth = match &*self.inner {
                 Upper::Interface(i) => {
                     match &*i.inner {
-                        Lower::Chain { .. } => true,
+                        Lower::Segment { .. } => true,
                         Lower::General { children, .. } => !children.values().any(|kids| kids.len() > 1),
                     }
                 }
@@ -4241,18 +4528,19 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
             let next_remain = remain.map(|r| r - 1);
 
-            // Fast path for Chain: no multi-depth slots, single child
-            if let Lower::Chain { value, next, empty, max_depth: _ } = &**node {
-                let fused_next = fuse_lower::<T, A>(next, next_remain, memo);
+            // Fast path for Segment: no multi-depth slots, recurse on next only
+            if let Lower::Segment { values, next, empty, max_depth: _ } = &**node {
+                let next_remain_seg = remain.map(|r| r - values.len() as isize);
+                let fused_next = fuse_lower::<T, A>(next, next_remain_seg, memo);
                 if Arc::ptr_eq(&fused_next, next) {
                     memo.insert(key, node.clone());
                     return node.clone();
                 }
-                let res = Arc::new(Lower::Chain {
-                    value: value.clone(),
+                let res = Arc::new(Lower::Segment {
+                    values: values.clone(),
                     next: fused_next.clone(),
                     empty: *empty,
-                    max_depth: fused_next.max_depth() + 1,
+                    max_depth: fused_next.max_depth() + values.len() as u32,
                 });
                 memo.insert(key, res.clone());
                 return res;
@@ -4324,7 +4612,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             let res = match &**node {
                 Upper::Interface(i) => {
                     let has_multi_depth_slots = match &*i.inner {
-                        Lower::Chain { .. } => false,
+                        Lower::Segment { .. } => false,
                         Lower::General { children, .. } => children.values().any(|kids| kids.len() > 1),
                     };
                     let fused_lower = fuse_lower::<T, A>(&i.inner, next_remain, memo_lower);
@@ -4427,7 +4715,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             }
             Upper::Interface(interface) => {
                 match &*interface.inner {
-                    Lower::Chain { value, .. } => f(value.clone()),
+                    Lower::Segment { values, .. } => f(values.last().unwrap().clone()),
                     Lower::General { children, .. } => {
                         for k in children.keys() {
                             f(k.clone());
@@ -4470,7 +4758,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
             let mut count = usize::from(node.empty());
             match &**node {
-                Lower::Chain { next, .. } => {
+                Lower::Segment { next, .. } => {
                     count = capped_add(count, count_lower(next, limit, memo), limit);
                 }
                 Lower::General { children, .. } => {
@@ -4528,7 +4816,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 }
                 Upper::Interface(i) => {
                     match &*i.inner {
-                        Lower::Chain { next, .. } => {
+                        Lower::Segment { next, .. } => {
                             count = capped_add(count, count_lower(next, limit, memo_lower), limit);
                         }
                         Lower::General { children, .. } => {
