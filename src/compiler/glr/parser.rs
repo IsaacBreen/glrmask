@@ -7,7 +7,7 @@ use super::analysis::EOF;
 use super::table::{Action, GLRTable};
 use crate::compiler::grammar::model::TerminalID;
 use crate::ds::bitset::BitSet;
-use crate::ds::leveled_gss::{LeveledGSS, Merge, PopResult};
+use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use smallvec::SmallVec;
 
 /// Accumulator stored in the GSS.  Wraps the underlying BTreeMap in an Arc
@@ -266,58 +266,59 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
             break;
         }
 
-        // Try virtual stack: process deterministic reduce chains as flat
-        // stack operations, avoiding GSS manipulation entirely.
+        // Virtual stack fast path: process deterministic reduce chains as
+        // flat stack operations.  On ambiguity (Split, Accept, or pop that
+        // would cross the floor), commit the progress so far back to the
+        // GSS and fall through to the general path.
         if let Some(mut vstack) = current.try_virtual_stack() {
-            let result = loop {
-                let Some(&state) = vstack.top() else { break None };
+            let mut modified = false;
+            loop {
+                let Some(&state) = vstack.top() else { break };
                 match table.action(state, token) {
                     Some(Action::Reduce(rule_id)) => {
                         let rule = &table.rules[*rule_id as usize];
-                        match vstack.pop(rule.rhs.len()) {
-                            PopResult::Ok => {}
-                            PopResult::HitFloor { .. } => break None,
+                        // Need enough states to pop AND leave a goto_from.
+                        if rule.rhs.len() >= vstack.len() {
+                            break;
                         }
-                        let Some(&goto_from) = vstack.top() else { break None };
+                        vstack.pop(rule.rhs.len()); // guaranteed Ok
+                        let goto_from = *vstack.top().unwrap();
                         match table.goto_target(goto_from, rule.lhs) {
-                            Some(target) => vstack.push(target),
-                            None => break Some(ParserGSS::empty()),
+                            Some(target) => {
+                                vstack.push(target);
+                                modified = true;
+                            }
+                            None => return ParserGSS::empty(),
                         }
                     }
                     Some(Action::Shift(target)) => {
                         vstack.push(*target);
-                        break Some(vstack.into_gss());
+                        return vstack.into_gss();
                     }
                     Some(Action::Split { shift: Some(target), reduces, accept })
                         if reduces.is_empty() && !*accept =>
                     {
                         vstack.push(*target);
-                        break Some(vstack.into_gss());
+                        return vstack.into_gss();
                     }
-                    Some(Action::Split { shift, reduces, accept }) => {
-                        if shift.is_none() && !*accept && reduces.len() == 1 {
-                            let rule = &table.rules[reduces[0] as usize];
-                            match vstack.pop(rule.rhs.len()) {
-                                PopResult::Ok => {}
-                                PopResult::HitFloor { .. } => break None,
-                            }
-                            let Some(&goto_from) = vstack.top() else { break None };
-                            match table.goto_target(goto_from, rule.lhs) {
-                                Some(target) => vstack.push(target),
-                                None => break Some(ParserGSS::empty()),
-                            }
-                            continue;
-                        }
-                        break None;
-                    }
-                    Some(Action::Accept) => break None,
-                    None => break Some(ParserGSS::empty()),
+                    Some(Action::Split { .. }) | Some(Action::Accept) => break,
+                    None => return ParserGSS::empty(),
                 }
-            };
-            if let Some(result) = result {
-                return result;
             }
-            // VirtualStack failed — fall through to general GSS operations
+            if modified {
+                // Commit virtual stack progress back to the GSS.
+                current = vstack.into_gss();
+                queue.clear();
+                processed.clear();
+                if let Some(state) = current.single_top_value() {
+                    queue.push(state);
+                } else {
+                    current.for_each_top_value(|state| queue.push(state));
+                }
+                if queue.is_empty() {
+                    break;
+                }
+            }
         }
 
         // General path: one iteration of reduce closure on the GSS.
