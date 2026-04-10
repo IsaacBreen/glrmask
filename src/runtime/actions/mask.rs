@@ -501,6 +501,44 @@ impl<'a> ConstraintState<'a> {
         });
     }
 
+    /// Transform a TerminalsDisallowed into a DenseMaskAcc.
+    fn terminals_disallowed_to_dense_acc(
+        &self,
+        terminals_disallowed: &crate::compiler::glr::parser::TerminalsDisallowed,
+        internal_tsid: u32,
+    ) -> Option<DenseMaskAcc> {
+        let universe = &self.constraint.seed_universe_dense;
+        let terminal_masks = &self.constraint.seed_terminal_dense;
+
+        if terminals_disallowed.is_empty()
+            || terminals_disallowed.values().all(|disallowed| disallowed.is_empty())
+        {
+            if universe.iter().all(|&word| word == 0) {
+                return None;
+            }
+            let dense: Arc<[u64]> = Arc::from(&**universe);
+            return Some(DenseMaskAcc(BTreeMap::from([(internal_tsid, dense)])));
+        }
+
+        let mut dense: Vec<u64> = universe.to_vec();
+        for (&orig_tokenizer_state, disallowed_in_state) in terminals_disallowed.iter() {
+            let tsid = self.constraint.internal_tsid_for_state(orig_tokenizer_state);
+            for &terminal_id in disallowed_in_state {
+                if let Some(mask) = terminal_masks.get(&(tsid, terminal_id)) {
+                    for (dense_word, mask_word) in dense.iter_mut().zip(mask.iter()) {
+                        *dense_word &= !mask_word;
+                    }
+                }
+            }
+        }
+
+        if dense.iter().all(|&word| word == 0) {
+            None
+        } else {
+            Some(DenseMaskAcc(BTreeMap::from([(internal_tsid, dense.into())])))
+        }
+    }
+
     /// Seed the mask queue, merging FW contributions into internal token bitmap.
     fn seed_mask_queue_merged(
         &self,
@@ -510,43 +548,90 @@ impl<'a> ConstraintState<'a> {
         queue: &mut MaskQueue,
         merged: &mut [u64],
     ) {
+        let parser_dwa = self.constraint.parser_dwa();
+
         for (&tokenizer_state, gss) in &self.state {
             if gss.is_empty() {
                 continue;
             }
 
             let internal_tsid = self.constraint.internal_tsid_for_state(tokenizer_state);
-            let universe = &self.constraint.seed_universe_dense;
-            let terminal_masks = &self.constraint.seed_terminal_dense;
 
-            let (decomposed, root_accs) = gss.apply_transform_and_decompose(|terminals_disallowed| {
-                if terminals_disallowed.is_empty()
-                    || terminals_disallowed.values().all(|disallowed| disallowed.is_empty())
-                {
-                    if universe.iter().all(|&word| word == 0) {
-                        return None;
-                    }
-                    let dense: Arc<[u64]> = Arc::from(&**universe);
-                    return Some(DenseMaskAcc(BTreeMap::from([(internal_tsid, dense)])));
+            // Chain fast path: extract chain from parser GSS and walk DWA inline,
+            // avoiding intermediate DenseMaskGSS allocations and BFS queue round-trips.
+            if let Some((chain_states, parser_acc, tail)) = gss.extract_chain_and_tail() {
+                let Some(mut acc) = self.terminals_disallowed_to_dense_acc(parser_acc, internal_tsid) else {
+                    continue;
+                };
+
+                // Merge start FW contribution
+                if let Some(final_weight) = start_final_weight {
+                    self.merge_final_weight_to_internal(final_weight, &acc, precomputed, merged);
                 }
 
-                let mut dense: Vec<u64> = universe.to_vec();
-                for (&orig_tokenizer_state, disallowed_in_state) in terminals_disallowed.iter() {
-                    let internal_tsid = self.constraint.internal_tsid_for_state(orig_tokenizer_state);
-                    for &terminal_id in disallowed_in_state {
-                        if let Some(mask) = terminal_masks.get(&(internal_tsid, terminal_id)) {
-                            for (dense_word, mask_word) in dense.iter_mut().zip(mask.iter()) {
-                                *dense_word &= !mask_word;
+                // Walk chain: first state goes through start_fast_trans,
+                // subsequent states through the target DWA state's transitions.
+                let mut cur_wa_state = parser_dwa.start_state;
+                let mut alive = true;
+
+                for parser_state in chain_states.iter() {
+                    let cur_fast_trans = &self.constraint.dwa_fast_transitions[cur_wa_state as usize];
+                    let labels = transition_labels(*parser_state);
+                    let mut found_target = None;
+                    for label in labels {
+                        if let Some((target, weight)) = cur_fast_trans.get(&label) {
+                            if weight.is_full() {
+                                found_target = Some(*target);
+                            } else {
+                                match acc.intersect_with_weight(weight, precomputed) {
+                                    Some(new_acc) => {
+                                        acc = new_acc;
+                                        found_target = Some(*target);
+                                    }
+                                    None => break,
+                                }
                             }
+                            break;
                         }
                     }
+
+                    let Some(target) = found_target else {
+                        alive = false;
+                        break;
+                    };
+
+                    cur_wa_state = target;
+                    let next_dwa_state = &parser_dwa.states[cur_wa_state as usize];
+
+                    // Merge FW at the new DWA state
+                    if let Some(final_weight) = &next_dwa_state.final_weight {
+                        self.merge_final_weight_to_internal(final_weight, &acc, precomputed, merged);
+                    }
                 }
 
-                if dense.iter().all(|&word| word == 0) {
-                    None
-                } else {
-                    Some(DenseMaskAcc(BTreeMap::from([(internal_tsid, dense.into())])))
+                // Enqueue tail if chain walk completed successfully
+                if alive && !acc.is_empty() {
+                    let cur_fast_trans = &self.constraint.dwa_fast_transitions[cur_wa_state as usize];
+                    let tail_gss = DenseMaskGSS::from_chain_tail_and_acc(tail, acc);
+                    if !tail_gss.is_empty() {
+                        tail_gss.for_each_decomposed(|ps, popped| {
+                            enqueue_parser_state_transitions(
+                                queue,
+                                cur_fast_trans,
+                                ps,
+                                &popped,
+                                precomputed,
+                            );
+                        });
+                    }
                 }
+
+                continue;
+            }
+
+            // General path: apply_transform_and_decompose for non-chain GSS.
+            let (decomposed, root_accs) = gss.apply_transform_and_decompose(|terminals_disallowed| {
+                self.terminals_disallowed_to_dense_acc(terminals_disallowed, internal_tsid)
             });
 
             if decomposed.is_empty() && root_accs.is_empty() {

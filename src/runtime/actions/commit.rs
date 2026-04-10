@@ -2,12 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::automata::lexer::tokenizer::TokenizerExecResult;
 use crate::compiler::glr::parser::{
-    AdvanceProfile,
     ParserGSS,
     TerminalsDisallowed,
     advance_stacks,
     advance_stacks_owned,
-    advance_stacks_profiled,
     stack_may_advance_on,
     stack_may_advance_on_any,
 };
@@ -262,7 +260,6 @@ fn advance_terminal_match_profiled(
     exec_result: &TokenizerExecResult,
     advance_result_cache: &mut AdvanceResultCache,
     terminal_result_cache: &mut FxHashMap<u32, ParserGSS>,
-    adv_profile: &mut AdvanceProfile,
 ) -> Option<ParserGSS> {
     if let Some(cached) = terminal_result_cache.get(&terminal) {
         return (!cached.is_empty()).then(|| cached.clone());
@@ -279,15 +276,7 @@ fn advance_terminal_match_profiled(
             return None;
         }
 
-        let (advanced, profile) = advance_stacks_profiled(&constraint.table, gss_at_offset, terminal);
-        adv_profile.isolate_ns += profile.isolate_ns;
-        adv_profile.popn_ns += profile.popn_ns;
-        adv_profile.base_isolate_ns += profile.base_isolate_ns;
-        adv_profile.merge_ns += profile.merge_ns;
-        adv_profile.absorb_push_ns += profile.absorb_push_ns;
-        adv_profile.shift_ns += profile.shift_ns;
-        adv_profile.n_loop_iters += profile.n_loop_iters;
-        adv_profile.n_reduces += profile.n_reduces;
+        let advanced = advance_stacks(&constraint.table, gss_at_offset, terminal);
         advance_result_cache.insert(advance_cache_key, (gss_at_offset.clone(), advanced.clone()));
         advanced
     };
@@ -666,7 +655,6 @@ fn commit_bytes_impl_profiled(
     let mut actionable_ns: u64 = 0;
     let mut may_advance_ns: u64 = 0;
     let mut n_advances: u64 = 0;
-    let mut adv_profile = AdvanceProfile::default();
     let mut offset = 0usize;
     while offset < processing_queue.len() {
         if processing_queue[offset].is_empty() {
@@ -718,7 +706,6 @@ fn commit_bytes_impl_profiled(
                 let advance_result = advance_terminal_match_profiled(
                     constraint, &gss_at_offset, matched.id, &exec_result,
                     &mut advance_result_cache, &mut terminal_result_cache,
-                    &mut adv_profile,
                 );
                 advance_ns += t_adv.elapsed().as_nanos() as u64;
                 n_advances += 1;
@@ -767,9 +754,7 @@ fn commit_bytes_impl_profiled(
     Ok((total_ns, scan_ns, prune_ns, queue_ns, fuse_ns, exec_ns, advance_ns,
         actionable_ns, may_advance_ns,
         n_tokenizer_states, n_queue_entries, n_advances,
-        adv_profile.isolate_ns, adv_profile.popn_ns, adv_profile.base_isolate_ns,
-        adv_profile.merge_ns, adv_profile.absorb_push_ns, adv_profile.shift_ns,
-        adv_profile.n_loop_iters as u64, adv_profile.n_reduces as u64))
+        0, 0, 0, 0, 0, 0, 0, 0))
 }
 
 impl<'a> ConstraintState<'a> {

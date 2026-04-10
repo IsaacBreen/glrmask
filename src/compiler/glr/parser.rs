@@ -229,72 +229,8 @@ pub(crate) fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: Te
     advance_stacks_core(table, stack, token)
 }
 
-/// Apply a chain of reduces followed by a final shift on a flat stack.
-/// Returns `None` if the chain encounters a Split or Accept action
-/// (which require the full GSS machinery). The `stack` parameter is
-/// bottom-first (index 0 = deepest state, last = top).
-fn advance_chain_reduce_shift(
-    stack: &mut SmallVec<[u32; 16]>,
-    table: &GLRTable,
-    token: TerminalID,
-) -> Option<SmallVec<[u32; 16]>> {
-    loop {
-        let &top = stack.last()?;
-        match table.action(top, token) {
-            Some(Action::Reduce(rule_id)) => {
-                let rule = &table.rules[*rule_id as usize];
-                let pop_count = rule.rhs.len();
-                if stack.len() <= pop_count {
-                    // Not enough states to pop — dead path
-                    return Some(SmallVec::new());
-                }
-                stack.truncate(stack.len() - pop_count);
-                let &goto_from = stack.last()?;
-                let target = table.goto_target(goto_from, rule.lhs)?;
-                stack.push(target);
-            }
-            Some(Action::Shift(target)) => {
-                stack.push(*target);
-                return Some(stack.clone());
-            }
-            Some(Action::Split {
-                shift: Some(target),
-                reduces,
-                accept,
-            }) if reduces.is_empty() && !*accept => {
-                // Pure shift disguised as Split
-                stack.push(*target);
-                return Some(stack.clone());
-            }
-            Some(Action::Split { shift, reduces, accept }) => {
-                // Handle splits with only reduces (no shift, no accept)
-                if shift.is_none() && !*accept && reduces.len() == 1 {
-                    // Single reduce in split — equivalent to plain Reduce
-                    let rule_id = reduces[0];
-                    let rule = &table.rules[rule_id as usize];
-                    let pop_count = rule.rhs.len();
-                    if stack.len() <= pop_count {
-                        return Some(SmallVec::new());
-                    }
-                    stack.truncate(stack.len() - pop_count);
-                    let &goto_from = stack.last()?;
-                    let target = table.goto_target(goto_from, rule.lhs)?;
-                    stack.push(target);
-                    continue;
-                }
-                return None; // Can't handle multi-reduce splits in flat path
-            }
-            Some(Action::Accept) => {
-                return None;
-            }
-            None => {
-                return Some(SmallVec::new()); // Dead path
-            }
-        }
-    }
-}
-
 fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> ParserGSS {
+    // Fast path: single top state with a pure shift action.
     if let Some(state) = stack.single_exclusive_top_value() {
         match table.action(state, token) {
             Some(Action::Shift(target)) => return stack.push(*target),
@@ -308,56 +244,11 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
         }
     }
 
-    let frontier = stack.peek_values();
-    if frontier.is_empty() {
-        return ParserGSS::empty();
-    }
-
-    let mut pure_shift_targets = SmallVec::<[(u32, u32); 8]>::new();
-    let mut pure_shift_only = true;
-    let mut any_action = false;
-    for state in frontier.iter().copied() {
-        match table.action(state, token) {
-            Some(Action::Shift(target)) => {
-                any_action = true;
-                pure_shift_targets.push((state, *target));
-            }
-            Some(Action::Split {
-                shift: Some(target),
-                reduces,
-                accept,
-            }) if reduces.is_empty() && !*accept => {
-                any_action = true;
-                pure_shift_targets.push((state, *target));
-            }
-            Some(Action::Reduce(_))
-            | Some(Action::Accept)
-            | Some(Action::Split { .. }) => {
-                any_action = true;
-                pure_shift_only = false;
-                break;
-            }
-            None => {}
-        }
-    }
-    if !any_action {
-        return ParserGSS::empty();
-    }
-    if pure_shift_only && !pure_shift_targets.is_empty() {
-        return stack.shift_top_values(pure_shift_targets);
-    }
-
-    // Virtual stack fast path: for top-Segment GSS chains, apply reduces as
-    // flat stack operations via VirtualStack. Avoids all intermediate Arc/GSS
-    // manipulation. When the virtual stack hits the floor (chain exhausted)
-    // or encounters splits/accept, falls through to the general path using
-    // the original stack (which re-derives all reduces correctly).
+    // Virtual stack fast path: deterministic reduce chains processed as flat
+    // stack operations.  Falls through on ambiguity, accept, or floor-hit.
     if let Some(mut vstack) = stack.try_virtual_stack() {
         let result = loop {
-            let Some(&state) = vstack.top() else {
-                // VirtualStack exhausted (floor may still have states) — fall back
-                break None;
-            };
+            let Some(&state) = vstack.top() else { break None };
             match table.action(state, token) {
                 Some(Action::Reduce(rule_id)) => {
                     let rule = &table.rules[*rule_id as usize];
@@ -365,10 +256,7 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
                         PopResult::Ok => {}
                         PopResult::HitFloor { .. } => break None,
                     }
-                    let Some(&goto_from) = vstack.top() else {
-                        // Exhausted after pop — floor may have the goto_from state
-                        break None;
-                    };
+                    let Some(&goto_from) = vstack.top() else { break None };
                     match table.goto_target(goto_from, rule.lhs) {
                         Some(target) => vstack.push(target),
                         None => break Some(ParserGSS::empty()),
@@ -391,10 +279,7 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
                             PopResult::Ok => {}
                             PopResult::HitFloor { .. } => break None,
                         }
-                        let Some(&goto_from) = vstack.top() else {
-                            // Exhausted after pop — floor may have the goto_from state
-                            break None;
-                        };
+                        let Some(&goto_from) = vstack.top() else { break None };
                         match table.goto_target(goto_from, rule.lhs) {
                             Some(target) => vstack.push(target),
                             None => break Some(ParserGSS::empty()),
@@ -410,175 +295,72 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
         if let Some(result) = result {
             return result;
         }
-        // Fall through: had splits/accept/hit floor/exhausted, use general path with original stack
     }
 
-    // Owned: no clone needed. First Arc::make_mut won't clone if refcount == 1.
+    // General path: reduce closure on the full GSS.
     let mut current = stack;
-
-    // Use SmallVec for processed states — linear scan is faster than FxHashSet
-    // for the typical case of ≤16 unique states in the reduce closure.
     let mut processed = SmallVec::<[u32; 16]>::new();
+    let mut queue = SmallVec::<[u32; 8]>::new();
 
-    // Collect initial unprocessed states from the GSS top values
-    let mut new_states = SmallVec::<[u32; 8]>::new();
     if let Some(state) = current.single_top_value() {
-        new_states.push(state);
+        queue.push(state);
     } else {
-        current.for_each_top_value(|state| {
-            new_states.push(state);
-        });
+        current.for_each_top_value(|state| queue.push(state));
+    }
+    if queue.is_empty() {
+        return ParserGSS::empty();
     }
 
-    // Partial-chain batch: run reduces on a flat buffer for the shared top
-    // chain. Batches N single-reduce iterations into one isolate + push,
-    // avoiding N-1 intermediate isolate_popn_bases + absorb_push_same_acc calls.
-    if new_states.len() == 1 {
-        if let Some(orig_chain) = current.extract_top_chain_states() {
-            if orig_chain.len() >= 3 {
-                let orig_top = *orig_chain.last().unwrap();
-                let mut flat = orig_chain.clone();
-                let mut batch_processed = SmallVec::<[u32; 16]>::new();
-                let mut batch_count = 0u32;
-
-                loop {
-                    let Some(&top) = flat.last() else { break; };
-                    if batch_processed.contains(&top) { break; }
-                    match table.action(top, token) {
-                        Some(Action::Reduce(rule_id)) => {
-                            let rule = &table.rules[*rule_id as usize];
-                            let pop = rule.rhs.len();
-                            if flat.len() <= pop {
-                                break; // Would pop below the chain
-                            }
-                            batch_processed.push(top);
-                            flat.truncate(flat.len() - pop);
-                            let &goto_from = flat.last().unwrap();
-                            if let Some(target) = table.goto_target(goto_from, rule.lhs) {
-                                flat.push(target);
-                                batch_count += 1;
-                            } else {
-                                flat.clear();
-                                break;
-                            }
-                        }
-                        _ => break, // non-Reduce action: stop flat processing
-                    }
-                }
-
-                if batch_count >= 2 {
-                    if flat.is_empty() {
-                        return ParserGSS::empty();
-                    }
-                    // Compute net effect on the GSS
-                    let common_len = orig_chain.iter().zip(flat.iter())
-                        .take_while(|(a, b)| a == b).count();
-                    let net_pop = orig_chain.len() - common_len;
-                    let new_above = &flat[common_len..];
-
-                    let bases = current.isolate_popn_bases(orig_top, net_pop as isize);
-                    current = if bases.len() == 1 {
-                        bases.into_iter().next().unwrap().1
-                    } else if bases.is_empty() {
-                        return ParserGSS::empty();
-                    } else {
-                        ParserGSS::merge_many(bases.into_iter().map(|(_, b)| b))
-                    };
-                    for &s in new_above {
-                        current = current.push(s);
-                    }
-                    // Transfer batch-processed states to main processed set
-                    processed.extend(batch_processed.iter().copied());
-                    // Continue general loop from the current top state
-                    new_states.clear();
-                    if let Some(&s) = flat.last() {
-                        new_states.push(s);
-                    }
-                }
-            }
-        }
-    }
-
-    let mut pending_bases_by_target = SmallVec::<[(u32, ParserGSS); 8]>::new();
+    let mut pending = SmallVec::<[(u32, ParserGSS); 8]>::new();
 
     loop {
-        if new_states.is_empty() {
+        if queue.is_empty() {
             break;
         }
 
-        // Fast path: single state with single Reduce action.
-        // Process immediately without collecting into pending_bases_by_target,
-        // avoiding Arc reference retention that causes expensive clones in make_mut.
-        if new_states.len() == 1 {
-            let state = new_states[0];
-            if !processed.contains(&state) {
-                if let Some(Action::Reduce(rule_id)) = table.action(state, token) {
-                    processed.push(state);
-                    let rule = &table.rules[*rule_id as usize];
-                    let rhs_len = rule.rhs.len();
-                    let lhs = rule.lhs;
-
-                    let bases = current.isolate_popn_bases(state, rhs_len as isize);
-                    new_states.clear();
-                    let mut any_reduced = false;
-                    for (goto_from, base) in bases {
-                        if let Some(target) = table.goto_target(goto_from, lhs) {
-                            current = current.absorb_push_same_acc(target, &base);
-                            new_states.push(target);
-                            any_reduced = true;
-                        }
-                    }
-                    if any_reduced {
-                        continue;
-                    }
-                    break;
-                }
-            }
-        }
-
         let mut any_reduced = false;
-        pending_bases_by_target.clear();
-        for state in new_states.drain(..) {
+        pending.clear();
+
+        for state in queue.drain(..) {
             if processed.contains(&state) {
                 continue;
             }
             processed.push(state);
+
             let reduce_rules: &[u32] = match table.action(state, token) {
                 Some(Action::Reduce(rule_id)) => std::slice::from_ref(rule_id),
                 Some(Action::Split { reduces, .. }) => reduces.as_slice(),
                 _ => &[],
             };
+
             for &rule_id in reduce_rules {
                 let rule = &table.rules[rule_id as usize];
-                let rhs_len = rule.rhs.len();
-                let lhs = rule.lhs;
-
-                let bases = current.isolate_popn_bases(state, rhs_len as isize);
+                let bases = current.isolate_popn_bases(state, rule.rhs.len() as isize);
                 for (goto_from, base) in bases {
-                    if let Some(target) = table.goto_target(goto_from, lhs) {
-                        if let Some((_, existing)) = pending_bases_by_target
-                            .iter_mut()
-                            .find(|(t, _)| *t == target)
+                    if let Some(target) = table.goto_target(goto_from, rule.lhs) {
+                        if let Some((_, existing)) = pending.iter_mut().find(|(t, _)| *t == target)
                         {
                             *existing = existing.merge(&base);
                         } else {
-                            pending_bases_by_target.push((target, base));
+                            pending.push((target, base));
                         }
                         any_reduced = true;
                     }
                 }
             }
         }
+
         if !any_reduced {
             break;
         }
-        // Absorb results and use goto targets directly as next iteration's new_states
-        for (target, base) in pending_bases_by_target.drain(..) {
+
+        for (target, base) in pending.drain(..) {
             current = current.absorb_push_same_acc(target, &base);
-            new_states.push(target);
+            queue.push(target);
         }
     }
 
+    // Shift phase.
     let mut shift_pairs = SmallVec::<[(u32, u32); 8]>::new();
     if let Some(state) = current.single_top_value() {
         if let Some(target) = shift_target(table.action(state, token)) {
@@ -592,251 +374,6 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
         });
     }
     current.shift_top_values_owned(shift_pairs)
-}
-
-/// Profiled version of `advance_stacks` that returns timing breakdown.
-#[derive(Debug, Default)]
-pub struct AdvanceProfile {
-    pub isolate_ns: u64,
-    pub popn_ns: u64,
-    pub base_isolate_ns: u64,
-    pub merge_ns: u64,
-    pub absorb_push_ns: u64,
-    pub shift_ns: u64,
-    pub n_loop_iters: u32,
-    pub n_reduces: u32,
-}
-
-pub(crate) fn advance_stacks_profiled(
-    table: &GLRTable,
-    stack: &ParserGSS,
-    token: TerminalID,
-) -> (ParserGSS, AdvanceProfile) {
-    use std::time::Instant;
-    let mut profile = AdvanceProfile::default();
-
-    // Single-state fast paths (no profiling needed since they're trivially fast)
-    if let Some(state) = stack.single_top_value() {
-        match table.action(state, token) {
-            Some(Action::Shift(target)) => return (stack.push(*target), profile),
-            Some(Action::Split {
-                shift: Some(target),
-                reduces,
-                accept,
-            }) if reduces.is_empty() && !*accept => return (stack.push(*target), profile),
-            Some(Action::Reduce(_)) | Some(Action::Accept) | Some(Action::Split { .. }) => {}
-            None => return (ParserGSS::empty(), profile),
-        }
-    }
-
-    let frontier = stack.peek_values();
-    if frontier.is_empty() {
-        return (ParserGSS::empty(), profile);
-    }
-
-    let mut pure_shift_targets = SmallVec::<[(u32, u32); 8]>::new();
-    let mut pure_shift_only = true;
-    let mut any_action = false;
-    for state in frontier.iter().copied() {
-        match table.action(state, token) {
-            Some(Action::Shift(target)) => {
-                any_action = true;
-                pure_shift_targets.push((state, *target));
-            }
-            Some(Action::Split {
-                shift: Some(target),
-                reduces,
-                accept,
-            }) if reduces.is_empty() && !*accept => {
-                any_action = true;
-                pure_shift_targets.push((state, *target));
-            }
-            Some(Action::Reduce(_))
-            | Some(Action::Accept)
-            | Some(Action::Split { .. }) => {
-                any_action = true;
-                pure_shift_only = false;
-                break;
-            }
-            None => {}
-        }
-    }
-    if !any_action {
-        return (ParserGSS::empty(), profile);
-    }
-    if pure_shift_only && !pure_shift_targets.is_empty() {
-        let t0 = Instant::now();
-        let result = stack.shift_top_values(pure_shift_targets);
-        profile.shift_ns = t0.elapsed().as_nanos() as u64;
-        return (result, profile);
-    }
-
-    let mut current = stack.clone();
-    let mut processed = SmallVec::<[u32; 16]>::new();
-
-    // Collect initial unprocessed states from the GSS top values
-    let mut new_states = SmallVec::<[u32; 8]>::new();
-    if let Some(state) = current.single_top_value() {
-        new_states.push(state);
-    } else {
-        current.for_each_top_value(|state| {
-            new_states.push(state);
-        });
-    }
-
-    let mut pending_bases_by_target = SmallVec::<[(u32, ParserGSS); 8]>::new();
-
-    loop {
-        profile.n_loop_iters += 1;
-        if new_states.is_empty() {
-            break;
-        }
-
-        let mut any_reduced = false;
-        pending_bases_by_target.clear();
-        for state in new_states.drain(..) {
-            if processed.contains(&state) {
-                continue;
-            }
-            processed.push(state);
-            let reduce_rules: &[u32] = match table.action(state, token) {
-                Some(Action::Reduce(rule_id)) => std::slice::from_ref(rule_id),
-                Some(Action::Split { reduces, .. }) => reduces.as_slice(),
-                _ => &[],
-            };
-            for &rule_id in reduce_rules {
-                profile.n_reduces += 1;
-                let rule = &table.rules[rule_id as usize];
-                let rhs_len = rule.rhs.len();
-                let lhs = rule.lhs;
-                let t0 = Instant::now();
-                let bases = current.isolate_popn_bases(state, rhs_len as isize);
-                profile.isolate_ns += t0.elapsed().as_nanos() as u64;
-
-                for (goto_from, base) in bases {
-                    if let Some(target) = table.goto_target(goto_from, lhs) {
-                        if let Some((_, existing)) = pending_bases_by_target
-                            .iter_mut()
-                            .find(|(t, _)| *t == target)
-                        {
-                            let t0 = Instant::now();
-                            *existing = existing.merge(&base);
-                            profile.merge_ns += t0.elapsed().as_nanos() as u64;
-                        } else {
-                            pending_bases_by_target.push((target, base));
-                        }
-                        any_reduced = true;
-                    }
-                }
-            }
-        }
-        if !any_reduced {
-            break;
-        }
-        // Absorb results and use goto targets directly as next iteration's new_states
-        for (target, base) in pending_bases_by_target.drain(..) {
-            let t0 = Instant::now();
-            current = current.absorb_push_same_acc(target, &base);
-            profile.absorb_push_ns += t0.elapsed().as_nanos() as u64;
-            new_states.push(target);
-        }
-    }
-
-    let mut shift_pairs = SmallVec::<[(u32, u32); 8]>::new();
-    if let Some(state) = current.single_top_value() {
-        if let Some(target) = shift_target(table.action(state, token)) {
-            shift_pairs.push((state, target));
-        }
-    } else {
-        current.for_each_top_value(|state| {
-            if let Some(target) = shift_target(table.action(state, token)) {
-                shift_pairs.push((state, target));
-            }
-        });
-    }
-    let t0 = Instant::now();
-    let result = current.shift_top_values_owned(shift_pairs);
-    profile.shift_ns = t0.elapsed().as_nanos() as u64;
-    (result, profile)
-}
-
-/// Flat-stack alternative to `advance_stacks` for small GSSs.
-///
-/// Converts the GSS to flat Vec stacks, applies reduce closure + shift using
-/// simple Vec operations, and rebuilds via `from_stacks`. This avoids the
-/// overhead of LeveledGSS operations (Arc, HashMap, recursive structure)
-/// which dominates runtime for small GSSs.
-///
-/// Returns `None` if the GSS has more paths than `max_paths`, in which case
-/// the caller should fall back to the standard `advance_stacks`.
-pub(crate) fn advance_stacks_flat(
-    table: &GLRTable,
-    stack: &ParserGSS,
-    token: TerminalID,
-    max_paths: usize,
-) -> Option<ParserGSS> {
-    let flat = stack.to_stacks_bounded(max_paths)?;
-    if flat.is_empty() {
-        return Some(ParserGSS::empty());
-    }
-
-    // Reduce closure on flat stacks.
-    // Each stack is (Vec<u32>, TerminalsDisallowed). The annotation is carried
-    // along unchanged through reduces (it's associated with the stack prefix
-    // that doesn't change during reduce closure).
-    let mut visited: std::collections::HashSet<Vec<u32>> = std::collections::HashSet::new();
-    let mut queue: VecDeque<(Vec<u32>, TerminalsDisallowed)> = VecDeque::new();
-
-    for (s, a) in &flat {
-        if visited.insert(s.clone()) {
-            queue.push_back((s.clone(), a.clone()));
-        }
-    }
-
-    let mut shifted: Vec<(Vec<u32>, TerminalsDisallowed)> = Vec::new();
-
-    while let Some((s, ann)) = queue.pop_front() {
-        let Some(&state) = s.last() else { continue };
-
-        // Check for shift action
-        if let Some(target) = shift_target(table.action(state, token)) {
-            let mut shifted_stack = s.clone();
-            shifted_stack.push(target);
-            shifted.push((shifted_stack, ann.clone()));
-        }
-
-        // Apply reduce rules
-        let reduce_rule_ids: &[u32] = match table.action(state, token) {
-            Some(Action::Reduce(rule_id)) => std::slice::from_ref(rule_id),
-            Some(Action::Split { reduces, .. }) => reduces.as_slice(),
-            _ => &[],
-        };
-
-        for &rule_id in reduce_rule_ids {
-            let rule = &table.rules[rule_id as usize];
-            let rhs_len = rule.rhs.len();
-            if s.len() < rhs_len + 1 {
-                continue;
-            }
-            let keep_len = s.len() - rhs_len;
-            let goto_from = s[keep_len - 1];
-            if let Some(target) = table.goto_target(goto_from, rule.lhs) {
-                let mut reduced = s[..keep_len].to_vec();
-                reduced.push(target);
-                if visited.insert(reduced.clone()) {
-                    // Carry annotation from the prefix (it's associated with the
-                    // lower part of the stack which is preserved through reduces)
-                    queue.push_back((reduced, ann.clone()));
-                }
-            }
-        }
-    }
-
-    if shifted.is_empty() {
-        Some(ParserGSS::empty())
-    } else {
-        Some(ParserGSS::from_stacks(&shifted))
-    }
 }
 
 pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
