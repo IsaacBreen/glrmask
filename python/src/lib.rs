@@ -271,59 +271,6 @@ impl PyConstraintState {
         Ok(())
     }
 
-    /// Like fill_mask but returns profiling stats as a dict.
-    /// Keys: seed_ns, bfs_ns, n_depth_buckets, n_dwa_visits, n_decompose_ops, n_final_weight_ops
-    fn fill_mask_profiled<'py>(&self, py: Python<'py>, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-        let slice = bitmask.as_slice_mut().map_err(|e| {
-            PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
-        })?;
-        let buf: &mut [u32] = unsafe {
-            std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
-        };
-        let (total_ns, seed_ns, bfs_ns, final_weight_ns, decompose_ns, enqueue_ns,
-             is_complete_ns, n_depth_buckets, n_dwa_visits, n_decompose_ops, n_final_weight_ops) =
-            self.inner.with_dependent(|_owner, state| state.fill_mask_profiled(buf));
-        let dict = pyo3::types::PyDict::new(py);
-        dict.set_item("total_ns", total_ns)?;
-        dict.set_item("seed_ns", seed_ns)?;
-        dict.set_item("bfs_ns", bfs_ns)?;
-        dict.set_item("final_weight_ns", final_weight_ns)?;
-        dict.set_item("decompose_ns", decompose_ns)?;
-        dict.set_item("enqueue_ns", enqueue_ns)?;
-        dict.set_item("is_complete_ns", is_complete_ns)?;
-        dict.set_item("n_depth_buckets", n_depth_buckets)?;
-        dict.set_item("n_dwa_visits", n_dwa_visits)?;
-        dict.set_item("n_decompose_ops", n_decompose_ops)?;
-        dict.set_item("n_final_weight_ops", n_final_weight_ops)?;
-        Ok(dict)
-    }
-
-    /// Like fill_mask (merged path, skips cache) but returns detailed timing breakdown.
-    fn fill_mask_timed<'py>(&self, py: Python<'py>, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-        let slice = bitmask.as_slice_mut().map_err(|e| {
-            PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
-        })?;
-        let buf: &mut [u32] = unsafe {
-            std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
-        };
-        let (total_ns, seed_ns, decompose_ns, enqueue_ns, fw_merge_ns,
-             convert_ns, cache_update_ns, n_dwa_visits, n_decompose_ops, n_fw_ops, n_enqueue_calls) =
-            self.inner.with_dependent(|_owner, state| state.fill_mask_timed(buf));
-        let dict = pyo3::types::PyDict::new(py);
-        dict.set_item("total_ns", total_ns)?;
-        dict.set_item("seed_ns", seed_ns)?;
-        dict.set_item("decompose_ns", decompose_ns)?;
-        dict.set_item("enqueue_ns", enqueue_ns)?;
-        dict.set_item("fw_merge_ns", fw_merge_ns)?;
-        dict.set_item("convert_ns", convert_ns)?;
-        dict.set_item("cache_update_ns", cache_update_ns)?;
-        dict.set_item("n_dwa_visits", n_dwa_visits)?;
-        dict.set_item("n_decompose_ops", n_decompose_ops)?;
-        dict.set_item("n_fw_ops", n_fw_ops)?;
-        dict.set_item("n_enqueue_calls", n_enqueue_calls)?;
-        Ok(dict)
-    }
-
     fn commit_token(&mut self, token_id: u32) -> PyResult<()> {
         self.inner
             .with_dependent_mut(|_owner, state| string_result(state.commit_token(token_id)))
