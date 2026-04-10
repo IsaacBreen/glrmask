@@ -504,14 +504,6 @@ impl<T: Clone + Eq + Hash> Lower<T> {
         }
     }
 
-    /// Get top-level children keys as a Vec.
-    fn children_keys_vec(&self) -> Vec<T> {
-        match self {
-            Lower::General { children, .. } => children.keys().cloned().collect(),
-            Lower::Segment { values, .. } => vec![values.last().unwrap().clone()],
-        }
-    }
-
     /// Ensure this Lower is in General form, converting from Segment if necessary.
     fn ensure_general(&mut self) {
         if let Lower::Segment { .. } = self {
@@ -538,15 +530,6 @@ impl<T: Clone + Eq + Hash> Lower<T> {
                 let children = CompactMap::unit(top_value, CompactOrdMap::unit(child.max_depth(), child));
                 *self = Lower::General { children, empty, max_depth };
             }
-        }
-    }
-
-    /// Get mutable access to children and max_depth. Converts Segment→General first.
-    fn children_and_depth_mut(&mut self) -> (&mut Children<T, Lower<T>>, &mut u32) {
-        self.ensure_general();
-        match self {
-            Lower::General { children, max_depth, .. } => (children, max_depth),
-            Lower::Segment { .. } => unreachable!(),
         }
     }
 
@@ -604,21 +587,6 @@ impl<T: Clone + Eq + Hash> Lower<T> {
             Lower::General { .. } => panic!("segment_rest_arc called on General"),
         }
     }
-
-    // Backwards-compatible aliases for code that checks is_chain / uses chain_value / chain_next.
-    // These work on Segment treating it as a single-top-value chain.
-    #[inline(always)]
-    fn is_chain(&self) -> bool { self.is_segment() }
-    #[inline(always)]
-    fn chain_value(&self) -> &T { self.segment_top_value() }
-    fn chain_next(&self) -> &Arc<Lower<T>> {
-        match self {
-            Lower::Segment { values, next, .. } if values.len() == 1 => next,
-            Lower::Segment { .. } => panic!("chain_next called on multi-value Segment; use segment_rest_arc()"),
-            Lower::General { .. } => panic!("chain_next called on General"),
-        }
-    }
-
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -2120,29 +2088,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         Arc::as_ptr(&self.inner) as usize
     }
 
-    pub fn root_interface_shape_key(&self) -> Option<usize> {
-        match &*self.inner {
-            Upper::Interface(interface) => Some(Arc::as_ptr(&interface.inner) as usize),
-            Upper::Branch(_) => None,
-        }
-    }
-
-    pub fn root_interface_acc(&self) -> Option<A> {
-        match &*self.inner {
-            Upper::Interface(interface) => Some(interface.acc.clone()),
-            Upper::Branch(_) => None,
-        }
-    }
-
-    pub fn with_root_interface_acc(&self, acc: A) -> Option<Self> {
-        match &*self.inner {
-            Upper::Interface(interface) => Some(Self {
-                inner: new_interface(interface.inner.clone(), acc),
-            }),
-            Upper::Branch(_) => None,
-        }
-    }
-
     #[cfg(test)]
     pub fn inner_ptrs_eq(&self, other: &Self) -> bool {
         match (&*self.inner, &*other.inner) {
@@ -2424,119 +2369,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
         dfs_upper(&self.inner, &mut vec![], &mut res);
         res
-    }
-
-    /// Like `to_stacks`, but returns `None` if the path count exceeds `limit`.
-    /// Avoids enumerating all paths when the GSS is too large.
-    pub fn to_stacks_bounded(&self, limit: usize) -> Option<Vec<(Vec<T>, A)>> {
-        let mut res: Vec<(Vec<T>, A)> = Vec::new();
-
-        fn dfs_lower_bounded<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
-            l: &Lower<T>,
-            pref: &mut Vec<T>,
-            acc: &A,
-            out: &mut Vec<(Vec<T>, A)>,
-            limit: usize,
-        ) -> bool {
-            if l.empty() {
-                let mut stack = pref.clone();
-                stack.reverse();
-                out.push((stack, acc.clone()));
-                if out.len() > limit { return false; }
-            }
-            match l {
-                Lower::Segment { values, next, .. } => {
-                    for v in values.iter().rev() {
-                        pref.push(v.clone());
-                    }
-                    if !dfs_lower_bounded(next, pref, acc, out, limit) {
-                        for _ in 0..values.len() { pref.pop(); }
-                        return false;
-                    }
-                    for _ in 0..values.len() { pref.pop(); }
-                }
-                Lower::General { children, .. } => {
-                    for (v, kids) in children.iter() {
-                        for child in kids.values() {
-                            pref.push(v.clone());
-                            if !dfs_lower_bounded(child, pref, acc, out, limit) {
-                                pref.pop();
-                                return false;
-                            }
-                            pref.pop();
-                        }
-                    }
-                }
-            }
-            true
-        }
-
-        fn dfs_upper_bounded<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
-            u: &Upper<T, A>,
-            pref: &mut Vec<T>,
-            out: &mut Vec<(Vec<T>, A)>,
-            limit: usize,
-        ) -> bool {
-            match u {
-                Upper::Branch(b) => {
-                    if let Some(e) = &b.empty {
-                        let mut stack = pref.clone();
-                        stack.reverse();
-                        out.push((stack, e.clone()));
-                        if out.len() > limit { return false; }
-                    }
-                    for (v, kids) in b.children.iter() {
-                        for child in kids.values() {
-                            pref.push(v.clone());
-                            if !dfs_upper_bounded(child, pref, out, limit) {
-                                pref.pop();
-                                return false;
-                            }
-                            pref.pop();
-                        }
-                    }
-                }
-                Upper::Interface(i) => {
-                    if i.inner.empty() {
-                        let mut stack = pref.clone();
-                        stack.reverse();
-                        out.push((stack, i.acc.clone()));
-                        if out.len() > limit { return false; }
-                    }
-                    match &*i.inner {
-                        Lower::Segment { values, next, .. } => {
-                            for v in values.iter().rev() {
-                                pref.push(v.clone());
-                            }
-                            if !dfs_lower_bounded(next, pref, &i.acc, out, limit) {
-                                for _ in 0..values.len() { pref.pop(); }
-                                return false;
-                            }
-                            for _ in 0..values.len() { pref.pop(); }
-                        }
-                        Lower::General { children, .. } => {
-                            for (v, kids) in children.iter() {
-                                for child in kids.values() {
-                                    pref.push(v.clone());
-                                    if !dfs_lower_bounded(child, pref, &i.acc, out, limit) {
-                                        pref.pop();
-                                        return false;
-                                    }
-                                    pref.pop();
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            true
-        }
-
-        if dfs_upper_bounded(&self.inner, &mut vec![], &mut res, limit) {
-            Some(res)
-        } else {
-            None
-        }
     }
 
     pub fn push(&self, value: T) -> Self {
@@ -3571,110 +3403,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
 
         Some((states, &interface.acc, ChainTail { inner: Arc::clone(current_arc) }))
-    }
-
-    /// Extract the top chain of state values from the GSS.
-    /// Walks down from the top, collecting states as long as each level has
-    /// exactly 1 child (i.e., the path is unambiguous). Stops when branching
-    /// is encountered or the chain reaches an empty node.
-    /// Returns `None` if the GSS is not an Interface or the top itself branches.
-    /// The returned SmallVec has the top-of-stack at the end (bottom-first order).
-    pub fn extract_top_chain_states(&self) -> Option<SmallVec<[T; 16]>> {
-        let interface = match &*self.inner {
-            Upper::Interface(iface) => iface,
-            _ => return None,
-        };
-
-        let mut states = SmallVec::<[T; 16]>::new();
-        let mut current: &Lower<T> = &interface.inner;
-
-        loop {
-            match current {
-                Lower::Segment { values, next, .. } => {
-                    for v in values.iter().rev() {
-                        states.push(v.clone());
-                    }
-                    current = &**next;
-                }
-                Lower::General { children, .. } => {
-                    if children.is_empty() {
-                        break;
-                    }
-                    if children.len() == 1 {
-                        let key = children.keys().next().unwrap().clone();
-                        let ordmap = children.values().next().unwrap();
-                        if ordmap.len() == 1 {
-                            states.push(key);
-                            let (_, next) = ordmap.iter().next().unwrap();
-                            current = &**next;
-                            continue;
-                        }
-                    }
-                    // Multi-child or multi-depth: stop here (chain top ends)
-                    break;
-                }
-            }
-        }
-
-        if states.is_empty() {
-            return None;
-        }
-
-        states.reverse(); // Convert from top-first to bottom-first
-        Some(states)
-    }
-
-    /// Extract the chain of state values from a single-path chain GSS.
-    /// Returns `None` if the GSS is not a pure single-path chain (e.g.,
-    /// has branches, General nodes with multiple children, or Branch upper).
-    /// The returned SmallVec has bottom-of-stack at index 0 and top at the end.
-    pub fn try_extract_chain_states(&self) -> Option<SmallVec<[T; 16]>> {
-        let interface = match &*self.inner {
-            Upper::Interface(iface) => iface,
-            _ => return None,
-        };
-
-        let mut states = SmallVec::<[T; 16]>::new();
-        let mut current: &Lower<T> = &interface.inner;
-
-        loop {
-            match current {
-                Lower::Segment { values, next, .. } => {
-                    for v in values.iter().rev() {
-                        states.push(v.clone());
-                    }
-                    current = &**next;
-                }
-                Lower::General { children, .. } => {
-                    if children.is_empty() {
-                        // Terminal node — end of chain (may or may not have empty)
-                        break;
-                    }
-                    if children.len() == 1 {
-                        // General with single child — treat as chain
-                        // (empty flag at intermediate nodes is OK; if a reduce
-                        // pops deeper than the chain, the fast path will
-                        // bail out at runtime)
-                        let key = children.keys().next().unwrap().clone();
-                        let ordmap = children.values().next().unwrap();
-                        if ordmap.len() == 1 {
-                            states.push(key);
-                            let (_, next) = ordmap.iter().next().unwrap();
-                            current = &**next;
-                            continue;
-                        }
-                    }
-                    return None; // Multi-child or multi-depth node
-                }
-            }
-        }
-
-        if states.is_empty() {
-            return None;
-        }
-
-        states.reverse(); // Convert from top-first to bottom-first
-        Some(states)
     }
 
     /// Try to view the top of this GSS as a flat virtual stack.
