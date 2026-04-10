@@ -2545,9 +2545,13 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
         let new_inner = match &*self.inner {
             Upper::Interface(i) => {
-                let mut new_children: Children<T, Lower<T>> = CompactMap::new();
-                new_children.insert(value, CompactOrdMap::unit(i.inner.max_depth(), i.inner.clone()));
-                let new_lower_root = new_lower(new_children, false);
+                let max_depth = i.inner.max_depth() + 1;
+                let new_lower_root = Arc::new(Lower::Segment {
+                    values: { let mut v = ArrayVec::new(); v.push(value); v },
+                    next: Arc::clone(&i.inner),
+                    empty: false,
+                    max_depth,
+                });
                 new_interface(new_lower_root, i.acc.clone())
             }
             Upper::Branch(_) => {
