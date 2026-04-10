@@ -7,7 +7,7 @@ use super::analysis::EOF;
 use super::table::{Action, GLRTable};
 use crate::compiler::grammar::model::TerminalID;
 use crate::ds::bitset::BitSet;
-use crate::ds::leveled_gss::{LeveledGSS, Merge};
+use crate::ds::leveled_gss::{LeveledGSS, Merge, PopResult};
 use smallvec::SmallVec;
 
 /// Accumulator stored in the GSS.  Wraps the underlying BTreeMap in an Arc
@@ -347,22 +347,27 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
         return stack.shift_top_values(pure_shift_targets);
     }
 
-    // Virtual stack fast path: for single-path chain GSS, apply reduces as
+    // Virtual stack fast path: for top-Segment GSS chains, apply reduces as
     // flat stack operations via VirtualStack. Avoids all intermediate Arc/GSS
-    // manipulation.
+    // manipulation. When the virtual stack hits the floor (chain exhausted)
+    // or encounters splits/accept, falls through to the general path using
+    // the original stack (which re-derives all reduces correctly).
     if let Some(mut vstack) = stack.try_virtual_stack() {
         let result = loop {
             let Some(&state) = vstack.top() else {
-                break Some(ParserGSS::empty());
+                // VirtualStack exhausted (floor may still have states) — fall back
+                break None;
             };
             match table.action(state, token) {
                 Some(Action::Reduce(rule_id)) => {
                     let rule = &table.rules[*rule_id as usize];
-                    if !vstack.pop(rule.rhs.len()) {
-                        break Some(ParserGSS::empty());
+                    match vstack.pop(rule.rhs.len()) {
+                        PopResult::Ok => {}
+                        PopResult::HitFloor { .. } => break None,
                     }
                     let Some(&goto_from) = vstack.top() else {
-                        break Some(ParserGSS::empty());
+                        // Exhausted after pop — floor may have the goto_from state
+                        break None;
                     };
                     match table.goto_target(goto_from, rule.lhs) {
                         Some(target) => vstack.push(target),
@@ -380,14 +385,15 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
                     break Some(vstack.into_gss());
                 }
                 Some(Action::Split { shift, reduces, accept }) => {
-                    // Single-reduce split: treat as plain Reduce
                     if shift.is_none() && !*accept && reduces.len() == 1 {
                         let rule = &table.rules[reduces[0] as usize];
-                        if !vstack.pop(rule.rhs.len()) {
-                            break Some(ParserGSS::empty());
+                        match vstack.pop(rule.rhs.len()) {
+                            PopResult::Ok => {}
+                            PopResult::HitFloor { .. } => break None,
                         }
                         let Some(&goto_from) = vstack.top() else {
-                            break Some(ParserGSS::empty());
+                            // Exhausted after pop — floor may have the goto_from state
+                            break None;
                         };
                         match table.goto_target(goto_from, rule.lhs) {
                             Some(target) => vstack.push(target),
@@ -395,7 +401,7 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
                         }
                         continue;
                     }
-                    break None; // Multi-reduce splits: fall through
+                    break None;
                 }
                 Some(Action::Accept) => break None,
                 None => break Some(ParserGSS::empty()),
@@ -404,7 +410,7 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
         if let Some(result) = result {
             return result;
         }
-        // Fall through: had splits/accept, use general path
+        // Fall through: had splits/accept/hit floor/exhausted, use general path with original stack
     }
 
     // Owned: no clone needed. First Arc::make_mut won't clone if refcount == 1.
