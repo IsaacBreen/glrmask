@@ -332,13 +332,15 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
                         return vstack.into_gss();
                     }
                     Some(Action::Split { .. }) | Some(Action::Accept) => {
-                        current = vstack.into_gss();
-                        queue.clear();
-                        processed.clear();
-                        if let Some(state) = current.single_top_value() {
-                            queue.push(state);
-                        } else {
-                            current.for_each_top_value(|state| queue.push(state));
+                        if vstack.has_pushes() {
+                            current = vstack.into_gss();
+                            queue.clear();
+                            processed.clear();
+                            if let Some(state) = current.single_top_value() {
+                                queue.push(state);
+                            } else {
+                                current.for_each_top_value(|state| queue.push(state));
+                            }
                         }
                         break;
                     }

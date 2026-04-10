@@ -2049,6 +2049,12 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
         self.pushed.len() + self.chain_depth
     }
 
+    /// Whether any goto-push operations have been recorded.
+    #[inline]
+    pub fn has_pushes(&self) -> bool {
+        !self.pushed.is_empty()
+    }
+
     /// Materialize the virtual stack back into a GSS.
     /// Reuses the original chain structure; only builds Segments for pushed states.
     pub fn into_gss(self) -> LeveledGSS<T, A> {
