@@ -271,24 +271,54 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
         // would cross the floor), commit the progress so far back to the
         // GSS and fall through to the general path.
         if let Some(mut vstack) = current.try_virtual_stack() {
-            let mut modified = false;
             loop {
                 let Some(&state) = vstack.top() else { break };
                 match table.action(state, token) {
                     Some(Action::Reduce(rule_id)) => {
                         let rule = &table.rules[*rule_id as usize];
-                        // Need enough states to pop AND leave a goto_from.
-                        if rule.rhs.len() >= vstack.len() {
-                            break;
-                        }
-                        vstack.pop(rule.rhs.len()); // guaranteed Ok
-                        let goto_from = *vstack.top().unwrap();
-                        match table.goto_target(goto_from, rule.lhs) {
-                            Some(target) => {
-                                vstack.push(target);
-                                modified = true;
+                        let nv = vstack.len();
+                        let nr = rule.rhs.len();
+                        if nv > nr {
+                            // Fast: pure vstack reduce — enough states to pop
+                            // and still have a goto_from.
+                            vstack.pop(nr);
+                            let goto_from = *vstack.top().unwrap();
+                            match table.goto_target(goto_from, rule.lhs) {
+                                Some(target) => vstack.push(target),
+                                None => return ParserGSS::empty(),
                             }
-                            None => return ParserGSS::empty(),
+                        } else {
+                            // Cross-floor: pop crosses the virtual stack boundary.
+                            // Complete the reduce on the real GSS.
+                            let remaining = (nr - nv) as isize;
+                            let lhs = rule.lhs;
+                            current = vstack.into_floor_gss();
+                            queue.clear();
+                            processed.clear();
+                            processed.push(state);
+
+                            let mut top_vals = SmallVec::<[u32; 8]>::new();
+                            if let Some(v) = current.single_top_value() {
+                                top_vals.push(v);
+                            } else {
+                                current.for_each_top_value(|v| top_vals.push(v));
+                            }
+
+                            for top_val in top_vals {
+                                let bases =
+                                    current.isolate_popn_bases(top_val, remaining);
+                                for (goto_from, base) in bases {
+                                    if let Some(target) =
+                                        table.goto_target(goto_from, lhs)
+                                    {
+                                        current = current
+                                            .absorb_push_same_acc(target, &base);
+                                        queue.push(target);
+                                    }
+                                }
+                            }
+
+                            break; // vstack consumed
                         }
                     }
                     Some(Action::Shift(target)) => {
@@ -301,23 +331,22 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
                         vstack.push(*target);
                         return vstack.into_gss();
                     }
-                    Some(Action::Split { .. }) | Some(Action::Accept) => break,
+                    Some(Action::Split { .. }) | Some(Action::Accept) => {
+                        current = vstack.into_gss();
+                        queue.clear();
+                        processed.clear();
+                        if let Some(state) = current.single_top_value() {
+                            queue.push(state);
+                        } else {
+                            current.for_each_top_value(|state| queue.push(state));
+                        }
+                        break;
+                    }
                     None => return ParserGSS::empty(),
                 }
             }
-            if modified {
-                // Commit virtual stack progress back to the GSS.
-                current = vstack.into_gss();
-                queue.clear();
-                processed.clear();
-                if let Some(state) = current.single_top_value() {
-                    queue.push(state);
-                } else {
-                    current.for_each_top_value(|state| queue.push(state));
-                }
-                if queue.is_empty() {
-                    break;
-                }
+            if queue.is_empty() {
+                break;
             }
         }
 

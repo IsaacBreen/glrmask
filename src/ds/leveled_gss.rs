@@ -1978,10 +1978,7 @@ pub struct ChainTail<T: Clone + Eq + Hash> {
 /// Values are stored bottom-first: index 0 is deepest (closest to floor), last is top.
 pub struct VirtualStack<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
     /// The extracted chain states, bottom-first.
-    states: SmallVec<[T; 32]>,
-    /// Number of states that came from the original GSS (not pushed by the caller).
-    /// States at indices < original_len are "borrowed" from the GSS.
-    original_len: usize,
+    states: ArrayVec<T, 32>,
     /// The accumulator from the Interface.
     acc: A,
     /// The Lower node below the extracted chain. Could be a General with splits,
@@ -3685,7 +3682,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             _ => return None,
         };
 
-        let mut states = SmallVec::<[T; 32]>::new();
+        let mut states = ArrayVec::<T, 32>::new();
         let mut floor_arc: &Arc<Lower<T>> = &interface.inner; // will be updated
 
         // Walk down the chain, collecting states top-first.
@@ -3695,29 +3692,30 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             match current {
                 Lower::Segment { values, next, .. } => {
                     for v in values.iter().rev() {
-                        states.push(v.clone());
+                        if states.try_push(v.clone()).is_err() {
+                            return None; // chain too long
+                        }
                     }
                     floor_arc = next;
                     current = &**next;
                 }
                 Lower::General { children, .. } => {
                     if children.is_empty() {
-                        // Empty terminal — this is the bottom of the GSS
                         break;
                     }
                     if children.len() == 1 {
                         let key = children.keys().next().unwrap().clone();
                         let ordmap = children.values().next().unwrap();
                         if ordmap.len() == 1 {
-                            // Single-child, single-depth General — traverse through it
-                            states.push(key);
+                            if states.try_push(key).is_err() {
+                                return None; // chain too long
+                            }
                             let (_, next) = ordmap.iter().next().unwrap();
                             floor_arc = next;
                             current = &**next;
                             continue;
                         }
                     }
-                    // Multi-child or multi-depth: not a single path — floor stops here
                     break;
                 }
             }
@@ -3727,11 +3725,9 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             return None;
         }
 
-        let original_len = states.len();
-        states.reverse(); // Convert from top-first to bottom-first
+        states.as_mut_slice().reverse(); // Convert from top-first to bottom-first
         Some(VirtualStack {
             states,
-            original_len,
             acc: interface.acc.clone(),
             floor: Arc::clone(floor_arc),
         })
