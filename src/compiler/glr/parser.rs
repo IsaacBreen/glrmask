@@ -244,60 +244,8 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
         }
     }
 
-    // Virtual stack fast path: deterministic reduce chains processed as flat
-    // stack operations.  Falls through on ambiguity, accept, or floor-hit.
-    if let Some(mut vstack) = stack.try_virtual_stack() {
-        let result = loop {
-            let Some(&state) = vstack.top() else { break None };
-            match table.action(state, token) {
-                Some(Action::Reduce(rule_id)) => {
-                    let rule = &table.rules[*rule_id as usize];
-                    match vstack.pop(rule.rhs.len()) {
-                        PopResult::Ok => {}
-                        PopResult::HitFloor { .. } => break None,
-                    }
-                    let Some(&goto_from) = vstack.top() else { break None };
-                    match table.goto_target(goto_from, rule.lhs) {
-                        Some(target) => vstack.push(target),
-                        None => break Some(ParserGSS::empty()),
-                    }
-                }
-                Some(Action::Shift(target)) => {
-                    vstack.push(*target);
-                    break Some(vstack.into_gss());
-                }
-                Some(Action::Split { shift: Some(target), reduces, accept })
-                    if reduces.is_empty() && !*accept =>
-                {
-                    vstack.push(*target);
-                    break Some(vstack.into_gss());
-                }
-                Some(Action::Split { shift, reduces, accept }) => {
-                    if shift.is_none() && !*accept && reduces.len() == 1 {
-                        let rule = &table.rules[reduces[0] as usize];
-                        match vstack.pop(rule.rhs.len()) {
-                            PopResult::Ok => {}
-                            PopResult::HitFloor { .. } => break None,
-                        }
-                        let Some(&goto_from) = vstack.top() else { break None };
-                        match table.goto_target(goto_from, rule.lhs) {
-                            Some(target) => vstack.push(target),
-                            None => break Some(ParserGSS::empty()),
-                        }
-                        continue;
-                    }
-                    break None;
-                }
-                Some(Action::Accept) => break None,
-                None => break Some(ParserGSS::empty()),
-            }
-        };
-        if let Some(result) = result {
-            return result;
-        }
-    }
-
-    // General path: reduce closure on the full GSS.
+    // Reduce closure: queue of states to process, with VirtualStack attempted
+    // on each iteration before falling back to general GSS operations.
     let mut current = stack;
     let mut processed = SmallVec::<[u32; 16]>::new();
     let mut queue = SmallVec::<[u32; 8]>::new();
@@ -318,6 +266,61 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
             break;
         }
 
+        // Try virtual stack: process deterministic reduce chains as flat
+        // stack operations, avoiding GSS manipulation entirely.
+        if let Some(mut vstack) = current.try_virtual_stack() {
+            let result = loop {
+                let Some(&state) = vstack.top() else { break None };
+                match table.action(state, token) {
+                    Some(Action::Reduce(rule_id)) => {
+                        let rule = &table.rules[*rule_id as usize];
+                        match vstack.pop(rule.rhs.len()) {
+                            PopResult::Ok => {}
+                            PopResult::HitFloor { .. } => break None,
+                        }
+                        let Some(&goto_from) = vstack.top() else { break None };
+                        match table.goto_target(goto_from, rule.lhs) {
+                            Some(target) => vstack.push(target),
+                            None => break Some(ParserGSS::empty()),
+                        }
+                    }
+                    Some(Action::Shift(target)) => {
+                        vstack.push(*target);
+                        break Some(vstack.into_gss());
+                    }
+                    Some(Action::Split { shift: Some(target), reduces, accept })
+                        if reduces.is_empty() && !*accept =>
+                    {
+                        vstack.push(*target);
+                        break Some(vstack.into_gss());
+                    }
+                    Some(Action::Split { shift, reduces, accept }) => {
+                        if shift.is_none() && !*accept && reduces.len() == 1 {
+                            let rule = &table.rules[reduces[0] as usize];
+                            match vstack.pop(rule.rhs.len()) {
+                                PopResult::Ok => {}
+                                PopResult::HitFloor { .. } => break None,
+                            }
+                            let Some(&goto_from) = vstack.top() else { break None };
+                            match table.goto_target(goto_from, rule.lhs) {
+                                Some(target) => vstack.push(target),
+                                None => break Some(ParserGSS::empty()),
+                            }
+                            continue;
+                        }
+                        break None;
+                    }
+                    Some(Action::Accept) => break None,
+                    None => break Some(ParserGSS::empty()),
+                }
+            };
+            if let Some(result) = result {
+                return result;
+            }
+            // VirtualStack failed — fall through to general GSS operations
+        }
+
+        // General path: one iteration of reduce closure on the GSS.
         let mut any_reduced = false;
         pending.clear();
 
