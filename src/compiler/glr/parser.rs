@@ -486,6 +486,31 @@ mod tests {
         }
     }
 
+    /// Differential test: for every token in `input`, advance both the GSS
+    /// (which uses VirtualStack) and the flat reference implementation, then
+    /// verify the resulting stack sets are identical.
+    fn assert_advance_matches_reference(parser: &GLRParser, input: &[TerminalID]) {
+        let mut gss = parser.stack.clone();
+        let mut vecs = stack_vectors(&gss);
+        for (i, &token) in input.iter().enumerate() {
+            let gss_advanced = advance_stacks(&parser.table, &gss, token);
+            let vec_advanced = advance_stack_vectors(&parser.table, &vecs, token);
+
+            let mut gss_stacks = dedup_stacks(stack_vectors(&gss_advanced));
+            gss_stacks.sort();
+            let mut ref_stacks = dedup_stacks(vec_advanced.clone());
+            ref_stacks.sort();
+
+            assert_eq!(
+                gss_stacks, ref_stacks,
+                "Mismatch at step {i} (token {token}):\n  GSS stacks: {:?}\n  Ref stacks: {:?}",
+                gss_stacks, ref_stacks
+            );
+            gss = gss_advanced;
+            vecs = vec_advanced;
+        }
+    }
+
     fn accepts(parser: &GLRParser, input: &[TerminalID]) -> bool {
         let mut current = GLRParser {
             table: parser.table.clone(),
@@ -884,5 +909,127 @@ mod tests {
             stacks_finished(&current.table, &advanced),
             "close token should reduce the wrapper family to a finished parse"
         );
+    }
+
+    /// Differential test: GSS advance (with VirtualStack) matches the flat
+    /// reference implementation for grammars with epsilon productions and
+    /// nullable nonterminals that can create intermediate `empty: true` nodes.
+    #[test]
+    fn test_vstack_matches_reference_nullable_grammars() {
+        // Grammar 1: S → A B, A → 'x' | ε, B → 'x' | ε
+        let gdef = make_grammar(
+            vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1), Symbol::Nonterminal(2)] },
+                Rule { lhs: 1, rhs: vec![Symbol::Terminal(0)] },
+                Rule { lhs: 1, rhs: vec![] },
+                Rule { lhs: 2, rhs: vec![Symbol::Terminal(0)] },
+                Rule { lhs: 2, rhs: vec![] },
+            ],
+            0,
+            vec![tdef(0, "x")],
+        );
+        let parser = build_parser(&gdef);
+        assert_advance_matches_reference(&parser, &[0]);
+        assert_advance_matches_reference(&parser, &[0, 0]);
+
+        // Grammar 2: S → S S | 'a' (highly ambiguous)
+        let gdef = make_grammar(
+            vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(0), Symbol::Nonterminal(0)] },
+                Rule { lhs: 0, rhs: vec![Symbol::Terminal(0)] },
+            ],
+            0,
+            vec![tdef(0, "a")],
+        );
+        let parser = build_parser(&gdef);
+        assert_advance_matches_reference(&parser, &[0, 0, 0, 0, 0]);
+
+        // Grammar 3: S → A 'c', A → 'd' | ε (nullable before terminal)
+        let gdef = make_grammar(
+            vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(0)] },
+                Rule { lhs: 1, rhs: vec![Symbol::Terminal(1)] },
+                Rule { lhs: 1, rhs: vec![] },
+            ],
+            0,
+            vec![tdef(0, "c"), tdef(1, "d")],
+        );
+        let parser = build_parser(&gdef);
+        assert_advance_matches_reference(&parser, &[1, 0]);
+        assert_advance_matches_reference(&parser, &[0]);
+
+        // Grammar 4: S → A, A → A 'a' | 'b' (left-recursive chain)
+        let gdef = make_grammar(
+            vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1)] },
+                Rule { lhs: 1, rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(0)] },
+                Rule { lhs: 1, rhs: vec![Symbol::Terminal(1)] },
+            ],
+            0,
+            vec![tdef(0, "a"), tdef(1, "b")],
+        );
+        let parser = build_parser(&gdef);
+        assert_advance_matches_reference(&parser, &[1, 0, 0, 0]);
+
+        // Grammar 5: Expression grammar (deep reduce chains across floor)
+        let gdef = make_grammar(
+            vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(0), Symbol::Terminal(1), Symbol::Nonterminal(1)] },
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1)] },
+                Rule { lhs: 1, rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(2), Symbol::Nonterminal(2)] },
+                Rule { lhs: 1, rhs: vec![Symbol::Nonterminal(2)] },
+                Rule { lhs: 2, rhs: vec![Symbol::Terminal(3), Symbol::Nonterminal(0), Symbol::Terminal(4)] },
+                Rule { lhs: 2, rhs: vec![Symbol::Terminal(0)] },
+            ],
+            0,
+            vec![tdef(0, "i"), tdef(1, "+"), tdef(2, "*"), tdef(3, "("), tdef(4, ")")],
+        );
+        let parser = build_parser(&gdef);
+        assert_advance_matches_reference(&parser, &[0, 1, 0, 2, 0]);
+        assert_advance_matches_reference(&parser, &[3, 0, 1, 0, 4, 2, 0]);
+
+        // Grammar 6: Reduce/reduce conflict
+        let gdef = make_grammar(
+            vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1)] },
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(2)] },
+                Rule { lhs: 1, rhs: vec![Symbol::Terminal(0)] },
+                Rule { lhs: 2, rhs: vec![Symbol::Terminal(0)] },
+            ],
+            0,
+            vec![tdef(0, "x")],
+        );
+        let parser = build_parser(&gdef);
+        assert_advance_matches_reference(&parser, &[0]);
+
+        // Grammar 7: Wrapper family (many nonterminals, deep stack)
+        {
+            const OPEN: u32 = 0;
+            const NUM: u32 = 1;
+            const COMMA: u32 = 2;
+            const CLOSE: u32 = 3;
+            const START: u32 = 0;
+            const BODY: u32 = 1;
+            const TAIL_ELEM: u32 = 2;
+            const TAIL_PACK: u32 = 3;
+            const FIRST_WRAP: u32 = 10;
+            const WRAPPER_COUNT: usize = 24;
+
+            let mut rules = vec![
+                Rule { lhs: START, rhs: vec![Symbol::Terminal(OPEN), Symbol::Terminal(NUM), Symbol::Nonterminal(BODY), Symbol::Terminal(CLOSE)] },
+                Rule { lhs: BODY, rhs: vec![Symbol::Nonterminal(TAIL_PACK)] },
+                Rule { lhs: TAIL_ELEM, rhs: vec![Symbol::Terminal(COMMA), Symbol::Terminal(NUM)] },
+                Rule { lhs: TAIL_PACK, rhs: vec![Symbol::Nonterminal(TAIL_ELEM)] },
+                Rule { lhs: TAIL_PACK, rhs: vec![Symbol::Nonterminal(TAIL_ELEM), Symbol::Nonterminal(TAIL_ELEM)] },
+            ];
+            for i in 0..WRAPPER_COUNT {
+                let wrap_nt = FIRST_WRAP + i as u32;
+                rules.push(Rule { lhs: wrap_nt, rhs: vec![Symbol::Nonterminal(TAIL_PACK)] });
+                rules.push(Rule { lhs: BODY, rhs: vec![Symbol::Nonterminal(wrap_nt)] });
+            }
+            let gdef = make_grammar(rules, START, vec![tdef(OPEN, "["), tdef(NUM, "n"), tdef(COMMA, ","), tdef(CLOSE, "]")]);
+            let parser = build_parser(&gdef);
+            assert_advance_matches_reference(&parser, &[OPEN, NUM, COMMA, NUM, COMMA, NUM, CLOSE]);
+        }
     }
 }
