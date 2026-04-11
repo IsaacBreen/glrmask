@@ -60,7 +60,7 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
     // we run the standard LR reduce loop on a flat stack first (fast path).
 
     let mut gss = stack;
-    let mut closed: SmallVec<[u32; 16]> = SmallVec::new();
+    let mut processed: SmallVec<[u32; 16]> = SmallVec::new();
 
     loop {
         // Deterministic fast path: when the GSS is a single chain, apply
@@ -68,17 +68,14 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
         // common case where no ambiguity exists yet, and also catches
         // cases where all but one path died in a previous wave.
         gss = apply_deterministic_reduces(table, gss, token);
-        let mut worklist: SmallVec<[u32; 8]> = SmallVec::from_iter(
-            gss.peek_values().into_iter().filter(|s| !closed.contains(s)),
-        );
 
         let mut gotos = SmallVec::<[(u32, ParserGSS); 8]>::new();
 
-        while let Some(state) = worklist.pop() {
-            if closed.contains(&state) {
+        for state in gss.peek_values() {
+            if processed.contains(&state) {
                 continue;
             }
-            closed.push(state);
+            processed.push(state);
 
             let Some(action) = table.action(state, token) else {
                 continue;
