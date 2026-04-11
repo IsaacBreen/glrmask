@@ -246,16 +246,8 @@ fn take_vstack_hit_count() -> usize {
 }
 
 fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> ParserGSS {
-    // Fast path: single top state with a pure shift.
-    if let Some(state) = stack.single_exclusive_top_value() {
-        match table.action(state, token) {
-            Some(action) => {
-                if let Some(target) = action.pure_shift_target() {
-                    return stack.push(target);
-                }
-            }
-            None => return ParserGSS::empty(),
-        }
+    if let Some(shifted) = try_trivial_shift(table, &stack, token) {
+        return shifted;
     }
 
     // Standard LR shape: first compute the lookahead-specific reduce closure,
@@ -263,7 +255,7 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
     let mut stacks = stack;
     let mut pending_reduce_states = SmallVec::<[u32; 8]>::new();
     let mut closed_reduce_states = SmallVec::<[u32; 16]>::new();
-    pending_reduce_states.extend(stacks.peek_values());
+    refresh_reduce_frontier(&stacks, &mut pending_reduce_states, &mut closed_reduce_states);
 
     while !pending_reduce_states.is_empty() {
         let before_key = stacks.ptr_key();
@@ -275,9 +267,7 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
         // If the deterministic fast path changed the frontier, restart the
         // reduce closure from the new top states.
         if stacks.ptr_key() != before_key {
-            pending_reduce_states.clear();
-            closed_reduce_states.clear();
-            pending_reduce_states.extend(stacks.peek_values());
+            refresh_reduce_frontier(&stacks, &mut pending_reduce_states, &mut closed_reduce_states);
             if pending_reduce_states.is_empty() {
                 break;
             }
@@ -297,6 +287,24 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
     }
 
     shift_frontier(table, stacks, token)
+}
+
+fn try_trivial_shift(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> Option<ParserGSS> {
+    let state = stack.single_exclusive_top_value()?;
+    match table.action(state, token) {
+        Some(action) => action.pure_shift_target().map(|target| stack.push(target)),
+        None => Some(ParserGSS::empty()),
+    }
+}
+
+fn refresh_reduce_frontier(
+    stacks: &ParserGSS,
+    pending_reduce_states: &mut SmallVec<[u32; 8]>,
+    closed_reduce_states: &mut SmallVec<[u32; 16]>,
+) {
+    pending_reduce_states.clear();
+    closed_reduce_states.clear();
+    pending_reduce_states.extend(stacks.peek_values());
 }
 
 /// Try the deterministic top-of-stack subcase.
@@ -389,22 +397,7 @@ fn reduce_frontier_step(
             continue;
         }
         closed_reduce_states.push(state);
-
-        let Some(action) = table.action(state, token) else { continue };
-
-        for &rule_id in action.reduce_rule_ids() {
-            let rule = &table.rules[rule_id as usize];
-            for (goto_from, base) in current.isolate_popn_bases(state, rule.rhs.len() as isize) {
-                if let Some(target) = table.goto_target(goto_from, rule.lhs) {
-                    if let Some((_, existing)) = pending_gotos.iter_mut().find(|(t, _)| *t == target) {
-                        *existing = existing.merge(&base);
-                    } else {
-                        pending_gotos.push((target, base));
-                    }
-                    any_reduced = true;
-                }
-            }
-        }
+        any_reduced |= collect_reduce_gotos_for_state(table, &current, state, token, &mut pending_gotos);
     }
 
     if any_reduced {
@@ -414,6 +407,34 @@ fn reduce_frontier_step(
         }
     }
     (current, any_reduced)
+}
+
+fn collect_reduce_gotos_for_state(
+    table: &GLRTable,
+    stacks: &ParserGSS,
+    state: u32,
+    token: TerminalID,
+    pending_gotos: &mut SmallVec<[(u32, ParserGSS); 8]>,
+) -> bool {
+    let Some(action) = table.action(state, token) else {
+        return false;
+    };
+
+    let mut any_reduced = false;
+    for &rule_id in action.reduce_rule_ids() {
+        let rule = &table.rules[rule_id as usize];
+        for (goto_from, base) in stacks.isolate_popn_bases(state, rule.rhs.len() as isize) {
+            if let Some(target) = table.goto_target(goto_from, rule.lhs) {
+                if let Some((_, existing)) = pending_gotos.iter_mut().find(|(t, _)| *t == target) {
+                    *existing = existing.merge(&base);
+                } else {
+                    pending_gotos.push((target, base));
+                }
+                any_reduced = true;
+            }
+        }
+    }
+    any_reduced
 }
 
 fn shift_frontier(table: &GLRTable, current: ParserGSS, token: TerminalID) -> ParserGSS {
