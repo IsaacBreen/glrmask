@@ -18,6 +18,8 @@ use crate::ds::leveled_gss::LeveledGSS;
 use smallvec::SmallVec;
 
 pub type ParserGSS = LeveledGSS<u32, TerminalsDisallowed>;
+type ReduceSources = SmallVec<[(u32, ParserGSS); 4]>;
+type GotoBatch = SmallVec<[(u32, ParserGSS); 8]>;
 
 
 pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> ParserGSS {
@@ -69,6 +71,10 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
     // ── Phase 2: Shift ──
     //
     // Push the lookahead token onto every surviving frontier state.
+    shift_frontier(table, gss, token)
+}
+
+fn shift_frontier(table: &GLRTable, gss: ParserGSS, token: TerminalID) -> ParserGSS {
     let mut shift_pairs = SmallVec::<[(u32, u32); 8]>::new();
     for state in gss.peek_values() {
         if let Some(target) = table.action(state, token).and_then(Action::shift_target) {
@@ -78,11 +84,67 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
     gss.shift_top_values_owned(shift_pairs)
 }
 
-fn apply_gotos(mut gss: ParserGSS, gotos: SmallVec<[(u32, ParserGSS); 8]>) -> ParserGSS {
+fn apply_gotos(mut gss: ParserGSS, gotos: GotoBatch) -> ParserGSS {
     for (target, base) in gotos {
         gss = gss.absorb_push_same_acc(target, &base);
     }
     gss
+}
+
+fn add_goto(gotos: &mut GotoBatch, target: u32, base: ParserGSS) {
+    if let Some((_, existing)) = gotos.iter_mut().find(|(t, _)| *t == target) {
+        *existing = existing.merge(&base);
+    } else {
+        gotos.push((target, base));
+    }
+}
+
+fn reduce_sources(gss: &ParserGSS, state: u32, rhs_len: usize) -> ReduceSources {
+    gss.isolate_pop_bases(state, rhs_len as isize)
+}
+
+fn popped_sources(gss: &ParserGSS, leftover: usize) -> ReduceSources {
+    let popped = gss.popn(leftover as isize);
+    let mut sources = ReduceSources::new();
+    for state in popped.peek_values() {
+        sources.push((state, popped.isolate(Some(state))));
+    }
+    sources
+}
+
+fn collect_rule_gotos(
+    table: &GLRTable,
+    lhs: u32,
+    sources: ReduceSources,
+) -> GotoBatch {
+    let mut gotos = GotoBatch::new();
+    for (goto_from, base) in sources {
+        if let Some(target) = table.goto_target(goto_from, lhs) {
+            add_goto(&mut gotos, target, base);
+        }
+    }
+    gotos
+}
+
+fn collect_reduce_gotos(table: &GLRTable, gss: &ParserGSS, token: TerminalID) -> GotoBatch {
+    let mut gotos = GotoBatch::new();
+
+    for state in gss.peek_values() {
+        let Some(action) = table.action(state, token) else {
+            continue;
+        };
+
+        for &rule_id in action.reduce_rule_ids() {
+            let rule = &table.rules[rule_id as usize];
+            for (goto_from, base) in reduce_sources(gss, state, rule.rhs.len()) {
+                if let Some(target) = table.goto_target(goto_from, rule.lhs) {
+                    add_goto(&mut gotos, target, base);
+                }
+            }
+        }
+    }
+
+    gotos
 }
 
 /// Apply one wave of nondeterministic reductions.
@@ -98,26 +160,7 @@ fn apply_nondeterministic_reduces(
     gss: ParserGSS,
     token: TerminalID,
 ) -> (ParserGSS, bool) {
-    let mut gotos = SmallVec::<[(u32, ParserGSS); 8]>::new();
-
-    for state in gss.peek_values() {
-        let Some(action) = table.action(state, token) else {
-            continue;
-        };
-
-        for &rule_id in action.reduce_rule_ids() {
-            let rule = &table.rules[rule_id as usize];
-            for (goto_from, base) in gss.isolate_pop_bases(state, rule.rhs.len() as isize) {
-                if let Some(target) = table.goto_target(goto_from, rule.lhs) {
-                    if let Some((_, existing)) = gotos.iter_mut().find(|(t, _)| *t == target) {
-                        *existing = existing.merge(&base);
-                    } else {
-                        gotos.push((target, base));
-                    }
-                }
-            }
-        }
-    }
+    let gotos = collect_reduce_gotos(table, &gss, token);
 
     if gotos.is_empty() {
         return (gss, false);
@@ -180,18 +223,7 @@ fn apply_deterministic_reduces(
                     // We crossed below the deterministic chain's floor.
                     // Finish the remaining pop on the materialized GSS,
                     // then apply all resulting gotos as one batch.
-                    let popped = stack.into_gss().popn(leftover as isize);
-                    let mut gotos = SmallVec::<[(u32, ParserGSS); 8]>::new();
-                    for goto_from in popped.peek_values() {
-                        if let Some(target) = table.goto_target(goto_from, rule.lhs) {
-                            let base = popped.isolate(Some(goto_from));
-                            if let Some((_, existing)) = gotos.iter_mut().find(|(t, _)| *t == target) {
-                                *existing = existing.merge(&base);
-                            } else {
-                                gotos.push((target, base));
-                            }
-                        }
-                    }
+                    let gotos = collect_rule_gotos(table, rule.lhs, popped_sources(&stack.into_gss(), leftover));
                     return apply_gotos(before_pop, gotos);
                 }
             }
