@@ -29,16 +29,6 @@ impl Action {
         }
     }
 
-    /// The shift target, only when there are no reduces or accept actions.
-    #[inline]
-    pub fn pure_shift_target(&self) -> Option<u32> {
-        match self {
-            Action::Shift(t) => Some(*t),
-            Action::Split { shift: Some(t), reduces, accept }
-                if reduces.is_empty() && !*accept => Some(*t),
-            _ => None,
-        }
-    }
 
     /// Slice of reduce rule IDs. Empty for Shift/Accept.
     #[inline]
@@ -897,5 +887,21 @@ mod tests {
             has_conflict,
             "Expected shift/reduce conflict for ambiguous grammar"
         );
+    }
+
+
+    #[test]
+    fn test_pending_action_finish_normalizes_pure_cases() {
+        let mut shift = PendingAction::default();
+        shift.push_shift(7);
+        assert_eq!(shift.finish(), Action::Shift(7));
+
+        let mut reduce = PendingAction::default();
+        reduce.push_reduce(11);
+        assert_eq!(reduce.finish(), Action::Reduce(11));
+
+        let mut accept = PendingAction::default();
+        accept.push_accept();
+        assert_eq!(accept.finish(), Action::Accept);
     }
 }

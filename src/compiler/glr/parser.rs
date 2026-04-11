@@ -43,8 +43,8 @@ pub(crate) fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: Te
 fn advance_stacks_core(table: &GLRTable, mut gss: ParserGSS, token: TerminalID) -> ParserGSS {
     // Fast path: single state with a pure shift action (most common case).
     if let Some(state) = gss.single_exclusive_top_value() {
-        if let Some(target) = table.action(state, token).and_then(Action::pure_shift_target) {
-            return gss.push(target);
+        if let Some(Action::Shift(target)) = table.action(state, token) {
+            return gss.push(*target);
         }
     }
 
@@ -204,12 +204,12 @@ fn advance_deterministically(
                     return false;
                 }
             }
-            Some(action) => {
-                if let Some(target) = action.pure_shift_target() {
-                    *gss = stack.into_gss().push(target);
-                    return true;
-                }
-                break; // Split, accept, or dead — handled by the caller.
+            Some(Action::Shift(target)) => {
+                *gss = stack.into_gss().push(*target);
+                return true;
+            }
+            Some(Action::Split { .. }) | Some(Action::Accept) => {
+                break; // Ambiguous or accepting — handled by the caller.
             }
             None => break,
         }
