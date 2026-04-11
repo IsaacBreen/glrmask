@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::automata::lexer::tokenizer::TokenizerExecResult;
+use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{
     ParserGSS,
-    TerminalsDisallowed,
     advance_stacks,
     advance_stacks_owned,
     stack_may_advance_on,

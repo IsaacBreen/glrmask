@@ -6,7 +6,8 @@ use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
-use crate::compiler::glr::parser::{ParserGSS, TerminalsDisallowed};
+use crate::compiler::glr::accumulator::TerminalsDisallowed;
+use crate::compiler::glr::parser::ParserGSS;
 use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar_def::TerminalID;
 use crate::ds::weight::Weight;

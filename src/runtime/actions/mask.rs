@@ -335,7 +335,7 @@ impl<'a> ConstraintState<'a> {
     /// Transform a TerminalsDisallowed into a DenseMaskAcc.
     fn terminals_disallowed_to_dense_acc(
         &self,
-        terminals_disallowed: &crate::compiler::glr::parser::TerminalsDisallowed,
+        terminals_disallowed: &crate::compiler::glr::accumulator::TerminalsDisallowed,
         internal_tsid: u32,
     ) -> Option<DenseMaskAcc> {
         let universe = &self.constraint.seed_universe_dense;
