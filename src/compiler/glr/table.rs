@@ -29,7 +29,6 @@ impl Action {
         }
     }
 
-
     /// Slice of reduce rule IDs. Empty for Shift/Accept.
     #[inline]
     pub fn reduce_rule_ids(&self) -> &[u32] {
@@ -72,6 +71,11 @@ impl GLRTable {
         table.merge_identical_rows();
         let merge_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
+        let pre_recog_states = table.num_states;
+        let t3 = std::time::Instant::now();
+        table.merge_recognizer_equivalent();
+        let recog_ms = t3.elapsed().as_secs_f64() * 1000.0;
+
         let debug_profile = std::env::var("GLRMASK_DEBUG_PROFILE")
             .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
             .unwrap_or(false);
@@ -79,8 +83,8 @@ impl GLRTable {
             let max_items = item_sets.iter().map(|s| s.len()).max().unwrap_or(0);
             let total_items: usize = item_sets.iter().map(|s| s.len()).sum();
             eprintln!(
-                "[glrmask/debug][glr_table] lr1_states={} lr1_ms={:.3} ielr_ms={:.3} pre_merge_states={} merge_ms={:.3} final_states={} max_items_per_state={} total_items={}",
-                item_sets.len(), lr1_ms, ielr_ms, pre_merge_states, merge_ms, table.num_states, max_items, total_items,
+                "[glrmask/debug][glr_table] lr1_states={} lr1_ms={:.3} ielr_ms={:.3} pre_merge_states={} merge_ms={:.3} pre_recog_states={} recog_ms={:.3} final_states={} max_items_per_state={} total_items={}",
+                item_sets.len(), lr1_ms, ielr_ms, pre_merge_states, merge_ms, pre_recog_states, recog_ms, table.num_states, max_items, total_items,
             );
         }
 
@@ -160,6 +164,229 @@ impl GLRTable {
             self.goto = new_goto;
             self.num_states = kept.len() as u32;
         }
+    }
+
+    /// Merge states that are equivalent for recognition purposes.
+    ///
+    /// Unlike `merge_identical_rows` which requires exact action/goto match,
+    /// this treats two Reduce actions as equivalent when they have the same
+    /// `(lhs, rhs_len)`, since the parser only uses those two fields.
+    /// It also merges goto columns for nonterminals that become equivalent.
+    /// Iterates until stable.
+    fn merge_recognizer_equivalent(&mut self) {
+        loop {
+            let prev_states = self.num_states;
+
+            // Step 1: Canonicalize rule IDs by (lhs, rhs_len).
+            let mut lhs_rhs_to_canon: FxHashMap<(NonterminalID, usize), u32> =
+                FxHashMap::default();
+            let rule_canon: Vec<u32> = self
+                .rules
+                .iter()
+                .enumerate()
+                .map(|(id, rule)| {
+                    let key = (rule.lhs, rule.rhs.len());
+                    *lhs_rhs_to_canon.entry(key).or_insert(id as u32)
+                })
+                .collect();
+
+            // Rewrite all action entries with canonical rule IDs.
+            for state in 0..self.num_states as usize {
+                let old = std::mem::take(&mut self.action[state]);
+                let mut new_action = FxHashMap::default();
+                for (tid, action) in old {
+                    new_action.insert(tid, canonicalize_action_rules(&action, &rule_canon));
+                }
+                self.action[state] = new_action;
+            }
+
+            // Step 2: Merge states with now-identical rows.
+            self.merge_identical_rows();
+
+            // Step 3: Merge goto columns for nonterminals whose goto vectors
+            // are identical across all states (i.e., they always land in the
+            // same state, or are both absent).
+            let nstates = self.num_states as usize;
+            let mut all_nts: BTreeSet<NonterminalID> = BTreeSet::new();
+            for goto_row in &self.goto {
+                for &nt in goto_row.keys() {
+                    all_nts.insert(nt);
+                }
+            }
+
+            // Build goto column for each nonterminal.
+            let mut nt_to_column: FxHashMap<NonterminalID, Vec<Option<u32>>> =
+                FxHashMap::default();
+            for &nt in &all_nts {
+                let col: Vec<Option<u32>> = (0..nstates)
+                    .map(|s| self.goto[s].get(&nt).copied())
+                    .collect();
+                nt_to_column.insert(nt, col);
+            }
+
+            // Group NTs by column.
+            let mut column_to_canon: FxHashMap<Vec<Option<u32>>, NonterminalID> =
+                FxHashMap::default();
+            let mut nt_remap: FxHashMap<NonterminalID, NonterminalID> = FxHashMap::default();
+            for &nt in &all_nts {
+                let col = &nt_to_column[&nt];
+                let canon = *column_to_canon.entry(col.clone()).or_insert(nt);
+                if canon != nt {
+                    nt_remap.insert(nt, canon);
+                }
+            }
+
+            if !nt_remap.is_empty() {
+                // Rewrite goto entries: merge columns.
+                for state in 0..nstates {
+                    let old = std::mem::take(&mut self.goto[state]);
+                    let mut new_goto: FxHashMap<NonterminalID, u32> = FxHashMap::default();
+                    for (nt, target) in old {
+                        let canon_nt = nt_remap.get(&nt).copied().unwrap_or(nt);
+                        // All remapped NTs should have the same target; just insert.
+                        new_goto.insert(canon_nt, target);
+                    }
+                    self.goto[state] = new_goto;
+                }
+
+                // Rewrite rule LHS to use canonical NTs.
+                for rule in &mut self.rules {
+                    if let Some(&canon) = nt_remap.get(&rule.lhs) {
+                        rule.lhs = canon;
+                    }
+                }
+
+                // Rewrite rule RHS nonterminals to use canonical NTs.
+                for rule in &mut self.rules {
+                    for sym in &mut rule.rhs {
+                        if let Symbol::Nonterminal(nt) = sym {
+                            if let Some(&canon) = nt_remap.get(nt) {
+                                *nt = canon;
+                            }
+                        }
+                    }
+                }
+
+                // Merge identical rows again after NT merging.
+                self.merge_identical_rows();
+            }
+
+            // Step 4: Local split collapsing.
+            // For each remaining Split action, check if all reduces land in the
+            // same goto target from every predecessor state.  If so, the split
+            // is invisible to a recognizer and we can collapse it.
+            let nstates2 = self.num_states as usize;
+
+            // Build predecessor map: for each state, which states can be
+            // "goto_from" after a rhs_len=K pop.
+            // For rhs_len=1: predecessor is any state X such that
+            //   goto[X][*] == this_state  OR  shift in action[X][*] -> this_state
+            let mut predecessors: Vec<BTreeSet<u32>> = vec![BTreeSet::new(); nstates2];
+            for x in 0..nstates2 {
+                for (_, action) in &self.action[x] {
+                    if let Some(target) = action.shift_target() {
+                        predecessors[target as usize].insert(x as u32);
+                    }
+                }
+                for (_, &target) in &self.goto[x] {
+                    predecessors[target as usize].insert(x as u32);
+                }
+            }
+
+            let mut collapsed_any = false;
+            let mut collapses: Vec<(usize, TerminalID, u32)> = Vec::new();
+            for state in 0..nstates2 {
+                for (&tid, action) in &self.action[state] {
+                    if let Action::Split { shift, reduces, accept } = action {
+                        // Only handle pure-reduce splits (no shift, no accept).
+                        if shift.is_some() || *accept {
+                            continue;
+                        }
+                        // Check: do all reduces have the same rhs_len?
+                        let rhs_len = self.rules[reduces[0] as usize].rhs.len();
+                        if reduces.iter().any(|&r| self.rules[r as usize].rhs.len() != rhs_len) {
+                            continue;
+                        }
+                        // For rhs_len=K, find all states that are K levels
+                        // up in the stack (predecessors^K).
+                        let mut candidate_froms: BTreeSet<u32> = BTreeSet::new();
+                        candidate_froms.insert(state as u32);
+                        for _ in 0..rhs_len {
+                            let mut next = BTreeSet::new();
+                            for &s in &candidate_froms {
+                                if let Some(preds) = predecessors.get(s as usize) {
+                                    next.extend(preds);
+                                }
+                            }
+                            candidate_froms = next;
+                        }
+                        if candidate_froms.is_empty() {
+                            continue;
+                        }
+                        // Check if all reduces lead to the same goto target
+                        // from every predecessor.
+                        let lhss: Vec<NonterminalID> = reduces
+                            .iter()
+                            .map(|&r| self.rules[r as usize].lhs)
+                            .collect();
+                        let mut all_same = true;
+                        'pred_loop: for &pred in &candidate_froms {
+                            let first_target = self.goto[pred as usize].get(&lhss[0]).copied();
+                            for &lhs in &lhss[1..] {
+                                let target = self.goto[pred as usize].get(&lhs).copied();
+                                if target != first_target {
+                                    all_same = false;
+                                    break 'pred_loop;
+                                }
+                            }
+                        }
+                        if all_same {
+                            collapses.push((state, tid, reduces[0]));
+                        }
+                    }
+                }
+            }
+
+            for (state, tid, rule_id) in collapses {
+                self.action[state].insert(tid, Action::Reduce(rule_id));
+                collapsed_any = true;
+            }
+
+            if collapsed_any {
+                self.merge_identical_rows();
+            }
+
+            if self.num_states == prev_states {
+                break;
+            }
+        }
+    }
+}
+
+fn canonicalize_action_rules(action: &Action, rule_canon: &[u32]) -> Action {
+    match action {
+        Action::Shift(t) => Action::Shift(*t),
+        Action::Reduce(rule) => Action::Reduce(rule_canon[*rule as usize]),
+        Action::Split {
+            shift,
+            reduces,
+            accept,
+        } => {
+            let mut canon_reduces: Vec<u32> =
+                reduces.iter().map(|r| rule_canon[*r as usize]).collect();
+            canon_reduces.sort_unstable();
+            canon_reduces.dedup();
+            if canon_reduces.len() == 1 && shift.is_none() && !accept {
+                Action::Reduce(canon_reduces[0])
+            } else {
+                Action::Split {
+                    shift: *shift,
+                    reduces: canon_reduces,
+                    accept: *accept,
+                }
+            }
+        }
+        Action::Accept => Action::Accept,
     }
 }
 
@@ -888,7 +1115,6 @@ mod tests {
             "Expected shift/reduce conflict for ambiguous grammar"
         );
     }
-
 
     #[test]
     fn test_pending_action_finish_normalizes_pure_cases() {

@@ -95,6 +95,30 @@ pub fn dump_json_schema_grammar_def(schema_json: &str) -> Result<String> {
         .map_err(|e| GlrMaskError::Serialization(format!("JSON serialization error: {e}")))
 }
 
+/// Serialize the PREPARED GrammarDef (after transforms) for a JSON schema as JSON.
+pub fn dump_json_schema_prepared_grammar_def(schema_json: &str) -> Result<String> {
+    let schema: serde_json::Value = serde_json::from_str(schema_json)
+        .map_err(|e| GlrMaskError::GrammarParse(format!("invalid JSON: {e}")))?;
+    let named = import::json_schema::schema_to_named_grammar(&schema)?;
+    let gdef = grammar::ast::lower(&named)?;
+    let prepared = compiler::grammar::transforms::prepare_grammar_transforms_only(gdef);
+    serde_json::to_string(&prepared)
+        .map_err(|e| GlrMaskError::Serialization(format!("JSON serialization error: {e}")))
+}
+
+/// Dump the GLR table (action/goto) for a JSON schema as JSON.
+pub fn dump_json_schema_glr_table(schema_json: &str) -> Result<String> {
+    let schema: serde_json::Value = serde_json::from_str(schema_json)
+        .map_err(|e| GlrMaskError::GrammarParse(format!("invalid JSON: {e}")))?;
+    let named = import::json_schema::schema_to_named_grammar(&schema)?;
+    let gdef = grammar::ast::lower(&named)?;
+    let prepared = compiler::grammar::transforms::prepare_grammar_transforms_only(gdef);
+    let analyzed = compiler::glr::analysis::AnalyzedGrammar::from_grammar_def(&prepared);
+    let table = compiler::glr::table::GLRTable::build(&analyzed);
+    serde_json::to_string(&table)
+        .map_err(|e| GlrMaskError::Serialization(format!("JSON serialization error: {e}")))
+}
+
 /// Compile a Constraint from a serialized GrammarDef JSON + vocab.
 /// This runs the full compile pipeline (equivalence analysis, terminal DWA, parser DWA).
 pub fn compile_grammar_def_json(grammar_def_json: &str, vocab: &Vocab) -> Result<Constraint> {

@@ -173,14 +173,10 @@ fn advance_deterministically(
         match table.action(state, token) {
             Some(Action::Reduce(rule_id)) => {
                 let rule = &table.rules[*rule_id as usize];
-                let before_pop = stack.clone().into_gss();
-                let leftover = stack.pop(rule.rhs.len());
-                if leftover == 0 {
+                if rule.rhs.len() < stack.len() {
                     // Pop |rhs| symbols and push the goto target.
-                    let Some(&goto_from) = stack.top() else {
-                        *gss = before_pop;
-                        return false;
-                    };
+                    stack.pop(rule.rhs.len());
+                    let goto_from = *stack.top().unwrap();
                     match table.goto_target(goto_from, rule.lhs) {
                         Some(target) => stack.push(target),
                         None => {
@@ -189,10 +185,12 @@ fn advance_deterministically(
                         }
                     }
                 } else {
-                    // We crossed below the deterministic chain's floor.
-                    // Finish the remaining pop on the materialized GSS,
-                    // then apply all resulting gotos as one batch.
-                    let popped = stack.into_gss().popn(leftover as isize);
+                    // This reduce reaches or crosses the deterministic chain's
+                    // floor. Finish it at the GSS level, batch the gotos, and
+                    // keep going deterministically if the rebuilt frontier is
+                    // still a single chain.
+                    let current = stack.into_gss();
+                    let popped = current.popn(rule.rhs.len() as isize);
                     let mut gotos = GotoBatch::new();
                     for goto_from in popped.peek_values() {
                         let base = popped.isolate(Some(goto_from));
@@ -200,8 +198,12 @@ fn advance_deterministically(
                             add_goto(&mut gotos, target, base);
                         }
                     }
-                    *gss = apply_gotos(before_pop, gotos);
-                    return false;
+                    let rebuilt = apply_gotos(current, gotos);
+                    let Some(next_stack) = rebuilt.try_virtual_stack() else {
+                        *gss = rebuilt;
+                        return false;
+                    };
+                    stack = next_stack;
                 }
             }
             Some(Action::Shift(target)) => {
@@ -221,6 +223,200 @@ fn advance_deterministically(
 
 pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
     stack.peek_values().into_iter().any(|state| table.action(state, token).is_some())
+}
+
+/// Profiled version of `advance_stacks_core`.
+/// Returns (result_gss, profile) where profile contains detailed timing.
+#[derive(Debug, Clone, Default)]
+pub struct AdvanceProfile {
+    pub pure_shift: bool,
+    pub deterministic_entered: bool,
+    pub deterministic_finished: bool,
+    pub nondeterministic_entered: bool,
+    pub vstack_len: u32,
+    pub n_reduces_above_floor: u32,
+    pub n_floor_crossings: u32,
+    pub n_nondet_waves: u32,
+    pub n_nondet_branches: u32,
+    pub top_states: u32,
+    pub gss_depth: u32,
+    pub total_ns: u64,
+    pub det_ns: u64,
+    pub nondet_ns: u64,
+    /// 0 = not entered, 1 = shift (finished), 2 = split, 3 = accept, 4 = no action, 5 = no top, 6 = vstack fail, 7 = floor cross vstack fail
+    pub det_exit_reason: u32,
+    pub det_exit_state: u32,
+}
+
+pub(crate) fn advance_stacks_profiled(
+    table: &GLRTable,
+    stack: &ParserGSS,
+    token: TerminalID,
+) -> (ParserGSS, AdvanceProfile) {
+    use std::time::Instant;
+    let t_total = Instant::now();
+    let mut profile = AdvanceProfile::default();
+
+    let summary = stack.summary();
+    profile.top_states = stack.peek_values().len() as u32;
+    profile.gss_depth = summary.max_depth;
+
+    let mut gss = stack.clone();
+
+    // Fast path: single state with a pure shift action
+    if let Some(state) = gss.single_exclusive_top_value() {
+        if let Some(Action::Shift(target)) = table.action(state, token) {
+            profile.pure_shift = true;
+            let result = gss.push(*target);
+            profile.total_ns = t_total.elapsed().as_nanos() as u64;
+            return (result, profile);
+        }
+    }
+
+    // Try deterministic path
+    let t_det = Instant::now();
+    let det_result = advance_deterministically_profiled(table, &mut gss, token, &mut profile);
+    profile.det_ns = t_det.elapsed().as_nanos() as u64;
+
+    if det_result {
+        profile.deterministic_finished = true;
+        profile.total_ns = t_total.elapsed().as_nanos() as u64;
+        return (gss, profile);
+    }
+
+    // Nondeterministic
+    let t_nondet = Instant::now();
+    profile.nondeterministic_entered = true;
+    let result = advance_nondeterministically_profiled(table, gss, token, &mut profile);
+    profile.nondet_ns = t_nondet.elapsed().as_nanos() as u64;
+    profile.total_ns = t_total.elapsed().as_nanos() as u64;
+    (result, profile)
+}
+
+fn advance_deterministically_profiled(
+    table: &GLRTable,
+    gss: &mut ParserGSS,
+    token: TerminalID,
+    profile: &mut AdvanceProfile,
+) -> bool {
+    let Some(mut stack) = gss.try_virtual_stack() else {
+        profile.det_exit_reason = 6; // vstack fail
+        return false;
+    };
+
+    profile.deterministic_entered = true;
+    profile.vstack_len = stack.len() as u32;
+
+    loop {
+        let Some(&state) = stack.top() else {
+            profile.det_exit_reason = 5; // no top
+            break;
+        };
+        match table.action(state, token) {
+            Some(Action::Reduce(rule_id)) => {
+                let rule = &table.rules[*rule_id as usize];
+                if rule.rhs.len() < stack.len() {
+                    profile.n_reduces_above_floor += 1;
+                    stack.pop(rule.rhs.len());
+                    let goto_from = *stack.top().unwrap();
+                    match table.goto_target(goto_from, rule.lhs) {
+                        Some(target) => stack.push(target),
+                        None => {
+                            *gss = ParserGSS::empty();
+                            profile.det_exit_reason = 4; // no goto
+                            return false;
+                        }
+                    }
+                } else {
+                    profile.n_floor_crossings += 1;
+                    let current = stack.into_gss();
+                    let popped = current.popn(rule.rhs.len() as isize);
+                    let mut gotos = GotoBatch::new();
+                    for goto_from in popped.peek_values() {
+                        let base = popped.isolate(Some(goto_from));
+                        if let Some(target) = table.goto_target(goto_from, rule.lhs) {
+                            add_goto(&mut gotos, target, base);
+                        }
+                    }
+                    let rebuilt = apply_gotos(current, gotos);
+                    let Some(next_stack) = rebuilt.try_virtual_stack() else {
+                        *gss = rebuilt;
+                        profile.det_exit_reason = 7; // floor cross vstack fail
+                        return false;
+                    };
+                    stack = next_stack;
+                }
+            }
+            Some(Action::Shift(target)) => {
+                *gss = stack.into_gss().push(*target);
+                profile.det_exit_reason = 1; // shift (finished)
+                return true;
+            }
+            Some(Action::Split { shift: _, reduces: _, accept: _ }) => {
+                profile.det_exit_reason = 2; // split
+                profile.det_exit_state = state;
+                break;
+            }
+            Some(Action::Accept) => {
+                profile.det_exit_reason = 3; // accept
+                profile.det_exit_state = state;
+                break;
+            }
+            None => {
+                profile.det_exit_reason = 4; // no action
+                profile.det_exit_state = state;
+                break;
+            }
+        }
+    }
+
+    *gss = stack.into_gss();
+    false
+}
+
+fn advance_nondeterministically_profiled(
+    table: &GLRTable,
+    mut closure: ParserGSS,
+    token: TerminalID,
+    profile: &mut AdvanceProfile,
+) -> ParserGSS {
+    let mut shifted = ParserGSS::empty();
+
+    loop {
+        profile.n_nondet_waves += 1;
+        let mut next = ParserGSS::empty();
+
+        for state in closure.peek_values() {
+            profile.n_nondet_branches += 1;
+            let Some(action) = table.action(state, token) else { continue; };
+
+            let mut isolated = closure.isolate(Some(state));
+            if advance_deterministically(table, &mut isolated, token) {
+                shifted = shifted.merge(&isolated);
+                continue;
+            }
+
+            if let Some(target) = action.shift_target() {
+                shifted = shifted.merge(&isolated.push(target));
+            }
+
+            for &rule_id in action.reduce_rule_ids() {
+                let rule = &table.rules[rule_id as usize];
+                for (goto_from, base) in reduce_sources(&closure, state, rule.rhs.len()) {
+                    let Some(target) = table.goto_target(goto_from, rule.lhs) else { continue; };
+                    let mut branch = base.push(target);
+                    if advance_deterministically(table, &mut branch, token) {
+                        shifted = shifted.merge(&branch);
+                    } else {
+                        next = next.merge(&branch);
+                    }
+                }
+            }
+        }
+
+        if next.is_empty() { return shifted; }
+        closure = next;
+    }
 }
 
 /// Returns true if any terminal in the given bitset may advance the parser stack,

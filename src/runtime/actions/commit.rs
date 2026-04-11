@@ -6,6 +6,8 @@ use crate::compiler::glr::parser::{
     ParserGSS,
     advance_stacks,
     advance_stacks_owned,
+    advance_stacks_profiled,
+    AdvanceProfile,
     stack_may_advance_on,
     stack_may_advance_on_any,
 };
@@ -377,6 +379,90 @@ fn commit_bytes_fast_path(
     Some(Ok(()))
 }
 
+fn commit_bytes_linear_fast_path(
+    constraint: &Constraint,
+    start_gss: ParserGSS,
+    bytes: &[u8],
+    first_exec_result: TokenizerExecResult,
+) -> Option<Result<ParserGSS, String>> {
+    let ignore_terminal = constraint.ignore_terminal;
+    let mut gss = start_gss;
+    let mut offset = 0usize;
+    let mut exec_result = first_exec_result;
+
+    loop {
+        let actionable_terminals = ActionableTerminals::from_gss(constraint, &gss);
+        let mut chosen: Option<(usize, u32, bool)> = None;
+
+        for matched in &exec_result.matches {
+            let ignored = is_ignored_terminal(ignore_terminal, matched.id);
+            if !ignored
+                && !is_actionable_terminal(
+                    actionable_terminals.as_ref(),
+                    constraint,
+                    matched.id,
+                )
+            {
+                continue;
+            }
+
+            let candidate = (matched.width, matched.id, ignored);
+            if let Some(existing) = chosen {
+                if existing != candidate {
+                    return None;
+                }
+            } else {
+                chosen = Some(candidate);
+            }
+        }
+
+        let Some((width, terminal, ignored)) = chosen else {
+            return None;
+        };
+
+        if let Some(end_state) = exec_result.end_state {
+            let future_terminals = constraint.tokenizer.possible_future_terminals(end_state);
+            if stack_may_advance_on_any(&constraint.table, &gss, future_terminals) {
+                return None;
+            }
+        }
+
+        if !ignored {
+            if !stack_may_advance_on(&constraint.table, &gss, terminal) {
+                return None;
+            }
+
+            let advanced = advance_stacks_owned(&constraint.table, gss, terminal);
+            if advanced.is_empty() {
+                return Some(Err(
+                    "commit rejected: no valid parser states remain".to_string(),
+                ));
+            }
+            gss = apply_future_terminal_disallow(constraint, &exec_result, terminal, advanced);
+            if gss.is_empty() {
+                return Some(Err(
+                    "commit rejected: no valid parser states remain".to_string(),
+                ));
+            }
+        }
+
+        offset += width;
+        if offset == bytes.len() {
+            let fused = gss.fuse(Some(1));
+            if fused.is_empty() {
+                return Some(Err(
+                    "commit rejected: no valid parser states remain".to_string(),
+                ));
+            }
+            return Some(Ok(fused));
+        }
+
+        exec_result = constraint
+            .tokenizer
+            .execute_from_state(&bytes[offset..], constraint.tokenizer.initial_state());
+    }
+}
+
 fn commit_bytes_impl(
     constraint: &Constraint,
     state: &mut BTreeMap<u32, ParserGSS>,
@@ -399,6 +485,29 @@ fn commit_bytes_impl(
             constraint, state, bytes, tokenizer_state, &exec_result,
         ) {
             return result;
+        }
+
+        if state
+            .values()
+            .next()
+            .is_some_and(|gss| gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()))
+        {
+            let start_gss = state.values().next().unwrap().clone();
+            if let Some(result) = commit_bytes_linear_fast_path(
+                constraint,
+                start_gss,
+                bytes,
+                exec_result.clone(),
+            ) {
+                match result {
+                    Ok(final_gss) => {
+                        state.clear();
+                        state.insert(constraint.tokenizer.initial_state(), final_gss);
+                        return Ok(());
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
         }
 
         // Fast path failed — build scan data from already-computed exec_result
@@ -584,13 +693,13 @@ fn commit_bytes_impl_profiled(
     constraint: &Constraint,
     state: &mut BTreeMap<u32, ParserGSS>,
     bytes: &[u8],
-) -> Result<(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64), String> {
+) -> Result<(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64), String> {
     use std::time::Instant;
     let t_total = Instant::now();
 
     if bytes.is_empty() {
         let total_ns = t_total.elapsed().as_nanos() as u64;
-        return Ok((total_ns, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+        return Ok((total_ns, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
     }
 
     let ignore_terminal = constraint.ignore_terminal;
@@ -611,7 +720,7 @@ fn commit_bytes_impl_profiled(
 
     let t_queue = Instant::now();
     let mut pending_state = ParserStatesByTokenizer::default();
-    let mut advance_result_cache = AdvanceResultCache::default();
+    let _advance_result_cache = AdvanceResultCache::default();
     let mut processing_queue: Vec<ParserStatesByTokenizer> =
         (0..=bytes.len()).map(|_| ParserStatesByTokenizer::default()).collect();
     processing_queue[0] = std::mem::take(state).into_iter().collect();
@@ -622,6 +731,7 @@ fn commit_bytes_impl_profiled(
     let mut actionable_ns: u64 = 0;
     let mut may_advance_ns: u64 = 0;
     let mut n_advances: u64 = 0;
+    let mut adv_profile = AdvanceProfile::default();
     let mut offset = 0usize;
     while offset < processing_queue.len() {
         if processing_queue[offset].is_empty() {
@@ -646,7 +756,7 @@ fn commit_bytes_impl_profiled(
             exec_ns += t_exec.elapsed().as_nanos() as u64;
 
             let mut seen_matches = FxHashSet::default();
-            let mut terminal_result_cache = FxHashMap::<u32, ParserGSS>::default();
+            let _terminal_result_cache = FxHashMap::<u32, ParserGSS>::default();
 
             for matched in &exec_result.matches {
                 let new_offset = offset + matched.width;
@@ -670,16 +780,42 @@ fn commit_bytes_impl_profiled(
                 }
 
                 let t_adv = Instant::now();
-                let advance_result = advance_terminal_match(
-                    constraint, &gss_at_offset, matched.id, &exec_result,
-                    &mut advance_result_cache, &mut terminal_result_cache,
+                // Inline profiled advance (skip cache for profiling)
+                if !stack_may_advance_on(&constraint.table, &gss_at_offset, matched.id) {
+                    advance_ns += t_adv.elapsed().as_nanos() as u64;
+                    n_advances += 1;
+                    continue;
+                }
+                let (advanced, sub_profile) = advance_stacks_profiled(
+                    &constraint.table, &gss_at_offset, matched.id,
+                );
+                // Aggregate profile
+                adv_profile.n_reduces_above_floor += sub_profile.n_reduces_above_floor;
+                adv_profile.n_floor_crossings += sub_profile.n_floor_crossings;
+                adv_profile.n_nondet_waves += sub_profile.n_nondet_waves;
+                adv_profile.n_nondet_branches += sub_profile.n_nondet_branches;
+                adv_profile.det_ns += sub_profile.det_ns;
+                adv_profile.nondet_ns += sub_profile.nondet_ns;
+                if sub_profile.pure_shift { adv_profile.pure_shift = true; }
+                if sub_profile.deterministic_entered { adv_profile.deterministic_entered = true; }
+                if sub_profile.deterministic_finished { adv_profile.deterministic_finished = true; }
+                if sub_profile.nondeterministic_entered { adv_profile.nondeterministic_entered = true; }
+                adv_profile.top_states = sub_profile.top_states;
+                adv_profile.vstack_len = sub_profile.vstack_len;
+                adv_profile.gss_depth = sub_profile.gss_depth;
+                adv_profile.det_exit_reason = sub_profile.det_exit_reason;
+                adv_profile.det_exit_state = sub_profile.det_exit_state;
+
+                let advanced = apply_future_terminal_disallow(
+                    constraint, &exec_result, matched.id, advanced,
                 );
                 advance_ns += t_adv.elapsed().as_nanos() as u64;
                 n_advances += 1;
 
-                let Some(gss) = advance_result else {
+                if advanced.is_empty() {
                     continue;
-                };
+                }
+                let gss = advanced;
 
                 queue_parser_state(
                     &mut processing_queue, &mut pending_state, new_offset, bytes.len(),
@@ -721,7 +857,16 @@ fn commit_bytes_impl_profiled(
     Ok((total_ns, scan_ns, prune_ns, queue_ns, fuse_ns, exec_ns, advance_ns,
         actionable_ns, may_advance_ns,
         n_tokenizer_states, n_queue_entries, n_advances,
-        0, 0, 0, 0, 0, 0, 0, 0))
+        adv_profile.n_reduces_above_floor as u64,
+        adv_profile.n_floor_crossings as u64,
+        adv_profile.n_nondet_waves as u64,
+        adv_profile.n_nondet_branches as u64,
+        adv_profile.det_ns,
+        adv_profile.nondet_ns,
+        adv_profile.vstack_len as u64,
+        adv_profile.gss_depth as u64,
+        adv_profile.det_exit_reason as u64,
+        adv_profile.det_exit_state as u64))
 }
 
 impl<'a> ConstraintState<'a> {
@@ -750,11 +895,11 @@ impl<'a> ConstraintState<'a> {
     }
 
     /// Like commit_token but returns profiling stats.
-    /// Returns 20-tuple with timing and count metrics.
+    /// Returns 22-tuple with timing and count metrics.
     pub fn commit_token_profiled(
         &mut self,
         token_id: u32,
-    ) -> Result<(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64), String> {
+    ) -> Result<(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64), String> {
         let constraint = self.constraint;
         let bytes = token_bytes_for_id(constraint, token_id)
             .ok_or_else(|| {

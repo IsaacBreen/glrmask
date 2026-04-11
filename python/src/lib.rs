@@ -284,7 +284,8 @@ impl PyConstraintState {
     /// Like commit_token but returns profiling stats as a dict.
     fn commit_token_profiled<'py>(&mut self, py: Python<'py>, token_id: u32) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
         let (total_ns, scan_ns, prune_ns, queue_ns, fuse_ns, exec_ns, advance_ns, actionable_ns, may_advance_ns, n_tokenizer_states, n_queue_entries, n_advances,
-             adv_isolate_ns, adv_popn_ns, adv_base_isolate_ns, adv_merge_ns, adv_absorb_push_ns, adv_shift_ns, adv_n_loop_iters, adv_n_reduces) =
+             adv_n_reduces_above_floor, adv_n_floor_crossings, adv_n_nondet_waves, adv_n_nondet_branches, adv_det_ns, adv_nondet_ns, adv_vstack_len, adv_gss_depth,
+             adv_det_exit_reason, adv_det_exit_state) =
             self.inner.with_dependent_mut(|_owner, state| {
                 state.commit_token_profiled(token_id).map_err(|e| PyValueError::new_err(e))
             })?;
@@ -301,14 +302,16 @@ impl PyConstraintState {
         dict.set_item("n_tokenizer_states", n_tokenizer_states)?;
         dict.set_item("n_queue_entries", n_queue_entries)?;
         dict.set_item("n_advances", n_advances)?;
-        dict.set_item("adv_isolate_ns", adv_isolate_ns)?;
-        dict.set_item("adv_popn_ns", adv_popn_ns)?;
-        dict.set_item("adv_base_isolate_ns", adv_base_isolate_ns)?;
-        dict.set_item("adv_merge_ns", adv_merge_ns)?;
-        dict.set_item("adv_absorb_push_ns", adv_absorb_push_ns)?;
-        dict.set_item("adv_shift_ns", adv_shift_ns)?;
-        dict.set_item("adv_n_loop_iters", adv_n_loop_iters)?;
-        dict.set_item("adv_n_reduces", adv_n_reduces)?;
+        dict.set_item("adv_n_reduces_above_floor", adv_n_reduces_above_floor)?;
+        dict.set_item("adv_n_floor_crossings", adv_n_floor_crossings)?;
+        dict.set_item("adv_n_nondet_waves", adv_n_nondet_waves)?;
+        dict.set_item("adv_n_nondet_branches", adv_n_nondet_branches)?;
+        dict.set_item("adv_det_ns", adv_det_ns)?;
+        dict.set_item("adv_nondet_ns", adv_nondet_ns)?;
+        dict.set_item("adv_vstack_len", adv_vstack_len)?;
+        dict.set_item("adv_gss_depth", adv_gss_depth)?;
+        dict.set_item("adv_det_exit_reason", adv_det_exit_reason)?;
+        dict.set_item("adv_det_exit_state", adv_det_exit_state)?;
         Ok(dict)
     }
 
@@ -356,6 +359,8 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(dump_json_schema_grammar, m)?)?;
     m.add_function(wrap_pyfunction!(dump_json_schema_terminals, m)?)?;
     m.add_function(wrap_pyfunction!(dump_json_schema_grammar_def, m)?)?;
+    m.add_function(wrap_pyfunction!(dump_json_schema_prepared_grammar_def, m)?)?;
+    m.add_function(wrap_pyfunction!(dump_json_schema_glr_table, m)?)?;
     m.add_function(wrap_pyfunction!(compile_grammar_def_json, m)?)?;
     Ok(())
 }
@@ -390,6 +395,18 @@ fn dump_json_schema_terminals(schema: &str) -> PyResult<String> {
 #[pyfunction]
 fn dump_json_schema_grammar_def(schema: &str) -> PyResult<String> {
     glrmask::dump_json_schema_grammar_def(schema)
+        .map_err(|e| PyValueError::new_err(format!("{e}")))
+}
+
+#[pyfunction]
+fn dump_json_schema_prepared_grammar_def(schema: &str) -> PyResult<String> {
+    glrmask::dump_json_schema_prepared_grammar_def(schema)
+        .map_err(|e| PyValueError::new_err(format!("{e}")))
+}
+
+#[pyfunction]
+fn dump_json_schema_glr_table(schema: &str) -> PyResult<String> {
+    glrmask::dump_json_schema_glr_table(schema)
         .map_err(|e| PyValueError::new_err(format!("{e}")))
 }
 

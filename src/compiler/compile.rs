@@ -365,7 +365,7 @@ fn compile_prepared_with_profile(
                 let analyzed_grammar = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
                 let analyze_grammar_ms = elapsed_ms(analyze_grammar_started_at);
 
-                #[cfg(debug_assertions)]
+                // Always check grammar preconditions (no ε-productions, no right recursion).
                 if let Err(message) = analyzed_grammar.debug_check_grammar_preconditions() {
                     panic!("[glrmask] grammar precondition violations:\n{}", message);
                 }
