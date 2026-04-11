@@ -102,45 +102,44 @@ fn advance_nondeterministically(
     let mut shifted = ParserGSS::empty();
 
     loop {
-        shifted = shifted.merge(&shift_frontier(table, closure.clone(), token));
+        let mut next = ParserGSS::empty();
 
-        let mut gotos = GotoBatch::new();
         for state in closure.peek_values() {
             let Some(action) = table.action(state, token) else {
                 continue;
             };
+            let mut isolated = closure.isolate(Some(state));
+            if advance_deterministically(table, &mut isolated, token) {
+                shifted = shifted.merge(&isolated);
+                continue;
+            }
+
+            if let Some(target) = action.shift_target() {
+                shifted = shifted.merge(&isolated.push(target));
+            }
 
             for &rule_id in action.reduce_rule_ids() {
                 let rule = &table.rules[rule_id as usize];
                 for (goto_from, base) in reduce_sources(&closure, state, rule.rhs.len()) {
-                    if let Some(target) = table.goto_target(goto_from, rule.lhs) {
-                        add_goto(&mut gotos, target, base);
+                    let Some(target) = table.goto_target(goto_from, rule.lhs) else {
+                        continue;
+                    };
+
+                    let mut branch = base.push(target);
+                    if advance_deterministically(table, &mut branch, token) {
+                        shifted = shifted.merge(&branch);
+                    } else {
+                        next = next.merge(&branch);
                     }
                 }
             }
         }
 
-        if gotos.is_empty() {
-            break;
+        if next.is_empty() {
+            return shifted;
         }
-
-        let mut next_closure = closure.clone();
-        for (target, base) in gotos {
-            let mut branch = base.push(target);
-            if advance_deterministically(table, &mut branch, token) {
-                shifted = shifted.merge(&branch);
-            } else {
-                next_closure = next_closure.merge(&branch);
-            }
-        }
-
-        if next_closure == closure {
-            break;
-        }
-        closure = next_closure;
+        closure = next;
     }
-
-    shifted
 }
 
 /// Standard LR reduce loop for the deterministic case.
