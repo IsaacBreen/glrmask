@@ -224,7 +224,6 @@ pub(crate) fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: Te
 enum VStackResult {
     Final(ParserGSS),
     Continue(ParserGSS),
-    Restart(ParserGSS),
 }
 
 #[cfg(test)]
@@ -260,14 +259,10 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
     }
 
     // VirtualStack fast path: process deterministic reductions without GSS ops.
-    let mut current = stack;
-    loop {
-        match try_vstack_reduces(table, current, token) {
-            VStackResult::Final(result) => return result,
-            VStackResult::Continue(gss) => { current = gss; break; }
-            VStackResult::Restart(gss) => current = gss,
-        }
-    }
+    let mut current = match try_vstack_reduces(table, stack, token) {
+        VStackResult::Final(result) => return result,
+        VStackResult::Continue(gss) => gss,
+    };
 
     // General reduce closure, then shift.
     let mut queue = SmallVec::<[u32; 8]>::new();
@@ -289,7 +284,7 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
 /// parser died, `Continue` if the general path should take over.
 fn try_vstack_reduces(
     table: &GLRTable,
-    mut current: ParserGSS,
+    current: ParserGSS,
     token: TerminalID,
 ) -> VStackResult {
     let Some(mut vstack) = current.try_virtual_stack() else {
@@ -301,7 +296,7 @@ fn try_vstack_reduces(
 
     loop {
         let Some(&state) = vstack.top() else {
-            return VStackResult::Continue(current);
+            break;
         };
         let action = table.action(state, token);
 
@@ -317,8 +312,7 @@ fn try_vstack_reduces(
                 let pop_count = rule.rhs.len();
                 if vstack.len() > pop_count {
                     // Above-floor reduce: pop, goto, push — stay on vstack.
-                    let remainder = vstack.pop(pop_count);
-                    debug_assert_eq!(remainder, 0, "len() > pop_count yet pop crossed segment chain");
+                    vstack.pop(pop_count);
                     let goto_from = *vstack.top().unwrap();
                     match table.goto_target(goto_from, rule.lhs) {
                         Some(target) => vstack.push(target),
@@ -337,11 +331,7 @@ fn try_vstack_reduces(
     }
 
     // Commit vstack to GSS and return to the general reduce loop.
-    if vstack.has_pushes() {
-        current = vstack.into_gss();
-        return VStackResult::Restart(current);
-    }
-    VStackResult::Continue(current)
+    VStackResult::Continue(vstack.into_gss())
 }
 
 /// One iteration of the general reduce closure. Returns `(updated_gss, true)`

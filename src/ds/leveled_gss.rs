@@ -1971,9 +1971,6 @@ pub struct VirtualStack<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
     values: ArrayVec<T, SEGMENT_CAP>,
     next: Arc<Lower<T>>,
     acc: A,
-    /// Set to true once any push() has been called; used to decide whether
-    /// the vstack diverged from the original GSS and needs to be re-committed.
-    modified: bool,
 }
 
 impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
@@ -1981,12 +1978,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
     #[inline]
     pub fn top(&self) -> Option<&T> {
         self.values.last()
-    }
-
-    /// Whether any push operations have been performed (i.e. state diverged from GSS).
-    #[inline]
-    pub fn has_pushes(&self) -> bool {
-        self.modified
     }
 
     /// Pop `n` values from the top.
@@ -2028,7 +2019,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
             self.next = new_segment(spilled, self.next.clone());
         }
         self.values.push(value);
-        self.modified = true;
     }
 
     /// The total number of values available across the current segment chain.
@@ -2038,17 +2028,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
     }
 
     /// Materialize the virtual stack back into a GSS.
-    /// Reuses the original chain structure; only materializes the current
-    /// top segment when it is non-empty.
     pub fn into_gss(self) -> LeveledGSS<T, A> {
-        if self.values.is_empty() {
-            if self.next.children_is_empty() && !self.next.empty() {
-                return LeveledGSS::empty();
-            }
-            return LeveledGSS {
-                inner: new_interface(self.next, self.acc),
-            };
-        }
         LeveledGSS {
             inner: new_interface(new_segment(self.values, self.next), self.acc),
         }
@@ -3358,7 +3338,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             Lower::Segment { values, next, .. } => (values.clone(), Arc::clone(next)),
             _ => return None,
         };
-        Some(VirtualStack { values, next, acc: interface.acc.clone(), modified: false })
+        Some(VirtualStack { values, next, acc: interface.acc.clone() })
     }
 
     pub fn is_empty(&self) -> bool {
