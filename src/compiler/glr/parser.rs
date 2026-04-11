@@ -1,4 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
+#[cfg(any(test, debug_assertions))]
+use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::sync::Arc;
@@ -122,10 +124,12 @@ fn shift_target(action: Option<&Action>) -> Option<u32> {
     }
 }
 
+#[cfg(any(test, debug_assertions))]
 fn stack_vectors(stack: &ParserGSS) -> Vec<Vec<u32>> {
     stack.to_stacks().into_iter().map(|(stack, _)| stack).collect()
 }
 
+#[cfg(any(test, debug_assertions))]
 fn reduce_closure_for_lookahead(
     table: &GLRTable,
     stacks: &[Vec<u32>],
@@ -196,6 +200,7 @@ fn advance_stack_vectors(
     dedup_stacks(next)
 }
 
+#[cfg(any(test, debug_assertions))]
 fn stacks_accept(table: &GLRTable, stacks: &[Vec<u32>]) -> bool {
     reduce_closure_for_lookahead(table, stacks, EOF)
         .into_iter()
@@ -250,21 +255,14 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
     let mut processed = SmallVec::<[u32; 16]>::new();
     let mut queue = SmallVec::<[u32; 8]>::new();
 
-    if let Some(state) = current.single_top_value() {
-        queue.push(state);
-    } else {
-        current.for_each_top_value(|state| queue.push(state));
-    }
+    queue.extend(current.peek_values());
     if queue.is_empty() {
         return ParserGSS::empty();
     }
 
     let mut pending = SmallVec::<[(u32, ParserGSS); 8]>::new();
 
-    loop {
-        if queue.is_empty() {
-            break;
-        }
+    while !queue.is_empty() {
 
         // Virtual stack fast path: process deterministic reduce chains as
         // flat stack operations.  On ambiguity (Split, Accept, or pop that
@@ -297,14 +295,7 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
                             processed.clear();
                             processed.push(state);
 
-                            let mut top_vals = SmallVec::<[u32; 8]>::new();
-                            if let Some(v) = current.single_top_value() {
-                                top_vals.push(v);
-                            } else {
-                                current.for_each_top_value(|v| top_vals.push(v));
-                            }
-
-                            for top_val in top_vals {
+                            for top_val in current.peek_values() {
                                 let bases =
                                     current.isolate_popn_bases(top_val, remaining);
                                 for (goto_from, base) in bases {
@@ -336,11 +327,7 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
                             current = vstack.into_gss();
                             queue.clear();
                             processed.clear();
-                            if let Some(state) = current.single_top_value() {
-                                queue.push(state);
-                            } else {
-                                current.for_each_top_value(|state| queue.push(state));
-                            }
+                            queue.extend(current.peek_values());
                         }
                         break;
                     }
@@ -397,30 +384,16 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
 
     // Shift phase.
     let mut shift_pairs = SmallVec::<[(u32, u32); 8]>::new();
-    if let Some(state) = current.single_top_value() {
+    for state in current.peek_values() {
         if let Some(target) = shift_target(table.action(state, token)) {
             shift_pairs.push((state, target));
         }
-    } else {
-        current.for_each_top_value(|state| {
-            if let Some(target) = shift_target(table.action(state, token)) {
-                shift_pairs.push((state, target));
-            }
-        });
     }
     current.shift_top_values_owned(shift_pairs)
 }
 
 pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
-    stack.peek_values().into_iter().any(|state| {
-        matches!(
-            table.action(state, token),
-            Some(Action::Shift(_))
-                | Some(Action::Reduce(_))
-                | Some(Action::Split { .. })
-                | Some(Action::Accept)
-        )
-    })
+    stack.peek_values().into_iter().any(|state| table.action(state, token).is_some())
 }
 
 /// Returns true if any terminal in the given bitset may advance the parser stack,
@@ -432,21 +405,11 @@ pub(crate) fn stack_may_advance_on_any(
     terminals: &BitSet,
 ) -> bool {
     stack.peek_values().into_iter().any(|state| {
-        if let Some(actions_for_state) = table.action.get(state as usize) {
-            actions_for_state.keys().any(|&terminal| {
-                let relevant = terminals.contains(terminal as usize) || terminal == EOF;
-                relevant
-                    && matches!(
-                        actions_for_state.get(&terminal),
-                        Some(Action::Shift(_))
-                            | Some(Action::Reduce(_))
-                            | Some(Action::Split { .. })
-                            | Some(Action::Accept)
-                    )
+        table.action.get(state as usize).is_some_and(|actions| {
+            actions.keys().any(|&terminal| {
+                terminals.contains(terminal as usize) || terminal == EOF
             })
-        } else {
-            false
-        }
+        })
     })
 }
 
@@ -455,36 +418,18 @@ pub(crate) fn stacks_finished(table: &GLRTable, stack: &ParserGSS) -> bool {
         return false;
     }
 
-    // IELR(1) fast check: if any root state has any action for EOF,
-    // the parser can accept. With IELR(1)'s precise lookahead, a reduce
-    // for EOF in a state implies the reduce chain leads to accept.
     let has_eof_action = stack
         .peek_values()
         .iter()
         .any(|&state| table.action(state, EOF).is_some());
 
-    // Debug assertion: verify the fast check matches the full check
     #[cfg(debug_assertions)]
-    {
-        let full_result = if has_eof_action {
-            // Only pay for full check when fast check says true
-            let vecs = stack_vectors(stack);
-            stacks_accept(table, &vecs)
-        } else {
-            false
-        };
-        // full_result can only be true if has_eof_action is true
-        // But has_eof_action true does NOT guarantee full_result true
-        // If this fires, the simple IELR(1) check is insufficient
-        if has_eof_action && !full_result {
-            // Log but don't crash — the check is an overapproximation
-            debug_assert!(
-                full_result,
-                "stacks_finished: IELR(1) fast check returned true but full check returned false.\n\
-                 Root states with EOF action: {:?}",
-                stack.peek_values().iter().filter(|&&s| table.action(s, EOF).is_some()).collect::<Vec<_>>()
-            );
-        }
+    if has_eof_action {
+        debug_assert!(
+            stacks_accept(table, &stack_vectors(stack)),
+            "IELR(1) fast check overapproximated for states {:?}",
+            stack.peek_values(),
+        );
     }
 
     has_eof_action
