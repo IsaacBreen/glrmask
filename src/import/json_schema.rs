@@ -4012,13 +4012,19 @@ impl<'a> SchemaCtx<'a> {
     /// Grammar structure:
     ///   Object → "{" body[0] "}" | "{" free_nc "}"   (when all-optional)
     ///   body[j] → KV(k_i) after[i+1]  for each legal key k_i from state j
-    ///   after[j] → Ref(free_c)         (if close allowed — ε or AP cont.)
-    ///            | "," body[j]         (if transitions exist)
+    ///   after[j] → ", " dispatch[j] | ε   (when close allowed, factored sep)
+    ///   after[j] → ", " body[j]           (when close not allowed)
+    ///   dispatch[j] → body[j]             (ordered — key disambiguates)
+    ///               | PP_pair free_c      (pattern property — key disambig.)
+    ///               | AP_pair additional_c (additional property — key disambig.)
     fn try_build_factored_ordered_object(
         &mut self,
         ordered: &[(String, GrammarExpr, bool)],
         free_c: &str,
         free_nc: &str,
+        free_pair_exprs: &[GrammarExpr],
+        additional_pair_exprs: &[GrammarExpr],
+        additional_c: &str,
     ) -> Result<Option<GrammarExpr>, GlrMaskError> {
         if ordered.is_empty() || ordered.len() > FACTORED_OPEN_OBJECT_MAX_KEYS {
             return Ok(None);
@@ -4119,21 +4125,48 @@ impl<'a> SchemaCtx<'a> {
             self.insert_rule(body_rule_names[state_idx].clone(), expr);
         }
 
-        // Emit after rules: Ref(free_c) when close is allowed (handles both
-        // close-immediately via ε and AP continuation via ", " AP_pair ...),
-        // plus "," body[j] to continue with more known keys.
+        // Emit after rules: factor out the separator to avoid R/R splits.
+        // When close is allowed AND free pair exprs exist, the old approach
+        // `Ref(free_c) | ", " body[j]` caused ambiguity because free_c
+        // can start with ", ".  Instead we factor: `", " dispatch | ε`.
         for state_idx in 0..states.len() {
             let state = &states[state_idx];
+            let close_allowed = Self::ordered_subset_close_allowed(mode, &variants, state);
+            let has_transitions = !transitions[state_idx].is_empty();
+            let has_free_dispatch = close_allowed
+                && (!free_pair_exprs.is_empty() || !additional_pair_exprs.is_empty());
+
             let mut alts = Vec::new();
 
-            if Self::ordered_subset_close_allowed(mode, &variants, state) {
-                alts.push(GrammarExpr::Ref(free_c.to_string()));
-            }
-            if !transitions[state_idx].is_empty() {
+            if has_transitions || has_free_dispatch {
+                // Build dispatch: body alternatives + free pair alternatives.
+                let mut dispatch_alts = Vec::new();
+                if has_transitions {
+                    dispatch_alts
+                        .push(GrammarExpr::Ref(body_rule_names[state_idx].clone()));
+                }
+                if has_free_dispatch {
+                    for pp_pair in free_pair_exprs {
+                        dispatch_alts.push(sequence_or_single(vec![
+                            pp_pair.clone(),
+                            GrammarExpr::Ref(free_c.to_string()),
+                        ]));
+                    }
+                    for ap_pair in additional_pair_exprs {
+                        dispatch_alts.push(sequence_or_single(vec![
+                            ap_pair.clone(),
+                            GrammarExpr::Ref(additional_c.to_string()),
+                        ]));
+                    }
+                }
                 alts.push(sequence_or_single(vec![
                     self.json_item_separator_expr(),
-                    GrammarExpr::Ref(body_rule_names[state_idx].clone()),
+                    choice_or_single(dispatch_alts),
                 ]));
+            }
+
+            if close_allowed {
+                alts.push(empty_expr());
             }
 
             let expr = if alts.is_empty() {
@@ -6994,6 +7027,10 @@ impl<'a> SchemaCtx<'a> {
         // existed, which destroyed property ordering and caused false-accepts.
         let _has_continuation = !additional_pair_exprs.is_empty() || !pattern_pair_exprs.is_empty();
 
+        // Save pair exprs for the factored DFA dispatch before they are moved.
+        let additional_pair_exprs_for_dispatch = additional_pair_exprs.clone();
+        let free_pair_exprs_for_dispatch = pattern_pair_exprs.clone();
+
         let (additional_nc, additional_c) = self.build_object_pair_tail(
             &base_name,
             "ap",
@@ -7050,9 +7087,6 @@ impl<'a> SchemaCtx<'a> {
         // Try the factored DFA approach for ordered optional keys in
         // closed objects.  This replaces the binary tree with a sequential
         // state machine, reducing max_paths from O(log N) to O(1).
-        // Restricted to closed objects (no additionalProperties) because
-        // the AP left-recursive continuation interacts poorly with the
-        // DFA body rules, causing build-time regressions on open objects.
         // Off by default; opt-in via GLRMASK_ENABLE_FACTORED_CLOSED_OBJECT=1.
         if Self::factored_closed_object_enabled()
             && !Self::exact_closed_object_disabled()
@@ -7065,6 +7099,26 @@ impl<'a> SchemaCtx<'a> {
                 &ordered,
                 &free_c,
                 &free_nc,
+                &[],
+                &[],
+                &additional_c,
+            )? {
+                return Ok(expr);
+            }
+        }
+
+        // Factored DFA for open objects: eliminates pure R/R splits that the
+        // binary tree creates at the tree/free_c boundary.  The separator is
+        // factored into a single dispatch rule at each DFA state, so the
+        // property key — not the separator — is the disambiguation point.
+        if ordered.iter().any(|(_, _, required)| !*required) {
+            if let Some(expr) = self.try_build_factored_ordered_object(
+                &ordered,
+                &free_c,
+                &free_nc,
+                &free_pair_exprs_for_dispatch,
+                &additional_pair_exprs_for_dispatch,
+                &additional_c,
             )? {
                 return Ok(expr);
             }

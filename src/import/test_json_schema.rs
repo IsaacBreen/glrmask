@@ -962,9 +962,11 @@ fn test_closed_object_single_variant_collapses_optional_tail_paths() {
         max_parser_paths_over_prefix(&constraint, prefix)
     });
 
-    assert!(
-        fallback_max > 1,
-        "fallback builder should retain the optional-tail split for this regression case"
+    // The factored DFA approach eliminates the optional-tail split even
+    // when the exact closed-object builder is disabled.
+    assert_eq!(
+        fallback_max, 1,
+        "factored DFA builder should collapse the optional-tail split"
     );
     assert_eq!(
         exact_max, 1,
