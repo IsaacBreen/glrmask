@@ -102,6 +102,8 @@ fn advance_nondeterministically(
     let mut shifted = ParserGSS::empty();
 
     loop {
+        shifted = shifted.merge(&shift_frontier(table, closure.clone(), token));
+
         let mut gotos = GotoBatch::new();
         for state in closure.peek_values() {
             let Some(action) = table.action(state, token) else {
@@ -138,7 +140,7 @@ fn advance_nondeterministically(
         closure = next_closure;
     }
 
-    shifted.merge(&shift_frontier(table, closure, token))
+    shifted
 }
 
 /// Standard LR reduce loop for the deterministic case.
