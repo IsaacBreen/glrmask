@@ -306,38 +306,25 @@ fn try_vstack_reduces(
                         None => return StepResult::Final(ParserGSS::empty()),
                     }
                 } else {
-                    // Cross-floor: pop reaches below the vstack, fall back to GSS.
-                    let extra_pops = (pop_count - vstack.len()) as isize;
-                    let lhs = rule.lhs;
-                    current = vstack.into_floor_gss();
-                    queue.clear();
-                    processed.clear();
-                    processed.push(state);
-                    for top_val in current.peek_values() {
-                        for (goto_from, base) in current.isolate_popn_bases(top_val, extra_pops) {
-                            if let Some(target) = table.goto_target(goto_from, lhs) {
-                                current = current.absorb_push_same_acc(target, &base);
-                                queue.push(target);
-                            }
-                        }
-                    }
-                    return StepResult::Continue(current);
+                    // Cross-floor: commit to GSS, let general path handle.
+                    break;
                 }
             }
-            // Ambiguity or accept: commit any vstack pushes and hand off.
-            Some(Action::Split { .. }) | Some(Action::Accept) => {
-                if vstack.has_pushes() {
-                    current = vstack.into_gss();
-                    queue.clear();
-                    processed.clear();
-                    queue.extend(current.peek_values());
-                }
-                return StepResult::Continue(current);
-            }
+            // Ambiguity or accept: commit to GSS, let general path handle.
+            Some(Action::Split { .. }) | Some(Action::Accept) => break,
             // Dead state.
             _ => return StepResult::Final(ParserGSS::empty()),
         }
     }
+
+    // Commit vstack to GSS and return to the general reduce loop.
+    if vstack.has_pushes() {
+        current = vstack.into_gss();
+        queue.clear();
+        processed.clear();
+        queue.extend(current.peek_values());
+    }
+    StepResult::Continue(current)
 }
 
 /// One iteration of the general reduce closure. Returns `(updated_gss, true)`
