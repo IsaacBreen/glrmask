@@ -1996,8 +1996,6 @@ pub struct VirtualStack<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
     chain_values_remaining: usize,
     /// States pushed on top via reduce-goto operations, bottom-first.
     pushed: ArrayVec<T, 32>,
-    /// The floor node (bottom of the deterministic chain).
-    floor: Arc<Lower<T>>,
     /// The accumulator from the Interface.
     acc: A,
 }
@@ -2086,18 +2084,18 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
     /// Reuses the original chain structure; only builds Segments for pushed states.
     pub fn into_gss(self) -> LeveledGSS<T, A> {
         if self.pushed.is_empty() && self.chain_depth == 0 {
-            if self.floor.children_is_empty() && !self.floor.empty() {
+            if self.chain.children_is_empty() && !self.chain.empty() {
                 return LeveledGSS::empty();
             }
             return LeveledGSS {
-                inner: new_interface(self.floor, self.acc),
+                inner: new_interface(self.chain, self.acc),
             };
         }
 
         // Get the effective chain base, truncating if we've partially consumed
         // the current Segment via pops.
         let mut current = if self.chain_depth == 0 {
-            Arc::clone(&self.floor)
+            Arc::clone(&self.chain)
         } else {
             self.effective_chain_base()
         };
@@ -3426,13 +3424,11 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         };
 
         let mut chain_depth = 0usize;
-        let mut floor_arc: &Arc<Lower<T>> = &interface.inner;
 
         // Walk down the chain to find the floor and count depth.
         let mut current: &Lower<T> = &interface.inner;
         while let Some((next, value_count)) = current.chain_step() {
             chain_depth += value_count;
-            floor_arc = next;
             current = &**next;
         }
 
@@ -3445,7 +3441,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             chain_depth,
             chain_values_remaining: interface.inner.chain_value_count(),
             pushed: ArrayVec::new(),
-            floor: Arc::clone(floor_arc),
             acc: interface.acc.clone(),
         })
     }
