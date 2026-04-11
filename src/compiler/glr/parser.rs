@@ -227,11 +227,13 @@ enum StepResult {
 fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> ParserGSS {
     // Fast path: single top state with a pure shift.
     if let Some(state) = stack.single_exclusive_top_value() {
-        if let Some(target) = table.action(state, token).and_then(Action::pure_shift_target) {
-            return stack.push(target);
-        }
-        if table.action(state, token).is_none() {
-            return ParserGSS::empty();
+        match table.action(state, token) {
+            Some(action) => {
+                if let Some(target) = action.pure_shift_target() {
+                    return stack.push(target);
+                }
+            }
+            None => return ParserGSS::empty(),
         }
     }
 
