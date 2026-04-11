@@ -124,6 +124,20 @@ fn shift_target(action: Option<&Action>) -> Option<u32> {
     }
 }
 
+/// Like `shift_target` but only returns a target when no reduces or accept
+/// actions remain — i.e. it's safe to shift without further processing.
+fn pure_shift_target(action: Option<&Action>) -> Option<u32> {
+    match action {
+        Some(Action::Shift(target)) => Some(*target),
+        Some(Action::Split {
+            shift: Some(target),
+            reduces,
+            accept,
+        }) if reduces.is_empty() && !*accept => Some(*target),
+        _ => None,
+    }
+}
+
 #[cfg(any(test, debug_assertions))]
 fn stack_vectors(stack: &ParserGSS) -> Vec<Vec<u32>> {
     stack.to_stacks().into_iter().map(|(stack, _)| stack).collect()
@@ -234,155 +248,173 @@ pub(crate) fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: Te
     advance_stacks_core(table, stack, token)
 }
 
+enum StepResult {
+    Final(ParserGSS),
+    Continue(ParserGSS),
+}
+
 fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> ParserGSS {
-    // Fast path: single top state with a pure shift action.
+    // Fast path: single top state with a pure shift.
     if let Some(state) = stack.single_exclusive_top_value() {
-        match table.action(state, token) {
-            Some(Action::Shift(target)) => return stack.push(*target),
-            Some(Action::Split {
-                shift: Some(target),
-                reduces,
-                accept,
-            }) if reduces.is_empty() && !*accept => return stack.push(*target),
-            Some(Action::Reduce(_)) | Some(Action::Accept) | Some(Action::Split { .. }) => {}
-            None => return ParserGSS::empty(),
+        if let Some(target) = pure_shift_target(table.action(state, token)) {
+            return stack.push(target);
+        }
+        if table.action(state, token).is_none() {
+            return ParserGSS::empty();
         }
     }
 
-    // Reduce closure: queue of states to process, with VirtualStack attempted
-    // on each iteration before falling back to general GSS operations.
+    // Reduce closure, then shift.
+    let current = match reduce_closure(table, stack, token) {
+        StepResult::Final(result) => return result,
+        StepResult::Continue(gss) => gss,
+    };
+    shift_all(table, current, token)
+}
+
+fn reduce_closure(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> StepResult {
     let mut current = stack;
-    let mut processed = SmallVec::<[u32; 16]>::new();
     let mut queue = SmallVec::<[u32; 8]>::new();
+    let mut processed = SmallVec::<[u32; 16]>::new();
 
     queue.extend(current.peek_values());
     if queue.is_empty() {
-        return ParserGSS::empty();
+        return StepResult::Continue(current);
     }
 
+    while !queue.is_empty() {
+        match try_vstack_reduces(table, current, &mut queue, &mut processed, token) {
+            StepResult::Final(result) => return StepResult::Final(result),
+            StepResult::Continue(gss) => current = gss,
+        }
+        if queue.is_empty() { break; }
+
+        let reduced;
+        (current, reduced) = general_reduce_step(table, current, &mut queue, &mut processed, token);
+        if !reduced { break; }
+    }
+
+    StepResult::Continue(current)
+}
+
+/// Try VirtualStack reductions. Returns `Final` if a shift completed or the
+/// parser died, `Continue` if the general path should take over.
+fn try_vstack_reduces(
+    table: &GLRTable,
+    mut current: ParserGSS,
+    queue: &mut SmallVec<[u32; 8]>,
+    processed: &mut SmallVec<[u32; 16]>,
+    token: TerminalID,
+) -> StepResult {
+    let Some(mut vstack) = current.try_virtual_stack() else {
+        return StepResult::Continue(current);
+    };
+
+    loop {
+        let Some(&state) = vstack.top() else {
+            return StepResult::Continue(current);
+        };
+        let action = table.action(state, token);
+
+        if let Some(target) = pure_shift_target(action) {
+            vstack.push(target);
+            return StepResult::Final(vstack.into_gss());
+        }
+
+        match action {
+            Some(Action::Reduce(rule_id)) => {
+                let rule = &table.rules[*rule_id as usize];
+                let nv = vstack.len();
+                let nr = rule.rhs.len();
+                if nv > nr {
+                    vstack.pop(nr);
+                    let goto_from = *vstack.top().unwrap();
+                    match table.goto_target(goto_from, rule.lhs) {
+                        Some(target) => vstack.push(target),
+                        None => return StepResult::Final(ParserGSS::empty()),
+                    }
+                } else {
+                    // Cross-floor: complete reduce on the real GSS.
+                    let remaining = (nr - nv) as isize;
+                    let lhs = rule.lhs;
+                    current = vstack.into_floor_gss();
+                    queue.clear();
+                    processed.clear();
+                    processed.push(state);
+                    for top_val in current.peek_values() {
+                        for (goto_from, base) in current.isolate_popn_bases(top_val, remaining) {
+                            if let Some(target) = table.goto_target(goto_from, lhs) {
+                                current = current.absorb_push_same_acc(target, &base);
+                                queue.push(target);
+                            }
+                        }
+                    }
+                    return StepResult::Continue(current);
+                }
+            }
+            Some(Action::Split { .. }) | Some(Action::Accept) => {
+                if vstack.has_pushes() {
+                    current = vstack.into_gss();
+                    queue.clear();
+                    processed.clear();
+                    queue.extend(current.peek_values());
+                }
+                return StepResult::Continue(current);
+            }
+            _ => return StepResult::Final(ParserGSS::empty()),
+        }
+    }
+}
+
+/// One iteration of the general reduce closure. Returns `(updated_gss, true)`
+/// if reductions happened, `(gss, false)` if none were possible.
+fn general_reduce_step(
+    table: &GLRTable,
+    mut current: ParserGSS,
+    queue: &mut SmallVec<[u32; 8]>,
+    processed: &mut SmallVec<[u32; 16]>,
+    token: TerminalID,
+) -> (ParserGSS, bool) {
+    let mut any_reduced = false;
     let mut pending = SmallVec::<[(u32, ParserGSS); 8]>::new();
 
-    while !queue.is_empty() {
-
-        // Virtual stack fast path: process deterministic reduce chains as
-        // flat stack operations.  On ambiguity (Split, Accept, or pop that
-        // would cross the floor), commit the progress so far back to the
-        // GSS and fall through to the general path.
-        if let Some(mut vstack) = current.try_virtual_stack() {
-            loop {
-                let Some(&state) = vstack.top() else { break };
-                match table.action(state, token) {
-                    Some(Action::Reduce(rule_id)) => {
-                        let rule = &table.rules[*rule_id as usize];
-                        let nv = vstack.len();
-                        let nr = rule.rhs.len();
-                        if nv > nr {
-                            // Fast: pure vstack reduce — enough states to pop
-                            // and still have a goto_from.
-                            vstack.pop(nr);
-                            let goto_from = *vstack.top().unwrap();
-                            match table.goto_target(goto_from, rule.lhs) {
-                                Some(target) => vstack.push(target),
-                                None => return ParserGSS::empty(),
-                            }
-                        } else {
-                            // Cross-floor: pop crosses the virtual stack boundary.
-                            // Complete the reduce on the real GSS.
-                            let remaining = (nr - nv) as isize;
-                            let lhs = rule.lhs;
-                            current = vstack.into_floor_gss();
-                            queue.clear();
-                            processed.clear();
-                            processed.push(state);
-
-                            for top_val in current.peek_values() {
-                                let bases =
-                                    current.isolate_popn_bases(top_val, remaining);
-                                for (goto_from, base) in bases {
-                                    if let Some(target) =
-                                        table.goto_target(goto_from, lhs)
-                                    {
-                                        current = current
-                                            .absorb_push_same_acc(target, &base);
-                                        queue.push(target);
-                                    }
-                                }
-                            }
-
-                            break; // vstack consumed
-                        }
-                    }
-                    Some(Action::Shift(target)) => {
-                        vstack.push(*target);
-                        return vstack.into_gss();
-                    }
-                    Some(Action::Split { shift: Some(target), reduces, accept })
-                        if reduces.is_empty() && !*accept =>
-                    {
-                        vstack.push(*target);
-                        return vstack.into_gss();
-                    }
-                    Some(Action::Split { .. }) | Some(Action::Accept) => {
-                        if vstack.has_pushes() {
-                            current = vstack.into_gss();
-                            queue.clear();
-                            processed.clear();
-                            queue.extend(current.peek_values());
-                        }
-                        break;
-                    }
-                    None => return ParserGSS::empty(),
-                }
-            }
-            if queue.is_empty() {
-                break;
-            }
+    for state in queue.drain(..) {
+        if processed.contains(&state) {
+            continue;
         }
+        processed.push(state);
 
-        // General path: one iteration of reduce closure on the GSS.
-        let mut any_reduced = false;
-        pending.clear();
+        let reduce_rules: &[u32] = match table.action(state, token) {
+            Some(Action::Reduce(rule_id)) => std::slice::from_ref(rule_id),
+            Some(Action::Split { reduces, .. }) => reduces.as_slice(),
+            _ => &[],
+        };
 
-        for state in queue.drain(..) {
-            if processed.contains(&state) {
-                continue;
-            }
-            processed.push(state);
-
-            let reduce_rules: &[u32] = match table.action(state, token) {
-                Some(Action::Reduce(rule_id)) => std::slice::from_ref(rule_id),
-                Some(Action::Split { reduces, .. }) => reduces.as_slice(),
-                _ => &[],
-            };
-
-            for &rule_id in reduce_rules {
-                let rule = &table.rules[rule_id as usize];
-                let bases = current.isolate_popn_bases(state, rule.rhs.len() as isize);
-                for (goto_from, base) in bases {
-                    if let Some(target) = table.goto_target(goto_from, rule.lhs) {
-                        if let Some((_, existing)) = pending.iter_mut().find(|(t, _)| *t == target)
-                        {
-                            *existing = existing.merge(&base);
-                        } else {
-                            pending.push((target, base));
-                        }
-                        any_reduced = true;
+        for &rule_id in reduce_rules {
+            let rule = &table.rules[rule_id as usize];
+            for (goto_from, base) in current.isolate_popn_bases(state, rule.rhs.len() as isize) {
+                if let Some(target) = table.goto_target(goto_from, rule.lhs) {
+                    if let Some((_, existing)) = pending.iter_mut().find(|(t, _)| *t == target) {
+                        *existing = existing.merge(&base);
+                    } else {
+                        pending.push((target, base));
                     }
+                    any_reduced = true;
                 }
             }
         }
+    }
 
-        if !any_reduced {
-            break;
-        }
-
-        for (target, base) in pending.drain(..) {
+    if any_reduced {
+        for (target, base) in pending {
             current = current.absorb_push_same_acc(target, &base);
             queue.push(target);
         }
     }
+    (current, any_reduced)
+}
 
-    // Shift phase.
+fn shift_all(table: &GLRTable, current: ParserGSS, token: TerminalID) -> ParserGSS {
     let mut shift_pairs = SmallVec::<[(u32, u32); 8]>::new();
     for state in current.peek_values() {
         if let Some(target) = shift_target(table.action(state, token)) {
