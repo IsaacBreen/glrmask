@@ -2065,22 +2065,16 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
         }
     }
 
-    /// Build a GSS from a floor Arc and accumulator, returning empty if the
-    /// floor has no children and isn't marked as an accepting state.
-    fn gss_from_floor(floor: Arc<Lower<T>>, acc: A) -> LeveledGSS<T, A> {
-        if floor.children_is_empty() && !floor.empty() {
-            return LeveledGSS::empty();
-        }
-        LeveledGSS {
-            inner: new_interface(floor, acc),
-        }
-    }
-
     /// Materialize the virtual stack back into a GSS.
     /// Reuses the original chain structure; only builds Segments for pushed states.
     pub fn into_gss(self) -> LeveledGSS<T, A> {
         if self.pushed.is_empty() && self.chain_depth == 0 {
-            return Self::gss_from_floor(self.floor, self.acc);
+            if self.floor.children_is_empty() && !self.floor.empty() {
+                return LeveledGSS::empty();
+            }
+            return LeveledGSS {
+                inner: new_interface(self.floor, self.acc),
+            };
         }
 
         // Get the effective chain base, truncating if we've partially consumed
