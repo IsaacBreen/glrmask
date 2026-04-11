@@ -43,35 +43,27 @@ pub(crate) fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: Te
 ///
 ///  2. **Shift** — push the lookahead's shift target onto every surviving
 ///     frontier state, producing the next GSS.
-fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> ParserGSS {
+fn advance_stacks_core(table: &GLRTable, mut gss: ParserGSS, token: TerminalID) -> ParserGSS {
     // Fast path: single state with a pure shift action (most common case).
-    if let Some(state) = stack.single_exclusive_top_value() {
+    if let Some(state) = gss.single_exclusive_top_value() {
         if let Some(target) = table.action(state, token).and_then(Action::pure_shift_target) {
-            return stack.push(target);
+            return gss.push(target);
         }
     }
 
-    // ── Phase 1: Reduce closure ──
-    //
-    // Apply reductions until no new gotos can be produced (fixpoint).
-    // Each iteration first tries the fast deterministic path (single chain),
-    // then falls through to the general nondeterministic path.
+    apply_reduces(table, &mut gss, token);
 
-    let mut gss = stack;
-
-    loop {
-        gss = apply_deterministic_reduces(table, gss, token);
-        let (new_gss, changed) = apply_nondeterministic_reduces(table, gss, token);
-        gss = new_gss;
-        if !changed {
-            break;
-        }
-    }
-
-    // ── Phase 2: Shift ──
-    //
-    // Push the lookahead token onto every surviving frontier state.
     shift_frontier(table, gss, token)
+}
+
+fn apply_reduces(table: &GLRTable, gss: &mut ParserGSS, token: TerminalID) {
+    // Keep applying reduce waves while they keep adding stacks.
+    while apply_reduces_wave(table, gss, token) {}
+}
+
+fn apply_reduces_wave(table: &GLRTable, gss: &mut ParserGSS, token: TerminalID) -> bool {
+    apply_deterministic_reduces(table, gss, token);
+    apply_nondeterministic_reduces(table, gss, token)
 }
 
 fn shift_frontier(table: &GLRTable, gss: ParserGSS, token: TerminalID) -> ParserGSS {
@@ -153,26 +145,27 @@ fn collect_reduce_gotos(table: &GLRTable, gss: &ParserGSS, token: TerminalID) ->
 /// consistent GSS snapshot), merging bases for same-target gotos, then
 /// applies them all at once.
 ///
-/// Returns `(new_gss, true)` if any gotos were produced and the GSS
-/// changed, `(gss, false)` if the reduce closure has reached a fixpoint.
+/// Returns the next GSS after one reduce wave. If no new gotos are
+/// produced, or the wave is a structural no-op, returns `gss` unchanged.
 fn apply_nondeterministic_reduces(
     table: &GLRTable,
-    gss: ParserGSS,
+    gss: &mut ParserGSS,
     token: TerminalID,
-) -> (ParserGSS, bool) {
-    let gotos = collect_reduce_gotos(table, &gss, token);
+) -> bool {
+    let gotos = collect_reduce_gotos(table, gss, token);
 
     if gotos.is_empty() {
-        return (gss, false);
+        return false;
     }
 
     let new_gss = apply_gotos(gss.clone(), gotos);
     // Fixpoint: if the gotos targeted existing states with existing
     // predecessors, the GSS is unchanged and we're done.
-    if new_gss == gss {
-        return (gss, false);
+    if new_gss == *gss {
+        return false;
     }
-    (new_gss, true)
+    *gss = new_gss;
+    true
 }
 
 /// Standard LR reduce loop for the deterministic case.
@@ -190,11 +183,11 @@ fn apply_nondeterministic_reduces(
 /// Returns the GSS unchanged if the frontier is ambiguous or empty.
 fn apply_deterministic_reduces(
     table: &GLRTable,
-    current: ParserGSS,
+    gss: &mut ParserGSS,
     token: TerminalID,
-) -> ParserGSS {
-    let Some(mut stack) = current.try_virtual_stack() else {
-        return current; // Ambiguous frontier — skip to the general GLR path.
+) {
+    let Some(mut stack) = gss.try_virtual_stack() else {
+        return; // Ambiguous frontier — skip to the general GLR path.
     };
 
     #[cfg(test)]
@@ -213,25 +206,30 @@ fn apply_deterministic_reduces(
                 if leftover == 0 {
                     // Pop |rhs| symbols and push the goto target.
                     let Some(&goto_from) = stack.top() else {
-                        return before_pop;
+                        *gss = before_pop;
+                        return;
                     };
                     match table.goto_target(goto_from, rule.lhs) {
                         Some(target) => stack.push(target),
-                        None => return ParserGSS::empty(),
+                        None => {
+                            *gss = ParserGSS::empty();
+                            return;
+                        }
                     }
                 } else {
                     // We crossed below the deterministic chain's floor.
                     // Finish the remaining pop on the materialized GSS,
                     // then apply all resulting gotos as one batch.
                     let gotos = collect_rule_gotos(table, rule.lhs, popped_sources(&stack.into_gss(), leftover));
-                    return apply_gotos(before_pop, gotos);
+                    *gss = apply_gotos(before_pop, gotos);
+                    return;
                 }
             }
             _ => break, // Shift, split, accept, or dead — handled by the caller.
         }
     }
 
-    stack.into_gss()
+    *gss = stack.into_gss();
 }
 
 pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
