@@ -41,6 +41,13 @@ pub(crate) fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: Te
 /// pure shift, fall back to the GLR path: build the reduce closure to a
 /// fixpoint and return the shifted next frontier.
 fn advance_stacks_core(table: &GLRTable, mut gss: ParserGSS, token: TerminalID) -> ParserGSS {
+    // Fast path: single state with a pure shift action (most common case).
+    if let Some(state) = gss.single_exclusive_top_value() {
+        if let Some(target) = table.action(state, token).and_then(Action::pure_shift_target) {
+            return gss.push(target);
+        }
+    }
+
     if advance_deterministically(table, &mut gss, token) {
         return gss;
     }
@@ -77,50 +84,6 @@ fn reduce_sources(gss: &ParserGSS, state: u32, rhs_len: usize) -> ReduceSources 
     gss.isolate_pop_bases(state, rhs_len as isize)
 }
 
-fn popped_sources(gss: &ParserGSS, leftover: usize) -> ReduceSources {
-    let popped = gss.popn(leftover as isize);
-    let mut sources = ReduceSources::new();
-    for state in popped.peek_values() {
-        sources.push((state, popped.isolate(Some(state))));
-    }
-    sources
-}
-
-fn collect_rule_gotos(
-    table: &GLRTable,
-    lhs: u32,
-    sources: ReduceSources,
-) -> GotoBatch {
-    let mut gotos = GotoBatch::new();
-    for (goto_from, base) in sources {
-        if let Some(target) = table.goto_target(goto_from, lhs) {
-            add_goto(&mut gotos, target, base);
-        }
-    }
-    gotos
-}
-
-fn collect_reduce_gotos(table: &GLRTable, gss: &ParserGSS, token: TerminalID) -> GotoBatch {
-    let mut gotos = GotoBatch::new();
-
-    for state in gss.peek_values() {
-        let Some(action) = table.action(state, token) else {
-            continue;
-        };
-
-        for &rule_id in action.reduce_rule_ids() {
-            let rule = &table.rules[rule_id as usize];
-            for (goto_from, base) in reduce_sources(gss, state, rule.rhs.len()) {
-                if let Some(target) = table.goto_target(goto_from, rule.lhs) {
-                    add_goto(&mut gotos, target, base);
-                }
-            }
-        }
-    }
-
-    gotos
-}
-
 /// Advance an ambiguous frontier.
 ///
 /// `closure` accumulates unshifted branches that still need GLR reduce-closure
@@ -139,7 +102,22 @@ fn advance_nondeterministically(
     let mut shifted = ParserGSS::empty();
 
     loop {
-        let gotos = collect_reduce_gotos(table, &closure, token);
+        let mut gotos = GotoBatch::new();
+        for state in closure.peek_values() {
+            let Some(action) = table.action(state, token) else {
+                continue;
+            };
+
+            for &rule_id in action.reduce_rule_ids() {
+                let rule = &table.rules[rule_id as usize];
+                for (goto_from, base) in reduce_sources(&closure, state, rule.rhs.len()) {
+                    if let Some(target) = table.goto_target(goto_from, rule.lhs) {
+                        add_goto(&mut gotos, target, base);
+                    }
+                }
+            }
+        }
+
         if gotos.is_empty() {
             break;
         }
@@ -214,7 +192,14 @@ fn advance_deterministically(
                     // We crossed below the deterministic chain's floor.
                     // Finish the remaining pop on the materialized GSS,
                     // then apply all resulting gotos as one batch.
-                    let gotos = collect_rule_gotos(table, rule.lhs, popped_sources(&stack.into_gss(), leftover));
+                    let popped = stack.into_gss().popn(leftover as isize);
+                    let mut gotos = GotoBatch::new();
+                    for goto_from in popped.peek_values() {
+                        let base = popped.isolate(Some(goto_from));
+                        if let Some(target) = table.goto_target(goto_from, rule.lhs) {
+                            add_goto(&mut gotos, target, base);
+                        }
+                    }
                     *gss = apply_gotos(before_pop, gotos);
                     return false;
                 }
