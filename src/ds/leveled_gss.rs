@@ -416,10 +416,10 @@ enum Lower<T: Clone + Eq + Hash> {
     /// Intermediate levels (all except the top) are guaranteed to have empty=false.
     /// Replaces the old Chain variant (which was Segment with exactly 1 value).
     /// Values are stack-allocated up to SEGMENT_CAP.
+    /// Segments are always non-accepting (empty is implicitly false).
     Segment {
         values: ArrayVec<T, SEGMENT_CAP>,
         next: Arc<Lower<T>>,
-        empty: bool,
         max_depth: u32,
     },
 }
@@ -428,7 +428,8 @@ impl<T: Clone + Eq + Hash> Lower<T> {
     #[inline(always)]
     fn empty(&self) -> bool {
         match self {
-            Lower::General { empty, .. } | Lower::Segment { empty, .. } => *empty,
+            Lower::General { empty, .. } => *empty,
+            Lower::Segment { .. } => false,
         }
     }
 
@@ -484,7 +485,7 @@ impl<T: Clone + Eq + Hash> Lower<T> {
     fn into_parts(self) -> (Children<T, Lower<T>>, bool, u32) {
         match self {
             Lower::General { children, empty, max_depth } => (children, empty, max_depth),
-            Lower::Segment { values, next, empty, max_depth } => {
+            Lower::Segment { values, next, max_depth } => {
                 let top_value = values.last().unwrap().clone();
                 let child = if values.len() == 1 {
                     next
@@ -495,12 +496,11 @@ impl<T: Clone + Eq + Hash> Lower<T> {
                     Arc::new(Lower::Segment {
                         values: rest_values,
                         next,
-                        empty: false,
                         max_depth: rest_md,
                     })
                 };
                 let children = CompactMap::unit(top_value, CompactOrdMap::unit(child.max_depth(), child));
-                (children, empty, max_depth)
+                (children, false, max_depth)
             }
         }
     }
@@ -539,7 +539,7 @@ impl<T: Clone + Eq + Hash> Lower<T> {
                 empty: false,
                 max_depth: 0,
             });
-            if let Lower::Segment { values, next, empty, max_depth } = old {
+            if let Lower::Segment { values, next, max_depth } = old {
                 let top_value = values.last().unwrap().clone();
                 let child = if values.len() == 1 {
                     next
@@ -550,12 +550,11 @@ impl<T: Clone + Eq + Hash> Lower<T> {
                     Arc::new(Lower::Segment {
                         values: rest_values,
                         next,
-                        empty: false,
                         max_depth: rest_md,
                     })
                 };
                 let children = CompactMap::unit(top_value, CompactOrdMap::unit(child.max_depth(), child));
-                *self = Lower::General { children, empty, max_depth };
+                *self = Lower::General { children, empty: false, max_depth };
             }
         }
     }
@@ -607,7 +606,6 @@ impl<T: Clone + Eq + Hash> Lower<T> {
                 Arc::new(Lower::Segment {
                     values: rest_values,
                     next: next.clone(),
-                    empty: false, // intermediate empties are always false
                     max_depth: rest_md,
                 })
             }
@@ -791,18 +789,17 @@ fn new_lower<T: Clone + Eq + Hash>(children: Children<T, Lower<T>>, empty: bool)
     // NOTE: We do NOT pack into existing child Segments here. Packing only happens
     // in batch-construction paths (from_chain_states) so that incremental push/pop
     // preserves Arc sharing (the child Arc is reused on pop).
-    if children.len() == 1 {
+    // Only compress to Segment when empty is false — Segments are non-accepting.
+    if !empty && children.len() == 1 {
         let (key, ord_map) = children.iter().next().unwrap();
         if ord_map.len() == 1 {
             let (_, next) = ord_map.iter().next().unwrap();
-            // Create a single-element Segment
             let mut values = ArrayVec::<T, SEGMENT_CAP>::new();
             values.push(key.clone());
             let max_depth = next.max_depth() + 1;
             return Arc::new(Lower::Segment {
                 values,
                 next: next.clone(),
-                empty,
                 max_depth,
             });
         }
@@ -2061,7 +2058,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
                 Arc::new(Lower::Segment {
                     values: kept,
                     next: Arc::clone(next),
-                    empty: false,
                     max_depth: md,
                 })
             }
@@ -2101,7 +2097,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
             current = Arc::new(Lower::Segment {
                 values,
                 next: current,
-                empty: false,
                 max_depth,
             });
         }
@@ -2435,7 +2430,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 let new_lower_root = Arc::new(Lower::Segment {
                     values: { let mut v = ArrayVec::new(); v.push(value); v },
                     next: Arc::clone(&i.inner),
-                    empty: false,
                     max_depth,
                 });
                 new_interface(new_lower_root, i.acc.clone())
@@ -2970,7 +2964,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     Some(Arc::new(Lower::Segment {
                         values: new_values,
                         next: next.clone(),
-                        empty: false,
                         max_depth: md,
                     }))
                 }
@@ -3525,7 +3518,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             current = Arc::new(Lower::Segment {
                 values,
                 next: current,
-                empty: false,
                 max_depth,
             });
         }
@@ -4357,7 +4349,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             let next_remain = remain.map(|r| r - 1);
 
             // Fast path for Segment: no multi-depth slots, recurse on next only
-            if let Lower::Segment { values, next, empty, max_depth: _ } = &**node {
+            if let Lower::Segment { values, next, max_depth: _ } = &**node {
                 let next_remain_seg = remain.map(|r| r - values.len() as isize);
                 let fused_next = fuse_lower::<T, A>(next, next_remain_seg, memo);
                 if Arc::ptr_eq(&fused_next, next) {
@@ -4367,7 +4359,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 let res = Arc::new(Lower::Segment {
                     values: values.clone(),
                     next: fused_next.clone(),
-                    empty: *empty,
                     max_depth: fused_next.max_depth() + values.len() as u32,
                 });
                 memo.insert(key, res.clone());
