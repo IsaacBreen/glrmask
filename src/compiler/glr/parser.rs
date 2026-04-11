@@ -316,6 +316,7 @@ fn try_vstack_reduces(
         };
         let action = table.action(state, token);
 
+        // Pure shift: push and we're done.
         if let Some(target) = pure_shift_target(action) {
             vstack.push(target);
             return StepResult::Final(vstack.into_gss());
@@ -324,25 +325,25 @@ fn try_vstack_reduces(
         match action {
             Some(Action::Reduce(rule_id)) => {
                 let rule = &table.rules[*rule_id as usize];
-                let nv = vstack.len();
-                let nr = rule.rhs.len();
-                if nv > nr {
-                    vstack.pop(nr);
+                let pop_count = rule.rhs.len();
+                if vstack.len() > pop_count {
+                    // Above-floor reduce: pop, goto, push — stay on vstack.
+                    vstack.pop(pop_count);
                     let goto_from = *vstack.top().unwrap();
                     match table.goto_target(goto_from, rule.lhs) {
                         Some(target) => vstack.push(target),
                         None => return StepResult::Final(ParserGSS::empty()),
                     }
                 } else {
-                    // Cross-floor: complete reduce on the real GSS.
-                    let remaining = (nr - nv) as isize;
+                    // Cross-floor: pop reaches below the vstack, fall back to GSS.
+                    let extra_pops = (pop_count - vstack.len()) as isize;
                     let lhs = rule.lhs;
                     current = vstack.into_floor_gss();
                     queue.clear();
                     processed.clear();
                     processed.push(state);
                     for top_val in current.peek_values() {
-                        for (goto_from, base) in current.isolate_popn_bases(top_val, remaining) {
+                        for (goto_from, base) in current.isolate_popn_bases(top_val, extra_pops) {
                             if let Some(target) = table.goto_target(goto_from, lhs) {
                                 current = current.absorb_push_same_acc(target, &base);
                                 queue.push(target);
@@ -352,6 +353,7 @@ fn try_vstack_reduces(
                     return StepResult::Continue(current);
                 }
             }
+            // Ambiguity or accept: commit any vstack pushes and hand off.
             Some(Action::Split { .. }) | Some(Action::Accept) => {
                 if vstack.has_pushes() {
                     current = vstack.into_gss();
@@ -361,6 +363,7 @@ fn try_vstack_reduces(
                 }
                 return StepResult::Continue(current);
             }
+            // Dead state.
             _ => return StepResult::Final(ParserGSS::empty()),
         }
     }

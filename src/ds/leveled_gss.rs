@@ -440,6 +440,24 @@ impl<T: Clone + Eq + Hash> Lower<T> {
         }
     }
 
+    /// If this node is a deterministic chain link (Segment or single-child
+    /// General with one edge), return a reference to the next Arc below it.
+    #[inline]
+    fn chain_next(&self) -> Option<&Arc<Lower<T>>> {
+        match self {
+            Lower::Segment { next, .. } => Some(next),
+            Lower::General { children, .. } if children.len() == 1 => {
+                let ordmap = children.values().next().unwrap();
+                if ordmap.len() == 1 {
+                    Some(&ordmap.iter().next().unwrap().1)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Get children as a general Children map.
     /// For Segment, constructs a map with the top value → rest-of-segment.
     fn children(&self) -> Children<T, Lower<T>> {
@@ -1987,19 +2005,8 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
         self.pushed.truncate(self.pushed.len() - from_pushed);
         let from_chain = n - from_pushed;
         for _ in 0..from_chain {
-            match &*self.chain {
-                Lower::Segment { next, .. } => {
-                    self.chain = Arc::clone(next);
-                }
-                Lower::General { children, .. } => {
-                    if children.len() == 1 {
-                        let ordmap = children.values().next().unwrap();
-                        if ordmap.len() == 1 {
-                            let (_, next) = ordmap.iter().next().unwrap();
-                            self.chain = Arc::clone(next);
-                        }
-                    }
-                }
+            if let Some(next) = self.chain.chain_next() {
+                self.chain = Arc::clone(next);
             }
             self.chain_depth -= 1;
         }
@@ -2023,19 +2030,24 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
         !self.pushed.is_empty()
     }
 
+    /// Build a GSS from a floor Arc and accumulator, returning empty if the
+    /// floor has no children and isn't marked as an accepting state.
+    fn gss_from_floor(floor: Arc<Lower<T>>, acc: A) -> LeveledGSS<T, A> {
+        if floor.children_is_empty() && !floor.empty() {
+            return LeveledGSS::empty();
+        }
+        LeveledGSS {
+            inner: new_interface(floor, acc),
+        }
+    }
+
     /// Materialize the virtual stack back into a GSS.
     /// Reuses the original chain structure; only builds Segments for pushed states.
     pub fn into_gss(self) -> LeveledGSS<T, A> {
-        let mut current = self.chain;
         if self.pushed.is_empty() && self.chain_depth == 0 {
-            // Stack fully popped — use floor
-            if self.floor.children_is_empty() && !self.floor.empty() {
-                return LeveledGSS::empty();
-            }
-            return LeveledGSS {
-                inner: new_interface(self.floor, self.acc),
-            };
+            return Self::gss_from_floor(self.floor, self.acc);
         }
+        let mut current = self.chain;
         // Build Segments only for pushed states, on top of the remaining chain.
         for state in self.pushed.iter() {
             let max_depth = current.max_depth() + 1;
@@ -2053,12 +2065,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
 
     /// Materialize the floor portion into a GSS (discarding all stack states).
     pub fn into_floor_gss(self) -> LeveledGSS<T, A> {
-        if self.floor.children_is_empty() && !self.floor.empty() {
-            return LeveledGSS::empty();
-        }
-        LeveledGSS {
-            inner: new_interface(self.floor, self.acc),
-        }
+        Self::gss_from_floor(self.floor, self.acc)
     }
 }
 
@@ -3421,31 +3428,14 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         let mut floor_arc: &Arc<Lower<T>> = &interface.inner;
 
         // Walk down the chain to find the floor and count depth.
-        // No value extraction needed — we'll read values lazily.
         let mut current: &Lower<T> = &interface.inner;
         loop {
-            match current {
-                Lower::Segment { next, .. } => {
-                    chain_depth += 1;
-                    floor_arc = next;
-                    current = &**next;
-                }
-                Lower::General { children, .. } => {
-                    if children.is_empty() {
-                        break;
-                    }
-                    if children.len() == 1 {
-                        let ordmap = children.values().next().unwrap();
-                        if ordmap.len() == 1 {
-                            chain_depth += 1;
-                            let (_, next) = ordmap.iter().next().unwrap();
-                            floor_arc = next;
-                            current = &**next;
-                            continue;
-                        }
-                    }
-                    break;
-                }
+            if let Some(next) = current.chain_next() {
+                chain_depth += 1;
+                floor_arc = next;
+                current = &**next;
+            } else {
+                break;
             }
         }
 
