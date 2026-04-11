@@ -221,11 +221,6 @@ pub(crate) fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: Te
     advance_stacks_core(table, stack, token)
 }
 
-enum StepResult {
-    Final(ParserGSS),
-    Continue(ParserGSS),
-}
-
 enum VStackResult {
     Final(ParserGSS),
     Continue(ParserGSS),
@@ -264,39 +259,22 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
         }
     }
 
-    // Reduce closure, then shift.
-    let current = match reduce_closure(table, stack, token) {
-        StepResult::Final(result) => return result,
-        StepResult::Continue(gss) => gss,
-    };
-    shift_all(table, current, token)
-}
-
-fn reduce_closure(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> StepResult {
+    // VirtualStack fast path: process deterministic reductions without GSS ops.
     let mut current = stack;
-    let mut queue = SmallVec::<[u32; 8]>::new();
-    let mut processed = SmallVec::<[u32; 16]>::new();
-
-    queue.extend(current.peek_values());
-    if queue.is_empty() {
-        return StepResult::Continue(current);
+    loop {
+        match try_vstack_reduces(table, current, token) {
+            VStackResult::Final(result) => return result,
+            VStackResult::Continue(gss) => { current = gss; break; }
+            VStackResult::Restart(gss) => current = gss,
+        }
     }
 
-    while !queue.is_empty() {
-        match try_vstack_reduces(table, current, token) {
-            VStackResult::Final(result) => return StepResult::Final(result),
-            VStackResult::Continue(gss) => current = gss,
-            VStackResult::Restart(gss) => {
-                current = gss;
-                queue.clear();
-                processed.clear();
-                queue.extend(current.peek_values());
-            }
-        }
-        if queue.is_empty() {
-            break;
-        }
+    // General reduce closure, then shift.
+    let mut queue = SmallVec::<[u32; 8]>::new();
+    let mut processed = SmallVec::<[u32; 16]>::new();
+    queue.extend(current.peek_values());
 
+    while !queue.is_empty() {
         let reduced;
         (current, reduced) = general_reduce_step(table, current, &mut queue, &mut processed, token);
         if !reduced {
@@ -304,7 +282,7 @@ fn reduce_closure(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> Step
         }
     }
 
-    StepResult::Continue(current)
+    shift_all(table, current, token)
 }
 
 /// Try VirtualStack reductions. Returns `Final` if a shift completed or the

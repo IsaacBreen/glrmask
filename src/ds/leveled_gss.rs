@@ -468,16 +468,6 @@ impl<T: Clone + Eq + Hash> Lower<T> {
         }
     }
 
-    /// How many stack values this chain node represents.
-    /// Segments contribute `values.len()`; deterministic Generals contribute 1.
-    #[inline]
-    fn chain_value_count(&self) -> usize {
-        match self {
-            Lower::Segment { values, .. } => values.len(),
-            _ => 1,
-        }
-    }
-
     /// Append the values represented by this deterministic chain node,
     /// top-first, into `out`.
     #[inline]
@@ -560,18 +550,8 @@ impl<T: Clone + Eq + Hash> Lower<T> {
                 empty: false,
                 max_depth: 0,
             });
-            if let Lower::Segment { values, next, max_depth, .. } = old {
-                let top_value = values.last().unwrap().clone();
-                let child = if values.len() == 1 {
-                    next
-                } else {
-                    let mut rest_values = values;
-                    rest_values.pop();
-                    new_segment(rest_values, next)
-                };
-                let children = CompactMap::unit(top_value, CompactOrdMap::unit(child.max_depth(), child));
-                *self = Lower::General { children, empty: false, max_depth };
-            }
+            let (children, empty, max_depth) = old.into_parts();
+            *self = Lower::General { children, empty, max_depth };
         }
     }
 
