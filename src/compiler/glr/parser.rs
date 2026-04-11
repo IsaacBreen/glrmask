@@ -313,8 +313,8 @@ fn try_vstack_reduces(
                 }
             }
             // Ambiguity or accept: commit to GSS, let general path handle.
-            Some(Action::Split { .. }) | Some(Action::Accept) => break,
-            // Dead state.
+            Some(Action::Split { .. } | Action::Accept) => break,
+            // No action or Shift already handled by pure_shift_target above.
             _ => return StepResult::Final(ParserGSS::empty()),
         }
     }

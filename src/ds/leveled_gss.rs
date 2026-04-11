@@ -787,7 +787,7 @@ where
 fn new_lower<T: Clone + Eq + Hash>(children: Children<T, Lower<T>>, empty: bool) -> Arc<Lower<T>> {
     // Use Segment variant when there's exactly one key with one depth entry.
     // NOTE: We do NOT pack into existing child Segments here. Packing only happens
-    // in batch-construction paths (from_chain_states) so that incremental push/pop
+    // in batch-construction paths (into_gss) so that incremental push/pop
     // preserves Arc sharing (the child Arc is reused on pop).
     // Only compress to Segment when empty is false — Segments are non-accepting.
     if !empty && children.len() == 1 {
@@ -3481,40 +3481,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             floor: Arc::clone(floor_arc),
             acc: interface.acc.clone(),
         })
-    }
-
-    /// Build a single-path chain GSS from a bottom-first list of state values.
-    /// Uses the accumulator from `template` (which should be the original GSS).
-    pub fn from_chain_states(states: &[T], template: &Self) -> Self {
-        if states.is_empty() {
-            return Self::empty();
-        }
-        let acc = match &*template.inner {
-            Upper::Interface(iface) => iface.acc.clone(),
-            _ => return Self::empty(),
-        };
-
-        // Build from bottom to top — pack into Segments
-        let base: Arc<Lower<T>> = Arc::new(Lower::General {
-            children: CompactMap::new(),
-            empty: true,
-            max_depth: 0,
-        });
-        // States are bottom-first, which matches our values ordering (deepest at index 0).
-        let mut current = base;
-        for chunk in states.chunks(SEGMENT_CAP) {
-            let values: ArrayVec<T, SEGMENT_CAP> = chunk.iter().cloned().collect();
-            let max_depth = current.max_depth() + values.len() as u32;
-            current = Arc::new(Lower::Segment {
-                values,
-                next: current,
-                max_depth,
-            });
-        }
-
-        LeveledGSS {
-            inner: new_interface(current, acc),
-        }
     }
 
     pub fn is_empty(&self) -> bool {
