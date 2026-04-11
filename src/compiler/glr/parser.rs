@@ -51,55 +51,17 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
 
     // ── Phase 1: Reduce closure ──
     //
-    // Process frontier states in waves.  Each wave collects all reduce-gotos
-    // from the current pending states (against a consistent GSS snapshot),
-    // then applies the gotos to the GSS all at once, seeding the next wave
-    // with any newly created states.
-    //
-    // At the start of each wave, if the GSS is a single deterministic chain,
-    // we run the standard LR reduce loop on a flat stack first (fast path).
+    // Apply reductions until no new gotos can be produced (fixpoint).
+    // Each iteration first tries the fast deterministic path (single chain),
+    // then falls through to the general nondeterministic path.
 
     let mut gss = stack;
 
     loop {
-        // Deterministic fast path: when the GSS is a single chain, apply
-        // the standard LR reduce loop on a flat stack.  This handles the
-        // common case where no ambiguity exists yet, and also catches
-        // cases where all but one path died in a previous wave.
         gss = apply_deterministic_reduces(table, gss, token);
-
-        let mut gotos = SmallVec::<[(u32, ParserGSS); 8]>::new();
-
-        for state in gss.peek_values() {
-            let Some(action) = table.action(state, token) else {
-                continue;
-            };
-
-            for &rule_id in action.reduce_rule_ids() {
-                let rule = &table.rules[rule_id as usize];
-                for (goto_from, base) in gss.reduce_bases(state, rule.rhs.len() as isize) {
-                    if let Some(target) = table.goto_target(goto_from, rule.lhs) {
-                        if let Some((_, existing)) = gotos.iter_mut().find(|(t, _)| *t == target) {
-                            *existing = existing.merge(&base);
-                        } else {
-                            gotos.push((target, base));
-                        }
-                    }
-                }
-            }
-        }
-
-        if gotos.is_empty() {
-            break;
-        }
-
-        let gss_before = gss.clone();
-        for (target, base) in gotos {
-            gss = gss.push_goto(target, &base);
-        }
-        // Fixpoint: if push_goto didn't change the GSS structure, all
-        // predecessor links already existed and no new reductions are possible.
-        if gss == gss_before {
+        let (new_gss, changed) = apply_nondeterministic_reduces(table, gss, token);
+        gss = new_gss;
+        if !changed {
             break;
         }
     }
@@ -116,6 +78,56 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
     gss.shift_top_values_owned(shift_pairs)
 }
 
+/// Apply one wave of nondeterministic reductions.
+///
+/// Collects all reduce-gotos from the current frontier states (against a
+/// consistent GSS snapshot), merging bases for same-target gotos, then
+/// applies them all at once.
+///
+/// Returns `(new_gss, true)` if any gotos were produced and the GSS
+/// changed, `(gss, false)` if the reduce closure has reached a fixpoint.
+fn apply_nondeterministic_reduces(
+    table: &GLRTable,
+    gss: ParserGSS,
+    token: TerminalID,
+) -> (ParserGSS, bool) {
+    let mut gotos = SmallVec::<[(u32, ParserGSS); 8]>::new();
+
+    for state in gss.peek_values() {
+        let Some(action) = table.action(state, token) else {
+            continue;
+        };
+
+        for &rule_id in action.reduce_rule_ids() {
+            let rule = &table.rules[rule_id as usize];
+            for (goto_from, base) in gss.isolate_pop_bases(state, rule.rhs.len() as isize) {
+                if let Some(target) = table.goto_target(goto_from, rule.lhs) {
+                    if let Some((_, existing)) = gotos.iter_mut().find(|(t, _)| *t == target) {
+                        *existing = existing.merge(&base);
+                    } else {
+                        gotos.push((target, base));
+                    }
+                }
+            }
+        }
+    }
+
+    if gotos.is_empty() {
+        return (gss, false);
+    }
+
+    let mut new_gss = gss.clone();
+    for (target, base) in gotos {
+        new_gss = new_gss.absorb_push_same_acc(target, &base);
+    }
+    // Fixpoint: if the gotos targeted existing states with existing
+    // predecessors, the GSS is unchanged and we're done.
+    if new_gss == gss {
+        return (gss, false);
+    }
+    (new_gss, true)
+}
+
 /// Standard LR reduce loop for the deterministic case.
 ///
 /// When the GSS frontier is a single linear chain (no ambiguity), the GSS
@@ -123,6 +135,10 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
 /// LR reduce loop directly: inspect the top state's action, pop |rhs|
 /// symbols, push the goto target, repeat — until a non-reduce action is
 /// reached or the chain becomes ambiguous.
+///
+/// If a reduce crosses below the chain's base (into the shared GSS
+/// substructure), we fall through to GSS-level operations for that
+/// reduce and return.
 ///
 /// Returns the GSS unchanged if the frontier is ambiguous or empty.
 fn apply_deterministic_reduces(
@@ -133,7 +149,6 @@ fn apply_deterministic_reduces(
     let Some(mut stack) = current.try_virtual_stack() else {
         return current; // Ambiguous frontier — skip to the general GLR path.
     };
-    let mut changed = false;
 
     #[cfg(test)]
     note_vstack_hit();
@@ -151,21 +166,20 @@ fn apply_deterministic_reduces(
                     stack.pop(rule.rhs.len());
                     let goto_from = *stack.top().unwrap();
                     match table.goto_target(goto_from, rule.lhs) {
-                        Some(target) => {
-                            stack.push(target);
-                            changed = true;
-                        }
+                        Some(target) => stack.push(target),
                         None => return ParserGSS::empty(),
                     }
                 } else {
-                    break; // Reduce would cross below this chain's base.
+                    // Reduce crosses below the VirtualStack's base.
+                    // Fall through to the general GLR path.
+                    break;
                 }
             }
             _ => break, // Shift, split, accept, or dead — handled by the caller.
         }
     }
 
-    if changed { stack.into_gss() } else { current }
+    stack.into_gss()
 }
 
 pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
