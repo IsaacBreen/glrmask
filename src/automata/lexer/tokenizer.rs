@@ -6,7 +6,7 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::automata::dfa::DFA;
-use crate::compiler::grammar_def::TerminalID;
+use crate::grammar::flat::TerminalID;
 use crate::ds::bitset::BitSet;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

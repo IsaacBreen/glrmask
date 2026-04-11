@@ -8,7 +8,7 @@
 use super::analysis::AnalyzedGrammar;
 use super::parser::{stacks_finished, GLRParser};
 use super::table::GLRTable;
-use crate::compiler::grammar::model::{GrammarDef, Rule, Symbol, Terminal, TerminalID};
+use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal, TerminalID};
 
 fn literal_terminal(id: u32, name: &str) -> Terminal {
     Terminal::Literal {

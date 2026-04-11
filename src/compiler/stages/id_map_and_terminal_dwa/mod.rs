@@ -19,7 +19,7 @@ use std::time::Instant;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
-use crate::compiler::grammar::model::TerminalID;
+use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::bitset::BitSet;
 use crate::Vocab;

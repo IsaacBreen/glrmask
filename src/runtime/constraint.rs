@@ -9,7 +9,7 @@ use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::ParserGSS;
 use crate::compiler::glr::table::GLRTable;
-use crate::compiler::grammar_def::TerminalID;
+use crate::grammar::flat::TerminalID;
 use crate::ds::weight::Weight;
 
 use super::state::ConstraintState;

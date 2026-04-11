@@ -12,7 +12,7 @@ use smallvec::SmallVec;
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::{Tokenizer, TokenizerMatch};
 use crate::automata::weighted::nwa::NWA;
-use crate::compiler::grammar::model::TerminalID;
+use crate::grammar::flat::TerminalID;
 use crate::compiler::possible_matches::PossibleMatchesComputer;
 use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::ds::u8set::U8Set;

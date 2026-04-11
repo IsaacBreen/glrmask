@@ -13,7 +13,7 @@ use crate::automata::weighted::minimize::{minimize, minimize_from_env};
 use crate::automata::weighted::nwa::{NWA, NWAState as NWAStateType};
 use crate::compiler::compile::compute_disallowed_follows;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
-use crate::compiler::grammar::model::TerminalID;
+use crate::grammar::flat::TerminalID;
 use crate::compiler::possible_matches::{
     PossibleMatchesByState, PossibleMatchesComputer, collect_possible_matches_by_internal_tsid,
 };

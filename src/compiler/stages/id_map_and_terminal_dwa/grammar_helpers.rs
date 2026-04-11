@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use crate::compiler::glr::analysis::{AnalyzedGrammar, EOF};
 use crate::compiler::glr::table::GLRTable;
-use crate::compiler::grammar::model::{Symbol, TerminalID};
+use crate::grammar::flat::{Symbol, TerminalID};
 use crate::ds::bitset::BitSet;
 
 use super::types::{ColorId, TerminalColoring};

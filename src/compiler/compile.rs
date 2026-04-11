@@ -10,7 +10,7 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::regex::Expr;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::GLRTable;
-use crate::compiler::grammar::model::{GrammarDef, Terminal};
+use crate::grammar::flat::{GrammarDef, Terminal};
 #[cfg(test)]
 use crate::compiler::grammar::transforms::prepare_grammar_for_compile;
 use crate::compiler::grammar::transforms::prepare_grammar_transforms_only;
@@ -838,8 +838,8 @@ pub(crate) fn compile_owned_profiled(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::grammar::model::tests::*;
-    use crate::compiler::grammar::model::{NonterminalID, Rule, Symbol, Terminal};
+    use crate::grammar::flat::tests::*;
+    use crate::grammar::flat::{NonterminalID, Rule, Symbol, Terminal};
     use crate::compiler::grammar::transforms::{
         compact_unused_terminals,
         expand_nullable_terminals,

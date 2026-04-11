@@ -755,7 +755,7 @@ fn analyze_equivalences_impl(
 mod tests {
     use super::*;
     use crate::compiler::compile::build_tokenizer;
-    use crate::compiler::grammar::model::{GrammarDef, Rule, Symbol, Terminal};
+    use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
     #[test]
     fn test_internal_id_map_shape() {

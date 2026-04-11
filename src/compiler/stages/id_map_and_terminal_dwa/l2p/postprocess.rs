@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 
 use crate::automata::weighted::nwa::{NWA, NWAState as NWAStateType};
-use crate::compiler::grammar::model::TerminalID;
+use crate::grammar::flat::TerminalID;
 use super::equivalence_analysis::disallowed_follows::{
     build_disallowed_follow_dfa, normalize_disallowed_follows,
 };

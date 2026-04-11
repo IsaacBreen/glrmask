@@ -4,7 +4,7 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use super::analysis::{EOF, AnalyzedGrammar};
-use crate::compiler::grammar_def::{NonterminalID, Rule, Symbol, TerminalID};
+use crate::grammar::flat::{NonterminalID, Rule, Symbol, TerminalID};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Action {
@@ -1272,8 +1272,8 @@ fn build_ielr_table(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::grammar_def::GrammarDef;
-    use crate::compiler::grammar_def::tests::*;
+    use crate::grammar::flat::GrammarDef;
+    use crate::grammar::flat::tests::*;
 
     #[test]
     fn test_table_simple_ab() {

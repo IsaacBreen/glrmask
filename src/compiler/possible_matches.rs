@@ -9,7 +9,7 @@ use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
-use crate::compiler::grammar::model::TerminalID;
+use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};

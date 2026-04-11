@@ -12,7 +12,7 @@ use std::sync::Arc;
 use super::accumulator::TerminalsDisallowed;
 use super::analysis::EOF;
 use super::table::{Action, GLRTable};
-use crate::compiler::grammar::model::TerminalID;
+use crate::grammar::flat::TerminalID;
 use crate::ds::bitset::BitSet;
 use crate::ds::leveled_gss::LeveledGSS;
 use smallvec::SmallVec;
@@ -633,8 +633,8 @@ pub(crate) fn valid_terminals_for_stacks(table: &GLRTable, stack: &ParserGSS) ->
 mod tests {
     use super::*;
     use crate::compiler::glr::analysis::AnalyzedGrammar;
-    use crate::compiler::grammar::model::tests::*;
-    use crate::compiler::grammar::model::{GrammarDef, Rule, Symbol, Terminal};
+    use crate::grammar::flat::tests::*;
+    use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
     fn build_parser(gdef: &GrammarDef) -> GLRParser {
         let grammar = AnalyzedGrammar::from_grammar_def(gdef);

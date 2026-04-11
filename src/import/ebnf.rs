@@ -1,5 +1,5 @@
 use crate::GlrMaskError;
-use crate::compiler::grammar_def::GrammarDef;
+use crate::grammar::flat::GrammarDef;
 use crate::grammar::factoring::factor_named_grammar;
 use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, lower};
 

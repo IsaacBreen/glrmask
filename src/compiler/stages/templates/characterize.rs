@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{Action, GLRTable};
-use crate::compiler::grammar::model::{NonterminalID, TerminalID};
+use crate::grammar::flat::{NonterminalID, TerminalID};
 
 type InitialShift = (u32, u32);
 

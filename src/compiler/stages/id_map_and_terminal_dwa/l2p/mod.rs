@@ -20,7 +20,7 @@ use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::minimize::{minimize_from_env, minimize_with_threshold};
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
-use crate::compiler::grammar::model::TerminalID;
+use crate::grammar::flat::TerminalID;
 use crate::compiler::possible_matches::{
     PossibleMatchesComputer,
 };

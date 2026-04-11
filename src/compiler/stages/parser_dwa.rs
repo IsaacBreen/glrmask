@@ -15,7 +15,7 @@ use crate::automata::weighted::nwa::{NWA, NwaBody};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::compiler::glr::table::GLRTable;
-use crate::compiler::grammar::model::TerminalID;
+use crate::grammar::flat::TerminalID;
 #[cfg(test)]
 use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::compiler::stages::resolve_negatives::resolve_negative_codes_in_nwa;
@@ -1317,8 +1317,8 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
 mod tests {
     use super::*;
     use crate::compiler::glr::analysis::AnalyzedGrammar;
-    use crate::compiler::grammar::model::GrammarDef;
-    use crate::compiler::grammar::model::tests::*;
+    use crate::grammar::flat::GrammarDef;
+    use crate::grammar::flat::tests::*;
     use range_set_blaze::RangeSetBlaze;
 
     fn token_weight(tokens: &[u32]) -> Weight {

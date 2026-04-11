@@ -10,7 +10,7 @@ use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic as unwei
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::{minimize_fast, minimize_from_env};
 use crate::automata::weighted::nwa::{NWA, NWAState};
-use crate::compiler::grammar::model::TerminalID;
+use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::templates::compile_dfa::Templates;
 use crate::ds::weight::Weight;
 

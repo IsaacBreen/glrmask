@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::compiler::grammar::model::{GrammarDef, NonterminalID, Rule, Symbol, TerminalID};
+use crate::grammar::flat::{GrammarDef, NonterminalID, Rule, Symbol, TerminalID};
 
 pub const EOF: TerminalID = u32::MAX;
 
@@ -1465,8 +1465,8 @@ fn compute_follow(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::grammar::model::tests::*;
-    use crate::compiler::grammar::model::{GrammarDef, Rule, Symbol, Terminal};
+    use crate::grammar::flat::tests::*;
+    use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
     fn term(id: u32, name: &str) -> Terminal {
         Terminal::Literal { id, bytes: name.as_bytes().to_vec() }

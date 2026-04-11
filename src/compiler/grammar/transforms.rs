@@ -4,8 +4,8 @@ use crate::automata::regex::Expr;
 use crate::automata::lexer::regex::parse_regex;
 use crate::compiler::compile::build_tokenizer;
 use crate::compiler::glr::analysis::{merge_identical_nonterminals, normalize_grammar};
-use crate::compiler::grammar::model::{GrammarDef, NonterminalID, Terminal};
-use crate::compiler::grammar_def::{Rule, Symbol, TerminalID};
+use crate::grammar::flat::{GrammarDef, NonterminalID, Terminal};
+use crate::grammar::flat::{Rule, Symbol, TerminalID};
 use crate::automata::lexer::tokenizer::Tokenizer;
 
 const MAX_RUNTIME_REDUCTION_LEN: usize = 5;
@@ -535,7 +535,7 @@ fn prepare_owned_grammar_for_compile_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::grammar::model::Terminal;
+    use crate::grammar::flat::Terminal;
 
     fn literal(id: u32, bytes: &[u8]) -> Terminal {
         Terminal::Literal {

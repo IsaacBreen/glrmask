@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::GlrMaskError;
-use crate::compiler::grammar_def::GrammarDef;
+use crate::grammar::flat::GrammarDef;
 use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, lower};
 use crate::grammar::factoring::factor_named_grammar;
 

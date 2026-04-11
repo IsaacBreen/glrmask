@@ -6,7 +6,7 @@ use crate::automata::lexer::ast::Expr as LexerExpr;
 use crate::automata::lexer::compile::build_regex;
 use crate::automata::lexer::dfa::DFA as LexerDfa;
 use crate::automata::lexer::regex::parse_regex;
-use crate::compiler::grammar_def::GrammarDef;
+use crate::grammar::flat::GrammarDef;
 use crate::ds::bitset::BitSet;
 use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, lower, promote_large_literal_alts};
 

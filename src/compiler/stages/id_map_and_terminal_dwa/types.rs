@@ -1,6 +1,6 @@
 //! Shared types used across the terminal DWA build pipeline.
 
-use crate::compiler::grammar::model::TerminalID;
+use crate::grammar::flat::TerminalID;
 
 /// Color identifier (index into graph-coloring partition).
 pub(crate) type ColorId = u32;
