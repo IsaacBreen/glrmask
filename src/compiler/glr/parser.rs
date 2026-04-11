@@ -44,26 +44,13 @@ pub(crate) fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: Te
 ///  2. **Shift** — push the lookahead's shift target onto every surviving
 ///     frontier state, producing the next GSS.
 fn advance_stacks_core(table: &GLRTable, mut gss: ParserGSS, token: TerminalID) -> ParserGSS {
-    // Fast path: single state with a pure shift action (most common case).
-    if let Some(state) = gss.single_exclusive_top_value() {
-        if let Some(target) = table.action(state, token).and_then(Action::pure_shift_target) {
-            return gss.push(target);
-        }
+    if apply_deterministic_reduces(table, &mut gss, token) {
+        return gss;
     }
 
-    apply_reduces(table, &mut gss, token);
+    while apply_nondeterministic_reduces(table, &mut gss, token) {}
 
     shift_frontier(table, gss, token)
-}
-
-fn apply_reduces(table: &GLRTable, gss: &mut ParserGSS, token: TerminalID) {
-    // Keep applying reduce waves while they keep adding stacks.
-    while apply_reduces_wave(table, gss, token) {}
-}
-
-fn apply_reduces_wave(table: &GLRTable, gss: &mut ParserGSS, token: TerminalID) -> bool {
-    apply_deterministic_reduces(table, gss, token);
-    apply_nondeterministic_reduces(table, gss, token)
 }
 
 fn shift_frontier(table: &GLRTable, gss: ParserGSS, token: TerminalID) -> ParserGSS {
@@ -176,18 +163,17 @@ fn apply_nondeterministic_reduces(
 /// symbols, push the goto target, repeat — until a non-reduce action is
 /// reached or the chain becomes ambiguous.
 ///
-/// If a reduce crosses below the chain's base (into the shared GSS
-/// substructure), we fall through to GSS-level operations for that
-/// reduce and return.
-///
-/// Returns the GSS unchanged if the frontier is ambiguous or empty.
+/// If this deterministic pass ends in a pure shift, it performs that shift
+/// itself and returns true to signal that the parser step is finished.
+/// Otherwise it mutates `gss` and returns false so the caller can continue
+/// with the nondeterministic reduce closure.
 fn apply_deterministic_reduces(
     table: &GLRTable,
     gss: &mut ParserGSS,
     token: TerminalID,
-) {
+) -> bool {
     let Some(mut stack) = gss.try_virtual_stack() else {
-        return; // Ambiguous frontier — skip to the general GLR path.
+        return false; // Ambiguous frontier — skip to the general GLR path.
     };
 
     #[cfg(test)]
@@ -207,13 +193,13 @@ fn apply_deterministic_reduces(
                     // Pop |rhs| symbols and push the goto target.
                     let Some(&goto_from) = stack.top() else {
                         *gss = before_pop;
-                        return;
+                        return false;
                     };
                     match table.goto_target(goto_from, rule.lhs) {
                         Some(target) => stack.push(target),
                         None => {
                             *gss = ParserGSS::empty();
-                            return;
+                            return false;
                         }
                     }
                 } else {
@@ -222,14 +208,22 @@ fn apply_deterministic_reduces(
                     // then apply all resulting gotos as one batch.
                     let gotos = collect_rule_gotos(table, rule.lhs, popped_sources(&stack.into_gss(), leftover));
                     *gss = apply_gotos(before_pop, gotos);
-                    return;
+                    return false;
                 }
             }
-            _ => break, // Shift, split, accept, or dead — handled by the caller.
+            Some(action) => {
+                if let Some(target) = action.pure_shift_target() {
+                    *gss = stack.into_gss().push(target);
+                    return true;
+                }
+                break; // Split, accept, or dead — handled by the caller.
+            }
+            None => break,
         }
     }
 
     *gss = stack.into_gss();
+    false
 }
 
 pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
