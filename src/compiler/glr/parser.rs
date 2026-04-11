@@ -81,7 +81,7 @@ fn shift_frontier(table: &GLRTable, gss: ParserGSS, token: TerminalID) -> Parser
             shift_pairs.push((state, target));
         }
     }
-    gss.shift_top_values_owned(shift_pairs)
+    gss.remap_top_values_owned(shift_pairs)
 }
 
 fn apply_gotos(mut gss: ParserGSS, gotos: GotoBatch) -> ParserGSS {

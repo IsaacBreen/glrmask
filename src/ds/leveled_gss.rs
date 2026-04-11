@@ -2429,7 +2429,8 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     /// Equivalent to merging `self.isolate(Some(from)).push(to)` for each
     /// `(from, to)` pair, but avoids repeated isolate/push/merge churn by
     /// rebuilding the shifted top layer in one pass.
-    pub fn shift_top_values<I>(&self, shifts: I) -> Self
+    /// Apply a bulk remapping to the current frontier values.
+    pub fn remap_top_values<I>(&self, shifts: I) -> Self
     where
         I: IntoIterator<Item = (T, T)>,
     {
@@ -2524,9 +2525,9 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
-    /// Like `shift_top_values` but takes ownership, allowing extraction of
+    /// Like `remap_top_values` but takes ownership, allowing extraction of
     /// children by move instead of clone when the Arcs are uniquely owned.
-    pub fn shift_top_values_owned<I>(self, shifts: I) -> Self
+    pub fn remap_top_values_owned<I>(self, shifts: I) -> Self
     where
         I: IntoIterator<Item = (T, T)>,
     {
@@ -2555,23 +2556,23 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                                 // Can't unwrap lower, fall back to clone path
                                 let i = Interface { inner: lower_arc, acc: acc.clone() };
                                 let gss = LeveledGSS { inner: Arc::new(Upper::Interface(Arc::new(i))) };
-                                return gss.shift_top_values(pairs);
+                                return gss.remap_top_values(pairs);
                             }
                         }
                     }
                     Err(iface_arc) => {
                         let gss = LeveledGSS { inner: Arc::new(Upper::Interface(iface_arc)) };
-                        return gss.shift_top_values(pairs);
+                        return gss.remap_top_values(pairs);
                     }
                 }
             }
             Ok(upper @ Upper::Branch(_)) => {
                 let gss = LeveledGSS { inner: Arc::new(upper) };
-                return gss.shift_top_values(pairs);
+                return gss.remap_top_values(pairs);
             }
             Err(arc) => {
                 let gss = LeveledGSS { inner: arc };
-                return gss.shift_top_values(pairs);
+                return gss.remap_top_values(pairs);
             }
         };
 
@@ -6036,12 +6037,12 @@ mod tests {
     }
 
     #[test]
-    fn test_chain_shift_top_values() {
+    fn test_chain_remap_top_values() {
         let gss0 = gss_from_str_stacks(&[
             (&["A", "B", "C"], &[1]),
         ]);
 
-        let shifted = gss0.shift_top_values(vec![
+        let shifted = gss0.remap_top_values(vec![
             ("C".to_string(), "X".to_string()),
         ]);
         let s = shifted.to_stacks();
