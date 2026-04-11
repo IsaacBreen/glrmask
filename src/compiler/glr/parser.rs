@@ -258,18 +258,28 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
         }
     }
 
-    // VirtualStack fast path: process deterministic reductions without GSS ops.
-    let mut current = match try_vstack_reduces(table, stack, token) {
-        VStackResult::Final(result) => return result,
-        VStackResult::Continue(gss) => gss,
-    };
-
     // General reduce closure, then shift.
+    let mut current = stack;
     let mut queue = SmallVec::<[u32; 8]>::new();
     let mut processed = SmallVec::<[u32; 16]>::new();
     queue.extend(current.peek_values());
 
     while !queue.is_empty() {
+        let before_key = current.ptr_key();
+        match try_vstack_reduces(table, current, token) {
+            VStackResult::Final(result) => return result,
+            VStackResult::Continue(gss) => current = gss,
+        }
+
+        if current.ptr_key() != before_key {
+            queue.clear();
+            processed.clear();
+            queue.extend(current.peek_values());
+            if queue.is_empty() {
+                break;
+            }
+        }
+
         let reduced;
         (current, reduced) = general_reduce_step(table, current, &mut queue, &mut processed, token);
         if !reduced {
@@ -290,6 +300,7 @@ fn try_vstack_reduces(
     let Some(mut vstack) = current.try_virtual_stack() else {
         return VStackResult::Continue(current);
     };
+    let mut changed = false;
 
     #[cfg(test)]
     note_vstack_hit();
@@ -315,7 +326,10 @@ fn try_vstack_reduces(
                     vstack.pop(pop_count);
                     let goto_from = *vstack.top().unwrap();
                     match table.goto_target(goto_from, rule.lhs) {
-                        Some(target) => vstack.push(target),
+                        Some(target) => {
+                            vstack.push(target);
+                            changed = true;
+                        }
                         None => return VStackResult::Final(ParserGSS::empty()),
                     }
                 } else {
@@ -331,7 +345,11 @@ fn try_vstack_reduces(
     }
 
     // Commit vstack to GSS and return to the general reduce loop.
-    VStackResult::Continue(vstack.into_gss())
+    if changed {
+        VStackResult::Continue(vstack.into_gss())
+    } else {
+        VStackResult::Continue(current)
+    }
 }
 
 /// One iteration of the general reduce closure. Returns `(updated_gss, true)`
