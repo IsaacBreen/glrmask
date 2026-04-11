@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use std::cell::Cell;
 #[cfg(any(test, debug_assertions))]
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
@@ -224,6 +226,31 @@ enum StepResult {
     Continue(ParserGSS),
 }
 
+enum VStackResult {
+    Final(ParserGSS),
+    Continue(ParserGSS),
+    Restart(ParserGSS),
+}
+
+#[cfg(test)]
+thread_local! {
+    static VSTACK_HIT_COUNT: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_vstack_hit() {
+    VSTACK_HIT_COUNT.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+fn take_vstack_hit_count() -> usize {
+    VSTACK_HIT_COUNT.with(|count| {
+        let hits = count.get();
+        count.set(0);
+        hits
+    })
+}
+
 fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> ParserGSS {
     // Fast path: single top state with a pure shift.
     if let Some(state) = stack.single_exclusive_top_value() {
@@ -256,15 +283,25 @@ fn reduce_closure(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> Step
     }
 
     while !queue.is_empty() {
-        match try_vstack_reduces(table, current, &mut queue, &mut processed, token) {
-            StepResult::Final(result) => return StepResult::Final(result),
-            StepResult::Continue(gss) => current = gss,
+        match try_vstack_reduces(table, current, token) {
+            VStackResult::Final(result) => return StepResult::Final(result),
+            VStackResult::Continue(gss) => current = gss,
+            VStackResult::Restart(gss) => {
+                current = gss;
+                queue.clear();
+                processed.clear();
+                queue.extend(current.peek_values());
+            }
         }
-        if queue.is_empty() { break; }
+        if queue.is_empty() {
+            break;
+        }
 
         let reduced;
         (current, reduced) = general_reduce_step(table, current, &mut queue, &mut processed, token);
-        if !reduced { break; }
+        if !reduced {
+            break;
+        }
     }
 
     StepResult::Continue(current)
@@ -275,24 +312,25 @@ fn reduce_closure(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> Step
 fn try_vstack_reduces(
     table: &GLRTable,
     mut current: ParserGSS,
-    queue: &mut SmallVec<[u32; 8]>,
-    processed: &mut SmallVec<[u32; 16]>,
     token: TerminalID,
-) -> StepResult {
+) -> VStackResult {
     let Some(mut vstack) = current.try_virtual_stack() else {
-        return StepResult::Continue(current);
+        return VStackResult::Continue(current);
     };
+
+    #[cfg(test)]
+    note_vstack_hit();
 
     loop {
         let Some(&state) = vstack.top() else {
-            return StepResult::Continue(current);
+            return VStackResult::Continue(current);
         };
         let action = table.action(state, token);
 
         // Pure shift: push and we're done.
         if let Some(target) = action.and_then(Action::pure_shift_target) {
             vstack.push(target);
-            return StepResult::Final(vstack.into_gss());
+            return VStackResult::Final(vstack.into_gss());
         }
 
         match action {
@@ -305,7 +343,7 @@ fn try_vstack_reduces(
                     let goto_from = *vstack.top().unwrap();
                     match table.goto_target(goto_from, rule.lhs) {
                         Some(target) => vstack.push(target),
-                        None => return StepResult::Final(ParserGSS::empty()),
+                        None => return VStackResult::Final(ParserGSS::empty()),
                     }
                 } else {
                     // Cross-floor: commit to GSS, let general path handle.
@@ -315,18 +353,16 @@ fn try_vstack_reduces(
             // Ambiguity or accept: commit to GSS, let general path handle.
             Some(Action::Split { .. } | Action::Accept) => break,
             // No action or Shift already handled by pure_shift_target above.
-            _ => return StepResult::Final(ParserGSS::empty()),
+            _ => return VStackResult::Final(ParserGSS::empty()),
         }
     }
 
     // Commit vstack to GSS and return to the general reduce loop.
     if vstack.has_pushes() {
         current = vstack.into_gss();
-        queue.clear();
-        processed.clear();
-        queue.extend(current.peek_values());
+        return VStackResult::Restart(current);
     }
-    StepResult::Continue(current)
+    VStackResult::Continue(current)
 }
 
 /// One iteration of the general reduce closure. Returns `(updated_gss, true)`
@@ -619,6 +655,37 @@ mod tests {
 
     fn tdef(id: u32, name: &str) -> Terminal {
         Terminal::Literal { id, bytes: name.as_bytes().to_vec() }
+    }
+
+    #[test]
+    fn test_advance_stacks_uses_virtual_stack_on_reduce_then_shift() {
+        // Grammar: S -> A '+' ; A -> 'i'
+        // After reading 'i', the next '+' triggers a deterministic reduce
+        // followed by a shift, which should go through the VirtualStack path.
+        let gdef = make_grammar(
+            vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(1)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
+            ],
+            0,
+            vec![tdef(0, "i"), tdef(1, "+")],
+        );
+        let parser = build_parser(&gdef);
+
+        let after_i = advance_stacks(&parser.table, &parser.stack, 0);
+        assert!(after_i.try_virtual_stack().is_some(), "single-path stack should admit VirtualStack");
+
+        take_vstack_hit_count();
+        let after_plus = advance_stacks(&parser.table, &after_i, 1);
+
+        assert!(!after_plus.is_empty(), "reduce-then-shift path should stay alive");
+        assert!(take_vstack_hit_count() > 0, "advance_stacks should hit try_vstack_reduces");
     }
 
     #[test]

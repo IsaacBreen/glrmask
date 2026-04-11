@@ -441,15 +441,16 @@ impl<T: Clone + Eq + Hash> Lower<T> {
     }
 
     /// If this node is a deterministic chain link (Segment or single-child
-    /// General with one edge), return a reference to the next Arc below it.
+    /// General with one edge), return the next Arc below it plus the number
+    /// of stack values represented at this node.
     #[inline]
-    fn chain_next(&self) -> Option<&Arc<Lower<T>>> {
+    fn chain_step(&self) -> Option<(&Arc<Lower<T>>, usize)> {
         match self {
-            Lower::Segment { next, .. } => Some(next),
+            Lower::Segment { next, values, .. } => Some((next, values.len())),
             Lower::General { children, .. } if children.len() == 1 => {
                 let ordmap = children.values().next().unwrap();
                 if ordmap.len() == 1 {
-                    Some(&ordmap.iter().next().unwrap().1)
+                    Some((&ordmap.iter().next().unwrap().1, 1))
                 } else {
                     None
                 }
@@ -465,6 +466,22 @@ impl<T: Clone + Eq + Hash> Lower<T> {
         match self {
             Lower::Segment { values, .. } => values.len(),
             _ => 1,
+        }
+    }
+
+    /// Append the values represented by this deterministic chain node,
+    /// top-first, into `out`.
+    #[inline]
+    fn append_chain_values_top_first(&self, out: &mut SmallVec<[T; 16]>) {
+        match self {
+            Lower::Segment { values, .. } => {
+                for value in values.iter().rev() {
+                    out.push(value.clone());
+                }
+            }
+            Lower::General { children, .. } => {
+                out.push(children.keys().next().unwrap().clone());
+            }
         }
     }
 
@@ -2016,7 +2033,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
             self.chain_depth -= take;
             remaining -= take;
             if self.chain_values_remaining == 0 {
-                if let Some(next) = self.chain.chain_next() {
+                if let Some((next, _)) = self.chain.chain_step() {
                     self.chain = Arc::clone(next);
                     self.chain_values_remaining = self.chain.chain_value_count();
                 }
@@ -3382,57 +3399,11 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         };
 
         let mut states = SmallVec::<[T; 16]>::new();
-        // Walk using Arc references so we can capture the tail Arc directly.
-        // First step: get the Arc from the interface's inner.
-        let first_arc: &Arc<Lower<T>>;
-        let first_state: T;
-        match &*interface.inner {
-            Lower::Segment { values, next, .. } => {
-                // Push all segment values top-first
-                for v in values.iter().rev() {
-                    states.push(v.clone());
-                }
-                first_arc = next;
-                // Skip the first_state/first_arc pattern — already handled
-            }
-            Lower::General { children, .. } => {
-                if children.is_empty() { return None; }
-                if children.len() != 1 { return None; }
-                let ordmap = children.values().next().unwrap();
-                if ordmap.len() != 1 { return None; }
-                first_state = children.keys().next().unwrap().clone();
-                first_arc = ordmap.values().next().unwrap();
-                states.push(first_state);
-            }
-        }
+        let mut current_arc: &Arc<Lower<T>> = &interface.inner;
 
-        // Now walk through Arc references, keeping the last Arc as the tail.
-        let mut current_arc: &Arc<Lower<T>> = first_arc;
-
-        loop {
-            match &**current_arc {
-                Lower::Segment { values, next, .. } => {
-                    for v in values.iter().rev() {
-                        states.push(v.clone());
-                    }
-                    current_arc = next;
-                }
-                Lower::General { children, .. } => {
-                    if children.is_empty() {
-                        break;
-                    }
-                    if children.len() == 1 {
-                        let key = children.keys().next().unwrap().clone();
-                        let ordmap = children.values().next().unwrap();
-                        if ordmap.len() == 1 {
-                            states.push(key);
-                            current_arc = ordmap.values().next().unwrap();
-                            continue;
-                        }
-                    }
-                    break;
-                }
-            }
+        while let Some((next, _)) = current_arc.chain_step() {
+            current_arc.append_chain_values_top_first(&mut states);
+            current_arc = next;
         }
 
         if states.len() < 2 {
@@ -3459,14 +3430,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
         // Walk down the chain to find the floor and count depth.
         let mut current: &Lower<T> = &interface.inner;
-        loop {
-            if let Some(next) = current.chain_next() {
-                chain_depth += current.chain_value_count();
-                floor_arc = next;
-                current = &**next;
-            } else {
-                break;
-            }
+        while let Some((next, value_count)) = current.chain_step() {
+            chain_depth += value_count;
+            floor_arc = next;
+            current = &**next;
         }
 
         if chain_depth == 0 {
