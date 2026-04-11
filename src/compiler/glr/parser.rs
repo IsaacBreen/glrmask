@@ -73,6 +73,219 @@ impl Merge for TerminalsDisallowed {
 
 pub type ParserGSS = LeveledGSS<u32, TerminalsDisallowed>;
 
+
+pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> ParserGSS {
+    advance_stacks_core(table, stack.clone(), token)
+}
+
+/// Like `advance_stacks` but takes ownership of the GSS, avoiding an
+/// unnecessary Arc clone when the caller doesn't need the original.
+pub(crate) fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> ParserGSS {
+    advance_stacks_core(table, stack, token)
+}
+
+/// Advance the GSS by one token.
+///
+/// This implements the standard two-phase GLR step:
+///
+///  1. **Reduce closure** — for the current lookahead, apply every applicable
+///     reduce rule across all frontier states.  Each reduction pops |rhs|
+///     symbols, looks up the goto target, and pushes it.  New goto targets
+///     seed further reduction waves until a fixed point is reached.
+///
+///  2. **Shift** — push the lookahead's shift target onto every surviving
+///     frontier state, producing the next GSS.
+fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> ParserGSS {
+    // Fast path: single state with a pure shift action (most common case).
+    if let Some(state) = stack.single_exclusive_top_value() {
+        if let Some(target) = table.action(state, token).and_then(Action::pure_shift_target) {
+            return stack.push(target);
+        }
+    }
+
+    // ── Phase 1: Reduce closure ──
+    //
+    // Process frontier states in waves.  Each wave collects all reduce-gotos
+    // from the current pending states (against a consistent GSS snapshot),
+    // then applies the gotos to the GSS all at once, seeding the next wave
+    // with any newly created states.
+    //
+    // When the frontier is a single deterministic chain, we first run the
+    // standard LR reduce loop on a flat stack (see apply_deterministic_reduces).
+
+    let mut gss = apply_deterministic_reduces(table, stack, token);
+
+    let mut worklist: SmallVec<[u32; 8]> = SmallVec::from_iter(gss.peek_values());
+    let mut closed: SmallVec<[u32; 16]> = SmallVec::new();
+
+    loop {
+        let mut gotos = SmallVec::<[(u32, ParserGSS); 8]>::new();
+
+        while let Some(state) = worklist.pop() {
+            if closed.contains(&state) {
+                continue;
+            }
+            closed.push(state);
+
+            let Some(action) = table.action(state, token) else {
+                continue;
+            };
+
+            for &rule_id in action.reduce_rule_ids() {
+                let rule = &table.rules[rule_id as usize];
+                for (goto_from, base) in gss.reduce_bases(state, rule.rhs.len() as isize) {
+                    if let Some(target) = table.goto_target(goto_from, rule.lhs) {
+                        if let Some((_, existing)) = gotos.iter_mut().find(|(t, _)| *t == target) {
+                            *existing = existing.merge(&base);
+                        } else {
+                            gotos.push((target, base));
+                        }
+                    }
+                }
+            }
+        }
+
+        if gotos.is_empty() {
+            break;
+        }
+
+        for (target, base) in gotos {
+            gss = gss.push_goto(target, &base);
+            worklist.push(target);
+        }
+    }
+
+    // ── Phase 2: Shift ──
+    //
+    // Push the lookahead token onto every surviving frontier state.
+    let mut shift_pairs = SmallVec::<[(u32, u32); 8]>::new();
+    for state in gss.peek_values() {
+        if let Some(target) = table.action(state, token).and_then(Action::shift_target) {
+            shift_pairs.push((state, target));
+        }
+    }
+    gss.shift_top_values_owned(shift_pairs)
+}
+
+/// Standard LR reduce loop for the deterministic case.
+///
+/// When the GSS frontier is a single linear chain (no ambiguity), the GSS
+/// degenerates to an ordinary flat parse stack.  This applies the textbook
+/// LR reduce loop directly: inspect the top state's action, pop |rhs|
+/// symbols, push the goto target, repeat — until a non-reduce action is
+/// reached or the chain becomes ambiguous.
+///
+/// Returns the GSS unchanged if the frontier is ambiguous or empty.
+fn apply_deterministic_reduces(
+    table: &GLRTable,
+    current: ParserGSS,
+    token: TerminalID,
+) -> ParserGSS {
+    let Some(mut stack) = current.try_virtual_stack() else {
+        return current; // Ambiguous frontier — skip to the general GLR path.
+    };
+    let mut changed = false;
+
+    #[cfg(test)]
+    note_vstack_hit();
+
+    loop {
+        let Some(&state) = stack.top() else {
+            break;
+        };
+
+        match table.action(state, token) {
+            Some(Action::Reduce(rule_id)) => {
+                let rule = &table.rules[*rule_id as usize];
+                if stack.len() > rule.rhs.len() {
+                    // Pop |rhs| symbols and push the goto target.
+                    stack.pop(rule.rhs.len());
+                    let goto_from = *stack.top().unwrap();
+                    match table.goto_target(goto_from, rule.lhs) {
+                        Some(target) => {
+                            stack.push(target);
+                            changed = true;
+                        }
+                        None => return ParserGSS::empty(),
+                    }
+                } else {
+                    break; // Reduce would cross below this chain's base.
+                }
+            }
+            _ => break, // Shift, split, accept, or dead — handled by the caller.
+        }
+    }
+
+    if changed { stack.into_gss() } else { current }
+}
+
+pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
+    stack.peek_values().into_iter().any(|state| table.action(state, token).is_some())
+}
+
+/// Returns true if any terminal in the given bitset may advance the parser stack,
+/// or if the parser has a Reduce/Accept action on EOF (since reductions may
+/// transition to states that can then shift on future terminals).
+pub(crate) fn stack_may_advance_on_any(
+    table: &GLRTable,
+    stack: &ParserGSS,
+    terminals: &BitSet,
+) -> bool {
+    stack.peek_values().into_iter().any(|state| {
+        table.action.get(state as usize).is_some_and(|actions| {
+            actions.keys().any(|&terminal| {
+                terminals.contains(terminal as usize) || terminal == EOF
+            })
+        })
+    })
+}
+
+pub(crate) fn stacks_finished(table: &GLRTable, stack: &ParserGSS) -> bool {
+    if stack.is_empty() {
+        return false;
+    }
+
+    let has_eof_action = stack
+        .peek_values()
+        .iter()
+        .any(|&state| table.action(state, EOF).is_some());
+
+    #[cfg(debug_assertions)]
+    if has_eof_action {
+        debug_assert!(
+            stacks_accept(table, &stack_vectors(stack)),
+            "IELR(1) fast check overapproximated for states {:?}",
+            stack.peek_values(),
+        );
+    }
+
+    has_eof_action
+}
+
+
+// ─── Test & debug infrastructure ──────────────────────────────────
+
+
+#[cfg(test)]
+thread_local! {
+    static VSTACK_HIT_COUNT: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_vstack_hit() {
+    VSTACK_HIT_COUNT.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+fn take_vstack_hit_count() -> usize {
+    VSTACK_HIT_COUNT.with(|count| {
+        let hits = count.get();
+        count.set(0);
+        hits
+    })
+}
+
+
 #[cfg(test)]
 pub(crate) struct GLRParser {
     pub table: GLRTable,
@@ -209,218 +422,6 @@ fn valid_terminals_for_stack_vectors(
     (0..table.num_terminals)
         .filter(|&terminal| !advance_stack_vectors(table, stacks, terminal).is_empty())
         .collect()
-}
-
-pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> ParserGSS {
-    advance_stacks_core(table, stack.clone(), token)
-}
-
-/// Like `advance_stacks` but takes ownership of the GSS, avoiding an
-/// unnecessary Arc clone when the caller doesn't need the original.
-pub(crate) fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> ParserGSS {
-    advance_stacks_core(table, stack, token)
-}
-
-#[cfg(test)]
-thread_local! {
-    static VSTACK_HIT_COUNT: Cell<usize> = const { Cell::new(0) };
-}
-
-#[cfg(test)]
-fn note_vstack_hit() {
-    VSTACK_HIT_COUNT.with(|count| count.set(count.get() + 1));
-}
-
-#[cfg(test)]
-fn take_vstack_hit_count() -> usize {
-    VSTACK_HIT_COUNT.with(|count| {
-        let hits = count.get();
-        count.set(0);
-        hits
-    })
-}
-
-/// Advance the GSS by one token.
-///
-/// This implements the standard two-phase GLR step:
-///
-///  1. **Reduce closure** — for the current lookahead, apply every applicable
-///     reduce rule across all frontier states.  Each reduction pops |rhs|
-///     symbols, looks up the goto target, and pushes it.  New goto targets
-///     seed further reduction waves until a fixed point is reached.
-///
-///  2. **Shift** — push the lookahead's shift target onto every surviving
-///     frontier state, producing the next GSS.
-fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> ParserGSS {
-    // Fast path: single state with a pure shift action (most common case).
-    if let Some(state) = stack.single_exclusive_top_value() {
-        if let Some(target) = table.action(state, token).and_then(Action::pure_shift_target) {
-            return stack.push(target);
-        }
-    }
-
-    // ── Phase 1: Reduce closure ──
-    //
-    // Process frontier states in waves.  Each wave collects all reduce-gotos
-    // from the current pending states (against a consistent GSS snapshot),
-    // then applies the gotos to the GSS all at once, seeding the next wave
-    // with any newly created states.
-    //
-    // When the GSS is a single deterministic chain, we first run the reduces
-    // on a flat VirtualStack (optimisation — avoids intermediate GSS nodes).
-
-    let mut gss = apply_deterministic_reduces(table, stack, token);
-
-    let mut worklist: SmallVec<[u32; 8]> = SmallVec::from_iter(gss.peek_values());
-    let mut closed: SmallVec<[u32; 16]> = SmallVec::new();
-
-    loop {
-        let mut gotos = SmallVec::<[(u32, ParserGSS); 8]>::new();
-
-        while let Some(state) = worklist.pop() {
-            if closed.contains(&state) {
-                continue;
-            }
-            closed.push(state);
-
-            let Some(action) = table.action(state, token) else {
-                continue;
-            };
-
-            for &rule_id in action.reduce_rule_ids() {
-                let rule = &table.rules[rule_id as usize];
-                for (goto_from, base) in gss.reduce_bases(state, rule.rhs.len() as isize) {
-                    if let Some(target) = table.goto_target(goto_from, rule.lhs) {
-                        if let Some((_, existing)) = gotos.iter_mut().find(|(t, _)| *t == target) {
-                            *existing = existing.merge(&base);
-                        } else {
-                            gotos.push((target, base));
-                        }
-                    }
-                }
-            }
-        }
-
-        if gotos.is_empty() {
-            break;
-        }
-
-        for (target, base) in gotos {
-            gss = gss.push_goto(target, &base);
-            worklist.push(target);
-        }
-    }
-
-    // ── Phase 2: Shift ──
-    //
-    // Push the lookahead token onto every surviving frontier state.
-    let mut shift_pairs = SmallVec::<[(u32, u32); 8]>::new();
-    for state in gss.peek_values() {
-        if let Some(target) = table.action(state, token).and_then(Action::shift_target) {
-            shift_pairs.push((state, target));
-        }
-    }
-    gss.shift_top_values_owned(shift_pairs)
-}
-
-/// Apply reductions along the deterministic chain top of the GSS.
-///
-/// When the GSS has a single linear chain, this runs the standard LR reduce
-/// loop on it directly (via VirtualStack) without materialising intermediate
-/// GSS nodes.  Only reduces are performed — shifting is handled by the caller.
-///
-/// Falls back to a no-op (returning the GSS unchanged) when the frontier is
-/// ambiguous (Split), crosses the VirtualStack floor, or reaches a non-reduce
-/// action.
-fn apply_deterministic_reduces(
-    table: &GLRTable,
-    current: ParserGSS,
-    token: TerminalID,
-) -> ParserGSS {
-    let Some(mut vstack) = current.try_virtual_stack() else {
-        return current;
-    };
-    let mut changed = false;
-
-    #[cfg(test)]
-    note_vstack_hit();
-
-    loop {
-        let Some(&state) = vstack.top() else {
-            break;
-        };
-        let action = table.action(state, token);
-
-        match action {
-            Some(Action::Reduce(rule_id)) => {
-                let rule = &table.rules[*rule_id as usize];
-                let pop_count = rule.rhs.len();
-                if vstack.len() > pop_count {
-                    // Above-floor reduce: pop, goto, push — stay on vstack.
-                    vstack.pop(pop_count);
-                    let goto_from = *vstack.top().unwrap();
-                    match table.goto_target(goto_from, rule.lhs) {
-                        Some(target) => {
-                            vstack.push(target);
-                            changed = true;
-                        }
-                        None => return ParserGSS::empty(),
-                    }
-                } else {
-                    // Cross-floor: commit to GSS, let general path handle.
-                    break;
-                }
-            }
-            // Shift, Split, Accept, or no action: stop reducing.
-            // The shift will be applied by the caller.
-            _ => break,
-        }
-    }
-
-    if changed { vstack.into_gss() } else { current }
-}
-
-pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
-    stack.peek_values().into_iter().any(|state| table.action(state, token).is_some())
-}
-
-/// Returns true if any terminal in the given bitset may advance the parser stack,
-/// or if the parser has a Reduce/Accept action on EOF (since reductions may
-/// transition to states that can then shift on future terminals).
-pub(crate) fn stack_may_advance_on_any(
-    table: &GLRTable,
-    stack: &ParserGSS,
-    terminals: &BitSet,
-) -> bool {
-    stack.peek_values().into_iter().any(|state| {
-        table.action.get(state as usize).is_some_and(|actions| {
-            actions.keys().any(|&terminal| {
-                terminals.contains(terminal as usize) || terminal == EOF
-            })
-        })
-    })
-}
-
-pub(crate) fn stacks_finished(table: &GLRTable, stack: &ParserGSS) -> bool {
-    if stack.is_empty() {
-        return false;
-    }
-
-    let has_eof_action = stack
-        .peek_values()
-        .iter()
-        .any(|&state| table.action(state, EOF).is_some());
-
-    #[cfg(debug_assertions)]
-    if has_eof_action {
-        debug_assert!(
-            stacks_accept(table, &stack_vectors(stack)),
-            "IELR(1) fast check overapproximated for states {:?}",
-            stack.peek_values(),
-        );
-    }
-
-    has_eof_action
 }
 
 #[cfg(test)]
