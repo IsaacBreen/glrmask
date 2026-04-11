@@ -113,31 +113,6 @@ fn dedup_stacks(stacks: impl IntoIterator<Item = Vec<u32>>) -> Vec<Vec<u32>> {
     out
 }
 
-fn shift_target(action: Option<&Action>) -> Option<u32> {
-    match action {
-        Some(Action::Shift(target)) => Some(*target),
-        Some(Action::Split {
-            shift: Some(target),
-            ..
-        }) => Some(*target),
-        _ => None,
-    }
-}
-
-/// Like `shift_target` but only returns a target when no reduces or accept
-/// actions remain — i.e. it's safe to shift without further processing.
-fn pure_shift_target(action: Option<&Action>) -> Option<u32> {
-    match action {
-        Some(Action::Shift(target)) => Some(*target),
-        Some(Action::Split {
-            shift: Some(target),
-            reduces,
-            accept,
-        }) if reduces.is_empty() && !*accept => Some(*target),
-        _ => None,
-    }
-}
-
 #[cfg(any(test, debug_assertions))]
 fn stack_vectors(stack: &ParserGSS) -> Vec<Vec<u32>> {
     stack.to_stacks().into_iter().map(|(stack, _)| stack).collect()
@@ -165,11 +140,7 @@ fn reduce_closure_for_lookahead(
         let Some(action) = table.action(state, lookahead) else {
             continue;
         };
-        let reduce_rule_ids: &[u32] = match action {
-            Action::Reduce(rule_id) => std::slice::from_ref(rule_id),
-            Action::Split { reduces, .. } => reduces.as_slice(),
-            Action::Shift(_) | Action::Accept => &[],
-        };
+        let reduce_rule_ids = action.reduce_rule_ids();
         for rule_id in reduce_rule_ids {
             let rule = &table.rules[*rule_id as usize];
             if stack.len() < rule.rhs.len() + 1 {
@@ -205,7 +176,7 @@ fn advance_stack_vectors(
         let Some(&state) = stack.last() else {
             continue;
         };
-        if let Some(target) = shift_target(table.action(state, token)) {
+        if let Some(target) = table.action(state, token).and_then(Action::shift_target) {
             let mut shifted = stack.clone();
             shifted.push(target);
             next.push(shifted);
@@ -256,7 +227,7 @@ enum StepResult {
 fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> ParserGSS {
     // Fast path: single top state with a pure shift.
     if let Some(state) = stack.single_exclusive_top_value() {
-        if let Some(target) = pure_shift_target(table.action(state, token)) {
+        if let Some(target) = table.action(state, token).and_then(Action::pure_shift_target) {
             return stack.push(target);
         }
         if table.action(state, token).is_none() {
@@ -317,7 +288,7 @@ fn try_vstack_reduces(
         let action = table.action(state, token);
 
         // Pure shift: push and we're done.
-        if let Some(target) = pure_shift_target(action) {
+        if let Some(target) = action.and_then(Action::pure_shift_target) {
             vstack.push(target);
             return StepResult::Final(vstack.into_gss());
         }
@@ -387,13 +358,9 @@ fn general_reduce_step(
         }
         processed.push(state);
 
-        let reduce_rules: &[u32] = match table.action(state, token) {
-            Some(Action::Reduce(rule_id)) => std::slice::from_ref(rule_id),
-            Some(Action::Split { reduces, .. }) => reduces.as_slice(),
-            _ => &[],
-        };
+        let Some(action) = table.action(state, token) else { continue };
 
-        for &rule_id in reduce_rules {
+        for &rule_id in action.reduce_rule_ids() {
             let rule = &table.rules[rule_id as usize];
             for (goto_from, base) in current.isolate_popn_bases(state, rule.rhs.len() as isize) {
                 if let Some(target) = table.goto_target(goto_from, rule.lhs) {
@@ -420,7 +387,7 @@ fn general_reduce_step(
 fn shift_all(table: &GLRTable, current: ParserGSS, token: TerminalID) -> ParserGSS {
     let mut shift_pairs = SmallVec::<[(u32, u32); 8]>::new();
     for state in current.peek_values() {
-        if let Some(target) = shift_target(table.action(state, token)) {
+        if let Some(target) = table.action(state, token).and_then(Action::shift_target) {
             shift_pairs.push((state, target));
         }
     }

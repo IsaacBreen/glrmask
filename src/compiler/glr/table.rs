@@ -18,6 +18,39 @@ pub enum Action {
     Accept,
 }
 
+impl Action {
+    /// The shift target, if any. Works for both Shift and Split.
+    #[inline]
+    pub fn shift_target(&self) -> Option<u32> {
+        match self {
+            Action::Shift(t) => Some(*t),
+            Action::Split { shift: Some(t), .. } => Some(*t),
+            _ => None,
+        }
+    }
+
+    /// The shift target, only when there are no reduces or accept actions.
+    #[inline]
+    pub fn pure_shift_target(&self) -> Option<u32> {
+        match self {
+            Action::Shift(t) => Some(*t),
+            Action::Split { shift: Some(t), reduces, accept }
+                if reduces.is_empty() && !*accept => Some(*t),
+            _ => None,
+        }
+    }
+
+    /// Slice of reduce rule IDs. Empty for Shift/Accept.
+    #[inline]
+    pub fn reduce_rule_ids(&self) -> &[u32] {
+        match self {
+            Action::Reduce(id) => std::slice::from_ref(id),
+            Action::Split { reduces, .. } => reduces.as_slice(),
+            _ => &[],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GLRTable {
     pub action: Vec<FxHashMap<TerminalID, Action>>,
