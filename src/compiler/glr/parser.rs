@@ -56,15 +56,22 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
     // then applies the gotos to the GSS all at once, seeding the next wave
     // with any newly created states.
     //
-    // When the frontier is a single deterministic chain, we first run the
-    // standard LR reduce loop on a flat stack (see apply_deterministic_reduces).
+    // At the start of each wave, if the GSS is a single deterministic chain,
+    // we run the standard LR reduce loop on a flat stack first (fast path).
 
-    let mut gss = apply_deterministic_reduces(table, stack, token);
-
-    let mut worklist: SmallVec<[u32; 8]> = SmallVec::from_iter(gss.peek_values());
+    let mut gss = stack;
     let mut closed: SmallVec<[u32; 16]> = SmallVec::new();
 
     loop {
+        // Deterministic fast path: when the GSS is a single chain, apply
+        // the standard LR reduce loop on a flat stack.  This handles the
+        // common case where no ambiguity exists yet, and also catches
+        // cases where all but one path died in a previous wave.
+        gss = apply_deterministic_reduces(table, gss, token);
+        let mut worklist: SmallVec<[u32; 8]> = SmallVec::from_iter(
+            gss.peek_values().into_iter().filter(|s| !closed.contains(s)),
+        );
+
         let mut gotos = SmallVec::<[(u32, ParserGSS); 8]>::new();
 
         while let Some(state) = worklist.pop() {
@@ -97,7 +104,6 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
 
         for (target, base) in gotos {
             gss = gss.push_goto(target, &base);
-            worklist.push(target);
         }
     }
 
