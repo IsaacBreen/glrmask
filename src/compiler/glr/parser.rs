@@ -60,7 +60,6 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
     // we run the standard LR reduce loop on a flat stack first (fast path).
 
     let mut gss = stack;
-    let mut processed: SmallVec<[u32; 16]> = SmallVec::new();
 
     loop {
         // Deterministic fast path: when the GSS is a single chain, apply
@@ -72,11 +71,6 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
         let mut gotos = SmallVec::<[(u32, ParserGSS); 8]>::new();
 
         for state in gss.peek_values() {
-            if processed.contains(&state) {
-                continue;
-            }
-            processed.push(state);
-
             let Some(action) = table.action(state, token) else {
                 continue;
             };
@@ -99,8 +93,14 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
             break;
         }
 
+        let gss_before = gss.clone();
         for (target, base) in gotos {
             gss = gss.push_goto(target, &base);
+        }
+        // Fixpoint: if push_goto didn't change the GSS structure, all
+        // predecessor links already existed and no new reductions are possible.
+        if gss == gss_before {
+            break;
         }
     }
 
