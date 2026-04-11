@@ -289,7 +289,7 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
 
             for &rule_id in action.reduce_rule_ids() {
                 let rule = &table.rules[rule_id as usize];
-                for (goto_from, base) in gss.isolate_popn_bases(state, rule.rhs.len() as isize) {
+                for (goto_from, base) in gss.reduce_bases(state, rule.rhs.len() as isize) {
                     if let Some(target) = table.goto_target(goto_from, rule.lhs) {
                         if let Some((_, existing)) = gotos.iter_mut().find(|(t, _)| *t == target) {
                             *existing = existing.merge(&base);
@@ -306,7 +306,7 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
         }
 
         for (target, base) in gotos {
-            gss = gss.absorb_push_same_acc(target, &base);
+            gss = gss.push_goto(target, &base);
             worklist.push(target);
         }
     }

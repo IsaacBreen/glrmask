@@ -2650,7 +2650,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     /// # Safety contract
     /// Caller must guarantee that both `self` and `base` have Interface
     /// inner variants with equal `acc` annotations.
-    pub fn absorb_push_same_acc(self, value: T, base: &Self) -> Self {
+    pub fn push_goto(self, value: T, base: &Self) -> Self {
         if base.is_empty() {
             return self;
         }
@@ -2777,7 +2777,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     /// Combined isolate_popn + enumerate top values and their isolated bases.
     /// Returns (top_value, base_GSS) pairs where base_GSS = popped.isolate(Some(top_value)).
     /// This avoids creating the intermediate "popped" GSS for the common case.
-    pub fn isolate_popn_bases(&self, value: T, n: isize) -> SmallVec<[(T, Self); 4]> {
+    pub fn reduce_bases(&self, value: T, n: isize) -> SmallVec<[(T, Self); 4]> {
         if self.is_empty() {
             return SmallVec::new();
         }
