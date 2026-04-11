@@ -221,9 +221,57 @@ pub(crate) fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: Te
     advance_stacks_core(table, stack, token)
 }
 
-enum ReducePathResult {
-    Final(ParserGSS),
+enum AdvanceStepResult {
+    Done(ParserGSS),
     Continue(ParserGSS),
+}
+
+/// Worklist for the current lookahead's reduce closure.
+///
+/// `pending` is the frontier of top states whose reduce actions still need to
+/// be propagated. `seen` tracks which top states have already been closed for
+/// the current frontier snapshot so we do not revisit them until the frontier
+/// is restarted from a changed GSS.
+struct ReduceFrontier {
+    pending: SmallVec<[u32; 8]>,
+    seen: SmallVec<[u32; 16]>,
+}
+
+impl ReduceFrontier {
+    fn new(stacks: &ParserGSS) -> Self {
+        let mut frontier = Self {
+            pending: SmallVec::new(),
+            seen: SmallVec::new(),
+        };
+        frontier.restart_from(stacks);
+        frontier
+    }
+
+    fn restart_from(&mut self, stacks: &ParserGSS) {
+        self.pending.clear();
+        self.seen.clear();
+        self.pending.extend(stacks.peek_values());
+    }
+
+    fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    fn take_pending(&mut self) -> SmallVec<[u32; 8]> {
+        std::mem::take(&mut self.pending)
+    }
+
+    fn already_closed(&self, state: u32) -> bool {
+        self.seen.contains(&state)
+    }
+
+    fn mark_closed(&mut self, state: u32) {
+        self.seen.push(state);
+    }
+
+    fn enqueue(&mut self, state: u32) {
+        self.pending.push(state);
+    }
 }
 
 #[cfg(test)]
@@ -253,22 +301,20 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
     // Standard LR shape: first compute the lookahead-specific reduce closure,
     // then shift the token on the surviving frontier.
     let mut stacks = stack;
-    let mut pending_reduce_states = SmallVec::<[u32; 8]>::new();
-    let mut closed_reduce_states = SmallVec::<[u32; 16]>::new();
-    refresh_reduce_frontier(&stacks, &mut pending_reduce_states, &mut closed_reduce_states);
+    let mut reduce_frontier = ReduceFrontier::new(&stacks);
 
-    while !pending_reduce_states.is_empty() {
+    while !reduce_frontier.is_empty() {
         let before_key = stacks.ptr_key();
         match try_deterministic_reduce_chain(table, stacks, token) {
-            ReducePathResult::Final(result) => return result,
-            ReducePathResult::Continue(next_stacks) => stacks = next_stacks,
+            AdvanceStepResult::Done(result) => return result,
+            AdvanceStepResult::Continue(next_stacks) => stacks = next_stacks,
         }
 
         // If the deterministic fast path changed the frontier, restart the
         // reduce closure from the new top states.
         if stacks.ptr_key() != before_key {
-            refresh_reduce_frontier(&stacks, &mut pending_reduce_states, &mut closed_reduce_states);
-            if pending_reduce_states.is_empty() {
+            reduce_frontier.restart_from(&stacks);
+            if reduce_frontier.is_empty() {
                 break;
             }
         }
@@ -277,8 +323,7 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
         (stacks, reduced) = reduce_frontier_step(
             table,
             stacks,
-            &mut pending_reduce_states,
-            &mut closed_reduce_states,
+            &mut reduce_frontier,
             token,
         );
         if !reduced {
@@ -297,22 +342,13 @@ fn try_trivial_shift(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> 
     }
 }
 
-fn refresh_reduce_frontier(
-    stacks: &ParserGSS,
-    pending_reduce_states: &mut SmallVec<[u32; 8]>,
-    closed_reduce_states: &mut SmallVec<[u32; 16]>,
-) {
-    pending_reduce_states.clear();
-    closed_reduce_states.clear();
-    pending_reduce_states.extend(stacks.peek_values());
-}
-
 /// Try the deterministic top-of-stack subcase.
 ///
 /// Conceptually this is the usual LR reduce loop running on one flat stack,
 /// but only while the current GSS frontier collapses to a single linear chain.
-/// Returns `Final` if the parse advanced or died immediately, `Continue` if the
-/// general GSS reduce closure should keep going.
+/// Returns `Done` if this already determined the full result of advancing on
+/// the current token, `Continue` if the general GSS reduce closure should keep
+/// going.
 ///
 /// VirtualStack is just the concrete representation used for this deterministic
 /// chain case.
@@ -320,9 +356,9 @@ fn try_deterministic_reduce_chain(
     table: &GLRTable,
     current: ParserGSS,
     token: TerminalID,
-) -> ReducePathResult {
+) -> AdvanceStepResult {
     let Some(mut vstack) = current.try_virtual_stack() else {
-        return ReducePathResult::Continue(current);
+        return AdvanceStepResult::Continue(current);
     };
     let mut changed = false;
 
@@ -338,7 +374,7 @@ fn try_deterministic_reduce_chain(
         // Pure shift: push and we're done.
         if let Some(target) = action.and_then(Action::pure_shift_target) {
             vstack.push(target);
-            return ReducePathResult::Final(vstack.into_gss());
+            return AdvanceStepResult::Done(vstack.into_gss());
         }
 
         match action {
@@ -354,7 +390,7 @@ fn try_deterministic_reduce_chain(
                             vstack.push(target);
                             changed = true;
                         }
-                        None => return ReducePathResult::Final(ParserGSS::empty()),
+                        None => return AdvanceStepResult::Done(ParserGSS::empty()),
                     }
                 } else {
                     // Cross-floor: commit to GSS, let general path handle.
@@ -364,15 +400,15 @@ fn try_deterministic_reduce_chain(
             // Ambiguity or accept: commit to GSS, let general path handle.
             Some(Action::Split { .. } | Action::Accept) => break,
             // No action or Shift already handled by pure_shift_target above.
-            _ => return ReducePathResult::Final(ParserGSS::empty()),
+            _ => return AdvanceStepResult::Done(ParserGSS::empty()),
         }
     }
 
     // Commit vstack to GSS and return to the general reduce loop.
     if changed {
-        ReducePathResult::Continue(vstack.into_gss())
+        AdvanceStepResult::Continue(vstack.into_gss())
     } else {
-        ReducePathResult::Continue(current)
+        AdvanceStepResult::Continue(current)
     }
 }
 
@@ -385,25 +421,24 @@ fn try_deterministic_reduce_chain(
 fn reduce_frontier_step(
     table: &GLRTable,
     mut current: ParserGSS,
-    pending_reduce_states: &mut SmallVec<[u32; 8]>,
-    closed_reduce_states: &mut SmallVec<[u32; 16]>,
+    reduce_frontier: &mut ReduceFrontier,
     token: TerminalID,
 ) -> (ParserGSS, bool) {
     let mut any_reduced = false;
     let mut pending_gotos = SmallVec::<[(u32, ParserGSS); 8]>::new();
 
-    for state in pending_reduce_states.drain(..) {
-        if closed_reduce_states.contains(&state) {
+    for state in reduce_frontier.take_pending() {
+        if reduce_frontier.already_closed(state) {
             continue;
         }
-        closed_reduce_states.push(state);
+        reduce_frontier.mark_closed(state);
         any_reduced |= collect_reduce_gotos_for_state(table, &current, state, token, &mut pending_gotos);
     }
 
     if any_reduced {
         for (target, base) in pending_gotos {
             current = current.absorb_push_same_acc(target, &base);
-            pending_reduce_states.push(target);
+            reduce_frontier.enqueue(target);
         }
     }
     (current, any_reduced)
