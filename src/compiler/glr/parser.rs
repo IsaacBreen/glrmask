@@ -34,15 +34,12 @@ pub(crate) fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: Te
 
 /// Advance the GSS by one token.
 ///
-/// This implements the standard two-phase GLR step:
+/// First try the deterministic single-chain path: repeatedly reduce a flat LR
+/// stack, and finish immediately if that path ends in a pure shift.
 ///
-///  1. **Reduce closure** — for the current lookahead, apply every applicable
-///     reduce rule across all frontier states.  Each reduction pops |rhs|
-///     symbols, looks up the goto target, and pushes it.  New goto targets
-///     seed further reduction waves until a fixed point is reached.
-///
-///  2. **Shift** — push the lookahead's shift target onto every surviving
-///     frontier state, producing the next GSS.
+/// If the frontier is ambiguous, or the deterministic path stops without a
+/// pure shift, fall back to the GLR path: build the reduce closure to a
+/// fixpoint and return the shifted next frontier.
 fn advance_stacks_core(table: &GLRTable, mut gss: ParserGSS, token: TerminalID) -> ParserGSS {
     if advance_deterministically(table, &mut gss, token) {
         return gss;
@@ -124,6 +121,16 @@ fn collect_reduce_gotos(table: &GLRTable, gss: &ParserGSS, token: TerminalID) ->
     gotos
 }
 
+/// Advance an ambiguous frontier.
+///
+/// `closure` accumulates unshifted branches that still need GLR reduce-closure
+/// processing. `shifted` accumulates branches that have already advanced past
+/// the current token and therefore belong in the returned next frontier.
+///
+/// Each wave computes reduce gotos from the current closure, then gives each
+/// newly reduced branch the same deterministic fast path used at the top level
+/// before deciding whether it can move directly into `shifted` or must be
+/// merged back into the closure.
 fn advance_nondeterministically(
     table: &GLRTable,
     mut closure: ParserGSS,
