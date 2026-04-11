@@ -90,10 +90,9 @@ fn reduce_sources(gss: &ParserGSS, state: u32, rhs_len: usize) -> ReduceSources 
 /// processing. `shifted` accumulates branches that have already advanced past
 /// the current token and therefore belong in the returned next frontier.
 ///
-/// Each wave computes reduce gotos from the current closure, then gives each
-/// newly reduced branch the same deterministic fast path used at the top level
-/// before deciding whether it can move directly into `shifted` or must be
-/// merged back into the closure.
+/// Each wave starts with a fresh `next` frontier. Shiftable isolated branches
+/// are moved directly into `shifted`; newly reduced branches are merged into
+/// `next` and become the closure for the next wave.
 fn advance_nondeterministically(
     table: &GLRTable,
     mut closure: ParserGSS,
