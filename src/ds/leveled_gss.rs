@@ -421,6 +421,7 @@ enum Lower<T: Clone + Eq + Hash> {
         values: ArrayVec<T, SEGMENT_CAP>,
         next: Arc<Lower<T>>,
         max_depth: u32,
+        segments_len: usize,
     },
 }
 
@@ -437,6 +438,14 @@ impl<T: Clone + Eq + Hash> Lower<T> {
     fn max_depth(&self) -> u32 {
         match self {
             Lower::General { max_depth, .. } | Lower::Segment { max_depth, .. } => *max_depth,
+        }
+    }
+
+    #[inline(always)]
+    fn segments_len(&self) -> usize {
+        match self {
+            Lower::Segment { segments_len, .. } => *segments_len,
+            Lower::General { .. } => 0,
         }
     }
 
@@ -502,19 +511,14 @@ impl<T: Clone + Eq + Hash> Lower<T> {
     fn into_parts(self) -> (Children<T, Lower<T>>, bool, u32) {
         match self {
             Lower::General { children, empty, max_depth } => (children, empty, max_depth),
-            Lower::Segment { values, next, max_depth } => {
+            Lower::Segment { values, next, max_depth, .. } => {
                 let top_value = values.last().unwrap().clone();
                 let child = if values.len() == 1 {
                     next
                 } else {
                     let mut rest_values = values;
                     rest_values.pop();
-                    let rest_md = next.max_depth() + rest_values.len() as u32;
-                    Arc::new(Lower::Segment {
-                        values: rest_values,
-                        next,
-                        max_depth: rest_md,
-                    })
+                    new_segment(rest_values, next)
                 };
                 let children = CompactMap::unit(top_value, CompactOrdMap::unit(child.max_depth(), child));
                 (children, false, max_depth)
@@ -556,19 +560,14 @@ impl<T: Clone + Eq + Hash> Lower<T> {
                 empty: false,
                 max_depth: 0,
             });
-            if let Lower::Segment { values, next, max_depth } = old {
+            if let Lower::Segment { values, next, max_depth, .. } = old {
                 let top_value = values.last().unwrap().clone();
                 let child = if values.len() == 1 {
                     next
                 } else {
                     let mut rest_values = values;
                     rest_values.pop();
-                    let rest_md = next.max_depth() + rest_values.len() as u32;
-                    Arc::new(Lower::Segment {
-                        values: rest_values,
-                        next,
-                        max_depth: rest_md,
-                    })
+                    new_segment(rest_values, next)
                 };
                 let children = CompactMap::unit(top_value, CompactOrdMap::unit(child.max_depth(), child));
                 *self = Lower::General { children, empty: false, max_depth };
@@ -619,12 +618,7 @@ impl<T: Clone + Eq + Hash> Lower<T> {
             Lower::Segment { values, next, .. } if values.len() == 1 => next.clone(),
             Lower::Segment { values, next, .. } => {
                 let rest_values: ArrayVec<T, SEGMENT_CAP> = values[..values.len() - 1].iter().cloned().collect();
-                let rest_md = next.max_depth() + rest_values.len() as u32;
-                Arc::new(Lower::Segment {
-                    values: rest_values,
-                    next: next.clone(),
-                    max_depth: rest_md,
-                })
+                new_segment(rest_values, next.clone())
             }
             Lower::General { .. } => panic!("segment_rest_arc called on General"),
         }
@@ -813,12 +807,7 @@ fn new_lower<T: Clone + Eq + Hash>(children: Children<T, Lower<T>>, empty: bool)
             let (_, next) = ord_map.iter().next().unwrap();
             let mut values = ArrayVec::<T, SEGMENT_CAP>::new();
             values.push(key.clone());
-            let max_depth = next.max_depth() + 1;
-            return Arc::new(Lower::Segment {
-                values,
-                next: next.clone(),
-                max_depth,
-            });
+            return new_segment(values, next.clone());
         }
     }
     let max_depth = max_depth_from_children(&children, |n: &Arc<Lower<T>>| n.max_depth());
@@ -826,6 +815,17 @@ fn new_lower<T: Clone + Eq + Hash>(children: Children<T, Lower<T>>, empty: bool)
         children,
         empty,
         max_depth,
+    })
+}
+
+fn new_segment<T: Clone + Eq + Hash>(values: ArrayVec<T, SEGMENT_CAP>, next: Arc<Lower<T>>) -> Arc<Lower<T>> {
+    let max_depth = next.max_depth() + values.len() as u32;
+    let segments_len = values.len() + next.segments_len();
+    Arc::new(Lower::Segment {
+        values,
+        next,
+        max_depth,
+        segments_len,
     })
 }
 
@@ -1988,132 +1988,91 @@ pub struct ChainTail<T: Clone + Eq + Hash> {
 /// The stack has a "floor" — the Lower node below the deterministic chain.
 /// When a pop would cross the floor, the caller falls back to the general path.
 pub struct VirtualStack<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
-    /// The current position in the original chain.
-    chain: Arc<Lower<T>>,
-    /// Total values remaining in the chain (across all nodes).
-    chain_depth: usize,
-    /// Values remaining in the current chain node (from the top).
-    chain_values_remaining: usize,
-    /// States pushed on top via reduce-goto operations, bottom-first.
-    pushed: ArrayVec<T, 32>,
-    /// The accumulator from the Interface.
+    values: ArrayVec<T, SEGMENT_CAP>,
+    next: Arc<Lower<T>>,
     acc: A,
+    /// Set to true once any push() has been called; used to decide whether
+    /// the vstack diverged from the original GSS and needs to be re-committed.
+    modified: bool,
 }
 
 impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
     /// The current top-of-stack value, or None if the stack is empty.
     #[inline]
     pub fn top(&self) -> Option<&T> {
-        if let Some(v) = self.pushed.last() {
-            return Some(v);
-        }
-        if self.chain_depth == 0 {
-            return None;
-        }
-        match &*self.chain {
-            Lower::Segment { values, .. } => Some(&values[self.chain_values_remaining - 1]),
-            Lower::General { children, .. } => children.keys().next(),
-        }
+        self.values.last()
+    }
+
+    /// Whether any push operations have been performed (i.e. state diverged from GSS).
+    #[inline]
+    pub fn has_pushes(&self) -> bool {
+        self.modified
     }
 
     /// Pop `n` values from the top.
-    /// Pops from pushed states first, then walks down the chain.
+    /// Returns the number of values that could not be popped because the
+    /// segment chain ended at a non-Segment lower node.
     #[inline]
-    pub fn pop(&mut self, n: usize) {
-        let total = self.pushed.len() + self.chain_depth;
-        debug_assert!(n <= total, "pop({n}) exceeds vstack len {total}");
-        let from_pushed = n.min(self.pushed.len());
-        self.pushed.truncate(self.pushed.len() - from_pushed);
-        let mut remaining = n - from_pushed;
+    pub fn pop(&mut self, mut remaining: usize) -> usize {
         while remaining > 0 {
-            let take = remaining.min(self.chain_values_remaining);
-            self.chain_values_remaining -= take;
-            self.chain_depth -= take;
+            let take = remaining.min(self.values.len());
+            let keep = self.values.len() - take;
+            self.values.truncate(keep);
             remaining -= take;
-            if self.chain_values_remaining == 0 {
-                if let Some((next, _)) = self.chain.chain_step() {
-                    self.chain = Arc::clone(next);
-                    self.chain_values_remaining = self.chain.chain_value_count();
+            if remaining == 0 {
+                break;
+            }
+            match &*self.next {
+                Lower::Segment { values, next, .. } => {
+                    self.values = values.clone();
+                    self.next = next.clone();
                 }
+                _ => break,
             }
         }
+        // If values was exactly drained, advance to next Segment so top() works.
+        if self.values.is_empty() {
+            if let Lower::Segment { values, next, .. } = &*self.next {
+                self.values = values.clone();
+                self.next = next.clone();
+            }
+        }
+        remaining
     }
 
     /// Push a value onto the top of the stack.
     #[inline]
     pub fn push(&mut self, value: T) {
-        self.pushed.push(value);
+        if self.values.len() == SEGMENT_CAP {
+            let spilled = std::mem::take(&mut self.values);
+            self.next = new_segment(spilled, self.next.clone());
+        }
+        self.values.push(value);
+        self.modified = true;
     }
 
-    /// The total number of values on the stack (pushed + remaining chain).
+    /// The total number of values available across the current segment chain.
     #[inline]
     pub fn len(&self) -> usize {
-        self.pushed.len() + self.chain_depth
-    }
-
-    /// Whether any goto-push operations have been recorded.
-    #[inline]
-    pub fn has_pushes(&self) -> bool {
-        !self.pushed.is_empty()
-    }
-
-    /// Returns the effective chain root, truncating the current Segment if
-    /// partially consumed by pops. If the chain is fully intact, returns it
-    /// as-is (no allocation).
-    fn effective_chain_base(&self) -> Arc<Lower<T>> {
-        let full_count = self.chain.chain_value_count();
-        if self.chain_values_remaining >= full_count {
-            return Arc::clone(&self.chain);
-        }
-        match &*self.chain {
-            Lower::Segment { values, next, .. } => {
-                let kept: ArrayVec<T, SEGMENT_CAP> =
-                    values[..self.chain_values_remaining].iter().cloned().collect();
-                let md = next.max_depth() + kept.len() as u32;
-                Arc::new(Lower::Segment {
-                    values: kept,
-                    next: Arc::clone(next),
-                    max_depth: md,
-                })
-            }
-            _ => Arc::clone(&self.chain),
-        }
+        self.values.len() + self.next.segments_len()
     }
 
     /// Materialize the virtual stack back into a GSS.
-    /// Reuses the original chain structure; only builds Segments for pushed states.
+    /// Reuses the original chain structure; only materializes the current
+    /// top segment when it is non-empty.
     pub fn into_gss(self) -> LeveledGSS<T, A> {
-        if self.pushed.is_empty() && self.chain_depth == 0 {
-            if self.chain.children_is_empty() && !self.chain.empty() {
+        if self.values.is_empty() {
+            if self.next.children_is_empty() && !self.next.empty() {
                 return LeveledGSS::empty();
             }
             return LeveledGSS {
-                inner: new_interface(self.chain, self.acc),
+                inner: new_interface(self.next, self.acc),
             };
         }
-
-        // Get the effective chain base, truncating if we've partially consumed
-        // the current Segment via pops.
-        let mut current = if self.chain_depth == 0 {
-            Arc::clone(&self.chain)
-        } else {
-            self.effective_chain_base()
-        };
-
-        if !self.pushed.is_empty() {
-            let values: ArrayVec<T, SEGMENT_CAP> = self.pushed.iter().cloned().collect();
-            let max_depth = current.max_depth() + values.len() as u32;
-            current = Arc::new(Lower::Segment {
-                values,
-                next: current,
-                max_depth,
-            });
-        }
         LeveledGSS {
-            inner: new_interface(current, self.acc),
+            inner: new_interface(new_segment(self.values, self.next), self.acc),
         }
     }
-
 }
 
 impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> PartialEq for LeveledGSS<T, A> {
@@ -2431,12 +2390,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
         let new_inner = match &*self.inner {
             Upper::Interface(i) => {
-                let max_depth = i.inner.max_depth() + 1;
-                let new_lower_root = Arc::new(Lower::Segment {
-                    values: { let mut v = ArrayVec::new(); v.push(value); v },
-                    next: Arc::clone(&i.inner),
-                    max_depth,
-                });
+                let new_lower_root = new_segment(
+                    { let mut v = ArrayVec::new(); v.push(value); v },
+                    Arc::clone(&i.inner),
+                );
                 new_interface(new_lower_root, i.acc.clone())
             }
             Upper::Branch(_) => {
@@ -2965,12 +2922,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     let keep = (seg_len - k) as usize;
                     let new_values: ArrayVec<T, SEGMENT_CAP> = values[..keep].iter().cloned().collect();
                     let next = node.segment_next();
-                    let md = next.max_depth() + new_values.len() as u32;
-                    Some(Arc::new(Lower::Segment {
-                        values: new_values,
-                        next: next.clone(),
-                        max_depth: md,
-                    }))
+                    Some(new_segment(new_values, next.clone()))
                 }
             } else {
                 let mut m: Option<Arc<Lower<T>>> = None;
@@ -3416,33 +3368,17 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     /// The chain is extracted until a non-Segment node is hit — that node becomes
     /// the "floor". The floor can be a General with splits, an empty terminal, etc.
     ///
-    /// Returns `None` if the GSS is not an Interface or the top is not a Segment.
+    /// Returns `None` if the GSS is not an Interface whose top node is a Segment.
     pub fn try_virtual_stack(&self) -> Option<VirtualStack<T, A>> {
         let interface = match &*self.inner {
             Upper::Interface(iface) => iface,
             _ => return None,
         };
-
-        let mut chain_depth = 0usize;
-
-        // Walk down the chain to find the floor and count depth.
-        let mut current: &Lower<T> = &interface.inner;
-        while let Some((next, value_count)) = current.chain_step() {
-            chain_depth += value_count;
-            current = &**next;
-        }
-
-        if chain_depth == 0 {
-            return None;
-        }
-
-        Some(VirtualStack {
-            chain: Arc::clone(&interface.inner),
-            chain_depth,
-            chain_values_remaining: interface.inner.chain_value_count(),
-            pushed: ArrayVec::new(),
-            acc: interface.acc.clone(),
-        })
+        let (values, next) = match &*interface.inner {
+            Lower::Segment { values, next, .. } => (values.clone(), Arc::clone(next)),
+            _ => return None,
+        };
+        Some(VirtualStack { values, next, acc: interface.acc.clone(), modified: false })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -4267,18 +4203,14 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             let next_remain = remain.map(|r| r - 1);
 
             // Fast path for Segment: no multi-depth slots, recurse on next only
-            if let Lower::Segment { values, next, max_depth: _ } = &**node {
+            if let Lower::Segment { values, next, .. } = &**node {
                 let next_remain_seg = remain.map(|r| r - values.len() as isize);
                 let fused_next = fuse_lower::<T, A>(next, next_remain_seg, memo);
                 if Arc::ptr_eq(&fused_next, next) {
                     memo.insert(key, node.clone());
                     return node.clone();
                 }
-                let res = Arc::new(Lower::Segment {
-                    values: values.clone(),
-                    next: fused_next.clone(),
-                    max_depth: fused_next.max_depth() + values.len() as u32,
-                });
+                let res = new_segment(values.clone(), fused_next);
                 memo.insert(key, res.clone());
                 return res;
             }

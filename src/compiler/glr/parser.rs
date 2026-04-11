@@ -339,7 +339,8 @@ fn try_vstack_reduces(
                 let pop_count = rule.rhs.len();
                 if vstack.len() > pop_count {
                     // Above-floor reduce: pop, goto, push — stay on vstack.
-                    vstack.pop(pop_count);
+                    let remainder = vstack.pop(pop_count);
+                    debug_assert_eq!(remainder, 0, "len() > pop_count yet pop crossed segment chain");
                     let goto_from = *vstack.top().unwrap();
                     match table.goto_target(goto_from, rule.lhs) {
                         Some(target) => vstack.push(target),
