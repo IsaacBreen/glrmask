@@ -18,6 +18,7 @@ use crate::ds::leveled_gss::LeveledGSS;
 use smallvec::SmallVec;
 
 pub type ParserGSS = LeveledGSS<u32, TerminalsDisallowed>;
+
 type ReduceSources = SmallVec<[(u32, ParserGSS); 4]>;
 type GotoBatch = SmallVec<[(u32, ParserGSS); 8]>;
 
@@ -210,8 +211,11 @@ fn advance_deterministically(
                 *gss = stack.into_gss().push(*target);
                 return true;
             }
-            Some(Action::Split { .. }) | Some(Action::Accept) => {
-                break; // Ambiguous or accepting — handled by the caller.
+            Some(Action::Split { .. }) => {
+                break;
+            }
+            Some(Action::Accept) => {
+                break;
             }
             None => break,
         }
@@ -352,7 +356,7 @@ fn advance_deterministically_profiled(
                 profile.det_exit_reason = 1; // shift (finished)
                 return true;
             }
-            Some(Action::Split { shift: _, reduces: _, accept: _ }) => {
+            Some(Action::Split { .. }) => {
                 profile.det_exit_reason = 2; // split
                 profile.det_exit_state = state;
                 break;

@@ -72,6 +72,16 @@ impl GLRTable {
         let merge_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
         let pre_recog_states = table.num_states;
+        let pre_recog_splits = {
+            let debug_profile = std::env::var("GLRMASK_DEBUG_PROFILE")
+                .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
+                .unwrap_or(false);
+            if debug_profile {
+                table.action.iter().filter(|row| {
+                    row.values().any(|a| matches!(a, Action::Split { .. }))
+                }).count()
+            } else { 0 }
+        };
         let t3 = std::time::Instant::now();
         table.merge_recognizer_equivalent();
         let recog_ms = t3.elapsed().as_secs_f64() * 1000.0;
@@ -82,9 +92,14 @@ impl GLRTable {
         if debug_profile {
             let max_items = item_sets.iter().map(|s| s.len()).max().unwrap_or(0);
             let total_items: usize = item_sets.iter().map(|s| s.len()).sum();
+            let count_splits = |t: &GLRTable| -> usize {
+                t.action.iter().filter(|row| {
+                    row.values().any(|a| matches!(a, Action::Split { .. }))
+                }).count()
+            };
             eprintln!(
-                "[glrmask/debug][glr_table] lr1_states={} lr1_ms={:.3} ielr_ms={:.3} pre_merge_states={} merge_ms={:.3} pre_recog_states={} recog_ms={:.3} final_states={} max_items_per_state={} total_items={}",
-                item_sets.len(), lr1_ms, ielr_ms, pre_merge_states, merge_ms, pre_recog_states, recog_ms, table.num_states, max_items, total_items,
+                "[glrmask/debug][glr_table] lr1_states={} lr1_ms={:.3} ielr_ms={:.3} pre_merge_states={} merge_ms={:.3} pre_recog_states={} pre_recog_splits={} recog_ms={:.3} final_states={} splits={} max_items_per_state={} total_items={}",
+                item_sets.len(), lr1_ms, ielr_ms, pre_merge_states, merge_ms, pre_recog_states, pre_recog_splits, recog_ms, table.num_states, count_splits(&table), max_items, total_items,
             );
         }
 
@@ -275,6 +290,13 @@ impl GLRTable {
             // For each remaining Split action, check if all reduces land in the
             // same goto target from every predecessor state.  If so, the split
             // is invisible to a recognizer and we can collapse it.
+            //
+            // Two sub-passes:
+            //  4a (original) — immediate goto-target equality from all static predecessors.
+            //  4b (new)      — speculative reduce-chain convergence: simulate
+            //      each alternative reduce for up to MAX_SPEC_DEPTH steps,
+            //      collecting the set of (top-state) the chain reaches.
+            //      If all alternatives converge to the same set, collapse.
             let nstates2 = self.num_states as usize;
 
             // Build predecessor map: for each state, which states can be
@@ -348,6 +370,257 @@ impl GLRTable {
             }
 
             for (state, tid, rule_id) in collapses {
+                self.action[state].insert(tid, Action::Reduce(rule_id));
+                collapsed_any = true;
+            }
+
+            // Step 4b: Deep split collapsing via stack-relative chain following.
+            //
+            // For pure R/R splits not collapsed in 4a, simulate the full reduce
+            // chain for each alternative.  Track predecessor depth relative to
+            // the ORIGINAL split state S (not intermediate chain states).
+            //
+            // The stack at the split: …→ preds^K(S) →…→ S (top)
+            //
+            // After alternative reduce Ri (pop=rhs_len(Ri)):
+            //   - Expose state at depth rhs_len(Ri) below S
+            //   - goto from that state with lhs(Ri) → push T1
+            //   - If T1 has another reduce on the same terminal, follow it:
+            //     pop rhs_len from T1's position, which goes further below S
+            //   - Continue until we reach a non-reduce action
+            //
+            // If all alternatives' chains converge to the same final state
+            // (same goto target from preds^(total_depth) of S), collapse.
+            //
+            // Two sub-passes:
+            //  4b-i: filter out split-state predecessors (handles circular deps)
+            //  4b-ii: deep chain following for remaining unconverged splits
+            let mut spec_collapses: Vec<(usize, TerminalID, u32)> = Vec::new();
+
+            // Build set of (state, terminal) pairs that have pure R/R splits
+            let pure_rr_splits: BTreeSet<(usize, TerminalID)> = {
+                let mut set = BTreeSet::new();
+                for s in 0..nstates2 {
+                    for (&t, a) in &self.action[s] {
+                        if let Action::Split { shift, reduces: _, accept } = a {
+                            if shift.is_none() && !*accept {
+                                set.insert((s, t));
+                            }
+                        }
+                    }
+                }
+                set
+            };
+
+            for state in 0..nstates2 {
+                for (&tid, action) in &self.action[state] {
+                    let Action::Split { shift, reduces, accept } = action else { continue };
+                    if shift.is_some() || *accept { continue }
+
+                    let rhs_len = self.rules[reduces[0] as usize].rhs.len();
+                    if reduces.iter().any(|&r| self.rules[r as usize].rhs.len() != rhs_len) {
+                        continue;
+                    }
+                    let reduces = reduces.clone();
+
+                    // Compute candidate_froms (predecessors^K of the split state)
+                    let mut candidate_froms: BTreeSet<u32> = BTreeSet::new();
+                    candidate_froms.insert(state as u32);
+                    for _ in 0..rhs_len {
+                        let mut next = BTreeSet::new();
+                        for &s in &candidate_froms {
+                            if let Some(preds) = predecessors.get(s as usize) {
+                                next.extend(preds);
+                            }
+                        }
+                        candidate_froms = next;
+                    }
+                    if candidate_froms.is_empty() { continue }
+
+                    // 4b-i: Filter out predecessors that are themselves split states
+                    let filtered: BTreeSet<u32> = candidate_froms.iter()
+                        .filter(|&&p| !pure_rr_splits.contains(&(p as usize, tid)))
+                        .copied()
+                        .collect();
+
+                    if filtered.is_empty() {
+                        spec_collapses.push((state, tid, reduces[0]));
+                        continue;
+                    }
+
+                    // Simple check: do all reduces converge from filtered preds?
+                    let lhss: Vec<NonterminalID> = reduces
+                        .iter()
+                        .map(|&r| self.rules[r as usize].lhs)
+                        .collect();
+                    let mut simple_converge = true;
+                    'pred_simple: for &pred in &filtered {
+                        let first_target = self.goto[pred as usize].get(&lhss[0]).copied();
+                        for &lhs in &lhss[1..] {
+                            if self.goto[pred as usize].get(&lhs).copied() != first_target {
+                                simple_converge = false;
+                                break 'pred_simple;
+                            }
+                        }
+                    }
+                    if simple_converge {
+                        spec_collapses.push((state, tid, reduces[0]));
+                        continue;
+                    }
+
+                    // 4b-ii: Deep chain following.
+                    // For each alternative, simulate the reduce chain and track
+                    // the total depth popped from the original split state S.
+                    //
+                    // Stack model: After initial reduce Ri (pop=K) from S:
+                    //   base_depth = K (below S)
+                    //   goto_from = preds^K(S)
+                    //   push T1 = goto[goto_from][lhs(Ri)]
+                    //   T1 sits at depth K-1 (one above goto_from)
+                    //
+                    // After follow-up reduce Rj (pop=M) from T1:
+                    //   We pop M items from T1's position. T1 is at K-1.
+                    //   Popping 1 removes T1 itself (back to K).
+                    //   Popping M total goes to depth K + M - 1.
+                    //   base_depth = K + M - 1
+                    //   goto_from = preds^(K+M-1)(S)
+                    //   push T2, sits at K + M - 2
+                    //
+                    // In general: after n reduces with pop values K1,K2,...,Kn,
+                    //   base_depth = K1 + K2 + ... + Kn - (n-1)
+                    //   = sum(Ki) - n + 1
+                    //
+                    // The chain terminates when the action at the pushed state
+                    // is not a Reduce on terminal T.
+                    //
+                    // All alternatives converge if they reach the same
+                    // (base_depth, final_lhs) and goto[preds^base_depth][lhs]
+                    // agrees for all preds.
+
+                    const MAX_CHAIN: usize = 32;
+
+                    // Follow one alternative's chain.  Returns (base_depth, final_lhs)
+                    // or None if the chain diverges or is too deep.
+                    let follow = |first_rule: u32| -> Option<(usize, NonterminalID)> {
+                        let mut depth = rhs_len; // after initial reduce
+                        let mut rule_id = first_rule;
+                        let lhs = self.rules[rule_id as usize].lhs;
+
+                        // Compute goto targets from preds^depth(state) with lhs
+                        let preds_at_depth = |d: usize| -> BTreeSet<u32> {
+                            let mut s = BTreeSet::new();
+                            s.insert(state as u32);
+                            for _ in 0..d {
+                                let mut next = BTreeSet::new();
+                                for &st in &s {
+                                    if let Some(ps) = predecessors.get(st as usize) {
+                                        next.extend(ps);
+                                    }
+                                }
+                                s = next;
+                            }
+                            s
+                        };
+
+                        let mut current_lhs = lhs;
+                        for _ in 0..MAX_CHAIN {
+                            let preds = preds_at_depth(depth);
+                            if preds.is_empty() { return None }
+
+                            // Get goto targets
+                            let mut goto_targets: BTreeSet<u32> = BTreeSet::new();
+                            for &p in &preds {
+                                if let Some(&gt) = self.goto[p as usize].get(&current_lhs) {
+                                    goto_targets.insert(gt);
+                                }
+                            }
+                            if goto_targets.is_empty() { return None }
+
+                            // Check action at goto targets on terminal tid
+                            let mut next_rule: Option<u32> = None;
+                            let mut all_reduce = true;
+                            for &gt in &goto_targets {
+                                match self.action.get(gt as usize).and_then(|r| r.get(&tid)) {
+                                    Some(Action::Reduce(r)) => {
+                                        match next_rule {
+                                            None => next_rule = Some(*r),
+                                            Some(nr) if nr == *r => {}
+                                            _ => { all_reduce = false; break }
+                                        }
+                                    }
+                                    _ => {
+                                        // Chain terminates
+                                        return Some((depth, current_lhs));
+                                    }
+                                }
+                            }
+                            if !all_reduce { return None }
+
+                            // Follow the next reduce
+                            rule_id = next_rule.unwrap();
+                            let next_rhs_len = self.rules[rule_id as usize].rhs.len();
+                            // depth after this reduce: current depth was where we pushed
+                            // the goto target (depth-1 for the pushed state).
+                            // Popping next_rhs_len from there:
+                            // new_base = (depth-1) + next_rhs_len
+                            //   = depth + next_rhs_len - 1
+                            depth = depth + next_rhs_len - 1;
+                            current_lhs = self.rules[rule_id as usize].lhs;
+                        }
+                        None // Too deep
+                    };
+
+                    // Follow all alternatives
+                    let mut first_result: Option<(usize, NonterminalID)> = None;
+                    let mut chain_converge = true;
+                    for &rule_id in &reduces {
+                        match follow(rule_id) {
+                            Some(result) => {
+                                match first_result {
+                                    None => first_result = Some(result),
+                                    Some(prev) if prev == result => {}
+                                    _ => { chain_converge = false; break }
+                                }
+                            }
+                            None => { chain_converge = false; break }
+                        }
+                    }
+
+                    if !chain_converge { continue }
+                    let Some((final_depth, final_lhs)) = first_result else { continue };
+
+                    // All alternatives converge to (final_depth, final_lhs).
+                    // Check: from preds^final_depth(state), do all gotos agree?
+                    let mut final_preds = BTreeSet::new();
+                    final_preds.insert(state as u32);
+                    for _ in 0..final_depth {
+                        let mut next = BTreeSet::new();
+                        for &s in &final_preds {
+                            if let Some(ps) = predecessors.get(s as usize) {
+                                next.extend(ps);
+                            }
+                        }
+                        final_preds = next;
+                    }
+
+                    let mut goto_target: Option<Option<u32>> = None;
+                    let mut targets_agree = true;
+                    for &pred in &final_preds {
+                        let target = self.goto[pred as usize].get(&final_lhs).copied();
+                        match goto_target {
+                            None => goto_target = Some(target),
+                            Some(prev) if prev == target => {}
+                            _ => { targets_agree = false; break }
+                        }
+                    }
+
+                    if targets_agree {
+                        spec_collapses.push((state, tid, reduces[0]));
+                    }
+                }
+            }
+
+            for (state, tid, rule_id) in spec_collapses {
                 self.action[state].insert(tid, Action::Reduce(rule_id));
                 collapsed_any = true;
             }
