@@ -78,6 +78,13 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
     gss.shift_top_values_owned(shift_pairs)
 }
 
+fn apply_gotos(mut gss: ParserGSS, gotos: SmallVec<[(u32, ParserGSS); 8]>) -> ParserGSS {
+    for (target, base) in gotos {
+        gss = gss.absorb_push_same_acc(target, &base);
+    }
+    gss
+}
+
 /// Apply one wave of nondeterministic reductions.
 ///
 /// Collects all reduce-gotos from the current frontier states (against a
@@ -116,10 +123,7 @@ fn apply_nondeterministic_reduces(
         return (gss, false);
     }
 
-    let mut new_gss = gss.clone();
-    for (target, base) in gotos {
-        new_gss = new_gss.absorb_push_same_acc(target, &base);
-    }
+    let new_gss = apply_gotos(gss.clone(), gotos);
     // Fixpoint: if the gotos targeted existing states with existing
     // predecessors, the GSS is unchanged and we're done.
     if new_gss == gss {
@@ -161,18 +165,34 @@ fn apply_deterministic_reduces(
         match table.action(state, token) {
             Some(Action::Reduce(rule_id)) => {
                 let rule = &table.rules[*rule_id as usize];
-                if stack.len() > rule.rhs.len() {
+                let before_pop = stack.clone().into_gss();
+                let leftover = stack.pop(rule.rhs.len());
+                if leftover == 0 {
                     // Pop |rhs| symbols and push the goto target.
-                    stack.pop(rule.rhs.len());
-                    let goto_from = *stack.top().unwrap();
+                    let Some(&goto_from) = stack.top() else {
+                        return before_pop;
+                    };
                     match table.goto_target(goto_from, rule.lhs) {
                         Some(target) => stack.push(target),
                         None => return ParserGSS::empty(),
                     }
                 } else {
-                    // Reduce crosses below the VirtualStack's base.
-                    // Fall through to the general GLR path.
-                    break;
+                    // We crossed below the deterministic chain's floor.
+                    // Finish the remaining pop on the materialized GSS,
+                    // then apply all resulting gotos as one batch.
+                    let popped = stack.into_gss().popn(leftover as isize);
+                    let mut gotos = SmallVec::<[(u32, ParserGSS); 8]>::new();
+                    for goto_from in popped.peek_values() {
+                        if let Some(target) = table.goto_target(goto_from, rule.lhs) {
+                            let base = popped.isolate(Some(goto_from));
+                            if let Some((_, existing)) = gotos.iter_mut().find(|(t, _)| *t == target) {
+                                *existing = existing.merge(&base);
+                            } else {
+                                gotos.push((target, base));
+                            }
+                        }
+                    }
+                    return apply_gotos(before_pop, gotos);
                 }
             }
             _ => break, // Shift, split, accept, or dead — handled by the caller.

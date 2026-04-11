@@ -2008,7 +2008,9 @@ pub struct ChainTail<T: Clone + Eq + Hash> {
 /// On commit, only the pushed portion needs new Segment nodes.
 ///
 /// The stack has a "floor" — the Lower node below the deterministic chain.
-/// When a pop would cross the floor, the caller falls back to the general path.
+/// When a pop would cross the floor, the caller can materialize the current
+/// chain and continue with GSS-level operations for the leftover pop depth.
+#[derive(Clone)]
 pub struct VirtualStack<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
     values: ArrayVec<T, SEGMENT_CAP>,
     next: Arc<Lower<T>>,
