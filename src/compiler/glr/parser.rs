@@ -44,13 +44,11 @@ pub(crate) fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: Te
 ///  2. **Shift** — push the lookahead's shift target onto every surviving
 ///     frontier state, producing the next GSS.
 fn advance_stacks_core(table: &GLRTable, mut gss: ParserGSS, token: TerminalID) -> ParserGSS {
-    if apply_deterministic_reduces(table, &mut gss, token) {
+    if advance_deterministically(table, &mut gss, token) {
         return gss;
     }
 
-    while apply_nondeterministic_reduces(table, &mut gss, token) {}
-
-    shift_frontier(table, gss, token)
+    advance_nondeterministically(table, gss, token)
 }
 
 fn shift_frontier(table: &GLRTable, gss: ParserGSS, token: TerminalID) -> ParserGSS {
@@ -126,33 +124,36 @@ fn collect_reduce_gotos(table: &GLRTable, gss: &ParserGSS, token: TerminalID) ->
     gotos
 }
 
-/// Apply one wave of nondeterministic reductions.
-///
-/// Collects all reduce-gotos from the current frontier states (against a
-/// consistent GSS snapshot), merging bases for same-target gotos, then
-/// applies them all at once.
-///
-/// Returns the next GSS after one reduce wave. If no new gotos are
-/// produced, or the wave is a structural no-op, returns `gss` unchanged.
-fn apply_nondeterministic_reduces(
+fn advance_nondeterministically(
     table: &GLRTable,
-    gss: &mut ParserGSS,
+    mut closure: ParserGSS,
     token: TerminalID,
-) -> bool {
-    let gotos = collect_reduce_gotos(table, gss, token);
+) -> ParserGSS {
+    let mut shifted = ParserGSS::empty();
 
-    if gotos.is_empty() {
-        return false;
+    loop {
+        let gotos = collect_reduce_gotos(table, &closure, token);
+        if gotos.is_empty() {
+            break;
+        }
+
+        let mut next_closure = closure.clone();
+        for (target, base) in gotos {
+            let mut branch = base.push(target);
+            if advance_deterministically(table, &mut branch, token) {
+                shifted = shifted.merge(&branch);
+            } else {
+                next_closure = next_closure.merge(&branch);
+            }
+        }
+
+        if next_closure == closure {
+            break;
+        }
+        closure = next_closure;
     }
 
-    let new_gss = apply_gotos(gss.clone(), gotos);
-    // Fixpoint: if the gotos targeted existing states with existing
-    // predecessors, the GSS is unchanged and we're done.
-    if new_gss == *gss {
-        return false;
-    }
-    *gss = new_gss;
-    true
+    shifted.merge(&shift_frontier(table, closure, token))
 }
 
 /// Standard LR reduce loop for the deterministic case.
@@ -167,7 +168,7 @@ fn apply_nondeterministic_reduces(
 /// itself and returns true to signal that the parser step is finished.
 /// Otherwise it mutates `gss` and returns false so the caller can continue
 /// with the nondeterministic reduce closure.
-fn apply_deterministic_reduces(
+fn advance_deterministically(
     table: &GLRTable,
     gss: &mut ParserGSS,
     token: TerminalID,
