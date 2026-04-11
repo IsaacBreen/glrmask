@@ -240,21 +240,34 @@ fn take_vstack_hit_count() -> usize {
     })
 }
 
+/// Advance the GSS by one token.
+///
+/// This implements the standard two-phase GLR step:
+///
+///  1. **Reduce closure** — for the current lookahead, apply every applicable
+///     reduce rule across all frontier states.  Each reduction pops |rhs|
+///     symbols, looks up the goto target, and pushes it.  New goto targets
+///     seed further reduction waves until a fixed point is reached.
+///
+///  2. **Shift** — push the lookahead's shift target onto every surviving
+///     frontier state, producing the next GSS.
 fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> ParserGSS {
-    // Fast path: single-state pure shift (most common case in LR(1) grammars).
-    if let Some(shifted) = try_trivial_shift(table, &stack, token) {
-        return shifted;
+    // Fast path: single state with a pure shift action (most common case).
+    if let Some(state) = stack.single_exclusive_top_value() {
+        if let Some(target) = table.action(state, token).and_then(Action::pure_shift_target) {
+            return stack.push(target);
+        }
     }
 
     // ── Phase 1: Reduce closure ──
     //
-    // Standard GLR "Reducer": process frontier states in waves.  Each wave
-    // collects all reduce-gotos from the current pending states (against a
-    // consistent GSS snapshot), then applies the gotos to the GSS all at once,
-    // seeding the next wave with any newly created states.
+    // Process frontier states in waves.  Each wave collects all reduce-gotos
+    // from the current pending states (against a consistent GSS snapshot),
+    // then applies the gotos to the GSS all at once, seeding the next wave
+    // with any newly created states.
     //
-    // Optimisation: when the GSS is a single deterministic chain, we first
-    // run the reduces on a flat VirtualStack before entering the general loop.
+    // When the GSS is a single deterministic chain, we first run the reduces
+    // on a flat VirtualStack (optimisation — avoids intermediate GSS nodes).
 
     let mut gss = apply_deterministic_reduces(table, stack, token);
 
@@ -262,7 +275,6 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
     let mut closed: SmallVec<[u32; 16]> = SmallVec::new();
 
     loop {
-        // Drain the current wave's pending states.
         let mut gotos = SmallVec::<[(u32, ParserGSS); 8]>::new();
 
         while let Some(state) = worklist.pop() {
@@ -293,7 +305,6 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
             break;
         }
 
-        // Apply this wave's gotos and seed the next wave.
         for (target, base) in gotos {
             gss = gss.absorb_push_same_acc(target, &base);
             worklist.push(target);
@@ -303,22 +314,20 @@ fn advance_stacks_core(table: &GLRTable, stack: ParserGSS, token: TerminalID) ->
     // ── Phase 2: Shift ──
     //
     // Push the lookahead token onto every surviving frontier state.
-    shift_frontier(table, gss, token)
-}
-
-fn try_trivial_shift(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> Option<ParserGSS> {
-    let state = stack.single_exclusive_top_value()?;
-    match table.action(state, token) {
-        Some(action) => action.pure_shift_target().map(|target| stack.push(target)),
-        None => Some(ParserGSS::empty()),
+    let mut shift_pairs = SmallVec::<[(u32, u32); 8]>::new();
+    for state in gss.peek_values() {
+        if let Some(target) = table.action(state, token).and_then(Action::shift_target) {
+            shift_pairs.push((state, target));
+        }
     }
+    gss.shift_top_values_owned(shift_pairs)
 }
 
 /// Apply reductions along the deterministic chain top of the GSS.
 ///
 /// When the GSS has a single linear chain, this runs the standard LR reduce
 /// loop on it directly (via VirtualStack) without materialising intermediate
-/// GSS nodes.  Only reduces are performed — shifting is left to `shift_frontier`.
+/// GSS nodes.  Only reduces are performed — shifting is handled by the caller.
 ///
 /// Falls back to a no-op (returning the GSS unchanged) when the frontier is
 /// ambiguous (Split), crosses the VirtualStack floor, or reaches a non-reduce
@@ -363,22 +372,12 @@ fn apply_deterministic_reduces(
                 }
             }
             // Shift, Split, Accept, or no action: stop reducing.
-            // The shift will be applied by shift_frontier.
+            // The shift will be applied by the caller.
             _ => break,
         }
     }
 
     if changed { vstack.into_gss() } else { current }
-}
-
-fn shift_frontier(table: &GLRTable, current: ParserGSS, token: TerminalID) -> ParserGSS {
-    let mut shift_pairs = SmallVec::<[(u32, u32); 8]>::new();
-    for state in current.peek_values() {
-        if let Some(target) = table.action(state, token).and_then(Action::shift_target) {
-            shift_pairs.push((state, target));
-        }
-    }
-    current.shift_top_values_owned(shift_pairs)
 }
 
 pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
