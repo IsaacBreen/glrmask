@@ -2105,10 +2105,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
         }
     }
 
-    /// Materialize the floor portion into a GSS (discarding all stack states).
-    pub fn into_floor_gss(self) -> LeveledGSS<T, A> {
-        Self::gss_from_floor(self.floor, self.acc)
-    }
 }
 
 impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> PartialEq for LeveledGSS<T, A> {
