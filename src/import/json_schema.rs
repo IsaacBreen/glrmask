@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use serde_json::{Map, Value};
 use crate::GlrMaskError;
@@ -2455,7 +2455,7 @@ fn merge_two_schemas(s1: &Map<String, Value>, s2: &Map<String, Value>) -> Map<St
         (None, None) => {}
     }
 
-    let handled: HashSet<&'static str> = [
+    let handled: BTreeSet<&'static str> = [
         "type",
         "properties",
         "required",
@@ -2547,7 +2547,7 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
     let convert_ms = t3.elapsed().as_secs_f64() * 1000.0;
 
     ctx.insert_rule("start", start_expr);
-    let terminal_names: HashSet<String> = ctx
+    let terminal_names: BTreeSet<String> = ctx
         .rules
         .iter()
         .map(|(name, _)| name.as_str())
@@ -2592,23 +2592,23 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
 struct SchemaCtx<'a> {
     root_schema: &'a Value,
     rules: Vec<(String, GrammarExpr)>,
-    rule_indices: HashMap<String, usize>,
-    used_rule_names: HashSet<String>,
-    ref_rule_names: HashMap<String, String>,
-    ref_compile_stack: HashSet<String>,
+    rule_indices: BTreeMap<String, usize>,
+    used_rule_names: BTreeSet<String>,
+    ref_rule_names: BTreeMap<String, String>,
+    ref_compile_stack: BTreeSet<String>,
     generated_object_rule_counter: usize,
     generated_rule_counter: usize,
-    expr_dedup_cache: HashMap<String, String>,
-    json_string_exact_cache: HashMap<usize, String>,
-    json_string_upto_cache: HashMap<usize, String>,
+    expr_dedup_cache: BTreeMap<String, String>,
+    json_string_exact_cache: BTreeMap<usize, String>,
+    json_string_upto_cache: BTreeMap<usize, String>,
     shared_ap_literal_keys: BTreeSet<String>,
     shared_ap_key_colon_expr: Option<GrammarExpr>,
-    shared_ap_key_rule_cache: HashMap<Vec<String>, String>,
+    shared_ap_key_rule_cache: BTreeMap<Vec<String>, String>,
     draft_stack: Vec<JsonSchemaDraft>,
     convert_depth: usize,
     /// Cache for `convert_schema`: identical sub-schemas produce the same
     /// grammar expression, avoiding duplicate rule generation.
-    schema_convert_cache: HashMap<String, GrammarExpr>,
+    schema_convert_cache: BTreeMap<String, GrammarExpr>,
 }
 
 impl<'a> SchemaCtx<'a> {
@@ -2616,21 +2616,21 @@ impl<'a> SchemaCtx<'a> {
         let mut ctx = Self {
             root_schema: root,
             rules: Vec::new(),
-            rule_indices: HashMap::new(),
-            used_rule_names: HashSet::new(),
-            ref_rule_names: HashMap::new(),
-            ref_compile_stack: HashSet::new(),
+            rule_indices: BTreeMap::new(),
+            used_rule_names: BTreeSet::new(),
+            ref_rule_names: BTreeMap::new(),
+            ref_compile_stack: BTreeSet::new(),
             generated_object_rule_counter: 0,
             generated_rule_counter: 0,
-            expr_dedup_cache: HashMap::new(),
-            json_string_exact_cache: HashMap::new(),
-            json_string_upto_cache: HashMap::new(),
+            expr_dedup_cache: BTreeMap::new(),
+            json_string_exact_cache: BTreeMap::new(),
+            json_string_upto_cache: BTreeMap::new(),
             shared_ap_literal_keys: collect_shared_ap_literal_keys(root),
             shared_ap_key_colon_expr: None,
-            shared_ap_key_rule_cache: HashMap::new(),
+            shared_ap_key_rule_cache: BTreeMap::new(),
             draft_stack: vec![DEFAULT_JSON_SCHEMA_DRAFT],
             convert_depth: 0,
-            schema_convert_cache: HashMap::new(),
+            schema_convert_cache: BTreeMap::new(),
         };
         ctx.ensure_base_rules();
         ctx
@@ -3809,7 +3809,7 @@ impl<'a> SchemaCtx<'a> {
     fn build_exact_ordered_closed_object_variants(
         &mut self,
         variants: Vec<OrderedClosedObjectVariant>,
-        key_exprs: HashMap<String, GrammarExpr>,
+        key_exprs: BTreeMap<String, GrammarExpr>,
         mode: StructuralBranchMode,
     ) -> Result<Option<GrammarExpr>, GlrMaskError> {
         if variants.is_empty() || variants.len() > EXACT_CLOSED_OBJECT_UNION_MAX_VARIANTS {
@@ -3827,7 +3827,7 @@ impl<'a> SchemaCtx<'a> {
             .collect();
         let mut states = vec![start_state.clone()];
         let mut transitions: Vec<Vec<(String, usize)>> = vec![Vec::new()];
-        let mut state_to_idx = HashMap::new();
+        let mut state_to_idx = BTreeMap::new();
         state_to_idx.insert(start_state, 0usize);
         let mut queue = VecDeque::from([0usize]);
 
@@ -3982,7 +3982,7 @@ impl<'a> SchemaCtx<'a> {
             return Ok(None);
         }
 
-        let key_exprs: HashMap<String, GrammarExpr> = ordered
+        let key_exprs: BTreeMap<String, GrammarExpr> = ordered
             .iter()
             .map(|(key, value_expr, _)| (key.clone(), value_expr.clone()))
             .collect();
@@ -4024,7 +4024,7 @@ impl<'a> SchemaCtx<'a> {
             return Ok(None);
         }
 
-        let key_exprs: HashMap<String, GrammarExpr> = ordered
+        let key_exprs: BTreeMap<String, GrammarExpr> = ordered
             .iter()
             .map(|(key, value_expr, _)| (key.clone(), value_expr.clone()))
             .collect();
@@ -4048,7 +4048,7 @@ impl<'a> SchemaCtx<'a> {
         }];
         let mut states = vec![start_state.clone()];
         let mut transitions: Vec<Vec<(String, usize)>> = vec![Vec::new()];
-        let mut state_to_idx = HashMap::new();
+        let mut state_to_idx = BTreeMap::new();
         state_to_idx.insert(start_state, 0usize);
         let mut queue = VecDeque::from([0usize]);
 
@@ -4198,8 +4198,8 @@ impl<'a> SchemaCtx<'a> {
             schema_variants.push(ordered);
         }
 
-        let mut key_schemas: HashMap<String, Value> = HashMap::new();
-        let mut required_by_key: HashMap<String, bool> = HashMap::new();
+        let mut key_schemas: BTreeMap<String, Value> = BTreeMap::new();
+        let mut required_by_key: BTreeMap<String, bool> = BTreeMap::new();
         for variant in &schema_variants {
             for item in &variant.items {
                 required_by_key
@@ -4219,7 +4219,7 @@ impl<'a> SchemaCtx<'a> {
             return Ok(None);
         }
 
-        let mut key_exprs: HashMap<String, GrammarExpr> = HashMap::new();
+        let mut key_exprs: BTreeMap<String, GrammarExpr> = BTreeMap::new();
         let mut skipped_optional_keys = BTreeSet::new();
         for (key, value_schema) in &key_schemas {
             match self.convert_schema(value_schema) {
@@ -6302,7 +6302,7 @@ impl<'a> SchemaCtx<'a> {
 
         let full_mask: Vec<usize> = (0..required_list.len()).collect();
         let mut masks = Vec::<Vec<usize>>::new();
-        let mut mask_indices = HashMap::<Vec<usize>, usize>::new();
+        let mut mask_indices = BTreeMap::<Vec<usize>, usize>::new();
         let mut pending = vec![full_mask.clone()];
         while let Some(mask) = pending.pop() {
             if mask_indices.contains_key(&mask) {
@@ -6446,7 +6446,7 @@ impl<'a> SchemaCtx<'a> {
 
         let full_mask: Vec<usize> = (0..literal_entries.len()).collect();
         let mut masks = Vec::<Vec<usize>>::new();
-        let mut mask_indices = HashMap::<Vec<usize>, usize>::new();
+        let mut mask_indices = BTreeMap::<Vec<usize>, usize>::new();
         let mut pending = vec![full_mask.clone()];
         while let Some(mask) = pending.pop() {
             if mask_indices.contains_key(&mask) {
@@ -6580,7 +6580,7 @@ impl<'a> SchemaCtx<'a> {
         &mut self,
         items: &[(GrammarExpr, bool)],
         needs_separator: bool,
-        cache: &mut HashMap<(usize, bool), GrammarExpr>,
+        cache: &mut BTreeMap<(usize, bool), GrammarExpr>,
         index: usize,
     ) -> GrammarExpr {
         if let Some(expr) = cache.get(&(index, needs_separator)) {
@@ -6902,7 +6902,7 @@ impl<'a> SchemaCtx<'a> {
                 }
 
                 // Collect DFAs to exclude via GrammarExpr::Exclude
-                let subset_members: HashSet<usize> = subset.iter().copied().collect();
+                let subset_members: BTreeSet<usize> = subset.iter().copied().collect();
                 let mut excluded_dfas: Vec<&LexerDfa> = Vec::new();
                 if let Some(ref fk_dfa) = fixed_key_union_dfa {
                     excluded_dfas.push(fk_dfa);
@@ -7281,7 +7281,7 @@ impl<'a> SchemaCtx<'a> {
                 }
             }
 
-            let mut sequence_cache = HashMap::new();
+            let mut sequence_cache = BTreeMap::new();
             let body = self.build_array_item_sequence(&array_items, false, &mut sequence_cache, 0);
             return Ok(sequence_or_single(vec![
                 literal_expr(b"["),
@@ -7384,9 +7384,9 @@ impl<'a> SchemaCtx<'a> {
 /// These terminals are "grammar-visible" and must have their own TerminalID.
 fn collect_grammar_visible_refs(
     rules: &[NamedRule],
-    terminal_names: &HashSet<String>,
-) -> HashSet<String> {
-    fn walk(expr: &GrammarExpr, terminal_names: &HashSet<String>, out: &mut HashSet<String>) {
+    terminal_names: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    fn walk(expr: &GrammarExpr, terminal_names: &BTreeSet<String>, out: &mut BTreeSet<String>) {
         match expr {
             GrammarExpr::Ref(name) => {
                 if terminal_names.contains(name) {
@@ -7413,7 +7413,7 @@ fn collect_grammar_visible_refs(
             | GrammarExpr::AnyByte => {}
         }
     }
-    let mut visible = HashSet::new();
+    let mut visible = BTreeSet::new();
     for rule in rules {
         if !rule.is_terminal {
             walk(&rule.expr, terminal_names, &mut visible);
