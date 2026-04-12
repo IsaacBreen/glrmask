@@ -2669,6 +2669,92 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
+    /// Equivalent to merging `self.isolate(Some(from)).replace_top_values([(from, to)])`
+    /// for each `(from, to)` pair, but rebuilds the replaced frontier in one pass.
+    pub fn replace_top_values<I>(&self, replacements: I) -> Self
+    where
+        I: IntoIterator<Item = (T, T)>,
+    {
+        let pairs: SmallVec<[(T, T); 8]> = replacements.into_iter().collect();
+        if pairs.is_empty() {
+            return Self::empty();
+        }
+        if pairs.len() == 1 {
+            let (ref from, ref to) = pairs[0];
+            if self.single_exclusive_top_value().as_ref() == Some(from) {
+                if let Some(mut stack) = self.clone().try_virtual_stack() {
+                    if stack.replace_top(to.clone()) {
+                        return stack.into_gss();
+                    }
+                }
+            }
+        }
+
+        match &*self.inner {
+            Upper::Interface(i) => {
+                let inner_children;
+                let seg_entry: Option<(&T, CompactOrdMap<Arc<Lower<T>>>)>;
+                match &*i.inner {
+                    Lower::Segment(seg) => {
+                        let top_val = seg.values.last().unwrap();
+                        let rest = i.inner.segment_rest_arc();
+                        inner_children = None;
+                        seg_entry = Some((top_val, CompactOrdMap::unit(rest.max_depth(), rest)));
+                    }
+                    Lower::General { children, .. } => {
+                        inner_children = Some(children);
+                        seg_entry = None;
+                    }
+                }
+
+                let mut replaced_children: Children<T, Lower<T>> = CompactMap::new();
+
+                for (from, to) in pairs.iter().cloned() {
+                    let kids_opt = if let Some((cv, ref ck)) = seg_entry {
+                        if *cv == from { Some(ck) } else { None }
+                    } else {
+                        inner_children.unwrap().get(&from)
+                    };
+                    let Some(kids) = kids_opt else {
+                        continue;
+                    };
+
+                    match replaced_children.get(&to) {
+                        Some(existing_kids) => {
+                            let mut merged_kids = existing_kids.clone();
+                            for (depth, child) in kids.iter() {
+                                if let Some(existing_child) = merged_kids.get(depth) {
+                                    merged_kids.insert(*depth, merge_lower(existing_child, child));
+                                } else {
+                                    merged_kids.insert(*depth, child.clone());
+                                }
+                            }
+                            replaced_children.insert(to, merged_kids);
+                        }
+                        None => {
+                            replaced_children.insert(to, kids.clone());
+                        }
+                    }
+                }
+
+                if replaced_children.is_empty() {
+                    return Self::empty();
+                }
+
+                let replaced_root = new_lower(replaced_children, false);
+                LeveledGSS {
+                    inner: new_interface(replaced_root, i.acc.clone()),
+                }
+            }
+            Upper::Branch(_) => {
+                let replaced = pairs
+                    .into_iter()
+                    .map(|(from, to)| self.isolate(Some(from.clone())).replace_top_values([(from, to)]));
+                Self::merge_many(replaced)
+            }
+        }
+    }
+
     /// Like `remap_top_values` but takes ownership, allowing extraction of
     /// children by move instead of clone when the Arcs are uniquely owned.
     pub fn remap_top_values_owned<I>(self, shifts: I) -> Self
@@ -2704,6 +2790,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                             }
                         }
                     }
+
                     Err(iface_arc) => {
                         let gss = LeveledGSS { inner: Arc::new(Upper::Interface(iface_arc)) };
                         return gss.remap_top_values(pairs);
@@ -2766,6 +2853,29 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         LeveledGSS {
             inner: new_interface(shifted_root, acc),
         }
+    }
+
+    /// Owned variant of `replace_top_values`.
+    pub fn replace_top_values_owned<I>(self, replacements: I) -> Self
+    where
+        I: IntoIterator<Item = (T, T)>,
+    {
+        let pairs: SmallVec<[(T, T); 8]> = replacements.into_iter().collect();
+        if pairs.is_empty() {
+            return Self::empty();
+        }
+        if pairs.len() == 1 {
+            let (ref from, ref to) = pairs[0];
+            if self.single_exclusive_top_value().as_ref() == Some(from) {
+                if let Some(mut stack) = self.try_virtual_stack() {
+                    if stack.replace_top(to.clone()) {
+                        return stack.into_gss();
+                    }
+                }
+            }
+        }
+
+        self.replace_top_values(pairs)
     }
 
     /// Equivalent to `self.merge(&base.push(value))` but avoids intermediate

@@ -44,7 +44,7 @@ pub(crate) fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: Te
 fn advance_stacks_core(table: &GLRTable, mut gss: ParserGSS, token: TerminalID) -> ParserGSS {
     // Fast path: single state with a pure shift action (most common case).
     if let Some(state) = gss.single_exclusive_top_value() {
-        if let Some(Action::Shift(target)) = table.action(state, token) {
+        if let Some(Action::Shift(target, _)) = table.action(state, token) {
             return gss.push(*target);
         }
     }
@@ -118,10 +118,9 @@ fn advance_nondeterministically(
                 shifted = shifted.merge(&isolated.push(target));
             }
 
-            for &rule_id in action.reduce_rule_ids() {
-                let rule = &table.rules[rule_id as usize];
-                for (goto_from, base) in reduce_sources(&closure, state, rule.rhs.len()) {
-                    let Some(target) = table.goto_target(goto_from, rule.lhs) else {
+            for (lhs, rhs_len) in action.iter_reduces() {
+                for (goto_from, base) in reduce_sources(&closure, state, rhs_len as usize) {
+                    let Some(target) = table.goto_target(goto_from, lhs) else {
                         continue;
                     };
 
@@ -172,12 +171,12 @@ fn advance_deterministically(
         };
 
         match table.action(state, token) {
-            Some(Action::Reduce(rule_id)) => {
-                let rule = &table.rules[*rule_id as usize];
-                if rule.rhs.len() < stack.len() {
-                    if rule.rhs.len() == 1 {
+            Some(Action::Reduce(lhs, rhs_len)) => {
+                let rhs_len = *rhs_len as usize;
+                if rhs_len < stack.len() {
+                    if rhs_len == 1 {
                         if let Some(goto_from) = stack.parent_of_top() {
-                            match table.goto_target(goto_from, rule.lhs) {
+                            match table.goto_target(goto_from, *lhs) {
                                 Some(target) if stack.replace_top(target) => continue,
                                 Some(_) | None => {
                                     *gss = ParserGSS::empty();
@@ -188,9 +187,9 @@ fn advance_deterministically(
                     }
 
                     // Pop |rhs| symbols and push the goto target.
-                    stack.pop(rule.rhs.len());
+                    stack.pop(rhs_len);
                     let goto_from = *stack.top().unwrap();
-                    match table.goto_target(goto_from, rule.lhs) {
+                    match table.goto_target(goto_from, *lhs) {
                         Some(target) => stack.push(target),
                         None => {
                             *gss = ParserGSS::empty();
@@ -198,15 +197,11 @@ fn advance_deterministically(
                         }
                     }
                 } else {
-                    // This reduce reaches or crosses the deterministic chain's
-                    // floor. Finish it at the GSS level, batch the gotos, and
-                    // keep going deterministically if the rebuilt frontier is
-                    // still a single chain.
                     let current = stack.into_gss();
-                    let popped = current.popn(rule.rhs.len() as isize);
+                    let popped = current.popn(rhs_len as isize);
                     let mut shifts = SmallVec::<[(u32, u32); 8]>::new();
                     for goto_from in popped.peek_values() {
-                        if let Some(target) = table.goto_target(goto_from, rule.lhs) {
+                        if let Some(target) = table.goto_target(goto_from, *lhs) {
                             shifts.push((goto_from, target));
                         }
                     }
@@ -218,7 +213,7 @@ fn advance_deterministically(
                     stack = next_stack;
                 }
             }
-            Some(Action::Shift(target)) => {
+            Some(Action::Shift(target, _)) => {
                 *gss = stack.into_gss().push(*target);
                 return true;
             }
@@ -330,7 +325,7 @@ pub(crate) fn advance_stacks_profiled(
     // Fast path: single state with a pure shift action
     let t_fast_path = Instant::now();
     if let Some(state) = gss.single_exclusive_top_value() {
-        if let Some(Action::Shift(target)) = table.action(state, token) {
+        if let Some(Action::Shift(target, _)) = table.action(state, token) {
             profile.pure_shift = true;
             profile.fast_path_ns = t_fast_path.elapsed().as_nanos() as u64;
             let result = gss.push(*target);
@@ -386,18 +381,18 @@ fn advance_deterministically_profiled(
         let action = table.action(state, token);
         profile.det_action_lookup_ns += t_action.elapsed().as_nanos() as u64;
         match action {
-            Some(Action::Reduce(rule_id)) => {
-                let rule = &table.rules[*rule_id as usize];
-                if rule.rhs.len() < stack.len() {
+            Some(Action::Reduce(lhs, rhs_len)) => {
+                let rhs_len = *rhs_len as usize;
+                if rhs_len < stack.len() {
                     profile.n_reduces_above_floor += 1;
-                    if rule.rhs.len() == 1 {
+                    if rhs_len == 1 {
                         let t_parent = Instant::now();
                         let goto_from = stack.parent_of_top();
                         profile.det_pop_ns += t_parent.elapsed().as_nanos() as u64;
                         if let Some(goto_from) = goto_from {
                             profile.n_det_goto_lookups += 1;
                             let t_goto = Instant::now();
-                            let goto = table.goto_target(goto_from, rule.lhs);
+                            let goto = table.goto_target(goto_from, *lhs);
                             profile.det_goto_lookup_ns += t_goto.elapsed().as_nanos() as u64;
                             match goto {
                                 Some(target) => {
@@ -418,12 +413,12 @@ fn advance_deterministically_profiled(
                     }
 
                     let t_pop = Instant::now();
-                    stack.pop(rule.rhs.len());
+                    stack.pop(rhs_len);
                     profile.det_pop_ns += t_pop.elapsed().as_nanos() as u64;
                     let goto_from = *stack.top().unwrap();
                     profile.n_det_goto_lookups += 1;
                     let t_goto = Instant::now();
-                    let goto = table.goto_target(goto_from, rule.lhs);
+                    let goto = table.goto_target(goto_from, *lhs);
                     profile.det_goto_lookup_ns += t_goto.elapsed().as_nanos() as u64;
                     match goto {
                         Some(target) => {
@@ -443,12 +438,12 @@ fn advance_deterministically_profiled(
                     let t_floor = Instant::now();
                     let current = stack.into_gss();
                     let t_sources = Instant::now();
-                    let popped = current.popn(rule.rhs.len() as isize);
+                    let popped = current.popn(rhs_len as isize);
                     let mut shifts = SmallVec::<[(u32, u32); 8]>::new();
                     for goto_from in popped.peek_values() {
                         profile.n_det_goto_lookups += 1;
                         let t_goto = Instant::now();
-                        let goto = table.goto_target(goto_from, rule.lhs);
+                        let goto = table.goto_target(goto_from, *lhs);
                         profile.det_goto_lookup_ns += t_goto.elapsed().as_nanos() as u64;
                         if let Some(target) = goto {
                             shifts.push((goto_from, target));
@@ -470,7 +465,7 @@ fn advance_deterministically_profiled(
                     stack = next_stack;
                 }
             }
-            Some(Action::Shift(target)) => {
+            Some(Action::Shift(target, _)) => {
                 *gss = stack.into_gss().push(*target);
                 profile.det_exit_reason = 1; // shift (finished)
                 return true;
@@ -540,14 +535,13 @@ fn advance_nondeterministically_profiled(
                 profile.nondet_merge_ns += t_merge.elapsed().as_nanos() as u64;
             }
 
-            for &rule_id in action.reduce_rule_ids() {
-                let rule = &table.rules[rule_id as usize];
+            for (lhs, rhs_len) in action.iter_reduces() {
                 let t_rs = Instant::now();
-                let sources = reduce_sources(&closure, state, rule.rhs.len());
+                let sources = reduce_sources(&closure, state, rhs_len as usize);
                 profile.nondet_reduce_sources_ns += t_rs.elapsed().as_nanos() as u64;
                 for (goto_from, base) in sources {
                     profile.n_nondet_reduce_ops += 1;
-                    let Some(target) = table.goto_target(goto_from, rule.lhs) else { continue; };
+                    let Some(target) = table.goto_target(goto_from, lhs) else { continue; };
                     let t_push = Instant::now();
                     let mut branch = base.push(target);
                     profile.nondet_push_ns += t_push.elapsed().as_nanos() as u64;
@@ -703,18 +697,17 @@ fn reduce_closure_for_lookahead(
         let Some(action) = table.action(state, lookahead) else {
             continue;
         };
-        let reduce_rule_ids = action.reduce_rule_ids();
-        for rule_id in reduce_rule_ids {
-            let rule = &table.rules[*rule_id as usize];
-            if stack.len() < rule.rhs.len() + 1 {
+        for (lhs, rhs_len) in action.iter_reduces() {
+            let rhs_len = rhs_len as usize;
+            if stack.len() < rhs_len + 1 {
                 continue;
             }
-            let keep_len = stack.len() - rule.rhs.len();
+            let keep_len = stack.len() - rhs_len;
             let mut reduced = stack[..keep_len].to_vec();
             let Some(&goto_from) = reduced.last() else {
                 continue;
             };
-            let Some(target) = table.goto_target(goto_from, rule.lhs) else {
+            let Some(target) = table.goto_target(goto_from, lhs) else {
                 continue;
             };
             reduced.push(target);
