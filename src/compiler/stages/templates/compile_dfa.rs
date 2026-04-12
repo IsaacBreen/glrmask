@@ -147,9 +147,10 @@ fn dfa_to_nwa_skeleton(dfa: &UnweightedDfa) -> NWA {
 
 fn compile_template_with_profile(
     characterization: &TerminalCharacterization,
+    terminal: TerminalID,
 ) -> (UnweightedDfa, NWA, TemplateCompilationSample) {
     let build_nfa_started_at = Instant::now();
-    let nfa = build_template_nfa(characterization);
+    let nfa = build_template_nfa(characterization, terminal);
     let build_nfa_ms = elapsed_ms(build_nfa_started_at);
     let (nfa_states, nfa_transitions) = nfa_size(&nfa);
 
@@ -220,7 +221,7 @@ impl Templates {
         let compiled: Vec<(TerminalID, UnweightedDfa, NWA)> = characterizations
             .par_iter()
             .map(|(&terminal, characterization)| {
-                let nfa = build_template_nfa(characterization);
+                let nfa = build_template_nfa(characterization, terminal);
                 let dfa = minimize_dfa(&determinize(&nfa));
                 let skeleton = dfa_to_nwa_skeleton(&dfa);
                 (terminal, dfa, skeleton)
@@ -254,7 +255,7 @@ impl Templates {
             characterizations
                 .par_iter()
                 .map(|(&terminal, characterization)| {
-                    let (dfa, skeleton, sample) = compile_template_with_profile(characterization);
+                    let (dfa, skeleton, sample) = compile_template_with_profile(characterization, terminal);
                     (terminal, dfa, skeleton, sample)
                 })
                 .collect();
@@ -302,6 +303,35 @@ fn build_nonterminal_nodes(
     nonterminal_nodes
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct ReplaceShorteningMode {
+    shorten_shift: bool,
+    shorten_goto: bool,
+}
+
+fn replace_shortening_mode() -> ReplaceShorteningMode {
+    let Ok(value) = std::env::var("GLRMASK_TEMPLATE_REPLACE_SHORTEN") else {
+        return ReplaceShorteningMode::default();
+    };
+
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "" | "0" | "false" | "no" | "off" => ReplaceShorteningMode::default(),
+        "shift" => ReplaceShorteningMode {
+            shorten_shift: true,
+            shorten_goto: false,
+        },
+        "goto" => ReplaceShorteningMode {
+            shorten_shift: false,
+            shorten_goto: true,
+        },
+        _ => ReplaceShorteningMode {
+            shorten_shift: true,
+            shorten_goto: true,
+        },
+    }
+}
+
 fn append_default_pop_chain(nfa: &mut NFA, mut from: u32, pop_count: usize, target: u32) {
     for pop_index in 0..pop_count {
         let to = if pop_index == pop_count - 1 {
@@ -335,23 +365,36 @@ fn add_positive_transition_chain(
 /// Each shift/reduce/escape/re-reduce path gets its own fresh intermediate
 /// states, connected to the shared start state (via epsilon) and to shared
 /// NT-node states.
-fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
+fn build_template_nfa(
+    characterization: &TerminalCharacterization,
+    _terminal: TerminalID,
+) -> NFA {
     let mut nfa = NFA::new();
     let start = 0u32; // NFA::new() creates state 0 as start
+    let shorten_mode = replace_shortening_mode();
 
     let nonterminal_nodes = build_nonterminal_nodes(&mut nfa, characterization);
 
-    for &(initial_state, shift_state) in &characterization.shifts {
+    for &(initial_state, shift_state, shift_is_replace) in &characterization.shifts {
         let s0 = nfa.add_state();
         let s1 = nfa.add_state();
         let s2 = nfa.add_state();
-        let s3 = nfa.add_state();
+        let s3 = if shorten_mode.shorten_shift && shift_is_replace {
+            None
+        } else {
+            Some(nfa.add_state())
+        };
 
         nfa.add_epsilon(start, s0);
         nfa.add_transition(s0, encode_positive_label(initial_state), s1);
-        nfa.add_transition(s1, encode_negative_label(initial_state), s2);
-        nfa.add_transition(s2, encode_negative_label(shift_state), s3);
-        nfa.set_accepting(s3);
+        if let Some(s3) = s3 {
+            nfa.add_transition(s1, encode_negative_label(initial_state), s2);
+            nfa.add_transition(s2, encode_negative_label(shift_state), s3);
+            nfa.set_accepting(s3);
+        } else {
+            nfa.add_transition(s1, encode_negative_label(shift_state), s2);
+            nfa.set_accepting(s2);
+        }
     }
 
     for &(initial_state, pop_count, nonterminal) in &characterization.reduces {
@@ -361,7 +404,6 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
 
         let s0 = nfa.add_state();
         nfa.add_epsilon(start, s0);
-
         add_positive_transition_chain(
             &mut nfa,
             s0,
@@ -371,22 +413,40 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
         );
     }
 
-    for &(source_nonterminal, revealed_state, goto_state, shift_state) in &characterization.nt_escapes {
+    for &(source_nonterminal, revealed_state, goto_state, shift_state, goto_is_replace, shift_is_replace) in &characterization.nt_escapes {
         let Some(&source_state) = nonterminal_nodes.get(&source_nonterminal) else {
             continue;
         };
 
         let s0 = nfa.add_state();
         let s1 = nfa.add_state();
-        let s2 = nfa.add_state();
-        let s3 = nfa.add_state();
+        let s2 = if shorten_mode.shorten_goto && goto_is_replace {
+            None
+        } else {
+            Some(nfa.add_state())
+        };
+        let s3 = if shorten_mode.shorten_shift && shift_is_replace {
+            None
+        } else {
+            Some(nfa.add_state())
+        };
         let s4 = nfa.add_state();
 
         nfa.add_epsilon(source_state, s0);
         nfa.add_transition(s0, encode_positive_label(revealed_state), s1);
-        nfa.add_transition(s1, encode_negative_label(revealed_state), s2);
-        nfa.add_transition(s2, encode_negative_label(goto_state), s3);
-        nfa.add_transition(s3, encode_negative_label(shift_state), s4);
+        let after_revealed = if let Some(s2) = s2 {
+            nfa.add_transition(s1, encode_negative_label(revealed_state), s2);
+            s2
+        } else {
+            s1
+        };
+        let after_goto = if let Some(s3) = s3 {
+            nfa.add_transition(after_revealed, encode_negative_label(goto_state), s3);
+            s3
+        } else {
+            after_revealed
+        };
+        nfa.add_transition(after_goto, encode_negative_label(shift_state), s4);
         nfa.set_accepting(s4);
     }
 
@@ -403,4 +463,100 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
     }
 
     nfa
+}
+
+#[cfg(test)]
+pub(crate) fn debug_template_nfa_label_paths(
+    characterization: &TerminalCharacterization,
+    terminal: TerminalID,
+    start: u32,
+) -> Vec<Vec<i32>> {
+    fn dfs(nfa: &NFA, state: u32, path: &mut Vec<i32>, out: &mut Vec<Vec<i32>>) {
+        let current = &nfa.states[state as usize];
+        if current.is_accepting {
+            out.push(path.clone());
+        }
+        for &next in &current.epsilons {
+            dfs(nfa, next, path, out);
+        }
+        for (&label, targets) in &current.transitions {
+            for &next in targets {
+                path.push(label);
+                dfs(nfa, next, path, out);
+                path.pop();
+            }
+        }
+    }
+
+    let nfa = build_template_nfa(characterization, terminal);
+    let mut out = Vec::new();
+    dfs(&nfa, start, &mut Vec::new(), &mut out);
+    out.sort();
+    out.dedup();
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_template_nfa_basic_shift() {
+        let characterization = TerminalCharacterization {
+            shifts: vec![(1, 2, false)],
+            reduces: vec![],
+            nt_escapes: vec![],
+            nt_rereduces: vec![],
+            all_nts: Default::default(),
+        };
+
+        let paths = debug_template_nfa_label_paths(&characterization, 7, 0);
+
+        assert!(paths.contains(&vec![encode_positive_label(1), encode_negative_label(1), encode_negative_label(2)]));
+    }
+
+    #[test]
+    fn test_build_template_nfa_basic_escape() {
+        let characterization = TerminalCharacterization {
+            shifts: vec![],
+            reduces: vec![],
+            nt_escapes: vec![(10, 3, 4, 5, false, false)],
+            nt_rereduces: vec![],
+            all_nts: [10].into_iter().collect(),
+        };
+
+        let paths = debug_template_nfa_label_paths(&characterization, 7, 1);
+
+        assert!(paths.contains(&vec![encode_positive_label(3), encode_negative_label(3), encode_negative_label(4), encode_negative_label(5)]));
+    }
+
+    #[test]
+    fn test_build_template_nfa_shift_replace_keeps_stack_shape() {
+        let characterization = TerminalCharacterization {
+            shifts: vec![(1, 2, true)],
+            reduces: vec![],
+            nt_escapes: vec![],
+            nt_rereduces: vec![],
+            all_nts: Default::default(),
+        };
+
+        let paths = debug_template_nfa_label_paths(&characterization, 7, 0);
+
+        assert!(paths.contains(&vec![encode_positive_label(1), encode_negative_label(1), encode_negative_label(2)]));
+    }
+
+    #[test]
+    fn test_build_template_nfa_goto_replace_keeps_stack_shape() {
+        let characterization = TerminalCharacterization {
+            shifts: vec![],
+            reduces: vec![],
+            nt_escapes: vec![(10, 3, 4, 5, true, false)],
+            nt_rereduces: vec![],
+            all_nts: [10].into_iter().collect(),
+        };
+
+        let paths = debug_template_nfa_label_paths(&characterization, 7, 1);
+
+        assert!(paths.contains(&vec![encode_positive_label(3), encode_negative_label(3), encode_negative_label(4), encode_negative_label(5)]));
+    }
 }

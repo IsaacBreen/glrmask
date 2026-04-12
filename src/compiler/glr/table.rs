@@ -6,13 +6,27 @@ use serde::{Deserialize, Serialize};
 use super::analysis::{EOF, AnalyzedGrammar};
 use crate::grammar::flat::{NonterminalID, Rule, Symbol, TerminalID};
 
+fn strong_replace_equivalence_filter_enabled() -> bool {
+    std::env::var("GLRMASK_STRONG_REPLACE_EQUIV")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Action {
-    Shift(u32),
-    Reduce(u32),
+    /// Shift to target state.  The bool is true when this is a shift-replace
+    /// (overwrite top-of-stack instead of pushing).
+    Shift(u32, bool),
+    /// Reduce: (nonterminal_id, reduce_length).
+    Reduce(u32, u32),
     Split {
-        shift: Option<u32>,
-        reduces: Vec<u32>,
+        /// Optional shift target + replace flag.
+        shift: Option<(u32, bool)>,
+        /// Each reduce is (nonterminal_id, reduce_length).
+        reduces: Vec<(u32, u32)>,
         accept: bool,
     },
     Accept,
@@ -23,19 +37,58 @@ impl Action {
     #[inline]
     pub fn shift_target(&self) -> Option<u32> {
         match self {
-            Action::Shift(t) => Some(*t),
-            Action::Split { shift: Some(t), .. } => Some(*t),
+            Action::Shift(t, _) => Some(*t),
+            Action::Split { shift: Some((t, _)), .. } => Some(*t),
             _ => None,
         }
     }
 
-    /// Slice of reduce rule IDs. Empty for Shift/Accept.
+    /// Whether the shift (if any) is a replace action.
     #[inline]
-    pub fn reduce_rule_ids(&self) -> &[u32] {
+    pub fn shift_is_replace(&self) -> bool {
         match self {
-            Action::Reduce(id) => std::slice::from_ref(id),
+            Action::Shift(_, r) => *r,
+            Action::Split { shift: Some((_, r)), .. } => *r,
+            _ => false,
+        }
+    }
+
+    /// Reduce entries as (nonterminal_id, reduce_length) pairs.
+    /// For Split, returns the reduces vec. For Reduce, callers should match directly.
+    #[inline]
+    pub fn split_reduces(&self) -> &[(u32, u32)] {
+        match self {
             Action::Split { reduces, .. } => reduces.as_slice(),
             _ => &[],
+        }
+    }
+
+    /// Iterate over all reduce entries as (nonterminal_id, reduce_length).
+    /// Works for both Reduce and Split variants.
+    #[inline]
+    pub fn iter_reduces(&self) -> ReduceIter<'_> {
+        match self {
+            Action::Reduce(nt, len) => ReduceIter::Single(Some((*nt, *len))),
+            Action::Split { reduces, .. } => ReduceIter::Multi(reduces.iter()),
+            _ => ReduceIter::Multi([].iter()),
+        }
+    }
+}
+
+/// Iterator over reduce entries (nonterminal_id, reduce_length).
+pub enum ReduceIter<'a> {
+    Single(Option<(u32, u32)>),
+    Multi(std::slice::Iter<'a, (u32, u32)>),
+}
+
+impl Iterator for ReduceIter<'_> {
+    type Item = (u32, u32);
+
+    #[inline]
+    fn next(&mut self) -> Option<(u32, u32)> {
+        match self {
+            ReduceIter::Single(v) => v.take(),
+            ReduceIter::Multi(iter) => iter.next().copied(),
         }
     }
 }
@@ -43,7 +96,8 @@ impl Action {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GLRTable {
     pub action: Vec<FxHashMap<TerminalID, Action>>,
-    pub goto: Vec<FxHashMap<NonterminalID, u32>>,
+    /// Goto table: maps (state, nonterminal) → (target_state, is_replace).
+    pub goto: Vec<FxHashMap<NonterminalID, (u32, bool)>>,
     pub num_states: u32,
     pub num_terminals: u32,
     pub num_rules: u32,
@@ -53,7 +107,7 @@ pub struct GLRTable {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct TableRowKey {
     action: Vec<(TerminalID, Action)>,
-    goto: Vec<(NonterminalID, u32)>,
+    goto: Vec<(NonterminalID, (u32, bool))>,
 }
 
 impl GLRTable {
@@ -84,6 +138,7 @@ impl GLRTable {
         };
         let t3 = std::time::Instant::now();
         table.merge_recognizer_equivalent();
+        table.compute_replace_bools();
         let recog_ms = t3.elapsed().as_secs_f64() * 1000.0;
 
         let debug_profile = std::env::var("GLRMASK_DEBUG_PROFILE")
@@ -117,7 +172,197 @@ impl GLRTable {
     pub fn goto_target(&self, state: u32, nt: NonterminalID) -> Option<u32> {
         self.goto
             .get(state as usize)
-            .and_then(|by_nt| by_nt.get(&nt).copied())
+            .and_then(|by_nt| by_nt.get(&nt).map(|&(target, _)| target))
+    }
+
+    /// Whether the goto from `state` on `nt` is a goto-replace.
+    #[inline]
+    pub fn goto_is_replace(&self, state: u32, nt: NonterminalID) -> bool {
+        self.goto
+            .get(state as usize)
+            .and_then(|by_nt| by_nt.get(&nt).map(|&(_, r)| r))
+            .unwrap_or(false)
+    }
+
+    /// Compute which gotos are "replaces" and set the bool in the goto table.
+    ///
+    fn compute_replace_bools(&mut self) {
+        for source_state in 0..self.num_states as usize {
+            let action_replaces: Vec<(TerminalID, bool)> = self.action[source_state]
+                .iter()
+                .filter_map(|(&terminal, action)| match action {
+                    Action::Shift(target, _) => Some((terminal, self.immediate_replace_safe_from_hidden_src(source_state as u32, *target))),
+                    Action::Split { shift: Some((target, _)), .. } => {
+                        Some((terminal, self.immediate_replace_safe_from_hidden_src(source_state as u32, *target)))
+                    }
+                    _ => None,
+                })
+                .collect();
+
+            for (terminal, replace) in action_replaces {
+                match self.action[source_state].get_mut(&terminal) {
+                    Some(Action::Shift(_, action_replace)) => *action_replace = replace,
+                    Some(Action::Split { shift: Some((_, action_replace)), .. }) => *action_replace = replace,
+                    _ => {}
+                }
+            }
+
+            let goto_replaces: Vec<(NonterminalID, bool)> = self.goto[source_state]
+                .iter()
+                .map(|(&nt, &(target, _))| {
+                    (nt, self.immediate_replace_safe_from_hidden_src(source_state as u32, target))
+                })
+                .collect();
+
+            for (nt, replace) in goto_replaces {
+                if let Some(entry) = self.goto[source_state].get_mut(&nt) {
+                    entry.1 = replace;
+                }
+            }
+        }
+
+        if strong_replace_equivalence_filter_enabled() {
+            self.filter_replace_bools_by_predecessor_goto_equivalence();
+        }
+    }
+
+    fn filter_replace_bools_by_predecessor_goto_equivalence(&mut self) {
+        let predecessors = self.predecessor_sets();
+
+        let mut shift_updates = Vec::new();
+        for source in 0..self.action.len() {
+            for (&terminal, action) in &self.action[source] {
+                match action {
+                    Action::Shift(target, true) => shift_updates.push((
+                        source,
+                        terminal,
+                        self.predecessor_goto_equivalent(source as u32, *target, &predecessors),
+                    )),
+                    Action::Split { shift: Some((target, true)), .. } => shift_updates.push((
+                        source,
+                        terminal,
+                        self.predecessor_goto_equivalent(source as u32, *target, &predecessors),
+                    )),
+                    _ => {}
+                }
+            }
+        }
+
+        for (source, terminal, keep_replace) in shift_updates {
+            match self.action[source].get_mut(&terminal) {
+                Some(Action::Shift(_, replace)) => *replace = keep_replace,
+                Some(Action::Split { shift: Some((_, replace)), .. }) => *replace = keep_replace,
+                _ => {}
+            }
+        }
+
+        let mut goto_updates = Vec::new();
+        for source in 0..self.goto.len() {
+            for (&nt, &(target, replace)) in &self.goto[source] {
+                if replace {
+                    goto_updates.push((
+                        source,
+                        nt,
+                        self.predecessor_goto_equivalent(source as u32, target, &predecessors),
+                    ));
+                }
+            }
+        }
+
+        for (source, nt, keep_replace) in goto_updates {
+            if let Some((_, replace)) = self.goto[source].get_mut(&nt) {
+                *replace = keep_replace;
+            }
+        }
+    }
+
+    fn predecessor_sets(&self) -> Vec<BTreeSet<u32>> {
+        let nstates = self.num_states as usize;
+        let mut predecessors: Vec<BTreeSet<u32>> = vec![BTreeSet::new(); nstates];
+        for source in 0..nstates {
+            for action in self.action[source].values() {
+                if let Some(target) = action.shift_target() {
+                    predecessors[target as usize].insert(source as u32);
+                }
+            }
+            for &(target, _) in self.goto[source].values() {
+                predecessors[target as usize].insert(source as u32);
+            }
+        }
+        predecessors
+    }
+
+    fn reduced_nonterminals_for_replace_target(&self, state: u32) -> Option<Vec<NonterminalID>> {
+        let mut nts = Vec::new();
+        for action in self.action[state as usize].values() {
+            match action {
+                Action::Shift(_, _) => return None,
+                Action::Reduce(lhs, len) => {
+                    if *len != 1 {
+                        return None;
+                    }
+                    nts.push(*lhs);
+                }
+                Action::Split { shift: Some(_), .. } => return None,
+                Action::Split { shift: None, reduces, .. } => {
+                    for &(lhs, len) in reduces {
+                        if len != 1 {
+                            return None;
+                        }
+                        nts.push(lhs);
+                    }
+                }
+                Action::Accept => {}
+            }
+        }
+        nts.sort_unstable();
+        nts.dedup();
+        Some(nts)
+    }
+
+    fn predecessor_goto_equivalent(
+        &self,
+        hidden_src: u32,
+        target_state: u32,
+        predecessors: &[BTreeSet<u32>],
+    ) -> bool {
+        let Some(reduced_nts) = self.reduced_nonterminals_for_replace_target(target_state) else {
+            return false;
+        };
+
+        for &nt in &reduced_nts {
+            let hidden_goto = self.goto_target(hidden_src, nt);
+            for &pred in &predecessors[hidden_src as usize] {
+                if self.goto_target(pred, nt) != hidden_goto {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn immediate_replace_safe_from_hidden_src(&self, hidden_src: u32, current_state: u32) -> bool {
+        self.action[current_state as usize]
+            .values()
+            .all(|action| self.action_is_safe_from_hidden_src(hidden_src, action))
+    }
+
+    fn action_is_safe_from_hidden_src(&self, hidden_src: u32, action: &Action) -> bool {
+        match action {
+            Action::Shift(_, _) => false,
+            Action::Reduce(lhs, len) => *len == 1 && self.goto_target(hidden_src, *lhs).is_some(),
+            Action::Split {
+                shift: Some(_),
+                reduces,
+                ..
+            } => reduces.is_empty(),
+            Action::Split {
+                shift: None,
+                reduces,
+                ..
+            } => reduces.iter().all(|&(lhs, len)| len == 1 && self.goto_target(hidden_src, lhs).is_some()),
+            Action::Accept => true,
+        }
     }
 
     /// Merge states with identical (action, goto) rows.
@@ -172,7 +417,7 @@ impl GLRTable {
                 .map(|&s| {
                     self.goto[s as usize]
                         .iter()
-                        .map(|(&nt, &target)| (nt, mapping[target as usize]))
+                        .map(|(&nt, &(target, replace))| (nt, (mapping[target as usize], replace)))
                         .collect()
                 })
                 .collect();
@@ -194,25 +439,14 @@ impl GLRTable {
         loop {
             let prev_states = self.num_states;
 
-            // Step 1: Canonicalize rule IDs by (lhs, rhs_len).
-            let mut lhs_rhs_to_canon: FxHashMap<(NonterminalID, usize), u32> =
-                FxHashMap::default();
-            let rule_canon: Vec<u32> = self
-                .rules
-                .iter()
-                .enumerate()
-                .map(|(id, rule)| {
-                    let key = (rule.lhs, rule.rhs.len());
-                    *lhs_rhs_to_canon.entry(key).or_insert(id as u32)
-                })
-                .collect();
-
-            // Rewrite all action entries with canonical rule IDs.
+            // Step 1: Canonicalize reduces.
+            // With (nt, len) representation, reduces with the same (nt, len)
+            // are already identical. Just dedup splits.
             for state in 0..self.num_states as usize {
                 let old = std::mem::take(&mut self.action[state]);
                 let mut new_action = FxHashMap::default();
                 for (tid, action) in old {
-                    new_action.insert(tid, canonicalize_action_rules(&action, &rule_canon));
+                    new_action.insert(tid, canonicalize_action_reduces(&action));
                 }
                 self.action[state] = new_action;
             }
@@ -232,17 +466,17 @@ impl GLRTable {
             }
 
             // Build goto column for each nonterminal.
-            let mut nt_to_column: FxHashMap<NonterminalID, Vec<Option<u32>>> =
+            let mut nt_to_column: FxHashMap<NonterminalID, Vec<Option<(u32, bool)>>> =
                 FxHashMap::default();
             for &nt in &all_nts {
-                let col: Vec<Option<u32>> = (0..nstates)
+                let col: Vec<Option<(u32, bool)>> = (0..nstates)
                     .map(|s| self.goto[s].get(&nt).copied())
                     .collect();
                 nt_to_column.insert(nt, col);
             }
 
             // Group NTs by column.
-            let mut column_to_canon: FxHashMap<Vec<Option<u32>>, NonterminalID> =
+            let mut column_to_canon: FxHashMap<Vec<Option<(u32, bool)>>, NonterminalID> =
                 FxHashMap::default();
             let mut nt_remap: FxHashMap<NonterminalID, NonterminalID> = FxHashMap::default();
             for &nt in &all_nts {
@@ -257,7 +491,7 @@ impl GLRTable {
                 // Rewrite goto entries: merge columns.
                 for state in 0..nstates {
                     let old = std::mem::take(&mut self.goto[state]);
-                    let mut new_goto: FxHashMap<NonterminalID, u32> = FxHashMap::default();
+                    let mut new_goto: FxHashMap<NonterminalID, (u32, bool)> = FxHashMap::default();
                     for (nt, target) in old {
                         let canon_nt = nt_remap.get(&nt).copied().unwrap_or(nt);
                         // All remapped NTs should have the same target; just insert.
@@ -280,6 +514,27 @@ impl GLRTable {
                             if let Some(&canon) = nt_remap.get(nt) {
                                 *nt = canon;
                             }
+                        }
+                    }
+                }
+
+                // Rewrite nonterminals in Action::Reduce and Split reduces.
+                for state in 0..nstates {
+                    for action in self.action[state].values_mut() {
+                        match action {
+                            Action::Reduce(nt, _) => {
+                                if let Some(&canon) = nt_remap.get(nt) {
+                                    *nt = canon;
+                                }
+                            }
+                            Action::Split { reduces, .. } => {
+                                for (nt, _) in reduces.iter_mut() {
+                                    if let Some(&canon) = nt_remap.get(nt) {
+                                        *nt = canon;
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -312,13 +567,13 @@ impl GLRTable {
                         predecessors[target as usize].insert(x as u32);
                     }
                 }
-                for (_, &target) in &self.goto[x] {
+                for (_, &(target, _)) in &self.goto[x] {
                     predecessors[target as usize].insert(x as u32);
                 }
             }
 
             let mut collapsed_any = false;
-            let mut collapses: Vec<(usize, TerminalID, u32)> = Vec::new();
+            let mut collapses: Vec<(usize, TerminalID, (u32, u32))> = Vec::new();
             for state in 0..nstates2 {
                 for (&tid, action) in &self.action[state] {
                     if let Action::Split { shift, reduces, accept } = action {
@@ -327,8 +582,8 @@ impl GLRTable {
                             continue;
                         }
                         // Check: do all reduces have the same rhs_len?
-                        let rhs_len = self.rules[reduces[0] as usize].rhs.len();
-                        if reduces.iter().any(|&r| self.rules[r as usize].rhs.len() != rhs_len) {
+                        let rhs_len = reduces[0].1 as usize;
+                        if reduces.iter().any(|&(_, len)| len as usize != rhs_len) {
                             continue;
                         }
                         // For rhs_len=K, find all states that are K levels
@@ -351,13 +606,13 @@ impl GLRTable {
                         // from every predecessor.
                         let lhss: Vec<NonterminalID> = reduces
                             .iter()
-                            .map(|&r| self.rules[r as usize].lhs)
+                            .map(|&(nt, _)| nt)
                             .collect();
                         let mut all_same = true;
                         'pred_loop: for &pred in &candidate_froms {
-                            let first_target = self.goto[pred as usize].get(&lhss[0]).copied();
+                            let first_target = self.goto[pred as usize].get(&lhss[0]).map(|&(t, _)| t);
                             for &lhs in &lhss[1..] {
-                                let target = self.goto[pred as usize].get(&lhs).copied();
+                                let target = self.goto[pred as usize].get(&lhs).map(|&(t, _)| t);
                                 if target != first_target {
                                     all_same = false;
                                     break 'pred_loop;
@@ -371,8 +626,8 @@ impl GLRTable {
                 }
             }
 
-            for (state, tid, rule_id) in collapses {
-                self.action[state].insert(tid, Action::Reduce(rule_id));
+            for (state, tid, (nt, len)) in collapses {
+                self.action[state].insert(tid, Action::Reduce(nt, len));
                 collapsed_any = true;
             }
 
@@ -397,7 +652,7 @@ impl GLRTable {
             // Two sub-passes:
             //  4b-i: filter out split-state predecessors (handles circular deps)
             //  4b-ii: deep chain following for remaining unconverged splits
-            let mut spec_collapses: Vec<(usize, TerminalID, u32)> = Vec::new();
+            let mut spec_collapses: Vec<(usize, TerminalID, (u32, u32))> = Vec::new();
 
             // Build set of (state, terminal) pairs that have pure R/R splits
             let pure_rr_splits: BTreeSet<(usize, TerminalID)> = {
@@ -419,8 +674,8 @@ impl GLRTable {
                     let Action::Split { shift, reduces, accept } = action else { continue };
                     if shift.is_some() || *accept { continue }
 
-                    let rhs_len = self.rules[reduces[0] as usize].rhs.len();
-                    if reduces.iter().any(|&r| self.rules[r as usize].rhs.len() != rhs_len) {
+                    let rhs_len = reduces[0].1 as usize;
+                    if reduces.iter().any(|&(_, len)| len as usize != rhs_len) {
                         continue;
                     }
                     let reduces = reduces.clone();
@@ -453,13 +708,13 @@ impl GLRTable {
                     // Simple check: do all reduces converge from filtered preds?
                     let lhss: Vec<NonterminalID> = reduces
                         .iter()
-                        .map(|&r| self.rules[r as usize].lhs)
+                        .map(|&(nt, _)| nt)
                         .collect();
                     let mut simple_converge = true;
                     'pred_simple: for &pred in &filtered {
-                        let first_target = self.goto[pred as usize].get(&lhss[0]).copied();
+                        let first_target = self.goto[pred as usize].get(&lhss[0]).map(|&(t, _)| t);
                         for &lhs in &lhss[1..] {
-                            if self.goto[pred as usize].get(&lhs).copied() != first_target {
+                            if self.goto[pred as usize].get(&lhs).map(|&(t, _)| t) != first_target {
                                 simple_converge = false;
                                 break 'pred_simple;
                             }
@@ -471,44 +726,11 @@ impl GLRTable {
                     }
 
                     // 4b-ii: Deep chain following.
-                    // For each alternative, simulate the reduce chain and track
-                    // the total depth popped from the original split state S.
-                    //
-                    // Stack model: After initial reduce Ri (pop=K) from S:
-                    //   base_depth = K (below S)
-                    //   goto_from = preds^K(S)
-                    //   push T1 = goto[goto_from][lhs(Ri)]
-                    //   T1 sits at depth K-1 (one above goto_from)
-                    //
-                    // After follow-up reduce Rj (pop=M) from T1:
-                    //   We pop M items from T1's position. T1 is at K-1.
-                    //   Popping 1 removes T1 itself (back to K).
-                    //   Popping M total goes to depth K + M - 1.
-                    //   base_depth = K + M - 1
-                    //   goto_from = preds^(K+M-1)(S)
-                    //   push T2, sits at K + M - 2
-                    //
-                    // In general: after n reduces with pop values K1,K2,...,Kn,
-                    //   base_depth = K1 + K2 + ... + Kn - (n-1)
-                    //   = sum(Ki) - n + 1
-                    //
-                    // The chain terminates when the action at the pushed state
-                    // is not a Reduce on terminal T.
-                    //
-                    // All alternatives converge if they reach the same
-                    // (base_depth, final_lhs) and goto[preds^base_depth][lhs]
-                    // agrees for all preds.
-
                     const MAX_CHAIN: usize = 32;
 
-                    // Follow one alternative's chain.  Returns (base_depth, final_lhs)
-                    // or None if the chain diverges or is too deep.
-                    let follow = |first_rule: u32| -> Option<(usize, NonterminalID)> {
+                    let follow = |first_reduce: (u32, u32)| -> Option<(usize, NonterminalID)> {
                         let mut depth = rhs_len; // after initial reduce
-                        let mut rule_id = first_rule;
-                        let lhs = self.rules[rule_id as usize].lhs;
 
-                        // Compute goto targets from preds^depth(state) with lhs
                         let preds_at_depth = |d: usize| -> BTreeSet<u32> {
                             let mut s = BTreeSet::new();
                             s.insert(state as u32);
@@ -524,59 +746,49 @@ impl GLRTable {
                             s
                         };
 
-                        let mut current_lhs = lhs;
+                        let mut current_lhs = first_reduce.0;
                         for _ in 0..MAX_CHAIN {
                             let preds = preds_at_depth(depth);
                             if preds.is_empty() { return None }
 
-                            // Get goto targets
                             let mut goto_targets: BTreeSet<u32> = BTreeSet::new();
                             for &p in &preds {
-                                if let Some(&gt) = self.goto[p as usize].get(&current_lhs) {
+                                if let Some(&(gt, _)) = self.goto[p as usize].get(&current_lhs) {
                                     goto_targets.insert(gt);
                                 }
                             }
                             if goto_targets.is_empty() { return None }
 
-                            // Check action at goto targets on terminal tid
-                            let mut next_rule: Option<u32> = None;
+                            let mut next_reduce: Option<(u32, u32)> = None;
                             let mut all_reduce = true;
                             for &gt in &goto_targets {
                                 match self.action.get(gt as usize).and_then(|r| r.get(&tid)) {
-                                    Some(Action::Reduce(r)) => {
-                                        match next_rule {
-                                            None => next_rule = Some(*r),
-                                            Some(nr) if nr == *r => {}
+                                    Some(Action::Reduce(nt, len)) => {
+                                        let r = (*nt, *len);
+                                        match next_reduce {
+                                            None => next_reduce = Some(r),
+                                            Some(nr) if nr == r => {}
                                             _ => { all_reduce = false; break }
                                         }
                                     }
                                     _ => {
-                                        // Chain terminates
                                         return Some((depth, current_lhs));
                                     }
                                 }
                             }
                             if !all_reduce { return None }
 
-                            // Follow the next reduce
-                            rule_id = next_rule.unwrap();
-                            let next_rhs_len = self.rules[rule_id as usize].rhs.len();
-                            // depth after this reduce: current depth was where we pushed
-                            // the goto target (depth-1 for the pushed state).
-                            // Popping next_rhs_len from there:
-                            // new_base = (depth-1) + next_rhs_len
-                            //   = depth + next_rhs_len - 1
-                            depth = depth + next_rhs_len - 1;
-                            current_lhs = self.rules[rule_id as usize].lhs;
+                            let (next_nt, next_len) = next_reduce.unwrap();
+                            depth = depth + next_len as usize - 1;
+                            current_lhs = next_nt;
                         }
                         None // Too deep
                     };
 
-                    // Follow all alternatives
                     let mut first_result: Option<(usize, NonterminalID)> = None;
                     let mut chain_converge = true;
-                    for &rule_id in &reduces {
-                        match follow(rule_id) {
+                    for &reduce in &reduces {
+                        match follow(reduce) {
                             Some(result) => {
                                 match first_result {
                                     None => first_result = Some(result),
@@ -591,8 +803,6 @@ impl GLRTable {
                     if !chain_converge { continue }
                     let Some((final_depth, final_lhs)) = first_result else { continue };
 
-                    // All alternatives converge to (final_depth, final_lhs).
-                    // Check: from preds^final_depth(state), do all gotos agree?
                     let mut final_preds = BTreeSet::new();
                     final_preds.insert(state as u32);
                     for _ in 0..final_depth {
@@ -608,7 +818,7 @@ impl GLRTable {
                     let mut goto_target: Option<Option<u32>> = None;
                     let mut targets_agree = true;
                     for &pred in &final_preds {
-                        let target = self.goto[pred as usize].get(&final_lhs).copied();
+                        let target = self.goto[pred as usize].get(&final_lhs).map(|&(t, _)| t);
                         match goto_target {
                             None => goto_target = Some(target),
                             Some(prev) if prev == target => {}
@@ -622,8 +832,8 @@ impl GLRTable {
                 }
             }
 
-            for (state, tid, rule_id) in spec_collapses {
-                self.action[state].insert(tid, Action::Reduce(rule_id));
+            for (state, tid, (nt, len)) in spec_collapses {
+                self.action[state].insert(tid, Action::Reduce(nt, len));
                 collapsed_any = true;
             }
 
@@ -638,21 +848,21 @@ impl GLRTable {
     }
 }
 
-fn canonicalize_action_rules(action: &Action, rule_canon: &[u32]) -> Action {
+fn canonicalize_action_reduces(action: &Action) -> Action {
     match action {
-        Action::Shift(t) => Action::Shift(*t),
-        Action::Reduce(rule) => Action::Reduce(rule_canon[*rule as usize]),
+        Action::Shift(t, r) => Action::Shift(*t, *r),
+        Action::Reduce(nt, len) => Action::Reduce(*nt, *len),
         Action::Split {
             shift,
             reduces,
             accept,
         } => {
-            let mut canon_reduces: Vec<u32> =
-                reduces.iter().map(|r| rule_canon[*r as usize]).collect();
+            let mut canon_reduces: Vec<(u32, u32)> = reduces.clone();
             canon_reduces.sort_unstable();
             canon_reduces.dedup();
             if canon_reduces.len() == 1 && shift.is_none() && !accept {
-                Action::Reduce(canon_reduces[0])
+                let (nt, len) = canon_reduces[0];
+                Action::Reduce(nt, len)
             } else {
                 Action::Split {
                     shift: *shift,
@@ -667,7 +877,7 @@ fn canonicalize_action_rules(action: &Action, rule_canon: &[u32]) -> Action {
 
 fn row_key(
     action_row: &FxHashMap<TerminalID, Action>,
-    goto_row: &FxHashMap<NonterminalID, u32>,
+    goto_row: &FxHashMap<NonterminalID, (u32, bool)>,
 ) -> TableRowKey {
     TableRowKey {
         action: action_row
@@ -683,14 +893,14 @@ fn row_key(
 
 fn remap_action_targets(action: &Action, mapping: &[u32]) -> Action {
     match action {
-        Action::Shift(target) => Action::Shift(mapping[*target as usize]),
-        Action::Reduce(rule) => Action::Reduce(*rule),
+        Action::Shift(target, replace) => Action::Shift(mapping[*target as usize], *replace),
+        Action::Reduce(nt, len) => Action::Reduce(*nt, *len),
         Action::Split {
             shift,
             reduces,
             accept,
         } => Action::Split {
-            shift: shift.map(|target| mapping[target as usize]),
+            shift: shift.map(|(target, replace)| (mapping[target as usize], replace)),
             reduces: reduces.clone(),
             accept: *accept,
         },
@@ -811,7 +1021,8 @@ fn build_lr0_item_sets(grammar: &AnalyzedGrammar) -> (Vec<BTreeSet<Item>>, Vec<B
 #[derive(Default)]
 struct PendingAction {
     shift: Option<u32>,
-    reduces: Vec<u32>,
+    shift_replace: bool,
+    reduces: Vec<(u32, u32)>,
     accept: bool,
 }
 
@@ -823,8 +1034,8 @@ impl PendingAction {
         }
     }
 
-    fn push_reduce(&mut self, rule_id: u32) {
-        self.reduces.push(rule_id);
+    fn push_reduce(&mut self, nt: u32, len: u32) {
+        self.reduces.push((nt, len));
     }
 
     fn push_accept(&mut self) {
@@ -835,11 +1046,14 @@ impl PendingAction {
         self.reduces.sort_unstable();
         self.reduces.dedup();
         match (self.shift, self.reduces.len(), self.accept) {
-            (Some(target), 0, false) => Action::Shift(target),
-            (None, 1, false) => Action::Reduce(self.reduces[0]),
+            (Some(target), 0, false) => Action::Shift(target, self.shift_replace),
+            (None, 1, false) => {
+                let (nt, len) = self.reduces[0];
+                Action::Reduce(nt, len)
+            }
             (None, 0, true) => Action::Accept,
             (shift, _, accept) => Action::Split {
-                shift,
+                shift: shift.map(|t| (t, self.shift_replace)),
                 reduces: self.reduces,
                 accept,
             },
@@ -851,12 +1065,12 @@ fn initialize_pending_and_goto(
     transitions: &[BTreeMap<Symbol, u32>],
 ) -> (
     Vec<BTreeMap<TerminalID, PendingAction>>,
-    Vec<FxHashMap<NonterminalID, u32>>,
+    Vec<FxHashMap<NonterminalID, (u32, bool)>>,
 ) {
     let mut pending = std::iter::repeat_with(BTreeMap::<TerminalID, PendingAction>::new)
         .take(transitions.len())
         .collect::<Vec<_>>();
-    let mut goto: Vec<FxHashMap<NonterminalID, u32>> = (0..transitions.len()).map(|_| FxHashMap::default()).collect();
+    let mut goto: Vec<FxHashMap<NonterminalID, (u32, bool)>> = (0..transitions.len()).map(|_| FxHashMap::default()).collect();
 
     for (state_id, by_symbol) in transitions.iter().enumerate() {
         for (symbol, &target) in by_symbol {
@@ -868,7 +1082,7 @@ fn initialize_pending_and_goto(
                         .push_shift(target);
                 }
                 Symbol::Nonterminal(nonterminal) => {
-                    goto[state_id].insert(*nonterminal, target);
+                    goto[state_id].insert(*nonterminal, (target, false));
                 }
             }
         }
@@ -880,7 +1094,7 @@ fn initialize_pending_and_goto(
 fn finish_table(
     grammar: &AnalyzedGrammar,
     pending: Vec<BTreeMap<TerminalID, PendingAction>>,
-    goto: Vec<FxHashMap<NonterminalID, u32>>,
+    goto: Vec<FxHashMap<NonterminalID, (u32, bool)>>,
 ) -> GLRTable {
     let action: Vec<FxHashMap<TerminalID, Action>> = pending
         .into_iter()
@@ -928,7 +1142,7 @@ fn build_slr1_table(
                 pending[state_id]
                     .entry(lookahead)
                     .or_default()
-                    .push_reduce(item.rule);
+                    .push_reduce(rule.lhs, rule.rhs.len() as u32);
             }
         }
     }
@@ -1092,7 +1306,6 @@ fn build_lr1_table(
     let (mut pending, goto) = initialize_pending_and_goto(transitions);
 
     for (state_id, items) in item_sets.iter().enumerate() {
-
         for item in items {
             let rule = &grammar.rules[item.rule as usize];
             if item.dot as usize != rule.rhs.len() {
@@ -1107,7 +1320,7 @@ fn build_lr1_table(
             pending[state_id]
                 .entry(item.lookahead)
                 .or_default()
-                .push_reduce(item.rule);
+                .push_reduce(rule.lhs, rule.rhs.len() as u32);
         }
     }
 
@@ -1126,11 +1339,11 @@ fn lr1_core_key(items: &BTreeSet<LR1Item>) -> Vec<Item> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ActionSig {
-    Shift(u32),
-    Reduce(u32),
+    Shift(u32, bool),
+    Reduce(u32, u32),
     Split {
-        shift: Option<u32>,
-        reduces: Vec<u32>,
+        shift: Option<(u32, bool)>,
+        reduces: Vec<(u32, u32)>,
         accept: bool,
     },
     Accept,
@@ -1145,14 +1358,14 @@ struct RowSignature {
 
 fn remap_action_to_partition(action: &Action, partition: &[u32]) -> ActionSig {
     match action {
-        Action::Shift(target) => ActionSig::Shift(partition[*target as usize]),
-        Action::Reduce(rule) => ActionSig::Reduce(*rule),
+        Action::Shift(target, replace) => ActionSig::Shift(partition[*target as usize], *replace),
+        Action::Reduce(nt, len) => ActionSig::Reduce(*nt, *len),
         Action::Split {
             shift,
             reduces,
             accept,
         } => ActionSig::Split {
-            shift: shift.map(|target| partition[target as usize]),
+            shift: shift.map(|(target, replace)| (partition[target as usize], replace)),
             reduces: reduces.clone(),
             accept: *accept,
         },
@@ -1196,7 +1409,7 @@ fn refine_same_core_partition(table: &GLRTable, core_keys: &[Vec<Item>]) -> Vec<
                 .collect();
             let goto = table.goto[state]
                 .iter()
-                .map(|(&nt, &target)| (nt, partition[target as usize]))
+                .map(|(&nt, &(target, _))| (nt, partition[target as usize]))
                 .collect();
             let signature = RowSignature {
                 core_class: core_class_of[state],
@@ -1246,7 +1459,7 @@ fn merge_same_core_lr1_states(table: GLRTable, core_keys: &[Vec<Item>]) -> GLRTa
         .map(|&rep| {
             table.goto[rep as usize]
                 .iter()
-                .map(|(&nt, &target)| (nt, partition[target as usize]))
+                .map(|(&nt, &(target, replace))| (nt, (partition[target as usize], replace)))
                 .collect()
         })
         .collect();
@@ -1287,14 +1500,14 @@ mod tests {
         assert!(table.num_states >= 3);
 
         let a0 = table.action(0, 0);
-        assert!(matches!(a0, Some(Action::Shift(_))));
+        assert!(matches!(a0, Some(Action::Shift(_, _))));
 
         let shift_state = match a0 {
-            Some(Action::Shift(s)) => *s,
+            Some(Action::Shift(s, _)) => *s,
             _ => panic!("expected shift"),
         };
         let a1 = table.action(shift_state, 1);
-        assert!(matches!(a1, Some(Action::Shift(_))));
+        assert!(matches!(a1, Some(Action::Shift(_,_))));
     }
 
     #[test]
@@ -1328,11 +1541,11 @@ mod tests {
 
         let a0 = table.action(0, 0);
         let s1 = match a0 {
-            Some(Action::Shift(s)) => *s,
+            Some(Action::Shift(s, _)) => *s,
             _ => panic!(),
         };
         let a1 = table.action(s1, EOF);
-        assert!(matches!(a1, Some(Action::Reduce(_))));
+        assert!(matches!(a1, Some(Action::Reduce(_, _))));
     }
 
     #[test]
@@ -1395,14 +1608,42 @@ mod tests {
     fn test_pending_action_finish_normalizes_pure_cases() {
         let mut shift = PendingAction::default();
         shift.push_shift(7);
-        assert_eq!(shift.finish(), Action::Shift(7));
+        assert_eq!(shift.finish(), Action::Shift(7, false));
 
         let mut reduce = PendingAction::default();
-        reduce.push_reduce(11);
-        assert_eq!(reduce.finish(), Action::Reduce(11));
+        reduce.push_reduce(5, 3);
+        assert_eq!(reduce.finish(), Action::Reduce(5, 3));
 
         let mut accept = PendingAction::default();
         accept.push_accept();
         assert_eq!(accept.finish(), Action::Accept);
+    }
+
+    #[test]
+    fn test_shift_replace_marked_when_target_immediately_len1_reduces() {
+        let gdef = GrammarDef {
+            rules: vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(1)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
+            ],
+            start: 0,
+            terminals: vec![
+                crate::grammar::flat::Terminal::Literal {
+                    id: 0,
+                    bytes: b"a".to_vec(),
+                },
+            ],
+            ..Default::default()
+        };
+        let grammar = AnalyzedGrammar::from_grammar_def(&gdef);
+        let table = GLRTable::build(&grammar);
+
+        assert!(matches!(table.action(0, 0), Some(Action::Shift(_, true))));
     }
 }
