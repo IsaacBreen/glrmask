@@ -951,6 +951,165 @@ fn commit_bytes_impl_profiled(
         adv_profile.nondet_det_ns))
 }
 
+/// Per-advance entry capturing GSS state and advance profile.
+pub struct PerAdvanceEntry {
+    pub terminal_id: u32,
+    pub tokenizer_state: u32,
+    pub gss_stacks_before: Vec<Vec<u32>>,
+    pub gss_summary_upperbranch: usize,
+    pub gss_summary_interface: usize,
+    pub gss_summary_lower: usize,
+    pub gss_summary_lower_general: usize,
+    pub gss_summary_lower_segment: usize,
+    pub gss_summary_edges: usize,
+    pub gss_summary_depth: u32,
+    pub profile: AdvanceProfile,
+}
+
+/// Like commit_bytes_impl_profiled but returns per-advance entries instead of aggregated timing.
+fn commit_bytes_per_advance(
+    constraint: &Constraint,
+    state: &mut BTreeMap<u32, ParserGSS>,
+    bytes: &[u8],
+) -> Result<(Vec<PerAdvanceEntry>, Vec<(u32, Vec<Vec<u32>>)>), String> {
+    if bytes.is_empty() {
+        let final_stacks = state.iter().map(|(&ts, gss)| {
+            (ts, gss.to_stacks().into_iter().map(|(s, _)| s).collect())
+        }).collect();
+        return Ok((Vec::new(), final_stacks));
+    }
+
+    let ignore_terminal = constraint.ignore_terminal;
+
+    let mut initial_scan = InitialCommitScan::collect(constraint, state, bytes);
+    prune_initial_states(
+        state,
+        &initial_scan.accepted_terminals,
+        &initial_scan.remapped_tokenizer_states,
+    );
+    state.retain(|_, parser_state| !parser_state.is_empty());
+
+    let mut pending_state = ParserStatesByTokenizer::default();
+    let mut processing_queue: Vec<ParserStatesByTokenizer> =
+        (0..=bytes.len()).map(|_| ParserStatesByTokenizer::default()).collect();
+    processing_queue[0] = std::mem::take(state).into_iter().collect();
+
+    let mut advances = Vec::new();
+    let mut offset = 0usize;
+
+    while offset < processing_queue.len() {
+        if processing_queue[offset].is_empty() {
+            offset += 1;
+            continue;
+        }
+
+        let states_to_process = std::mem::take(&mut processing_queue[offset]);
+        for (tokenizer_state, gss_at_offset) in states_to_process {
+            let actionable_terminals = ActionableTerminals::from_gss(constraint, &gss_at_offset);
+            let exec_result = if offset == 0 {
+                initial_scan.take_exec_result(tokenizer_state).unwrap_or_else(|| {
+                    constraint.tokenizer.execute_from_state(&bytes[offset..], tokenizer_state)
+                })
+            } else {
+                constraint.tokenizer.execute_from_state(&bytes[offset..], tokenizer_state)
+            };
+
+            let mut seen_matches = FxHashSet::default();
+
+            for matched in &exec_result.matches {
+                let new_offset = offset + matched.width;
+                let ignored = is_ignored_terminal(ignore_terminal, matched.id);
+
+                if !ignored
+                    && !is_actionable_terminal(actionable_terminals.as_ref(), constraint, matched.id)
+                {
+                    continue;
+                }
+                if !seen_matches.insert((matched.width, matched.id)) {
+                    continue;
+                }
+
+                if ignored {
+                    queue_parser_state(
+                        &mut processing_queue, &mut pending_state, new_offset, bytes.len(),
+                        constraint.tokenizer.initial_state(), gss_at_offset.clone(),
+                    );
+                    continue;
+                }
+
+                if !stack_may_advance_on(&constraint.table, &gss_at_offset, matched.id) {
+                    continue;
+                }
+
+                // Capture GSS stacks and summary before advance
+                let gss_stacks_before: Vec<Vec<u32>> = gss_at_offset.to_stacks()
+                    .into_iter().map(|(s, _)| s).collect();
+                let gss_summary = gss_at_offset.summary();
+
+                let (advanced, sub_profile) = advance_stacks_profiled(
+                    &constraint.table, &gss_at_offset, matched.id,
+                );
+
+                advances.push(PerAdvanceEntry {
+                    terminal_id: matched.id,
+                    tokenizer_state,
+                    gss_stacks_before,
+                    gss_summary_upperbranch: gss_summary.upperbranch_nodes,
+                    gss_summary_interface: gss_summary.interface_nodes,
+                    gss_summary_lower: gss_summary.lower_nodes,
+                    gss_summary_lower_general: gss_summary.lower_general_nodes,
+                    gss_summary_lower_segment: gss_summary.lower_segment_nodes,
+                    gss_summary_edges: gss_summary.total_edges,
+                    gss_summary_depth: gss_summary.max_depth,
+                    profile: sub_profile,
+                });
+
+                let advanced = apply_future_terminal_disallow(
+                    constraint, &exec_result, matched.id, advanced,
+                );
+
+                if advanced.is_empty() {
+                    continue;
+                }
+
+                queue_parser_state(
+                    &mut processing_queue, &mut pending_state, new_offset, bytes.len(),
+                    constraint.tokenizer.initial_state(), advanced,
+                );
+            }
+
+            if let Some(end_state) = exec_result.end_state {
+                let future_terminals = constraint.tokenizer.possible_future_terminals(end_state);
+                if stack_may_advance_on_any(&constraint.table, &gss_at_offset, future_terminals) {
+                    queue_parser_state(
+                        &mut processing_queue, &mut pending_state, bytes.len(), bytes.len(),
+                        end_state, gss_at_offset.clone(),
+                    );
+                }
+            }
+        }
+        offset += 1;
+    }
+
+    // Fuse
+    let mut new_state: BTreeMap<u32, ParserGSS> = pending_state.into_iter().collect();
+    for parser_state in new_state.values_mut() {
+        *parser_state = parser_state.fuse(Some(1));
+    }
+    new_state.retain(|_, parser_state| !parser_state.is_empty());
+
+    let final_stacks: Vec<(u32, Vec<Vec<u32>>)> = new_state.iter().map(|(&ts, gss)| {
+        (ts, gss.to_stacks().into_iter().map(|(s, _)| s).collect())
+    }).collect();
+
+    *state = new_state;
+    if state.is_empty() {
+        return Err("commit rejected: no valid parser states remain".to_string());
+    }
+
+    Ok((advances, final_stacks))
+}
+
 impl<'a> ConstraintState<'a> {
     /// Commit a sampled token, advancing the constraint state.
     ///
@@ -988,6 +1147,21 @@ impl<'a> ConstraintState<'a> {
                 format!("commit_token: token_id {token_id} not in vocabulary")
             })?;
         commit_bytes_impl_profiled(constraint, &mut self.state, bytes)
+    }
+
+    /// Like commit_token_profiled but returns per-advance entries.
+    /// Returns (advances, final_gss_stacks) where each advance entry contains
+    /// terminal_id, tokenizer_state, GSS stacks before advance, and advance profile.
+    pub fn commit_token_per_advance(
+        &mut self,
+        token_id: u32,
+    ) -> Result<(Vec<PerAdvanceEntry>, Vec<(u32, Vec<Vec<u32>>)>), String> {
+        let constraint = self.constraint;
+        let bytes = token_bytes_for_id(constraint, token_id)
+            .ok_or_else(|| {
+                format!("commit_token: token_id {token_id} not in vocabulary")
+            })?;
+        commit_bytes_per_advance(constraint, &mut self.state, bytes)
     }
 
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {

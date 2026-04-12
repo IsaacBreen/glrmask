@@ -734,6 +734,8 @@ pub struct LeveledGSSSummary {
     pub upperbranch_nodes: usize,
     pub interface_nodes: usize,
     pub lower_nodes: usize,
+    pub lower_general_nodes: usize,
+    pub lower_segment_nodes: usize,
     pub total_unique_nodes: usize,
     pub total_edges: usize,
     pub accumulator_instances: usize,
@@ -3443,6 +3445,8 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         let mut upperbranch_nodes = 0usize;
         let mut interface_nodes = 0usize;
         let mut lower_nodes = 0usize;
+        let mut lower_general_nodes = 0usize;
+        let mut lower_segment_nodes = 0usize;
         let mut total_edges = 0usize;
         let mut accumulator_instances = 0usize;
 
@@ -3487,6 +3491,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 continue;
             }
             lower_nodes += 1;
+            match &*node {
+                Lower::Segment(_) => lower_segment_nodes += 1,
+                Lower::General { .. } => lower_general_nodes += 1,
+            }
             // Walk through this node and any owned segment chain below it.
             let mut current: &Lower<T> = &*node;
             loop {
@@ -3498,10 +3506,12 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                                 let inner_id = Arc::as_ptr(inner_seg) as usize;
                                 if !visited_lower.insert(inner_id) { break; }
                                 lower_nodes += 1;
+                                lower_segment_nodes += 1;
                                 current = &*seg.next;
                             }
                             Lower::General { children, .. } => {
                                 lower_nodes += 1;
+                                lower_general_nodes += 1;
                                 for kids in children.values() {
                                     total_edges += kids.len();
                                     for child in kids.values() {
@@ -3530,6 +3540,8 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             upperbranch_nodes,
             interface_nodes,
             lower_nodes,
+            lower_general_nodes,
+            lower_segment_nodes,
             total_unique_nodes: upperbranch_nodes + interface_nodes + lower_nodes,
             total_edges,
             accumulator_instances,

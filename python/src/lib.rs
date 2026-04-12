@@ -346,6 +346,65 @@ impl PyConstraintState {
         self.inner.with_dependent(|_owner, state| state.debug_parser_stacks())
     }
 
+    /// Per-advance profiling: returns a list of per-advance entries and final GSS stacks.
+    fn commit_token_per_advance<'py>(&mut self, py: Python<'py>, token_id: u32) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let (advances, final_stacks) = self.inner.with_dependent_mut(|_owner, state| {
+            state.commit_token_per_advance(token_id).map_err(|e| PyValueError::new_err(e))
+        })?;
+
+        let result = pyo3::types::PyDict::new(py);
+
+        // Convert advances to list of dicts
+        let advance_list = pyo3::types::PyList::empty(py);
+        for entry in advances {
+            let d = pyo3::types::PyDict::new(py);
+            d.set_item("terminal_id", entry.terminal_id)?;
+            d.set_item("tokenizer_state", entry.tokenizer_state)?;
+            d.set_item("gss_stacks_before", entry.gss_stacks_before)?;
+            d.set_item("gss_upperbranch_nodes", entry.gss_summary_upperbranch)?;
+            d.set_item("gss_interface_nodes", entry.gss_summary_interface)?;
+            d.set_item("gss_lower_nodes", entry.gss_summary_lower)?;
+            d.set_item("gss_lower_general_nodes", entry.gss_summary_lower_general)?;
+            d.set_item("gss_lower_segment_nodes", entry.gss_summary_lower_segment)?;
+            d.set_item("gss_total_edges", entry.gss_summary_edges)?;
+            d.set_item("gss_max_depth", entry.gss_summary_depth)?;
+
+            // Profile fields
+            let p = &entry.profile;
+            d.set_item("pure_shift", p.pure_shift)?;
+            d.set_item("deterministic_entered", p.deterministic_entered)?;
+            d.set_item("deterministic_finished", p.deterministic_finished)?;
+            d.set_item("nondeterministic_entered", p.nondeterministic_entered)?;
+            d.set_item("vstack_len", p.vstack_len)?;
+            d.set_item("n_reduces_above_floor", p.n_reduces_above_floor)?;
+            d.set_item("n_floor_crossings", p.n_floor_crossings)?;
+            d.set_item("n_nondet_waves", p.n_nondet_waves)?;
+            d.set_item("n_nondet_branches", p.n_nondet_branches)?;
+            d.set_item("top_states", p.top_states)?;
+            d.set_item("gss_depth", p.gss_depth)?;
+            d.set_item("total_ns", p.total_ns)?;
+            d.set_item("clone_ns", p.clone_ns)?;
+            d.set_item("summary_ns", p.summary_ns)?;
+            d.set_item("fast_path_ns", p.fast_path_ns)?;
+            d.set_item("det_ns", p.det_ns)?;
+            d.set_item("nondet_ns", p.nondet_ns)?;
+            d.set_item("nondet_det_ns", p.nondet_det_ns)?;
+            d.set_item("det_exit_reason", p.det_exit_reason)?;
+            d.set_item("det_exit_state", p.det_exit_state)?;
+            d.set_item("n_det_action_lookups", p.n_det_action_lookups)?;
+            d.set_item("n_det_goto_lookups", p.n_det_goto_lookups)?;
+            d.set_item("n_det_popn_ops", p.n_det_popn_ops)?;
+            d.set_item("n_nondet_reduce_ops", p.n_nondet_reduce_ops)?;
+            d.set_item("n_nondet_merges", p.n_nondet_merges)?;
+            d.set_item("n_nondet_isolates", p.n_nondet_isolates)?;
+            advance_list.append(d)?;
+        }
+        result.set_item("advances", advance_list)?;
+        result.set_item("final_stacks", final_stacks)?;
+
+        Ok(result)
+    }
+
     fn commit_bytes(&mut self, data: &[u8]) -> PyResult<()> {
         self.inner
             .with_dependent_mut(|_owner, state| string_result(state.commit_bytes(data)))

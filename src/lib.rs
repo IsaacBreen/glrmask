@@ -20,6 +20,7 @@ pub use error::{Error, GlrMaskError, Result};
 pub use runtime::{
     Constraint,
     ConstraintState,
+    PerAdvanceEntry,
 };
 pub use vocab::Vocab;
 
