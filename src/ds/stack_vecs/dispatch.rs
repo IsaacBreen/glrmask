@@ -115,6 +115,11 @@ macro_rules! define_dyn_stack_vec {
                 match self { $( Self::$variant(v) => v.try_push(val), )+ }
             }
 
+            #[inline]
+            pub fn try_harder_push(&mut self, val: T) -> bool {
+                match self { $( Self::$variant(v) => v.try_harder_push(val), )+ }
+            }
+
             pub fn append(&self, other: &Self) -> Self {
                 match (self, other) {
                     $( (Self::$variant(a), Self::$variant(b)) => Self::$variant(a.append(b)), )+

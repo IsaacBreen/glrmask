@@ -175,6 +175,17 @@ impl<T: Clone + Eq + Hash> StackVec<T> for ArcArrayVec<T>
     fn truncate(&mut self, new_len: usize) { ArcArrayVec::truncate(self, new_len) }
     #[inline]
     fn try_push(&mut self, val: T) -> bool { ArcArrayVec::try_push(self, val) }
+    fn try_harder_push(&mut self, val: T) -> bool {
+        // If shared, clone the backing data to make it uniquely owned, then push.
+        if Arc::strong_count(&self.data) != 1 {
+            let mut new_data = self.as_slice().to_vec();
+            new_data.push(val);
+            self.data = Arc::new(new_data);
+            self.nw = self.data.len();
+            return true;
+        }
+        ArcArrayVec::try_push(self, val)
+    }
     fn append(&self, other: &Self) -> Self { ArcArrayVec::append(self, other) }
     fn to_vec(&self) -> Vec<T> { ArcArrayVec::to_vec(self) }
 }

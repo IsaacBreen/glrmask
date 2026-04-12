@@ -213,6 +213,14 @@ impl<T: Clone + Eq + Hash> StackVec<T> for SegVec<T>
         false
     }
 
+    fn try_harder_push(&mut self, val: T) -> bool {
+        // Materialize into a new Vec, push, and rebuild as Arc<[T]>.
+        let mut v = self.to_vec();
+        v.push(val);
+        *self = SegVec::from_vec(v);
+        true
+    }
+
     fn append(&self, other: &Self) -> Self {
         SegVec::append(self, other)
     }

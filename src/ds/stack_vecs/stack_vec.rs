@@ -44,6 +44,14 @@ where
     /// When `false`, the caller should create a new segment and push there.
     fn try_push(&mut self, val: T) -> bool;
 
+    /// Like `try_push`, but tries harder: if the push fails due to shared
+    /// backing data (e.g. refcount > 1), clones the data first and retries.
+    /// Still returns `false` if the push fails for structural reasons
+    /// (e.g. fixed capacity exceeded).
+    fn try_harder_push(&mut self, val: T) -> bool {
+        self.try_push(val)
+    }
+
     /// Append `other`'s elements on top of `self`, producing a new instance.
     fn append(&self, other: &Self) -> Self;
 
