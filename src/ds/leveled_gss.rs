@@ -1,6 +1,5 @@
-use im::{HashMap as IHashMap, OrdMap};
+use im::{HashMap as IHashMap, OrdMap, Vector as ImVector};
 use smallvec::{SmallVec, smallvec};
-use arrayvec::ArrayVec;
 use std::collections::{HashMap as StdHashMap, HashSet, VecDeque};
 #[cfg(test)]
 use std::collections::BTreeMap;
@@ -400,17 +399,14 @@ impl<'a, V: Clone> IntoIterator for &'a CompactOrdMap<V> {
 
 type Children<T, N> = CompactMap<T, CompactOrdMap<Arc<N>>>;
 
-/// Maximum number of values packed into a single Segment node.
-const SEGMENT_CAP: usize = 32;
-
 /// Linear segment of the stack: multiple values packed into one node.
 /// `values[0]` is the deepest value (closest to `next`),
 /// `values[last]` is the shallowest (top of stack).
 /// Intermediate levels (all except the top) are guaranteed to have empty=false.
-/// Values are stack-allocated up to SEGMENT_CAP.
+/// Values are stored in a persistent im::Vector for O(1) clone.
 /// Segments are always non-accepting (empty is implicitly false).
 struct Segment<T: Clone + Eq + Hash> {
-    values: ArrayVec<T, SEGMENT_CAP>,
+    values: ImVector<T>,
     next: Arc<Lower<T>>,
     max_depth: u32,
     segments_len: usize,
@@ -547,7 +543,7 @@ impl<T: Clone + Eq + Hash> Lower<T> {
                     seg.next
                 } else {
                     let mut rest_values = seg.values;
-                    rest_values.pop();
+                    rest_values.pop_back();
                     new_segment(rest_values, seg.next)
                 };
                 let children = CompactMap::unit(top_value, CompactOrdMap::unit(child.max_depth(), child));
@@ -621,10 +617,10 @@ impl<T: Clone + Eq + Hash> Lower<T> {
         }
     }
 
-    /// For Segment variant, get the values slice.
+    /// For Segment variant, get the values vector.
     /// Panics if called on General.
     #[inline(always)]
-    fn segment_values(&self) -> &[T] {
+    fn segment_values(&self) -> &ImVector<T> {
         match self {
             Lower::Segment(seg) => &seg.values,
             Lower::General { .. } => panic!("segment_values called on General"),
@@ -637,8 +633,8 @@ impl<T: Clone + Eq + Hash> Lower<T> {
         match self {
             Lower::Segment(seg) if seg.values.len() == 1 => seg.next.clone(),
             Lower::Segment(seg) => seg.rest.get_or_init(|| {
-                let rest_values: ArrayVec<T, SEGMENT_CAP> =
-                    seg.values[..seg.values.len() - 1].iter().cloned().collect();
+                let rest_values: ImVector<T> =
+                    seg.values.take(seg.values.len() - 1);
                 new_segment(rest_values, seg.next.clone())
             }).clone(),
             Lower::General { .. } => panic!("segment_rest_arc called on General"),
@@ -828,8 +824,7 @@ fn new_lower<T: Clone + Eq + Hash>(children: Children<T, Lower<T>>, empty: bool)
         let (key, ord_map) = children.iter().next().unwrap();
         if ord_map.len() == 1 {
             let (_, next) = ord_map.iter().next().unwrap();
-            let mut values = ArrayVec::<T, SEGMENT_CAP>::new();
-            values.push(key.clone());
+            let values = ImVector::unit(key.clone());
             return new_segment(values, next.clone());
         }
     }
@@ -841,29 +836,20 @@ fn new_lower<T: Clone + Eq + Hash>(children: Children<T, Lower<T>>, empty: bool)
     })
 }
 
-fn new_segment<T: Clone + Eq + Hash>(values: ArrayVec<T, SEGMENT_CAP>, next: Arc<Lower<T>>) -> Arc<Lower<T>> {
-    // Merge with child segment if it fits: avoids chains of length-1 segments.
+fn new_segment<T: Clone + Eq + Hash>(values: ImVector<T>, next: Arc<Lower<T>>) -> Arc<Lower<T>> {
+    // Always merge with child segment: im::Vector append is O(log n) and clone is O(1).
     if let Lower::Segment(child_seg) = &*next {
-        let total_len = values.len() + child_seg.values.len();
-        if total_len <= SEGMENT_CAP {
-            let mut merged = ArrayVec::<T, SEGMENT_CAP>::new();
-            // child values are deeper (closer to bottom), ours are shallower (top)
-            for v in child_seg.values.iter() {
-                merged.push(v.clone());
-            }
-            for v in values.iter() {
-                merged.push(v.clone());
-            }
-            let max_depth = child_seg.next.max_depth() + merged.len() as u32;
-            let segments_len = merged.len() + child_seg.next.segments_len();
-            return Arc::new(Lower::Segment(Arc::new(Segment {
-                values: merged,
-                next: child_seg.next.clone(),
-                max_depth,
-                segments_len,
-                rest: OnceLock::new(),
-            })));
-        }
+        let mut merged = child_seg.values.clone(); // O(1) clone
+        merged.append(values); // O(log n) append
+        let max_depth = child_seg.next.max_depth() + merged.len() as u32;
+        let segments_len = merged.len() + child_seg.next.segments_len();
+        return Arc::new(Lower::Segment(Arc::new(Segment {
+            values: merged,
+            next: child_seg.next.clone(),
+            max_depth,
+            segments_len,
+            rest: OnceLock::new(),
+        })));
     }
     let max_depth = next.max_depth() + values.len() as u32;
     let segments_len = values.len() + next.segments_len();
@@ -2037,7 +2023,7 @@ pub struct ChainTail<T: Clone + Eq + Hash> {
 /// chain and continue with GSS-level operations for the leftover pop depth.
 #[derive(Clone)]
 pub struct VirtualStack<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
-    values: ArrayVec<T, SEGMENT_CAP>,
+    values: ImVector<T>,
     next: Arc<Lower<T>>,
     acc: A,
 }
@@ -2083,16 +2069,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
     /// Push a value onto the top of the stack.
     #[inline]
     pub fn push(&mut self, value: T) {
-        if self.values.len() == SEGMENT_CAP {
-            let spilled = std::mem::take(&mut self.values);
-            let old_next = std::mem::replace(&mut self.next, new_lower(CompactMap::new(), false));
-            let max_depth = old_next.max_depth() + spilled.len() as u32;
-            let segments_len = spilled.len() + old_next.segments_len();
-            self.next = Arc::new(Lower::Segment(Arc::new(Segment {
-                values: spilled, next: old_next, max_depth, segments_len, rest: OnceLock::new(),
-            })));
-        }
-        self.values.push(value);
+        self.values.push_back(value);
     }
 
     /// The total number of values available across the current segment chain.
@@ -2434,7 +2411,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         let new_inner = match &*self.inner {
             Upper::Interface(i) => {
                 let new_lower_root = new_segment(
-                    { let mut v = ArrayVec::new(); v.push(value); v },
+                    ImVector::unit(value),
                     i.inner.clone(),
                 );
                 new_interface(new_lower_root, i.acc.clone())
@@ -2969,7 +2946,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 } else {
                     // Pop within segment: create shorter segment with remaining values
                     let keep = (seg_len - k) as usize;
-                    let new_values: ArrayVec<T, SEGMENT_CAP> = values[..keep].iter().cloned().collect();
+                    let new_values = values.take(keep);
                     let next = node.segment_next();
                     Some(new_segment(new_values, next.clone()))
                 }
@@ -3175,7 +3152,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 } else {
                     // Pop within segment: create shorter segment with remaining values
                     let keep = (seg_len - k) as usize;
-                    let new_values: ArrayVec<T, SEGMENT_CAP> = seg.values[..keep].iter().cloned().collect();
+                    let new_values = seg.values.take(keep);
                     new_segment(new_values, seg.next.clone())
                 }
             } else {
