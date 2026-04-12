@@ -2161,6 +2161,57 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
         self.pending_top = Some(value);
     }
 
+    /// Return the value immediately below the current top, if any.
+    #[inline]
+    pub fn parent_of_top(&self) -> Option<T> {
+        if self.pending_top.is_some() {
+            if let Some(parent) = self.values.last() {
+                return Some(parent.clone());
+            }
+            if let Lower::Segment(seg) = &*self.next {
+                return seg.values.last().cloned();
+            }
+        } else {
+            let len = self.values.len();
+            if len >= 2 {
+                return self.values.take(len - 1).last().cloned();
+            }
+            if len == 1 {
+                if let Lower::Segment(seg) = &*self.next {
+                    return seg.values.last().cloned();
+                }
+            }
+        }
+
+        let mut parent = self.clone();
+        if parent.pop(1) == 0 {
+            parent.top().cloned()
+        } else {
+            None
+        }
+    }
+
+    /// Replace the current top-of-stack value in place.
+    #[inline]
+    pub fn replace_top(&mut self, value: T) -> bool {
+        if self.top().is_none() {
+            return false;
+        }
+        if self.pending_top.is_some() {
+            self.pending_top = Some(value);
+            return true;
+        }
+
+        let len = self.values.len();
+        if len > 0 {
+            self.values.truncate(len - 1);
+            self.pending_top = Some(value);
+            return true;
+        }
+
+        true
+    }
+
     /// The total number of values available across the current segment chain.
     #[inline]
     pub fn len(&self) -> usize {

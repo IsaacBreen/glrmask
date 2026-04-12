@@ -175,6 +175,18 @@ fn advance_deterministically(
             Some(Action::Reduce(rule_id)) => {
                 let rule = &table.rules[*rule_id as usize];
                 if rule.rhs.len() < stack.len() {
+                    if rule.rhs.len() == 1 {
+                        if let Some(goto_from) = stack.parent_of_top() {
+                            match table.goto_target(goto_from, rule.lhs) {
+                                Some(target) if stack.replace_top(target) => continue,
+                                Some(_) | None => {
+                                    *gss = ParserGSS::empty();
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+
                     // Pop |rhs| symbols and push the goto target.
                     stack.pop(rule.rhs.len());
                     let goto_from = *stack.top().unwrap();
@@ -378,6 +390,33 @@ fn advance_deterministically_profiled(
                 let rule = &table.rules[*rule_id as usize];
                 if rule.rhs.len() < stack.len() {
                     profile.n_reduces_above_floor += 1;
+                    if rule.rhs.len() == 1 {
+                        let t_parent = Instant::now();
+                        let goto_from = stack.parent_of_top();
+                        profile.det_pop_ns += t_parent.elapsed().as_nanos() as u64;
+                        if let Some(goto_from) = goto_from {
+                            profile.n_det_goto_lookups += 1;
+                            let t_goto = Instant::now();
+                            let goto = table.goto_target(goto_from, rule.lhs);
+                            profile.det_goto_lookup_ns += t_goto.elapsed().as_nanos() as u64;
+                            match goto {
+                                Some(target) => {
+                                    let t_replace = Instant::now();
+                                    if stack.replace_top(target) {
+                                        profile.det_push_ns += t_replace.elapsed().as_nanos() as u64;
+                                        continue;
+                                    }
+                                    profile.det_push_ns += t_replace.elapsed().as_nanos() as u64;
+                                }
+                                None => {
+                                    *gss = ParserGSS::empty();
+                                    profile.det_exit_reason = 4; // no goto
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+
                     let t_pop = Instant::now();
                     stack.pop(rule.rhs.len());
                     profile.det_pop_ns += t_pop.elapsed().as_nanos() as u64;
