@@ -245,7 +245,10 @@ pub struct AdvanceProfile {
     pub top_states: u32,
     pub gss_depth: u32,
     pub total_ns: u64,
-    pub setup_ns: u64,
+    /// Arc::clone cost only (production cost)
+    pub clone_ns: u64,
+    /// summary() BFS traversal (profiling-only overhead)
+    pub summary_ns: u64,
     pub fast_path_ns: u64,
     pub det_ns: u64,
     pub nondet_ns: u64,
@@ -263,13 +266,16 @@ pub(crate) fn advance_stacks_profiled(
     let t_total = Instant::now();
     let mut profile = AdvanceProfile::default();
 
-    let t_setup = Instant::now();
+    let t_clone = Instant::now();
+    let mut gss = stack.clone();
+    profile.clone_ns = t_clone.elapsed().as_nanos() as u64;
+
+    // summary() is profiling-only overhead — not in the production path
+    let t_summary = Instant::now();
     let summary = stack.summary();
     profile.top_states = stack.peek_values().len() as u32;
     profile.gss_depth = summary.max_depth;
-
-    let mut gss = stack.clone();
-    profile.setup_ns = t_setup.elapsed().as_nanos() as u64;
+    profile.summary_ns = t_summary.elapsed().as_nanos() as u64;
 
     // Fast path: single state with a pure shift action
     let t_fast_path = Instant::now();

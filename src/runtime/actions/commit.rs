@@ -693,13 +693,14 @@ fn commit_bytes_impl_profiled(
     constraint: &Constraint,
     state: &mut BTreeMap<u32, ParserGSS>,
     bytes: &[u8],
-) -> Result<(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64), String> {
+) -> Result<(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64), String> {
     use std::time::Instant;
+    let verbose = std::env::var("GLRMASK_PROFILE_VERBOSE").is_ok();
     let t_total = Instant::now();
 
     if bytes.is_empty() {
         let total_ns = t_total.elapsed().as_nanos() as u64;
-        return Ok((total_ns, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+        return Ok((total_ns, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
     }
 
     let ignore_terminal = constraint.ignore_terminal;
@@ -719,11 +720,13 @@ fn commit_bytes_impl_profiled(
     let prune_ns = t_prune.elapsed().as_nanos() as u64;
 
     let t_queue = Instant::now();
+    let t_queue_alloc = Instant::now();
     let mut pending_state = ParserStatesByTokenizer::default();
     let _advance_result_cache = AdvanceResultCache::default();
     let mut processing_queue: Vec<ParserStatesByTokenizer> =
         (0..=bytes.len()).map(|_| ParserStatesByTokenizer::default()).collect();
     processing_queue[0] = std::mem::take(state).into_iter().collect();
+    let queue_alloc_ns = t_queue_alloc.elapsed().as_nanos() as u64;
 
     let mut n_queue_entries: u64 = 0;
     let mut exec_ns: u64 = 0;
@@ -734,6 +737,13 @@ fn commit_bytes_impl_profiled(
     let mut actionable_ns: u64 = 0;
     let mut may_advance_ns: u64 = 0;
     let mut n_advances: u64 = 0;
+    let mut queue_state_ns: u64 = 0;
+    let mut seen_matches_ns: u64 = 0;
+    let mut profile_agg_ns: u64 = 0;
+    let mut n_matches_checked: u64 = 0;
+    let mut n_matches_skipped_actionable: u64 = 0;
+    let mut n_matches_skipped_seen: u64 = 0;
+    let mut n_ignored: u64 = 0;
     let mut adv_profile = AdvanceProfile::default();
     let mut offset = 0usize;
     while offset < processing_queue.len() {
@@ -762,23 +772,32 @@ fn commit_bytes_impl_profiled(
             let _terminal_result_cache = FxHashMap::<u32, ParserGSS>::default();
 
             for matched in &exec_result.matches {
+                n_matches_checked += 1;
                 let new_offset = offset + matched.width;
                 let ignored = is_ignored_terminal(ignore_terminal, matched.id);
 
                 if !ignored
                     && !is_actionable_terminal(actionable_terminals.as_ref(), constraint, matched.id)
                 {
+                    n_matches_skipped_actionable += 1;
                     continue;
                 }
-                if !seen_matches.insert((matched.width, matched.id)) {
+                let t_seen = Instant::now();
+                let is_new = seen_matches.insert((matched.width, matched.id));
+                seen_matches_ns += t_seen.elapsed().as_nanos() as u64;
+                if !is_new {
+                    n_matches_skipped_seen += 1;
                     continue;
                 }
 
                 if ignored {
+                    n_ignored += 1;
+                    let t_qs = Instant::now();
                     queue_parser_state(
                         &mut processing_queue, &mut pending_state, new_offset, bytes.len(),
                         constraint.tokenizer.initial_state(), gss_at_offset.clone(),
                     );
+                    queue_state_ns += t_qs.elapsed().as_nanos() as u64;
                     continue;
                 }
 
@@ -798,11 +817,13 @@ fn commit_bytes_impl_profiled(
                 );
                 advance_core_ns += t_adv_core.elapsed().as_nanos() as u64;
                 // Aggregate profile
+                let t_pagg = Instant::now();
                 adv_profile.n_reduces_above_floor += sub_profile.n_reduces_above_floor;
                 adv_profile.n_floor_crossings += sub_profile.n_floor_crossings;
                 adv_profile.n_nondet_waves += sub_profile.n_nondet_waves;
                 adv_profile.n_nondet_branches += sub_profile.n_nondet_branches;
-                adv_profile.setup_ns += sub_profile.setup_ns;
+                adv_profile.clone_ns += sub_profile.clone_ns;
+                adv_profile.summary_ns += sub_profile.summary_ns;
                 adv_profile.fast_path_ns += sub_profile.fast_path_ns;
                 adv_profile.det_ns += sub_profile.det_ns;
                 adv_profile.nondet_ns += sub_profile.nondet_ns;
@@ -815,6 +836,7 @@ fn commit_bytes_impl_profiled(
                 adv_profile.gss_depth = sub_profile.gss_depth;
                 adv_profile.det_exit_reason = sub_profile.det_exit_reason;
                 adv_profile.det_exit_state = sub_profile.det_exit_state;
+                profile_agg_ns += t_pagg.elapsed().as_nanos() as u64;
 
                 let t_adv_disallow = Instant::now();
                 let advanced = apply_future_terminal_disallow(
@@ -829,10 +851,12 @@ fn commit_bytes_impl_profiled(
                 }
                 let gss = advanced;
 
+                let t_qs = Instant::now();
                 queue_parser_state(
                     &mut processing_queue, &mut pending_state, new_offset, bytes.len(),
                     constraint.tokenizer.initial_state(), gss,
                 );
+                queue_state_ns += t_qs.elapsed().as_nanos() as u64;
             }
 
             if let Some(end_state) = exec_result.end_state {
@@ -843,21 +867,29 @@ fn commit_bytes_impl_profiled(
                 if !may_advance {
                     continue;
                 }
+                let t_qs = Instant::now();
                 queue_parser_state(
                     &mut processing_queue, &mut pending_state, bytes.len(), bytes.len(),
                     end_state, gss_at_offset,
                 );
+                queue_state_ns += t_qs.elapsed().as_nanos() as u64;
             }
         }
     }
     let queue_ns = t_queue.elapsed().as_nanos() as u64;
 
     let t_fuse = Instant::now();
+    let t_fuse_convert = Instant::now();
     let mut new_state: BTreeMap<u32, ParserGSS> = pending_state.into_iter().collect();
+    let fuse_convert_ns = t_fuse_convert.elapsed().as_nanos() as u64;
+    let t_fuse_core = Instant::now();
     for parser_state in new_state.values_mut() {
         *parser_state = parser_state.fuse(Some(1));
     }
+    let fuse_core_ns = t_fuse_core.elapsed().as_nanos() as u64;
+    let t_fuse_retain = Instant::now();
     new_state.retain(|_, parser_state| !parser_state.is_empty());
+    let fuse_retain_ns = t_fuse_retain.elapsed().as_nanos() as u64;
     let fuse_ns = t_fuse.elapsed().as_nanos() as u64;
 
     *state = new_state;
@@ -866,6 +898,26 @@ fn commit_bytes_impl_profiled(
     }
 
     let total_ns = t_total.elapsed().as_nanos() as u64;
+    if verbose {
+        let queue_overhead = queue_ns.saturating_sub(exec_ns + advance_ns + actionable_ns + may_advance_ns + queue_state_ns + seen_matches_ns);
+        eprintln!("[PROFILE_VERBOSE] === Queue Overhead Breakdown ===");
+        eprintln!("[PROFILE_VERBOSE] queue_alloc_ns:       {}", queue_alloc_ns);
+        eprintln!("[PROFILE_VERBOSE] queue_state_ns:       {}", queue_state_ns);
+        eprintln!("[PROFILE_VERBOSE] seen_matches_ns:      {}", seen_matches_ns);
+        eprintln!("[PROFILE_VERBOSE] profile_agg_ns:       {}", profile_agg_ns);
+        eprintln!("[PROFILE_VERBOSE] queue_residual_ns:    {}", queue_overhead);
+        eprintln!("[PROFILE_VERBOSE] n_matches_checked:    {}", n_matches_checked);
+        eprintln!("[PROFILE_VERBOSE] n_matches_skip_act:   {}", n_matches_skipped_actionable);
+        eprintln!("[PROFILE_VERBOSE] n_matches_skip_seen:  {}", n_matches_skipped_seen);
+        eprintln!("[PROFILE_VERBOSE] n_ignored:            {}", n_ignored);
+        eprintln!("[PROFILE_VERBOSE] === Fuse Breakdown ===");
+        eprintln!("[PROFILE_VERBOSE] fuse_convert_ns:      {}", fuse_convert_ns);
+        eprintln!("[PROFILE_VERBOSE] fuse_core_ns:         {}", fuse_core_ns);
+        eprintln!("[PROFILE_VERBOSE] fuse_retain_ns:       {}", fuse_retain_ns);
+        eprintln!("[PROFILE_VERBOSE] fuse_total_ns:        {}", fuse_ns);
+        eprintln!("[PROFILE_VERBOSE] n_pending_entries:    {}", state.len());
+    }
+
     Ok((total_ns, scan_ns, prune_ns, queue_ns, fuse_ns, exec_ns, advance_ns,
         advance_may_check_ns, advance_core_ns, advance_future_disallow_ns,
         actionable_ns, may_advance_ns,
@@ -874,14 +926,15 @@ fn commit_bytes_impl_profiled(
         adv_profile.n_floor_crossings as u64,
         adv_profile.n_nondet_waves as u64,
         adv_profile.n_nondet_branches as u64,
-        adv_profile.setup_ns,
+        adv_profile.clone_ns,
         adv_profile.fast_path_ns,
         adv_profile.det_ns,
         adv_profile.nondet_ns,
         adv_profile.vstack_len as u64,
         adv_profile.gss_depth as u64,
         adv_profile.det_exit_reason as u64,
-        adv_profile.det_exit_state as u64))
+        adv_profile.det_exit_state as u64,
+        adv_profile.summary_ns))
 }
 
 impl<'a> ConstraintState<'a> {
@@ -914,7 +967,7 @@ impl<'a> ConstraintState<'a> {
     pub fn commit_token_profiled(
         &mut self,
         token_id: u32,
-    ) -> Result<(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64), String> {
+    ) -> Result<(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64), String> {
         let constraint = self.constraint;
         let bytes = token_bytes_for_id(constraint, token_id)
             .ok_or_else(|| {
