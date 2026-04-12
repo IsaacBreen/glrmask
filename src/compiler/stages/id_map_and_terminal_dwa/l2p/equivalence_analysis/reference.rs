@@ -838,12 +838,12 @@ mod tests {
         use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic;
         use crate::automata::unweighted_u32::subtract::subtract;
 
-        fn format_label(grammar: &crate::compiler::grammar::model::GrammarDef, label: Label) -> String {
+        fn format_label(grammar: &crate::grammar::flat::GrammarDef, label: Label) -> String {
             let gid = label as usize;
             format!("{gid}:{}", grammar.terminal_display_name(gid as u32))
         }
 
-        fn pretty_dfa(grammar: &crate::compiler::grammar::model::GrammarDef, dfa: &DFA) -> String {
+        fn pretty_dfa(grammar: &crate::grammar::flat::GrammarDef, dfa: &DFA) -> String {
             use std::fmt::Write;
             let mut out = String::new();
             let _ = writeln!(out, "  {} states, start={}", dfa.states.len(), dfa.start_state);

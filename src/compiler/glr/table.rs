@@ -1315,7 +1315,7 @@ mod tests {
                 rhs: vec![Symbol::Terminal(0)],
             }],
             start: 0,
-            terminals: vec![crate::compiler::grammar_def::Terminal::Literal {
+            terminals: vec![crate::grammar::flat::Terminal::Literal {
                 id: 0,
                 bytes: b"a".to_vec(),
             }],
@@ -1364,11 +1364,11 @@ mod tests {
             ],
             start: 0,
             terminals: vec![
-                crate::compiler::grammar_def::Terminal::Literal {
+                crate::grammar::flat::Terminal::Literal {
                     id: 0,
                     bytes: b"a".to_vec(),
                 },
-                crate::compiler::grammar_def::Terminal::Literal {
+                crate::grammar::flat::Terminal::Literal {
                     id: 1,
                     bytes: b"+".to_vec(),
                 },
