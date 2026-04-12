@@ -110,6 +110,9 @@ impl<T: Clone + Eq + Hash, const CAP: usize> StackVec<T> for ArrayStackVec<T, CA
 }
 
 // Type aliases for common sizes
+pub type ArrayStackVec4<T> = ArrayStackVec<T, 4>;
+pub type ArrayStackVec8<T> = ArrayStackVec<T, 8>;
+pub type ArrayStackVec16<T> = ArrayStackVec<T, 16>;
 pub type ArrayStackVec32<T> = ArrayStackVec<T, 32>;
 pub type ArrayStackVec64<T> = ArrayStackVec<T, 64>;
 pub type ArrayStackVec128<T> = ArrayStackVec<T, 128>;

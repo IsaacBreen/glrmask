@@ -59,6 +59,9 @@ macro_rules! define_small_stack_vec {
     };
 }
 
+define_small_stack_vec!(SmallStackVec4, 4);
+define_small_stack_vec!(SmallStackVec8, 8);
+define_small_stack_vec!(SmallStackVec16, 16);
 define_small_stack_vec!(SmallStackVec32, 32);
 define_small_stack_vec!(SmallStackVec64, 64);
 define_small_stack_vec!(SmallStackVec128, 128);
