@@ -1,7 +1,6 @@
 use im::{HashMap as IHashMap, OrdMap};
 use smallvec::{SmallVec, smallvec};
 use super::stack_vecs::dispatch::DynStackVec;
-use std::cell::Cell;
 use std::collections::{HashMap as StdHashMap, HashSet, VecDeque};
 #[cfg(test)]
 use std::collections::BTreeMap;
@@ -1357,62 +1356,27 @@ fn accs_by_depth_upper<T, A>(
     }
 }
 
-thread_local! {
-    static MERGE_LOWER_DEPTH: Cell<u32> = const { Cell::new(0) };
-    static MERGE_LOWER_CALLS: Cell<u64> = const { Cell::new(0) };
-    static MERGE_LOWER_PTR_EQ: Cell<u64> = const { Cell::new(0) };
-    static MERGE_LOWER_SEG_SEG: Cell<u64> = const { Cell::new(0) };
-    static MERGE_LOWER_SEG_GEN: Cell<u64> = const { Cell::new(0) };
-    static MERGE_LOWER_GEN_GEN: Cell<u64> = const { Cell::new(0) };
-    static MERGE_LOWER_SEG_NEXT_EQ: Cell<u64> = const { Cell::new(0) };
-}
 
 fn merge_lower<T: Clone + Eq + Hash>(l1: &Arc<Lower<T>>, l2: &Arc<Lower<T>>) -> Arc<Lower<T>> {
-    let depth = MERGE_LOWER_DEPTH.with(|d| { let v = d.get(); d.set(v + 1); v });
-    if depth == 0 {
-        MERGE_LOWER_CALLS.with(|c| c.set(0));
-        MERGE_LOWER_PTR_EQ.with(|c| c.set(0));
-        MERGE_LOWER_SEG_SEG.with(|c| c.set(0));
-        MERGE_LOWER_SEG_GEN.with(|c| c.set(0));
-        MERGE_LOWER_GEN_GEN.with(|c| c.set(0));
-        MERGE_LOWER_SEG_NEXT_EQ.with(|c| c.set(0));
-    }
-    MERGE_LOWER_CALLS.with(|c| c.set(c.get() + 1));
-
     if Arc::ptr_eq(l1, l2) {
-        MERGE_LOWER_PTR_EQ.with(|c| c.set(c.get() + 1));
-        MERGE_LOWER_DEPTH.with(|d| d.set(depth));
-        if depth == 0 {
-            let calls = MERGE_LOWER_CALLS.with(|c| c.get());
-            eprintln!("[merge_lower] calls={} ptr_eq={} seg_seg={} seg_gen={} gen_gen={} seg_next_eq={}",
-                calls,
-                MERGE_LOWER_PTR_EQ.with(|c| c.get()),
-                MERGE_LOWER_SEG_SEG.with(|c| c.get()),
-                MERGE_LOWER_SEG_GEN.with(|c| c.get()),
-                MERGE_LOWER_GEN_GEN.with(|c| c.get()),
-                MERGE_LOWER_SEG_NEXT_EQ.with(|c| c.get()),
-            );
-        }
         return l1.clone();
     }
     let new_empty = l1.empty() || l2.empty();
-    // Fast path: merge two Segment nodes or Segment + General without building full Children
     let merged_children = match (&**l1, &**l2) {
         (Lower::Segment(s1), Lower::Segment(s2)) => {
-            MERGE_LOWER_SEG_SEG.with(|c| c.set(c.get() + 1));
-            if Arc::ptr_eq(&s1.next, &s2.next) {
-                MERGE_LOWER_SEG_NEXT_EQ.with(|c| c.set(c.get() + 1));
+            // Fast path: if both segments share the same tail and have identical
+            // values, they are structurally identical — skip deep recursion.
+            if Arc::ptr_eq(&s1.next, &s2.next) && s1.values == s2.values {
+                return l1.clone();
             }
             let v1 = l1.segment_top_value();
             let v2 = l2.segment_top_value();
             let r1 = l1.segment_rest_arc();
             let r2 = l2.segment_rest_arc();
             if v1 == v2 {
-                // Same key: merge the rests
                 let merged_next = merge_lower(&r1, &r2);
                 CompactMap::unit(v1.clone(), CompactOrdMap::unit(merged_next.max_depth(), merged_next))
             } else {
-                // Different keys: two entries
                 let mut c = CompactMap::unit(v1.clone(), CompactOrdMap::unit(r1.max_depth(), r1));
                 c.insert(v2.clone(), CompactOrdMap::unit(r2.max_depth(), r2));
                 c
@@ -1420,7 +1384,6 @@ fn merge_lower<T: Clone + Eq + Hash>(l1: &Arc<Lower<T>>, l2: &Arc<Lower<T>>) -> 
         }
         (Lower::Segment(_), Lower::General { children, .. }) |
         (Lower::General { children, .. }, Lower::Segment(_)) => {
-            MERGE_LOWER_SEG_GEN.with(|c| c.set(c.get() + 1));
             let seg = if l1.is_segment() { l1 } else { l2 };
             let value = seg.segment_top_value();
             let rest = seg.segment_rest_arc();
@@ -1441,23 +1404,10 @@ fn merge_lower<T: Clone + Eq + Hash>(l1: &Arc<Lower<T>>, l2: &Arc<Lower<T>>) -> 
             merged
         }
         (Lower::General { children: c1, .. }, Lower::General { children: c2, .. }) => {
-            MERGE_LOWER_GEN_GEN.with(|c| c.set(c.get() + 1));
             merge_children(c1, c2, |a, b| merge_lower(a, b))
         }
     };
-    let result = new_lower(merged_children, new_empty);
-    MERGE_LOWER_DEPTH.with(|d| d.set(depth));
-    if depth == 0 {
-        eprintln!("[merge_lower] calls={} ptr_eq={} seg_seg={} seg_gen={} gen_gen={} seg_next_eq={}",
-            MERGE_LOWER_CALLS.with(|c| c.get()),
-            MERGE_LOWER_PTR_EQ.with(|c| c.get()),
-            MERGE_LOWER_SEG_SEG.with(|c| c.get()),
-            MERGE_LOWER_SEG_GEN.with(|c| c.get()),
-            MERGE_LOWER_GEN_GEN.with(|c| c.get()),
-            MERGE_LOWER_SEG_NEXT_EQ.with(|c| c.get()),
-        );
-    }
-    result
+    new_lower(merged_children, new_empty)
 }
 
 fn interface_to_upperbranch<T, A>(it: &Arc<Interface<T, A>>) -> Arc<UpperBranch<T, A>>
