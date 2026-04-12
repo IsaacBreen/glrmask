@@ -805,4 +805,492 @@ impl Constraint {
     pub fn debug_num_states(&self) -> u32 {
         self.table.num_states
     }
+
+    /// Return statistics about the GLR table:
+    /// - reduce length distribution
+    /// - replace shift/goto counts
+    pub fn debug_table_stats(&self) -> String {
+        use std::collections::BTreeMap;
+        use crate::compiler::glr::table::Action;
+
+        let mut reduce_len_counts: BTreeMap<u32, usize> = BTreeMap::new();
+        let mut total_reduces = 0usize;
+        let mut total_shifts = 0usize;
+        let mut replace_shifts = 0usize;
+        let mut total_splits = 0usize;
+
+        for row in &self.table.action {
+            for (_, action) in row {
+                match action {
+                    Action::Shift(_, is_replace) => {
+                        total_shifts += 1;
+                        if *is_replace { replace_shifts += 1; }
+                    }
+                    Action::Reduce(_, len) => {
+                        *reduce_len_counts.entry(*len).or_insert(0) += 1;
+                        total_reduces += 1;
+                    }
+                    Action::Split { shift, reduces, .. } => {
+                        total_splits += 1;
+                        if let Some((_, is_replace)) = shift {
+                            total_shifts += 1;
+                            if *is_replace { replace_shifts += 1; }
+                        }
+                        for &(_, len) in reduces {
+                            *reduce_len_counts.entry(len).or_insert(0) += 1;
+                            total_reduces += 1;
+                        }
+                    }
+                    Action::Accept => {}
+                }
+            }
+        }
+
+        let mut total_gotos = 0usize;
+        let mut replace_gotos = 0usize;
+        for goto_row in &self.table.goto {
+            for (_, &(_, is_replace)) in goto_row {
+                total_gotos += 1;
+                if is_replace { replace_gotos += 1; }
+            }
+        }
+
+        let total_reduce_len: u64 = reduce_len_counts.iter()
+            .map(|(&len, &count)| len as u64 * count as u64)
+            .sum();
+        let avg_reduce_len = if total_reduces > 0 {
+            total_reduce_len as f64 / total_reduces as f64
+        } else {
+            0.0
+        };
+
+        let mut s = String::new();
+        s.push_str(&format!("States: {}\n", self.table.num_states));
+        s.push_str(&format!("Total shifts: {} (replace: {})\n", total_shifts, replace_shifts));
+        s.push_str(&format!("Total gotos: {} (replace: {})\n", total_gotos, replace_gotos));
+        s.push_str(&format!("Total reduces: {} (avg len: {:.2})\n", total_reduces, avg_reduce_len));
+        s.push_str(&format!("Total splits: {}\n", total_splits));
+        s.push_str("Reduce length distribution:\n");
+        for (&len, &count) in &reduce_len_counts {
+            s.push_str(&format!("  len={}: {} ({:.1}%)\n", len, count,
+                100.0 * count as f64 / total_reduces as f64));
+        }
+        s
+    }
+
+    pub fn debug_replace_context_stats(&self) -> String {
+        use crate::compiler::glr::table::Action;
+        use std::collections::VecDeque;
+
+        let nstates = self.table.num_states as usize;
+        let mut reachable = vec![false; nstates];
+        let mut queue = VecDeque::new();
+        if nstates > 0 {
+            reachable[0] = true;
+            queue.push_back(0u32);
+        }
+
+        while let Some(state) = queue.pop_front() {
+            for action in self.table.action[state as usize].values() {
+                if let Some(target) = action.shift_target() {
+                    if !reachable[target as usize] {
+                        reachable[target as usize] = true;
+                        queue.push_back(target);
+                    }
+                }
+            }
+            for &(target, _) in self.table.goto[state as usize].values() {
+                if !reachable[target as usize] {
+                    reachable[target as usize] = true;
+                    queue.push_back(target);
+                }
+            }
+        }
+
+        let mut incoming_replace = vec![false; nstates];
+        let mut incoming_nonreplace = vec![false; nstates];
+        let mut replace_sources = vec![Vec::new(); nstates];
+        let mut edges = Vec::new();
+
+        for source in 0..nstates {
+            if !reachable[source] {
+                continue;
+            }
+
+            for action in self.table.action[source].values() {
+                match action {
+                    Action::Shift(target, replace) => {
+                        edges.push((source, *target as usize, if *replace { 1u32 } else { 0u32 }));
+                        if *replace {
+                            incoming_replace[*target as usize] = true;
+                            replace_sources[*target as usize].push(source as u32);
+                        } else {
+                            incoming_nonreplace[*target as usize] = true;
+                        }
+                    }
+                    Action::Split { shift: Some((target, replace)), .. } => {
+                        edges.push((source, *target as usize, if *replace { 1u32 } else { 0u32 }));
+                        if *replace {
+                            incoming_replace[*target as usize] = true;
+                            replace_sources[*target as usize].push(source as u32);
+                        } else {
+                            incoming_nonreplace[*target as usize] = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            for &(target, replace) in self.table.goto[source].values() {
+                edges.push((source, target as usize, if replace { 1u32 } else { 0u32 }));
+                if replace {
+                    incoming_replace[target as usize] = true;
+                    replace_sources[target as usize].push(source as u32);
+                } else {
+                    incoming_nonreplace[target as usize] = true;
+                }
+            }
+        }
+
+        let inf = u32::MAX / 4;
+        let mut min_replace_depth = vec![inf; nstates];
+        let mut max_replace_depth = vec![None; nstates];
+        if nstates > 0 {
+            min_replace_depth[0] = 0;
+            max_replace_depth[0] = Some(0u32);
+        }
+
+        for _ in 0..nstates.saturating_sub(1) {
+            let mut changed = false;
+            for &(source, target, weight) in &edges {
+                if min_replace_depth[source] != inf {
+                    let candidate = min_replace_depth[source].saturating_add(weight);
+                    if candidate < min_replace_depth[target] {
+                        min_replace_depth[target] = candidate;
+                        changed = true;
+                    }
+                }
+
+                if let Some(source_max) = max_replace_depth[source] {
+                    let candidate = source_max.saturating_add(weight);
+                    match max_replace_depth[target] {
+                        Some(current) if current >= candidate => {}
+                        _ => {
+                            max_replace_depth[target] = Some(candidate);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        let unbounded_replace_cycle = edges.iter().any(|&(source, target, weight)| {
+            match max_replace_depth[source] {
+                Some(source_max) => {
+                    let candidate = source_max.saturating_add(weight);
+                    match max_replace_depth[target] {
+                        Some(current) => candidate > current,
+                        None => true,
+                    }
+                }
+                None => false,
+            }
+        });
+
+        let mut reduce_states = 0usize;
+        let mut replace_only = 0usize;
+        let mut nonreplace_only = 0usize;
+        let mut mixed = 0usize;
+        let mut fixed_replace_depth = 0usize;
+        let mut varying_replace_depth = 0usize;
+        let mut replace_depth_gt_one = 0usize;
+        let mut max_fixed_replace_depth = 0u32;
+        let mut single_hidden_source = 0usize;
+        let mut multiple_hidden_sources = 0usize;
+        let mut max_hidden_sources = 0usize;
+        let mut multi_source_same_reduce_gotos = 0usize;
+        let mut multi_source_distinct_reduce_gotos = 0usize;
+        let mut max_reduce_goto_signatures = 0usize;
+        let mut single_source_immediate_representable = 0usize;
+        let mut single_source_immediate_shift_conflict = 0usize;
+
+        for state in 0..nstates {
+            if !reachable[state] {
+                continue;
+            }
+
+            let has_reduce = self.table.action[state].values().any(|action| {
+                match action {
+                    Action::Reduce(_, _) => true,
+                    Action::Split { reduces, .. } => !reduces.is_empty(),
+                    _ => false,
+                }
+            });
+            if !has_reduce {
+                continue;
+            }
+
+            reduce_states += 1;
+            match (incoming_replace[state], incoming_nonreplace[state]) {
+                (true, true) => mixed += 1,
+                (true, false) => replace_only += 1,
+                (false, true) => nonreplace_only += 1,
+                (false, false) => {}
+            }
+
+            if incoming_replace[state] {
+                replace_sources[state].sort_unstable();
+                replace_sources[state].dedup();
+                let hidden_source_count = replace_sources[state].len();
+                max_hidden_sources = max_hidden_sources.max(hidden_source_count);
+                if hidden_source_count <= 1 {
+                    single_hidden_source += 1;
+                    if let Some(&hidden_src) = replace_sources[state].first() {
+                        let mut representable = true;
+                        for (&terminal, action) in &self.table.action[state] {
+                            let mut frontier = Vec::new();
+                            let mut frontier_accept = false;
+
+                            match action {
+                                Action::Reduce(lhs, len) if *len == 1 => {
+                                    if let Some(target) = self.table.goto_target(hidden_src, *lhs) {
+                                        frontier.push(target);
+                                    }
+                                }
+                                Action::Split { shift: None, reduces, accept } => {
+                                    frontier_accept = *accept;
+                                    for &(lhs, len) in reduces {
+                                        if len == 1 {
+                                            if let Some(target) = self.table.goto_target(hidden_src, lhs) {
+                                                frontier.push(target);
+                                            }
+                                        }
+                                    }
+                                }
+                                Action::Accept => {
+                                    frontier_accept = true;
+                                }
+                                _ => {
+                                    representable = false;
+                                    break;
+                                }
+                            }
+
+                            let mut shift_targets = std::collections::BTreeSet::new();
+                            let mut saw_terminal_action = frontier_accept;
+                            for frontier_state in frontier {
+                                if let Some(next_action) = self.table.action(frontier_state, terminal) {
+                                    saw_terminal_action = true;
+                                    if let Some(target) = next_action.shift_target() {
+                                        shift_targets.insert(target);
+                                    }
+                                }
+                            }
+
+                            if saw_terminal_action && shift_targets.len() > 1 {
+                                representable = false;
+                                break;
+                            }
+                        }
+
+                        if representable {
+                            single_source_immediate_representable += 1;
+                        } else {
+                            single_source_immediate_shift_conflict += 1;
+                        }
+                    }
+                } else {
+                    multiple_hidden_sources += 1;
+
+                    let mut reduce_lhss = Vec::new();
+                    for action in self.table.action[state].values() {
+                        for (lhs, _) in action.iter_reduces() {
+                            reduce_lhss.push(lhs);
+                        }
+                    }
+                    reduce_lhss.sort_unstable();
+                    reduce_lhss.dedup();
+
+                    let mut signatures = Vec::new();
+                    for &hidden_src in &replace_sources[state] {
+                        let signature: Vec<Option<u32>> = reduce_lhss
+                            .iter()
+                            .map(|&lhs| self.table.goto_target(hidden_src, lhs))
+                            .collect();
+                        signatures.push(signature);
+                    }
+                    signatures.sort_unstable();
+                    signatures.dedup();
+
+                    let signature_count = signatures.len();
+                    max_reduce_goto_signatures = max_reduce_goto_signatures.max(signature_count);
+                    if signature_count <= 1 {
+                        multi_source_same_reduce_gotos += 1;
+                    } else {
+                        multi_source_distinct_reduce_gotos += 1;
+                    }
+                }
+
+                let min_depth = min_replace_depth[state];
+                let max_depth = max_replace_depth[state].unwrap_or(0);
+                if min_depth == max_depth {
+                    fixed_replace_depth += 1;
+                    max_fixed_replace_depth = max_fixed_replace_depth.max(max_depth);
+                } else {
+                    varying_replace_depth += 1;
+                }
+                if max_depth > 1 {
+                    replace_depth_gt_one += 1;
+                }
+            }
+        }
+
+        format!(
+            "Reachable reduce states: {}\n  replace-only: {}\n  non-replace-only: {}\n  mixed-context: {}\n  replace-depth fixed: {}\n  replace-depth varying: {}\n  replace-depth max>1: {}\n  replace-depth max fixed: {}\n  replace-cycle reachable: {}\n  hidden-source count=1: {}\n  hidden-source count>1: {}\n  hidden-source max: {}\n  single-source immediate representable: {}\n  single-source immediate conflict: {}\n  multi-source same reduce-gotos: {}\n  multi-source distinct reduce-gotos: {}\n  reduce-goto signature max: {}\n",
+            reduce_states,
+            replace_only,
+            nonreplace_only,
+            mixed,
+            fixed_replace_depth,
+            varying_replace_depth,
+            replace_depth_gt_one,
+            max_fixed_replace_depth,
+            unbounded_replace_cycle,
+            single_hidden_source,
+            multiple_hidden_sources,
+            max_hidden_sources,
+            single_source_immediate_representable,
+            single_source_immediate_shift_conflict,
+            multi_source_same_reduce_gotos,
+            multi_source_distinct_reduce_gotos,
+            max_reduce_goto_signatures,
+        )
+    }
+
+    pub fn debug_replace_predecessor_goto_equivalence_stats(&self) -> String {
+        use crate::compiler::glr::table::Action;
+        use std::collections::BTreeSet;
+
+        let nstates = self.table.num_states as usize;
+        let mut predecessors: Vec<BTreeSet<u32>> = vec![BTreeSet::new(); nstates];
+        for source in 0..nstates {
+            for action in self.table.action[source].values() {
+                if let Some(target) = action.shift_target() {
+                    predecessors[target as usize].insert(source as u32);
+                }
+            }
+            for &(target, _) in self.table.goto[source].values() {
+                predecessors[target as usize].insert(source as u32);
+            }
+        }
+
+        let reduced_nonterminals = |state: u32| -> Option<Vec<u32>> {
+            let mut nts = Vec::new();
+            for action in self.table.action[state as usize].values() {
+                match action {
+                    Action::Shift(_, _) => return None,
+                    Action::Reduce(lhs, len) => {
+                        if *len != 1 {
+                            return None;
+                        }
+                        nts.push(*lhs);
+                    }
+                    Action::Split { shift: Some(_), .. } => return None,
+                    Action::Split { shift: None, reduces, .. } => {
+                        for &(lhs, len) in reduces {
+                            if len != 1 {
+                                return None;
+                            }
+                            nts.push(lhs);
+                        }
+                    }
+                    Action::Accept => {}
+                }
+            }
+            nts.sort_unstable();
+            nts.dedup();
+            Some(nts)
+        };
+
+        let is_equivalent = |hidden_src: u32, target_state: u32| -> bool {
+            let Some(reduced_nts) = reduced_nonterminals(target_state) else {
+                return false;
+            };
+
+            for &nt in &reduced_nts {
+                let hidden_goto = self.table.goto_target(hidden_src, nt);
+                for &pred in &predecessors[hidden_src as usize] {
+                    if self.table.goto_target(pred, nt) != hidden_goto {
+                        return false;
+                    }
+                }
+            }
+            true
+        };
+
+        let mut shift_replace_total = 0usize;
+        let mut shift_replace_equiv = 0usize;
+        let mut goto_replace_total = 0usize;
+        let mut goto_replace_equiv = 0usize;
+        let mut unsafe_shift_examples = Vec::new();
+        let mut unsafe_goto_examples = Vec::new();
+
+        for source in 0..nstates {
+            for (&terminal, action) in &self.table.action[source] {
+                match action {
+                    Action::Shift(target, true) => {
+                        shift_replace_total += 1;
+                        if is_equivalent(source as u32, *target) {
+                            shift_replace_equiv += 1;
+                        } else if unsafe_shift_examples.len() < 8 {
+                            unsafe_shift_examples.push(format!(
+                                "shift source={} terminal={} target={}",
+                                source, terminal, target
+                            ));
+                        }
+                    }
+                    Action::Split { shift: Some((target, true)), .. } => {
+                        shift_replace_total += 1;
+                        if is_equivalent(source as u32, *target) {
+                            shift_replace_equiv += 1;
+                        } else if unsafe_shift_examples.len() < 8 {
+                            unsafe_shift_examples.push(format!(
+                                "split-shift source={} terminal={} target={}",
+                                source, terminal, target
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            for (&nt, &(target, replace)) in &self.table.goto[source] {
+                if !replace {
+                    continue;
+                }
+                goto_replace_total += 1;
+                if is_equivalent(source as u32, target) {
+                    goto_replace_equiv += 1;
+                } else if unsafe_goto_examples.len() < 8 {
+                    unsafe_goto_examples.push(format!(
+                        "goto source={} nt={} target={}",
+                        source, nt, target
+                    ));
+                }
+            }
+        }
+
+        format!(
+            "Shift replace total: {}\n  predecessor-goto-equivalent: {}\nGoto replace total: {}\n  predecessor-goto-equivalent: {}\nUnsafe shift examples: {:?}\nUnsafe goto examples: {:?}\n",
+            shift_replace_total,
+            shift_replace_equiv,
+            goto_replace_total,
+            goto_replace_equiv,
+            unsafe_shift_examples,
+            unsafe_goto_examples,
+        )
+    }
 }

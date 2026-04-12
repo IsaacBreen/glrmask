@@ -7,6 +7,11 @@ use crate::import::ast::{GrammarExpr, NamedGrammar};
 use crate::import::json_schema::schema_to_named_grammar;
 use crate::runtime::{Constraint, ConstraintState};
 use crate::Vocab;
+use crate::compiler::glr::analysis::AnalyzedGrammar;
+use crate::compiler::glr::table::GLRTable;
+use crate::compiler::grammar::transforms::prepare_grammar_transforms_only;
+use crate::compiler::stages::templates::characterize::characterize_terminals;
+use crate::compiler::stages::templates::compile_dfa::{Templates, debug_template_nfa_label_paths};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
@@ -236,6 +241,106 @@ fn with_env_var<T>(key: &str, value: Option<&str>, f: impl FnOnce() -> T) -> T {
     result
 }
 
+fn token_vocab(tokens: &[&[u8]]) -> Vocab {
+    let entries: Vec<(u32, Vec<u8>)> = tokens
+        .iter()
+        .enumerate()
+        .map(|(i, token)| (i as u32, token.to_vec()))
+        .collect();
+    Vocab::new(entries, None)
+}
+
+fn allowed_token_ids(mask: &[u32], count: usize) -> Vec<u32> {
+    (0..count)
+        .filter(|&id| token_allowed(mask, id))
+        .map(|id| id as u32)
+        .collect()
+}
+
+fn compile_prefix_items_templates(
+    schema: &str,
+    shorten_replace: bool,
+) -> Vec<(u32, usize)> {
+    let grammar = schema_to_named_grammar(
+        &serde_json::from_str::<serde_json::Value>(schema).expect("schema JSON should parse"),
+    )
+    .expect("schema should convert to named grammar");
+    let lowered = crate::grammar::ast::lower(&grammar).expect("schema should lower");
+    let prepared = prepare_grammar_transforms_only(lowered);
+    let analyzed = AnalyzedGrammar::from_grammar_def(&prepared);
+    let table = GLRTable::build(&analyzed);
+    let characterizations = characterize_terminals(&table, &analyzed);
+    let templates = with_env_var(
+        "GLRMASK_TEMPLATE_REPLACE_SHORTEN",
+        shorten_replace.then_some("1"),
+        || Templates::from_characterizations(&characterizations),
+    );
+
+    templates
+        .by_terminal
+        .iter()
+        .map(|(&terminal, dfa)| (terminal, dfa.states.len()))
+        .collect()
+}
+
+fn compile_prefix_items_characterizations(
+    schema: &str,
+) -> std::collections::BTreeMap<u32, crate::compiler::stages::templates::characterize::TerminalCharacterization> {
+    let grammar = schema_to_named_grammar(
+        &serde_json::from_str::<serde_json::Value>(schema).expect("schema JSON should parse"),
+    )
+    .expect("schema should convert to named grammar");
+    let lowered = crate::grammar::ast::lower(&grammar).expect("schema should lower");
+    let prepared = prepare_grammar_transforms_only(lowered);
+    let analyzed = AnalyzedGrammar::from_grammar_def(&prepared);
+    let table = GLRTable::build(&analyzed);
+    characterize_terminals(&table, &analyzed)
+}
+
+fn compile_schema_table_characterizations_and_templates(
+    schema: &str,
+    shorten_mode: Option<&str>,
+) -> (
+    GLRTable,
+    std::collections::BTreeMap<u32, crate::compiler::stages::templates::characterize::TerminalCharacterization>,
+    Templates,
+) {
+    let grammar = schema_to_named_grammar(
+        &serde_json::from_str::<serde_json::Value>(schema).expect("schema JSON should parse"),
+    )
+    .expect("schema should convert to named grammar");
+    let lowered = crate::grammar::ast::lower(&grammar).expect("schema should lower");
+    let prepared = prepare_grammar_transforms_only(lowered);
+    let analyzed = AnalyzedGrammar::from_grammar_def(&prepared);
+    let table = GLRTable::build(&analyzed);
+    let characterizations = characterize_terminals(&table, &analyzed);
+    let templates = with_env_var("GLRMASK_TEMPLATE_REPLACE_SHORTEN", shorten_mode, || {
+        Templates::from_characterizations(&characterizations)
+    });
+    (table, characterizations, templates)
+}
+
+fn compile_prefix_items_table_and_templates(
+    schema: &str,
+    shorten_replace: bool,
+) -> (GLRTable, Templates) {
+    let grammar = schema_to_named_grammar(
+        &serde_json::from_str::<serde_json::Value>(schema).expect("schema JSON should parse"),
+    )
+    .expect("schema should convert to named grammar");
+    let lowered = crate::grammar::ast::lower(&grammar).expect("schema should lower");
+    let prepared = prepare_grammar_transforms_only(lowered);
+    let analyzed = AnalyzedGrammar::from_grammar_def(&prepared);
+    let table = GLRTable::build(&analyzed);
+    let characterizations = characterize_terminals(&table, &analyzed);
+    let templates = with_env_var(
+        "GLRMASK_TEMPLATE_REPLACE_SHORTEN",
+        shorten_replace.then_some("1"),
+        || Templates::from_characterizations(&characterizations),
+    );
+    (table, templates)
+}
+
 /// Adapted from `test_ebnf_ws_nullable`.
 ///
 /// Whitespace rule is nullable via `(…)*`; after committing `{`, the `}`
@@ -272,6 +377,398 @@ fn test_bounded_array_uses_repeat_range_ast() {
         named.rules.iter().any(|rule| contains_repeat_range(&rule.expr)),
         "bounded arrays should preserve a RepeatRange node instead of desugaring to an optional ladder"
     );
+}
+
+#[test]
+fn test_diag_template_replace_prefix_items_mask_difference() {
+    let schema = r#"{
+        "type": "array",
+        "prefixItems": [{"type": "string"}, {"type": "integer"}]
+    }"#;
+    let tokens: [&[u8]; 4] = [b"[]", b"[\"x\"]", b"[1]", b"[\"x\", \"y\"]"];
+    let vocab = token_vocab(&tokens);
+
+    let baseline = with_env_var("GLRMASK_TEMPLATE_REPLACE_SHORTEN", None, || {
+        Constraint::from_json_schema(schema, &vocab).expect("baseline schema should compile")
+    });
+    let shortened = with_env_var("GLRMASK_TEMPLATE_REPLACE_SHORTEN", Some("1"), || {
+        Constraint::from_json_schema(schema, &vocab).expect("shortened schema should compile")
+    });
+
+    let baseline_allowed = allowed_token_ids(&baseline.start().mask(), tokens.len());
+    let shortened_allowed = allowed_token_ids(&shortened.start().mask(), tokens.len());
+    let replace_equiv_stats = baseline.debug_replace_predecessor_goto_equivalence_stats();
+
+    let baseline_templates = compile_prefix_items_templates(schema, false);
+    let shortened_templates = compile_prefix_items_templates(schema, true);
+    let characterizations = compile_prefix_items_characterizations(schema);
+    let (table, baseline_templates_full) = compile_prefix_items_table_and_templates(schema, false);
+    let (_, shortened_templates_full) = compile_prefix_items_table_and_templates(schema, true);
+    let mut changed_templates = Vec::new();
+    for ((terminal, baseline_states), (_, shortened_states)) in baseline_templates.iter().zip(shortened_templates.iter()) {
+        if baseline_states != shortened_states {
+            changed_templates.push((*terminal, *baseline_states, *shortened_states));
+        }
+    }
+
+    let first_changed_terminal = changed_templates
+        .first()
+        .map(|(terminal, _, _)| *terminal)
+        .expect("at least one template should change under shortening");
+    let characterization = characterizations
+        .get(&first_changed_terminal)
+        .expect("changed terminal should have a characterization");
+    let baseline_paths = with_env_var("GLRMASK_TEMPLATE_REPLACE_SHORTEN", None, || {
+        debug_template_nfa_label_paths(characterization, first_changed_terminal, 0)
+    });
+    let shortened_paths = with_env_var("GLRMASK_TEMPLATE_REPLACE_SHORTEN", Some("1"), || {
+        debug_template_nfa_label_paths(characterization, first_changed_terminal, 0)
+    });
+
+    let state7_actions: Vec<(u32, String)> = table.action[7]
+        .iter()
+        .map(|(&terminal, action)| (terminal, format!("{:?}", action)))
+        .collect();
+    let state45_actions: Vec<(u32, String)> = table.action[45]
+        .iter()
+        .map(|(&terminal, action)| (terminal, format!("{:?}", action)))
+        .collect();
+    let incoming_to_7: Vec<String> = table
+        .action
+        .iter()
+        .enumerate()
+        .flat_map(|(source, row)| {
+            row.iter().filter_map(move |(&terminal, action)| match action {
+                crate::compiler::glr::table::Action::Shift(target, replace) if *target == 7 => {
+                    Some(format!("shift source={} terminal={} replace={}", source, terminal, replace))
+                }
+                crate::compiler::glr::table::Action::Split { shift: Some((target, replace)), .. } if *target == 7 => {
+                    Some(format!("split-shift source={} terminal={} replace={}", source, terminal, replace))
+                }
+                _ => None,
+            })
+        })
+        .chain(table.goto.iter().enumerate().flat_map(|(source, row)| {
+            row.iter().filter_map(move |(&nt, &(target, replace))| {
+                (target == 7).then(|| format!("goto source={} nt={} replace={}", source, nt, replace))
+            })
+        }))
+        .collect();
+    let incoming_to_45: Vec<String> = table
+        .action
+        .iter()
+        .enumerate()
+        .flat_map(|(source, row)| {
+            row.iter().filter_map(move |(&terminal, action)| match action {
+                crate::compiler::glr::table::Action::Shift(target, replace) if *target == 45 => {
+                    Some(format!("shift source={} terminal={} replace={}", source, terminal, replace))
+                }
+                crate::compiler::glr::table::Action::Split { shift: Some((target, replace)), .. } if *target == 45 => {
+                    Some(format!("split-shift source={} terminal={} replace={}", source, terminal, replace))
+                }
+                _ => None,
+            })
+        })
+        .chain(table.goto.iter().enumerate().flat_map(|(source, row)| {
+            row.iter().filter_map(move |(&nt, &(target, replace))| {
+                (target == 45).then(|| format!("goto source={} nt={} replace={}", source, nt, replace))
+            })
+        }))
+        .collect();
+    let preds_of_3: Vec<(u32, Option<u32>)> = table
+        .action
+        .iter()
+        .enumerate()
+        .flat_map(|(source, row)| {
+            row.values().filter_map(move |action| match action {
+                crate::compiler::glr::table::Action::Shift(target, _)
+                    if *target == 3 => Some(source as u32),
+                crate::compiler::glr::table::Action::Split { shift: Some((target, _)), .. }
+                    if *target == 3 => Some(source as u32),
+                _ => None,
+            })
+        })
+        .chain(table.goto.iter().enumerate().flat_map(|(source, row)| {
+            row.values().filter_map(move |&(target, _)| (target == 3).then_some(source as u32))
+        }))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(|pred| (pred, table.goto_target(pred, 0)))
+        .collect();
+    let goto_3_0 = table.goto_target(3, 0);
+    let preds_of_30: Vec<(u32, Option<u32>)> = table
+        .action
+        .iter()
+        .enumerate()
+        .flat_map(|(source, row)| {
+            row.values().filter_map(move |action| match action {
+                crate::compiler::glr::table::Action::Shift(target, _)
+                    if *target == 30 => Some(source as u32),
+                crate::compiler::glr::table::Action::Split { shift: Some((target, _)), .. }
+                    if *target == 30 => Some(source as u32),
+                _ => None,
+            })
+        })
+        .chain(table.goto.iter().enumerate().flat_map(|(source, row)| {
+            row.values().filter_map(move |&(target, _)| (target == 30).then_some(source as u32))
+        }))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(|pred| (pred, table.goto_target(pred, 0)))
+        .collect();
+    let goto_30_0 = table.goto_target(30, 0);
+    let baseline_terminal0_dfa = baseline_templates_full
+        .by_terminal
+        .get(&first_changed_terminal)
+        .expect("baseline template should exist");
+    let shortened_terminal0_dfa = shortened_templates_full
+        .by_terminal
+        .get(&first_changed_terminal)
+        .expect("shortened template should exist");
+
+    eprintln!("baseline initial allowed tokens: {:?}", baseline_allowed);
+    eprintln!("shortened initial allowed tokens: {:?}", shortened_allowed);
+    eprintln!("replace predecessor-goto-equivalence stats:\n{}", replace_equiv_stats);
+    eprintln!("changed template dfa sizes: {:?}", changed_templates);
+    eprintln!(
+        "terminal {} characterization shifts: {:?}",
+        first_changed_terminal,
+        characterization.shifts
+    );
+    eprintln!(
+        "terminal {} characterization nt_escapes: {:?}",
+        first_changed_terminal,
+        characterization.nt_escapes
+    );
+    eprintln!(
+        "terminal {} baseline nfa paths: {:?}",
+        first_changed_terminal,
+        baseline_paths
+    );
+    eprintln!(
+        "terminal {} shortened nfa paths: {:?}",
+        first_changed_terminal,
+        shortened_paths
+    );
+    eprintln!("state 7 actions: {:?}", state7_actions);
+    eprintln!("state 45 actions: {:?}", state45_actions);
+    eprintln!("incoming edges to state 7: {:?}", incoming_to_7);
+    eprintln!("incoming edges to state 45: {:?}", incoming_to_45);
+    eprintln!("goto_target(3, 0): {:?}", goto_3_0);
+    eprintln!("predecessors of state 3 with goto_target(P, 0): {:?}", preds_of_3);
+    eprintln!("goto_target(30, 0): {:?}", goto_30_0);
+    eprintln!("predecessors of state 30 with goto_target(P, 0): {:?}", preds_of_30);
+    eprintln!("terminal {} baseline dfa:\n{}", first_changed_terminal, baseline_terminal0_dfa);
+    eprintln!("terminal {} shortened dfa:\n{}", first_changed_terminal, shortened_terminal0_dfa);
+
+    assert_eq!(baseline_allowed, vec![0, 1]);
+    assert_eq!(shortened_allowed, vec![0]);
+    assert!(!changed_templates.is_empty());
+    assert_ne!(baseline_paths, shortened_paths);
+}
+
+#[test]
+fn test_diag_goto_only_failure_replace_equivalence_stats() {
+    let cases = [
+        (
+            "prefix_pattern_properties",
+            r#"{
+                "type": "object",
+                "patternProperties": {
+                    "^mode": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                    }
+                }
+            }"#,
+        ),
+        (
+            "structural_cross_token",
+            r#"{
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "a": {"type": "string"},
+                                "b": {"type": "string"}
+                            },
+                            "required": ["a", "b"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["items"],
+                "additionalProperties": false
+            }"#,
+        ),
+        (
+            "o76439_cross_token",
+            r#"{
+                "type": "object",
+                "properties": {
+                    "severity": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high"]
+                    },
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string", "maxLength": 512},
+                                "note": {"type": "string", "maxLength": 512}
+                            },
+                            "required": ["id", "note"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["severity"],
+                "additionalProperties": false
+            }"#,
+        ),
+    ];
+
+    for (name, schema) in cases {
+        let constraint = schema_constraint(schema);
+        eprintln!(
+            "goto-only failure case {} replace equivalence stats:\n{}",
+            name,
+            constraint.debug_replace_predecessor_goto_equivalence_stats()
+        );
+    }
+}
+
+#[test]
+fn test_diag_goto_only_structural_cross_token_mask_difference() {
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "a": {"type": "string", "maxLength": 10},
+                        "b": {"type": "string", "maxLength": 10}
+                    },
+                    "required": ["a", "b"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["items"],
+        "additionalProperties": false
+    }"#;
+    let tokens: [&[u8]; 2] = [
+        b"{\"items\": [{\"a\": \"x\", \"b\": \"y\"},",
+        b" {\"a\": \"z\", \"b\": \"w\"}]}",
+    ];
+    let vocab = token_vocab(&tokens);
+
+    let baseline = with_env_var("GLRMASK_TEMPLATE_REPLACE_SHORTEN", None, || {
+        Constraint::from_json_schema(schema, &vocab).expect("baseline schema should compile")
+    });
+    let goto_only = with_env_var("GLRMASK_TEMPLATE_REPLACE_SHORTEN", Some("goto"), || {
+        Constraint::from_json_schema(schema, &vocab).expect("goto-only schema should compile")
+    });
+    let baseline_stats = baseline.debug_replace_predecessor_goto_equivalence_stats();
+
+    let baseline_initial = allowed_token_ids(&baseline.start().mask(), tokens.len());
+    let goto_initial = allowed_token_ids(&goto_only.start().mask(), tokens.len());
+
+    let mut baseline_state = baseline.start();
+    let mut goto_state = goto_only.start();
+    baseline_state.commit_token(0).expect("baseline should accept token 0");
+    goto_state.commit_token(0).expect("goto-only should accept token 0");
+    let baseline_after_first = allowed_token_ids(&baseline_state.mask(), tokens.len());
+    let goto_after_first = allowed_token_ids(&goto_state.mask(), tokens.len());
+
+    let (_, baseline_chars, baseline_templates) =
+        compile_schema_table_characterizations_and_templates(schema, None);
+    let (_, goto_chars, goto_templates) =
+        compile_schema_table_characterizations_and_templates(schema, Some("goto"));
+    let mut changed_templates = Vec::new();
+    for ((terminal, baseline_dfa), (_, goto_dfa)) in baseline_templates
+        .by_terminal
+        .iter()
+        .zip(goto_templates.by_terminal.iter())
+    {
+        if baseline_dfa != goto_dfa {
+            let baseline_char = baseline_chars.get(terminal).expect("baseline characterization");
+            let goto_char = goto_chars.get(terminal).expect("goto characterization");
+            changed_templates.push((
+                *terminal,
+                baseline_dfa.states.len(),
+                goto_dfa.states.len(),
+                baseline_char.shifts.clone(),
+                baseline_char.all_nts.clone(),
+                baseline_char.nt_escapes.clone(),
+                goto_char.nt_escapes.clone(),
+            ));
+        }
+    }
+
+    let (path_terminal, _, _, _, all_nts, nt_escapes, _) = changed_templates
+        .iter()
+        .find(|(_, _, _, _, _, nt_escapes, _)| nt_escapes.iter().any(|entry| entry.4))
+        .expect("expected a changed template with goto replace");
+    let &(source_nt, _, _, _, _, _) = nt_escapes
+        .iter()
+        .find(|entry| entry.4)
+        .expect("expected goto-replace nt escape");
+    let nt_start = 1 + all_nts.iter().copied().collect::<Vec<_>>()
+        .into_iter()
+        .position(|nt| nt == source_nt)
+        .expect("source nonterminal should exist") as u32;
+    let baseline_paths = with_env_var("GLRMASK_TEMPLATE_REPLACE_SHORTEN", None, || {
+        debug_template_nfa_label_paths(
+            baseline_chars.get(path_terminal).expect("baseline characterization"),
+            *path_terminal,
+            nt_start,
+        )
+    });
+    let goto_paths = with_env_var("GLRMASK_TEMPLATE_REPLACE_SHORTEN", Some("goto"), || {
+        debug_template_nfa_label_paths(
+            baseline_chars.get(path_terminal).expect("baseline characterization"),
+            *path_terminal,
+            nt_start,
+        )
+    });
+
+    eprintln!("structural_cross_token baseline initial allowed: {:?}", baseline_initial);
+    eprintln!("structural_cross_token goto-only initial allowed: {:?}", goto_initial);
+    eprintln!(
+        "structural_cross_token baseline after first allowed: {:?}",
+        baseline_after_first
+    );
+    eprintln!(
+        "structural_cross_token goto-only after first allowed: {:?}",
+        goto_after_first
+    );
+    eprintln!(
+        "structural_cross_token replace equivalence stats:\n{}",
+        baseline_stats
+    );
+    eprintln!("structural_cross_token changed templates: {:?}", changed_templates);
+    eprintln!(
+        "structural_cross_token terminal {} baseline nt-paths: {:?}",
+        path_terminal,
+        baseline_paths
+    );
+    eprintln!(
+        "structural_cross_token terminal {} goto-only nt-paths: {:?}",
+        path_terminal,
+        goto_paths
+    );
+
+    assert_eq!(baseline_initial, vec![0]);
+    assert_eq!(goto_initial, vec![0]);
+    assert_eq!(baseline_after_first, vec![1]);
+    assert!(goto_after_first.is_empty());
 }
 
 #[test]
