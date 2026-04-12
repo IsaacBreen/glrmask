@@ -693,14 +693,14 @@ fn commit_bytes_impl_profiled(
     constraint: &Constraint,
     state: &mut BTreeMap<u32, ParserGSS>,
     bytes: &[u8],
-) -> Result<(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64), String> {
+) -> Result<(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64), String> {
     use std::time::Instant;
     let verbose = std::env::var("GLRMASK_PROFILE_VERBOSE").is_ok();
     let t_total = Instant::now();
 
     if bytes.is_empty() {
         let total_ns = t_total.elapsed().as_nanos() as u64;
-        return Ok((total_ns, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+        return Ok((total_ns, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
     }
 
     let ignore_terminal = constraint.ignore_terminal;
@@ -836,6 +836,12 @@ fn commit_bytes_impl_profiled(
                 adv_profile.gss_depth = sub_profile.gss_depth;
                 adv_profile.det_exit_reason = sub_profile.det_exit_reason;
                 adv_profile.det_exit_state = sub_profile.det_exit_state;
+                adv_profile.n_det_action_lookups += sub_profile.n_det_action_lookups;
+                adv_profile.n_det_goto_lookups += sub_profile.n_det_goto_lookups;
+                adv_profile.n_det_popn_ops += sub_profile.n_det_popn_ops;
+                adv_profile.n_nondet_reduce_ops += sub_profile.n_nondet_reduce_ops;
+                adv_profile.n_nondet_merges += sub_profile.n_nondet_merges;
+                adv_profile.n_nondet_isolates += sub_profile.n_nondet_isolates;
                 profile_agg_ns += t_pagg.elapsed().as_nanos() as u64;
 
                 let t_adv_disallow = Instant::now();
@@ -934,7 +940,13 @@ fn commit_bytes_impl_profiled(
         adv_profile.gss_depth as u64,
         adv_profile.det_exit_reason as u64,
         adv_profile.det_exit_state as u64,
-        adv_profile.summary_ns))
+        adv_profile.summary_ns,
+        adv_profile.n_det_action_lookups as u64,
+        adv_profile.n_det_goto_lookups as u64,
+        adv_profile.n_det_popn_ops as u64,
+        adv_profile.n_nondet_reduce_ops as u64,
+        adv_profile.n_nondet_merges as u64,
+        adv_profile.n_nondet_isolates as u64))
 }
 
 impl<'a> ConstraintState<'a> {
@@ -967,7 +979,7 @@ impl<'a> ConstraintState<'a> {
     pub fn commit_token_profiled(
         &mut self,
         token_id: u32,
-    ) -> Result<(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64), String> {
+    ) -> Result<(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64), String> {
         let constraint = self.constraint;
         let bytes = token_bytes_for_id(constraint, token_id)
             .ok_or_else(|| {

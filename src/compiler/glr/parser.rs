@@ -255,6 +255,19 @@ pub struct AdvanceProfile {
     /// 0 = not entered, 1 = shift (finished), 2 = split, 3 = accept, 4 = no action, 5 = no top, 6 = vstack fail, 7 = floor cross vstack fail
     pub det_exit_reason: u32,
     pub det_exit_state: u32,
+    // --- Operation counters that explain cost ---
+    /// Number of action table lookups in the deterministic loop
+    pub n_det_action_lookups: u32,
+    /// Number of goto lookups in the deterministic path
+    pub n_det_goto_lookups: u32,
+    /// Number of expensive GSS-level popn operations (floor crossings)
+    pub n_det_popn_ops: u32,
+    /// Number of reduce source enumerations in the nondeterministic path
+    pub n_nondet_reduce_ops: u32,
+    /// Number of GSS merge operations in the nondeterministic path
+    pub n_nondet_merges: u32,
+    /// Number of GSS isolate operations in the nondeterministic path
+    pub n_nondet_isolates: u32,
 }
 
 pub(crate) fn advance_stacks_profiled(
@@ -329,6 +342,7 @@ fn advance_deterministically_profiled(
             profile.det_exit_reason = 5; // no top
             break;
         };
+        profile.n_det_action_lookups += 1;
         match table.action(state, token) {
             Some(Action::Reduce(rule_id)) => {
                 let rule = &table.rules[*rule_id as usize];
@@ -336,6 +350,7 @@ fn advance_deterministically_profiled(
                     profile.n_reduces_above_floor += 1;
                     stack.pop(rule.rhs.len());
                     let goto_from = *stack.top().unwrap();
+                    profile.n_det_goto_lookups += 1;
                     match table.goto_target(goto_from, rule.lhs) {
                         Some(target) => stack.push(target),
                         None => {
@@ -346,11 +361,13 @@ fn advance_deterministically_profiled(
                     }
                 } else {
                     profile.n_floor_crossings += 1;
+                    profile.n_det_popn_ops += 1;
                     let current = stack.into_gss();
                     let popped = current.popn(rule.rhs.len() as isize);
                     let mut gotos = GotoBatch::new();
                     for goto_from in popped.peek_values() {
                         let base = popped.isolate(Some(goto_from));
+                        profile.n_det_goto_lookups += 1;
                         if let Some(target) = table.goto_target(goto_from, rule.lhs) {
                             add_goto(&mut gotos, target, base);
                         }
@@ -407,21 +424,26 @@ fn advance_nondeterministically_profiled(
             profile.n_nondet_branches += 1;
             let Some(action) = table.action(state, token) else { continue; };
 
+            profile.n_nondet_isolates += 1;
             let mut isolated = closure.isolate(Some(state));
             if advance_deterministically(table, &mut isolated, token) {
+                profile.n_nondet_merges += 1;
                 shifted = shifted.merge(&isolated);
                 continue;
             }
 
             if let Some(target) = action.shift_target() {
+                profile.n_nondet_merges += 1;
                 shifted = shifted.merge(&isolated.push(target));
             }
 
             for &rule_id in action.reduce_rule_ids() {
                 let rule = &table.rules[rule_id as usize];
                 for (goto_from, base) in reduce_sources(&closure, state, rule.rhs.len()) {
+                    profile.n_nondet_reduce_ops += 1;
                     let Some(target) = table.goto_target(goto_from, rule.lhs) else { continue; };
                     let mut branch = base.push(target);
+                    profile.n_nondet_merges += 1;
                     if advance_deterministically(table, &mut branch, token) {
                         shifted = shifted.merge(&branch);
                     } else {
