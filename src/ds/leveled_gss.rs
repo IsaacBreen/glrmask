@@ -2096,18 +2096,74 @@ pub struct ChainTail<T: Clone + Eq + Hash> {
 /// The stack has a "floor" — the Lower node below the deterministic chain.
 /// When a pop would cross the floor, the caller can materialize the current
 /// chain and continue with GSS-level operations for the leftover pop depth.
+///
+/// `pending_top` is a lazy optimization: pushes set `pending_top` instead of
+/// immediately modifying the backing values. If a pop immediately follows,
+/// we consume `pending_top` first, avoiding touching the segment chain at all.
+/// This is a common pattern during deterministic reduce chains:
+///   pop(n) → push(goto) → pop(m) → push(goto2) → ...
 #[derive(Clone)]
 pub struct VirtualStack<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
     values: SV<T>,
     next: Arc<Lower<T>>,
     acc: A,
+    pending_top: Option<T>,
+}
+
+/// Controls how eagerly VirtualStack creates new segments vs reusing existing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PushMode {
+    /// Use try_push only. On failure, create a new segment. (default)
+    Lazy,
+    /// Use try_harder_push first (clone shared data if needed).
+    /// Only create a new segment if that also fails.
+    Eager,
+}
+
+static PUSH_MODE: OnceLock<PushMode> = OnceLock::new();
+
+fn push_mode() -> PushMode {
+    *PUSH_MODE.get_or_init(|| {
+        match std::env::var("PUSH_MODE").as_deref() {
+            Ok("eager") | Ok("harder") => PushMode::Eager,
+            _ => PushMode::Lazy,
+        }
+    })
 }
 
 impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
     /// The current top-of-stack value, or None if the stack is empty.
     #[inline]
     pub fn top(&self) -> Option<&T> {
-        self.values.last()
+        self.pending_top.as_ref().or_else(|| self.values.last())
+    }
+
+    /// Flush pending_top into the backing values.
+    #[inline]
+    fn flush_pending(&mut self) {
+        if let Some(val) = self.pending_top.take() {
+            self.realize_push(val);
+        }
+    }
+
+    /// Actually push a value into the backing storage.
+    #[inline]
+    fn realize_push(&mut self, value: T) {
+        let pushed = match push_mode() {
+            PushMode::Lazy => self.values.try_push(value.clone()),
+            PushMode::Eager => {
+                if self.values.try_push(value.clone()) {
+                    true
+                } else {
+                    self.values.try_harder_push(value.clone())
+                }
+            }
+        };
+        if !pushed {
+            let seg = new_segment(self.values.clone(), self.next.clone());
+            self.next = seg;
+            self.values = SV::unit(value);
+        }
     }
 
     /// Pop `n` values from the top.
@@ -2115,6 +2171,11 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
     /// segment chain ended at a non-Segment lower node.
     #[inline]
     pub fn pop(&mut self, mut remaining: usize) -> usize {
+        // Consume pending_top first (free).
+        if remaining > 0 && self.pending_top.is_some() {
+            self.pending_top = None;
+            remaining -= 1;
+        }
         while remaining > 0 {
             let take = remaining.min(self.values.len());
             let keep = self.values.len() - take;
@@ -2132,7 +2193,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
             }
         }
         // If values was exactly drained, advance to next Segment so top() works.
-        if self.values.is_empty() {
+        if self.values.is_empty() && self.pending_top.is_none() {
             if let Lower::Segment(seg) = &*self.next {
                 self.values = seg.values.clone();
                 self.next = seg.next.clone();
@@ -2142,26 +2203,23 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
     }
 
     /// Push a value onto the top of the stack.
-    /// If the backing data is shared (try_push fails), creates a new segment
-    /// boundary and starts fresh.
+    /// Defers the actual push — stores in pending_top. If there's already a
+    /// pending value, flushes it to the backing storage first.
     #[inline]
     pub fn push(&mut self, value: T) {
-        if !self.values.try_push(value.clone()) {
-            // Can't push in-place — create a segment from current values, start fresh.
-            let seg = new_segment(self.values.clone(), self.next.clone());
-            self.next = seg;
-            self.values = SV::unit(value);
-        }
+        self.flush_pending();
+        self.pending_top = Some(value);
     }
 
     /// The total number of values available across the current segment chain.
     #[inline]
     pub fn len(&self) -> usize {
-        self.values.len() + self.next.segments_len()
+        self.values.len() + self.next.segments_len() + if self.pending_top.is_some() { 1 } else { 0 }
     }
 
     /// Materialize the virtual stack back into a GSS.
-    pub fn into_gss(self) -> LeveledGSS<T, A> {
+    pub fn into_gss(mut self) -> LeveledGSS<T, A> {
+        self.flush_pending();
         LeveledGSS {
             inner: new_interface(new_segment(self.values, self.next), self.acc),
         }
@@ -3505,7 +3563,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             Lower::Segment(seg) => (seg.values.clone(), seg.next.clone()),
             _ => return None,
         };
-        Some(VirtualStack { values, next, acc: interface.acc.clone() })
+        Some(VirtualStack { values, next, acc: interface.acc.clone(), pending_top: None })
     }
 
     pub fn is_empty(&self) -> bool {
