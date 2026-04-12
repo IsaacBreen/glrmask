@@ -127,6 +127,13 @@ macro_rules! define_dyn_stack_vec {
                 }
             }
 
+            pub fn try_append(&self, other: &Self) -> Option<Self> {
+                match (self, other) {
+                    $( (Self::$variant(a), Self::$variant(b)) => a.try_append(b).map(Self::$variant), )+
+                    _ => panic!("DynStackVec: variant mismatch in try_append"),
+                }
+            }
+
             #[inline]
             pub fn capacity(&self) -> usize {
                 match self { $( Self::$variant(v) => v.capacity(), )+ }

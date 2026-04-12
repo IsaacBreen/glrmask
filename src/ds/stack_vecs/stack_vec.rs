@@ -55,6 +55,12 @@ where
     /// Append `other`'s elements on top of `self`, producing a new instance.
     fn append(&self, other: &Self) -> Self;
 
+    /// Try to append `other`'s elements on top of `self`.
+    /// Returns `Some(combined)` on success, `None` if it would exceed capacity.
+    fn try_append(&self, other: &Self) -> Option<Self> {
+        Some(self.append(other))
+    }
+
     /// Maximum capacity. Returns `usize::MAX` if unbounded.
     fn capacity(&self) -> usize {
         usize::MAX

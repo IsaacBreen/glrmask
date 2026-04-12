@@ -104,6 +104,13 @@ impl<T: Clone + Eq + Hash, const CAP: usize> StackVec<T> for ArrayStackVec<T, CA
         Self(av)
     }
 
+    fn try_append(&self, other: &Self) -> Option<Self> {
+        if self.0.len() + other.0.len() > CAP {
+            return None;
+        }
+        Some(self.append(other))
+    }
+
     fn capacity(&self) -> usize {
         CAP
     }
