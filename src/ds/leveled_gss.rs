@@ -647,9 +647,17 @@ impl<T: Clone + Eq + Hash> Lower<T> {
         match self {
             Lower::Segment(seg) if seg.values.len() == 1 => seg.next.clone(),
             Lower::Segment(seg) => seg.rest.get_or_init(|| {
-                let rest_values: SV<T> =
-                    seg.values.take(seg.values.len() - 1);
-                new_segment(rest_values, seg.next.clone())
+                let rest_values = seg.values.take(seg.values.len() - 1);
+                // Don't merge with child; just create a shorter segment.
+                let max_depth = seg.max_depth - 1;
+                let segments_len = seg.segments_len - 1;
+                Arc::new(Lower::Segment(Arc::new(Segment {
+                    values: rest_values,
+                    next: seg.next.clone(),
+                    max_depth,
+                    segments_len,
+                    rest: OnceLock::new(),
+                })))
             }).clone(),
             Lower::General { .. } => panic!("segment_rest_arc called on General"),
         }
@@ -851,18 +859,21 @@ fn new_lower<T: Clone + Eq + Hash>(children: Children<T, Lower<T>>, empty: bool)
 }
 
 fn new_segment<T: Clone + Eq + Hash>(values: SV<T>, next: Arc<Lower<T>>) -> Arc<Lower<T>> {
-    // Always merge with child segment if possible.
+    // Merge with child segment if possible and fits.
     if let Lower::Segment(child_seg) = &*next {
-        let merged = child_seg.values.append(&values); // O(n) append
-        let max_depth = child_seg.next.max_depth() + merged.len() as u32;
-        let segments_len = merged.len() + child_seg.next.segments_len();
-        return Arc::new(Lower::Segment(Arc::new(Segment {
-            values: merged,
-            next: child_seg.next.clone(),
-            max_depth,
-            segments_len,
-            rest: OnceLock::new(),
-        })));
+        let combined_len = child_seg.values.len() + values.len();
+        if combined_len <= child_seg.values.capacity() {
+            let merged = child_seg.values.append(&values);
+            let max_depth = child_seg.next.max_depth() + merged.len() as u32;
+            let segments_len = merged.len() + child_seg.next.segments_len();
+            return Arc::new(Lower::Segment(Arc::new(Segment {
+                values: merged,
+                next: child_seg.next.clone(),
+                max_depth,
+                segments_len,
+                rest: OnceLock::new(),
+            })));
+        }
     }
     let max_depth = next.max_depth() + values.len() as u32;
     let segments_len = values.len() + next.segments_len();

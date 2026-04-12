@@ -389,6 +389,10 @@ impl PyConstraintState {
             d.set_item("det_ns", p.det_ns)?;
             d.set_item("nondet_ns", p.nondet_ns)?;
             d.set_item("nondet_det_ns", p.nondet_det_ns)?;
+            d.set_item("nondet_isolate_ns", p.nondet_isolate_ns)?;
+            d.set_item("nondet_merge_ns", p.nondet_merge_ns)?;
+            d.set_item("nondet_reduce_sources_ns", p.nondet_reduce_sources_ns)?;
+            d.set_item("nondet_push_ns", p.nondet_push_ns)?;
             d.set_item("det_exit_reason", p.det_exit_reason)?;
             d.set_item("det_exit_state", p.det_exit_state)?;
             d.set_item("n_det_action_lookups", p.n_det_action_lookups)?;

@@ -47,6 +47,11 @@ where
     /// Append `other`'s elements on top of `self`, producing a new instance.
     fn append(&self, other: &Self) -> Self;
 
+    /// Maximum capacity. Returns `usize::MAX` if unbounded.
+    fn capacity(&self) -> usize {
+        usize::MAX
+    }
+
     /// Convert to a Vec. O(n).
     fn to_vec(&self) -> Vec<T>;
 }

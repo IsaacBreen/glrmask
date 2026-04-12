@@ -122,6 +122,11 @@ macro_rules! define_dyn_stack_vec {
                 }
             }
 
+            #[inline]
+            pub fn capacity(&self) -> usize {
+                match self { $( Self::$variant(v) => v.capacity(), )+ }
+            }
+
             pub fn to_vec(&self) -> Vec<T> {
                 match self { $( Self::$variant(v) => v.to_vec(), )+ }
             }

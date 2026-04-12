@@ -104,6 +104,10 @@ impl<T: Clone + Eq + Hash, const CAP: usize> StackVec<T> for ArrayStackVec<T, CA
         Self(av)
     }
 
+    fn capacity(&self) -> usize {
+        CAP
+    }
+
     fn to_vec(&self) -> Vec<T> {
         self.0.to_vec()
     }

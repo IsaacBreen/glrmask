@@ -270,6 +270,14 @@ pub struct AdvanceProfile {
     pub n_nondet_isolates: u32,
     /// Time spent in advance_deterministically() calls inside the nondeterministic loop
     pub nondet_det_ns: u64,
+    /// Time spent in GSS isolate operations in the nondeterministic path
+    pub nondet_isolate_ns: u64,
+    /// Time spent in GSS merge operations in the nondeterministic path
+    pub nondet_merge_ns: u64,
+    /// Time spent in reduce_sources (isolate_pop_bases) in the nondeterministic path
+    pub nondet_reduce_sources_ns: u64,
+    /// Time spent in push operations in the nondeterministic path
+    pub nondet_push_ns: u64,
 }
 
 pub(crate) fn advance_stacks_profiled(
@@ -428,36 +436,53 @@ fn advance_nondeterministically_profiled(
             let Some(action) = table.action(state, token) else { continue; };
 
             profile.n_nondet_isolates += 1;
+            let t_isolate = Instant::now();
             let mut isolated = closure.isolate(Some(state));
+            profile.nondet_isolate_ns += t_isolate.elapsed().as_nanos() as u64;
+
             let t_nd_det = Instant::now();
             let det_ok = advance_deterministically(table, &mut isolated, token);
             profile.nondet_det_ns += t_nd_det.elapsed().as_nanos() as u64;
             if det_ok {
                 profile.n_nondet_merges += 1;
+                let t_merge = Instant::now();
                 shifted = shifted.merge(&isolated);
+                profile.nondet_merge_ns += t_merge.elapsed().as_nanos() as u64;
                 continue;
             }
 
             if let Some(target) = action.shift_target() {
                 profile.n_nondet_merges += 1;
-                shifted = shifted.merge(&isolated.push(target));
+                let t_push = Instant::now();
+                let pushed = isolated.push(target);
+                profile.nondet_push_ns += t_push.elapsed().as_nanos() as u64;
+                let t_merge = Instant::now();
+                shifted = shifted.merge(&pushed);
+                profile.nondet_merge_ns += t_merge.elapsed().as_nanos() as u64;
             }
 
             for &rule_id in action.reduce_rule_ids() {
                 let rule = &table.rules[rule_id as usize];
-                for (goto_from, base) in reduce_sources(&closure, state, rule.rhs.len()) {
+                let t_rs = Instant::now();
+                let sources = reduce_sources(&closure, state, rule.rhs.len());
+                profile.nondet_reduce_sources_ns += t_rs.elapsed().as_nanos() as u64;
+                for (goto_from, base) in sources {
                     profile.n_nondet_reduce_ops += 1;
                     let Some(target) = table.goto_target(goto_from, rule.lhs) else { continue; };
+                    let t_push = Instant::now();
                     let mut branch = base.push(target);
+                    profile.nondet_push_ns += t_push.elapsed().as_nanos() as u64;
                     profile.n_nondet_merges += 1;
                     let t_nd_det2 = Instant::now();
                     let det_ok2 = advance_deterministically(table, &mut branch, token);
                     profile.nondet_det_ns += t_nd_det2.elapsed().as_nanos() as u64;
+                    let t_merge = Instant::now();
                     if det_ok2 {
                         shifted = shifted.merge(&branch);
                     } else {
                         next = next.merge(&branch);
                     }
+                    profile.nondet_merge_ns += t_merge.elapsed().as_nanos() as u64;
                 }
             }
         }
