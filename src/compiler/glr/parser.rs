@@ -268,6 +268,8 @@ pub struct AdvanceProfile {
     pub n_nondet_merges: u32,
     /// Number of GSS isolate operations in the nondeterministic path
     pub n_nondet_isolates: u32,
+    /// Time spent in advance_deterministically() calls inside the nondeterministic loop
+    pub nondet_det_ns: u64,
 }
 
 pub(crate) fn advance_stacks_profiled(
@@ -414,6 +416,7 @@ fn advance_nondeterministically_profiled(
     token: TerminalID,
     profile: &mut AdvanceProfile,
 ) -> ParserGSS {
+    use std::time::Instant;
     let mut shifted = ParserGSS::empty();
 
     loop {
@@ -426,7 +429,10 @@ fn advance_nondeterministically_profiled(
 
             profile.n_nondet_isolates += 1;
             let mut isolated = closure.isolate(Some(state));
-            if advance_deterministically(table, &mut isolated, token) {
+            let t_nd_det = Instant::now();
+            let det_ok = advance_deterministically(table, &mut isolated, token);
+            profile.nondet_det_ns += t_nd_det.elapsed().as_nanos() as u64;
+            if det_ok {
                 profile.n_nondet_merges += 1;
                 shifted = shifted.merge(&isolated);
                 continue;
@@ -444,7 +450,10 @@ fn advance_nondeterministically_profiled(
                     let Some(target) = table.goto_target(goto_from, rule.lhs) else { continue; };
                     let mut branch = base.push(target);
                     profile.n_nondet_merges += 1;
-                    if advance_deterministically(table, &mut branch, token) {
+                    let t_nd_det2 = Instant::now();
+                    let det_ok2 = advance_deterministically(table, &mut branch, token);
+                    profile.nondet_det_ns += t_nd_det2.elapsed().as_nanos() as u64;
+                    if det_ok2 {
                         shifted = shifted.merge(&branch);
                     } else {
                         next = next.merge(&branch);

@@ -287,7 +287,8 @@ impl PyConstraintState {
              adv_n_reduces_above_floor, adv_n_floor_crossings, adv_n_nondet_waves, adv_n_nondet_branches, adv_clone_ns, adv_fast_path_ns, adv_det_ns, adv_nondet_ns, adv_vstack_len, adv_gss_depth,
              adv_det_exit_reason, adv_det_exit_state, adv_summary_ns,
              adv_n_det_action_lookups, adv_n_det_goto_lookups, adv_n_det_popn_ops,
-             adv_n_nondet_reduce_ops, adv_n_nondet_merges, adv_n_nondet_isolates) =
+             adv_n_nondet_reduce_ops, adv_n_nondet_merges, adv_n_nondet_isolates,
+             adv_nondet_det_ns) =
             self.inner.with_dependent_mut(|_owner, state| {
                 state.commit_token_profiled(token_id).map_err(|e| PyValueError::new_err(e))
             })?;
@@ -326,6 +327,7 @@ impl PyConstraintState {
         dict.set_item("adv_n_nondet_reduce_ops", adv_n_nondet_reduce_ops)?;
         dict.set_item("adv_n_nondet_merges", adv_n_nondet_merges)?;
         dict.set_item("adv_n_nondet_isolates", adv_n_nondet_isolates)?;
+        dict.set_item("adv_nondet_det_ns", adv_nondet_det_ns)?;
         Ok(dict)
     }
 
