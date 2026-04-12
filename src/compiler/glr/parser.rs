@@ -245,6 +245,8 @@ pub struct AdvanceProfile {
     pub top_states: u32,
     pub gss_depth: u32,
     pub total_ns: u64,
+    pub setup_ns: u64,
+    pub fast_path_ns: u64,
     pub det_ns: u64,
     pub nondet_ns: u64,
     /// 0 = not entered, 1 = shift (finished), 2 = split, 3 = accept, 4 = no action, 5 = no top, 6 = vstack fail, 7 = floor cross vstack fail
@@ -261,21 +263,26 @@ pub(crate) fn advance_stacks_profiled(
     let t_total = Instant::now();
     let mut profile = AdvanceProfile::default();
 
+    let t_setup = Instant::now();
     let summary = stack.summary();
     profile.top_states = stack.peek_values().len() as u32;
     profile.gss_depth = summary.max_depth;
 
     let mut gss = stack.clone();
+    profile.setup_ns = t_setup.elapsed().as_nanos() as u64;
 
     // Fast path: single state with a pure shift action
+    let t_fast_path = Instant::now();
     if let Some(state) = gss.single_exclusive_top_value() {
         if let Some(Action::Shift(target)) = table.action(state, token) {
             profile.pure_shift = true;
+            profile.fast_path_ns = t_fast_path.elapsed().as_nanos() as u64;
             let result = gss.push(*target);
             profile.total_ns = t_total.elapsed().as_nanos() as u64;
             return (result, profile);
         }
     }
+    profile.fast_path_ns = t_fast_path.elapsed().as_nanos() as u64;
 
     // Try deterministic path
     let t_det = Instant::now();

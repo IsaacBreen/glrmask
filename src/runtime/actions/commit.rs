@@ -693,13 +693,13 @@ fn commit_bytes_impl_profiled(
     constraint: &Constraint,
     state: &mut BTreeMap<u32, ParserGSS>,
     bytes: &[u8],
-) -> Result<(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64), String> {
+) -> Result<(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64), String> {
     use std::time::Instant;
     let t_total = Instant::now();
 
     if bytes.is_empty() {
         let total_ns = t_total.elapsed().as_nanos() as u64;
-        return Ok((total_ns, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+        return Ok((total_ns, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
     }
 
     let ignore_terminal = constraint.ignore_terminal;
@@ -728,6 +728,9 @@ fn commit_bytes_impl_profiled(
     let mut n_queue_entries: u64 = 0;
     let mut exec_ns: u64 = 0;
     let mut advance_ns: u64 = 0;
+    let mut advance_may_check_ns: u64 = 0;
+    let mut advance_core_ns: u64 = 0;
+    let mut advance_future_disallow_ns: u64 = 0;
     let mut actionable_ns: u64 = 0;
     let mut may_advance_ns: u64 = 0;
     let mut n_advances: u64 = 0;
@@ -781,19 +784,26 @@ fn commit_bytes_impl_profiled(
 
                 let t_adv = Instant::now();
                 // Inline profiled advance (skip cache for profiling)
-                if !stack_may_advance_on(&constraint.table, &gss_at_offset, matched.id) {
+                let t_adv_may = Instant::now();
+                let may_advance_now = stack_may_advance_on(&constraint.table, &gss_at_offset, matched.id);
+                advance_may_check_ns += t_adv_may.elapsed().as_nanos() as u64;
+                if !may_advance_now {
                     advance_ns += t_adv.elapsed().as_nanos() as u64;
                     n_advances += 1;
                     continue;
                 }
+                let t_adv_core = Instant::now();
                 let (advanced, sub_profile) = advance_stacks_profiled(
                     &constraint.table, &gss_at_offset, matched.id,
                 );
+                advance_core_ns += t_adv_core.elapsed().as_nanos() as u64;
                 // Aggregate profile
                 adv_profile.n_reduces_above_floor += sub_profile.n_reduces_above_floor;
                 adv_profile.n_floor_crossings += sub_profile.n_floor_crossings;
                 adv_profile.n_nondet_waves += sub_profile.n_nondet_waves;
                 adv_profile.n_nondet_branches += sub_profile.n_nondet_branches;
+                adv_profile.setup_ns += sub_profile.setup_ns;
+                adv_profile.fast_path_ns += sub_profile.fast_path_ns;
                 adv_profile.det_ns += sub_profile.det_ns;
                 adv_profile.nondet_ns += sub_profile.nondet_ns;
                 if sub_profile.pure_shift { adv_profile.pure_shift = true; }
@@ -806,9 +816,11 @@ fn commit_bytes_impl_profiled(
                 adv_profile.det_exit_reason = sub_profile.det_exit_reason;
                 adv_profile.det_exit_state = sub_profile.det_exit_state;
 
+                let t_adv_disallow = Instant::now();
                 let advanced = apply_future_terminal_disallow(
                     constraint, &exec_result, matched.id, advanced,
                 );
+                advance_future_disallow_ns += t_adv_disallow.elapsed().as_nanos() as u64;
                 advance_ns += t_adv.elapsed().as_nanos() as u64;
                 n_advances += 1;
 
@@ -855,12 +867,15 @@ fn commit_bytes_impl_profiled(
 
     let total_ns = t_total.elapsed().as_nanos() as u64;
     Ok((total_ns, scan_ns, prune_ns, queue_ns, fuse_ns, exec_ns, advance_ns,
+        advance_may_check_ns, advance_core_ns, advance_future_disallow_ns,
         actionable_ns, may_advance_ns,
         n_tokenizer_states, n_queue_entries, n_advances,
         adv_profile.n_reduces_above_floor as u64,
         adv_profile.n_floor_crossings as u64,
         adv_profile.n_nondet_waves as u64,
         adv_profile.n_nondet_branches as u64,
+        adv_profile.setup_ns,
+        adv_profile.fast_path_ns,
         adv_profile.det_ns,
         adv_profile.nondet_ns,
         adv_profile.vstack_len as u64,
@@ -899,7 +914,7 @@ impl<'a> ConstraintState<'a> {
     pub fn commit_token_profiled(
         &mut self,
         token_id: u32,
-    ) -> Result<(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64), String> {
+    ) -> Result<(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64), String> {
         let constraint = self.constraint;
         let bytes = token_bytes_for_id(constraint, token_id)
             .ok_or_else(|| {
