@@ -1,16 +1,15 @@
 use im::{HashMap as IHashMap, OrdMap};
 use smallvec::{SmallVec, smallvec};
-use super::stack_vecs::arc_array_vec::ArcArrayVec;
+use super::stack_vecs::dispatch::DynStackVec;
 use std::collections::{HashMap as StdHashMap, HashSet, VecDeque};
 #[cfg(test)]
 use std::collections::BTreeMap;
 use std::hash::Hash;
 use std::sync::{Arc, OnceLock};
 
-/// Type alias for segment values. Change this to swap implementations.
-/// Options: ArcArrayVec<T>, SegVec<T>, ImStackVec<T>, VecStackVec<T>,
-///          ArrayStackVec<T, 128>, SmallStackVec<T, 64>, RpdsStackVec<T>
-type SV<T> = ArcArrayVec<T>;
+/// Type alias for segment values. Set `STACKVEC` env var to switch at runtime:
+///   arc (default), array64, array128, im, seg, vec, small64, small128
+type SV<T> = DynStackVec<T>;
 
 pub trait Merge: Clone {
     fn merge(&self, other: &Self) -> Self;

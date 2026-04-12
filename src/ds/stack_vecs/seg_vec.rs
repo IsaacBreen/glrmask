@@ -175,7 +175,7 @@ impl<T: Clone> Default for SegVec<T> {
     }
 }
 
-impl<T: Clone + Eq + Hash + std::fmt::Debug> StackVec<T> for SegVec<T>
+impl<T: Clone + Eq + Hash> StackVec<T> for SegVec<T>
 {
     #[inline]
     fn unit(val: T) -> Self {

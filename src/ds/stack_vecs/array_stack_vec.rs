@@ -42,7 +42,7 @@ impl<T, const CAP: usize> Default for ArrayStackVec<T, CAP> {
     }
 }
 
-impl<T: Clone + Eq + Hash + std::fmt::Debug, const CAP: usize> StackVec<T> for ArrayStackVec<T, CAP>
+impl<T: Clone + Eq + Hash, const CAP: usize> StackVec<T> for ArrayStackVec<T, CAP>
 {
     #[inline]
     fn unit(val: T) -> Self {

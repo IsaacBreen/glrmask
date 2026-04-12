@@ -159,7 +159,7 @@ impl<T> Default for ArcArrayVec<T> {
     }
 }
 
-impl<T: Clone + Eq + Hash + std::fmt::Debug> StackVec<T> for ArcArrayVec<T>
+impl<T: Clone + Eq + Hash> StackVec<T> for ArcArrayVec<T>
 {
     #[inline]
     fn unit(val: T) -> Self { ArcArrayVec::unit(val) }

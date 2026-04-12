@@ -38,7 +38,7 @@ impl<T: Clone> Default for ImStackVec<T> {
     }
 }
 
-impl<T: Clone + Eq + Hash + std::fmt::Debug> StackVec<T> for ImStackVec<T>
+impl<T: Clone + Eq + Hash> StackVec<T> for ImStackVec<T>
 {
     #[inline]
     fn unit(val: T) -> Self {

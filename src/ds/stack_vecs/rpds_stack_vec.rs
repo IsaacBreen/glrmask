@@ -46,7 +46,7 @@ impl<T> Default for RpdsStackVec<T> {
     }
 }
 
-impl<T: Clone + Eq + Hash + std::fmt::Debug> StackVec<T> for RpdsStackVec<T>
+impl<T: Clone + Eq + Hash> StackVec<T> for RpdsStackVec<T>
 {
     fn unit(val: T) -> Self {
         Self(rpds::Stack::new().push(val))

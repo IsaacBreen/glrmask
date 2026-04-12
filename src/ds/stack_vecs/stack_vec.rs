@@ -1,4 +1,3 @@
-use std::fmt::Debug;
 use std::hash::Hash;
 
 /// Common interface for stack-like vectors used in GSS segments.
@@ -11,7 +10,7 @@ use std::hash::Hash;
 /// - `VecStackVec`: Plain Vec. O(n) clone, O(1) access.
 /// - `SmallStackVec`: SmallVec inline/heap hybrid. O(n) clone, O(1) access.
 /// - `RpdsStackVec`: rpds::Stack persistent list. O(1) clone/push, O(n) access.
-pub trait StackVec<T>: Clone + PartialEq + Eq + Hash + Debug + Default
+pub trait StackVec<T>: Clone + PartialEq + Eq + Hash + Default
 where
     T: Clone + Eq + Hash,
 {

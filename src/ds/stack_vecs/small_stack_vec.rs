@@ -28,7 +28,7 @@ macro_rules! define_small_stack_vec {
             fn default() -> Self { Self(SmallVec::new()) }
         }
 
-        impl<T: Clone + Eq + Hash + std::fmt::Debug> StackVec<T> for $name<T> {
+        impl<T: Clone + Eq + Hash> StackVec<T> for $name<T> {
             #[inline]
             fn unit(val: T) -> Self {
                 let mut sv = SmallVec::new();
