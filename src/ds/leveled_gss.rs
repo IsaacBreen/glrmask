@@ -3590,7 +3590,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             loop {
                 match current {
                     Lower::Segment(seg) => {
-                        total_edges += seg.values.len();
+                        total_edges += 1; // One edge from this Segment to its next
                         match &*seg.next {
                             Lower::Segment(inner_seg) => {
                                 let inner_id = Arc::as_ptr(inner_seg) as usize;
