@@ -379,12 +379,18 @@ fn commit_bytes_fast_path(
     Some(Ok(()))
 }
 
+enum LinearFastPathResult {
+    Complete(Result<ParserGSS, String>),
+    Continue { gss: ParserGSS, offset: usize },
+    Restart,
+}
+
 fn commit_bytes_linear_fast_path(
     constraint: &Constraint,
     start_gss: ParserGSS,
     bytes: &[u8],
     first_exec_result: TokenizerExecResult,
-) -> Option<Result<ParserGSS, String>> {
+) -> LinearFastPathResult {
     let ignore_terminal = constraint.ignore_terminal;
     let mut gss = start_gss;
     let mut offset = 0usize;
@@ -409,7 +415,11 @@ fn commit_bytes_linear_fast_path(
             let candidate = (matched.width, matched.id, ignored);
             if let Some(existing) = chosen {
                 if existing != candidate {
-                    return None;
+                    return if offset > 0 {
+                        LinearFastPathResult::Continue { gss, offset }
+                    } else {
+                        LinearFastPathResult::Restart
+                    };
                 }
             } else {
                 chosen = Some(candidate);
@@ -417,30 +427,42 @@ fn commit_bytes_linear_fast_path(
         }
 
         let Some((width, terminal, ignored)) = chosen else {
-            return None;
+            return if offset > 0 {
+                LinearFastPathResult::Continue { gss, offset }
+            } else {
+                LinearFastPathResult::Restart
+            };
         };
 
         if let Some(end_state) = exec_result.end_state {
             let future_terminals = constraint.tokenizer.possible_future_terminals(end_state);
             if stack_may_advance_on_any(&constraint.table, &gss, future_terminals) {
-                return None;
+                return if offset > 0 {
+                    LinearFastPathResult::Continue { gss, offset }
+                } else {
+                    LinearFastPathResult::Restart
+                };
             }
         }
 
         if !ignored {
             if !stack_may_advance_on(&constraint.table, &gss, terminal) {
-                return None;
+                return if offset > 0 {
+                    LinearFastPathResult::Continue { gss, offset }
+                } else {
+                    LinearFastPathResult::Restart
+                };
             }
 
             let advanced = advance_stacks_owned(&constraint.table, gss, terminal);
             if advanced.is_empty() {
-                return Some(Err(
+                return LinearFastPathResult::Complete(Err(
                     "commit rejected: no valid parser states remain".to_string(),
                 ));
             }
             gss = apply_future_terminal_disallow(constraint, &exec_result, terminal, advanced);
             if gss.is_empty() {
-                return Some(Err(
+                return LinearFastPathResult::Complete(Err(
                     "commit rejected: no valid parser states remain".to_string(),
                 ));
             }
@@ -450,11 +472,11 @@ fn commit_bytes_linear_fast_path(
         if offset == bytes.len() {
             let fused = gss.fuse(Some(1));
             if fused.is_empty() {
-                return Some(Err(
+                return LinearFastPathResult::Complete(Err(
                     "commit rejected: no valid parser states remain".to_string(),
                 ));
             }
-            return Some(Ok(fused));
+            return LinearFastPathResult::Complete(Ok(fused));
         }
 
         exec_result = constraint
@@ -493,20 +515,134 @@ fn commit_bytes_impl(
             .is_some_and(|gss| gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()))
         {
             let start_gss = state.values().next().unwrap().clone();
-            if let Some(result) = commit_bytes_linear_fast_path(
+            match commit_bytes_linear_fast_path(
                 constraint,
                 start_gss,
                 bytes,
                 exec_result.clone(),
             ) {
-                match result {
-                    Ok(final_gss) => {
-                        state.clear();
-                        state.insert(constraint.tokenizer.initial_state(), final_gss);
-                        return Ok(());
+                LinearFastPathResult::Complete(result) => {
+                    match result {
+                        Ok(final_gss) => {
+                            state.clear();
+                            state.insert(constraint.tokenizer.initial_state(), final_gss);
+                            return Ok(());
+                        }
+                        Err(err) => return Err(err),
                     }
-                    Err(err) => return Err(err),
                 }
+                LinearFastPathResult::Continue { gss, offset } => {
+                    bufs.clear_all();
+                    state.clear();
+                    state.insert(constraint.tokenizer.initial_state(), gss);
+
+                    if bytes.len() - offset == 1 {
+                        return commit_bytes_impl(constraint, state, &bytes[offset..], bufs);
+                    }
+
+                    let mut processing_queue: Vec<ParserStatesByTokenizer> =
+                        (0..=bytes.len()).map(|_| ParserStatesByTokenizer::default()).collect();
+                    processing_queue[offset] = std::mem::take(state).into_iter().collect();
+
+                    let mut offset = offset;
+                    while offset < processing_queue.len() {
+                        if processing_queue[offset].is_empty() {
+                            offset += 1;
+                            continue;
+                        }
+
+                        let states_to_process = std::mem::take(&mut processing_queue[offset]);
+                        for (tokenizer_state, gss_at_offset) in states_to_process {
+                            let actionable_terminals = ActionableTerminals::from_gss(constraint, &gss_at_offset);
+                            let exec_result = constraint
+                                .tokenizer
+                                .execute_from_state(&bytes[offset..], tokenizer_state);
+
+                            bufs.seen_matches.clear();
+                            bufs.terminal_result_cache.clear();
+
+                            for matched in &exec_result.matches {
+                                let new_offset = offset + matched.width;
+                                let ignored = is_ignored_terminal(ignore_terminal, matched.id);
+
+                                if !ignored
+                                    && !is_actionable_terminal(
+                                        actionable_terminals.as_ref(),
+                                        constraint,
+                                        matched.id,
+                                    )
+                                {
+                                    continue;
+                                }
+                                if !bufs.seen_matches.insert((matched.width, matched.id)) {
+                                    continue;
+                                }
+
+                                if ignored {
+                                    queue_parser_state(
+                                        &mut processing_queue,
+                                        &mut bufs.pending_state,
+                                        new_offset,
+                                        bytes.len(),
+                                        constraint.tokenizer.initial_state(),
+                                        gss_at_offset.clone(),
+                                    );
+                                    continue;
+                                }
+
+                                let Some(gss) = advance_terminal_match(
+                                    constraint,
+                                    &gss_at_offset,
+                                    matched.id,
+                                    &exec_result,
+                                    &mut bufs.advance_result_cache,
+                                    &mut bufs.terminal_result_cache,
+                                ) else {
+                                    continue;
+                                };
+
+                                queue_parser_state(
+                                    &mut processing_queue,
+                                    &mut bufs.pending_state,
+                                    new_offset,
+                                    bytes.len(),
+                                    constraint.tokenizer.initial_state(),
+                                    gss,
+                                );
+                            }
+
+                            if let Some(end_state) = exec_result.end_state {
+                                let future_terminals = constraint.tokenizer.possible_future_terminals(end_state);
+                                if !stack_may_advance_on_any(&constraint.table, &gss_at_offset, future_terminals)
+                                {
+                                    continue;
+                                }
+
+                                queue_parser_state(
+                                    &mut processing_queue,
+                                    &mut bufs.pending_state,
+                                    bytes.len(),
+                                    bytes.len(),
+                                    end_state,
+                                    gss_at_offset,
+                                );
+                            }
+                        }
+                    }
+
+                    let mut new_state: BTreeMap<u32, ParserGSS> = bufs.pending_state.drain().collect();
+                    for parser_state in new_state.values_mut() {
+                        *parser_state = parser_state.fuse(Some(1));
+                    }
+                    new_state.retain(|_, parser_state| !parser_state.is_empty());
+
+                    *state = new_state;
+                    if state.is_empty() {
+                        return Err("commit rejected: no valid parser states remain".to_string());
+                    }
+                    return Ok(());
+                }
+                LinearFastPathResult::Restart => {}
             }
         }
 
