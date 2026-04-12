@@ -8,15 +8,16 @@ use super::stack_vec::StackVec;
 /// Note: rpds::Stack stores elements in LIFO order (top first).
 /// Our convention is bottom-first, so we reverse on conversion.
 #[derive(Clone, Debug)]
-pub struct RpdsStackVec<T>(rpds::Stack<T>);
+pub struct RpdsStackVec<T>(rpds::StackSync<T>);
 
 impl<T: Clone + Eq + Hash> RpdsStackVec<T> {
     /// Iterate from bottom to top. O(n) — collects and reverses.
-    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &T> + ExactSizeIterator {
+    pub fn iter(&self) -> std::vec::IntoIter<&T> {
         // rpds::Stack iterates top-to-bottom; we need bottom-to-top.
         // Collect references, reverse, return.
-        let items: Vec<&T> = self.0.iter().collect();
-        items.into_iter().rev()
+        let mut items: Vec<&T> = self.0.iter().collect();
+        items.reverse();
+        items.into_iter()
     }
 }
 
@@ -42,20 +43,20 @@ impl<T: Hash> Hash for RpdsStackVec<T> {
 
 impl<T> Default for RpdsStackVec<T> {
     fn default() -> Self {
-        Self(rpds::Stack::new())
+        Self(rpds::StackSync::new_sync())
     }
 }
 
 impl<T: Clone + Eq + Hash> StackVec<T> for RpdsStackVec<T>
 {
     fn unit(val: T) -> Self {
-        Self(rpds::Stack::new().push(val))
+        Self(rpds::StackSync::new_sync().push(val))
     }
 
     fn from_vec(v: Vec<T>) -> Self {
         // Push each element; rpds::Stack pushes to front, so push in order
         // to get bottom-first (first pushed = deepest = last in rpds iteration).
-        let mut stack = rpds::Stack::new();
+        let mut stack = rpds::StackSync::new_sync();
         for item in v {
             stack = stack.push(item);
         }
@@ -90,7 +91,7 @@ impl<T: Clone + Eq + Hash> StackVec<T> for RpdsStackVec<T>
         let new_len = new_len.min(self.0.size());
         let pops = self.0.size() - new_len;
         for _ in 0..pops {
-            self.0 = self.0.pop().unwrap_or_else(rpds::Stack::new);
+            self.0 = self.0.pop().unwrap_or_else(rpds::StackSync::new_sync);
         }
     }
 

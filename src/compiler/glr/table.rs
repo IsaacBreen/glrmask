@@ -106,12 +106,14 @@ impl GLRTable {
         table
     }
 
+    #[inline]
     pub fn action(&self, state: u32, terminal: TerminalID) -> Option<&Action> {
         self.action
             .get(state as usize)
             .and_then(|by_terminal| by_terminal.get(&terminal))
     }
 
+    #[inline]
     pub fn goto_target(&self, state: u32, nt: NonterminalID) -> Option<u32> {
         self.goto
             .get(state as usize)

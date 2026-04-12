@@ -7,6 +7,7 @@ use super::array_stack_vec::{
     ArrayStackVec64, ArrayStackVec128, ArrayStackVec256,
 };
 use super::im_stack_vec::ImStackVec;
+use super::rpds_stack_vec::RpdsStackVec;
 use super::seg_vec::SegVec;
 use super::vec_stack_vec::VecStackVec;
 use super::small_stack_vec::{
@@ -23,6 +24,7 @@ enum Variant {
     ArcArray,
     Array4, Array8, Array16, Array32, Array64, Array128, Array256,
     Im,
+    Rpds,
     Seg,
     Vec,
     Small4, Small8, Small16, Small32, Small64, Small128,
@@ -42,6 +44,7 @@ fn selected_variant() -> Variant {
             Ok("array128") | Ok("array") => Variant::Array128,
             Ok("array256") => Variant::Array256,
             Ok("im") | Ok("im_vector") => Variant::Im,
+            Ok("rpds") | Ok("rpds_stack") => Variant::Rpds,
             Ok("seg") | Ok("seg_vec") => Variant::Seg,
             Ok("vec") => Variant::Vec,
             Ok("small4") => Variant::Small4,
@@ -187,6 +190,7 @@ macro_rules! define_dyn_stack_vec {
     // Helper: generate DynIter from iter kind
     (@iter slice $v:ident) => { DynIter::Slice($v.iter()) };
     (@iter im $v:ident) => { DynIter::Im($v.iter()) };
+    (@iter vec_refs $v:ident) => { DynIter::VecRefs($v.iter()) };
 }
 
 define_dyn_stack_vec! {
@@ -199,6 +203,7 @@ define_dyn_stack_vec! {
     Array128(ArrayStackVec128<T>)   => slice,
     Array256(ArrayStackVec256<T>)   => slice,
     Im(ImStackVec<T>)               => im,
+    Rpds(RpdsStackVec<T>)           => vec_refs,
     Seg(SegVec<T>)                  => slice,
     Vec(VecStackVec<T>)             => slice,
     Small4(SmallStackVec4<T>)       => slice,
@@ -213,6 +218,7 @@ define_dyn_stack_vec! {
 pub enum DynIter<'a, T> {
     Slice(std::slice::Iter<'a, T>),
     Im(im::vector::Iter<'a, T>),
+    VecRefs(std::vec::IntoIter<&'a T>),
 }
 
 impl<'a, T: Clone> Iterator for DynIter<'a, T> {
@@ -222,6 +228,7 @@ impl<'a, T: Clone> Iterator for DynIter<'a, T> {
         match self {
             Self::Slice(it) => it.next(),
             Self::Im(it) => it.next(),
+            Self::VecRefs(it) => it.next(),
         }
     }
     #[inline]
@@ -229,6 +236,7 @@ impl<'a, T: Clone> Iterator for DynIter<'a, T> {
         match self {
             Self::Slice(it) => it.size_hint(),
             Self::Im(it) => it.size_hint(),
+            Self::VecRefs(it) => it.size_hint(),
         }
     }
 }
@@ -239,6 +247,7 @@ impl<'a, T: Clone> DoubleEndedIterator for DynIter<'a, T> {
         match self {
             Self::Slice(it) => it.next_back(),
             Self::Im(it) => it.next_back(),
+            Self::VecRefs(it) => it.next_back(),
         }
     }
 }
