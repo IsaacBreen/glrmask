@@ -262,6 +262,16 @@ pub struct AdvanceProfile {
     pub n_det_goto_lookups: u32,
     /// Number of expensive GSS-level popn operations (floor crossings)
     pub n_det_popn_ops: u32,
+    /// Time spent in deterministic action table lookups
+    pub det_action_lookup_ns: u64,
+    /// Time spent in deterministic goto table lookups
+    pub det_goto_lookup_ns: u64,
+    /// Time spent in VirtualStack pop operations above the floor
+    pub det_pop_ns: u64,
+    /// Time spent in VirtualStack push operations above the floor
+    pub det_push_ns: u64,
+    /// Time spent handling deterministic floor crossings at the GSS level
+    pub det_floor_cross_ns: u64,
     /// Number of reduce source enumerations in the nondeterministic path
     pub n_nondet_reduce_ops: u32,
     /// Number of GSS merge operations in the nondeterministic path
@@ -339,6 +349,8 @@ fn advance_deterministically_profiled(
     token: TerminalID,
     profile: &mut AdvanceProfile,
 ) -> bool {
+    use std::time::Instant;
+
     let Some(mut stack) = gss.try_virtual_stack() else {
         profile.det_exit_reason = 6; // vstack fail
         return false;
@@ -353,16 +365,28 @@ fn advance_deterministically_profiled(
             break;
         };
         profile.n_det_action_lookups += 1;
-        match table.action(state, token) {
+        let t_action = Instant::now();
+        let action = table.action(state, token);
+        profile.det_action_lookup_ns += t_action.elapsed().as_nanos() as u64;
+        match action {
             Some(Action::Reduce(rule_id)) => {
                 let rule = &table.rules[*rule_id as usize];
                 if rule.rhs.len() < stack.len() {
                     profile.n_reduces_above_floor += 1;
+                    let t_pop = Instant::now();
                     stack.pop(rule.rhs.len());
+                    profile.det_pop_ns += t_pop.elapsed().as_nanos() as u64;
                     let goto_from = *stack.top().unwrap();
                     profile.n_det_goto_lookups += 1;
-                    match table.goto_target(goto_from, rule.lhs) {
-                        Some(target) => stack.push(target),
+                    let t_goto = Instant::now();
+                    let goto = table.goto_target(goto_from, rule.lhs);
+                    profile.det_goto_lookup_ns += t_goto.elapsed().as_nanos() as u64;
+                    match goto {
+                        Some(target) => {
+                            let t_push = Instant::now();
+                            stack.push(target);
+                            profile.det_push_ns += t_push.elapsed().as_nanos() as u64;
+                        }
                         None => {
                             *gss = ParserGSS::empty();
                             profile.det_exit_reason = 4; // no goto
@@ -372,17 +396,22 @@ fn advance_deterministically_profiled(
                 } else {
                     profile.n_floor_crossings += 1;
                     profile.n_det_popn_ops += 1;
+                    let t_floor = Instant::now();
                     let current = stack.into_gss();
                     let popped = current.popn(rule.rhs.len() as isize);
                     let mut gotos = GotoBatch::new();
                     for goto_from in popped.peek_values() {
                         let base = popped.isolate(Some(goto_from));
                         profile.n_det_goto_lookups += 1;
-                        if let Some(target) = table.goto_target(goto_from, rule.lhs) {
+                        let t_goto = Instant::now();
+                        let goto = table.goto_target(goto_from, rule.lhs);
+                        profile.det_goto_lookup_ns += t_goto.elapsed().as_nanos() as u64;
+                        if let Some(target) = goto {
                             add_goto(&mut gotos, target, base);
                         }
                     }
                     let rebuilt = apply_gotos(current, gotos);
+                    profile.det_floor_cross_ns += t_floor.elapsed().as_nanos() as u64;
                     let Some(next_stack) = rebuilt.try_virtual_stack() else {
                         *gss = rebuilt;
                         profile.det_exit_reason = 7; // floor cross vstack fail

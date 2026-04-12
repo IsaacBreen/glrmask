@@ -283,12 +283,13 @@ impl PyConstraintState {
 
     /// Like commit_token but returns profiling stats as a dict.
     fn commit_token_profiled<'py>(&mut self, py: Python<'py>, token_id: u32) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-        let (total_ns, scan_ns, prune_ns, queue_ns, fuse_ns, exec_ns, advance_ns, advance_may_check_ns, advance_core_ns, advance_future_disallow_ns, actionable_ns, may_advance_ns, n_tokenizer_states, n_queue_entries, n_advances,
-             adv_n_reduces_above_floor, adv_n_floor_crossings, adv_n_nondet_waves, adv_n_nondet_branches, adv_clone_ns, adv_fast_path_ns, adv_det_ns, adv_nondet_ns, adv_vstack_len, adv_gss_depth,
-             adv_det_exit_reason, adv_det_exit_state, adv_summary_ns,
-             adv_n_det_action_lookups, adv_n_det_goto_lookups, adv_n_det_popn_ops,
-             adv_n_nondet_reduce_ops, adv_n_nondet_merges, adv_n_nondet_isolates,
-             adv_nondet_det_ns) =
+           let (total_ns, scan_ns, prune_ns, queue_ns, fuse_ns, exec_ns, advance_ns, advance_may_check_ns, advance_core_ns, advance_future_disallow_ns, actionable_ns, may_advance_ns, n_tokenizer_states, n_queue_entries, n_advances,
+               adv_n_reduces_above_floor, adv_n_floor_crossings, adv_n_nondet_waves, adv_n_nondet_branches, adv_clone_ns, adv_fast_path_ns, adv_det_ns, adv_nondet_ns, adv_vstack_len, adv_gss_depth,
+               adv_det_exit_reason, adv_det_exit_state, adv_summary_ns,
+               adv_n_det_action_lookups, adv_n_det_goto_lookups, adv_n_det_popn_ops,
+               adv_det_action_lookup_ns, adv_det_goto_lookup_ns, adv_det_pop_ns, adv_det_push_ns, adv_det_floor_cross_ns,
+               adv_n_nondet_reduce_ops, adv_n_nondet_merges, adv_n_nondet_isolates,
+               adv_nondet_det_ns) =
             self.inner.with_dependent_mut(|_owner, state| {
                 state.commit_token_profiled(token_id).map_err(|e| PyValueError::new_err(e))
             })?;
@@ -324,6 +325,11 @@ impl PyConstraintState {
         dict.set_item("adv_n_det_action_lookups", adv_n_det_action_lookups)?;
         dict.set_item("adv_n_det_goto_lookups", adv_n_det_goto_lookups)?;
         dict.set_item("adv_n_det_popn_ops", adv_n_det_popn_ops)?;
+        dict.set_item("adv_det_action_lookup_ns", adv_det_action_lookup_ns)?;
+        dict.set_item("adv_det_goto_lookup_ns", adv_det_goto_lookup_ns)?;
+        dict.set_item("adv_det_pop_ns", adv_det_pop_ns)?;
+        dict.set_item("adv_det_push_ns", adv_det_push_ns)?;
+        dict.set_item("adv_det_floor_cross_ns", adv_det_floor_cross_ns)?;
         dict.set_item("adv_n_nondet_reduce_ops", adv_n_nondet_reduce_ops)?;
         dict.set_item("adv_n_nondet_merges", adv_n_nondet_merges)?;
         dict.set_item("adv_n_nondet_isolates", adv_n_nondet_isolates)?;
@@ -398,6 +404,11 @@ impl PyConstraintState {
             d.set_item("n_det_action_lookups", p.n_det_action_lookups)?;
             d.set_item("n_det_goto_lookups", p.n_det_goto_lookups)?;
             d.set_item("n_det_popn_ops", p.n_det_popn_ops)?;
+            d.set_item("det_action_lookup_ns", p.det_action_lookup_ns)?;
+            d.set_item("det_goto_lookup_ns", p.det_goto_lookup_ns)?;
+            d.set_item("det_pop_ns", p.det_pop_ns)?;
+            d.set_item("det_push_ns", p.det_push_ns)?;
+            d.set_item("det_floor_cross_ns", p.det_floor_cross_ns)?;
             d.set_item("n_nondet_reduce_ops", p.n_nondet_reduce_ops)?;
             d.set_item("n_nondet_merges", p.n_nondet_merges)?;
             d.set_item("n_nondet_isolates", p.n_nondet_isolates)?;
