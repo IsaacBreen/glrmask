@@ -1,10 +1,16 @@
-use im::{HashMap as IHashMap, OrdMap, Vector as ImVector};
+use im::{HashMap as IHashMap, OrdMap};
 use smallvec::{SmallVec, smallvec};
+use super::stack_vecs::arc_array_vec::ArcArrayVec;
 use std::collections::{HashMap as StdHashMap, HashSet, VecDeque};
 #[cfg(test)]
 use std::collections::BTreeMap;
 use std::hash::Hash;
 use std::sync::{Arc, OnceLock};
+
+/// Type alias for segment values. Change this to swap implementations.
+/// Options: ArcArrayVec<T>, SegVec<T>, ImStackVec<T>, VecStackVec<T>,
+///          ArrayStackVec<T, 128>, SmallStackVec<T, 64>, RpdsStackVec<T>
+type SV<T> = ArcArrayVec<T>;
 
 pub trait Merge: Clone {
     fn merge(&self, other: &Self) -> Self;
@@ -403,10 +409,10 @@ type Children<T, N> = CompactMap<T, CompactOrdMap<Arc<N>>>;
 /// `values[0]` is the deepest value (closest to `next`),
 /// `values[last]` is the shallowest (top of stack).
 /// Intermediate levels (all except the top) are guaranteed to have empty=false.
-/// Values are stored in a persistent im::Vector for O(1) clone.
+/// Values are stored in SV<T> (type-aliased segment vector).
 /// Segments are always non-accepting (empty is implicitly false).
 struct Segment<T: Clone + Eq + Hash> {
-    values: ImVector<T>,
+    values: SV<T>,
     next: Arc<Lower<T>>,
     max_depth: u32,
     segments_len: usize,
@@ -542,8 +548,7 @@ impl<T: Clone + Eq + Hash> Lower<T> {
                 let child = if seg.values.len() == 1 {
                     seg.next
                 } else {
-                    let mut rest_values = seg.values;
-                    rest_values.pop_back();
+                    let rest_values = seg.values.take(seg.values.len() - 1);
                     new_segment(rest_values, seg.next)
                 };
                 let children = CompactMap::unit(top_value, CompactOrdMap::unit(child.max_depth(), child));
@@ -620,7 +625,7 @@ impl<T: Clone + Eq + Hash> Lower<T> {
     /// For Segment variant, get the values vector.
     /// Panics if called on General.
     #[inline(always)]
-    fn segment_values(&self) -> &ImVector<T> {
+    fn segment_values(&self) -> &SV<T> {
         match self {
             Lower::Segment(seg) => &seg.values,
             Lower::General { .. } => panic!("segment_values called on General"),
@@ -633,7 +638,7 @@ impl<T: Clone + Eq + Hash> Lower<T> {
         match self {
             Lower::Segment(seg) if seg.values.len() == 1 => seg.next.clone(),
             Lower::Segment(seg) => seg.rest.get_or_init(|| {
-                let rest_values: ImVector<T> =
+                let rest_values: SV<T> =
                     seg.values.take(seg.values.len() - 1);
                 new_segment(rest_values, seg.next.clone())
             }).clone(),
@@ -824,7 +829,7 @@ fn new_lower<T: Clone + Eq + Hash>(children: Children<T, Lower<T>>, empty: bool)
         let (key, ord_map) = children.iter().next().unwrap();
         if ord_map.len() == 1 {
             let (_, next) = ord_map.iter().next().unwrap();
-            let values = ImVector::unit(key.clone());
+            let values = SV::unit(key.clone());
             return new_segment(values, next.clone());
         }
     }
@@ -836,11 +841,10 @@ fn new_lower<T: Clone + Eq + Hash>(children: Children<T, Lower<T>>, empty: bool)
     })
 }
 
-fn new_segment<T: Clone + Eq + Hash>(values: ImVector<T>, next: Arc<Lower<T>>) -> Arc<Lower<T>> {
-    // Always merge with child segment: im::Vector append is O(log n) and clone is O(1).
+fn new_segment<T: Clone + Eq + Hash>(values: SV<T>, next: Arc<Lower<T>>) -> Arc<Lower<T>> {
+    // Always merge with child segment if possible.
     if let Lower::Segment(child_seg) = &*next {
-        let mut merged = child_seg.values.clone(); // O(1) clone
-        merged.append(values); // O(log n) append
+        let merged = child_seg.values.append(&values); // O(n) append
         let max_depth = child_seg.next.max_depth() + merged.len() as u32;
         let segments_len = merged.len() + child_seg.next.segments_len();
         return Arc::new(Lower::Segment(Arc::new(Segment {
@@ -2023,7 +2027,7 @@ pub struct ChainTail<T: Clone + Eq + Hash> {
 /// chain and continue with GSS-level operations for the leftover pop depth.
 #[derive(Clone)]
 pub struct VirtualStack<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
-    values: ImVector<T>,
+    values: SV<T>,
     next: Arc<Lower<T>>,
     acc: A,
 }
@@ -2067,9 +2071,16 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
     }
 
     /// Push a value onto the top of the stack.
+    /// If the backing data is shared (try_push fails), creates a new segment
+    /// boundary and starts fresh.
     #[inline]
     pub fn push(&mut self, value: T) {
-        self.values.push_back(value);
+        if !self.values.try_push(value.clone()) {
+            // Can't push in-place — create a segment from current values, start fresh.
+            let seg = new_segment(self.values.clone(), self.next.clone());
+            self.next = seg;
+            self.values = SV::unit(value);
+        }
     }
 
     /// The total number of values available across the current segment chain.
@@ -2411,7 +2422,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         let new_inner = match &*self.inner {
             Upper::Interface(i) => {
                 let new_lower_root = new_segment(
-                    ImVector::unit(value),
+                    SV::unit(value),
                     i.inner.clone(),
                 );
                 new_interface(new_lower_root, i.acc.clone())
