@@ -2174,6 +2174,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
             inner: new_interface(new_segment(self.values, self.next), self.acc),
         }
     }
+
 }
 
 impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> PartialEq for LeveledGSS<T, A> {

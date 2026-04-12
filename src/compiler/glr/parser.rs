@@ -192,14 +192,13 @@ fn advance_deterministically(
                     // still a single chain.
                     let current = stack.into_gss();
                     let popped = current.popn(rule.rhs.len() as isize);
-                    let mut gotos = GotoBatch::new();
+                    let mut shifts = SmallVec::<[(u32, u32); 8]>::new();
                     for goto_from in popped.peek_values() {
-                        let base = popped.isolate(Some(goto_from));
                         if let Some(target) = table.goto_target(goto_from, rule.lhs) {
-                            add_goto(&mut gotos, target, base);
+                            shifts.push((goto_from, target));
                         }
                     }
-                    let rebuilt = apply_gotos(current, gotos);
+                    let rebuilt = popped.remap_top_values_owned(shifts);
                     let Some(next_stack) = rebuilt.try_virtual_stack() else {
                         *gss = rebuilt;
                         return false;
@@ -272,6 +271,12 @@ pub struct AdvanceProfile {
     pub det_push_ns: u64,
     /// Time spent handling deterministic floor crossings at the GSS level
     pub det_floor_cross_ns: u64,
+    /// Time spent computing deterministic floor-cross reduce sources
+    pub det_floor_sources_ns: u64,
+    /// Time spent rebuilding the deterministic floor-cross frontier from gotos
+    pub det_floor_rebuild_ns: u64,
+    /// Time spent attempting to recover a VirtualStack after deterministic floor crossing
+    pub det_floor_try_vstack_ns: u64,
     /// Number of reduce source enumerations in the nondeterministic path
     pub n_nondet_reduce_ops: u32,
     /// Number of GSS merge operations in the nondeterministic path
@@ -398,25 +403,31 @@ fn advance_deterministically_profiled(
                     profile.n_det_popn_ops += 1;
                     let t_floor = Instant::now();
                     let current = stack.into_gss();
+                    let t_sources = Instant::now();
                     let popped = current.popn(rule.rhs.len() as isize);
-                    let mut gotos = GotoBatch::new();
+                    let mut shifts = SmallVec::<[(u32, u32); 8]>::new();
                     for goto_from in popped.peek_values() {
-                        let base = popped.isolate(Some(goto_from));
                         profile.n_det_goto_lookups += 1;
                         let t_goto = Instant::now();
                         let goto = table.goto_target(goto_from, rule.lhs);
                         profile.det_goto_lookup_ns += t_goto.elapsed().as_nanos() as u64;
                         if let Some(target) = goto {
-                            add_goto(&mut gotos, target, base);
+                            shifts.push((goto_from, target));
                         }
                     }
-                    let rebuilt = apply_gotos(current, gotos);
+                    profile.det_floor_sources_ns += t_sources.elapsed().as_nanos() as u64;
+                    let t_rebuild = Instant::now();
+                    let rebuilt = popped.remap_top_values_owned(shifts);
+                    profile.det_floor_rebuild_ns += t_rebuild.elapsed().as_nanos() as u64;
                     profile.det_floor_cross_ns += t_floor.elapsed().as_nanos() as u64;
+                    let t_try_vstack = Instant::now();
                     let Some(next_stack) = rebuilt.try_virtual_stack() else {
+                        profile.det_floor_try_vstack_ns += t_try_vstack.elapsed().as_nanos() as u64;
                         *gss = rebuilt;
                         profile.det_exit_reason = 7; // floor cross vstack fail
                         return false;
                     };
+                    profile.det_floor_try_vstack_ns += t_try_vstack.elapsed().as_nanos() as u64;
                     stack = next_stack;
                 }
             }
