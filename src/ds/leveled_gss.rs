@@ -547,8 +547,18 @@ impl<T: Clone + Eq + Hash> Lower<T> {
                 let child = if seg.values.len() == 1 {
                     seg.next
                 } else {
+                    // Pop the top value by taking all-but-last. O(1) for view-based types.
+                    // Don't call new_segment() — no need to merge, just shrink the segment.
                     let rest_values = seg.values.take(seg.values.len() - 1);
-                    new_segment(rest_values, seg.next)
+                    let child_max_depth = seg.max_depth - 1;
+                    let segments_len = seg.segments_len - 1;
+                    Arc::new(Lower::Segment(Arc::new(Segment {
+                        values: rest_values,
+                        next: seg.next,
+                        max_depth: child_max_depth,
+                        segments_len,
+                        rest: OnceLock::new(),
+                    })))
                 };
                 let children = CompactMap::unit(top_value, CompactOrdMap::unit(child.max_depth(), child));
                 (children, false, max_depth)
