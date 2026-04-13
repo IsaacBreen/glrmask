@@ -805,4 +805,12 @@ impl Constraint {
     pub fn debug_num_states(&self) -> u32 {
         self.table.num_states
     }
+
+    pub fn debug_parser_dwa_num_states(&self) -> usize {
+        self.parser_dwa.states.len()
+    }
+
+    pub fn debug_parser_dwa_num_transitions(&self) -> usize {
+        self.parser_dwa.states.iter().map(|s| s.transitions.len()).sum()
+    }
 }
