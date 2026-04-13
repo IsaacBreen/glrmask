@@ -23,10 +23,6 @@ pub(crate) struct TemplateCompileProfile {
     pub(crate) determinize_ms: f64,
     pub(crate) minimize_ms: f64,
     pub(crate) total_ms: f64,
-    pub(crate) selected_baseline: usize,
-    pub(crate) selected_goto_only: usize,
-    pub(crate) selected_shift_only: usize,
-    pub(crate) selected_both: usize,
     pub(crate) num_terminals: usize,
     pub(crate) unique_characterizations: usize,
     pub(crate) max_characterization_multiplicity: usize,
@@ -62,10 +58,6 @@ impl TemplateCompileProfile {
         self.determinize_ms += sample.determinize_ms;
         self.minimize_ms += sample.minimize_ms;
         self.total_ms += sample.total_ms();
-        self.selected_baseline += usize::from(sample.selected_mode == SelectedMode::Baseline);
-        self.selected_goto_only += usize::from(sample.selected_mode == SelectedMode::GotoOnly);
-        self.selected_shift_only += usize::from(sample.selected_mode == SelectedMode::ShiftOnly);
-        self.selected_both += usize::from(sample.selected_mode == SelectedMode::Both);
         self.num_terminals += 1;
         self.total_nfa_states += sample.nfa_states;
         self.max_nfa_states = self.max_nfa_states.max(sample.nfa_states);
@@ -83,7 +75,6 @@ struct TemplateCompilationSample {
     build_nfa_ms: f64,
     determinize_ms: f64,
     minimize_ms: f64,
-    selected_mode: SelectedMode,
     nfa_states: usize,
     nfa_transitions: usize,
     dfa_states: usize,
@@ -94,15 +85,6 @@ impl TemplateCompilationSample {
     fn total_ms(&self) -> f64 {
         self.build_nfa_ms + self.determinize_ms + self.minimize_ms
     }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-enum SelectedMode {
-    #[default]
-    Baseline,
-    GotoOnly,
-    ShiftOnly,
-    Both,
 }
 
 fn elapsed_ms(started_at: Instant) -> f64 {
@@ -163,64 +145,11 @@ fn dfa_to_nwa_skeleton(dfa: &UnweightedDfa) -> NWA {
     }
 }
 
-fn dfas_are_isomorphic(left: &UnweightedDfa, right: &UnweightedDfa) -> bool {
-    use std::collections::{BTreeMap, VecDeque};
-
-    let mut mapping = BTreeMap::new();
-    let mut reverse = BTreeMap::new();
-    let mut queue = VecDeque::new();
-
-    mapping.insert(left.start_state, right.start_state);
-    reverse.insert(right.start_state, left.start_state);
-    queue.push_back((left.start_state, right.start_state));
-
-    while let Some((left_state, right_state)) = queue.pop_front() {
-        let left_node = &left.states[left_state as usize];
-        let right_node = &right.states[right_state as usize];
-
-        if left_node.is_accepting != right_node.is_accepting {
-            return false;
-        }
-        if left_node.transitions.len() != right_node.transitions.len() {
-            return false;
-        }
-
-        for (&label, &left_target) in &left_node.transitions {
-            let Some(&right_target) = right_node.transitions.get(&label) else {
-                return false;
-            };
-
-            match mapping.get(&left_target).copied() {
-                Some(existing) if existing != right_target => return false,
-                Some(_) => {}
-                None => {
-                    if reverse.insert(right_target, left_target).is_some() {
-                        return false;
-                    }
-                    mapping.insert(left_target, right_target);
-                    queue.push_back((left_target, right_target));
-                }
-            }
-        }
-    }
-
-    mapping.len() == left.states.len() && reverse.len() == right.states.len()
-}
-
 fn compile_template_with_profile(
     characterization: &TerminalCharacterization,
-    terminal: TerminalID,
-) -> (UnweightedDfa, NWA, TemplateCompilationSample) {
-    compile_template(characterization, terminal, replace_shortening_mode())
-}
-
-fn compile_template_variant_with_profile(
-    characterization: &TerminalCharacterization,
-    terminal: TerminalID,
-    mode: TemplateShorteningMode,
 ) -> (UnweightedDfa, NWA, TemplateCompilationSample) {
     let build_nfa_started_at = Instant::now();
-    let nfa = build_template_nfa_with_mode(characterization, terminal, mode);
+    let nfa = build_template_nfa(characterization);
     let build_nfa_ms = elapsed_ms(build_nfa_started_at);
     let (nfa_states, nfa_transitions) = nfa_size(&nfa);
 
@@ -242,7 +171,6 @@ fn compile_template_variant_with_profile(
             build_nfa_ms,
             determinize_ms,
             minimize_ms,
-            selected_mode: SelectedMode::Baseline,
             nfa_states,
             nfa_transitions,
             dfa_states,
@@ -251,148 +179,17 @@ fn compile_template_variant_with_profile(
     )
 }
 
-fn compile_template(
-    characterization: &TerminalCharacterization,
-    terminal: TerminalID,
-    mode: ReplaceShorteningMode,
-) -> (UnweightedDfa, NWA, TemplateCompilationSample) {
-    match mode {
-        ReplaceShorteningMode::Force(mode) => {
-            compile_template_variant_with_profile(characterization, terminal, mode)
-        }
-        ReplaceShorteningMode::VerifyAll => {
-            let baseline_mode = TemplateShorteningMode::default();
-            let goto_only_mode = TemplateShorteningMode {
-                shorten_shift: false,
-                shorten_goto: true,
-            };
-            let shift_only_mode = TemplateShorteningMode {
-                shorten_shift: true,
-                shorten_goto: false,
-            };
-            let both_mode = TemplateShorteningMode {
-                shorten_shift: true,
-                shorten_goto: true,
-            };
-            let goto_has_effect = characterization
-                .nt_escapes
-                .iter()
-                .any(|&(_, _, _, _, goto_is_replace, _)| goto_is_replace);
-            let shift_has_effect = characterization
-                .shifts
-                .iter()
-                .any(|&(_, _, shift_is_replace)| shift_is_replace)
-                || characterization
-                    .nt_escapes
-                    .iter()
-                    .any(|&(_, _, _, _, _, shift_is_replace)| shift_is_replace);
-
-            let (baseline_dfa, baseline_skeleton, mut baseline_sample) =
-                compile_template_variant_with_profile(characterization, terminal, baseline_mode);
-            let mut goto_variant = None;
-            if goto_has_effect {
-                let (goto_dfa, goto_skeleton, goto_sample) =
-                    compile_template_variant_with_profile(characterization, terminal, goto_only_mode);
-                baseline_sample.build_nfa_ms += goto_sample.build_nfa_ms;
-                baseline_sample.determinize_ms += goto_sample.determinize_ms;
-                baseline_sample.minimize_ms += goto_sample.minimize_ms;
-                let goto_matches = dfas_are_isomorphic(&baseline_dfa, &goto_dfa);
-                goto_variant = Some((goto_matches, goto_dfa, goto_skeleton));
-            }
-
-            let mut shift_variant = None;
-            if shift_has_effect {
-                let (shift_dfa, shift_skeleton, shift_sample) =
-                    compile_template_variant_with_profile(characterization, terminal, shift_only_mode);
-                baseline_sample.build_nfa_ms += shift_sample.build_nfa_ms;
-                baseline_sample.determinize_ms += shift_sample.determinize_ms;
-                baseline_sample.minimize_ms += shift_sample.minimize_ms;
-                let shift_matches = dfas_are_isomorphic(&baseline_dfa, &shift_dfa);
-                shift_variant = Some((shift_matches, shift_dfa, shift_skeleton));
-            }
-
-            let goto_matches = goto_variant.as_ref().map(|(matches, _, _)| *matches).unwrap_or(false);
-            let shift_matches = shift_variant.as_ref().map(|(matches, _, _)| *matches).unwrap_or(false);
-
-            if goto_matches && shift_matches {
-                let (both_dfa, both_skeleton, both_sample) =
-                    compile_template_variant_with_profile(characterization, terminal, both_mode);
-                baseline_sample.build_nfa_ms += both_sample.build_nfa_ms;
-                baseline_sample.determinize_ms += both_sample.determinize_ms;
-                baseline_sample.minimize_ms += both_sample.minimize_ms;
-
-                if dfas_are_isomorphic(&baseline_dfa, &both_dfa) {
-                    baseline_sample.selected_mode = SelectedMode::Both;
-                    if std::env::var("GLRMASK_DEBUG_PROFILE").is_ok() {
-                        eprintln!(
-                            "[glrmask/debug][template_verify] terminal={} selected=both",
-                            terminal,
-                        );
-                    }
-                    return (both_dfa, both_skeleton, baseline_sample);
-                }
-
-                baseline_sample.selected_mode = SelectedMode::GotoOnly;
-                if std::env::var("GLRMASK_DEBUG_PROFILE").is_ok() {
-                    eprintln!(
-                        "[glrmask/debug][template_verify] terminal={} selected=goto-only",
-                        terminal,
-                    );
-                }
-                let (_, goto_dfa, goto_skeleton) = goto_variant.expect("goto variant should exist");
-                return (goto_dfa, goto_skeleton, baseline_sample);
-            }
-
-            if goto_matches {
-                baseline_sample.selected_mode = SelectedMode::GotoOnly;
-                if std::env::var("GLRMASK_DEBUG_PROFILE").is_ok() {
-                    eprintln!(
-                        "[glrmask/debug][template_verify] terminal={} selected=goto-only",
-                        terminal,
-                    );
-                }
-                let (_, goto_dfa, goto_skeleton) = goto_variant.expect("goto variant should exist");
-                return (goto_dfa, goto_skeleton, baseline_sample);
-            }
-
-            if shift_matches {
-                baseline_sample.selected_mode = SelectedMode::ShiftOnly;
-                if std::env::var("GLRMASK_DEBUG_PROFILE").is_ok() {
-                    eprintln!(
-                        "[glrmask/debug][template_verify] terminal={} selected=shift-only",
-                        terminal,
-                    );
-                }
-                let (_, shift_dfa, shift_skeleton) = shift_variant.expect("shift variant should exist");
-                return (shift_dfa, shift_skeleton, baseline_sample);
-            }
-
-            if std::env::var("GLRMASK_DEBUG_PROFILE").is_ok() {
-                eprintln!(
-                    "[glrmask/debug][template_verify] terminal={} selected=baseline",
-                    terminal,
-                );
-            }
-            (baseline_dfa, baseline_skeleton, baseline_sample)
-        }
-    }
-}
-
 pub(crate) fn emit_template_profile_summary(
     characterize_ms: f64,
     profile: &TemplateCompileProfile,
 ) {
     eprintln!(
-        "[glrmask/profile][templates] characterize_ms={:.3} compile_ms={:.3} build_nfa_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} selected_baseline={} selected_goto_only={} selected_shift_only={} selected_both={} num_terminals={} unique_characterizations={} max_characterization_multiplicity={} avg_nfa_states={:.1} max_nfa_states={} avg_nfa_transitions={:.1} max_nfa_transitions={} avg_dfa_states={:.1} max_dfa_states={} avg_dfa_transitions={:.1} max_dfa_transitions={} total_ms={:.3}",
+        "[glrmask/profile][templates] characterize_ms={:.3} compile_ms={:.3} build_nfa_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} num_terminals={} unique_characterizations={} max_characterization_multiplicity={} avg_nfa_states={:.1} max_nfa_states={} avg_nfa_transitions={:.1} max_nfa_transitions={} avg_dfa_states={:.1} max_dfa_states={} avg_dfa_transitions={:.1} max_dfa_transitions={} total_ms={:.3}",
         characterize_ms,
         profile.total_ms,
         profile.build_nfa_ms,
         profile.determinize_ms,
         profile.minimize_ms,
-        profile.selected_baseline,
-        profile.selected_goto_only,
-        profile.selected_shift_only,
-        profile.selected_both,
         profile.num_terminals,
         profile.unique_characterizations,
         profile.max_characterization_multiplicity,
@@ -423,7 +220,9 @@ impl Templates {
         let compiled: Vec<(TerminalID, UnweightedDfa, NWA)> = characterizations
             .par_iter()
             .map(|(&terminal, characterization)| {
-                let (dfa, skeleton, _) = compile_template(characterization, terminal, replace_shortening_mode());
+                let nfa = build_template_nfa(characterization);
+                let dfa = minimize_dfa(&determinize(&nfa));
+                let skeleton = dfa_to_nwa_skeleton(&dfa);
                 (terminal, dfa, skeleton)
             })
             .collect();
@@ -455,7 +254,7 @@ impl Templates {
             characterizations
                 .par_iter()
                 .map(|(&terminal, characterization)| {
-                    let (dfa, skeleton, sample) = compile_template_with_profile(characterization, terminal);
+                    let (dfa, skeleton, sample) = compile_template_with_profile(characterization);
                     (terminal, dfa, skeleton, sample)
                 })
                 .collect();
@@ -503,50 +302,6 @@ fn build_nonterminal_nodes(
     nonterminal_nodes
 }
 
-#[derive(Clone, Copy, Debug)]
-enum ReplaceShorteningMode {
-    VerifyAll,
-    Force(TemplateShorteningMode),
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct TemplateShorteningMode {
-    shorten_shift: bool,
-    shorten_goto: bool,
-}
-
-fn replace_shortening_mode() -> ReplaceShorteningMode {
-    let default = ReplaceShorteningMode::Force(TemplateShorteningMode {
-        shorten_shift: true,
-        shorten_goto: true,
-    });
-
-    let Ok(value) = std::env::var("GLRMASK_TEMPLATE_REPLACE_SHORTEN") else {
-        return default;
-    };
-
-    let normalized = value.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "auto" | "verify" => default,
-        "" | "0" | "false" | "no" | "off" => ReplaceShorteningMode::Force(TemplateShorteningMode {
-            shorten_shift: false,
-            shorten_goto: false,
-        }),
-        "shift" => ReplaceShorteningMode::Force(TemplateShorteningMode {
-            shorten_shift: true,
-            shorten_goto: false,
-        }),
-        "goto" => ReplaceShorteningMode::Force(TemplateShorteningMode {
-            shorten_shift: false,
-            shorten_goto: true,
-        }),
-        _ => ReplaceShorteningMode::Force(TemplateShorteningMode {
-            shorten_shift: true,
-            shorten_goto: true,
-        }),
-    }
-}
-
 fn append_default_pop_chain(nfa: &mut NFA, mut from: u32, pop_count: usize, target: u32) {
     for pop_index in 0..pop_count {
         let to = if pop_index == pop_count - 1 {
@@ -580,36 +335,23 @@ fn add_positive_transition_chain(
 /// Each shift/reduce/escape/re-reduce path gets its own fresh intermediate
 /// states, connected to the shared start state (via epsilon) and to shared
 /// NT-node states.
-fn build_template_nfa_with_mode(
-    characterization: &TerminalCharacterization,
-    _terminal: TerminalID,
-    shorten_mode: TemplateShorteningMode,
-) -> NFA {
+fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
     let mut nfa = NFA::new();
     let start = 0u32; // NFA::new() creates state 0 as start
 
     let nonterminal_nodes = build_nonterminal_nodes(&mut nfa, characterization);
 
-    for &(initial_state, shift_state, shift_is_replace) in &characterization.shifts {
+    for &(initial_state, shift_state) in &characterization.shifts {
         let s0 = nfa.add_state();
         let s1 = nfa.add_state();
         let s2 = nfa.add_state();
-        let s3 = if shorten_mode.shorten_shift && shift_is_replace {
-            None
-        } else {
-            Some(nfa.add_state())
-        };
+        let s3 = nfa.add_state();
 
         nfa.add_epsilon(start, s0);
         nfa.add_transition(s0, encode_positive_label(initial_state), s1);
-        if let Some(s3) = s3 {
-            nfa.add_transition(s1, encode_negative_label(initial_state), s2);
-            nfa.add_transition(s2, encode_negative_label(shift_state), s3);
-            nfa.set_accepting(s3);
-        } else {
-            nfa.add_transition(s1, encode_negative_label(shift_state), s2);
-            nfa.set_accepting(s2);
-        }
+        nfa.add_transition(s1, encode_negative_label(initial_state), s2);
+        nfa.add_transition(s2, encode_negative_label(shift_state), s3);
+        nfa.set_accepting(s3);
     }
 
     for &(initial_state, pop_count, nonterminal) in &characterization.reduces {
@@ -619,6 +361,7 @@ fn build_template_nfa_with_mode(
 
         let s0 = nfa.add_state();
         nfa.add_epsilon(start, s0);
+
         add_positive_transition_chain(
             &mut nfa,
             s0,
@@ -628,40 +371,22 @@ fn build_template_nfa_with_mode(
         );
     }
 
-    for &(source_nonterminal, revealed_state, goto_state, shift_state, goto_is_replace, shift_is_replace) in &characterization.nt_escapes {
+    for &(source_nonterminal, revealed_state, goto_state, shift_state) in &characterization.nt_escapes {
         let Some(&source_state) = nonterminal_nodes.get(&source_nonterminal) else {
             continue;
         };
 
         let s0 = nfa.add_state();
         let s1 = nfa.add_state();
-        let s2 = if shorten_mode.shorten_goto && goto_is_replace {
-            None
-        } else {
-            Some(nfa.add_state())
-        };
-        let s3 = if shorten_mode.shorten_shift && shift_is_replace {
-            None
-        } else {
-            Some(nfa.add_state())
-        };
+        let s2 = nfa.add_state();
+        let s3 = nfa.add_state();
         let s4 = nfa.add_state();
 
         nfa.add_epsilon(source_state, s0);
         nfa.add_transition(s0, encode_positive_label(revealed_state), s1);
-        let after_revealed = if let Some(s2) = s2 {
-            nfa.add_transition(s1, encode_negative_label(revealed_state), s2);
-            s2
-        } else {
-            s1
-        };
-        let after_goto = if let Some(s3) = s3 {
-            nfa.add_transition(after_revealed, encode_negative_label(goto_state), s3);
-            s3
-        } else {
-            after_revealed
-        };
-        nfa.add_transition(after_goto, encode_negative_label(shift_state), s4);
+        nfa.add_transition(s1, encode_negative_label(revealed_state), s2);
+        nfa.add_transition(s2, encode_negative_label(goto_state), s3);
+        nfa.add_transition(s3, encode_negative_label(shift_state), s4);
         nfa.set_accepting(s4);
     }
 
@@ -678,190 +403,4 @@ fn build_template_nfa_with_mode(
     }
 
     nfa
-}
-
-#[cfg(test)]
-pub(crate) fn debug_template_nfa_label_paths(
-    characterization: &TerminalCharacterization,
-    terminal: TerminalID,
-    start: u32,
-) -> Vec<Vec<i32>> {
-    let mode = match replace_shortening_mode() {
-        ReplaceShorteningMode::Force(mode) => mode,
-        ReplaceShorteningMode::VerifyAll => TemplateShorteningMode::default(),
-    };
-    debug_template_nfa_label_paths_with_mode(characterization, terminal, start, mode)
-}
-
-#[cfg(test)]
-fn debug_template_nfa_label_paths_with_mode(
-    characterization: &TerminalCharacterization,
-    terminal: TerminalID,
-    start: u32,
-    mode: TemplateShorteningMode,
-) -> Vec<Vec<i32>> {
-    fn dfs(nfa: &NFA, state: u32, path: &mut Vec<i32>, out: &mut Vec<Vec<i32>>) {
-        let current = &nfa.states[state as usize];
-        if current.is_accepting {
-            out.push(path.clone());
-        }
-        for &next in &current.epsilons {
-            dfs(nfa, next, path, out);
-        }
-        for (&label, targets) in &current.transitions {
-            for &next in targets {
-                path.push(label);
-                dfs(nfa, next, path, out);
-                path.pop();
-            }
-        }
-    }
-
-    let nfa = build_template_nfa_with_mode(characterization, terminal, mode);
-    let mut out = Vec::new();
-    dfs(&nfa, start, &mut Vec::new(), &mut out);
-    out.sort();
-    out.dedup();
-    out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_build_template_nfa_basic_shift() {
-        let characterization = TerminalCharacterization {
-            shifts: vec![(1, 2, false)],
-            reduces: vec![],
-            nt_escapes: vec![],
-            nt_rereduces: vec![],
-            all_nts: Default::default(),
-        };
-
-        let paths = debug_template_nfa_label_paths_with_mode(
-            &characterization,
-            7,
-            0,
-            TemplateShorteningMode::default(),
-        );
-
-        assert!(paths.contains(&vec![encode_positive_label(1), encode_negative_label(1), encode_negative_label(2)]));
-    }
-
-    #[test]
-    fn test_build_template_nfa_basic_escape() {
-        let characterization = TerminalCharacterization {
-            shifts: vec![],
-            reduces: vec![],
-            nt_escapes: vec![(10, 3, 4, 5, false, false)],
-            nt_rereduces: vec![],
-            all_nts: [10].into_iter().collect(),
-        };
-
-        let paths = debug_template_nfa_label_paths_with_mode(
-            &characterization,
-            7,
-            1,
-            TemplateShorteningMode::default(),
-        );
-
-        assert!(paths.contains(&vec![encode_positive_label(3), encode_negative_label(3), encode_negative_label(4), encode_negative_label(5)]));
-    }
-
-    #[test]
-    fn test_build_template_nfa_force_shift_shortens_candidate() {
-        let characterization = TerminalCharacterization {
-            shifts: vec![(1, 2, true)],
-            reduces: vec![],
-            nt_escapes: vec![],
-            nt_rereduces: vec![],
-            all_nts: Default::default(),
-        };
-
-        let paths = debug_template_nfa_label_paths_with_mode(
-            &characterization,
-            7,
-            0,
-            TemplateShorteningMode {
-                shorten_shift: true,
-                shorten_goto: false,
-            },
-        );
-
-        assert!(paths.contains(&vec![encode_positive_label(1), encode_negative_label(2)]));
-    }
-
-    #[test]
-    fn test_build_template_nfa_force_goto_shortens_candidate() {
-        let characterization = TerminalCharacterization {
-            shifts: vec![],
-            reduces: vec![],
-            nt_escapes: vec![(10, 3, 4, 5, true, false)],
-            nt_rereduces: vec![],
-            all_nts: [10].into_iter().collect(),
-        };
-
-        let paths = debug_template_nfa_label_paths_with_mode(
-            &characterization,
-            7,
-            1,
-            TemplateShorteningMode {
-                shorten_shift: false,
-                shorten_goto: true,
-            },
-        );
-
-        assert!(paths.contains(&vec![encode_positive_label(3), encode_negative_label(4), encode_negative_label(5)]));
-    }
-
-    #[test]
-    fn test_compile_template_verify_falls_back_when_shift_shortening_changes_dfa() {
-        let characterization = TerminalCharacterization {
-            shifts: vec![(1, 2, true)],
-            reduces: vec![],
-            nt_escapes: vec![],
-            nt_rereduces: vec![],
-            all_nts: Default::default(),
-        };
-
-        let baseline_mode = TemplateShorteningMode::default();
-        let shortened_mode = TemplateShorteningMode {
-            shorten_shift: true,
-            shorten_goto: true,
-        };
-
-        let (baseline_dfa, _, _) = compile_template_variant_with_profile(&characterization, 7, baseline_mode);
-        let (shortened_dfa, _, _) = compile_template_variant_with_profile(&characterization, 7, shortened_mode);
-        let (auto_dfa, _, auto_sample) = compile_template(&characterization, 7, ReplaceShorteningMode::VerifyAll);
-
-        assert_ne!(baseline_dfa, shortened_dfa);
-        assert_eq!(auto_dfa, baseline_dfa);
-        assert_eq!(auto_sample.selected_mode, SelectedMode::Baseline);
-    }
-
-    #[test]
-    fn test_compile_template_verify_uses_shortened_when_dfa_matches() {
-        let characterization = TerminalCharacterization {
-            shifts: vec![],
-            reduces: vec![],
-            nt_escapes: vec![(10, 3, 4, 5, true, false)],
-            nt_rereduces: vec![],
-            all_nts: [10].into_iter().collect(),
-        };
-
-        let baseline_mode = TemplateShorteningMode::default();
-        let shortened_mode = TemplateShorteningMode {
-            shorten_shift: true,
-            shorten_goto: true,
-        };
-
-        let (baseline_dfa, _, _) = compile_template_variant_with_profile(&characterization, 7, baseline_mode);
-        let (shortened_dfa, _, _) = compile_template_variant_with_profile(&characterization, 7, shortened_mode);
-        let (auto_dfa, _, auto_sample) = compile_template(&characterization, 7, ReplaceShorteningMode::VerifyAll);
-
-        assert_eq!(baseline_dfa, shortened_dfa);
-        assert_eq!(auto_dfa, shortened_dfa);
-        assert_eq!(auto_sample.selected_mode, SelectedMode::GotoOnly);
-    }
 }

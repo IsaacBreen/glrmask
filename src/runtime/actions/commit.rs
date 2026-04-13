@@ -1,7 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use smallvec::SmallVec;
-
 use crate::automata::lexer::tokenizer::TokenizerExecResult;
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{
@@ -313,14 +311,8 @@ fn commit_bytes_fast_path(
     // Inlines the entire advance + prune + fuse to avoid all function call overhead.
     if all_accs_empty {
         if let Some(top_state) = gss.single_exclusive_top_value() {
-            if let Some(Action::Shift(target, replace)) = constraint.table.action(top_state, terminal) {
-                let shifted = if *replace
-                    && gss.try_virtual_stack().and_then(|stack| stack.parent_of_top()).is_some()
-                {
-                    gss.clone().replace_top_values_owned([(top_state, *target)])
-                } else {
-                    gss.push(*target)
-                };
+            if let Some(Action::Shift(target)) = constraint.table.action(top_state, terminal) {
+                let shifted = gss.push(*target);
                 state.clear();
                 state.insert(constraint.tokenizer.initial_state(), shifted);
                 return Some(Ok(()));
@@ -393,7 +385,7 @@ enum LinearFastPathResult {
     Restart,
 }
 
-fn commit_bytes_linear_fast_path_single(
+fn commit_bytes_linear_fast_path(
     constraint: &Constraint,
     start_gss: ParserGSS,
     bytes: &[u8],
@@ -493,155 +485,6 @@ fn commit_bytes_linear_fast_path_single(
     }
 }
 
-fn commit_bytes_linear_fast_path(
-    constraint: &Constraint,
-    start_gss: ParserGSS,
-    bytes: &[u8],
-    first_exec_result: TokenizerExecResult,
-) -> LinearFastPathResult {
-    if start_gss.peek_values().len() <= 1 {
-        return commit_bytes_linear_fast_path_single(
-            constraint,
-            start_gss,
-            bytes,
-            first_exec_result,
-        );
-    }
-
-    let ignore_terminal = constraint.ignore_terminal;
-
-    // Pre-isolate: if the GSS has multiple top states, split into separate
-    // branches so each per-byte advance takes the deterministic path.
-    // This avoids isolate+merge overhead inside advance_nondeterministically
-    // at every byte; we only merge once at the end.
-    let top_states = start_gss.peek_values();
-    let mut branches: SmallVec<[ParserGSS; 4]> = if top_states.len() > 1 {
-        top_states
-            .iter()
-            .filter_map(|&s| {
-                let b = start_gss.isolate(Some(s));
-                if b.is_empty() { None } else { Some(b) }
-            })
-            .collect()
-    } else {
-        smallvec::smallvec![start_gss]
-    };
-
-    let mut offset = 0usize;
-    let mut exec_result = first_exec_result;
-
-    loop {
-        // Compute actionable terminals from union of all branches
-        let mut chosen: Option<(usize, u32, bool)> = None;
-
-        for matched in &exec_result.matches {
-            let ignored = is_ignored_terminal(ignore_terminal, matched.id);
-            if !ignored {
-                let any_can_advance = branches.iter().any(|b|
-                    stack_may_advance_on(&constraint.table, b, matched.id)
-                );
-                if !any_can_advance {
-                    continue;
-                }
-            }
-
-            let candidate = (matched.width, matched.id, ignored);
-            if let Some(existing) = chosen {
-                if existing != candidate {
-                    return if offset > 0 {
-                        LinearFastPathResult::Continue { gss: merge_branches(&branches), offset }
-                    } else {
-                        LinearFastPathResult::Restart
-                    };
-                }
-            } else {
-                chosen = Some(candidate);
-            }
-        }
-
-        let Some((width, terminal, ignored)) = chosen else {
-            return if offset > 0 {
-                LinearFastPathResult::Continue { gss: merge_branches(&branches), offset }
-            } else {
-                LinearFastPathResult::Restart
-            };
-        };
-
-        if let Some(end_state) = exec_result.end_state {
-            let future_terminals = constraint.tokenizer.possible_future_terminals(end_state);
-            let any_can_advance = branches.iter().any(|b|
-                stack_may_advance_on_any(&constraint.table, b, future_terminals)
-            );
-            if any_can_advance {
-                return if offset > 0 {
-                    LinearFastPathResult::Continue { gss: merge_branches(&branches), offset }
-                } else {
-                    LinearFastPathResult::Restart
-                };
-            }
-        }
-
-        if !ignored {
-            let any_can_advance = branches.iter().any(|b|
-                stack_may_advance_on(&constraint.table, b, terminal)
-            );
-            if !any_can_advance {
-                return if offset > 0 {
-                    LinearFastPathResult::Continue { gss: merge_branches(&branches), offset }
-                } else {
-                    LinearFastPathResult::Restart
-                };
-            }
-
-            // Advance each branch independently
-            for branch in &mut branches {
-                if !stack_may_advance_on(&constraint.table, branch, terminal) {
-                    *branch = ParserGSS::empty();
-                    continue;
-                }
-                let advanced = advance_stacks_owned(
-                    &constraint.table,
-                    std::mem::replace(branch, ParserGSS::empty()),
-                    terminal,
-                );
-                *branch = apply_future_terminal_disallow(
-                    constraint, &exec_result, terminal, advanced,
-                );
-            }
-            branches.retain(|b| !b.is_empty());
-            if branches.is_empty() {
-                return LinearFastPathResult::Complete(Err(
-                    "commit rejected: no valid parser states remain".to_string(),
-                ));
-            }
-        }
-
-        offset += width;
-        if offset == bytes.len() {
-            let merged = merge_branches(&branches);
-            let fused = merged.fuse(Some(1));
-            if fused.is_empty() {
-                return LinearFastPathResult::Complete(Err(
-                    "commit rejected: no valid parser states remain".to_string(),
-                ));
-            }
-            return LinearFastPathResult::Complete(Ok(fused));
-        }
-
-        exec_result = constraint
-            .tokenizer
-            .execute_from_state(&bytes[offset..], constraint.tokenizer.initial_state());
-    }
-}
-
-fn merge_branches(branches: &[ParserGSS]) -> ParserGSS {
-    let mut result = ParserGSS::empty();
-    for b in branches {
-        result = result.merge(b);
-    }
-    result
-}
-
 fn commit_bytes_impl(
     constraint: &Constraint,
     state: &mut BTreeMap<u32, ParserGSS>,
@@ -689,32 +532,6 @@ fn commit_bytes_impl(
                     }
                 }
                 LinearFastPathResult::Continue { gss, offset } => {
-                    // Try to handle the remaining suffix without the full generic queue.
-                    let suffix = &bytes[offset..];
-                    let suffix_exec = constraint
-                        .tokenizer
-                        .execute_from_state(suffix, constraint.tokenizer.initial_state());
-
-                    // End-state-only shortcut: suffix produces no terminal matches
-                    // but advances the tokenizer to a viable end state.
-                    let no_actionable_matches = suffix_exec.matches.iter().all(|m| {
-                        is_ignored_terminal(ignore_terminal, m.id)
-                            || !stack_may_advance_on(&constraint.table, &gss, m.id)
-                    });
-                    if no_actionable_matches {
-                        if let Some(end_state) = suffix_exec.end_state {
-                            let future_terminals = constraint.tokenizer.possible_future_terminals(end_state);
-                            if stack_may_advance_on_any(&constraint.table, &gss, future_terminals) {
-                                let fused = gss.fuse(Some(1));
-                                if !fused.is_empty() {
-                                    state.clear();
-                                    state.insert(end_state, fused);
-                                    return Ok(());
-                                }
-                            }
-                        }
-                    }
-
                     bufs.clear_all();
                     state.clear();
                     state.insert(constraint.tokenizer.initial_state(), gss);
