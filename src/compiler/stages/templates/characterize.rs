@@ -6,11 +6,11 @@ use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{Action, GLRTable};
 use crate::grammar::flat::{NonterminalID, TerminalID};
 
-type InitialEscape = (u32, bool, Vec<u32>);
+type InitialEscape = (u32, Vec<u32>);
 
 type InitialReduce = (u32, usize, NonterminalID);
 
-type NtEscape = (NonterminalID, u32, bool, Vec<u32>);
+type NtEscape = (NonterminalID, u32, Vec<u32>);
 
 type NtRereduce = (NonterminalID, u32, usize, NonterminalID);
 
@@ -99,7 +99,8 @@ fn record_initial_action(
 ) {
     match action {
         Action::Shift(shift_state, replace) => {
-            escapes.insert((state, *replace, vec![*shift_state]));
+            let pushes = if *replace { vec![*shift_state] } else { vec![state, *shift_state] };
+            escapes.insert((state, pushes));
         }
         Action::Reduce(lhs, len) => {
             let rule_len = *len as usize;
@@ -113,7 +114,8 @@ fn record_initial_action(
             ..
         } => {
             if let Some((shift_state, replace)) = shift {
-                escapes.insert((state, *replace, vec![*shift_state]));
+                let pushes = if *replace { vec![*shift_state] } else { vec![state, *shift_state] };
+                escapes.insert((state, pushes));
             }
             for &(lhs, len) in split_reduces {
                 let rule_len = len as usize;
@@ -141,12 +143,11 @@ fn record_goto_action(
 ) {
     match action {
         Action::Shift(shift_state, shift_replace) => {
-            let pushes = if *shift_replace {
-                vec![*shift_state]
-            } else {
-                vec![current_state, *shift_state]
-            };
-            nt_escapes.insert((stack_nt, revealed_state, goto_replace, pushes));
+            let mut pushes = Vec::new();
+            if !goto_replace { pushes.push(revealed_state); }
+            if !*shift_replace { pushes.push(current_state); }
+            pushes.push(*shift_state);
+            nt_escapes.insert((stack_nt, revealed_state, pushes));
         }
         Action::Reduce(lhs, len) => {
             handle_reduce(
@@ -168,12 +169,11 @@ fn record_goto_action(
             ..
         } => {
             if let Some((shift_state, shift_replace)) = shift {
-                let pushes = if *shift_replace {
-                    vec![*shift_state]
-                } else {
-                    vec![current_state, *shift_state]
-                };
-                nt_escapes.insert((stack_nt, revealed_state, goto_replace, pushes));
+                let mut pushes = Vec::new();
+                if !goto_replace { pushes.push(revealed_state); }
+                if !*shift_replace { pushes.push(current_state); }
+                pushes.push(*shift_state);
+                nt_escapes.insert((stack_nt, revealed_state, pushes));
             }
             for &(lhs, len) in split_reduces {
                 handle_reduce(
@@ -307,10 +307,10 @@ fn characterize_terminal_with_initial(
 
             for (&inheritor, targets) in &inheritances {
                 for &target in targets {
-                    // Copy nt_escapes: (nt, target, replace, pushes) → (nt, inheritor, replace, pushes)
-                    for &(nt, revealed, replace, ref pushes) in &nt_escapes {
+                    // Copy nt_escapes: (nt, target, pushes) → (nt, inheritor, pushes)
+                    for &(nt, revealed, ref pushes) in &nt_escapes {
                         if revealed == target {
-                            let inherited = (nt, inheritor, replace, pushes.clone());
+                            let inherited = (nt, inheritor, pushes.clone());
                             if !nt_escapes.contains(&inherited) {
                                 new_escapes.insert(inherited);
                             }
@@ -340,7 +340,7 @@ fn characterize_terminal_with_initial(
     for &(_, _, nt) in &reduces {
         referenced_nts.insert(nt);
     }
-    for &(src_nt, _, _, _) in &nt_escapes {
+    for &(src_nt, _, _) in &nt_escapes {
         referenced_nts.insert(src_nt);
     }
     for &(src_nt, _, _, target_nt) in &nt_rereduces {

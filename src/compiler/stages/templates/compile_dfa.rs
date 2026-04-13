@@ -341,17 +341,12 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
 
     let nonterminal_nodes = build_nonterminal_nodes(&mut nfa, characterization);
 
-    // Initial escapes: positive(state) → [negative(state) if !replace] → negative(push[0]) → ... → accepting
-    for &(initial_state, replace, ref pushes) in &characterization.escapes {
+    // Initial escapes: positive(state) → negative(pushes[0]) → ... → accepting
+    for &(initial_state, ref pushes) in &characterization.escapes {
         let s0 = nfa.add_state();
         nfa.add_epsilon(start, s0);
         let mut prev = nfa.add_state();
         nfa.add_transition(s0, encode_positive_label(initial_state), prev);
-        if !replace {
-            let next = nfa.add_state();
-            nfa.add_transition(prev, encode_negative_label(initial_state), next);
-            prev = next;
-        }
         for &push_state in pushes {
             let next = nfa.add_state();
             nfa.add_transition(prev, encode_negative_label(push_state), next);
@@ -377,8 +372,8 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
         );
     }
 
-    // NT escapes: nt_node → positive(revealed) → [negative(revealed) if !replace] → negative(push[0]) → ... → accepting
-    for &(source_nonterminal, revealed_state, replace, ref pushes) in &characterization.nt_escapes {
+    // NT escapes: nt_node → positive(revealed) → negative(pushes[0]) → ... → accepting
+    for &(source_nonterminal, revealed_state, ref pushes) in &characterization.nt_escapes {
         let Some(&source_state) = nonterminal_nodes.get(&source_nonterminal) else {
             continue;
         };
@@ -387,11 +382,6 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
         nfa.add_epsilon(source_state, s0);
         let mut prev = nfa.add_state();
         nfa.add_transition(s0, encode_positive_label(revealed_state), prev);
-        if !replace {
-            let next = nfa.add_state();
-            nfa.add_transition(prev, encode_negative_label(revealed_state), next);
-            prev = next;
-        }
         for &push_state in pushes {
             let next = nfa.add_state();
             nfa.add_transition(prev, encode_negative_label(push_state), next);
