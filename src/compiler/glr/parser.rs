@@ -1496,9 +1496,11 @@ mod tests {
         );
         let parser = build_parser(&gdef);
 
-        // 1. Verify at least one replace shift and one replace goto exist in the table.
-        //    (Skipped when GLRMASK_DISABLE_REPLACE=1.)
         let replace_disabled = std::env::var("GLRMASK_DISABLE_REPLACE").map_or(false, |v| v == "1");
+        let replace_shift_disabled = replace_disabled
+            || std::env::var("GLRMASK_DISABLE_REPLACE_SHIFT").map_or(false, |v| v == "1");
+        let replace_goto_disabled = replace_disabled
+            || std::env::var("GLRMASK_DISABLE_REPLACE_GOTO").map_or(false, |v| v == "1");
         let mut replace_shifts = 0u32;
         let mut replace_gotos = 0u32;
         for actions_by_terminal in &parser.table.action {
@@ -1515,11 +1517,14 @@ mod tests {
                 if is_replace { replace_gotos += 1; }
             }
         }
-        if !replace_disabled {
+        if !replace_shift_disabled {
             assert!(replace_shifts > 0, "Expected at least one replace shift, found none");
-            assert!(replace_gotos > 0, "Expected at least one replace goto, found none");
         } else {
             assert_eq!(replace_shifts, 0, "Replace shifts should be 0 when disabled");
+        }
+        if !replace_goto_disabled {
+            assert!(replace_gotos > 0, "Expected at least one replace goto, found none");
+        } else {
             assert_eq!(replace_gotos, 0, "Replace gotos should be 0 when disabled");
         }
 

@@ -132,7 +132,7 @@ fn record_goto_action(
     table: &GLRTable,
     stack_nt: NonterminalID,
     revealed_state: u32,
-    current_state: u32,
+    goto_state: u32,
     action: &Action,
     goto_replace: bool,
     visited: &mut BTreeSet<u32>,
@@ -145,7 +145,7 @@ fn record_goto_action(
         Action::Shift(shift_state, shift_replace) => {
             let mut pushes = Vec::new();
             if !goto_replace { pushes.push(revealed_state); }
-            if !*shift_replace { pushes.push(current_state); }
+            if !*shift_replace { pushes.push(goto_state); }
             pushes.push(*shift_state);
             nt_escapes.insert((stack_nt, revealed_state, pushes));
         }
@@ -171,7 +171,7 @@ fn record_goto_action(
             if let Some((shift_state, shift_replace)) = shift {
                 let mut pushes = Vec::new();
                 if !goto_replace { pushes.push(revealed_state); }
-                if !*shift_replace { pushes.push(current_state); }
+                if !*shift_replace { pushes.push(goto_state); }
                 pushes.push(*shift_state);
                 nt_escapes.insert((stack_nt, revealed_state, pushes));
             }
@@ -384,15 +384,15 @@ fn explore_from_goto(
     visited.insert(start_state);
     worklist.push_back(start_state);
 
-    while let Some(current_state) = worklist.pop_front() {
-        let Some(action) = table.action(current_state, terminal) else {
+    while let Some(goto_state) = worklist.pop_front() {
+        let Some(action) = table.action(goto_state, terminal) else {
             continue;
         };
         record_goto_action(
             table,
             stack_nt,
             revealed_state,
-            current_state,
+            goto_state,
             action,
             goto_replace,
             &mut visited,

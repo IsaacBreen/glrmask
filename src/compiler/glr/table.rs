@@ -7,11 +7,25 @@ use serde::{Deserialize, Serialize};
 use super::analysis::{EOF, AnalyzedGrammar};
 use crate::grammar::flat::{NonterminalID, Rule, Symbol, TerminalID};
 
-/// Check once whether replace actions are disabled via env var.
-fn replace_actions_enabled() -> bool {
+fn env_flag_enabled(key: &str) -> bool {
+    std::env::var(key).map_or(false, |v| v == "1")
+}
+
+/// Check once whether replace shifts are enabled via env vars.
+fn replace_shifts_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var("GLRMASK_DISABLE_REPLACE").map_or(true, |v| v != "1")
+        !env_flag_enabled("GLRMASK_DISABLE_REPLACE")
+            && !env_flag_enabled("GLRMASK_DISABLE_REPLACE_SHIFT")
+    })
+}
+
+/// Check once whether replace gotos are enabled via env vars.
+fn replace_gotos_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !env_flag_enabled("GLRMASK_DISABLE_REPLACE")
+            && !env_flag_enabled("GLRMASK_DISABLE_REPLACE_GOTO")
     })
 }
 
@@ -1077,7 +1091,10 @@ fn build_lr1_item_sets(
             // has dot at position 1 (i.e., all items came from items that
             // already had dot > 0).
             let has_dot_1 = kernel.iter().any(|item| item.dot == 1);
-            let is_replace = !has_dot_1 && replace_actions_enabled();
+            let is_replace = match symbol {
+                Symbol::Terminal(_) => !has_dot_1 && replace_shifts_enabled(),
+                Symbol::Nonterminal(_) => !has_dot_1 && replace_gotos_enabled(),
+            };
 
             // If replace, decrement stack_depth for all kernel items.
             let adjusted_kernel = if is_replace {
@@ -1130,9 +1147,9 @@ fn build_lr1_table(
     for (state_id, by_symbol) in transitions.iter().enumerate() {
         for (symbol, &target) in by_symbol {
             let has_dot_1 = item_sets[target as usize].iter().any(|item| item.dot == 1);
-            let is_replace = !has_dot_1 && replace_actions_enabled();
             match symbol {
                 Symbol::Terminal(terminal) => {
+                    let is_replace = !has_dot_1 && replace_shifts_enabled();
                     if let Some(pa) = pending[state_id].get_mut(terminal) {
                         if let Some((_, ref mut r)) = pa.shift {
                             *r = is_replace;
@@ -1140,6 +1157,7 @@ fn build_lr1_table(
                     }
                 }
                 Symbol::Nonterminal(nonterminal) => {
+                    let is_replace = !has_dot_1 && replace_gotos_enabled();
                     if let Some(entry) = goto[state_id].get_mut(nonterminal) {
                         entry.1 = is_replace;
                     }

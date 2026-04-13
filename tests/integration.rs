@@ -1178,6 +1178,37 @@ fn test_right_recursive_item_bug() {
     );
 }
 
+#[test]
+fn test_open_map_with_alternative_value_keeps_closing_delimiter_allowed() {
+    let vocab = make_vocab(&["{", "}", ",", ":", "f", "o", "b", "a", "r", "1"]);
+    let c = Constraint::from_lark(
+        r#"
+        start: "{" entries? "}"
+        entries: pair ("," pair)*
+        pair: key ":" value
+        key: "f" "o" "o"
+        value: word | number
+        word: "b" "a" "r"
+        number: "1"
+        "#,
+        &vocab,
+    )
+    .unwrap();
+
+    let mut s = c.start();
+    commit_all(&mut s, &[0, 4, 5, 5, 3, 6, 7, 8]);
+
+    let mask = s.mask();
+    assert!(
+        token_allowed(&mask, 1),
+        "closing delimiter should be allowed after completing the alternative-valued pair"
+    );
+    assert!(
+        token_allowed(&mask, 2),
+        "pair separator should remain allowed after completing the alternative-valued pair"
+    );
+}
+
 // force() regressions where exactly one token stays in the mask.
 
 /// Grammar: s ::= 'a' 'b' 'c' (fully deterministic single path).
@@ -2407,8 +2438,8 @@ fn test_anchored_pattern_rejects_false_positive_after_partial_match() {
 
     let mut s = c.start();
     // Commit opening quote and 'a'
-    s.commit_token(0); // "
-    s.commit_token(1); // a
+    s.commit_token(0).unwrap(); // "
+    s.commit_token(1).unwrap(); // a
 
     let mask = s.mask();
     assert!(
