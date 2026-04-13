@@ -404,3 +404,278 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
 
     nfa
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
+    use crate::automata::unweighted_u32::nfa::NFAState;
+    use crate::automata::weighted::dwa::DWA;
+    use crate::automata::weighted::nwa::NWA as WeightedNwa;
+    use crate::compiler::glr::labels::{DEFAULT_LABEL, is_negative_label, negative_to_positive_label};
+    use crate::compiler::glr::analysis::AnalyzedGrammar;
+    use crate::compiler::glr::table::GLRTable;
+    use crate::compiler::grammar::transforms::prepare_grammar_transforms_only;
+    use crate::compiler::pipeline::build_tokenizer;
+    use crate::compiler::stages::equiv_types::InternalIdMap;
+    use crate::compiler::stages::parser_dwa::build_parser_dwa_from_terminal_dwa_with_precomputed_templates;
+    use crate::compiler::stages::templates::characterize::characterize_terminals;
+    use crate::compiler::stages::terminal_dwa_compat::build_terminal_dwa_for_existing_id_map;
+    use crate::grammar::flat::{GrammarDef, Symbol, Terminal};
+    use crate::import::lark::parse_lark;
+    use crate::Constraint;
+    use crate::Vocab;
+
+    fn minimal_repro_grammar() -> &'static str {
+        r#"
+        start: item+ "d"
+        item: "d" node
+        node: leaf
+        leaf: "d"
+        "#
+    }
+
+    fn minimal_boundary_pass_grammar() -> &'static str {
+        r#"
+        start: item+ "d"
+        item: "d" leaf
+        leaf: "d"
+        "#
+    }
+
+    fn minimal_repro_vocab() -> Vocab {
+        Vocab::new(vec![(0, b"d".to_vec())], None)
+    }
+
+    fn mask_allows(mask: &[u32], token: u32) -> bool {
+        let word = (token / 32) as usize;
+        let bit = 1u32 << (token % 32);
+        mask.get(word).is_some_and(|value| (value & bit) != 0)
+    }
+
+    fn describe_label(label: i32) -> String {
+        if label == DEFAULT_LABEL {
+            "DEFAULT".to_string()
+        } else if is_negative_label(label) {
+            format!("push({})", negative_to_positive_label(label))
+        } else {
+            format!("pop({})", label)
+        }
+    }
+
+    fn print_unweighted_dfa(label: &str, dfa: &UnweightedDfa) {
+        eprintln!("{} start_state={}", label, dfa.start_state);
+        for (state_id, state) in dfa.states.iter().enumerate() {
+            eprintln!("  state {} accepting={}", state_id, state.is_accepting);
+            let mut transitions = state.transitions.iter().collect::<Vec<_>>();
+            transitions.sort_by_key(|(edge_label, _)| **edge_label);
+            for (edge_label, target) in transitions {
+                eprintln!("    {} -> {}", describe_label(*edge_label), target);
+            }
+        }
+    }
+
+    fn print_nfa(label: &str, nfa: &NFA) {
+        eprintln!("{} start_states={:?}", label, nfa.start_states);
+        for (state_id, state) in nfa.states.iter().enumerate() {
+            print_nfa_state(state_id, state);
+        }
+    }
+
+    fn print_nfa_state(state_id: usize, state: &NFAState) {
+        eprintln!("  state {} accepting={} epsilons={:?}", state_id, state.is_accepting, state.epsilons);
+        let mut transitions = state.transitions.iter().collect::<Vec<_>>();
+        transitions.sort_by_key(|(edge_label, _)| **edge_label);
+        for (edge_label, targets) in transitions {
+            eprintln!("    {} -> {:?}", describe_label(*edge_label), targets);
+        }
+    }
+
+    fn print_weighted_nwa(label: &str, nwa: &WeightedNwa) {
+        eprintln!("{} start_states={:?}", label, nwa.start_states);
+        for (state_id, state) in nwa.states.iter().enumerate() {
+            eprintln!("  state {} final_weight={:?} epsilons={:?}", state_id, state.final_weight, state.epsilons);
+            let mut transitions = state.transitions.iter().collect::<Vec<_>>();
+            transitions.sort_by_key(|(edge_label, _)| **edge_label);
+            for (edge_label, targets) in transitions {
+                eprintln!("    {} -> {:?}", describe_label(*edge_label), targets);
+            }
+        }
+    }
+
+    fn print_weighted_dwa(label: &str, dwa: &DWA) {
+        eprintln!("{} start_state={}", label, dwa.start_state);
+        for (state_id, state) in dwa.states.iter().enumerate() {
+            eprintln!("  state {} final_weight={:?}", state_id, state.final_weight);
+            let mut transitions = state.transitions.iter().collect::<Vec<_>>();
+            transitions.sort_by_key(|(edge_label, _)| **edge_label);
+            for (edge_label, (target, weight)) in transitions {
+                eprintln!("    {} -> {} weight={:?}", describe_label(*edge_label), target, weight);
+            }
+        }
+    }
+
+    fn print_grammar(grammar: &GrammarDef) {
+        eprintln!("=== Prepared Grammar ===");
+        eprintln!("start_nt={} ignore_terminal={:?}", grammar.start, grammar.ignore_terminal);
+        eprintln!("nonterminal_names={:?}", grammar.nonterminal_names);
+        for terminal in &grammar.terminals {
+            match terminal {
+                Terminal::Literal { id, bytes } => {
+                    eprintln!("terminal {} literal {:?}", id, String::from_utf8_lossy(bytes));
+                }
+                Terminal::Pattern { id, pattern, utf8 } => {
+                    eprintln!("terminal {} pattern {:?} utf8={}", id, pattern, utf8);
+                }
+                Terminal::Expr { id, expr } => {
+                    eprintln!("terminal {} expr {:?}", id, expr);
+                }
+            }
+        }
+        for (index, rule) in grammar.rules.iter().enumerate() {
+            let rhs = rule
+                .rhs
+                .iter()
+                .map(|symbol| match symbol {
+                    Symbol::Terminal(terminal) => format!("T{}", terminal),
+                    Symbol::Nonterminal(nonterminal) => format!("N{}", nonterminal),
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            eprintln!("rule {}: N{} -> {}", index, rule.lhs, rhs);
+        }
+    }
+
+    fn print_analyzed_grammar(grammar: &AnalyzedGrammar) {
+        eprintln!("=== Analyzed Grammar ===");
+        eprintln!(
+            "num_terminals={} num_nonterminals={} nullable={:?}",
+            grammar.num_terminals,
+            grammar.num_nonterminals,
+            grammar.nullable
+        );
+        for (index, rule) in grammar.rules.iter().enumerate() {
+            let rhs = rule
+                .rhs
+                .iter()
+                .map(|symbol| match symbol {
+                    Symbol::Terminal(terminal) => format!("T{}", terminal),
+                    Symbol::Nonterminal(nonterminal) => format!("N{}", nonterminal),
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            eprintln!("analyzed rule {}: N{} -> {}", index, rule.lhs, rhs);
+        }
+        for nonterminal in 0..grammar.num_nonterminals {
+            eprintln!(
+                "FIRST(N{})={:?} FOLLOW(N{})={:?}",
+                nonterminal,
+                grammar.first[nonterminal as usize],
+                nonterminal,
+                grammar.follow[nonterminal as usize]
+            );
+        }
+    }
+
+    fn print_glr_table(table: &GLRTable) {
+        eprintln!("=== GLR Table ===");
+        eprintln!(
+            "num_states={} num_terminals={} num_rules={}",
+            table.num_states,
+            table.num_terminals,
+            table.num_rules
+        );
+        for (index, rule) in table.rules.iter().enumerate() {
+            eprintln!("table rule {}: lhs={} rhs={:?}", index, rule.lhs, rule.rhs);
+        }
+        for state in 0..table.num_states as usize {
+            eprintln!("state {}", state);
+            let mut actions = table.action[state].iter().collect::<Vec<_>>();
+            actions.sort_by_key(|(terminal, _)| **terminal);
+            for (terminal, action) in actions {
+                eprintln!("  action T{} -> {:?}", terminal, action);
+            }
+            let mut gotos = table.goto[state].iter().collect::<Vec<_>>();
+            gotos.sort_by_key(|(nonterminal, _)| **nonterminal);
+            for (nonterminal, (target, replace)) in gotos {
+                eprintln!("  goto N{} -> state {} replace={}", nonterminal, target, replace);
+            }
+        }
+    }
+
+    fn dump_case(label: &str, grammar_text: &str) {
+        let vocab = minimal_repro_vocab();
+        let grammar = parse_lark(grammar_text).unwrap();
+        let prepared = prepare_grammar_transforms_only(grammar);
+        eprintln!("\n================ {} ================", label);
+        print_grammar(&prepared);
+
+        let mut tokenizer = build_tokenizer(&prepared);
+        tokenizer.isolate_start_state_and_drain_nullable_terminals();
+
+        let analyzed = AnalyzedGrammar::from_grammar_def(&prepared);
+        print_analyzed_grammar(&analyzed);
+
+        let table = GLRTable::build(&analyzed);
+        print_glr_table(&table);
+
+        let characterizations = characterize_terminals(&table, &analyzed);
+        eprintln!("=== Terminal Characterizations ===");
+        for (terminal, characterization) in &characterizations {
+            eprintln!("terminal {} characterization {:#?}", terminal, characterization);
+            let template_nfa = build_template_nfa(characterization);
+            print_nfa(&format!("terminal {} template_nfa", terminal), &template_nfa);
+        }
+
+        let templates = Templates::from_characterizations(&characterizations);
+        eprintln!("=== Template DFAs / Skeleton NWAs ===");
+        for (terminal, dfa) in &templates.by_terminal {
+            print_unweighted_dfa(&format!("terminal {} template_dfa", terminal), dfa);
+        }
+        for (terminal, nwa) in &templates.by_terminal_nwa {
+            print_weighted_nwa(&format!("terminal {} template_nwa_skeleton", terminal), nwa);
+        }
+
+        let id_map = InternalIdMap::build_identity(&tokenizer, &vocab);
+        eprintln!("=== Internal ID Map ===");
+        eprintln!("tokenizer_states {:#?}", id_map.tokenizer_states);
+        eprintln!("vocab_tokens {:#?}", id_map.vocab_tokens);
+
+        let terminal_dwa = build_terminal_dwa_for_existing_id_map(
+            &analyzed,
+            &tokenizer,
+            &vocab,
+            &id_map,
+            prepared.ignore_terminal,
+        );
+        eprintln!("=== Terminal DWA ===");
+        print_weighted_dwa("terminal_dwa", &terminal_dwa);
+
+        let parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
+            &table,
+            &analyzed,
+            &terminal_dwa,
+            templates,
+        );
+        eprintln!("=== Parser DWA ===");
+        print_weighted_dwa("parser_dwa", &parser_dwa);
+
+        let constraint = Constraint::from_lark(grammar_text, &vocab).unwrap();
+        let mut state = constraint.start();
+        state.commit_bytes(b"dd").unwrap();
+        let mask = state.mask();
+        eprintln!("=== Runtime Probe ===");
+        eprintln!("mask_after_dd={:?}", mask);
+        eprintln!("closing_token_allowed={}", mask_allows(&mask, 0));
+        let mut accepting = constraint.start();
+        eprintln!("commit_ddd_result={:?}", accepting.commit_bytes(b"ddd"));
+    }
+
+    #[test]
+    #[ignore = "debug-only artifact dump for the minimized goto repro"]
+    fn dump_minimal_goto_repro_artifacts() {
+        dump_case("FAILING_MINIMAL", minimal_repro_grammar());
+        dump_case("PASSING_BOUNDARY", minimal_boundary_pass_grammar());
+    }
+}
