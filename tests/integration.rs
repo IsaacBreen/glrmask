@@ -1183,7 +1183,7 @@ fn test_repeated_item_with_one_less_wrapper_allows_closing_token() {
     let vocab = make_vocab(&["d"]);
     let c = Constraint::from_lark(
         r#"
-        start: item* "d"
+        start: item+ "d"
         item: "b" leaf
         leaf: "g"
         "#,
@@ -1209,7 +1209,7 @@ fn test_repeated_item_keeps_closing_token_allowed() {
     let vocab = make_vocab(&["d"]);
     let c = Constraint::from_lark(
         r#"
-        start: item* "d"
+        start: item+ "d"
         item: "b" node
         node: leaf
         leaf: "g"
