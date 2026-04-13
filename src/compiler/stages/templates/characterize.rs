@@ -137,6 +137,7 @@ fn record_goto_action(
     worklist: &mut VecDeque<u32>,
     nt_escapes: &mut BTreeSet<NtEscape>,
     nt_rereduces: &mut BTreeSet<NtRereduce>,
+    inheritances: &mut BTreeMap<u32, BTreeSet<u32>>,
 ) {
     match action {
         Action::Shift(shift_state, shift_replace) => {
@@ -158,6 +159,7 @@ fn record_goto_action(
                 visited,
                 worklist,
                 nt_rereduces,
+                inheritances,
             );
         }
         Action::Split {
@@ -184,6 +186,7 @@ fn record_goto_action(
                     visited,
                     worklist,
                     nt_rereduces,
+                    inheritances,
                 );
             }
         }
@@ -269,6 +272,7 @@ fn characterize_terminal_with_initial(
 ) -> TerminalCharacterization {
     let mut nt_escapes = BTreeSet::new();
     let mut nt_rereduces = BTreeSet::new();
+    let mut inheritances: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
 
     for revealed_state in 0..table.num_states {
         if let Some(gotos) = table.goto.get(revealed_state as usize) {
@@ -287,8 +291,48 @@ fn characterize_terminal_with_initial(
                     goto_replace,
                     &mut nt_escapes,
                     &mut nt_rereduces,
+                    &mut inheritances,
                 );
             }
+        }
+    }
+
+    // Distribute inheritances: when revealed_state R inherits from R2 (due to
+    // a replace goto R → R2), copy all nt_escapes and nt_rereduces that have
+    // R2 as their revealed_state to also use R.  Repeat until no new entries.
+    if !inheritances.is_empty() {
+        loop {
+            let mut new_escapes = BTreeSet::new();
+            let mut new_rereduces = BTreeSet::new();
+
+            for (&inheritor, targets) in &inheritances {
+                for &target in targets {
+                    // Copy nt_escapes: (nt, target, replace, pushes) → (nt, inheritor, replace, pushes)
+                    for &(nt, revealed, replace, ref pushes) in &nt_escapes {
+                        if revealed == target {
+                            let inherited = (nt, inheritor, replace, pushes.clone());
+                            if !nt_escapes.contains(&inherited) {
+                                new_escapes.insert(inherited);
+                            }
+                        }
+                    }
+                    // Copy nt_rereduces: (nt, target, pop, tgt_nt) → (nt, inheritor, pop, tgt_nt)
+                    for &(nt, revealed, pop, tgt_nt) in &nt_rereduces {
+                        if revealed == target {
+                            let inherited = (nt, inheritor, pop, tgt_nt);
+                            if !nt_rereduces.contains(&inherited) {
+                                new_rereduces.insert(inherited);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if new_escapes.is_empty() && new_rereduces.is_empty() {
+                break;
+            }
+            nt_escapes.extend(new_escapes);
+            nt_rereduces.extend(new_rereduces);
         }
     }
 
@@ -332,6 +376,7 @@ fn explore_from_goto(
     goto_replace: bool,
     nt_escapes: &mut BTreeSet<NtEscape>,
     nt_rereduces: &mut BTreeSet<NtRereduce>,
+    inheritances: &mut BTreeMap<u32, BTreeSet<u32>>,
 ) {
     let mut worklist = VecDeque::new();
     let mut visited = BTreeSet::new();
@@ -354,6 +399,7 @@ fn explore_from_goto(
             &mut worklist,
             nt_escapes,
             nt_rereduces,
+            inheritances,
         );
     }
 }
@@ -368,6 +414,7 @@ fn handle_reduce(
     visited: &mut BTreeSet<u32>,
     worklist: &mut VecDeque<u32>,
     nt_rereduces: &mut BTreeSet<NtRereduce>,
+    inheritances: &mut BTreeMap<u32, BTreeSet<u32>>,
 ) {
     // If the goto was a replace, the goto state was never pushed, so the
     // reduce effectively pops one fewer item from the perspective of the
@@ -376,7 +423,15 @@ fn handle_reduce(
     match effective_len {
         0 => unreachable!(),
         1 => {
-            if let Some((next_goto_state, _)) = table.goto_target(revealed_state, reduce_nt) {
+            if let Some((next_goto_state, next_replace)) = table.goto_target(revealed_state, reduce_nt) {
+                if next_replace {
+                    // The goto from revealed_state is replace — revealed_state
+                    // inherits all escapes/rereduces of next_goto_state.
+                    inheritances
+                        .entry(revealed_state)
+                        .or_default()
+                        .insert(next_goto_state);
+                }
                 if visited.insert(next_goto_state) {
                     worklist.push_back(next_goto_state);
                 }

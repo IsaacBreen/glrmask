@@ -523,6 +523,18 @@ fn test_diag_replace_comma() {
     }
 }
 
+/// Minimal reproducer: after a number value in a 2-property object, the mask
+/// must allow comma.
+#[test]
+fn test_replace_comma_after_number_value() {
+    let schema = r#"{"type":"object","properties":{"a":{"type":"number"},"b":{"type":"number"}}}"#;
+    let c = schema_constraint(schema);
+    let mut s = c.start();
+    advance_byte_prefix(&mut s, br#"{"a": 1"#);
+    let mask = s.mask();
+    assert_token_allowed(&mask, b',' as usize, "comma must be allowed after number value in object");
+}
+
 #[test]
 fn test_schema_object_after_comma_requires_key_quote() {
     let schema = r#"{

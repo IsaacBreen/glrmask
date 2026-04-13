@@ -321,11 +321,11 @@ fn add_positive_transition_chain(
     pop_count: usize,
     target: u32,
 ) {
-    let first_target = if pop_count == 0 {
-        target
-    } else {
-        nfa.add_state()
-    };
+    if pop_count == 0 {
+        nfa.add_transition(from, encode_positive_label(revealed_state), target);
+        return;
+    }
+    let first_target = nfa.add_state();
     nfa.add_transition(from, encode_positive_label(revealed_state), first_target);
     append_default_pop_chain(nfa, first_target, pop_count, target);
 }
