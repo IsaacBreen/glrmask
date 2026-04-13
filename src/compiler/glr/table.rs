@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::OnceLock;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
 use super::analysis::{EOF, AnalyzedGrammar};
@@ -108,6 +108,10 @@ pub struct GLRTable {
     pub num_terminals: u32,
     pub num_rules: u32,
     pub rules: Vec<Rule>,
+    /// Set of (state, terminal) pairs where the shift was created by the
+    /// transfer mechanism.  The characterization should treat these as
+    /// non-replace to avoid creating pop-0 reduces in the template NFA.
+    pub forwarded_shifts: FxHashSet<(u32, TerminalID)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -239,6 +243,10 @@ impl GLRTable {
 
             self.action = new_action;
             self.goto = new_goto;
+            self.forwarded_shifts = self.forwarded_shifts
+                .iter()
+                .map(|&(state, terminal)| (mapping[state as usize], terminal))
+                .collect();
             self.num_states = kept.len() as u32;
         }
     }
@@ -884,39 +892,45 @@ impl PendingAction {
 }
 
 fn initialize_pending_and_goto(
-    transitions: &[BTreeMap<Symbol, u32>],
+    transitions: &[BTreeMap<Symbol, (u32, bool, bool)>],
 ) -> (
     Vec<BTreeMap<TerminalID, PendingAction>>,
     Vec<FxHashMap<NonterminalID, (u32, bool)>>,
+    FxHashSet<(u32, TerminalID)>,
 ) {
     let mut pending = std::iter::repeat_with(BTreeMap::<TerminalID, PendingAction>::new)
         .take(transitions.len())
         .collect::<Vec<_>>();
     let mut goto: Vec<FxHashMap<NonterminalID, (u32, bool)>> = (0..transitions.len()).map(|_| FxHashMap::default()).collect();
+    let mut forwarded_shifts = FxHashSet::default();
 
     for (state_id, by_symbol) in transitions.iter().enumerate() {
-        for (symbol, &target) in by_symbol {
+        for (symbol, &(target, is_replace, is_forwarded)) in by_symbol {
             match symbol {
                 Symbol::Terminal(terminal) => {
                     pending[state_id]
                         .entry(*terminal)
                         .or_default()
-                        .push_shift(target, false); // replace computed later
+                        .push_shift(target, is_replace);
+                    if is_forwarded {
+                        forwarded_shifts.insert((state_id as u32, *terminal));
+                    }
                 }
                 Symbol::Nonterminal(nonterminal) => {
-                    goto[state_id].insert(*nonterminal, (target, false)); // replace computed later
+                    goto[state_id].insert(*nonterminal, (target, is_replace));
                 }
             }
         }
     }
 
-    (pending, goto)
+    (pending, goto, forwarded_shifts)
 }
 
 fn finish_table(
     grammar: &AnalyzedGrammar,
     pending: Vec<BTreeMap<TerminalID, PendingAction>>,
     goto: Vec<FxHashMap<NonterminalID, (u32, bool)>>,
+    forwarded_shifts: FxHashSet<(u32, TerminalID)>,
 ) -> GLRTable {
     let action: Vec<FxHashMap<TerminalID, Action>> = pending
         .into_iter()
@@ -936,6 +950,7 @@ fn finish_table(
         num_terminals: grammar.num_terminals,
         num_rules: grammar.rules.len() as u32,
         rules: grammar.rules.clone(),
+        forwarded_shifts,
     }
 }
 
@@ -945,7 +960,12 @@ fn build_slr1_table(
     item_sets: &[BTreeSet<Item>],
     transitions: &[BTreeMap<Symbol, u32>],
 ) -> GLRTable {
-    let (mut pending, goto) = initialize_pending_and_goto(transitions);
+    // Convert old-style transitions to new format with replace=false, forwarded=false
+    let transitions_with_replace: Vec<BTreeMap<Symbol, (u32, bool, bool)>> = transitions
+        .iter()
+        .map(|m| m.iter().map(|(s, &t)| (s.clone(), (t, false, false))).collect())
+        .collect();
+    let (mut pending, goto, forwarded_shifts) = initialize_pending_and_goto(&transitions_with_replace);
 
     for (state_id, items) in item_sets.iter().enumerate() {
 
@@ -969,7 +989,7 @@ fn build_slr1_table(
         }
     }
 
-    finish_table(grammar, pending, goto)
+    finish_table(grammar, pending, goto, forwarded_shifts)
 }
 
 // LR(1) item set construction.
@@ -1172,7 +1192,7 @@ fn compute_transfer_items(
 
 fn build_lr1_item_sets(
     grammar: &AnalyzedGrammar,
-) -> (Vec<BTreeSet<LR1Item>>, Vec<BTreeMap<Symbol, u32>>) {
+) -> (Vec<BTreeSet<LR1Item>>, Vec<BTreeMap<Symbol, (u32, bool, bool)>>) {
     let rules = &grammar.rules;
 
     let initial = {
@@ -1183,7 +1203,7 @@ fn build_lr1_item_sets(
     };
 
     let mut item_sets = vec![initial.clone()];
-    let mut transitions = vec![BTreeMap::new()];
+    let mut transitions: Vec<BTreeMap<Symbol, (u32, bool, bool)>> = vec![BTreeMap::new()];
     let mut set_to_id: FxHashMap<Vec<LR1Item>, u32> = FxHashMap::default();
     set_to_id.insert(initial.iter().copied().collect(), 0);
 
@@ -1231,12 +1251,15 @@ fn build_lr1_item_sets(
             // Local-forward transfer: when has_dot_1 but transfer is enabled,
             // try to transfer foo items from the source state into the kernel
             // so the transition can still be marked as replace.
+            // Only apply for nonterminal gotos — terminal shifts would lose
+            // essential closure items (like terminal shifts for recursive
+            // rules) because transferred items skip closure.
             if has_dot_1 && !is_replace && local_forward_replace_enabled() {
-                let enable_for_shifts = match &symbol {
-                    Symbol::Terminal(_) => replace_shifts_enabled(),
+                let enable_for_this = match &symbol {
+                    Symbol::Terminal(_) => false, // disabled for terminal shifts
                     Symbol::Nonterminal(_) => replace_gotos_enabled(),
                 };
-                if enable_for_shifts {
+                if enable_for_this {
                     if let Some(transferred) =
                         compute_transfer_items(&kernel, &source_items, rules)
                     {
@@ -1262,9 +1285,14 @@ fn build_lr1_item_sets(
                 }
             }
 
+            // Track whether this replace was created by the transfer mechanism.
+            let is_forwarded = is_replace && kernel.iter().any(|it| it.transferred);
+
             // If replace, decrement stack_depth for non-transferred kernel
-            // items.  Transferred items keep their original stack_depth
-            // because they represent parsing context from the source state.
+            // items — the replace absorbs one stack level for items that
+            // went through the shift. Transferred items didn't go through
+            // the shift; they were copied from the source state and await
+            // nonterminal gotos, so their sd is already correct.
             let adjusted_kernel: BTreeSet<LR1Item> = if is_replace {
                 kernel
                     .iter()
@@ -1300,7 +1328,7 @@ fn build_lr1_item_sets(
                 new_id
             };
 
-            transitions[state_id as usize].insert(symbol, target_id);
+            transitions[state_id as usize].insert(symbol, (target_id, is_replace, is_forwarded));
         }
     }
 
@@ -1332,14 +1360,14 @@ fn apply_local_forward_replace(
     pending: &mut Vec<BTreeMap<TerminalID, PendingAction>>,
     goto: &mut Vec<FxHashMap<NonterminalID, (u32, bool)>>,
     item_sets: &[BTreeSet<LR1Item>],
-    transitions: &[BTreeMap<Symbol, u32>],
+    transitions: &[BTreeMap<Symbol, (u32, bool, bool)>],
     rules: &[Rule],
 ) {
     loop {
         let mut changed = false;
 
         for source in 0..item_sets.len() {
-            for (symbol, &target) in &transitions[source] {
+            for (symbol, &(target, _, _)) in &transitions[source] {
                 let currently_non_replace = match symbol {
                     Symbol::Terminal(terminal) => pending[source]
                         .get(terminal)
@@ -1381,7 +1409,7 @@ fn apply_local_forward_replace(
 
                     let mut reduce_state = target;
                     for next_symbol in &rule.rhs[item.dot as usize..] {
-                        let Some(&next_state) = transitions[reduce_state as usize].get(next_symbol) else {
+                        let Some(&(next_state, _, _)) = transitions[reduce_state as usize].get(next_symbol) else {
                             valid = false;
                             break;
                         };
@@ -1473,49 +1501,14 @@ fn apply_local_forward_replace(
 fn build_lr1_table(
     grammar: &AnalyzedGrammar,
     item_sets: &[BTreeSet<LR1Item>],
-    transitions: &[BTreeMap<Symbol, u32>],
+    transitions: &[BTreeMap<Symbol, (u32, bool, bool)>],
 ) -> GLRTable {
-    let (mut pending, mut goto) = initialize_pending_and_goto(transitions);
+    let (pending, goto, forwarded_shifts) = initialize_pending_and_goto(transitions);
 
-    // Compute replace bools for shift and goto transitions.
-    // A transition from state x to state y is a REPLACE iff no item in
-    // state y's kernel has dot at position 1.
-    // Kernel items are those with dot > 0 in the item set.
-    for (state_id, by_symbol) in transitions.iter().enumerate() {
-        for (symbol, &target) in by_symbol {
-            // Exclude transferred items from has_dot_1: if the state
-            // contains any transferred items, the transfer mechanism has
-            // already compensated for the dot-1 items, so the transition
-            // should be marked as replace.
-            let has_transferred = item_sets[target as usize]
-                .iter()
-                .any(|item| item.transferred);
-            let has_dot_1 = if has_transferred {
-                false
-            } else {
-                item_sets[target as usize]
-                    .iter()
-                    .any(|item| item.dot == 1)
-            };
-            match symbol {
-                Symbol::Terminal(terminal) => {
-                    let is_replace = !has_dot_1 && replace_shifts_enabled();
-                    if let Some(pa) = pending[state_id].get_mut(terminal) {
-                        if let Some((_, ref mut r)) = pa.shift {
-                            *r = is_replace;
-                        }
-                    }
-                }
-                Symbol::Nonterminal(nonterminal) => {
-                    let is_replace = !has_dot_1 && replace_gotos_enabled();
-                    if let Some(entry) = goto[state_id].get_mut(nonterminal) {
-                        entry.1 = is_replace;
-                    }
-                }
-            }
-        }
-    }
+    // Replace flags are now carried in the transitions map from
+    // build_lr1_item_sets, so we don't need to recompute them here.
 
+    let mut pending = pending;
     for (state_id, items) in item_sets.iter().enumerate() {
 
         for item in items {
@@ -1544,7 +1537,7 @@ fn build_lr1_table(
     // transferred-item mechanism in build_lr1_item_sets handles it
     // at construction time.
 
-    finish_table(grammar, pending, goto)
+    finish_table(grammar, pending, goto, forwarded_shifts)
 }
 
 // IELR-style merge.
@@ -1684,6 +1677,12 @@ fn merge_same_core_lr1_states(table: GLRTable, core_keys: &[Vec<Item>]) -> GLRTa
         })
         .collect();
 
+    // Remap forwarded_shifts to use merged state IDs
+    let forwarded_shifts: FxHashSet<(u32, TerminalID)> = table.forwarded_shifts
+        .iter()
+        .map(|&(state, terminal)| (partition[state as usize], terminal))
+        .collect();
+
     GLRTable {
         action,
         goto,
@@ -1691,13 +1690,14 @@ fn merge_same_core_lr1_states(table: GLRTable, core_keys: &[Vec<Item>]) -> GLRTa
         num_terminals: table.num_terminals,
         num_rules: table.num_rules,
         rules: table.rules,
+        forwarded_shifts,
     }
 }
 
 fn build_ielr_table(
     grammar: &AnalyzedGrammar,
     item_sets: &[BTreeSet<LR1Item>],
-    transitions: &[BTreeMap<Symbol, u32>],
+    transitions: &[BTreeMap<Symbol, (u32, bool, bool)>],
 ) -> GLRTable {
     let canonical = build_lr1_table(grammar, item_sets, transitions);
     let core_keys = item_sets.iter().map(lr1_core_key).collect::<Vec<_>>();

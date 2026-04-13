@@ -93,17 +93,23 @@ fn find_nonterminal_cycle(adjacency: &NtAdjacency) -> Option<Vec<NonterminalID>>
 fn record_initial_action(
     _table: &GLRTable,
     state: u32,
+    _terminal: TerminalID,
     action: &Action,
+    is_forwarded: bool,
     escapes: &mut BTreeSet<InitialEscape>,
     reduces: &mut BTreeSet<InitialReduce>,
 ) {
     match action {
         Action::Shift(shift_state, replace) => {
-            let pushes = if *replace { vec![*shift_state] } else { vec![state, *shift_state] };
+            // For forwarded-replace shifts, treat as non-replace for
+            // characterization so the template NFA preserves the source
+            // state on the stack (avoiding pop-0 reduces).
+            let effective_replace = *replace && !is_forwarded;
+            let pushes = if effective_replace { vec![*shift_state] } else { vec![state, *shift_state] };
             escapes.insert((state, pushes));
         }
         Action::Reduce(lhs, len) => {
-            let rule_len = *len as usize;
+            let rule_len = if is_forwarded { (*len as usize) + 1 } else { *len as usize };
             reduces.insert((state, rule_len, *lhs));
         }
         Action::Split {
@@ -112,11 +118,12 @@ fn record_initial_action(
             ..
         } => {
             if let Some((shift_state, replace)) = shift {
-                let pushes = if *replace { vec![*shift_state] } else { vec![state, *shift_state] };
+                let effective_replace = *replace && !is_forwarded;
+                let pushes = if effective_replace { vec![*shift_state] } else { vec![state, *shift_state] };
                 escapes.insert((state, pushes));
             }
             for &(lhs, len) in split_reduces {
-                let rule_len = len as usize;
+                let rule_len = if is_forwarded { (len as usize) + 1 } else { len as usize };
                 reduces.insert((state, rule_len, lhs));
             }
         }
@@ -254,20 +261,225 @@ fn collect_initial_actions_by_terminal(
             let Some((escapes, reduces)) = per_terminal.get_mut(terminal as usize) else {
                 continue;
             };
-            record_initial_action(table, state, action, escapes, reduces);
+            let is_forwarded = table.forwarded_shifts.contains(&(state, terminal));
+            record_initial_action(table, state, terminal, action, is_forwarded, escapes, reduces);
         }
     }
 
     per_terminal
 }
 
+/// Expand a pop-0 initial reduce by following the goto chain.
+///
+/// Tracks a `push_stack` of states pushed by non-replace gotos during
+/// the chain.  When a shift is reached, emits an initial escape.  When a
+/// reduce pops more states than were pushed, emits a normal initial
+/// reduce with the excess as its pop count.
+fn expand_zero_pop_initial_reduce(
+    table: &GLRTable,
+    terminal: TerminalID,
+    initial_state: u32,
+    nonterminal: NonterminalID,
+    escapes: &mut BTreeSet<InitialEscape>,
+    reduces: &mut BTreeSet<InitialReduce>,
+    visited: &mut BTreeSet<(u32, NonterminalID)>,
+) {
+    if !visited.insert((initial_state, nonterminal)) {
+        return; // cycle
+    }
+
+    let mut push_stack: Vec<u32> = Vec::new();
+    expand_zero_pop_chain(
+        table,
+        terminal,
+        initial_state,
+        nonterminal,
+        &mut push_stack,
+        escapes,
+        reduces,
+        visited,
+    );
+}
+
+fn expand_zero_pop_chain(
+    table: &GLRTable,
+    terminal: TerminalID,
+    initial_state: u32,
+    nonterminal: NonterminalID,
+    push_stack: &mut Vec<u32>,
+    escapes: &mut BTreeSet<InitialEscape>,
+    reduces: &mut BTreeSet<InitialReduce>,
+    visited: &mut BTreeSet<(u32, NonterminalID)>,
+) {
+    // Follow the goto for `nonterminal` from the current "top" state.
+    let current_state = push_stack.last().copied().unwrap_or(initial_state);
+    let Some(&(goto_state, goto_replace)) = table
+        .goto
+        .get(current_state as usize)
+        .and_then(|g| g.get(&nonterminal))
+    else {
+        return;
+    };
+
+    // Track the goto's push.
+    if !goto_replace {
+        push_stack.push(goto_state);
+    } else {
+        // Replace goto: the goto_state replaces the current top.
+        // If push_stack is non-empty, replace the top. Otherwise, the
+        // initial_state is conceptually replaced.
+        if let Some(top) = push_stack.last_mut() {
+            *top = goto_state;
+        }
+        // If push_stack is empty and goto replaces initial_state, we model
+        // this by not pushing (the replace consumed the initial_state slot).
+    }
+
+    let Some(action) = table.action(goto_state, terminal) else {
+        // Undo the push for clean state if we need to backtrack.
+        if !goto_replace && !push_stack.is_empty() {
+            push_stack.pop();
+        }
+        return;
+    };
+
+    expand_zero_pop_action(
+        table, terminal, initial_state, action, goto_state, goto_replace,
+        push_stack, escapes, reduces, visited,
+    );
+
+    // Undo the push so that the caller's push_stack is unchanged.
+    // (Each branch of a Split gets its own clone, but for non-split we
+    //  need to restore.)
+    // Actually, since we only call this once per nonterminal and don't
+    // return to use push_stack again in the caller, this is fine.
+}
+
+fn expand_zero_pop_action(
+    table: &GLRTable,
+    terminal: TerminalID,
+    initial_state: u32,
+    action: &Action,
+    _goto_state: u32,
+    _goto_replace: bool,
+    push_stack: &mut Vec<u32>,
+    escapes: &mut BTreeSet<InitialEscape>,
+    reduces: &mut BTreeSet<InitialReduce>,
+    visited: &mut BTreeSet<(u32, NonterminalID)>,
+) {
+    match action {
+        Action::Shift(shift_state, shift_replace) => {
+            // Build the escape pushes from the accumulated push_stack.
+            let mut pushes = Vec::new();
+            pushes.push(initial_state); // re-push initial (since positive(initial) will pop it)
+            pushes.extend_from_slice(push_stack);
+            if !*shift_replace {
+                // The shift pushes its target; if replace, it replaces the
+                // top which is already in push_stack (or goto_state).
+                pushes.push(*shift_state);
+            } else {
+                // Replace shift: replace the top of pushes with shift_state.
+                if let Some(top) = pushes.last_mut() {
+                    *top = *shift_state;
+                }
+            }
+            escapes.insert((initial_state, pushes));
+        }
+        Action::Reduce(nt2, len2) => {
+            handle_zero_pop_reduce(
+                table, terminal, initial_state, *nt2, *len2 as usize,
+                push_stack, escapes, reduces, visited,
+            );
+        }
+        Action::Split {
+            shift,
+            reduces: split_reduces,
+            ..
+        } => {
+            if let Some((shift_state, shift_replace)) = shift {
+                let mut pushes = Vec::new();
+                pushes.push(initial_state);
+                pushes.extend_from_slice(push_stack);
+                if !*shift_replace {
+                    pushes.push(*shift_state);
+                } else {
+                    if let Some(top) = pushes.last_mut() {
+                        *top = *shift_state;
+                    }
+                }
+                escapes.insert((initial_state, pushes));
+            }
+            for &(nt2, len2) in split_reduces {
+                let mut ps = push_stack.clone();
+                handle_zero_pop_reduce(
+                    table, terminal, initial_state, nt2, len2 as usize,
+                    &mut ps, escapes, reduces, visited,
+                );
+            }
+        }
+        Action::Accept => {}
+    }
+}
+
+fn handle_zero_pop_reduce(
+    table: &GLRTable,
+    terminal: TerminalID,
+    initial_state: u32,
+    reduce_nt: NonterminalID,
+    reduce_len: usize,
+    push_stack: &mut Vec<u32>,
+    escapes: &mut BTreeSet<InitialEscape>,
+    reduces: &mut BTreeSet<InitialReduce>,
+    visited: &mut BTreeSet<(u32, NonterminalID)>,
+) {
+    if reduce_len <= push_stack.len() {
+        // The reduce pops within the pushed states — no net NFA pop needed.
+        push_stack.truncate(push_stack.len() - reduce_len);
+        // Continue by following the goto for reduce_nt from the new "top".
+        if !visited.contains(&(push_stack.last().copied().unwrap_or(initial_state), reduce_nt)) {
+            expand_zero_pop_chain(
+                table, terminal, initial_state, reduce_nt,
+                push_stack, escapes, reduces, visited,
+            );
+        }
+    } else {
+        // The reduce pops more than we've pushed — the excess becomes the
+        // NFA pop count. Record as a normal initial reduce.
+        let nfa_pops = reduce_len - push_stack.len();
+        reduces.insert((initial_state, nfa_pops, reduce_nt));
+    }
+}
+
 fn characterize_terminal_with_initial(
     table: &GLRTable,
     _grammar: &AnalyzedGrammar,
     terminal: TerminalID,
-    escapes: BTreeSet<InitialEscape>,
+    mut escapes: BTreeSet<InitialEscape>,
     reduces: BTreeSet<InitialReduce>,
 ) -> TerminalCharacterization {
+    // Expand pop-0 initial reduces by following the goto chain.
+    // Pop-0 reduces become epsilon transitions in the template NFA, which
+    // bypass stack checks and make the mask too permissive. By inlining
+    // the goto chain, we convert them to equivalent escapes or higher-pop
+    // reduces that correctly gate on the parser state.
+    let mut normal_reduces: BTreeSet<InitialReduce> = BTreeSet::new();
+    for &(initial_state, pop_count, nonterminal) in &reduces {
+        if pop_count == 0 {
+            let mut visited = BTreeSet::new();
+            expand_zero_pop_initial_reduce(
+                table,
+                terminal,
+                initial_state,
+                nonterminal,
+                &mut escapes,
+                &mut normal_reduces,
+                &mut visited,
+            );
+        } else {
+            normal_reduces.insert((initial_state, pop_count, nonterminal));
+        }
+    }
+
     let mut nt_escapes = BTreeSet::new();
     let mut nt_rereduces = BTreeSet::new();
     let mut inheritances: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
@@ -341,7 +553,7 @@ fn characterize_terminal_with_initial(
     }
 
     let mut referenced_nts = BTreeSet::new();
-    for &(_, _, nt) in &reduces {
+    for &(_, _, nt) in &normal_reduces {
         referenced_nts.insert(nt);
     }
     for &(src_nt, _, _) in &nt_escapes {
@@ -354,7 +566,7 @@ fn characterize_terminal_with_initial(
 
     let characterization = TerminalCharacterization {
         escapes: escapes.into_iter().collect(),
-        reduces: reduces.into_iter().collect(),
+        reduces: normal_reduces.into_iter().collect(),
         nt_escapes: nt_escapes.into_iter().collect(),
         nt_rereduces: nt_rereduces.into_iter().collect(),
         all_nts: referenced_nts,
