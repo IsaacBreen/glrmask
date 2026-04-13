@@ -1552,7 +1552,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "covered by integration test_repeated_item_keeps_closing_token_allowed with GLRMASK_ENABLE_LOCAL_FORWARD_REPLACE=1"]
+    #[ignore = "unit test grammar structure differs from integration — covered by test_repeated_item with GLRMASK_ENABLE_LOCAL_FORWARD_REPLACE=1"]
     fn test_local_forward_replace_handles_chain_grammar() {
         with_local_forward_replace_enabled(|| {
             // Replicate the integration-test grammar pattern that exercises

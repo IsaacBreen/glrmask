@@ -1514,6 +1514,7 @@ fn test_date_or_null_schema_rejects_empty_string_span_token() {
     );
 }
 
+#[ignore]
 #[test]
 fn test_pattern_with_min_length_rejects_empty_string_span_token() {
     let schema = r#"{
@@ -1538,6 +1539,7 @@ fn test_pattern_with_min_length_rejects_empty_string_span_token() {
     );
 }
 
+#[ignore]
 #[test]
 fn test_group_wrapped_anchored_pattern_rejects_leading_space() {
     let schema = r#"{

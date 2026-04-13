@@ -1120,7 +1120,9 @@ fn compute_transfer_items(
         return None;
     }
 
-    // Iteratively find foo items, following single-symbol chains.
+    // Iteratively find foo items, following the nonterminal chain.
+    // The chain extends through ALL foo items' LHS nonterminals so that
+    // gotos for every nonterminal in the reduce chain are available.
     let mut all_needed = needed_nts.clone();
     let mut found_nts: BTreeSet<NonterminalID> = BTreeSet::new();
     loop {
@@ -1136,16 +1138,13 @@ fn compute_transfer_items(
                         ..*item
                     });
                     found_nts.insert(*nt);
-                    // If this foo item is itself a single-symbol production
-                    // at dot=0, its completion will produce its LHS, requiring
-                    // further foo items for that LHS.
+                    // Add this foo item's LHS to the chain so that gotos
+                    // for it are also generated in the target state.
                     if item.dot == 0 {
                         let foo_rule = &rules[item.rule as usize];
-                        if foo_rule.rhs.len() == 1 {
-                            let chain_nt = foo_rule.lhs;
-                            if !all_needed.contains(&chain_nt) {
-                                new_needed.insert(chain_nt);
-                            }
+                        let chain_nt = foo_rule.lhs;
+                        if !all_needed.contains(&chain_nt) {
+                            new_needed.insert(chain_nt);
                         }
                     }
                 }
@@ -1158,6 +1157,8 @@ fn compute_transfer_items(
     }
 
     // ALL initially needed nonterminals must have at least one foo item.
+    // Chain-extended nonterminals may not have foo items (e.g. the
+    // augmented start nonterminal) which is fine.
     if !needed_nts.is_subset(&found_nts) {
         return None;
     }
