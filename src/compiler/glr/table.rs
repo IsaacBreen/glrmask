@@ -29,6 +29,19 @@ fn replace_gotos_enabled() -> bool {
     })
 }
 
+std::thread_local! {
+    pub(crate) static LOCAL_FORWARD_REPLACE_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+fn local_forward_replace_enabled() -> bool {
+    LOCAL_FORWARD_REPLACE_OVERRIDE.with(|c| {
+        if let Some(v) = c.get() {
+            return v;
+        }
+        env_flag_enabled("GLRMASK_ENABLE_LOCAL_FORWARD_REPLACE")
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Action {
     Shift(u32, bool),
@@ -967,11 +980,15 @@ struct LR1Item {
     dot: u32,
     lookahead: TerminalID,
     stack_depth: u32,
+    /// When true, this item was "transferred" from a parent state to provide
+    /// goto information.  Transferred items do NOT participate in closure,
+    /// shift actions, or reduce actions — only goto transitions.
+    transferred: bool,
 }
 
 impl LR1Item {
     fn new(rule: u32, dot: u32, lookahead: TerminalID, stack_depth: u32) -> Self {
-        Self { rule, dot, lookahead, stack_depth }
+        Self { rule, dot, lookahead, stack_depth, transferred: false }
     }
 
     fn next_symbol<'a>(&self, rules: &'a [Rule]) -> Option<&'a Symbol> {
@@ -1020,6 +1037,10 @@ fn lr1_closure(
     let mut queue: VecDeque<LR1Item> = items.iter().copied().collect();
 
     while let Some(item) = queue.pop_front() {
+        // Transferred items do not participate in closure.
+        if item.transferred {
+            continue;
+        }
         if let Some(Symbol::Nonterminal(nt)) = item.next_symbol(rules) {
             let rhs = &rules[item.rule as usize].rhs;
             let beta = &rhs[(item.dot as usize + 1)..];
@@ -1056,6 +1077,98 @@ fn lr1_goto_set(
     lr1_closure(&kernel, grammar)
 }
 
+/// Compute transferred items for the local-forward replace optimisation.
+///
+/// For each dot-1 item `[A → X . rest, la]` in `kernel`, find "foo items" in
+/// `source_items` — items whose symbol-after-dot is `Nonterminal(A)`.  These
+/// are the items that generate gotos for `A` in the source state.  Transferring
+/// them into the target kernel provides the same gotos at the target so the
+/// transition can be marked replace.
+///
+/// Returns `None` if:
+/// - any dot-1 item belongs to `rule == 0` (augmented start), or
+/// - any dot-1 item is NOT completed (i.e., not a single-symbol production), or
+/// - any dot-1 item's LHS nonterminal has NO foo items in the source.
+///
+/// Recursively follows single-symbol production chains: when a foo item is
+/// itself a single-symbol production at dot=0, its LHS nonterminal also needs
+/// foo items in the source.
+///
+/// Returns `Some(transferred)` with the set of transferred items otherwise.
+fn compute_transfer_items(
+    kernel: &BTreeSet<LR1Item>,
+    source_items: &BTreeSet<LR1Item>,
+    rules: &[Rule],
+) -> Option<Vec<LR1Item>> {
+    let mut transferred = Vec::new();
+
+    // Collect the LHS nonterminals of all dot-1 items.
+    // Only completed dot-1 items (single-symbol productions) are eligible.
+    let mut needed_nts: BTreeSet<NonterminalID> = BTreeSet::new();
+    for item in kernel.iter().filter(|it| it.dot == 1) {
+        if item.rule == 0 {
+            return None;
+        }
+        let rule = &rules[item.rule as usize];
+        if (item.dot as usize) != rule.rhs.len() {
+            return None;
+        }
+        needed_nts.insert(rule.lhs);
+    }
+
+    if needed_nts.is_empty() {
+        return None;
+    }
+
+    // Iteratively find foo items, following single-symbol chains.
+    let mut all_needed = needed_nts.clone();
+    let mut found_nts: BTreeSet<NonterminalID> = BTreeSet::new();
+    loop {
+        let mut new_needed: BTreeSet<NonterminalID> = BTreeSet::new();
+        for item in source_items {
+            if item.transferred {
+                continue;
+            }
+            if let Some(Symbol::Nonterminal(nt)) = item.next_symbol(rules) {
+                if all_needed.contains(nt) && !found_nts.contains(nt) {
+                    transferred.push(LR1Item {
+                        transferred: true,
+                        ..*item
+                    });
+                    found_nts.insert(*nt);
+                    // If this foo item is itself a single-symbol production
+                    // at dot=0, its completion will produce its LHS, requiring
+                    // further foo items for that LHS.
+                    if item.dot == 0 {
+                        let foo_rule = &rules[item.rule as usize];
+                        if foo_rule.rhs.len() == 1 {
+                            let chain_nt = foo_rule.lhs;
+                            if !all_needed.contains(&chain_nt) {
+                                new_needed.insert(chain_nt);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if new_needed.is_empty() {
+            break;
+        }
+        all_needed.extend(&new_needed);
+    }
+
+    // ALL initially needed nonterminals must have at least one foo item.
+    if !needed_nts.is_subset(&found_nts) {
+        return None;
+    }
+
+    if transferred.is_empty() {
+        return None;
+    }
+
+    Some(transferred)
+}
+
 fn build_lr1_item_sets(
     grammar: &AnalyzedGrammar,
 ) -> (Vec<BTreeSet<LR1Item>>, Vec<BTreeMap<Symbol, u32>>) {
@@ -1075,9 +1188,27 @@ fn build_lr1_item_sets(
 
     let mut queue = VecDeque::from([0u32]);
     while let Some(state_id) = queue.pop_front() {
+        let source_items = item_sets[state_id as usize].clone();
+
         // Build all goto kernels in a single pass over items.
         let mut kernels: BTreeMap<Symbol, BTreeSet<LR1Item>> = BTreeMap::new();
-        for item in &item_sets[state_id as usize] {
+        for item in &source_items {
+            // Transferred items only advance through nonterminal gotos.
+            if item.transferred {
+                if let Some(Symbol::Nonterminal(nt)) = item.next_symbol(rules) {
+                    kernels
+                        .entry(Symbol::Nonterminal(*nt))
+                        .or_default()
+                        .insert(LR1Item {
+                            rule: item.rule,
+                            dot: item.dot + 1,
+                            lookahead: item.lookahead,
+                            stack_depth: item.stack_depth,
+                            transferred: false, // un-transfer on goto
+                        });
+                }
+                continue;
+            }
             if let Some(sym) = item.next_symbol(rules) {
                 kernels
                     .entry(sym.clone())
@@ -1086,27 +1217,69 @@ fn build_lr1_item_sets(
             }
         }
 
-        for (symbol, kernel) in &kernels {
+        for (symbol, mut kernel) in kernels {
             // Check replace condition: is_replace iff no item in the kernel
             // has dot at position 1 (i.e., all items came from items that
             // already had dot > 0).
             let has_dot_1 = kernel.iter().any(|item| item.dot == 1);
-            let is_replace = match symbol {
+            let mut is_replace = match &symbol {
                 Symbol::Terminal(_) => !has_dot_1 && replace_shifts_enabled(),
                 Symbol::Nonterminal(_) => !has_dot_1 && replace_gotos_enabled(),
             };
 
-            // If replace, decrement stack_depth for all kernel items.
-            let adjusted_kernel = if is_replace {
+            // Local-forward transfer: when has_dot_1 but transfer is enabled,
+            // try to transfer foo items from the source state into the kernel
+            // so the transition can still be marked as replace.
+            if has_dot_1 && !is_replace && local_forward_replace_enabled() {
+                let enable_for_shifts = match &symbol {
+                    Symbol::Terminal(_) => replace_shifts_enabled(),
+                    Symbol::Nonterminal(_) => replace_gotos_enabled(),
+                };
+                if enable_for_shifts {
+                    if let Some(transferred) =
+                        compute_transfer_items(&kernel, &source_items, rules)
+                    {
+                        kernel.extend(transferred);
+                        // De-duplicate: remove transferred items that also
+                        // exist as non-transferred.
+                        let to_remove: Vec<LR1Item> = kernel
+                            .iter()
+                            .filter(|it| it.transferred)
+                            .filter(|it| {
+                                kernel.contains(&LR1Item {
+                                    transferred: false,
+                                    ..**it
+                                })
+                            })
+                            .copied()
+                            .collect();
+                        for item in to_remove {
+                            kernel.remove(&item);
+                        }
+                        is_replace = true;
+                    }
+                }
+            }
+
+            // If replace, decrement stack_depth for non-transferred kernel
+            // items.  Transferred items keep their original stack_depth
+            // because they represent parsing context from the source state.
+            let adjusted_kernel: BTreeSet<LR1Item> = if is_replace {
                 kernel
                     .iter()
-                    .map(|item| LR1Item {
-                        stack_depth: item.stack_depth.saturating_sub(1),
-                        ..*item
+                    .map(|item| {
+                        if item.transferred {
+                            *item
+                        } else {
+                            LR1Item {
+                                stack_depth: item.stack_depth.saturating_sub(1),
+                                ..*item
+                            }
+                        }
                     })
                     .collect()
             } else {
-                kernel.clone()
+                kernel
             };
 
             let target_items = lr1_closure(&adjusted_kernel, grammar);
@@ -1126,11 +1299,174 @@ fn build_lr1_item_sets(
                 new_id
             };
 
-            transitions[state_id as usize].insert(symbol.clone(), target_id);
+            transitions[state_id as usize].insert(symbol, target_id);
         }
     }
 
     (item_sets, transitions)
+}
+
+fn current_unique_reduce_len(
+    pending: &[BTreeMap<TerminalID, PendingAction>],
+    state: u32,
+    lookahead: TerminalID,
+    nonterminal: NonterminalID,
+) -> Option<u32> {
+    let pending_action = pending.get(state as usize)?.get(&lookahead)?;
+    let mut unique_len = None;
+    for &(reduce_nt, reduce_len) in &pending_action.reduces {
+        if reduce_nt != nonterminal {
+            continue;
+        }
+        match unique_len {
+            None => unique_len = Some(reduce_len),
+            Some(existing) if existing == reduce_len => {}
+            Some(_) => return None,
+        }
+    }
+    unique_len
+}
+
+fn apply_local_forward_replace(
+    pending: &mut Vec<BTreeMap<TerminalID, PendingAction>>,
+    goto: &mut Vec<FxHashMap<NonterminalID, (u32, bool)>>,
+    item_sets: &[BTreeSet<LR1Item>],
+    transitions: &[BTreeMap<Symbol, u32>],
+    rules: &[Rule],
+) {
+    loop {
+        let mut changed = false;
+
+        for source in 0..item_sets.len() {
+            for (symbol, &target) in &transitions[source] {
+                let currently_non_replace = match symbol {
+                    Symbol::Terminal(terminal) => pending[source]
+                        .get(terminal)
+                        .and_then(|pending_action| pending_action.shift)
+                        .is_some_and(|(_, is_replace)| !is_replace),
+                    Symbol::Nonterminal(nonterminal) => goto[source]
+                        .get(nonterminal)
+                        .is_some_and(|&(_, is_replace)| !is_replace),
+                };
+                if !currently_non_replace {
+                    continue;
+                }
+
+                let dot1_items: Vec<_> = item_sets[target as usize]
+                    .iter()
+                    .copied()
+                    .filter(|item| item.dot == 1)
+                    .collect();
+                if dot1_items.is_empty() {
+                    continue;
+                }
+
+                let mut forwarded: BTreeMap<(u32, NonterminalID), u32> = BTreeMap::new();
+                let mut rewrites = Vec::new();
+                let mut valid = true;
+
+                for item in dot1_items {
+                    if item.rule == 0 {
+                        valid = false;
+                        break;
+                    }
+
+                    let rule = &rules[item.rule as usize];
+                    let reduce_nt = rule.lhs;
+                    let Some(&(forward_target, _)) = goto[source].get(&reduce_nt) else {
+                        valid = false;
+                        break;
+                    };
+
+                    let mut reduce_state = target;
+                    for next_symbol in &rule.rhs[item.dot as usize..] {
+                        let Some(&next_state) = transitions[reduce_state as usize].get(next_symbol) else {
+                            valid = false;
+                            break;
+                        };
+                        reduce_state = next_state;
+                    }
+                    if !valid {
+                        break;
+                    }
+
+                    let Some(current_len) = current_unique_reduce_len(
+                        pending,
+                        reduce_state,
+                        item.lookahead,
+                        reduce_nt,
+                    ) else {
+                        valid = false;
+                        break;
+                    };
+                    if current_len != 1 {
+                        valid = false;
+                        break;
+                    }
+
+                    match forwarded.get(&(reduce_state, reduce_nt)) {
+                        Some(&existing_target) if existing_target != forward_target => {
+                            valid = false;
+                            break;
+                        }
+                        Some(_) => {}
+                        None => {
+                            if let Some(&(existing_target, existing_replace)) =
+                                goto[reduce_state as usize].get(&reduce_nt)
+                            {
+                                if existing_target != forward_target || !existing_replace {
+                                    valid = false;
+                                    break;
+                                }
+                            }
+                            forwarded.insert((reduce_state, reduce_nt), forward_target);
+                        }
+                    }
+
+                    rewrites.push((reduce_state, item.lookahead, reduce_nt));
+                }
+
+                if !valid || rewrites.is_empty() {
+                    continue;
+                }
+
+                changed = true;
+
+                match symbol {
+                    Symbol::Terminal(terminal) => {
+                        if let Some(pending_action) = pending[source].get_mut(terminal) {
+                            if let Some((_, is_replace)) = pending_action.shift.as_mut() {
+                                *is_replace = true;
+                            }
+                        }
+                    }
+                    Symbol::Nonterminal(nonterminal) => {
+                        if let Some((_, is_replace)) = goto[source].get_mut(nonterminal) {
+                            *is_replace = true;
+                        }
+                    }
+                }
+
+                for &(reduce_state, lookahead, reduce_nt) in &rewrites {
+                    if let Some(pending_action) = pending[reduce_state as usize].get_mut(&lookahead) {
+                        for (existing_nt, reduce_len) in pending_action.reduces.iter_mut() {
+                            if *existing_nt == reduce_nt && *reduce_len == 1 {
+                                *reduce_len = 0;
+                            }
+                        }
+                    }
+                }
+
+                for ((reduce_state, reduce_nt), forward_target) in forwarded {
+                    goto[reduce_state as usize].insert(reduce_nt, (forward_target, true));
+                }
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
 }
 
 fn build_lr1_table(
@@ -1146,7 +1482,20 @@ fn build_lr1_table(
     // Kernel items are those with dot > 0 in the item set.
     for (state_id, by_symbol) in transitions.iter().enumerate() {
         for (symbol, &target) in by_symbol {
-            let has_dot_1 = item_sets[target as usize].iter().any(|item| item.dot == 1);
+            // Exclude transferred items from has_dot_1: if the state
+            // contains any transferred items, the transfer mechanism has
+            // already compensated for the dot-1 items, so the transition
+            // should be marked as replace.
+            let has_transferred = item_sets[target as usize]
+                .iter()
+                .any(|item| item.transferred);
+            let has_dot_1 = if has_transferred {
+                false
+            } else {
+                item_sets[target as usize]
+                    .iter()
+                    .any(|item| item.dot == 1)
+            };
             match symbol {
                 Symbol::Terminal(terminal) => {
                     let is_replace = !has_dot_1 && replace_shifts_enabled();
@@ -1169,6 +1518,10 @@ fn build_lr1_table(
     for (state_id, items) in item_sets.iter().enumerate() {
 
         for item in items {
+            // Transferred items do not generate reduces.
+            if item.transferred {
+                continue;
+            }
             let rule = &grammar.rules[item.rule as usize];
             if item.dot as usize != rule.rhs.len() {
                 continue;
@@ -1185,6 +1538,10 @@ fn build_lr1_table(
                 .push_reduce(rule.lhs, item.stack_depth);
         }
     }
+
+    // NOTE: apply_local_forward_replace is no longer needed — the
+    // transferred-item mechanism in build_lr1_item_sets handles it
+    // at construction time.
 
     finish_table(grammar, pending, goto)
 }

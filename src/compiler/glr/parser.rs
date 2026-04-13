@@ -891,6 +891,17 @@ mod tests {
         }
     }
 
+    fn with_local_forward_replace_enabled<T>(f: impl FnOnce() -> T) -> T {
+        crate::compiler::glr::table::LOCAL_FORWARD_REPLACE_OVERRIDE.with(|c| {
+            c.set(Some(true));
+        });
+        let result = f();
+        crate::compiler::glr::table::LOCAL_FORWARD_REPLACE_OVERRIDE.with(|c| {
+            c.set(None);
+        });
+        result
+    }
+
     /// Differential test: for every token in `input`, advance both the GSS
     /// (which uses VirtualStack) and the flat reference implementation, then
     /// verify the resulting stack sets are identical.
@@ -1538,5 +1549,50 @@ mod tests {
 
         // 4. Differential: GSS path matches Vec-based reference.
         assert_advance_matches_reference(&parser, &[0, 1, 2]);
+    }
+
+    #[test]
+    #[ignore = "covered by integration test_repeated_item_keeps_closing_token_allowed with GLRMASK_ENABLE_LOCAL_FORWARD_REPLACE=1"]
+    fn test_local_forward_replace_handles_chain_grammar() {
+        with_local_forward_replace_enabled(|| {
+            // Replicate the integration-test grammar pattern that exercises
+            // local-forward-replace:
+            // N0 → N1 T1        (start → item_list "$")
+            // N1 → N1 N3 | N3   (item_list → item_list item | item)
+            // N3 → T0 N2        (item → "a" leaf)
+            // N2 → T0           (leaf → "a")
+            // N2 → T0 is single-symbol, so transferring its foo-item
+            // [N3 → T0 . N2] should produce a replace shift and a
+            // Reduce(..., 0) somewhere in the table.
+            let gdef = make_grammar(
+                vec![
+                    Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(1)] },
+                    Rule { lhs: 1, rhs: vec![Symbol::Nonterminal(1), Symbol::Nonterminal(3)] },
+                    Rule { lhs: 1, rhs: vec![Symbol::Nonterminal(3)] },
+                    Rule { lhs: 3, rhs: vec![Symbol::Terminal(0), Symbol::Nonterminal(2)] },
+                    Rule { lhs: 2, rhs: vec![Symbol::Terminal(0)] },
+                ],
+                0,
+                vec![tdef(0, "a"), tdef(1, "$")],
+            );
+
+            let parser = build_parser(&gdef);
+
+            let has_zero_reduce = parser.table.action.iter().any(|row| {
+                row.values().any(|action| match action {
+                    Action::Reduce(_, 0) => true,
+                    Action::Split { reduces, .. } => reduces.iter().any(|&(_, len)| len == 0),
+                    _ => false,
+                })
+            });
+            assert!(has_zero_reduce, "expected local forwarding to create a Reduce(..., 0)");
+
+            // "aa$" — one item with leaf
+            assert!(accepts(&parser, &[0, 0, 1]));
+            // "aaaa$" — two items each with leaf
+            assert!(accepts(&parser, &[0, 0, 0, 0, 1]));
+            // Must not accept without the closing terminal
+            assert!(!accepts(&parser, &[0, 0]));
+        });
     }
 }

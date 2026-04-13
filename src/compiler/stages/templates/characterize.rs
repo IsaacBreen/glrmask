@@ -104,9 +104,7 @@ fn record_initial_action(
         }
         Action::Reduce(lhs, len) => {
             let rule_len = *len as usize;
-            if rule_len > 0 {
-                reduces.insert((state, rule_len - 1, *lhs));
-            }
+            reduces.insert((state, rule_len, *lhs));
         }
         Action::Split {
             shift,
@@ -119,9 +117,7 @@ fn record_initial_action(
             }
             for &(lhs, len) in split_reduces {
                 let rule_len = len as usize;
-                if rule_len > 0 {
-                    reduces.insert((state, rule_len - 1, lhs));
-                }
+                reduces.insert((state, rule_len, lhs));
             }
         }
         Action::Accept => {}
@@ -154,6 +150,7 @@ fn record_goto_action(
                 table,
                 stack_nt,
                 revealed_state,
+                goto_state,
                 *len as usize,
                 *lhs,
                 goto_replace,
@@ -180,6 +177,7 @@ fn record_goto_action(
                     table,
                     stack_nt,
                     revealed_state,
+                    goto_state,
                     len as usize,
                     lhs,
                     goto_replace,
@@ -297,6 +295,12 @@ fn characterize_terminal_with_initial(
         }
     }
 
+    // Debug: print nt_escapes before inheritance
+    if std::env::var("GLRMASK_DEBUG_CHARACTERIZE").is_ok() {
+        eprintln!("[debug characterize] terminal={} nt_escapes_before_inherit={:?}", terminal, nt_escapes);
+        eprintln!("[debug characterize] terminal={} inheritances={:?}", terminal, inheritances);
+    }
+
     // Distribute inheritances: when revealed_state R inherits from R2 (due to
     // a replace goto R → R2), copy all nt_escapes and nt_rereduces that have
     // R2 as their revealed_state to also use R.  Repeat until no new entries.
@@ -384,10 +388,14 @@ fn explore_from_goto(
     visited.insert((start_state, goto_replace));
     worklist.push_back((start_state, goto_replace));
 
+    let debug_char = std::env::var("GLRMASK_DEBUG_CHARACTERIZE").is_ok();
     while let Some((goto_state, current_replace)) = worklist.pop_front() {
         let Some(action) = table.action(goto_state, terminal) else {
             continue;
         };
+        if debug_char && stack_nt == 1 && revealed_state == 0 {
+            eprintln!("[debug N1@0] BFS pop goto_state={} replace={} action={:?}", goto_state, current_replace, action);
+        }
         record_goto_action(
             table,
             stack_nt,
@@ -408,6 +416,7 @@ fn handle_reduce(
     table: &GLRTable,
     stack_nt: NonterminalID,
     revealed_state: u32,
+    goto_state: u32,
     len: usize,
     reduce_nt: NonterminalID,
     goto_replace: bool,
@@ -421,7 +430,15 @@ fn handle_reduce(
     // template NFA.  Equivalently, add 1 to len.
     let effective_len = if goto_replace { len + 1 } else { len };
     match effective_len {
-        0 => unreachable!(),
+        0 => {
+            // Zero-length reduce at a non-replace goto target.
+            // The goto_state is still on the stack; follow the goto from it.
+            if let Some((next_goto_state, next_replace)) = table.goto_target(goto_state, reduce_nt) {
+                if visited.insert((next_goto_state, next_replace)) {
+                    worklist.push_back((next_goto_state, next_replace));
+                }
+            }
+        }
         1 => {
             if let Some((next_goto_state, next_replace)) = table.goto_target(revealed_state, reduce_nt) {
                 if next_replace {
@@ -438,7 +455,7 @@ fn handle_reduce(
             }
         }
         2.. => {
-            nt_rereduces.insert((stack_nt, revealed_state, effective_len - 2, reduce_nt));
+            nt_rereduces.insert((stack_nt, revealed_state, effective_len - 1, reduce_nt));
         }
     }
 }

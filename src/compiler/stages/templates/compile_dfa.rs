@@ -322,12 +322,17 @@ fn add_positive_transition_chain(
     target: u32,
 ) {
     if pop_count == 0 {
+        // Zero-length reduce: no stack pop — epsilon to the nonterminal node.
+        nfa.add_epsilon(from, target);
+        return;
+    }
+    if pop_count == 1 {
         nfa.add_transition(from, encode_positive_label(revealed_state), target);
         return;
     }
     let first_target = nfa.add_state();
     nfa.add_transition(from, encode_positive_label(revealed_state), first_target);
-    append_default_pop_chain(nfa, first_target, pop_count, target);
+    append_default_pop_chain(nfa, first_target, pop_count - 1, target);
 }
 
 /// Build an unweighted NFA from a terminal characterization.
