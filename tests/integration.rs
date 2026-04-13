@@ -1184,18 +1184,18 @@ fn test_repeated_item_with_one_less_wrapper_allows_closing_token() {
     let c = Constraint::from_lark(
         r#"
         start: item+ "d"
-        item: "b" leaf
-        leaf: "g"
+        item: "d" leaf
+        leaf: "d"
         "#,
         &vocab,
     )
     .unwrap();
 
     let mut accepts_closing = c.start();
-    accepts_closing.commit_bytes(b"bgd").unwrap();
+    accepts_closing.commit_bytes(b"ddd").unwrap();
 
     let mut s = c.start();
-    s.commit_bytes(b"bg").unwrap();
+    s.commit_bytes(b"dd").unwrap();
 
     let mask = s.mask();
     assert!(
@@ -1210,19 +1210,19 @@ fn test_repeated_item_keeps_closing_token_allowed() {
     let c = Constraint::from_lark(
         r#"
         start: item+ "d"
-        item: "b" node
+        item: "d" node
         node: leaf
-        leaf: "g"
+        leaf: "d"
         "#,
         &vocab,
     )
     .unwrap();
 
     let mut accepts_closing = c.start();
-    accepts_closing.commit_bytes(b"bgd").unwrap();
+    accepts_closing.commit_bytes(b"ddd").unwrap();
 
     let mut s = c.start();
-    s.commit_bytes(b"bg").unwrap();
+    s.commit_bytes(b"dd").unwrap();
 
     let mask = s.mask();
     assert!(
