@@ -1515,7 +1515,6 @@ fn test_date_or_null_schema_rejects_empty_string_span_token() {
 }
 
 #[test]
-#[ignore = "hangs — pre-existing issue"]
 fn test_pattern_with_min_length_rejects_empty_string_span_token() {
     let schema = r#"{
         "type": "object",
