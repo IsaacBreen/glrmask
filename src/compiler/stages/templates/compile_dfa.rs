@@ -310,13 +310,21 @@ struct ReplaceShorteningMode {
 }
 
 fn replace_shortening_mode() -> ReplaceShorteningMode {
+    let default = ReplaceShorteningMode {
+        shorten_shift: false,
+        shorten_goto: true,
+    };
+
     let Ok(value) = std::env::var("GLRMASK_TEMPLATE_REPLACE_SHORTEN") else {
-        return ReplaceShorteningMode::default();
+        return default;
     };
 
     let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "" | "0" | "false" | "no" | "off" => ReplaceShorteningMode::default(),
+        "" | "0" | "false" | "no" | "off" => ReplaceShorteningMode {
+            shorten_shift: false,
+            shorten_goto: false,
+        },
         "shift" => ReplaceShorteningMode {
             shorten_shift: true,
             shorten_goto: false,
@@ -546,7 +554,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_template_nfa_goto_replace_keeps_stack_shape() {
+    fn test_build_template_nfa_goto_replace_shortens_by_default() {
         let characterization = TerminalCharacterization {
             shifts: vec![],
             reduces: vec![],
@@ -557,6 +565,6 @@ mod tests {
 
         let paths = debug_template_nfa_label_paths(&characterization, 7, 1);
 
-        assert!(paths.contains(&vec![encode_positive_label(3), encode_negative_label(3), encode_negative_label(4), encode_negative_label(5)]));
+        assert!(paths.contains(&vec![encode_positive_label(3), encode_negative_label(4), encode_negative_label(5)]));
     }
 }

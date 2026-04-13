@@ -6,15 +6,6 @@ use serde::{Deserialize, Serialize};
 use super::analysis::{EOF, AnalyzedGrammar};
 use crate::grammar::flat::{NonterminalID, Rule, Symbol, TerminalID};
 
-fn strong_replace_equivalence_filter_enabled() -> bool {
-    std::env::var("GLRMASK_STRONG_REPLACE_EQUIV")
-        .map(|value| {
-            let normalized = value.trim().to_ascii_lowercase();
-            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
-        })
-        .unwrap_or(false)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Action {
     /// Shift to target state.  The bool is true when this is a shift-replace
@@ -221,9 +212,7 @@ impl GLRTable {
             }
         }
 
-        if strong_replace_equivalence_filter_enabled() {
-            self.filter_replace_bools_by_predecessor_goto_equivalence();
-        }
+        self.filter_replace_bools_by_predecessor_goto_equivalence();
     }
 
     fn filter_replace_bools_by_predecessor_goto_equivalence(&mut self) {

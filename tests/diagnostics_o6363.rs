@@ -54,6 +54,8 @@ fn dump_o6363_table_stats() {
 
     println!("\n=== o6363 Table Statistics ===");
     println!("{}", constraint.debug_table_stats());
+    println!("=== Parser DWA Statistics ===");
+    println!("{}", constraint.debug_parser_dwa_stats());
     println!("=== Replace Context Statistics ===");
     println!("{}", constraint.debug_replace_context_stats());
     println!("=== Replace Equivalence Statistics ===");
@@ -61,7 +63,10 @@ fn dump_o6363_table_stats() {
 
     // Now process some tokens and track max stack depth
     let mut state = constraint.start();
+    let mask_started_at = std::time::Instant::now();
     let mask = state.mask();
+    let mut total_mask_ns = mask_started_at.elapsed().as_nanos() as u64;
+    let mut mask_calls = 1u64;
 
     // Find first allowed token to start
     let first_token = (0..mask.len() as u32 * 32)
@@ -116,7 +121,10 @@ fn dump_o6363_table_stats() {
             println!("  Step {}: new max stack depth = {} (paths={})", total_steps, max_stack_depth, path_count);
         }
 
+        let mask_started_at = std::time::Instant::now();
         let mask = state.mask();
+        total_mask_ns += mask_started_at.elapsed().as_nanos() as u64;
+        mask_calls += 1;
         // Count allowed tokens
         let mut allowed: Vec<u32> = Vec::new();
         for word_idx in 0..mask.len() {
@@ -154,6 +162,10 @@ fn dump_o6363_table_stats() {
     println!("Max parser path count: {}", max_path_count);
     println!("Avg parser path count: {:.1}", total_path_count as f64 / total_steps.max(1) as f64);
     println!("Total tokens processed: {}", total_steps);
+    let total_mask_ms = total_mask_ns as f64 / 1_000_000.0;
+    println!("Mask calls: {}", mask_calls);
+    println!("Total mask time (ms): {:.3}", total_mask_ms);
+    println!("Mask throughput (calls/sec): {:.1}", mask_calls as f64 / (total_mask_ns as f64 / 1_000_000_000.0).max(1e-9));
 
     // Now feed a known deeply-nested JSON to find max stack depth
     println!("\n=== Deep Nesting Test ===");
@@ -162,7 +174,10 @@ fn dump_o6363_table_stats() {
     let nested_json = r#"{"apiVersion":"x","kind":"x","metadata":{"name":"x","labels":{"a":{"b":{"c":"d"}}}}}"#;
     let mut max_depth_nested = 0usize;
     for (i, byte) in nested_json.bytes().enumerate() {
+        let mask_started_at = std::time::Instant::now();
         let mask = state2.mask();
+        total_mask_ns += mask_started_at.elapsed().as_nanos() as u64;
+        mask_calls += 1;
         let token = byte as u32;
         let word = token / 32;
         let bit = token % 32;

@@ -806,6 +806,25 @@ impl Constraint {
         self.table.num_states
     }
 
+    pub fn debug_parser_dwa_stats(&self) -> String {
+        let stats = self.parser_dwa.stats();
+        let final_states = self
+            .parser_dwa
+            .states
+            .iter()
+            .filter(|state| state.final_weight.is_some())
+            .count();
+
+        format!(
+            "states: {}\ntransitions: {}\ntransition_pairs: {}\ninterned_ranges: {}\nfinal_states: {}",
+            stats.states,
+            stats.transitions,
+            stats.transition_pairs,
+            stats.interned_ranges,
+            final_states,
+        )
+    }
+
     /// Return statistics about the GLR table:
     /// - reduce length distribution
     /// - replace shift/goto counts

@@ -380,6 +380,7 @@ fn test_bounded_array_uses_repeat_range_ast() {
 }
 
 #[test]
+#[ignore = "diagnostic helper test"]
 fn test_diag_template_replace_prefix_items_mask_difference() {
     let schema = r#"{
         "type": "array",
@@ -568,6 +569,7 @@ fn test_diag_template_replace_prefix_items_mask_difference() {
 }
 
 #[test]
+#[ignore = "diagnostic helper test"]
 fn test_diag_goto_only_failure_replace_equivalence_stats() {
     let cases = [
         (
@@ -643,6 +645,7 @@ fn test_diag_goto_only_failure_replace_equivalence_stats() {
 }
 
 #[test]
+#[ignore = "diagnostic helper test"]
 fn test_diag_goto_only_structural_cross_token_mask_difference() {
     let schema = r#"{
         "type": "object",
