@@ -440,13 +440,17 @@ fn handle_reduce(
     worklist: &mut VecDeque<u32>,
     nt_rereduces: &mut BTreeSet<NtRereduce>,
 ) {
-    if len == 1 {
-        if let Some(next_goto_state) = table.goto_target(revealed_state, reduce_nt) {
-            if visited.insert(next_goto_state) {
-                worklist.push_back(next_goto_state);
+    match len {
+        0 => unreachable!(),
+        1 => {
+            if let Some(next_goto_state) = table.goto_target(revealed_state, reduce_nt) {
+                if visited.insert(next_goto_state) {
+                    worklist.push_back(next_goto_state);
+                }
             }
         }
-    } else if len > 1 {
-        nt_rereduces.insert((stack_nt, revealed_state, len - 2, reduce_nt));
+        2.. => {
+            nt_rereduces.insert((stack_nt, revealed_state, len - 2, reduce_nt));
+        }
     }
 }
