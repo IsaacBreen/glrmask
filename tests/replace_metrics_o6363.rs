@@ -133,60 +133,80 @@ fn measure_replace_metrics() {
 
 #[test]
 fn compare_replace_vs_no_replace() {
+    // Due to OnceLock in table.rs, we can't toggle replace in the same process.
+    // Build the no-replace version first (since OnceLock hasn't been initialized yet).
     let schema_str = load_schema();
     let vocab = build_realistic_vocab();
 
-    // With replace (default)
-    let constraint_with = Constraint::from_json_schema(&schema_str, &vocab).unwrap();
-    let dwa_states_with = constraint_with.debug_parser_dwa_num_states();
-    let dwa_trans_with = constraint_with.debug_parser_dwa_num_transitions();
-    let glr_states_with = constraint_with.debug_num_states();
-
-    // Without replace
     unsafe { std::env::set_var("GLRMASK_DISABLE_REPLACE", "1"); }
     let constraint_without = Constraint::from_json_schema(&schema_str, &vocab).unwrap();
     let dwa_states_without = constraint_without.debug_parser_dwa_num_states();
     let dwa_trans_without = constraint_without.debug_parser_dwa_num_transitions();
     let glr_states_without = constraint_without.debug_num_states();
-    unsafe { std::env::remove_var("GLRMASK_DISABLE_REPLACE"); }
 
-    println!("\n=== o6363 Replace vs No-Replace Comparison ===");
-    println!("                  | With Replace | Without Replace | Ratio");
-    println!("GLR states        | {:>12} | {:>15} | {:.2}x",
-        glr_states_with, glr_states_without,
-        glr_states_without as f64 / glr_states_with as f64);
-    println!("Parser DWA states | {:>12} | {:>15} | {:.2}x",
-        dwa_states_with, dwa_states_without,
-        dwa_states_without as f64 / dwa_states_with as f64);
-    println!("Parser DWA trans  | {:>12} | {:>15} | {:.2}x",
-        dwa_trans_with, dwa_trans_without,
-        dwa_trans_without as f64 / dwa_trans_with as f64);
+    let sample_json = br#"{"apiVersion": "skaffold/v2beta26", "build": {"artifacts": [{"context": ".", "image": "gcr.io/k8s-skaffold/example", "sync": {"*.py": ".", "css//*.css": "app/css"}}], "tagPolicy": {"gitCommit": {}}}, "deploy": {"kustomize": {"flags": {"apply": ["--prune"], "delete": ["--prune"], "global": ["--enable-helm"]}, "path": "."}}, "kind": "Config", "profiles": [{"activation": [{"env": "ENV=production", "kubeContext": "minikube"}], "build": {"artifacts": [{"context": ".", "image": "gcr.io/k8s-skaffold/example-prod", "sync": {"*.py": ".", "css//*.css": "app/css"}}], "tagPolicy": {"gitCommit": {}}}, "deploy": {"kustomize": {"flags": {"apply": ["--prune"], "delete": ["--prune"], "global": ["--enable-helm"]}, "path": "."}}, "name": "profile-prod"}], "test": [{"image": "gcr.io/k8s-skaffold/example", "structureTests": ["./test/*"]}]}"#;
 
-    // Measure max stack depth during parsing of a sample JSON
-    let sample_json = br#"{"apiVersion":"skaffold/v1"}"#;
-    let mut max_depth_with = 0usize;
     let mut max_depth_without = 0usize;
-    {
-        let mut s = constraint_with.start();
-        for &b in sample_json.iter() {
-            if s.commit_bytes(&[b]).is_err() { break; }
-            let d = max_stack_depth(&s);
-            if d > max_depth_with { max_depth_with = d; }
-        }
-    }
+    let mut depth_without_histogram: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
     {
         let mut s = constraint_without.start();
         for &b in sample_json.iter() {
             if s.commit_bytes(&[b]).is_err() { break; }
             let d = max_stack_depth(&s);
+            *depth_without_histogram.entry(d).or_insert(0) += 1;
             if d > max_depth_without { max_depth_without = d; }
         }
     }
 
-    println!("Max stack depth   | {:>12} | {:>15} | {:.2}x",
-        max_depth_with, max_depth_without,
-        max_depth_without as f64 / max_depth_with.max(1) as f64);
-    println!("=================================================\n");
+    println!("\n=== o6363 WITHOUT Replace (GLRMASK_DISABLE_REPLACE=1) ===");
+    println!("GLR states: {}", glr_states_without);
+    println!("Parser DWA states: {}", dwa_states_without);
+    println!("Parser DWA transitions: {}", dwa_trans_without);
+    println!("Max stack depth: {}", max_depth_without);
+    println!("Stack depth histogram:");
+    for (d, count) in &depth_without_histogram {
+        println!("  depth={}: {}", d, count);
+    }
+    println!("=========================================================\n");
+}
+
+#[test]
+fn stats_with_replace() {
+    // This test must run in a SEPARATE invocation from compare_replace_vs_no_replace
+    // (or at least before it, since OnceLock caches the replace flag).
+    // Run with: cargo test --release --test replace_metrics_o6363 stats_with_replace -- --nocapture
+    let schema_str = load_schema();
+    let vocab = build_realistic_vocab();
+
+    let constraint_with = Constraint::from_json_schema(&schema_str, &vocab).unwrap();
+    let dwa_states_with = constraint_with.debug_parser_dwa_num_states();
+    let dwa_trans_with = constraint_with.debug_parser_dwa_num_transitions();
+    let glr_states_with = constraint_with.debug_num_states();
+
+    let sample_json = br#"{"apiVersion": "skaffold/v2beta26", "build": {"artifacts": [{"context": ".", "image": "gcr.io/k8s-skaffold/example", "sync": {"*.py": ".", "css//*.css": "app/css"}}], "tagPolicy": {"gitCommit": {}}}, "deploy": {"kustomize": {"flags": {"apply": ["--prune"], "delete": ["--prune"], "global": ["--enable-helm"]}, "path": "."}}, "kind": "Config", "profiles": [{"activation": [{"env": "ENV=production", "kubeContext": "minikube"}], "build": {"artifacts": [{"context": ".", "image": "gcr.io/k8s-skaffold/example-prod", "sync": {"*.py": ".", "css//*.css": "app/css"}}], "tagPolicy": {"gitCommit": {}}}, "deploy": {"kustomize": {"flags": {"apply": ["--prune"], "delete": ["--prune"], "global": ["--enable-helm"]}, "path": "."}}, "name": "profile-prod"}], "test": [{"image": "gcr.io/k8s-skaffold/example", "structureTests": ["./test/*"]}]}"#;
+
+    let mut max_depth_with = 0usize;
+    let mut depth_with_histogram: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+    {
+        let mut s = constraint_with.start();
+        for &b in sample_json.iter() {
+            if s.commit_bytes(&[b]).is_err() { break; }
+            let d = max_stack_depth(&s);
+            *depth_with_histogram.entry(d).or_insert(0) += 1;
+            if d > max_depth_with { max_depth_with = d; }
+        }
+    }
+
+    println!("\n=== o6363 WITH Replace (default) ===");
+    println!("GLR states: {}", glr_states_with);
+    println!("Parser DWA states: {}", dwa_states_with);
+    println!("Parser DWA transitions: {}", dwa_trans_with);
+    println!("Max stack depth: {}", max_depth_with);
+    println!("Stack depth histogram:");
+    for (d, count) in &depth_with_histogram {
+        println!("  depth={}: {}", d, count);
+    }
+    println!("====================================\n");
 }
 
 #[test]
