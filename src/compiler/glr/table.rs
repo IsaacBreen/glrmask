@@ -211,7 +211,6 @@ impl GLRTable {
                 }
             }
         }
-
         self.filter_replace_bools_by_predecessor_goto_equivalence();
     }
 
@@ -335,6 +334,7 @@ impl GLRTable {
             .values()
             .all(|action| self.action_is_safe_from_hidden_src(hidden_src, action))
     }
+
 
     fn action_is_safe_from_hidden_src(&self, hidden_src: u32, action: &Action) -> bool {
         match action {

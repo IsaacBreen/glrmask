@@ -313,8 +313,14 @@ fn commit_bytes_fast_path(
     // Inlines the entire advance + prune + fuse to avoid all function call overhead.
     if all_accs_empty {
         if let Some(top_state) = gss.single_exclusive_top_value() {
-            if let Some(Action::Shift(target, _)) = constraint.table.action(top_state, terminal) {
-                let shifted = gss.push(*target);
+            if let Some(Action::Shift(target, replace)) = constraint.table.action(top_state, terminal) {
+                let shifted = if *replace
+                    && gss.try_virtual_stack().and_then(|stack| stack.parent_of_top()).is_some()
+                {
+                    gss.clone().replace_top_values_owned([(top_state, *target)])
+                } else {
+                    gss.push(*target)
+                };
                 state.clear();
                 state.insert(constraint.tokenizer.initial_state(), shifted);
                 return Some(Ok(()));
