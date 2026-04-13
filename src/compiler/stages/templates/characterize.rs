@@ -6,11 +6,18 @@ use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{Action, GLRTable};
 use crate::grammar::flat::{NonterminalID, TerminalID};
 
-type InitialShift = (u32, u32);
+type InitialShift = (u32, u32, bool);
 
 type InitialReduce = (u32, usize, NonterminalID);
 
-type NtEscape = (NonterminalID, u32, u32, u32);
+// non-replace goto, non-replace shift
+type NtEscapeNN = (NonterminalID, u32, u32, u32);
+// replace goto, non-replace shift
+type NtEscapeRN = (NonterminalID, u32, u32, u32);
+// non-replace goto, replace shift
+type NtEscapeNR = (NonterminalID, u32, u32);
+// replace goto, replace shift
+type NtEscapeRR = (NonterminalID, u32, u32);
 
 type NtRereduce = (NonterminalID, u32, usize, NonterminalID);
 
@@ -20,7 +27,10 @@ type NtAdjacency = BTreeMap<NonterminalID, BTreeSet<NonterminalID>>;
 pub struct TerminalCharacterization {
     pub shifts: Vec<InitialShift>,
     pub reduces: Vec<InitialReduce>,
-    pub nt_escapes: Vec<NtEscape>,
+    pub nt_escapes_nn: Vec<NtEscapeNN>,
+    pub nt_escapes_rn: Vec<NtEscapeRN>,
+    pub nt_escapes_nr: Vec<NtEscapeNR>,
+    pub nt_escapes_rr: Vec<NtEscapeRR>,
     pub nt_rereduces: Vec<NtRereduce>,
     pub all_nts: BTreeSet<NonterminalID>,
 }
@@ -90,26 +100,21 @@ fn find_nonterminal_cycle(adjacency: &NtAdjacency) -> Option<Vec<NonterminalID>>
     None
 }
 
-fn reduce_rule_info(table: &GLRTable, rule_id: u32) -> (usize, NonterminalID) {
-    let rule = &table.rules[rule_id as usize];
-    (rule.rhs.len(), rule.lhs)
-}
-
 fn record_initial_action(
-    table: &GLRTable,
+    _table: &GLRTable,
     state: u32,
     action: &Action,
     shifts: &mut BTreeSet<InitialShift>,
     reduces: &mut BTreeSet<InitialReduce>,
 ) {
     match action {
-        Action::Shift(shift_state) => {
-            shifts.insert((state, *shift_state));
+        Action::Shift(shift_state, replace) => {
+            shifts.insert((state, *shift_state, *replace));
         }
-        Action::Reduce(rule_id) => {
-            let (rule_len, lhs) = reduce_rule_info(table, *rule_id);
+        Action::Reduce(lhs, len) => {
+            let rule_len = *len as usize;
             if rule_len > 0 {
-                reduces.insert((state, rule_len - 1, lhs));
+                reduces.insert((state, rule_len - 1, *lhs));
             }
         }
         Action::Split {
@@ -117,11 +122,11 @@ fn record_initial_action(
             reduces: split_reduces,
             ..
         } => {
-            if let Some(shift_state) = shift {
-                shifts.insert((state, *shift_state));
+            if let Some((shift_state, replace)) = shift {
+                shifts.insert((state, *shift_state, *replace));
             }
-            for &rule_id in split_reduces {
-                let (rule_len, lhs) = reduce_rule_info(table, rule_id);
+            for &(lhs, len) in split_reduces {
+                let rule_len = len as usize;
                 if rule_len > 0 {
                     reduces.insert((state, rule_len - 1, lhs));
                 }
@@ -137,23 +142,32 @@ fn record_goto_action(
     revealed_state: u32,
     current_state: u32,
     action: &Action,
+    goto_replace: bool,
     visited: &mut BTreeSet<u32>,
     worklist: &mut VecDeque<u32>,
-    nt_escapes: &mut BTreeSet<NtEscape>,
+    nt_escapes_nn: &mut BTreeSet<NtEscapeNN>,
+    nt_escapes_rn: &mut BTreeSet<NtEscapeRN>,
+    nt_escapes_nr: &mut BTreeSet<NtEscapeNR>,
+    nt_escapes_rr: &mut BTreeSet<NtEscapeRR>,
     nt_rereduces: &mut BTreeSet<NtRereduce>,
 ) {
     match action {
-        Action::Shift(shift_state) => {
-            nt_escapes.insert((stack_nt, revealed_state, current_state, *shift_state));
+        Action::Shift(shift_state, shift_replace) => {
+            match (goto_replace, *shift_replace) {
+                (false, false) => { nt_escapes_nn.insert((stack_nt, revealed_state, current_state, *shift_state)); }
+                (true, false) => { nt_escapes_rn.insert((stack_nt, revealed_state, current_state, *shift_state)); }
+                (false, true) => { nt_escapes_nr.insert((stack_nt, revealed_state, *shift_state)); }
+                (true, true) => { nt_escapes_rr.insert((stack_nt, revealed_state, *shift_state)); }
+            }
         }
-        Action::Reduce(rule_id) => {
-            let (rule_len, lhs) = reduce_rule_info(table, *rule_id);
+        Action::Reduce(lhs, len) => {
             handle_reduce(
                 table,
                 stack_nt,
                 revealed_state,
-                rule_len,
-                lhs,
+                *len as usize,
+                *lhs,
+                goto_replace,
                 visited,
                 worklist,
                 nt_rereduces,
@@ -164,17 +178,22 @@ fn record_goto_action(
             reduces: split_reduces,
             ..
         } => {
-            if let Some(shift_state) = shift {
-                nt_escapes.insert((stack_nt, revealed_state, current_state, *shift_state));
+            if let Some((shift_state, shift_replace)) = shift {
+                match (goto_replace, *shift_replace) {
+                    (false, false) => { nt_escapes_nn.insert((stack_nt, revealed_state, current_state, *shift_state)); }
+                    (true, false) => { nt_escapes_rn.insert((stack_nt, revealed_state, current_state, *shift_state)); }
+                    (false, true) => { nt_escapes_nr.insert((stack_nt, revealed_state, *shift_state)); }
+                    (true, true) => { nt_escapes_rr.insert((stack_nt, revealed_state, *shift_state)); }
+                }
             }
-            for &rule_id in split_reduces {
-                let (rule_len, lhs) = reduce_rule_info(table, rule_id);
+            for &(lhs, len) in split_reduces {
                 handle_reduce(
                     table,
                     stack_nt,
                     revealed_state,
-                    rule_len,
+                    len as usize,
                     lhs,
+                    goto_replace,
                     visited,
                     worklist,
                     nt_rereduces,
@@ -210,9 +229,13 @@ pub(crate) fn characterize_terminals(
                 characterize_terminal_with_initial(table, grammar, terminal, shifts, reduces);
             if debug {
                 let ms = t0.elapsed().as_secs_f64() * 1000.0;
+                let total_escapes = characterization.nt_escapes_nn.len()
+                    + characterization.nt_escapes_rn.len()
+                    + characterization.nt_escapes_nr.len()
+                    + characterization.nt_escapes_rr.len();
                 let total_entries = characterization.shifts.len()
                     + characterization.reduces.len()
-                    + characterization.nt_escapes.len()
+                    + total_escapes
                     + characterization.nt_rereduces.len();
                 if ms > 1.0 || total_entries > 500 {
                     eprintln!(
@@ -220,7 +243,7 @@ pub(crate) fn characterize_terminals(
                         terminal,
                         characterization.shifts.len(),
                         characterization.reduces.len(),
-                        characterization.nt_escapes.len(),
+                        total_escapes,
                         characterization.nt_rereduces.len(),
                         characterization.all_nts.len(),
                         total_entries,
@@ -261,12 +284,15 @@ fn characterize_terminal_with_initial(
     shifts: BTreeSet<InitialShift>,
     reduces: BTreeSet<InitialReduce>,
 ) -> TerminalCharacterization {
-    let mut nt_escapes = BTreeSet::new();
+    let mut nt_escapes_nn = BTreeSet::new();
+    let mut nt_escapes_rn = BTreeSet::new();
+    let mut nt_escapes_nr = BTreeSet::new();
+    let mut nt_escapes_rr = BTreeSet::new();
     let mut nt_rereduces = BTreeSet::new();
 
     for revealed_state in 0..table.num_states {
         if let Some(gotos) = table.goto.get(revealed_state as usize) {
-            for (&nonterminal, &goto_state) in gotos {
+            for (&nonterminal, &(goto_state, goto_replace)) in gotos {
                 // Skip traversals where the goto target has no action for this
                 // terminal — the BFS would immediately return with no effect.
                 if table.action(goto_state, terminal).is_none() {
@@ -278,7 +304,11 @@ fn characterize_terminal_with_initial(
                     nonterminal,
                     revealed_state,
                     goto_state,
-                    &mut nt_escapes,
+                    goto_replace,
+                    &mut nt_escapes_nn,
+                    &mut nt_escapes_rn,
+                    &mut nt_escapes_nr,
+                    &mut nt_escapes_rr,
                     &mut nt_rereduces,
                 );
             }
@@ -289,7 +319,16 @@ fn characterize_terminal_with_initial(
     for &(_, _, nt) in &reduces {
         referenced_nts.insert(nt);
     }
-    for &(src_nt, _, _, _) in &nt_escapes {
+    for &(src_nt, _, _, _) in &nt_escapes_nn {
+        referenced_nts.insert(src_nt);
+    }
+    for &(src_nt, _, _, _) in &nt_escapes_rn {
+        referenced_nts.insert(src_nt);
+    }
+    for &(src_nt, _, _) in &nt_escapes_nr {
+        referenced_nts.insert(src_nt);
+    }
+    for &(src_nt, _, _) in &nt_escapes_rr {
         referenced_nts.insert(src_nt);
     }
     for &(src_nt, _, _, target_nt) in &nt_rereduces {
@@ -300,7 +339,10 @@ fn characterize_terminal_with_initial(
     let characterization = TerminalCharacterization {
         shifts: shifts.into_iter().collect(),
         reduces: reduces.into_iter().collect(),
-        nt_escapes: nt_escapes.into_iter().collect(),
+        nt_escapes_nn: nt_escapes_nn.into_iter().collect(),
+        nt_escapes_rn: nt_escapes_rn.into_iter().collect(),
+        nt_escapes_nr: nt_escapes_nr.into_iter().collect(),
+        nt_escapes_rr: nt_escapes_rr.into_iter().collect(),
         nt_rereduces: nt_rereduces.into_iter().collect(),
         all_nts: referenced_nts,
     };
@@ -322,24 +364,33 @@ fn record_goto_action_fast(
     revealed_state: u32,
     current_state: u32,
     action: &Action,
+    goto_replace: bool,
     visited: &mut [bool],
     visited_stack: &mut Vec<u32>,
     worklist: &mut VecDeque<u32>,
-    nt_escapes: &mut BTreeSet<NtEscape>,
+    nt_escapes_nn: &mut BTreeSet<NtEscapeNN>,
+    nt_escapes_rn: &mut BTreeSet<NtEscapeRN>,
+    nt_escapes_nr: &mut BTreeSet<NtEscapeNR>,
+    nt_escapes_rr: &mut BTreeSet<NtEscapeRR>,
     nt_rereduces: &mut BTreeSet<NtRereduce>,
 ) {
     match action {
-        Action::Shift(shift_state) => {
-            nt_escapes.insert((stack_nt, revealed_state, current_state, *shift_state));
+        Action::Shift(shift_state, shift_replace) => {
+            match (goto_replace, *shift_replace) {
+                (false, false) => { nt_escapes_nn.insert((stack_nt, revealed_state, current_state, *shift_state)); }
+                (true, false) => { nt_escapes_rn.insert((stack_nt, revealed_state, current_state, *shift_state)); }
+                (false, true) => { nt_escapes_nr.insert((stack_nt, revealed_state, *shift_state)); }
+                (true, true) => { nt_escapes_rr.insert((stack_nt, revealed_state, *shift_state)); }
+            }
         }
-        Action::Reduce(rule_id) => {
-            let (rule_len, lhs) = reduce_rule_info(table, *rule_id);
+        Action::Reduce(lhs, len) => {
             handle_reduce_fast(
                 table,
                 stack_nt,
                 revealed_state,
-                rule_len,
-                lhs,
+                *len as usize,
+                *lhs,
+                goto_replace,
                 visited,
                 visited_stack,
                 worklist,
@@ -351,17 +402,22 @@ fn record_goto_action_fast(
             reduces: split_reduces,
             ..
         } => {
-            if let Some(shift_state) = shift {
-                nt_escapes.insert((stack_nt, revealed_state, current_state, *shift_state));
+            if let Some((shift_state, shift_replace)) = shift {
+                match (goto_replace, *shift_replace) {
+                    (false, false) => { nt_escapes_nn.insert((stack_nt, revealed_state, current_state, *shift_state)); }
+                    (true, false) => { nt_escapes_rn.insert((stack_nt, revealed_state, current_state, *shift_state)); }
+                    (false, true) => { nt_escapes_nr.insert((stack_nt, revealed_state, *shift_state)); }
+                    (true, true) => { nt_escapes_rr.insert((stack_nt, revealed_state, *shift_state)); }
+                }
             }
-            for &rule_id in split_reduces {
-                let (rule_len, lhs) = reduce_rule_info(table, rule_id);
+            for &(lhs, len) in split_reduces {
                 handle_reduce_fast(
                     table,
                     stack_nt,
                     revealed_state,
-                    rule_len,
+                    len as usize,
                     lhs,
+                    goto_replace,
                     visited,
                     visited_stack,
                     worklist,
@@ -379,21 +435,23 @@ fn handle_reduce_fast(
     revealed_state: u32,
     len: usize,
     reduce_nt: NonterminalID,
+    goto_replace: bool,
     visited: &mut [bool],
     visited_stack: &mut Vec<u32>,
     worklist: &mut VecDeque<u32>,
     nt_rereduces: &mut BTreeSet<NtRereduce>,
 ) {
-    if len == 1 {
-        if let Some(next_goto_state) = table.goto_target(revealed_state, reduce_nt) {
+    let effective_len = if goto_replace { len + 1 } else { len };
+    if effective_len == 1 {
+        if let Some((next_goto_state, _)) = table.goto_target(revealed_state, reduce_nt) {
             if (next_goto_state as usize) < visited.len() && !visited[next_goto_state as usize] {
                 visited[next_goto_state as usize] = true;
                 visited_stack.push(next_goto_state);
                 worklist.push_back(next_goto_state);
             }
         }
-    } else if len > 1 {
-        nt_rereduces.insert((stack_nt, revealed_state, len - 2, reduce_nt));
+    } else if effective_len > 1 {
+        nt_rereduces.insert((stack_nt, revealed_state, effective_len - 2, reduce_nt));
     }
 }
 
@@ -403,7 +461,11 @@ fn explore_from_goto(
     stack_nt: NonterminalID,
     revealed_state: u32,
     start_state: u32,
-    nt_escapes: &mut BTreeSet<NtEscape>,
+    goto_replace: bool,
+    nt_escapes_nn: &mut BTreeSet<NtEscapeNN>,
+    nt_escapes_rn: &mut BTreeSet<NtEscapeRN>,
+    nt_escapes_nr: &mut BTreeSet<NtEscapeNR>,
+    nt_escapes_rr: &mut BTreeSet<NtEscapeRR>,
     nt_rereduces: &mut BTreeSet<NtRereduce>,
 ) {
     let mut worklist = VecDeque::new();
@@ -422,9 +484,13 @@ fn explore_from_goto(
             revealed_state,
             current_state,
             action,
+            goto_replace,
             &mut visited,
             &mut worklist,
-            nt_escapes,
+            nt_escapes_nn,
+            nt_escapes_rn,
+            nt_escapes_nr,
+            nt_escapes_rr,
             nt_rereduces,
         );
     }
@@ -436,21 +502,26 @@ fn handle_reduce(
     revealed_state: u32,
     len: usize,
     reduce_nt: NonterminalID,
+    goto_replace: bool,
     visited: &mut BTreeSet<u32>,
     worklist: &mut VecDeque<u32>,
     nt_rereduces: &mut BTreeSet<NtRereduce>,
 ) {
-    match len {
+    // If the goto was a replace, the goto state was never pushed, so the
+    // reduce effectively pops one fewer item from the perspective of the
+    // template NFA.  Equivalently, add 1 to len.
+    let effective_len = if goto_replace { len + 1 } else { len };
+    match effective_len {
         0 => unreachable!(),
         1 => {
-            if let Some(next_goto_state) = table.goto_target(revealed_state, reduce_nt) {
+            if let Some((next_goto_state, _)) = table.goto_target(revealed_state, reduce_nt) {
                 if visited.insert(next_goto_state) {
                     worklist.push_back(next_goto_state);
                 }
             }
         }
         2.. => {
-            nt_rereduces.insert((stack_nt, revealed_state, len - 2, reduce_nt));
+            nt_rereduces.insert((stack_nt, revealed_state, effective_len - 2, reduce_nt));
         }
     }
 }

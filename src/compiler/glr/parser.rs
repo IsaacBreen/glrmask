@@ -44,8 +44,12 @@ pub(crate) fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: Te
 fn advance_stacks_core(table: &GLRTable, mut gss: ParserGSS, token: TerminalID) -> ParserGSS {
     // Fast path: single state with a pure shift action (most common case).
     if let Some(state) = gss.single_exclusive_top_value() {
-        if let Some(Action::Shift(target)) = table.action(state, token) {
-            return gss.push(*target);
+        if let Some(Action::Shift(target, is_replace)) = table.action(state, token) {
+            return if *is_replace {
+                gss.popn(1).push(*target)
+            } else {
+                gss.push(*target)
+            };
         }
     }
 
@@ -115,24 +119,32 @@ fn advance_nondeterministically(
             }
 
             if let Some(target) = action.shift_target() {
-                shifted = shifted.merge(&isolated.push(target));
+                let is_replace = action.shift_is_replace();
+                if is_replace {
+                    shifted = shifted.merge(&isolated.popn(1).push(target));
+                } else {
+                    shifted = shifted.merge(&isolated.push(target));
+                }
             }
 
-            for &rule_id in action.reduce_rule_ids() {
-                let rule = &table.rules[rule_id as usize];
-                for (goto_from, base) in reduce_sources(&closure, state, rule.rhs.len()) {
-                    let Some(target) = table.goto_target(goto_from, rule.lhs) else {
+            action.for_each_reduce(|nt, len| {
+                for (goto_from, base) in reduce_sources(&closure, state, len as usize) {
+                    let Some((target, is_replace)) = table.goto_target(goto_from, nt) else {
                         continue;
                     };
 
-                    let mut branch = base.push(target);
+                    let mut branch = if is_replace {
+                        base.popn(1).push(target)
+                    } else {
+                        base.push(target)
+                    };
                     if advance_deterministically(table, &mut branch, token) {
                         shifted = shifted.merge(&branch);
                     } else {
                         next = next.merge(&branch);
                     }
                 }
-            }
+            });
         }
 
         if next.is_empty() {
@@ -172,13 +184,19 @@ fn advance_deterministically(
         };
 
         match table.action(state, token) {
-            Some(Action::Reduce(rule_id)) => {
-                let rule = &table.rules[*rule_id as usize];
-                if rule.rhs.len() < stack.len() {
-                    if rule.rhs.len() == 1 {
+            Some(Action::Reduce(nt, len)) => {
+                let rhs_len = *len as usize;
+                if rhs_len < stack.len() {
+                    if rhs_len == 1 {
                         if let Some(goto_from) = stack.parent_of_top() {
-                            match table.goto_target(goto_from, rule.lhs) {
-                                Some(target) if stack.replace_top(target) => continue,
+                            match table.goto_target(goto_from, *nt) {
+                                Some((target, false)) if stack.replace_top(target) => continue,
+                                Some((target, true)) => {
+                                    // Replace goto: pop current + goto_from, push target
+                                    stack.pop(2);
+                                    stack.push(target);
+                                    continue;
+                                }
                                 Some(_) | None => {
                                     *gss = ParserGSS::empty();
                                     return false;
@@ -188,10 +206,13 @@ fn advance_deterministically(
                     }
 
                     // Pop |rhs| symbols and push the goto target.
-                    stack.pop(rule.rhs.len());
+                    stack.pop(rhs_len);
                     let goto_from = *stack.top().unwrap();
-                    match table.goto_target(goto_from, rule.lhs) {
-                        Some(target) => stack.push(target),
+                    match table.goto_target(goto_from, *nt) {
+                        Some((target, false)) => stack.push(target),
+                        Some((target, true)) => {
+                            stack.replace_top(target);
+                        }
                         None => {
                             *gss = ParserGSS::empty();
                             return false;
@@ -203,14 +224,28 @@ fn advance_deterministically(
                     // keep going deterministically if the rebuilt frontier is
                     // still a single chain.
                     let current = stack.into_gss();
-                    let popped = current.popn(rule.rhs.len() as isize);
-                    let mut shifts = SmallVec::<[(u32, u32); 8]>::new();
+                    let popped = current.popn(rhs_len as isize);
+                    let mut normal_shifts = SmallVec::<[(u32, u32); 8]>::new();
+                    let mut replace_gotos = SmallVec::<[(u32, u32); 4]>::new();
                     for goto_from in popped.peek_values() {
-                        if let Some(target) = table.goto_target(goto_from, rule.lhs) {
-                            shifts.push((goto_from, target));
+                        if let Some((target, is_replace)) = table.goto_target(goto_from, *nt) {
+                            if is_replace {
+                                replace_gotos.push((goto_from, target));
+                            } else {
+                                normal_shifts.push((goto_from, target));
+                            }
                         }
                     }
-                    let rebuilt = popped.remap_top_values_owned(shifts);
+                    let rebuilt = if replace_gotos.is_empty() {
+                        popped.remap_top_values_owned(normal_shifts)
+                    } else {
+                        let mut r = popped.remap_top_values(normal_shifts);
+                        for (goto_from, target) in replace_gotos {
+                            let base = popped.isolate(Some(goto_from));
+                            r = r.merge(&base.popn(1).push(target));
+                        }
+                        r
+                    };
                     let Some(next_stack) = rebuilt.try_virtual_stack() else {
                         *gss = rebuilt;
                         return false;
@@ -218,8 +253,13 @@ fn advance_deterministically(
                     stack = next_stack;
                 }
             }
-            Some(Action::Shift(target)) => {
-                *gss = stack.into_gss().push(*target);
+            Some(Action::Shift(target, is_replace)) => {
+                if *is_replace {
+                    stack.replace_top(*target);
+                    *gss = stack.into_gss();
+                } else {
+                    *gss = stack.into_gss().push(*target);
+                }
                 return true;
             }
             Some(Action::Split { .. }) => {
@@ -330,10 +370,14 @@ pub(crate) fn advance_stacks_profiled(
     // Fast path: single state with a pure shift action
     let t_fast_path = Instant::now();
     if let Some(state) = gss.single_exclusive_top_value() {
-        if let Some(Action::Shift(target)) = table.action(state, token) {
+        if let Some(Action::Shift(target, is_replace)) = table.action(state, token) {
             profile.pure_shift = true;
             profile.fast_path_ns = t_fast_path.elapsed().as_nanos() as u64;
-            let result = gss.push(*target);
+            let result = if *is_replace {
+                gss.popn(1).push(*target)
+            } else {
+                gss.push(*target)
+            };
             profile.total_ns = t_total.elapsed().as_nanos() as u64;
             return (result, profile);
         }
@@ -386,27 +430,34 @@ fn advance_deterministically_profiled(
         let action = table.action(state, token);
         profile.det_action_lookup_ns += t_action.elapsed().as_nanos() as u64;
         match action {
-            Some(Action::Reduce(rule_id)) => {
-                let rule = &table.rules[*rule_id as usize];
-                if rule.rhs.len() < stack.len() {
+            Some(Action::Reduce(nt, len)) => {
+                let rhs_len = *len as usize;
+                if rhs_len < stack.len() {
                     profile.n_reduces_above_floor += 1;
-                    if rule.rhs.len() == 1 {
+                    if rhs_len == 1 {
                         let t_parent = Instant::now();
                         let goto_from = stack.parent_of_top();
                         profile.det_pop_ns += t_parent.elapsed().as_nanos() as u64;
                         if let Some(goto_from) = goto_from {
                             profile.n_det_goto_lookups += 1;
                             let t_goto = Instant::now();
-                            let goto = table.goto_target(goto_from, rule.lhs);
+                            let goto = table.goto_target(goto_from, *nt);
                             profile.det_goto_lookup_ns += t_goto.elapsed().as_nanos() as u64;
                             match goto {
-                                Some(target) => {
+                                Some((target, false)) => {
                                     let t_replace = Instant::now();
                                     if stack.replace_top(target) {
                                         profile.det_push_ns += t_replace.elapsed().as_nanos() as u64;
                                         continue;
                                     }
                                     profile.det_push_ns += t_replace.elapsed().as_nanos() as u64;
+                                }
+                                Some((target, true)) => {
+                                    let t_replace = Instant::now();
+                                    stack.pop(2);
+                                    stack.push(target);
+                                    profile.det_push_ns += t_replace.elapsed().as_nanos() as u64;
+                                    continue;
                                 }
                                 None => {
                                     *gss = ParserGSS::empty();
@@ -418,17 +469,22 @@ fn advance_deterministically_profiled(
                     }
 
                     let t_pop = Instant::now();
-                    stack.pop(rule.rhs.len());
+                    stack.pop(rhs_len);
                     profile.det_pop_ns += t_pop.elapsed().as_nanos() as u64;
                     let goto_from = *stack.top().unwrap();
                     profile.n_det_goto_lookups += 1;
                     let t_goto = Instant::now();
-                    let goto = table.goto_target(goto_from, rule.lhs);
+                    let goto = table.goto_target(goto_from, *nt);
                     profile.det_goto_lookup_ns += t_goto.elapsed().as_nanos() as u64;
                     match goto {
-                        Some(target) => {
+                        Some((target, false)) => {
                             let t_push = Instant::now();
                             stack.push(target);
+                            profile.det_push_ns += t_push.elapsed().as_nanos() as u64;
+                        }
+                        Some((target, true)) => {
+                            let t_push = Instant::now();
+                            stack.replace_top(target);
                             profile.det_push_ns += t_push.elapsed().as_nanos() as u64;
                         }
                         None => {
@@ -443,20 +499,34 @@ fn advance_deterministically_profiled(
                     let t_floor = Instant::now();
                     let current = stack.into_gss();
                     let t_sources = Instant::now();
-                    let popped = current.popn(rule.rhs.len() as isize);
-                    let mut shifts = SmallVec::<[(u32, u32); 8]>::new();
+                    let popped = current.popn(rhs_len as isize);
+                    let mut normal_shifts = SmallVec::<[(u32, u32); 8]>::new();
+                    let mut replace_gotos = SmallVec::<[(u32, u32); 4]>::new();
                     for goto_from in popped.peek_values() {
                         profile.n_det_goto_lookups += 1;
                         let t_goto = Instant::now();
-                        let goto = table.goto_target(goto_from, rule.lhs);
+                        let goto = table.goto_target(goto_from, *nt);
                         profile.det_goto_lookup_ns += t_goto.elapsed().as_nanos() as u64;
-                        if let Some(target) = goto {
-                            shifts.push((goto_from, target));
+                        if let Some((target, is_replace)) = goto {
+                            if is_replace {
+                                replace_gotos.push((goto_from, target));
+                            } else {
+                                normal_shifts.push((goto_from, target));
+                            }
                         }
                     }
                     profile.det_floor_sources_ns += t_sources.elapsed().as_nanos() as u64;
                     let t_rebuild = Instant::now();
-                    let rebuilt = popped.remap_top_values_owned(shifts);
+                    let rebuilt = if replace_gotos.is_empty() {
+                        popped.remap_top_values_owned(normal_shifts)
+                    } else {
+                        let mut r = popped.remap_top_values(normal_shifts);
+                        for (goto_from, target) in replace_gotos {
+                            let base = popped.isolate(Some(goto_from));
+                            r = r.merge(&base.popn(1).push(target));
+                        }
+                        r
+                    };
                     profile.det_floor_rebuild_ns += t_rebuild.elapsed().as_nanos() as u64;
                     profile.det_floor_cross_ns += t_floor.elapsed().as_nanos() as u64;
                     let t_try_vstack = Instant::now();
@@ -470,8 +540,13 @@ fn advance_deterministically_profiled(
                     stack = next_stack;
                 }
             }
-            Some(Action::Shift(target)) => {
-                *gss = stack.into_gss().push(*target);
+            Some(Action::Shift(target, is_replace)) => {
+                if *is_replace {
+                    stack.replace_top(*target);
+                    *gss = stack.into_gss();
+                } else {
+                    *gss = stack.into_gss().push(*target);
+                }
                 profile.det_exit_reason = 1; // shift (finished)
                 return true;
             }
@@ -531,25 +606,33 @@ fn advance_nondeterministically_profiled(
             }
 
             if let Some(target) = action.shift_target() {
+                let is_replace = action.shift_is_replace();
                 profile.n_nondet_merges += 1;
                 let t_push = Instant::now();
-                let pushed = isolated.push(target);
+                let pushed = if is_replace {
+                    isolated.popn(1).push(target)
+                } else {
+                    isolated.push(target)
+                };
                 profile.nondet_push_ns += t_push.elapsed().as_nanos() as u64;
                 let t_merge = Instant::now();
                 shifted = shifted.merge(&pushed);
                 profile.nondet_merge_ns += t_merge.elapsed().as_nanos() as u64;
             }
 
-            for &rule_id in action.reduce_rule_ids() {
-                let rule = &table.rules[rule_id as usize];
+            action.for_each_reduce(|nt, len| {
                 let t_rs = Instant::now();
-                let sources = reduce_sources(&closure, state, rule.rhs.len());
+                let sources = reduce_sources(&closure, state, len as usize);
                 profile.nondet_reduce_sources_ns += t_rs.elapsed().as_nanos() as u64;
                 for (goto_from, base) in sources {
                     profile.n_nondet_reduce_ops += 1;
-                    let Some(target) = table.goto_target(goto_from, rule.lhs) else { continue; };
+                    let Some((target, is_replace)) = table.goto_target(goto_from, nt) else { continue; };
                     let t_push = Instant::now();
-                    let mut branch = base.push(target);
+                    let mut branch = if is_replace {
+                        base.popn(1).push(target)
+                    } else {
+                        base.push(target)
+                    };
                     profile.nondet_push_ns += t_push.elapsed().as_nanos() as u64;
                     profile.n_nondet_merges += 1;
                     let t_nd_det2 = Instant::now();
@@ -563,7 +646,7 @@ fn advance_nondeterministically_profiled(
                     }
                     profile.nondet_merge_ns += t_merge.elapsed().as_nanos() as u64;
                 }
-            }
+            });
         }
 
         if next.is_empty() { return shifted; }
@@ -703,25 +786,30 @@ fn reduce_closure_for_lookahead(
         let Some(action) = table.action(state, lookahead) else {
             continue;
         };
-        let reduce_rule_ids = action.reduce_rule_ids();
-        for rule_id in reduce_rule_ids {
-            let rule = &table.rules[*rule_id as usize];
-            if stack.len() < rule.rhs.len() + 1 {
-                continue;
+        action.for_each_reduce(|nt, len| {
+            let rhs_len = len as usize;
+            if stack.len() < rhs_len + 1 {
+                return;
             }
-            let keep_len = stack.len() - rule.rhs.len();
+            let keep_len = stack.len() - rhs_len;
             let mut reduced = stack[..keep_len].to_vec();
             let Some(&goto_from) = reduced.last() else {
-                continue;
+                return;
             };
-            let Some(target) = table.goto_target(goto_from, rule.lhs) else {
-                continue;
+            let Some((target, is_replace)) = table.goto_target(goto_from, nt) else {
+                return;
             };
-            reduced.push(target);
-            if visited.insert(reduced.clone()) {
-                queue.push_back(reduced);
+            if is_replace {
+                // Replace goto: pop goto_from, push target
+                reduced.pop();
+                reduced.push(target);
+            } else {
+                reduced.push(target);
             }
-        }
+            if visited.insert(reduced.clone()) {
+                queue.push_back(reduced.clone());
+            }
+        });
     }
 
     visited.into_iter().collect()
@@ -740,7 +828,11 @@ fn advance_stack_vectors(
             continue;
         };
         if let Some(target) = table.action(state, token).and_then(Action::shift_target) {
+            let is_replace = table.action(state, token).map_or(false, |a| a.shift_is_replace());
             let mut shifted = stack.clone();
+            if is_replace {
+                shifted.pop();
+            }
             shifted.push(target);
             next.push(shifted);
         }
@@ -1375,5 +1467,71 @@ mod tests {
             let parser = build_parser(&gdef);
             assert_advance_matches_reference(&parser, &[OPEN, NUM, COMMA, NUM, COMMA, NUM, CLOSE]);
         }
+    }
+
+    /// End-to-end test proving replace shift/goto transitions actually work.
+    ///
+    /// Grammar: S → A B 'c', A → 'a', B → 'b'
+    ///
+    /// The 3-symbol production S → A B c forces:
+    /// - goto(_, B) to the state with kernel {S → AB.c} is REPLACE (dot=2, no dot=1)
+    /// - shift 'c' to the state with kernel {S → ABc.} is REPLACE (dot=3, no dot=1)
+    ///
+    /// The test asserts the table marks these transitions as replace, that
+    /// parsing still accepts the valid input, and that the GSS-level and
+    /// Vec-reference implementations agree.
+    #[test]
+    fn test_replace_shift_and_goto_end_to_end() {
+        // S(0) → A(1) B(2) T(2)
+        // A(1) → T(0)
+        // B(2) → T(1)
+        let gdef = make_grammar(
+            vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1), Symbol::Nonterminal(2), Symbol::Terminal(2)] },
+                Rule { lhs: 1, rhs: vec![Symbol::Terminal(0)] },
+                Rule { lhs: 2, rhs: vec![Symbol::Terminal(1)] },
+            ],
+            0,
+            vec![tdef(0, "a"), tdef(1, "b"), tdef(2, "c")],
+        );
+        let parser = build_parser(&gdef);
+
+        // 1. Verify at least one replace shift and one replace goto exist in the table.
+        //    (Skipped when GLRMASK_DISABLE_REPLACE=1.)
+        let replace_disabled = std::env::var("GLRMASK_DISABLE_REPLACE").map_or(false, |v| v == "1");
+        let mut replace_shifts = 0u32;
+        let mut replace_gotos = 0u32;
+        for actions_by_terminal in &parser.table.action {
+            for (_, action) in actions_by_terminal {
+                match action {
+                    Action::Shift(_, true) => replace_shifts += 1,
+                    Action::Split { shift: Some((_, true)), .. } => replace_shifts += 1,
+                    _ => {}
+                }
+            }
+        }
+        for gotos_by_nt in &parser.table.goto {
+            for (_, &(_, is_replace)) in gotos_by_nt {
+                if is_replace { replace_gotos += 1; }
+            }
+        }
+        if !replace_disabled {
+            assert!(replace_shifts > 0, "Expected at least one replace shift, found none");
+            assert!(replace_gotos > 0, "Expected at least one replace goto, found none");
+        } else {
+            assert_eq!(replace_shifts, 0, "Replace shifts should be 0 when disabled");
+            assert_eq!(replace_gotos, 0, "Replace gotos should be 0 when disabled");
+        }
+
+        // 2. Parse valid input: a b c  (terminals 0 1 2)
+        assert!(accepts(&parser, &[0, 1, 2]));
+
+        // 3. Reject invalid inputs.
+        assert!(!accepts(&parser, &[0, 1]));
+        assert!(!accepts(&parser, &[0]));
+        assert!(!accepts(&parser, &[1, 0, 2]));
+
+        // 4. Differential: GSS path matches Vec-based reference.
+        assert_advance_matches_reference(&parser, &[0, 1, 2]);
     }
 }

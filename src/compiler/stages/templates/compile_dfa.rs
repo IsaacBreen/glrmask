@@ -341,17 +341,28 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
 
     let nonterminal_nodes = build_nonterminal_nodes(&mut nfa, characterization);
 
-    for &(initial_state, shift_state) in &characterization.shifts {
-        let s0 = nfa.add_state();
-        let s1 = nfa.add_state();
-        let s2 = nfa.add_state();
-        let s3 = nfa.add_state();
+    for &(initial_state, shift_state, replace) in &characterization.shifts {
+        if replace {
+            let s0 = nfa.add_state();
+            let s1 = nfa.add_state();
+            let s2 = nfa.add_state();
 
-        nfa.add_epsilon(start, s0);
-        nfa.add_transition(s0, encode_positive_label(initial_state), s1);
-        nfa.add_transition(s1, encode_negative_label(initial_state), s2);
-        nfa.add_transition(s2, encode_negative_label(shift_state), s3);
-        nfa.set_accepting(s3);
+            nfa.add_epsilon(start, s0);
+            nfa.add_transition(s0, encode_positive_label(initial_state), s1);
+            nfa.add_transition(s1, encode_negative_label(shift_state), s2);
+            nfa.set_accepting(s2);
+        } else {
+            let s0 = nfa.add_state();
+            let s1 = nfa.add_state();
+            let s2 = nfa.add_state();
+            let s3 = nfa.add_state();
+
+            nfa.add_epsilon(start, s0);
+            nfa.add_transition(s0, encode_positive_label(initial_state), s1);
+            nfa.add_transition(s1, encode_negative_label(initial_state), s2);
+            nfa.add_transition(s2, encode_negative_label(shift_state), s3);
+            nfa.set_accepting(s3);
+        }
     }
 
     for &(initial_state, pop_count, nonterminal) in &characterization.reduces {
@@ -371,7 +382,8 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
         );
     }
 
-    for &(source_nonterminal, revealed_state, goto_state, shift_state) in &characterization.nt_escapes {
+    // nn: non-replace goto, non-replace shift — full 5-state path
+    for &(source_nonterminal, revealed_state, goto_state, shift_state) in &characterization.nt_escapes_nn {
         let Some(&source_state) = nonterminal_nodes.get(&source_nonterminal) else {
             continue;
         };
@@ -388,6 +400,58 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
         nfa.add_transition(s2, encode_negative_label(goto_state), s3);
         nfa.add_transition(s3, encode_negative_label(shift_state), s4);
         nfa.set_accepting(s4);
+    }
+
+    // rn: replace goto, non-replace shift — 4-state path (no revealed pop)
+    for &(source_nonterminal, revealed_state, goto_state, shift_state) in &characterization.nt_escapes_rn {
+        let Some(&source_state) = nonterminal_nodes.get(&source_nonterminal) else {
+            continue;
+        };
+
+        let s0 = nfa.add_state();
+        let s1 = nfa.add_state();
+        let s2 = nfa.add_state();
+        let s3 = nfa.add_state();
+
+        nfa.add_epsilon(source_state, s0);
+        nfa.add_transition(s0, encode_positive_label(revealed_state), s1);
+        nfa.add_transition(s1, encode_negative_label(goto_state), s2);
+        nfa.add_transition(s2, encode_negative_label(shift_state), s3);
+        nfa.set_accepting(s3);
+    }
+
+    // nr: non-replace goto, replace shift — 4-state path (goto omitted since replaced by shift)
+    for &(source_nonterminal, revealed_state, shift_state) in &characterization.nt_escapes_nr {
+        let Some(&source_state) = nonterminal_nodes.get(&source_nonterminal) else {
+            continue;
+        };
+
+        let s0 = nfa.add_state();
+        let s1 = nfa.add_state();
+        let s2 = nfa.add_state();
+        let s3 = nfa.add_state();
+
+        nfa.add_epsilon(source_state, s0);
+        nfa.add_transition(s0, encode_positive_label(revealed_state), s1);
+        nfa.add_transition(s1, encode_negative_label(revealed_state), s2);
+        nfa.add_transition(s2, encode_negative_label(shift_state), s3);
+        nfa.set_accepting(s3);
+    }
+
+    // rr: replace goto, replace shift — 3-state path
+    for &(source_nonterminal, revealed_state, shift_state) in &characterization.nt_escapes_rr {
+        let Some(&source_state) = nonterminal_nodes.get(&source_nonterminal) else {
+            continue;
+        };
+
+        let s0 = nfa.add_state();
+        let s1 = nfa.add_state();
+        let s2 = nfa.add_state();
+
+        nfa.add_epsilon(source_state, s0);
+        nfa.add_transition(s0, encode_positive_label(revealed_state), s1);
+        nfa.add_transition(s1, encode_negative_label(shift_state), s2);
+        nfa.set_accepting(s2);
     }
 
     for &(source_nonterminal, revealed_state, pop_count, target_nonterminal) in &characterization.nt_rereduces {
