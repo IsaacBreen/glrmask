@@ -1179,33 +1179,55 @@ fn test_right_recursive_item_bug() {
 }
 
 #[test]
-fn test_open_map_with_alternative_value_keeps_closing_delimiter_allowed() {
-    let vocab = make_vocab(&["{", "}", ",", ":", "f", "o", "b", "a", "r", "1"]);
+fn test_repeated_item_with_one_less_wrapper_allows_closing_token() {
+    let vocab = make_vocab(&["d"]);
     let c = Constraint::from_lark(
         r#"
-        start: "{" entries? "}"
-        entries: pair ("," pair)*
-        pair: key ":" value
-        key: "f" "o" "o"
-        value: word | number
-        word: "b" "a" "r"
-        number: "1"
+        start: item* "d"
+        item: "b" leaf
+        leaf: "g"
         "#,
         &vocab,
     )
     .unwrap();
 
+    let mut accepts_closing = c.start();
+    accepts_closing.commit_bytes(b"bgd").unwrap();
+
     let mut s = c.start();
-    commit_all(&mut s, &[0, 4, 5, 5, 3, 6, 7, 8]);
+    s.commit_bytes(b"bg").unwrap();
 
     let mask = s.mask();
     assert!(
-        token_allowed(&mask, 1),
-        "closing delimiter should be allowed after completing the alternative-valued pair"
+        token_allowed(&mask, 0),
+        "closing token should stay allowed when the extra wrapper is removed"
     );
+}
+
+#[test]
+fn test_repeated_item_keeps_closing_token_allowed() {
+    let vocab = make_vocab(&["d"]);
+    let c = Constraint::from_lark(
+        r#"
+        start: item* "d"
+        item: "b" node
+        node: leaf
+        leaf: "g"
+        "#,
+        &vocab,
+    )
+    .unwrap();
+
+    let mut accepts_closing = c.start();
+    accepts_closing.commit_bytes(b"bgd").unwrap();
+
+    let mut s = c.start();
+    s.commit_bytes(b"bg").unwrap();
+
+    let mask = s.mask();
     assert!(
-        token_allowed(&mask, 2),
-        "pair separator should remain allowed after completing the alternative-valued pair"
+        token_allowed(&mask, 0),
+        "closing token should be allowed after completing the repeated item"
     );
 }
 
