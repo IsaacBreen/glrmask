@@ -135,8 +135,8 @@ fn record_goto_action(
     goto_state: u32,
     action: &Action,
     goto_replace: bool,
-    visited: &mut BTreeSet<u32>,
-    worklist: &mut VecDeque<u32>,
+    visited: &mut BTreeSet<(u32, bool)>,
+    worklist: &mut VecDeque<(u32, bool)>,
     nt_escapes: &mut BTreeSet<NtEscape>,
     nt_rereduces: &mut BTreeSet<NtRereduce>,
     inheritances: &mut BTreeMap<u32, BTreeSet<u32>>,
@@ -381,10 +381,10 @@ fn explore_from_goto(
     let mut worklist = VecDeque::new();
     let mut visited = BTreeSet::new();
 
-    visited.insert(start_state);
-    worklist.push_back(start_state);
+    visited.insert((start_state, goto_replace));
+    worklist.push_back((start_state, goto_replace));
 
-    while let Some(goto_state) = worklist.pop_front() {
+    while let Some((goto_state, current_replace)) = worklist.pop_front() {
         let Some(action) = table.action(goto_state, terminal) else {
             continue;
         };
@@ -394,7 +394,7 @@ fn explore_from_goto(
             revealed_state,
             goto_state,
             action,
-            goto_replace,
+            current_replace,
             &mut visited,
             &mut worklist,
             nt_escapes,
@@ -411,8 +411,8 @@ fn handle_reduce(
     len: usize,
     reduce_nt: NonterminalID,
     goto_replace: bool,
-    visited: &mut BTreeSet<u32>,
-    worklist: &mut VecDeque<u32>,
+    visited: &mut BTreeSet<(u32, bool)>,
+    worklist: &mut VecDeque<(u32, bool)>,
     nt_rereduces: &mut BTreeSet<NtRereduce>,
     inheritances: &mut BTreeMap<u32, BTreeSet<u32>>,
 ) {
@@ -432,8 +432,8 @@ fn handle_reduce(
                         .or_default()
                         .insert(next_goto_state);
                 }
-                if visited.insert(next_goto_state) {
-                    worklist.push_back(next_goto_state);
+                if visited.insert((next_goto_state, next_replace)) {
+                    worklist.push_back((next_goto_state, next_replace));
                 }
             }
         }
