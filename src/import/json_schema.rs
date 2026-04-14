@@ -188,6 +188,37 @@ fn factored_open_object_max_keys() -> usize {
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OrderedObjectShape {
+    Right,
+    Balanced,
+    Left,
+}
+
+fn ordered_object_shape() -> OrderedObjectShape {
+    match std::env::var("GLRMASK_ORDERED_OBJECT_SHAPE")
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("left") => OrderedObjectShape::Left,
+        Some("balanced") => OrderedObjectShape::Balanced,
+        Some("right") | Some("factored") | None => OrderedObjectShape::Right,
+        Some(_) => OrderedObjectShape::Right,
+    }
+}
+
+fn factored_ordered_object_enabled() -> bool {
+    std::env::var("GLRMASK_DISABLE_FACTORED_ORDERED_OBJECT")
+        .map(|v| {
+            let n = v.trim().to_ascii_lowercase();
+            !matches!(n.as_str(), "" | "0" | "false" | "no" | "off")
+        })
+        .map(|disabled| !disabled)
+        .unwrap_or(true)
+        && matches!(ordered_object_shape(), OrderedObjectShape::Right)
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 enum JsonSchemaDraft {
     Draft4,
@@ -4533,7 +4564,12 @@ impl<'a> SchemaCtx<'a> {
             (empty_expr(), true)
         } else {
             let mut next_idx = 0usize;
-            self.build_object_tree(&base_name, &ordered, &mut next_idx)?
+            self.build_object_tree(
+                &base_name,
+                &ordered,
+                &mut next_idx,
+                ordered_object_shape(),
+            )?
         };
 
         // Helper: wrap an object-only expression with non-object alternatives
@@ -7166,7 +7202,10 @@ impl<'a> SchemaCtx<'a> {
         // closed objects.  This replaces the binary tree with a sequential
         // state machine, reducing max_paths from O(log N) to O(1).
         // Off by default; opt-in via GLRMASK_ENABLE_FACTORED_CLOSED_OBJECT=1.
-        if Self::factored_closed_object_enabled()
+        let object_shape = ordered_object_shape();
+
+        if factored_ordered_object_enabled()
+            && Self::factored_closed_object_enabled()
             && !Self::exact_closed_object_disabled()
             && !has_additional_properties
             && ordered.iter().any(|(_, _, required)| !*required)
@@ -7189,7 +7228,7 @@ impl<'a> SchemaCtx<'a> {
         // binary tree creates at the tree/free_c boundary.  The separator is
         // factored into a single dispatch rule at each DFA state, so the
         // property key — not the separator — is the disambiguation point.
-        if ordered.iter().any(|(_, _, required)| !*required) {
+        if factored_ordered_object_enabled() && ordered.iter().any(|(_, _, required)| !*required) {
             if let Some(expr) = self.try_build_factored_ordered_object(
                 &ordered,
                 &free_c,
@@ -7204,7 +7243,12 @@ impl<'a> SchemaCtx<'a> {
 
         let mut next_tree_rule_index = 0usize;
         let (tree_expr, tree_can_be_empty) =
-            self.build_object_tree(&base_name, &ordered, &mut next_tree_rule_index)?;
+            self.build_object_tree(
+                &base_name,
+                &ordered,
+                &mut next_tree_rule_index,
+                object_shape,
+            )?;
         let tree_prefix = sequence_or_single(vec![literal_expr(b"{"), tree_expr]);
         let with_tree_prefix = sequence_or_single(vec![
             tree_prefix,
@@ -7231,6 +7275,7 @@ impl<'a> SchemaCtx<'a> {
         base_name: &str,
         items: &[(String, GrammarExpr, bool)],
         next_rule_index: &mut usize,
+        shape: OrderedObjectShape,
     ) -> Result<(GrammarExpr, bool), GlrMaskError> {
         if items.len() == 1 {
             let (key, value_expr, is_required) = &items[0];
@@ -7245,11 +7290,15 @@ impl<'a> SchemaCtx<'a> {
             return Ok((GrammarExpr::Ref(rule_name), true));
         }
 
-        let mid = items.len() / 2;
+        let mid = match shape {
+            OrderedObjectShape::Balanced => items.len() / 2,
+            OrderedObjectShape::Left => items.len() - 1,
+            OrderedObjectShape::Right => 1,
+        };
         let (left_expr, left_can_be_empty) =
-            self.build_object_tree(base_name, &items[..mid], next_rule_index)?;
+            self.build_object_tree(base_name, &items[..mid], next_rule_index, shape)?;
         let (right_expr, right_can_be_empty) =
-            self.build_object_tree(base_name, &items[mid..], next_rule_index)?;
+            self.build_object_tree(base_name, &items[mid..], next_rule_index, shape)?;
 
         let mut options = vec![sequence_or_single(vec![
             left_expr.clone(),
