@@ -193,6 +193,7 @@ enum OrderedObjectShape {
     Right,
     Balanced,
     Left,
+    LeftBalanced,
 }
 
 fn ordered_object_shape() -> OrderedObjectShape {
@@ -203,6 +204,9 @@ fn ordered_object_shape() -> OrderedObjectShape {
     {
         Some("left") => OrderedObjectShape::Left,
         Some("balanced") => OrderedObjectShape::Balanced,
+        Some("left-balanced") | Some("left_balanced") | Some("leftbalanced") => {
+            OrderedObjectShape::LeftBalanced
+        }
         Some("right") | Some("factored") => OrderedObjectShape::Right,
         None => OrderedObjectShape::Balanced,
         Some(_) => OrderedObjectShape::Balanced,
@@ -7295,6 +7299,16 @@ impl<'a> SchemaCtx<'a> {
             OrderedObjectShape::Balanced => items.len() / 2,
             OrderedObjectShape::Left => items.len() - 1,
             OrderedObjectShape::Right => 1,
+            OrderedObjectShape::LeftBalanced => {
+                let first_optional = items
+                    .iter()
+                    .position(|(_, _, required)| !*required);
+                match first_optional {
+                    None => items.len() - 1,
+                    Some(0) => items.len() / 2,
+                    Some(idx) => idx,
+                }
+            }
         };
         let (left_expr, left_can_be_empty) =
             self.build_object_tree(base_name, &items[..mid], next_rule_index, shape)?;
