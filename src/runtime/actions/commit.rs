@@ -544,12 +544,18 @@ fn commit_bytes_impl(
                         return commit_bytes_impl(constraint, state, &bytes[offset..], bufs);
                     }
 
-                    let mut processing_queue: Vec<ParserStatesByTokenizer> =
-                        (0..=bytes.len()).map(|_| ParserStatesByTokenizer::default()).collect();
+                    let needed_queue_len = bytes.len() + 1;
+                    let mut processing_queue = std::mem::take(&mut bufs.processing_queue);
+                    if processing_queue.len() < needed_queue_len {
+                        processing_queue.resize_with(needed_queue_len, ParserStatesByTokenizer::default);
+                    }
+                    for bucket in processing_queue.iter_mut().take(needed_queue_len) {
+                        bucket.clear();
+                    }
                     processing_queue[offset] = std::mem::take(state).into_iter().collect();
 
                     let mut offset = offset;
-                    while offset < processing_queue.len() {
+                    while offset < needed_queue_len {
                         if processing_queue[offset].is_empty() {
                             offset += 1;
                             continue;
@@ -641,6 +647,7 @@ fn commit_bytes_impl(
                     new_state.retain(|_, parser_state| !parser_state.is_empty());
 
                     *state = new_state;
+                    bufs.processing_queue = processing_queue;
                     if state.is_empty() {
                         return Err("commit rejected: no valid parser states remain".to_string());
                     }
@@ -717,12 +724,18 @@ fn commit_bytes_impl(
 
     state.retain(|_, parser_state| !parser_state.is_empty());
 
-    let mut processing_queue: Vec<ParserStatesByTokenizer> =
-        (0..=bytes.len()).map(|_| ParserStatesByTokenizer::default()).collect();
+    let needed_queue_len = bytes.len() + 1;
+    let mut processing_queue = std::mem::take(&mut bufs.processing_queue);
+    if processing_queue.len() < needed_queue_len {
+        processing_queue.resize_with(needed_queue_len, ParserStatesByTokenizer::default);
+    }
+    for bucket in processing_queue.iter_mut().take(needed_queue_len) {
+        bucket.clear();
+    }
     processing_queue[0] = std::mem::take(state).into_iter().collect();
 
     let mut offset = 0usize;
-    while offset < processing_queue.len() {
+    while offset < needed_queue_len {
         if processing_queue[offset].is_empty() {
             offset += 1;
             continue;
@@ -822,6 +835,7 @@ fn commit_bytes_impl(
     new_state.retain(|_, parser_state| !parser_state.is_empty());
 
     *state = new_state;
+    bufs.processing_queue = processing_queue;
     if state.is_empty() {
         return Err("commit rejected: no valid parser states remain".to_string());
     }

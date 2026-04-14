@@ -26,6 +26,7 @@ pub(crate) struct CommitBuffers {
     pub exec_results: FxHashMap<u32, crate::automata::lexer::tokenizer::TokenizerExecResult>,
     pub remapped_tokenizer_states: FxHashMap<u32, u32>,
     pub accepted_terminals: FxHashMap<u32, FxHashSet<u32>>,
+    pub processing_queue: Vec<FxHashMap<u32, ParserGSS>>,
 }
 
 impl Clone for CommitBuffers {
@@ -44,6 +45,9 @@ impl CommitBuffers {
         self.exec_results.clear();
         self.remapped_tokenizer_states.clear();
         self.accepted_terminals.clear();
+        for bucket in &mut self.processing_queue {
+            bucket.clear();
+        }
     }
 }
 
