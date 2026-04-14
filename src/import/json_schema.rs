@@ -4234,17 +4234,25 @@ impl<'a> SchemaCtx<'a> {
 
                 if i == 0 {
                     // First key: no leading separator in the literal.
-                    let kv = self.build_merged_literal_key_value_expr(
-                        b"",
-                        key_j,
-                        value_j.clone(),
-                    );
+                    let kv = if has_free && ordered.len() >= 16 {
+                        self.build_fused_merged_literal_key_value_expr(
+                            b"",
+                            key_j,
+                            value_j.clone(),
+                        )
+                    } else {
+                        self.build_merged_literal_key_value_expr(
+                            b"",
+                            key_j,
+                            value_j.clone(),
+                        )
+                    };
                     alts.push(kv);
                 } else {
                     // Continuation key: MERGE the separator `", "` into the key literal.
                     // This turns `, "key_j": ` into a single token, making the
                     // grammar deterministic after prefix[i].
-                    let sep_kv = self.build_merged_literal_key_value_expr(
+                    let sep_kv = self.build_fused_merged_literal_key_value_expr(
                         b", ",
                         key_j,
                         value_j.clone(),
@@ -5668,6 +5676,12 @@ impl<'a> SchemaCtx<'a> {
         wrap_key_colon_terminal(body)
     }
 
+    fn fused_json_key_colon_literal(&self, text: &str) -> GrammarExpr {
+        let mut bytes = json_string_literal_bytes(text);
+        bytes.extend_from_slice(b": ");
+        literal_expr(&bytes)
+    }
+
     fn build_merged_literal_key_value_expr(
         &self,
         leading_literal: &[u8],
@@ -5730,6 +5744,73 @@ impl<'a> SchemaCtx<'a> {
         };
 
         // Flatten the value into parts to avoid nested Sequences
+        match value_expr {
+            GrammarExpr::Sequence(inner) => parts.extend(inner),
+            other => parts.push(other),
+        }
+        sequence_or_single(parts)
+    }
+
+    fn build_fused_merged_literal_key_value_expr(
+        &self,
+        leading_literal: &[u8],
+        key: &str,
+        value_expr: GrammarExpr,
+    ) -> GrammarExpr {
+        let key_expr = self.fused_json_key_colon_literal(key);
+        let mut parts = match key_expr {
+            GrammarExpr::Sequence(parts) => parts,
+            other => vec![other],
+        };
+
+        if let Some(GrammarExpr::Literal(first)) = parts.first_mut() {
+            let mut merged = Vec::with_capacity(leading_literal.len() + first.len());
+            merged.extend_from_slice(leading_literal);
+            merged.extend_from_slice(first);
+            *first = merged;
+        } else {
+            parts.insert(0, literal_expr(leading_literal));
+        }
+
+        let value_expr = if let Some(GrammarExpr::Literal(last)) = parts.last_mut() {
+            match value_expr {
+                GrammarExpr::Literal(mut bytes)
+                    if matches!(bytes.first(), Some(b'{') | Some(b'[')) =>
+                {
+                    last.push(bytes.remove(0));
+                    if bytes.is_empty() {
+                        empty_expr()
+                    } else {
+                        literal_expr(&bytes)
+                    }
+                }
+                GrammarExpr::Sequence(value_parts) => {
+                    let mut flat = Vec::new();
+                    for part in value_parts {
+                        match part {
+                            GrammarExpr::Sequence(inner) => flat.extend(inner),
+                            other => flat.push(other),
+                        }
+                    }
+                    if let Some(GrammarExpr::Literal(bytes)) = flat.first_mut() {
+                        if let Some(&first) = bytes.first() {
+                            if matches!(first, b'{' | b'[') {
+                                last.push(first);
+                                bytes.remove(0);
+                                if bytes.is_empty() {
+                                    flat.remove(0);
+                                }
+                            }
+                        }
+                    }
+                    sequence_or_single(flat)
+                }
+                other => other,
+            }
+        } else {
+            value_expr
+        };
+
         match value_expr {
             GrammarExpr::Sequence(inner) => parts.extend(inner),
             other => parts.push(other),
