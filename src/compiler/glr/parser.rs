@@ -119,7 +119,8 @@ fn advance_nondeterministically(
             }
 
             if let Some(target) = action.shift_target() {
-                let is_replace = action.shift_is_replace();
+                let is_replace = action.shift_is_replace()
+                    && !table.forwarded_shifts.contains(&(state, token));
                 if is_replace {
                     shifted = shifted.merge(&isolated.popn(1).push(target));
                 } else {
@@ -606,7 +607,8 @@ fn advance_nondeterministically_profiled(
             }
 
             if let Some(target) = action.shift_target() {
-                let is_replace = action.shift_is_replace();
+                let is_replace = action.shift_is_replace()
+                    && !table.forwarded_shifts.contains(&(state, token));
                 profile.n_nondet_merges += 1;
                 let t_push = Instant::now();
                 let pushed = if is_replace {
@@ -828,7 +830,9 @@ fn advance_stack_vectors(
             continue;
         };
         if let Some(target) = table.action(state, token).and_then(Action::shift_target) {
-            let is_replace = table.action(state, token).map_or(false, |a| a.shift_is_replace());
+            let is_replace = table.action(state, token).is_some_and(|a| {
+                a.shift_is_replace() && !table.forwarded_shifts.contains(&(state, token))
+            });
             let mut shifted = stack.clone();
             if is_replace {
                 shifted.pop();
@@ -1552,7 +1556,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "chain grammar with local-forward-replace: parser rejects multi-item inputs"]
+    #[ignore = "recursive grammars are excluded by the local-forward transfer_safe guard"]
     fn test_local_forward_replace_handles_chain_grammar() {
         with_local_forward_replace_enabled(|| {
             // Replicate the integration-test grammar pattern that exercises
@@ -1585,7 +1589,10 @@ mod tests {
                     _ => false,
                 })
             });
-            assert!(has_zero_reduce, "expected local forwarding to create a Reduce(..., 0)");
+            assert!(
+                !has_zero_reduce,
+                "recursive grammars should stay on the non-forwarded path"
+            );
 
             // "aa$" — one item with leaf
             assert!(accepts(&parser, &[0, 0, 1]));
@@ -1593,6 +1600,37 @@ mod tests {
             assert!(accepts(&parser, &[0, 0, 0, 0, 1]));
             // Must not accept without the closing terminal
             assert!(!accepts(&parser, &[0, 0]));
+        });
+    }
+
+    #[test]
+    fn test_local_forward_replace_skips_unsafe_forwarded_terminal_shift() {
+        with_local_forward_replace_enabled(|| {
+            // S(0) -> A(1) T(1)
+            // A(1) -> T(0)
+            //
+            // Shifting T(0) completes A in the target kernel while the
+            // source state already has the foo item [S -> .A T(1)]. This is
+            // the minimal terminal-forwarding shape, but it also introduces a
+            // new pop-0 completed item in the target closure, so the safety
+            // guard should reject the forwarded shift.
+            let gdef = make_grammar(
+                vec![
+                    Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(1)] },
+                    Rule { lhs: 1, rhs: vec![Symbol::Terminal(0)] },
+                ],
+                0,
+                vec![tdef(0, "a"), tdef(1, "$")],
+            );
+            let parser = build_parser(&gdef);
+
+            assert!(
+                parser.table.forwarded_shifts.is_empty(),
+                "unsafe terminal forwarding should fall back to the ordinary shift"
+            );
+
+            assert!(accepts(&parser, &[0, 1]));
+            assert!(!accepts(&parser, &[0]));
         });
     }
 

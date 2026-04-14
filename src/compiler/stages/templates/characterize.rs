@@ -101,10 +101,7 @@ fn record_initial_action(
 ) {
     match action {
         Action::Shift(shift_state, replace) => {
-            // For forwarded-replace shifts, treat as non-replace for
-            // characterization so the template NFA preserves the source
-            // state on the stack (avoiding pop-0 reduces).
-            let effective_replace = *replace && !is_forwarded;
+            let effective_replace = *replace;
             let pushes = if effective_replace { vec![*shift_state] } else { vec![state, *shift_state] };
             escapes.insert((state, pushes));
         }
@@ -118,7 +115,7 @@ fn record_initial_action(
             ..
         } => {
             if let Some((shift_state, replace)) = shift {
-                let effective_replace = *replace && !is_forwarded;
+                let effective_replace = *replace;
                 let pushes = if effective_replace { vec![*shift_state] } else { vec![state, *shift_state] };
                 escapes.insert((state, pushes));
             }

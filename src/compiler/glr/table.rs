@@ -403,6 +403,9 @@ impl GLRTable {
                         if shift.is_some() || *accept {
                             continue;
                         }
+                        if reduces.is_empty() {
+                            continue;
+                        }
                         // Check: do all reduces have the same rhs_len?
                         let (_, rhs_len) = reduces[0];
                         if reduces.iter().any(|&(_, l)| l != rhs_len) {
@@ -495,6 +498,7 @@ impl GLRTable {
                 for (&tid, action) in &self.action[state] {
                     let Action::Split { shift, reduces, accept } = action else { continue };
                     if shift.is_some() || *accept { continue }
+                    if reduces.is_empty() { continue }
 
                     let (_, rhs_len) = reduces[0];
                     if reduces.iter().any(|&(_, l)| l != rhs_len) {
@@ -852,7 +856,7 @@ fn build_lr0_item_sets(grammar: &AnalyzedGrammar) -> (Vec<BTreeSet<Item>>, Vec<B
     )
 }
 
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone)]
 struct PendingAction {
     shift: Option<(u32, bool)>,
     reduces: Vec<(NonterminalID, u32)>,
@@ -1318,6 +1322,7 @@ fn build_lr1_item_sets(
         }
 
         for (symbol, mut kernel) in kernels {
+            let base_kernel = kernel.clone();
             // Check replace condition: is_replace iff no item in the kernel
             // has dot at position 1 (i.e., all items came from items that
             // already had dot > 0).
@@ -1326,16 +1331,14 @@ fn build_lr1_item_sets(
                 Symbol::Terminal(_) => !has_dot_1 && replace_shifts_enabled(),
                 Symbol::Nonterminal(_) => !has_dot_1 && replace_gotos_enabled(),
             };
+            let mut used_transfer = false;
 
             // Local-forward transfer: when has_dot_1 but transfer is enabled,
             // try to transfer foo items from the source state into the kernel
             // so the transition can still be marked as replace.
-            // Terminal shifts are disabled: the characterization cannot yet
-            // handle the zero-pop reduces that terminal transfer creates
-            // at intermediate token positions.
             if has_dot_1 && !is_replace && local_forward_replace_enabled() && transfer_safe {
                 let enable_for_this = match &symbol {
-                    Symbol::Terminal(_) => false,
+                    Symbol::Terminal(_) => replace_shifts_enabled(),
                     Symbol::Nonterminal(_) => replace_gotos_enabled(),
                 };
                 if enable_for_this {
@@ -1360,19 +1363,19 @@ fn build_lr1_item_sets(
                             kernel.remove(&item);
                         }
                         is_replace = true;
+                        used_transfer = true;
                     }
                 }
             }
 
-            // Track whether this replace was created by the transfer mechanism.
-            let is_forwarded = is_replace && kernel.iter().any(|it| it.transferred);
+            let mut kernel_has_transferred = used_transfer && kernel.iter().any(|it| it.transferred);
 
             // If replace, decrement stack_depth for non-transferred kernel
             // items — the replace absorbs one stack level for items that
             // went through the shift. Transferred items didn't go through
             // the shift; they were copied from the source state and await
             // nonterminal gotos, so their sd is already correct.
-            let adjusted_kernel: BTreeSet<LR1Item> = if is_replace {
+            let mut adjusted_kernel: BTreeSet<LR1Item> = if is_replace {
                 kernel
                     .iter()
                     .map(|item| {
@@ -1390,7 +1393,29 @@ fn build_lr1_item_sets(
                 kernel
             };
 
-            let target_items = lr1_closure(&adjusted_kernel, grammar);
+            let mut target_items = lr1_closure(&adjusted_kernel, grammar);
+            if used_transfer && matches!(symbol, Symbol::Terminal(_)) {
+                let base_target_items = lr1_closure(&base_kernel, grammar);
+                let base_has_zero_pop_completed = base_target_items.iter().any(|item| {
+                    let rule = &rules[item.rule as usize];
+                    (item.dot as usize) == rule.rhs.len() && item.stack_depth == 0
+                });
+                let transferred_has_zero_pop_completed = target_items.iter().any(|item| {
+                    let rule = &rules[item.rule as usize];
+                    (item.dot as usize) == rule.rhs.len() && item.stack_depth == 0
+                });
+                if transferred_has_zero_pop_completed && !base_has_zero_pop_completed {
+                    kernel = base_kernel;
+                    is_replace = false;
+                    kernel_has_transferred = false;
+                    adjusted_kernel = kernel;
+                    target_items = lr1_closure(&adjusted_kernel, grammar);
+                }
+            }
+
+            // Track whether this replace was created by the transfer mechanism.
+            let is_forwarded = is_replace && kernel_has_transferred;
+
             if target_items.is_empty() {
                 continue;
             }
