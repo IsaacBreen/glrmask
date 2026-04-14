@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::sync::OnceLock;
 
 use serde_json::{Map, Value};
 use crate::GlrMaskError;
@@ -109,6 +110,83 @@ const EXACT_CLOSED_OBJECT_UNION_MAX_KEYS: usize = 16;
 const EXACT_CLOSED_OBJECT_SINGLE_MAX_KEYS: usize = 16;
 const EXACT_CLOSED_OBJECT_UNION_MAX_STATES: usize = 128;
 const FACTORED_OPEN_OBJECT_MAX_KEYS: usize = 64;
+
+fn env_usize_with_default(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn closed_required_object_fused_literal_max_alts() -> usize {
+    static VALUE: OnceLock<usize> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        env_usize_with_default(
+            "GLRMASK_CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_ALTS",
+            CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_ALTS,
+        )
+    })
+}
+
+fn closed_required_object_fused_literal_max_total_bytes() -> usize {
+    static VALUE: OnceLock<usize> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        env_usize_with_default(
+            "GLRMASK_CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_TOTAL_BYTES",
+            CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_TOTAL_BYTES,
+        )
+    })
+}
+
+fn exact_closed_object_union_max_variants() -> usize {
+    static VALUE: OnceLock<usize> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        env_usize_with_default(
+            "GLRMASK_EXACT_CLOSED_OBJECT_UNION_MAX_VARIANTS",
+            EXACT_CLOSED_OBJECT_UNION_MAX_VARIANTS,
+        )
+    })
+}
+
+fn exact_closed_object_union_max_keys() -> usize {
+    static VALUE: OnceLock<usize> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        env_usize_with_default(
+            "GLRMASK_EXACT_CLOSED_OBJECT_UNION_MAX_KEYS",
+            EXACT_CLOSED_OBJECT_UNION_MAX_KEYS,
+        )
+    })
+}
+
+fn exact_closed_object_single_max_keys() -> usize {
+    static VALUE: OnceLock<usize> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        env_usize_with_default(
+            "GLRMASK_EXACT_CLOSED_OBJECT_SINGLE_MAX_KEYS",
+            EXACT_CLOSED_OBJECT_SINGLE_MAX_KEYS,
+        )
+    })
+}
+
+fn exact_closed_object_union_max_states() -> usize {
+    static VALUE: OnceLock<usize> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        env_usize_with_default(
+            "GLRMASK_EXACT_CLOSED_OBJECT_UNION_MAX_STATES",
+            EXACT_CLOSED_OBJECT_UNION_MAX_STATES,
+        )
+    })
+}
+
+fn factored_open_object_max_keys() -> usize {
+    static VALUE: OnceLock<usize> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        env_usize_with_default(
+            "GLRMASK_FACTORED_OPEN_OBJECT_MAX_KEYS",
+            FACTORED_OPEN_OBJECT_MAX_KEYS,
+        )
+    })
+}
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 enum JsonSchemaDraft {
@@ -465,7 +543,7 @@ fn finite_literal_alternatives(
     };
 
     let total_bytes = alts.iter().map(Vec::len).sum::<usize>();
-    if alts.len() > max_alts || total_bytes > CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_TOTAL_BYTES {
+    if alts.len() > max_alts || total_bytes > closed_required_object_fused_literal_max_total_bytes() {
         return None;
     }
 
@@ -473,7 +551,7 @@ fn finite_literal_alternatives(
 }
 
 fn maybe_fuse_finite_literal_expr(expr: GrammarExpr, context: &str) -> GrammarExpr {
-    let Some(alts) = finite_literal_alternatives(&expr, CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_ALTS) else {
+    let Some(alts) = finite_literal_alternatives(&expr, closed_required_object_fused_literal_max_alts()) else {
         return expr;
     };
     if alts.len() < 2 {
@@ -3812,10 +3890,10 @@ impl<'a> SchemaCtx<'a> {
         key_exprs: BTreeMap<String, GrammarExpr>,
         mode: StructuralBranchMode,
     ) -> Result<Option<GrammarExpr>, GlrMaskError> {
-        if variants.is_empty() || variants.len() > EXACT_CLOSED_OBJECT_UNION_MAX_VARIANTS {
+        if variants.is_empty() || variants.len() > exact_closed_object_union_max_variants() {
             return Ok(None);
         }
-        if key_exprs.len() > EXACT_CLOSED_OBJECT_UNION_MAX_KEYS {
+        if key_exprs.len() > exact_closed_object_union_max_keys() {
             return Ok(None);
         }
 
@@ -3843,7 +3921,7 @@ impl<'a> SchemaCtx<'a> {
                     idx
                 } else {
                     let idx = states.len();
-                    if idx >= EXACT_CLOSED_OBJECT_UNION_MAX_STATES {
+                    if idx >= exact_closed_object_union_max_states() {
                         return Ok(None);
                     }
                     states.push(next_state.clone());
@@ -3978,7 +4056,7 @@ impl<'a> SchemaCtx<'a> {
         &mut self,
         ordered: &[(String, GrammarExpr, bool)],
     ) -> Result<Option<GrammarExpr>, GlrMaskError> {
-        if ordered.is_empty() || ordered.len() > EXACT_CLOSED_OBJECT_SINGLE_MAX_KEYS {
+        if ordered.is_empty() || ordered.len() > exact_closed_object_single_max_keys() {
             return Ok(None);
         }
 
@@ -4026,7 +4104,7 @@ impl<'a> SchemaCtx<'a> {
         additional_pair_exprs: &[GrammarExpr],
         additional_c: &str,
     ) -> Result<Option<GrammarExpr>, GlrMaskError> {
-        if ordered.is_empty() || ordered.len() > FACTORED_OPEN_OBJECT_MAX_KEYS {
+        if ordered.is_empty() || ordered.len() > factored_open_object_max_keys() {
             return Ok(None);
         }
 
@@ -4070,7 +4148,7 @@ impl<'a> SchemaCtx<'a> {
                     idx
                 } else {
                     let idx = states.len();
-                    if idx >= EXACT_CLOSED_OBJECT_UNION_MAX_STATES {
+                    if idx >= exact_closed_object_union_max_states() {
                         return Ok(None);
                     }
                     states.push(next_state.clone());
@@ -4207,7 +4285,7 @@ impl<'a> SchemaCtx<'a> {
         options: &[Value],
         mode: StructuralBranchMode,
     ) -> Result<Option<GrammarExpr>, GlrMaskError> {
-        if options.len() < 2 || options.len() > EXACT_CLOSED_OBJECT_UNION_MAX_VARIANTS {
+        if options.len() < 2 || options.len() > exact_closed_object_union_max_variants() {
             return Ok(None);
         }
 
@@ -4248,7 +4326,7 @@ impl<'a> SchemaCtx<'a> {
                 }
             }
         }
-        if key_schemas.len() > EXACT_CLOSED_OBJECT_UNION_MAX_KEYS {
+        if key_schemas.len() > exact_closed_object_union_max_keys() {
             return Ok(None);
         }
 
