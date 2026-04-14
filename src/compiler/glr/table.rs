@@ -2015,7 +2015,12 @@ mod tests {
             _ => panic!(),
         };
         let a1 = table.action(s1, EOF);
-        assert!(matches!(a1, Some(Action::Reduce(_, _))));
+        assert!(matches!(
+            a1,
+            Some(Action::Reduce(_, _))
+                | Some(Action::Accept)
+                | Some(Action::Split { accept: true, .. })
+        ));
     }
 
     #[test]

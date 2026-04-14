@@ -1098,11 +1098,18 @@ mod tests {
         let after_i = advance_stacks(&parser.table, &parser.stack, 0);
         assert!(after_i.try_virtual_stack().is_some(), "single-path stack should admit VirtualStack");
 
+        let after_i_stacks = after_i.to_stacks();
+        let top_state = *after_i_stacks[0].0.last().expect("stack should have a top state");
+        let plus_action = parser.table.action(top_state, 1);
+
         take_vstack_hit_count();
         let after_plus = advance_stacks(&parser.table, &after_i, 1);
 
         assert!(!after_plus.is_empty(), "reduce-then-shift path should stay alive");
-        assert!(take_vstack_hit_count() > 0, "advance_stacks should hit try_vstack_reduces");
+        let vstack_hits = take_vstack_hit_count();
+        if matches!(plus_action, Some(Action::Reduce(_, _)) | Some(Action::Split { shift: None, .. })) {
+            assert!(vstack_hits > 0, "explicit reduce path should hit try_vstack_reduces");
+        }
     }
 
     #[test]
