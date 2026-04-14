@@ -203,8 +203,9 @@ fn ordered_object_shape() -> OrderedObjectShape {
     {
         Some("left") => OrderedObjectShape::Left,
         Some("balanced") => OrderedObjectShape::Balanced,
-        Some("right") | Some("factored") | None => OrderedObjectShape::Right,
-        Some(_) => OrderedObjectShape::Right,
+        Some("right") | Some("factored") => OrderedObjectShape::Right,
+        None => OrderedObjectShape::Balanced,
+        Some(_) => OrderedObjectShape::Balanced,
     }
 }
 
