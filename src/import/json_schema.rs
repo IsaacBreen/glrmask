@@ -109,7 +109,7 @@ const EXACT_CLOSED_OBJECT_UNION_MAX_VARIANTS: usize = 8;
 const EXACT_CLOSED_OBJECT_UNION_MAX_KEYS: usize = 16;
 const EXACT_CLOSED_OBJECT_SINGLE_MAX_KEYS: usize = 16;
 const EXACT_CLOSED_OBJECT_UNION_MAX_STATES: usize = 128;
-const FACTORED_OPEN_OBJECT_MAX_KEYS: usize = 64;
+const FACTORED_OPEN_OBJECT_MAX_KEYS: usize = 200;
 
 fn env_usize_with_default(name: &str, default: usize) -> usize {
     std::env::var(name)
@@ -221,7 +221,6 @@ fn factored_ordered_object_enabled() -> bool {
         })
         .map(|disabled| !disabled)
         .unwrap_or(true)
-        && matches!(ordered_object_shape(), OrderedObjectShape::Right)
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -4131,6 +4130,38 @@ impl<'a> SchemaCtx<'a> {
     ///   dispatch[j] → body[j]             (ordered — key disambiguates)
     ///               | PP_pair free_c      (pattern property — key disambig.)
     ///               | AP_pair additional_c (additional property — key disambig.)
+    /// Build a left-recursive grammar for ordered objects.
+    ///
+    /// The key insight: merge the separator `", "` into the key literal for all
+    /// non-first keys. This makes each key transition look like:
+    ///   prefix[k] → prefix[j] SEP_KV_k
+    /// where SEP_KV_k = `", "key_k": ` is a SINGLE merged literal terminal.
+    ///
+    /// Because each SEP_KV_k token is unique (different key string), the parser
+    /// is 100% deterministic after any prefix[j]: it simply matches the next token.
+    ///
+    /// Grammar:
+    ///   First-key rules (no separator in literal):
+    ///     prefix[k] → KV_k          if k is reachable from state 0 (gap 0..k all optional)
+    ///   Continuation rules (separator merged into literal):
+    ///     prefix[k] → prefix[j] SEP_KV_k   for each j where gap j..k all optional, j > 0
+    ///
+    ///   body → prefix[j]              for each closeable j
+    ///         | prefix[j] free_expr   for closeable j with free properties
+    ///         | free_expr              if can close at 0 (all optional + has free)
+    ///         | ε                      if can close at 0
+    ///
+    ///   Object → "{" body "}"
+    ///
+    /// Stack depth: O(1) at all times — prefix reduces eagerly after each key.
+    /// Determinism: after prefix[j], the next token uniquely identifies the next rule.
+    ///   - If next token is SEP_KV_k: shift and reduce prefix[k] → prefix[j] SEP_KV_k
+    ///   - If next token is `}`: reduce body → prefix[j]
+    ///   - If next token is `, ` (not merged): this is the free-property separator
+    ///     In this case there IS a small fork at `, `: prefix[j] (close or continue).
+    ///     But with the merged literal, no key starts with `, ` as a bare separator — 
+    ///     the separator IS the key literal. So `, "k1": ` is ONE token.
+    ///     The only ambiguity remains at the BODY level for free properties.
     fn try_build_factored_ordered_object(
         &mut self,
         ordered: &[(String, GrammarExpr, bool)],
@@ -4144,64 +4175,13 @@ impl<'a> SchemaCtx<'a> {
             return Ok(None);
         }
 
-        let key_exprs: std::collections::BTreeMap<String, GrammarExpr> = ordered
-            .iter()
-            .map(|(key, value_expr, _)| (key.clone(), value_expr.clone()))
-            .collect();
-        let variant = OrderedClosedObjectVariant {
-            items: ordered
-                .iter()
-                .map(|(key, value_expr, required)| OrderedClosedObjectItem {
-                    key: key.clone(),
-                    value_expr: value_expr.clone(),
-                    required: *required,
-                })
-                .collect(),
-        };
-        let variants = vec![variant];
-        let mode = StructuralBranchMode::AnyOf;
+        let n = ordered.len();
+        let has_free = !free_pair_exprs.is_empty() || !additional_pair_exprs.is_empty();
 
-        // Build the DFA
-        let start_state: Vec<OrderedSubsetCursor> = vec![OrderedSubsetCursor {
-            variant_idx: 0,
-            cursor: 0,
-        }];
-        let mut states = vec![start_state.clone()];
-        let mut transitions: Vec<Vec<(String, usize)>> = vec![Vec::new()];
-        let mut state_to_idx = std::collections::BTreeMap::new();
-        state_to_idx.insert(start_state, 0usize);
-        let mut queue = std::collections::VecDeque::from([0usize]);
-
-        while let Some(state_idx) = queue.pop_front() {
-            let state = states[state_idx].clone();
-            let mut edges = Vec::new();
-            for key in Self::ordered_subset_legal_next_keys(&variants, &state) {
-                let next_state = Self::ordered_subset_transition(&variants, &state, &key);
-                if next_state.is_empty() {
-                    continue;
-                }
-                let next_idx = if let Some(&idx) = state_to_idx.get(&next_state) {
-                    idx
-                } else {
-                    let idx = states.len();
-                    if idx >= exact_closed_object_union_max_states() {
-                        return Ok(None);
-                    }
-                    states.push(next_state.clone());
-                    transitions.push(Vec::new());
-                    state_to_idx.insert(next_state, idx);
-                    queue.push_back(idx);
-                    idx
-                };
-                edges.push((key, next_idx));
-            }
-            transitions[state_idx] = edges;
-        }
-
-        // Generate rule names.
+        // Allocate base name.
         let mut base_index = self.generated_object_rule_counter;
         let base_name = loop {
-            let candidate = format!("obj_fac_l_{base_index}");
+            let candidate = format!("obj_lrec_{base_index}");
             if !self.used_rule_names.contains(&format!("{candidate}_p1")) {
                 break candidate;
             }
@@ -4209,113 +4189,123 @@ impl<'a> SchemaCtx<'a> {
         };
         self.generated_object_rule_counter = base_index + 1;
 
-        let prefix_rule_names: Vec<String> = (0..states.len())
-            .map(|idx| format!("{base_name}_p{idx}"))
-            .collect();
+        let prefix_name = |j: usize| -> String { format!("{base_name}_p{j}") };
 
-        // 1. Collect incoming edges for each state: incoming[next_idx] = vec![(prev_idx, key)]
-        let mut incoming: Vec<Vec<(usize, String)>> = vec![Vec::new(); states.len()];
-        for state_idx in 0..states.len() {
-            for (key, next_idx) in &transitions[state_idx] {
-                incoming[*next_idx].push((state_idx, key.clone()));
-            }
-        }
-
-        // 2. Emit Left-Recursive Rules for each prefix > 0
-        // Prefix[j] -> Prefix[i] ", " KV_j | KV_j
-        for state_idx in 1..states.len() {
+        // Helper: build free-property expression.
+        let make_free_expr = |free_pair_exprs: &[GrammarExpr],
+                               additional_pair_exprs: &[GrammarExpr],
+                               free_c: &str,
+                               additional_c: &str| -> GrammarExpr {
             let mut alts = Vec::new();
-            for (prev_idx, key) in &incoming[state_idx] {
-                let value_expr = key_exprs.get(key).unwrap().clone();
-                let kv_expr = self.build_merged_literal_key_value_expr(b"", key, value_expr);
-                if *prev_idx == 0 {
-                    alts.push(kv_expr);
+            for pp in free_pair_exprs {
+                alts.push(sequence_or_single(vec![
+                    pp.clone(),
+                    GrammarExpr::Ref(free_c.to_string()),
+                ]));
+            }
+            for ap in additional_pair_exprs {
+                alts.push(sequence_or_single(vec![
+                    ap.clone(),
+                    GrammarExpr::Ref(additional_c.to_string()),
+                ]));
+            }
+            choice_or_single(alts)
+        };
+
+        // State j can close iff all remaining keys ordered[j..n] are optional.
+        let can_close_at = |j: usize| -> bool {
+            ordered[j..].iter().all(|(_, _, req)| !req)
+        };
+
+        // Emit prefix rules: prefix[j] for j in 1..=n.
+        // prefix[j] represents any valid ordered prefix ending at key k_{j-1}.
+        // KEY TECHNIQUE: for continuation keys (i > 0), merge the separator into
+        // the literal so that `, "key_j": ` is a SINGLE token. This makes the
+        // grammar deterministic: after prefix[i], the parser sees a unique token
+        // for each possible next key, eliminating nondeterminism at ", ".
+        for j in 1..=n {
+            let (key_j, value_j, _) = &ordered[j - 1];
+            let mut alts = Vec::new();
+
+            for i in 0..j {
+                // gap i..(j-1) must all be optional.
+                let gap_ok = ordered[i..j - 1].iter().all(|(_, _, req)| !req);
+                if !gap_ok { continue; }
+
+                if i == 0 {
+                    // First key: no leading separator in the literal.
+                    let kv = self.build_merged_literal_key_value_expr(
+                        b"",
+                        key_j,
+                        value_j.clone(),
+                    );
+                    alts.push(kv);
                 } else {
+                    // Continuation key: MERGE the separator `", "` into the key literal.
+                    // This turns `, "key_j": ` into a single token, making the
+                    // grammar deterministic after prefix[i].
+                    let sep_kv = self.build_merged_literal_key_value_expr(
+                        b", ",
+                        key_j,
+                        value_j.clone(),
+                    );
                     alts.push(sequence_or_single(vec![
-                        GrammarExpr::Ref(prefix_rule_names[*prev_idx].clone()),
-                        self.json_item_separator_expr(),
-                        kv_expr,
+                        GrammarExpr::Ref(prefix_name(i)),
+                        sep_kv,
                     ]));
                 }
             }
-            self.insert_rule(
-                prefix_rule_names[state_idx].clone(),
-                choice_or_single(alts),
-            );
+
+            if alts.is_empty() { return Ok(None); }
+            self.insert_rule(prefix_name(j), choice_or_single(alts));
         }
 
-        // 3. Emit Body Alternatives
+        // Build body alternatives.
+        // Each closeable state j contributes:
+        //   - prefix[j]                     (close after known keys)
+        //   - prefix[j] ", " free_expr       (if has_free: continue with free properties)
+        // State 0 (no known keys yet) contributes:
+        //   - free_expr                      (if has_free)
+        //   - ε                              (if can close at 0)
         let mut body_alts = Vec::new();
-        let has_free = !free_pair_exprs.is_empty() || !additional_pair_exprs.is_empty();
 
-        for state_idx in 0..states.len() {
-            let state = &states[state_idx];
-            let close_allowed = Self::ordered_subset_close_allowed(mode, &variants, state);
-            if !close_allowed {
-                continue;
-            }
-
-            if state_idx == 0 {
-                if has_free {
-                    let mut free_alts = Vec::new();
-                    for pp_pair in free_pair_exprs {
-                        free_alts.push(sequence_or_single(vec![
-                            pp_pair.clone(),
-                            GrammarExpr::Ref(free_c.to_string()),
-                        ]));
-                    }
-                    for ap_pair in additional_pair_exprs {
-                        free_alts.push(sequence_or_single(vec![
-                            ap_pair.clone(),
-                            GrammarExpr::Ref(additional_c.to_string()),
-                        ]));
-                    }
-                    let free_choice = choice_or_single(free_alts);
-                    body_alts.push(free_choice);
-                } else {
-                    body_alts.push(empty_expr());
-                }
-            } else {
-                // End cleanly at this state.
-                body_alts.push(GrammarExpr::Ref(prefix_rule_names[state_idx].clone()));
-
-                // Transition to free properties.
-                if has_free {
-                    let mut free_alts = Vec::new();
-                    for pp_pair in free_pair_exprs {
-                        free_alts.push(sequence_or_single(vec![
-                            pp_pair.clone(),
-                            GrammarExpr::Ref(free_c.to_string()),
-                        ]));
-                    }
-                    for ap_pair in additional_pair_exprs {
-                        free_alts.push(sequence_or_single(vec![
-                            ap_pair.clone(),
-                            GrammarExpr::Ref(additional_c.to_string()),
-                        ]));
-                    }
-                    let free_choice = choice_or_single(free_alts);
-
-                    body_alts.push(sequence_or_single(vec![
-                        GrammarExpr::Ref(prefix_rule_names[state_idx].clone()),
-                        self.json_item_separator_expr(),
-                        free_choice,
-                    ]));
-                }
+        for j in 1..=n {
+            if !can_close_at(j) { continue; }
+            body_alts.push(GrammarExpr::Ref(prefix_name(j)));
+            if has_free {
+                let free_expr = make_free_expr(
+                    free_pair_exprs, additional_pair_exprs, free_c, additional_c
+                );
+                body_alts.push(sequence_or_single(vec![
+                    GrammarExpr::Ref(prefix_name(j)),
+                    self.json_item_separator_expr(),
+                    free_expr,
+                ]));
             }
         }
 
-        let expr = sequence_or_single(vec![
+        if can_close_at(0) {
+            if has_free {
+                let free_expr = make_free_expr(
+                    free_pair_exprs, additional_pair_exprs, free_c, additional_c
+                );
+                body_alts.push(free_expr);
+            }
+            body_alts.push(empty_expr());
+        }
+
+        if body_alts.is_empty() { return Ok(None); }
+
+        let all_optional = ordered.iter().all(|(_, _, req)| !req);
+        let inner = sequence_or_single(vec![
             literal_expr(b"{"),
             choice_or_single(body_alts),
             literal_expr(b"}"),
         ]);
-        
-        // Return body_expr. Let caller handle exact empty object cases if all_optional
-        let all_optional = ordered.iter().all(|(_, _, required)| !*required);
-        if all_optional {
+
+        if all_optional && !free_nc.is_empty() {
             Ok(Some(choice_or_single(vec![
-                expr,
+                inner,
                 sequence_or_single(vec![
                     literal_expr(b"{"),
                     GrammarExpr::Ref(free_nc.to_string()),
@@ -4323,7 +4313,7 @@ impl<'a> SchemaCtx<'a> {
                 ]),
             ])))
         } else {
-            Ok(Some(expr))
+            Ok(Some(inner))
         }
     }
 
@@ -7215,10 +7205,10 @@ impl<'a> SchemaCtx<'a> {
             ]));
         }
 
-        // Try the factored DFA approach for ordered optional keys in
-        // closed objects.  This replaces the binary tree with a sequential
-        // state machine, reducing max_paths from O(log N) to O(1).
-        // Off by default; opt-in via GLRMASK_ENABLE_FACTORED_CLOSED_OBJECT=1.
+        // Factored left-recursive grammar for ordered objects with optional keys.
+        // Merges the separator into the key literal for deterministic O(1)-depth parsing.
+        // Activated via GLRMASK_ENABLE_FACTORED_CLOSED_OBJECT=1 or unconditionally
+        // when GLRMASK_DISABLE_FACTORED_ORDERED_OBJECT is not set.
         let object_shape = ordered_object_shape();
 
         if factored_ordered_object_enabled()
@@ -7241,10 +7231,7 @@ impl<'a> SchemaCtx<'a> {
             }
         }
 
-        // Factored DFA for open objects: eliminates pure R/R splits that the
-        // binary tree creates at the tree/free_c boundary.  The separator is
-        // factored into a single dispatch rule at each DFA state, so the
-        // property key — not the separator — is the disambiguation point.
+        // Factored left-recursive grammar for open objects (with additional/pattern properties).
         if factored_ordered_object_enabled() && ordered.iter().any(|(_, _, required)| !*required) {
             if let Some(expr) = self.try_build_factored_ordered_object(
                 &ordered,
@@ -7294,6 +7281,7 @@ impl<'a> SchemaCtx<'a> {
         next_rule_index: &mut usize,
         shape: OrderedObjectShape,
     ) -> Result<(GrammarExpr, bool), GlrMaskError> {
+
         if items.len() == 1 {
             let (key, value_expr, is_required) = &items[0];
             let kv_expr = self.build_merged_literal_key_value_expr(b"", key, value_expr.clone());
