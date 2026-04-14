@@ -1552,7 +1552,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "unit test grammar structure differs from integration — covered by test_repeated_item with GLRMASK_ENABLE_LOCAL_FORWARD_REPLACE=1"]
+    #[ignore = "chain grammar with local-forward-replace: parser rejects multi-item inputs"]
     fn test_local_forward_replace_handles_chain_grammar() {
         with_local_forward_replace_enabled(|| {
             // Replicate the integration-test grammar pattern that exercises
@@ -1593,6 +1593,72 @@ mod tests {
             assert!(accepts(&parser, &[0, 0, 0, 0, 1]));
             // Must not accept without the closing terminal
             assert!(!accepts(&parser, &[0, 0]));
+        });
+    }
+
+    /// Test that a simple linear grammar produces an optimal table with
+    /// local-forward-replace: NO reductions, ALL non-accept actions are
+    /// replace shifts.
+    ///
+    /// Grammar:
+    ///   S → A '$'
+    ///   A → 'a' 'a' 'a' 'a'
+    ///
+    /// Without replace the table has Reduce(A/4) and Reduce(S/2).
+    /// With full forward-replace the parser should produce a table where
+    /// every action is either a replace shift or accept — no reductions,
+    /// no gotos needed.
+    #[test]
+    fn test_optimal_linear_grammar_no_reductions() {
+        with_local_forward_replace_enabled(|| {
+            // S(0) → A(1) T(1)
+            // A(1) → T(0) T(0) T(0) T(0)
+            let gdef = make_grammar(
+                vec![
+                    Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(1)] },
+                    Rule { lhs: 1, rhs: vec![
+                        Symbol::Terminal(0), Symbol::Terminal(0),
+                        Symbol::Terminal(0), Symbol::Terminal(0),
+                    ]},
+                ],
+                0,
+                vec![tdef(0, "a"), tdef(1, "$")],
+            );
+            let parser = build_parser(&gdef);
+
+            // Assert: no reductions in the table. All non-accept actions
+            // must be replace shifts.
+            for (state_id, actions) in parser.table.action.iter().enumerate() {
+                for (terminal, action) in actions {
+                    match action {
+                        Action::Accept => {}
+                        Action::Shift(_, true) => {} // replace shift — expected
+                        Action::Shift(_, false) => {
+                            panic!(
+                                "State {state_id}: non-replace shift on terminal {terminal}"
+                            );
+                        }
+                        Action::Reduce(nt, len) => {
+                            panic!(
+                                "State {state_id}: Reduce({nt}, {len}) on terminal {terminal} — expected no reductions"
+                            );
+                        }
+                        Action::Split { .. } => {
+                            panic!(
+                                "State {state_id}: Split on terminal {terminal} — expected no splits"
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Parser must accept valid input.
+            assert!(accepts(&parser, &[0, 0, 0, 0, 1])); // "aaaa$"
+
+            // Parser must reject invalid inputs.
+            assert!(!accepts(&parser, &[0, 0, 0, 1]));       // "aaa$" — too few 'a's
+            assert!(!accepts(&parser, &[0, 0, 0, 0]));       // "aaaa" — missing '$'
+            assert!(!accepts(&parser, &[0, 0, 0, 0, 0, 1])); // "aaaaa$" — too many 'a's
         });
     }
 }

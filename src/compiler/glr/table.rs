@@ -852,7 +852,7 @@ fn build_lr0_item_sets(grammar: &AnalyzedGrammar) -> (Vec<BTreeSet<Item>>, Vec<B
     )
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct PendingAction {
     shift: Option<(u32, bool)>,
     reduces: Vec<(NonterminalID, u32)>,
@@ -1115,6 +1115,78 @@ fn lr1_goto_set(
 /// foo items in the source.
 ///
 /// Returns `Some(transferred)` with the set of transferred items otherwise.
+
+/// Eagerly advance transferred items past completed nonterminals in the
+/// same kernel.  For example, if the kernel has:
+///   [LPAREN → '('. , sd=0]  (completed, non-transferred)
+///   [f → .LPAREN e ')' , transferred]
+/// then the transferred item can be directly advanced to [f → LPAREN.e ')']
+/// because LPAREN is already completed.  This avoids creating a zero-pop
+/// reduce + goto in the table.
+fn eagerly_advance_transferred(
+    kernel: &BTreeSet<LR1Item>,
+    rules: &[Rule],
+) -> BTreeSet<LR1Item> {
+    // Collect completed nonterminals (LHS of completed non-transferred items
+    // with sd == 0).
+    let mut completed_nts: BTreeSet<NonterminalID> = BTreeSet::new();
+    for item in kernel {
+        if item.transferred {
+            continue;
+        }
+        let rule = &rules[item.rule as usize];
+        if item.dot as usize == rule.rhs.len() && item.stack_depth == 0 {
+            completed_nts.insert(rule.lhs);
+        }
+    }
+
+    if completed_nts.is_empty() {
+        return kernel.clone();
+    }
+
+    let mut advanced_nts: BTreeSet<NonterminalID> = BTreeSet::new();
+    let mut result = BTreeSet::new();
+    for item in kernel {
+        if item.transferred {
+            if let Some(Symbol::Nonterminal(nt)) = item.next_symbol(rules) {
+                if completed_nts.contains(nt) {
+                    // Advance the transferred item past the completed NT.
+                    // Keep sd unchanged: the advancement replaces a
+                    // reduce+goto pair that was a no-op in stack terms
+                    // (zero-pop reduce followed by non-replace goto).
+                    result.insert(LR1Item {
+                        rule: item.rule,
+                        dot: item.dot + 1,
+                        lookahead: item.lookahead,
+                        stack_depth: item.stack_depth,
+                        transferred: false,
+                    });
+                    advanced_nts.insert(*nt);
+                    continue;
+                }
+            }
+        }
+        result.insert(*item);
+    }
+
+    // Remove completed items whose nonterminal was consumed by advancement.
+    // They would produce zero-pop reduces that are now unnecessary.
+    let advanced_nts_copy = advanced_nts;
+    result.retain(|item| {
+        if item.transferred {
+            return true;
+        }
+        let rule = &rules[item.rule as usize];
+        if item.dot as usize == rule.rhs.len() && item.stack_depth == 0 {
+            !advanced_nts_copy.contains(&rule.lhs)
+        } else {
+            true
+        }
+    });
+
+    result
+}
+
 fn compute_transfer_items(
     kernel: &BTreeSet<LR1Item>,
     source_items: &BTreeSet<LR1Item>,
@@ -1207,6 +1279,13 @@ fn build_lr1_item_sets(
     let mut set_to_id: FxHashMap<Vec<LR1Item>, u32> = FxHashMap::default();
     set_to_id.insert(initial.iter().copied().collect(), 0);
 
+    // Pre-compute safety checks for the transfer mechanism.
+    // Transfer is unsafe for nullable grammars (epsilon productions create
+    // split actions that the mechanism can't handle) and recursive grammars
+    // (shared reduce states get corrupted).
+    let transfer_safe = !grammar.nullable.iter().any(|&n| n != 0)
+        && !grammar_has_recursion(rules);
+
     let mut queue = VecDeque::from([0u32]);
     while let Some(state_id) = queue.pop_front() {
         let source_items = item_sets[state_id as usize].clone();
@@ -1251,12 +1330,12 @@ fn build_lr1_item_sets(
             // Local-forward transfer: when has_dot_1 but transfer is enabled,
             // try to transfer foo items from the source state into the kernel
             // so the transition can still be marked as replace.
-            // Only apply for nonterminal gotos — terminal shifts would lose
-            // essential closure items (like terminal shifts for recursive
-            // rules) because transferred items skip closure.
-            if has_dot_1 && !is_replace && local_forward_replace_enabled() {
+            // Terminal shifts are disabled: the characterization cannot yet
+            // handle the zero-pop reduces that terminal transfer creates
+            // at intermediate token positions.
+            if has_dot_1 && !is_replace && local_forward_replace_enabled() && transfer_safe {
                 let enable_for_this = match &symbol {
-                    Symbol::Terminal(_) => false, // disabled for terminal shifts
+                    Symbol::Terminal(_) => false,
                     Symbol::Nonterminal(_) => replace_gotos_enabled(),
                 };
                 if enable_for_this {
@@ -1356,6 +1435,33 @@ fn current_unique_reduce_len(
     unique_len
 }
 
+/// Check if any nonterminal can transitively reach itself through the
+/// grammar's production rules. Returns true if any recursion exists.
+fn grammar_has_recursion(rules: &[Rule]) -> bool {
+    let max_nt = rules.iter().map(|r| r.lhs).max().unwrap_or(0) as usize + 1;
+    // Build adjacency: lhs → set of nonterminals appearing in rhs.
+    let mut adj = vec![vec![false; max_nt]; max_nt];
+    for rule in rules {
+        for sym in &rule.rhs {
+            if let Symbol::Nonterminal(nt) = sym {
+                adj[rule.lhs as usize][*nt as usize] = true;
+            }
+        }
+    }
+    // Transitive closure (Floyd-Warshall on small nonterminal set).
+    for k in 0..max_nt {
+        for i in 0..max_nt {
+            for j in 0..max_nt {
+                if adj[i][k] && adj[k][j] {
+                    adj[i][j] = true;
+                }
+            }
+        }
+    }
+    // Check diagonal: any nonterminal that can reach itself.
+    (0..max_nt).any(|i| adj[i][i])
+}
+
 fn apply_local_forward_replace(
     pending: &mut Vec<BTreeMap<TerminalID, PendingAction>>,
     goto: &mut Vec<FxHashMap<NonterminalID, (u32, bool)>>,
@@ -1363,6 +1469,17 @@ fn apply_local_forward_replace(
     transitions: &[BTreeMap<Symbol, (u32, bool, bool)>],
     rules: &[Rule],
 ) {
+    // Build incoming-transition count per state so we can check whether
+    // a reduce-state is uniquely reachable.  If multiple transitions
+    // lead into the reduce state, rewriting its reduce length would
+    // corrupt other paths (e.g. recursive grammars).
+    let mut in_count = vec![0u32; item_sets.len()];
+    for t in transitions {
+        for &(target, _, _) in t.values() {
+            in_count[target as usize] += 1;
+        }
+    }
+
     loop {
         let mut changed = false;
 
@@ -1408,14 +1525,25 @@ fn apply_local_forward_replace(
                     };
 
                     let mut reduce_state = target;
+                    let mut chain_unique = in_count[target as usize] <= 1;
                     for next_symbol in &rule.rhs[item.dot as usize..] {
                         let Some(&(next_state, _, _)) = transitions[reduce_state as usize].get(next_symbol) else {
                             valid = false;
                             break;
                         };
                         reduce_state = next_state;
+                        // If a state in the chain is reachable from
+                        // multiple predecessors, we can't safely rewrite
+                        // its reduce because other paths share it.
+                        if in_count[reduce_state as usize] > 1 {
+                            chain_unique = false;
+                        }
                     }
                     if !valid {
+                        break;
+                    }
+                    if !chain_unique {
+                        valid = false;
                         break;
                     }
 
@@ -1498,6 +1626,81 @@ fn apply_local_forward_replace(
     }
 }
 
+/// Inline zero-pop reduces: when a state has Reduce(nt, 0) on some terminal,
+/// follow the goto to the target state and copy the target's action for that
+/// terminal into the current state. This eliminates the zero-pop reduce
+/// entirely, replacing it with a direct shift or accept.
+///
+/// Iterates until no more inlining is possible (handles chains of zero-pop
+/// reduces).
+fn inline_zero_pop_reduces(
+    pending: &mut Vec<BTreeMap<TerminalID, PendingAction>>,
+    goto: &mut Vec<FxHashMap<NonterminalID, (u32, bool)>>,
+) {
+    loop {
+        let mut changed = false;
+
+        for state in 0..pending.len() {
+            // Collect (terminal, nt, target_state) triples for zero-pop reduces.
+            let mut to_inline: Vec<(TerminalID, NonterminalID, u32)> = Vec::new();
+            if let Some(by_terminal) = pending.get(state) {
+                for (&terminal, pa) in by_terminal {
+                    for &(reduce_nt, reduce_len) in &pa.reduces {
+                        if reduce_len == 0 {
+                            if let Some(&(target, _)) = goto[state].get(&reduce_nt) {
+                                to_inline.push((terminal, reduce_nt, target));
+                            }
+                        }
+                    }
+                }
+            }
+
+            for (terminal, reduce_nt, target) in to_inline {
+                if target as usize == state {
+                    continue; // avoid self-reference
+                }
+
+                // Read action at target state for the same terminal.
+                let target_pa = pending[target as usize].get(&terminal).cloned();
+
+                if let Some(pa) = pending[state].get_mut(&terminal) {
+                    // Remove the zero-pop reduce.
+                    pa.reduces.retain(|&(nt, len)| !(nt == reduce_nt && len == 0));
+
+                    // Inline target's actions.
+                    if let Some(tpa) = target_pa {
+                        if let Some((shift_target, _)) = tpa.shift {
+                            pa.push_shift(shift_target, true);
+                        }
+                        for (nt, len) in &tpa.reduces {
+                            pa.push_reduce(*nt, *len);
+                        }
+                        if tpa.accept {
+                            pa.push_accept();
+                        }
+
+                        // Propagate gotos needed for any zero-pop reduces
+                        // we just inlined from the target state.
+                        for &(nt, len) in &tpa.reduces {
+                            if len == 0 {
+                                if let Some(&goto_entry) = goto[target as usize].get(&nt) {
+                                    goto[state].entry(nt).or_insert(goto_entry);
+                                }
+                            }
+                        }
+                    }
+
+                    changed = true;
+                }
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+}
+
 fn build_lr1_table(
     grammar: &AnalyzedGrammar,
     item_sets: &[BTreeSet<LR1Item>],
@@ -1509,6 +1712,7 @@ fn build_lr1_table(
     // build_lr1_item_sets, so we don't need to recompute them here.
 
     let mut pending = pending;
+    let mut goto = goto;
     for (state_id, items) in item_sets.iter().enumerate() {
 
         for item in items {
@@ -1533,9 +1737,30 @@ fn build_lr1_table(
         }
     }
 
-    // NOTE: apply_local_forward_replace is no longer needed — the
-    // transferred-item mechanism in build_lr1_item_sets handles it
-    // at construction time.
+    // Post-process: convert non-replace transitions to replace where
+    // possible by following the dot-1 items through to their reduce
+    // states and rewriting sd=1 reduces to sd=0 with forwarded gotos.
+    // Only safe for grammars that are:
+    // - not using the transferred-item mechanism
+    // - non-recursive (no shared reduce states)
+    // - non-nullable (no epsilon productions that create split actions)
+    let has_forwarded = transitions.iter().any(|t| t.values().any(|&(_, _, f)| f));
+    let has_recursion = grammar_has_recursion(&grammar.rules);
+    let has_nullable = grammar.nullable.iter().any(|&n| n != 0);
+    if local_forward_replace_enabled() && !has_forwarded && !has_recursion && !has_nullable {
+        apply_local_forward_replace(
+            &mut pending,
+            &mut goto,
+            item_sets,
+            transitions,
+            &grammar.rules,
+        );
+    }
+    // For non-forwarded grammars (apply_local_forward_replace path),
+    // inline the zero-pop reduces it created.
+    if local_forward_replace_enabled() && !has_forwarded && !has_recursion && !has_nullable {
+        inline_zero_pop_reduces(&mut pending, &mut goto);
+    }
 
     finish_table(grammar, pending, goto, forwarded_shifts)
 }
