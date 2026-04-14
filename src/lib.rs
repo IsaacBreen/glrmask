@@ -29,7 +29,8 @@ pub fn dump_json_schema_grammar(schema_json: &str) -> Result<String> {
     let schema: serde_json::Value = serde_json::from_str(schema_json)
         .map_err(|e| GlrMaskError::GrammarParse(format!("invalid JSON: {e}")))?;
     let named = import::json_schema::schema_to_named_grammar(&schema)?;
-    Ok(named.to_lark())
+    let factored = grammar::factoring::factor_named_grammar(named);
+    Ok(factored.to_lark())
 }
 
 /// Dump ALL terminals from a JSON schema grammar as JSON.

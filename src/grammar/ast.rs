@@ -111,6 +111,15 @@ impl NamedGrammar {
 /// Format a `GrammarExpr` in Lark-like syntax. `parens` controls whether
 /// compound expressions get wrapped in parentheses for disambiguation.
 fn grammar_expr_to_lark(expr: &GrammarExpr, out: &mut String, parens: bool) {
+    grammar_expr_to_lark_with_indent(expr, out, parens, 0);
+}
+
+fn grammar_expr_to_lark_with_indent(
+    expr: &GrammarExpr,
+    out: &mut String,
+    parens: bool,
+    indent: usize,
+) {
     use std::fmt::Write;
     match expr {
         GrammarExpr::Ref(name) => {
@@ -124,23 +133,39 @@ fn grammar_expr_to_lark(expr: &GrammarExpr, out: &mut String, parens: bool) {
                 if i > 0 {
                     out.push(' ');
                 }
-                grammar_expr_to_lark(item, out, true);
+                grammar_expr_to_lark_with_indent(item, out, true, indent);
             }
             if parens && items.len() > 1 {
                 out.push(')');
             }
         }
         GrammarExpr::Choice(alts) => {
+            let multiline = alts.len() > 6;
             if parens && alts.len() > 1 {
                 out.push('(');
             }
             for (i, alt) in alts.iter().enumerate() {
                 if i > 0 {
-                    out.push_str(" | ");
+                    if multiline {
+                        out.push('\n');
+                        for _ in 0..(indent + 4) {
+                            out.push(' ');
+                        }
+                        out.push_str("| ");
+                    } else {
+                        out.push_str(" | ");
+                    }
                 }
-                grammar_expr_to_lark(alt, out, true);
+                let child_indent = if multiline { indent + 6 } else { indent };
+                grammar_expr_to_lark_with_indent(alt, out, true, child_indent);
             }
             if parens && alts.len() > 1 {
+                if multiline {
+                    out.push('\n');
+                    for _ in 0..indent {
+                        out.push(' ');
+                    }
+                }
                 out.push(')');
             }
         }
@@ -154,19 +179,19 @@ fn grammar_expr_to_lark(expr: &GrammarExpr, out: &mut String, parens: bool) {
             }
         }
         GrammarExpr::Optional(inner) => {
-            grammar_expr_to_lark(inner, out, true);
+            grammar_expr_to_lark_with_indent(inner, out, true, indent);
             out.push('?');
         }
         GrammarExpr::Repeat(inner) => {
-            grammar_expr_to_lark(inner, out, true);
+            grammar_expr_to_lark_with_indent(inner, out, true, indent);
             out.push('*');
         }
         GrammarExpr::RepeatOne(inner) => {
-            grammar_expr_to_lark(inner, out, true);
+            grammar_expr_to_lark_with_indent(inner, out, true, indent);
             out.push('+');
         }
         GrammarExpr::RepeatRange { expr: inner, min, max } => {
-            grammar_expr_to_lark(inner, out, true);
+            grammar_expr_to_lark_with_indent(inner, out, true, indent);
             write!(out, "~{}..{}", min, max).unwrap();
         }
         GrammarExpr::TerminalExpr(terminal_expr) => {
@@ -175,9 +200,9 @@ fn grammar_expr_to_lark(expr: &GrammarExpr, out: &mut String, parens: bool) {
         }
         GrammarExpr::Exclude { expr: inner, exclude } => {
             write!(out, "/*Exclude(").unwrap();
-            grammar_expr_to_lark(inner, out, false);
+            grammar_expr_to_lark_with_indent(inner, out, false, indent);
             write!(out, " \\ ").unwrap();
-            grammar_expr_to_lark(exclude, out, false);
+            grammar_expr_to_lark_with_indent(exclude, out, false, indent);
             write!(out, ")*/").unwrap();
         }
         GrammarExpr::CharClass { def, negate, utf8 } => {
