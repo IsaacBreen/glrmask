@@ -4144,7 +4144,7 @@ impl<'a> SchemaCtx<'a> {
             return Ok(None);
         }
 
-        let key_exprs: BTreeMap<String, GrammarExpr> = ordered
+        let key_exprs: std::collections::BTreeMap<String, GrammarExpr> = ordered
             .iter()
             .map(|(key, value_expr, _)| (key.clone(), value_expr.clone()))
             .collect();
@@ -4161,16 +4161,16 @@ impl<'a> SchemaCtx<'a> {
         let variants = vec![variant];
         let mode = StructuralBranchMode::AnyOf;
 
-        // Build the DFA (same state machine as exact closed objects).
+        // Build the DFA
         let start_state: Vec<OrderedSubsetCursor> = vec![OrderedSubsetCursor {
             variant_idx: 0,
             cursor: 0,
         }];
         let mut states = vec![start_state.clone()];
         let mut transitions: Vec<Vec<(String, usize)>> = vec![Vec::new()];
-        let mut state_to_idx = BTreeMap::new();
+        let mut state_to_idx = std::collections::BTreeMap::new();
         state_to_idx.insert(start_state, 0usize);
-        let mut queue = VecDeque::from([0usize]);
+        let mut queue = std::collections::VecDeque::from([0usize]);
 
         while let Some(state_idx) = queue.pop_front() {
             let state = states[state_idx].clone();
@@ -4201,109 +4201,121 @@ impl<'a> SchemaCtx<'a> {
         // Generate rule names.
         let mut base_index = self.generated_object_rule_counter;
         let base_name = loop {
-            let candidate = format!("obj_fac_{base_index}");
-            if !self.used_rule_names.contains(&format!("{candidate}_s0")) {
+            let candidate = format!("obj_fac_l_{base_index}");
+            if !self.used_rule_names.contains(&format!("{candidate}_p1")) {
                 break candidate;
             }
             base_index += 1;
         };
         self.generated_object_rule_counter = base_index + 1;
 
-        let body_rule_names: Vec<String> = (0..states.len())
-            .map(|idx| format!("{base_name}_s{idx}"))
-            .collect();
-        let after_rule_names: Vec<String> = (0..states.len())
-            .map(|idx| format!("{base_name}_a{idx}"))
+        let prefix_rule_names: Vec<String> = (0..states.len())
+            .map(|idx| format!("{base_name}_p{idx}"))
             .collect();
 
-        // Emit body rules: KV alternatives only (no ε — close is handled
-        // by the after-rules via free_c, and the empty-body case is handled
-        // by the top-level "{" free_nc "}" alternative).
+        // 1. Collect incoming edges for each state: incoming[next_idx] = vec![(prev_idx, key)]
+        let mut incoming: Vec<Vec<(usize, String)>> = vec![Vec::new(); states.len()];
         for state_idx in 0..states.len() {
-            let mut alts = Vec::new();
             for (key, next_idx) in &transitions[state_idx] {
-                let Some(value_expr) = key_exprs.get(key).cloned() else {
-                    return Ok(None);
-                };
-                let kv_expr = self.build_merged_literal_key_value_expr(b"", key, value_expr);
-                alts.push(sequence_or_single(vec![
-                    kv_expr,
-                    GrammarExpr::Ref(after_rule_names[*next_idx].clone()),
-                ]));
+                incoming[*next_idx].push((state_idx, key.clone()));
             }
-            let expr = if alts.is_empty() {
-                never_expr()
-            } else {
-                choice_or_single(alts)
-            };
-            self.insert_rule(body_rule_names[state_idx].clone(), expr);
         }
 
-        // Emit after rules: factor out the separator to avoid R/R splits.
-        // When close is allowed AND free pair exprs exist, the old approach
-        // `Ref(free_c) | ", " body[j]` caused ambiguity because free_c
-        // can start with ", ".  Instead we factor: `", " dispatch | ε`.
+        // 2. Emit Left-Recursive Rules for each prefix > 0
+        // Prefix[j] -> Prefix[i] ", " KV_j | KV_j
+        for state_idx in 1..states.len() {
+            let mut alts = Vec::new();
+            for (prev_idx, key) in &incoming[state_idx] {
+                let value_expr = key_exprs.get(key).unwrap().clone();
+                let kv_expr = self.build_merged_literal_key_value_expr(b"", key, value_expr);
+                if *prev_idx == 0 {
+                    alts.push(kv_expr);
+                } else {
+                    alts.push(sequence_or_single(vec![
+                        GrammarExpr::Ref(prefix_rule_names[*prev_idx].clone()),
+                        self.json_item_separator_expr(),
+                        kv_expr,
+                    ]));
+                }
+            }
+            self.insert_rule(
+                prefix_rule_names[state_idx].clone(),
+                choice_or_single(alts),
+            );
+        }
+
+        // 3. Emit Body Alternatives
+        let mut body_alts = Vec::new();
+        let has_free = !free_pair_exprs.is_empty() || !additional_pair_exprs.is_empty();
+
         for state_idx in 0..states.len() {
             let state = &states[state_idx];
             let close_allowed = Self::ordered_subset_close_allowed(mode, &variants, state);
-            let has_transitions = !transitions[state_idx].is_empty();
-            let has_free_dispatch = close_allowed
-                && (!free_pair_exprs.is_empty() || !additional_pair_exprs.is_empty());
+            if !close_allowed {
+                continue;
+            }
 
-            let mut alts = Vec::new();
-
-            if has_transitions || has_free_dispatch {
-                // Build dispatch: body alternatives + free pair alternatives.
-                let mut dispatch_alts = Vec::new();
-                if has_transitions {
-                    dispatch_alts
-                        .push(GrammarExpr::Ref(body_rule_names[state_idx].clone()));
-                }
-                if has_free_dispatch {
+            if state_idx == 0 {
+                if has_free {
+                    let mut free_alts = Vec::new();
                     for pp_pair in free_pair_exprs {
-                        dispatch_alts.push(sequence_or_single(vec![
+                        free_alts.push(sequence_or_single(vec![
                             pp_pair.clone(),
                             GrammarExpr::Ref(free_c.to_string()),
                         ]));
                     }
                     for ap_pair in additional_pair_exprs {
-                        dispatch_alts.push(sequence_or_single(vec![
+                        free_alts.push(sequence_or_single(vec![
                             ap_pair.clone(),
                             GrammarExpr::Ref(additional_c.to_string()),
                         ]));
                     }
+                    let free_choice = choice_or_single(free_alts);
+                    body_alts.push(free_choice);
+                } else {
+                    body_alts.push(empty_expr());
                 }
-                alts.push(sequence_or_single(vec![
-                    self.json_item_separator_expr(),
-                    choice_or_single(dispatch_alts),
-                ]));
-            }
-
-            if close_allowed {
-                alts.push(empty_expr());
-            }
-
-            let expr = if alts.is_empty() {
-                never_expr()
             } else {
-                choice_or_single(alts)
-            };
-            self.insert_rule(after_rule_names[state_idx].clone(), expr);
+                // End cleanly at this state.
+                body_alts.push(GrammarExpr::Ref(prefix_rule_names[state_idx].clone()));
+
+                // Transition to free properties.
+                if has_free {
+                    let mut free_alts = Vec::new();
+                    for pp_pair in free_pair_exprs {
+                        free_alts.push(sequence_or_single(vec![
+                            pp_pair.clone(),
+                            GrammarExpr::Ref(free_c.to_string()),
+                        ]));
+                    }
+                    for ap_pair in additional_pair_exprs {
+                        free_alts.push(sequence_or_single(vec![
+                            ap_pair.clone(),
+                            GrammarExpr::Ref(additional_c.to_string()),
+                        ]));
+                    }
+                    let free_choice = choice_or_single(free_alts);
+
+                    body_alts.push(sequence_or_single(vec![
+                        GrammarExpr::Ref(prefix_rule_names[state_idx].clone()),
+                        self.json_item_separator_expr(),
+                        free_choice,
+                    ]));
+                }
+            }
         }
 
-        // Top-level expression.
-        let all_optional = ordered.iter().all(|(_, _, required)| !*required);
-        let body_expr = sequence_or_single(vec![
+        let expr = sequence_or_single(vec![
             literal_expr(b"{"),
-            GrammarExpr::Ref(body_rule_names[0].clone()),
+            choice_or_single(body_alts),
             literal_expr(b"}"),
         ]);
-
+        
+        // Return body_expr. Let caller handle exact empty object cases if all_optional
+        let all_optional = ordered.iter().all(|(_, _, required)| !*required);
         if all_optional {
-            // When all keys are optional, the object can also be empty or
-            // AP-only, handled by free_nc.
             Ok(Some(choice_or_single(vec![
-                body_expr,
+                expr,
                 sequence_or_single(vec![
                     literal_expr(b"{"),
                     GrammarExpr::Ref(free_nc.to_string()),
@@ -4311,7 +4323,7 @@ impl<'a> SchemaCtx<'a> {
                 ]),
             ])))
         } else {
-            Ok(Some(body_expr))
+            Ok(Some(expr))
         }
     }
 
