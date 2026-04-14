@@ -1283,12 +1283,14 @@ fn build_lr1_item_sets(
     let mut set_to_id: FxHashMap<Vec<LR1Item>, u32> = FxHashMap::default();
     set_to_id.insert(initial.iter().copied().collect(), 0);
 
-    // Pre-compute safety checks for the transfer mechanism.
-    // Transfer is unsafe for nullable grammars (epsilon productions create
-    // split actions that the mechanism can't handle) and recursive grammars
-    // (shared reduce states get corrupted).
-    let transfer_safe = !grammar.nullable.iter().any(|&n| n != 0)
-        && !grammar_has_recursion(rules);
+    // Pre-compute safety checks for the transfer mechanism only when the
+    // mechanism is enabled. Recursion detection can be expensive on large
+    // grammars, so avoid paying that cost on the default path.
+    let transfer_safe = if local_forward_replace_enabled() {
+        !grammar.nullable.iter().any(|&n| n != 0) && !grammar_has_recursion(rules)
+    } else {
+        false
+    };
 
     let mut queue = VecDeque::from([0u32]);
     while let Some(state_id) = queue.pop_front() {
@@ -1464,27 +1466,41 @@ fn current_unique_reduce_len(
 /// grammar's production rules. Returns true if any recursion exists.
 fn grammar_has_recursion(rules: &[Rule]) -> bool {
     let max_nt = rules.iter().map(|r| r.lhs).max().unwrap_or(0) as usize + 1;
-    // Build adjacency: lhs → set of nonterminals appearing in rhs.
-    let mut adj = vec![vec![false; max_nt]; max_nt];
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); max_nt];
     for rule in rules {
+        let lhs = rule.lhs as usize;
         for sym in &rule.rhs {
             if let Symbol::Nonterminal(nt) = sym {
-                adj[rule.lhs as usize][*nt as usize] = true;
+                adj[lhs].push(*nt as usize);
             }
         }
     }
-    // Transitive closure (Floyd-Warshall on small nonterminal set).
-    for k in 0..max_nt {
-        for i in 0..max_nt {
-            for j in 0..max_nt {
-                if adj[i][k] && adj[k][j] {
-                    adj[i][j] = true;
+
+    // 0 = unvisited, 1 = visiting, 2 = done.
+    let mut color = vec![0u8; max_nt];
+    fn dfs(node: usize, adj: &[Vec<usize>], color: &mut [u8]) -> bool {
+        color[node] = 1;
+        for &next in &adj[node] {
+            match color[next] {
+                1 => return true,
+                0 => {
+                    if dfs(next, adj, color) {
+                        return true;
+                    }
                 }
+                _ => {}
             }
         }
+        color[node] = 2;
+        false
     }
-    // Check diagonal: any nonterminal that can reach itself.
-    (0..max_nt).any(|i| adj[i][i])
+
+    for nt in 0..max_nt {
+        if color[nt] == 0 && dfs(nt, &adj, &mut color) {
+            return true;
+        }
+    }
+    false
 }
 
 fn apply_local_forward_replace(
@@ -1769,10 +1785,15 @@ fn build_lr1_table(
     // - not using the transferred-item mechanism
     // - non-recursive (no shared reduce states)
     // - non-nullable (no epsilon productions that create split actions)
+    let local_forward_enabled = local_forward_replace_enabled();
     let has_forwarded = transitions.iter().any(|t| t.values().any(|&(_, _, f)| f));
-    let has_recursion = grammar_has_recursion(&grammar.rules);
     let has_nullable = grammar.nullable.iter().any(|&n| n != 0);
-    if local_forward_replace_enabled() && !has_forwarded && !has_recursion && !has_nullable {
+    let has_recursion = if local_forward_enabled {
+        grammar_has_recursion(&grammar.rules)
+    } else {
+        false
+    };
+    if local_forward_enabled && !has_forwarded && !has_recursion && !has_nullable {
         apply_local_forward_replace(
             &mut pending,
             &mut goto,
@@ -1783,7 +1804,7 @@ fn build_lr1_table(
     }
     // For non-forwarded grammars (apply_local_forward_replace path),
     // inline the zero-pop reduces it created.
-    if local_forward_replace_enabled() && !has_forwarded && !has_recursion && !has_nullable {
+    if local_forward_enabled && !has_forwarded && !has_recursion && !has_nullable {
         inline_zero_pop_reduces(&mut pending, &mut goto);
     }
 
