@@ -1837,6 +1837,12 @@ fn max_string_length_cap() -> Option<usize> {
         .and_then(|v| v.trim().parse::<usize>().ok())
 }
 
+fn use_structured_uri() -> bool {
+    std::env::var("GLRMASK_STRUCT_URI_FORMAT")
+        .map(|v| !v.is_empty() && v != "0" && v.to_lowercase() != "false")
+        .unwrap_or(false)
+}
+
 fn json_wrapped_pattern(pattern: &str) -> GrammarExpr {
     let inner = json_search_pattern(pattern);
     wrap_string_value_regex(&inner)
@@ -5470,6 +5476,23 @@ impl<'a> SchemaCtx<'a> {
                 }
                 return Ok(json_wrapped_fullmatch_pattern(&format!("{}+", unit_pattern)));
             }
+            // Fixed-length unanchored pattern optimization:
+            // When an unanchored pattern has a fixed byte length *and* the string's
+            // minLength/maxLength are both equal to that length, the search semantics
+            // (STRING_CHAR* pattern STRING_CHAR*) collapse to fullmatch — there is no
+            // room for any padding bytes.  This eliminates unbounded-length padding
+            // that would otherwise cause DFA state explosion.
+            if !pattern_all_branches_anchored(&pattern) {
+                let expr = parse_regex(&pattern, true);
+                let (pat_min_bytes, pat_max_bytes) = regex_byte_length_bounds(&expr);
+                if pat_min_bytes > 0 && pat_max_bytes == Some(pat_min_bytes) {
+                    let pat_len = pat_min_bytes;
+                    if min_len == pat_len && max_len == Some(pat_len)
+                    {
+                        return Ok(json_wrapped_fullmatch_pattern(&pattern));
+                    }
+                }
+            }
             if pattern_all_branches_anchored(&pattern) {
                 // Every branch is ^…$, so json_wrapped_pattern produces no
                 // <string_tail> padding — safe from DFA explosion.
@@ -5656,10 +5679,44 @@ impl<'a> SchemaCtx<'a> {
                     ]))),
                 ])))
             }
+            "uri" if use_structured_uri() => {
+                Ok(self.build_structured_uri_expr())
+            }
             _ => json_format_pattern(format_name)
                 .map(json_wrapped_fullmatch_pattern)
                 .ok_or_else(|| GlrMaskError::GrammarParse(format!("Unknown format: {format_name}"))),
         }
+    }
+
+fn build_structured_uri_expr(&mut self) -> GrammarExpr {
+        let scheme = sequence_or_single(vec![
+            regex_expr(r#"[a-zA-Z]"#),
+            GrammarExpr::Repeat(Box::new(regex_expr(r#"[a-zA-Z0-9+\-.]"#))),
+        ]);
+        let colon = literal_expr(b":");
+        let slashes = literal_expr(b"//");
+        let uri_body_char = r#"[a-zA-Z0-9\-._~!$&'()*+,;=:@/?%]"#;
+        let uri_internals = self.extract_terminal_rule(
+            GrammarExpr::RepeatOne(Box::new(regex_expr(uri_body_char))),
+            "URI_BODY",
+        );
+        let port = GrammarExpr::Optional(Box::new(sequence_or_single(vec![
+            literal_expr(b":"),
+            GrammarExpr::RepeatOne(Box::new(regex_expr(r#"[0-9]"#))),
+        ])));
+        let authority_path = sequence_or_single(vec![
+            slashes,
+            uri_internals.clone(),
+            port,
+        ]);
+        let uri_body = choice_or_single(vec![
+            authority_path,
+            uri_internals,
+        ]);
+        let body = sequence_or_single(vec![scheme, colon, uri_body]);
+        let (terminal_body, wrap) = wrap_string_value_expr_parts(body);
+        let body = self.extract_terminal_rule(terminal_body, "JSON_FORMAT_URI");
+        wrap(body)
     }
 
     fn json_literal(&self, value: &Value) -> GrammarExpr {
