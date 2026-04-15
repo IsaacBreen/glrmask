@@ -86,6 +86,58 @@ pub fn dump_json_schema_terminals(schema_json: &str) -> Result<String> {
         .map_err(|e| GlrMaskError::Serialization(format!("JSON serialization error: {e}")))
 }
 
+/// Dump ALL terminals from the JSON schema grammar after the compile-time
+/// grammar transforms have run.
+///
+/// This matches the terminal set used by `compile_owned()` after
+/// `prepare_grammar_transforms_only()`.
+pub fn dump_json_schema_terminals_prepared(schema_json: &str) -> Result<String> {
+    let gdef = import::json_schema::json_schema_to_grammar(schema_json)?;
+    let prepared = compiler::grammar::transforms::prepare_grammar_transforms_only(gdef);
+
+    let mut terminals_json = Vec::new();
+    for terminal in &prepared.terminals {
+        let id = terminal.id();
+        let name = prepared.terminal_names.get(&id).cloned();
+        let entry = match terminal {
+            grammar::flat::Terminal::Literal { bytes, .. } => {
+                serde_json::json!({
+                    "id": id,
+                    "name": name,
+                    "type": "literal",
+                    "bytes": String::from_utf8_lossy(bytes),
+                })
+            }
+            grammar::flat::Terminal::Pattern { pattern, utf8, .. } => {
+                serde_json::json!({
+                    "id": id,
+                    "name": name,
+                    "type": "pattern",
+                    "pattern": pattern,
+                    "utf8": utf8,
+                })
+            }
+            grammar::flat::Terminal::Expr { expr, .. } => {
+                serde_json::json!({
+                    "id": id,
+                    "name": name,
+                    "type": "expr",
+                    "expr_debug": format!("{:?}", expr),
+                })
+            }
+        };
+        terminals_json.push(entry);
+    }
+
+    let output = serde_json::json!({
+        "terminal_count": prepared.terminals.len(),
+        "terminals": terminals_json,
+    });
+
+    serde_json::to_string_pretty(&output)
+        .map_err(|e| GlrMaskError::Serialization(format!("JSON serialization error: {e}")))
+}
+
 /// Serialize the full GrammarDef for a JSON schema as JSON.
 /// This preserves all terminal data (including DFAs) for exact round-tripping.
 pub fn dump_json_schema_grammar_def(schema_json: &str) -> Result<String> {

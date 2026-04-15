@@ -2615,8 +2615,14 @@ pub fn json_schema_to_grammar(schema_json: &str) -> Result<GrammarDef, GlrMaskEr
     let mut named = schema_to_named_grammar(&schema)?;
     let schema_to_named_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
+    let promote_enabled = std::env::var("GLRMASK_PROMOTE_LARGE_LITERAL_ALTS")
+        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off"))
+        .unwrap_or(true);
+
     let t2 = std::time::Instant::now();
-    promote_large_literal_alts(&mut named, 10);
+    if promote_enabled {
+        promote_large_literal_alts(&mut named, 10);
+    }
     let promote_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
     let t3 = std::time::Instant::now();
