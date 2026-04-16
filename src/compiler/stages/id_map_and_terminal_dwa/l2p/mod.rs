@@ -76,14 +76,22 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let total_started_at = Instant::now();
     let num_original_states = tokenizer.num_states() as usize;
     let num_active_terminals = active_terminals.iter().filter(|&&active| active).count();
+    let mut relevant_bytes = [false; 256];
+    for bytes in vocab.entries.values() {
+        for &byte in bytes {
+            relevant_bytes[byte as usize] = true;
+        }
+    }
 
     // ---- Step 0: Simplify tokenizer for active terminals ----
-    // Strip non-active terminal bits from finalizers and minimize.
-    // This merges states that only differed by non-active terminal info,
-    // reducing the state count for equivalence analysis and NWA building.
+    // Strip non-active terminal bits from finalizers, drop transitions on
+    // bytes absent from this partition's vocab, and minimize. This merges
+    // states that only differed by non-active terminal info or irrelevant-byte
+    // transitions, reducing the state count for equivalence analysis and NWA
+    // building.
     let simplify_started_at = Instant::now();
     let (simplified_tok, orig_to_simplified) =
-        tokenizer.simplify_for_terminals(active_terminals);
+        tokenizer.simplify_for_terminals(active_terminals, Some(&relevant_bytes));
     let simplify_ms = simplify_started_at.elapsed().as_secs_f64() * 1000.0;
 
     if debug_profile_enabled() {

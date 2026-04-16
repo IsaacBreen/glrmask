@@ -232,11 +232,18 @@ impl Tokenizer {
 
     /// Create a simplified tokenizer that only knows about `active_terminals`.
     ///
-    /// Non-active terminal bits are cleared from all finalizers, then the DFA
-    /// is minimized (states that only differed by non-active terminal info
-    /// merge). Returns `(simplified_tokenizer, original_to_simplified_state_map)`.
+    /// Non-active terminal bits are cleared from all finalizers. When
+    /// `relevant_bytes` is provided, transitions on bytes outside that set are
+    /// also removed; the resulting DFA is only expected to be used on the
+    /// partition's vocab bytes. The DFA is then minimized.
+    ///
+    /// Returns `(simplified_tokenizer, original_to_simplified_state_map)`.
     /// Unreachable original states map to `u32::MAX`.
-    pub fn simplify_for_terminals(&self, active_terminals: &[bool]) -> (Tokenizer, Vec<u32>) {
+    pub fn simplify_for_terminals(
+        &self,
+        active_terminals: &[bool],
+        relevant_bytes: Option<&[bool; 256]>,
+    ) -> (Tokenizer, Vec<u32>) {
         let compile_profile = std::env::var("GLRMASK_PROFILE_COMPILE")
             .map(|v| !v.is_empty() && v != "0")
             .unwrap_or(false);
@@ -254,9 +261,23 @@ impl Tokenizer {
             }
         }
 
-        // Clear finalizer bits for non-active terminals.
         let mut any_cleared = false;
+        let mut transitions_pruned = false;
         for state in dfa.states_mut() {
+            if let Some(relevant_bytes) = relevant_bytes {
+                let filtered_transitions: Vec<(u8, u32)> = state
+                    .transitions
+                    .iter()
+                    .filter(|(byte, _)| relevant_bytes[*byte as usize])
+                    .map(|(byte, &target)| (byte, target))
+                    .collect();
+                if filtered_transitions.len() != state.transitions.len() {
+                    state.transitions = crate::ds::char_transitions::CharTransitions::from_sorted_entries(
+                        filtered_transitions,
+                    );
+                    transitions_pruned = true;
+                }
+            }
             for (terminal_id, active) in active_terminals.iter().enumerate() {
                 if !active && terminal_id < state.finalizers.len() && state.finalizers.contains(terminal_id) {
                     state.finalizers.clear(terminal_id);
@@ -266,13 +287,13 @@ impl Tokenizer {
         }
         let t_clear = t_start.elapsed();
 
-        if !any_cleared {
-            // No finalizer bits changed — possible_futures are already correct.
+        if !any_cleared && !transitions_pruned {
+            // No finalizer bits or transitions changed.
             let n = dfa.num_states();
             let identity: Vec<u32> = (0..n as u32).collect();
             if compile_profile {
                 eprintln!(
-                    "[glrmask/profile][simplify_detail] states={} no_bits_cleared clone_ms={:.1} clear_ms={:.1}",
+                    "[glrmask/profile][simplify_detail] states={} no_change clone_ms={:.1} clear_ms={:.1}",
                     n, t_clone.as_secs_f64()*1000.0, (t_clear - t_clone).as_secs_f64()*1000.0,
                 );
             }
@@ -300,7 +321,7 @@ impl Tokenizer {
         // themselves equivalent after masking (a deep equivalence the local
         // check cannot see). Skip the fingerprint heuristic for small active
         // sets and let Hopcroft discover actual merges.
-        if pre_minimize_states > 1000 && num_active > 32 {
+        if pre_minimize_states > 1000 && num_active > 32 && !transitions_pruned {
             let distinct = dfa.distinct_fingerprint_count();
             let n = pre_minimize_states;
             if distinct > n * 9 / 10 {
@@ -308,9 +329,8 @@ impl Tokenizer {
                 // expensive clone + SCC + partition work.
                 // Instead of recompute_possible_futures (which does full SCC),
                 // just mask existing possible_futures with active_groups.
-                // This is correct because clearing finalizer bits doesn't
-                // change transitions, so active groups' reachability is
-                // unchanged.
+                // This is correct because only finalizer bits changed; active
+                // groups' reachability is unchanged.
                 dfa.mask_possible_futures(&active_bitset);
                 let identity: Vec<u32> = (0..n as u32).collect();
                 if compile_profile {
