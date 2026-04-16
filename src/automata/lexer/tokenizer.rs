@@ -47,6 +47,29 @@ fn group_matches_by_width(matches: Vec<TokenizerMatch>) -> Vec<(usize, BTreeSet<
     grouped.into_iter().collect()
 }
 
+fn remap_masked_possible_futures(
+    tokenizer: &Tokenizer,
+    active_groups: &BitSet,
+    state_mapping: &[u32],
+    num_new_states: usize,
+) -> Vec<BitSet> {
+    let mut remapped = (0..num_new_states)
+        .map(|_| BitSet::new(active_groups.len()))
+        .collect::<Vec<_>>();
+
+    for (old_state, &new_state) in state_mapping.iter().enumerate() {
+        if new_state == u32::MAX {
+            continue;
+        }
+
+        let mut masked = tokenizer.dfa.possible_future_group_ids(old_state as u32).clone();
+        masked.intersect_with(active_groups);
+        remapped[new_state as usize].union_with(&masked);
+    }
+
+    remapped
+}
+
 impl Tokenizer {
     pub fn start_state(&self) -> u32 {
         0
@@ -352,7 +375,7 @@ impl Tokenizer {
         // due to deep chain structure, so go straight to Hopcroft minimize
         // which converges regardless. For smaller DFAs, try iterative first
         // (fast when it converges) and fall through to Hopcroft if it doesn't.
-        let (minimized, state_mapping) = if num_active <= 16 && pre_minimize_states <= 20_000 {
+        let (mut minimized, state_mapping) = if num_active <= 16 && pre_minimize_states <= 20_000 {
             match dfa.try_minimize_full_with_state_mapping() {
                 Some(result) => result,
                 None => {
@@ -370,6 +393,19 @@ impl Tokenizer {
         } else {
             dfa.minimize_with_state_mapping()
         };
+
+        if transitions_pruned {
+            let remapped_futures = remap_masked_possible_futures(
+                self,
+                &active_bitset,
+                &state_mapping,
+                minimized.num_states() as usize,
+            );
+            for (state, futures) in remapped_futures.into_iter().enumerate() {
+                minimized.set_possible_future_group_ids(state as u32, futures);
+            }
+        }
+
         let t_minimize = t_pre_min.elapsed();
         let post_minimize_states = minimized.num_states();
         
@@ -467,5 +503,21 @@ mod tests {
                 (2, BTreeSet::from([1])),
             ]
         );
+    }
+
+    #[test]
+    fn test_simplify_for_terminals_preserves_futures_for_pruned_bytes() {
+        let tokenizer = build_tokenizer_from_exprs(&[parse_regex("-[0-9]", true)]);
+        let dash_state = tokenizer.step(tokenizer.start_state(), b'-').unwrap();
+        assert!(tokenizer.possible_future_terminals(dash_state).contains(0));
+
+        let mut relevant_bytes = [false; 256];
+        relevant_bytes[b'-' as usize] = true;
+
+        let (simplified, mapping) = tokenizer.simplify_for_terminals(&[true], Some(&relevant_bytes));
+        let simplified_dash_state = mapping[dash_state as usize];
+
+        assert_ne!(simplified_dash_state, u32::MAX);
+        assert!(simplified.possible_future_terminals(simplified_dash_state).contains(0));
     }
 }

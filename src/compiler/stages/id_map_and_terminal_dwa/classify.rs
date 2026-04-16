@@ -139,13 +139,15 @@ pub(crate) fn classify_vocab_char_type(bytes: &[u8]) -> u8 {
     if content.is_empty() {
         return 5; // Just a space marker → auxiliary non-alnum
     }
+    if content.len() == 1 && matches!(content[0], b'+' | b'-') {
+        return 1;
+    }
     // Try to decode as UTF-8 for Unicode-aware classification.
     if let Ok(s) = std::str::from_utf8(content) {
         let all_alnum = s.chars().all(|c| c.is_alphanumeric());
         if all_alnum {
             let has_alpha = s.chars().any(|c| c.is_alphabetic());
             if has_alpha {
-                // Distinguish ASCII-only alpha from Unicode alpha.
                 let has_ascii_alpha = content.iter().any(|b| b.is_ascii_alphabetic());
                 if has_ascii_alpha {
                     return 2; // ASCII alpha (may also contain non-ASCII alpha)
@@ -216,9 +218,29 @@ pub(crate) fn classify_terminal_path_lengths(
 
     // 1. Vocab byte bitset: all bytes appearing in any vocab token.
     let mut vocab_bytes = U8Set::empty();
+    let mut token_end_future_terminals = BitSet::new(nt);
     for bytes in vocab.entries.values() {
         for &b in bytes {
             vocab_bytes.insert(b);
+        }
+
+        let mut state = tokenizer.start_state();
+        let mut valid = true;
+        for &b in bytes {
+            match tokenizer.step(state, b) {
+                Some(next_state) => state = next_state,
+                None => {
+                    valid = false;
+                    break;
+                }
+            }
+        }
+        if valid {
+            for terminal_id in tokenizer.possible_future_terminals_iter(state) {
+                if (terminal_id as usize) < nt {
+                    token_end_future_terminals.set(terminal_id as usize);
+                }
+            }
         }
     }
 
@@ -236,6 +258,11 @@ pub(crate) fn classify_terminal_path_lengths(
 
     // 3. Mark terminals that may participate in paths of length ≥ 2.
     let mut is_two_plus = BitSet::new(nt);
+    for t in 0..nt {
+        if token_end_future_terminals.contains(t) {
+            is_two_plus.set(t);
+        }
+    }
 
     // Debug: collect the actual contributing pairs
     let debug_profile = super::types::debug_profile_enabled();
@@ -333,4 +360,37 @@ pub(crate) fn classify_terminal_path_lengths(
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use crate::automata::lexer::regex::parse_regex;
+    use crate::compiler::compile::build_tokenizer_from_exprs;
+    use crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalPathLength;
+    use crate::ds::bitset::BitSet;
+    use crate::Vocab;
+
+    use super::classify_terminal_path_lengths;
+
+    #[test]
+    fn classify_prefix_only_partition_as_two_plus() {
+        let tokenizer = build_tokenizer_from_exprs(&[parse_regex("-[0-9]", true)]);
+        let vocab = Vocab::new(vec![(0, b"-".to_vec())], None);
+        let disallowed_follows = BTreeMap::<u32, BitSet>::new();
+
+        let path_lengths =
+            classify_terminal_path_lengths(&tokenizer, &vocab, &disallowed_follows, 1, None);
+
+        assert_eq!(path_lengths, vec![TerminalPathLength::TwoPlus]);
+    }
+
+    #[test]
+    fn classify_sign_prefix_tokens_as_mixed_partition() {
+        assert_eq!(super::classify_vocab_char_type(b"-"), 1);
+        assert_eq!(super::classify_vocab_char_type(b" -"), 1);
+        assert_eq!(super::classify_vocab_char_type(b"+"), 1);
+    }
+
 }
