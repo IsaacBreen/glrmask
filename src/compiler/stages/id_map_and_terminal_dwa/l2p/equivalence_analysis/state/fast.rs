@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use rayon::prelude::*;
 
 use super::super::compat::TokenizerView;
+use crate::ds::bitset::BitSet;
 
 /// The result of state equivalence analysis: sets of state IDs that behave identically.
 pub type StateEquivalenceResult = BTreeSet<BTreeSet<usize>>;
@@ -87,13 +88,224 @@ fn hash_future_groups(future_groups: &[usize]) -> u128 {
     hash
 }
 
+fn hash_future_groups_filtered(future_groups: &[usize], disallowed: &BitSet) -> u128 {
+    let allowed_count = future_groups
+        .iter()
+        .filter(|&&gid| !disallowed.contains(gid))
+        .count();
+    let mut hash = mix_u128(0xF0C7_F0C7_F0C7_F0C7 ^ allowed_count as u128);
+    for &gid in future_groups {
+        if !disallowed.contains(gid) {
+            hash = mix_tagged(hash, 0x9E37_79B9_7F4A_7C15, gid as u128);
+        }
+    }
+    hash
+}
+
+#[derive(Clone)]
+struct FollowContextTable {
+    gid_to_context: Vec<usize>,
+    disallowed_by_context: Vec<BitSet>,
+}
+
+impl FollowContextTable {
+    fn new(num_groups: usize, disallowed_follows: Option<&[BitSet]>) -> Self {
+        let root = BitSet::new(num_groups);
+        let Some(disallowed_follows) = disallowed_follows else {
+            return Self {
+                gid_to_context: vec![0; num_groups],
+                disallowed_by_context: vec![root],
+            };
+        };
+
+        let mut gid_to_context = vec![0; num_groups];
+        let mut disallowed_by_context = vec![root];
+        let mut seen: std::collections::HashMap<BitSet, usize> = std::collections::HashMap::new();
+
+        for gid in 0..num_groups {
+            let bits = disallowed_follows
+                .get(gid)
+                .cloned()
+                .unwrap_or_else(|| BitSet::new(num_groups));
+            let ctx = if bits.is_zero() {
+                0
+            } else if let Some(&ctx) = seen.get(&bits) {
+                ctx
+            } else {
+                let ctx = disallowed_by_context.len();
+                seen.insert(bits.clone(), ctx);
+                disallowed_by_context.push(bits);
+                ctx
+            };
+            gid_to_context[gid] = ctx;
+        }
+
+        Self {
+            gid_to_context,
+            disallowed_by_context,
+        }
+    }
+
+    #[inline(always)]
+    fn num_contexts(&self) -> usize {
+        self.disallowed_by_context.len()
+    }
+
+    #[inline(always)]
+    fn context_for_gid(&self, gid: usize) -> usize {
+        self.gid_to_context.get(gid).copied().unwrap_or(0)
+    }
+
+    #[inline(always)]
+    fn allows_follow(&self, context: usize, gid: usize) -> bool {
+        !self.disallowed_by_context[context].contains(gid)
+    }
+}
+
+#[derive(Clone, Default)]
+struct SuffixNode {
+    end_state: Option<usize>,
+    edges: Vec<(usize, usize)>,
+}
+
+struct TokenSuffixHashes {
+    len: usize,
+    num_contexts: usize,
+    hashes: Vec<u128>,
+}
+
+impl TokenSuffixHashes {
+    #[inline(always)]
+    fn get(&self, context: usize, pos: usize) -> u128 {
+        self.hashes[context * self.len + pos]
+    }
+}
+
+fn build_future_group_hashes_by_context(
+    dfa_future_groups: &[Vec<usize>],
+    follow_contexts: &FollowContextTable,
+) -> Vec<Vec<u128>> {
+    (0..follow_contexts.num_contexts())
+        .map(|context| {
+            let disallowed = &follow_contexts.disallowed_by_context[context];
+            dfa_future_groups
+                .iter()
+                .map(|future_groups| {
+                    if disallowed.is_zero() {
+                        hash_future_groups(future_groups)
+                    } else {
+                        hash_future_groups_filtered(future_groups, disallowed)
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn hash_suffix_node(
+    context: usize,
+    pos: usize,
+    nodes: &[SuffixNode],
+    token_len: usize,
+    follow_contexts: &FollowContextTable,
+    future_group_hashes_by_context: &[Vec<u128>],
+    memo: &mut [u128],
+    ready: &mut [bool],
+) -> u128 {
+    const DEAD_NODE_TAG: u128 = 0xDEAD_DEAD_DEAD_DEAD;
+    const ACCEPT_SINK_HASH: u128 = 0xA11C_EA5E_A11C_EA5E;
+    const EDGE_COUNT_TAG: u128 = 0xEDEC_EDEC_EDEC_EDEC;
+    const EDGE_GID_TAG: u128 = 0xE001_E001_E001_E001;
+    const EDGE_POS_TAG: u128 = 0xE002_E002_E002_E002;
+    const EDGE_CHILD_TAG: u128 = 0xE003_E003_E003_E003;
+
+    let idx = context * token_len + pos;
+    if ready[idx] {
+        return memo[idx];
+    }
+
+    let node = &nodes[pos];
+    let mut edge_count = 0usize;
+    let mut hash = match node.end_state {
+        Some(state) => mix_tagged(
+            0x51A7_E000_0000_0001,
+            0xF070_F070_F070_F070,
+            future_group_hashes_by_context[context][state],
+        ),
+        None => mix_u128(DEAD_NODE_TAG),
+    };
+
+    for &(gid, target_pos) in &node.edges {
+        if !follow_contexts.allows_follow(context, gid) {
+            continue;
+        }
+        edge_count += 1;
+        let child_hash = if target_pos >= token_len {
+            ACCEPT_SINK_HASH
+        } else {
+            let child_context = follow_contexts.context_for_gid(gid);
+            hash_suffix_node(
+                child_context,
+                target_pos,
+                nodes,
+                token_len,
+                follow_contexts,
+                future_group_hashes_by_context,
+                memo,
+                ready,
+            )
+        };
+        hash = mix_tagged(hash, EDGE_GID_TAG, gid as u128);
+        hash = mix_tagged(hash, EDGE_POS_TAG, target_pos as u128);
+        hash = mix_tagged(hash, EDGE_CHILD_TAG, child_hash);
+    }
+
+    let result = mix_tagged(hash, EDGE_COUNT_TAG, edge_count as u128);
+    ready[idx] = true;
+    memo[idx] = result;
+    result
+}
+
+fn build_token_suffix_hashes(
+    nodes: Vec<SuffixNode>,
+    follow_contexts: &FollowContextTable,
+    future_group_hashes_by_context: &[Vec<u128>],
+) -> TokenSuffixHashes {
+    let len = nodes.len();
+    let num_contexts = follow_contexts.num_contexts();
+    let mut hashes = vec![0u128; len * num_contexts];
+    let mut ready = vec![false; len * num_contexts];
+
+    for context in 0..num_contexts {
+        for pos in 0..len {
+            let _ = hash_suffix_node(
+                context,
+                pos,
+                &nodes,
+                len,
+                follow_contexts,
+                future_group_hashes_by_context,
+                &mut hashes,
+                &mut ready,
+            );
+        }
+    }
+
+    TokenSuffixHashes {
+        len,
+        num_contexts,
+        hashes,
+    }
+}
+
 fn hash_trellis_node_from_positions(
     end_state: Option<usize>,
     positions: &[i32],
     active_bits: &[u64],
     token_len: usize,
-    suffix_hashes: &[u128],
     future_group_hashes: &[u128],
+    follow_contexts: &FollowContextTable,
+    suffix_hashes: Option<&TokenSuffixHashes>,
 ) -> u128 {
     const DEAD_NODE_TAG: u128 = 0xDEAD_DEAD_DEAD_DEAD;
     const ACCEPT_SINK_HASH: u128 = 0xA11C_EA5E_A11C_EA5E;
@@ -124,7 +336,9 @@ fn hash_trellis_node_from_positions(
             let child_hash = if target_pos >= token_len {
                 ACCEPT_SINK_HASH
             } else {
-                suffix_hashes[target_pos]
+                let suffix_hashes = suffix_hashes.expect("child suffix hashes required for live edge");
+                let child_context = follow_contexts.context_for_gid(gid);
+                suffix_hashes.get(child_context, target_pos)
             };
             hash = mix_tagged(hash, EDGE_GID_TAG, gid as u128);
             hash = mix_tagged(hash, EDGE_POS_TAG, target_pos as u128);
@@ -154,7 +368,7 @@ fn build_strided_batches(total_tokens: usize, target_batch_size: usize) -> Vec<V
     batches
 }
 
-fn build_start_state_suffix_hashes(
+fn build_start_state_suffix_nodes(
     token: &[u8],
     tokenizer_start: usize,
     dfa_transitions: &[u32],
@@ -162,14 +376,13 @@ fn build_start_state_suffix_hashes(
     num_bc: usize,
     dfa_finalizers: &[Vec<usize>],
     state_has_future: &[bool],
-    future_group_hashes: &[u128],
     skip_groups: &[bool],
     positions: &mut [i32],
     active_bits: &mut [u64],
-) -> Vec<u128> {
+) -> Vec<SuffixNode> {
     let len = token.len();
     let num_groups = positions.len();
-    let mut suffix_hashes = vec![0u128; len];
+    let mut suffix_nodes = vec![SuffixNode::default(); len];
     let skip_groups_enabled = !skip_groups.is_empty();
 
     clear_active_positions(positions, active_bits);
@@ -205,20 +418,25 @@ fn build_start_state_suffix_hashes(
             }
         }
 
-        let end_state = (!done).then_some(current);
-        suffix_hashes[pos] = hash_trellis_node_from_positions(
-            end_state,
-            positions,
-            active_bits,
-            len,
-            &suffix_hashes,
-            future_group_hashes,
-        );
+        let mut edges = Vec::new();
+        for (word_idx, &word) in active_bits.iter().enumerate() {
+            let mut bits = word;
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                let gid = word_idx * 64 + bit;
+                bits &= bits - 1;
+                edges.push((gid, positions[gid] as usize));
+            }
+        }
+
+        suffix_nodes[pos] = SuffixNode {
+            end_state: (!done).then_some(current),
+            edges,
+        };
 
         clear_active_positions(positions, active_bits);
     }
-
-    suffix_hashes
+    suffix_nodes
 }
 
 /// Find state equivalence classes for a tokenizer.
@@ -228,6 +446,25 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]> + Sync>(
     states: &[usize],
 ) -> Vec<usize> {
     find_state_equivalence_classes_ex(tokenizer, tokens, states, &[], None, None, None)
+}
+
+pub fn find_state_equivalence_classes_with_disallowed<S: AsRef<[u8]> + Sync>(
+    tokenizer: &TokenizerView,
+    tokens: &[S],
+    states: &[usize],
+    disallowed_follows: &[BitSet],
+) -> Vec<usize> {
+    find_state_equivalence_classes_ex_inner(
+        tokenizer,
+        tokens,
+        states,
+        &[],
+        Some(disallowed_follows),
+        None,
+        None,
+        None,
+        false,
+    )
 }
 
 /// Find state equivalence classes with optional disallowed-follows filtering
@@ -247,7 +484,17 @@ pub fn find_state_equivalence_classes_ex<S: AsRef<[u8]> + Sync>(
     batch_size: Option<usize>,
     early_stop_override: Option<bool>,
 ) -> Vec<usize> {
-    find_state_equivalence_classes_ex_inner(tokenizer, tokens, states, skip_groups, max_batches, batch_size, early_stop_override, false)
+    find_state_equivalence_classes_ex_inner(
+        tokenizer,
+        tokens,
+        states,
+        skip_groups,
+        None,
+        max_batches,
+        batch_size,
+        early_stop_override,
+        false,
+    )
 }
 
 pub fn find_state_equivalence_classes_ex_with_rep_confirmation<S: AsRef<[u8]> + Sync>(
@@ -259,7 +506,41 @@ pub fn find_state_equivalence_classes_ex_with_rep_confirmation<S: AsRef<[u8]> + 
     batch_size: Option<usize>,
     early_stop_override: Option<bool>,
 ) -> Vec<usize> {
-    find_state_equivalence_classes_ex_inner(tokenizer, tokens, states, skip_groups, max_batches, batch_size, early_stop_override, true)
+    find_state_equivalence_classes_ex_inner(
+        tokenizer,
+        tokens,
+        states,
+        skip_groups,
+        None,
+        max_batches,
+        batch_size,
+        early_stop_override,
+        true,
+    )
+}
+
+pub fn find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed<
+    S: AsRef<[u8]> + Sync,
+>(
+    tokenizer: &TokenizerView,
+    tokens: &[S],
+    states: &[usize],
+    disallowed_follows: &[BitSet],
+    max_batches: Option<usize>,
+    batch_size: Option<usize>,
+    early_stop_override: Option<bool>,
+) -> Vec<usize> {
+    find_state_equivalence_classes_ex_inner(
+        tokenizer,
+        tokens,
+        states,
+        &[],
+        Some(disallowed_follows),
+        max_batches,
+        batch_size,
+        early_stop_override,
+        true,
+    )
 }
 
 fn find_state_equivalence_classes_ex_inner<S: AsRef<[u8]> + Sync>(
@@ -267,6 +548,7 @@ fn find_state_equivalence_classes_ex_inner<S: AsRef<[u8]> + Sync>(
     tokens: &[S],
     states: &[usize],
     skip_groups: &[bool],
+    disallowed_follows: Option<&[BitSet]>,
     max_batches: Option<usize>,
     batch_size: Option<usize>,
     early_stop_override: Option<bool>,
@@ -279,18 +561,29 @@ fn find_state_equivalence_classes_ex_inner<S: AsRef<[u8]> + Sync>(
     }
 
     let refinement_started_at = std::time::Instant::now();
-    let mapping = find_state_equivalence_classes_token_based(tokenizer, tokens, states, skip_groups, max_batches, batch_size, early_stop_override, rep_only_confirmation);
+    let mapping = find_state_equivalence_classes_token_based(
+        tokenizer,
+        tokens,
+        states,
+        skip_groups,
+        disallowed_follows,
+        max_batches,
+        batch_size,
+        early_stop_override,
+        rep_only_confirmation,
+    );
     let refinement_time = refinement_started_at.elapsed();
 
     if profile_equivalence {
         let final_classes = count_classes(&mapping);
         eprintln!(
-            "[glrmask/profile][state_equiv] token_refine_ms={:.3} states={}→{} ({:.2}x) skip_groups={} max_batches={:?}",
+            "[glrmask/profile][state_equiv] token_refine_ms={:.3} states={}→{} ({:.2}x) skip_groups={} follow_contexts={} max_batches={:?}",
             refinement_time.as_secs_f64() * 1000.0,
             states.len(),
             final_classes,
             states.len() as f64 / final_classes.max(1) as f64,
             skip_groups.iter().filter(|&&b| b).count(),
+            disallowed_follows.map_or(1, |bits| FollowContextTable::new(bits.len(), Some(bits)).num_contexts()),
             max_batches,
         );
     }
@@ -303,6 +596,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     tokens: &[S],
     states: &[usize],
     skip_groups: &[bool],
+    disallowed_follows: Option<&[BitSet]>,
     max_batches: Option<usize>,
     custom_batch_size: Option<usize>,
     early_stop_override: Option<bool>,
@@ -369,18 +663,20 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
         .iter()
         .map(|future_groups| !future_groups.is_empty())
         .collect();
-    let future_group_hashes: Vec<u128> = dfa_future_groups
+    let mut max_gid = dfa_finalizers
         .iter()
-        .map(|future_groups| hash_future_groups(future_groups))
-        .collect();
-
-    let mut max_gid: Option<usize> = None;
-    for finals in &dfa_finalizers {
-        if let Some(m) = finals.iter().max() {
-            max_gid = Some(max_gid.map_or(*m, |cur| cur.max(*m)));
-        }
+        .chain(dfa_future_groups.iter())
+        .flat_map(|groups| groups.iter().copied())
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(0);
+    if let Some(disallowed_follows) = disallowed_follows {
+        max_gid = max_gid.max(disallowed_follows.len());
     }
-    let num_groups = max_gid.map(|m| m + 1).unwrap_or(0);
+    let num_groups = max_gid;
+    let follow_contexts = FollowContextTable::new(num_groups, disallowed_follows);
+    let future_group_hashes_by_context =
+        build_future_group_hashes_by_context(&dfa_future_groups, &follow_contexts);
     let mut sorted_indices: Vec<usize> = (0..tokens.len()).collect();
     sorted_indices.par_sort_unstable_by(|&a, &b| tokens[a].as_ref().cmp(tokens[b].as_ref()));
 
@@ -422,7 +718,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     };
 
     let tokenizer_start = tokenizer.initial_state_id();
-    let suffix_hashes_by_token: Vec<Vec<u128>> = sorted_tokens
+    let suffix_hashes_by_token: Vec<Option<TokenSuffixHashes>> = sorted_tokens
         .par_iter()
         .enumerate()
         .map_init(
@@ -434,9 +730,9 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
             },
             |(positions, active_bits), (token_idx, token)| {
                 if !needed_token_flags[token_idx] {
-                    Vec::new()
+                    None
                 } else {
-                    build_start_state_suffix_hashes(
+                    let nodes = build_start_state_suffix_nodes(
                         token,
                         tokenizer_start,
                         compact_transitions,
@@ -444,11 +740,15 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                         num_bc,
                         &dfa_finalizers,
                         &state_has_future,
-                        &future_group_hashes,
                         skip_groups,
                         positions,
                         active_bits,
-                    )
+                    );
+                    Some(build_token_suffix_hashes(
+                        nodes,
+                        &follow_contexts,
+                        &future_group_hashes_by_context,
+                    ))
                 }
             },
         )
@@ -470,8 +770,9 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
         &dead_positions,
         &dead_active_bits,
         0,
-        &[],
-        &future_group_hashes,
+        &future_group_hashes_by_context[0],
+        &follow_contexts,
+        None,
     );
 
     let mut group_ids: Vec<usize> = vec![0usize; states.len()];
@@ -675,8 +976,9 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                                     positions,
                                     active_bits,
                                     token.len(),
-                                    &suffix_hashes_by_token[global_token_idx],
-                                    &future_group_hashes,
+                                    &future_group_hashes_by_context[0],
+                                    &follow_contexts,
+                                    suffix_hashes_by_token[global_token_idx].as_ref(),
                                 )
                             } else {
                                 let current = walk_frames.last().unwrap().state;
@@ -685,8 +987,9 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                                     positions,
                                     active_bits,
                                     token.len(),
-                                    &suffix_hashes_by_token[global_token_idx],
-                                    &future_group_hashes,
+                                    &future_group_hashes_by_context[0],
+                                    &follow_contexts,
+                                    suffix_hashes_by_token[global_token_idx].as_ref(),
                                 )
                             };
                             hash_delta = hash_delta.wrapping_add(
@@ -873,7 +1176,17 @@ mod tests {
         ];
         let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
 
-        let direct = find_state_equivalence_classes_token_based(&tokenizer_view, &tokens, &states, &[], None, None, None, false);
+        let direct = find_state_equivalence_classes_token_based(
+            &tokenizer_view,
+            &tokens,
+            &states,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
         let actual = find_state_equivalence_classes(&tokenizer_view, &tokens, &states);
 
         assert_eq!(
@@ -921,12 +1234,28 @@ mod tests {
 
         // Ground truth: no early stop, all tokens processed
         let ground_truth = find_state_equivalence_classes_token_based(
-            &tokenizer_view, &tokens, &states, &[], None, Some(2), None, false,
+            &tokenizer_view,
+            &tokens,
+            &states,
+            &[],
+            None,
+            None,
+            Some(2),
+            None,
+            false,
         );
 
         // With early_stop: must match ground truth (fix ensures all tokens processed)
         let early_stop_result = find_state_equivalence_classes_token_based(
-            &tokenizer_view, &tokens, &states, &[], None, Some(2), Some(true), true,
+            &tokenizer_view,
+            &tokens,
+            &states,
+            &[],
+            None,
+            None,
+            Some(2),
+            Some(true),
+            true,
         );
 
         // Count distinct classes

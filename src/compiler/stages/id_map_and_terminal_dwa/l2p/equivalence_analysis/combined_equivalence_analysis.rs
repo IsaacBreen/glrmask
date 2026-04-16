@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use hashbrown::HashMap;
 
 use super::compat::TokenizerView;
+use super::disallowed_follows::normalize_disallowed_follows;
 use crate::ds::bitset::BitSet;
 
 use super::state::fast::{self as state_equivalence_analysis, StateEquivalenceResult};
@@ -417,6 +418,7 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
 
     let pre_reduced_states = collect_representative_states(&pre_state_reps);
     let tokenizer_num_groups = tokenizer_group_count(tokenizer);
+    let normalized_disallowed_follows = normalize_disallowed_follows(tokenizer_num_groups, disallowed_follows);
     let num_dfa_states = tokenizer.dfa().states.len();
     let force_pre_vocab_state_reduction = env_flag_enabled(FORCE_PRE_VOCAB_STATE_REDUCTION_ENV);
     let disable_pre_vocab_state_reduction = env_flag_enabled(DISABLE_PRE_VOCAB_STATE_REDUCTION_ENV);
@@ -443,22 +445,16 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
     let vocab_states = if use_pre_vocab_state_reduction {
         let pre_vocab_state_started_at = std::time::Instant::now();
 
-        // NOTE: disallowed_follows cannot be used to skip groups in the state
-        // equivalence hash because "universally disallowed" groups can still be
-        // the FIRST match in a sequence. Skipping them would incorrectly merge
-        // states that differ in first-match behavior. Context-dependent filtering
-        // (per-parent-edge) would be correct but prohibitively expensive.
-
         // Rep-only confirmation: after groups stabilize (first stable batch),
         // the second confirmation batch walks only one representative per group
         // instead of all ~2462 active states. This saves one full batch of walks
         // (e.g. 2462×5000 = 12.3M walks → 19×5000 = 95K walks for just the
         // confirmation step). Convergence batches still walk all states.
-        let reduced_state_reps = state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation(
+        let reduced_state_reps = state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed(
             tokenizer,
             &dedup.representative_token_bytes,
             &pre_reduced_states,
-            &[], // skip_groups
+            &normalized_disallowed_follows,
             pre_vocab_max_batches,
             pre_vocab_batch_size,
             Some(true), // early_stop
@@ -516,10 +512,11 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
             &dedup_vocab_classes,
             &dedup.representative_token_bytes,
         );
-        let reduced_state_reps = state_equivalence_analysis::find_state_equivalence_classes(
+        let reduced_state_reps = state_equivalence_analysis::find_state_equivalence_classes_with_disallowed(
             tokenizer,
             &vocab_representative_tokens,
             &pre_reduced_states,
+            &normalized_disallowed_follows,
         );
         let rep_to_final: BTreeMap<usize, usize> = pre_reduced_states
             .iter()
@@ -712,6 +709,7 @@ mod tests {
 
     use crate::automata::lexer::ast::{bytes, star};
     use crate::compiler::compile::build_tokenizer_from_exprs;
+    use super::super::disallowed_follows::normalize_disallowed_follows;
     use super::super::compat::TokenizerView;
     use super::super::reference::find_equivalence_classes;
     use super::super::state::fast as fast_state_equivalence;
@@ -745,5 +743,48 @@ mod tests {
         let reference = find_equivalence_classes(&tokenizer_view, &tokens, &states, &disallowed, None);
 
         verify_state_partition_reference(&fast_classes, &reference.state_classes);
+    }
+
+    #[test]
+    fn disallowed_aware_state_partition_matches_reference() {
+        let exprs = [bytes(b"a"), star(bytes(b"b")), bytes(b"c")];
+        let tokenizer = build_tokenizer_from_exprs(&exprs);
+        let tokenizer_view = TokenizerView::new(&tokenizer);
+
+        let tokens: Vec<Vec<u8>> = vec![
+            b"c".to_vec(),
+            b"ca".to_vec(),
+            b"cba".to_vec(),
+            b"bb".to_vec(),
+        ];
+        let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
+
+        let mut disallowed = BTreeMap::new();
+        let mut bits = BitSet::new(3);
+        bits.set(1);
+        disallowed.insert(2u32, bits);
+
+        let normalized = normalize_disallowed_follows(3, &disallowed);
+        let fast_mapping = fast_state_equivalence::find_state_equivalence_classes_with_disallowed(
+            &tokenizer_view,
+            &tokens,
+            &states,
+            &normalized,
+        );
+        let fast_classes =
+            fast_state_equivalence::mapping_to_equivalence_classes(&states, &fast_mapping);
+        let reference = find_equivalence_classes(&tokenizer_view, &tokens, &states, &disallowed, None);
+
+        let fast_partition: std::collections::BTreeSet<Vec<_>> = fast_classes
+            .iter()
+            .map(|class| class.iter().copied().collect())
+            .collect();
+        let reference_partition: std::collections::BTreeSet<Vec<_>> = reference
+            .state_classes
+            .iter()
+            .map(|class| class.iter().copied().collect())
+            .collect();
+
+        assert_eq!(fast_partition, reference_partition);
     }
 }
