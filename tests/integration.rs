@@ -774,7 +774,7 @@ fn test_large_max_repetition() {
 
     let mask_after = state.mask();
     assert_mask_allows(&mask_after, &[0]);
-    assert!(!state.is_finished(), "Should not be finished after only 3 tokens");
+    assert!(state.is_finished(), "Should be finished after 3 tokens (3 >= min=0)");
 }
 
 
@@ -2657,4 +2657,49 @@ fn bench_kb815_literals_only() {
 
     // Basic sanity check
     let _state = constraint.start();
+}
+
+#[test]
+fn test_small_range_finished_semantics() {
+    let vocab = make_vocab(&["a"]);
+
+    // ~0..3: can accept EOF after min=0 (but needs >= 1 token for parser init)
+    let c = lark_constraint(&["a"], r#"start: "a" ~0..3"#);
+    let mut s = c.start();
+    assert_mask_allows(&s.mask(), &[0]);
+    commit_all(&mut s, &[0]);
+    assert!(s.is_finished());
+
+    // ~1..3: can accept EOF after min=1
+    let c = lark_constraint(&["a"], r#"start: "a" ~1..3"#);
+    let mut s = c.start();
+    assert_mask_allows(&s.mask(), &[0]);
+    commit_all(&mut s, &[0]);
+    assert!(s.is_finished());
+
+    // ~2..3: cannot accept EOF after 1 token (need min=2)
+    let c = lark_constraint(&["a"], r#"start: "a" ~2..3"#);
+    let mut s = c.start();
+    commit_all(&mut s, &[0]);
+    assert!(!s.is_finished());
+    commit_all(&mut s, &[0]);
+    assert!(s.is_finished());
+
+    // * (0 or more): can accept EOF after any token
+    let c = lark_constraint(&["a"], r#"start: "a"*"#);
+    let mut s = c.start();
+    commit_all(&mut s, &[0]);
+    assert!(s.is_finished());
+
+    // + (1 or more): can accept EOF after >= 1 token
+    let c = lark_constraint(&["a"], r#"start: "a"+"#);
+    let mut s = c.start();
+    commit_all(&mut s, &[0]);
+    assert!(s.is_finished());
+
+    // ? (0 or 1): can accept EOF after 0 or 1 token
+    let c = lark_constraint(&["a"], r#"start: "a"? "#);
+    let mut s = c.start();
+    commit_all(&mut s, &[0]);
+    assert!(s.is_finished());
 }
