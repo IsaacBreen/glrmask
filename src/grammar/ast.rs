@@ -243,8 +243,8 @@ enum RepeatTreeShape {
     Balanced,
     Left,
     Right,
-    /// Left exact decomposition (prefix-sharing for O(1) item commits)
-    /// with balanced range alternation (O(log N) close-bracket resolution).
+    /// Balanced exact decomposition (O(log N) tree depth) with balanced
+    /// range alternation (O(log N) close-bracket resolution).
     LeftBalanced,
 }
 
@@ -281,11 +281,11 @@ fn left_repeat_range_back_bucket() -> usize {
 fn exact_repeat_split(count: usize, shape: RepeatTreeShape) -> (usize, usize) {
     debug_assert!(count > 1);
     match shape {
-        RepeatTreeShape::Balanced => {
+        RepeatTreeShape::Balanced | RepeatTreeShape::LeftBalanced => {
             let left = count / 2;
             (left, count - left)
         }
-        RepeatTreeShape::Left | RepeatTreeShape::LeftBalanced => (count - 1, 1),
+        RepeatTreeShape::Left => (count - 1, 1),
         RepeatTreeShape::Right => (1, count - 1),
     }
 }
