@@ -344,9 +344,9 @@ struct Scratch {
     single_target_seen: Vec<u32>,
     single_target_seen_epoch: u32,
     // Suffix DAG
-    dag: HashMap<usize, DagNode>,
+    dag_nodes: Vec<Option<DagNode>>,
     dag_queue: Vec<usize>,
-    dag_disallowed: HashMap<usize, BitSet>,
+    dag_disallowed: Vec<Option<BitSet>>,
     single_target_hash_pos: usize,
     single_target_hash: u64,
     suffix_match_positions: Vec<u32>,
@@ -758,19 +758,28 @@ fn intersect_node_disallowed(
     pos: usize,
     incoming: &BitSet,
 ) {
-    if let Some(existing) = scratch.dag_disallowed.get_mut(&pos) {
+    ensure_position_slot(&mut scratch.dag_disallowed, pos);
+    if let Some(existing) = scratch.dag_disallowed[pos].as_mut() {
         *existing = existing.intersection(incoming);
     } else {
-        scratch.dag_disallowed.insert(pos, incoming.clone());
+        scratch.dag_disallowed[pos] = Some(incoming.clone());
     }
 }
 
 fn node_disallows_gid(scratch: &Scratch, pos: usize, gid: usize) -> bool {
     scratch
         .dag_disallowed
-        .get(&pos)
+        .get(pos)
+        .and_then(|bits| bits.as_ref())
         .map(|bits| bits.contains(gid))
         .unwrap_or(false)
+}
+
+#[inline]
+fn ensure_position_slot<T>(slots: &mut Vec<Option<T>>, pos: usize) {
+    if pos >= slots.len() {
+        slots.resize_with(pos + 1, || None);
+    }
 }
 
 impl Scratch {
@@ -789,9 +798,9 @@ impl Scratch {
             single_target_gids: SmallVec::new(),
             single_target_seen: vec![0; num_groups],
             single_target_seen_epoch: 1,
-            dag: HashMap::new(),
+            dag_nodes: Vec::new(),
             dag_queue: Vec::new(),
-            dag_disallowed: HashMap::new(),
+            dag_disallowed: Vec::new(),
             single_target_hash_pos: usize::MAX,
             single_target_hash: 0,
             suffix_match_positions: vec![NONE; num_groups],
@@ -1140,7 +1149,7 @@ fn hash_suffixes(
     let total_started_at = profile_signature_detail.then(Instant::now);
     let setup_started_at = profile_signature_detail.then(Instant::now);
     let len = slice.len();
-    scratch.dag.clear();
+    scratch.dag_nodes.clear();
     scratch.dag_queue.clear();
     scratch.dag_disallowed.clear();
 
@@ -1150,23 +1159,25 @@ fn hash_suffixes(
             for &gid in rest {
                 combined = combined.intersection(dfa.disallowed_for(gid));
             }
-            scratch.dag_disallowed.insert(pos, combined);
+            ensure_position_slot(&mut scratch.dag_disallowed, pos);
+            scratch.dag_disallowed[pos] = Some(combined);
         }
     }
     let setup_ns = setup_started_at.map_or(0, elapsed_ns);
 
     // BFS from target positions: run suffix DFA at each, discover new positions from edges
     for &pos in &scratch.targets {
-        if pos < len && !scratch.dag.contains_key(&pos) {
+        if pos < len {
+            ensure_position_slot(&mut scratch.dag_nodes, pos);
+            if scratch.dag_nodes[pos].is_some() {
+                continue;
+            }
             scratch.dag_queue.push(pos);
-            scratch.dag.insert(
-                pos,
-                DagNode {
-                    hash: 0,
-                    edges: EdgeList::new(),
-                    end_state: STATE_NONE,
-                },
-            );
+            scratch.dag_nodes[pos] = Some(DagNode {
+                hash: 0,
+                edges: EdgeList::new(),
+                end_state: STATE_NONE,
+            });
         }
     }
 
@@ -1186,26 +1197,24 @@ fn hash_suffixes(
         );
         run_suffix_ns += run_suffix_started_at.map_or(0, elapsed_ns);
         for &(_, target) in &edges {
-            if target < len && !scratch.dag.contains_key(&target) {
+            if target < len {
+                ensure_position_slot(&mut scratch.dag_nodes, target);
+                if scratch.dag_nodes[target].is_some() {
+                    continue;
+                }
                 scratch.dag_queue.push(target);
-                scratch.dag.insert(
-                    target,
-                    DagNode {
-                        hash: 0,
-                        edges: EdgeList::new(),
-                        end_state: STATE_NONE,
-                    },
-                );
+                scratch.dag_nodes[target] = Some(DagNode {
+                    hash: 0,
+                    edges: EdgeList::new(),
+                    end_state: STATE_NONE,
+                });
             }
         }
-        scratch.dag.insert(
-            pos,
-            DagNode {
-                hash: 0,
-                edges,
-                end_state: end_state.unwrap_or(STATE_NONE),
-            },
-        );
+        scratch.dag_nodes[pos] = Some(DagNode {
+            hash: 0,
+            edges,
+            end_state: end_state.unwrap_or(STATE_NONE),
+        });
     }
     let bfs_ns = bfs_started_at.map_or(0, elapsed_ns);
 
@@ -1213,7 +1222,7 @@ fn hash_suffixes(
     scratch.dag_queue.sort_unstable();
     for idx in 0..scratch.dag_queue.len() {
         let pos = scratch.dag_queue[idx];
-        let edges = scratch.dag[&pos].edges.clone();
+        let edges = scratch.dag_nodes[pos].as_ref().unwrap().edges.clone();
 
         for &(gid, target) in &edges {
             if node_disallows_gid(scratch, pos, gid) {
@@ -1226,25 +1235,35 @@ fn hash_suffixes(
     }
     let propagate_ns = propagate_started_at.map_or(0, elapsed_ns);
 
-    // Hash bottom-up: process deeper positions first
+    // Hash bottom-up: process deeper positions first. Reuse the ascending
+    // topological order from propagation and walk it in reverse instead of
+    // paying for a second sort.
     let hash_started_at = profile_signature_detail.then(Instant::now);
-    scratch.dag_queue.sort_unstable_by(|a, b| b.cmp(a));
-    for idx in 0..scratch.dag_queue.len() {
+    for idx in (0..scratch.dag_queue.len()).rev() {
         let pos = scratch.dag_queue[idx];
-        let node = scratch.dag.get(&pos).unwrap();
+        let node = scratch.dag_nodes[pos].as_ref().unwrap();
         let edges = node.edges.clone();
         let end_state = node.end_state;
         let mut h = new_hasher();
-        h.write_u64(dfa.completion_with_disallowed(end_state, scratch.dag_disallowed.get(&pos)));
+        h.write_u64(dfa.completion_with_disallowed(
+            end_state,
+            scratch.dag_disallowed.get(pos).and_then(|bits| bits.as_ref()),
+        ));
 
         for &(gid, target) in &edges {
             if node_disallows_gid(scratch, pos, gid) {
                 continue;
             }
             h.write_u64(gid as u64);
-            h.write_u64(scratch.dag.get(&target).map_or(0, |node| node.hash));
+            h.write_u64(
+                scratch
+                    .dag_nodes
+                    .get(target)
+                    .and_then(|node| node.as_ref())
+                    .map_or(0, |node| node.hash),
+            );
         }
-        scratch.dag.get_mut(&pos).unwrap().hash = h.finish();
+        scratch.dag_nodes[pos].as_mut().unwrap().hash = h.finish();
     }
     let hash_ns = hash_started_at.map_or(0, elapsed_ns);
 
@@ -1396,7 +1415,7 @@ fn finish_token_signature(
 ) -> u64 {
     let num_groups = dfa.num_groups;
     let dirty_words = scratch.dirty_words;
-    let dag = &scratch.dag;
+    let dag = &scratch.dag_nodes;
     let single_target_hash_pos = scratch.single_target_hash_pos;
     let single_target_hash = scratch.single_target_hash;
     let mut sig: u64 = HASH_SEED3;
@@ -1424,7 +1443,9 @@ fn finish_token_signature(
                         let target_hash = if single_target_hash_pos == target {
                             single_target_hash
                         } else {
-                            dag.get(&target).map_or(0, |node| node.hash)
+                            dag.get(target)
+                                .and_then(|node| node.as_ref())
+                                .map_or(0, |node| node.hash)
                         };
                         h.write_u64(target_hash);
                     }
@@ -1735,7 +1756,7 @@ fn finish_token_signature_no_cleanup(
 ) -> u64 {
     let num_groups = dfa.num_groups;
     let dirty_words = scratch.dirty_words;
-    let dag = &scratch.dag;
+    let dag = &scratch.dag_nodes;
     let single_target_hash_pos = scratch.single_target_hash_pos;
     let single_target_hash = scratch.single_target_hash;
     let mut sig: u64 = HASH_SEED3;
@@ -1763,7 +1784,9 @@ fn finish_token_signature_no_cleanup(
                         let target_hash = if single_target_hash_pos == target {
                             single_target_hash
                         } else {
-                            dag.get(&target).map_or(0, |node| node.hash)
+                            dag.get(target)
+                                .and_then(|node| node.as_ref())
+                                .map_or(0, |node| node.hash)
                         };
                         h.write_u64(target_hash);
                     }
@@ -2488,8 +2511,8 @@ pub fn debug_compare_token_signatures(
     
     // Dump DAG entries
     for &pos in &[1usize, 2, 3, 4] {
-        let dag_a = scratch_s1.dag.get(&pos);
-        let dag_b = scratch_s2.dag.get(&pos);
+        let dag_a = scratch_s1.dag_nodes.get(pos).and_then(|node| node.as_ref());
+        let dag_b = scratch_s2.dag_nodes.get(pos).and_then(|node| node.as_ref());
         if dag_a.is_some() || dag_b.is_some() {
             let hash_a = dag_a.map(|n| n.hash).unwrap_or(0);
             let hash_b = dag_b.map(|n| n.hash).unwrap_or(0);
@@ -2497,8 +2520,8 @@ pub fn debug_compare_token_signatures(
             let edges_b = dag_b.map(|n| &n.edges).cloned().unwrap_or_default();
             let end_a = dag_a.map(|n| n.end_state).unwrap_or(STATE_NONE);
             let end_b = dag_b.map(|n| n.end_state).unwrap_or(STATE_NONE);
-            let disallowed_a = scratch_s1.dag_disallowed.get(&pos);
-            let disallowed_b = scratch_s2.dag_disallowed.get(&pos);
+            let disallowed_a = scratch_s1.dag_disallowed.get(pos).and_then(|bits| bits.as_ref());
+            let disallowed_b = scratch_s2.dag_disallowed.get(pos).and_then(|bits| bits.as_ref());
             eprintln!("[debug_compare] DAG pos={}: hash_a={:#018x} hash_b={:#018x} match={} edges_a={:?} edges_b={:?} end_a={} end_b={}",
                 pos, hash_a, hash_b, hash_a == hash_b, edges_a.as_slice(), edges_b.as_slice(), end_a, end_b);
             

@@ -12,7 +12,7 @@ use range_set_blaze::RangeSetBlaze;
 
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
-use crate::automata::weighted::minimize::{minimize, minimize_from_env};
+use crate::automata::weighted::minimize::{minimize, minimize_fast, minimize_from_env};
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::stages::compact::{compact_from_env, CompactMode};
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
@@ -215,7 +215,9 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
 
     // 2b. Optimize ID ordering to minimize weight range fragmentation.
     let reorder_started_at = Instant::now();
-    optimize_nwa_id_ordering(&mut global_nwa, &mut global_id_map);
+    if label != "global" {
+        optimize_nwa_id_ordering(&mut global_nwa, &mut global_id_map);
+    }
     let reorder_ms = reorder_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // 3. Determinize + minimize.
@@ -227,7 +229,7 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     let det_states = det.states.len();
     let minimize_started_at = Instant::now();
     let mut dwa = if label == "global" {
-        minimize_from_env(&det, "GLRMASK_MINIMIZE_MERGE_GLOBAL", minimize)
+        minimize_from_env(&det, "GLRMASK_MINIMIZE_MERGE_GLOBAL", minimize_fast)
     } else {
         minimize_from_env(&det, "GLRMASK_MINIMIZE_MERGE", minimize)
     };

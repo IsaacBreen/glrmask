@@ -56,7 +56,7 @@ const PRE_VOCAB_STATE_REDUCTION_MAX_GROUPS: usize = 256;
 /// Only run pre-vocab state reduction when the deduped token count is high
 /// enough that the vocab signature pass is expensive. With few tokens, the
 /// vocab pass is already cheap and pre-reduction adds overhead.
-const PRE_VOCAB_STATE_REDUCTION_MIN_TOKENS: usize = 5000;
+const PRE_VOCAB_STATE_REDUCTION_MIN_TOKENS: usize = 3000;
 /// When the deduped token count exceeds this, limit state reduction to a single
 /// batch (5000 tokens) to avoid the cost of processing the full token set.
 const PRE_VOCAB_STATE_REDUCTION_MAX_FULL_TOKENS: usize = 5000;
@@ -64,9 +64,10 @@ const PRE_VOCAB_STATE_REDUCTION_MAX_FULL_TOKENS: usize = 5000;
 /// (limited batches) instead of walking all tokens. Walking a small sample
 /// through many states is much cheaper while still providing effective
 /// coarsening for the downstream vocab pass.
-const PRE_VOCAB_STATE_REDUCTION_LARGE_DFA_THRESHOLD: usize = 16_000;
+const PRE_VOCAB_STATE_REDUCTION_LARGE_DFA_THRESHOLD: usize = 14_000;
 /// Number of sample tokens per batch for large-DFA pre-vocab state reduction.
-const PRE_VOCAB_STATE_REDUCTION_LARGE_DFA_BATCH_SIZE: usize = 200;
+const PRE_VOCAB_STATE_REDUCTION_LARGE_DFA_BATCH_SIZE: usize =
+    PRE_VOCAB_STATE_REDUCTION_MAX_FULL_TOKENS;
 
 /// Result of combined equivalence analysis.
 pub struct CombinedEquivalenceResult {
@@ -431,7 +432,7 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
     };
     // For large DFAs, use sample-based pre-vocab reduction: walk only a small
     // batch of tokens through the states instead of all tokens. This avoids
-    // O(tokens × states) cost while still coarsening effectively.
+    // O(tokens × states) cost while still providing effective coarsening.
     let large_dfa = num_dfa_states >= PRE_VOCAB_STATE_REDUCTION_LARGE_DFA_THRESHOLD;
     let pre_vocab_max_batches = if large_dfa { Some(1) } else { None };
     let pre_vocab_batch_size = if large_dfa {

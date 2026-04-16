@@ -20,6 +20,34 @@ struct WalkFrame {
 }
 
 #[inline(always)]
+fn bit_words(num_bits: usize) -> usize {
+    num_bits.div_ceil(64)
+}
+
+#[inline(always)]
+fn bitset_set(bits: &mut [u64], idx: usize) {
+    bits[idx >> 6] |= 1u64 << (idx & 63);
+}
+
+#[inline(always)]
+fn bitset_clear(bits: &mut [u64], idx: usize) {
+    bits[idx >> 6] &= !(1u64 << (idx & 63));
+}
+
+#[inline(always)]
+fn clear_active_positions(positions: &mut [i32], active_bits: &mut [u64]) {
+    for (word_idx, word) in active_bits.iter_mut().enumerate() {
+        let mut bits = *word;
+        while bits != 0 {
+            let bit = bits.trailing_zeros() as usize;
+            positions[word_idx * 64 + bit] = -1;
+            bits &= bits - 1;
+        }
+        *word = 0;
+    }
+}
+
+#[inline(always)]
 fn mix_u128(mut x: u128) -> u128 {
     x ^= x >> 33;
     x = x.wrapping_mul(0xff51afd7ed558ccd);
@@ -62,10 +90,10 @@ fn hash_future_groups(future_groups: &[usize]) -> u128 {
 fn hash_trellis_node_from_positions(
     end_state: Option<usize>,
     positions: &[i32],
+    active_bits: &[u64],
     token_len: usize,
     suffix_hashes: &[u128],
     future_group_hashes: &[u128],
-    skip_groups: &[bool],
 ) -> u128 {
     const DEAD_NODE_TAG: u128 = 0xDEAD_DEAD_DEAD_DEAD;
     const ACCEPT_SINK_HASH: u128 = 0xA11C_EA5E_A11C_EA5E;
@@ -84,23 +112,24 @@ fn hash_trellis_node_from_positions(
         None => mix_u128(DEAD_NODE_TAG),
     };
 
-    for (gid, &target_pos) in positions.iter().enumerate() {
-        if target_pos < 0 {
-            continue;
+    for (word_idx, &word) in active_bits.iter().enumerate() {
+        let mut bits = word;
+        while bits != 0 {
+            let bit = bits.trailing_zeros() as usize;
+            let gid = word_idx * 64 + bit;
+            bits &= bits - 1;
+
+            let target_pos = positions[gid] as usize;
+            edge_count += 1;
+            let child_hash = if target_pos >= token_len {
+                ACCEPT_SINK_HASH
+            } else {
+                suffix_hashes[target_pos]
+            };
+            hash = mix_tagged(hash, EDGE_GID_TAG, gid as u128);
+            hash = mix_tagged(hash, EDGE_POS_TAG, target_pos as u128);
+            hash = mix_tagged(hash, EDGE_CHILD_TAG, child_hash);
         }
-        if !skip_groups.is_empty() && skip_groups[gid] {
-            continue;
-        }
-        edge_count += 1;
-        let target_pos = target_pos as usize;
-        let child_hash = if target_pos >= token_len {
-            ACCEPT_SINK_HASH
-        } else {
-            suffix_hashes[target_pos]
-        };
-        hash = mix_tagged(hash, EDGE_GID_TAG, gid as u128);
-        hash = mix_tagged(hash, EDGE_POS_TAG, target_pos as u128);
-        hash = mix_tagged(hash, EDGE_CHILD_TAG, child_hash);
     }
 
     mix_tagged(hash, EDGE_COUNT_TAG, edge_count as u128)
@@ -129,39 +158,49 @@ fn build_start_state_suffix_hashes(
     token: &[u8],
     tokenizer_start: usize,
     dfa_transitions: &[u32],
+    byte_to_class: &[u8; 256],
+    num_bc: usize,
     dfa_finalizers: &[Vec<usize>],
-    dfa_future_groups: &[Vec<usize>],
+    state_has_future: &[bool],
     future_group_hashes: &[u128],
-    num_groups: usize,
     skip_groups: &[bool],
+    positions: &mut [i32],
+    active_bits: &mut [u64],
 ) -> Vec<u128> {
     let len = token.len();
+    let num_groups = positions.len();
     let mut suffix_hashes = vec![0u128; len];
-    let mut positions = vec![-1i32; num_groups];
+    let skip_groups_enabled = !skip_groups.is_empty();
+
+    clear_active_positions(positions, active_bits);
 
     for pos in (0..len).rev() {
-        positions.fill(-1);
-
         let mut current = tokenizer_start;
-        let mut done = dfa_future_groups[current].is_empty();
+        let mut current_ct_base = current * num_bc;
+        let mut done = !state_has_future[current];
 
         for (offset, &byte) in token[pos..].iter().enumerate() {
             if done {
                 break;
             }
-            let next = dfa_transitions[current * 256 + byte as usize];
+            let next = dfa_transitions[current_ct_base + byte_to_class[byte as usize] as usize];
             if next == u32::MAX {
                 done = true;
                 break;
             }
             current = next as usize;
+            current_ct_base = current * num_bc;
             let absolute_pos = (pos + offset + 1) as i32;
             for &gid in &dfa_finalizers[current] {
-                if gid < num_groups {
-                    positions[gid] = absolute_pos;
+                if gid >= num_groups || (skip_groups_enabled && skip_groups[gid]) {
+                    continue;
                 }
+                if positions[gid] < 0 {
+                    bitset_set(active_bits, gid);
+                }
+                positions[gid] = absolute_pos;
             }
-            if dfa_future_groups[current].is_empty() {
+            if !state_has_future[current] {
                 done = true;
             }
         }
@@ -169,12 +208,14 @@ fn build_start_state_suffix_hashes(
         let end_state = (!done).then_some(current);
         suffix_hashes[pos] = hash_trellis_node_from_positions(
             end_state,
-            &positions,
+            positions,
+            active_bits,
             len,
             &suffix_hashes,
             future_group_hashes,
-            skip_groups,
         );
+
+        clear_active_positions(positions, active_bits);
     }
 
     suffix_hashes
@@ -324,6 +365,10 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
         .iter()
         .map(|state| state.possible_future_group_ids.iter().copied().collect())
         .collect();
+    let state_has_future: Vec<bool> = dfa_future_groups
+        .iter()
+        .map(|future_groups| !future_groups.is_empty())
+        .collect();
     let future_group_hashes: Vec<u128> = dfa_future_groups
         .iter()
         .map(|future_groups| hash_future_groups(future_groups))
@@ -348,22 +393,65 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
 
     let total_tokens = sorted_tokens.len();
 
+    let early_stop = early_stop_override.unwrap_or_else(|| {
+        std::env::var("STATE_EQUIV_EARLY_STOP")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    });
+    let batch_size = custom_batch_size.unwrap_or(250);
+    let batches = build_strided_batches(total_tokens, batch_size);
+
+    let needed_token_flags = if let Some(max) = max_batches {
+        let mut flags = vec![false; total_tokens];
+        let mut used_batches = 0usize;
+        for batch_indices in &batches {
+            if used_batches >= max {
+                break;
+            }
+            if batch_indices.is_empty() {
+                continue;
+            }
+            used_batches += 1;
+            for &token_idx in batch_indices {
+                flags[token_idx] = true;
+            }
+        }
+        flags
+    } else {
+        vec![true; total_tokens]
+    };
+
     let tokenizer_start = tokenizer.initial_state_id();
-    let raw_transitions: &[u32] = &dfa.transitions;
     let suffix_hashes_by_token: Vec<Vec<u128>> = sorted_tokens
         .par_iter()
-        .map(|token| {
-            build_start_state_suffix_hashes(
-                token,
-                tokenizer_start,
-                raw_transitions,
-                &dfa_finalizers,
-                &dfa_future_groups,
-                &future_group_hashes,
-                num_groups,
-                skip_groups,
-            )
-        })
+        .enumerate()
+        .map_init(
+            || {
+                (
+                    vec![-1i32; num_groups],
+                    vec![0u64; bit_words(num_groups)],
+                )
+            },
+            |(positions, active_bits), (token_idx, token)| {
+                if !needed_token_flags[token_idx] {
+                    Vec::new()
+                } else {
+                    build_start_state_suffix_hashes(
+                        token,
+                        tokenizer_start,
+                        compact_transitions,
+                        byte_to_class,
+                        num_bc,
+                        &dfa_finalizers,
+                        &state_has_future,
+                        &future_group_hashes,
+                        skip_groups,
+                        positions,
+                        active_bits,
+                    )
+                }
+            },
+        )
         .collect();
 
     let common_prefix_len = |a: &[u8], b: &[u8]| -> usize {
@@ -375,21 +463,15 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
         i
     };
 
-    let early_stop = early_stop_override.unwrap_or_else(|| {
-        std::env::var("STATE_EQUIV_EARLY_STOP")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-    });
-    let batch_size = custom_batch_size.unwrap_or(5000);
-    let batches = build_strided_batches(total_tokens, batch_size);
     let dead_positions = vec![-1i32; num_groups];
+    let dead_active_bits = vec![0u64; bit_words(num_groups)];
     let fully_dead_token_hash = hash_trellis_node_from_positions(
         None,
         &dead_positions,
+        &dead_active_bits,
         0,
         &[],
         &future_group_hashes,
-        skip_groups,
     );
 
     let mut group_ids: Vec<usize> = vec![0usize; states.len()];
@@ -462,6 +544,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                     (
                         Vec::<WalkFrame>::new(),
                         vec![-1; num_groups],
+                        vec![0u64; bit_words(num_groups)],
                         Vec::<(usize, i32)>::new(),
                     )
                 },
@@ -491,8 +574,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                             live_ranges.push((range_start, range_end));
                         }
                     }
-                    let (walk_frames, positions, changes) = scratch;
-                    let mut prev_groups_hash: u128;
+                    let (walk_frames, positions, active_bits, changes) = scratch;
 
                     for (range_start, range_end) in live_ranges {
                         if range_start >= range_end {
@@ -505,11 +587,8 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                             dead_at_depth: None,
                             changes_len: 0,
                         });
-                        if num_groups > 0 {
-                            positions.fill(-1);
-                        }
+                        clear_active_positions(positions, active_bits);
                         changes.clear();
-                        prev_groups_hash = 0;
 
                         for token_idx in range_start..range_end {
                             let global_token_idx = batch_indices[token_idx];
@@ -528,26 +607,12 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                                 let target_mark = walk_frames[prefix_len].changes_len;
                                 while changes.len() > target_mark {
                                     let (gid, prev_pos) = changes.pop().unwrap();
-                                    let cur_pos = positions[gid];
-                                    if cur_pos >= 0 {
-                                        let cur_pos_u = cur_pos as u32;
-                                        prev_groups_hash = prev_groups_hash.wrapping_sub(mix_u128(
-                                            (gid as u128) | ((cur_pos_u as u128) << 32),
-                                        ));
-                                        if prev_pos < 0 {
-                                            positions[gid] = -1;
-                                        } else {
-                                            let prev_pos_u = prev_pos as u32;
-                                            prev_groups_hash = prev_groups_hash.wrapping_add(
-                                                mix_u128(
-                                                    (gid as u128)
-                                                        | ((prev_pos_u as u128) << 32),
-                                                ),
-                                            );
-                                            positions[gid] = prev_pos;
-                                        }
+                                    if prev_pos < 0 {
+                                        positions[gid] = -1;
+                                        bitset_clear(active_bits, gid);
                                     } else {
                                         positions[gid] = prev_pos;
+                                        bitset_set(active_bits, gid);
                                     }
                                 }
 
@@ -588,24 +653,9 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                                             let prev = positions[gid];
                                             if prev != pos_i32 {
                                                 if prev < 0 {
-                                                    prev_groups_hash = prev_groups_hash
-                                                        .wrapping_add(mix_u128(
-                                                            (gid as u128)
-                                                                | ((position as u128) << 32),
-                                                        ));
-                                                    changes.push((gid, -1));
-                                                } else {
-                                                    prev_groups_hash = prev_groups_hash
-                                                        .wrapping_sub(mix_u128(
-                                                            (gid as u128) | ((prev as u128) << 32),
-                                                        ));
-                                                    prev_groups_hash = prev_groups_hash
-                                                        .wrapping_add(mix_u128(
-                                                            (gid as u128)
-                                                                | ((position as u128) << 32),
-                                                        ));
-                                                    changes.push((gid, prev));
+                                                    bitset_set(active_bits, gid);
                                                 }
+                                                changes.push((gid, prev));
                                                 positions[gid] = pos_i32;
                                             }
                                         }
@@ -623,20 +673,20 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                                 hash_trellis_node_from_positions(
                                     None,
                                     positions,
+                                    active_bits,
                                     token.len(),
                                     &suffix_hashes_by_token[global_token_idx],
                                     &future_group_hashes,
-                                    skip_groups,
                                 )
                             } else {
                                 let current = walk_frames.last().unwrap().state;
                                 hash_trellis_node_from_positions(
                                     Some(current as usize),
                                     positions,
+                                    active_bits,
                                     token.len(),
                                     &suffix_hashes_by_token[global_token_idx],
                                     &future_group_hashes,
-                                    skip_groups,
                                 )
                             };
                             hash_delta = hash_delta.wrapping_add(

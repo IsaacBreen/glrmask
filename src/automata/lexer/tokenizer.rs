@@ -292,7 +292,15 @@ impl Tokenizer {
         // transitions even with few active groups, making minimize O(n log n)
         // on 77K+ states with 0 reduction.
         let num_active = active_terminals.iter().filter(|&&b| b).count();
-        if pre_minimize_states > 1000 {
+        // For large active sets the masking changes very few finalizer bits, so
+        // the transition topology already distinguishes states and the
+        // fingerprint check is a valid fast-path. But for small active sets
+        // the fingerprint check is wrong: it hashes raw target state IDs, so
+        // two states A→C and A→D look distinct even when C and D are
+        // themselves equivalent after masking (a deep equivalence the local
+        // check cannot see). Skip the fingerprint heuristic for small active
+        // sets and let Hopcroft discover actual merges.
+        if pre_minimize_states > 1000 && num_active > 32 {
             let distinct = dfa.distinct_fingerprint_count();
             let n = pre_minimize_states;
             if distinct > n * 9 / 10 {
