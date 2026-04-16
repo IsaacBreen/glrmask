@@ -1839,8 +1839,8 @@ fn max_string_length_cap() -> Option<usize> {
 
 fn use_structured_uri() -> bool {
     std::env::var("GLRMASK_STRUCT_URI_FORMAT")
-        .map(|v| !v.is_empty() && v != "0" && v.to_lowercase() != "false")
-        .unwrap_or(false)
+        .map(|v| v != "0" && v.to_lowercase() != "false")
+        .unwrap_or(true)
 }
 
 fn json_wrapped_pattern(pattern: &str) -> GrammarExpr {
@@ -5689,34 +5689,293 @@ impl<'a> SchemaCtx<'a> {
     }
 
 fn build_structured_uri_expr(&mut self) -> GrammarExpr {
-        let scheme = sequence_or_single(vec![
-            regex_expr(r#"[a-zA-Z]"#),
-            GrammarExpr::Repeat(Box::new(regex_expr(r#"[a-zA-Z0-9+\-.]"#))),
-        ]);
-        let colon = literal_expr(b":");
-        let slashes = literal_expr(b"//");
-        let uri_body_char = r#"[a-zA-Z0-9\-._~!$&'()*+,;=:@/?%]"#;
-        let uri_internals = self.extract_terminal_rule(
-            GrammarExpr::RepeatOne(Box::new(regex_expr(uri_body_char))),
-            "URI_BODY",
+        // RFC 3986 URI grammar expressed as structured grammar productions.
+        // Uses non-terminal productions (lowercase prefixes) instead of
+        // monolithic regex terminals to avoid DFA state explosion.
+        //
+        // URI = scheme ":" hier-part [ "?" query ] [ "#" fragment ]
+
+        // --- Character classes ---
+
+        // HEXDIG = DIGIT / "A"-"F" / "a"-"f"
+        let hexdig = GrammarExpr::CharClass {
+            def: "0-9a-fA-F".into(),
+            negate: false,
+            utf8: true,
+        };
+
+        // pct-encoded = "%" HEXDIG HEXDIG
+        let pct_encoded = self.extract_rule(
+            sequence_or_single(vec![
+                literal_expr(b"%"),
+                GrammarExpr::RepeatRange {
+                    expr: Box::new(hexdig.clone()),
+                    min: 2,
+                    max: 2,
+                },
+            ]),
+            "uri_pct",
         );
+
+        // pchar = unreserved / pct-encoded / sub-delims / ":" / "@"
+        // Char class for pchar (all pchar chars except pct-encoded)
+        let pchar_cc = GrammarExpr::CharClass {
+            def: r"a-zA-Z0-9\-._~!$&'()*+,;=:@".into(),
+            negate: false,
+            utf8: true,
+        };
+        let pchar = self.extract_rule(
+            choice_or_single(vec![pchar_cc, pct_encoded.clone()]),
+            "uri_pchar",
+        );
+
+        // Query/fragment char: pchar / "/" / "?"  (plus pct-encoded)
+        let qf_cc = GrammarExpr::CharClass {
+            def: r"a-zA-Z0-9\-._~!$&'()*+,;=:@/?".into(),
+            negate: false,
+            utf8: true,
+        };
+        let qf_char = self.extract_rule(
+            choice_or_single(vec![qf_cc, pct_encoded.clone()]),
+            "uri_qfc",
+        );
+
+        // --- scheme ---
+        // scheme = ALPHA *( ALPA / DIGIT / "+" / "-" / "." )
+        let scheme = sequence_or_single(vec![
+            GrammarExpr::CharClass {
+                def: "a-zA-Z".into(),
+                negate: false,
+                utf8: true,
+            },
+            GrammarExpr::Repeat(Box::new(GrammarExpr::CharClass {
+                def: "a-zA-Z0-9+\\-.".into(),
+                negate: false,
+                utf8: true,
+            })),
+        ]);
+
+        // --- userinfo ---
+        // userinfo = *( unreserved / pct-encoded / sub-delims / ":" )
+        // Char class = unreserved + sub-delims + ":" (i.e. pchar minus "@")
+        let userinfo_cc = GrammarExpr::CharClass {
+            def: r"a-zA-Z0-9\-._~!$&'()*+,;=:".into(),
+            negate: false,
+            utf8: true,
+        };
+        let userinfo = GrammarExpr::Repeat(Box::new(choice_or_single(vec![
+            userinfo_cc,
+            pct_encoded.clone(),
+        ])));
+        let userinfo_at = GrammarExpr::Optional(Box::new(sequence_or_single(vec![
+            userinfo,
+            literal_expr(b"@"),
+        ])));
+
+        // --- host ---
+        // host = IP-literal / IPv4address / reg-name
+
+        // IPvFuture = "v" 1*HEXDIG "." 1*( unreserved / sub-delims / ":" )
+        let ipv_future = sequence_or_single(vec![
+            literal_expr(b"v"),
+            GrammarExpr::RepeatOne(Box::new(hexdig.clone())),
+            literal_expr(b"."),
+            GrammarExpr::RepeatOne(Box::new(GrammarExpr::CharClass {
+                def: r"a-zA-Z0-9\-._~!$&'()*+,;=:".into(),
+                negate: false,
+                utf8: true,
+            })),
+        ]);
+
+        // h16 = 1*4 HEXDIG
+        let h16 = GrammarExpr::RepeatRange {
+            expr: Box::new(hexdig.clone()),
+            min: 1,
+            max: 4,
+        };
+        let h16_colon = self.extract_rule(
+            sequence_or_single(vec![h16.clone(), literal_expr(b":")]),
+            "uri_h16c",
+        );
+        let colon_h16 = self.extract_rule(
+            sequence_or_single(vec![literal_expr(b":"), h16.clone()]),
+            "uri_ch16",
+        );
+
+        // IPv6 address — 10 alternatives from RFC 3986 Appendix A
+        let ipv6_alts = vec![
+            // 1: h16:h16:h16:h16:h16:h16:h16:h16  (full address)
+            sequence_or_single(vec![
+                GrammarExpr::RepeatRange { expr: Box::new(h16_colon.clone()), min: 7, max: 7 },
+                h16.clone(),
+            ]),
+            // 2: (:: at end) (h16 ":"){1,7} ":"
+            sequence_or_single(vec![
+                GrammarExpr::RepeatRange { expr: Box::new(h16_colon.clone()), min: 1, max: 7 },
+                literal_expr(b":"),
+            ]),
+            // 3 (h16 ":"){1,6} ":" h16
+            sequence_or_single(vec![
+                GrammarExpr::RepeatRange { expr: Box::new(h16_colon.clone()), min: 1, max: 6 },
+                literal_expr(b":"),
+                h16.clone(),
+            ]),
+            // 4 (h16 ":"){1,5} (":" h16){1,2}
+            sequence_or_single(vec![
+                GrammarExpr::RepeatRange { expr: Box::new(h16_colon.clone()), min: 1, max: 5 },
+                GrammarExpr::RepeatRange { expr: Box::new(colon_h16.clone()), min: 1, max: 2 },
+            ]),
+            // 5 (h16 ":"){1,4} (":" h16){1,3}
+            sequence_or_single(vec![
+                GrammarExpr::RepeatRange { expr: Box::new(h16_colon.clone()), min: 1, max: 4 },
+                GrammarExpr::RepeatRange { expr: Box::new(colon_h16.clone()), min: 1, max: 3 },
+            ]),
+            // 6 (h16 ":"){1,3} (":" h16){1,4}
+            sequence_or_single(vec![
+                GrammarExpr::RepeatRange { expr: Box::new(h16_colon.clone()), min: 1, max: 3 },
+                GrammarExpr::RepeatRange { expr: Box::new(colon_h16.clone()), min: 1, max: 4 },
+            ]),
+            // 7 (h16 ":"){1,2} (":" h16){1,5}
+            sequence_or_single(vec![
+                GrammarExpr::RepeatRange { expr: Box::new(h16_colon.clone()), min: 1, max: 2 },
+                GrammarExpr::RepeatRange { expr: Box::new(colon_h16.clone()), min: 1, max: 5 },
+            ]),
+            // 8 h16 ":" (":" h16){1,6}
+            sequence_or_single(vec![
+                h16.clone(),
+                literal_expr(b":"),
+                GrammarExpr::RepeatRange { expr: Box::new(colon_h16.clone()), min: 1, max: 6 },
+            ]),
+            // 9 ":" (":" h16){1,7}
+            sequence_or_single(vec![
+                literal_expr(b":"),
+                GrammarExpr::RepeatRange { expr: Box::new(colon_h16.clone()), min: 1, max: 7 },
+            ]),
+            // 10 :: alone
+            literal_expr(b"::"),
+        ];
+        let ipv6_address = choice_or_single(ipv6_alts);
+
+        // IP-literal = "[" ( IPv6address / IPvFuture ) "]"
+        let ip_literal = sequence_or_single(vec![
+            literal_expr(b"["),
+            choice_or_single(vec![ipv6_address, ipv_future]),
+            literal_expr(b"]"),
+        ]);
+
+        // IPv4address = dec-octet "." dec-octet "." dec-octet "." dec-octet
+        let dec_octet = self.extract_terminal_rule(
+            regex_expr(r#"(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"#),
+            "URI_DEC_OCTET",
+        );
+        let ipv4_address = sequence_or_single(vec![
+            dec_octet.clone(),
+            literal_expr(b"."),
+            dec_octet.clone(),
+            literal_expr(b"."),
+            dec_octet.clone(),
+            literal_expr(b"."),
+            dec_octet,
+        ]);
+
+        // reg-name = *( unreserved / pct-encoded / sub-delims )
+        let reg_name_cc = GrammarExpr::CharClass {
+            def: r"a-zA-Z0-9\-._~!$&'()*+,;=".into(),
+            negate: false,
+            utf8: true,
+        };
+        let re_name = GrammarExpr::Repeat(Box::new(choice_or_single(vec![
+            reg_name_cc,
+            pct_encoded.clone(),
+        ])));
+
+        let host = choice_or_single(vec![ip_literal, ipv4_address, re_name]);
+
+        // --- port ---
+        // port = *DIGIT
         let port = GrammarExpr::Optional(Box::new(sequence_or_single(vec![
             literal_expr(b":"),
-            GrammarExpr::RepeatOne(Box::new(regex_expr(r#"[0-9]"#))),
+            GrammarExpr::Repeat(Box::new(GrammarExpr::CharClass {
+                def: "0-9".into(),
+                negate: false,
+                utf8: true,
+            })),
         ])));
-        let authority_path = sequence_or_single(vec![
-            slashes,
-            uri_internals.clone(),
-            port,
+
+        // authority = [ userinfo "@" ] host [ ":" port ]
+        let authority = sequence_or_single(vec![userinfo_at, host, port]);
+
+        // --- path ---
+        // segment = *pchar
+        let segment = GrammarExpr::Repeat(Box::new(pchar.clone()));
+        // segment-nz = 1*pchar
+        let segment_nz = GrammarExpr::RepeatOne(Box::new(pchar.clone()));
+
+        // path-abempty = *( "/" segment )
+        let path_abempty = GrammarExpr::Repeat(Box::new(sequence_or_single(vec![
+            literal_expr(b"/"),
+            segment.clone(),
+        ])));
+
+        // path-absolute = "/" [ segment-nz *( "/" segment ) ]
+        let path_absolute = sequence_or_single(vec![
+            literal_expr(b"/"),
+            GrammarExpr::Optional(Box::new(sequence_or_single(vec![
+                segment_nz.clone(),
+                GrammarExpr::Repeat(Box::new(sequence_or_single(vec![
+                    literal_expr(b"/"),
+                    segment.clone(),
+                ]))),
+            ]))),
         ]);
-        let uri_body = choice_or_single(vec![
-            authority_path,
-            uri_internals,
+
+        // path-rootless = segment-nz *( "/" segment )
+        let path_rootless = sequence_or_single(vec![
+            segment_nz,
+            GrammarExpr::Repeat(Box::new(sequence_or_single(vec![
+                literal_expr(b"/"),
+                segment,
+            ]))),
         ]);
-        let body = sequence_or_single(vec![scheme, colon, uri_body]);
-        let (terminal_body, wrap) = wrap_string_value_expr_parts(body);
-        let body = self.extract_terminal_rule(terminal_body, "JSON_FORMAT_URI");
-        wrap(body)
+
+        // hier-part = "//" authority path-abempty
+        //           / path-absolute
+        //           / path-rootless
+        //           / path-empty
+        let hier_part = choice_or_single(vec![
+            sequence_or_single(vec![
+                literal_expr(b"//"),
+                authority,
+                path_abempty,
+            ]),
+            path_absolute,
+            path_rootless,
+            GrammarExpr::Sequence(vec![]), // path-empty
+        ]);
+
+        // --- query & fragment ---
+        // query = "?" *( pchar / "/" / "?" )  [optional group]
+        let query = GrammarExpr::Optional(Box::new(sequence_or_single(vec![
+            literal_expr(b"?"),
+            GrammarExpr::Repeat(Box::new(qf_char.clone())),
+        ])));
+
+        // fragment = "#" *( pchar / "/" / "?" )  [optional group]
+        let fragment = GrammarExpr::Optional(Box::new(sequence_or_single(vec![
+            literal_expr(b"#"),
+            GrammarExpr::Repeat(Box::new(qf_char)),
+        ])));
+
+        // URI = scheme ":" hier-part query fragment
+        let uri_body = sequence_or_single(vec![
+            scheme,
+            literal_expr(b":"),
+            hier_part,
+            query,
+            fragment,
+        ]);
+
+        quoted_expr(uri_body)
     }
 
     fn json_literal(&self, value: &Value) -> GrammarExpr {
