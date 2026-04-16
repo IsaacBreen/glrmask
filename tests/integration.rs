@@ -733,7 +733,7 @@ fn test_hideous_ambiguity() {
 }
 
 #[test]
-fn test_large_repetition() {
+fn test_large_exact_repetition() {
     // IDs: "a" -> 0
     let vocab = make_vocab(&["a"]);
 
@@ -757,6 +757,26 @@ fn test_large_repetition() {
     assert_mask_allows(&mask_after, &[0]);
     assert!(!state.is_finished(), "Should not be finished after only 3 tokens");
 }
+
+#[test]
+fn test_large_max_repetition() {
+    let vocab = make_vocab(&["a"]);
+
+    let lark = r#"start: "a" ~0..1000000000"#;
+    let constraint = lark_constraint(&["a"], lark);
+
+    let mut state = constraint.start();
+
+    let mask = state.mask();
+    assert_mask_allows(&mask, &[0]);
+
+    commit_all(&mut state, &[0, 0, 0]);
+
+    let mask_after = state.mask();
+    assert_mask_allows(&mask_after, &[0]);
+    assert!(!state.is_finished(), "Should not be finished after only 3 tokens");
+}
+
 
 /// Grammar: s ::= DEF_T; DEF_T ::= "def".
 /// Verifies that the multi-byte vocab token "def" is allowed at token id 0.
