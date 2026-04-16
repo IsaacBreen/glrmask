@@ -264,8 +264,19 @@ fn repeat_tree_shape_from_value(value: &str) -> RepeatTreeShape {
     }
 }
 
-const RIGHT_REPEAT_RANGE_FRONT_BUCKET: usize = 128;
-const LEFT_REPEAT_RANGE_BACK_BUCKET: usize = 128;
+fn right_repeat_range_front_bucket() -> usize {
+    std::env::var("GLRMASK_RIGHT_REPEAT_RANGE_FRONT_BUCKET")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(128)
+}
+
+fn left_repeat_range_back_bucket() -> usize {
+    std::env::var("GLRMASK_LEFT_REPEAT_RANGE_BACK_BUCKET")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(128)
+}
 
 fn exact_repeat_split(count: usize, shape: RepeatTreeShape) -> (usize, usize) {
     debug_assert!(count > 1);
@@ -417,8 +428,8 @@ impl Lowerer {
         let (_, nonterminal) = self.fresh_nonterminal("repeat_range");
         self.repeat_range_cache.insert(key, nonterminal);
         match shape {
-            RepeatTreeShape::Right if (max - min + 1) > RIGHT_REPEAT_RANGE_FRONT_BUCKET => {
-                let cutoff = (min + RIGHT_REPEAT_RANGE_FRONT_BUCKET - 1).min(max);
+            RepeatTreeShape::Right if (max - min + 1) > right_repeat_range_front_bucket() => {
+                let cutoff = (min + right_repeat_range_front_bucket() - 1).min(max);
                 for count in min..=cutoff {
                     let exact_nonterminal =
                         self.repeat_exact_nonterminal(symbol, count, shape);
@@ -441,8 +452,8 @@ impl Lowerer {
                 }
                 return nonterminal;
             }
-            RepeatTreeShape::Left if (max - min + 1) > LEFT_REPEAT_RANGE_BACK_BUCKET => {
-                let cutoff = max.saturating_sub(LEFT_REPEAT_RANGE_BACK_BUCKET - 1).max(min);
+            RepeatTreeShape::Left if (max - min + 1) > left_repeat_range_back_bucket() => {
+                let cutoff = max.saturating_sub(left_repeat_range_back_bucket() - 1).max(min);
                 if min < cutoff {
                     let head_nonterminal = self.repeat_range_nonterminal(
                         symbol,
