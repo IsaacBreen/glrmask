@@ -732,6 +732,32 @@ fn test_hideous_ambiguity() {
     }
 }
 
+#[test]
+fn test_large_repetition() {
+    // IDs: "a" -> 0
+    let vocab = make_vocab(&["a"]);
+
+    // A grammar requiring exactly 1 billion 'a's.
+    // This specifically tests that the Lowerer uses logarithmic decomposition (Binary Tree)
+    // rather than linear decomposition, which would cause a stack overflow.
+    let lark = r#"start: "a" ~1000000000..1000000000"#;
+    let constraint = lark_constraint(&["a"], lark);
+
+    let mut state = constraint.start();
+
+    // 1. Check initial mask: 'a' must be allowed.
+    let mask = state.mask();
+    assert_mask_allows(&mask, &[0]);
+
+    // 2. Commit a few tokens.
+    // Even after a few commits, we should still be far from the billion-token goal.
+    commit_all(&mut state, &[0, 0, 0]);
+
+    let mask_after = state.mask();
+    assert_mask_allows(&mask_after, &[0]);
+    assert!(!state.is_finished(), "Should not be finished after only 3 tokens");
+}
+
 /// Grammar: s ::= DEF_T; DEF_T ::= "def".
 /// Verifies that the multi-byte vocab token "def" is allowed at token id 0.
 #[test]
