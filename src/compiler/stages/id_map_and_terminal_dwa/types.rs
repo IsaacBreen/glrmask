@@ -86,6 +86,15 @@ pub(crate) fn debug_profile_enabled() -> bool {
         .unwrap_or(false)
 }
 
+pub(crate) fn debug_terminal_mapping_enabled() -> bool {
+    std::env::var("GLRMASK_DEBUG_TERMINAL_MAPPINGS")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(false)
+}
+
 pub(crate) fn debug_verbose_enabled() -> bool {
     std::env::var("GLRMASK_DEBUG_VERBOSE")
         .map(|value| {

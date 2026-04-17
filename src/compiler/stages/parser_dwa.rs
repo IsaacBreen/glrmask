@@ -159,27 +159,24 @@ fn build_state_summaries(
             unique_bundles.len(),
             pending_branches_by_state.iter().map(|b| b.len()).sum::<usize>(),
         );
-        for (i, bundle) in unique_bundles.iter().enumerate() {
-            let terminals: Vec<_> = bundle.keys().collect();
-            if terminals.len() > 5 || bundle.values().any(|w| !w.is_empty()) {
-                eprintln!(
-                    "[glrmask/profile][parser_dwa_bundles] bundle={} num_terminals={}",
-                    i, terminals.len(),
-                );
-            }
-        }
     }
 
     let built_bundles: Vec<Arc<NWA>> = {
         use rayon::prelude::*;
         unique_bundles
             .par_iter()
-            .map(|bundle| {
+            .enumerate()
+            .map(|(bundle_id, bundle)| {
+                let build_started_at = Instant::now();
                 let nwa = Arc::new(templates.build_bundle(bundle));
                 if parser_dwa_profile_enabled() {
+                    let build_ms = build_started_at.elapsed().as_secs_f64() * 1000.0;
                     eprintln!(
-                        "[glrmask/profile][parser_dwa_bundle_built] bundle_terminals={} nwa_states={}",
-                        bundle.len(), nwa.states.len(),
+                        "[glrmask/profile][parser_dwa_bundle] bundle={:>4} terminals={:>4} nwa_states={:>5} build_ms={:>7.1}",
+                        bundle_id,
+                        bundle.len(),
+                        nwa.states.len(),
+                        build_ms,
                     );
                 }
                 nwa

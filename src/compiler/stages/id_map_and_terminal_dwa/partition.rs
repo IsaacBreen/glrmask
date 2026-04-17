@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -15,9 +16,23 @@ use crate::compiler::stages::id_map_and_terminal_dwa::classify::classify_termina
 use crate::compiler::stages::id_map_and_terminal_dwa::merge::{LocalIdMapTerminalDwa, merge_local_id_maps_and_terminal_dwas};
 use crate::compiler::stages::id_map_and_terminal_dwa::types::{
     TerminalColoring, TerminalPathLength, compile_profile_enabled, debug_profile_enabled,
+    debug_terminal_mapping_enabled,
 };
 use crate::ds::bitset::BitSet;
 use crate::Vocab;
+
+fn maybe_print_terminal_mappings(grammar: &AnalyzedGrammar, num_terminals: u32) {
+    static TERMINAL_MAPPINGS_PRINTED: OnceLock<()> = OnceLock::new();
+    TERMINAL_MAPPINGS_PRINTED.get_or_init(|| {
+        for terminal_id in 0..num_terminals {
+            eprintln!(
+                "[glrmask/debug][terminal_mapping] id={:>4} name={}",
+                terminal_id,
+                grammar.terminal_display_name(terminal_id),
+            );
+        }
+    });
+}
 
 /// Build an id_map and terminal DWA for a single vocab partition.
 ///
@@ -83,7 +98,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
         }
     }
 
-    if debug_profile_enabled() {
+    if debug_profile_enabled() || debug_terminal_mapping_enabled() {
         let l1_ids: Vec<u32> = terminal_path_lengths.iter().enumerate()
             .filter(|(_, l)| **l == TerminalPathLength::One)
             .map(|(i, _)| i as u32)
@@ -96,10 +111,16 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
             .filter(|(_, l)| **l == TerminalPathLength::Zero)
             .map(|(i, _)| i as u32)
             .collect();
-        eprintln!(
-            "[glrmask/debug][partition_classify] label={} l1_terminal_ids={:?} l2p_terminal_ids={:?} zero_terminal_ids={:?}",
-            partition_label, l1_ids, l2p_ids, zero_ids,
-        );
+        if debug_profile_enabled() || debug_terminal_mapping_enabled() {
+            eprintln!(
+                "[glrmask/debug][partition_classify] label={} l1_terminal_ids={:?} l2p_terminal_ids={:?} zero_terminal_ids={:?}",
+                partition_label, l1_ids, l2p_ids, zero_ids,
+            );
+        }
+
+        if debug_terminal_mapping_enabled() {
+            maybe_print_terminal_mappings(grammar, num_terminals);
+        }
     }
 
     // Build L1 and L2+ terminal DWAs in parallel.
@@ -178,6 +199,10 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     merged.profile.add_assign(dominant_branch_profile);
     merged.profile.id_map_ms += classify_ms;
     let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    if debug_terminal_mapping_enabled() {
+        super::emit_terminal_dwa_symbol_counts(partition_label, &merged.dwa, grammar);
+    }
 
     if compile_profile_enabled() || debug_profile_enabled() {
         eprintln!(

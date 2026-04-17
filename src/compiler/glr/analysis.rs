@@ -10,6 +10,7 @@ pub struct AnalyzedGrammar {
     #[allow(dead_code)]
     pub start: NonterminalID,
     pub num_terminals: u32,
+    pub terminal_display_names: Vec<String>,
     pub num_nonterminals: u32,
     pub nullable: BTreeSet<NonterminalID>,
     pub first: Vec<BTreeSet<TerminalID>>,
@@ -44,12 +45,22 @@ impl AnalyzedGrammar {
             rules,
             start: augmented_start,
             num_terminals: g.num_terminals(),
+            terminal_display_names: (0..g.num_terminals())
+                .map(|terminal| g.terminal_display_name(terminal))
+                .collect(),
             num_nonterminals,
             nullable,
             first,
             follow,
             rules_by_lhs,
         }
+    }
+
+    pub fn terminal_display_name(&self, terminal: TerminalID) -> &str {
+        self.terminal_display_names
+            .get(terminal as usize)
+            .map(String::as_str)
+            .unwrap_or("<unknown-terminal>")
     }
 
     /// Debug check: asserts the grammar has no right recursion, no indirect left
@@ -1503,6 +1514,22 @@ mod tests {
         assert!(g.first[1].contains(&0)); 
         
         assert!(g.follow[1].contains(&1)); 
+    }
+
+    #[test]
+    fn test_terminal_display_name_prefers_named_override() {
+        let gdef = GrammarDef {
+            rules: vec![Rule { lhs: 0, rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1)] }],
+            start: 0,
+            terminals: vec![term(0, "a"), term(1, "b")],
+            terminal_names: BTreeMap::from([(0, "LETTER_A".to_string())]),
+            ..Default::default()
+        };
+
+        let g = AnalyzedGrammar::from_grammar_def(&gdef);
+
+        assert_eq!(g.terminal_display_name(0), "LETTER_A");
+        assert_eq!(g.terminal_display_name(1), "b");
     }
 
     /// Simple non-recursive grammar passes all checks.

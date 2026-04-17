@@ -973,7 +973,7 @@ fn build_and_color_hybrid(
     // Step 1: Partition refinement to get fine-grained classes.
     let class_coloring = partition_refine_coloring_raw(candidates, dwa, old_to_new);
     let num_classes = class_coloring.iter().max().map(|&c| c + 1).unwrap_or(0);
-    let refine_ms = if debug { t0.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
+    let _refine_ms = if debug { t0.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
 
     if num_classes <= 1 {
         return class_coloring;
@@ -1148,15 +1148,7 @@ fn build_and_color_hybrid(
         }
     }
 
-    let merge_ms = if debug { t1.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
-
-    if debug {
-        let num_colors = groups.len();
-        eprintln!(
-            "[glrmask/debug][minimize_hybrid] candidates={} classes={} refine_ms={:.1} merge_ms={:.1} colors={}",
-            candidates.len(), num_classes, refine_ms, merge_ms, num_colors
-        );
-    }
+    let _merge_ms = if debug { t1.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
 
     // Step 4: Map each candidate through class → merged color.
     let mut class_to_group = vec![0usize; num_classes];

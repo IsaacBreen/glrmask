@@ -25,7 +25,47 @@ use crate::ds::bitset::BitSet;
 use crate::Vocab;
 
 use classify::classify_vocab_char_type;
-use types::{TerminalColoring, TerminalDwaPhaseProfile, compile_profile_enabled, debug_profile_enabled};
+use types::{TerminalColoring, TerminalDwaPhaseProfile, compile_profile_enabled, debug_profile_enabled, debug_terminal_mapping_enabled};
+
+fn format_terminal_edge_symbol_counts(grammar: &AnalyzedGrammar, dwa: &DWA) -> Vec<String> {
+    let mut counts = vec![0usize; grammar.num_terminals as usize];
+    for state in &dwa.states {
+        for (&label, _) in &state.transitions {
+            if label >= 0 {
+                let label = label as usize;
+                if label < counts.len() {
+                    counts[label] += 1;
+                }
+            }
+        }
+    }
+
+    counts
+        .into_iter()
+        .enumerate()
+        .map(|(terminal_id, count)| {
+            format!(
+                "{}:{}={}",
+                terminal_id,
+                grammar.terminal_display_name(terminal_id as u32),
+                count,
+            )
+        })
+        .collect()
+}
+
+fn terminal_dwa_edge_count(dwa: &DWA) -> usize {
+    dwa.states.iter().map(|state| state.transitions.len()).sum()
+}
+
+fn emit_terminal_dwa_symbol_counts(label: &str, dwa: &DWA, grammar: &AnalyzedGrammar) {
+    eprintln!(
+        "[glrmask/debug][terminal_dwa][symbol_counts] label={} edges={} terminal_edge_symbol_counts={:?}",
+        label,
+        terminal_dwa_edge_count(dwa),
+        format_terminal_edge_symbol_counts(grammar, dwa),
+    );
+}
 
 /// Build the global `(InternalIdMap, DWA)` for the full vocabulary.
 ///
@@ -204,6 +244,10 @@ pub(crate) fn build_id_map_and_terminal_dwa(
             profile.total_ms(),
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
+    }
+
+    if debug_terminal_mapping_enabled() {
+        emit_terminal_dwa_symbol_counts("global", &merged.dwa, grammar);
     }
 
     if std::env::var("GLRMASK_DEBUG_DWA_DUMP").map_or(false, |v| v == "1") {
