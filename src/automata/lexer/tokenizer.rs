@@ -206,6 +206,112 @@ fn append_continuation_alias_states(
     }
 }
 
+/// Merge alias states that are byte-for-byte identical, never touching
+/// main-DFA states (indices `< main_state_count`). Uses a single pass over
+/// alias states with a hash signature; redirects redundant aliases to a
+/// canonical representative and compacts the DFA.
+///
+/// This is a cheap structural dedup — it does not collapse transitive
+/// equivalences that full Hopcroft minimization would find, but it catches
+/// the common case where `append_continuation_alias_states` clones the same
+/// original state multiple times via different paths.
+fn dedup_alias_states(
+    minimized: &mut DFA,
+    main_state_count: usize,
+    state_mapping: &mut [u32],
+) {
+    use crate::ds::char_transitions::CharTransitions;
+    use rustc_hash::FxHashMap;
+    use std::hash::{Hash, Hasher};
+
+    let n = minimized.num_states() as usize;
+    if n <= main_state_count {
+        return;
+    }
+
+    // Hash signature = FxHash of (finalizer bits + sorted transitions).
+    // On collision we verify equality.
+    let mut sig_hash: FxHashMap<u64, u32> = FxHashMap::default();
+    let mut redirect = vec![u32::MAX; n];
+    let mut any = false;
+
+    for s in main_state_count..n {
+        let st = &minimized.states()[s];
+        let mut hasher = rustc_hash::FxHasher::default();
+        for bit in st.finalizers.iter_ones() {
+            bit.hash(&mut hasher);
+        }
+        0xAAAA_u32.hash(&mut hasher);
+        for (b, &t) in st.transitions.iter() {
+            b.hash(&mut hasher);
+            t.hash(&mut hasher);
+        }
+        let key = hasher.finish();
+        match sig_hash.get(&key) {
+            Some(&canon) => {
+                // Verify equality to guard against hash collisions.
+                let c = &minimized.states()[canon as usize];
+                let s_state = &minimized.states()[s];
+                let fins_eq = c.finalizers == s_state.finalizers;
+                let trans_eq = c.transitions.iter().count() == s_state.transitions.iter().count()
+                    && c.transitions
+                        .iter()
+                        .zip(s_state.transitions.iter())
+                        .all(|((b1, &t1), (b2, &t2))| b1 == b2 && t1 == t2);
+                if fins_eq && trans_eq {
+                    redirect[s] = canon;
+                    any = true;
+                }
+            }
+            None => {
+                sig_hash.insert(key, s as u32);
+            }
+        }
+    }
+
+    if !any {
+        return;
+    }
+
+    // Compact: surviving states get new indices; redirected states inherit
+    // their canonical's new index.
+    let mut old_to_new = vec![u32::MAX; n];
+    let mut new_idx: u32 = 0;
+    for s in 0..n {
+        if redirect[s] == u32::MAX {
+            old_to_new[s] = new_idx;
+            new_idx += 1;
+        }
+    }
+    for s in 0..n {
+        if redirect[s] != u32::MAX {
+            old_to_new[s] = old_to_new[redirect[s] as usize];
+        }
+    }
+
+    let mut new_states = Vec::with_capacity(new_idx as usize);
+    let old_states = std::mem::take(minimized.states_mut());
+    for (old_idx, mut st) in old_states.into_iter().enumerate() {
+        if redirect[old_idx] != u32::MAX {
+            continue;
+        }
+        let entries: Vec<(u8, u32)> = st
+            .transitions
+            .iter()
+            .map(|(b, &t)| (b, old_to_new[t as usize]))
+            .collect();
+        st.transitions = CharTransitions::from_sorted_entries(entries);
+        new_states.push(st);
+    }
+    *minimized.states_mut() = new_states;
+
+    for slot in state_mapping.iter_mut() {
+        if *slot != u32::MAX {
+            *slot = old_to_new[*slot as usize];
+        }
+    }
+}
+
 struct TerminalFilteredDfa {
     dfa: DFA,
     active_bitset: BitSet,
@@ -445,6 +551,55 @@ impl Tokenizer {
             }
         }
 
+        // Coreachability prune: remove transitions whose target cannot
+        // reach any active terminal. Without this, Hopcroft treats
+        // "transition to dead state" and "no transition" as distinguishable,
+        // keeping states that differ only in their inactive-terminal
+        // sub-structure separate. Pruning these transitions turns them into
+        // implicit-trap transitions, letting Hopcroft collapse states with
+        // equivalent active-terminal futures but different dead-chain
+        // structure.
+        //
+        // IMPORTANT: use ORIGINAL possible_future_group_ids (from self,
+        // before relevant-byte filtering), because continuation-alias states
+        // reachable only via pruned bytes must remain "live" so their
+        // original futures are preserved for downstream lookups.
+        let num_states_after_filter = dfa.num_states();
+        let mut is_dead = vec![false; num_states_after_filter];
+        for s in 0..num_states_after_filter {
+            let st = &dfa.states()[s];
+            let final_active = !st.finalizers.is_disjoint(&active_bitset);
+            let future_active = !self
+                .dfa
+                .possible_future_group_ids(s as u32)
+                .is_disjoint(&active_bitset);
+            if !final_active && !future_active {
+                is_dead[s] = true;
+            }
+        }
+        let mut coreach_pruned = false;
+        for state in dfa.states_mut().iter_mut() {
+            let orig_len = state.transitions.len();
+            if orig_len == 0 {
+                continue;
+            }
+            let mut filtered = Vec::with_capacity(orig_len);
+            for (byte, &target) in state.transitions.iter() {
+                if !is_dead[target as usize] {
+                    filtered.push((byte, target));
+                }
+            }
+            if filtered.len() != orig_len {
+                state.transitions = crate::ds::char_transitions::CharTransitions::from_sorted_entries(
+                    filtered,
+                );
+                coreach_pruned = true;
+            }
+        }
+        if coreach_pruned {
+            any_cleared = true;
+        }
+
         TerminalFilteredDfa {
             dfa,
             active_bitset,
@@ -495,6 +650,36 @@ impl Tokenizer {
             pruned_targets,
         } = self.filter_dfa_for_terminals(active_terminals, relevant_bytes);
         let t_clear = t_start.elapsed();
+
+        // Diagnostic: count states that cannot reach any active finalizer.
+        // Hopcroft will NOT collapse these into a single sink if their
+        // transitions still distinguish them (even when every transition
+        // eventually leads only to dead states, the distinguishing depth keeps
+        // them apart until the algorithm fully propagates). We report the
+        // split so we can decide whether to add a coreachability prune pass.
+        if std::env::var_os("GLRMASK_DEBUG_SIMPLIFY_COREACH").is_some() {
+            let num_states = dfa.num_states();
+            let mut coreach = 0usize;
+            let mut has_active_final = 0usize;
+            for s in 0..num_states {
+                let st = &dfa.states()[s];
+                let final_active = !st.finalizers.is_disjoint(&active_bitset);
+                let future_active = !dfa
+                    .possible_future_group_ids(s as u32)
+                    .is_disjoint(&active_bitset);
+                if final_active {
+                    has_active_final += 1;
+                }
+                if final_active || future_active {
+                    coreach += 1;
+                }
+            }
+            eprintln!(
+                "[glrmask/debug][simplify_coreach] pre_minimize_states={} coreach={} dead={} has_active_final={} active_terminals={}",
+                num_states, coreach, num_states - coreach, has_active_final,
+                active_terminals.iter().filter(|&&b| b).count(),
+            );
+        }
 
         let continuation_roots = if transitions_pruned {
             collect_pruned_continuation_roots(
@@ -558,14 +743,82 @@ impl Tokenizer {
             dfa.minimize_with_state_mapping()
         };
 
-        if transitions_pruned {
+        if transitions_pruned && !continuation_roots.is_empty() {
+            let main_state_count = minimized.num_states() as usize;
             append_continuation_alias_states(
                 &mut minimized,
                 &dfa,
                 &continuation_roots,
                 &mut state_mapping,
             );
-        };
+            // Merge identical alias states (aliases with byte-for-byte equal
+            // transitions and finalizers). This is a conservative in-place
+            // dedup that never touches main DFA states, preserving the
+            // transition shape Hopcroft produced for the filtered DFA while
+            // collapsing the redundant alias clones that cloning introduces.
+            dedup_alias_states(
+                &mut minimized,
+                main_state_count,
+                &mut state_mapping,
+            );
+
+            // Optional: full Hopcroft re-minimize after dedup. We prevent
+            // main-state/alias-state cross-merging by tagging every alias
+            // with a synthetic finalizer bit before the minimize call so
+            // Hopcroft's initial partition separates them. The bit is
+            // cleared on the resulting DFA before anyone observes it.
+            if std::env::var_os("GLRMASK_DEBUG_REMIN_FULL").is_some() {
+                let synthetic_bit = self.num_terminals as usize;
+                let num_groups = minimized.num_groups().max(synthetic_bit + 1);
+                minimized.ensure_group_capacity(num_groups);
+                for s in main_state_count..minimized.num_states() as usize {
+                    let mut fins = minimized.states()[s].finalizers.clone();
+                    if fins.len() <= synthetic_bit {
+                        let mut grown =
+                            crate::ds::bitset::BitSet::new(synthetic_bit + 1);
+                        for b in fins.iter_ones() {
+                            grown.set(b);
+                        }
+                        fins = grown;
+                    }
+                    fins.set(synthetic_bit);
+                    minimized.states_mut()[s].finalizers = fins;
+                }
+                let mut roots: Vec<u32> = state_mapping
+                    .iter()
+                    .copied()
+                    .filter(|&m| m != u32::MAX)
+                    .collect();
+                roots.sort_unstable();
+                roots.dedup();
+                let pre = minimized.num_states() as usize;
+                let (mut remin, remap) =
+                    minimized.minimize_with_state_mapping_and_roots(&roots);
+
+                for s in 0..remin.num_states() as usize {
+                    if remin.states()[s].finalizers.len() > synthetic_bit
+                        && remin.states()[s].finalizers.contains(synthetic_bit)
+                    {
+                        let mut fins = remin.states()[s].finalizers.clone();
+                        fins.clear(synthetic_bit);
+                        remin.states_mut()[s].finalizers = fins;
+                    }
+                }
+                eprintln!(
+                    "[glrmask/debug][remin_tagged] pre={} post={} main_count={}",
+                    pre,
+                    remin.num_states(),
+                    main_state_count,
+                );
+
+                for slot in state_mapping.iter_mut() {
+                    if *slot != u32::MAX {
+                        *slot = remap[*slot as usize];
+                    }
+                }
+                minimized = remin;
+            }
+        }
 
         if transitions_pruned {
             let remapped_futures = remap_masked_possible_futures(
@@ -719,6 +972,286 @@ mod tests {
                 .iter()
                 .any(|matched| matched.id == 0 && matched.width == 1),
             "the bridge terminal must still match from the preserved continuation state"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn measure_p2_active_terminals_github_hard_o1051() {
+        // The 15 terminals active in l2p partition p2 for Github_hard---o1051.
+        // Run with: cargo test --release -- --ignored --nocapture measure_p2_active
+        let patterns: &[(&str, &str)] = &[
+            ("JSON_BOOL", r#"(?:true|false)"#),
+            ("JSON_NULL", r#"null"#),
+            (":", r#":"#),
+            (",", r#","#),
+            (
+                "JSON_STRING_CHAR_UPTO_CLOSE_3",
+                r#"(?:[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}){0,256}""#,
+            ),
+            (
+                "JSON_STRING_CHAR_EXACT_256_4",
+                r#"(?:[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}){256}"#,
+            ),
+            (
+                "JSON_STRING_CHAR_UPTO_CLOSE_6",
+                r#"(?:[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}){0,256}""#,
+            ),
+            ("hex_char", r#"[0-9a-fA-F]"#),
+            ("uri_char_at", r#"[a-zA-Z0-9\-._~!$&'()*+,;=:@]"#),
+            ("uri_char_at_slash_q", r#"[a-zA-Z0-9\-._~!$&'()*+,;=:@/?]"#),
+            ("alpha", r#"[a-zA-Z]"#),
+            ("scheme_char", r#"[a-zA-Z0-9+\-.]"#),
+            ("uri_char_colon", r#"[a-zA-Z0-9\-._~!$&'()*+,;=:]"#),
+            ("v_literal", r#"v"#),
+            ("uri_char_plain", r#"[a-zA-Z0-9\-._~!$&'()*+,;=]"#),
+        ];
+
+        let exprs: Vec<_> = patterns
+            .iter()
+            .map(|(_, p)| parse_regex(p, true))
+            .collect();
+
+        let t0 = std::time::Instant::now();
+        let tokenizer = build_tokenizer_from_exprs(&exprs);
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        eprintln!(
+            "[measure_p2] tokenizer_states={} terminals={} build_ms={:.3}",
+            tokenizer.num_states(),
+            patterns.len(),
+            ms
+        );
+
+        // Measure each terminal alone.
+        for (label, pattern) in patterns {
+            let t0 = std::time::Instant::now();
+            let tok = build_tokenizer_from_exprs(&[parse_regex(pattern, true)]);
+            let ms = t0.elapsed().as_secs_f64() * 1000.0;
+            eprintln!(
+                "[measure_p2] alone={:30} states={} ms={:.3}",
+                label,
+                tok.num_states(),
+                ms,
+            );
+        }
+
+        // Measure leave-one-out.
+        for (i, (label, _)) in patterns.iter().enumerate() {
+            let subset: Vec<_> = exprs
+                .iter()
+                .enumerate()
+                .filter_map(|(j, e)| (j != i).then(|| e.clone()))
+                .collect();
+            let t0 = std::time::Instant::now();
+            let tok = build_tokenizer_from_exprs(&subset);
+            let ms = t0.elapsed().as_secs_f64() * 1000.0;
+            eprintln!(
+                "[measure_p2] drop={:30} states={} ms={:.3}",
+                label,
+                tok.num_states(),
+                ms,
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn measure_simplify_vs_from_scratch_realistic() {
+        // Build 15 active + MANY quoted-string-literal decoys (mimicking
+        // property-key literals in a JSON schema). These overlap heavily
+        // with active JSON_STRING_CHAR regexes at the byte level.
+        let active_patterns: &[&str] = &[
+            r#"(?:true|false)"#,
+            r#"null"#,
+            r#":"#,
+            r#","#,
+            r#"(?:[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}){0,256}""#,
+            r#"(?:[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}){256}"#,
+            r#"(?:[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}){0,256}""#,
+            r#"[0-9a-fA-F]"#,
+            r#"[a-zA-Z0-9\-._~!$&'()*+,;=:@]"#,
+            r#"[a-zA-Z0-9\-._~!$&'()*+,;=:@/?]"#,
+            r#"[a-zA-Z]"#,
+            r#"[a-zA-Z0-9+\-.]"#,
+            r#"[a-zA-Z0-9\-._~!$&'()*+,;=:]"#,
+            r#"v"#,
+            r#"[a-zA-Z0-9\-._~!$&'()*+,;=]"#,
+        ];
+        // ~60 property-key literals enclosed in quotes — these are ALL
+        // bounded-length prefixes of JSON_STRING_CHAR body patterns.
+        let key_literals: &[&str] = &[
+            "repository", "owner", "name", "full_name", "description",
+            "url", "html_url", "git_url", "ssh_url", "clone_url",
+            "homepage", "language", "forks_count", "stargazers_count",
+            "watchers_count", "size", "default_branch", "open_issues_count",
+            "is_template", "topics", "has_issues", "has_projects", "has_wiki",
+            "has_pages", "has_downloads", "archived", "disabled", "visibility",
+            "pushed_at", "created_at", "updated_at", "permissions",
+            "allow_rebase_merge", "template_repository", "allow_squash_merge",
+            "allow_auto_merge", "delete_branch_on_merge", "allow_merge_commit",
+            "subscribers_count", "network_count", "license", "forks",
+            "open_issues", "watchers", "node_id", "id", "type", "login",
+            "gravatar_id", "avatar_url", "followers_url", "following_url",
+            "gists_url", "starred_url", "subscriptions_url", "organizations_url",
+            "repos_url", "events_url", "received_events_url", "site_admin",
+            "spdx_id", "key", "admin", "pull", "push",
+        ];
+
+        let active_exprs: Vec<_> = active_patterns
+            .iter()
+            .map(|p| parse_regex(p, true))
+            .collect();
+        let from_scratch = build_tokenizer_from_exprs(&active_exprs);
+        eprintln!("[real_sim] from_scratch_states={}", from_scratch.num_states());
+
+        let mut combined_exprs: Vec<_> = active_exprs.clone();
+        for k in key_literals {
+            // Quoted literal: "<key>" — keys are alphanumeric+_, no regex meta
+            let pattern = format!(r#""{}""#, k);
+            combined_exprs.push(parse_regex(&pattern, true));
+        }
+        // Add the o1051 "killer" unbounded-body terminals that don't appear in
+        // my naive decoys:
+        let killer_patterns: &[&str] = &[
+            // JSON_STRING_BODY-like: unbounded body star
+            r#"(?:[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*"#,
+            // UUID-inside-body regex (id=37)
+            r#"(?:(?:[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*(?:[\x30-\x39\x61-\x66]{8}-[\x30-\x39\x61-\x66]{4}-[\x30-\x39\x61-\x66]{4}-[\x30-\x39\x61-\x66]{4}-[\x30-\x39\x61-\x66]{12})(?:[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*)""#,
+            // Date-inside-body (id=78)
+            r#"(?:([\x30-\x39]{4})(-([\x30-\x39]{2}))?(-([\x30-\x39]{2}))?)""#,
+            // Unbounded body then close quote (id=6)
+            r#"(?:(?:[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*)""#,
+            // IPv4 octet
+            r#"(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"#,
+            // JSON integer / number
+            r#"\-?(?:0|[1-9][0-9]*)"#,
+            r#"\-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+\-]?[0-9]+)?"#,
+        ];
+        for p in killer_patterns {
+            combined_exprs.push(parse_regex(p, true));
+        }
+        let combined = build_tokenizer_from_exprs(&combined_exprs);
+        eprintln!(
+            "[real_sim] combined_states={} active={} inactive={}",
+            combined.num_states(),
+            active_patterns.len(),
+            key_literals.len(),
+        );
+
+        let n_total = combined_exprs.len();
+        let mut active_mask = vec![false; n_total];
+        for i in 0..active_patterns.len() {
+            active_mask[i] = true;
+        }
+
+        let (simplified, _mapping) = combined.simplify_for_terminals(&active_mask, None);
+        eprintln!(
+            "[real_sim] simplify_for_terminals states={} (target={} overshoot={:.2}x)",
+            simplified.num_states(),
+            from_scratch.num_states(),
+            simplified.num_states() as f64 / from_scratch.num_states() as f64,
+        );
+
+        // Also test with relevant_bytes set to the bytes actually used by active
+        // terminals (simulating what the real pipeline does for a partition).
+        let mut relevant_bytes = [false; 256];
+        for b in b'a'..=b'z' { relevant_bytes[b as usize] = true; }
+        for b in b'A'..=b'Z' { relevant_bytes[b as usize] = true; }
+        for b in b'0'..=b'9' { relevant_bytes[b as usize] = true; }
+        for &b in b"-._~!$&'()*+,;=:@/?\"\\" { relevant_bytes[b as usize] = true; }
+        let (simplified_rb, _mapping_rb) =
+            combined.simplify_for_terminals(&active_mask, Some(&relevant_bytes));
+        eprintln!(
+            "[real_sim] simplify_for_terminals_with_rb states={} (vs no_rb={})",
+            simplified_rb.num_states(),
+            simplified.num_states(),
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn measure_simplify_vs_from_scratch() {
+        // Build a tokenizer from 15 active + several "inactive decoy" terminals.
+        // Then simplify with only the 15 active and compare to from-scratch.
+        let active_patterns: &[&str] = &[
+            r#"(?:true|false)"#,
+            r#"null"#,
+            r#":"#,
+            r#","#,
+            r#"(?:[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}){0,256}""#,
+            r#"(?:[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}){256}"#,
+            r#"(?:[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}){0,256}""#,
+            r#"[0-9a-fA-F]"#,
+            r#"[a-zA-Z0-9\-._~!$&'()*+,;=:@]"#,
+            r#"[a-zA-Z0-9\-._~!$&'()*+,;=:@/?]"#,
+            r#"[a-zA-Z]"#,
+            r#"[a-zA-Z0-9+\-.]"#,
+            r#"[a-zA-Z0-9\-._~!$&'()*+,;=:]"#,
+            r#"v"#,
+            r#"[a-zA-Z0-9\-._~!$&'()*+,;=]"#,
+        ];
+        // Inactive decoys: bounded-repeat date-time-like patterns and other
+        // chains that would exist in the original full tokenizer.
+        let inactive_patterns: &[&str] = &[
+            r#"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+\-][0-9]{2}:[0-9]{2})"#,
+            r#"[0-9]{4}-[0-9]{2}-[0-9]{2}"#,
+            r#"[0-9]{2}:[0-9]{2}:[0-9]{2}"#,
+            r#"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#,
+            r#"(?:[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}){0,512}""#,
+            r#"(?:[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}){128}"#,
+            r#"\-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+\-]?[0-9]+)?"#,
+        ];
+
+        let from_scratch_exprs: Vec<_> = active_patterns
+            .iter()
+            .map(|p| parse_regex(p, true))
+            .collect();
+        let from_scratch = build_tokenizer_from_exprs(&from_scratch_exprs);
+        eprintln!("[sim] from_scratch_states={}", from_scratch.num_states());
+
+        // Combined tokenizer: active + inactive
+        let mut combined_exprs: Vec<_> = from_scratch_exprs.clone();
+        for p in inactive_patterns {
+            combined_exprs.push(parse_regex(p, true));
+        }
+        let combined = build_tokenizer_from_exprs(&combined_exprs);
+        eprintln!(
+            "[sim] combined_states={} (active={} + inactive={})",
+            combined.num_states(),
+            active_patterns.len(),
+            inactive_patterns.len(),
+        );
+
+        // Simplify: only first N terminals active.
+        let n_active = active_patterns.len();
+        let n_total = combined_exprs.len();
+        let mut active_mask = vec![false; n_total];
+        for i in 0..n_active {
+            active_mask[i] = true;
+        }
+
+        let t0 = std::time::Instant::now();
+        let (simplified, _mapping) = combined.simplify_for_terminals(&active_mask, None);
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        eprintln!(
+            "[sim] simplify_for_terminals states={} ms={:.3}",
+            simplified.num_states(),
+            ms,
+        );
+
+        // Re-minimize the simplified DFA to check if it's already minimal.
+        let (remin, _) = simplified.dfa.minimize_with_state_mapping();
+        eprintln!(
+            "[sim] re_minimize_states={} (same as above means already minimal)",
+            remin.num_states(),
+        );
+
+        // Expected: simplified should equal from_scratch. If not, simplify is buggy.
+        eprintln!(
+            "[sim] DIFF: simplified={} from_scratch={} overshoot={}x",
+            simplified.num_states(),
+            from_scratch.num_states(),
+            simplified.num_states() as f64 / from_scratch.num_states() as f64,
         );
     }
 }

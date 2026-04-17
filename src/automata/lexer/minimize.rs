@@ -662,17 +662,13 @@ impl DFA {
                 minimality_check_blocks = blocks;
             }
             TopologyPrerefine::Refined { blocks: refined_blocks, .. } => {
-                // If topology found the DFA is nearly minimal (>90% unique
-                // signatures) AND the DFA is large enough that Hopcroft is
-                // expensive, skip the O(n·|Σ|·log n) minimize.
-                // For small DFAs (≤1000 states), Hopcroft is cheap and
-                // transitive merges can provide large reductions.
-                if !force_hopcroft && n > 1000 && refined_blocks.len() > n * 9 / 10 {
-                    working.recompute_possible_futures();
-                    let identity: Vec<u32> = (0..n as u32).collect();
-                    let composed = compose_mappings(&old_to_working, &identity);
-                    return (working, composed);
-                }
+                // Previously bailed out when refined_blocks.len() > n*9/10,
+                // assuming the DFA was near-minimal. That heuristic was
+                // unsound: topology_prerefine uses a one-pass signature that
+                // over-splits when blocks depend on each other's refinement
+                // (product-DFA states whose active language is equal but
+                // whose one-pass signatures differ due to inactive-dimension
+                // coupling). Always fall through to Hopcroft.
                 minimality_check_blocks = refined_blocks;
             }
             TopologyPrerefine::Skip => {}
@@ -719,12 +715,8 @@ impl DFA {
                 minimality_check_blocks = blocks;
             }
             TopologyPrerefine::Refined { blocks: refined_blocks, .. } => {
-                if !force_hopcroft && n > 1000 && refined_blocks.len() > n * 9 / 10 {
-                    working.recompute_possible_futures();
-                    let identity: Vec<u32> = (0..n as u32).collect();
-                    let composed = compose_mappings(&old_to_working, &identity);
-                    return (working, composed);
-                }
+                // See minimize_impl: topology prerefine is unsound as a
+                // minimality predictor; always fall through to Hopcroft.
                 minimality_check_blocks = refined_blocks;
             }
             TopologyPrerefine::Skip => {}

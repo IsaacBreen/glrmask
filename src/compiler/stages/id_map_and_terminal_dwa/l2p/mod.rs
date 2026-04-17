@@ -204,6 +204,26 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         );
     }
 
+    // DIAGNOSTIC: compare simplified state count against a tokenizer built
+    // from scratch using only the active terminals. These should match
+    // (they describe the same language); any overshoot indicates a bug in
+    // the simplify pipeline.
+    if std::env::var_os("GLRMASK_DEBUG_SIMPLIFY_COMPARE_FROM_SCRATCH").is_some() {
+        // Re-minimize the simplified DFA. If state count drops, minimize is
+        // not reaching a fixed point in the pipeline.
+        let dfa_clone = simplified_tok.dfa.clone();
+        let t0 = Instant::now();
+        let (remin, _) = dfa_clone.minimize_with_state_mapping();
+        let remin_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        eprintln!(
+            "[glrmask/debug][l2p_remin] partition={} simplified_states={} remin_states={} remin_ms={:.1}",
+            partition_label,
+            simplified_tok.num_states(),
+            remin.num_states(),
+            remin_ms,
+        );
+    }
+
     // From here on, use the simplified tokenizer for all operations.
     let tokenizer = &simplified_tok;
 

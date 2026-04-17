@@ -177,8 +177,36 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     let shared_classify_cache = external_classify_cache.unwrap_or(&owned_classify_cache);
 
     // Build each partition in parallel using rayon.
+    // GLRMASK_PARTITION_SERIAL=1 runs partitions sequentially so inner rayon
+    // parallelism inside equivalence analysis can saturate all cores instead
+    // of competing with outer partition parallelism on oversubscribed
+    // workloads.
     use rayon::prelude::*;
-    let partition_results: Vec<(Option<(merge::LocalIdMapTerminalDwa, f64)>, usize)> = sub_vocabs
+    let partition_serial = std::env::var_os("GLRMASK_PARTITION_SERIAL").is_some();
+    let partition_results: Vec<(Option<(merge::LocalIdMapTerminalDwa, f64)>, usize)> = if partition_serial {
+        sub_vocabs
+            .iter()
+            .enumerate()
+            .map(|(idx, sub_vocab)| {
+                let started_at = Instant::now();
+                let label = format!("p{}", idx);
+                let result = partition::build_partition_id_map_and_terminal_dwa(
+                    &label,
+                    tokenizer,
+                    sub_vocab,
+                    terminal_coloring,
+                    use_terminal_coloring,
+                    ignore_terminal,
+                    grammar,
+                    disallowed_follows,
+                    &flat_trans,
+                    Some(&shared_vocab_dfa_cache),
+                    Some(&shared_classify_cache),
+                ).map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0));
+                (result, idx)
+            })
+            .collect()
+    } else { sub_vocabs
         .par_iter()
         .enumerate()
         .map(|(idx, sub_vocab)| {
@@ -199,7 +227,8 @@ pub(crate) fn build_id_map_and_terminal_dwa(
             ).map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0));
             (result, idx)
         })
-        .collect();
+        .collect()
+    };
 
     let partition_ms: Vec<f64> = {
         let mut ms = vec![0.0; sub_vocabs.len()];
