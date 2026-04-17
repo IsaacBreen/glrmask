@@ -640,6 +640,30 @@ impl Tokenizer {
             .map(|v| !v.is_empty() && v != "0")
             .unwrap_or(false);
 
+        // When a partition has few active terminals, skipping the
+        // relevant_bytes pruning gives a dramatically smaller simplified
+        // DFA: minimizing the active-only DFA collapses states equivalent
+        // in the active language (often close to an optimal from-scratch
+        // build), whereas relevant_bytes pruning leaves the continuation
+        // graph behind pruned bytes, which the alias stage clones wholesale.
+        // For partitions where most terminals are active, the alias stage
+        // stays small and relevant_bytes pruning dominates the reduction,
+        // so keep that path.
+        let relevant_bytes = if std::env::var_os("GLRMASK_FORCE_RELEVANT_BYTES").is_some() {
+            relevant_bytes
+        } else if std::env::var_os("GLRMASK_NO_RELEVANT_BYTES").is_some() {
+            None
+        } else {
+            match relevant_bytes {
+                Some(rb) => {
+                    let num_active = active_terminals.iter().filter(|&&a| a).count();
+                    let num_total = active_terminals.len();
+                    if num_active * 2 <= num_total { None } else { Some(rb) }
+                }
+                None => None,
+            }
+        };
+
         let t_start = std::time::Instant::now();
         let t_clone = t_start.elapsed();
         let TerminalFilteredDfa {
@@ -743,6 +767,16 @@ impl Tokenizer {
             dfa.minimize_with_state_mapping()
         };
 
+        if std::env::var_os("GLRMASK_DEBUG_SIMPLIFY_PHASES").is_some() {
+            eprintln!(
+                "[glrmask/debug][simplify_phase] active={} pre_min={} post_first_min={} roots={}",
+                num_active,
+                pre_minimize_states,
+                minimized.num_states(),
+                continuation_roots.len(),
+            );
+        }
+
         if transitions_pruned && !continuation_roots.is_empty() {
             let main_state_count = minimized.num_states() as usize;
             append_continuation_alias_states(
@@ -761,6 +795,14 @@ impl Tokenizer {
                 main_state_count,
                 &mut state_mapping,
             );
+
+            if std::env::var_os("GLRMASK_DEBUG_SIMPLIFY_PHASES").is_some() {
+                eprintln!(
+                    "[glrmask/debug][simplify_phase] after_append_dedup states={} main_count={}",
+                    minimized.num_states(),
+                    main_state_count,
+                );
+            }
 
             // Optional: full Hopcroft re-minimize after dedup. We prevent
             // main-state/alias-state cross-merging by tagging every alias
