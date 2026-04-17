@@ -3,11 +3,12 @@ use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use once_cell::sync::Lazy;
 use rustc_hash::FxHashMap;
+use dashmap::DashMap;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 
 #[derive(Debug, Clone)]
 pub struct Weight(pub Arc<WeightMap>);
@@ -15,18 +16,16 @@ pub struct Weight(pub Arc<WeightMap>);
 type SharedTokenSet = Arc<RangeSetBlaze<u32>>;
 type WeightMap = RangeMapBlaze<u32, SharedTokenSet>;
 
-#[derive(Default)]
-struct GlobalWeightInterner {
-    token_sets: FxHashMap<RangeSetBlaze<u32>, Weak<RangeSetBlaze<u32>>>,
-    weights: FxHashMap<u64, Vec<Weak<WeightMap>>>,
-    token_inserts_since_cleanup: usize,
-    weight_inserts_since_cleanup: usize,
-}
-
 const INTERNER_CLEANUP_INTERVAL: usize = 1024;
 
-static GLOBAL_WEIGHT_INTERNER: Lazy<Mutex<GlobalWeightInterner>> =
-    Lazy::new(|| Mutex::new(GlobalWeightInterner::default()));
+// Sharded interner: DashMap provides internal striping (~16 shards) so concurrent
+// intern calls can run in parallel on different keys. Previously we used a single
+// `Mutex<GlobalWeightInterner>` which serialized all weight-op fresh constructions.
+static GLOBAL_TOKEN_SETS: Lazy<DashMap<RangeSetBlaze<u32>, Weak<RangeSetBlaze<u32>>>> =
+    Lazy::new(DashMap::new);
+static GLOBAL_WEIGHTS: Lazy<DashMap<u64, Vec<Weak<WeightMap>>>> = Lazy::new(DashMap::new);
+static TOKEN_INSERTS_SINCE_CLEANUP: AtomicUsize = AtomicUsize::new(0);
+static WEIGHT_INSERTS_SINCE_CLEANUP: AtomicUsize = AtomicUsize::new(0);
 
 static EMPTY_RANGESET: Lazy<SharedTokenSet> = Lazy::new(|| Arc::new(RangeSetBlaze::new()));
 
@@ -41,71 +40,81 @@ static ALL_WEIGHT: Lazy<Weight> = Lazy::new(|| {
     finalize_weight_map(map)
 });
 
-fn with_interner<R>(f: impl FnOnce(&mut GlobalWeightInterner) -> R) -> R {
-    let mut interner = GLOBAL_WEIGHT_INTERNER.lock().unwrap();
-    f(&mut interner)
+fn prune_dead_token_sets() {
+    GLOBAL_TOKEN_SETS.retain(|_, weak| weak.strong_count() > 0);
 }
 
-impl GlobalWeightInterner {
-    fn prune_dead_token_sets(&mut self) {
-        self.token_sets.retain(|_, weak| weak.strong_count() > 0);
-    }
+fn prune_dead_weights() {
+    GLOBAL_WEIGHTS.retain(|_, bucket| {
+        bucket.retain(|weak| weak.strong_count() > 0);
+        !bucket.is_empty()
+    });
+}
 
-    fn prune_dead_weights(&mut self) {
-        self.weights.retain(|_, bucket| {
-            bucket.retain(|weak| weak.strong_count() > 0);
-            !bucket.is_empty()
-        });
-    }
-
-    fn maybe_cleanup_token_sets(&mut self) {
-        if self.token_inserts_since_cleanup < INTERNER_CLEANUP_INTERVAL {
-            return;
-        }
-        self.prune_dead_token_sets();
-        self.token_inserts_since_cleanup = 0;
-    }
-
-    fn maybe_cleanup_weights(&mut self) {
-        if self.weight_inserts_since_cleanup < INTERNER_CLEANUP_INTERVAL {
-            return;
-        }
-        self.prune_dead_weights();
-        self.weight_inserts_since_cleanup = 0;
-    }
-
-    fn clear_all(&mut self) {
-        self.token_sets.clear();
-        self.weights.clear();
-        self.token_inserts_since_cleanup = 0;
-        self.weight_inserts_since_cleanup = 0;
-    }
-
-    fn clear_stale(&mut self) {
-        self.prune_dead_token_sets();
-        self.prune_dead_weights();
-        self.token_inserts_since_cleanup = 0;
-        self.weight_inserts_since_cleanup = 0;
+fn maybe_cleanup_token_sets() {
+    if TOKEN_INSERTS_SINCE_CLEANUP.fetch_add(1, Ordering::Relaxed) + 1
+        >= INTERNER_CLEANUP_INTERVAL
+    {
+        // Best-effort: swap counter to 0 and prune. Racy but harmless.
+        TOKEN_INSERTS_SINCE_CLEANUP.store(0, Ordering::Relaxed);
+        prune_dead_token_sets();
     }
 }
+
+fn maybe_cleanup_weights() {
+    if WEIGHT_INSERTS_SINCE_CLEANUP.fetch_add(1, Ordering::Relaxed) + 1
+        >= INTERNER_CLEANUP_INTERVAL
+    {
+        WEIGHT_INSERTS_SINCE_CLEANUP.store(0, Ordering::Relaxed);
+        prune_dead_weights();
+    }
+}
+
+fn interner_clear_all() {
+    GLOBAL_TOKEN_SETS.clear();
+    GLOBAL_WEIGHTS.clear();
+    TOKEN_INSERTS_SINCE_CLEANUP.store(0, Ordering::Relaxed);
+    WEIGHT_INSERTS_SINCE_CLEANUP.store(0, Ordering::Relaxed);
+}
+
+fn interner_clear_stale() {
+    prune_dead_token_sets();
+    prune_dead_weights();
+    TOKEN_INSERTS_SINCE_CLEANUP.store(0, Ordering::Relaxed);
+    WEIGHT_INSERTS_SINCE_CLEANUP.store(0, Ordering::Relaxed);
+}
+
 
 fn intern_rangeset(tokens: RangeSetBlaze<u32>) -> SharedTokenSet {
     if tokens.is_empty() {
         return Arc::clone(&EMPTY_RANGESET);
     }
 
-    with_interner(|interner| {
-        if let Some(existing) = interner.token_sets.get(&tokens).and_then(Weak::upgrade) {
-            return existing;
+    // Use `entry` to obtain exclusive access to this shard for the given key.
+    use dashmap::mapref::entry::Entry;
+    let shared = match GLOBAL_TOKEN_SETS.entry(tokens) {
+        Entry::Occupied(mut occupied) => {
+            if let Some(existing) = occupied.get().upgrade() {
+                return existing;
+            }
+            // Stale weak: replace with new Arc.
+            let key = occupied.key().clone();
+            let shared = Arc::new(key);
+            occupied.insert(Arc::downgrade(&shared));
+            shared
         }
-
-        interner.maybe_cleanup_token_sets();
-        let key = tokens.clone();
-        let shared = Arc::new(tokens);
-        interner.token_sets.insert(key, Arc::downgrade(&shared));
-        interner.token_inserts_since_cleanup += 1;
-        shared
-    })
+        Entry::Vacant(vacant) => {
+            let key = vacant.key().clone();
+            let shared = Arc::new(key);
+            vacant.insert(Arc::downgrade(&shared));
+            shared
+        }
+    };
+    // NOTE: `shared` was created after the Entry guard was released (match returned),
+    // but we still must not call cleanup while holding any DashMap guard. The match
+    // arms drop their guards before returning, so calling cleanup here is safe.
+    maybe_cleanup_token_sets();
+    shared
 }
 
 fn weight_map_fingerprint(map: &WeightMap) -> u64 {
@@ -141,31 +150,23 @@ fn weight_map_eq(left: &WeightMap, right: &WeightMap) -> bool {
 
 fn intern_weight_map(map: WeightMap) -> Arc<WeightMap> {
     let fingerprint = weight_map_fingerprint(&map);
-    with_interner(|interner| {
-        if let Some(bucket) = interner.weights.get_mut(&fingerprint) {
-            let mut idx = 0usize;
-            while idx < bucket.len() {
-                let Some(existing) = bucket[idx].upgrade() else {
-                    bucket.swap_remove(idx);
-                    continue;
-                };
-                if weight_map_eq(existing.as_ref(), &map) {
-                    return existing;
-                }
-                idx += 1;
-            }
+    let mut bucket = GLOBAL_WEIGHTS.entry(fingerprint).or_default();
+    let mut idx = 0usize;
+    while idx < bucket.len() {
+        let Some(existing) = bucket[idx].upgrade() else {
+            bucket.swap_remove(idx);
+            continue;
+        };
+        if weight_map_eq(existing.as_ref(), &map) {
+            return existing;
         }
-
-        interner.maybe_cleanup_weights();
-        let shared = Arc::new(map);
-        interner
-            .weights
-            .entry(fingerprint)
-            .or_default()
-            .push(Arc::downgrade(&shared));
-        interner.weight_inserts_since_cleanup += 1;
-        shared
-    })
+        idx += 1;
+    }
+    let shared = Arc::new(map);
+    bucket.push(Arc::downgrade(&shared));
+    drop(bucket);
+    maybe_cleanup_weights();
+    shared
 }
 
 fn same_shared_token_set(left: &SharedTokenSet, right: &SharedTokenSet) -> bool {
@@ -357,12 +358,12 @@ fn with_weight_op_memo<R>(f: impl FnOnce(&mut WeightOpMemo) -> R) -> R {
 
 /// Clear the global interned-weight tables entirely.
 pub fn clear_all_weights() {
-    with_interner(|interner| interner.clear_all());
+    interner_clear_all();
 }
 
 /// Prune only dead entries from the global weight interner.
 pub fn clear_stale_weights() {
-    with_interner(|interner| interner.clear_stale());
+    interner_clear_stale();
 }
 
 /// Clear weight-operation memo caches on **all** threads.
@@ -1745,9 +1746,8 @@ mod tests {
             map.extend_simple(std::iter::once((0..=1, Arc::new(stale_tokens.clone()))));
             let shared = Arc::new(map);
             let weak = Arc::downgrade(&shared);
-            let mut interner = GLOBAL_WEIGHT_INTERNER.lock().unwrap();
-            interner.token_sets.insert(stale_tokens.clone(), stale_token_weak);
-            interner.weights.insert(fingerprint, vec![weak.clone()]);
+            GLOBAL_TOKEN_SETS.insert(stale_tokens.clone(), stale_token_weak);
+            GLOBAL_WEIGHTS.insert(fingerprint, vec![weak.clone()]);
             drop(shared);
             weak
         };
@@ -1756,9 +1756,8 @@ mod tests {
 
         clear_stale_weights();
 
-        let interner = GLOBAL_WEIGHT_INTERNER.lock().unwrap();
-        assert!(!interner.weights.contains_key(&fingerprint));
-        if let Some(live_entry) = interner.token_sets.get(&stale_tokens) {
+        assert!(!GLOBAL_WEIGHTS.contains_key(&fingerprint));
+        if let Some(live_entry) = GLOBAL_TOKEN_SETS.get(&stale_tokens) {
             assert!(live_entry.strong_count() > 0);
         }
     }
