@@ -70,6 +70,142 @@ fn remap_masked_possible_futures(
     remapped
 }
 
+fn state_has_active_continuation(dfa: &DFA, state: usize, active_groups: &BitSet) -> bool {
+    !dfa.states()[state].finalizers.is_disjoint(active_groups)
+        || !dfa.possible_future_group_ids(state as u32).is_disjoint(active_groups)
+}
+
+fn state_needs_preserved_root(dfa: &DFA, state: usize, active_groups: &BitSet) -> bool {
+    let dfa_state = &dfa.states()[state];
+    !dfa_state.finalizers.is_disjoint(active_groups)
+        || (!dfa_state.transitions.is_empty()
+            && !dfa.possible_future_group_ids(state as u32).is_disjoint(active_groups))
+}
+
+fn collect_pruned_continuation_roots(
+    dfa: &DFA,
+    pruned_targets: &[Vec<u32>],
+    active_groups: &BitSet,
+) -> Vec<u32> {
+    let num_states = dfa.num_states();
+    if num_states == 0 || pruned_targets.len() != num_states {
+        return Vec::new();
+    }
+
+    let mut reachable = vec![false; num_states];
+    let mut queue = vec![0usize];
+    reachable[0] = true;
+    while let Some(state) = queue.pop() {
+        for (_, &next) in dfa.states()[state].transitions.iter() {
+            let next = next as usize;
+            if !reachable[next] {
+                reachable[next] = true;
+                queue.push(next);
+            }
+        }
+    }
+
+    let mut visited = vec![false; num_states];
+    let mut preserved = vec![false; num_states];
+    let mut queue = Vec::new();
+    for targets in pruned_targets {
+        for &target in targets {
+            let target = target as usize;
+            if target < num_states && !reachable[target] && !visited[target] {
+                visited[target] = true;
+                queue.push(target);
+            }
+        }
+    }
+
+    while let Some(state) = queue.pop() {
+        if state_needs_preserved_root(dfa, state, active_groups) {
+            preserved[state] = true;
+        }
+        for &next in &pruned_targets[state] {
+            let next = next as usize;
+            if next < num_states
+                && !reachable[next]
+                && !visited[next]
+                && state_has_active_continuation(dfa, next, active_groups)
+            {
+                visited[next] = true;
+                queue.push(next);
+            }
+        }
+    }
+
+    preserved
+        .into_iter()
+        .enumerate()
+        .filter_map(|(state, keep)| keep.then_some(state as u32))
+        .collect()
+}
+
+fn append_continuation_alias_states(
+    minimized: &mut DFA,
+    pruned_dfa: &DFA,
+    continuation_roots: &[u32],
+    state_mapping: &mut Vec<u32>,
+) {
+    if continuation_roots.is_empty() {
+        return;
+    }
+
+    fn ensure_continuation_alias_state(
+        minimized: &mut DFA,
+        pruned_dfa: &DFA,
+        state_mapping: &mut Vec<u32>,
+        building: &mut [bool],
+        original_state: usize,
+    ) -> u32 {
+        if state_mapping[original_state] != u32::MAX {
+            return state_mapping[original_state];
+        }
+
+        if building[original_state] {
+            return state_mapping[original_state];
+        }
+
+        building[original_state] = true;
+        let alias_state = minimized.add_state();
+        state_mapping[original_state] = alias_state;
+
+        let original = &pruned_dfa.states()[original_state];
+        let mut transitions = Vec::with_capacity(original.transitions.len());
+        for (byte, &target) in original.transitions.iter() {
+            let mapped_target = ensure_continuation_alias_state(
+                minimized,
+                pruned_dfa,
+                state_mapping,
+                building,
+                target as usize,
+            );
+            transitions.push((byte, mapped_target));
+        }
+
+        let alias = &mut minimized.states_mut()[alias_state as usize];
+        alias.transitions = crate::ds::char_transitions::CharTransitions::from_sorted_entries(transitions);
+        alias.finalizers = original.finalizers.clone();
+        building[original_state] = false;
+        alias_state
+    }
+
+    let mut building = vec![false; pruned_dfa.num_states()];
+    for &root in continuation_roots {
+        let root = root as usize;
+        if root < pruned_dfa.num_states() {
+            ensure_continuation_alias_state(
+                minimized,
+                pruned_dfa,
+                state_mapping,
+                &mut building,
+                root,
+            );
+        }
+    }
+}
+
 impl Tokenizer {
     pub fn start_state(&self) -> u32 {
         0
@@ -286,14 +422,19 @@ impl Tokenizer {
 
         let mut any_cleared = false;
         let mut transitions_pruned = false;
-        for state in dfa.states_mut() {
+        let mut pruned_targets = relevant_bytes.map(|_| vec![Vec::new(); dfa.num_states()]);
+        for (state_id, state) in dfa.states_mut().iter_mut().enumerate() {
             if let Some(relevant_bytes) = relevant_bytes {
-                let filtered_transitions: Vec<(u8, u32)> = state
-                    .transitions
-                    .iter()
-                    .filter(|(byte, _)| relevant_bytes[*byte as usize])
-                    .map(|(byte, &target)| (byte, target))
-                    .collect();
+                let mut filtered_transitions = Vec::with_capacity(state.transitions.len());
+                for (byte, &target) in state.transitions.iter() {
+                    if relevant_bytes[byte as usize] {
+                        filtered_transitions.push((byte, target));
+                    } else {
+                        if let Some(pruned_targets) = pruned_targets.as_mut() {
+                            pruned_targets[state_id].push(target);
+                        }
+                    }
+                }
                 if filtered_transitions.len() != state.transitions.len() {
                     state.transitions = crate::ds::char_transitions::CharTransitions::from_sorted_entries(
                         filtered_transitions,
@@ -309,6 +450,16 @@ impl Tokenizer {
             }
         }
         let t_clear = t_start.elapsed();
+
+        let continuation_roots = if transitions_pruned {
+            collect_pruned_continuation_roots(
+                &dfa,
+                pruned_targets.as_deref().unwrap_or(&[]),
+                &active_bitset,
+            )
+        } else {
+            Vec::new()
+        };
 
         if !any_cleared && !transitions_pruned {
             // No finalizer bits or transitions changed.
@@ -375,7 +526,7 @@ impl Tokenizer {
         // due to deep chain structure, so go straight to Hopcroft minimize
         // which converges regardless. For smaller DFAs, try iterative first
         // (fast when it converges) and fall through to Hopcroft if it doesn't.
-        let (mut minimized, state_mapping) = if num_active <= 16 && pre_minimize_states <= 20_000 {
+        let (mut minimized, mut state_mapping) = if num_active <= 16 && pre_minimize_states <= 20_000 {
             match dfa.try_minimize_full_with_state_mapping() {
                 Some(result) => result,
                 None => {
@@ -392,6 +543,15 @@ impl Tokenizer {
             }
         } else {
             dfa.minimize_with_state_mapping()
+        };
+
+        if transitions_pruned {
+            append_continuation_alias_states(
+                &mut minimized,
+                &dfa,
+                &continuation_roots,
+                &mut state_mapping,
+            );
         };
 
         if transitions_pruned {
@@ -519,5 +679,33 @@ mod tests {
 
         assert_ne!(simplified_dash_state, u32::MAX);
         assert!(simplified.possible_future_terminals(simplified_dash_state).contains(0));
+    }
+
+    #[test]
+    fn test_simplify_for_terminals_preserves_continuation_states_behind_pruned_bytes() {
+        let tokenizer = build_tokenizer_from_exprs(&[bytes(b": "), bytes(b"true")]);
+        let colon_state = tokenizer.step(tokenizer.start_state(), b':').unwrap();
+
+        let mut relevant_bytes = [false; 256];
+        for byte in [b' ', b't', b'r', b'u', b'e'] {
+            relevant_bytes[byte as usize] = true;
+        }
+
+        let (simplified, mapping) = tokenizer.simplify_for_terminals(&[true, true], Some(&relevant_bytes));
+        let simplified_colon_state = mapping[colon_state as usize];
+
+        assert_ne!(
+            simplified_colon_state,
+            u32::MAX,
+            "continuation states reached through pruned bytes must remain addressable"
+        );
+
+        let exec = simplified.execute_from_state_all_widths(b" true", simplified_colon_state);
+        assert!(
+            exec.matches
+                .iter()
+                .any(|matched| matched.id == 0 && matched.width == 1),
+            "the bridge terminal must still match from the preserved continuation state"
+        );
     }
 }

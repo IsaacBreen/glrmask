@@ -524,14 +524,30 @@ impl DFA {
     /// Minimize this DFA using Hopcroft's algorithm.
     /// Returns a new, minimized DFA.  State 0 remains the start state.
     pub fn minimize(&self) -> DFA {
-        self.minimize_impl(false).0
+        self.minimize_impl(false, true).0
     }
 
     /// Minimize this DFA and return the mapping from original states to
     /// minimized states.  `mapping[old_state] = new_state`.
     /// Unreachable original states map to `u32::MAX`.
     pub fn minimize_with_state_mapping(&self) -> (DFA, Vec<u32>) {
-        self.minimize_impl(false)
+        self.minimize_impl(false, true)
+    }
+
+    /// Minimize this DFA and return the mapping from original states to
+    /// minimized states without first dropping states unreachable from state 0.
+    ///
+    /// This is useful when callers still need mappings for continuation states
+    /// that are only reachable after resuming from inside a partially matched
+    /// terminal.
+    pub fn minimize_with_state_mapping_preserve_all_states(&self) -> (DFA, Vec<u32>) {
+        self.minimize_impl(false, false)
+    }
+
+    /// Minimize this DFA while preserving states reachable from state 0 or any
+    /// of the provided extra roots.
+    pub fn minimize_with_state_mapping_and_roots(&self, extra_roots: &[u32]) -> (DFA, Vec<u32>) {
+        self.minimize_impl_with_roots(false, extra_roots)
     }
 
     /// Try fast iterative signature refinement to minimize this DFA.
@@ -540,41 +556,97 @@ impl DFA {
     /// Does NOT clone the DFA until convergence is confirmed, so the
     /// not-converged path is very cheap.
     pub fn try_minimize_full_with_state_mapping(&self) -> Option<(DFA, Vec<u32>)> {
-        const MAX_REFINE_ITERATIONS: u32 = 6;
-
-        let n = self.states().len();
-        if n == 0 {
-            return Some((self.clone(), Vec::new()));
-        }
-        if n <= 1 {
-            let mut result = self.clone();
-            result.recompute_possible_futures();
-            return Some((result, vec![0]));
-        }
-
-        // Compute partition on the ORIGINAL DFA (read-only, no clone needed).
-        let (_, blocks) = partition_by_finalizers(self);
-        let blocks = iterative_signature_refine(self, blocks, MAX_REFINE_ITERATIONS)?;
-
-        // Convergence confirmed — now rebuild (this clones internally).
-        let (result, block_map) = self.rebuild_from_blocks_with_mapping(blocks);
-        Some((result, block_map))
+        self.try_minimize_full_with_state_mapping_impl(true)
     }
 
-    fn minimize_impl(&self, force_hopcroft: bool) -> (DFA, Vec<u32>) {
+    /// Like `try_minimize_full_with_state_mapping`, but preserves all original
+    /// states instead of removing those unreachable from state 0 first.
+    pub fn try_minimize_full_with_state_mapping_preserve_all_states(&self) -> Option<(DFA, Vec<u32>)> {
+        self.try_minimize_full_with_state_mapping_impl(false)
+    }
+
+    pub fn try_minimize_full_with_state_mapping_and_roots(
+        &self,
+        extra_roots: &[u32],
+    ) -> Option<(DFA, Vec<u32>)> {
+        self.try_minimize_full_with_state_mapping_and_roots_impl(extra_roots)
+    }
+
+    fn try_minimize_full_with_state_mapping_impl(
+        &self,
+        drop_unreachable: bool,
+    ) -> Option<(DFA, Vec<u32>)> {
+        const MAX_REFINE_ITERATIONS: u32 = 6;
+
+        let orig_n = self.states().len();
+        if orig_n == 0 {
+            return Some((self.clone(), Vec::new()));
+        }
+
+        let mut working = self.clone();
+        let old_to_working = if drop_unreachable {
+            working.remove_unreachable_states_with_mapping()
+        } else {
+            (0..orig_n as u32).collect()
+        };
+        let n = working.states().len();
+
+        if n <= 1 {
+            working.recompute_possible_futures();
+            return Some((working, old_to_working));
+        }
+
+        let (_, blocks) = partition_by_finalizers(&working);
+        let blocks = iterative_signature_refine(&working, blocks, MAX_REFINE_ITERATIONS)?;
+
+        let (result, block_map) = working.rebuild_from_blocks_with_mapping(blocks);
+        Some((result, compose_mappings(&old_to_working, &block_map)))
+    }
+
+    fn try_minimize_full_with_state_mapping_and_roots_impl(
+        &self,
+        extra_roots: &[u32],
+    ) -> Option<(DFA, Vec<u32>)> {
+        const MAX_REFINE_ITERATIONS: u32 = 6;
+
+        let orig_n = self.states().len();
+        if orig_n == 0 {
+            return Some((self.clone(), Vec::new()));
+        }
+
+        let mut working = self.clone();
+        let old_to_working = working.remove_unreachable_states_with_roots_with_mapping(extra_roots);
+        let n = working.states().len();
+
+        if n <= 1 {
+            working.recompute_possible_futures();
+            return Some((working, old_to_working));
+        }
+
+        let (_, blocks) = partition_by_finalizers(&working);
+        let blocks = iterative_signature_refine(&working, blocks, MAX_REFINE_ITERATIONS)?;
+
+        let (result, block_map) = working.rebuild_from_blocks_with_mapping(blocks);
+        Some((result, compose_mappings(&old_to_working, &block_map)))
+    }
+
+    fn minimize_impl(&self, force_hopcroft: bool, drop_unreachable: bool) -> (DFA, Vec<u32>) {
         let orig_n = self.states().len();
         if orig_n == 0 {
             return (self.clone(), Vec::new());
         }
 
         let mut working = self.clone();
-        let unreachable_map = working.remove_unreachable_states_with_mapping();
+        let old_to_working = if drop_unreachable {
+            working.remove_unreachable_states_with_mapping()
+        } else {
+            (0..orig_n as u32).collect()
+        };
         let n = working.states().len();
 
         if n <= 1 {
             working.recompute_possible_futures();
-            // Compose: original → (after unreachable removal) → identity
-            return (working, unreachable_map);
+            return (working, old_to_working);
         }
 
         let (partition, blocks) = partition_by_finalizers(&working);
@@ -584,7 +656,7 @@ impl DFA {
             TopologyPrerefine::AlreadyMinimal(blocks) => {
                 if !force_hopcroft {
                     let (result, block_map) = working.rebuild_from_blocks_with_mapping(blocks);
-                    let composed = compose_mappings(&unreachable_map, &block_map);
+                    let composed = compose_mappings(&old_to_working, &block_map);
                     return (result, composed);
                 }
                 minimality_check_blocks = blocks;
@@ -598,7 +670,7 @@ impl DFA {
                 if !force_hopcroft && n > 1000 && refined_blocks.len() > n * 9 / 10 {
                     working.recompute_possible_futures();
                     let identity: Vec<u32> = (0..n as u32).collect();
-                    let composed = compose_mappings(&unreachable_map, &identity);
+                    let composed = compose_mappings(&old_to_working, &identity);
                     return (working, composed);
                 }
                 minimality_check_blocks = refined_blocks;
@@ -608,14 +680,66 @@ impl DFA {
 
         if minimality_check_blocks.iter().all(|block| block.len() <= 1) {
             let (result, block_map) = working.rebuild_from_blocks_with_mapping(minimality_check_blocks);
-            let composed = compose_mappings(&unreachable_map, &block_map);
+            let composed = compose_mappings(&old_to_working, &block_map);
             return (result, composed);
         }
 
         let blocks = hopcroft_refine_partition(&working, partition, blocks);
 
         let (result, block_map) = working.rebuild_from_blocks_with_mapping(blocks);
-        let composed = compose_mappings(&unreachable_map, &block_map);
+        let composed = compose_mappings(&old_to_working, &block_map);
+        (result, composed)
+    }
+
+    fn minimize_impl_with_roots(&self, force_hopcroft: bool, extra_roots: &[u32]) -> (DFA, Vec<u32>) {
+        let orig_n = self.states().len();
+        if orig_n == 0 {
+            return (self.clone(), Vec::new());
+        }
+
+        let mut working = self.clone();
+        let old_to_working = working.remove_unreachable_states_with_roots_with_mapping(extra_roots);
+        let n = working.states().len();
+
+        if n <= 1 {
+            working.recompute_possible_futures();
+            return (working, old_to_working);
+        }
+
+        let (partition, blocks) = partition_by_finalizers(&working);
+        let mut minimality_check_blocks = blocks.clone();
+
+        match topology_prerefine_partition(&working, &partition) {
+            TopologyPrerefine::AlreadyMinimal(blocks) => {
+                if !force_hopcroft {
+                    let (result, block_map) = working.rebuild_from_blocks_with_mapping(blocks);
+                    let composed = compose_mappings(&old_to_working, &block_map);
+                    return (result, composed);
+                }
+                minimality_check_blocks = blocks;
+            }
+            TopologyPrerefine::Refined { blocks: refined_blocks, .. } => {
+                if !force_hopcroft && n > 1000 && refined_blocks.len() > n * 9 / 10 {
+                    working.recompute_possible_futures();
+                    let identity: Vec<u32> = (0..n as u32).collect();
+                    let composed = compose_mappings(&old_to_working, &identity);
+                    return (working, composed);
+                }
+                minimality_check_blocks = refined_blocks;
+            }
+            TopologyPrerefine::Skip => {}
+        }
+
+        if minimality_check_blocks.iter().all(|block| block.len() <= 1) {
+            let (result, block_map) = working.rebuild_from_blocks_with_mapping(minimality_check_blocks);
+            let composed = compose_mappings(&old_to_working, &block_map);
+            return (result, composed);
+        }
+
+        let blocks = hopcroft_refine_partition(&working, partition, blocks);
+
+        let (result, block_map) = working.rebuild_from_blocks_with_mapping(blocks);
+        let composed = compose_mappings(&old_to_working, &block_map);
         (result, composed)
     }
 
@@ -627,10 +751,23 @@ impl DFA {
     /// Remove unreachable states, returning old→new mapping.
     /// Unreachable states map to `u32::MAX`.
     fn remove_unreachable_states_with_mapping(&mut self) -> Vec<u32> {
+        self.remove_unreachable_states_with_roots_with_mapping(&[])
+    }
+
+    /// Remove states unreachable from state 0 or any provided extra roots,
+    /// returning old→new mapping. Unreachable states map to `u32::MAX`.
+    fn remove_unreachable_states_with_roots_with_mapping(&mut self, extra_roots: &[u32]) -> Vec<u32> {
         let n = self.states().len();
         let mut reachable = vec![false; n];
         let mut queue = vec![0usize];
         reachable[0] = true;
+        for &root in extra_roots {
+            let root = root as usize;
+            if root < n && !reachable[root] {
+                reachable[root] = true;
+                queue.push(root);
+            }
+        }
 
         while let Some(state) = queue.pop() {
             for (_, &next) in self.states()[state].transitions.iter() {

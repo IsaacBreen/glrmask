@@ -1300,4 +1300,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_cross_token_bridge_after_partial_literal_terminal() {
+        let gdef = GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1), Symbol::Terminal(2)],
+            }],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal { id: 0, bytes: b"\"".to_vec() },
+                Terminal::Literal { id: 1, bytes: b": ".to_vec() },
+                Terminal::Literal { id: 2, bytes: b"true".to_vec() },
+            ],
+            ..Default::default()
+        };
+        let vocab = Vocab::new(
+            vec![
+                (0, b"\"".to_vec()),
+                (1, b"\":".to_vec()),
+                (2, b": ".to_vec()),
+                (3, b" true".to_vec()),
+                (4, b"true".to_vec()),
+            ],
+            None,
+        );
+
+        let constraint = compile(&gdef, &vocab);
+        let mut state = constraint.start();
+
+        let mask = state.mask();
+        assert!(
+            mask_has_token(&mask, 1),
+            "token '\" :' must be allowed so the compile can stop mid-': ' and continue in the next token"
+        );
+
+        state.commit_token(1).unwrap();
+
+        let mask = state.mask();
+        assert!(
+            mask_has_token(&mask, 3),
+            "token ' true' must be allowed after '\" :' to bridge ': ' into 'true'"
+        );
+    }
+
 }
