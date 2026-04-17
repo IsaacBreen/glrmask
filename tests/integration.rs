@@ -2703,3 +2703,202 @@ fn test_small_range_finished_semantics() {
     commit_all(&mut s, &[0]);
     assert!(s.is_finished());
 }
+
+/// Reproduces super-linear build-time scaling of `"a" ~0..N` for increasing N.
+///
+/// Runs a wide range of sizes and prints build time + various stats.
+/// Enable with `--ignored --nocapture`. Pair with env vars like
+/// `GLRMASK_PROFILE_COMPILE_SUMMARY=1 GLRMASK_PROFILE_PARSER_DWA=1` for detail.
+#[test]
+#[ignore]
+fn bench_bounded_repeat_scaling() {
+    use std::time::Instant;
+
+    // Dense set of sizes spanning 10 → 1e12 for precise scaling fits.
+    let sizes: &[u64] = if std::env::var_os("BENCH_BIG_ONLY").is_some() {
+        &[1_000_000, 1_000_000_000, 1_000_000_000_000]
+    } else {
+        &[
+            10, 100, 1_000, 10_000, 100_000,
+            1_000_000, 10_000_000, 100_000_000,
+            1_000_000_000, 10_000_000_000, 100_000_000_000,
+            1_000_000_000_000,
+        ]
+    };
+
+    eprintln!();
+    eprintln!("=== bench_bounded_repeat_scaling (grammar: \"a\" ~0..N) ===");
+    eprintln!(
+        "{:>14}  {:>4}  {:>10}  {:>10}  {:>10}  {:>17}  {:>22}",
+        "N",
+        "logN",
+        "popcnt",
+        "build_ms",
+        "num_states",
+        "parser_dwa_states",
+        "parser_dwa_transitions",
+    );
+
+    for &n in sizes {
+        let grammar = format!("start: \"a\" ~0..{}", n);
+        let vocab = make_vocab(&["a"]);
+        // Warm up once (first build pays JIT / alloc startup).
+        let _ = Constraint::from_lark(&grammar, &vocab).unwrap();
+        let t0 = Instant::now();
+        let constraint = Constraint::from_lark(&grammar, &vocab).unwrap();
+        let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        eprintln!(
+            "{:>14}  {:>4}  {:>10}  {:>10.2}  {:>10}  {:>17}  {:>22}",
+            n,
+            64 - (n as u64).leading_zeros(),
+            (n as u64).count_ones(),
+            elapsed_ms,
+            constraint.debug_num_states(),
+            constraint.debug_parser_dwa_num_states(),
+            constraint.debug_parser_dwa_num_transitions(),
+        );
+    }
+}
+
+/// Compare a power-of-two-sized repeat against its neighbors to isolate the
+/// effect of bit popcount / binary-decomposition sharing.
+#[test]
+#[ignore]
+fn bench_bounded_repeat_popcount() {
+    use std::time::Instant;
+
+    // Pairs of (N, label) designed to test whether popcount(N) matters.
+    let cases: &[(u64, &str)] = &[
+        ((1u64 << 30) - 1, "2^30 - 1  (30 set bits)"),
+        (1u64 << 30,       "2^30      (1 set bit)"),
+        ((1u64 << 30) + 1, "2^30 + 1  (2 set bits)"),
+        ((1u64 << 40) - 1, "2^40 - 1  (40 set bits)"),
+        (1u64 << 40,       "2^40      (1 set bit)"),
+        ((1u64 << 40) + 1, "2^40 + 1  (2 set bits)"),
+        (1_000_000_000,    "10^9"),
+        (1_073_741_824,    "2^30 ≈ 10^9"),
+        (1_000_000_000_000,"10^12"),
+        (1_099_511_627_776,"2^40 ≈ 10^12"),
+    ];
+
+    eprintln!();
+    eprintln!("=== bench_bounded_repeat_popcount ===");
+    eprintln!(
+        "{:>20}  {:>30}  {:>10}  {:>10}  {:>10}  {:>17}  {:>22}",
+        "N",
+        "label",
+        "build_ms",
+        "popcnt",
+        "num_states",
+        "parser_dwa_states",
+        "parser_dwa_transitions",
+    );
+
+    for &(n, label) in cases {
+        let grammar = format!("start: \"a\" ~0..{}", n);
+        let vocab = make_vocab(&["a"]);
+        let _ = Constraint::from_lark(&grammar, &vocab).unwrap();
+        let t0 = Instant::now();
+        let constraint = Constraint::from_lark(&grammar, &vocab).unwrap();
+        let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        eprintln!(
+            "{:>20}  {:>30}  {:>10.2}  {:>10}  {:>10}  {:>17}  {:>22}",
+            n,
+            label,
+            elapsed_ms,
+            n.count_ones(),
+            constraint.debug_num_states(),
+            constraint.debug_parser_dwa_num_states(),
+            constraint.debug_parser_dwa_num_transitions(),
+        );
+    }
+}
+
+/// Build a symmetric balanced-binary grammar: `rN -> r{N/2} r{N/2}` for pow2 N.
+/// Accepts 0..=N copies of "a". O(log N) rules.
+fn build_symmetric_pow2_grammar(log_n: u32) -> String {
+    let mut out = String::new();
+    out.push_str("start: r_0\n");
+    // r_0 is top; r_i refers to a tree of 2^(log_n - i) leaves.
+    for level in 0..log_n {
+        out.push_str(&format!("r_{}: r_{} r_{}\n", level, level + 1, level + 1));
+    }
+    out.push_str(&format!("r_{}: \"a\" | \n", log_n));
+    out
+}
+
+/// Build an asymmetric balanced-binary grammar: every node has a distinct
+/// left child and right child nonterminal (different names but identical
+/// languages). Accepts 0..=N copies of "a". O(N) rules.
+fn build_asymmetric_pow2_grammar(log_n: u32) -> String {
+    let mut out = String::new();
+    out.push_str("start: r_\n");
+    // Walk a full binary tree; each node has a distinct path-encoded name.
+    fn rec(out: &mut String, path: &str, depth: u32, max_depth: u32) {
+        if depth == max_depth {
+            out.push_str(&format!("r_{}: \"a\" | \n", path));
+        } else {
+            out.push_str(&format!(
+                "r_{}: r_{}L r_{}R\n",
+                path, path, path
+            ));
+            let left = format!("{}L", path);
+            let right = format!("{}R", path);
+            rec(out, &left, depth + 1, max_depth);
+            rec(out, &right, depth + 1, max_depth);
+        }
+    }
+    rec(&mut out, "", 0, log_n);
+    out
+}
+
+/// Directly test the hypothesis: the `A -> B B` pattern (same nonterminal on
+/// both sides) causes a super-linear blow-up in parser_dwa transitions vs an
+/// equivalent grammar with distinct nonterminals on each side.
+#[test]
+#[ignore]
+fn bench_symmetric_vs_asymmetric() {
+    use std::time::Instant;
+
+    eprintln!();
+    eprintln!("=== bench_symmetric_vs_asymmetric (grammar: balanced binary accepting 0..2^k 'a's) ===");
+    eprintln!(
+        "{:>6}  {:>8}  {:>10}  {:>10}  {:>10}  {:>17}  {:>22}",
+        "shape", "log2(N)", "num_rules", "build_ms", "num_states", "pdwa_states", "pdwa_trans",
+    );
+
+    for log_n in 1..=7u32 {
+        // Symmetric
+        let grammar = build_symmetric_pow2_grammar(log_n);
+        let num_rules = grammar.lines().filter(|l| l.contains(":")).count();
+        let vocab = make_vocab(&["a"]);
+        let _ = Constraint::from_lark(&grammar, &vocab).unwrap();
+        let t0 = Instant::now();
+        let c = Constraint::from_lark(&grammar, &vocab).unwrap();
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        eprintln!(
+            "{:>6}  {:>8}  {:>10}  {:>10.2}  {:>10}  {:>17}  {:>22}",
+            "sym", log_n, num_rules, ms,
+            c.debug_num_states(),
+            c.debug_parser_dwa_num_states(),
+            c.debug_parser_dwa_num_transitions(),
+        );
+
+        // Asymmetric: same language but all distinct nonterminal names.
+        let grammar = build_asymmetric_pow2_grammar(log_n);
+        let num_rules = grammar.lines().filter(|l| l.contains(":")).count();
+        let _ = Constraint::from_lark(&grammar, &vocab).unwrap();
+        let t0 = Instant::now();
+        let c = Constraint::from_lark(&grammar, &vocab).unwrap();
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        eprintln!(
+            "{:>6}  {:>8}  {:>10}  {:>10.2}  {:>10}  {:>17}  {:>22}",
+            "asym", log_n, num_rules, ms,
+            c.debug_num_states(),
+            c.debug_parser_dwa_num_states(),
+            c.debug_parser_dwa_num_transitions(),
+        );
+    }
+}
