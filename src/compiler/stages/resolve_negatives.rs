@@ -750,8 +750,9 @@ fn apply_cancellations_parallel_fixpoint(nwa: &mut NWA) {
     }
 
     let num_threads = rayon::current_num_threads().max(1);
-    // Small inputs: just run sequentially to avoid overhead.
-    if state_count < 512 || num_threads < 2 {
+    // Small inputs, forced-serial override, or single-threaded rayon: run sequentially.
+    let force_serial = std::env::var("GLRMASK_RESOLVE_SERIAL").is_ok();
+    if force_serial || state_count < 512 || num_threads < 2 {
         let range = full_state_range(nwa);
         apply_cancellations_range(nwa, range);
         return;
@@ -768,8 +769,11 @@ fn apply_cancellations_parallel_fixpoint(nwa: &mut NWA) {
     // Global snapshot of derived epsilons, indexed by source state. Grows monotonically.
     let mut global_derived: DerivedEpsilons = vec![None; state_count];
 
+    let profile_enabled = std::env::var("GLRMASK_PROFILE_RESOLVE_ROUNDS").is_ok();
     let max_rounds = 16; // safety bound; typical convergence is 2-4 rounds.
-    for _round in 0..max_rounds {
+    let mut rounds_run: usize = 0;
+    for round in 0..max_rounds {
+        let round_started_at = std::time::Instant::now();
         // In parallel: each chunk runs a full cancellation fixpoint against the current
         // global snapshot. Chunks only write derived epsilons for sources in their range,
         // so the result slices are disjoint.
@@ -778,8 +782,14 @@ fn apply_cancellations_parallel_fixpoint(nwa: &mut NWA) {
             .cloned()
             .map(|range| compute_cancellations_range_inner(nwa, range, Some(&global_derived)))
             .collect();
+        let compute_ms = round_started_at.elapsed().as_secs_f64() * 1000.0;
 
+        let merge_started_at = std::time::Instant::now();
         let mut changed = false;
+        let mut total_deltas = 0usize;
+        for batch in &results {
+            total_deltas += batch.len();
+        }
         for batch in results {
             for (from, to, weight) in batch {
                 let slot = global_derived[from as usize].get_or_insert_with(FxHashMap::default);
@@ -789,9 +799,27 @@ fn apply_cancellations_parallel_fixpoint(nwa: &mut NWA) {
                 }
             }
         }
+        let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
+        rounds_run += 1;
+
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][resolve_rounds] round={} compute_ms={:.1} merge_ms={:.1} total_deltas={} changed={}",
+                round, compute_ms, merge_ms, total_deltas, changed,
+            );
+        }
         if !changed {
             break;
         }
+    }
+
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][resolve_rounds] total_rounds={} chunks={} state_count={}",
+            rounds_run,
+            chunks.len(),
+            state_count,
+        );
     }
 
     // Apply all derived epsilons to the NWA.
