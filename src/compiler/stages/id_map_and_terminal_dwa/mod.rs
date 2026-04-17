@@ -14,7 +14,6 @@ pub(crate) mod types;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -29,16 +28,13 @@ use classify::classify_vocab_char_type;
 use types::{TerminalColoring, TerminalDwaPhaseProfile, compile_profile_enabled, debug_profile_enabled, debug_terminal_mapping_enabled};
 
 fn maybe_print_terminal_mappings(grammar: &AnalyzedGrammar) {
-    static TERMINAL_MAPPINGS_PRINTED: OnceLock<()> = OnceLock::new();
-    TERMINAL_MAPPINGS_PRINTED.get_or_init(|| {
-        for terminal_id in 0..grammar.num_terminals {
-            eprintln!(
-                "[glrmask/debug][terminal_mapping] id={:>4} name={}",
-                terminal_id,
-                grammar.terminal_display_name(terminal_id),
-            );
-        }
-    });
+    for terminal_id in 0..grammar.num_terminals {
+        eprintln!(
+            "[glrmask/debug][terminal_mapping] id={:>4} name={}",
+            terminal_id,
+            grammar.terminal_display_name(terminal_id),
+        );
+    }
 }
 
 fn format_terminal_edge_symbol_counts(num_terminals: usize, dwa: &DWA) -> Vec<String> {
