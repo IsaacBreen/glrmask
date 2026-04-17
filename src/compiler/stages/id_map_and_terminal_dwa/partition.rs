@@ -6,7 +6,6 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -20,19 +19,6 @@ use crate::compiler::stages::id_map_and_terminal_dwa::types::{
 };
 use crate::ds::bitset::BitSet;
 use crate::Vocab;
-
-fn maybe_print_terminal_mappings(grammar: &AnalyzedGrammar, num_terminals: u32) {
-    static TERMINAL_MAPPINGS_PRINTED: OnceLock<()> = OnceLock::new();
-    TERMINAL_MAPPINGS_PRINTED.get_or_init(|| {
-        for terminal_id in 0..num_terminals {
-            eprintln!(
-                "[glrmask/debug][terminal_mapping] id={:>4} name={}",
-                terminal_id,
-                grammar.terminal_display_name(terminal_id),
-            );
-        }
-    });
-}
 
 /// Build an id_map and terminal DWA for a single vocab partition.
 ///
@@ -118,9 +104,6 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
             );
         }
 
-        if debug_terminal_mapping_enabled() {
-            maybe_print_terminal_mappings(grammar, num_terminals);
-        }
     }
 
     // Build L1 and L2+ terminal DWAs in parallel.
