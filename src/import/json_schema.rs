@@ -5689,12 +5689,16 @@ impl<'a> SchemaCtx<'a> {
     }
 
 fn build_structured_uri_expr(&mut self) -> GrammarExpr {
-        // RFC 3986 URI grammar expressed as structured grammar productions.
-        // Uses non-terminal productions (lowercase prefixes) instead of
-        // monolithic regex terminals to avoid DFA state explosion.
-        //
-        // URI = scheme ":" hier-part [ "?" query ] [ "#" fragment ]
-
+        // Ablation switch: set URI_ABLATE=<csv> to disable URI parts for
+        // perf investigation. Parts: ipv6, ipv_future, ip_literal, ipv4,
+        // reg_name, userinfo, port, path_abempty, path_absolute, path_rootless,
+        // hier_part_extra (drops the 3 non-authority hier-part branches),
+        // query, fragment, scheme_rich (collapses scheme body).
+        let ablate: std::collections::BTreeSet<String> = std::env::var("URI_ABLATE")
+            .ok()
+            .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+            .unwrap_or_default();
+        let ablated = |name: &str| ablate.contains(name);
         // --- Character classes ---
 
         // HEXDIG = DIGIT / "A"-"F" / "a"-"f"
@@ -5854,12 +5858,21 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
             // 10 :: alone
             literal_expr(b"::"),
         ];
-        let ipv6_address = choice_or_single(ipv6_alts);
+        let ipv6_address = if ablated("ipv6") {
+            literal_expr(b"::")
+        } else {
+            choice_or_single(ipv6_alts)
+        };
 
         // IP-literal = "[" ( IPv6address / IPvFuture ) "]"
+        let ip_literal_choice = if ablated("ipv_future") {
+            ipv6_address
+        } else {
+            choice_or_single(vec![ipv6_address, ipv_future])
+        };
         let ip_literal = sequence_or_single(vec![
             literal_expr(b"["),
-            choice_or_single(vec![ipv6_address, ipv_future]),
+            ip_literal_choice,
             literal_expr(b"]"),
         ]);
 
@@ -5889,7 +5902,14 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
             pct_encoded.clone(),
         ])));
 
-        let host = choice_or_single(vec![ip_literal, ipv4_address, re_name]);
+        let mut host_alts: Vec<GrammarExpr> = Vec::new();
+        if !ablated("ip_literal") { host_alts.push(ip_literal); }
+        if !ablated("ipv4") { host_alts.push(ipv4_address); }
+        if !ablated("reg_name") { host_alts.push(re_name); } else {
+            // Keep at least one host alternative (single letter) so URI is parseable.
+            host_alts.push(GrammarExpr::CharClass { def: "a-zA-Z".into(), negate: false, utf8: true });
+        }
+        let host = choice_or_single(host_alts);
 
         // --- port ---
         // port = *DIGIT
@@ -5903,7 +5923,9 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         ])));
 
         // authority = [ userinfo "@" ] host [ ":" port ]
-        let authority = sequence_or_single(vec![userinfo_at, host, port]);
+        let userinfo_part = if ablated("userinfo") { GrammarExpr::Sequence(vec![]) } else { userinfo_at };
+        let port_part = if ablated("port") { GrammarExpr::Sequence(vec![]) } else { port };
+        let authority = sequence_or_single(vec![userinfo_part, host, port_part]);
 
         // --- path ---
         // segment = *pchar
@@ -5942,16 +5964,19 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         //           / path-absolute
         //           / path-rootless
         //           / path-empty
-        let hier_part = choice_or_single(vec![
-            sequence_or_single(vec![
-                literal_expr(b"//"),
-                authority,
-                path_abempty,
-            ]),
-            path_absolute,
-            path_rootless,
-            GrammarExpr::Sequence(vec![]), // path-empty
-        ]);
+        let mut hier_alts: Vec<GrammarExpr> = Vec::new();
+        let path_abempty_part = if ablated("path_abempty") { GrammarExpr::Sequence(vec![]) } else { path_abempty };
+        hier_alts.push(sequence_or_single(vec![
+            literal_expr(b"//"),
+            authority,
+            path_abempty_part,
+        ]));
+        if !ablated("hier_part_extra") {
+            if !ablated("path_absolute") { hier_alts.push(path_absolute); }
+            if !ablated("path_rootless") { hier_alts.push(path_rootless); }
+            hier_alts.push(GrammarExpr::Sequence(vec![])); // path-empty
+        }
+        let hier_part = choice_or_single(hier_alts);
 
         // --- query & fragment ---
         // query = "?" *( pchar / "/" / "?" )  [optional group]
@@ -5967,12 +5992,14 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         ])));
 
         // URI = scheme ":" hier-part query fragment
+        let query_part = if ablated("query") { GrammarExpr::Sequence(vec![]) } else { query };
+        let fragment_part = if ablated("fragment") { GrammarExpr::Sequence(vec![]) } else { fragment };
         let uri_body = sequence_or_single(vec![
             scheme,
             literal_expr(b":"),
             hier_part,
-            query,
-            fragment,
+            query_part,
+            fragment_part,
         ]);
 
         quoted_expr(uri_body)
