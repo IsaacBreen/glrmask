@@ -240,122 +240,187 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     );
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let tsid_fallback_started_at = Instant::now();
-    let dropped_original_state_tsid_fallback = build_dropped_original_state_tsid_fallback(
-        original_tokenizer,
-        &simplified_tok,
-        &simplified_id_map,
-        &orig_to_simplified,
-        vocab,
-        active_terminals,
-        &relevant_bytes,
-        disallowed_follows,
-    );
-    let tsid_fallback_ms = tsid_fallback_started_at.elapsed().as_secs_f64() * 1000.0;
+    // tsid_fallback is independent of the NWA build / postprocess /
+    // determinize / minimize pipeline: it only feeds into the final
+    // `LocalIdMapTerminalDwa` struct. Run it in parallel with steps 2-8
+    // via rayon::join. On the critical partition this cuts ~150-200ms
+    // off the per-partition sequential critical path.
+    let tokenizer = &simplified_tok;
+    let (
+        (dropped_original_state_tsid_fallback, tsid_fallback_ms),
+        (
+            dwa,
+            vocab_tree_ms,
+            possible_matches_ms,
+            seed_ms,
+            trie_build_ms,
+            always_allowed_ms,
+            collapse_ms,
+            disallowed_ms,
+            prune_ms,
+            canonicalize_ms,
+            determinize_ms,
+            minimize_ms,
+            nwa_states_after_build,
+            nwa_states_after_collapse,
+            nwa_states_after_disallowed,
+            nwa_states_after_prune,
+            nwa_states_after_canonicalize,
+            dwa_stats_before_compact,
+            dwa_stats_after_compact,
+            early_none,
+        ),
+    ) = rayon::join(
+        || {
+            let t0 = Instant::now();
+            let fb = build_dropped_original_state_tsid_fallback(
+                original_tokenizer,
+                &simplified_tok,
+                &simplified_id_map,
+                &orig_to_simplified,
+                vocab,
+                active_terminals,
+                &relevant_bytes,
+                disallowed_follows,
+            );
+            (fb, t0.elapsed().as_secs_f64() * 1000.0)
+        },
+        || {
+            // ---- Step 2-3: Internal vocab + prefix tree ----
+            let vocab_tree_started_at = Instant::now();
+            let internal_vocab = internal_vocab_entries(vocab, &simplified_id_map);
+            if internal_vocab.is_empty() {
+                // Signal early-None via a sentinel. Build a dummy DWA;
+                // outer code will observe `early_none=true` and return.
+                return (
+                    crate::automata::weighted_u32::dwa::DWA::new(0, 0),
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    0usize, 0usize, 0usize, 0usize, 0usize,
+                    crate::automata::weighted_u32::dwa::DWA::new(0, 0).stats(),
+                    crate::automata::weighted_u32::dwa::DWA::new(0, 0).stats(),
+                    true,
+                );
+            }
+            let full_tree = VocabPrefixTree::build_owned(
+                internal_vocab
+                    .iter()
+                    .map(|(token_id, bytes)| (*token_id as usize, bytes.clone()))
+                    .collect(),
+            );
+            let vocab_tree_ms = vocab_tree_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    // ---- Step 2-3: Internal vocab + prefix tree ----
-    let vocab_tree_started_at = Instant::now();
-    let internal_vocab = internal_vocab_entries(vocab, &simplified_id_map);
-    if internal_vocab.is_empty() {
+            // ---- Step 4: Possible matches (lazy via computer) ----
+            let mut pm_computer = PossibleMatchesComputer::new(tokenizer);
+            let possible_matches_ms = 0.0;
+
+            // ---- Step 5: Create NWA and seed root nodes ----
+            let seed_started_at = Instant::now();
+            let mut nwa = NWA::new(simplified_id_map.num_tsids(), simplified_id_map.max_internal_token_id());
+            let leaf_state = nwa.add_state();
+            nwa.set_final_weight(leaf_state, Weight::all());
+            let start_state = nwa.add_state();
+            nwa.start_states.push(start_state);
+
+            let roots = seed_root_nodes(
+                &mut nwa,
+                start_state,
+                &simplified_id_map,
+            );
+            let seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
+
+            // ---- Step 6: Trie-walk NWA build ----
+            let trie_build_started_at = Instant::now();
+            let _build_profile = build_nwa_via_trie_walk(
+                tokenizer,
+                terminal_coloring,
+                use_terminal_coloring,
+                ignore_terminal,
+                &mut nwa,
+                leaf_state,
+                simplified_id_map.num_tsids(),
+                &full_tree.root,
+                &roots,
+                &mut pm_computer,
+                None,
+            );
+            let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
+
+            // ---- Step 7: Postprocess ----
+            let always_allowed_started_at = Instant::now();
+            let always_allowed = compute_always_allowed_follows(grammar);
+            let always_allowed_ms = always_allowed_started_at.elapsed().as_secs_f64() * 1000.0;
+            let nwa_states_after_build = nwa.states.len();
+
+            if debug_profile_enabled() {
+                let non_empty_count = always_allowed.iter().filter(|v| !v.is_empty()).count();
+                let total_entries: usize = always_allowed.iter().map(|v| v.len()).sum();
+                eprintln!(
+                    "[glrmask/debug][always_allowed] terminals_with_follows={}/{} total_entries={}",
+                    non_empty_count, always_allowed.len(), total_entries,
+                );
+            }
+
+            let collapse_started_at = Instant::now();
+            collapse_always_allowed(&mut nwa, &always_allowed, grammar.num_terminals as usize);
+            let collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
+            let nwa_states_after_collapse = nwa.states.len();
+
+            let disallowed_started_at = Instant::now();
+            apply_disallowed_follow_constraints(&mut nwa, disallowed_follows, grammar.num_terminals as usize);
+            let disallowed_ms = disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
+            let nwa_states_after_disallowed = nwa.states.len();
+
+            let prune_started_at = Instant::now();
+            prune_non_coreachable_states(&mut nwa);
+            let prune_ms = prune_started_at.elapsed().as_secs_f64() * 1000.0;
+            let nwa_states_after_prune = nwa.states.len();
+
+            let canonicalize_started_at = Instant::now();
+            canonicalize_acyclic_nwa(&mut nwa);
+            let canonicalize_ms = canonicalize_started_at.elapsed().as_secs_f64() * 1000.0;
+            let nwa_states_after_canonicalize = nwa.states.len();
+
+            // ---- Step 8: Determinize → minimize ----
+            let determinize_started_at = Instant::now();
+            let det = determinize(&nwa).expect("L2+ terminal NWA determinization failed");
+            let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
+
+            let minimize_started_at = Instant::now();
+            let dwa = minimize_from_env(&det, "GLRMASK_MINIMIZE_L2P", |dwa| {
+                minimize_with_threshold(dwa, 50)
+            });
+            let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
+            let dwa_stats_before_compact = dwa.stats();
+            let dwa_stats_after_compact = dwa.stats();
+
+            (
+                dwa,
+                vocab_tree_ms,
+                possible_matches_ms,
+                seed_ms,
+                trie_build_ms,
+                always_allowed_ms,
+                collapse_ms,
+                disallowed_ms,
+                prune_ms,
+                canonicalize_ms,
+                determinize_ms,
+                minimize_ms,
+                nwa_states_after_build,
+                nwa_states_after_collapse,
+                nwa_states_after_disallowed,
+                nwa_states_after_prune,
+                nwa_states_after_canonicalize,
+                dwa_stats_before_compact,
+                dwa_stats_after_compact,
+                false,
+            )
+        },
+    );
+    if early_none {
         return None;
     }
-    let full_tree = VocabPrefixTree::build_owned(
-        internal_vocab
-            .iter()
-            .map(|(token_id, bytes)| (*token_id as usize, bytes.clone()))
-            .collect(),
-    );
-    let vocab_tree_ms = vocab_tree_started_at.elapsed().as_secs_f64() * 1000.0;
-
-    // ---- Step 4: Possible matches ----
-    // Possible matches are consumed lazily during the trie walk via
-    // `PossibleMatchesComputer`; eager full-state materialization here just
-    // prewarmed caches without affecting the constructed NWA.
-    let mut pm_computer = PossibleMatchesComputer::new(tokenizer);
-    let possible_matches_ms = 0.0;
-
-    // ---- Step 5: Create NWA and seed root nodes ----
-    let seed_started_at = Instant::now();
-    let mut nwa = NWA::new(simplified_id_map.num_tsids(), simplified_id_map.max_internal_token_id());
-    let leaf_state = nwa.add_state();
-    nwa.set_final_weight(leaf_state, Weight::all());
-    let start_state = nwa.add_state();
-    nwa.start_states.push(start_state);
-
-    let roots = seed_root_nodes(
-        &mut nwa,
-        start_state,
-        &simplified_id_map,
-    );
-    let seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
-
-    // ---- Step 6: Trie-walk NWA build ----
-    // active_terminals filtering is no longer needed — the simplified tokenizer
-    // only reports active terminals in its finalizers.
-    let trie_build_started_at = Instant::now();
-    let _build_profile = build_nwa_via_trie_walk(
-        tokenizer,
-        terminal_coloring,
-        use_terminal_coloring,
-        ignore_terminal,
-        &mut nwa,
-        leaf_state,
-        simplified_id_map.num_tsids(),
-        &full_tree.root,
-        &roots,
-        &mut pm_computer,
-        None,
-    );
-    let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
-
-    // ---- Step 7: Postprocess ----
-    let always_allowed_started_at = Instant::now();
-    let always_allowed = compute_always_allowed_follows(grammar);
-    let always_allowed_ms = always_allowed_started_at.elapsed().as_secs_f64() * 1000.0;
-    let nwa_states_after_build = nwa.states.len();
-
-    if debug_profile_enabled() {
-        let non_empty_count = always_allowed.iter().filter(|v| !v.is_empty()).count();
-        let total_entries: usize = always_allowed.iter().map(|v| v.len()).sum();
-        eprintln!(
-            "[glrmask/debug][always_allowed] terminals_with_follows={}/{} total_entries={}",
-            non_empty_count, always_allowed.len(), total_entries,
-        );
-    }
-
-    let collapse_started_at = Instant::now();
-    collapse_always_allowed(&mut nwa, &always_allowed, grammar.num_terminals as usize);
-    let collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
-    let nwa_states_after_collapse = nwa.states.len();
-
-    let disallowed_started_at = Instant::now();
-    apply_disallowed_follow_constraints(&mut nwa, disallowed_follows, grammar.num_terminals as usize);
-    let disallowed_ms = disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
-    let nwa_states_after_disallowed = nwa.states.len();
-
-    let prune_started_at = Instant::now();
-    prune_non_coreachable_states(&mut nwa);
-    let prune_ms = prune_started_at.elapsed().as_secs_f64() * 1000.0;
-    let nwa_states_after_prune = nwa.states.len();
-
-    let canonicalize_started_at = Instant::now();
-    canonicalize_acyclic_nwa(&mut nwa);
-    let canonicalize_ms = canonicalize_started_at.elapsed().as_secs_f64() * 1000.0;
-    let nwa_states_after_canonicalize = nwa.states.len();
     let postprocess_ms = always_allowed_ms + collapse_ms + disallowed_ms + prune_ms + canonicalize_ms;
-
-    // ---- Step 8: Determinize → minimize ----
-    let determinize_started_at = Instant::now();
-    let det = determinize(&nwa).expect("L2+ terminal NWA determinization failed");
-    let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
-
-    let minimize_started_at = Instant::now();
-    let dwa = minimize_from_env(&det, "GLRMASK_MINIMIZE_L2P", |dwa| {
-        minimize_with_threshold(dwa, 50)
-    });
-    let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
-    let dwa_stats_before_compact = dwa.stats();
-    let dwa_stats_after_compact = dwa.stats();
 
     if compile_profile_enabled() || debug_profile_enabled() {
         eprintln!(
