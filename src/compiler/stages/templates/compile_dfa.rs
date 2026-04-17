@@ -335,6 +335,83 @@ fn add_positive_transition_chain(
     append_default_pop_chain(nfa, first_target, pop_count - 1, target);
 }
 
+/// A shared DEFAULT-labeled pop chain ending at `target`.
+///
+/// `chain[i]` is an NFA state such that there is a sequence of `i+1`
+/// consecutive DEFAULT transitions from `chain[i]` to `target`. That is:
+/// - `chain[0]` has a DEFAULT transition to `target` (one pop).
+/// - `chain[i]` has a DEFAULT transition to `chain[i - 1]` (i+1 pops).
+///
+/// A caller wanting `k` pops leading to `target` (`k >= 1`) directs its
+/// positive transition to `chain[k - 1]`, reusing all DEFAULT-pop states
+/// shared by other reduces targeting the same nonterminal. This keeps
+/// the template NFA size at O(num_nonterminals × max_pop_count) instead
+/// of O(total_reduces × avg_pop_count).
+struct PopChain {
+    states: Vec<u32>,
+}
+
+struct PopChainPool {
+    chains: BTreeMap<u32, PopChain>,
+}
+
+impl PopChainPool {
+    fn new() -> Self {
+        Self {
+            chains: BTreeMap::new(),
+        }
+    }
+
+    /// Return the NFA state that has a chain of `pop_count` DEFAULT transitions
+    /// terminating at the nonterminal node `target_state`, extending the shared
+    /// chain for `target_nt` as needed. Requires `pop_count >= 1`.
+    fn entry_state(
+        &mut self,
+        nfa: &mut NFA,
+        target_nt: u32,
+        target_state: u32,
+        pop_count: usize,
+    ) -> u32 {
+        debug_assert!(pop_count >= 1);
+        let chain = self.chains.entry(target_nt).or_insert_with(|| PopChain {
+            states: Vec::new(),
+        });
+        while chain.states.len() < pop_count {
+            let idx = chain.states.len();
+            let predecessor = if idx == 0 {
+                target_state
+            } else {
+                chain.states[idx - 1]
+            };
+            let new_state = nfa.add_state();
+            nfa.add_transition(new_state, DEFAULT_LABEL, predecessor);
+            chain.states.push(new_state);
+        }
+        chain.states[pop_count - 1]
+    }
+}
+
+fn add_positive_transition_chain_shared(
+    nfa: &mut NFA,
+    pool: &mut PopChainPool,
+    from: u32,
+    revealed_state: u32,
+    pop_count: usize,
+    target_nt: u32,
+    target_state: u32,
+) {
+    if pop_count == 0 {
+        nfa.add_epsilon(from, target_state);
+        return;
+    }
+    if pop_count == 1 {
+        nfa.add_transition(from, encode_positive_label(revealed_state), target_state);
+        return;
+    }
+    let entry = pool.entry_state(nfa, target_nt, target_state, pop_count - 1);
+    nfa.add_transition(from, encode_positive_label(revealed_state), entry);
+}
+
 /// Build an unweighted NFA from a terminal characterization.
 ///
 /// Each shift/reduce/escape/re-reduce path gets its own fresh intermediate
@@ -345,19 +422,54 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
     let start = 0u32; // NFA::new() creates state 0 as start
 
     let nonterminal_nodes = build_nonterminal_nodes(&mut nfa, characterization);
+    let mut pool = PopChainPool::new();
 
-    // Initial escapes: positive(state) → negative(pushes[0]) → ... → accepting
+    // Shared escape-chain cache.
+    //
+    // An "escape chain" is the sequence
+    //     positive(revealed_state) → negative(pushes[0]) → … → negative(pushes[n]) → accepting
+    // emitted for every `(escape)` and `(nt_escape)` entry in the
+    // characterization. Many entries share identical
+    // `(revealed_state, pushes)` signatures (e.g. every nonterminal in the
+    // grammar may escape to the same reveal state via the same push path),
+    // so we materialise each unique signature exactly once and splice the
+    // source state onto the cached entry point via an epsilon transition.
+    //
+    // This collapses the escape portion of the template NFA from
+    // O(num_entries × chain_len) states down to O(num_unique_signatures ×
+    // chain_len + num_entries) states, which is the dominant saving for
+    // balanced-binary bounded-repeat grammars.
+    let mut escape_chain_cache: BTreeMap<(u32, Vec<u32>), u32> = BTreeMap::new();
+
+    // Emit a (possibly cached) escape chain for the supplied `(revealed_state,
+    // pushes)` signature and return the chain's entry state. The caller is
+    // expected to epsilon-connect its source state to the returned entry.
+    let build_or_get_escape_chain =
+        |nfa: &mut NFA,
+         cache: &mut BTreeMap<(u32, Vec<u32>), u32>,
+         revealed_state: u32,
+         pushes: &[u32]|
+         -> u32 {
+            if let Some(&entry) = cache.get(&(revealed_state, pushes.to_vec())) {
+                return entry;
+            }
+            let entry = nfa.add_state();
+            let mut prev = nfa.add_state();
+            nfa.add_transition(entry, encode_positive_label(revealed_state), prev);
+            for &push_state in pushes {
+                let next = nfa.add_state();
+                nfa.add_transition(prev, encode_negative_label(push_state), next);
+                prev = next;
+            }
+            nfa.set_accepting(prev);
+            cache.insert((revealed_state, pushes.to_vec()), entry);
+            entry
+        };
+
+    // Initial escapes: start → [cached escape chain] → accepting
     for &(initial_state, ref pushes) in &characterization.escapes {
-        let s0 = nfa.add_state();
-        nfa.add_epsilon(start, s0);
-        let mut prev = nfa.add_state();
-        nfa.add_transition(s0, encode_positive_label(initial_state), prev);
-        for &push_state in pushes {
-            let next = nfa.add_state();
-            nfa.add_transition(prev, encode_negative_label(push_state), next);
-            prev = next;
-        }
-        nfa.set_accepting(prev);
+        let entry = build_or_get_escape_chain(&mut nfa, &mut escape_chain_cache, initial_state, pushes);
+        nfa.add_epsilon(start, entry);
     }
 
     for &(initial_state, pop_count, nonterminal) in &characterization.reduces {
@@ -368,31 +480,26 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
         let s0 = nfa.add_state();
         nfa.add_epsilon(start, s0);
 
-        add_positive_transition_chain(
+        add_positive_transition_chain_shared(
             &mut nfa,
+            &mut pool,
             s0,
             initial_state,
             pop_count,
+            nonterminal,
             target_nonterminal_state,
         );
     }
 
-    // NT escapes: nt_node → positive(revealed) → negative(pushes[0]) → ... → accepting
+    // NT escapes: nt_node → [cached escape chain] → accepting. Chains are
+    // shared across all (source_nonterminal, revealed_state, pushes) entries
+    // that agree on `(revealed_state, pushes)`.
     for &(source_nonterminal, revealed_state, ref pushes) in &characterization.nt_escapes {
         let Some(&source_state) = nonterminal_nodes.get(&source_nonterminal) else {
             continue;
         };
-
-        let s0 = nfa.add_state();
-        nfa.add_epsilon(source_state, s0);
-        let mut prev = nfa.add_state();
-        nfa.add_transition(s0, encode_positive_label(revealed_state), prev);
-        for &push_state in pushes {
-            let next = nfa.add_state();
-            nfa.add_transition(prev, encode_negative_label(push_state), next);
-            prev = next;
-        }
-        nfa.set_accepting(prev);
+        let entry = build_or_get_escape_chain(&mut nfa, &mut escape_chain_cache, revealed_state, pushes);
+        nfa.add_epsilon(source_state, entry);
     }
 
     for &(source_nonterminal, revealed_state, pop_count, target_nonterminal) in &characterization.nt_rereduces {
@@ -404,7 +511,15 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
 
         let s0 = nfa.add_state();
         nfa.add_epsilon(source_state, s0);
-        add_positive_transition_chain(&mut nfa, s0, revealed_state, pop_count, target_state);
+        add_positive_transition_chain_shared(
+            &mut nfa,
+            &mut pool,
+            s0,
+            revealed_state,
+            pop_count,
+            target_nonterminal,
+            target_state,
+        );
     }
 
     nfa
