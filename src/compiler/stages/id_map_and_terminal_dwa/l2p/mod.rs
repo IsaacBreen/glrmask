@@ -15,6 +15,8 @@ pub(crate) mod postprocess;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
+use rustc_hash::FxHashMap;
+
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::minimize::{minimize_from_env, minimize_with_threshold};
@@ -32,11 +34,110 @@ use crate::Vocab;
 
 use super::grammar_helpers::compute_always_allowed_follows;
 use super::types::{TerminalColoring, TerminalDwaPhaseProfile, compile_profile_enabled, debug_profile_enabled};
+use equivalence_analysis::compat::TokenizerView;
+use equivalence_analysis::disallowed_follows::normalize_disallowed_follows;
+use equivalence_analysis::state::fast as fast_state_equivalence;
 use nwa_builder::{build_nwa_via_trie_walk, internal_vocab_entries, seed_root_nodes};
 use postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
     prune_non_coreachable_states,
 };
+
+fn build_partition_pruned_tokenizer(
+    tokenizer: &Tokenizer,
+    active_terminals: &[bool],
+    relevant_bytes: &[bool; 256],
+) -> Tokenizer {
+    tokenizer.clone_filtered_for_terminals(active_terminals, relevant_bytes)
+}
+
+fn classify_dropped_original_states_to_local_tsids(
+    original_tokenizer: &Tokenizer,
+    simplified_tokenizer: &Tokenizer,
+    simplified_id_map: &crate::compiler::stages::equiv_types::InternalIdMap,
+    original_to_local_state: &[u32],
+    vocab: &Vocab,
+    active_terminals: &[bool],
+    relevant_bytes: &[bool; 256],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+) -> Vec<u32> {
+    let mut original_to_local_tsid = vec![u32::MAX; original_to_local_state.len()];
+    let mut simplified_state_to_original = vec![u32::MAX; simplified_tokenizer.num_states() as usize];
+
+    for (original_state, &local_state) in original_to_local_state.iter().enumerate() {
+        if local_state == u32::MAX {
+            continue;
+        }
+        original_to_local_tsid[original_state] =
+            simplified_id_map.tokenizer_states.original_to_internal[local_state as usize];
+        if simplified_state_to_original[local_state as usize] == u32::MAX {
+            simplified_state_to_original[local_state as usize] = original_state as u32;
+        }
+    }
+
+    let missing_states: Vec<usize> = original_to_local_tsid
+        .iter()
+        .enumerate()
+        .filter_map(|(state, &tsid)| (tsid == u32::MAX).then_some(state))
+        .collect();
+    if missing_states.is_empty() {
+        return original_to_local_tsid;
+    }
+
+    let representative_local_tsids_and_states: Vec<(u32, usize)> = simplified_id_map
+        .tokenizer_states
+        .iter_representative_ids()
+        .enumerate()
+        .filter_map(|local_state| {
+            let (local_tsid, local_state) = local_state;
+            let original_state = simplified_state_to_original[local_state as usize];
+            (original_state != u32::MAX).then_some((local_tsid as u32, original_state as usize))
+        })
+        .collect();
+    if representative_local_tsids_and_states.is_empty() {
+        return original_to_local_tsid;
+    }
+
+    let representative_tokens: Vec<&[u8]> = simplified_id_map
+        .vocab_tokens
+        .iter_representative_ids()
+        .filter_map(|token_id| vocab.entries.get(&token_id).map(|bytes| bytes.as_slice()))
+        .collect();
+    if representative_tokens.is_empty() {
+        return original_to_local_tsid;
+    }
+
+    let mut states: Vec<usize> = representative_local_tsids_and_states
+        .iter()
+        .map(|(_, original_state)| *original_state)
+        .collect();
+    states.extend(missing_states.iter().copied());
+
+    let pruned_tokenizer = build_partition_pruned_tokenizer(original_tokenizer, active_terminals, relevant_bytes);
+    let tokenizer_view = TokenizerView::new(&pruned_tokenizer);
+    let normalized_disallowed = normalize_disallowed_follows(pruned_tokenizer.num_terminals as usize, disallowed_follows);
+    let representative_mapping = fast_state_equivalence::find_state_equivalence_classes_with_disallowed(
+        &tokenizer_view,
+        &representative_tokens,
+        &states,
+        &normalized_disallowed,
+    );
+
+    let mut representative_state_to_tsid = FxHashMap::default();
+    for (idx, &(local_tsid, _)) in representative_local_tsids_and_states.iter().enumerate() {
+        let mapped_rep = representative_mapping[idx];
+        representative_state_to_tsid.entry(mapped_rep).or_insert(local_tsid);
+    }
+
+    for (idx, &original_state) in missing_states.iter().enumerate() {
+        let rep = representative_mapping[representative_local_tsids_and_states.len() + idx];
+        if let Some(&tsid) = representative_state_to_tsid.get(&rep) {
+            original_to_local_tsid[original_state] = tsid;
+        }
+    }
+
+    original_to_local_tsid
+}
 
 /// Build an L2+ id_map and terminal DWA for the given vocab and terminal set.
 ///
@@ -72,6 +173,8 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     if vocab.is_empty() {
         return None;
     }
+
+    let original_tokenizer = tokenizer;
 
     let total_started_at = Instant::now();
     let num_original_states = tokenizer.num_states() as usize;
@@ -116,6 +219,17 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         flat_trans,
     );
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let original_to_local_tsid = classify_dropped_original_states_to_local_tsids(
+        original_tokenizer,
+        &simplified_tok,
+        &simplified_id_map,
+        &orig_to_simplified,
+        vocab,
+        active_terminals,
+        &relevant_bytes,
+        disallowed_follows,
+    );
 
     // ---- Step 2-3: Internal vocab + prefix tree ----
     let vocab_tree_started_at = Instant::now();
@@ -263,6 +377,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         id_map: simplified_id_map,
         dwa,
         original_to_local_state: orig_to_simplified,
+        original_to_local_tsid: Some(original_to_local_tsid),
         profile: TerminalDwaPhaseProfile {
             id_map_ms: simplify_ms + id_map_ms,
             terminal_dwa_ms: vocab_tree_ms

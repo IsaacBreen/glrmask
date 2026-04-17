@@ -389,6 +389,34 @@ impl Tokenizer {
         Some(state)
     }
 
+    pub(crate) fn clone_filtered_for_terminals(
+        &self,
+        active_terminals: &[bool],
+        relevant_bytes: &[bool; 256],
+    ) -> Tokenizer {
+        let mut tokenizer = self.clone();
+        for state in tokenizer.dfa.states_mut().iter_mut() {
+            let filtered_transitions: Vec<(u8, u32)> = state
+                .transitions
+                .iter()
+                .filter(|(byte, _)| relevant_bytes[*byte as usize])
+                .map(|(byte, &target)| (byte, target))
+                .collect();
+            if filtered_transitions.len() != state.transitions.len() {
+                state.transitions = crate::ds::char_transitions::CharTransitions::from_sorted_entries(
+                    filtered_transitions,
+                );
+            }
+            for (terminal_id, active) in active_terminals.iter().enumerate() {
+                if !active && terminal_id < state.finalizers.len() && state.finalizers.contains(terminal_id) {
+                    state.finalizers.clear(terminal_id);
+                }
+            }
+        }
+        tokenizer.dfa.recompute_possible_futures();
+        tokenizer
+    }
+
     /// Create a simplified tokenizer that only knows about `active_terminals`.
     ///
     /// Non-active terminal bits are cleared from all finalizers. When
@@ -429,10 +457,8 @@ impl Tokenizer {
                 for (byte, &target) in state.transitions.iter() {
                     if relevant_bytes[byte as usize] {
                         filtered_transitions.push((byte, target));
-                    } else {
-                        if let Some(pruned_targets) = pruned_targets.as_mut() {
-                            pruned_targets[state_id].push(target);
-                        }
+                    } else if let Some(pruned_targets) = pruned_targets.as_mut() {
+                        pruned_targets[state_id].push(target);
                     }
                 }
                 if filtered_transitions.len() != state.transitions.len() {
