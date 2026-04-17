@@ -918,15 +918,24 @@ fn apply_permutations_to_dwa(
     tsid_perm: &[u32],
     token_perm: &[u32],
 ) {
-    let mut cache = HashMap::new();
-    let mut weight_map: HashMap<usize, Weight> = HashMap::with_capacity(unique_weights.len());
-    for w in unique_weights {
-        let old_ptr = Arc::as_ptr(&w.0) as usize;
-        let new_w = permute_weight_with_cache(w, tsid_perm, token_perm, &mut cache);
-        weight_map.insert(old_ptr, new_w);
-    }
+    use rayon::prelude::*;
 
-    for state in &mut dwa.states {
+    // Permute each unique weight in parallel. Each worker holds its own
+    // per-weight token-set cache (shared across that weight's internal
+    // range-values but not across weights). For large DWAs (~2k unique
+    // weights) this is a significant win — each weight's permutation is
+    // O(num_ranges * num_tokens) and the work splits cleanly.
+    let weight_entries: Vec<(usize, Weight)> = unique_weights
+        .par_iter()
+        .map(|w| {
+            let mut cache = HashMap::new();
+            let new_w = permute_weight_with_cache(w, tsid_perm, token_perm, &mut cache);
+            (Arc::as_ptr(&w.0) as usize, new_w)
+        })
+        .collect();
+    let weight_map: HashMap<usize, Weight> = weight_entries.into_iter().collect();
+
+    dwa.states.par_iter_mut().for_each(|state| {
         for (_, (_, weight)) in state.transitions.iter_mut() {
             let ptr = Arc::as_ptr(&weight.0) as usize;
             if let Some(new_w) = weight_map.get(&ptr) {
@@ -939,7 +948,7 @@ fn apply_permutations_to_dwa(
                 *fw = new_w.clone();
             }
         }
-    }
+    });
 }
 
 fn apply_random_layout_move(layout: &mut [u32], rng: &mut StdRng) {
