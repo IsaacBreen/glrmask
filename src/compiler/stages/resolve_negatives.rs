@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use range_set_blaze::RangeSetBlaze;
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::automata::weighted::nwa::{NWA, NWAState};
@@ -179,19 +180,23 @@ fn propagate_query_through_derived_epsilons(
     worklist: &mut VecDeque<CancellationTask>,
     queued: &mut QueuedQueries,
     derived_epsilons: &DerivedEpsilons,
+    foreign_derived: Option<&DerivedEpsilons>,
 ) {
-    let Some(derived_from_current) = derived_epsilons[current_state as usize].as_ref() else {
-        return;
-    };
+    let local = derived_epsilons[current_state as usize].as_ref();
+    let foreign = foreign_derived.and_then(|fd| fd[current_state as usize].as_ref());
 
-    for (&target_state, epsilon_weight) in derived_from_current {
+    let propagate = |target_state: u32,
+                     epsilon_weight: &Weight,
+                     query_weights: &mut QueryWeights,
+                     worklist: &mut VecDeque<CancellationTask>,
+                     queued: &mut QueuedQueries| {
         let propagated = intersect_with_single_weight_hint(
             query_weight_to_current,
             query_single,
             epsilon_weight,
         );
         if propagated.is_empty() {
-            continue;
+            return;
         }
         queue_query_weight(
             query_weights,
@@ -202,6 +207,19 @@ fn propagate_query_through_derived_epsilons(
             positive_label,
             propagated,
         );
+    };
+
+    if let Some(local_map) = local {
+        for (&target_state, epsilon_weight) in local_map {
+            propagate(target_state, epsilon_weight, query_weights, worklist, queued);
+        }
+    }
+    if let Some(foreign_map) = foreign {
+        for (&target_state, epsilon_weight) in foreign_map {
+            // Skip if local already has a stronger entry for this target
+            // (merging handled below in queue_query_weight's dedup anyway).
+            propagate(target_state, epsilon_weight, query_weights, worklist, queued);
+        }
     }
 }
 
@@ -284,6 +302,14 @@ pub(crate) fn compute_cancellations_range(
     nwa: &NWA,
     range: std::ops::Range<u32>,
 ) -> Vec<(u32, u32, Weight)> {
+    compute_cancellations_range_inner(nwa, range, None)
+}
+
+fn compute_cancellations_range_inner(
+    nwa: &NWA,
+    range: std::ops::Range<u32>,
+    foreign_derived: Option<&DerivedEpsilons>,
+) -> Vec<(u32, u32, Weight)> {
     let state_count = nwa.states.len() as u32;
     if state_count == 0 {
         return Vec::new();
@@ -341,6 +367,7 @@ pub(crate) fn compute_cancellations_range(
             &mut worklist,
             &mut queued,
             &derived_epsilons,
+            foreign_derived,
         );
 
         if let Some(positive_targets) = nwa.states[current_state as usize]
@@ -710,11 +737,72 @@ pub(crate) fn remove_redundant_default_transitions(nwa: &mut NWA) {
 }
 
 pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
-    let state_range = full_state_range(nwa);
-    apply_cancellations_range(nwa, state_range);
+    apply_cancellations_parallel_fixpoint(nwa);
     apply_finality_fixpoint(nwa);
     remove_negative_transitions(nwa);
     remove_redundant_default_transitions(nwa);
+}
+
+fn apply_cancellations_parallel_fixpoint(nwa: &mut NWA) {
+    let state_count = nwa.states.len();
+    if state_count == 0 {
+        return;
+    }
+
+    let num_threads = rayon::current_num_threads().max(1);
+    // Small inputs: just run sequentially to avoid overhead.
+    if state_count < 512 || num_threads < 2 {
+        let range = full_state_range(nwa);
+        apply_cancellations_range(nwa, range);
+        return;
+    }
+
+    // Chunk source states across threads (~4 chunks per thread for load-balancing).
+    let target_chunks = (num_threads * 4).max(1);
+    let chunk_size = (state_count.div_ceil(target_chunks)).max(64);
+    let chunks: Vec<std::ops::Range<u32>> = (0..state_count)
+        .step_by(chunk_size)
+        .map(|start| (start as u32)..((start + chunk_size).min(state_count) as u32))
+        .collect();
+
+    // Global snapshot of derived epsilons, indexed by source state. Grows monotonically.
+    let mut global_derived: DerivedEpsilons = vec![None; state_count];
+
+    let max_rounds = 16; // safety bound; typical convergence is 2-4 rounds.
+    for _round in 0..max_rounds {
+        // In parallel: each chunk runs a full cancellation fixpoint against the current
+        // global snapshot. Chunks only write derived epsilons for sources in their range,
+        // so the result slices are disjoint.
+        let results: Vec<Vec<(u32, u32, Weight)>> = chunks
+            .par_iter()
+            .cloned()
+            .map(|range| compute_cancellations_range_inner(nwa, range, Some(&global_derived)))
+            .collect();
+
+        let mut changed = false;
+        for batch in results {
+            for (from, to, weight) in batch {
+                let slot = global_derived[from as usize].get_or_insert_with(FxHashMap::default);
+                let entry = slot.entry(to).or_insert_with(Weight::empty);
+                if merge_weight(entry, weight) {
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // Apply all derived epsilons to the NWA.
+    for (from, targets) in global_derived.into_iter().enumerate() {
+        let Some(targets) = targets else { continue };
+        for (to, weight) in targets {
+            if !weight.is_empty() {
+                nwa.add_epsilon(from as u32, to, weight);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
