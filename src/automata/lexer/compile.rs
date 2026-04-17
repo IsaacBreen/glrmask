@@ -11,7 +11,7 @@ use super::ast::Expr;
 use super::dfa::DFA;
 use super::nfa::NFA;
 
-type ProductStateTuple = SmallVec<[(u32, u32); 8]>;
+type ProductStateTuple = SmallVec<[(u32, u32); 12]>;
 
 fn common_prefix_factor(exprs: &[Expr]) -> Option<(Expr, Vec<Expr>)> {
     fn candidate_prefix(expr: &Expr) -> Option<&Expr> {
