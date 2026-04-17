@@ -21,11 +21,27 @@ use crate::ds::weight::Weight;
 use super::types::{TerminalDwaPhaseProfile, compile_profile_enabled, debug_profile_enabled};
 
 #[derive(Debug, Clone)]
+pub(crate) struct DroppedOriginalStateTsidFallback {
+    original_to_local_tsid: Vec<u32>,
+}
+
+impl DroppedOriginalStateTsidFallback {
+    pub(crate) fn new(original_to_local_tsid: Vec<u32>) -> Self {
+        Self { original_to_local_tsid }
+    }
+
+    fn resolve(&self, original_state: usize) -> u32 {
+        self.original_to_local_tsid[original_state]
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct LocalIdMapTerminalDwa {
     pub(crate) id_map: InternalIdMap,
     pub(crate) dwa: DWA,
     pub(crate) original_to_local_state: Vec<u32>,
-    pub(crate) original_to_local_tsid: Option<Vec<u32>>,
+    // Temporary merge-side shim for original states dropped by tokenizer simplification.
+    pub(crate) dropped_original_state_tsid_fallback: Option<DroppedOriginalStateTsidFallback>,
     pub(crate) profile: TerminalDwaPhaseProfile,
 }
 
@@ -48,8 +64,8 @@ fn merge_phase_profile(
 }
 
 fn local_tsid_for_original_state(local: &LocalIdMapTerminalDwa, original_state: usize) -> u32 {
-    if let Some(original_to_local_tsid) = &local.original_to_local_tsid {
-        return original_to_local_tsid[original_state];
+    if let Some(fallback) = &local.dropped_original_state_tsid_fallback {
+        return fallback.resolve(original_state);
     }
 
     let local_state = local.original_to_local_state[original_state];
@@ -162,7 +178,7 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
         id_map: global,
         dwa,
         original_to_local_state: identity_original_to_local_state(num_tokenizer_states),
-        original_to_local_tsid: None,
+        dropped_original_state_tsid_fallback: None,
         profile,
     }
 }
@@ -285,7 +301,7 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
         id_map: global,
         dwa,
         original_to_local_state: identity_original_to_local_state(num_tokenizer_states),
-        original_to_local_tsid: None,
+        dropped_original_state_tsid_fallback: None,
         profile,
     }
 }

@@ -206,6 +206,14 @@ fn append_continuation_alias_states(
     }
 }
 
+struct TerminalFilteredDfa {
+    dfa: DFA,
+    active_bitset: BitSet,
+    any_cleared: bool,
+    transitions_pruned: bool,
+    pruned_targets: Option<Vec<Vec<u32>>>,
+}
+
 impl Tokenizer {
     pub fn start_state(&self) -> u32 {
         0
@@ -389,57 +397,13 @@ impl Tokenizer {
         Some(state)
     }
 
-    pub(crate) fn clone_filtered_for_terminals(
-        &self,
-        active_terminals: &[bool],
-        relevant_bytes: &[bool; 256],
-    ) -> Tokenizer {
-        let mut tokenizer = self.clone();
-        for state in tokenizer.dfa.states_mut().iter_mut() {
-            let filtered_transitions: Vec<(u8, u32)> = state
-                .transitions
-                .iter()
-                .filter(|(byte, _)| relevant_bytes[*byte as usize])
-                .map(|(byte, &target)| (byte, target))
-                .collect();
-            if filtered_transitions.len() != state.transitions.len() {
-                state.transitions = crate::ds::char_transitions::CharTransitions::from_sorted_entries(
-                    filtered_transitions,
-                );
-            }
-            for (terminal_id, active) in active_terminals.iter().enumerate() {
-                if !active && terminal_id < state.finalizers.len() && state.finalizers.contains(terminal_id) {
-                    state.finalizers.clear(terminal_id);
-                }
-            }
-        }
-        tokenizer.dfa.recompute_possible_futures();
-        tokenizer
-    }
-
-    /// Create a simplified tokenizer that only knows about `active_terminals`.
-    ///
-    /// Non-active terminal bits are cleared from all finalizers. When
-    /// `relevant_bytes` is provided, transitions on bytes outside that set are
-    /// also removed; the resulting DFA is only expected to be used on the
-    /// partition's vocab bytes. The DFA is then minimized.
-    ///
-    /// Returns `(simplified_tokenizer, original_to_simplified_state_map)`.
-    /// Unreachable original states map to `u32::MAX`.
-    pub fn simplify_for_terminals(
+    fn filter_dfa_for_terminals(
         &self,
         active_terminals: &[bool],
         relevant_bytes: Option<&[bool; 256]>,
-    ) -> (Tokenizer, Vec<u32>) {
-        let compile_profile = std::env::var("GLRMASK_PROFILE_COMPILE")
-            .map(|v| !v.is_empty() && v != "0")
-            .unwrap_or(false);
-
-        let t_start = std::time::Instant::now();
+    ) -> TerminalFilteredDfa {
         let mut dfa = self.dfa.clone();
-        let t_clone = t_start.elapsed();
 
-        // Build active-groups BitSet for masking possible_future_group_ids.
         let num_groups = self.num_terminals as usize;
         let mut active_bitset = crate::ds::bitset::BitSet::new(num_groups);
         for (tid, &active) in active_terminals.iter().enumerate() {
@@ -468,13 +432,68 @@ impl Tokenizer {
                     transitions_pruned = true;
                 }
             }
-            for (terminal_id, active) in active_terminals.iter().enumerate() {
-                if !active && terminal_id < state.finalizers.len() && state.finalizers.contains(terminal_id) {
-                    state.finalizers.clear(terminal_id);
-                    any_cleared = true;
+            if state.finalizers.len() == active_bitset.len() && !state.finalizers.is_subset(&active_bitset) {
+                state.finalizers.intersect_with(&active_bitset);
+                any_cleared = true;
+            } else {
+                for (terminal_id, active) in active_terminals.iter().enumerate() {
+                    if !active && terminal_id < state.finalizers.len() && state.finalizers.contains(terminal_id) {
+                        state.finalizers.clear(terminal_id);
+                        any_cleared = true;
+                    }
                 }
             }
         }
+
+        TerminalFilteredDfa {
+            dfa,
+            active_bitset,
+            any_cleared,
+            transitions_pruned,
+            pruned_targets,
+        }
+    }
+
+    pub(crate) fn clone_filtered_for_terminals(
+        &self,
+        active_terminals: &[bool],
+        relevant_bytes: &[bool; 256],
+    ) -> Tokenizer {
+        let mut filtered = self.filter_dfa_for_terminals(active_terminals, Some(relevant_bytes));
+        filtered.dfa.recompute_possible_futures();
+        Tokenizer {
+            dfa: filtered.dfa,
+            num_terminals: self.num_terminals,
+        }
+    }
+
+    /// Create a simplified tokenizer that only knows about `active_terminals`.
+    ///
+    /// Non-active terminal bits are cleared from all finalizers. When
+    /// `relevant_bytes` is provided, transitions on bytes outside that set are
+    /// also removed; the resulting DFA is only expected to be used on the
+    /// partition's vocab bytes. The DFA is then minimized.
+    ///
+    /// Returns `(simplified_tokenizer, original_to_simplified_state_map)`.
+    /// Unreachable original states map to `u32::MAX`.
+    pub fn simplify_for_terminals(
+        &self,
+        active_terminals: &[bool],
+        relevant_bytes: Option<&[bool; 256]>,
+    ) -> (Tokenizer, Vec<u32>) {
+        let compile_profile = std::env::var("GLRMASK_PROFILE_COMPILE")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false);
+
+        let t_start = std::time::Instant::now();
+        let t_clone = t_start.elapsed();
+        let TerminalFilteredDfa {
+            mut dfa,
+            active_bitset,
+            any_cleared,
+            transitions_pruned,
+            pruned_targets,
+        } = self.filter_dfa_for_terminals(active_terminals, relevant_bytes);
         let t_clear = t_start.elapsed();
 
         let continuation_roots = if transitions_pruned {
@@ -488,7 +507,6 @@ impl Tokenizer {
         };
 
         if !any_cleared && !transitions_pruned {
-            // No finalizer bits or transitions changed.
             let n = dfa.num_states();
             let identity: Vec<u32> = (0..n as u32).collect();
             if compile_profile {
@@ -501,36 +519,12 @@ impl Tokenizer {
         }
 
         let pre_minimize_states = dfa.num_states();
-        
-        // For large DFAs, check if minimize would early-return with zero
-        // reduction. minimize_impl skips Hopcroft when topology_prerefine
-        // finds >90% of blocks are unique. We can predict this cheaply using
-        // fingerprints: if >90% of (transitions, finalizers) fingerprints are
-        // distinct, minimize will certainly early-return unchanged.
-        //
-        // This check applies to ALL cases (including few active groups).
-        // Counting DFAs (from maxLength constraints) have genuinely distinct
-        // transitions even with few active groups, making minimize O(n log n)
-        // on 77K+ states with 0 reduction.
+
         let num_active = active_terminals.iter().filter(|&&b| b).count();
-        // For large active sets the masking changes very few finalizer bits, so
-        // the transition topology already distinguishes states and the
-        // fingerprint check is a valid fast-path. But for small active sets
-        // the fingerprint check is wrong: it hashes raw target state IDs, so
-        // two states A→C and A→D look distinct even when C and D are
-        // themselves equivalent after masking (a deep equivalence the local
-        // check cannot see). Skip the fingerprint heuristic for small active
-        // sets and let Hopcroft discover actual merges.
         if pre_minimize_states > 1000 && num_active > 32 && !transitions_pruned {
             let distinct = dfa.distinct_fingerprint_count();
             let n = pre_minimize_states;
             if distinct > n * 9 / 10 {
-                // minimize would early-return with no reduction. Skip the
-                // expensive clone + SCC + partition work.
-                // Instead of recompute_possible_futures (which does full SCC),
-                // just mask existing possible_futures with active_groups.
-                // This is correct because only finalizer bits changed; active
-                // groups' reachability is unchanged.
                 dfa.mask_possible_futures(&active_bitset);
                 let identity: Vec<u32> = (0..n as u32).collect();
                 if compile_profile {
@@ -546,17 +540,10 @@ impl Tokenizer {
         }
 
         let t_pre_min = std::time::Instant::now();
-        // When few groups are active, try fast iterative refinement to
-        // discover deep equivalences. For very large DFAs (>20K states),
-        // iterative refinement rarely converges in the 6-iteration budget
-        // due to deep chain structure, so go straight to Hopcroft minimize
-        // which converges regardless. For smaller DFAs, try iterative first
-        // (fast when it converges) and fall through to Hopcroft if it doesn't.
         let (mut minimized, mut state_mapping) = if num_active <= 16 && pre_minimize_states <= 20_000 {
             match dfa.try_minimize_full_with_state_mapping() {
                 Some(result) => result,
                 None => {
-                    // Iterative refinement didn't converge — use full minimize.
                     if compile_profile {
                         eprintln!(
                             "[glrmask/profile][simplify_detail] states={} active={} iterative_bail_ms={:.1} falling_through_to_hopcroft",
@@ -594,7 +581,7 @@ impl Tokenizer {
 
         let t_minimize = t_pre_min.elapsed();
         let post_minimize_states = minimized.num_states();
-        
+
         if compile_profile {
             let total = t_start.elapsed();
             eprintln!(

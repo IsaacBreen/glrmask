@@ -26,7 +26,7 @@ use crate::grammar::flat::TerminalID;
 use crate::compiler::possible_matches::{
     PossibleMatchesComputer,
 };
-use crate::compiler::stages::id_map_and_terminal_dwa::merge::LocalIdMapTerminalDwa;
+use crate::compiler::stages::id_map_and_terminal_dwa::merge::{DroppedOriginalStateTsidFallback, LocalIdMapTerminalDwa};
 use crate::ds::bitset::BitSet;
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::ds::weight::Weight;
@@ -51,7 +51,7 @@ fn build_partition_pruned_tokenizer(
     tokenizer.clone_filtered_for_terminals(active_terminals, relevant_bytes)
 }
 
-fn classify_dropped_original_states_to_local_tsids(
+fn build_dropped_original_state_tsid_fallback(
     original_tokenizer: &Tokenizer,
     simplified_tokenizer: &Tokenizer,
     simplified_id_map: &crate::compiler::stages::equiv_types::InternalIdMap,
@@ -60,7 +60,7 @@ fn classify_dropped_original_states_to_local_tsids(
     active_terminals: &[bool],
     relevant_bytes: &[bool; 256],
     disallowed_follows: &BTreeMap<u32, BitSet>,
-) -> Vec<u32> {
+) -> DroppedOriginalStateTsidFallback {
     let mut original_to_local_tsid = vec![u32::MAX; original_to_local_state.len()];
     let mut simplified_state_to_original = vec![u32::MAX; simplified_tokenizer.num_states() as usize];
 
@@ -81,7 +81,7 @@ fn classify_dropped_original_states_to_local_tsids(
         .filter_map(|(state, &tsid)| (tsid == u32::MAX).then_some(state))
         .collect();
     if missing_states.is_empty() {
-        return original_to_local_tsid;
+        return DroppedOriginalStateTsidFallback::new(original_to_local_tsid);
     }
 
     let representative_local_tsids_and_states: Vec<(u32, usize)> = simplified_id_map
@@ -95,7 +95,7 @@ fn classify_dropped_original_states_to_local_tsids(
         })
         .collect();
     if representative_local_tsids_and_states.is_empty() {
-        return original_to_local_tsid;
+        return DroppedOriginalStateTsidFallback::new(original_to_local_tsid);
     }
 
     let representative_tokens: Vec<&[u8]> = simplified_id_map
@@ -104,7 +104,7 @@ fn classify_dropped_original_states_to_local_tsids(
         .filter_map(|token_id| vocab.entries.get(&token_id).map(|bytes| bytes.as_slice()))
         .collect();
     if representative_tokens.is_empty() {
-        return original_to_local_tsid;
+        return DroppedOriginalStateTsidFallback::new(original_to_local_tsid);
     }
 
     let mut states: Vec<usize> = representative_local_tsids_and_states
@@ -136,7 +136,7 @@ fn classify_dropped_original_states_to_local_tsids(
         }
     }
 
-    original_to_local_tsid
+    DroppedOriginalStateTsidFallback::new(original_to_local_tsid)
 }
 
 /// Build an L2+ id_map and terminal DWA for the given vocab and terminal set.
@@ -220,7 +220,8 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     );
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let original_to_local_tsid = classify_dropped_original_states_to_local_tsids(
+    let tsid_fallback_started_at = Instant::now();
+    let dropped_original_state_tsid_fallback = build_dropped_original_state_tsid_fallback(
         original_tokenizer,
         &simplified_tok,
         &simplified_id_map,
@@ -230,6 +231,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         &relevant_bytes,
         disallowed_follows,
     );
+    let tsid_fallback_ms = tsid_fallback_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // ---- Step 2-3: Internal vocab + prefix tree ----
     let vocab_tree_started_at = Instant::now();
@@ -337,7 +339,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
     if compile_profile_enabled() || debug_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][l2p] partition={} vocab_tokens={} active_terminals={} original_states={} tsids={} simplify_ms={:.3} simplified_states={} id_map_ms={:.3} vocab_tree_ms={:.3} possible_matches_ms={:.3} seed_ms={:.3} terminal_nwa_build_ms={:.3} nwa_states={}->{}->{}->{}->{} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} prune_ms={:.3} canonicalize_ms={:.3} postprocess_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} minimize_states={} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} total_ms={:.3}",
+            "[glrmask/profile][l2p] partition={} vocab_tokens={} active_terminals={} original_states={} tsids={} simplify_ms={:.3} simplified_states={} id_map_ms={:.3} tsid_fallback_ms={:.3} vocab_tree_ms={:.3} possible_matches_ms={:.3} seed_ms={:.3} terminal_nwa_build_ms={:.3} nwa_states={}->{}->{}->{}->{} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} prune_ms={:.3} canonicalize_ms={:.3} postprocess_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} minimize_states={} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} total_ms={:.3}",
             partition_label,
             vocab.entries.len(),
             num_active_terminals,
@@ -346,6 +348,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             simplify_ms,
             simplified_tok.num_states(),
             id_map_ms,
+            tsid_fallback_ms,
             vocab_tree_ms,
             possible_matches_ms,
             seed_ms,
@@ -377,9 +380,9 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         id_map: simplified_id_map,
         dwa,
         original_to_local_state: orig_to_simplified,
-        original_to_local_tsid: Some(original_to_local_tsid),
+        dropped_original_state_tsid_fallback: Some(dropped_original_state_tsid_fallback),
         profile: TerminalDwaPhaseProfile {
-            id_map_ms: simplify_ms + id_map_ms,
+            id_map_ms: simplify_ms + id_map_ms + tsid_fallback_ms,
             terminal_dwa_ms: vocab_tree_ms
                 + possible_matches_ms
                 + seed_ms

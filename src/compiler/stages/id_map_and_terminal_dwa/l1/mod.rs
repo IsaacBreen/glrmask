@@ -303,7 +303,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
         id_map,
         dwa,
         original_to_local_state: identity_original_to_local_state(tokenizer.num_states() as usize),
-        original_to_local_tsid: None,
+        dropped_original_state_tsid_fallback: None,
         profile: TerminalDwaPhaseProfile {
             id_map_ms,
             terminal_dwa_ms: terminal_build_ms,
