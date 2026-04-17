@@ -218,29 +218,9 @@ pub(crate) fn classify_terminal_path_lengths(
 
     // 1. Vocab byte bitset: all bytes appearing in any vocab token.
     let mut vocab_bytes = U8Set::empty();
-    let mut token_end_future_terminals = BitSet::new(nt);
     for bytes in vocab.entries.values() {
         for &b in bytes {
             vocab_bytes.insert(b);
-        }
-
-        let mut state = tokenizer.start_state();
-        let mut valid = true;
-        for &b in bytes {
-            match tokenizer.step(state, b) {
-                Some(next_state) => state = next_state,
-                None => {
-                    valid = false;
-                    break;
-                }
-            }
-        }
-        if valid {
-            for terminal_id in tokenizer.possible_future_terminals_iter(state) {
-                if (terminal_id as usize) < nt {
-                    token_end_future_terminals.set(terminal_id as usize);
-                }
-            }
         }
     }
 
@@ -258,11 +238,6 @@ pub(crate) fn classify_terminal_path_lengths(
 
     // 3. Mark terminals that may participate in paths of length ≥ 2.
     let mut is_two_plus = BitSet::new(nt);
-    for t in 0..nt {
-        if token_end_future_terminals.contains(t) {
-            is_two_plus.set(t);
-        }
-    }
 
     // Debug: collect the actual contributing pairs
     let debug_profile = super::types::debug_profile_enabled();
@@ -375,7 +350,7 @@ mod tests {
     use super::classify_terminal_path_lengths;
 
     #[test]
-    fn classify_prefix_only_partition_as_two_plus() {
+    fn classify_prefix_only_partition_as_one() {
         let tokenizer = build_tokenizer_from_exprs(&[parse_regex("-[0-9]", true)]);
         let vocab = Vocab::new(vec![(0, b"-".to_vec())], None);
         let disallowed_follows = BTreeMap::<u32, BitSet>::new();
@@ -383,7 +358,7 @@ mod tests {
         let path_lengths =
             classify_terminal_path_lengths(&tokenizer, &vocab, &disallowed_follows, 1, None);
 
-        assert_eq!(path_lengths, vec![TerminalPathLength::TwoPlus]);
+        assert_eq!(path_lengths, vec![TerminalPathLength::One]);
     }
 
     #[test]
