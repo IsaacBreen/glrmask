@@ -559,8 +559,9 @@ pub(crate) fn collect_possible_matches_by_internal_tsid_dense(
     num_internal_tokens: u32,
 ) -> (BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>, PossibleMatchesProfile) {
     // For small workloads, the serial path with FxHashMap cache is faster.
-    // For larger workloads, the batched trie walk eliminates cache overhead.
-    if tokenizer_state_ids.num_internal_ids() < 5000 {
+    // For medium-to-large workloads, the batched trie walk eliminates cache
+    // overhead even before we reach the old 5k-state cutoff.
+    if tokenizer_state_ids.num_internal_ids() < 2048 {
         return collect_possible_matches_dense_serial(
             tokenizer, root, tokenizer_state_ids, num_internal_tokens,
         );
