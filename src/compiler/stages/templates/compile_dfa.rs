@@ -4,7 +4,7 @@
 //! path, epsilon-connected to NT nodes) and then determinizes + minimizes to
 //! produce an acyclic unweighted DFA.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 use crate::automata::weighted::nwa::{NWA, NWAState};
@@ -424,52 +424,85 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
     let nonterminal_nodes = build_nonterminal_nodes(&mut nfa, characterization);
     let mut pool = PopChainPool::new();
 
-    // Shared escape-chain cache.
+    // Shared escape-chain tail.
     //
     // An "escape chain" is the sequence
     //     positive(revealed_state) → negative(pushes[0]) → … → negative(pushes[n]) → accepting
     // emitted for every `(escape)` and `(nt_escape)` entry in the
-    // characterization. Many entries share identical
-    // `(revealed_state, pushes)` signatures (e.g. every nonterminal in the
-    // grammar may escape to the same reveal state via the same push path),
-    // so we materialise each unique signature exactly once and splice the
-    // source state onto the cached entry point via an epsilon transition.
+    // characterization. Rather than materialise a distinct entry node per
+    // signature and splice the source via an epsilon, each source adds its
+    // positive transition directly to a shared "pos-target" state that
+    // represents the state reached just after firing `positive(revealed)`.
+    // The pos-target state is cached per `pushes` (the `revealed` component
+    // differs per caller but never affects the negative-chain tail).
     //
-    // This collapses the escape portion of the template NFA from
-    // O(num_entries × chain_len) states down to O(num_unique_signatures ×
-    // chain_len + num_entries) states, which is the dominant saving for
-    // balanced-binary bounded-repeat grammars.
-    let mut escape_chain_cache: BTreeMap<(u32, Vec<u32>), u32> = BTreeMap::new();
+    // A source dedup set eliminates duplicate positive transitions when the
+    // characterization repeats `(source, revealed, pushes)` tuples.
 
-    // Emit a (possibly cached) escape chain for the supplied `(revealed_state,
-    // pushes)` signature and return the chain's entry state. The caller is
-    // expected to epsilon-connect its source state to the returned entry.
-    let build_or_get_escape_chain =
+    // Suffix trie over *reversed* push sequences, all rooted at a single
+    // shared accepting state. If two signatures share a common `pushes`
+    // suffix, they share the corresponding NFA states and negative
+    // transitions. For `(pushes = [p0, p1, …, pn])`, the trie walk starts at
+    // the shared `accept_root` and consumes `pn, pn-1, …, p0` in reverse;
+    // the state reached after consuming all pushes is the pos-target that
+    // the caller's positive transition points at.
+    //
+    // Key: `(child_state, push_label)` → `parent_state` such that
+    // `parent_state` has a `negative(push_label)` transition to `child_state`.
+    let accept_root = nfa.add_state();
+    nfa.set_accepting(accept_root);
+    let mut suffix_trie: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+
+    // Cache of pos-target states keyed by `pushes`.
+    let mut pos_target_cache: BTreeMap<Vec<u32>, u32> = BTreeMap::new();
+
+    // Dedup set for emitted `(source, revealed, pushes)` positive transitions.
+    // Keying includes `pushes` rather than `pos_target` because two distinct
+    // `pushes` sequences may resolve (under suffix sharing) to the same
+    // `pos_target`, yet still represent logically distinct escapes; we dedupe
+    // purely to avoid inserting the same transition twice when the
+    // characterization contains exact duplicates.
+    let mut emitted_escapes: BTreeSet<(u32, u32, Vec<u32>)> = BTreeSet::new();
+
+    // Resolve (or build) the pos-target for a `pushes` suffix by walking
+    // it in reverse through the suffix trie rooted at `accept_root`.
+    let resolve_pos_target =
         |nfa: &mut NFA,
-         cache: &mut BTreeMap<(u32, Vec<u32>), u32>,
-         revealed_state: u32,
+         pos_target_cache: &mut BTreeMap<Vec<u32>, u32>,
+         suffix_trie: &mut BTreeMap<(u32, u32), u32>,
          pushes: &[u32]|
          -> u32 {
-            if let Some(&entry) = cache.get(&(revealed_state, pushes.to_vec())) {
-                return entry;
+            if let Some(&cached) = pos_target_cache.get(pushes) {
+                return cached;
             }
-            let entry = nfa.add_state();
-            let mut prev = nfa.add_state();
-            nfa.add_transition(entry, encode_positive_label(revealed_state), prev);
-            for &push_state in pushes {
-                let next = nfa.add_state();
-                nfa.add_transition(prev, encode_negative_label(push_state), next);
-                prev = next;
+            let mut cur = accept_root;
+            for &push_state in pushes.iter().rev() {
+                let key = (cur, push_state);
+                cur = if let Some(&existing) = suffix_trie.get(&key) {
+                    existing
+                } else {
+                    let s = nfa.add_state();
+                    nfa.add_transition(s, encode_negative_label(push_state), cur);
+                    suffix_trie.insert(key, s);
+                    s
+                };
             }
-            nfa.set_accepting(prev);
-            cache.insert((revealed_state, pushes.to_vec()), entry);
-            entry
+            pos_target_cache.insert(pushes.to_vec(), cur);
+            cur
         };
 
-    // Initial escapes: start → [cached escape chain] → accepting
+    // Initial escapes: start → positive(initial_state) → [shared suffix tail] → accept_root
     for &(initial_state, ref pushes) in &characterization.escapes {
-        let entry = build_or_get_escape_chain(&mut nfa, &mut escape_chain_cache, initial_state, pushes);
-        nfa.add_epsilon(start, entry);
+        if !emitted_escapes.insert((start, initial_state, pushes.to_vec())) {
+            continue;
+        }
+        let pos_target = resolve_pos_target(
+            &mut nfa,
+            &mut pos_target_cache,
+            &mut suffix_trie,
+            pushes,
+        );
+        nfa.add_transition(start, encode_positive_label(initial_state), pos_target);
     }
 
     for &(initial_state, pop_count, nonterminal) in &characterization.reduces {
@@ -477,13 +510,13 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
             continue;
         };
 
-        let s0 = nfa.add_state();
-        nfa.add_epsilon(start, s0);
-
+        // Emit the reduce chain directly from `start`; no staging state is
+        // needed because `start` is already the common source for every
+        // `reduces` entry, and the chain itself handles the pop/reveal split.
         add_positive_transition_chain_shared(
             &mut nfa,
             &mut pool,
-            s0,
+            start,
             initial_state,
             pop_count,
             nonterminal,
@@ -491,15 +524,25 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
         );
     }
 
-    // NT escapes: nt_node → [cached escape chain] → accepting. Chains are
-    // shared across all (source_nonterminal, revealed_state, pushes) entries
-    // that agree on `(revealed_state, pushes)`.
+    // NT escapes: source_nt_node → positive(revealed) → [shared suffix tail] → accept_root.
+    // The suffix tail is shared across every `(source, revealed, pushes)` that
+    // agrees on the `pushes` tail; the positive transition is added directly
+    // from the source, with dedup against exact `(source, revealed, pushes)`
+    // duplicates.
     for &(source_nonterminal, revealed_state, ref pushes) in &characterization.nt_escapes {
         let Some(&source_state) = nonterminal_nodes.get(&source_nonterminal) else {
             continue;
         };
-        let entry = build_or_get_escape_chain(&mut nfa, &mut escape_chain_cache, revealed_state, pushes);
-        nfa.add_epsilon(source_state, entry);
+        if !emitted_escapes.insert((source_state, revealed_state, pushes.to_vec())) {
+            continue;
+        }
+        let pos_target = resolve_pos_target(
+            &mut nfa,
+            &mut pos_target_cache,
+            &mut suffix_trie,
+            pushes,
+        );
+        nfa.add_transition(source_state, encode_positive_label(revealed_state), pos_target);
     }
 
     for &(source_nonterminal, revealed_state, pop_count, target_nonterminal) in &characterization.nt_rereduces {
@@ -509,12 +552,13 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
             continue;
         };
 
-        let s0 = nfa.add_state();
-        nfa.add_epsilon(source_state, s0);
+        // Emit the rereduce chain directly from `source_state`; per-entry
+        // staging states are redundant (the chain's own states disambiguate
+        // distinct entries).
         add_positive_transition_chain_shared(
             &mut nfa,
             &mut pool,
-            s0,
+            source_state,
             revealed_state,
             pop_count,
             target_nonterminal,
