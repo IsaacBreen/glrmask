@@ -72,6 +72,32 @@ fn emit_terminal_dwa_symbol_counts(label: &str, dwa: &DWA, grammar: &AnalyzedGra
 
 /// Build the global `(InternalIdMap, DWA)` for the full vocabulary.
 ///
+/// IMPORTANT: the JSON-schema importer must not feed this stage large numbers
+/// of short, grammar-visible alnum-ish terminals. A terminal is
+/// "grammar-visible" when it is either a named terminal or an inline
+/// literal/pattern that appears directly in a nonterminal rule body.
+///
+/// Those terminals are pathological for terminal-DWA construction when all of
+/// the following hold:
+///
+/// 1. they match one of a broad character class but only a small bounded
+///    number of characters (classic bad cases: `[a-z]`, `[a-z]{1,3}`,
+///    bare URI/hostname/JSON-string body fragments);
+/// 2. they do not carry stabilizing punctuation with them, especially on the
+///    trailing edge; and
+/// 3. they are grammar-visible rather than internal-only.
+///
+/// This creates explosive same-prefix ambiguity in the terminal DWA: e.g. a
+/// visible `[a-z]` and `[a-z][a-z]` force the DWA to keep many competing
+/// terminal continuations alive. The importer therefore deliberately fuses
+/// punctuation into visible terminals when possible, and keeps short generic
+/// bodies internal-only whenever possible. Do not "simplify" that structure
+/// away without re-checking schemas like `Github_hard---o1051` and
+/// `uuid_maxlength5000`.
+///
+/// `JSON_NUMBER` is the known exception: it technically fits the heuristic, but
+/// in practice it has not shown the same DWA blow-up.
+///
 /// 1. Splits vocab into 3 partitions by leading-byte character type.
 /// 2. Builds each partition's `(InternalIdMap, DWA)` in parallel via
 ///    [`partition::build_partition_id_map_and_terminal_dwa`].
