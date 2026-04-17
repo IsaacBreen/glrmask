@@ -207,6 +207,7 @@ pub(crate) fn build_tokenizer_from_exprs(exprs: &[Expr]) -> Tokenizer {
     Tokenizer {
         dfa: regex.dfa,
         num_terminals: exprs.len() as u32,
+        exprs: Some(std::sync::Arc::from(exprs.to_vec())),
     }
 }
 

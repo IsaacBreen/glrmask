@@ -1,11 +1,13 @@
 //! Runtime-facing tokenizer API built on top of the lexer DFA.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::automata::dfa::DFA;
+use crate::automata::regex::Expr;
 use crate::grammar::flat::TerminalID;
 use crate::ds::bitset::BitSet;
 
@@ -13,6 +15,11 @@ use crate::ds::bitset::BitSet;
 pub struct Tokenizer {
     pub(crate) dfa: DFA,
     pub num_terminals: u32,
+    /// Per-terminal regex expressions used to (re)build this tokenizer.
+    /// Skipped during (de)serialization because they are only needed during
+    /// compile-time simplification for active-terminal rebuilds.
+    #[serde(default, skip)]
+    pub(crate) exprs: Option<Arc<[Expr]>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -325,6 +332,100 @@ impl Tokenizer {
         0
     }
 
+    /// Build a simplified tokenizer by rebuilding the DFA from scratch using
+    /// only the active terminal expressions. Finalizer and possible-future
+    /// bitsets in the returned tokenizer are in the ORIGINAL terminal-id
+    /// space (inactive bits always clear). Returns `None` if this tokenizer
+    /// has no cached `exprs` or the active set is empty.
+    ///
+    /// The `orig_to_simplified` mapping is computed by a parallel BFS over
+    /// (original_state, fresh_state) pairs starting at (0, 0), following
+    /// bytes that exist in the fresh DFA. Original states unreachable via
+    /// any active-language byte sequence are left as `u32::MAX`.
+    pub fn simplified_from_active_exprs(
+        &self,
+        active_terminals: &[bool],
+    ) -> Option<(Tokenizer, Vec<u32>)> {
+        use std::collections::VecDeque;
+
+        let exprs = self.exprs.as_ref()?;
+        if exprs.len() != active_terminals.len() {
+            return None;
+        }
+        let local_to_orig: Vec<u32> = active_terminals
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &a)| a.then_some(i as u32))
+            .collect();
+        if local_to_orig.is_empty() {
+            return None;
+        }
+
+        // Build fresh DFA from active exprs only. Local terminal IDs 0..k-1.
+        let active_exprs: Vec<Expr> = local_to_orig
+            .iter()
+            .map(|&orig| exprs[orig as usize].clone())
+            .collect();
+        let regex = crate::automata::lexer::compile::build_regex(&active_exprs);
+        let mut fresh_dfa: DFA = regex.dfa;
+
+        // Remap finalizers and possible_future_group_ids from local IDs
+        // (0..num_active-1) to original IDs in a num_terminals-wide bitset.
+        let num_terminals = self.num_terminals as usize;
+        fresh_dfa.ensure_group_capacity(num_terminals);
+        let num_states = fresh_dfa.num_states();
+        for s in 0..num_states {
+            let old_fins = fresh_dfa.states()[s].finalizers.clone();
+            let mut new_fins = BitSet::new(num_terminals);
+            for local in old_fins.iter_ones() {
+                if let Some(&orig) = local_to_orig.get(local) {
+                    new_fins.set(orig as usize);
+                }
+            }
+            let old_fut = fresh_dfa
+                .possible_future_group_ids(s as u32)
+                .clone();
+            let mut new_fut = BitSet::new(num_terminals);
+            for local in old_fut.iter_ones() {
+                if let Some(&orig) = local_to_orig.get(local) {
+                    new_fut.set(orig as usize);
+                }
+            }
+            fresh_dfa.overwrite_state_metadata(s as u32, new_fins, new_fut);
+        }
+
+        // Parallel BFS: original state 0 maps to fresh state 0.
+        let n_orig = self.dfa.num_states();
+        let mut mapping = vec![u32::MAX; n_orig];
+        mapping[0] = 0;
+        let mut queue: VecDeque<u32> = VecDeque::new();
+        queue.push_back(0);
+        while let Some(o) = queue.pop_front() {
+            let f = mapping[o as usize];
+            let o_state = &self.dfa.states()[o as usize];
+            for (byte, &o_next) in o_state.transitions.iter() {
+                if let Some(f_next) = fresh_dfa.step(f, byte) {
+                    let slot = &mut mapping[o_next as usize];
+                    if *slot == u32::MAX {
+                        *slot = f_next;
+                        queue.push_back(o_next);
+                    } else {
+                        debug_assert_eq!(*slot, f_next,
+                            "parallel BFS inconsistency: orig {} mapped to both {} and {}",
+                            o_next, *slot, f_next);
+                    }
+                }
+            }
+        }
+
+        let tok = Tokenizer {
+            dfa: fresh_dfa,
+            num_terminals: self.num_terminals,
+            exprs: self.exprs.clone(),
+        };
+        Some((tok, mapping))
+    }
+
     /// Detect nullable terminals (those that match the empty string) by
     /// inspecting start-state finalizers, remove them from the DFA, and return
     /// the set.  After this call the tokenizer no longer reports those
@@ -619,6 +720,7 @@ impl Tokenizer {
         Tokenizer {
             dfa: filtered.dfa,
             num_terminals: self.num_terminals,
+            exprs: self.exprs.clone(),
         }
     }
 
@@ -639,6 +741,30 @@ impl Tokenizer {
         let compile_profile = std::env::var("GLRMASK_PROFILE_COMPILE")
             .map(|v| !v.is_empty() && v != "0")
             .unwrap_or(false);
+
+        // Fast path: when we have cached exprs and the active set is a
+        // small fraction of all terminals, rebuild the tokenizer directly
+        // from the active expressions. This sidesteps the cost of cloning
+        // and minimizing the full ~26k-state original DFA for each
+        // partition. Gated behind GLRMASK_FROM_SCRATCH_SIMPLIFY for now.
+        let use_from_scratch = std::env::var_os("GLRMASK_FROM_SCRATCH_SIMPLIFY").is_some()
+            && self.exprs.is_some()
+            && {
+                let num_active = active_terminals.iter().filter(|&&a| a).count();
+                num_active * 2 <= active_terminals.len()
+            };
+        if use_from_scratch {
+            if let Some(result) = self.simplified_from_active_exprs(active_terminals) {
+                if compile_profile {
+                    eprintln!(
+                        "[glrmask/profile][simplify_detail] from_scratch states={} active={}",
+                        result.0.num_states(),
+                        active_terminals.iter().filter(|&&a| a).count(),
+                    );
+                }
+                return result;
+            }
+        }
 
         // When a partition has few active terminals, skipping the
         // relevant_bytes pruning gives a dramatically smaller simplified
@@ -724,7 +850,7 @@ impl Tokenizer {
                     n, t_clone.as_secs_f64()*1000.0, (t_clear - t_clone).as_secs_f64()*1000.0,
                 );
             }
-            return (Tokenizer { dfa, num_terminals: self.num_terminals }, identity);
+            return (Tokenizer { dfa, num_terminals: self.num_terminals, exprs: self.exprs.clone() }, identity);
         }
 
         let pre_minimize_states = dfa.num_states();
@@ -744,7 +870,7 @@ impl Tokenizer {
                         distinct, n, total.as_secs_f64()*1000.0,
                     );
                 }
-                return (Tokenizer { dfa, num_terminals: self.num_terminals }, identity);
+                return (Tokenizer { dfa, num_terminals: self.num_terminals, exprs: self.exprs.clone() }, identity);
             }
         }
 
@@ -893,6 +1019,7 @@ impl Tokenizer {
         let simplified = Tokenizer {
             dfa: minimized,
             num_terminals: self.num_terminals,
+            exprs: self.exprs.clone(),
         };
 
         (simplified, state_mapping)

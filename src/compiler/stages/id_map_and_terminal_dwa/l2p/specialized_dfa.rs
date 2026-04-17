@@ -195,6 +195,7 @@ pub(crate) fn build_specialized_tokenizer(
     let spec_tokenizer = Tokenizer {
         dfa: new_dfa,
         num_terminals: tokenizer.num_terminals,
+        exprs: tokenizer.exprs.clone(),
     };
 
     SpecializedTokenizer {
