@@ -171,11 +171,20 @@ fn build_state_summaries(
                 let nwa = Arc::new(templates.build_bundle(bundle));
                 if parser_dwa_profile_enabled() {
                     let build_ms = build_started_at.elapsed().as_secs_f64() * 1000.0;
+                    let nwa_transitions: usize = nwa
+                        .states
+                        .iter()
+                        .map(|s| {
+                            s.transitions.values().map(|v| v.len()).sum::<usize>()
+                                + s.epsilons.len()
+                        })
+                        .sum();
                     eprintln!(
-                        "[glrmask/profile][parser_dwa_bundle] bundle={:>4} terminals={:>4} nwa_states={:>5} build_ms={:>7.1}",
+                        "[glrmask/profile][parser_dwa_bundle] bundle={:>4} terminals={:>4} nwa_states={:>5} nwa_trans={:>6} build_ms={:>7.1}",
                         bundle_id,
                         bundle.len(),
                         nwa.states.len(),
+                        nwa_transitions,
                         build_ms,
                     );
                 }
@@ -1231,6 +1240,16 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
         return DWA::new(0, 0);
     };
 
+    if parser_dwa_profile_enabled() {
+        let nwa_transitions: usize = parser_nwa.states.iter()
+            .map(|s| s.transitions.values().map(|v| v.len()).sum::<usize>() + s.epsilons.len())
+            .sum();
+        eprintln!(
+            "[glrmask/profile][parser_dwa_scale] phase=pre_resolve_negatives nwa_states={} nwa_transitions={} terminal_dwa_states={}",
+            parser_nwa.states.len(), nwa_transitions, terminal_dwa.states.len(),
+        );
+    }
+
     let resolve_negatives_started_at = Instant::now();
     resolve_negative_codes_in_nwa(&mut parser_nwa);
     profile.resolve_negatives_ms = elapsed_ms(resolve_negatives_started_at);
@@ -1240,7 +1259,7 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
             .map(|s| s.transitions.values().map(|v| v.len()).sum::<usize>() + s.epsilons.len())
             .sum();
         eprintln!(
-            "[glrmask/profile][parser_dwa_scale] nwa_states={} nwa_transitions={} terminal_dwa_states={}",
+            "[glrmask/profile][parser_dwa_scale] phase=post_resolve_negatives nwa_states={} nwa_transitions={} terminal_dwa_states={}",
             parser_nwa.states.len(), nwa_transitions, terminal_dwa.states.len(),
         );
     }
