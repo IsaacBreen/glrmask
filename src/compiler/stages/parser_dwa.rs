@@ -422,6 +422,66 @@ fn build_possible_outgoing_ids_by_state(
         .collect()
 }
 
+fn local_epsilon_closure(
+    nwa: &NWA,
+    weight_by_state: &mut Vec<Option<Weight>>,
+    closure_queue: &mut VecDeque<u32>,
+    seed: &mut FxHashMap<u32, Weight>,
+) {
+    let mut seed_states: Vec<u32> = Vec::new();
+    for (&state_id, weight) in seed.iter() {
+        weight_by_state[state_id as usize] = Some(weight.clone());
+        closure_queue.push_back(state_id);
+        seed_states.push(state_id);
+    }
+    if seed.len() == 1 {
+        let state_id = seed_states[0];
+        if let Some(state) = nwa.states.get(state_id as usize) {
+            if state.epsilons.is_empty() {
+                closure_queue.clear();
+                for &s in &seed_states {
+                    weight_by_state[s as usize] = None;
+                }
+                return;
+            }
+        }
+    }
+    while let Some(state_id) = closure_queue.pop_front() {
+        let Some(current_weight) = weight_by_state[state_id as usize].clone() else {
+            continue;
+        };
+        let Some(state) = nwa.states.get(state_id as usize) else {
+            continue;
+        };
+        for (target, edge_weight) in &state.epsilons {
+            let contribution = current_weight.intersection(edge_weight);
+            if contribution.is_empty() {
+                continue;
+            }
+            let target_idx = *target as usize;
+            if let Some(existing) = &weight_by_state[target_idx] {
+                if !contribution.is_subset(existing) {
+                    weight_by_state[target_idx] = Some(existing.union(&contribution));
+                    closure_queue.push_back(*target);
+                    if !seed_states.contains(target) {
+                        seed_states.push(*target);
+                    }
+                }
+            } else {
+                weight_by_state[target_idx] = Some(contribution);
+                closure_queue.push_back(*target);
+                seed_states.push(*target);
+            }
+        }
+    }
+    seed.clear();
+    for &s in &seed_states {
+        if let Some(w) = weight_by_state[s as usize].take() {
+            seed.insert(s, w);
+        }
+    }
+}
+
 fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
     fn subset_key(entries: &[(u32, Weight)]) -> Vec<(u32, usize)> {
         entries.iter().map(|(sid, w)| (*sid, w.ptr_key())).collect()
@@ -600,62 +660,123 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
         if profile_enabled { prof_intersection_ns += t_intersect.elapsed().as_nanos() as u64; }
 
         let t_target = std::time::Instant::now();
-        for (label, target_contributions) in raw_targets.drain() {
-            if target_contributions.is_empty() {
-                continue;
+        let raw_target_entries: Vec<(i32, FxHashMap<u32, Vec<Weight>>)> =
+            raw_targets.drain().collect();
+        if profile_enabled {
+            for (_, contribs) in &raw_target_entries {
+                for (_, weights) in contribs {
+                    prof_total_raw_target_entries += weights.len() as u64;
+                }
             }
+        }
 
+        type LabelResult = (i32, Weight, Vec<(u32, Weight)>, Vec<u32>);
+        let process_label = |weight_by_state: &mut Vec<Option<Weight>>,
+                             closure_queue: &mut VecDeque<u32>,
+                             target_subset: &mut FxHashMap<u32, Weight>,
+                             label: i32,
+                             target_contributions: FxHashMap<u32, Vec<Weight>>|
+         -> Option<LabelResult> {
+            if target_contributions.is_empty() {
+                return None;
+            }
             target_subset.clear();
             for (dst, weights) in target_contributions {
-                if profile_enabled { prof_total_raw_target_entries += weights.len() as u64; }
                 let combined = Weight::union_all(weights.iter());
                 if !combined.is_empty() {
                     target_subset.insert(dst, combined);
                 }
             }
-
             if target_subset.is_empty() {
-                continue;
+                return None;
             }
-
             let edge_weight = Weight::union_all(target_subset.values());
             if edge_weight.is_empty() {
-                continue;
+                return None;
             }
-
-            if profile_enabled {
-                prof_labels_processed += 1;
-                prof_eps_closure_calls += 1;
-            }
-            let t_eps = std::time::Instant::now();
-            epsilon_closure(&mut weight_by_state, &mut closure_queue, &mut target_subset);
-            if profile_enabled { prof_eps_closure_ns += t_eps.elapsed().as_nanos() as u64; }
+            local_epsilon_closure(nwa, weight_by_state, closure_queue, target_subset);
             if target_subset.is_empty() {
-                continue;
+                return None;
             }
-
-            // Normalization: complement() returns empty() for non-trivial weights,
-            // so edge_complement.is_empty() is always true — skip entirely.
-
-            canonicalize_into(&target_subset, &mut canon_buf);
-            if canon_buf.is_empty() {
-                continue;
+            let mut canon: Vec<(u32, Weight)> = target_subset
+                .iter()
+                .filter(|(_, w)| !w.is_empty())
+                .map(|(id, w)| (*id, w.clone()))
+                .collect();
+            canon.sort_unstable_by_key(|(state_id, _)| *state_id);
+            if canon.is_empty() {
+                return None;
             }
+            let next_support: Vec<u32> = canon.iter().map(|(sid, _)| *sid).collect();
+            Some((label, edge_weight, canon, next_support))
+        };
 
-            let next_support: Vec<u32> = canon_buf.iter().map(|(state_id, _)| *state_id).collect();
+        // Parallelism threshold: below this, serial path reuses outer buffers.
+        const PAR_LABEL_THRESHOLD: usize = 8;
+        let label_results: Vec<LabelResult> = if raw_target_entries.len() >= PAR_LABEL_THRESHOLD {
+            use rayon::prelude::*;
+            let t_eps = std::time::Instant::now();
+            let num_states = num_nwa_states;
+            let results: Vec<LabelResult> = raw_target_entries
+                .into_par_iter()
+                .map_init(
+                    || {
+                        (
+                            vec![None::<Weight>; num_states],
+                            VecDeque::<u32>::new(),
+                            FxHashMap::<u32, Weight>::default(),
+                        )
+                    },
+                    |(wbs, cq, ts), (label, contribs)| {
+                        process_label(wbs, cq, ts, label, contribs)
+                    },
+                )
+                .filter_map(|x| x)
+                .collect();
+            if profile_enabled {
+                let count = results.len() as u64;
+                prof_labels_processed += count;
+                prof_eps_closure_calls += count;
+                prof_eps_closure_ns += t_eps.elapsed().as_nanos() as u64;
+            }
+            results
+        } else {
+            let mut results: Vec<LabelResult> = Vec::with_capacity(raw_target_entries.len());
+            for (label, contribs) in raw_target_entries {
+                let t_eps = std::time::Instant::now();
+                let res = process_label(
+                    &mut weight_by_state,
+                    &mut closure_queue,
+                    &mut target_subset,
+                    label,
+                    contribs,
+                );
+                if profile_enabled {
+                    if res.is_some() {
+                        prof_labels_processed += 1;
+                        prof_eps_closure_calls += 1;
+                    }
+                    prof_eps_closure_ns += t_eps.elapsed().as_nanos() as u64;
+                }
+                if let Some(r) = res {
+                    results.push(r);
+                }
+            }
+            results
+        };
 
+        for (label, edge_weight, canon, next_support) in label_results {
             key_buf.clear();
-            key_buf.extend(canon_buf.iter().map(|(sid, w)| (*sid, w.ptr_key())));
+            key_buf.extend(canon.iter().map(|(sid, w)| (*sid, w.ptr_key())));
             let to_state = if let Some(existing) = subset_map.get(&key_buf).copied() {
                 existing
             } else {
                 let new_state = dwa.add_state();
                 subset_map.insert(key_buf.clone(), new_state);
-                worklist.push_back(canon_buf.clone());
+                worklist.push_back(canon);
                 supports.push(next_support);
                 new_state
             };
-
             dwa.add_transition(from_state, label, to_state, edge_weight);
         }
         if profile_enabled { prof_target_build_ns += t_target.elapsed().as_nanos() as u64; }
