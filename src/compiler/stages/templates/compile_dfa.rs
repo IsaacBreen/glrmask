@@ -34,6 +34,10 @@ pub(crate) struct TemplateCompileProfile {
     pub(crate) max_dfa_states: usize,
     pub(crate) total_dfa_transitions: usize,
     pub(crate) max_dfa_transitions: usize,
+    pub(crate) total_premin_dfa_states: usize,
+    pub(crate) max_premin_dfa_states: usize,
+    pub(crate) total_premin_dfa_transitions: usize,
+    pub(crate) max_premin_dfa_transitions: usize,
 }
 
 impl TemplateCompileProfile {
@@ -53,6 +57,14 @@ impl TemplateCompileProfile {
         average(self.total_dfa_transitions, self.num_terminals)
     }
 
+    pub(crate) fn avg_premin_dfa_states(&self) -> f64 {
+        average(self.total_premin_dfa_states, self.num_terminals)
+    }
+
+    pub(crate) fn avg_premin_dfa_transitions(&self) -> f64 {
+        average(self.total_premin_dfa_transitions, self.num_terminals)
+    }
+
     fn observe_compilation(&mut self, sample: &TemplateCompilationSample) {
         self.build_nfa_ms += sample.build_nfa_ms;
         self.determinize_ms += sample.determinize_ms;
@@ -67,6 +79,11 @@ impl TemplateCompileProfile {
         self.max_dfa_states = self.max_dfa_states.max(sample.dfa_states);
         self.total_dfa_transitions += sample.dfa_transitions;
         self.max_dfa_transitions = self.max_dfa_transitions.max(sample.dfa_transitions);
+        self.total_premin_dfa_states += sample.premin_dfa_states;
+        self.max_premin_dfa_states = self.max_premin_dfa_states.max(sample.premin_dfa_states);
+        self.total_premin_dfa_transitions += sample.premin_dfa_transitions;
+        self.max_premin_dfa_transitions =
+            self.max_premin_dfa_transitions.max(sample.premin_dfa_transitions);
     }
 }
 
@@ -79,6 +96,8 @@ struct TemplateCompilationSample {
     nfa_transitions: usize,
     dfa_states: usize,
     dfa_transitions: usize,
+    premin_dfa_states: usize,
+    premin_dfa_transitions: usize,
 }
 
 impl TemplateCompilationSample {
@@ -156,6 +175,7 @@ fn compile_template_with_profile(
     let determinize_started_at = Instant::now();
     let determinized = determinize(&nfa);
     let determinize_ms = elapsed_ms(determinize_started_at);
+    let (premin_dfa_states, premin_dfa_transitions) = dfa_size(&determinized);
 
     let minimize_started_at = Instant::now();
     let dfa = minimize_dfa(&determinized);
@@ -175,6 +195,8 @@ fn compile_template_with_profile(
             nfa_transitions,
             dfa_states,
             dfa_transitions,
+            premin_dfa_states,
+            premin_dfa_transitions,
         },
     )
 }
@@ -184,7 +206,7 @@ pub(crate) fn emit_template_profile_summary(
     profile: &TemplateCompileProfile,
 ) {
     eprintln!(
-        "[glrmask/profile][templates] characterize_ms={:.3} compile_ms={:.3} build_nfa_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} num_terminals={} unique_characterizations={} max_characterization_multiplicity={} avg_nfa_states={:.1} max_nfa_states={} avg_nfa_transitions={:.1} max_nfa_transitions={} avg_dfa_states={:.1} max_dfa_states={} avg_dfa_transitions={:.1} max_dfa_transitions={} total_ms={:.3}",
+        "[glrmask/profile][templates] characterize_ms={:.3} compile_ms={:.3} build_nfa_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} num_terminals={} unique_characterizations={} max_characterization_multiplicity={} avg_nfa_states={:.1} max_nfa_states={} avg_nfa_transitions={:.1} max_nfa_transitions={} avg_premin_dfa_states={:.1} max_premin_dfa_states={} avg_premin_dfa_transitions={:.1} max_premin_dfa_transitions={} avg_dfa_states={:.1} max_dfa_states={} avg_dfa_transitions={:.1} max_dfa_transitions={} total_ms={:.3}",
         characterize_ms,
         profile.total_ms,
         profile.build_nfa_ms,
@@ -197,6 +219,10 @@ pub(crate) fn emit_template_profile_summary(
         profile.max_nfa_states,
         profile.avg_nfa_transitions(),
         profile.max_nfa_transitions,
+        profile.avg_premin_dfa_states(),
+        profile.max_premin_dfa_states,
+        profile.avg_premin_dfa_transitions(),
+        profile.max_premin_dfa_transitions,
         profile.avg_dfa_states(),
         profile.max_dfa_states,
         profile.avg_dfa_transitions(),
