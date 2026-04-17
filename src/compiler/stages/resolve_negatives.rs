@@ -750,9 +750,12 @@ fn apply_cancellations_parallel_fixpoint(nwa: &mut NWA) {
     }
 
     let num_threads = rayon::current_num_threads().max(1);
-    // Small inputs, forced-serial override, or single-threaded rayon: run sequentially.
-    let force_serial = std::env::var("GLRMASK_RESOLVE_SERIAL").is_ok();
-    if force_serial || state_count < 512 || num_threads < 2 {
+    // The round-based parallel fixpoint adds enough chunking and merge overhead
+    // that the plain sequential worklist wins on the o1051 parser-NWA build.
+    // Keep the older parallel path available behind an explicit opt-in for
+    // experimentation, but default to the cheaper serial path.
+    let force_parallel = std::env::var("GLRMASK_RESOLVE_PARALLEL").is_ok();
+    if !force_parallel || state_count < 512 || num_threads < 2 {
         let range = full_state_range(nwa);
         apply_cancellations_range(nwa, range);
         return;
