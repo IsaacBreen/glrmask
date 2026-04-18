@@ -1677,4 +1677,58 @@ mod tests {
         assert!(mask_has_token(&mask, 2), "the trailing sibling token should remain allowed after the bridged empty object token");
     }
 
+    #[test]
+    fn test_json_schema_open_ordered_object_keeps_additional_property_continuation_after_shared_optional_ref() {
+        let schema = r##"{
+            "type": "object",
+            "properties": {
+                "extension": {
+                    "type": "object",
+                    "properties": {
+                        "req0": { "instanceof": "function" },
+                        "req1": { "instanceof": "function" },
+                        "onRequest": { "$ref": "#/definitions/Event" },
+                        "onRequestExternal": { "$ref": "#/definitions/Event" }
+                    },
+                    "required": ["req0", "req1"]
+                }
+            },
+            "definitions": {
+                "Event": {
+                    "type": "object",
+                    "properties": {
+                        "addListener": { "instanceof": "function" },
+                        "addRules": { "instanceof": "function" },
+                        "getRules": { "instanceof": "function" },
+                        "hasListener": { "instanceof": "function" },
+                        "hasListeners": { "instanceof": "function" },
+                        "removeListener": { "instanceof": "function" },
+                        "removeRules": { "instanceof": "function" }
+                    }
+                }
+            }
+        }"##;
+
+        let grammar = json_schema_to_grammar(schema).expect("schema should lower to a grammar");
+        let vocab = Vocab::new(vec![(0, b" {},".to_vec())], None);
+        let constraint = compile(&grammar, &vocab);
+        let mut state = constraint.start();
+
+        state
+            .commit_bytes(
+                b"{\"extension\": {\"req0\": \"function () {}\", \"req1\": \"function () {}\", \"onRequest\": {\"addListener\": \"function () {}\", \"addRules\": \"function () {}\", \"getRules\": \"function () {}\", \"hasListener\": \"function () {}\", \"hasListeners\": \"function () {}\", \"removeListener\": \"function () {}\", \"removeRules\": \"function () {}\"}, \"onRequestExternal\":"
+            )
+            .expect("prefix should keep the parser state live");
+
+        let mask = state.mask();
+        assert!(
+            mask_has_token(&mask, 0),
+            "open ordered objects should still allow an empty shared-ref object token followed by a comma when additional properties remain available"
+        );
+
+        state
+            .commit_token(0)
+            .expect("the bridged empty-object token should stay accepted");
+    }
+
 }
