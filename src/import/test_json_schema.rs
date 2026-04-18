@@ -1598,3 +1598,6 @@ fn test_large_max_length_string_respects_min_length() {
         "long-enough string token should remain allowed when minLength=8",
     );
 }
+
+include!("/tmp/cfa_rust_test_o9788.rs");
+include!("/tmp/minimize_o9788_bug.rs");

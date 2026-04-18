@@ -606,6 +606,83 @@ fn maybe_fuse_finite_literal_expr(expr: GrammarExpr, context: &str) -> GrammarEx
     )
 }
 
+fn try_append_suffix_to_trailing_literal(expr: GrammarExpr, suffix: &[u8]) -> Option<GrammarExpr> {
+    match expr {
+        GrammarExpr::Literal(mut bytes) => {
+            if matches!(bytes.last(), Some(b'}') | Some(b']')) {
+                bytes.extend_from_slice(suffix);
+                Some(GrammarExpr::Literal(bytes))
+            } else {
+                None
+            }
+        }
+        GrammarExpr::Sequence(mut parts) => {
+            let last = parts.pop()?;
+            let new_last = try_append_suffix_to_trailing_literal(last, suffix)?;
+            parts.push(new_last);
+            Some(sequence_or_single(parts))
+        }
+        GrammarExpr::Choice(options) => {
+            let mut fused = Vec::with_capacity(options.len());
+            for option in options {
+                fused.push(try_append_suffix_to_trailing_literal(option, suffix)?);
+            }
+            Some(choice_or_single(fused))
+        }
+        _ => None,
+    }
+}
+
+fn try_take_leading_container_delim(expr: GrammarExpr) -> Option<(u8, GrammarExpr)> {
+    match expr {
+        GrammarExpr::Literal(mut bytes) => {
+            let first = *bytes.first()?;
+            if !matches!(first, b'{' | b'[') {
+                return None;
+            }
+            bytes.remove(0);
+            let rest = if bytes.is_empty() {
+                empty_expr()
+            } else {
+                literal_expr(&bytes)
+            };
+            Some((first, rest))
+        }
+        GrammarExpr::Sequence(mut parts) => {
+            if parts.is_empty() {
+                return None;
+            }
+            let first_part = parts.remove(0);
+            let (first, rest_first) = try_take_leading_container_delim(first_part)?;
+            let mut rebuilt = Vec::new();
+            match rest_first {
+                GrammarExpr::Sequence(inner) => rebuilt.extend(inner),
+                GrammarExpr::Literal(bytes) if bytes.is_empty() => {}
+                other => rebuilt.push(other),
+            }
+            rebuilt.extend(parts);
+            Some((first, sequence_or_single(rebuilt)))
+        }
+        GrammarExpr::Choice(options) => {
+            let mut stripped = Vec::with_capacity(options.len());
+            let mut first_byte = None;
+            for option in options {
+                let (candidate_first, rest) = try_take_leading_container_delim(option)?;
+                if let Some(expected_first) = first_byte {
+                    if expected_first != candidate_first {
+                        return None;
+                    }
+                } else {
+                    first_byte = Some(candidate_first);
+                }
+                stripped.push(rest);
+            }
+            Some((first_byte?, choice_or_single(stripped)))
+        }
+        _ => None,
+    }
+}
+
 fn json_format_pattern(format_name: &str) -> Option<&'static str> {
     Some(match format_name {
         "time" => {
@@ -1696,11 +1773,12 @@ fn key_colon_literal_body_bytes(text: &str) -> Vec<u8> {
 
 /// Build the colon-space suffix expression for keys: `": "`, `":"` + `" "`, or nothing.
 fn key_colon_suffix_expr() -> GrammarExpr {
-    if split_colon_from_space() {
+    let with_space = if split_colon_from_space() {
         sequence_or_single(vec![literal_expr(b":"), literal_expr(b" ")])
     } else {
         literal_expr(b": ")
-    }
+    };
+    choice_or_single(vec![literal_expr(b":"), with_space])
 }
 
 /// Wrap a body terminal expression as a JSON string **value**.
@@ -2753,6 +2831,43 @@ impl<'a> SchemaCtx<'a> {
         };
         ctx.ensure_base_rules();
         ctx
+    }
+
+    fn try_append_suffix_to_trailing_literal_expr(
+        &self,
+        expr: GrammarExpr,
+        suffix: &[u8],
+    ) -> Option<GrammarExpr> {
+        match expr {
+            GrammarExpr::Ref(rule_name) => {
+                let rule_expr = self
+                    .rule_indices
+                    .get(&rule_name)
+                    .and_then(|&index| self.rules.get(index))?
+                    .1
+                    .clone();
+                self.try_append_suffix_to_trailing_literal_expr(rule_expr, suffix)
+            }
+            other => try_append_suffix_to_trailing_literal(other, suffix),
+        }
+    }
+
+    fn try_take_leading_container_delim_expr(
+        &self,
+        expr: GrammarExpr,
+    ) -> Option<(u8, GrammarExpr)> {
+        match expr {
+            GrammarExpr::Ref(rule_name) => {
+                let rule_expr = self
+                    .rule_indices
+                    .get(&rule_name)
+                    .and_then(|&index| self.rules.get(index))?
+                    .1
+                    .clone();
+                self.try_take_leading_container_delim_expr(rule_expr)
+            }
+            other => try_take_leading_container_delim(other),
+        }
     }
 
     fn current_draft(&self) -> JsonSchemaDraft {
@@ -6015,9 +6130,13 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
     }
 
     fn fused_json_key_colon_literal(&self, text: &str) -> GrammarExpr {
-        let mut bytes = json_string_literal_bytes(text);
-        bytes.extend_from_slice(b": ");
-        literal_expr(&bytes)
+        let mut no_space = json_string_literal_bytes(text);
+        no_space.push(b':');
+
+        let mut with_space = no_space.clone();
+        with_space.push(b' ');
+
+        choice_or_single(vec![literal_expr(&no_space), literal_expr(&with_space)])
     }
 
     fn build_merged_literal_key_value_expr(
@@ -6041,44 +6160,33 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
             parts.insert(0, literal_expr(leading_literal));
         }
 
-        let value_expr = if let Some(GrammarExpr::Literal(last)) = parts.last_mut() {
-            match value_expr {
-                GrammarExpr::Literal(mut bytes)
-                    if matches!(bytes.first(), Some(b'{') | Some(b'[')) =>
-                {
-                    last.push(bytes.remove(0));
-                    if bytes.is_empty() {
-                        empty_expr()
-                    } else {
-                        literal_expr(&bytes)
-                    }
-                }
-                GrammarExpr::Sequence(value_parts) => {
-                    // Flatten nested Sequences so we can reach the leading Literal
-                    let mut flat = Vec::new();
-                    for part in value_parts {
-                        match part {
-                            GrammarExpr::Sequence(inner) => flat.extend(inner),
-                            other => flat.push(other),
-                        }
-                    }
-                    if let Some(GrammarExpr::Literal(bytes)) = flat.first_mut() {
-                        if let Some(&first) = bytes.first() {
-                            if matches!(first, b'{' | b'[') {
-                                last.push(first);
-                                bytes.remove(0);
-                                if bytes.is_empty() {
-                                    flat.remove(0);
-                                }
-                            }
-                        }
-                    }
-                    sequence_or_single(flat)
-                }
-                other => other,
+        let key_expr = sequence_or_single(parts);
+        let (mut parts, value_expr) = if let Some((first, rest)) = self.try_take_leading_container_delim_expr(value_expr.clone()) {
+            if let Some(fused_key_expr) = self.try_append_suffix_to_trailing_literal_expr(key_expr.clone(), &[first]) {
+                (
+                    match fused_key_expr {
+                        GrammarExpr::Sequence(inner) => inner,
+                        other => vec![other],
+                    },
+                    rest,
+                )
+            } else {
+                (
+                    match key_expr {
+                        GrammarExpr::Sequence(inner) => inner,
+                        other => vec![other],
+                    },
+                    value_expr,
+                )
             }
         } else {
-            value_expr
+            (
+                match key_expr {
+                    GrammarExpr::Sequence(inner) => inner,
+                    other => vec![other],
+                },
+                value_expr,
+            )
         };
 
         // Flatten the value into parts to avoid nested Sequences
@@ -6110,43 +6218,33 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
             parts.insert(0, literal_expr(leading_literal));
         }
 
-        let value_expr = if let Some(GrammarExpr::Literal(last)) = parts.last_mut() {
-            match value_expr {
-                GrammarExpr::Literal(mut bytes)
-                    if matches!(bytes.first(), Some(b'{') | Some(b'[')) =>
-                {
-                    last.push(bytes.remove(0));
-                    if bytes.is_empty() {
-                        empty_expr()
-                    } else {
-                        literal_expr(&bytes)
-                    }
-                }
-                GrammarExpr::Sequence(value_parts) => {
-                    let mut flat = Vec::new();
-                    for part in value_parts {
-                        match part {
-                            GrammarExpr::Sequence(inner) => flat.extend(inner),
-                            other => flat.push(other),
-                        }
-                    }
-                    if let Some(GrammarExpr::Literal(bytes)) = flat.first_mut() {
-                        if let Some(&first) = bytes.first() {
-                            if matches!(first, b'{' | b'[') {
-                                last.push(first);
-                                bytes.remove(0);
-                                if bytes.is_empty() {
-                                    flat.remove(0);
-                                }
-                            }
-                        }
-                    }
-                    sequence_or_single(flat)
-                }
-                other => other,
+        let key_expr = sequence_or_single(parts);
+        let (mut parts, value_expr) = if let Some((first, rest)) = self.try_take_leading_container_delim_expr(value_expr.clone()) {
+            if let Some(fused_key_expr) = self.try_append_suffix_to_trailing_literal_expr(key_expr.clone(), &[first]) {
+                (
+                    match fused_key_expr {
+                        GrammarExpr::Sequence(inner) => inner,
+                        other => vec![other],
+                    },
+                    rest,
+                )
+            } else {
+                (
+                    match key_expr {
+                        GrammarExpr::Sequence(inner) => inner,
+                        other => vec![other],
+                    },
+                    value_expr,
+                )
             }
         } else {
-            value_expr
+            (
+                match key_expr {
+                    GrammarExpr::Sequence(inner) => inner,
+                    other => vec![other],
+                },
+                value_expr,
+            )
         };
 
         match value_expr {
@@ -6170,17 +6268,14 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
                 JSON_ITEM_SEPARATOR.to_vec()
             };
             if index > 0 {
-                if let Some(GrammarExpr::Sequence(prev_parts)) = parts.last_mut() {
-                    if let Some(GrammarExpr::Literal(prev_last)) = prev_parts.last_mut() {
-                        if matches!(prev_last.last(), Some(b'}') | Some(b']')) {
-                            prev_last.extend_from_slice(&leading_literal);
+                if !leading_literal.is_empty() {
+                    if let Some(prev_expr) = parts.pop() {
+                        if let Some(fused_prev) = self.try_append_suffix_to_trailing_literal_expr(prev_expr.clone(), &leading_literal) {
+                            parts.push(fused_prev);
                             leading_literal.clear();
+                        } else {
+                            parts.push(prev_expr);
                         }
-                    }
-                } else if let Some(GrammarExpr::Literal(prev_last)) = parts.last_mut() {
-                    if matches!(prev_last.last(), Some(b'}') | Some(b']')) {
-                        prev_last.extend_from_slice(&leading_literal);
-                        leading_literal.clear();
                     }
                 }
             }
@@ -6192,17 +6287,12 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         }
 
         if let Some(trailing_literal) = trailing_literal {
-            if let Some(GrammarExpr::Sequence(last_parts)) = parts.last_mut() {
-                if let Some(GrammarExpr::Literal(last_literal)) = last_parts.last_mut() {
-                    if matches!(last_literal.last(), Some(b'}') | Some(b']')) {
-                        last_literal.extend_from_slice(trailing_literal);
-                        return sequence_or_single(parts);
-                    }
-                }
-            } else if let Some(GrammarExpr::Literal(last_literal)) = parts.last_mut() {
-                if matches!(last_literal.last(), Some(b'}') | Some(b']')) {
-                    last_literal.extend_from_slice(trailing_literal);
+            if let Some(last_expr) = parts.pop() {
+                if let Some(fused_last) = self.try_append_suffix_to_trailing_literal_expr(last_expr.clone(), trailing_literal) {
+                    parts.push(fused_last);
                     return sequence_or_single(parts);
+                } else {
+                    parts.push(last_expr);
                 }
             }
 
@@ -7681,6 +7771,7 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         if tree_can_be_empty {
             return Ok(choice_or_single(vec![
                 with_tree_prefix,
+                sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]),
                 sequence_or_single(vec![
                     literal_expr(b"{"),
                     GrammarExpr::Ref(free_nc),
@@ -9001,6 +9092,206 @@ mod tests {
     }
 
     #[test]
+    fn test_optional_nested_object_allows_empty_object_token_followed_by_required_sibling() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "evt": {
+                    "type": "object",
+                    "properties": {
+                        "addListener": {"type": "string"},
+                        "removeRules": {"type": "string"}
+                    }
+                },
+                "next": {"type": "string"}
+            },
+            "required": ["evt", "next"],
+            "additionalProperties": false
+        }"#;
+
+        assert!(accepts_sequence(
+            schema,
+            &[b"{\"evt\":", b" {},", b" \"next\":\"x\"}"],
+        ));
+    }
+
+    #[test]
+    fn test_shared_nested_event_ref_allows_empty_object_token_for_later_optional_sibling() {
+        let schema = r##"{
+            "$defs": {
+                "event": {
+                    "type": "object",
+                    "properties": {
+                        "addListener": {"type": "string"},
+                        "removeRules": {"type": "string"}
+                    }
+                }
+            },
+            "type": "object",
+            "properties": {
+                "sendRequest": {"type": "string"},
+                "onRequest": {"$ref": "#/$defs/event"},
+                "onRequestExternal": {"$ref": "#/$defs/event"},
+                "tail": {"type": "string"}
+            },
+            "required": ["sendRequest", "onRequestExternal", "tail"],
+            "additionalProperties": false
+        }"##;
+
+        let vocab = Vocab::new(
+            vec![
+                (0, b"{\"sendRequest\":\"x\", \"onRequestExternal\":".to_vec()),
+                (1, b" {},".to_vec()),
+                (2, b" \"tail\":\"y\"}".to_vec()),
+            ],
+            None,
+        );
+        let constraint = crate::Constraint::from_json_schema(schema, &vocab).unwrap();
+        let mut state = constraint.start();
+        let mask_allows = |mask: &[u32], token_id: u32| {
+            let (word_idx, bit_idx) = (token_id as usize / 32, token_id as usize % 32);
+            word_idx < mask.len() && ((mask[word_idx] >> bit_idx) & 1) != 0
+        };
+
+        state.commit_token(0).unwrap();
+        let mask = state.mask();
+        assert!(mask_allows(&mask, 1), "the empty-object token should be allowed after the shared-ref key prefix");
+
+        state.commit_token(1).unwrap();
+        let mask = state.mask();
+        assert!(mask_allows(&mask, 2), "the trailing sibling token should remain allowed after the shared-ref empty-object token");
+
+        state.commit_token(2).unwrap();
+        assert!(state.is_finished());
+    }
+
+    #[test]
+    fn test_shared_untyped_event_ref_allows_empty_object_token_for_later_optional_sibling() {
+        let schema = r##"{
+            "$defs": {
+                "event": {
+                    "type": "object",
+                    "properties": {
+                        "addListener": {},
+                        "addRules": {},
+                        "getRules": {},
+                        "hasListener": {},
+                        "hasListeners": {},
+                        "removeListener": {},
+                        "removeRules": {}
+                    }
+                }
+            },
+            "type": "object",
+            "properties": {
+                "sendRequest": {},
+                "onRequest": {"$ref": "#/$defs/event"},
+                "onRequestExternal": {"$ref": "#/$defs/event"},
+                "tail": {}
+            },
+            "required": ["sendRequest", "onRequestExternal", "tail"],
+            "additionalProperties": false
+        }"##;
+
+        let vocab = Vocab::new(
+            vec![
+                (0, b"{\"sendRequest\":\"x\", \"onRequestExternal\":".to_vec()),
+                (1, b" {},".to_vec()),
+                (2, b" \"tail\":\"y\"}".to_vec()),
+            ],
+            None,
+        );
+        let constraint = crate::Constraint::from_json_schema(schema, &vocab).unwrap();
+        let mut state = constraint.start();
+        let mask_allows = |mask: &[u32], token_id: u32| {
+            let (word_idx, bit_idx) = (token_id as usize / 32, token_id as usize % 32);
+            word_idx < mask.len() && ((mask[word_idx] >> bit_idx) & 1) != 0
+        };
+
+        state.commit_token(0).unwrap();
+        let mask = state.mask();
+        assert!(mask_allows(&mask, 1), "the empty-object token should be allowed after the shared untyped-ref key prefix");
+
+        state.commit_token(1).unwrap();
+        let mask = state.mask();
+        assert!(mask_allows(&mask, 2), "the trailing sibling token should remain allowed after the shared untyped-ref empty-object token");
+
+        state.commit_token(2).unwrap();
+        assert!(state.is_finished());
+    }
+
+    #[test]
+    fn test_large_extension_like_shared_event_ref_allows_empty_object_token() {
+        let schema = r##"{
+            "$defs": {
+                "event": {
+                    "type": "object",
+                    "properties": {
+                        "addListener": {},
+                        "addRules": {},
+                        "getRules": {},
+                        "hasListener": {},
+                        "hasListeners": {},
+                        "removeListener": {},
+                        "removeRules": {}
+                    }
+                }
+            },
+            "type": "object",
+            "properties": {
+                "getBackgroundPage": {},
+                "getURL": {},
+                "getViews": {},
+                "isAllowedFileSchemeAccess": {},
+                "isAllowedIncognitoAccess": {},
+                "setUpdateUrlData": {},
+                "sendRequest": {},
+                "onRequest": {"$ref": "#/$defs/event"},
+                "onRequestExternal": {"$ref": "#/$defs/event"},
+                "tail": {}
+            },
+            "required": [
+                "getBackgroundPage",
+                "getURL",
+                "getViews",
+                "isAllowedFileSchemeAccess",
+                "isAllowedIncognitoAccess",
+                "setUpdateUrlData",
+                "sendRequest",
+                "onRequestExternal",
+                "tail"
+            ],
+            "additionalProperties": false
+        }"##;
+
+        let vocab = Vocab::new(
+            vec![
+                (0, b"{\"getBackgroundPage\":\"x\", \"getURL\":\"x\", \"getViews\":\"x\", \"isAllowedFileSchemeAccess\":\"x\", \"isAllowedIncognitoAccess\":\"x\", \"setUpdateUrlData\":\"x\", \"sendRequest\":\"x\", \"onRequestExternal\":".to_vec()),
+                (1, b" {},".to_vec()),
+                (2, b" \"tail\":\"y\"}".to_vec()),
+            ],
+            None,
+        );
+        let constraint = crate::Constraint::from_json_schema(schema, &vocab).unwrap();
+        let mut state = constraint.start();
+        let mask_allows = |mask: &[u32], token_id: u32| {
+            let (word_idx, bit_idx) = (token_id as usize / 32, token_id as usize % 32);
+            word_idx < mask.len() && ((mask[word_idx] >> bit_idx) & 1) != 0
+        };
+
+        state.commit_token(0).unwrap();
+        let mask = state.mask();
+        assert!(mask_allows(&mask, 1), "the empty-object token should be allowed after the larger extension-like shared-ref prefix");
+
+        state.commit_token(1).unwrap();
+        let mask = state.mask();
+        assert!(mask_allows(&mask, 2), "the trailing sibling token should remain allowed after the larger extension-like shared-ref empty-object token");
+
+        state.commit_token(2).unwrap();
+        assert!(state.is_finished());
+    }
+
+    #[test]
     fn test_required_open_object_still_accepts_finite_required_prefix() {
         let schema = r#"{
             "type": "object",
@@ -9782,6 +10073,68 @@ mod tests {
         assert!(accepts_sequence(schema, &[
             b"{\"severity\": \"low\", \"items\": [{\"id\": \"a\", \"note\": \"b\"},",
             b" {\"id\": \"c\", \"note\": \"d\"}]}",
+        ]));
+    }
+
+    #[test]
+    fn test_cross_token_string_close_object_close_comma() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "globals": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string", "maxLength": 255},
+                            "json": {"type": "string", "maxLength": 255},
+                            "cloudOnly": {"type": "boolean"},
+                            "description": {"type": "string", "maxLength": 255}
+                        },
+                        "required": ["key", "json"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["globals"],
+            "additionalProperties": false
+        }"#;
+
+        assert!(accepts_sequence(schema, &[
+            b"{\"globals\": [{\"key\": \"a\", \"json\": \"{\\\"key\\\":\\\"value\\\"}\", \"cloudOnly\": false, \"description\": \"d\"",
+            b"},",
+            b" {\"key\": \"b\", \"json\": \"{\\\"key\\\":\\\"value\\\"}\"}]}",
+        ]));
+    }
+
+    #[test]
+    fn test_cross_token_optional_field_skipped_after_boolean_then_close_comma() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "globals": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string", "maxLength": 255},
+                            "json": {"type": "string", "maxLength": 255},
+                            "cloudOnly": {"type": "boolean"},
+                            "description": {"type": "string", "maxLength": 255}
+                        },
+                        "required": ["key", "json", "cloudOnly"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["globals"],
+            "additionalProperties": false
+        }"#;
+
+        assert!(accepts_sequence(schema, &[
+            b"{\"globals\": [{\"key\": \"a\", \"json\": \"{\\\"key\\\":\\\"value\\\"}\", \"cloudOnly\": false",
+            b"},",
+            b" {\"key\": \"b\", \"json\": \"{\\\"key\\\":\\\"value\\\"}\", \"cloudOnly\": false}]}",
         ]));
     }
 

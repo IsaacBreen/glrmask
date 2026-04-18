@@ -23,7 +23,6 @@ pub(crate) fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
     let (prepared_grammar, _tokenizer) = prepare_grammar_for_compile(grammar);
     super::pipeline::compile_prepared(prepared_grammar, vocab)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1342,6 +1341,340 @@ mod tests {
             mask_has_token(&mask, 3),
             "token ' true' must be allowed after '\" :' to bridge ': ' into 'true'"
         );
+    }
+
+    #[test]
+    fn test_cross_token_bridge_after_complete_literal_terminal() {
+        let gdef = GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(1)],
+            }],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal { id: 0, bytes: b"}".to_vec() },
+                Terminal::Literal { id: 1, bytes: b",".to_vec() },
+            ],
+            ..Default::default()
+        };
+        let vocab = Vocab::new(
+            vec![
+                (0, b"}".to_vec()),
+                (1, b",".to_vec()),
+                (2, b"},".to_vec()),
+            ],
+            None,
+        );
+
+        let constraint = compile(&gdef, &vocab);
+        let mut state = constraint.start();
+
+        let mask = state.mask();
+        assert!(mask_has_token(&mask, 0), "token '}}' should be allowed initially");
+        assert!(
+            mask_has_token(&mask, 2),
+            "token '}},' must be allowed to bridge a complete '}}' terminal into the following ',' terminal"
+        );
+
+        state.commit_token(2).unwrap();
+        assert!(state.is_finished(), "state should finish after committing bridged token '}},'");
+    }
+
+    #[test]
+    fn test_cross_token_bridge_across_reduction_boundary() {
+        let gdef = GrammarDef {
+            rules: vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(1), Symbol::Nonterminal(1)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
+            ],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal { id: 0, bytes: b"}".to_vec() },
+                Terminal::Literal { id: 1, bytes: b",".to_vec() },
+            ],
+            ..Default::default()
+        };
+        let vocab = Vocab::new(
+            vec![
+                (0, b"}".to_vec()),
+                (1, b",".to_vec()),
+                (2, b"},".to_vec()),
+            ],
+            None,
+        );
+
+        let constraint = compile(&gdef, &vocab);
+        let mut state = constraint.start();
+
+        let mask = state.mask();
+        assert!(mask_has_token(&mask, 0), "token '}}' should be allowed initially");
+        assert!(
+            mask_has_token(&mask, 2),
+            "token '}},' must be allowed even when the ',' only becomes legal after reducing the preceding '}}' item"
+        );
+
+        state.commit_token(2).unwrap();
+
+        let mask = state.mask();
+        assert!(mask_has_token(&mask, 0), "token '}}' should remain allowed for the trailing reduced item");
+
+        state.commit_token(0).unwrap();
+        assert!(state.is_finished(), "state should finish after the bridged token and final reduced item");
+    }
+
+    #[test]
+    fn test_cross_token_bridge_across_nullable_inner_chain() {
+        let gdef = GrammarDef {
+            rules: vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![
+                        Symbol::Terminal(0),
+                        Symbol::Nonterminal(1),
+                        Symbol::Terminal(3),
+                        Symbol::Terminal(4),
+                    ],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![
+                        Symbol::Terminal(1),
+                        Symbol::Nonterminal(2),
+                        Symbol::Terminal(2),
+                    ],
+                },
+                Rule {
+                    lhs: 2,
+                    rhs: vec![],
+                },
+                Rule {
+                    lhs: 2,
+                    rhs: vec![Symbol::Terminal(5)],
+                },
+            ],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal { id: 0, bytes: b"{\"evt\":".to_vec() },
+                Terminal::Literal { id: 1, bytes: b" {".to_vec() },
+                Terminal::Literal { id: 2, bytes: b"}".to_vec() },
+                Terminal::Literal { id: 3, bytes: b", ".to_vec() },
+                Terminal::Literal { id: 4, bytes: b"\"next\":\"x\"}".to_vec() },
+                Terminal::Literal { id: 5, bytes: b"\"k\":\"v\"".to_vec() },
+            ],
+            ..Default::default()
+        };
+        let vocab = Vocab::new(
+            vec![
+                (0, b"{\"evt\":".to_vec()),
+                (1, b" {},".to_vec()),
+                (2, b" \"next\":\"x\"}".to_vec()),
+                (3, b" {\"k\":\"v\"},".to_vec()),
+            ],
+            None,
+        );
+
+        let (prepared_grammar, _) = prepare_grammar_for_compile(&gdef);
+        assert!(
+            prepared_grammar.rules.iter().any(|rule| {
+                rule.rhs
+                    .windows(2)
+                    .any(|window| {
+                        window == [Symbol::Terminal(1), Symbol::Terminal(2)]
+                            || window == [Symbol::Terminal(2), Symbol::Terminal(3)]
+                    })
+            }),
+            "prepared grammar should expose direct terminal adjacency across the nullable inner chain"
+        );
+
+        let constraint = compile(&gdef, &vocab);
+        let mut state = constraint.start();
+        let prefix_exec = constraint
+            .tokenizer
+            .execute_from_state(b"{\"evt\":", constraint.tokenizer.initial_state());
+        let prefix_state = prefix_exec.end_state.expect("prefix should leave the tokenizer in a live state");
+        let _possible_matches = constraint.possible_matches_for_state(prefix_state);
+
+        state
+            .commit_bytes(b"{\"evt\":")
+            .expect("prefix token should advance the parser state");
+
+        let mask = state.mask();
+        assert!(mask_has_token(&mask, 1), "token ' {{}},' should be allowed after the key prefix when the inner object body reduces through epsilon before '}}'");
+        assert!(mask_has_token(&mask, 3), "non-empty object token should also remain allowed");
+
+        state.commit_token(1).unwrap();
+
+        let mask = state.mask();
+        assert!(mask_has_token(&mask, 2), "after the bridged empty-object token, the trailing sibling token should remain allowed");
+
+        state.commit_token(2).unwrap();
+        assert!(state.is_finished(), "state should finish after the bridged empty-object token and trailing sibling token");
+    }
+
+    #[test]
+    fn test_cross_token_bridge_after_partial_key_prefix_through_nested_nullable_object_chain() {
+        let gdef = GrammarDef {
+            rules: vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![
+                        Symbol::Terminal(0),
+                        Symbol::Nonterminal(1),
+                        Symbol::Terminal(5),
+                        Symbol::Terminal(6),
+                    ],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![
+                        Symbol::Terminal(1),
+                        Symbol::Nonterminal(2),
+                        Symbol::Terminal(4),
+                    ],
+                },
+                Rule {
+                    lhs: 2,
+                    rhs: vec![Symbol::Terminal(2), Symbol::Nonterminal(3)],
+                },
+                Rule {
+                    lhs: 2,
+                    rhs: vec![Symbol::Nonterminal(4)],
+                },
+                Rule {
+                    lhs: 3,
+                    rhs: vec![Symbol::Terminal(3), Symbol::Terminal(7), Symbol::Nonterminal(3)],
+                },
+                Rule { lhs: 3, rhs: vec![] },
+                Rule {
+                    lhs: 4,
+                    rhs: vec![Symbol::Terminal(7), Symbol::Nonterminal(3)],
+                },
+                Rule { lhs: 4, rhs: vec![] },
+            ],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal { id: 0, bytes: b"{\"onRequestExternal\": ".to_vec() },
+                Terminal::Literal { id: 1, bytes: b"{".to_vec() },
+                Terminal::Literal { id: 2, bytes: b"\"removeRules\": \"x\"".to_vec() },
+                Terminal::Literal { id: 3, bytes: b", ".to_vec() },
+                Terminal::Literal { id: 4, bytes: b"}".to_vec() },
+                Terminal::Literal { id: 5, bytes: b", ".to_vec() },
+                Terminal::Literal { id: 6, bytes: b"\"next\":\"x\"}".to_vec() },
+                Terminal::Literal { id: 7, bytes: b"\"extra\": \"y\"".to_vec() },
+            ],
+            ..Default::default()
+        };
+        let vocab = Vocab::new(
+            vec![
+                (0, b"{\"onRequestExternal\":".to_vec()),
+                (1, b" {},".to_vec()),
+                (2, b" \"next\":\"x\"}".to_vec()),
+                (3, b" {\"removeRules\": \"x\"},".to_vec()),
+            ],
+            None,
+        );
+
+        let constraint = compile(&gdef, &vocab);
+        let mut state = constraint.start();
+        state
+            .commit_bytes(b"{\"onRequestExternal\":")
+            .expect("partial key-prefix token should advance the parser state");
+
+        let mask = state.mask();
+        assert!(
+            mask_has_token(&mask, 1),
+            "token ' {{}},' should remain allowed when the empty object closes only after a nested nullable chain and the comma-space separator continues in the next token"
+        );
+
+        state.commit_token(1).unwrap();
+        let mask = state.mask();
+        assert!(mask_has_token(&mask, 2), "the trailing sibling token should remain allowed after the bridged empty object token");
+    }
+
+    #[test]
+    fn test_cross_token_bridge_with_regex_additional_property_alternative() {
+        let gdef = GrammarDef {
+            rules: vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![
+                        Symbol::Terminal(0),
+                        Symbol::Nonterminal(1),
+                        Symbol::Terminal(3),
+                        Symbol::Terminal(4),
+                    ],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![
+                        Symbol::Terminal(1),
+                        Symbol::Nonterminal(2),
+                        Symbol::Terminal(2),
+                    ],
+                },
+                Rule {
+                    lhs: 2,
+                    rhs: vec![
+                        Symbol::Terminal(5),
+                        Symbol::Terminal(6),
+                        Symbol::Nonterminal(3),
+                    ],
+                },
+                Rule { lhs: 2, rhs: vec![] },
+                Rule {
+                    lhs: 3,
+                    rhs: vec![
+                        Symbol::Terminal(3),
+                        Symbol::Terminal(5),
+                        Symbol::Terminal(6),
+                        Symbol::Nonterminal(3),
+                    ],
+                },
+                Rule { lhs: 3, rhs: vec![] },
+            ],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal { id: 0, bytes: b"{\"sendRequest\":\"x\", \"onRequestExternal\": ".to_vec() },
+                Terminal::Literal { id: 1, bytes: b"{".to_vec() },
+                Terminal::Literal { id: 2, bytes: b"}".to_vec() },
+                Terminal::Literal { id: 3, bytes: b", ".to_vec() },
+                Terminal::Literal { id: 4, bytes: b"\"tail\":\"y\"}".to_vec() },
+                Terminal::Pattern { id: 5, pattern: r#"\"(?:[^\"\\]|\\.)*\": ?"#.to_string(), utf8: false },
+                Terminal::Literal { id: 6, bytes: b"\"z\"".to_vec() },
+            ],
+            ..Default::default()
+        };
+        let vocab = Vocab::new(
+            vec![
+                (0, b"{\"sendRequest\":\"x\", \"onRequestExternal\":".to_vec()),
+                (1, b" {},".to_vec()),
+                (2, b" \"tail\":\"y\"}".to_vec()),
+                (3, b" {\"other\":\"z\"},".to_vec()),
+            ],
+            None,
+        );
+
+        let constraint = compile(&gdef, &vocab);
+        let mut state = constraint.start();
+        state
+            .commit_bytes(b"{\"sendRequest\":\"x\", \"onRequestExternal\":")
+            .expect("partial key-prefix token should advance the parser state");
+
+        let mask = state.mask();
+        assert!(
+            mask_has_token(&mask, 1),
+            "token ' {{}},' should remain allowed even when the empty object competes with a regex additional-property branch"
+        );
+
+        state.commit_token(1).unwrap();
+        let mask = state.mask();
+        assert!(mask_has_token(&mask, 2), "the trailing sibling token should remain allowed after the bridged empty object token");
     }
 
 }
