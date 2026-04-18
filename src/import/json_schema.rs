@@ -1771,14 +1771,13 @@ fn key_colon_literal_body_bytes(text: &str) -> Vec<u8> {
     bytes
 }
 
-/// Build the colon-space suffix expression for keys: `": "`, `":"` + `" "`, or nothing.
+/// Build the colon-space suffix expression for keys.
 fn key_colon_suffix_expr() -> GrammarExpr {
-    let with_space = if split_colon_from_space() {
+    if split_colon_from_space() {
         sequence_or_single(vec![literal_expr(b":"), literal_expr(b" ")])
     } else {
         literal_expr(b": ")
-    };
-    choice_or_single(vec![literal_expr(b":"), with_space])
+    }
 }
 
 /// Wrap a body terminal expression as a JSON string **value**.
@@ -6130,13 +6129,9 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
     }
 
     fn fused_json_key_colon_literal(&self, text: &str) -> GrammarExpr {
-        let mut no_space = json_string_literal_bytes(text);
-        no_space.push(b':');
-
-        let mut with_space = no_space.clone();
-        with_space.push(b' ');
-
-        choice_or_single(vec![literal_expr(&no_space), literal_expr(&with_space)])
+        let mut bytes = json_string_literal_bytes(text);
+        bytes.extend_from_slice(b": ");
+        literal_expr(&bytes)
     }
 
     fn build_merged_literal_key_value_expr(
