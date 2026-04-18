@@ -2853,10 +2853,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         self.merge(&LeveledGSS { inner: Arc::new(Upper::Interface(base_iface.clone())) })
     }
 
-    /// Combined `isolate(Some(value)).popn(n)` that avoids creating the
-    /// intermediate isolated GSS. For Interface variants with a single
-    /// interface path at `value`, walks directly down `n` levels without
-    /// any intermediate allocations.
+    /// Combined `isolate(Some(value)).popn(n)` helper.
     pub fn isolate_popn(&self, value: T, n: isize) -> Self {
         if n <= 0 {
             return self.isolate(Some(value));
@@ -2864,60 +2861,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         if self.is_empty() {
             return Self::empty();
         }
-        // Fast path for Interface variant
-        if let Upper::Interface(interface) = &*self.inner {
-            // Get children for the isolated value — handle Segment directly
-            let child_opt = if interface.inner.is_segment() {
-                if interface.inner.segment_top_value() == &value {
-                    Some(interface.inner.segment_rest_arc())
-                } else {
-                    None
-                }
-            } else if let Lower::General { children, .. } = &*interface.inner {
-                children.get(&value).and_then(|kids| {
-                    if kids.len() == 1 {
-                        Some(kids.values().next().unwrap().clone())
-                    } else {
-                        None
-                    }
-                })
-            } else {
-                None
-            };
-            if let Some(child) = child_opt {
-                // Now walk down n-1 more levels (we already descended 1 level by isolating)
-                let remaining = n - 1;
-                if remaining <= 0 {
-                    // We need to return the child wrapped as a GSS
-                    // Handle empty flag on the original lower level
-                    let mut result = child.clone();
-                    if interface.inner.empty() {
-                        // The isolated level had an empty marker — at depth 1 pop
-                        // this means we include the empty terminal
-                        if remaining == 0 {
-                            let terminal = new_lower(CompactMap::new(), true);
-                            result = merge_lower(&result, &terminal);
-                        }
-                    }
-                    if result.children_is_empty() && !result.empty() {
-                        return Self::empty();
-                    }
-                    return Self {
-                        inner: new_interface(result, interface.acc.clone()),
-                    };
-                }
-                // Walk down remaining levels using the child directly
-                let temp = Self {
-                    inner: new_interface(child.clone(), interface.acc.clone()),
-                };
-                if let Some(fast) = temp.popn_single_interface_path(remaining) {
-                    return fast;
-                }
-            } else {
-                return Self::empty();
-            }
-        }
-        // Fallback to separate isolate + popn
         self.isolate(Some(value)).popn(n)
     }
 
@@ -2925,116 +2868,14 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     /// Returns (top_value, base_GSS) pairs where base_GSS = popped.isolate(Some(top_value)).
     /// This avoids creating the intermediate "popped" GSS for the common case.
     pub fn isolate_pop_bases(&self, value: T, n: isize) -> SmallVec<[(T, Self); 4]> {
-        if self.is_empty() {
-            return SmallVec::new();
-        }
-        // Fast path: walk down through single-child Interface levels
-        // without creating intermediate GSSes.
-        if let Upper::Interface(interface) = &*self.inner {
-            // Get first child for this value — handle Segment directly
-            let rest_storage;
-            let first_child_opt: Option<&Arc<Lower<T>>> = if interface.inner.is_segment() {
-                if interface.inner.segment_top_value() == &value {
-                    rest_storage = interface.inner.segment_rest_arc();
-                    Some(&rest_storage)
-                } else {
-                    None
-                }
-            } else if let Lower::General { children, .. } = &*interface.inner {
-                children.get(&value).and_then(|kids| {
-                    if kids.len() == 1 {
-                        Some(kids.values().next().unwrap())
-                    } else {
-                        None // Multiple depth entries — fall through
-                    }
-                })
-            } else {
-                None
-            };
-
-            if let Some(first_child) = first_child_opt {
-
-                    // Walk down (n-1) more levels through single-child chains
-                    // without creating intermediate GSSes.
-                    let mut current: &Lower<T> = &**first_child;
-                    let mut remaining = n - 1;
-                    while remaining > 0 {
-                        if current.empty() {
-                            break;
-                        }
-                        match current {
-                            Lower::Segment(seg) => {
-                                let seg_len = seg.values.len() as isize;
-                                if remaining >= seg_len {
-                                    current = &seg.next;
-                                    remaining -= seg_len;
-                                } else {
-                                    break; // Would land inside segment — fall to slow path
-                                }
-                            }
-                            Lower::General { children, .. } => {
-                                if children.len() == 1 {
-                                    let ordmap = children.values().next().unwrap();
-                                    if ordmap.len() != 1 {
-                                        break;
-                                    }
-                                    let (_, child) = ordmap.iter().next().unwrap();
-                                    current = &**child;
-                                    remaining -= 1;
-                                } else {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    if remaining == 0 {
-                        // Successfully walked all n levels. `current` is the
-                        // base's inner Lower node.
-                        if current.children_len() == 0 {
-                            return SmallVec::new();
-                        }
-                        let acc = &interface.acc;
-                        if current.children_len() == 1 {
-                            let goto_from = match current {
-                                Lower::Segment(seg) => seg.values.last().unwrap().clone(),
-                                Lower::General { children, .. } => {
-                                    children.keys().next().unwrap().clone()
-                                }
-                            };
-                            let base = Self {
-                                inner: new_interface(Arc::new(current.clone()), acc.clone()),
-                            };
-                            return smallvec![(goto_from, base)];
-                        }
-                        // Multiple children at the base — split (must be General)
-                        let mut result = SmallVec::new();
-                        if let Lower::General { children, .. } = current {
-                            for (k, ordmap) in children.iter() {
-                                let filtered = CompactMap::unit(k.clone(), ordmap.clone());
-                                let new_lower = new_lower(filtered, false);
-                                let base = Self {
-                                    inner: new_interface(new_lower, acc.clone()),
-                                };
-                                result.push((k.clone(), base));
-                            }
-                        }
-                        return result;
-                    }
-                    // Chain walk couldn't reach the target depth (branching
-                    // encountered). Fall through to general path.
-            } else if !interface.inner.children_contains_key(&value) {
-                return SmallVec::new();
-            }
-        }
-        // General fallback: use isolate_popn then iterate
         let popped = self.isolate_popn(value, n);
         if popped.is_empty() {
             return SmallVec::new();
         }
         if let Some(v) = popped.single_top_value() {
-            // Single top value: isolate is identity, base = popped
-            return smallvec![(v, popped)];
+            let mut result = SmallVec::new();
+            result.push((v, popped));
+            return result;
         }
         let top_vals = popped.peek_values();
         let mut result = SmallVec::new();

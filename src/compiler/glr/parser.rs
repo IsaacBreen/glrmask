@@ -965,6 +965,114 @@ mod tests {
     }
 
     #[test]
+    fn test_vstack_matches_reference_raw_o9788_n10_prefix() {
+        const T_A: u32 = 0;
+        const T_C: u32 = 1;
+        const T_B: u32 = 2;
+        const T_S: u32 = 3;
+
+        const NT_ITEM: u32 = 0;
+        const NT_OPT: u32 = 1;
+        const NT_REPEAT2: u32 = 2;
+        const NT_REPEAT4: u32 = 3;
+        const NT_REPEAT8: u32 = 4;
+        const NT_REPEAT10: u32 = 5;
+        const NT_START: u32 = 6;
+
+        let gdef = make_grammar(
+            vec![
+                Rule {
+                    lhs: NT_ITEM,
+                    rhs: vec![Symbol::Terminal(T_A), Symbol::Terminal(T_B)],
+                },
+                Rule {
+                    lhs: NT_ITEM,
+                    rhs: vec![
+                        Symbol::Terminal(T_A),
+                        Symbol::Nonterminal(NT_OPT),
+                        Symbol::Terminal(T_B),
+                    ],
+                },
+                Rule {
+                    lhs: NT_OPT,
+                    rhs: vec![Symbol::Terminal(T_C)],
+                },
+                Rule {
+                    lhs: NT_REPEAT2,
+                    rhs: vec![Symbol::Terminal(T_S), Symbol::Nonterminal(NT_ITEM)],
+                },
+                Rule {
+                    lhs: NT_REPEAT2,
+                    rhs: vec![
+                        Symbol::Terminal(T_S),
+                        Symbol::Nonterminal(NT_ITEM),
+                        Symbol::Terminal(T_S),
+                        Symbol::Nonterminal(NT_ITEM),
+                    ],
+                },
+                Rule {
+                    lhs: NT_REPEAT4,
+                    rhs: vec![Symbol::Nonterminal(NT_REPEAT2)],
+                },
+                Rule {
+                    lhs: NT_REPEAT4,
+                    rhs: vec![
+                        Symbol::Nonterminal(NT_REPEAT2),
+                        Symbol::Nonterminal(NT_REPEAT2),
+                    ],
+                },
+                Rule {
+                    lhs: NT_REPEAT8,
+                    rhs: vec![Symbol::Nonterminal(NT_REPEAT4)],
+                },
+                Rule {
+                    lhs: NT_REPEAT8,
+                    rhs: vec![
+                        Symbol::Nonterminal(NT_REPEAT4),
+                        Symbol::Nonterminal(NT_REPEAT4),
+                    ],
+                },
+                Rule {
+                    lhs: NT_REPEAT10,
+                    rhs: vec![Symbol::Nonterminal(NT_REPEAT8)],
+                },
+                Rule {
+                    lhs: NT_REPEAT10,
+                    rhs: vec![Symbol::Nonterminal(NT_REPEAT2)],
+                },
+                Rule {
+                    lhs: NT_REPEAT10,
+                    rhs: vec![
+                        Symbol::Nonterminal(NT_REPEAT8),
+                        Symbol::Nonterminal(NT_REPEAT2),
+                    ],
+                },
+                Rule {
+                    lhs: NT_START,
+                    rhs: vec![Symbol::Nonterminal(NT_ITEM)],
+                },
+                Rule {
+                    lhs: NT_START,
+                    rhs: vec![
+                        Symbol::Nonterminal(NT_ITEM),
+                        Symbol::Nonterminal(NT_REPEAT10),
+                    ],
+                },
+            ],
+            NT_START,
+            vec![tdef(T_A, "a"), tdef(T_C, "c"), tdef(T_B, "b"), tdef(T_S, "s")],
+        );
+        let parser = build_parser(&gdef);
+
+        let mut prefix = vec![T_A, T_B];
+        for _ in 0..9 {
+            prefix.extend_from_slice(&[T_S, T_A, T_B]);
+        }
+
+        assert_advance_matches_reference(&parser, &prefix);
+    }
+
+    #[test]
     fn test_parse_simple_ab() {
         let gdef = simple_ab_grammar(); 
         let parser = build_parser(&gdef);

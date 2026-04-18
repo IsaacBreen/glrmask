@@ -32,6 +32,110 @@ fn parser_for(grammar_def: &GrammarDef) -> GLRParser {
     GLRParser::new(table)
 }
 
+fn raw_o9788_n10_grammar() -> GrammarDef {
+    const T_A: u32 = 0;
+    const T_C: u32 = 1;
+    const T_B: u32 = 2;
+    const T_S: u32 = 3;
+
+    const NT_ITEM: u32 = 0;
+    const NT_OPT: u32 = 1;
+    const NT_REPEAT2: u32 = 2;
+    const NT_REPEAT4: u32 = 3;
+    const NT_REPEAT8: u32 = 4;
+    const NT_REPEAT10: u32 = 5;
+    const NT_START: u32 = 6;
+
+    grammar_definition(
+        vec![
+            Rule {
+                lhs: NT_ITEM,
+                rhs: vec![Symbol::Terminal(T_A), Symbol::Terminal(T_B)],
+            },
+            Rule {
+                lhs: NT_ITEM,
+                rhs: vec![
+                    Symbol::Terminal(T_A),
+                    Symbol::Nonterminal(NT_OPT),
+                    Symbol::Terminal(T_B),
+                ],
+            },
+            Rule {
+                lhs: NT_OPT,
+                rhs: vec![Symbol::Terminal(T_C)],
+            },
+            Rule {
+                lhs: NT_REPEAT2,
+                rhs: vec![Symbol::Terminal(T_S), Symbol::Nonterminal(NT_ITEM)],
+            },
+            Rule {
+                lhs: NT_REPEAT2,
+                rhs: vec![
+                    Symbol::Terminal(T_S),
+                    Symbol::Nonterminal(NT_ITEM),
+                    Symbol::Terminal(T_S),
+                    Symbol::Nonterminal(NT_ITEM),
+                ],
+            },
+            Rule {
+                lhs: NT_REPEAT4,
+                rhs: vec![Symbol::Nonterminal(NT_REPEAT2)],
+            },
+            Rule {
+                lhs: NT_REPEAT4,
+                rhs: vec![
+                    Symbol::Nonterminal(NT_REPEAT2),
+                    Symbol::Nonterminal(NT_REPEAT2),
+                ],
+            },
+            Rule {
+                lhs: NT_REPEAT8,
+                rhs: vec![Symbol::Nonterminal(NT_REPEAT4)],
+            },
+            Rule {
+                lhs: NT_REPEAT8,
+                rhs: vec![
+                    Symbol::Nonterminal(NT_REPEAT4),
+                    Symbol::Nonterminal(NT_REPEAT4),
+                ],
+            },
+            Rule {
+                lhs: NT_REPEAT10,
+                rhs: vec![Symbol::Nonterminal(NT_REPEAT8)],
+            },
+            Rule {
+                lhs: NT_REPEAT10,
+                rhs: vec![Symbol::Nonterminal(NT_REPEAT2)],
+            },
+            Rule {
+                lhs: NT_REPEAT10,
+                rhs: vec![
+                    Symbol::Nonterminal(NT_REPEAT8),
+                    Symbol::Nonterminal(NT_REPEAT2),
+                ],
+            },
+            Rule {
+                lhs: NT_START,
+                rhs: vec![Symbol::Nonterminal(NT_ITEM)],
+            },
+            Rule {
+                lhs: NT_START,
+                rhs: vec![
+                    Symbol::Nonterminal(NT_ITEM),
+                    Symbol::Nonterminal(NT_REPEAT10),
+                ],
+            },
+        ],
+        NT_START,
+        vec![
+            literal_terminal(T_A, "a"),
+            literal_terminal(T_C, "c"),
+            literal_terminal(T_B, "b"),
+            literal_terminal(T_S, "s"),
+        ],
+    )
+}
+
 fn accepts(parser: &GLRParser, input: &[TerminalID]) -> bool {
     let mut current = GLRParser {
         table: parser.table.clone(),
@@ -168,6 +272,40 @@ fn test_explicit_eof_single_rule_grammar() {
     assert_rejects(&parser, &[1], "\"$\" should fail (wrong first token)");
     assert_rejects(&parser, &[0], "\"a\" alone should not be accepted (missing $)");
     assert_rejects(&parser, &[], "empty should not be accepted");
+}
+
+#[test]
+fn test_raw_o9788_n10_manual_grammar_smoke() {
+    let grammar = raw_o9788_n10_grammar();
+    let parser = parser_for(&grammar);
+
+    assert_accepts(
+        &parser,
+        &[0, 2],
+        "manual raw grammar should accept the base item without going through Lark or Constraint",
+    );
+}
+
+#[test]
+fn test_raw_o9788_n10_keeps_separator_shift_after_ten_items() {
+    let grammar = raw_o9788_n10_grammar();
+    let mut current = parser_for(&grammar);
+
+    let mut prefix = vec![0u32, 2u32];
+    for _ in 0..9 {
+        prefix.extend_from_slice(&[3u32, 0u32, 2u32]);
+    }
+
+    for (index, token) in prefix.into_iter().enumerate() {
+        let (next, progressed) = current.step(token);
+        assert!(progressed, "raw parser repro stopped early at prefix token index {index}");
+        current = next;
+    }
+
+    assert!(
+        current.valid_terminals().contains(&3),
+        "after 10 items, the raw parser should still allow one more separator 's' for the 11th item"
+    );
 }
 
 /// Simple parse-table generation and parse.
