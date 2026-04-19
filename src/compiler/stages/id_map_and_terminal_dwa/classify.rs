@@ -29,6 +29,7 @@ pub(crate) enum L2pPartitionCostFn {
     Size,
     SizeLog,
     LogLog,
+    UnionSize,
 }
 
 impl L2pPartitionCostFn {
@@ -37,6 +38,7 @@ impl L2pPartitionCostFn {
             Self::Size => "size",
             Self::SizeLog => "size_log",
             Self::LogLog => "log_log",
+            Self::UnionSize => "union_size",
         }
     }
 }
@@ -72,6 +74,7 @@ struct L2pTokenGroup {
 #[derive(Clone)]
 struct L2pPartitionBucket {
     l2p_intersection: Option<BitSet>,
+    l2p_union: Option<BitSet>,
     token_ids: Vec<u32>,
 }
 
@@ -79,6 +82,7 @@ impl L2pPartitionBucket {
     fn new() -> Self {
         Self {
             l2p_intersection: None,
+            l2p_union: None,
             token_ids: Vec::new(),
         }
     }
@@ -473,6 +477,20 @@ fn compute_partition_cost(cost_fn: L2pPartitionCostFn, l2p_terminals: usize, par
         L2pPartitionCostFn::Size => num_l2p * size,
         L2pPartitionCostFn::SizeLog => num_l2p * size.ln(),
         L2pPartitionCostFn::LogLog => num_l2p.ln() * size.ln(),
+        L2pPartitionCostFn::UnionSize => num_l2p * size,
+    }
+}
+
+fn partition_metric_count(
+    cost_fn: L2pPartitionCostFn,
+    intersection_count: usize,
+    union_count: usize,
+) -> usize {
+    match cost_fn {
+        L2pPartitionCostFn::UnionSize => union_count,
+        L2pPartitionCostFn::Size | L2pPartitionCostFn::SizeLog | L2pPartitionCostFn::LogLog => {
+            intersection_count
+        }
     }
 }
 
@@ -528,6 +546,7 @@ pub(crate) fn estimate_l2p_objective_for_token_partitions(
         }
 
         let mut intersection: Option<BitSet> = None;
+        let mut union: Option<BitSet> = None;
         for &token_id in token_ids {
             if let Some(token_l2p) = token_l2p_map.get(&token_id) {
                 if let Some(current) = &mut intersection {
@@ -535,12 +554,22 @@ pub(crate) fn estimate_l2p_objective_for_token_partitions(
                 } else {
                     intersection = Some(token_l2p.clone());
                 }
+                if let Some(current) = &mut union {
+                    current.union_with(token_l2p);
+                } else {
+                    union = Some(token_l2p.clone());
+                }
             }
         }
 
         let l2p_count = intersection.as_ref().map_or(0, BitSet::count_ones);
+        let union_count = union.as_ref().map_or(0, BitSet::count_ones);
         l2p_counts.push(l2p_count);
-        costs.push(compute_partition_cost(cost_fn, l2p_count, token_ids.len()));
+        costs.push(compute_partition_cost(
+            cost_fn,
+            partition_metric_count(cost_fn, l2p_count, union_count),
+            token_ids.len(),
+        ));
     }
 
     let score = objective_score(objective, &costs);
@@ -595,9 +624,19 @@ fn partition_token_l2p_map_by_cost(
             } else {
                 group.l2p_terminals.clone()
             };
+            let candidate_union = if let Some(current) = &bucket.l2p_union {
+                current.union(&group.l2p_terminals)
+            } else {
+                group.l2p_terminals.clone()
+            };
             let candidate_l2p_count = candidate_intersection.count_ones();
+            let candidate_union_count = candidate_union.count_ones();
             let candidate_size = bucket.size() + group.token_ids.len();
-            let candidate_cost = compute_partition_cost(cost_fn, candidate_l2p_count, candidate_size);
+            let candidate_cost = compute_partition_cost(
+                cost_fn,
+                partition_metric_count(cost_fn, candidate_l2p_count, candidate_union_count),
+                candidate_size,
+            );
 
             let mut candidate_costs = current_costs.clone();
             candidate_costs[idx] = candidate_cost;
@@ -625,6 +664,11 @@ fn partition_token_l2p_map_by_cost(
         } else {
             bucket.l2p_intersection = Some(group.l2p_terminals.clone());
         }
+        if let Some(current) = &mut bucket.l2p_union {
+            current.union_with(&group.l2p_terminals);
+        } else {
+            bucket.l2p_union = Some(group.l2p_terminals.clone());
+        }
         bucket.token_ids.extend(group.token_ids);
         current_costs[best_idx] = best_cost;
     }
@@ -633,7 +677,14 @@ fn partition_token_l2p_map_by_cost(
 
     let estimated_partition_costs: Vec<f64> = buckets
         .iter()
-        .map(|bucket| compute_partition_cost(cost_fn, bucket.l2p_count(), bucket.size()))
+        .map(|bucket| {
+            let union_count = bucket.l2p_union.as_ref().map_or(0, BitSet::count_ones);
+            compute_partition_cost(
+                cost_fn,
+                partition_metric_count(cost_fn, bucket.l2p_count(), union_count),
+                bucket.size(),
+            )
+        })
         .collect();
     let estimated_l2p_terminals: Vec<usize> = buckets.iter().map(L2pPartitionBucket::l2p_count).collect();
     let partitions = buckets.into_iter().map(|bucket| bucket.token_ids).collect::<Vec<_>>();
