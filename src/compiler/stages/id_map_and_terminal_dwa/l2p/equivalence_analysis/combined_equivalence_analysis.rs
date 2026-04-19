@@ -67,8 +67,9 @@ const PRE_VOCAB_STATE_REDUCTION_MAX_FULL_TOKENS: usize = 5000;
 /// coarsening for the downstream vocab pass.
 const PRE_VOCAB_STATE_REDUCTION_LARGE_DFA_THRESHOLD: usize = 14_000;
 /// Number of sample tokens per batch for large-DFA pre-vocab state reduction.
-const PRE_VOCAB_STATE_REDUCTION_LARGE_DFA_BATCH_SIZE: usize =
-    PRE_VOCAB_STATE_REDUCTION_MAX_FULL_TOKENS;
+/// Keep this coarse by default so the pre-vocab pass still merges aggressively
+/// on very large DFAs; callers can raise it with GLRMASK_LARGE_DFA_BATCH_SIZE.
+const PRE_VOCAB_STATE_REDUCTION_LARGE_DFA_BATCH_SIZE: usize = 200;
 
 // Env var names for runtime overrides of numeric thresholds.
 const LARGE_DFA_THRESHOLD_ENV: &str = "GLRMASK_LARGE_DFA_THRESHOLD";
