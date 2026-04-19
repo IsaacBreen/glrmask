@@ -875,22 +875,18 @@ impl Tokenizer {
         }
 
         let t_pre_min = std::time::Instant::now();
-        let (mut minimized, mut state_mapping) = if num_active <= 16 && pre_minimize_states <= 20_000 {
-            match dfa.try_minimize_full_with_state_mapping() {
-                Some(result) => result,
-                None => {
-                    if compile_profile {
-                        eprintln!(
-                            "[glrmask/profile][simplify_detail] states={} active={} iterative_bail_ms={:.1} falling_through_to_hopcroft",
-                            pre_minimize_states, num_active,
-                            t_pre_min.elapsed().as_secs_f64()*1000.0,
-                        );
-                    }
-                    dfa.minimize_with_state_mapping()
+        let (mut minimized, mut state_mapping) = match dfa.try_minimize_full_with_state_mapping() {
+            Some(result) => result,
+            None => {
+                if compile_profile {
+                    eprintln!(
+                        "[glrmask/profile][simplify_detail] states={} active={} iterative_bail_ms={:.1} falling_through_to_hopcroft",
+                        pre_minimize_states, num_active,
+                        t_pre_min.elapsed().as_secs_f64()*1000.0,
+                    );
                 }
+                dfa.minimize_with_state_mapping()
             }
-        } else {
-            dfa.minimize_with_state_mapping()
         };
 
         if std::env::var_os("GLRMASK_DEBUG_SIMPLIFY_PHASES").is_some() {
