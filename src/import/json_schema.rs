@@ -5813,78 +5813,25 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
             .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
             .unwrap_or_default();
         let ablated = |name: &str| ablate.contains(name);
-        // --- Character classes ---
+        // --- Multi-char regex run terminals ---
+        // Each fires once per run instead of once per byte.
 
-        // HEXDIG = DIGIT / "A"-"F" / "a"-"f"
-        let hexdig = GrammarExpr::CharClass {
-            def: "0-9a-fA-F".into(),
-            negate: false,
-            utf8: true,
-        };
+        // pchar run (1+): unreserved + sub-delims + ":" + "@" + pct-encoded
+        // Used for segment (*pchar) and segment-nz (1*pchar)
+        let pchar_run = regex_expr(r#"(?:[a-zA-Z0-9\-._~!$&'()*+,;=:@]|%[0-9a-fA-F]{2})+"#);
 
-        // pct-encoded = "%" HEXDIG HEXDIG
-        let pct_encoded = self.extract_rule(
-            sequence_or_single(vec![
-                literal_expr(b"%"),
-                GrammarExpr::RepeatRange {
-                    expr: Box::new(hexdig.clone()),
-                    min: 2,
-                    max: 2,
-                },
-            ]),
-            "uri_pct",
-        );
-
-        // pchar = unreserved / pct-encoded / sub-delims / ":" / "@"
-        // Char class for pchar (all pchar chars except pct-encoded)
-        let pchar_cc = GrammarExpr::CharClass {
-            def: r"a-zA-Z0-9\-._~!$&'()*+,;=:@".into(),
-            negate: false,
-            utf8: true,
-        };
-        let pchar = self.extract_rule(
-            choice_or_single(vec![pchar_cc, pct_encoded.clone()]),
-            "uri_pchar",
-        );
-
-        // Query/fragment char: pchar / "/" / "?"  (plus pct-encoded)
-        let qf_cc = GrammarExpr::CharClass {
-            def: r"a-zA-Z0-9\-._~!$&'()*+,;=:@/?".into(),
-            negate: false,
-            utf8: true,
-        };
-        let qf_char = self.extract_rule(
-            choice_or_single(vec![qf_cc, pct_encoded.clone()]),
-            "uri_qfc",
-        );
+        // qf_run (1+): query/fragment chars (pchar + "/" + "?") + pct-encoded
+        let qf_run = regex_expr(r#"(?:[a-zA-Z0-9\-._~!$&'()*+,;=:@/?]|%[0-9a-fA-F]{2})+"#);
 
         // --- scheme ---
-        // scheme = ALPHA *( ALPA / DIGIT / "+" / "-" / "." )
-        let scheme = sequence_or_single(vec![
-            GrammarExpr::CharClass {
-                def: "a-zA-Z".into(),
-                negate: false,
-                utf8: true,
-            },
-            GrammarExpr::Repeat(Box::new(GrammarExpr::CharClass {
-                def: "a-zA-Z0-9+\\-.".into(),
-                negate: false,
-                utf8: true,
-            })),
-        ]);
+        // scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
+        let scheme = regex_expr(r#"[a-zA-Z][a-zA-Z0-9+\-.]*"#);
 
         // --- userinfo ---
         // userinfo = *( unreserved / pct-encoded / sub-delims / ":" )
-        // Char class = unreserved + sub-delims + ":" (i.e. pchar minus "@")
-        let userinfo_cc = GrammarExpr::CharClass {
-            def: r"a-zA-Z0-9\-._~!$&'()*+,;=:".into(),
-            negate: false,
-            utf8: true,
-        };
-        let userinfo = GrammarExpr::Repeat(Box::new(choice_or_single(vec![
-            userinfo_cc,
-            pct_encoded.clone(),
-        ])));
+        let userinfo = GrammarExpr::Optional(Box::new(
+            regex_expr(r#"(?:[a-zA-Z0-9\-._~!$&'()*+,;=:]|%[0-9a-fA-F]{2})+"#),
+        ));
         let userinfo_at = GrammarExpr::Optional(Box::new(sequence_or_single(vec![
             userinfo,
             literal_expr(b"@"),
@@ -5896,29 +5843,15 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         // IPvFuture = "v" 1*HEXDIG "." 1*( unreserved / sub-delims / ":" )
         let ipv_future = sequence_or_single(vec![
             literal_expr(b"v"),
-            GrammarExpr::RepeatOne(Box::new(hexdig.clone())),
+            regex_expr("[0-9a-fA-F]+"),
             literal_expr(b"."),
-            GrammarExpr::RepeatOne(Box::new(GrammarExpr::CharClass {
-                def: r"a-zA-Z0-9\-._~!$&'()*+,;=:".into(),
-                negate: false,
-                utf8: true,
-            })),
+            regex_expr(r#"[a-zA-Z0-9\-._~!$&'()*+,;=:]+"#),
         ]);
 
-        // h16 = 1*4 HEXDIG
-        let h16 = GrammarExpr::RepeatRange {
-            expr: Box::new(hexdig.clone()),
-            min: 1,
-            max: 4,
-        };
-        let h16_colon = self.extract_rule(
-            sequence_or_single(vec![h16.clone(), literal_expr(b":")]),
-            "uri_h16c",
-        );
-        let colon_h16 = self.extract_rule(
-            sequence_or_single(vec![literal_expr(b":"), h16.clone()]),
-            "uri_ch16",
-        );
+        // h16 = 1*4 HEXDIG (regex terminal: fires once per h16 group)
+        let h16 = regex_expr("[0-9a-fA-F]{1,4}");
+        let h16_colon = regex_expr("[0-9a-fA-F]{1,4}:");
+        let colon_h16 = regex_expr(":[0-9a-fA-F]{1,4}");
 
         // IPv6 address — 10 alternatives from RFC 3986 Appendix A
         let ipv6_alts = vec![
@@ -6006,22 +5939,16 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         ]);
 
         // reg-name = *( unreserved / pct-encoded / sub-delims )
-        let reg_name_cc = GrammarExpr::CharClass {
-            def: r"a-zA-Z0-9\-._~!$&'()*+,;=".into(),
-            negate: false,
-            utf8: true,
-        };
-        let re_name = GrammarExpr::Repeat(Box::new(choice_or_single(vec![
-            reg_name_cc,
-            pct_encoded.clone(),
-        ])));
+        let re_name = GrammarExpr::Optional(Box::new(
+            regex_expr(r#"(?:[a-zA-Z0-9\-._~!$&'()*+,;=]|%[0-9a-fA-F]{2})+"#),
+        ));
 
         let mut host_alts: Vec<GrammarExpr> = Vec::new();
         if !ablated("ip_literal") { host_alts.push(ip_literal); }
         if !ablated("ipv4") { host_alts.push(ipv4_address); }
         if !ablated("reg_name") { host_alts.push(re_name); } else {
             // Keep at least one host alternative (single letter) so URI is parseable.
-            host_alts.push(GrammarExpr::CharClass { def: "a-zA-Z".into(), negate: false, utf8: true });
+            host_alts.push(regex_expr("[a-zA-Z]"));
         }
         let host = choice_or_single(host_alts);
 
@@ -6029,11 +5956,7 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         // port = *DIGIT
         let port = GrammarExpr::Optional(Box::new(sequence_or_single(vec![
             literal_expr(b":"),
-            GrammarExpr::Repeat(Box::new(GrammarExpr::CharClass {
-                def: "0-9".into(),
-                negate: false,
-                utf8: true,
-            })),
+            GrammarExpr::Optional(Box::new(regex_expr("[0-9]+"))),
         ])));
 
         // authority = [ userinfo "@" ] host [ ":" port ]
@@ -6042,10 +5965,10 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         let authority = sequence_or_single(vec![userinfo_part, host, port_part]);
 
         // --- path ---
-        // segment = *pchar
-        let segment = GrammarExpr::Repeat(Box::new(pchar.clone()));
+        // segment = *pchar → Optional(run) so empty segments don't fire any terminal
+        let segment = GrammarExpr::Optional(Box::new(pchar_run.clone()));
         // segment-nz = 1*pchar
-        let segment_nz = GrammarExpr::RepeatOne(Box::new(pchar.clone()));
+        let segment_nz = pchar_run.clone();
 
         // path-abempty = *( "/" segment )
         let path_abempty = GrammarExpr::Repeat(Box::new(sequence_or_single(vec![
@@ -6096,13 +6019,13 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         // query = "?" *( pchar / "/" / "?" )  [optional group]
         let query = GrammarExpr::Optional(Box::new(sequence_or_single(vec![
             literal_expr(b"?"),
-            GrammarExpr::Repeat(Box::new(qf_char.clone())),
+            GrammarExpr::Optional(Box::new(qf_run.clone())),
         ])));
 
         // fragment = "#" *( pchar / "/" / "?" )  [optional group]
         let fragment = GrammarExpr::Optional(Box::new(sequence_or_single(vec![
             literal_expr(b"#"),
-            GrammarExpr::Repeat(Box::new(qf_char)),
+            GrammarExpr::Optional(Box::new(qf_run)),
         ])));
 
         // URI = scheme ":" hier-part query fragment
