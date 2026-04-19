@@ -551,9 +551,6 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
                     if !contribution.is_subset(existing) {
                         weight_by_state[target_idx] = Some(existing.union(&contribution));
                         closure_queue.push_back(*target);
-                        if !seed_states.contains(target) {
-                            seed_states.push(*target);
-                        }
                     }
                 } else {
                     weight_by_state[target_idx] = Some(contribution);
@@ -605,7 +602,7 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
     subset_map.insert(subset_key(&canon_buf), dwa.start_state);
     worklist.push_back(canon_buf.clone());
 
-    let mut raw_targets: FxHashMap<i32, FxHashMap<u32, Vec<Weight>>> = FxHashMap::default();
+    let mut raw_targets: FxHashMap<i32, FxHashMap<u32, Weight>> = FxHashMap::default();
     // Reusable target subset map — cleared and reused each iteration.
     let mut target_subset: FxHashMap<u32, Weight> = FxHashMap::default();
     // Memoize local epsilon-closure outputs keyed by pre-closure weighted subsets.
@@ -655,19 +652,24 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
                         continue;
                     }
 
-                    raw_targets.entry(label).or_default().entry(*target).or_default().push(next_weight);
+                    let entry = raw_targets.entry(label).or_default().entry(*target).or_insert_with(Weight::empty);
+                    *entry = if entry.is_empty() {
+                        next_weight
+                    } else {
+                        entry.union(&next_weight)
+                    };
                 }
             }
         }
         if profile_enabled { prof_intersection_ns += t_intersect.elapsed().as_nanos() as u64; }
 
         let t_target = std::time::Instant::now();
-        let raw_target_entries: Vec<(i32, FxHashMap<u32, Vec<Weight>>)> =
+        let raw_target_entries: Vec<(i32, FxHashMap<u32, Weight>)> =
             raw_targets.drain().collect();
         if profile_enabled {
             for (_, contribs) in &raw_target_entries {
-                for (_, weights) in contribs {
-                    prof_total_raw_target_entries += weights.len() as u64;
+                for _ in contribs.values() {
+                    prof_total_raw_target_entries += 1;
                 }
             }
         }
@@ -682,8 +684,7 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
             }
 
             target_subset.clear();
-            for (dst, weights) in contribs {
-                let combined = Weight::union_all(weights.iter());
+            for (dst, combined) in contribs {
                 if !combined.is_empty() {
                     target_subset.insert(dst, combined);
                 }
