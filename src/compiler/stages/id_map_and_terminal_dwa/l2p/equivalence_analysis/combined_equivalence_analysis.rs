@@ -70,6 +70,14 @@ const PRE_VOCAB_STATE_REDUCTION_LARGE_DFA_THRESHOLD: usize = 14_000;
 const PRE_VOCAB_STATE_REDUCTION_LARGE_DFA_BATCH_SIZE: usize =
     PRE_VOCAB_STATE_REDUCTION_MAX_FULL_TOKENS;
 
+// Env var names for runtime overrides of numeric thresholds.
+const LARGE_DFA_THRESHOLD_ENV: &str = "GLRMASK_LARGE_DFA_THRESHOLD";
+const LARGE_DFA_BATCH_SIZE_ENV: &str = "GLRMASK_LARGE_DFA_BATCH_SIZE";
+const PRE_VOCAB_MIN_TOKENS_ENV: &str = "GLRMASK_PRE_VOCAB_MIN_TOKENS";
+const PRE_VOCAB_MAX_FULL_TOKENS_ENV: &str = "GLRMASK_PRE_VOCAB_MAX_FULL_TOKENS";
+const PRE_VOCAB_MIN_STATES_ENV: &str = "GLRMASK_PRE_VOCAB_MIN_STATES";
+const PRE_VOCAB_MAX_GROUPS_ENV: &str = "GLRMASK_PRE_VOCAB_MAX_GROUPS";
+
 /// Result of combined equivalence analysis.
 pub struct CombinedEquivalenceResult {
     /// Vocab equivalence classes: sets of token indices that behave identically.
@@ -86,6 +94,13 @@ fn env_flag_enabled(name: &str) -> bool {
             !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
         })
         .unwrap_or(false)
+}
+
+fn env_usize_override(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(default)
 }
 
 fn compile_profile_enabled() -> bool {
@@ -422,23 +437,31 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
     let num_dfa_states = tokenizer.dfa().states.len();
     let force_pre_vocab_state_reduction = env_flag_enabled(FORCE_PRE_VOCAB_STATE_REDUCTION_ENV);
     let disable_pre_vocab_state_reduction = env_flag_enabled(DISABLE_PRE_VOCAB_STATE_REDUCTION_ENV);
+    let pre_vocab_min_states = env_usize_override(PRE_VOCAB_MIN_STATES_ENV, PRE_VOCAB_STATE_REDUCTION_MIN_STATES);
+    let pre_vocab_max_groups = env_usize_override(PRE_VOCAB_MAX_GROUPS_ENV, PRE_VOCAB_STATE_REDUCTION_MAX_GROUPS);
+    let pre_vocab_min_tokens = env_usize_override(PRE_VOCAB_MIN_TOKENS_ENV, PRE_VOCAB_STATE_REDUCTION_MIN_TOKENS);
     let use_pre_vocab_state_reduction = if force_pre_vocab_state_reduction {
         true
     } else if disable_pre_vocab_state_reduction {
         false
     } else {
         !skip_token_state
-            && pre_reduced_states.len() >= PRE_VOCAB_STATE_REDUCTION_MIN_STATES
-            && tokenizer_num_groups <= PRE_VOCAB_STATE_REDUCTION_MAX_GROUPS
-            && dedup.representative_token_bytes.len() >= PRE_VOCAB_STATE_REDUCTION_MIN_TOKENS
+            && pre_reduced_states.len() >= pre_vocab_min_states
+            && tokenizer_num_groups <= pre_vocab_max_groups
+            && dedup.representative_token_bytes.len() >= pre_vocab_min_tokens
     };
     // For large DFAs, use sample-based pre-vocab reduction: walk only a small
     // batch of tokens through the states instead of all tokens. This avoids
     // O(tokens × states) cost while still providing effective coarsening.
-    let large_dfa = num_dfa_states >= PRE_VOCAB_STATE_REDUCTION_LARGE_DFA_THRESHOLD;
+    let large_dfa_threshold = env_usize_override(LARGE_DFA_THRESHOLD_ENV, PRE_VOCAB_STATE_REDUCTION_LARGE_DFA_THRESHOLD);
+    let large_dfa_batch_size = env_usize_override(LARGE_DFA_BATCH_SIZE_ENV, PRE_VOCAB_STATE_REDUCTION_LARGE_DFA_BATCH_SIZE);
+    let pre_vocab_max_full_tokens = env_usize_override(PRE_VOCAB_MAX_FULL_TOKENS_ENV, PRE_VOCAB_STATE_REDUCTION_MAX_FULL_TOKENS);
+    let large_dfa = num_dfa_states >= large_dfa_threshold;
     let pre_vocab_max_batches = if large_dfa { Some(1) } else { None };
     let pre_vocab_batch_size = if large_dfa {
-        Some(PRE_VOCAB_STATE_REDUCTION_LARGE_DFA_BATCH_SIZE)
+        Some(large_dfa_batch_size)
+    } else if dedup.representative_token_bytes.len() > pre_vocab_max_full_tokens {
+        Some(pre_vocab_max_full_tokens)
     } else {
         None
     };
