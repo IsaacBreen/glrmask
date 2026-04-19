@@ -7712,19 +7712,7 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         // Separator-merged left-recursive grammar for ordered objects with optional keys.
         // Off by default; opt-in via GLRMASK_ENABLE_FACTORED_ORDERED_OBJECT=1
         // and GLRMASK_ENABLE_FACTORED_CLOSED_OBJECT=1.
-        //
-        // Open ordered objects need their optional suffix to stay right-leaning so
-        // the additional/pattern-property continuation remains live after consuming
-        // an optional branch. Balanced trees can strand the continuation after a
-        // shared optional object leaf, which rejects tokens like ` {},` even though
-        // the object still permits another property.
-        let object_shape = if ordered.iter().any(|(_, _, required)| !*required)
-            && (has_additional_properties || !pattern_properties.is_empty())
-        {
-            OrderedObjectShape::Right
-        } else {
-            ordered_object_shape()
-        };
+        let object_shape = ordered_object_shape();
 
         if factored_ordered_object_enabled()
             && Self::factored_closed_object_enabled()
