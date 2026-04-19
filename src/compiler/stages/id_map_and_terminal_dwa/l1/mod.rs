@@ -247,12 +247,12 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     let tsids_after_compact = id_map.num_tsids();
     let tokens_after_compact = id_map.num_internal_tokens();
     let compact_tsid_shrink_pct = if tsids_before_compact > 0 {
-        ((tsids_before_compact - tsids_after_compact) as f64) * 100.0 / tsids_before_compact as f64
+        (tsids_before_compact as f64 - tsids_after_compact as f64) * 100.0 / tsids_before_compact as f64
     } else {
         0.0
     };
     let compact_vocab_shrink_pct = if tokens_before_compact > 0 {
-        ((tokens_before_compact - tokens_after_compact) as f64) * 100.0 / tokens_before_compact as f64
+        (tokens_before_compact as f64 - tokens_after_compact as f64) * 100.0 / tokens_before_compact as f64
     } else {
         0.0
     };

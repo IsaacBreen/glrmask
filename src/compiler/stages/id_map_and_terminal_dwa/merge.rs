@@ -97,12 +97,12 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
         let compact_tsids_after = input.id_map.num_tsids();
         let compact_tokens_after = input.id_map.num_internal_tokens();
         let compact_tsid_shrink_pct = if compact_tsids_before > 0 {
-            ((compact_tsids_before - compact_tsids_after) as f64) * 100.0 / compact_tsids_before as f64
+            (compact_tsids_before as f64 - compact_tsids_after as f64) * 100.0 / compact_tsids_before as f64
         } else {
             0.0
         };
         let compact_vocab_shrink_pct = if compact_tokens_before > 0 {
-            ((compact_tokens_before - compact_tokens_after) as f64) * 100.0 / compact_tokens_before as f64
+            (compact_tokens_before as f64 - compact_tokens_after as f64) * 100.0 / compact_tokens_before as f64
         } else {
             0.0
         };
@@ -177,12 +177,12 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
     let compact_tsids_after = global.num_tsids();
     let compact_tokens_after = global.num_internal_tokens();
     let compact_tsid_shrink_pct = if compact_tsids_before > 0 {
-        ((compact_tsids_before - compact_tsids_after) as f64) * 100.0 / compact_tsids_before as f64
+        (compact_tsids_before as f64 - compact_tsids_after as f64) * 100.0 / compact_tsids_before as f64
     } else {
         0.0
     };
     let compact_vocab_shrink_pct = if compact_tokens_before > 0 {
-        ((compact_tokens_before - compact_tokens_after) as f64) * 100.0 / compact_tokens_before as f64
+        (compact_tokens_before as f64 - compact_tokens_after as f64) * 100.0 / compact_tokens_before as f64
     } else {
         0.0
     };
@@ -244,12 +244,12 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
         let compact_tsids_after = input.id_map.num_tsids();
         let compact_tokens_after = input.id_map.num_internal_tokens();
         let compact_tsid_shrink_pct = if compact_tsids_before > 0 {
-            ((compact_tsids_before - compact_tsids_after) as f64) * 100.0 / compact_tsids_before as f64
+            (compact_tsids_before as f64 - compact_tsids_after as f64) * 100.0 / compact_tsids_before as f64
         } else {
             0.0
         };
         let compact_vocab_shrink_pct = if compact_tokens_before > 0 {
-            ((compact_tokens_before - compact_tokens_after) as f64) * 100.0 / compact_tokens_before as f64
+            (compact_tokens_before as f64 - compact_tokens_after as f64) * 100.0 / compact_tokens_before as f64
         } else {
             0.0
         };
@@ -337,12 +337,12 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     let compact_tsids_after = global.num_tsids();
     let compact_tokens_after = global.num_internal_tokens();
     let compact_tsid_shrink_pct = if compact_tsids_before > 0 {
-        ((compact_tsids_before - compact_tsids_after) as f64) * 100.0 / compact_tsids_before as f64
+        (compact_tsids_before as f64 - compact_tsids_after as f64) * 100.0 / compact_tsids_before as f64
     } else {
         0.0
     };
     let compact_vocab_shrink_pct = if compact_tokens_before > 0 {
-        ((compact_tokens_before - compact_tokens_after) as f64) * 100.0 / compact_tokens_before as f64
+        (compact_tokens_before as f64 - compact_tokens_after as f64) * 100.0 / compact_tokens_before as f64
     } else {
         0.0
     };
