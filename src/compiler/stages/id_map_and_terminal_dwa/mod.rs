@@ -19,21 +19,25 @@ use std::time::Instant;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
-use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::bitset::BitSet;
+use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 
 use classify::classify_vocab_char_type;
-use types::{TerminalColoring, TerminalDwaPhaseProfile, compile_profile_enabled, debug_profile_enabled, debug_terminal_mapping_enabled};
+use types::{
+    compile_profile_enabled, debug_profile_enabled, debug_terminal_mapping_enabled, TerminalColoring,
+    TerminalDwaPhaseProfile,
+};
 
 fn l2p_partition_cost_fn_from_env() -> classify::L2pPartitionCostFn {
     match std::env::var("GLRMASK_L2P_COST_FN").as_deref() {
         Ok("size") | Err(_) => classify::L2pPartitionCostFn::Size,
         Ok("size_log") => classify::L2pPartitionCostFn::SizeLog,
         Ok("log_log") => classify::L2pPartitionCostFn::LogLog,
+        Ok("union_size") => classify::L2pPartitionCostFn::UnionSize,
         Ok(other) => panic!(
-            "Invalid GLRMASK_L2P_COST_FN={other}; expected one of: size, size_log, log_log"
+            "Invalid GLRMASK_L2P_COST_FN={other}; expected one of: size, size_log, log_log, union_size"
         ),
     }
 }
