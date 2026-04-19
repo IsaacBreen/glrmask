@@ -244,21 +244,35 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     );
     let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
     let dwa_stats_after_compact = dwa.stats();
+    let tsids_after_compact = id_map.num_tsids();
+    let tokens_after_compact = id_map.num_internal_tokens();
+    let compact_tsid_shrink_pct = if tsids_before_compact > 0 {
+        ((tsids_before_compact - tsids_after_compact) as f64) * 100.0 / tsids_before_compact as f64
+    } else {
+        0.0
+    };
+    let compact_vocab_shrink_pct = if tokens_before_compact > 0 {
+        ((tokens_before_compact - tokens_after_compact) as f64) * 100.0 / tokens_before_compact as f64
+    } else {
+        0.0
+    };
 
     if profiling {
         let stats_str = if let Some(stats) = compact_report.profile_stats {
             format!(
-                " compact_tsids_before={} compact_tsids_after={} compact_tokens_before={} compact_tokens_after={} compact_weight_ranges_before={} compact_weight_ranges_after={} compact_token_ranges_before={} compact_token_ranges_after={}",
+                " compact_tsids_before={} compact_tsids_after={} compact_tokens_before={} compact_tokens_after={} compact_tsid_shrink_pct={:.2} compact_vocab_shrink_pct={:.2} compact_weight_ranges_before={} compact_weight_ranges_after={} compact_token_ranges_before={} compact_token_ranges_after={}",
                 stats.tsids_before, stats.tsids_after,
                 stats.tokens_before, stats.tokens_after,
+                compact_tsid_shrink_pct, compact_vocab_shrink_pct,
                 stats.weight_ranges_before, stats.weight_ranges_after,
                 stats.token_ranges_before, stats.token_ranges_after,
             )
         } else {
             format!(
-                " compact_tsids_before={} compact_tsids_after={} compact_tokens_before={} compact_tokens_after={}",
-                tsids_before_compact, id_map.num_tsids(),
-                tokens_before_compact, id_map.num_internal_tokens(),
+                " compact_tsids_before={} compact_tsids_after={} compact_tokens_before={} compact_tokens_after={} compact_tsid_shrink_pct={:.2} compact_vocab_shrink_pct={:.2}",
+                tsids_before_compact, tsids_after_compact,
+                tokens_before_compact, tokens_after_compact,
+                compact_tsid_shrink_pct, compact_vocab_shrink_pct,
             )
         };
         eprintln!(

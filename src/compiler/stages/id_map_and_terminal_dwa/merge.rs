@@ -89,14 +89,34 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
     if inputs.len() == 1 {
         let mut input = inputs.into_iter().next().unwrap();
         input.id_map = expand_local_id_map_to_original_space(&input, num_tokenizer_states);
+        let compact_tsids_before = input.id_map.num_tsids();
+        let compact_tokens_before = input.id_map.num_internal_tokens();
         let compact_started_at = Instant::now();
         compact_from_env(&mut input.dwa, &mut input.id_map, "GLRMASK_COMPACT_MERGE", CompactMode::Fast, false);
         let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
+        let compact_tsids_after = input.id_map.num_tsids();
+        let compact_tokens_after = input.id_map.num_internal_tokens();
+        let compact_tsid_shrink_pct = if compact_tsids_before > 0 {
+            ((compact_tsids_before - compact_tsids_after) as f64) * 100.0 / compact_tsids_before as f64
+        } else {
+            0.0
+        };
+        let compact_vocab_shrink_pct = if compact_tokens_before > 0 {
+            ((compact_tokens_before - compact_tokens_after) as f64) * 100.0 / compact_tokens_before as f64
+        } else {
+            0.0
+        };
         if compile_profile_enabled() || debug_profile_enabled() {
             eprintln!(
-                "[glrmask/profile][merge] label={} inputs=1 build_global_id_map_ms=0.000 remap_union_ms=0.000 determinize_ms=0.000 minimize_ms=0.000 compact_ms={:.3} total_ms={:.3}",
+                "[glrmask/profile][merge] label={} inputs=1 build_global_id_map_ms=0.000 remap_union_ms=0.000 determinize_ms=0.000 minimize_ms=0.000 compact_ms={:.3} compact_tsids_before={} compact_tsids_after={} compact_tokens_before={} compact_tokens_after={} compact_tsid_shrink_pct={:.2} compact_vocab_shrink_pct={:.2} total_ms={:.3}",
                 label,
                 compact_ms,
+                compact_tsids_before,
+                compact_tsids_after,
+                compact_tokens_before,
+                compact_tokens_after,
+                compact_tsid_shrink_pct,
+                compact_vocab_shrink_pct,
                 total_started_at.elapsed().as_secs_f64() * 1000.0,
             );
         }
@@ -149,9 +169,23 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
     let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let mut global = global_id_map;
+    let compact_tsids_before = global.num_tsids();
+    let compact_tokens_before = global.num_internal_tokens();
     let compact_started_at = Instant::now();
     compact_from_env(&mut dwa, &mut global, "GLRMASK_COMPACT_MERGE", CompactMode::Fast, false);
     let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
+    let compact_tsids_after = global.num_tsids();
+    let compact_tokens_after = global.num_internal_tokens();
+    let compact_tsid_shrink_pct = if compact_tsids_before > 0 {
+        ((compact_tsids_before - compact_tsids_after) as f64) * 100.0 / compact_tsids_before as f64
+    } else {
+        0.0
+    };
+    let compact_vocab_shrink_pct = if compact_tokens_before > 0 {
+        ((compact_tokens_before - compact_tokens_after) as f64) * 100.0 / compact_tokens_before as f64
+    } else {
+        0.0
+    };
     let profile = merge_phase_profile(
         global_id_map_ms,
         remap_union_ms,
@@ -162,7 +196,7 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
 
     if compile_profile_enabled() || debug_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][merge] label={} inputs={} build_global_id_map_ms={:.3} remap_union_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} compact_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][merge] label={} inputs={} build_global_id_map_ms={:.3} remap_union_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} compact_ms={:.3} compact_tsids_before={} compact_tsids_after={} compact_tokens_before={} compact_tokens_after={} compact_tsid_shrink_pct={:.2} compact_vocab_shrink_pct={:.2} total_ms={:.3}",
             label,
             inputs.len(),
             global_id_map_ms,
@@ -170,6 +204,12 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
             determinize_ms,
             minimize_ms,
             compact_ms,
+            compact_tsids_before,
+            compact_tsids_after,
+            compact_tokens_before,
+            compact_tokens_after,
+            compact_tsid_shrink_pct,
+            compact_vocab_shrink_pct,
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
@@ -196,14 +236,34 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
 
     if inputs.len() == 1 {
         let mut input = inputs.into_iter().next().unwrap();
+        let compact_tsids_before = input.id_map.num_tsids();
+        let compact_tokens_before = input.id_map.num_internal_tokens();
         let compact_started_at = Instant::now();
         compact_from_env(&mut input.dwa, &mut input.id_map, "GLRMASK_COMPACT_MERGE_GLOBAL", CompactMode::Fast, false);
         let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
+        let compact_tsids_after = input.id_map.num_tsids();
+        let compact_tokens_after = input.id_map.num_internal_tokens();
+        let compact_tsid_shrink_pct = if compact_tsids_before > 0 {
+            ((compact_tsids_before - compact_tsids_after) as f64) * 100.0 / compact_tsids_before as f64
+        } else {
+            0.0
+        };
+        let compact_vocab_shrink_pct = if compact_tokens_before > 0 {
+            ((compact_tokens_before - compact_tokens_after) as f64) * 100.0 / compact_tokens_before as f64
+        } else {
+            0.0
+        };
         if compile_profile_enabled() || debug_profile_enabled() {
             eprintln!(
-                "[glrmask/profile][merge] label={} inputs=1 build_global_id_map_ms=0.000 remap_union_ms=0.000 determinize_ms=0.000 minimize_ms=0.000 compact_ms={:.3} total_ms={:.3}",
+                "[glrmask/profile][merge] label={} inputs=1 build_global_id_map_ms=0.000 remap_union_ms=0.000 determinize_ms=0.000 minimize_ms=0.000 compact_ms={:.3} compact_tsids_before={} compact_tsids_after={} compact_tokens_before={} compact_tokens_after={} compact_tsid_shrink_pct={:.2} compact_vocab_shrink_pct={:.2} total_ms={:.3}",
                 label,
                 compact_ms,
+                compact_tsids_before,
+                compact_tsids_after,
+                compact_tokens_before,
+                compact_tokens_after,
+                compact_tsid_shrink_pct,
+                compact_vocab_shrink_pct,
                 total_started_at.elapsed().as_secs_f64() * 1000.0,
             );
         }
@@ -269,9 +329,23 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
 
     // 4. Compact.
     let mut global = global_id_map;
+    let compact_tsids_before = global.num_tsids();
+    let compact_tokens_before = global.num_internal_tokens();
     let compact_started_at = Instant::now();
     compact_from_env(&mut dwa, &mut global, "GLRMASK_COMPACT_MERGE_GLOBAL", CompactMode::Fast, false);
     let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
+    let compact_tsids_after = global.num_tsids();
+    let compact_tokens_after = global.num_internal_tokens();
+    let compact_tsid_shrink_pct = if compact_tsids_before > 0 {
+        ((compact_tsids_before - compact_tsids_after) as f64) * 100.0 / compact_tsids_before as f64
+    } else {
+        0.0
+    };
+    let compact_vocab_shrink_pct = if compact_tokens_before > 0 {
+        ((compact_tokens_before - compact_tokens_after) as f64) * 100.0 / compact_tokens_before as f64
+    } else {
+        0.0
+    };
     let profile = merge_phase_profile(
         global_id_map_ms,
         remap_union_ms,
@@ -282,7 +356,7 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
 
     if compile_profile_enabled() || debug_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][merge] label={} inputs={} build_global_id_map_ms={:.3} remap_union_ms={:.3} reorder_ms={:.3} determinize_ms={:.3} det_states={} minimize_ms={:.3} min_states={} compact_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][merge] label={} inputs={} build_global_id_map_ms={:.3} remap_union_ms={:.3} reorder_ms={:.3} determinize_ms={:.3} det_states={} minimize_ms={:.3} min_states={} compact_ms={:.3} compact_tsids_before={} compact_tsids_after={} compact_tokens_before={} compact_tokens_after={} compact_tsid_shrink_pct={:.2} compact_vocab_shrink_pct={:.2} total_ms={:.3}",
             label,
             inputs.len(),
             global_id_map_ms,
@@ -293,6 +367,12 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
             minimize_ms,
             min_states,
             compact_ms,
+            compact_tsids_before,
+            compact_tsids_after,
+            compact_tokens_before,
+            compact_tokens_after,
+            compact_tsid_shrink_pct,
+            compact_vocab_shrink_pct,
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
