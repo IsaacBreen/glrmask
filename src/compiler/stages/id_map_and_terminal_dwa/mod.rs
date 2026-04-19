@@ -261,9 +261,39 @@ pub(crate) fn build_id_map_and_terminal_dwa(
         let cost_fn = l2p_partition_cost_fn_from_env();
         let objective = l2p_partition_objective_from_env();
         let num_partitions = l2p_partition_count_from_env();
+        let min_grammar_terminals_limit = l2p_auto_min_grammar_terminals_from_env();
+        let char_token_partitions = classify::partition_vocab_char_type_tokens(vocab);
+        let char_partition_sizes: Vec<usize> = char_token_partitions.iter().map(|partition| partition.len()).collect();
+        if (grammar.num_terminals as usize) < min_grammar_terminals_limit {
+            if compile_profile_enabled() || debug_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][auto_l2p_partition] cost_fn={} objective={} l2p_partitions={} grammar_terminals={} disallowed_follows_len={} min_grammar_terminals_limit={} char_partition_sizes={:?} chosen=char_type reason=low_grammar_terminal_count",
+                    cost_fn.as_str(),
+                    objective.as_str(),
+                    num_partitions,
+                    grammar.num_terminals,
+                    disallowed_follows.len(),
+                    min_grammar_terminals_limit,
+                    char_partition_sizes,
+                );
+            }
+            char_token_partitions
+                .into_iter()
+                .map(|token_ids| {
+                    let entries = token_ids
+                        .into_iter()
+                        .filter_map(|token_id| {
+                            vocab.entries
+                                .get(&token_id)
+                                .map(|bytes| (token_id, bytes.clone()))
+                        })
+                        .collect();
+                    Vocab::new(entries, None)
+                })
+                .collect()
+        } else {
         let bytesets = shared_classify_cache
             .get_or_init(|| classify::SharedClassifyBytesets::build(tokenizer, grammar.num_terminals));
-        let char_token_partitions = classify::partition_vocab_char_type_tokens(vocab);
         let second_largest_limit = l2p_auto_second_largest_limit_from_env();
         let max_estimated_l2p_terminals_limit = l2p_auto_max_estimated_l2p_terminals_from_env();
         let min_estimated_l2p_terminals_limit = l2p_auto_min_estimated_l2p_terminals_from_env();
@@ -316,7 +346,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
 
         if compile_profile_enabled() || debug_profile_enabled() {
             eprintln!(
-                "[glrmask/profile][auto_l2p_partition] cost_fn={} objective={} l2p_partitions={} l2p_score={:.3} char_score={:.3} second_largest={} second_largest_limit={} max_estimated_l2p_terminals={} max_estimated_l2p_terminals_limit={} chosen={} l2p_sizes={:?} l2p_costs={:?} char_costs={:?} l2p_l2p_terminals={:?} char_l2p_terminals={:?}",
+                "[glrmask/profile][auto_l2p_partition] cost_fn={} objective={} l2p_partitions={} l2p_score={:.3} char_score={:.3} second_largest={} second_largest_limit={} disallowed_follows_len={} max_estimated_l2p_terminals={} min_estimated_l2p_terminals_limit={} max_estimated_l2p_terminals_limit={} char_partition_sizes={:?} chosen={} l2p_sizes={:?} l2p_costs={:?} char_costs={:?} l2p_l2p_terminals={:?} char_l2p_terminals={:?}",
                 cost_fn.as_str(),
                 objective.as_str(),
                 num_partitions,
@@ -324,8 +354,11 @@ pub(crate) fn build_id_map_and_terminal_dwa(
                 char_score,
                 second_largest,
                 second_largest_limit,
+                disallowed_follows.len(),
                 max_estimated_l2p_terminals,
+                min_estimated_l2p_terminals_limit,
                 max_estimated_l2p_terminals_limit,
+                char_partition_sizes,
                 if use_l2p { "l2p_cost" } else { "char_type" },
                 l2p_partition_sizes,
                 l2p_partitioning.estimated_partition_costs,
@@ -367,6 +400,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
                 })
                 .collect()
         }
+            }
     } else {
         // Default 7-partition scheme by character type:
         // P0=structural non-alnum, P1=mixed, P2=ASCII-alpha, P3=digit,
