@@ -76,6 +76,20 @@ fn l2p_auto_max_estimated_l2p_terminals_from_env() -> usize {
         .unwrap_or(7)
 }
 
+fn l2p_auto_min_estimated_l2p_terminals_from_env() -> usize {
+    std::env::var("GLRMASK_L2P_AUTO_MIN_ESTIMATED_L2P_TERMINALS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(6)
+}
+
+fn l2p_auto_min_grammar_terminals_from_env() -> usize {
+    std::env::var("GLRMASK_L2P_AUTO_MIN_GRAMMAR_TERMINALS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(12)
+}
+
 fn maybe_print_terminal_mappings(grammar: &AnalyzedGrammar) {
     for terminal_id in 0..grammar.num_terminals {
         eprintln!(
@@ -252,6 +266,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
         let char_token_partitions = classify::partition_vocab_char_type_tokens(vocab);
         let second_largest_limit = l2p_auto_second_largest_limit_from_env();
         let max_estimated_l2p_terminals_limit = l2p_auto_max_estimated_l2p_terminals_from_env();
+        let min_estimated_l2p_terminals_limit = l2p_auto_min_estimated_l2p_terminals_from_env();
 
         let (l2p_partitioning, token_l2p_map) = classify::partition_vocab_by_l2p_cost_with_token_map(
             vocab,
@@ -281,6 +296,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
             .max()
             .unwrap_or(0);
         let use_l2p = if second_largest <= second_largest_limit
+            && max_estimated_l2p_terminals >= min_estimated_l2p_terminals_limit
             && max_estimated_l2p_terminals <= max_estimated_l2p_terminals_limit
         {
             let (computed_char_costs, computed_char_l2p_terminals, computed_char_score) =
