@@ -75,15 +75,6 @@ fn build_dropped_original_state_tsid_fallback(
         }
     }
 
-    let missing_states: Vec<usize> = original_to_local_tsid
-        .iter()
-        .enumerate()
-        .filter_map(|(state, &tsid)| (tsid == u32::MAX).then_some(state))
-        .collect();
-    if missing_states.is_empty() {
-        return DroppedOriginalStateTsidFallback::new(original_to_local_tsid);
-    }
-
     let representative_local_tsids_and_states: Vec<(u32, usize)> = simplified_id_map
         .tokenizer_states
         .iter_representative_ids()
@@ -95,6 +86,53 @@ fn build_dropped_original_state_tsid_fallback(
         })
         .collect();
     if representative_local_tsids_and_states.is_empty() {
+        return DroppedOriginalStateTsidFallback::new(original_to_local_tsid);
+    }
+
+    // Fast path: missing states that can never produce an active terminal are
+    // equivalent to an already-mapped dead representative state.
+    let active_bitset = bitset_from_active_terminals(active_terminals, original_tokenizer.num_terminals as usize);
+    let mut dead_representative_tsid = None;
+    for &(local_tsid, original_state) in &representative_local_tsids_and_states {
+        let has_active_final = original_tokenizer
+            .matched_terminals_iter(original_state as u32)
+            .any(|tid| active_terminals.get(tid as usize).copied().unwrap_or(false));
+        let has_active_future = !original_tokenizer
+            .possible_future_terminals(original_state as u32)
+            .is_disjoint(&active_bitset);
+        if !has_active_final && !has_active_future {
+            dead_representative_tsid = Some(local_tsid);
+            break;
+        }
+    }
+
+    let mut unresolved_missing_states = Vec::new();
+    if let Some(dead_tsid) = dead_representative_tsid {
+        for (state, tsid) in original_to_local_tsid.iter_mut().enumerate() {
+            if *tsid != u32::MAX {
+                continue;
+            }
+            let has_active_final = original_tokenizer
+                .matched_terminals_iter(state as u32)
+                .any(|tid| active_terminals.get(tid as usize).copied().unwrap_or(false));
+            let has_active_future = !original_tokenizer
+                .possible_future_terminals(state as u32)
+                .is_disjoint(&active_bitset);
+            if !has_active_final && !has_active_future {
+                *tsid = dead_tsid;
+            } else {
+                unresolved_missing_states.push(state);
+            }
+        }
+    } else {
+        unresolved_missing_states = original_to_local_tsid
+            .iter()
+            .enumerate()
+            .filter_map(|(state, &tsid)| (tsid == u32::MAX).then_some(state))
+            .collect();
+    }
+
+    if unresolved_missing_states.is_empty() {
         return DroppedOriginalStateTsidFallback::new(original_to_local_tsid);
     }
 
@@ -111,7 +149,7 @@ fn build_dropped_original_state_tsid_fallback(
         .iter()
         .map(|(_, original_state)| *original_state)
         .collect();
-    states.extend(missing_states.iter().copied());
+    states.extend(unresolved_missing_states.iter().copied());
 
     let pruned_tokenizer = build_partition_pruned_tokenizer(original_tokenizer, active_terminals, relevant_bytes);
     let tokenizer_view = TokenizerView::new(&pruned_tokenizer);
@@ -129,7 +167,7 @@ fn build_dropped_original_state_tsid_fallback(
         representative_state_to_tsid.entry(mapped_rep).or_insert(local_tsid);
     }
 
-    for (idx, &original_state) in missing_states.iter().enumerate() {
+    for (idx, &original_state) in unresolved_missing_states.iter().enumerate() {
         let rep = representative_mapping[representative_local_tsids_and_states.len() + idx];
         if let Some(&tsid) = representative_state_to_tsid.get(&rep) {
             original_to_local_tsid[original_state] = tsid;
@@ -137,6 +175,16 @@ fn build_dropped_original_state_tsid_fallback(
     }
 
     DroppedOriginalStateTsidFallback::new(original_to_local_tsid)
+}
+
+fn bitset_from_active_terminals(active_terminals: &[bool], num_terminals: usize) -> BitSet {
+    let mut bits = BitSet::new(num_terminals);
+    for (terminal_id, &active) in active_terminals.iter().enumerate() {
+        if active {
+            bits.set(terminal_id);
+        }
+    }
+    bits
 }
 
 /// Build an L2+ id_map and terminal DWA for the given vocab and terminal set.
