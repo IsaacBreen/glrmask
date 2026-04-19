@@ -1133,6 +1133,14 @@ pub struct PerAdvanceEntry {
     pub gss_summary_lower_segment: usize,
     pub gss_summary_edges: usize,
     pub gss_summary_depth: u32,
+    /// Start byte offset (inclusive) within the committed token bytes.
+    pub match_start: usize,
+    /// End byte offset (exclusive) within the committed token bytes.
+    pub match_end: usize,
+    /// Total committed token byte length (position bound).
+    pub token_bound: usize,
+    /// Actual token-byte slice consumed by this tokenizer match.
+    pub match_bytes: Vec<u8>,
     pub profile: AdvanceProfile,
 }
 
@@ -1231,6 +1239,10 @@ fn commit_bytes_per_advance(
                     gss_summary_lower_segment: gss_summary.lower_segment_nodes,
                     gss_summary_edges: gss_summary.total_edges,
                     gss_summary_depth: gss_summary.max_depth,
+                    match_start: offset,
+                    match_end: new_offset,
+                    token_bound: bytes.len(),
+                    match_bytes: bytes[offset..new_offset].to_vec(),
                     profile: sub_profile,
                 });
 

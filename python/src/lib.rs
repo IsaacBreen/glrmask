@@ -378,6 +378,10 @@ impl PyConstraintState {
             d.set_item("gss_lower_segment_nodes", entry.gss_summary_lower_segment)?;
             d.set_item("gss_total_edges", entry.gss_summary_edges)?;
             d.set_item("gss_max_depth", entry.gss_summary_depth)?;
+            d.set_item("match_start", entry.match_start)?;
+            d.set_item("match_end", entry.match_end)?;
+            d.set_item("token_bound", entry.token_bound)?;
+            d.set_item("match_bytes", entry.match_bytes)?;
 
             // Profile fields
             let p = &entry.profile;
