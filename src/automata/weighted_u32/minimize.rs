@@ -37,7 +37,15 @@ pub fn minimize_with_threshold(dwa: &DWA, partition_refine_threshold: usize) -> 
     })
 }
 
-/// Fast minimize that uses signature-based partition refinement instead of
+/// Minimize using partition refinement + disjoint-domain merging, without push_weights.
+/// Much faster than `minimize` for DWAs where all mergeable state pairs have disjoint
+/// token domains (e.g. the global merge DWA built from partitioned vocabularies).
+/// Falls back to the caller's DWA unchanged if the input is cyclic.
+pub fn minimize_partition_refine(dwa: &DWA) -> DWA {
+    minimize_if_acyclic(dwa, super::minimize_acyclic::minimize_acyclic_partition_refine)
+}
+
+
 /// O(n²) pairwise graph coloring. Produces a valid (correct) DWA that may
 /// be slightly larger than the graph-coloring result (doesn't merge states
 /// with overlapping needed sets). Suitable for bundle minimization where

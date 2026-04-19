@@ -1911,6 +1911,131 @@ pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
     minimized
 }
 
+/// Minimize using partition refinement: exact-signature grouping + disjoint-domain merging.
+///
+/// Significantly faster than [`minimize_acyclic`] because it skips `push_weights` and the
+/// O(n²) overlap-compatibility analysis used in [`build_and_color_hybrid`].  Instead it:
+///   1. Computes needed sets directly on the original DWA (no clone, no weight pushing).
+///   2. Groups states by exact transition signature (same labels, mapped targets, weights).
+///   3. Merges groups whose needed-set unions are disjoint (i.e. they accept different tokens).
+///
+/// **Correctness guarantee**: produces the same minimal DWA as [`minimize_acyclic`] when all
+/// state pairs that can be merged have *disjoint* needed sets — which holds for the global
+/// merge DWA built from vocabulary-partitioned per-char-type DWAs.
+///
+/// When some mergeable state pairs have *overlapping* needed sets (a strictly harder case),
+/// this function may produce a slightly larger DWA than full minimize. It is always correct.
+pub fn minimize_acyclic_partition_refine(dwa: &DWA) -> DWA {
+    if dwa.states.is_empty() {
+        return dwa.clone();
+    }
+
+    let Some(topo) = compute_topo_order(dwa) else {
+        return dwa.clone(); // cyclic — caller handles
+    };
+
+    let heights = compute_heights(dwa, &topo);
+    let max_height = heights.iter().max().copied().unwrap_or(0);
+    let n = dwa.states.len();
+    let start_state = dwa.start_state as usize;
+
+    // Compute needed sets on the original DWA (no push_weights clone/modification).
+    let needed = compute_needed_sets(dwa, &topo);
+    let productive_transitions = compute_productive_transitions(dwa, &needed);
+
+    let reachable_from_start = compute_reachable_from_start(dwa, start_state);
+
+    let mut states_by_height: Vec<Vec<usize>> = vec![vec![]; max_height + 1];
+    for (id, &h) in heights.iter().enumerate() {
+        if !reachable_from_start[id] { continue; }
+        if needed[id].is_empty() && id != start_state { continue; }
+        states_by_height[h].push(id);
+    }
+
+    let mut old_to_new = vec![UNMAPPED; n];
+    let mut new_states: Vec<MergedStateBuilder> = Vec::new();
+
+    for h in 0..=max_height {
+        let candidates = &states_by_height[h];
+        if candidates.is_empty() { continue; }
+
+        // Use partition_refine_coloring: exact signature match + disjoint-domain merge.
+        // This is cheaper than build_and_color_hybrid (no overlap analysis needed).
+        let coloring = partition_refine_coloring(
+            candidates,
+            dwa,
+            &needed,
+            &old_to_new,
+            &productive_transitions,
+        );
+
+        let base_new_id = new_states.len() as u32;
+        let num_colors = coloring.iter().max().map(|&c| c + 1).unwrap_or(0);
+
+        for (idx, &color) in coloring.iter().enumerate() {
+            old_to_new[candidates[idx]] = base_new_id + color as u32;
+        }
+
+        new_states.extend((0..num_colors).map(|_| MergedStateBuilder::default()));
+
+        let builders = &mut new_states[base_new_id as usize..];
+        for (idx, &color) in coloring.iter().enumerate() {
+            // Restrict transition weights by needed[target] for correctness without push_weights.
+            merge_state_with_needed_restriction(
+                candidates[idx],
+                color,
+                dwa,
+                &needed,
+                &old_to_new,
+                builders,
+            );
+        }
+        for builder in builders.iter_mut() {
+            builder.finalize_for_reuse();
+        }
+    }
+
+    reconstruct_dwa(start_state, &old_to_new, new_states)
+}
+
+/// Like `merge_state_into_builder` but restricts each transition weight to `needed[target]`.
+/// Correct without push_weights: ensures no slack tokens are carried forward after merge.
+fn merge_state_with_needed_restriction(
+    old_id: usize,
+    color: usize,
+    dwa: &DWA,
+    needed: &[Weight],
+    old_to_new: &[u32],
+    builders: &mut [MergedStateBuilder],
+) {
+    let builder = &mut builders[color];
+    let old_state = &dwa.states[old_id];
+
+    if let Some(fw) = &old_state.final_weight {
+        builder.add_final_weight(fw);
+    }
+
+    let n = dwa.states.len();
+    for (&label, (target_raw, w_orig)) in &old_state.transitions {
+        let t = *target_raw as usize;
+        if t >= n { continue; }
+        let target_new = old_to_new[t];
+        if target_new == UNMAPPED { continue; }
+        if needed[t].is_empty() { continue; }
+
+        let w = if needed[t].is_full() {
+            w_orig.clone()
+        } else {
+            // Restrict to tokens that actually reach acceptance from target.
+            w_orig.intersection(&needed[t])
+        };
+
+        if !w.is_empty() {
+            builder.add_transition(label, target_new, w);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
