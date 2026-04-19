@@ -423,17 +423,18 @@ impl Lowerer {
         symbol: &Symbol,
         max: usize,
     ) -> NonterminalID {
+        let key = (symbol.clone(), max);
+        if let Some(&nt) = self.repeat_max_cache.get(&key) {
+            return nt;
+        }
+
         if max == 0 {
             let (_, nt) = self.fresh_nonterminal("repeat_max");
+            self.repeat_max_cache.insert(key, nt);
             self.rules.push(Rule {
                 lhs: nt,
                 rhs: Vec::new(),
             });
-            return nt;
-        }
-
-        let key = (symbol.clone(), max);
-        if let Some(&nt) = self.repeat_max_cache.get(&key) {
             return nt;
         }
 
@@ -470,8 +471,18 @@ impl Lowerer {
         if let Some(&nt) = self.repeat_min1_max_cache.get(&key) {
             return nt;
         }
+
         let (_, nt) = self.fresh_nonterminal("repeat_min1_max");
         self.repeat_min1_max_cache.insert(key, nt);
+
+        if max == 1 {
+            self.rules.push(Rule {
+                lhs: nt,
+                rhs: vec![symbol.clone()],
+            });
+            return nt;
+        }
+
         let tail_nt = self.repeat_max_nonterminal(symbol, max - 1);
         self.rules.push(Rule {
             lhs: nt,
