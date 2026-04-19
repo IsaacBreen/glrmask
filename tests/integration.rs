@@ -2351,6 +2351,65 @@ fn test_minimal_lark_repro_compiles_without_panicking() {
 }
 
 #[test]
+fn test_json_schema_shared_optional_ref_keeps_later_sibling_token() {
+    // Four ordered properties is the smallest shape where balanced and right-leaning
+    // object trees differ. This is the smallest stable JSON-schema reduction that
+    // still exercises the shared-ref continuation path end to end.
+    let constraint = json_schema_constraint(
+        &[
+            "{\"sendRequest\":\"x\", \"onRequestExternal\":",
+            " {},",
+            " \"tail\":\"y\"}",
+        ],
+        r##"{
+            "$defs": {
+                "e": {
+                    "type": "object",
+                    "properties": {
+                        "x": { "type": "string" }
+                    }
+                }
+            },
+            "type": "object",
+            "properties": {
+                "sendRequest": { "type": "string" },
+                "onRequest": { "$ref": "#/$defs/e" },
+                "onRequestExternal": { "$ref": "#/$defs/e" },
+                "tail": { "type": "string" }
+            },
+            "required": ["sendRequest", "onRequestExternal", "tail"],
+            "additionalProperties": false
+        }"##,
+    );
+    let mut state = constraint.start();
+
+    state
+        .commit_token(0)
+        .expect("prefix token should keep the shared-ref object continuation live");
+
+    let mask = state.mask();
+    assert!(
+        token_allowed(&mask, 1),
+        "token ' {{}},' must remain allowed after the shared optional ref object so the later sibling can stay reachable"
+    );
+
+    state
+        .commit_token(1)
+        .expect("the bridged empty-object comma token should stay accepted");
+
+    let mask = state.mask();
+    assert!(
+        token_allowed(&mask, 2),
+        "the later sibling token must remain allowed after the shared-ref empty-object token"
+    );
+
+    state
+        .commit_token(2)
+        .expect("the later sibling continuation should stay accepted");
+    assert!(state.is_finished(), "the minimal shared-ref continuation sequence should finish");
+}
+
+#[test]
 fn test_space_star_then_f_allows_joint_space_f_token() {
     let vocab = Vocab::new(
         vec![(0u32, b" ".to_vec()), (1u32, b" f".to_vec())],
