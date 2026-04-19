@@ -214,7 +214,12 @@ fn ordered_object_shape() -> OrderedObjectShape {
 }
 
 fn factored_ordered_object_enabled() -> bool {
-    env_flag("GLRMASK_ENABLE_FACTORED_ORDERED_OBJECT")
+    // Default to true: use the separator-merged left-recursive grammar
+    // which is deterministic at key boundaries, reducing TBM and TTFM.
+    // Disable via GLRMASK_ENABLE_FACTORED_ORDERED_OBJECT=0.
+    std::env::var("GLRMASK_ENABLE_FACTORED_ORDERED_OBJECT")
+        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off"))
+        .unwrap_or(true)
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -3918,10 +3923,12 @@ impl<'a> SchemaCtx<'a> {
     }
 
     /// Returns true when the separator-merged left-recursive grammar for
-    /// closed objects with optional keys is enabled.  Off by default; opt-in
-    /// via `GLRMASK_ENABLE_FACTORED_CLOSED_OBJECT=1`.
+    /// closed objects with optional keys is enabled.  On by default; disable
+    /// via `GLRMASK_ENABLE_FACTORED_CLOSED_OBJECT=0`.
     fn factored_closed_object_enabled() -> bool {
-        env_flag("GLRMASK_ENABLE_FACTORED_CLOSED_OBJECT")
+        std::env::var("GLRMASK_ENABLE_FACTORED_CLOSED_OBJECT")
+            .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off"))
+            .unwrap_or(true)
     }
 
     fn collect_ordered_closed_object_schema_variant(
