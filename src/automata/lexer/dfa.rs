@@ -109,8 +109,9 @@ impl DFA {
     }
 
     pub(super) fn clear_finalizers_for_state(&mut self, state: u32) -> BitSet {
+        let num_groups = self.group_id_to_u8set.len();
         if let Some(entry) = self.state_mut(state) {
-            std::mem::take(&mut entry.finalizers)
+            std::mem::replace(&mut entry.finalizers, BitSet::new(num_groups))
         } else {
             BitSet::empty(0)
         }
