@@ -53,13 +53,13 @@ fn dump_o6363_table_stats() {
     let constraint = Constraint::from_json_schema(&schema_str, &vocab).unwrap();
 
     println!("\n=== o6363 Table Statistics ===");
-    println!("{}", constraint.debug_table_stats());
+    println!("{:?}", constraint.debug_rules());
     println!("=== Parser DWA Statistics ===");
-    println!("{}", constraint.debug_parser_dwa_stats());
+    println!("{}", constraint.debug_parser_dwa_num_states());
     println!("=== Replace Context Statistics ===");
-    println!("{}", constraint.debug_replace_context_stats());
+    println!("{}", constraint.debug_num_states());
     println!("=== Replace Equivalence Statistics ===");
-    println!("{}", constraint.debug_replace_predecessor_goto_equivalence_stats());
+    println!("{}", constraint.debug_num_terminals());
 
     // Now process some tokens and track max stack depth
     let mut state = constraint.start();
