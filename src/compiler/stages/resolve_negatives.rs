@@ -243,14 +243,22 @@ fn extend_derived_epsilons(
         return;
     }
 
-    let derived_weight = derived_epsilons[source_state as usize]
-        .get_or_insert_with(FxHashMap::default)
-        .entry(target_state)
-        .or_insert_with(Weight::empty);
-    if !merge_weight(derived_weight, new_derived_weight) {
-        return;
+    {
+        let derived_weight = derived_epsilons[source_state as usize]
+            .get_or_insert_with(FxHashMap::default)
+            .entry(target_state)
+            .or_insert_with(Weight::empty);
+        if !merge_weight(derived_weight, new_derived_weight) {
+            return;
+        }
     }
-    let derived_weight = derived_weight.clone();
+
+    let Some(derived_weight) = derived_epsilons[source_state as usize]
+        .as_ref()
+        .and_then(|targets| targets.get(&target_state))
+    else {
+        return;
+    };
 
     let Some(existing_queries) = query_weights[source_state as usize].as_ref() else {
         return;
@@ -259,7 +267,7 @@ fn extend_derived_epsilons(
     let mut propagated_updates = Vec::with_capacity(existing_queries.len());
 
     for ((upstream_source_state, upstream_label), upstream_weight) in existing_queries {
-        let propagated = intersect_or_clone_right_if_subset(upstream_weight, &derived_weight);
+        let propagated = intersect_or_clone_right_if_subset(upstream_weight, derived_weight);
         if propagated.is_empty() {
             continue;
         }
@@ -737,10 +745,34 @@ pub(crate) fn remove_redundant_default_transitions(nwa: &mut NWA) {
 }
 
 pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_RESOLVE_NEGATIVES").is_some();
+
+    let cancellations_started_at = std::time::Instant::now();
     apply_cancellations_parallel_fixpoint(nwa);
+    let cancellations_ms = cancellations_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let finality_started_at = std::time::Instant::now();
     apply_finality_fixpoint(nwa);
+    let finality_ms = finality_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let remove_negative_started_at = std::time::Instant::now();
     remove_negative_transitions(nwa);
+    let remove_negative_ms = remove_negative_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let remove_default_started_at = std::time::Instant::now();
     remove_redundant_default_transitions(nwa);
+    let remove_default_ms = remove_default_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][resolve_negatives] cancellations_ms={:.3} finality_ms={:.3} remove_negative_ms={:.3} remove_default_ms={:.3} total_ms={:.3}",
+            cancellations_ms,
+            finality_ms,
+            remove_negative_ms,
+            remove_default_ms,
+            cancellations_ms + finality_ms + remove_negative_ms + remove_default_ms,
+        );
+    }
 }
 
 fn apply_cancellations_parallel_fixpoint(nwa: &mut NWA) {
