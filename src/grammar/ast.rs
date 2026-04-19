@@ -240,6 +240,9 @@ struct Lowerer {
     /// Shared cache for repeat-max nonterminals, keyed by (symbol, max).
     /// Used by LeftBalanced/Balanced shapes for O(log N) range decomposition.
     repeat_max_cache: BTreeMap<(Symbol, usize), NonterminalID>,
+    /// Shared cache for repeat-min1-max nonterminals, keyed by (symbol, max).
+    /// repeat_min1_max_N matches exactly 1..N elements (N >= 1).
+    repeat_min1_max_cache: BTreeMap<(Symbol, usize), NonterminalID>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -329,6 +332,7 @@ impl Lowerer {
             repeat_exact_cache: BTreeMap::new(),
             repeat_range_cache: BTreeMap::new(),
             repeat_max_cache: BTreeMap::new(),
+            repeat_min1_max_cache: BTreeMap::new(),
         }
     }
 
@@ -437,38 +441,42 @@ impl Lowerer {
         self.repeat_max_cache.insert(key, nt);
 
         if max == 1 {
-            self.rules.push(Rule {
-                lhs: nt,
-                rhs: Vec::new(),
-            });
-            self.rules.push(Rule {
-                lhs: nt,
-                rhs: vec![symbol.clone()],
-            });
-        } else if max.is_power_of_two() {
+            self.rules.push(Rule { lhs: nt, rhs: Vec::new() });
+            self.rules.push(Rule { lhs: nt, rhs: vec![symbol.clone()] });
+        } else {
+            // Unambiguous split: 0..half elements use repeat_max_half;
+            // half+1..max elements require exactly `half` up front then 1..max-half more.
+            // The two alternatives are disjoint → no GSS path explosion.
             let half = max / 2;
             let half_nt = self.repeat_max_nonterminal(symbol, half);
+            let exact_half_nt = self.repeat_exact_nonterminal(symbol, half, RepeatTreeShape::LeftBalanced);
+            let min1_tail_nt = self.repeat_min1_max_nonterminal(symbol, max - half);
+            self.rules.push(Rule { lhs: nt, rhs: vec![Symbol::Nonterminal(half_nt)] });
             self.rules.push(Rule {
                 lhs: nt,
-                rhs: vec![
-                    Symbol::Nonterminal(half_nt),
-                    Symbol::Nonterminal(half_nt),
-                ],
-            });
-        } else {
-            let highest_bit = 1usize << max.ilog2();
-            let low = max - highest_bit;
-            let high_nt = self.repeat_max_nonterminal(symbol, highest_bit);
-            let low_nt = self.repeat_max_nonterminal(symbol, low);
-            self.rules.push(Rule {
-                lhs: nt,
-                rhs: vec![
-                    Symbol::Nonterminal(high_nt),
-                    Symbol::Nonterminal(low_nt),
-                ],
+                rhs: vec![Symbol::Nonterminal(exact_half_nt), Symbol::Nonterminal(min1_tail_nt)],
             });
         }
 
+        nt
+    }
+
+    /// Returns a nonterminal matching exactly 1..=max occurrences of `symbol`.
+    /// Defined as: `symbol repeat_max_{max-1}` — the first element is mandatory,
+    /// the rest (0..max-1) are handled by `repeat_max`.
+    fn repeat_min1_max_nonterminal(&mut self, symbol: &Symbol, max: usize) -> NonterminalID {
+        debug_assert!(max >= 1);
+        let key = (symbol.clone(), max);
+        if let Some(&nt) = self.repeat_min1_max_cache.get(&key) {
+            return nt;
+        }
+        let (_, nt) = self.fresh_nonterminal("repeat_min1_max");
+        self.repeat_min1_max_cache.insert(key, nt);
+        let tail_nt = self.repeat_max_nonterminal(symbol, max - 1);
+        self.rules.push(Rule {
+            lhs: nt,
+            rhs: vec![symbol.clone(), Symbol::Nonterminal(tail_nt)],
+        });
         nt
     }
 
