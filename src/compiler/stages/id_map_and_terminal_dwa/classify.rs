@@ -483,39 +483,80 @@ fn objective_score(objective: L2pPartitionObjective, costs: &[f64]) -> f64 {
     }
 }
 
-/// Partition vocab into a fixed number of sets using the user-requested
-/// terminal x token L2P bitset model.
-///
-/// For each token, compute the set of terminals whose `(terminal, token)`
-/// bit is true.  A terminal remains L2P for a partition iff it is true for
-/// every token in that partition, so the partition's L2P-terminal set is the
-/// intersection of the token-level sets.  We greedily assign groups of tokens
-/// sharing the same L2P signature to minimize either the max or the sum of the
-/// per-partition surrogate costs.
-pub(crate) fn partition_vocab_by_l2p_cost(
+fn compute_token_l2p_map(
     vocab: &crate::Vocab,
     bytesets: &SharedClassifyBytesets,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     num_terminals: u32,
+) -> BTreeMap<u32, BitSet> {
+    let nt = num_terminals as usize;
+    let (byte_to_last, byte_to_first) = build_byte_terminal_reverse_index(bytesets, nt);
+
+    let mut token_l2p_map = BTreeMap::<u32, BitSet>::new();
+    for (&token_id, bytes) in &vocab.entries {
+        token_l2p_map.insert(
+            token_id,
+            token_l2p_terminals(bytes, &byte_to_last, &byte_to_first, disallowed_follows, nt),
+        );
+    }
+    token_l2p_map
+}
+
+pub(crate) fn partition_vocab_char_type_tokens(vocab: &crate::Vocab) -> Vec<Vec<u32>> {
+    let mut partitions: Vec<Vec<u32>> = (0..7).map(|_| Vec::new()).collect();
+    for (&token_id, bytes) in &vocab.entries {
+        let idx = classify_vocab_char_type(bytes) as usize;
+        partitions[idx].push(token_id);
+    }
+    partitions
+}
+
+pub(crate) fn estimate_l2p_objective_for_token_partitions(
+    token_partitions: &[Vec<u32>],
+    token_l2p_map: &BTreeMap<u32, BitSet>,
+    cost_fn: L2pPartitionCostFn,
+    objective: L2pPartitionObjective,
+) -> (Vec<f64>, Vec<usize>, f64) {
+    let mut costs = Vec::with_capacity(token_partitions.len());
+    let mut l2p_counts = Vec::with_capacity(token_partitions.len());
+
+    for token_ids in token_partitions {
+        if token_ids.is_empty() {
+            costs.push(0.0);
+            l2p_counts.push(0);
+            continue;
+        }
+
+        let mut intersection: Option<BitSet> = None;
+        for &token_id in token_ids {
+            if let Some(token_l2p) = token_l2p_map.get(&token_id) {
+                if let Some(current) = &mut intersection {
+                    current.intersect_with(token_l2p);
+                } else {
+                    intersection = Some(token_l2p.clone());
+                }
+            }
+        }
+
+        let l2p_count = intersection.as_ref().map_or(0, BitSet::count_ones);
+        l2p_counts.push(l2p_count);
+        costs.push(compute_partition_cost(cost_fn, l2p_count, token_ids.len()));
+    }
+
+    let score = objective_score(objective, &costs);
+    (costs, l2p_counts, score)
+}
+
+fn partition_token_l2p_map_by_cost(
+    token_l2p_map: &BTreeMap<u32, BitSet>,
     num_partitions: usize,
     cost_fn: L2pPartitionCostFn,
     objective: L2pPartitionObjective,
 ) -> L2pCostPartitioning {
-    let nt = num_terminals as usize;
-
-    let (byte_to_last, byte_to_first) = build_byte_terminal_reverse_index(bytesets, nt);
-
     let mut grouped_index = BTreeMap::<Vec<u64>, usize>::new();
     let mut groups: Vec<L2pTokenGroup> = Vec::new();
 
-    for (&token_id, bytes) in &vocab.entries {
-        let l2p_terminals = token_l2p_terminals(
-            bytes,
-            &byte_to_last,
-            &byte_to_first,
-            disallowed_follows,
-            nt,
-        );
+    for (&token_id, l2p_terminals) in token_l2p_map {
         let key = l2p_terminals.words().to_vec();
         if let Some(&group_idx) = grouped_index.get(&key) {
             groups[group_idx].token_ids.push(token_id);
@@ -523,7 +564,7 @@ pub(crate) fn partition_vocab_by_l2p_cost(
             let group_idx = groups.len();
             grouped_index.insert(key, group_idx);
             groups.push(L2pTokenGroup {
-                l2p_terminals,
+                l2p_terminals: l2p_terminals.clone(),
                 token_ids: vec![token_id],
             });
         }
@@ -603,6 +644,50 @@ pub(crate) fn partition_vocab_by_l2p_cost(
         estimated_partition_costs,
         estimated_l2p_terminals,
     }
+}
+
+pub(crate) fn partition_vocab_by_l2p_cost_with_token_map(
+    vocab: &crate::Vocab,
+    bytesets: &SharedClassifyBytesets,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    num_terminals: u32,
+    num_partitions: usize,
+    cost_fn: L2pPartitionCostFn,
+    objective: L2pPartitionObjective,
+) -> (L2pCostPartitioning, BTreeMap<u32, BitSet>) {
+    let token_l2p_map = compute_token_l2p_map(vocab, bytesets, disallowed_follows, num_terminals);
+    let partitioning = partition_token_l2p_map_by_cost(&token_l2p_map, num_partitions, cost_fn, objective);
+    (partitioning, token_l2p_map)
+}
+
+/// Partition vocab into a fixed number of sets using the user-requested
+/// terminal x token L2P bitset model.
+///
+/// For each token, compute the set of terminals whose `(terminal, token)`
+/// bit is true.  A terminal remains L2P for a partition iff it is true for
+/// every token in that partition, so the partition's L2P-terminal set is the
+/// intersection of the token-level sets.  We greedily assign groups of tokens
+/// sharing the same L2P signature to minimize either the max or the sum of the
+/// per-partition surrogate costs.
+pub(crate) fn partition_vocab_by_l2p_cost(
+    vocab: &crate::Vocab,
+    bytesets: &SharedClassifyBytesets,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    num_terminals: u32,
+    num_partitions: usize,
+    cost_fn: L2pPartitionCostFn,
+    objective: L2pPartitionObjective,
+) -> L2pCostPartitioning {
+    partition_vocab_by_l2p_cost_with_token_map(
+        vocab,
+        bytesets,
+        disallowed_follows,
+        num_terminals,
+        num_partitions,
+        cost_fn,
+        objective,
+    )
+    .0
 }
 
 #[cfg(test)]

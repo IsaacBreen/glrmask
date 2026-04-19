@@ -56,6 +56,14 @@ fn l2p_partition_count_from_env() -> usize {
         .unwrap_or(10)
 }
 
+    fn l2p_auto_second_largest_limit_from_env() -> usize {
+        std::env::var("GLRMASK_L2P_AUTO_SECOND_LARGEST_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&count| count > 0)
+        .unwrap_or(2000)
+    }
+
 fn maybe_print_terminal_mappings(grammar: &AnalyzedGrammar) {
     for terminal_id in 0..grammar.num_terminals {
         eprintln!(
@@ -158,9 +166,13 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     let shared_classify_cache: &classify::SharedClassifyCache =
         external_classify_cache.unwrap_or(&owned_classify_cache);
 
+    let partition_scheme = std::env::var("GLRMASK_PARTITION_SCHEME").unwrap_or_else(|_| "char_type".to_string());
+
     // Split vocab into partitions. Default: 7 partitions by character type.
     // Override: GLRMASK_PARTITION_FILE=path/to/partitions.json maps token_id → partition_index.
     // Override: GLRMASK_PARTITION_SCHEME=l2p_cost uses experimental per-token L2P cost partitioning.
+    // Override: GLRMASK_PARTITION_SCHEME=auto_l2p_cost selects between char_type and l2p_cost
+    // based on estimated objective score for the current grammar + vocab.
     let partition_vocab_started_at = Instant::now();
     let sub_vocabs: Vec<Vocab> = if let Ok(partition_file) = std::env::var("GLRMASK_PARTITION_FILE") {
         // Read partition assignments from JSON file: { "token_id": partition_index, ... }
@@ -178,7 +190,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     } else if force_all_l2p {
         let all_entries: Vec<(u32, Vec<u8>)> = vocab.entries.iter().map(|(&id, bytes)| (id, bytes.clone())).collect();
         vec![Vocab::new(all_entries, None)]
-    } else if std::env::var("GLRMASK_PARTITION_SCHEME").map_or(false, |v| v == "l2p_cost") {
+    } else if partition_scheme == "l2p_cost" {
         let cost_fn = l2p_partition_cost_fn_from_env();
         let objective = l2p_partition_objective_from_env();
         let num_partitions = l2p_partition_count_from_env();
@@ -219,6 +231,103 @@ pub(crate) fn build_id_map_and_terminal_dwa(
                 Vocab::new(entries, None)
             })
             .collect()
+    } else if partition_scheme == "auto_l2p_cost" {
+        let cost_fn = l2p_partition_cost_fn_from_env();
+        let objective = l2p_partition_objective_from_env();
+        let num_partitions = l2p_partition_count_from_env();
+        let bytesets = shared_classify_cache
+            .get_or_init(|| classify::SharedClassifyBytesets::build(tokenizer, grammar.num_terminals));
+
+        let (l2p_partitioning, token_l2p_map) = classify::partition_vocab_by_l2p_cost_with_token_map(
+            vocab,
+            bytesets,
+            disallowed_follows,
+            grammar.num_terminals,
+            num_partitions,
+            cost_fn,
+            objective,
+        );
+        let char_token_partitions = classify::partition_vocab_char_type_tokens(vocab);
+        let mut char_costs: Vec<f64> = Vec::new();
+        let mut char_l2p_terminals: Vec<usize> = Vec::new();
+        let mut char_score = f64::INFINITY;
+
+        let use_l2p: bool;
+        let l2p_partition_sizes: Vec<usize> = l2p_partitioning
+            .partitions
+            .iter()
+            .map(|token_ids| token_ids.len())
+            .collect();
+        let mut sorted_sizes = l2p_partition_sizes.clone();
+        sorted_sizes.sort_unstable_by(|left, right| right.cmp(left));
+        let second_largest = sorted_sizes.get(1).copied().unwrap_or(0);
+        let second_largest_limit = l2p_auto_second_largest_limit_from_env();
+        if second_largest <= second_largest_limit {
+            let (computed_char_costs, computed_char_l2p_terminals, computed_char_score) =
+                classify::estimate_l2p_objective_for_token_partitions(
+                    &char_token_partitions,
+                    &token_l2p_map,
+                    cost_fn,
+                    objective,
+                );
+            char_costs = computed_char_costs;
+            char_l2p_terminals = computed_char_l2p_terminals;
+            char_score = computed_char_score;
+            use_l2p = l2p_partitioning.objective_score < char_score;
+        } else {
+            use_l2p = false;
+        }
+        if compile_profile_enabled() || debug_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][auto_l2p_partition] cost_fn={} objective={} l2p_partitions={} l2p_score={:.3} char_score={:.3} second_largest={} second_largest_limit={} chosen={} l2p_sizes={:?} l2p_costs={:?} char_costs={:?} l2p_l2p_terminals={:?} char_l2p_terminals={:?}",
+                cost_fn.as_str(),
+                objective.as_str(),
+                num_partitions,
+                l2p_partitioning.objective_score,
+                char_score,
+                second_largest,
+                second_largest_limit,
+                if use_l2p { "l2p_cost" } else { "char_type" },
+                l2p_partition_sizes,
+                l2p_partitioning.estimated_partition_costs,
+                char_costs,
+                l2p_partitioning.estimated_l2p_terminals,
+                char_l2p_terminals,
+            );
+        }
+
+        if use_l2p {
+            l2p_partitioning
+                .partitions
+                .into_iter()
+                .map(|token_ids| {
+                    let entries = token_ids
+                        .into_iter()
+                        .filter_map(|token_id| {
+                            vocab.entries
+                                .get(&token_id)
+                                .map(|bytes| (token_id, bytes.clone()))
+                        })
+                        .collect();
+                    Vocab::new(entries, None)
+                })
+                .collect()
+        } else {
+            char_token_partitions
+                .into_iter()
+                .map(|token_ids| {
+                    let entries = token_ids
+                        .into_iter()
+                        .filter_map(|token_id| {
+                            vocab.entries
+                                .get(&token_id)
+                                .map(|bytes| (token_id, bytes.clone()))
+                        })
+                        .collect();
+                    Vocab::new(entries, None)
+                })
+                .collect()
+        }
     } else {
         // Default 7-partition scheme by character type:
         // P0=structural non-alnum, P1=mixed, P2=ASCII-alpha, P3=digit,
