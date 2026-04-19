@@ -337,6 +337,96 @@ pub(crate) fn classify_terminal_path_lengths(
     result
 }
 
+
+/// Classify each vocab token into one of three partition indices based on
+/// per-token byte analysis, using only that token's own bytes (rather than
+/// the union of all vocab bytes used by `classify_terminal_path_lengths`).
+///
+/// Partition indices:
+/// - **0** (L2+):  the token's bytes contain both a last-byte for some terminal t1 and a
+///   first-byte for some terminal t2 where (t1→t2) is not disallowed, making at least one
+///   terminal TwoPlus.  Placed in the L2+ partition.
+/// - **1** (L1):   no such pair exists; at least one terminal is reachable.
+///   Placed in the pure-L1 partition (the L2+ builder is skipped for this partition).
+/// - **2** (L0):   no terminal interacts with this token's bytes at all.
+///   Placed in the irrelevant/remainder partition (trivially empty work).
+pub(crate) fn classify_vocab_token_path_types(
+    vocab: &crate::Vocab,
+    bytesets: &SharedClassifyBytesets,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    num_terminals: u32,
+) -> BTreeMap<u32, u8> {
+    let nt = num_terminals as usize;
+
+    // Precompute: for each byte value, which terminals have it in last/first/reachable.
+    let mut byte_to_last: Vec<Vec<usize>> = vec![Vec::new(); 256];
+    let mut byte_to_first: Vec<Vec<usize>> = vec![Vec::new(); 256];
+    let mut byte_to_reachable: Vec<Vec<usize>> = vec![Vec::new(); 256];
+    for t in 0..nt {
+        for b in 0u8..=255 {
+            if bytesets.last_bytes[t].contains(b) {
+                byte_to_last[b as usize].push(t);
+            }
+            if bytesets.first_bytes[t].contains(b) {
+                byte_to_first[b as usize].push(t);
+            }
+            if bytesets.reachable_bytes[t].contains(b) {
+                byte_to_reachable[b as usize].push(t);
+            }
+        }
+    }
+
+    let mut result = BTreeMap::new();
+
+    for (&token_id, bytes) in &vocab.entries {
+        let mut seen = [false; 256];
+        let mut last_set = BitSet::new(nt);
+        let mut first_set = BitSet::new(nt);
+        let mut relevant_set = BitSet::new(nt);
+
+        for &b in bytes {
+            if !seen[b as usize] {
+                seen[b as usize] = true;
+                for &t in &byte_to_last[b as usize] {
+                    last_set.set(t);
+                }
+                for &t in &byte_to_first[b as usize] {
+                    first_set.set(t);
+                }
+                for &t in &byte_to_reachable[b as usize] {
+                    relevant_set.set(t);
+                }
+            }
+        }
+
+        // Compute l2p_set: terminals that become TwoPlus when vocab = {this token}.
+        let mut l2p_set = BitSet::new(nt);
+        for t1 in last_set.iter() {
+            let disallowed = disallowed_follows.get(&(t1 as u32));
+            for t2 in first_set.iter() {
+                let blocked = disallowed.map_or(false, |d| d.contains(t2));
+                if !blocked {
+                    l2p_set.set(t1);
+                    l2p_set.set(t2);
+                }
+            }
+        }
+
+        // Classify: L2+ if any terminal pair fires, L1 if relevant but no pair, L0 otherwise.
+        let partition_idx: u8 = if !l2p_set.is_empty() {
+            0
+        } else if !relevant_set.is_empty() {
+            1
+        } else {
+            2
+        };
+
+        result.insert(token_id, partition_idx);
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;

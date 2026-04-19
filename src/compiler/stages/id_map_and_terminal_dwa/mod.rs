@@ -120,8 +120,18 @@ pub(crate) fn build_id_map_and_terminal_dwa(
         maybe_print_terminal_mappings(grammar);
     }
 
-    // Split vocab into partitions. Default: 5 partitions by character type.
+    // Shared cache for terminal classification byte sets. The DFA scanning
+    // (reachable_bytes, first_bytes, last_bytes) is identical across partitions;
+    // only the vocab-dependent classification differs. Reuse external cache if
+    // provided (already populated by compile.rs pre-classification), otherwise
+    // create a fresh one for partition sharing.
+    let owned_classify_cache = classify::SharedClassifyCache::new();
+    let shared_classify_cache: &classify::SharedClassifyCache =
+        external_classify_cache.unwrap_or(&owned_classify_cache);
+
+    // Split vocab into partitions. Default: 7 partitions by character type.
     // Override: GLRMASK_PARTITION_FILE=path/to/partitions.json maps token_id → partition_index.
+    // Override: GLRMASK_PARTITION_SCHEME=l2p_aware uses experimental per-token L2P partitioning.
     let partition_vocab_started_at = Instant::now();
     let sub_vocabs: Vec<Vocab> = if let Ok(partition_file) = std::env::var("GLRMASK_PARTITION_FILE") {
         // Read partition assignments from JSON file: { "token_id": partition_index, ... }
@@ -139,8 +149,30 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     } else if force_all_l2p {
         let all_entries: Vec<(u32, Vec<u8>)> = vocab.entries.iter().map(|(&id, bytes)| (id, bytes.clone())).collect();
         vec![Vocab::new(all_entries, None)]
+    } else if std::env::var("GLRMASK_PARTITION_SCHEME").map_or(false, |v| v == "l2p_aware") {
+        // Experimental L2P-aware 3-partition scheme (opt-in via GLRMASK_PARTITION_SCHEME=l2p_aware):
+        // P0 (L2+): token's own bytes contain both a last-byte for some terminal t1 and a
+        //           first-byte for some terminal t2 where (t1→t2) is not disallowed.
+        // P1 (L1):  no such pair; at least one terminal is reachable from this token's bytes.
+        // P2 (L0):  no terminal interacts with this token's bytes at all.
+        // NOTE: For grammars with many terminals most tokens trigger L2+ pairs, so P0 is large
+        //       and P1/P2 are small.  This scheme is provided for experimentation only.
+        let bytesets = shared_classify_cache
+            .get_or_init(|| classify::SharedClassifyBytesets::build(tokenizer, grammar.num_terminals));
+        let token_types = classify::classify_vocab_token_path_types(
+            vocab,
+            bytesets,
+            disallowed_follows,
+            grammar.num_terminals,
+        );
+        let mut partition_entries: Vec<Vec<(u32, Vec<u8>)>> = vec![Vec::new(); 3];
+        for (&token_id, bytes) in &vocab.entries {
+            let idx = token_types.get(&token_id).copied().unwrap_or(2) as usize;
+            partition_entries[idx].push((token_id, bytes.clone()));
+        }
+        partition_entries.into_iter().map(|entries| Vocab::new(entries, None)).collect()
     } else {
-        // Default 7-partition scheme:
+        // Default 7-partition scheme by character type:
         // P0=structural non-alnum, P1=mixed, P2=ASCII-alpha, P3=digit,
         // P4=Unicode-only-alpha, P5=short auxiliary non-alnum (≤8B),
         // P6=long auxiliary non-alnum (>8B)
@@ -167,14 +199,6 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     // The cache validates state counts, so it's safely ignored when simplify
     // changes the DFA (reducing state count via minimization).
     let shared_vocab_dfa_cache = l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
-
-    // Shared cache for terminal classification byte sets. The DFA scanning
-    // (reachable_bytes, first_bytes, last_bytes) is identical across partitions;
-    // only the vocab-dependent classification differs. Reuse external cache if
-    // provided (already populated by compile.rs pre-classification), otherwise
-    // create a fresh one for partition sharing.
-    let owned_classify_cache = classify::SharedClassifyCache::new();
-    let shared_classify_cache = external_classify_cache.unwrap_or(&owned_classify_cache);
 
     // Build each partition in parallel using rayon.
     // GLRMASK_PARTITION_SERIAL=1 runs partitions sequentially so inner rayon
