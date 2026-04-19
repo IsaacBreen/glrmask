@@ -348,7 +348,12 @@ impl Tokenizer {
     ) -> Option<(Tokenizer, Vec<u32>)> {
         use std::collections::VecDeque;
 
-        let exprs = self.exprs.as_ref()?;
+        let exprs = match self.exprs.as_ref() {
+            Some(e) => e,
+            None => {
+                return None;
+            }
+        };
         if exprs.len() != active_terminals.len() {
             return None;
         }
@@ -746,13 +751,14 @@ impl Tokenizer {
         // small fraction of all terminals, rebuild the tokenizer directly
         // from the active expressions. This sidesteps the cost of cloning
         // and minimizing the full ~26k-state original DFA for each
-        // partition. Gated behind GLRMASK_FROM_SCRATCH_SIMPLIFY for now.
-        let use_from_scratch = std::env::var_os("GLRMASK_FROM_SCRATCH_SIMPLIFY").is_some()
-            && self.exprs.is_some()
-            && {
-                let num_active = active_terminals.iter().filter(|&&a| a).count();
-                num_active * 2 <= active_terminals.len()
-            };
+        // partition. When less than half the terminals are active, the
+        // fresh DFA is dramatically smaller (e.g. 3k states for 7 active
+        // vs 25k for 42), making both simplify and id_map much faster.
+        let use_from_scratch = self.exprs.is_some() && {
+            let num_active = active_terminals.iter().filter(|&&a| a).count();
+            let total = active_terminals.len();
+            num_active * 2 <= total
+        };
         if use_from_scratch {
             if let Some(result) = self.simplified_from_active_exprs(active_terminals) {
                 if compile_profile {
