@@ -24,6 +24,74 @@ pub struct SharedClassifyBytesets {
 /// Cache type for lazy `SharedClassifyBytesets` initialization across partitions.
 pub type SharedClassifyCache = std::sync::OnceLock<SharedClassifyBytesets>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum L2pPartitionCostFn {
+    Size,
+    SizeLog,
+    LogLog,
+}
+
+impl L2pPartitionCostFn {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Size => "size",
+            Self::SizeLog => "size_log",
+            Self::LogLog => "log_log",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum L2pPartitionObjective {
+    Max,
+    Sum,
+}
+
+impl L2pPartitionObjective {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Max => "max",
+            Self::Sum => "sum",
+        }
+    }
+}
+
+pub(crate) struct L2pCostPartitioning {
+    pub(crate) partitions: Vec<Vec<u32>>,
+    pub(crate) estimated_partition_costs: Vec<f64>,
+    pub(crate) estimated_l2p_terminals: Vec<usize>,
+    pub(crate) objective_score: f64,
+}
+
+#[derive(Clone)]
+struct L2pTokenGroup {
+    l2p_terminals: BitSet,
+    token_ids: Vec<u32>,
+}
+
+#[derive(Clone)]
+struct L2pPartitionBucket {
+    l2p_intersection: Option<BitSet>,
+    token_ids: Vec<u32>,
+}
+
+impl L2pPartitionBucket {
+    fn new() -> Self {
+        Self {
+            l2p_intersection: None,
+            token_ids: Vec::new(),
+        }
+    }
+
+    fn size(&self) -> usize {
+        self.token_ids.len()
+    }
+
+    fn l2p_count(&self) -> usize {
+        self.l2p_intersection.as_ref().map_or(0, BitSet::count_ones)
+    }
+}
+
 impl SharedClassifyBytesets {
     /// Scan the DFA to compute per-terminal byte sets.
     ///
@@ -337,32 +405,13 @@ pub(crate) fn classify_terminal_path_lengths(
     result
 }
 
-
-/// Classify each vocab token into one of three partition indices based on
-/// per-token byte analysis, using only that token's own bytes (rather than
-/// the union of all vocab bytes used by `classify_terminal_path_lengths`).
-///
-/// Partition indices:
-/// - **0** (L2+):  the token's bytes contain both a last-byte for some terminal t1 and a
-///   first-byte for some terminal t2 where (t1→t2) is not disallowed, making at least one
-///   terminal TwoPlus.  Placed in the L2+ partition.
-/// - **1** (L1):   no such pair exists; at least one terminal is reachable.
-///   Placed in the pure-L1 partition (the L2+ builder is skipped for this partition).
-/// - **2** (L0):   no terminal interacts with this token's bytes at all.
-///   Placed in the irrelevant/remainder partition (trivially empty work).
-pub(crate) fn classify_vocab_token_path_types(
-    vocab: &crate::Vocab,
+fn build_byte_terminal_reverse_index(
     bytesets: &SharedClassifyBytesets,
-    disallowed_follows: &BTreeMap<u32, BitSet>,
-    num_terminals: u32,
-) -> BTreeMap<u32, u8> {
-    let nt = num_terminals as usize;
-
-    // Precompute: for each byte value, which terminals have it in last/first/reachable.
+    num_terminals: usize,
+) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
     let mut byte_to_last: Vec<Vec<usize>> = vec![Vec::new(); 256];
     let mut byte_to_first: Vec<Vec<usize>> = vec![Vec::new(); 256];
-    let mut byte_to_reachable: Vec<Vec<usize>> = vec![Vec::new(); 256];
-    for t in 0..nt {
+    for t in 0..num_terminals {
         for b in 0u8..=255 {
             if bytesets.last_bytes[t].contains(b) {
                 byte_to_last[b as usize].push(t);
@@ -370,61 +419,190 @@ pub(crate) fn classify_vocab_token_path_types(
             if bytesets.first_bytes[t].contains(b) {
                 byte_to_first[b as usize].push(t);
             }
-            if bytesets.reachable_bytes[t].contains(b) {
-                byte_to_reachable[b as usize].push(t);
+        }
+    }
+    (byte_to_last, byte_to_first)
+}
+
+fn token_l2p_terminals(
+    bytes: &[u8],
+    byte_to_last: &[Vec<usize>],
+    byte_to_first: &[Vec<usize>],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    num_terminals: usize,
+) -> BitSet {
+    let mut seen = [false; 256];
+    let mut last_set = BitSet::new(num_terminals);
+    let mut first_set = BitSet::new(num_terminals);
+
+    for &b in bytes {
+        if !seen[b as usize] {
+            seen[b as usize] = true;
+            for &t in &byte_to_last[b as usize] {
+                last_set.set(t);
+            }
+            for &t in &byte_to_first[b as usize] {
+                first_set.set(t);
             }
         }
     }
 
-    let mut result = BTreeMap::new();
+    let mut l2p_set = BitSet::new(num_terminals);
+    for t1 in last_set.iter() {
+        let disallowed = disallowed_follows.get(&(t1 as u32));
+        for t2 in first_set.iter() {
+            let blocked = disallowed.map_or(false, |d| d.contains(t2));
+            if !blocked {
+                l2p_set.set(t1);
+                l2p_set.set(t2);
+            }
+        }
+    }
+
+    l2p_set
+}
+
+fn compute_partition_cost(cost_fn: L2pPartitionCostFn, l2p_terminals: usize, partition_size: usize) -> f64 {
+    if l2p_terminals == 0 || partition_size == 0 {
+        return 0.0;
+    }
+
+    let num_l2p = l2p_terminals as f64;
+    let size = partition_size as f64;
+    match cost_fn {
+        L2pPartitionCostFn::Size => num_l2p * size,
+        L2pPartitionCostFn::SizeLog => num_l2p * size.ln(),
+        L2pPartitionCostFn::LogLog => num_l2p.ln() * size.ln(),
+    }
+}
+
+fn objective_score(objective: L2pPartitionObjective, costs: &[f64]) -> f64 {
+    match objective {
+        L2pPartitionObjective::Max => costs.iter().copied().fold(0.0, f64::max),
+        L2pPartitionObjective::Sum => costs.iter().sum(),
+    }
+}
+
+/// Partition vocab into a fixed number of sets using the user-requested
+/// terminal x token L2P bitset model.
+///
+/// For each token, compute the set of terminals whose `(terminal, token)`
+/// bit is true.  A terminal remains L2P for a partition iff it is true for
+/// every token in that partition, so the partition's L2P-terminal set is the
+/// intersection of the token-level sets.  We greedily assign groups of tokens
+/// sharing the same L2P signature to minimize either the max or the sum of the
+/// per-partition surrogate costs.
+pub(crate) fn partition_vocab_by_l2p_cost(
+    vocab: &crate::Vocab,
+    bytesets: &SharedClassifyBytesets,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    num_terminals: u32,
+    num_partitions: usize,
+    cost_fn: L2pPartitionCostFn,
+    objective: L2pPartitionObjective,
+) -> L2pCostPartitioning {
+    let nt = num_terminals as usize;
+
+    let (byte_to_last, byte_to_first) = build_byte_terminal_reverse_index(bytesets, nt);
+
+    let mut grouped_index = BTreeMap::<Vec<u64>, usize>::new();
+    let mut groups: Vec<L2pTokenGroup> = Vec::new();
 
     for (&token_id, bytes) in &vocab.entries {
-        let mut seen = [false; 256];
-        let mut last_set = BitSet::new(nt);
-        let mut first_set = BitSet::new(nt);
-        let mut relevant_set = BitSet::new(nt);
-
-        for &b in bytes {
-            if !seen[b as usize] {
-                seen[b as usize] = true;
-                for &t in &byte_to_last[b as usize] {
-                    last_set.set(t);
-                }
-                for &t in &byte_to_first[b as usize] {
-                    first_set.set(t);
-                }
-                for &t in &byte_to_reachable[b as usize] {
-                    relevant_set.set(t);
-                }
-            }
-        }
-
-        // Compute l2p_set: terminals that become TwoPlus when vocab = {this token}.
-        let mut l2p_set = BitSet::new(nt);
-        for t1 in last_set.iter() {
-            let disallowed = disallowed_follows.get(&(t1 as u32));
-            for t2 in first_set.iter() {
-                let blocked = disallowed.map_or(false, |d| d.contains(t2));
-                if !blocked {
-                    l2p_set.set(t1);
-                    l2p_set.set(t2);
-                }
-            }
-        }
-
-        // Classify: L2+ if any terminal pair fires, L1 if relevant but no pair, L0 otherwise.
-        let partition_idx: u8 = if !l2p_set.is_empty() {
-            0
-        } else if !relevant_set.is_empty() {
-            1
+        let l2p_terminals = token_l2p_terminals(
+            bytes,
+            &byte_to_last,
+            &byte_to_first,
+            disallowed_follows,
+            nt,
+        );
+        let key = l2p_terminals.words().to_vec();
+        if let Some(&group_idx) = grouped_index.get(&key) {
+            groups[group_idx].token_ids.push(token_id);
         } else {
-            2
-        };
-
-        result.insert(token_id, partition_idx);
+            let group_idx = groups.len();
+            grouped_index.insert(key, group_idx);
+            groups.push(L2pTokenGroup {
+                l2p_terminals,
+                token_ids: vec![token_id],
+            });
+        }
     }
 
-    result
+    groups.sort_by(|left, right| {
+        let left_weight = left.l2p_terminals.count_ones() * left.token_ids.len();
+        let right_weight = right.l2p_terminals.count_ones() * right.token_ids.len();
+        right_weight
+            .cmp(&left_weight)
+            .then_with(|| right.l2p_terminals.count_ones().cmp(&left.l2p_terminals.count_ones()))
+            .then_with(|| right.token_ids.len().cmp(&left.token_ids.len()))
+    });
+
+    let mut buckets = vec![L2pPartitionBucket::new(); num_partitions.max(1)];
+    let mut current_costs = vec![0.0; buckets.len()];
+
+    for group in groups {
+        let mut best_idx = 0usize;
+        let mut best_score = f64::INFINITY;
+        let mut best_cost = f64::INFINITY;
+        let mut best_l2p_count = usize::MAX;
+        let mut best_size = usize::MAX;
+
+        for (idx, bucket) in buckets.iter().enumerate() {
+            let candidate_intersection = if let Some(current) = &bucket.l2p_intersection {
+                current.intersection(&group.l2p_terminals)
+            } else {
+                group.l2p_terminals.clone()
+            };
+            let candidate_l2p_count = candidate_intersection.count_ones();
+            let candidate_size = bucket.size() + group.token_ids.len();
+            let candidate_cost = compute_partition_cost(cost_fn, candidate_l2p_count, candidate_size);
+
+            let mut candidate_costs = current_costs.clone();
+            candidate_costs[idx] = candidate_cost;
+            let score = objective_score(objective, &candidate_costs);
+
+            let better = score < best_score
+                || (score == best_score
+                    && (candidate_cost < best_cost
+                        || (candidate_cost == best_cost
+                            && (candidate_l2p_count < best_l2p_count
+                                || (candidate_l2p_count == best_l2p_count
+                                    && candidate_size < best_size)))));
+            if better {
+                best_idx = idx;
+                best_score = score;
+                best_cost = candidate_cost;
+                best_l2p_count = candidate_l2p_count;
+                best_size = candidate_size;
+            }
+        }
+
+        let bucket = &mut buckets[best_idx];
+        if let Some(current) = &mut bucket.l2p_intersection {
+            current.intersect_with(&group.l2p_terminals);
+        } else {
+            bucket.l2p_intersection = Some(group.l2p_terminals.clone());
+        }
+        bucket.token_ids.extend(group.token_ids);
+        current_costs[best_idx] = best_cost;
+    }
+
+    buckets.sort_by(|left, right| right.size().cmp(&left.size()));
+
+    let estimated_partition_costs: Vec<f64> = buckets
+        .iter()
+        .map(|bucket| compute_partition_cost(cost_fn, bucket.l2p_count(), bucket.size()))
+        .collect();
+    let estimated_l2p_terminals: Vec<usize> = buckets.iter().map(L2pPartitionBucket::l2p_count).collect();
+    let partitions = buckets.into_iter().map(|bucket| bucket.token_ids).collect::<Vec<_>>();
+
+    L2pCostPartitioning {
+        objective_score: objective_score(objective, &estimated_partition_costs),
+        partitions,
+        estimated_partition_costs,
+        estimated_l2p_terminals,
+    }
 }
 
 #[cfg(test)]

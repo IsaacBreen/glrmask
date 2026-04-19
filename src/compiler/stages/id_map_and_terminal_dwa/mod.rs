@@ -27,6 +27,35 @@ use crate::Vocab;
 use classify::classify_vocab_char_type;
 use types::{TerminalColoring, TerminalDwaPhaseProfile, compile_profile_enabled, debug_profile_enabled, debug_terminal_mapping_enabled};
 
+fn l2p_partition_cost_fn_from_env() -> classify::L2pPartitionCostFn {
+    match std::env::var("GLRMASK_L2P_COST_FN").as_deref() {
+        Ok("size") | Err(_) => classify::L2pPartitionCostFn::Size,
+        Ok("size_log") => classify::L2pPartitionCostFn::SizeLog,
+        Ok("log_log") => classify::L2pPartitionCostFn::LogLog,
+        Ok(other) => panic!(
+            "Invalid GLRMASK_L2P_COST_FN={other}; expected one of: size, size_log, log_log"
+        ),
+    }
+}
+
+fn l2p_partition_objective_from_env() -> classify::L2pPartitionObjective {
+    match std::env::var("GLRMASK_L2P_COST_OBJECTIVE").as_deref() {
+        Ok("max") | Err(_) => classify::L2pPartitionObjective::Max,
+        Ok("sum") => classify::L2pPartitionObjective::Sum,
+        Ok(other) => panic!(
+            "Invalid GLRMASK_L2P_COST_OBJECTIVE={other}; expected one of: max, sum"
+        ),
+    }
+}
+
+fn l2p_partition_count_from_env() -> usize {
+    std::env::var("GLRMASK_L2P_COST_PARTITIONS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&count| count > 0)
+        .unwrap_or(10)
+}
+
 fn maybe_print_terminal_mappings(grammar: &AnalyzedGrammar) {
     for terminal_id in 0..grammar.num_terminals {
         eprintln!(
@@ -131,7 +160,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
 
     // Split vocab into partitions. Default: 7 partitions by character type.
     // Override: GLRMASK_PARTITION_FILE=path/to/partitions.json maps token_id → partition_index.
-    // Override: GLRMASK_PARTITION_SCHEME=l2p_aware uses experimental per-token L2P partitioning.
+    // Override: GLRMASK_PARTITION_SCHEME=l2p_cost uses experimental per-token L2P cost partitioning.
     let partition_vocab_started_at = Instant::now();
     let sub_vocabs: Vec<Vocab> = if let Ok(partition_file) = std::env::var("GLRMASK_PARTITION_FILE") {
         // Read partition assignments from JSON file: { "token_id": partition_index, ... }
@@ -149,28 +178,47 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     } else if force_all_l2p {
         let all_entries: Vec<(u32, Vec<u8>)> = vocab.entries.iter().map(|(&id, bytes)| (id, bytes.clone())).collect();
         vec![Vocab::new(all_entries, None)]
-    } else if std::env::var("GLRMASK_PARTITION_SCHEME").map_or(false, |v| v == "l2p_aware") {
-        // Experimental L2P-aware 3-partition scheme (opt-in via GLRMASK_PARTITION_SCHEME=l2p_aware):
-        // P0 (L2+): token's own bytes contain both a last-byte for some terminal t1 and a
-        //           first-byte for some terminal t2 where (t1→t2) is not disallowed.
-        // P1 (L1):  no such pair; at least one terminal is reachable from this token's bytes.
-        // P2 (L0):  no terminal interacts with this token's bytes at all.
-        // NOTE: For grammars with many terminals most tokens trigger L2+ pairs, so P0 is large
-        //       and P1/P2 are small.  This scheme is provided for experimentation only.
+    } else if std::env::var("GLRMASK_PARTITION_SCHEME").map_or(false, |v| v == "l2p_cost") {
+        let cost_fn = l2p_partition_cost_fn_from_env();
+        let objective = l2p_partition_objective_from_env();
+        let num_partitions = l2p_partition_count_from_env();
         let bytesets = shared_classify_cache
             .get_or_init(|| classify::SharedClassifyBytesets::build(tokenizer, grammar.num_terminals));
-        let token_types = classify::classify_vocab_token_path_types(
+        let partitioning = classify::partition_vocab_by_l2p_cost(
             vocab,
             bytesets,
             disallowed_follows,
             grammar.num_terminals,
+            num_partitions,
+            cost_fn,
+            objective,
         );
-        let mut partition_entries: Vec<Vec<(u32, Vec<u8>)>> = vec![Vec::new(); 3];
-        for (&token_id, bytes) in &vocab.entries {
-            let idx = token_types.get(&token_id).copied().unwrap_or(2) as usize;
-            partition_entries[idx].push((token_id, bytes.clone()));
+        if compile_profile_enabled() || debug_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][l2p_cost_partitioning] cost_fn={} objective={} partitions={} estimated_costs={:?} estimated_l2p_terminals={:?} objective_score={:.3}",
+                cost_fn.as_str(),
+                objective.as_str(),
+                num_partitions,
+                partitioning.estimated_partition_costs,
+                partitioning.estimated_l2p_terminals,
+                partitioning.objective_score,
+            );
         }
-        partition_entries.into_iter().map(|entries| Vocab::new(entries, None)).collect()
+        partitioning
+            .partitions
+            .into_iter()
+            .map(|token_ids| {
+                let entries = token_ids
+                    .into_iter()
+                    .filter_map(|token_id| {
+                        vocab.entries
+                            .get(&token_id)
+                            .map(|bytes| (token_id, bytes.clone()))
+                    })
+                    .collect();
+                Vocab::new(entries, None)
+            })
+            .collect()
     } else {
         // Default 7-partition scheme by character type:
         // P0=structural non-alnum, P1=mixed, P2=ASCII-alpha, P3=digit,
