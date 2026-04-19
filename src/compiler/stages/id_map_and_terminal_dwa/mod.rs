@@ -65,7 +65,7 @@ fn l2p_auto_second_largest_limit_from_env() -> usize {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|&count| count > 0)
-        .unwrap_or(2000)
+        .unwrap_or(12000)
 }
 
 fn l2p_auto_max_estimated_l2p_terminals_from_env() -> usize {
