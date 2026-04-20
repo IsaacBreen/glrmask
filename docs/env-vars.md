@@ -123,6 +123,7 @@ This document lists all `GLRMASK_*` environment variables used in this crate, gr
 | Variable | Valid values | Default |
 |---|---|---|
 | `GLRMASK_REPEAT_TREE_SHAPE` | `left`, `balanced`, `leftbalanced`, `left_balanced` (other set value falls to right) | `leftbalanced` when unset |
+| `GLRMASK_MAX_RUNTIME_REDUCTION_LEN` | positive integer (`usize > 0`) | `5` |
 
 ## Runtime
 

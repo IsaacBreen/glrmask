@@ -477,7 +477,11 @@ fn prepare_grammar_transforms_impl(
     let merge1_ms = t3.elapsed().as_secs_f64() * 1000.0;
 
     let t4 = std::time::Instant::now();
-    bound_runtime_reduction_length(normalized, MAX_RUNTIME_REDUCTION_LEN);
+    let max_reduction_len = std::env::var("GLRMASK_MAX_RUNTIME_REDUCTION_LEN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(MAX_RUNTIME_REDUCTION_LEN);
+    bound_runtime_reduction_length(normalized, max_reduction_len);
     let bound_ms = t4.elapsed().as_secs_f64() * 1000.0;
 
     let t5 = std::time::Instant::now();
