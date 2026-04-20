@@ -188,31 +188,6 @@ fn factored_open_object_max_keys() -> usize {
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OrderedObjectShape {
-    Right,
-    Balanced,
-    Left,
-    LeftBalanced,
-}
-
-fn ordered_object_shape() -> OrderedObjectShape {
-    match std::env::var("GLRMASK_ORDERED_OBJECT_SHAPE")
-        .ok()
-        .map(|v| v.trim().to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("left") => OrderedObjectShape::Left,
-        Some("balanced") => OrderedObjectShape::Balanced,
-        Some("left-balanced") | Some("left_balanced") | Some("leftbalanced") => {
-            OrderedObjectShape::LeftBalanced
-        }
-        Some("right") | Some("factored") => OrderedObjectShape::Right,
-        None => OrderedObjectShape::Balanced,
-        Some(_) => OrderedObjectShape::Balanced,
-    }
-}
-
 fn factored_ordered_object_enabled() -> bool {
     // Default to true: use the separator-merged left-recursive grammar
     // which is deterministic at key boundaries, reducing TBM and TTFM.
@@ -573,7 +548,8 @@ fn finite_literal_alternatives(
         | GrammarExpr::RepeatRange { .. }
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
-        | GrammarExpr::AnyByte => return None,
+        | GrammarExpr::AnyByte
+        | GrammarExpr::SeparatedSequence { .. } => return None,
     };
 
     let total_bytes = alts.iter().map(Vec::len).sum::<usize>();
@@ -4700,13 +4676,15 @@ impl<'a> SchemaCtx<'a> {
         let (tree_expr, tree_can_be_empty) = if ordered.is_empty() {
             (empty_expr(), true)
         } else {
-            let mut next_idx = 0usize;
-            self.build_object_tree(
-                &base_name,
-                &ordered,
-                &mut next_idx,
-                ordered_object_shape(),
-            )?
+            let items: Vec<(GrammarExpr, bool)> = ordered.iter()
+                .map(|(key, value_expr, is_required)| {
+                    let item_expr = self.build_merged_literal_key_value_expr(b"", key, value_expr.clone());
+                    (item_expr, *is_required)
+                })
+                .collect();
+            let can_be_empty = items.iter().all(|(_, req)| !req);
+            let separator = self.json_item_separator_expr();
+            (GrammarExpr::SeparatedSequence { items, separator: Box::new(separator) }, can_be_empty)
         };
 
         // Helper: wrap an object-only expression with non-object alternatives
@@ -7642,7 +7620,6 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         // Separator-merged left-recursive grammar for ordered objects with optional keys.
         // Off by default; opt-in via GLRMASK_ENABLE_FACTORED_ORDERED_OBJECT=1
         // and GLRMASK_ENABLE_FACTORED_CLOSED_OBJECT=1.
-        let object_shape = ordered_object_shape();
 
         if factored_ordered_object_enabled()
             && Self::factored_closed_object_enabled()
@@ -7678,14 +7655,15 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
             }
         }
 
-        let mut next_tree_rule_index = 0usize;
-        let (tree_expr, tree_can_be_empty) =
-            self.build_object_tree(
-                &base_name,
-                &ordered,
-                &mut next_tree_rule_index,
-                object_shape,
-            )?;
+        let items: Vec<(GrammarExpr, bool)> = ordered.iter()
+            .map(|(key, value_expr, is_required)| {
+                let item_expr = self.build_merged_literal_key_value_expr(b"", key, value_expr.clone());
+                (item_expr, *is_required)
+            })
+            .collect();
+        let tree_can_be_empty = items.iter().all(|(_, req)| !req);
+        let separator = self.json_item_separator_expr();
+        let tree_expr = GrammarExpr::SeparatedSequence { items, separator: Box::new(separator) };
         let tree_prefix = sequence_or_single(vec![literal_expr(b"{"), tree_expr]);
         let with_tree_prefix = sequence_or_single(vec![
             tree_prefix,
@@ -7706,69 +7684,6 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         }
 
         Ok(with_tree_prefix)
-    }
-
-    fn build_object_tree(
-        &mut self,
-        base_name: &str,
-        items: &[(String, GrammarExpr, bool)],
-        next_rule_index: &mut usize,
-        shape: OrderedObjectShape,
-    ) -> Result<(GrammarExpr, bool), GlrMaskError> {
-
-        if items.len() == 1 {
-            let (key, value_expr, is_required) = &items[0];
-            let kv_expr = self.build_merged_literal_key_value_expr(b"", key, value_expr.clone());
-            if *is_required {
-                return Ok((kv_expr, false));
-            }
-
-            let rule_name = format!("{base_name}_t{}", *next_rule_index);
-            *next_rule_index += 1;
-            self.insert_rule(rule_name.clone(), kv_expr);
-            return Ok((GrammarExpr::Ref(rule_name), true));
-        }
-
-        let mid = match shape {
-            OrderedObjectShape::Balanced => items.len() / 2,
-            OrderedObjectShape::Left => items.len() - 1,
-            OrderedObjectShape::Right => 1,
-            OrderedObjectShape::LeftBalanced => {
-                let first_optional = items
-                    .iter()
-                    .position(|(_, _, required)| !*required);
-                match first_optional {
-                    None => items.len() - 1,
-                    Some(0) => items.len() / 2,
-                    Some(idx) => idx,
-                }
-            }
-        };
-        let (left_expr, left_can_be_empty) =
-            self.build_object_tree(base_name, &items[..mid], next_rule_index, shape)?;
-        let (right_expr, right_can_be_empty) =
-            self.build_object_tree(base_name, &items[mid..], next_rule_index, shape)?;
-
-        let mut options = vec![sequence_or_single(vec![
-            left_expr.clone(),
-            self.json_item_separator_expr(),
-            right_expr.clone(),
-        ])];
-        if right_can_be_empty {
-            options.push(left_expr.clone());
-        }
-        if left_can_be_empty {
-            options.push(right_expr.clone());
-        }
-
-        if options.len() == 1 {
-            return Ok((options.pop().unwrap(), false));
-        }
-
-        let rule_name = format!("{base_name}_t{}", *next_rule_index);
-        *next_rule_index += 1;
-        self.insert_rule(rule_name.clone(), choice_or_single(options));
-        Ok((GrammarExpr::Ref(rule_name), left_can_be_empty && right_can_be_empty))
     }
 
     fn property_name_pattern(property_names: &Value) -> Result<&str, GlrMaskError> {
@@ -8041,6 +7956,12 @@ fn collect_grammar_visible_refs(
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::TerminalExpr(_)
             | GrammarExpr::AnyByte => {}
+            GrammarExpr::SeparatedSequence { items, separator } => {
+                for (item, _) in items {
+                    walk(item, terminal_names, out);
+                }
+                walk(separator, terminal_names, out);
+            }
         }
     }
     let mut visible = BTreeSet::new();

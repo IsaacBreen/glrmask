@@ -31,6 +31,54 @@ pub enum GrammarExpr {
     CharClass { def: String, negate: bool, utf8: bool },
     RawRegex(String),
     AnyByte,
+    /// A separator-delimited sequence of items where some items are optional.
+    ///
+    /// `items` is an ordered list of `(item_expr, is_required)` pairs.
+    /// The sequence allows any subset of items (respecting order) where all
+    /// required items are present and optional items may be omitted.
+    /// Items that are present are joined by `separator` between consecutive ones.
+    ///
+    /// This generalises the "ordered object" pattern from JSON Schema (comma-separated
+    /// key-value pairs where some keys are optional) to arbitrary grammars.
+    SeparatedSequence {
+        items: Vec<(GrammarExpr, bool)>,
+        separator: Box<GrammarExpr>,
+    },
+}
+
+/// Controls the tree shape used when lowering [`GrammarExpr::SeparatedSequence`].
+///
+/// The shape determines how the item list is recursively split into subtrees,
+/// which affects parse-path counts and grammar size. Configure via the
+/// `GLRMASK_ORDERED_OBJECT_SHAPE` environment variable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommaSepShape {
+    /// Split at the midpoint (balanced binary tree). Default.
+    Balanced,
+    /// Always split one item from the left (left-linear tree).
+    Left,
+    /// Always split one item from the right (right-linear / factored tree).
+    Right,
+    /// Split at the first optional item boundary; fall back to balanced.
+    LeftBalanced,
+}
+
+/// Read the `CommaSepShape` from the `GLRMASK_ORDERED_OBJECT_SHAPE` environment variable.
+pub fn comma_sep_shape() -> CommaSepShape {
+    match std::env::var("GLRMASK_ORDERED_OBJECT_SHAPE")
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("left") => CommaSepShape::Left,
+        Some("balanced") => CommaSepShape::Balanced,
+        Some("left-balanced") | Some("left_balanced") | Some("leftbalanced") => {
+            CommaSepShape::LeftBalanced
+        }
+        Some("right") | Some("factored") => CommaSepShape::Right,
+        None => CommaSepShape::Balanced,
+        Some(_) => CommaSepShape::Balanced,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -220,6 +268,17 @@ fn grammar_expr_to_lark_with_indent(
         }
         GrammarExpr::AnyByte => {
             out.push_str("/./ /*AnyByte*/");
+        }
+        GrammarExpr::SeparatedSequence { items, separator } => {
+            write!(out, "/*SeparatedSequence(sep=").unwrap();
+            grammar_expr_to_lark_with_indent(separator, out, false, indent);
+            write!(out, ", items=[").unwrap();
+            for (i, (item, required)) in items.iter().enumerate() {
+                if i > 0 { write!(out, ", ").unwrap(); }
+                grammar_expr_to_lark_with_indent(item, out, true, indent);
+                if !required { write!(out, "?").unwrap(); }
+            }
+            write!(out, "])*/").unwrap();
         }
     }
 }
@@ -686,6 +745,11 @@ impl Lowerer {
                 GrammarExpr::RepeatRange { expr, min, max } => {
                     lowerer.emit_repeat_range(lhs, expr, *min, *max)?;
                 }
+                GrammarExpr::SeparatedSequence { items, separator } => {
+                    let shape = comma_sep_shape();
+                    let (sym, _) = lowerer.lower_separated_sequence_inner(items, separator, shape)?;
+                    lowerer.rules.push(Rule { lhs, rhs: vec![sym] });
+                }
                 _ => {
                     let symbol = lowerer.lower_expr_terminalish(expr)?;
                     lowerer.rules.push(Rule {
@@ -742,8 +806,79 @@ impl Lowerer {
             | GrammarExpr::Optional(_)
             | GrammarExpr::Repeat(_)
             | GrammarExpr::RepeatOne(_)
-            | GrammarExpr::RepeatRange { .. } => self.lower_expr(expr),
+            | GrammarExpr::RepeatRange { .. }
+            | GrammarExpr::SeparatedSequence { .. } => self.lower_expr(expr),
         })
+    }
+
+    /// Lower a `SeparatedSequence` into a grammar symbol.
+    ///
+    /// Returns `(symbol, can_be_empty)` where `can_be_empty` is `true` if the
+    /// symbol can derive the empty string (i.e., all items are optional).
+    ///
+    /// The tree is split according to `shape`, mirroring the same algorithm used
+    /// for JSON Schema ordered objects.
+    fn lower_separated_sequence_inner(
+        &mut self,
+        items: &[(GrammarExpr, bool)],
+        separator: &GrammarExpr,
+        shape: CommaSepShape,
+    ) -> Result<(Symbol, bool), GlrMaskError> {
+        debug_assert!(!items.is_empty());
+
+        if items.len() == 1 {
+            let (item_expr, is_required) = &items[0];
+            let item_sym = self.lower_expr_terminalish(item_expr)?;
+            // Return can_be_empty=true for optional items as a signal to the parent to add
+            // a "without this item and its preceding separator" alternative.  We do NOT emit
+            // an epsilon rule here — that would create dangling separators in the parent rule
+            // (e.g. "key": , ).  The caller of lower_separated_sequence_inner handles the
+            // all-optional empty case via an explicit separate alternative (e.g. "{}").
+            return Ok((item_sym, !is_required));
+        }
+
+        let mid = match shape {
+            CommaSepShape::Balanced => items.len() / 2,
+            CommaSepShape::Left => items.len() - 1,
+            CommaSepShape::Right => 1,
+            CommaSepShape::LeftBalanced => {
+                let first_optional = items.iter().position(|(_, required)| !required);
+                match first_optional {
+                    None => items.len() - 1,
+                    Some(0) => items.len() / 2,
+                    Some(idx) => idx,
+                }
+            }
+        };
+
+        let sep_sym = self.lower_expr_terminalish(separator)?;
+        let (left_sym, left_can_be_empty) =
+            self.lower_separated_sequence_inner(&items[..mid], separator, shape)?;
+        let (right_sym, right_can_be_empty) =
+            self.lower_separated_sequence_inner(&items[mid..], separator, shape)?;
+
+        let (_, nt) = self.fresh_nonterminal("sep_seq");
+
+        // Always: left sep right
+        self.rules.push(Rule {
+            lhs: nt,
+            rhs: vec![left_sym.clone(), sep_sym, right_sym.clone()],
+        });
+        // If right side can be empty: left alone is valid
+        if right_can_be_empty {
+            self.rules.push(Rule { lhs: nt, rhs: vec![left_sym.clone()] });
+        }
+        // If left side can be empty: right alone is valid
+        if left_can_be_empty {
+            self.rules.push(Rule { lhs: nt, rhs: vec![right_sym.clone()] });
+        }
+
+        // Both sides can be empty: propagate the flag upward so the grandparent can add a
+        // "without this subtree and its separator" alternative.  Do NOT emit nt -> ε here;
+        // that would produce dangling separators in the enclosing rule.
+        let can_be_empty = left_can_be_empty && right_can_be_empty;
+
+        Ok((Symbol::Nonterminal(nt), can_be_empty))
     }
 
     /// Register a pre-resolved terminal Expr, deduplicating by value.
@@ -842,6 +977,11 @@ fn grammar_expr_to_expr(
                 )));
             }
         }
+        GrammarExpr::SeparatedSequence { .. } => {
+            return Err(GlrMaskError::GrammarParse(
+                "GrammarExpr::SeparatedSequence cannot appear inside a terminal rule".into(),
+            ));
+        }
     })
 }
 
@@ -931,6 +1071,12 @@ fn promote_expr_literals(
         | GrammarExpr::RepeatOne(inner)
         | GrammarExpr::RepeatRange { expr: inner, .. } => {
             promote_expr_literals(inner, threshold, new_rules, cache, counter);
+        }
+        GrammarExpr::SeparatedSequence { items, separator } => {
+            for (item, _) in items.iter_mut() {
+                promote_expr_literals(item, threshold, new_rules, cache, counter);
+            }
+            promote_expr_literals(separator, threshold, new_rules, cache, counter);
         }
         _ => {}
     }
@@ -1384,5 +1530,155 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // ── SeparatedSequence tests ────────────────────────────────────────────
+
+    fn make_sep_seq_grammar(items: Vec<(GrammarExpr, bool)>, sep: GrammarExpr) -> NamedGrammar {
+        NamedGrammar {
+            rules: vec![nt(
+                "start",
+                GrammarExpr::SeparatedSequence { items, separator: Box::new(sep) },
+            )],
+            start: "start".into(),
+            ignore: None,
+        }
+    }
+
+    fn sep_terminal_id(gdef: &GrammarDef) -> TerminalID {
+        gdef.terminals
+            .iter()
+            .find_map(|t| match t {
+                Terminal::Literal { id, bytes } if bytes == b"," => Some(*id),
+                _ => None,
+            })
+            .expect("separator terminal ',' should exist in lowered grammar")
+    }
+
+    fn item_terminal_id(gdef: &GrammarDef, byte: u8) -> TerminalID {
+        gdef.terminals
+            .iter()
+            .find_map(|t| match t {
+                Terminal::Literal { id, bytes } if bytes == &[byte] => Some(*id),
+                _ => None,
+            })
+            .expect("item terminal should exist in lowered grammar")
+    }
+
+    /// `SeparatedSequence` with all required items accepts exactly `n-1` separators.
+    #[test]
+    fn test_separated_sequence_all_required_has_fixed_sep_count() {
+        // items: a(req), b(req), c(req) → must produce exactly "a,b,c" (2 separators)
+        let g = make_sep_seq_grammar(
+            vec![
+                (GrammarExpr::Literal(b"a".to_vec()), true),
+                (GrammarExpr::Literal(b"b".to_vec()), true),
+                (GrammarExpr::Literal(b"c".to_vec()), true),
+            ],
+            GrammarExpr::Literal(b",".to_vec()),
+        );
+        let gdef = lower(&g).unwrap();
+        let sep_tid = sep_terminal_id(&gdef);
+        let mut memo = BTreeMap::new();
+        let sep_counts = derivable_terminal_counts(&gdef, sep_tid, gdef.start, &mut memo);
+        assert_eq!(sep_counts, BTreeSet::from([2usize]), "3 required items must produce exactly 2 separators");
+    }
+
+    /// Optional items let the parent skip the separator — no dangling commas.
+    #[test]
+    fn test_separated_sequence_optional_item_no_dangling_sep() {
+        // items: a(req), b(opt), c(req) → can produce "a,b,c" (2 seps) or "a,c" (1 sep).
+        // Must NOT produce any path with a dangling separator.
+        let g = make_sep_seq_grammar(
+            vec![
+                (GrammarExpr::Literal(b"a".to_vec()), true),
+                (GrammarExpr::Literal(b"b".to_vec()), false),
+                (GrammarExpr::Literal(b"c".to_vec()), true),
+            ],
+            GrammarExpr::Literal(b",".to_vec()),
+        );
+        let gdef = lower(&g).unwrap();
+        let sep_tid = sep_terminal_id(&gdef);
+        let mut memo = BTreeMap::new();
+        let sep_counts = derivable_terminal_counts(&gdef, sep_tid, gdef.start, &mut memo);
+        assert_eq!(
+            sep_counts,
+            BTreeSet::from([1usize, 2]),
+            "optional middle item allows 1 or 2 separators, never 0 or 3"
+        );
+        // Verify that no grammar rule has an empty rhs for the sep_seq NTs,
+        // which would allow a dangling separator.
+        let sep_rules_with_epsilon: Vec<_> = gdef
+            .rules
+            .iter()
+            .filter(|r| r.lhs != gdef.start && r.rhs.is_empty())
+            .collect();
+        assert!(
+            sep_rules_with_epsilon.is_empty(),
+            "no epsilon rules should be introduced by SeparatedSequence (dangling separator guard)"
+        );
+    }
+
+    /// Two optional items: accepts a,b or a alone or b alone — but never epsilon.
+    #[test]
+    fn test_separated_sequence_all_optional_no_epsilon_rule() {
+        // items: a(opt), b(opt) → can_be_empty=true but no epsilon rule emitted.
+        let g = make_sep_seq_grammar(
+            vec![
+                (GrammarExpr::Literal(b"a".to_vec()), false),
+                (GrammarExpr::Literal(b"b".to_vec()), false),
+            ],
+            GrammarExpr::Literal(b",".to_vec()),
+        );
+        let gdef = lower(&g).unwrap();
+
+        // The grammar should accept "a,b" (1 sep), "a" (0 seps), "b" (0 seps).
+        let sep_tid = sep_terminal_id(&gdef);
+        let a_tid = item_terminal_id(&gdef, b'a');
+        let b_tid = item_terminal_id(&gdef, b'b');
+
+        let mut memo = BTreeMap::new();
+        let sep_counts = derivable_terminal_counts(&gdef, sep_tid, gdef.start, &mut memo);
+        assert_eq!(sep_counts, BTreeSet::from([0usize, 1]), "two optional items → 0 or 1 separators");
+
+        memo.clear();
+        let a_counts = derivable_terminal_counts(&gdef, a_tid, gdef.start, &mut memo);
+        assert_eq!(a_counts, BTreeSet::from([0usize, 1]), "a is optional → 0 or 1 occurrences");
+
+        memo.clear();
+        let b_counts = derivable_terminal_counts(&gdef, b_tid, gdef.start, &mut memo);
+        assert_eq!(b_counts, BTreeSet::from([0usize, 1]), "b is optional → 0 or 1 occurrences");
+
+        // No epsilon rules anywhere — caller handles the "nothing present" case.
+        let any_epsilon = gdef.rules.iter().any(|r| r.rhs.is_empty());
+        assert!(!any_epsilon, "SeparatedSequence must not emit epsilon rules");
+    }
+
+    /// Single required item: lowers to just the item symbol, no wrapper rule needed.
+    #[test]
+    fn test_separated_sequence_single_required() {
+        let g = make_sep_seq_grammar(
+            vec![(GrammarExpr::Literal(b"x".to_vec()), true)],
+            GrammarExpr::Literal(b",".to_vec()),
+        );
+        let gdef = lower(&g).unwrap();
+        // Only the 'x' terminal; the separator should not appear.
+        assert_eq!(gdef.terminals.len(), 1, "single required item: only one terminal");
+        assert!(matches!(&gdef.terminals[0], Terminal::Literal { bytes, .. } if bytes == b"x"));
+    }
+
+    /// Single optional item: lowers to just the item symbol (no epsilon or wrapper NT emitted).
+    #[test]
+    fn test_separated_sequence_single_optional() {
+        let g = make_sep_seq_grammar(
+            vec![(GrammarExpr::Literal(b"x".to_vec()), false)],
+            GrammarExpr::Literal(b",".to_vec()),
+        );
+        let gdef = lower(&g).unwrap();
+        // Only the 'x' terminal; no separator.
+        assert_eq!(gdef.terminals.len(), 1, "single optional item: only one terminal");
+        // No epsilon rules.
+        let any_epsilon = gdef.rules.iter().any(|r| r.rhs.is_empty());
+        assert!(!any_epsilon, "single optional item must not produce an epsilon rule");
     }
 }

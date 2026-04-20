@@ -28,6 +28,10 @@ fn contains_regex_features(expr: &GrammarExpr) -> bool {
         | GrammarExpr::Repeat(inner)
         | GrammarExpr::RepeatOne(inner)
         | GrammarExpr::RepeatRange { expr: inner, .. } => contains_regex_features(inner),
+        GrammarExpr::SeparatedSequence { items, separator } => {
+            items.iter().any(|(item, _)| contains_regex_features(item))
+                || contains_regex_features(separator)
+        }
     }
 }
 
@@ -246,6 +250,12 @@ impl ChoiceFactorer {
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::TerminalExpr(_)
             | GrammarExpr::AnyByte => {}
+            GrammarExpr::SeparatedSequence { items, separator } => {
+                for (item, _) in items {
+                    Self::collect_refs_impl(item, refs);
+                }
+                Self::collect_refs_impl(separator, refs);
+            }
         }
     }
 
@@ -377,6 +387,12 @@ impl ChoiceFactorer {
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::TerminalExpr(_)
             | GrammarExpr::AnyByte => {}
+            GrammarExpr::SeparatedSequence { items, separator } => {
+                for (item, _) in items {
+                    Self::collect_refs_static(item, refs);
+                }
+                Self::collect_refs_static(separator, refs);
+            }
         }
     }
 

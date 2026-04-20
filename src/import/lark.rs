@@ -635,6 +635,38 @@ fn expand_lark_expr(
         GrammarExpr::RawRegex(pattern) => GrammarExpr::RawRegex(pattern.clone()),
         GrammarExpr::TerminalExpr(expr) => GrammarExpr::TerminalExpr(expr.clone()),
         GrammarExpr::AnyByte => GrammarExpr::AnyByte,
+        GrammarExpr::SeparatedSequence { items, separator } => {
+            let new_items = items
+                .iter()
+                .map(|(item, req)| {
+                    Ok((
+                        expand_lark_expr(
+                            item,
+                            in_terminal_rule,
+                            rule_map,
+                            terminal_names,
+                            parser_names,
+                            memo,
+                            visiting,
+                        )?,
+                        *req,
+                    ))
+                })
+                .collect::<Result<Vec<_>, GlrMaskError>>()?;
+            let new_separator = expand_lark_expr(
+                separator,
+                in_terminal_rule,
+                rule_map,
+                terminal_names,
+                parser_names,
+                memo,
+                visiting,
+            )?;
+            GrammarExpr::SeparatedSequence {
+                items: new_items,
+                separator: Box::new(new_separator),
+            }
+        }
     })
 }
 
