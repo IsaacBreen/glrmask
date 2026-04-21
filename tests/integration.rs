@@ -3046,3 +3046,107 @@ fn bench_symmetric_vs_asymmetric() {
         );
     }
 }
+
+/// Test for an ambiguous recursive grammar where `,` serves as separator at
+/// every level. The grammar is:
+///
+/// ```text
+/// s ::= l
+/// l ::= a , b | a | b
+/// a ::= c , d | c | d
+/// b ::= e , f | e | f
+/// c ::= 'a' , 'b' | 'a' | 'b'
+/// d ::= 'c' , 'd' | 'c' | 'd'
+/// e ::= 'e' , 'f' | 'e' | 'f'
+/// f ::= 'g' , 'h' | 'g' | 'h'
+/// ```
+///
+/// The input `a , b , c , d , e , f , g , h` is structurally ambiguous: the
+/// eight comma-separated tokens can be grouped into l, a, b, c, d, e, f in
+/// many different ways. This test prints the parse table and asserts that
+/// there are no SR/RR conflicts (the assertion FAILS — the grammar is
+/// ambiguous).
+///
+/// Note: glrmask EBNF treats all-uppercase identifiers as terminal rule names
+/// and mixed/lowercase identifiers as nonterminals, so the grammar variables
+/// use lowercase names while quoted literals `'a'`..`'h'` match vocab tokens.
+#[test]
+fn test_grammar_cascading_ambiguity() {
+    // Tokens: a=0  ,=1  b=2  c=3  d=4  e=5  f=6  g=7  h=8
+    let tokens = &["a", ",", "b", "c", "d", "e", "f", "g", "h"];
+    let constraint = ebnf_constraint(tokens, r#"
+        s ::= l
+        l ::= a ',' b | a | b
+        a ::= c ',' d | c | d
+        b ::= e ',' f | e | f
+        c ::= 'a' ',' 'b' | 'a' | 'b'
+        d ::= 'c' ',' 'd' | 'c' | 'd'
+        e ::= 'e' ',' 'f' | 'e' | 'f'
+        f ::= 'g' ',' 'h' | 'g' | 'h'
+    "#);
+
+    // ── Parse table ────────────────────────────────────────────────────────
+    let num_states    = constraint.debug_num_states();
+    let num_terminals = constraint.debug_num_terminals();
+    let rules         = constraint.debug_rules();
+    // Map internal token ID → original vocab string (best-effort).
+    let internal_to_tokens = constraint.debug_internal_token_to_tokens();
+    let internal_name = |tid: u32| -> String {
+        let orig_ids = internal_to_tokens.get(tid as usize)
+            .map(|v| v.as_slice()).unwrap_or(&[]);
+        let names: Vec<&str> = orig_ids.iter()
+            .filter_map(|&id| tokens.get(id as usize).copied())
+            .collect();
+        if names.is_empty() {
+            format!("t{tid}")
+        } else {
+            names.join("/")
+        }
+    };
+
+    eprintln!();
+    eprintln!("=== parse table: {num_states} states, {num_terminals} terminals ===");
+    eprintln!();
+    eprintln!("Rules:");
+    for (lhs, rhs_len, rhs_dbg) in &rules {
+        eprintln!("  NT{lhs} -> ({rhs_len} symbols) {rhs_dbg}");
+    }
+    eprintln!();
+    eprintln!("Actions per state:");
+    for state in 0..num_states {
+        let mut actions = constraint.debug_actions_for_state(state);
+        if actions.is_empty() { continue; }
+        actions.sort_by_key(|(tid, _)| *tid);
+        let formatted: Vec<String> = actions.iter()
+            .map(|(tid, act)| format!("{}:{}", internal_name(*tid), act))
+            .collect();
+        eprintln!("  s{state:>3}: {}", formatted.join("  "));
+    }
+    eprintln!();
+
+    // ── Conflict check (this assertion FAILS — grammar is ambiguous) ───────
+    let conflicts: Vec<String> = (0..num_states).flat_map(|state| {
+        constraint.debug_actions_for_state(state).into_iter()
+            .filter(|(_, act)| act.contains("Split"))
+            .map(move |(tid, act)| format!("state {state} on t{tid}: {act}"))
+    }).collect();
+
+    assert!(
+        conflicts.is_empty(),
+        "SR/RR conflicts found ({} total):\n{}",
+        conflicts.len(),
+        conflicts.join("\n")
+    );
+
+    // ── Feed example input and report max concurrent stacks ────────────────
+    // Input: a , b , c , d , e , f , g , h
+    let input: &[u32] = &[0, 1, 2, 1, 3, 1, 4, 1, 5, 1, 6, 1, 7, 1, 8];
+    let mut state = constraint.start();
+    let mut max_stacks = state.parser_path_count(1_000_000);
+    for &tok in input {
+        state.commit_token(tok).unwrap();
+        max_stacks = max_stacks.max(state.parser_path_count(1_000_000));
+    }
+    max_stacks = max_stacks.max(state.parser_path_count(1_000_000));
+    eprintln!("max concurrent stacks over input: {max_stacks}");
+}
