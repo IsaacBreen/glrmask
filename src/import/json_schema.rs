@@ -2123,6 +2123,21 @@ fn json_wrapped_key_colon_pattern(pattern: &str) -> GrammarExpr {
     wrap_key_colon_regex(&inner)
 }
 
+fn property_name_pattern_terminal_prefix(pattern: &str) -> String {
+    let mut out = String::from("JSON_PROP_NAME_PATTERN_");
+    for ch in pattern.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_uppercase());
+        } else {
+            out.push('_');
+        }
+        if out.len() >= 80 {
+            break;
+        }
+    }
+    out
+}
+
 /// Build a GrammarExpr body for a string value, fusing non-split quotes
 /// into the body.  Returns `(terminal_body, wrapper)`.
 ///
@@ -5830,6 +5845,11 @@ impl<'a> SchemaCtx<'a> {
         self.extract_terminal_rule(wrap_string_value_regex(inner_regex), prefix)
     }
 
+    fn extract_wrapped_key_colon_search_pattern(&mut self, pattern: &str, prefix: &str) -> GrammarExpr {
+        let inner = json_search_pattern(pattern);
+        self.extract_terminal_rule(wrap_key_colon_regex(&inner), prefix)
+    }
+
 fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         // Ablation switch: set URI_ABLATE=<csv> to disable URI parts for
         // perf investigation. Parts: ipv6, ipv_future, ip_literal, ipv4,
@@ -7813,7 +7833,11 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         value_expr: GrammarExpr,
     ) -> Result<GrammarExpr, GlrMaskError> {
         let pattern = Self::property_name_pattern(property_names)?;
-        let pair = sequence_or_single(vec![json_wrapped_key_colon_pattern(pattern), value_expr]);
+        let prefix = property_name_pattern_terminal_prefix(pattern);
+        let pair = sequence_or_single(vec![
+            self.extract_wrapped_key_colon_search_pattern(pattern, &prefix),
+            value_expr,
+        ]);
         Ok(self.build_repeated_object_pairs(pair))
     }
 
@@ -7826,7 +7850,11 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
     ) -> Result<GrammarExpr, GlrMaskError> {
         let pattern = Self::property_name_pattern(property_names)?;
         let matched_key_colon_body = regex_expr(key_colon_body_regex(&json_search_pattern(pattern)));
-        let matched_key_colon_full = wrap_key_colon_terminal(matched_key_colon_body.clone());
+        let prefix = property_name_pattern_terminal_prefix(pattern);
+        let matched_key_colon_full = self.extract_terminal_rule(
+            wrap_key_colon_terminal(matched_key_colon_body.clone()),
+            &prefix,
+        );
         let matched_pair = sequence_or_single(vec![
             matched_key_colon_full,
             matched_value_expr,
