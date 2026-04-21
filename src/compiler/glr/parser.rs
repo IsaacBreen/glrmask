@@ -1348,17 +1348,19 @@ a ::= 'f'"#,
 
     #[test]
     fn test_manual_table_mre_abstract_split_path_regression_minimal() {
-        // Minimal self-contained abstract failing witness found by recursive reduction.
-        // No schema import, no Constraint, no commit_bytes.
+        // Regression test for unit-reduction inlining bug.
+        // Grammar has two derivations for the "object" nonterminal N55:
+        //   fused:  N55 → T(8) T(18)           — input [8, 18]
+        //   split:  N55 → T(8) T(9) T(10)      — input [8, 9, 10]
+        // T(9) also appears as the final token of the start rule, which is
+        // the structural overlap that previously caused the inlining pass to
+        // drop the split path from the table.
         let gdef = make_grammar(
             vec![
                 Rule { lhs: 1, rhs: vec![Symbol::Terminal(0)] },
                 Rule { lhs: 2, rhs: vec![Symbol::Terminal(1), Symbol::Nonterminal(1)] },
-                Rule { lhs: 22, rhs: vec![] },
-                Rule { lhs: 18, rhs: vec![] },
-                Rule { lhs: 57, rhs: vec![Symbol::Nonterminal(22), Symbol::Terminal(10), Symbol::Nonterminal(18)] },
                 Rule { lhs: 55, rhs: vec![Symbol::Terminal(8), Symbol::Terminal(18)] },
-                Rule { lhs: 55, rhs: vec![Symbol::Terminal(8), Symbol::Nonterminal(57), Symbol::Terminal(18)] },
+                Rule { lhs: 55, rhs: vec![Symbol::Terminal(8), Symbol::Terminal(9), Symbol::Terminal(10)] },
                 Rule { lhs: 58, rhs: vec![Symbol::Terminal(8)] },
                 Rule { lhs: 59, rhs: vec![Symbol::Nonterminal(58), Symbol::Terminal(1), Symbol::Terminal(17), Symbol::Terminal(7), Symbol::Nonterminal(55)] },
                 Rule { lhs: 60, rhs: vec![Symbol::Nonterminal(59), Symbol::Terminal(1), Symbol::Terminal(19), Symbol::Terminal(7), Symbol::Nonterminal(2)] },
@@ -1368,13 +1370,20 @@ a ::= 'f'"#,
             (0..20).map(|i| tdef(i, &format!("t{i}"))).collect(),
         );
 
-        let parser = build_parser(&gdef);
+        let grammar = AnalyzedGrammar::from_grammar_def(&gdef);
+        let table_no_inline = GLRTable::build_with_unit_reduction_inlining(&grammar, false);
+        let table_inline = GLRTable::build_with_unit_reduction_inlining(&grammar, true);
+        let parser_no_inline = GLRParser::new(table_no_inline);
+        let parser_inline = GLRParser::new(table_inline);
 
+        // Both inputs are in the language of the grammar.
         let fused_input = vec![8, 1, 17, 7, 8, 18, 1, 19, 7, 1, 0, 9];
         let split_input = vec![8, 1, 17, 7, 8, 9, 10, 1, 19, 7, 1, 0, 9];
 
-        assert!(accepts(&parser, &fused_input), "fused path should accept");
-        assert!(accepts(&parser, &split_input), "split path should also accept");
+        assert!(accepts(&parser_no_inline, &fused_input), "no-inline: fused path must accept");
+        assert!(accepts(&parser_no_inline, &split_input), "no-inline: split path must accept");
+        assert!(accepts(&parser_inline, &fused_input), "inline: fused path must accept");
+        assert!(accepts(&parser_inline, &split_input), "inline: split path must accept");
     }
 
     fn tdef(id: u32, name: &str) -> Terminal {

@@ -122,6 +122,13 @@ struct TableRowKey {
 
 impl GLRTable {
     pub fn build(grammar: &AnalyzedGrammar) -> Self {
+        Self::build_with_unit_reduction_inlining(grammar, true)
+    }
+
+    pub(crate) fn build_with_unit_reduction_inlining(
+        grammar: &AnalyzedGrammar,
+        inline_unit_reductions: bool,
+    ) -> Self {
         let t0 = std::time::Instant::now();
         let (item_sets, transitions) = build_lr1_item_sets(grammar);
         let lr1_ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -133,7 +140,9 @@ impl GLRTable {
         let pre_merge_states = table.num_states;
         let t2 = std::time::Instant::now();
         table.merge_identical_rows();
-        table.collapse_sr_unit_reductions_with_compatible_gotos();
+        if inline_unit_reductions {
+            table.collapse_sr_unit_reductions_with_compatible_gotos();
+        }
         table.merge_identical_rows();
         let merge_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
