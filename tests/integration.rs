@@ -2524,49 +2524,33 @@ fn max_parser_paths_for_text(constraint: &Constraint, text: &str) -> usize {
     max_paths.max(state.parser_path_count(1_000_000))
 }
 
+/// MRE for ordered-optional-property ambiguity (the o58906 mechanism).
+///
+/// A closed object with N optional keys and minProperties:1 generates N
+/// top-level ordered-entry alternatives in the grammar — one for each
+/// possible "first present" key. All N alternatives remain simultaneously
+/// live until properties start to disambiguate, so the GLR parser forks
+/// exactly N stacks. One optional key → 1 stack (no fork). Two optional
+/// keys → 2 stacks. And so on, linearly.
 #[test]
-fn test_mre_ordered_optional_object_ambiguity_minimized_and_controllable() {
+fn test_mre_ordered_optional_object_ambiguity() {
     let vocab = make_byte_vocab();
 
-    // Recursively minimize n_keys from a clearly-ambiguous seed until removing
-    // one more key loses ambiguity.
-    let mut n_keys = 6usize;
-    loop {
-        if n_keys <= 1 {
-            break;
-        }
-        let schema_prev = optional_ordered_object_schema(n_keys - 1);
-        let example_prev = ordered_object_example(n_keys - 1);
-        let c_prev = Constraint::from_json_schema(&schema_prev, &vocab).unwrap();
-        let prev_paths = max_parser_paths_for_text(&c_prev, &example_prev);
-        if prev_paths > 1 {
-            n_keys -= 1;
-        } else {
-            break;
-        }
-    }
+    // n=1: single optional key, no ambiguity possible.
+    let c = Constraint::from_json_schema(&optional_ordered_object_schema(1), &vocab).unwrap();
+    assert_eq!(max_parser_paths_for_text(&c, &ordered_object_example(1)), 1,
+        "n=1: no fork expected with a single optional key");
 
-    assert_eq!(n_keys, 2, "minimal ambiguity reproducer should require exactly two optional keys");
+    // n=2: two optional keys → 2 concurrent stacks at peak.
+    let c = Constraint::from_json_schema(&optional_ordered_object_schema(2), &vocab).unwrap();
+    assert_eq!(max_parser_paths_for_text(&c, &ordered_object_example(2)), 2,
+        "n=2: minimal ambiguous case, exactly 2 stacks");
 
-    let schema_min = optional_ordered_object_schema(n_keys);
-    let example_min = ordered_object_example(n_keys);
-    let c_min = Constraint::from_json_schema(&schema_min, &vocab).unwrap();
-    let min_paths = max_parser_paths_for_text(&c_min, &example_min);
-    assert!(min_paths > 1, "minimal case should still be ambiguous");
-
-    // Same mechanism, larger ordered optional-key sets => more concurrent stacks.
-    let mut growth = Vec::new();
-    for n in [2usize, 4, 6, 8] {
-        let schema = optional_ordered_object_schema(n);
-        let example = ordered_object_example(n);
-        let c = Constraint::from_json_schema(&schema, &vocab).unwrap();
-        growth.push((n, max_parser_paths_for_text(&c, &example)));
-    }
-
-    for pair in growth.windows(2) {
-        let (_, left) = pair[0];
-        let (_, right) = pair[1];
-        assert!(right > left, "ambiguity should increase with more optional ordered keys: {growth:?}");
+    // n=3..8: max paths equals n exactly.
+    for n in [3usize, 4, 5, 6, 7, 8] {
+        let c = Constraint::from_json_schema(&optional_ordered_object_schema(n), &vocab).unwrap();
+        assert_eq!(max_parser_paths_for_text(&c, &ordered_object_example(n)), n,
+            "n={n}: expected exactly {n} concurrent stacks");
     }
 }
 
