@@ -3138,15 +3138,80 @@ fn test_grammar_cascading_ambiguity() {
         conflicts.join("\n")
     );
 
-    // ── Feed example input and report max concurrent stacks ────────────────
-    // Input: a , b , c , d , e , f , g , h
-    let input: &[u32] = &[0, 1, 2, 1, 3, 1, 4, 1, 5, 1, 6, 1, 7, 1, 8];
-    let mut state = constraint.start();
-    let mut max_stacks = state.parser_path_count(1_000_000);
-    for &tok in input {
-        state.commit_token(tok).unwrap();
+    // ── Feed inputs and assert each commit succeeds; assert max stacks ≤ 2 ─
+    // Tokens: a=0  ,=1  b=2  c=3  d=4  e=5  f=6  g=7  h=8
+    //
+    // Grammar structure:
+    //   c uses {0 'a', 2 'b'},  d uses {3 'c', 4 'd'}
+    //   e uses {5 'e', 6 'f'},  f uses {7 'g', 8 'h'}
+    //   a = c | d | c,d    b = e | f | e,f    l = a | b | a,b
+    //
+    // All inputs below are valid in the grammar and should (after the bug is
+    // fixed) commit without error and produce ≤ 2 concurrent stacks.
+    // Currently BOTH assertions may fail — that is expected.
+    let test_inputs: &[(&str, &[u32])] = &[
+        // ── single leaf tokens ──────────────────────────────────────────────
+        ("'a'",         &[0]),
+        ("'b'",         &[2]),
+        ("'c'",         &[3]),
+        ("'d'",         &[4]),
+        ("'e'",         &[5]),
+        ("'f'",         &[6]),
+        ("'g'",         &[7]),
+        ("'h'",         &[8]),
+        // ── leaf-level pairs (c/d/e/f with their own comma) ─────────────────
+        ("'a','b'",     &[0, 1, 2]),
+        ("'c','d'",     &[3, 1, 4]),
+        ("'e','f'",     &[5, 1, 6]),
+        ("'g','h'",     &[7, 1, 8]),
+        // ── a-level: c,d (both leaf pairs) ──────────────────────────────────
+        ("(a,b),(c,d)", &[0, 1, 2, 1, 3, 1, 4]),
+        // ── b-level: e,f (both leaf pairs) ──────────────────────────────────
+        ("(e,f),(g,h)", &[5, 1, 6, 1, 7, 1, 8]),
+        // ── l-level: a,b where each side is a leaf pair ──────────────────────
+        ("a,b,c,d , e,f,g,h", &[0, 1, 2, 1, 3, 1, 4, 1, 5, 1, 6, 1, 7, 1, 8]),
+        // ── cross-level: l := a,b with minimal a and b ──────────────────────
+        // a='a' (→c→a), b='e' (→e→b)
+        ("'a' , 'e'",   &[0, 1, 5]),
+        // a='b' (→c→a), b='g' (→f→b)
+        ("'b' , 'g'",   &[2, 1, 7]),
+        // a='c' (→d→a), b='e' (→e→b)
+        ("'c' , 'e'",   &[3, 1, 5]),
+        // a='d' (→d→a), b='f' (→e→b)
+        ("'d' , 'f'",   &[4, 1, 6]),
+        // ── cross-level: a := c,d with minimal c and d ───────────────────────
+        // c='a', d='c'  → a=(c,d)  → l=a
+        ("'a' , 'c'",   &[0, 1, 3]),
+        // c='b', d='d'  → a=(c,d)  → l=a
+        ("'b' , 'd'",   &[2, 1, 4]),
+        // ── mixed lengths ────────────────────────────────────────────────────
+        // a=(a,b pair), b='e'
+        ("(a,b) , 'e'", &[0, 1, 2, 1, 5]),
+        // a=(c,d pair), b=(g,h pair)
+        ("(c,d) , (g,h)", &[3, 1, 4, 1, 7, 1, 8]),
+        // c=(a,b pair), d='c' → a=(c,d)
+        ("(a,b) , 'c'", &[0, 1, 2, 1, 3]),
+        // a='a', b=(e,f pair)
+        ("'a' , (e,f)",  &[0, 1, 5, 1, 6]),
+    ];
+
+    eprintln!();
+    for (label, input) in test_inputs {
+        let mut state = constraint.start();
+        let mut max_stacks = state.parser_path_count(1_000_000);
+        for (pos, &tok) in input.iter().enumerate() {
+            state.commit_token(tok)
+                .unwrap_or_else(|e| panic!(
+                    "input {label:?}: commit failed at pos {pos} (tok {tok}): {e:?}"
+                ));
+            max_stacks = max_stacks.max(state.parser_path_count(1_000_000));
+        }
         max_stacks = max_stacks.max(state.parser_path_count(1_000_000));
+        eprintln!("  {label:30}  max_stacks={max_stacks}");
+
+        assert!(
+            max_stacks <= 2,
+            "input {label:?}: max concurrent stacks was {max_stacks}, expected ≤ 2",
+        );
     }
-    max_stacks = max_stacks.max(state.parser_path_count(1_000_000));
-    eprintln!("max concurrent stacks over input: {max_stacks}");
 }
