@@ -1348,13 +1348,17 @@ a ::= 'f'"#,
 
     #[test]
     fn test_manual_table_mre_abstract_split_path_regression_minimal() {
-        // Minimal abstract failing witness found by recursive reduction.
+        // Minimal self-contained abstract failing witness found by recursive reduction.
         // No schema import, no Constraint, no commit_bytes.
         let gdef = make_grammar(
             vec![
                 Rule { lhs: 1, rhs: vec![Symbol::Terminal(0)] },
                 Rule { lhs: 2, rhs: vec![Symbol::Terminal(1), Symbol::Nonterminal(1)] },
+                Rule { lhs: 22, rhs: vec![] },
+                Rule { lhs: 18, rhs: vec![] },
+                Rule { lhs: 57, rhs: vec![Symbol::Nonterminal(22), Symbol::Terminal(10), Symbol::Nonterminal(18)] },
                 Rule { lhs: 55, rhs: vec![Symbol::Terminal(8), Symbol::Terminal(18)] },
+                Rule { lhs: 55, rhs: vec![Symbol::Terminal(8), Symbol::Nonterminal(57), Symbol::Terminal(18)] },
                 Rule { lhs: 58, rhs: vec![Symbol::Terminal(8)] },
                 Rule { lhs: 59, rhs: vec![Symbol::Nonterminal(58), Symbol::Terminal(1), Symbol::Terminal(17), Symbol::Terminal(7), Symbol::Nonterminal(55)] },
                 Rule { lhs: 60, rhs: vec![Symbol::Nonterminal(59), Symbol::Terminal(1), Symbol::Terminal(19), Symbol::Terminal(7), Symbol::Nonterminal(2)] },
