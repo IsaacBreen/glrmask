@@ -2076,32 +2076,190 @@ item ::= 'd'"#,
     assert!(state.is_finished());
 }
 
-// Minimal non-schema reproduction of the empty-object bridge failure.
-// Required simultaneously: mid-terminal commit_bytes prefix, 3-byte closing terminal,
-// double unit-reduce chain to epsilon, and a non-empty alternative in ap_nc.
-// Removing ANY ONE of these four features makes the test pass.
+// Minimal abstract reproduction of the recognition regression.
+// After consuming the first byte of 'ab', token 'bc' should complete the parse,
+// but unit-reduction inlining rejects it.
 #[test]
-fn test_minimal_repro_double_unit_reduce_mid_terminal() {
-    let vocab = Vocab::new(
-        vec![
-            (0u32, b" {},".to_vec()),
-            (1u32, b" v}".to_vec()),
-        ],
-        None,
-    );
+fn test_minimal_repro_abstract_mid_terminal_nullable_choice() {
+    let vocab = Vocab::new(vec![(0u32, b"bc".to_vec())], None);
     let c = Constraint::from_ebnf(
-        r#"start ::= 'a' ': ' '{' free_nc '}, ' 'v}'
-free_nc ::= ap_nc
-ap_nc ::=
-ap_nc ::= 'd' (', ' 'd')*"#,
+        r#"s ::= 'ab' a 'c'
+a ::=
+a ::= 'f'"#,
         &vocab,
     )
     .unwrap();
 
     let mut s = c.start();
-    s.commit_bytes(b"a:").unwrap();
+    s.commit_bytes(b"a").unwrap();
     s.commit_token(0).unwrap();
+    assert!(s.is_finished());
+}
+
+#[test]
+fn test_minimal_repro_abstract_mid_terminal_nullable_choice_commit_bytes_only() {
+    // Cover every byte that appears in the grammar with at least one vocab entry:
+    // 'a' in token 0, 'b'/'c' in token 1, and 'f' in token 2.
+    let vocab = Vocab::new(
+        vec![
+            (0u32, b"a".to_vec()),
+            (1u32, b"bc".to_vec()),
+            (2u32, b"f".to_vec()),
+        ],
+        None,
+    );
+    let c = Constraint::from_ebnf(
+        r#"s ::= 'ab' a 'c'
+a ::= 'f'?"#,
+        &vocab,
+    )
+    .unwrap();
+
+    let mut s = c.start();
+    s.commit_bytes(b"a").unwrap();
+    s.commit_bytes(b"bc").unwrap();
+    assert!(s.is_finished());
+}
+
+#[test]
+fn test_minimal_repro_abstract_mid_terminal_nullable_choice_commit_token_with_vocab_coverage() {
+    let vocab = Vocab::new(
+        vec![
+            (0u32, b"a".to_vec()),
+            (1u32, b"bc".to_vec()),
+            (2u32, b"f".to_vec()),
+        ],
+        None,
+    );
+    let c = Constraint::from_ebnf(
+        r#"s ::= 'ab' a 'c'
+a ::=
+a ::= 'f'"#,
+        &vocab,
+    )
+    .unwrap();
+
+    let mut s = c.start();
+    s.commit_bytes(b"a").unwrap();
     s.commit_token(1).unwrap();
+    assert!(s.is_finished());
+}
+
+#[test]
+fn test_minimal_repro_abstract_mid_terminal_nullable_choice_commit_bytes_with_vocab_coverage() {
+    let vocab = Vocab::new(
+        vec![
+            (0u32, b"a".to_vec()),
+            (1u32, b"bc".to_vec()),
+            (2u32, b"f".to_vec()),
+        ],
+        None,
+    );
+    let c = Constraint::from_ebnf(
+        r#"s ::= 'ab' a 'c'
+a ::=
+a ::= 'f'"#,
+        &vocab,
+    )
+    .unwrap();
+
+    let mut s = c.start();
+    s.commit_bytes(b"a").unwrap();
+    s.commit_bytes(b"bc").unwrap();
+    assert!(s.is_finished());
+}
+
+#[test]
+fn test_minimal_repro_abstract_mid_terminal_nullable_choice_commit_bytes_min_vocab() {
+    let vocab = Vocab::new(vec![(0u32, b"bc".to_vec())], None);
+    let c = Constraint::from_ebnf(
+        r#"s ::= 'ab' a 'c'
+a ::=
+a ::= 'f'"#,
+        &vocab,
+    )
+    .unwrap();
+
+    let mut s = c.start();
+    s.commit_bytes(b"a").unwrap();
+    s.commit_bytes(b"bc").unwrap();
+    assert!(s.is_finished());
+}
+
+#[test]
+fn test_minimal_repro_abstract_mid_terminal_nullable_choice_optional_syntax_commit_token() {
+    let vocab = Vocab::new(vec![(0u32, b"bc".to_vec())], None);
+    let c = Constraint::from_ebnf(
+        r#"s ::= 'ab' a 'c'
+a ::= 'f'?"#,
+        &vocab,
+    )
+    .unwrap();
+
+    let mut s = c.start();
+    s.commit_bytes(b"a").unwrap();
+    s.commit_token(0).unwrap();
+    assert!(s.is_finished());
+}
+
+#[test]
+fn test_minimal_repro_abstract_debug_rules_explicit_nullable_shape() {
+    let vocab = Vocab::new(vec![(0u32, b"bc".to_vec())], None);
+    let explicit = Constraint::from_ebnf(
+        r#"s ::= 'ab' a 'c'
+a ::=
+a ::= 'f'"#,
+        &vocab,
+    )
+    .unwrap();
+    let optional = Constraint::from_ebnf(
+        r#"s ::= 'ab' a 'c'
+a ::= 'f'?"#,
+        &vocab,
+    )
+    .unwrap();
+
+    let explicit_rules = explicit.debug_rules();
+    let optional_rules = optional.debug_rules();
+    assert!(
+        explicit_rules == optional_rules,
+        "expected explicit nullable syntax and optional syntax to compile to the same normalized rule set after duplicate-rule merging; explicit={explicit_rules:?} optional={optional_rules:?}"
+    );
+}
+
+#[test]
+fn test_minimal_repro_abstract_debug_rules_optional_syntax_shape() {
+    let vocab = Vocab::new(vec![(0u32, b"bc".to_vec())], None);
+    let c = Constraint::from_ebnf(
+        r#"s ::= 'ab' a 'c'
+a ::= 'f'?"#,
+        &vocab,
+    )
+    .unwrap();
+
+    let rules = c.debug_rules();
+    let a_rules: Vec<_> = rules.iter().filter(|(lhs, _, _)| *lhs == 1).collect();
+    assert!(
+        a_rules.iter().all(|(_, len, _)| *len != 0),
+        "expected optional syntax lowering not to keep a direct empty rule on lhs=1; rules={rules:?}"
+    );
+}
+
+#[test]
+#[ignore]
+fn test_minimal_repro_abstract_no_suffix_misfinishes() {
+    let vocab = Vocab::new(vec![(0u32, b"b".to_vec())], None);
+    let c = Constraint::from_ebnf(
+        r#"s ::= 'ab' a
+a ::=
+a ::= 'f'"#,
+        &vocab,
+    )
+    .unwrap();
+
+    let mut s = c.start();
+    s.commit_bytes(b"a").unwrap();
+    s.commit_token(0).unwrap();
     assert!(s.is_finished());
 }
 

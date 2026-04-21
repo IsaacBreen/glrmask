@@ -1176,6 +1176,138 @@ mod tests {
         assert!(!valid.contains(&1)); 
     }
 
+    #[test]
+    fn test_manual_table_repro_nullable_choice_recognition_regression() {
+        let gdef = make_grammar(
+            vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![
+                        Symbol::Terminal(0),
+                        Symbol::Nonterminal(1),
+                        Symbol::Terminal(2),
+                    ],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Terminal(1)],
+                },
+            ],
+            0,
+            vec![tdef(0, "ab"), tdef(1, "f"), tdef(2, "c")],
+        );
+        let parser = build_parser(&gdef);
+
+        assert!(
+            accepts(&parser, &[0, 2]),
+            "manual GLR table should accept 'ab' followed by 'c' when the middle nonterminal is nullable",
+        );
+    }
+
+    #[test]
+    fn test_manual_table_repro_from_ebnf_explicit_nullable_choice_regression() {
+        let parsed = crate::import::ebnf::parse_ebnf(
+            r#"s ::= 'ab' a 'c'
+a ::=
+a ::= 'f'"#,
+        )
+        .unwrap();
+        let prepared = crate::compiler::grammar::transforms::prepare_grammar_transforms_only(parsed);
+
+        let term_id = |bytes: &[u8]| {
+            prepared
+                .terminals
+                .iter()
+                .find_map(|terminal| match terminal {
+                    Terminal::Literal { id, bytes: terminal_bytes } if terminal_bytes == bytes => Some(*id),
+                    _ => None,
+                })
+                .unwrap()
+        };
+
+        let ab = term_id(b"ab");
+        let c = term_id(b"c");
+
+        let grammar = AnalyzedGrammar::from_grammar_def(&prepared);
+        let table = GLRTable::build(&grammar);
+        let parser = GLRParser::new(table);
+
+        assert!(
+            accepts(&parser, &[ab, c]),
+            "parser built from the exact EBNF explicit-nullable form should accept 'ab' then 'c'",
+        );
+    }
+
+    #[test]
+    fn test_manual_table_control_from_ebnf_optional_nullable_choice() {
+        let parsed = crate::import::ebnf::parse_ebnf(
+            r#"s ::= 'ab' a 'c'
+    a ::= 'f'?"#,
+        )
+        .unwrap();
+        let prepared = crate::compiler::grammar::transforms::prepare_grammar_transforms_only(parsed);
+
+        let term_id = |bytes: &[u8]| {
+            prepared
+                .terminals
+                .iter()
+                .find_map(|terminal| match terminal {
+                    Terminal::Literal { id, bytes: terminal_bytes } if terminal_bytes == bytes => Some(*id),
+                    _ => None,
+                })
+                .unwrap()
+        };
+
+        let ab = term_id(b"ab");
+        let c = term_id(b"c");
+
+        let grammar = AnalyzedGrammar::from_grammar_def(&prepared);
+        let table = GLRTable::build(&grammar);
+        let parser = GLRParser::new(table);
+
+        assert!(
+            accepts(&parser, &[ab, c]),
+            "parser built from the optional-syntax form should accept 'ab' then 'c'",
+        );
+    }
+
+    #[test]
+    fn test_manual_table_preprepare_control_from_ebnf_explicit_nullable_choice() {
+        let parsed = crate::import::ebnf::parse_ebnf(
+            r#"s ::= 'ab' a 'c'
+a ::=
+a ::= 'f'"#,
+        )
+        .unwrap();
+
+        let term_id = |bytes: &[u8]| {
+            parsed
+                .terminals
+                .iter()
+                .find_map(|terminal| match terminal {
+                    Terminal::Literal { id, bytes: terminal_bytes } if terminal_bytes == bytes => Some(*id),
+                    _ => None,
+                })
+                .unwrap()
+        };
+
+        let ab = term_id(b"ab");
+        let c = term_id(b"c");
+
+        let grammar = AnalyzedGrammar::from_grammar_def(&parsed);
+        let table = GLRTable::build(&grammar);
+        let parser = GLRParser::new(table);
+
+        assert!(
+            accepts(&parser, &[ab, c]),
+            "parser built from parsed EBNF before prepare transforms should accept 'ab' then 'c'",
+        );
+    }
+
     fn tdef(id: u32, name: &str) -> Terminal {
         Terminal::Literal { id, bytes: name.as_bytes().to_vec() }
     }
