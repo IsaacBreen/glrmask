@@ -30,33 +30,40 @@ fn common_prefix_factor(exprs: &[Expr]) -> Option<(Expr, Vec<Expr>)> {
     Some((prefix, remainders))
 }
 
-fn expr_contains_exclude(expr: &Expr) -> bool {
+fn expr_contains_group_op(expr: &Expr) -> bool {
     match expr {
-        Expr::Exclude { .. } => true,
-        Expr::Seq(parts) | Expr::Choice(parts) => parts.iter().any(expr_contains_exclude),
-        Expr::Repeat { expr, .. } => expr_contains_exclude(expr),
-        Expr::Shared(inner) => expr_contains_exclude(inner),
+        Expr::Exclude { .. } | Expr::Intersect { .. } => true,
+        Expr::Seq(parts) | Expr::Choice(parts) => parts.iter().any(expr_contains_group_op),
+        Expr::Repeat { expr, .. } => expr_contains_group_op(expr),
+        Expr::Shared(inner) => expr_contains_group_op(inner),
         Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Epsilon => false,
     }
 }
 
-fn split_top_level_exclusions(expr: &Expr) -> (Expr, Vec<Expr>) {
+fn split_top_level_group_ops(expr: &Expr) -> (Expr, Vec<Expr>, Vec<Expr>) {
     match expr {
         Expr::Exclude { expr, exclude } => {
-            let (base, mut excluded) = split_top_level_exclusions(expr);
+            let (base, mut excluded, intersections) = split_top_level_group_ops(expr);
             excluded.push((**exclude).clone());
-            (base, excluded)
+            (base, excluded, intersections)
         }
-        Expr::Shared(inner) if matches!(inner.as_ref(), Expr::Exclude { .. }) => {
-            split_top_level_exclusions(inner.as_ref())
+        Expr::Intersect { expr, intersect } => {
+            let (base, excluded, mut intersections) = split_top_level_group_ops(expr);
+            intersections.push((**intersect).clone());
+            (base, excluded, intersections)
         }
-        _ => (expr.clone(), Vec::new()),
+        Expr::Shared(inner)
+            if matches!(inner.as_ref(), Expr::Exclude { .. } | Expr::Intersect { .. }) => {
+            split_top_level_group_ops(inner.as_ref())
+        }
+        _ => (expr.clone(), Vec::new(), Vec::new()),
     }
 }
 
 struct ExclusionCompilePlan {
     compiled_exprs: Vec<Expr>,
     exclusions: BTreeMap<u32, BTreeSet<u32>>,
+    intersections: BTreeMap<u32, BTreeSet<u32>>,
     visible_groups: usize,
 }
 
@@ -64,40 +71,61 @@ fn build_exclusion_compile_plan(exprs: &[Expr]) -> ExclusionCompilePlan {
     let visible_groups = exprs.len();
     let mut compiled_exprs = Vec::with_capacity(visible_groups);
     let mut deferred_exclusions = Vec::<Vec<Expr>>::with_capacity(visible_groups);
+    let mut deferred_intersections = Vec::<Vec<Expr>>::with_capacity(visible_groups);
 
     for expr in exprs {
-        let (base, excluded) = split_top_level_exclusions(expr);
+        let (base, excluded, intersections) = split_top_level_group_ops(expr);
         assert!(
-            !expr_contains_exclude(&base),
-            "Expr::Exclude is currently only supported at the top level of a terminal expression"
+            !expr_contains_group_op(&base),
+            "Expr::Exclude and Expr::Intersect are currently only supported at the top level of a terminal expression"
         );
         for excluded_expr in &excluded {
             assert!(
-                !expr_contains_exclude(excluded_expr),
-                "nested Expr::Exclude inside an exclusion branch is not supported"
+                !expr_contains_group_op(excluded_expr),
+                "nested Expr::Exclude/Expr::Intersect inside an exclusion branch is not supported"
+            );
+        }
+        for intersection_expr in &intersections {
+            assert!(
+                !expr_contains_group_op(intersection_expr),
+                "nested Expr::Exclude/Expr::Intersect inside an intersection branch is not supported"
             );
         }
         compiled_exprs.push(base);
         deferred_exclusions.push(excluded);
+        deferred_intersections.push(intersections);
     }
 
     let mut exclusions = BTreeMap::<u32, BTreeSet<u32>>::new();
+    let mut intersections = BTreeMap::<u32, BTreeSet<u32>>::new();
     let mut next_group = visible_groups as u32;
-    for (group_id, excluded_exprs) in deferred_exclusions.into_iter().enumerate() {
-        if excluded_exprs.is_empty() {
-            continue;
-        }
-        let entry = exclusions.entry(group_id as u32).or_default();
+    for (group_id, (excluded_exprs, intersection_exprs)) in deferred_exclusions
+        .into_iter()
+        .zip(deferred_intersections.into_iter())
+        .enumerate()
+    {
+        let exclusion_entry = exclusions.entry(group_id as u32).or_default();
         for excluded_expr in excluded_exprs {
             compiled_exprs.push(excluded_expr);
-            entry.insert(next_group);
+            exclusion_entry.insert(next_group);
+            next_group += 1;
+        }
+
+        let intersection_entry = intersections.entry(group_id as u32).or_default();
+        for intersection_expr in intersection_exprs {
+            compiled_exprs.push(intersection_expr);
+            intersection_entry.insert(next_group);
             next_group += 1;
         }
     }
 
+    exclusions.retain(|_, v| !v.is_empty());
+    intersections.retain(|_, v| !v.is_empty());
+
     ExclusionCompilePlan {
         compiled_exprs,
         exclusions,
+        intersections,
         visible_groups,
     }
 }
@@ -106,6 +134,9 @@ fn expr_accepts_empty(expr: &Expr) -> bool {
     match expr {
         Expr::U8Seq(bytes) => bytes.is_empty(),
         Expr::U8Class(_) => false,
+        Expr::Intersect { expr, intersect } => {
+            expr_accepts_empty(expr) && expr_accepts_empty(intersect)
+        }
         Expr::Seq(parts) => parts.iter().all(expr_accepts_empty),
         Expr::Choice(options) => options.iter().any(expr_accepts_empty),
         Expr::Exclude { expr, exclude } => expr_accepts_empty(expr) && !expr_accepts_empty(exclude),
@@ -122,6 +153,7 @@ fn expr_u8set(expr: &Expr) -> U8Set {
         Expr::Seq(parts) | Expr::Choice(parts) => parts
             .iter()
             .fold(U8Set::empty(), |acc, part| acc | expr_u8set(part)),
+        Expr::Intersect { expr, intersect } => expr_u8set(expr).intersection(&expr_u8set(intersect)),
         Expr::Exclude { expr, .. } => expr_u8set(expr),
         Expr::Repeat { expr, .. } => expr_u8set(expr),
         Expr::Shared(inner) => expr_u8set(inner),
@@ -781,6 +813,9 @@ fn append_compiled_expr(expr: &Expr, nfa: &mut NFA, start: u32, end: u32) {
         Expr::U8Seq(bytes) => append_byte_sequence_expr(bytes, nfa, start, end),
         Expr::U8Class(set) => {
             nfa.add_u8set_transition(start, *set, end);
+        }
+        Expr::Intersect { .. } => {
+            unreachable!("nested Expr::Intersect must be lowered before NFA compilation")
         }
         Expr::Seq(parts) => append_sequence_expr(parts, nfa, start, end),
         Expr::Choice(options) => append_choice_expr(options, nfa, start, end),
@@ -1509,6 +1544,9 @@ pub fn build_regex_with_profile_label(exprs: &[Expr], _profile_label: &str) -> R
     if !plan.exclusions.is_empty() {
         dfa.apply_group_exclusions(&plan.exclusions);
     }
+    if !plan.intersections.is_empty() {
+        dfa.apply_group_intersections(&plan.intersections);
+    }
 
     let dfa = if plan.visible_groups < plan.compiled_exprs.len() {
         dfa.project_groups(plan.visible_groups)
@@ -1635,7 +1673,7 @@ fn build_regex_nfa_impl(exprs: &[Expr], probe_single_exprs: bool) -> NFA {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automata::regex::{byte, bytes, choice, class, exclude, repeat};
+    use crate::automata::regex::{byte, bytes, choice, class, exclude, intersect, repeat};
 
     fn accepts(regex: &Regex, input: &[u8]) -> bool {
         let mut state = 0;
@@ -1748,5 +1786,26 @@ mod tests {
         assert!(!accepts(&regex, b"a"));
         assert!(!accepts(&regex, b"b"));
         assert!(accepts(&regex, b"c"));
+    }
+
+    #[test]
+    fn test_top_level_intersection_allows_only_common_match() {
+        let regex = build_regex(&[intersect(class(U8Set::from_range(b'a', b'c')), byte(b'b'))]);
+
+        assert!(!accepts(&regex, b"a"));
+        assert!(accepts(&regex, b"b"));
+        assert!(!accepts(&regex, b"c"));
+    }
+
+    #[test]
+    fn test_top_level_intersection_chain_requires_all_members() {
+        let regex = build_regex(&[intersect(
+            intersect(class(U8Set::from_range(0, 255)), class(U8Set::from_range(b'a', b'z'))),
+            byte(b'q'),
+        )]);
+
+        assert!(accepts(&regex, b"q"));
+        assert!(!accepts(&regex, b"a"));
+        assert!(!accepts(&regex, b"Q"));
     }
 }

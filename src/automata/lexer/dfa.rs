@@ -47,6 +47,26 @@ fn excluded_group_indices(
     to_clear
 }
 
+fn intersection_missing_group_indices(
+    finalizers: &BitSet,
+    intersections: &BTreeMap<GroupId, BTreeSet<GroupId>>,
+) -> Vec<usize> {
+    let mut to_clear = Vec::new();
+    for (&group_id, required) in intersections {
+        let group_index = group_id as usize;
+        if !finalizers.contains(group_index) {
+            continue;
+        }
+        if required
+            .iter()
+            .any(|required_id| !finalizers.contains(*required_id as usize))
+        {
+            to_clear.push(group_index);
+        }
+    }
+    to_clear
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DFAState {
     pub transitions: CharTransitions<u32>,
@@ -222,6 +242,22 @@ impl DFA {
             }
 
             for group_index in excluded_group_indices(&state.finalizers, excludes) {
+                if state.finalizers.contains(group_index) {
+                    state.finalizers.clear(group_index);
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    pub(crate) fn apply_group_intersections(
+        &mut self,
+        intersections: &BTreeMap<GroupId, BTreeSet<GroupId>>,
+    ) -> bool {
+        let mut changed = false;
+        for state in &mut self.states {
+            for group_index in intersection_missing_group_indices(&state.finalizers, intersections) {
                 if state.finalizers.contains(group_index) {
                     state.finalizers.clear(group_index);
                     changed = true;

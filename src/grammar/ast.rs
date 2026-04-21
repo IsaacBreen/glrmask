@@ -377,6 +377,13 @@ fn format_terminal_expr(expr: &Expr) -> String {
                 render(exclude, out, false);
                 out.push(')');
             }
+            Expr::Intersect { expr, intersect } => {
+                out.push('(');
+                render(expr, out, false);
+                out.push_str(" & ");
+                render(intersect, out, false);
+                out.push(')');
+            }
             Expr::Repeat { expr, min, max } => {
                 render(expr, out, true);
                 match (*min, *max) {

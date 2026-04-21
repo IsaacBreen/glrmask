@@ -16,6 +16,10 @@ use crate::ds::u8set::U8Set;
 pub enum Expr {
     U8Seq(Vec<u8>),
     U8Class(U8Set),
+    Intersect {
+        expr: Box<Expr>,
+        intersect: Box<Expr>,
+    },
     Seq(Vec<Expr>),
     Choice(Vec<Expr>),
     Exclude {
@@ -55,6 +59,13 @@ pub fn exclude(expr: impl Into<Expr>, excluded: impl Into<Expr>) -> Expr {
     Expr::Exclude {
         expr: Box::new(expr.into()),
         exclude: Box::new(excluded.into()),
+    }
+}
+
+pub fn intersect(expr: impl Into<Expr>, other: impl Into<Expr>) -> Expr {
+    Expr::Intersect {
+        expr: Box::new(expr.into()),
+        intersect: Box::new(other.into()),
     }
 }
 
@@ -171,6 +182,7 @@ impl Expr {
         match self {
             Expr::U8Seq(bytes) => bytes.is_empty(),
             Expr::U8Class(_) => false,
+            Expr::Intersect { expr, intersect } => expr.is_nullable() && intersect.is_nullable(),
             Expr::Seq(parts) => parts.iter().all(Expr::is_nullable),
             Expr::Choice(options) => options.iter().any(Expr::is_nullable),
             Expr::Exclude { expr, exclude } => expr.is_nullable() && !exclude.is_nullable(),
@@ -186,6 +198,10 @@ impl Expr {
             Expr::Choice(options) => {
                 Expr::make_choice(options.into_iter().map(Expr::optimize).collect())
             }
+            Expr::Intersect { expr, intersect } => Expr::Intersect {
+                expr: Box::new(expr.optimize()),
+                intersect: Box::new(intersect.optimize()),
+            },
             Expr::Exclude { expr, exclude } => Expr::Exclude {
                 expr: Box::new(expr.optimize()),
                 exclude: Box::new(exclude.optimize()),
@@ -214,6 +230,7 @@ impl Expr {
                 }
                 None
             }
+            Expr::Intersect { .. } => None,
             Expr::Exclude { .. } => None,
             Expr::Shared(inner) => inner.strip_prefix(prefix),
             _ => None,

@@ -908,6 +908,18 @@ fn regex_byte_length_bounds(expr: &crate::automata::lexer::ast::Expr) -> (usize,
                 (min_total, max_total)
             }
         }
+        Expr::Intersect { expr, intersect } => {
+            let (left_min, left_max) = regex_byte_length_bounds(expr);
+            let (right_min, right_max) = regex_byte_length_bounds(intersect);
+            let min_total = left_min.max(right_min);
+            let max_total = match (left_max, right_max) {
+                (Some(left), Some(right)) => Some(left.min(right)),
+                (Some(left), None) => Some(left),
+                (None, Some(right)) => Some(right),
+                (None, None) => None,
+            };
+            (min_total, max_total)
+        }
         Expr::Exclude { expr, .. } => regex_byte_length_bounds(expr),
         Expr::Repeat { expr, min, max } => {
             let (inner_min, inner_max) = regex_byte_length_bounds(expr);
@@ -5645,15 +5657,16 @@ impl<'a> SchemaCtx<'a> {
                 // keep the length DFA small (avoids explosion from large
                 // maxLength values).
                 let search_regex = string_value_body_regex(&json_search_pattern(&pattern));
-                let search_dfa = build_regex(&[parse_regex(&search_regex, true)]).dfa;
                 let length_inner = match max_len {
                     Some(ml) if ml <= 100 => format!(r#"(?:{}){{{},{}}}"#, JSON_STRING_CHAR_PATTERN, min_len, ml),
                     _ => format!(r#"(?:{}){{{},}}"#, JSON_STRING_CHAR_PATTERN, min_len),
                 };
                 let length_regex = string_value_body_regex(&length_inner);
-                let length_dfa = build_regex(&[parse_regex(&length_regex, true)]).dfa;
-                let intersected = Self::intersect_lexer_dfa(&search_dfa, &length_dfa);
-                let body = self.build_lexer_dfa_expr(&intersected, "JSON_STRING_PATTERN_ANCHORED_BOUNDED");
+                let intersected = LexerExpr::Intersect {
+                    expr: Box::new(parse_regex(&search_regex, true)),
+                    intersect: Box::new(parse_regex(&length_regex, true)),
+                };
+                let body = self.build_lexer_expr(&intersected, "JSON_STRING_PATTERN_ANCHORED_BOUNDED");
                 return Ok(wrap_string_value_terminal(body));
             }
             if min_len > 0 || max_len.is_some() {
@@ -5667,11 +5680,12 @@ impl<'a> SchemaCtx<'a> {
                 if let Some(ml) = max_len {
                     if ml <= MAX_BOUNDED_SEARCH_TAIL {
                         let search_regex = string_value_body_regex(&json_search_pattern(&pattern));
-                        let search_dfa = build_regex(&[parse_regex(&search_regex, true)]).dfa;
                         let length_regex = json_wrapped_string_length_regex(min_len, ml);
-                        let length_dfa = build_regex(&[parse_regex(&length_regex, true)]).dfa;
-                        let intersected = Self::intersect_lexer_dfa(&search_dfa, &length_dfa);
-                        let body = self.build_lexer_dfa_expr(&intersected, "JSON_STRING_PATTERN_BOUNDED");
+                        let intersected = LexerExpr::Intersect {
+                            expr: Box::new(parse_regex(&search_regex, true)),
+                            intersect: Box::new(parse_regex(&length_regex, true)),
+                        };
+                        let body = self.build_lexer_expr(&intersected, "JSON_STRING_PATTERN_BOUNDED");
                         return Ok(wrap_string_value_terminal(body));
                     }
                 }
@@ -5680,12 +5694,13 @@ impl<'a> SchemaCtx<'a> {
                 // DFA explosion).
                 if min_len > 0 {
                     let search_regex = string_value_body_regex(&json_search_pattern(&pattern));
-                    let search_dfa = build_regex(&[parse_regex(&search_regex, true)]).dfa;
                     let length_inner = format!(r#"(?:{}){{{},}}"#, JSON_STRING_CHAR_PATTERN, min_len);
                     let length_regex = string_value_body_regex(&length_inner);
-                    let length_dfa = build_regex(&[parse_regex(&length_regex, true)]).dfa;
-                    let intersected = Self::intersect_lexer_dfa(&search_dfa, &length_dfa);
-                    let body = self.build_lexer_dfa_expr(&intersected, "JSON_STRING_PATTERN_MINLEN");
+                    let intersected = LexerExpr::Intersect {
+                        expr: Box::new(parse_regex(&search_regex, true)),
+                        intersect: Box::new(parse_regex(&length_regex, true)),
+                    };
+                    let body = self.build_lexer_expr(&intersected, "JSON_STRING_PATTERN_MINLEN");
                     return Ok(wrap_string_value_terminal(body));
                 }
                 return Ok(self.extract_wrapped_search_pattern(
@@ -7614,7 +7629,7 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
             for (subset_idx, subset) in subsets.into_iter().enumerate() {
                 // Collect key expressions to exclude via GrammarExpr::Exclude.
                 let subset_members: BTreeSet<usize> = subset.iter().copied().collect();
-                let base_expr = if subset.len() == 1 {
+                let subset_expr = if subset.len() == 1 {
                     pattern_key_colon_exprs[subset[0]].clone()
                 } else {
                     let subset_exprs = subset
@@ -7622,6 +7637,14 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
                         .map(|idx| pattern_key_colon_exprs[*idx].clone())
                         .collect::<Vec<_>>();
                     LexerExpr::Choice(subset_exprs)
+                };
+                let base_expr = if let Some(scoped_base) = base_key_colon_expr.as_ref() {
+                    LexerExpr::Intersect {
+                        expr: Box::new(scoped_base.clone()),
+                        intersect: Box::new(subset_expr),
+                    }
+                } else {
+                    subset_expr
                 };
                 let mut excluded_exprs: Vec<LexerExpr> = Vec::new();
                 if let Some(ref fk_expr) = fixed_key_union_expr {
