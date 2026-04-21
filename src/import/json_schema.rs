@@ -7640,21 +7640,37 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
                     &format!("{base_name}_ap_key"),
                 )?)
             } else if key_dfa_needed {
-                let additional_key_dfa = base_key_colon_dfa
-                    .as_ref()
-                    .expect("additional-properties DFA should exist when needed");
-                let mut excluded_dfas: Vec<&LexerDfa> = Vec::new();
-                if let Some(ref fk_dfa) = additional_fixed_key_union_dfa {
-                    excluded_dfas.push(fk_dfa);
+                if pattern_properties.is_empty() && property_names.is_none() {
+                    // Literal-only AP exclusions are more stable when kept as
+                    // expression trees; the DFA->Expr->Exclude path can lose
+                    // precision for split key-colon terminals.
+                    let key_expr = Self::scoped_key_colon_expr(None)?;
+                    let mut excluded_exprs: Vec<LexerExpr> = Vec::new();
+                    if let Some(expr) = Self::literal_key_colon_union_expr(&additional_excluded_literal_keys) {
+                        excluded_exprs.push(expr);
+                    }
+                    Some(self.build_excluding_key_colon_expr_internal(
+                        key_expr,
+                        excluded_exprs,
+                        &format!("{}_AP_KEY", base_name.to_uppercase()),
+                    ))
+                } else {
+                    let additional_key_dfa = base_key_colon_dfa
+                        .as_ref()
+                        .expect("additional-properties DFA should exist when needed");
+                    let mut excluded_dfas: Vec<&LexerDfa> = Vec::new();
+                    if let Some(ref fk_dfa) = additional_fixed_key_union_dfa {
+                        excluded_dfas.push(fk_dfa);
+                    }
+                    for pattern_dfa in &pattern_key_colon_dfas {
+                        excluded_dfas.push(pattern_dfa);
+                    }
+                    Some(self.build_excluding_key_colon_dfa_expr(
+                        additional_key_dfa,
+                        &excluded_dfas,
+                        &format!("{}_AP_KEY", base_name.to_uppercase()),
+                    ))
                 }
-                for pattern_dfa in &pattern_key_colon_dfas {
-                    excluded_dfas.push(pattern_dfa);
-                }
-                Some(self.build_excluding_key_colon_dfa_expr(
-                    additional_key_dfa,
-                    &excluded_dfas,
-                    &format!("{}_AP_KEY", base_name.to_uppercase()),
-                ))
             } else {
                 Some(self.json_key_colon_ref())
             };
