@@ -1235,7 +1235,7 @@ fn try_inline_unit_reductions_for_cell_inner(
 
         match table.action[reduce_dst as usize].get(&tid).cloned() {
             None => {
-                changed = true;
+                pending.push_reduce(lhs, pop_len);
             }
             Some(inline_action) => {
                 let resolved_inline = match try_inline_unit_reductions_for_cell_inner(
@@ -2676,4 +2676,5 @@ mod tests {
         accept.push_accept();
         assert_eq!(accept.finish(), Action::Accept);
     }
+
 }
