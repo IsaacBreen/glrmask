@@ -1938,6 +1938,202 @@ ap ::= 'd'"#,
     );
 }
 
+// Scaffolding test kept to validate commit_bytes path also fails for the schema.
+#[test]
+#[ignore]
+fn test_schema_commit_bytes_vs_commit_token() {
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "evt": {
+                "type": "object",
+                "properties": {
+                    "addListener": {"type": "string"},
+                    "removeRules": {"type": "string"}
+                }
+            },
+            "next": {"type": "string"}
+        },
+        "required": ["evt", "next"],
+        "additionalProperties": false
+    }"#;
+
+    let token0 = b"{\"evt\":";
+    let token1 = b" {},";
+    let token2 = b" \"next\":\"x\"}";
+
+    // Approach A: commit_bytes for the prefix
+    {
+        let vocab = Vocab::new(
+            vec![(1u32, token1.to_vec()), (2u32, token2.to_vec())],
+            None,
+        );
+        let c = glrmask::Constraint::from_json_schema(schema, &vocab).unwrap();
+        let mut state = c.start();
+        state.commit_bytes(token0).expect("commit_bytes of token0 should succeed");
+        let mask = state.mask();
+        assert!(
+            token_allowed(&mask, 1),
+            "commit_bytes: token1 ' {{}},' should be in mask after prefix bytes"
+        );
+        state.commit_token(1).unwrap();
+        let mask = state.mask();
+        assert!(token_allowed(&mask, 2), "commit_bytes: token2 should be in mask after token1");
+        state.commit_token(2).unwrap();
+        assert!(state.is_finished());
+    }
+
+    // Approach B: commit_token for the prefix (mirrors the failing schema test exactly)
+    {
+        let vocab = Vocab::new(
+            vec![(0u32, token0.to_vec()), (1u32, token1.to_vec()), (2u32, token2.to_vec())],
+            None,
+        );
+        let c = glrmask::Constraint::from_json_schema(schema, &vocab).unwrap();
+        let mut state = c.start();
+        state.commit_token(0).unwrap();
+        let mask = state.mask();
+        assert!(
+            token_allowed(&mask, 1),
+            "commit_token: token1 ' {{}},' should be in mask after committing token0"
+        );
+        state.commit_token(1).unwrap();
+        let mask = state.mask();
+        assert!(token_allowed(&mask, 2), "commit_token: token2 should be in mask after token1");
+        state.commit_token(2).unwrap();
+        assert!(state.is_finished());
+    }
+}
+
+#[test]
+#[ignore]
+fn test_prefix_ending_mid_terminal_repro() {
+    // Grammar where ':' is the last byte of token0 and ' ' (completing ': ') is the first byte
+    // of token1. This mirrors how {"evt": splits inside the ': ' 2-byte terminal.
+    let vocab = Vocab::new(
+        vec![
+            (0u32, b"a:".to_vec()),
+            (1u32, b" {},".to_vec()),  // space completes ': ', then inner object
+            (2u32, b" b".to_vec()),
+            (3u32, b" {d},".to_vec()),
+        ],
+        None,
+    );
+    let constraint = Constraint::from_ebnf(
+        r#"start ::= 'a' ': ' inner ' b'
+inner ::= '{' body '},'
+body ::= ap_list |
+ap_list ::= ap (', ' ap)*
+ap ::= 'd'"#,
+        &vocab,
+    )
+    .unwrap();
+
+    let mut state = constraint.start();
+    // commit_bytes stops mid-terminal (': ' has ':' consumed but not ' ')
+    state.commit_bytes(b"a:").expect("partial prefix should advance");
+    let mask = state.mask();
+    assert!(
+        token_allowed(&mask, 1),
+        "token ' {{}},' should be in mask when prefix ends mid-terminal (inside ': ')"
+    );
+    assert!(
+        token_allowed(&mask, 3),
+        "token ' {{d}},' should be in mask when prefix ends mid-terminal"
+    );
+
+    state.commit_token(1).unwrap();
+    let mask = state.mask();
+    assert!(token_allowed(&mask, 2), "trailing token should be in mask after the bridged empty-object");
+
+    state.commit_token(2).unwrap();
+    assert!(state.is_finished());
+}
+
+#[test]
+#[ignore]
+fn test_token1_ends_mid_3byte_terminal_repro() {
+    let constraint = Constraint::from_ebnf(
+        r#"start ::= 'a' ': ' '{' body '}, ' 'v}'
+body ::= item (', ' item)* |
+item ::= 'd'"#,
+        &Vocab::new(
+            vec![
+                (0u32, b"a:".to_vec()),
+                (1u32, b" {},".to_vec()),
+                (2u32, b" v}".to_vec()),
+                (3u32, b" {d},".to_vec()),
+            ],
+            None,
+        ),
+    )
+    .unwrap();
+
+    let mut state = constraint.start();
+    state.commit_bytes(b"a:").unwrap();
+    state.commit_token(1).unwrap();
+    state.commit_token(2).unwrap();
+    assert!(state.is_finished());
+}
+
+// Minimal non-schema reproduction of the empty-object bridge failure.
+// Required simultaneously: mid-terminal commit_bytes prefix, 3-byte closing terminal,
+// double unit-reduce chain to epsilon, and a non-empty alternative in ap_nc.
+// Removing ANY ONE of these four features makes the test pass.
+#[test]
+fn test_minimal_repro_double_unit_reduce_mid_terminal() {
+    let vocab = Vocab::new(
+        vec![
+            (0u32, b" {},".to_vec()),
+            (1u32, b" v}".to_vec()),
+        ],
+        None,
+    );
+    let c = Constraint::from_ebnf(
+        r#"start ::= 'a' ': ' '{' free_nc '}, ' 'v}'
+free_nc ::= ap_nc
+ap_nc ::=
+ap_nc ::= 'd' (', ' 'd')*"#,
+        &vocab,
+    )
+    .unwrap();
+
+    let mut s = c.start();
+    s.commit_bytes(b"a:").unwrap();
+    s.commit_token(0).unwrap();
+    s.commit_token(1).unwrap();
+    assert!(s.is_finished());
+}
+
+#[test]
+#[ignore]
+fn test_schema_shape_with_unit_alias_and_3byte_close() {
+    let constraint = Constraint::from_ebnf(
+        r#"start ::= 'a' ': ' '{' free_nc '}, ' 'v}'
+free_nc ::= ap_nc
+ap_nc ::= ap ap_c |
+ap_c ::= ap_lr
+ap_lr ::= ap_lr ', ' ap |
+ap ::= 'd'"#,
+        &Vocab::new(
+            vec![
+                (0u32, b"a:".to_vec()),
+                (1u32, b" {},".to_vec()),
+                (2u32, b" v}".to_vec()),
+                (3u32, b" {d},".to_vec()),
+            ],
+            None,
+        ),
+    )
+    .unwrap();
+
+    let mut state = constraint.start();
+    state.commit_bytes(b"a:").unwrap();
+    state.commit_token(1).unwrap();
+    state.commit_token(2).unwrap();
+    assert!(state.is_finished());
+}
+
 #[test]
 fn test_full_json_grammar_exposes_high_id_span_token() {
     let lark = r#"start: ws value ws
