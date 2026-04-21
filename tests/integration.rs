@@ -2526,53 +2526,87 @@ fn max_parser_paths_for_text(constraint: &Constraint, text: &str) -> usize {
 
 /// MRE for ordered-optional-property ambiguity (the o58906 mechanism).
 ///
-/// A closed object with N optional keys and minProperties:1 generates N
-/// top-level ordered-entry alternatives in the grammar — one for each
-/// possible "first present" key. All N alternatives remain simultaneously
-/// live until properties start to disambiguate, so the GLR parser forks
-/// exactly N stacks. One optional key → 1 stack (no fork). Two optional
-/// keys → 2 stacks. And so on, linearly.
+/// A closed object with N optional keys and `minProperties: 1` causes the
+/// compiler to emit N top-level ordered-entry alternatives — one anchored on
+/// each possible "first present" key. All N alternatives remain live until
+/// properties start to disambiguate, so the GLR parser maintains exactly N
+/// concurrent stacks. Max forks = N, controllable by adding/removing keys.
+///
+/// Ceiling: `EXACT_CLOSED_OBJECT_SINGLE_MAX_KEYS = 16`. Above that the
+/// compiler takes a different path and the N-alternative structure is not
+/// generated.
 #[test]
 fn test_mre_ordered_optional_object_ambiguity() {
     let vocab = make_byte_vocab();
 
-    // n=1: single optional key — no fork possible.
-    let c = Constraint::from_json_schema(
-        r#"{"type":"object","properties":{"o":{"type":"object","properties":{"k00":{"type":"integer"}},"additionalProperties":false,"minProperties":1}},"required":["o"],"additionalProperties":false}"#,
-        &vocab,
-    ).unwrap();
-    assert_eq!(max_parser_paths_for_text(&c, r#"{"o": {"k00": 0}}"#), 1,
-        "n=1: no fork with a single optional key");
+    // n=1: no fork — a single optional key has no competing alternative.
+    let c = Constraint::from_json_schema(r#"{
+        "type": "object",
+        "properties": { "o": {
+            "type": "object",
+            "properties": { "k00": {"type": "integer"} },
+            "additionalProperties": false, "minProperties": 1
+        }},
+        "required": ["o"], "additionalProperties": false
+    }"#, &vocab).unwrap();
+    assert_eq!(max_parser_paths_for_text(&c, r#"{"o": {"k00": 0}}"#), 1);
 
     // n=2: minimal ambiguous case — 2 concurrent stacks.
-    let c = Constraint::from_json_schema(
-        r#"{"type":"object","properties":{"o":{"type":"object","properties":{"k00":{"type":"integer"},"k01":{"type":"integer"}},"additionalProperties":false,"minProperties":1}},"required":["o"],"additionalProperties":false}"#,
-        &vocab,
-    ).unwrap();
-    assert_eq!(max_parser_paths_for_text(&c, r#"{"o": {"k00": 0, "k01": 0}}"#), 2,
-        "n=2: exactly 2 stacks");
+    let c = Constraint::from_json_schema(r#"{
+        "type": "object",
+        "properties": { "o": {
+            "type": "object",
+            "properties": {
+                "k00": {"type": "integer"},
+                "k01": {"type": "integer"}
+            },
+            "additionalProperties": false, "minProperties": 1
+        }},
+        "required": ["o"], "additionalProperties": false
+    }"#, &vocab).unwrap();
+    assert_eq!(max_parser_paths_for_text(&c, r#"{"o": {"k00": 0, "k01": 0}}"#), 2);
 
     // n=4
-    let c = Constraint::from_json_schema(
-        r#"{"type":"object","properties":{"o":{"type":"object","properties":{"k00":{"type":"integer"},"k01":{"type":"integer"},"k02":{"type":"integer"},"k03":{"type":"integer"}},"additionalProperties":false,"minProperties":1}},"required":["o"],"additionalProperties":false}"#,
-        &vocab,
-    ).unwrap();
-    assert_eq!(max_parser_paths_for_text(&c, r#"{"o": {"k00": 0, "k01": 0, "k02": 0, "k03": 0}}"#), 4,
-        "n=4: exactly 4 stacks");
+    let c = Constraint::from_json_schema(r#"{
+        "type": "object",
+        "properties": { "o": {
+            "type": "object",
+            "properties": {
+                "k00": {"type": "integer"},
+                "k01": {"type": "integer"},
+                "k02": {"type": "integer"},
+                "k03": {"type": "integer"}
+            },
+            "additionalProperties": false, "minProperties": 1
+        }},
+        "required": ["o"], "additionalProperties": false
+    }"#, &vocab).unwrap();
+    assert_eq!(max_parser_paths_for_text(&c, r#"{"o": {"k00": 0, "k01": 0, "k02": 0, "k03": 0}}"#), 4);
 
-    // n=8
-    let c = Constraint::from_json_schema(
-        r#"{"type":"object","properties":{"o":{"type":"object","properties":{"k00":{"type":"integer"},"k01":{"type":"integer"},"k02":{"type":"integer"},"k03":{"type":"integer"},"k04":{"type":"integer"},"k05":{"type":"integer"},"k06":{"type":"integer"},"k07":{"type":"integer"}},"additionalProperties":false,"minProperties":1}},"required":["o"],"additionalProperties":false}"#,
-        &vocab,
-    ).unwrap();
-    assert_eq!(max_parser_paths_for_text(&c, r#"{"o": {"k00": 0, "k01": 0, "k02": 0, "k03": 0, "k04": 0, "k05": 0, "k06": 0, "k07": 0}}"#), 8,
-        "n=8: exactly 8 stacks");
+    // n=8: each line is one key — you can count them.
+    let c = Constraint::from_json_schema(r#"{
+        "type": "object",
+        "properties": { "o": {
+            "type": "object",
+            "properties": {
+                "k00": {"type": "integer"},
+                "k01": {"type": "integer"},
+                "k02": {"type": "integer"},
+                "k03": {"type": "integer"},
+                "k04": {"type": "integer"},
+                "k05": {"type": "integer"},
+                "k06": {"type": "integer"},
+                "k07": {"type": "integer"}
+            },
+            "additionalProperties": false, "minProperties": 1
+        }},
+        "required": ["o"], "additionalProperties": false
+    }"#, &vocab).unwrap();
+    assert_eq!(max_parser_paths_for_text(&c,
+        r#"{"o": {"k00": 0, "k01": 0, "k02": 0, "k03": 0, "k04": 0, "k05": 0, "k06": 0, "k07": 0}}"#
+    ), 8);
 
-    // n=16: the maximum for this mechanism. The schema compiler uses
-    // try_build_exact_closed_object, which is capped at
-    // EXACT_CLOSED_OBJECT_SINGLE_MAX_KEYS = 16. Above that the compiler
-    // falls back to a different grammar representation and the
-    // ordered-alternative fork does not occur.
+    // n=12, n=16: generated schemas, same assertion.
     for n in [12usize, 16] {
         let c = Constraint::from_json_schema(&optional_ordered_object_schema(n), &vocab).unwrap();
         assert_eq!(max_parser_paths_for_text(&c, &ordered_object_example(n)), n,
