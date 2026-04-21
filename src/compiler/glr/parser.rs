@@ -1347,109 +1347,55 @@ a ::= 'f'"#,
     }
 
     #[test]
-    fn test_manual_table_mre_abstract_extracted_split_path_regression() {
-        // Abstract failing witness, hand-written directly as GrammarDef
-        // (no JSON schema import, no Constraint, no commit_bytes).
-        //
-        // This grammar includes both a fused separator terminal path and a
-        // split separator path. The fused path accepts; the split path is
-        // expected to accept too, but currently fails.
-        let gdef = make_grammar(
-            vec![
-                Rule { lhs: 1, rhs: vec![Symbol::Terminal(0)] },
-                Rule { lhs: 2, rhs: vec![Symbol::Terminal(1), Symbol::Nonterminal(1)] },
-                Rule { lhs: 3, rhs: vec![Symbol::Terminal(2)] },
-                Rule { lhs: 4, rhs: vec![Symbol::Terminal(3)] },
-                Rule { lhs: 7, rhs: vec![Symbol::Terminal(4)] },
-                Rule { lhs: 8, rhs: vec![Symbol::Terminal(5)] },
-                Rule { lhs: 10, rhs: vec![Symbol::Terminal(1), Symbol::Terminal(6), Symbol::Terminal(7)] },
-                Rule { lhs: 11, rhs: vec![Symbol::Nonterminal(10), Symbol::Nonterminal(14)] },
-                Rule { lhs: 12, rhs: vec![Symbol::Terminal(8), Symbol::Terminal(9)] },
-                Rule { lhs: 29, rhs: vec![Symbol::Terminal(10), Symbol::Nonterminal(11)] },
-                Rule { lhs: 28, rhs: vec![Symbol::Nonterminal(29)] },
-                Rule { lhs: 28, rhs: vec![Symbol::Nonterminal(28), Symbol::Nonterminal(29)] },
-                Rule { lhs: 12, rhs: vec![Symbol::Terminal(8), Symbol::Nonterminal(11), Symbol::Terminal(9)] },
-                Rule { lhs: 12, rhs: vec![Symbol::Terminal(8), Symbol::Nonterminal(11), Symbol::Nonterminal(28), Symbol::Terminal(9)] },
-                Rule { lhs: 13, rhs: vec![Symbol::Terminal(11), Symbol::Terminal(12)] },
-                Rule { lhs: 33, rhs: vec![Symbol::Terminal(10), Symbol::Nonterminal(14)] },
-                Rule { lhs: 32, rhs: vec![Symbol::Nonterminal(33)] },
-                Rule { lhs: 32, rhs: vec![Symbol::Nonterminal(32), Symbol::Nonterminal(33)] },
-                Rule { lhs: 13, rhs: vec![Symbol::Terminal(11), Symbol::Nonterminal(14), Symbol::Terminal(12)] },
-                Rule { lhs: 13, rhs: vec![Symbol::Terminal(11), Symbol::Nonterminal(14), Symbol::Nonterminal(32), Symbol::Terminal(12)] },
-                Rule { lhs: 14, rhs: vec![Symbol::Nonterminal(12)] },
-                Rule { lhs: 14, rhs: vec![Symbol::Nonterminal(13)] },
-                Rule { lhs: 14, rhs: vec![Symbol::Nonterminal(2)] },
-                Rule { lhs: 14, rhs: vec![Symbol::Nonterminal(4)] },
-                Rule { lhs: 14, rhs: vec![Symbol::Nonterminal(3)] },
-                Rule { lhs: 14, rhs: vec![Symbol::Nonterminal(7)] },
-                Rule { lhs: 14, rhs: vec![Symbol::Nonterminal(8)] },
-                Rule { lhs: 15, rhs: vec![Symbol::Terminal(13)] },
-                Rule { lhs: 36, rhs: vec![Symbol::Terminal(1), Symbol::Nonterminal(15), Symbol::Terminal(7), Symbol::Nonterminal(14)] },
-                Rule { lhs: 16, rhs: vec![Symbol::Terminal(10), Symbol::Nonterminal(36)] },
-                Rule { lhs: 16, rhs: vec![Symbol::Nonterminal(16), Symbol::Terminal(10), Symbol::Nonterminal(36)] },
-                Rule { lhs: 17, rhs: vec![Symbol::Nonterminal(16)] },
-                Rule { lhs: 18, rhs: vec![Symbol::Nonterminal(36)] },
-                Rule { lhs: 18, rhs: vec![Symbol::Nonterminal(36), Symbol::Nonterminal(17)] },
-                Rule { lhs: 19, rhs: vec![Symbol::Nonterminal(18)] },
-                Rule { lhs: 21, rhs: vec![Symbol::Terminal(1), Symbol::Terminal(14), Symbol::Terminal(7), Symbol::Nonterminal(2)] },
-                Rule { lhs: 22, rhs: vec![Symbol::Terminal(1), Symbol::Terminal(15), Symbol::Terminal(7), Symbol::Nonterminal(2)] },
-                Rule { lhs: 22, rhs: vec![Symbol::Nonterminal(21), Symbol::Terminal(16), Symbol::Nonterminal(2)] },
-                Rule { lhs: 57, rhs: vec![Symbol::Nonterminal(21)] },
-                Rule { lhs: 57, rhs: vec![Symbol::Nonterminal(21), Symbol::Terminal(10), Symbol::Nonterminal(18)] },
-                Rule { lhs: 57, rhs: vec![Symbol::Nonterminal(22)] },
-                Rule { lhs: 57, rhs: vec![Symbol::Nonterminal(22), Symbol::Terminal(10), Symbol::Nonterminal(18)] },
-                Rule { lhs: 57, rhs: vec![Symbol::Nonterminal(36)] },
-                Rule { lhs: 57, rhs: vec![Symbol::Nonterminal(36), Symbol::Nonterminal(17)] },
-                Rule { lhs: 55, rhs: vec![Symbol::Terminal(8), Symbol::Terminal(18)] },
-                Rule { lhs: 55, rhs: vec![Symbol::Terminal(8), Symbol::Nonterminal(57), Symbol::Terminal(18)] },
-                Rule { lhs: 55, rhs: vec![Symbol::Terminal(8), Symbol::Nonterminal(19), Symbol::Terminal(18)] },
-                Rule { lhs: 58, rhs: vec![Symbol::Terminal(8)] },
-                Rule { lhs: 59, rhs: vec![Symbol::Nonterminal(58), Symbol::Terminal(1), Symbol::Terminal(17), Symbol::Terminal(7), Symbol::Nonterminal(55)] },
-                Rule { lhs: 60, rhs: vec![Symbol::Nonterminal(59), Symbol::Terminal(1), Symbol::Terminal(19), Symbol::Terminal(7), Symbol::Nonterminal(2)] },
-                Rule { lhs: 27, rhs: vec![Symbol::Nonterminal(60), Symbol::Terminal(9)] },
-            ],
-            27,
-            vec![
-                tdef(0, "t0"),
-                tdef(1, "t1"),
-                tdef(2, "t2"),
-                tdef(3, "t3"),
-                tdef(4, "t4"),
-                tdef(5, "t5"),
-                tdef(6, "t6"),
-                tdef(7, "t7"),
-                tdef(8, "t8"),
-                tdef(9, "t9"),
-                tdef(10, "t10"),
-                tdef(11, "t11"),
-                tdef(12, "t12"),
-                tdef(13, "t13"),
-                tdef(14, "t14"),
-                tdef(15, "t15"),
-                tdef(16, "t16"),
-                tdef(17, "t17"),
-                tdef(18, "t18"),
-                tdef(19, "t19"),
-            ],
-        );
+    fn test_manual_table_mre_json_schema_split_separator_regression() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "evt": {
+                    "type": "object",
+                    "properties": {
+                        "addListener": {"type": "string"},
+                        "removeRules": {"type": "string"}
+                    }
+                },
+                "next": {"type": "string"}
+            },
+            "required": ["evt", "next"],
+            "additionalProperties": false
+        }"#;
 
-        let parser = build_parser(&gdef);
+        let gdef = crate::import::json_schema::json_schema_to_grammar(schema).unwrap();
+        let prepared = crate::compiler::grammar::transforms::prepare_grammar_transforms_only(gdef);
 
-        // Fused path (analogous to a single fused separator terminal)
-        let fused_input = vec![8, 1, 17, 7, 8, 18, 1, 19, 7, 1, 0, 9];
+        let term = |bytes: &[u8]| {
+            prepared
+                .terminals
+                .iter()
+                .find_map(|t| match t {
+                    Terminal::Literal { id, bytes: b } if b == bytes => Some(*id),
+                    _ => None,
+                })
+                .unwrap()
+        };
 
-        // Split path (analogous to separate close + separator terminals)
-        let split_input = vec![8, 1, 17, 7, 8, 9, 10, 1, 19, 7, 1, 0, 9];
+        let string_tail = prepared
+            .terminals
+            .iter()
+            .find_map(|t| match t {
+                Terminal::Expr { id, .. } => Some(*id),
+                _ => None,
+            })
+            .unwrap();
 
-        assert!(
-            accepts(&parser, &fused_input),
-            "embedded abstract grammar should accept fused path",
-        );
+        let fused_input = vec![term(b"{"), term(b"\""), term(b"evt\""), term(b": "), term(b"{"), term(b"}, "), term(b"\""), term(b"next\""), term(b": "), term(b"\""), string_tail, term(b"}")];
+        let split_input = vec![term(b"{"), term(b"\""), term(b"evt\""), term(b": "), term(b"{"), term(b"}"), term(b", "), term(b"\""), term(b"next\""), term(b": "), term(b"\""), string_tail, term(b"}")];
 
-        assert!(
-            accepts(&parser, &split_input),
-            "embedded abstract grammar should accept split path too",
-        );
+        let grammar = AnalyzedGrammar::from_grammar_def(&prepared);
+        let table = GLRTable::build(&grammar);
+        let parser = GLRParser::new(table);
+
+        assert!(accepts(&parser, &fused_input), "fused path should accept");
+        assert!(accepts(&parser, &split_input), "split path should also accept");
     }
 
     fn tdef(id: u32, name: &str) -> Terminal {
