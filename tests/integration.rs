@@ -2475,6 +2475,101 @@ fn test_minimal_python_example_with_compiled_grammar() {
     assert!(!token_allowed(&mask, 10), "plus should not be allowed immediately after the second plus");
 }
 
+fn make_byte_vocab() -> Vocab {
+    let entries: Vec<(u32, Vec<u8>)> = (0u32..=255).map(|b| (b, vec![b as u8])).collect();
+    Vocab::new(entries, None)
+}
+
+fn optional_ordered_object_schema(n_keys: usize) -> String {
+    let mut props = String::new();
+    for i in 0..n_keys {
+        if i > 0 {
+            props.push_str(", ");
+        }
+        let key = format!("k{i:02}");
+        props.push_str(&format!("\"{key}\": {{\"type\": \"integer\"}}"));
+    }
+
+    format!(
+        "{{\"type\":\"object\",\"properties\":{{\"o\":{{\"type\":\"object\",\"properties\":{{{props}}},\"additionalProperties\":false,\"minProperties\":1}}}},\"required\":[\"o\"],\"additionalProperties\":false}}"
+    )
+}
+
+fn ordered_object_example(n_keys: usize) -> String {
+    let mut kvs = String::new();
+    for i in 0..n_keys {
+        if i > 0 {
+            kvs.push_str(", ");
+        }
+        let key = format!("k{i:02}");
+        kvs.push_str(&format!("\"{key}\": 0"));
+    }
+    format!("{{\"o\": {{{kvs}}}}}")
+}
+
+fn max_parser_paths_for_text(constraint: &Constraint, text: &str) -> usize {
+    let mut state = constraint.start();
+    let mut max_paths = state.parser_path_count(1_000_000);
+
+    for &byte in text.as_bytes() {
+        let mask = state.mask();
+        assert!(
+            token_allowed(&mask, byte as usize),
+            "byte token {byte} must be allowed while replaying example text"
+        );
+        max_paths = max_paths.max(state.parser_path_count(1_000_000));
+        state.commit_token(byte as u32).unwrap();
+    }
+
+    max_paths.max(state.parser_path_count(1_000_000))
+}
+
+#[test]
+fn test_mre_ordered_optional_object_ambiguity_minimized_and_controllable() {
+    let vocab = make_byte_vocab();
+
+    // Recursively minimize n_keys from a clearly-ambiguous seed until removing
+    // one more key loses ambiguity.
+    let mut n_keys = 6usize;
+    loop {
+        if n_keys <= 1 {
+            break;
+        }
+        let schema_prev = optional_ordered_object_schema(n_keys - 1);
+        let example_prev = ordered_object_example(n_keys - 1);
+        let c_prev = Constraint::from_json_schema(&schema_prev, &vocab).unwrap();
+        let prev_paths = max_parser_paths_for_text(&c_prev, &example_prev);
+        if prev_paths > 1 {
+            n_keys -= 1;
+        } else {
+            break;
+        }
+    }
+
+    assert_eq!(n_keys, 2, "minimal ambiguity reproducer should require exactly two optional keys");
+
+    let schema_min = optional_ordered_object_schema(n_keys);
+    let example_min = ordered_object_example(n_keys);
+    let c_min = Constraint::from_json_schema(&schema_min, &vocab).unwrap();
+    let min_paths = max_parser_paths_for_text(&c_min, &example_min);
+    assert!(min_paths > 1, "minimal case should still be ambiguous");
+
+    // Same mechanism, larger ordered optional-key sets => more concurrent stacks.
+    let mut growth = Vec::new();
+    for n in [2usize, 4, 6, 8] {
+        let schema = optional_ordered_object_schema(n);
+        let example = ordered_object_example(n);
+        let c = Constraint::from_json_schema(&schema, &vocab).unwrap();
+        growth.push((n, max_parser_paths_for_text(&c, &example)));
+    }
+
+    for pair in growth.windows(2) {
+        let (_, left) = pair[0];
+        let (_, right) = pair[1];
+        assert!(right > left, "ambiguity should increase with more optional ordered keys: {growth:?}");
+    }
+}
+
 /// Minimal o56012 repro: fast and reference vocab equivalence must agree.
 #[test]
 fn test_reference_equivalence_matches_fast_analysis_for_o56012_repro() {
