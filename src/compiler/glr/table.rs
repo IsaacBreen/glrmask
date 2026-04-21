@@ -133,6 +133,8 @@ impl GLRTable {
         let pre_merge_states = table.num_states;
         let t2 = std::time::Instant::now();
         table.merge_identical_rows();
+        table.collapse_sr_unit_reductions_with_compatible_gotos();
+        table.merge_identical_rows();
         let merge_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
         let pre_recog_states = table.num_states;
@@ -248,6 +250,86 @@ impl GLRTable {
                 .map(|&(state, terminal)| (mapping[state as usize], terminal))
                 .collect();
             self.num_states = kept.len() as u32;
+        }
+    }
+
+    /// Collapse select SR splits of the form `Shift / Reduce(A -> x)` where
+    /// the reduce is unit-length and stack-shape-compatible.
+    ///
+    /// Safety guard: only collapse when every predecessor can perform the
+    /// reduce goto and each corresponding reduce destination has the same goto
+    /// row as the split state. This avoids changing stack-shape-visible goto
+    /// behavior when inlining the unit reduction.
+    fn collapse_sr_unit_reductions_with_compatible_gotos(&mut self) {
+        loop {
+            let nstates = self.num_states as usize;
+            let mut predecessors: Vec<BTreeSet<u32>> = vec![BTreeSet::new(); nstates];
+
+            for src in 0..nstates {
+                for action in self.action[src].values() {
+                    if let Some(dst) = action.shift_target() {
+                        predecessors[dst as usize].insert(src as u32);
+                    }
+                }
+                for &(dst, _) in self.goto[src].values() {
+                    predecessors[dst as usize].insert(src as u32);
+                }
+            }
+
+            let mut changed = false;
+            for state in 0..nstates {
+                let tids: Vec<TerminalID> = self.action[state].keys().copied().collect();
+                for tid in tids {
+                    let Some(action) = self.action[state].get(&tid).cloned() else {
+                        continue;
+                    };
+
+                    let Action::Split {
+                        shift: Some((shift_target, shift_replace)),
+                        reduces,
+                        accept,
+                    } = action
+                    else {
+                        continue;
+                    };
+
+                    if accept || reduces.len() != 1 {
+                        continue;
+                    }
+
+                    let (lhs, pop_len) = reduces[0];
+                    if pop_len != 1 {
+                        continue;
+                    }
+
+                    let preds = &predecessors[state];
+                    if preds.is_empty() {
+                        continue;
+                    }
+
+                    let mut all_compatible = true;
+                    for &pred in preds {
+                        let Some(&(reduce_dst, _)) = self.goto[pred as usize].get(&lhs) else {
+                            all_compatible = false;
+                            break;
+                        };
+                        if self.goto[reduce_dst as usize] != self.goto[state] {
+                            all_compatible = false;
+                            break;
+                        }
+                    }
+                    if !all_compatible {
+                        continue;
+                    }
+
+                    self.action[state].insert(tid, Action::Shift(shift_target, shift_replace));
+                    changed = true;
+                }
+            }
+
+            if !changed {
+                break;
+            }
         }
     }
 
