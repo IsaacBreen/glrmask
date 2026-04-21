@@ -1767,6 +1767,8 @@ fn key_colon_literal_body_bytes(text: &str) -> Vec<u8> {
 }
 
 /// Build the colon-space suffix expression for keys.
+/// Accepts both compact (`":"`) and spaced (`": "`) JSON, since JSON allows
+/// optional whitespace after the colon in key-value pairs.
 fn key_colon_suffix_expr() -> GrammarExpr {
     if split_colon_from_space() {
         sequence_or_single(vec![literal_expr(b":"), literal_expr(b" ")])
@@ -4138,7 +4140,7 @@ impl<'a> SchemaCtx<'a> {
                     let Some(value_expr) = key_exprs.get(key).cloned() else {
                         return Ok(None);
                     };
-                    let kv_expr = self.build_merged_literal_key_value_expr(b"", key, value_expr);
+                    let kv_expr = self.build_fused_merged_literal_key_value_expr(b"", key, value_expr);
                     alts.push(sequence_or_single(vec![
                         kv_expr,
                         GrammarExpr::Ref(after_rule_names[*next_idx].clone()),
@@ -4198,7 +4200,7 @@ impl<'a> SchemaCtx<'a> {
                 let Some(value_expr) = key_exprs.get(key).cloned() else {
                     return Ok(None);
                 };
-                let kv_expr = self.build_merged_literal_key_value_expr(b"", key, value_expr);
+                let kv_expr = self.build_fused_merged_literal_key_value_expr(b"", key, value_expr);
                 if Self::ordered_subset_close_allowed(mode, &variants, &states[*next_idx]) {
                     alts.push(kv_expr.clone());
                 }
@@ -6118,9 +6120,13 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
     }
 
     fn fused_json_key_colon_literal(&self, text: &str) -> GrammarExpr {
-        let mut bytes = json_string_literal_bytes(text);
-        bytes.extend_from_slice(b": ");
-        literal_expr(&bytes)
+        let mut no_space = json_string_literal_bytes(text);
+        no_space.push(b':');
+
+        let mut with_space = no_space.clone();
+        with_space.push(b' ');
+
+        choice_or_single(vec![literal_expr(&no_space), literal_expr(&with_space)])
     }
 
     fn build_merged_literal_key_value_expr(
@@ -6198,7 +6204,7 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
             merged.extend_from_slice(leading_literal);
             merged.extend_from_slice(first);
             *first = merged;
-        } else {
+        } else if !leading_literal.is_empty() {
             parts.insert(0, literal_expr(leading_literal));
         }
 
@@ -6290,8 +6296,20 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         &self,
         ordered: &[(String, GrammarExpr, bool)],
     ) -> GrammarExpr {
+        // Use fused key literals so compact JSON (no space after colon) is accepted
+        // alongside spaced JSON. The fused form is Choice([key":], [key": ]).
+        let mut parts = vec![literal_expr(b"{")];
+        for (index, (key, value_expr, _)) in ordered.iter().enumerate() {
+            let leading: &[u8] = if index == 0 { b"" } else { JSON_ITEM_SEPARATOR };
+            parts.push(self.build_fused_merged_literal_key_value_expr(
+                leading,
+                key,
+                value_expr.clone(),
+            ));
+        }
+        parts.push(literal_expr(b"}"));
         maybe_fuse_finite_literal_expr(
-            self.build_required_ordered_object_body_expr(ordered, Some(b"}")),
+            sequence_or_single(parts),
             &format!("closed_required_ordered_object:items={}", ordered.len()),
         )
     }
