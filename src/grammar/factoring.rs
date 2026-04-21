@@ -75,14 +75,30 @@ struct ChoiceFactorer {
 
 impl ChoiceFactorer {
     fn new(rules: Vec<NamedRule>, terminals: &HashSet<String>) -> Self {
-        let ordered_rules: Vec<(String, bool)> = rules
-            .iter()
-            .map(|r| (r.name.clone(), r.is_terminal))
-            .collect();
-        let rules_by_name: HashMap<String, GrammarExpr> = rules
-            .into_iter()
-            .map(|r| (r.name, r.expr))
-            .collect();
+        let mut ordered_rules: Vec<(String, bool)> = Vec::new();
+        let mut seen_names = HashSet::<String>::new();
+        let mut rules_by_name: HashMap<String, GrammarExpr> = HashMap::new();
+
+        for rule in rules {
+            if seen_names.insert(rule.name.clone()) {
+                ordered_rules.push((rule.name.clone(), rule.is_terminal));
+            }
+
+            rules_by_name
+                .entry(rule.name)
+                .and_modify(|existing| {
+                    let merged = match existing.clone() {
+                        GrammarExpr::Choice(mut options) => {
+                            options.push(rule.expr.clone());
+                            GrammarExpr::Choice(options)
+                        }
+                        previous => GrammarExpr::Choice(vec![previous, rule.expr.clone()]),
+                    };
+                    *existing = merged;
+                })
+                .or_insert(rule.expr);
+        }
+
         let recursive_rules = Self::find_recursive_rules(&rules_by_name);
 
         Self {
@@ -516,6 +532,29 @@ mod tests {
             &helper_rule.expr,
             GrammarExpr::Choice(options) if options == &vec![lit(b"a"), lit(b"b")]
         ));
+    }
+
+    #[test]
+    fn test_factor_named_grammar_merges_repeated_rule_definitions_into_choice() {
+        let factored = factor_grammar_rules(
+            vec![
+                nt("start", GrammarExpr::Ref("a".to_string())),
+                nt("a", GrammarExpr::Sequence(vec![])),
+                nt("a", lit(b"f")),
+            ],
+            &terminals(&[]),
+        );
+
+        let a_rule = factored
+            .iter()
+            .find(|r| r.name == "a")
+            .expect("merged rule 'a' should exist");
+        assert!(matches!(
+            &a_rule.expr,
+            GrammarExpr::Choice(options)
+                if options == &vec![GrammarExpr::Sequence(vec![]), lit(b"f")]
+        ));
+        assert_eq!(factored.iter().filter(|r| r.name == "a").count(), 1);
     }
 
     #[test]
