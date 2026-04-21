@@ -1347,52 +1347,27 @@ a ::= 'f'"#,
     }
 
     #[test]
-    fn test_manual_table_mre_json_schema_split_separator_regression() {
-        let schema = r#"{
-            "type": "object",
-            "properties": {
-                "evt": {
-                    "type": "object",
-                    "properties": {
-                        "addListener": {"type": "string"},
-                        "removeRules": {"type": "string"}
-                    }
-                },
-                "next": {"type": "string"}
-            },
-            "required": ["evt", "next"],
-            "additionalProperties": false
-        }"#;
+    fn test_manual_table_mre_abstract_split_path_regression_minimal() {
+        // Minimal abstract failing witness found by recursive reduction.
+        // No schema import, no Constraint, no commit_bytes.
+        let gdef = make_grammar(
+            vec![
+                Rule { lhs: 1, rhs: vec![Symbol::Terminal(0)] },
+                Rule { lhs: 2, rhs: vec![Symbol::Terminal(1), Symbol::Nonterminal(1)] },
+                Rule { lhs: 55, rhs: vec![Symbol::Terminal(8), Symbol::Terminal(18)] },
+                Rule { lhs: 58, rhs: vec![Symbol::Terminal(8)] },
+                Rule { lhs: 59, rhs: vec![Symbol::Nonterminal(58), Symbol::Terminal(1), Symbol::Terminal(17), Symbol::Terminal(7), Symbol::Nonterminal(55)] },
+                Rule { lhs: 60, rhs: vec![Symbol::Nonterminal(59), Symbol::Terminal(1), Symbol::Terminal(19), Symbol::Terminal(7), Symbol::Nonterminal(2)] },
+                Rule { lhs: 27, rhs: vec![Symbol::Nonterminal(60), Symbol::Terminal(9)] },
+            ],
+            27,
+            (0..20).map(|i| tdef(i, &format!("t{i}"))).collect(),
+        );
 
-        let gdef = crate::import::json_schema::json_schema_to_grammar(schema).unwrap();
-        let prepared = crate::compiler::grammar::transforms::prepare_grammar_transforms_only(gdef);
+        let parser = build_parser(&gdef);
 
-        let term = |bytes: &[u8]| {
-            prepared
-                .terminals
-                .iter()
-                .find_map(|t| match t {
-                    Terminal::Literal { id, bytes: b } if b == bytes => Some(*id),
-                    _ => None,
-                })
-                .unwrap()
-        };
-
-        let string_tail = prepared
-            .terminals
-            .iter()
-            .find_map(|t| match t {
-                Terminal::Expr { id, .. } => Some(*id),
-                _ => None,
-            })
-            .unwrap();
-
-        let fused_input = vec![term(b"{"), term(b"\""), term(b"evt\""), term(b": "), term(b"{"), term(b"}, "), term(b"\""), term(b"next\""), term(b": "), term(b"\""), string_tail, term(b"}")];
-        let split_input = vec![term(b"{"), term(b"\""), term(b"evt\""), term(b": "), term(b"{"), term(b"}"), term(b", "), term(b"\""), term(b"next\""), term(b": "), term(b"\""), string_tail, term(b"}")];
-
-        let grammar = AnalyzedGrammar::from_grammar_def(&prepared);
-        let table = GLRTable::build(&grammar);
-        let parser = GLRParser::new(table);
+        let fused_input = vec![8, 1, 17, 7, 8, 18, 1, 19, 7, 1, 0, 9];
+        let split_input = vec![8, 1, 17, 7, 8, 9, 10, 1, 19, 7, 1, 0, 9];
 
         assert!(accepts(&parser, &fused_input), "fused path should accept");
         assert!(accepts(&parser, &split_input), "split path should also accept");
