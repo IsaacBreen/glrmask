@@ -1126,13 +1126,21 @@ pub struct PerAdvanceEntry {
     pub terminal_id: u32,
     pub tokenizer_state: u32,
     pub gss_stacks_before: Vec<Vec<u32>>,
-    pub gss_summary_upperbranch: usize,
-    pub gss_summary_interface: usize,
-    pub gss_summary_lower: usize,
-    pub gss_summary_lower_general: usize,
-    pub gss_summary_lower_segment: usize,
-    pub gss_summary_edges: usize,
-    pub gss_summary_depth: u32,
+    pub gss_stacks_after: Vec<Vec<u32>>,
+    pub gss_summary_upperbranch_before: usize,
+    pub gss_summary_interface_before: usize,
+    pub gss_summary_lower_before: usize,
+    pub gss_summary_lower_general_before: usize,
+    pub gss_summary_lower_segment_before: usize,
+    pub gss_summary_edges_before: usize,
+    pub gss_summary_depth_before: u32,
+    pub gss_summary_upperbranch_after: usize,
+    pub gss_summary_interface_after: usize,
+    pub gss_summary_lower_after: usize,
+    pub gss_summary_lower_general_after: usize,
+    pub gss_summary_lower_segment_after: usize,
+    pub gss_summary_edges_after: usize,
+    pub gss_summary_depth_after: u32,
     /// Start byte offset (inclusive) within the committed token bytes.
     pub match_start: usize,
     /// End byte offset (exclusive) within the committed token bytes.
@@ -1219,36 +1227,49 @@ fn commit_bytes_per_advance(
                     continue;
                 }
 
-                // Capture GSS stacks and summary before advance
+                // Capture GSS stacks and summary before advance.
                 let gss_stacks_before: Vec<Vec<u32>> = gss_at_offset.to_stacks()
                     .into_iter().map(|(s, _)| s).collect();
-                let gss_summary = gss_at_offset.summary();
+                let gss_summary_before = gss_at_offset.summary();
 
                 let (advanced, sub_profile) = advance_stacks_profiled(
                     &constraint.table, &gss_at_offset, matched.id,
                 );
 
+                let advanced = apply_future_terminal_disallow(
+                    constraint, &exec_result, matched.id, advanced,
+                );
+
+                // Capture GSS stacks and summary after advance/disallow.
+                let gss_stacks_after: Vec<Vec<u32>> = advanced.to_stacks()
+                    .into_iter().map(|(s, _)| s).collect();
+                let gss_summary_after = advanced.summary();
+
                 advances.push(PerAdvanceEntry {
                     terminal_id: matched.id,
                     tokenizer_state,
                     gss_stacks_before,
-                    gss_summary_upperbranch: gss_summary.upperbranch_nodes,
-                    gss_summary_interface: gss_summary.interface_nodes,
-                    gss_summary_lower: gss_summary.lower_nodes,
-                    gss_summary_lower_general: gss_summary.lower_general_nodes,
-                    gss_summary_lower_segment: gss_summary.lower_segment_nodes,
-                    gss_summary_edges: gss_summary.total_edges,
-                    gss_summary_depth: gss_summary.max_depth,
+                    gss_stacks_after,
+                    gss_summary_upperbranch_before: gss_summary_before.upperbranch_nodes,
+                    gss_summary_interface_before: gss_summary_before.interface_nodes,
+                    gss_summary_lower_before: gss_summary_before.lower_nodes,
+                    gss_summary_lower_general_before: gss_summary_before.lower_general_nodes,
+                    gss_summary_lower_segment_before: gss_summary_before.lower_segment_nodes,
+                    gss_summary_edges_before: gss_summary_before.total_edges,
+                    gss_summary_depth_before: gss_summary_before.max_depth,
+                    gss_summary_upperbranch_after: gss_summary_after.upperbranch_nodes,
+                    gss_summary_interface_after: gss_summary_after.interface_nodes,
+                    gss_summary_lower_after: gss_summary_after.lower_nodes,
+                    gss_summary_lower_general_after: gss_summary_after.lower_general_nodes,
+                    gss_summary_lower_segment_after: gss_summary_after.lower_segment_nodes,
+                    gss_summary_edges_after: gss_summary_after.total_edges,
+                    gss_summary_depth_after: gss_summary_after.max_depth,
                     match_start: offset,
                     match_end: new_offset,
                     token_bound: bytes.len(),
                     match_bytes: bytes[offset..new_offset].to_vec(),
                     profile: sub_profile,
                 });
-
-                let advanced = apply_future_terminal_disallow(
-                    constraint, &exec_result, matched.id, advanced,
-                );
 
                 if advanced.is_empty() {
                     continue;

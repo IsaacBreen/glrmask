@@ -371,13 +371,24 @@ impl PyConstraintState {
             d.set_item("terminal_id", entry.terminal_id)?;
             d.set_item("tokenizer_state", entry.tokenizer_state)?;
             d.set_item("gss_stacks_before", entry.gss_stacks_before)?;
-            d.set_item("gss_upperbranch_nodes", entry.gss_summary_upperbranch)?;
-            d.set_item("gss_interface_nodes", entry.gss_summary_interface)?;
-            d.set_item("gss_lower_nodes", entry.gss_summary_lower)?;
-            d.set_item("gss_lower_general_nodes", entry.gss_summary_lower_general)?;
-            d.set_item("gss_lower_segment_nodes", entry.gss_summary_lower_segment)?;
-            d.set_item("gss_total_edges", entry.gss_summary_edges)?;
-            d.set_item("gss_max_depth", entry.gss_summary_depth)?;
+            d.set_item("gss_stacks_after", entry.gss_stacks_after)?;
+
+            d.set_item("gss_before_upperbranch_nodes", entry.gss_summary_upperbranch_before)?;
+            d.set_item("gss_before_interface_nodes", entry.gss_summary_interface_before)?;
+            d.set_item("gss_before_lower_nodes", entry.gss_summary_lower_before)?;
+            d.set_item("gss_before_lower_general_nodes", entry.gss_summary_lower_general_before)?;
+            d.set_item("gss_before_lower_segment_nodes", entry.gss_summary_lower_segment_before)?;
+            d.set_item("gss_before_total_edges", entry.gss_summary_edges_before)?;
+            d.set_item("gss_before_max_depth", entry.gss_summary_depth_before)?;
+
+            // Backward-compatible key names now intentionally refer to AFTER state.
+            d.set_item("gss_upperbranch_nodes", entry.gss_summary_upperbranch_after)?;
+            d.set_item("gss_interface_nodes", entry.gss_summary_interface_after)?;
+            d.set_item("gss_lower_nodes", entry.gss_summary_lower_after)?;
+            d.set_item("gss_lower_general_nodes", entry.gss_summary_lower_general_after)?;
+            d.set_item("gss_lower_segment_nodes", entry.gss_summary_lower_segment_after)?;
+            d.set_item("gss_total_edges", entry.gss_summary_edges_after)?;
+            d.set_item("gss_max_depth", entry.gss_summary_depth_after)?;
             d.set_item("match_start", entry.match_start)?;
             d.set_item("match_end", entry.match_end)?;
             d.set_item("token_bound", entry.token_bound)?;
