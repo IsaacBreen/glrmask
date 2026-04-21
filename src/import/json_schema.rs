@@ -2106,6 +2106,18 @@ fn json_wrapped_fullmatch_pattern(pattern: &str) -> GrammarExpr {
     wrap_string_value_regex(&inner)
 }
 
+fn format_terminal_rule_prefix(format_name: &str) -> String {
+    let mut out = String::from("JSON_FORMAT_");
+    for ch in format_name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_uppercase());
+        } else {
+            out.push('_');
+        }
+    }
+    out
+}
+
 fn json_wrapped_key_colon_pattern(pattern: &str) -> GrammarExpr {
     let inner = json_search_pattern(pattern);
     wrap_key_colon_regex(&inner)
@@ -5572,7 +5584,10 @@ impl<'a> SchemaCtx<'a> {
                 if min_len > 0 || max_len.is_some() {
                     return Ok(self.build_bounded_string_from_unit_regex(&unit_pattern, min_len, max_len));
                 }
-                return Ok(json_wrapped_fullmatch_pattern(&format!("{}+", unit_pattern)));
+                return Ok(self.extract_wrapped_fullmatch_pattern(
+                    &format!("{}+", unit_pattern),
+                    "JSON_STRING_PATTERN_FULLMATCH",
+                ));
             }
             // Fixed-length unanchored pattern optimization:
             // When an unanchored pattern has a fixed byte length *and* the string's
@@ -5587,7 +5602,10 @@ impl<'a> SchemaCtx<'a> {
                     let pat_len = pat_min_bytes;
                     if min_len == pat_len && max_len == Some(pat_len)
                     {
-                        return Ok(json_wrapped_fullmatch_pattern(&pattern));
+                        return Ok(self.extract_wrapped_fullmatch_pattern(
+                            &pattern,
+                            "JSON_STRING_PATTERN_FULLMATCH",
+                        ));
                     }
                 }
             }
@@ -5600,7 +5618,10 @@ impl<'a> SchemaCtx<'a> {
                 // enforce minLength (e.g. pattern ^(.*)$ can match "").
                 let pattern_min = pattern_min_char_count(&pattern).unwrap_or(0);
                 if pattern_min >= min_len {
-                    return Ok(json_wrapped_pattern(&pattern));
+                    return Ok(self.extract_wrapped_search_pattern(
+                        &pattern,
+                        "JSON_STRING_PATTERN_SEARCH",
+                    ));
                 }
                 // Pattern can produce strings shorter than minLength.
                 // Intersect with a minimum-length regex.  Use {min,} to
@@ -5650,9 +5671,15 @@ impl<'a> SchemaCtx<'a> {
                     let body = self.build_lexer_dfa_expr(&intersected, "JSON_STRING_PATTERN_MINLEN");
                     return Ok(wrap_string_value_terminal(body));
                 }
-                return Ok(json_wrapped_pattern(&pattern));
+                return Ok(self.extract_wrapped_search_pattern(
+                    &pattern,
+                    "JSON_STRING_PATTERN_SEARCH",
+                ));
             } else {
-                return Ok(json_wrapped_pattern(&pattern));
+                return Ok(self.extract_wrapped_search_pattern(
+                    &pattern,
+                    "JSON_STRING_PATTERN_SEARCH",
+                ));
             }
         }
 
@@ -5780,10 +5807,27 @@ impl<'a> SchemaCtx<'a> {
             "uri" if use_structured_uri() => {
                 Ok(self.build_structured_uri_expr())
             }
-            _ => json_format_pattern(format_name)
-                .map(json_wrapped_fullmatch_pattern)
-                .ok_or_else(|| GlrMaskError::GrammarParse(format!("Unknown format: {format_name}"))),
+            _ => {
+                let pattern = json_format_pattern(format_name)
+                    .ok_or_else(|| GlrMaskError::GrammarParse(format!("Unknown format: {format_name}")))?;
+                let prefix = format_terminal_rule_prefix(format_name);
+                Ok(self.extract_wrapped_fullmatch_pattern(pattern, &prefix))
+            }
         }
+    }
+
+    fn extract_wrapped_search_pattern(&mut self, pattern: &str, prefix: &str) -> GrammarExpr {
+        let inner = json_search_pattern(pattern);
+        self.extract_wrapped_string_regex(&inner, prefix)
+    }
+
+    fn extract_wrapped_fullmatch_pattern(&mut self, pattern: &str, prefix: &str) -> GrammarExpr {
+        let inner = jsonify_regex_dot(pattern);
+        self.extract_wrapped_string_regex(&inner, prefix)
+    }
+
+    fn extract_wrapped_string_regex(&mut self, inner_regex: &str, prefix: &str) -> GrammarExpr {
+        self.extract_terminal_rule(wrap_string_value_regex(inner_regex), prefix)
     }
 
 fn build_structured_uri_expr(&mut self) -> GrammarExpr {
