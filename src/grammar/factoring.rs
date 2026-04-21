@@ -24,6 +24,9 @@ fn contains_regex_features(expr: &GrammarExpr) -> bool {
         GrammarExpr::Exclude { expr, exclude } => {
             contains_regex_features(expr) || contains_regex_features(exclude)
         }
+        GrammarExpr::Intersect { expr, intersect } => {
+            contains_regex_features(expr) || contains_regex_features(intersect)
+        }
         GrammarExpr::Optional(inner)
         | GrammarExpr::Repeat(inner)
         | GrammarExpr::RepeatOne(inner)
@@ -241,6 +244,10 @@ impl ChoiceFactorer {
                 Self::collect_refs_impl(expr, refs);
                 Self::collect_refs_impl(exclude, refs);
             }
+            GrammarExpr::Intersect { expr, intersect } => {
+                Self::collect_refs_impl(expr, refs);
+                Self::collect_refs_impl(intersect, refs);
+            }
             GrammarExpr::Optional(expr)
             | GrammarExpr::Repeat(expr)
             | GrammarExpr::RepeatOne(expr)
@@ -377,6 +384,10 @@ impl ChoiceFactorer {
             GrammarExpr::Exclude { expr, exclude } => {
                 Self::collect_refs_static(expr, refs);
                 Self::collect_refs_static(exclude, refs);
+            }
+            GrammarExpr::Intersect { expr, intersect } => {
+                Self::collect_refs_static(expr, refs);
+                Self::collect_refs_static(intersect, refs);
             }
             GrammarExpr::Optional(expr)
             | GrammarExpr::Repeat(expr)

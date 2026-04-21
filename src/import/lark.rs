@@ -586,6 +586,26 @@ fn expand_lark_expr(
                 visiting,
             )?,
         },
+        GrammarExpr::Intersect { expr, intersect } => GrammarExpr::Intersect {
+            expr: expand_lark_boxed_expr(
+                expr,
+                in_terminal_rule,
+                rule_map,
+                terminal_names,
+                parser_names,
+                memo,
+                visiting,
+            )?,
+            intersect: expand_lark_boxed_expr(
+                intersect,
+                in_terminal_rule,
+                rule_map,
+                terminal_names,
+                parser_names,
+                memo,
+                visiting,
+            )?,
+        },
         GrammarExpr::Optional(inner) => GrammarExpr::Optional(expand_lark_boxed_expr(
             inner,
             in_terminal_rule,

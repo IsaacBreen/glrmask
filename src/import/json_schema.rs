@@ -545,6 +545,7 @@ fn finite_literal_alternatives(
         GrammarExpr::Ref(_)
         | GrammarExpr::TerminalExpr(_)
         | GrammarExpr::Exclude { .. }
+        | GrammarExpr::Intersect { .. }
         | GrammarExpr::Repeat(_)
         | GrammarExpr::RepeatOne(_)
         | GrammarExpr::RepeatRange { .. }
@@ -8151,6 +8152,10 @@ fn collect_grammar_visible_refs(
             GrammarExpr::Exclude { expr, exclude } => {
                 walk(expr, terminal_names, out);
                 walk(exclude, terminal_names, out);
+            }
+            GrammarExpr::Intersect { expr, intersect } => {
+                walk(expr, terminal_names, out);
+                walk(intersect, terminal_names, out);
             }
             GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }

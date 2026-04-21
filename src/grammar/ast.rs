@@ -19,6 +19,10 @@ pub enum GrammarExpr {
         expr: Box<GrammarExpr>,
         exclude: Box<GrammarExpr>,
     },
+    Intersect {
+        expr: Box<GrammarExpr>,
+        intersect: Box<GrammarExpr>,
+    },
     Optional(Box<GrammarExpr>),
     Repeat(Box<GrammarExpr>),
     RepeatOne(Box<GrammarExpr>),
@@ -251,6 +255,13 @@ fn grammar_expr_to_lark_with_indent(
             grammar_expr_to_lark_with_indent(inner, out, false, indent);
             write!(out, " \\ ").unwrap();
             grammar_expr_to_lark_with_indent(exclude, out, false, indent);
+            write!(out, ")*/").unwrap();
+        }
+        GrammarExpr::Intersect { expr: inner, intersect } => {
+            write!(out, "/*Intersect(").unwrap();
+            grammar_expr_to_lark_with_indent(inner, out, false, indent);
+            write!(out, " & ").unwrap();
+            grammar_expr_to_lark_with_indent(intersect, out, false, indent);
             write!(out, ")*/").unwrap();
         }
         GrammarExpr::CharClass { def, negate, utf8 } => {
@@ -930,6 +941,12 @@ impl Lowerer {
                         .into(),
                 ));
             }
+            GrammarExpr::Intersect { .. } => {
+                return Err(GlrMaskError::GrammarParse(
+                    "GrammarExpr::Intersect must be extracted into a terminal rule before lowering"
+                        .into(),
+                ));
+            }
             GrammarExpr::AnyByte => {
                 Symbol::Terminal(self.terminal_id(".", ".", false))
             }
@@ -1065,6 +1082,10 @@ fn grammar_expr_to_expr(
         GrammarExpr::Exclude { expr, exclude } => Expr::Exclude {
             expr: Box::new(grammar_expr_to_expr(expr, terminal_bodies, terminal_expr_cache, visiting)?),
             exclude: Box::new(grammar_expr_to_expr(exclude, terminal_bodies, terminal_expr_cache, visiting)?),
+        },
+        GrammarExpr::Intersect { expr, intersect } => Expr::Intersect {
+            expr: Box::new(grammar_expr_to_expr(expr, terminal_bodies, terminal_expr_cache, visiting)?),
+            intersect: Box::new(grammar_expr_to_expr(intersect, terminal_bodies, terminal_expr_cache, visiting)?),
         },
         GrammarExpr::Optional(inner) => Expr::Repeat {
             expr: Box::new(grammar_expr_to_expr(inner, terminal_bodies, terminal_expr_cache, visiting)?),
