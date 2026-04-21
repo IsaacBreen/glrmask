@@ -6672,9 +6672,76 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         self.extract_terminal_rule(GrammarExpr::TerminalExpr(expr.clone()), prefix)
     }
 
+    fn dfa_to_expr(dfa: &LexerDfa) -> LexerExpr {
+        let n = dfa.num_states();
+        let final_idx = n;
+        let size = n + 1;
+        let mut r: Vec<Vec<Option<LexerExpr>>> = vec![vec![None; size]; size];
+
+        for (state_id, state) in dfa.states().iter().enumerate() {
+            let mut by_target: HashMap<usize, crate::ds::u8set::U8Set> = HashMap::new();
+            for (byte, &target) in state.transitions.iter() {
+                by_target
+                    .entry(target as usize)
+                    .or_insert_with(crate::ds::u8set::U8Set::empty)
+                    .insert(byte);
+            }
+            for (target, set) in by_target {
+                Self::add_option_expr(&mut r[state_id][target], LexerExpr::U8Class(set));
+            }
+            if !state.finalizers.is_empty() {
+                Self::add_option_expr(&mut r[state_id][final_idx], LexerExpr::Epsilon);
+            }
+        }
+
+        for k in (1..n).rev() {
+            let kk_star: Option<LexerExpr> = r[k][k].take().map(|loop_expr| LexerExpr::Repeat {
+                expr: Box::new(loop_expr),
+                min: 0,
+                max: None,
+            });
+
+            let sources: Vec<(usize, LexerExpr)> = (0..size)
+                .filter(|&i| i != k)
+                .filter_map(|i| r[i][k].take().map(|e| (i, e)))
+                .collect();
+
+            let targets: Vec<(usize, Option<LexerExpr>)> = (0..size)
+                .filter(|&j| j != k)
+                .map(|j| (j, r[k][j].clone()))
+                .collect();
+
+            for (i, ik_expr) in sources {
+                for (j, kj_opt) in &targets {
+                    let kj_expr = match kj_opt {
+                        Some(e) => e.clone(),
+                        None => continue,
+                    };
+                    let bridge = match &kk_star {
+                        Some(star) => LexerExpr::make_seq(vec![ik_expr.clone(), star.clone(), kj_expr]),
+                        None => LexerExpr::make_seq(vec![ik_expr.clone(), kj_expr]),
+                    };
+                    Self::add_option_expr(&mut r[i][*j], bridge);
+                }
+            }
+        }
+
+        r[0][final_idx]
+            .take()
+            .unwrap_or_else(|| LexerExpr::Choice(vec![]))
+    }
+
+    fn add_option_expr(slot: &mut Option<LexerExpr>, new_expr: LexerExpr) {
+        match slot {
+            None => *slot = Some(new_expr),
+            Some(existing) => {
+                *existing = LexerExpr::make_choice(vec![existing.clone(), new_expr]);
+            }
+        }
+    }
+
     fn build_lexer_dfa_expr(&mut self, dfa: &LexerDfa, prefix: &str) -> GrammarExpr {
-        use crate::automata::lexer::compile::dfa_to_lexer_expr;
-        let expr = dfa_to_lexer_expr(dfa);
+        let expr = Self::dfa_to_expr(dfa);
         self.build_lexer_expr(&expr, prefix)
     }
 
