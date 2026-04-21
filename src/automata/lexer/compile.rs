@@ -831,23 +831,15 @@ pub fn build_regex(exprs: &[Expr]) -> Regex {
 /// Convert a compiled DFA to an equivalent [`Expr`] tree using state elimination
 /// (Arden's lemma). The resulting expression accepts exactly the same language
 /// as the DFA.
-///
-/// This is used to convert computed DFAs back into `Expr` trees so that we can
-/// avoid storing DFAs directly in the expression enum.
 pub fn dfa_to_lexer_expr(dfa: &DFA) -> Expr {
     use std::collections::HashMap;
 
     let n = dfa.num_states();
-    // Index `n` is the synthetic "accepting" sink state.
     let final_idx = n;
     let size = n + 1;
-
-    // `r[i][j]` = the regex language of direct transitions from state i to state j,
-    // expressed as an `Option<Expr>` (None = dead / no transition).
     let mut r: Vec<Vec<Option<Expr>>> = vec![vec![None; size]; size];
 
     for (state_id, state) in dfa.states().iter().enumerate() {
-        // Group transitions by target state, building a U8Set per target.
         let mut by_target: HashMap<usize, U8Set> = HashMap::new();
         for (byte, &target) in state.transitions.iter() {
             by_target
@@ -858,28 +850,23 @@ pub fn dfa_to_lexer_expr(dfa: &DFA) -> Expr {
         for (target, set) in by_target {
             add_option_expr(&mut r[state_id][target], Expr::U8Class(set));
         }
-        // ε-transition to the final sink for each accepting state.
         if !state.finalizers.is_empty() {
             add_option_expr(&mut r[state_id][final_idx], Expr::Epsilon);
         }
     }
 
-    // Eliminate states 1..n-1 (keep state 0 as start and `final_idx` as sink).
     for k in (1..n).rev() {
-        // Self-loop: apply Kleene star via Arden's lemma.
         let kk_star: Option<Expr> = r[k][k].take().map(|loop_expr| Expr::Repeat {
             expr: Box::new(loop_expr),
             min: 0,
             max: None,
         });
 
-        // Collect all (source, expr) pairs leading INTO k.
         let sources: Vec<(usize, Expr)> = (0..size)
             .filter(|&i| i != k)
             .filter_map(|i| r[i][k].take().map(|e| (i, e)))
             .collect();
 
-        // Snapshot all (target, expr) pairs leading OUT OF k.
         let targets: Vec<(usize, Option<Expr>)> = (0..size)
             .filter(|&j| j != k)
             .map(|j| (j, r[k][j].clone()))
@@ -892,9 +879,7 @@ pub fn dfa_to_lexer_expr(dfa: &DFA) -> Expr {
                     None => continue,
                 };
                 let bridge = match &kk_star {
-                    Some(star) => {
-                        Expr::make_seq(vec![ik_expr.clone(), star.clone(), kj_expr])
-                    }
+                    Some(star) => Expr::make_seq(vec![ik_expr.clone(), star.clone(), kj_expr]),
                     None => Expr::make_seq(vec![ik_expr.clone(), kj_expr]),
                 };
                 add_option_expr(&mut r[i][*j], bridge);

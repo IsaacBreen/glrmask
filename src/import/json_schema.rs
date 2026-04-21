@@ -6670,13 +6670,13 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         self.extract_terminal_rule(GrammarExpr::TerminalExpr(expr.clone()), prefix)
     }
 
-    /// Convert a DFA to an expression and wrap it in a terminal rule.
     fn build_lexer_dfa_expr(&mut self, dfa: &LexerDfa, prefix: &str) -> GrammarExpr {
         use crate::automata::lexer::compile::dfa_to_lexer_expr;
         let expr = dfa_to_lexer_expr(dfa);
         self.build_lexer_expr(&expr, prefix)
     }
 
+    /// Convert a DFA to an expression and wrap it in a terminal rule.
     /// Build a grammar expression for a key-colon expression, wrapping it with
     /// the split-off literal parts (opening quote, close quote, colon-space).
     fn build_key_colon_expr(&mut self, expr: &LexerExpr, prefix: &str) -> GrammarExpr {
@@ -6706,35 +6706,6 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         };
         let body_terminal = self.extract_terminal_rule(body, prefix);
         wrap_key_colon_terminal(body_terminal)
-    }
-
-    /// Build a grammar expression for a key-colon DFA, wrapping it with
-    /// the split-off literal parts (opening quote, close quote, colon-space)
-    /// just like `wrap_key_colon_regex` does for regex-based keys.
-    fn build_key_colon_dfa_expr(&mut self, dfa: &LexerDfa, prefix: &str) -> GrammarExpr {
-        self.build_excluding_key_colon_dfa_expr(dfa, &[], prefix)
-    }
-
-    /// Build a key-colon terminal from a base DFA, excluding any keys matched
-    /// by the `excluded` DFAs. Converts the DFAs to expressions before using them.
-    fn build_excluding_key_colon_dfa_expr(
-        &mut self,
-        base_dfa: &LexerDfa,
-        excluded_dfas: &[&LexerDfa],
-        prefix: &str,
-    ) -> GrammarExpr {
-        use crate::automata::lexer::compile::dfa_to_lexer_expr;
-        if !Self::dfa_accepts_any(base_dfa) {
-            return never_expr();
-        }
-        let base_expr = dfa_to_lexer_expr(base_dfa);
-        let mut excluded_exprs = Vec::new();
-        for excl_dfa in excluded_dfas {
-            if Self::dfa_accepts_any(excl_dfa) {
-                excluded_exprs.push(dfa_to_lexer_expr(excl_dfa));
-            }
-        }
-        self.build_excluding_key_colon_expr_internal(base_expr, excluded_exprs, prefix)
     }
 
     fn build_excluding_key_colon_expr(
@@ -7541,18 +7512,18 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         };
         self.generated_object_rule_counter = base_index + 1;
 
-        let key_dfa_needed = !pattern_properties.is_empty()
+        let key_expr_needed = !pattern_properties.is_empty()
             || property_names.is_some()
             || !additional_excluded_literal_keys.is_empty();
-        let (base_key_colon_dfa, fixed_key_union_dfa, additional_fixed_key_union_dfa, pattern_key_colon_dfas) =
-            if key_dfa_needed {
+        let (base_key_colon_expr, fixed_key_union_expr, additional_fixed_key_union_expr, pattern_key_colon_exprs) =
+            if key_expr_needed {
                 (
-                    Some(Self::scoped_key_colon_dfa(property_names)?),
-                    Self::literal_key_colon_union_dfa(&fixed_literal_keys),
-                    Self::literal_key_colon_union_dfa(&additional_excluded_literal_keys),
+                    Some(Self::scoped_key_colon_expr(property_names)?),
+                    Self::literal_key_colon_union_expr(&fixed_literal_keys),
+                    Self::literal_key_colon_union_expr(&additional_excluded_literal_keys),
                     pattern_properties
                         .iter()
-                        .map(|(pattern, _)| Self::pattern_key_colon_dfa(pattern))
+                        .map(|(pattern, _)| Self::pattern_key_colon_expr(pattern))
                         .collect::<Vec<_>>(),
                 )
             } else {
@@ -7572,35 +7543,30 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
             );
 
             for (subset_idx, subset) in subsets.into_iter().enumerate() {
-                let mut key_dfa = base_key_colon_dfa
-                    .as_ref()
-                    .expect("pattern/property-name DFA should exist when needed")
-                    .clone();
-                for pattern_idx in &subset {
-                    key_dfa = Self::intersect_lexer_dfa(&key_dfa, &pattern_key_colon_dfas[*pattern_idx]);
-                    if !Self::dfa_accepts_any(&key_dfa) {
-                        break;
-                    }
-                }
-                if !Self::dfa_accepts_any(&key_dfa) {
-                    continue;
-                }
-
-                // Collect DFAs to exclude via GrammarExpr::Exclude
+                // Collect key expressions to exclude via GrammarExpr::Exclude.
                 let subset_members: BTreeSet<usize> = subset.iter().copied().collect();
-                let mut excluded_dfas: Vec<&LexerDfa> = Vec::new();
-                if let Some(ref fk_dfa) = fixed_key_union_dfa {
-                    excluded_dfas.push(fk_dfa);
+                let base_expr = if subset.len() == 1 {
+                    pattern_key_colon_exprs[subset[0]].clone()
+                } else {
+                    let subset_exprs = subset
+                        .iter()
+                        .map(|idx| pattern_key_colon_exprs[*idx].clone())
+                        .collect::<Vec<_>>();
+                    LexerExpr::Choice(subset_exprs)
+                };
+                let mut excluded_exprs: Vec<LexerExpr> = Vec::new();
+                if let Some(ref fk_expr) = fixed_key_union_expr {
+                    excluded_exprs.push(fk_expr.clone());
                 }
-                for (pattern_idx, pattern_dfa) in pattern_key_colon_dfas.iter().enumerate() {
+                for (pattern_idx, pattern_expr) in pattern_key_colon_exprs.iter().enumerate() {
                     if !subset_members.contains(&pattern_idx) {
-                        excluded_dfas.push(pattern_dfa);
+                        excluded_exprs.push(pattern_expr.clone());
                     }
                 }
 
-                let key_expr = self.build_excluding_key_colon_dfa_expr(
-                    &key_dfa,
-                    &excluded_dfas,
+                let key_expr = self.build_excluding_key_colon_expr_internal(
+                    base_expr,
+                    excluded_exprs,
                     &format!("{}_PP_SUBSET_{}_KEY", base_name.to_uppercase(), subset_idx),
                 );
 
@@ -7626,9 +7592,9 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
             let additional_key_expr = if ap_key_any_string() {
                 // Skip key exclusion — AP keys accept any JSON string.
                 // Each object still gets its own uniquely-named terminal to preserve grammar structure.
-                let full_key_dfa = Self::scoped_key_colon_dfa(property_names)?;
-                Some(self.build_key_colon_dfa_expr(
-                    &full_key_dfa,
+                let full_key_expr = Self::scoped_key_colon_expr(property_names)?;
+                Some(self.build_key_colon_expr(
+                    &full_key_expr,
                     &format!("{}_AP_KEY", base_name.to_uppercase()),
                 ))
             } else if shared_ap_key_exclusions_enabled()
@@ -7639,7 +7605,7 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
                     &additional_excluded_literal_keys,
                     &format!("{base_name}_ap_key"),
                 )?)
-            } else if key_dfa_needed {
+            } else if key_expr_needed {
                 if pattern_properties.is_empty() && property_names.is_none() {
                     // Literal-only AP exclusions are more stable when kept as
                     // expression trees; the DFA->Expr->Exclude path can lose
@@ -7655,19 +7621,19 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
                         &format!("{}_AP_KEY", base_name.to_uppercase()),
                     ))
                 } else {
-                    let additional_key_dfa = base_key_colon_dfa
+                    let additional_key_expr = base_key_colon_expr
                         .as_ref()
-                        .expect("additional-properties DFA should exist when needed");
-                    let mut excluded_dfas: Vec<&LexerDfa> = Vec::new();
-                    if let Some(ref fk_dfa) = additional_fixed_key_union_dfa {
-                        excluded_dfas.push(fk_dfa);
+                        .expect("additional-properties key expression should exist when needed");
+                    let mut excluded_exprs: Vec<LexerExpr> = Vec::new();
+                    if let Some(ref fk_expr) = additional_fixed_key_union_expr {
+                        excluded_exprs.push(fk_expr.clone());
                     }
-                    for pattern_dfa in &pattern_key_colon_dfas {
-                        excluded_dfas.push(pattern_dfa);
+                    for pattern_expr in &pattern_key_colon_exprs {
+                        excluded_exprs.push(pattern_expr.clone());
                     }
-                    Some(self.build_excluding_key_colon_dfa_expr(
-                        additional_key_dfa,
-                        &excluded_dfas,
+                    Some(self.build_excluding_key_colon_expr_internal(
+                        additional_key_expr.clone(),
+                        excluded_exprs,
                         &format!("{}_AP_KEY", base_name.to_uppercase()),
                     ))
                 }
