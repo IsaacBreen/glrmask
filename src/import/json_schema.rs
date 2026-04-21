@@ -5,11 +5,13 @@ use serde_json::{Map, Value};
 use crate::GlrMaskError;
 use crate::automata::lexer::ast::Expr as LexerExpr;
 use crate::automata::lexer::compile::build_regex;
-use crate::automata::lexer::dfa::DFA as LexerDfa;
+use crate::automata::lexer::dfa;
 use crate::automata::lexer::regex::parse_regex;
 use crate::grammar::flat::GrammarDef;
 use crate::ds::bitset::BitSet;
 use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, lower, promote_large_literal_alts};
+
+type LexerDfa = dfa::DFA;
 
 // WARNING: Do NOT break terminals containing repeats of multi-char subexpressions
 // into grammar-level repeats of single characters. Doing so creates terminals of
