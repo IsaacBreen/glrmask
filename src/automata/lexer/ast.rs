@@ -12,13 +12,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::ds::u8set::U8Set;
 
-use super::dfa::DFA;
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Expr {
     U8Seq(Vec<u8>),
     U8Class(U8Set),
-    Dfa(DFA),
     Seq(Vec<Expr>),
     Choice(Vec<Expr>),
     Exclude {
@@ -174,7 +171,6 @@ impl Expr {
         match self {
             Expr::U8Seq(bytes) => bytes.is_empty(),
             Expr::U8Class(_) => false,
-            Expr::Dfa(dfa) => !dfa.finalizers(0).is_empty(),
             Expr::Seq(parts) => parts.iter().all(Expr::is_nullable),
             Expr::Choice(options) => options.iter().any(Expr::is_nullable),
             Expr::Exclude { expr, exclude } => expr.is_nullable() && !exclude.is_nullable(),
@@ -190,7 +186,6 @@ impl Expr {
             Expr::Choice(options) => {
                 Expr::make_choice(options.into_iter().map(Expr::optimize).collect())
             }
-            Expr::Dfa(dfa) => Expr::Dfa(dfa),
             Expr::Exclude { expr, exclude } => Expr::Exclude {
                 expr: Box::new(expr.optimize()),
                 exclude: Box::new(exclude.optimize()),
@@ -219,7 +214,6 @@ impl Expr {
                 }
                 None
             }
-            Expr::Dfa(_) => None,
             Expr::Exclude { .. } => None,
             Expr::Shared(inner) => inner.strip_prefix(prefix),
             _ => None,

@@ -876,7 +876,6 @@ fn regex_byte_length_bounds(expr: &crate::automata::lexer::ast::Expr) -> (usize,
     match expr {
         Expr::U8Seq(bytes) => (bytes.len(), Some(bytes.len())),
         Expr::U8Class(_) => (1, Some(1)),
-        Expr::Dfa(_) => (0, None),
         Expr::Seq(parts) => {
             let mut min_total = 0usize;
             let mut max_total = Some(0usize);
@@ -6457,6 +6456,17 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         Ok(regex.dfa.finalizers(state).contains(0))
     }
 
+    fn scoped_key_colon_expr(property_names: Option<&Value>) -> Result<LexerExpr, GlrMaskError> {
+        let pattern = if let Some(property_names) = property_names {
+            key_colon_body_regex(
+                &json_search_pattern(Self::property_name_pattern(property_names)?),
+            )
+        } else {
+            key_colon_body_regex(JSON_STRING_BODY_ONLY_REGEX)
+        };
+        Ok(parse_regex(&pattern, true))
+    }
+
     fn scoped_key_colon_dfa(property_names: Option<&Value>) -> Result<LexerDfa, GlrMaskError> {
         let pattern = if let Some(property_names) = property_names {
             key_colon_body_regex(
@@ -6468,10 +6478,31 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         Ok(build_regex(&[parse_regex(&pattern, true)]).dfa)
     }
 
+    fn pattern_key_colon_expr(pattern: &str) -> LexerExpr {
+        let inner = json_search_pattern(pattern);
+        let pat = key_colon_body_regex(&inner);
+        parse_regex(&pat, true)
+    }
+
     fn pattern_key_colon_dfa(pattern: &str) -> LexerDfa {
         let inner = json_search_pattern(pattern);
         let pat = key_colon_body_regex(&inner);
         build_regex(&[parse_regex(&pat, true)]).dfa
+    }
+
+    fn literal_key_colon_union_expr(keys: &BTreeSet<String>) -> Option<LexerExpr> {
+        if keys.is_empty() {
+            return None;
+        }
+        let exprs = keys
+            .iter()
+            .map(|key| LexerExpr::U8Seq(key_colon_literal_body_bytes(key)))
+            .collect::<Vec<_>>();
+        Some(if exprs.len() == 1 {
+            exprs.into_iter().next().unwrap()
+        } else {
+            LexerExpr::Choice(exprs)
+        })
     }
 
     fn literal_key_colon_union_dfa(keys: &BTreeSet<String>) -> Option<LexerDfa> {
@@ -6571,15 +6602,46 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         )
     }
 
-    fn build_lexer_dfa_expr(&mut self, dfa: &LexerDfa, prefix: &str) -> GrammarExpr {
-        if !Self::dfa_accepts_any(dfa) {
-            return never_expr();
-        }
+    fn build_lexer_expr(&mut self, expr: &LexerExpr, prefix: &str) -> GrammarExpr {
+        self.extract_terminal_rule(GrammarExpr::TerminalExpr(expr.clone()), prefix)
+    }
 
-        self.extract_terminal_rule(
-            GrammarExpr::TerminalExpr(LexerExpr::Dfa(dfa.clone())),
-            prefix,
-        )
+    /// Convert a DFA to an expression and wrap it in a terminal rule.
+    fn build_lexer_dfa_expr(&mut self, dfa: &LexerDfa, prefix: &str) -> GrammarExpr {
+        use crate::automata::lexer::compile::dfa_to_lexer_expr;
+        let expr = dfa_to_lexer_expr(dfa);
+        self.build_lexer_expr(&expr, prefix)
+    }
+
+    /// Build a grammar expression for a key-colon expression, wrapping it with
+    /// the split-off literal parts (opening quote, close quote, colon-space).
+    fn build_key_colon_expr(&mut self, expr: &LexerExpr, prefix: &str) -> GrammarExpr {
+        self.build_excluding_key_colon_expr_internal(expr.clone(), vec![], prefix)
+    }
+
+    /// Build a key-colon terminal from a base expression, excluding any keys matched
+    /// by the `excluded` expressions. Builds the exclusion directly into the Expr tree.
+    fn build_excluding_key_colon_expr_internal(
+        &mut self,
+        base_expr: LexerExpr,
+        excluded_exprs: Vec<LexerExpr>,
+        prefix: &str,
+    ) -> GrammarExpr {
+        let base_body = GrammarExpr::TerminalExpr(base_expr);
+        let body = if excluded_exprs.is_empty() {
+            base_body
+        } else {
+            let excluded_grammar_exprs: Vec<GrammarExpr> = excluded_exprs
+                .into_iter()
+                .map(|expr| GrammarExpr::TerminalExpr(expr))
+                .collect();
+            GrammarExpr::Exclude {
+                expr: Box::new(base_body),
+                exclude: Box::new(choice_or_single(excluded_grammar_exprs)),
+            }
+        };
+        let body_terminal = self.extract_terminal_rule(body, prefix);
+        wrap_key_colon_terminal(body_terminal)
     }
 
     /// Build a grammar expression for a key-colon DFA, wrapping it with
@@ -6590,32 +6652,25 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
     }
 
     /// Build a key-colon terminal from a base DFA, excluding any keys matched
-    /// by the `excluded` DFAs.  Uses `GrammarExpr::Exclude` instead of
-    /// DFA-level subtraction so that the grammar compiler handles exclusion.
+    /// by the `excluded` DFAs. Converts the DFAs to expressions before using them.
     fn build_excluding_key_colon_dfa_expr(
         &mut self,
         base_dfa: &LexerDfa,
         excluded_dfas: &[&LexerDfa],
         prefix: &str,
     ) -> GrammarExpr {
+        use crate::automata::lexer::compile::dfa_to_lexer_expr;
         if !Self::dfa_accepts_any(base_dfa) {
             return never_expr();
         }
-        let base_body = GrammarExpr::TerminalExpr(LexerExpr::Dfa(base_dfa.clone()));
-        let body = if excluded_dfas.is_empty() {
-            base_body
-        } else {
-            let excluded_exprs: Vec<GrammarExpr> = excluded_dfas
-                .iter()
-                .map(|dfa| GrammarExpr::TerminalExpr(LexerExpr::Dfa((*dfa).clone())))
-                .collect();
-            GrammarExpr::Exclude {
-                expr: Box::new(base_body),
-                exclude: Box::new(choice_or_single(excluded_exprs)),
+        let base_expr = dfa_to_lexer_expr(base_dfa);
+        let mut excluded_exprs = Vec::new();
+        for excl_dfa in excluded_dfas {
+            if Self::dfa_accepts_any(excl_dfa) {
+                excluded_exprs.push(dfa_to_lexer_expr(excl_dfa));
             }
-        };
-        let body_terminal = self.extract_terminal_rule(body, prefix);
-        wrap_key_colon_terminal(body_terminal)
+        }
+        self.build_excluding_key_colon_expr_internal(base_expr, excluded_exprs, prefix)
     }
 
     fn build_excluding_key_colon_expr(
@@ -6643,15 +6698,15 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         let expr = if self.shared_ap_literal_keys.is_empty() {
             self.json_key_colon_ref()
         } else {
-            let key_dfa = Self::scoped_key_colon_dfa(None)?;
-            let shared_excluded_dfa = Self::literal_key_colon_union_dfa(&self.shared_ap_literal_keys);
-            let mut excluded_dfas: Vec<&LexerDfa> = Vec::new();
-            if let Some(ref dfa) = shared_excluded_dfa {
-                excluded_dfas.push(dfa);
+            let key_expr = Self::scoped_key_colon_expr(None)?;
+            let shared_excluded_expr = Self::literal_key_colon_union_expr(&self.shared_ap_literal_keys);
+            let mut excluded_exprs: Vec<LexerExpr> = Vec::new();
+            if let Some(expr) = shared_excluded_expr {
+                excluded_exprs.push(expr);
             }
-            self.build_excluding_key_colon_dfa_expr(
-                &key_dfa,
-                &excluded_dfas,
+            self.build_excluding_key_colon_expr_internal(
+                key_expr,
+                excluded_exprs,
                 "AP_SHARED_KEY_COLON",
             )
         };
@@ -7038,10 +7093,10 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
             if ap_key_any_string() {
                 // Skip key exclusion — AP keys accept any JSON string.
                 // Each object still gets its own uniquely-named terminal.
-                let full_key_dfa = Self::scoped_key_colon_dfa(None)?;
+                let full_key_expr = Self::scoped_key_colon_expr(None)?;
                 Some(sequence_or_single(vec![
-                    self.build_key_colon_dfa_expr(
-                        &full_key_dfa,
+                    self.build_key_colon_expr(
+                        &full_key_expr,
                         &format!("{}_KEY_COLON", base_name.to_uppercase()),
                     ),
                     extra_value_expr,
@@ -7061,16 +7116,16 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
                 let mut excluded_literal_keys = BTreeSet::<String>::new();
                 excluded_literal_keys.extend(properties.keys().cloned());
                 excluded_literal_keys.extend(required_list.iter().cloned());
-                let key_dfa = Self::scoped_key_colon_dfa(None)?;
-                let mut excluded_dfas: Vec<&LexerDfa> = Vec::new();
-                let excluded_literal_dfa = Self::literal_key_colon_union_dfa(&excluded_literal_keys);
-                if let Some(ref dfa) = excluded_literal_dfa {
-                    excluded_dfas.push(dfa);
+                let key_expr = Self::scoped_key_colon_expr(None)?;
+                let mut excluded_exprs: Vec<LexerExpr> = Vec::new();
+                let excluded_literal_expr = Self::literal_key_colon_union_expr(&excluded_literal_keys);
+                if let Some(expr) = excluded_literal_expr {
+                    excluded_exprs.push(expr);
                 }
                 Some(sequence_or_single(vec![
-                    self.build_excluding_key_colon_dfa_expr(
-                        &key_dfa,
-                        &excluded_dfas,
+                    self.build_excluding_key_colon_expr_internal(
+                        key_expr,
+                        excluded_exprs,
                         &format!("{}_KEY_COLON", base_name.to_uppercase()),
                     ),
                     extra_value_expr,

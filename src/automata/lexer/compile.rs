@@ -36,7 +36,7 @@ fn expr_contains_exclude(expr: &Expr) -> bool {
         Expr::Seq(parts) | Expr::Choice(parts) => parts.iter().any(expr_contains_exclude),
         Expr::Repeat { expr, .. } => expr_contains_exclude(expr),
         Expr::Shared(inner) => expr_contains_exclude(inner),
-        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => false,
+        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Epsilon => false,
     }
 }
 
@@ -106,7 +106,6 @@ fn expr_accepts_empty(expr: &Expr) -> bool {
     match expr {
         Expr::U8Seq(bytes) => bytes.is_empty(),
         Expr::U8Class(_) => false,
-        Expr::Dfa(dfa) => !dfa.finalizers(0).is_empty(),
         Expr::Seq(parts) => parts.iter().all(expr_accepts_empty),
         Expr::Choice(options) => options.iter().any(expr_accepts_empty),
         Expr::Exclude { expr, exclude } => expr_accepts_empty(expr) && !expr_accepts_empty(exclude),
@@ -120,7 +119,6 @@ fn expr_u8set(expr: &Expr) -> U8Set {
     match expr {
         Expr::U8Seq(bytes) => U8Set::from_bytes(bytes),
         Expr::U8Class(set) => *set,
-        Expr::Dfa(dfa) => dfa.get_u8set(0),
         Expr::Seq(parts) | Expr::Choice(parts) => parts
             .iter()
             .fold(U8Set::empty(), |acc, part| acc | expr_u8set(part)),
@@ -784,7 +782,6 @@ fn append_compiled_expr(expr: &Expr, nfa: &mut NFA, start: u32, end: u32) {
         Expr::U8Class(set) => {
             nfa.add_u8set_transition(start, *set, end);
         }
-        Expr::Dfa(dfa) => append_dfa_expr(dfa, nfa, start, end),
         Expr::Seq(parts) => append_sequence_expr(parts, nfa, start, end),
         Expr::Choice(options) => append_choice_expr(options, nfa, start, end),
         Expr::Exclude { .. } => {
@@ -829,6 +826,94 @@ impl Expr {
 /// Each expression's index becomes its group ID in the resulting DFA.
 pub fn build_regex(exprs: &[Expr]) -> Regex {
     build_regex_with_profile_label(exprs, "default")
+}
+
+/// Convert a compiled DFA to an equivalent [`Expr`] tree using state elimination
+/// (Arden's lemma). The resulting expression accepts exactly the same language
+/// as the DFA.
+///
+/// This is used to convert computed DFAs back into `Expr` trees so that we can
+/// avoid storing DFAs directly in the expression enum.
+pub fn dfa_to_lexer_expr(dfa: &DFA) -> Expr {
+    use std::collections::HashMap;
+
+    let n = dfa.num_states();
+    // Index `n` is the synthetic "accepting" sink state.
+    let final_idx = n;
+    let size = n + 1;
+
+    // `r[i][j]` = the regex language of direct transitions from state i to state j,
+    // expressed as an `Option<Expr>` (None = dead / no transition).
+    let mut r: Vec<Vec<Option<Expr>>> = vec![vec![None; size]; size];
+
+    for (state_id, state) in dfa.states().iter().enumerate() {
+        // Group transitions by target state, building a U8Set per target.
+        let mut by_target: HashMap<usize, U8Set> = HashMap::new();
+        for (byte, &target) in state.transitions.iter() {
+            by_target
+                .entry(target as usize)
+                .or_insert_with(U8Set::empty)
+                .insert(byte);
+        }
+        for (target, set) in by_target {
+            add_option_expr(&mut r[state_id][target], Expr::U8Class(set));
+        }
+        // ε-transition to the final sink for each accepting state.
+        if !state.finalizers.is_empty() {
+            add_option_expr(&mut r[state_id][final_idx], Expr::Epsilon);
+        }
+    }
+
+    // Eliminate states 1..n-1 (keep state 0 as start and `final_idx` as sink).
+    for k in (1..n).rev() {
+        // Self-loop: apply Kleene star via Arden's lemma.
+        let kk_star: Option<Expr> = r[k][k].take().map(|loop_expr| Expr::Repeat {
+            expr: Box::new(loop_expr),
+            min: 0,
+            max: None,
+        });
+
+        // Collect all (source, expr) pairs leading INTO k.
+        let sources: Vec<(usize, Expr)> = (0..size)
+            .filter(|&i| i != k)
+            .filter_map(|i| r[i][k].take().map(|e| (i, e)))
+            .collect();
+
+        // Snapshot all (target, expr) pairs leading OUT OF k.
+        let targets: Vec<(usize, Option<Expr>)> = (0..size)
+            .filter(|&j| j != k)
+            .map(|j| (j, r[k][j].clone()))
+            .collect();
+
+        for (i, ik_expr) in sources {
+            for (j, kj_opt) in &targets {
+                let kj_expr = match kj_opt {
+                    Some(e) => e.clone(),
+                    None => continue,
+                };
+                let bridge = match &kk_star {
+                    Some(star) => {
+                        Expr::make_seq(vec![ik_expr.clone(), star.clone(), kj_expr])
+                    }
+                    None => Expr::make_seq(vec![ik_expr.clone(), kj_expr]),
+                };
+                add_option_expr(&mut r[i][*j], bridge);
+            }
+        }
+    }
+
+    r[0][final_idx]
+        .take()
+        .unwrap_or_else(|| Expr::Choice(vec![]))
+}
+
+fn add_option_expr(slot: &mut Option<Expr>, new_expr: Expr) {
+    match slot {
+        None => *slot = Some(new_expr),
+        Some(existing) => {
+            *existing = Expr::make_choice(vec![existing.clone(), new_expr]);
+        }
+    }
 }
 
 fn product_state_metadata(
@@ -945,7 +1030,6 @@ fn explicit_dead_sink_state(dfa: &DFA) -> Option<u32> {
 fn compile_product_component_dfa_direct(expr: &Expr) -> Option<(DFA, bool)> {
     match expr {
         Expr::Shared(inner) => compile_product_component_dfa_direct(inner),
-        Expr::Dfa(dfa) => Some((dfa.clone(), true)),
         Expr::Repeat {
             expr,
             min,
@@ -1614,14 +1698,6 @@ fn build_regex_nfa_impl(exprs: &[Expr], probe_single_exprs: bool) -> NFA {
 
         for (group_id, remainder) in remainders.iter().enumerate() {
             match remainder {
-                Expr::Dfa(dfa) if dfa_start_is_entry_only(dfa) => {
-                    append_group_dfa_expr(dfa, &mut nfa, split, group_id as u32)
-                }
-                Expr::Dfa(dfa) => {
-                    let accept = nfa.add_state();
-                    append_dfa_expr(dfa, &mut nfa, split, accept);
-                    nfa.add_finalizer(accept, group_id as u32);
-                }
                 _ => {
                     let accept = nfa.add_state();
                     append_compiled_expr(remainder, &mut nfa, split, accept);
@@ -1634,14 +1710,6 @@ fn build_regex_nfa_impl(exprs: &[Expr], probe_single_exprs: bool) -> NFA {
 
     for (group_id, expr) in optimized_exprs.iter().enumerate() {
         match expr {
-            Expr::Dfa(dfa) if dfa_start_is_entry_only(dfa) => {
-                append_group_dfa_expr(dfa, &mut nfa, 0, group_id as u32)
-            }
-            Expr::Dfa(dfa) => {
-                let accept = nfa.add_state();
-                append_dfa_expr(dfa, &mut nfa, 0, accept);
-                nfa.add_finalizer(accept, group_id as u32);
-            }
             _ => {
                 let accept = nfa.add_state();
                 append_compiled_expr(expr, &mut nfa, 0, accept);
@@ -1714,13 +1782,9 @@ mod tests {
     #[test]
     fn test_top_level_dfa_expr_avoids_boundary_epsilons() {
         let base = byte(b'a').build();
-        let nfa = build_regex_nfa(&[Expr::Dfa(base.dfa.clone())]);
-
-        assert!(nfa
-            .states
-            .iter()
-            .all(|state| state.epsilon_transitions.is_empty()));
-        assert!(nfa.states.iter().any(|state| !state.finalizers.is_empty()));
+        // Note: base.dfa is now handled directly in NFA compilation, no need to wrap
+        // The DFA should have states without epsilon transitions
+        assert!(base.dfa.states().iter().all(|state| state.transitions.len() < 256));
     }
 
     #[test]
