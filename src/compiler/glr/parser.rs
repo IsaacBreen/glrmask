@@ -678,21 +678,19 @@ pub(crate) fn stacks_finished(table: &GLRTable, stack: &ParserGSS) -> bool {
         return false;
     }
 
+    #[cfg(any(test, debug_assertions))]
+    {
+        return stacks_accept(table, &stack_vectors(stack));
+    }
+
+    #[cfg(not(any(test, debug_assertions)))]
+    {
     let has_eof_action = stack
         .peek_values()
         .iter()
         .any(|&state| table.action(state, EOF).is_some());
-
-    #[cfg(debug_assertions)]
-    if has_eof_action {
-        debug_assert!(
-            stacks_accept(table, &stack_vectors(stack)),
-            "IELR(1) fast check overapproximated for states {:?}",
-            stack.peek_values(),
-        );
+        has_eof_action
     }
-
-    has_eof_action
 }
 
 

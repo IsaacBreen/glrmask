@@ -1616,6 +1616,329 @@ string ::= '"' '"'"#,
 }
 
 #[test]
+fn test_minimal_cross_token_bridge_through_nullable_unit_reduction() {
+    let vocab = Vocab::new(
+        vec![
+            (0u32, b"a".to_vec()),
+            (1u32, b" {},".to_vec()),
+            (2u32, b" b".to_vec()),
+            (3u32, b" {d},".to_vec()),
+            (4u32, b" {c},".to_vec()),
+        ],
+        None,
+    );
+    let constraint = Constraint::from_ebnf(
+        r#"start ::= "a" " " obj "," " b"
+obj ::= "{" inner "}"
+inner ::= "c" tail | rest
+tail ::= "," "d" tail |
+rest ::= "d" tail |"#,
+        &vocab,
+    )
+    .unwrap();
+
+    let mut state = constraint.start();
+    state
+        .commit_bytes(b"a")
+        .expect("prefix bytes should advance the parser state");
+
+    let mask = state.mask();
+    assert!(
+        token_allowed(&mask, 1),
+        "token ' {{}},' should be allowed after the prefix when the nested object body reduces through a nullable unit-production"
+    );
+    assert!(
+        token_allowed(&mask, 3),
+        "token ' {{d}},' should also remain allowed after the prefix"
+    );
+    assert!(
+        token_allowed(&mask, 4),
+        "token ' {{c}},' should also remain allowed after the prefix"
+    );
+
+    state.commit_token(1).unwrap();
+    let mask = state.mask();
+    assert!(
+        token_allowed(&mask, 2),
+        "the trailing token should remain allowed after the bridged empty-object token"
+    );
+
+    state.commit_token(2).unwrap();
+    assert!(state.is_finished());
+}
+
+#[test]
+fn test_json_like_cross_token_bridge_through_nullable_unit_reduction() {
+    let vocab = Vocab::new(
+        vec![
+            (0u32, b"{\"x\":".to_vec()),
+            (1u32, b" {},".to_vec()),
+            (2u32, b" \"y\":\"z\"}".to_vec()),
+            (3u32, b" {\"r\":\"x\"},".to_vec()),
+            (4u32, b" {\"e\":\"y\"},".to_vec()),
+        ],
+        None,
+    );
+    let constraint = Constraint::from_ebnf(
+        r#"start ::= "{\"x\":" " " obj "," " \"y\":\"z\"}"
+obj ::= "{" body "}"
+body ::= "\"r\":\"x\"" tail | extras
+tail ::= ", " "\"e\":\"y\"" tail |
+extras ::= "\"e\":\"y\"" tail |"#,
+        &vocab,
+    )
+    .unwrap();
+
+    let mut state = constraint.start();
+    state
+        .commit_bytes(b"{\"x\":")
+        .expect("prefix bytes should advance the parser state");
+
+    let mask = state.mask();
+    assert!(token_allowed(&mask, 1), "empty nested-object token should be allowed after the partial key prefix");
+    assert!(token_allowed(&mask, 3), "non-empty nested-object token should remain allowed after the partial key prefix");
+    assert!(token_allowed(&mask, 4), "additional-property nested-object token should remain allowed after the partial key prefix");
+
+    state.commit_token(1).unwrap();
+    let mask = state.mask();
+    assert!(token_allowed(&mask, 2), "trailing sibling token should remain allowed after the bridged empty-object token");
+
+    state.commit_token(2).unwrap();
+    assert!(state.is_finished());
+}
+
+#[test]
+fn test_ported_cross_token_bridge_through_nullable_chain() {
+    let vocab = Vocab::new(
+        vec![
+            (0u32, b"{\"onRequestExternal\":".to_vec()),
+            (1u32, b" {},".to_vec()),
+            (2u32, b" \"next\":\"x\"}".to_vec()),
+            (3u32, b" {\"removeRules\": \"x\"},".to_vec()),
+        ],
+        None,
+    );
+    let constraint = Constraint::from_ebnf(
+        r#"start ::= T0 obj T5 T6
+obj ::= T1 body T4
+body ::= T2 tail | rest
+tail ::= T3 T7 tail |
+rest ::= T7 tail |
+T0 ::= '{"onRequestExternal": '
+T1 ::= '{'
+T2 ::= '"removeRules": "x"'
+T3 ::= ', '
+T4 ::= '}'
+T5 ::= ', '
+T6 ::= '"next":"x"}'
+T7 ::= '"extra": "y"'"#,
+        &vocab,
+    )
+    .unwrap();
+
+    let mut state = constraint.start();
+    state
+        .commit_bytes(b"{\"onRequestExternal\":")
+        .expect("partial key-prefix bytes should advance the parser state");
+
+    let mask = state.mask();
+    assert!(
+        token_allowed(&mask, 1),
+        "token ' {{}},' should remain allowed when the empty object closes only after a nullable chain and the separator continues in the next token"
+    );
+    assert!(
+        token_allowed(&mask, 3),
+        "non-empty nested-object token should remain allowed after the same prefix"
+    );
+
+    state.commit_token(1).unwrap();
+    let mask = state.mask();
+    assert!(
+        token_allowed(&mask, 2),
+        "the trailing sibling token should remain allowed after the bridged empty-object token"
+    );
+}
+
+#[test]
+fn test_ported_cross_token_bridge_with_regex_additional_property_alternative() {
+    let vocab = Vocab::new(
+        vec![
+            (0u32, b"{\"sendRequest\":\"x\", \"onRequestExternal\":".to_vec()),
+            (1u32, b" {},".to_vec()),
+            (2u32, b" \"tail\":\"y\"}".to_vec()),
+            (3u32, b" {\"other\":\"z\"},".to_vec()),
+        ],
+        None,
+    );
+    let constraint = Constraint::from_lark(
+        r#"
+        start: PREFIX obj SEP NEXT
+        obj: OPEN body CLOSE
+        body: KEYCOLON VALUE tail |
+        tail: SEP KEYCOLON VALUE tail |
+
+        PREFIX: /\{"sendRequest":"x", "onRequestExternal": ?/
+        OPEN: "{"
+        CLOSE: "}"
+        SEP: ", "
+        NEXT: /"tail":"y"\}/
+        KEYCOLON: /"(?:[^"\\]|\\.)*": ?/
+        VALUE: "\"z\""
+        "#,
+        &vocab,
+    )
+    .unwrap();
+
+    let mut state = constraint.start();
+    state
+        .commit_bytes(b"{\"sendRequest\":\"x\", \"onRequestExternal\":")
+        .expect("partial key-prefix bytes should advance the parser state");
+
+    let mask = state.mask();
+    assert!(
+        token_allowed(&mask, 1),
+        "token ' {{}},' should remain allowed even when the empty object competes with a regex additional-property branch"
+    );
+    assert!(
+        token_allowed(&mask, 3),
+        "non-empty regex additional-property token should remain allowed after the same prefix"
+    );
+
+    state.commit_token(1).unwrap();
+    let mask = state.mask();
+    assert!(
+        token_allowed(&mask, 2),
+        "the trailing sibling token should remain allowed after the bridged empty-object token"
+    );
+}
+
+#[test]
+fn test_ported_exact_lowered_shape_bridge() {
+    let vocab = Vocab::new(
+        vec![
+            (0u32, b"a".to_vec()),
+            (1u32, b" {},".to_vec()),
+            (2u32, b" b".to_vec()),
+            (3u32, b" {d},".to_vec()),
+        ],
+        None,
+    );
+    let constraint = Constraint::from_ebnf(
+        r#"start ::= 'a' ' ' inner ' b'
+inner ::= '{' body '},'
+body ::= ap_nc |
+ap_nc ::= ap ap_c |
+ap_c ::= ap_lr
+ap_lr ::= ap_lr ', ' ap |
+ap ::= 'd'"#,
+        &vocab,
+    )
+    .unwrap();
+
+    let mut state = constraint.start();
+    state
+        .commit_bytes(b"a")
+        .expect("partial key-prefix bytes should advance the parser state");
+
+    let mask = state.mask();
+    assert!(token_allowed(&mask, 1), "empty nested-object token should be allowed after the lowered-shape prefix");
+    assert!(token_allowed(&mask, 3), "non-empty nested-object token should remain allowed after the same prefix");
+
+    state.commit_token(1).unwrap();
+    let mask = state.mask();
+    assert!(token_allowed(&mask, 2), "trailing sibling token should remain allowed after the bridged empty-object token");
+}
+
+#[test]
+fn test_ported_exact_lowered_shape_bridge_without_unit_alias() {
+    let vocab = Vocab::new(
+        vec![
+            (0u32, b"a".to_vec()),
+            (1u32, b" {},".to_vec()),
+            (2u32, b" b".to_vec()),
+            (3u32, b" {d},".to_vec()),
+        ],
+        None,
+    );
+    let constraint = Constraint::from_ebnf(
+        r#"start ::= 'a' ' ' inner ' b'
+inner ::= '{' body '},'
+body ::= ap_nc |
+ap_nc ::= ap ap_lr |
+ap_lr ::= ap_lr ', ' ap |
+ap ::= 'd'"#,
+        &vocab,
+    )
+    .unwrap();
+
+    let mut state = constraint.start();
+    state
+        .commit_bytes(b"a")
+        .expect("partial key-prefix bytes should advance the parser state");
+
+    let mask = state.mask();
+    assert!(
+        token_allowed(&mask, 1),
+        "empty nested-object token should still be allowed when the unit alias is removed"
+    );
+    assert!(
+        token_allowed(&mask, 3),
+        "non-empty nested-object token should still be allowed when the unit alias is removed"
+    );
+
+    state.commit_token(1).unwrap();
+    let mask = state.mask();
+    assert!(
+        token_allowed(&mask, 2),
+        "trailing sibling token should remain allowed after the bridged empty-object token when the unit alias is removed"
+    );
+}
+
+#[test]
+fn test_ported_exact_lowered_shape_bridge_with_direct_repetition() {
+    let vocab = Vocab::new(
+        vec![
+            (0u32, b"a".to_vec()),
+            (1u32, b" {},".to_vec()),
+            (2u32, b" b".to_vec()),
+            (3u32, b" {d},".to_vec()),
+        ],
+        None,
+    );
+    let constraint = Constraint::from_ebnf(
+        r#"start ::= 'a' ' ' inner ' b'
+inner ::= '{' body '},'
+body ::= ap_list |
+ap_list ::= ap (', ' ap)*
+ap ::= 'd'"#,
+        &vocab,
+    )
+    .unwrap();
+
+    let mut state = constraint.start();
+    state
+        .commit_bytes(b"a")
+        .expect("partial key-prefix bytes should advance the parser state");
+
+    let mask = state.mask();
+    assert!(
+        token_allowed(&mask, 1),
+        "empty nested-object token should be allowed for the direct-repetition control"
+    );
+    assert!(
+        token_allowed(&mask, 3),
+        "non-empty nested-object token should be allowed for the direct-repetition control"
+    );
+
+    state.commit_token(1).unwrap();
+    let mask = state.mask();
+    assert!(
+        token_allowed(&mask, 2),
+        "trailing sibling token should remain allowed after the bridged empty-object token for the direct-repetition control"
+    );
+}
+
+#[test]
 fn test_full_json_grammar_exposes_high_id_span_token() {
     let lark = r#"start: ws value ws
 value: object | array | string | number | "true" | "false" | "null"

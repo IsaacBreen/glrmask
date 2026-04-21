@@ -1160,6 +1160,16 @@ fn try_inline_unit_reductions_for_cell(
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
 ) -> Result<Option<CellUpdate>, ()> {
+    match action {
+        Action::Split {
+            shift: Some(_),
+            accept: false,
+            ..
+        }
+        | Action::Shift(_, _) => {}
+        _ => return Ok(None),
+    }
+
     let mut visiting = BTreeSet::new();
     try_inline_unit_reductions_for_cell_inner(
         table,
