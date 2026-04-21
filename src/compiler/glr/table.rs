@@ -253,30 +253,35 @@ impl GLRTable {
         }
     }
 
-    /// Collapse select SR splits of the form `Shift / Reduce(A -> x)` where
-    /// the reduce is unit-length and stack-shape-compatible.
+    /// Collapse unit reductions by inlining their destination actions.
     ///
-    /// Safety guard: only collapse when every predecessor can perform the
-    /// reduce goto and each corresponding reduce destination has the same goto
-    /// row as the split state. This avoids changing stack-shape-visible goto
-    /// behavior when inlining the unit reduction.
+    /// When inlining produces multiple shift destinations, create a synthetic
+    /// merged state whose row is the union of its constituents' rows. This
+    /// keeps the parser representation unchanged: every action cell still has
+    /// at most one shift slot, but that shift target may be a merged state.
     fn collapse_sr_unit_reductions_with_compatible_gotos(&mut self) {
+        let original_num_states = self.num_states;
+        let mut constituent_sets: Vec<BTreeSet<u32>> = (0..self.num_states)
+            .map(|state| BTreeSet::from([state]))
+            .collect();
+        let mut subset_to_state: FxHashMap<Vec<u32>, u32> = (0..self.num_states)
+            .map(|state| (vec![state], state))
+            .collect();
+        let mut failed_subsets: FxHashSet<Vec<u32>> = FxHashSet::default();
+
         loop {
-            let nstates = self.num_states as usize;
-            let mut predecessors: Vec<BTreeSet<u32>> = vec![BTreeSet::new(); nstates];
+            refresh_merged_states(
+                self,
+                original_num_states,
+                &mut constituent_sets,
+                &mut subset_to_state,
+                &mut failed_subsets,
+            );
 
-            for src in 0..nstates {
-                for action in self.action[src].values() {
-                    if let Some(dst) = action.shift_target() {
-                        predecessors[dst as usize].insert(src as u32);
-                    }
-                }
-                for &(dst, _) in self.goto[src].values() {
-                    predecessors[dst as usize].insert(src as u32);
-                }
-            }
-
+            let predecessors = build_state_predecessors(self, original_num_states, &constituent_sets);
+            let nstates = original_num_states as usize;
             let mut changed = false;
+
             for state in 0..nstates {
                 let tids: Vec<TerminalID> = self.action[state].keys().copied().collect();
                 for tid in tids {
@@ -284,46 +289,30 @@ impl GLRTable {
                         continue;
                     };
 
-                    let Action::Split {
-                        shift: Some((shift_target, shift_replace)),
-                        reduces,
-                        accept,
-                    } = action
-                    else {
+                    let Ok(update) = try_inline_unit_reductions_for_cell(
+                        self,
+                        &predecessors,
+                        state as u32,
+                        tid,
+                        &action,
+                        &mut constituent_sets,
+                        &mut subset_to_state,
+                        &mut failed_subsets,
+                    ) else {
                         continue;
                     };
 
-                    if accept || reduces.len() != 1 {
-                        continue;
-                    }
-
-                    let (lhs, pop_len) = reduces[0];
-                    if pop_len != 1 {
-                        continue;
-                    }
-
-                    let preds = &predecessors[state];
-                    if preds.is_empty() {
-                        continue;
-                    }
-
-                    let mut all_compatible = true;
-                    for &pred in preds {
-                        let Some(&(reduce_dst, _)) = self.goto[pred as usize].get(&lhs) else {
-                            all_compatible = false;
-                            break;
-                        };
-                        if self.goto[reduce_dst as usize] != self.goto[state] {
-                            all_compatible = false;
-                            break;
+                    match update {
+                        Some(CellUpdate::Set(new_action)) if new_action != action => {
+                            self.action[state].insert(tid, new_action);
+                            changed = true;
                         }
+                        Some(CellUpdate::Remove) => {
+                            self.action[state].remove(&tid);
+                            changed = true;
+                        }
+                        _ => {}
                     }
-                    if !all_compatible {
-                        continue;
-                    }
-
-                    self.action[state].insert(tid, Action::Shift(shift_target, shift_replace));
-                    changed = true;
                 }
             }
 
@@ -810,6 +799,481 @@ fn row_key(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CellUpdate {
+    Set(Action),
+    Remove,
+}
+
+fn build_state_predecessors(
+    table: &GLRTable,
+    original_num_states: u32,
+    constituent_sets: &[BTreeSet<u32>],
+) -> Vec<BTreeSet<u32>> {
+    let nstates = table.num_states as usize;
+    let mut predecessors: Vec<BTreeSet<u32>> = vec![BTreeSet::new(); nstates];
+
+    for src in 0..original_num_states as usize {
+        for action in table.action[src].values() {
+            if let Some(dst) = action.shift_target() {
+                predecessors[dst as usize].extend(constituent_sets[src].iter().copied());
+            }
+        }
+        for &(dst, _) in table.goto[src].values() {
+            predecessors[dst as usize].extend(constituent_sets[src].iter().copied());
+        }
+    }
+
+    predecessors
+}
+
+fn subset_key(subset: &BTreeSet<u32>) -> Vec<u32> {
+    subset.iter().copied().collect()
+}
+
+fn union_state_subsets(
+    states: impl IntoIterator<Item = u32>,
+    constituent_sets: &[BTreeSet<u32>],
+) -> BTreeSet<u32> {
+    let mut out = BTreeSet::new();
+    for state in states {
+        out.extend(constituent_sets[state as usize].iter().copied());
+    }
+    out
+}
+
+fn merge_shift_into_pending(
+    pending: &mut PendingAction,
+    target: u32,
+    replace: bool,
+    table: &mut GLRTable,
+    constituent_sets: &mut Vec<BTreeSet<u32>>,
+    subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
+    failed_subsets: &mut FxHashSet<Vec<u32>>,
+) -> Result<(), ()> {
+    match pending.shift {
+        None => {
+            pending.shift = Some((target, replace));
+            Ok(())
+        }
+        Some((existing_target, existing_replace)) => {
+            if existing_target == target {
+                return if existing_replace == replace { Ok(()) } else { Err(()) };
+            }
+            if existing_replace != replace {
+                return Err(());
+            }
+            let merged_subset = union_state_subsets([existing_target, target], constituent_sets);
+            let merged_target = ensure_subset_state(
+                table,
+                &merged_subset,
+                constituent_sets,
+                subset_to_state,
+                failed_subsets,
+            )?;
+            pending.shift = Some((merged_target, replace));
+            Ok(())
+        }
+    }
+}
+
+fn merge_action_into_pending(
+    pending: &mut PendingAction,
+    action: &Action,
+    table: &mut GLRTable,
+    constituent_sets: &mut Vec<BTreeSet<u32>>,
+    subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
+    failed_subsets: &mut FxHashSet<Vec<u32>>,
+) -> Result<(), ()> {
+    match action {
+        Action::Shift(target, replace) => merge_shift_into_pending(
+            pending,
+            *target,
+            *replace,
+            table,
+            constituent_sets,
+            subset_to_state,
+            failed_subsets,
+        ),
+        Action::Reduce(nt, len) => {
+            pending.push_reduce(*nt, *len);
+            Ok(())
+        }
+        Action::Split {
+            shift,
+            reduces,
+            accept,
+        } => {
+            if let Some((target, replace)) = shift {
+                merge_shift_into_pending(
+                    pending,
+                    *target,
+                    *replace,
+                    table,
+                    constituent_sets,
+                    subset_to_state,
+                    failed_subsets,
+                )?;
+            }
+            for &(nt, len) in reduces {
+                pending.push_reduce(nt, len);
+            }
+            if *accept {
+                pending.push_accept();
+            }
+            Ok(())
+        }
+        Action::Accept => {
+            pending.push_accept();
+            Ok(())
+        }
+    }
+}
+
+fn build_merged_action_row(
+    table: &mut GLRTable,
+    subset: &BTreeSet<u32>,
+    constituent_sets: &mut Vec<BTreeSet<u32>>,
+    subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
+    failed_subsets: &mut FxHashSet<Vec<u32>>,
+) -> Result<FxHashMap<TerminalID, Action>, ()> {
+    let mut terminals = BTreeSet::new();
+    for &state in subset {
+        for &tid in table.action[state as usize].keys() {
+            terminals.insert(tid);
+        }
+    }
+
+    let mut row = FxHashMap::default();
+    for tid in terminals {
+        let mut pending = PendingAction::default();
+        for &state in subset {
+            if let Some(action) = table.action[state as usize].get(&tid).cloned() {
+                merge_action_into_pending(
+                    &mut pending,
+                    &action,
+                    table,
+                    constituent_sets,
+                    subset_to_state,
+                    failed_subsets,
+                )?;
+            }
+        }
+        if let Some(action) = pending.maybe_finish() {
+            row.insert(tid, action);
+        }
+    }
+
+    Ok(row)
+}
+
+fn build_merged_goto_row(
+    table: &mut GLRTable,
+    subset: &BTreeSet<u32>,
+    constituent_sets: &mut Vec<BTreeSet<u32>>,
+    subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
+    failed_subsets: &mut FxHashSet<Vec<u32>>,
+) -> Result<FxHashMap<NonterminalID, (u32, bool)>, ()> {
+    let mut nts = BTreeSet::new();
+    for &state in subset {
+        for &nt in table.goto[state as usize].keys() {
+            nts.insert(nt);
+        }
+    }
+
+    let mut row = FxHashMap::default();
+    for nt in nts {
+        let mut replace: Option<bool> = None;
+        let mut target_subset = BTreeSet::new();
+        let mut saw_target = false;
+
+        for &state in subset {
+            if let Some(&(target, is_replace)) = table.goto[state as usize].get(&nt) {
+                saw_target = true;
+                match replace {
+                    None => replace = Some(is_replace),
+                    Some(existing) if existing == is_replace => {}
+                    Some(_) => return Err(()),
+                }
+                target_subset.extend(constituent_sets[target as usize].iter().copied());
+            }
+        }
+
+        if !saw_target {
+            continue;
+        }
+
+        let merged_target = ensure_subset_state(
+            table,
+            &target_subset,
+            constituent_sets,
+            subset_to_state,
+            failed_subsets,
+        )?;
+        row.insert(nt, (merged_target, replace.unwrap()));
+    }
+
+    Ok(row)
+}
+
+fn ensure_subset_state(
+    table: &mut GLRTable,
+    subset: &BTreeSet<u32>,
+    constituent_sets: &mut Vec<BTreeSet<u32>>,
+    subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
+    failed_subsets: &mut FxHashSet<Vec<u32>>,
+) -> Result<u32, ()> {
+    debug_assert!(!subset.is_empty());
+    if subset.len() == 1 {
+        return Ok(*subset.iter().next().unwrap());
+    }
+
+    let key = subset_key(subset);
+    if let Some(&state) = subset_to_state.get(&key) {
+        return Ok(state);
+    }
+    if failed_subsets.contains(&key) {
+        return Err(());
+    }
+
+    let state = table.num_states;
+    table.num_states += 1;
+    table.action.push(FxHashMap::default());
+    table.goto.push(FxHashMap::default());
+    constituent_sets.push(subset.clone());
+    subset_to_state.insert(key.clone(), state);
+
+    let built = (|| {
+        let action_row = build_merged_action_row(
+            table,
+            subset,
+            constituent_sets,
+            subset_to_state,
+            failed_subsets,
+        )?;
+        let goto_row = build_merged_goto_row(
+            table,
+            subset,
+            constituent_sets,
+            subset_to_state,
+            failed_subsets,
+        )?;
+        Ok::<_, ()>((action_row, goto_row))
+    })();
+
+    match built {
+        Ok((action_row, goto_row)) => {
+            table.action[state as usize] = action_row;
+            table.goto[state as usize] = goto_row;
+            Ok(state)
+        }
+        Err(()) => {
+            subset_to_state.remove(&key);
+            failed_subsets.insert(key);
+            table.action.pop();
+            table.goto.pop();
+            table.num_states -= 1;
+            constituent_sets.pop();
+            Err(())
+        }
+    }
+}
+
+fn refresh_merged_states(
+    table: &mut GLRTable,
+    original_num_states: u32,
+    constituent_sets: &mut Vec<BTreeSet<u32>>,
+    subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
+    failed_subsets: &mut FxHashSet<Vec<u32>>,
+) {
+    let mut state = original_num_states as usize;
+    while state < table.num_states as usize {
+        let subset = constituent_sets[state].clone();
+        let rebuilt = (|| {
+            let action_row = build_merged_action_row(
+                table,
+                &subset,
+                constituent_sets,
+                subset_to_state,
+                failed_subsets,
+            )?;
+            let goto_row = build_merged_goto_row(
+                table,
+                &subset,
+                constituent_sets,
+                subset_to_state,
+                failed_subsets,
+            )?;
+            Ok::<_, ()>((action_row, goto_row))
+        })();
+
+        if let Ok((action_row, goto_row)) = rebuilt {
+            table.action[state] = action_row;
+            table.goto[state] = goto_row;
+        }
+
+        state += 1;
+    }
+}
+
+fn unit_reduce_destination(
+    table: &GLRTable,
+    predecessors: &[BTreeSet<u32>],
+    state: u32,
+    lhs: NonterminalID,
+) -> Option<u32> {
+    let preds = &predecessors[state as usize];
+    assert!(!preds.is_empty());
+
+    let relevant_preds: Vec<u32> = preds
+        .iter()
+        .copied()
+        .filter(|&pred| table.goto[pred as usize].contains_key(&lhs))
+        .collect();
+    if relevant_preds.is_empty() {
+        return None;
+    }
+
+    let mut reduce_dst: Option<u32> = None;
+    for pred in relevant_preds {
+        let (dst, _) = table.goto[pred as usize][&lhs];
+        if table.goto[dst as usize] != table.goto[state as usize] {
+            return None;
+        }
+        match reduce_dst {
+            None => reduce_dst = Some(dst),
+            Some(existing) if existing == dst => {}
+            Some(_) => return None,
+        }
+    }
+
+    reduce_dst
+}
+
+fn try_inline_unit_reductions_for_cell(
+    table: &mut GLRTable,
+    predecessors: &[BTreeSet<u32>],
+    state: u32,
+    tid: TerminalID,
+    action: &Action,
+    constituent_sets: &mut Vec<BTreeSet<u32>>,
+    subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
+    failed_subsets: &mut FxHashSet<Vec<u32>>,
+) -> Result<Option<CellUpdate>, ()> {
+    let mut visiting = BTreeSet::new();
+    try_inline_unit_reductions_for_cell_inner(
+        table,
+        predecessors,
+        state,
+        tid,
+        action,
+        constituent_sets,
+        subset_to_state,
+        failed_subsets,
+        &mut visiting,
+    )
+}
+
+fn try_inline_unit_reductions_for_cell_inner(
+    table: &mut GLRTable,
+    predecessors: &[BTreeSet<u32>],
+    state: u32,
+    tid: TerminalID,
+    action: &Action,
+    constituent_sets: &mut Vec<BTreeSet<u32>>,
+    subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
+    failed_subsets: &mut FxHashSet<Vec<u32>>,
+    visiting: &mut BTreeSet<(u32, TerminalID)>,
+) -> Result<Option<CellUpdate>, ()> {
+    if !visiting.insert((state, tid)) {
+        return Ok(None);
+    }
+
+    let mut pending = PendingAction::default();
+    let mut reduces: Vec<(NonterminalID, u32)> = Vec::new();
+
+    match action {
+        Action::Shift(target, replace) => pending.push_shift(*target, *replace),
+        Action::Reduce(nt, len) => reduces.push((*nt, *len)),
+        Action::Split {
+            shift,
+            reduces: action_reduces,
+            accept,
+        } => {
+            if let Some((target, replace)) = shift {
+                pending.push_shift(*target, *replace);
+            }
+            reduces.extend(action_reduces.iter().copied());
+            if *accept {
+                pending.push_accept();
+            }
+        }
+        Action::Accept => pending.push_accept(),
+    }
+
+    let mut changed = false;
+    for (lhs, pop_len) in reduces {
+        if pop_len != 1 {
+            pending.push_reduce(lhs, pop_len);
+            continue;
+        }
+
+        let Some(reduce_dst) = unit_reduce_destination(table, predecessors, state, lhs) else {
+            pending.push_reduce(lhs, pop_len);
+            continue;
+        };
+
+        match table.action[reduce_dst as usize].get(&tid).cloned() {
+            None => {
+                changed = true;
+            }
+            Some(inline_action) => {
+                let resolved_inline = match try_inline_unit_reductions_for_cell_inner(
+                    table,
+                    predecessors,
+                    reduce_dst,
+                    tid,
+                    &inline_action,
+                    constituent_sets,
+                    subset_to_state,
+                    failed_subsets,
+                    visiting,
+                )? {
+                    Some(CellUpdate::Set(action)) => Some(action),
+                    Some(CellUpdate::Remove) => None,
+                    None => Some(inline_action),
+                };
+
+                let Some(resolved_inline) = resolved_inline else {
+                    changed = true;
+                    continue;
+                };
+
+                merge_action_into_pending(
+                    &mut pending,
+                    &resolved_inline,
+                    table,
+                    constituent_sets,
+                    subset_to_state,
+                    failed_subsets,
+                )?;
+                changed = true;
+            }
+        }
+    }
+
+    let result = if !changed {
+        Ok(None)
+    } else {
+        Ok(match pending.maybe_finish() {
+            Some(action) => Some(CellUpdate::Set(action)),
+            None => Some(CellUpdate::Remove),
+        })
+    };
+    visiting.remove(&(state, tid));
+    result
+}
+
 fn remap_action_targets(action: &Action, mapping: &[u32]) -> Action {
     match action {
         Action::Shift(target, replace) => Action::Shift(mapping[*target as usize], *replace),
@@ -961,19 +1425,25 @@ impl PendingAction {
         self.accept = true;
     }
 
-    fn finish(mut self) -> Action {
+    fn maybe_finish(mut self) -> Option<Action> {
         self.reduces.sort_unstable();
         self.reduces.dedup();
         match (self.shift, self.reduces.len(), self.accept) {
-            (Some((target, replace)), 0, false) => Action::Shift(target, replace),
-            (None, 1, false) => Action::Reduce(self.reduces[0].0, self.reduces[0].1),
-            (None, 0, true) => Action::Accept,
-            (shift, _, accept) => Action::Split {
+            (None, 0, false) => None,
+            (Some((target, replace)), 0, false) => Some(Action::Shift(target, replace)),
+            (None, 1, false) => Some(Action::Reduce(self.reduces[0].0, self.reduces[0].1)),
+            (None, 0, true) => Some(Action::Accept),
+            (shift, _, accept) => Some(Action::Split {
                 shift,
                 reduces: self.reduces,
                 accept,
-            },
+            }),
         }
+    }
+
+    fn finish(self) -> Action {
+        self.maybe_finish()
+            .expect("PendingAction::finish called on an empty action")
     }
 }
 
