@@ -74,12 +74,12 @@ fn byte_vocab() -> Vocab {
 }
 
 fn anyof_object_schema_with_n_branches(n: usize) -> String {
+    // Minimal reproducing schema: shared "id" property + unique "k{i}" per branch.
+    // No type annotations, no required, no explicit additionalProperties (defaults to true).
+    // additionalProperties:true is what causes ambiguity: when parsing {"id":0,"k0":0},
+    // branch 0 treats k0 as a known property; branches 1..N-1 treat it as additional.
     let branches: Vec<String> = (0..n)
-        .map(|i| {
-            format!(
-                r#"    {{"type":"object","properties":{{"id":{{"type":"string"}},"k{i}":{{"type":"string"}}}},"required":["id"],"additionalProperties":true}}"#
-            )
-        })
+        .map(|i| format!(r#"    {{"properties":{{"id":{{}},"k{i}":{{}}}}}}"#))
         .collect();
 
     format!(
@@ -306,7 +306,7 @@ fn test_json_schema_bare_object_accepts_compact_empty_object_token() {
 #[test]
 fn test_json_schema_anyof_ambiguity_grows_with_n_not_log_n() {
     let vocab = byte_vocab();
-    let input = br#"{"id": "x", "k0": "y"}"#;
+    let input = br#"{"id": 0, "k0": 0}"#;
     let ns = [2usize, 4, 8, 16];
 
     let mut observations = Vec::new();
