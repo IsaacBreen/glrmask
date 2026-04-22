@@ -1169,8 +1169,12 @@ impl Lowerer {
                 }
                 GrammarExpr::SeparatedSequence { items, separator } => {
                     let shape = comma_sep_shape();
-                    let (sym, _) = lowerer.lower_separated_sequence_inner(items, separator, shape)?;
+                    let (sym, can_be_empty) =
+                        lowerer.lower_separated_sequence_inner(items, separator, shape)?;
                     lowerer.rules.push(Rule { lhs, rhs: vec![sym] });
+                    if can_be_empty {
+                        lowerer.rules.push(Rule { lhs, rhs: Vec::new() });
+                    }
                 }
                 GrammarExpr::Epsilon => {
                     lowerer.rules.push(Rule { lhs, rhs: Vec::new() });
@@ -2309,10 +2313,10 @@ mod tests {
         );
     }
 
-    /// Two optional items: accepts a,b or a alone or b alone — but never epsilon.
+    /// Two optional items: accepts a,b or a alone or b alone — and now epsilon.
     #[test]
     fn test_separated_sequence_all_optional_no_epsilon_rule() {
-        // items: a(opt), b(opt) → can_be_empty=true but no epsilon rule emitted.
+        // items: a(opt), b(opt) → can_be_empty=true and top-level epsilon emitted.
         let g = make_sep_seq_grammar(
             vec![
                 (GrammarExpr::Literal(b"a".to_vec()), false),
@@ -2339,9 +2343,9 @@ mod tests {
         let b_counts = derivable_terminal_counts(&gdef, b_tid, gdef.start, &mut memo);
         assert_eq!(b_counts, BTreeSet::from([0usize, 1]), "b is optional → 0 or 1 occurrences");
 
-        // No epsilon rules anywhere — caller handles the "nothing present" case.
-        let any_epsilon = gdef.rules.iter().any(|r| r.rhs.is_empty());
-        assert!(!any_epsilon, "SeparatedSequence must not emit epsilon rules");
+        // Nullable SeparatedSequence now emits an epsilon helper production.
+        let has_epsilon = gdef.rules.iter().any(|r| r.rhs.is_empty());
+        assert!(has_epsilon, "nullable SeparatedSequence should emit an epsilon rule");
     }
 
     /// Single required item: lowers to just the item symbol, no wrapper rule needed.
@@ -2357,7 +2361,7 @@ mod tests {
         assert!(matches!(&gdef.terminals[0], Terminal::Literal { bytes, .. } if bytes == b"x"));
     }
 
-    /// Single optional item: lowers to just the item symbol (no epsilon or wrapper NT emitted).
+    /// Single optional item: lowers to item plus an epsilon alternative.
     #[test]
     fn test_separated_sequence_single_optional() {
         let g = make_sep_seq_grammar(
@@ -2367,9 +2371,9 @@ mod tests {
         let gdef = lower(&g).unwrap();
         // Only the 'x' terminal; no separator.
         assert_eq!(gdef.terminals.len(), 1, "single optional item: only one terminal");
-        // No epsilon rules.
-        let any_epsilon = gdef.rules.iter().any(|r| r.rhs.is_empty());
-        assert!(!any_epsilon, "single optional item must not produce an epsilon rule");
+        // Nullable SeparatedSequence emits an epsilon helper production.
+        let has_epsilon = gdef.rules.iter().any(|r| r.rhs.is_empty());
+        assert!(has_epsilon, "single optional item should produce an epsilon rule");
     }
 
     #[test]

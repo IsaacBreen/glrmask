@@ -7704,28 +7704,20 @@ impl<'a> SchemaCtx<'a> {
             None
         } else {
             let pair = choice_or_single(pattern_pair_exprs);
-            Some(sequence_or_single(vec![
-                pair.clone(),
-                repeat_expr(
-                    sequence_or_single(vec![self.json_item_separator_expr(), pair]),
-                    0,
-                    None,
-                ),
-            ]))
+            Some(GrammarExpr::SeparatedSequence {
+                items: vec![(GrammarExpr::Repeat(Box::new(pair)), true)],
+                separator: Box::new(self.json_item_separator_expr()),
+            })
         };
 
         let additional_list_expr = if additional_pair_exprs.is_empty() {
             None
         } else {
             let pair = choice_or_single(additional_pair_exprs);
-            Some(sequence_or_single(vec![
-                pair.clone(),
-                repeat_expr(
-                    sequence_or_single(vec![self.json_item_separator_expr(), pair]),
-                    0,
-                    None,
-                ),
-            ]))
+            Some(GrammarExpr::SeparatedSequence {
+                items: vec![(GrammarExpr::Repeat(Box::new(pair)), true)],
+                separator: Box::new(self.json_item_separator_expr()),
+            })
         };
 
         if !Self::exact_closed_object_disabled()
@@ -7755,30 +7747,51 @@ impl<'a> SchemaCtx<'a> {
             self.insert_rule(format!("{base_name}_ap_list"), expr)
         });
 
-        let (tree_expr, tree_can_be_empty) =
-            self.build_ordered_object_body_separated_sequence_expr(&ordered);
-        let tree_rule = if ordered.is_empty() {
+        let mut np_item_rules = Vec::<(String, bool)>::new();
+        for (idx, (key, value_expr, is_required)) in ordered.iter().enumerate() {
+            let np_item_rule = self.insert_rule(
+                format!("{base_name}_np_{idx}"),
+                self.build_merged_literal_key_value_expr(b"", key, value_expr.clone()),
+            );
+            np_item_rules.push((np_item_rule, *is_required));
+        }
+        let named_props_can_be_empty = np_item_rules.iter().all(|(_, is_required)| !*is_required);
+        let named_props_list_rule = if np_item_rules.is_empty() {
             None
         } else {
-            Some(self.insert_rule(format!("{base_name}_tree"), tree_expr))
+            Some(self.insert_rule(
+                format!("{base_name}_np_list"),
+                GrammarExpr::SeparatedSequence {
+                    items: np_item_rules
+                        .iter()
+                        .map(|(rule_name, is_required)| {
+                            (GrammarExpr::Ref(rule_name.clone()), *is_required)
+                        })
+                        .collect(),
+                    separator: Box::new(self.json_item_separator_expr()),
+                },
+            ))
         };
 
         let mut body_items: Vec<(GrammarExpr, bool)> = Vec::new();
-        if let Some(tree_rule) = &tree_rule {
-            body_items.push((GrammarExpr::Ref(tree_rule.clone()), !tree_can_be_empty));
+        let mut body_can_be_empty = true;
+        if let Some(np_rule) = &named_props_list_rule {
+            body_items.push((GrammarExpr::Ref(np_rule.clone()), true));
+            body_can_be_empty &= named_props_can_be_empty;
         }
         if let Some(pp_rule) = &pattern_list_rule {
-            body_items.push((GrammarExpr::Ref(pp_rule.clone()), false));
+            body_items.push((GrammarExpr::Ref(pp_rule.clone()), true));
+            body_can_be_empty &= true;
         }
         if let Some(ap_rule) = &additional_list_rule {
-            body_items.push((GrammarExpr::Ref(ap_rule.clone()), false));
+            body_items.push((GrammarExpr::Ref(ap_rule.clone()), true));
+            body_can_be_empty &= true;
         }
 
         if body_items.is_empty() {
             return Ok(sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]));
         }
 
-        let body_can_be_empty = body_items.iter().all(|(_, is_required)| !*is_required);
         let body_expr = if body_items.len() == 1 {
             body_items.into_iter().next().unwrap().0
         } else {
