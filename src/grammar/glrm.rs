@@ -88,6 +88,35 @@ fn dump_nt_expr(expr: &GrammarExpr, needs_parens: bool) -> String {
                 inner
             }
         }
+        GrammarExpr::Exclude { expr: inner, exclude } => {
+            let lhs = dump_set_operand(inner);
+            let rhs = match exclude.as_ref() {
+                GrammarExpr::Choice(alts) if !alts.is_empty() => alts
+                    .iter()
+                    .map(dump_set_operand)
+                    .collect::<Vec<_>>()
+                    .join(" - "),
+                _ => dump_set_operand(exclude),
+            };
+            let infix = format!("{} - {}", lhs, rhs);
+            if needs_parens {
+                format!("({})", infix)
+            } else {
+                infix
+            }
+        }
+        GrammarExpr::Intersect { expr: inner, intersect } => {
+            let infix = format!(
+                "{} & {}",
+                dump_set_operand(inner),
+                dump_set_operand(intersect)
+            );
+            if needs_parens {
+                format!("({})", infix)
+            } else {
+                infix
+            }
+        }
         _ => dump_nt_seq(expr),
     }
 }
@@ -179,7 +208,9 @@ fn dump_nt_atom(expr: &GrammarExpr) -> String {
 
 fn dump_set_operand(expr: &GrammarExpr) -> String {
     match expr {
-        GrammarExpr::Choice(_) => format!("({})", dump_nt_expr(expr, false)),
+        GrammarExpr::Choice(_) | GrammarExpr::Exclude { .. } | GrammarExpr::Intersect { .. } => {
+            format!("({})", dump_nt_expr(expr, false))
+        }
         _ => dump_nt_expr(expr, false),
     }
 }
@@ -1074,6 +1105,10 @@ nt b ::= "b";
         );
         let dumped = to_glrm(&g);
         assert!(dumped.contains("key - a - b"), "expected chained dump form, got: {dumped}");
+        assert!(
+            dumped.contains("nt start ::= key - a - b;"),
+            "expected no outer parentheses around top-level chain, got: {dumped}"
+        );
     }
 
     #[test]
