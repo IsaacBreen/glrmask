@@ -414,6 +414,14 @@ impl PyConstraintState {
             d.set_item("det_ns", p.det_ns)?;
             d.set_item("nondet_ns", p.nondet_ns)?;
             d.set_item("nondet_det_ns", p.nondet_det_ns)?;
+            d.set_item("nondet_det_action_lookup_ns", p.nondet_det_action_lookup_ns)?;
+            d.set_item("nondet_det_goto_lookup_ns", p.nondet_det_goto_lookup_ns)?;
+            d.set_item("nondet_det_pop_ns", p.nondet_det_pop_ns)?;
+            d.set_item("nondet_det_push_ns", p.nondet_det_push_ns)?;
+            d.set_item("nondet_det_floor_cross_ns", p.nondet_det_floor_cross_ns)?;
+            d.set_item("nondet_det_floor_sources_ns", p.nondet_det_floor_sources_ns)?;
+            d.set_item("nondet_det_floor_rebuild_ns", p.nondet_det_floor_rebuild_ns)?;
+            d.set_item("nondet_det_floor_try_vstack_ns", p.nondet_det_floor_try_vstack_ns)?;
             d.set_item("nondet_isolate_ns", p.nondet_isolate_ns)?;
             d.set_item("nondet_merge_ns", p.nondet_merge_ns)?;
             d.set_item("nondet_reduce_sources_ns", p.nondet_reduce_sources_ns)?;

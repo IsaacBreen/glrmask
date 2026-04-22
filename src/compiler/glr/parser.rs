@@ -338,6 +338,22 @@ pub struct AdvanceProfile {
     pub n_nondet_isolates: u32,
     /// Time spent in advance_deterministically() calls inside the nondeterministic loop
     pub nondet_det_ns: u64,
+    /// Time spent in deterministic action table lookups performed inside nondet_det
+    pub nondet_det_action_lookup_ns: u64,
+    /// Time spent in deterministic goto table lookups performed inside nondet_det
+    pub nondet_det_goto_lookup_ns: u64,
+    /// Time spent in deterministic virtual-stack pop operations performed inside nondet_det
+    pub nondet_det_pop_ns: u64,
+    /// Time spent in deterministic virtual-stack push operations performed inside nondet_det
+    pub nondet_det_push_ns: u64,
+    /// Time spent in deterministic floor-cross handling performed inside nondet_det
+    pub nondet_det_floor_cross_ns: u64,
+    /// Time spent in deterministic floor-cross source enumeration inside nondet_det
+    pub nondet_det_floor_sources_ns: u64,
+    /// Time spent in deterministic floor-cross frontier rebuild inside nondet_det
+    pub nondet_det_floor_rebuild_ns: u64,
+    /// Time spent trying to recover a virtual stack after floor crossing inside nondet_det
+    pub nondet_det_floor_try_vstack_ns: u64,
     /// Time spent in GSS isolate operations in the nondeterministic path
     pub nondet_isolate_ns: u64,
     /// Time spent in GSS merge operations in the nondeterministic path
@@ -596,8 +612,22 @@ fn advance_nondeterministically_profiled(
             profile.nondet_isolate_ns += t_isolate.elapsed().as_nanos() as u64;
 
             let t_nd_det = Instant::now();
-            let det_ok = advance_deterministically(table, &mut isolated, token);
+            let mut nd_det_profile = AdvanceProfile::default();
+            let det_ok = advance_deterministically_profiled(
+                table,
+                &mut isolated,
+                token,
+                &mut nd_det_profile,
+            );
             profile.nondet_det_ns += t_nd_det.elapsed().as_nanos() as u64;
+            profile.nondet_det_action_lookup_ns += nd_det_profile.det_action_lookup_ns;
+            profile.nondet_det_goto_lookup_ns += nd_det_profile.det_goto_lookup_ns;
+            profile.nondet_det_pop_ns += nd_det_profile.det_pop_ns;
+            profile.nondet_det_push_ns += nd_det_profile.det_push_ns;
+            profile.nondet_det_floor_cross_ns += nd_det_profile.det_floor_cross_ns;
+            profile.nondet_det_floor_sources_ns += nd_det_profile.det_floor_sources_ns;
+            profile.nondet_det_floor_rebuild_ns += nd_det_profile.det_floor_rebuild_ns;
+            profile.nondet_det_floor_try_vstack_ns += nd_det_profile.det_floor_try_vstack_ns;
             if det_ok {
                 profile.n_nondet_merges += 1;
                 let t_merge = Instant::now();
@@ -638,8 +668,22 @@ fn advance_nondeterministically_profiled(
                     profile.nondet_push_ns += t_push.elapsed().as_nanos() as u64;
                     profile.n_nondet_merges += 1;
                     let t_nd_det2 = Instant::now();
-                    let det_ok2 = advance_deterministically(table, &mut branch, token);
+                    let mut nd_det_profile = AdvanceProfile::default();
+                    let det_ok2 = advance_deterministically_profiled(
+                        table,
+                        &mut branch,
+                        token,
+                        &mut nd_det_profile,
+                    );
                     profile.nondet_det_ns += t_nd_det2.elapsed().as_nanos() as u64;
+                    profile.nondet_det_action_lookup_ns += nd_det_profile.det_action_lookup_ns;
+                    profile.nondet_det_goto_lookup_ns += nd_det_profile.det_goto_lookup_ns;
+                    profile.nondet_det_pop_ns += nd_det_profile.det_pop_ns;
+                    profile.nondet_det_push_ns += nd_det_profile.det_push_ns;
+                    profile.nondet_det_floor_cross_ns += nd_det_profile.det_floor_cross_ns;
+                    profile.nondet_det_floor_sources_ns += nd_det_profile.det_floor_sources_ns;
+                    profile.nondet_det_floor_rebuild_ns += nd_det_profile.det_floor_rebuild_ns;
+                    profile.nondet_det_floor_try_vstack_ns += nd_det_profile.det_floor_try_vstack_ns;
                     let t_merge = Instant::now();
                     if det_ok2 {
                         shifted = shifted.merge(&branch);
