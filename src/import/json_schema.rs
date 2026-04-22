@@ -4899,10 +4899,13 @@ impl<'a> SchemaCtx<'a> {
             }
         }
 
-        // Open-object anyOf dominance reduction (language-preserving).
-        // When all variants are open objects and one variant's language covers the union,
-        // compile just that dominant variant to eliminate GLR ambiguity.
-        if keyword == "anyOf" {
+        // Open-object anyOf dominance reduction can be enabled for experimentation.
+        // Keep it opt-in because recent benchmarks show language discrepancies on
+        // real-world schemas when enabled by default.
+        if keyword == "anyOf"
+            && std::env::var("GLRMASK_ENABLE_ANYOF_OPEN_OBJECT_DOMINANCE")
+                .map_or(false, |v| v == "1")
+        {
             if let Some(expr) = self.try_reduce_anyof_open_objects(schema, options)? {
                 return Ok(Some(expr));
             }
@@ -6448,7 +6451,7 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn json_item_separator_expr(&self) -> GrammarExpr {
-        literal_expr(JSON_ITEM_SEPARATOR)
+        sequence_or_single(vec![literal_expr(b","), literal_expr(b" ")])
     }
 
     fn normalized_additional_properties_schema(
