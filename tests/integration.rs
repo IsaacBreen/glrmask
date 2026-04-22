@@ -89,6 +89,15 @@ fn anyof_object_schema_with_n_branches(n: usize) -> String {
     )
 }
 
+fn ambiguous_ebnf_with_n_prefix_alternatives(n: usize) -> String {
+    assert!(n > 0, "n must be > 0");
+    let alts = (1..=n)
+        .map(|k| format!("'{}'", "a".repeat(k)))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    format!("start ::= {alts}\n")
+}
+
 fn max_parser_paths_over_bytes(constraint: &Constraint, input: &[u8]) -> usize {
     let mut state = constraint.start();
     let mut max_paths = state.parser_path_count(1_000_000);
@@ -335,6 +344,46 @@ fn test_json_schema_anyof_ambiguity_grows_with_n_not_log_n() {
             "expected at least linear lower bound on this family: N={n}, max_paths={max_paths}"
         );
         if n >= 8 {
+            assert!(
+                (max_paths as f64) > 3.0 * log2_n_plus_1,
+                "growth should be clearly above logarithmic for larger N: N={n}, max_paths={max_paths}, 3*log2(N+1)={}",
+                3.0 * log2_n_plus_1
+            );
+        }
+    }
+}
+
+#[test]
+fn test_ebnf_ambiguity_grows_with_n_not_log_n() {
+    let vocab = byte_vocab();
+    let ns = [2usize, 4, 8, 16, 32];
+
+    let mut observations = Vec::new();
+    for &n in &ns {
+        let grammar = ambiguous_ebnf_with_n_prefix_alternatives(n);
+        let input = vec![b'a'; n];
+        let constraint = Constraint::from_ebnf(&grammar, &vocab).unwrap();
+        let max_paths = max_parser_paths_over_bytes(&constraint, &input);
+        println!("N={n} max_paths={max_paths}\n{grammar}");
+        observations.push((n, max_paths));
+    }
+
+    for pair in observations.windows(2) {
+        let (n0, p0) = pair[0];
+        let (n1, p1) = pair[1];
+        assert!(
+            p1 > p0,
+            "max parser paths should increase with N: N={n0} -> {p0}, N={n1} -> {p1}"
+        );
+    }
+
+    for (n, max_paths) in observations {
+        let log2_n_plus_1 = ((n + 1) as f64).log2();
+        assert!(
+            max_paths >= n,
+            "expected at least linear lower bound on this family: N={n}, max_paths={max_paths}"
+        );
+        if n >= 16 {
             assert!(
                 (max_paths as f64) > 3.0 * log2_n_plus_1,
                 "growth should be clearly above logarithmic for larger N: N={n}, max_paths={max_paths}, 3*log2(N+1)={}",
