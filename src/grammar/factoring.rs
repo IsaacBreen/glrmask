@@ -65,7 +65,7 @@ pub fn factor_grammar_rules(
 
 struct ChoiceFactorer {
     rules: HashMap<String, GrammarExpr>,
-    ordered_rules: Vec<(String, bool)>,
+    ordered_rules: Vec<(String, bool, bool)>,
     terminals: HashSet<String>,
     recursive_rules: HashSet<String>,
     new_rules: Vec<NamedRule>,
@@ -74,13 +74,13 @@ struct ChoiceFactorer {
 
 impl ChoiceFactorer {
     fn new(rules: Vec<NamedRule>, terminals: &HashSet<String>) -> Self {
-        let mut ordered_rules: Vec<(String, bool)> = Vec::new();
+        let mut ordered_rules: Vec<(String, bool, bool)> = Vec::new();
         let mut seen_names = HashSet::<String>::new();
         let mut rules_by_name: HashMap<String, GrammarExpr> = HashMap::new();
 
         for rule in rules {
             if seen_names.insert(rule.name.clone()) {
-                ordered_rules.push((rule.name.clone(), rule.is_terminal));
+                ordered_rules.push((rule.name.clone(), rule.is_terminal, rule.is_internal));
             }
 
             rules_by_name
@@ -111,7 +111,7 @@ impl ChoiceFactorer {
     }
 
     fn factor_all(mut self) -> Vec<NamedRule> {
-        for (name, is_terminal) in self.ordered_rules.clone() {
+        for (name, is_terminal, is_internal) in self.ordered_rules.clone() {
             let expr = self
                 .rules
                 .get(&name)
@@ -128,7 +128,7 @@ impl ChoiceFactorer {
                 name,
                 expr: factored_expr,
                 is_terminal,
-                is_internal: false,
+                is_internal,
             });
         }
 

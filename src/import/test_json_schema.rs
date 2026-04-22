@@ -318,13 +318,13 @@ fn test_shared_additional_properties_key_exclusions_create_shared_terminal_and_a
 
     let grammar = with_env_var("GLRMASK_AP_SHARED_EXCLUSIONS", Some("1"), || named_grammar_from_schema(schema));
 
+    // Internal sub-terminals (body decomposed for readability) may also have this prefix.
     let shared_rules: Vec<_> = grammar
         .rules
         .iter()
-        .filter(|rule| rule.name.starts_with("AP_SHARED_KEY_COLON_"))
+        .filter(|rule| rule.name.starts_with("AP_SHARED_KEY_COLON_") && !rule.is_internal)
         .collect();
-    assert_eq!(shared_rules.len(), 1, "expected exactly one shared additional-properties key terminal");
-
+    assert_eq!(shared_rules.len(), 1, "expected exactly one non-internal shared additional-properties key terminal");
     let shared_rule_name = shared_rules[0].name.as_str();
     let ap_key_rules: Vec<_> = grammar
         .rules

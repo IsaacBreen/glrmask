@@ -6730,19 +6730,46 @@ impl<'a> SchemaCtx<'a> {
         self.build_excluding_key_colon_expr_internal(expr.clone(), vec![], prefix)
     }
 
+    /// Recursively convert a `LexerExpr` to a `GrammarExpr`, extracting
+    /// each operand of `Intersect` and `Exclude` as a separate named internal
+    /// terminal.  This keeps the composite terminal rule readable: instead of
+    /// one giant inline blob the body becomes e.g.
+    /// `exclude(intersect(KEY_BODY_0, PATTERN_B_0), "a\"")`.
+    fn extract_lexer_expr_decomposed(&mut self, expr: LexerExpr, prefix: &str) -> GrammarExpr {
+        match expr {
+            LexerExpr::Intersect { expr, intersect } => {
+                let left = self.extract_lexer_expr_decomposed(*expr, prefix);
+                let right = self.extract_lexer_expr_decomposed(*intersect, prefix);
+                GrammarExpr::Intersect {
+                    expr: Box::new(left),
+                    intersect: Box::new(right),
+                }
+            }
+            LexerExpr::Exclude { expr, exclude } => {
+                let left = self.extract_lexer_expr_decomposed(*expr, prefix);
+                let right = self.extract_lexer_expr_decomposed(*exclude, prefix);
+                GrammarExpr::Exclude {
+                    expr: Box::new(left),
+                    exclude: Box::new(right),
+                }
+            }
+            other => self.extract_terminal_rule(expr_to_grammar_expr(&other), prefix),
+        }
+    }
+
     fn build_excluding_key_colon_expr_internal(
         &mut self,
         base_expr: LexerExpr,
         excluded_exprs: Vec<LexerExpr>,
         prefix: &str,
     ) -> GrammarExpr {
-        let base_body = expr_to_grammar_expr(&base_expr);
+        let base_body = self.extract_lexer_expr_decomposed(base_expr, prefix);
         let body = if excluded_exprs.is_empty() {
             base_body
         } else {
             let excluded_grammar_exprs: Vec<GrammarExpr> = excluded_exprs
                 .into_iter()
-                .map(|e| expr_to_grammar_expr(&e))
+                .map(|e| self.extract_terminal_rule(expr_to_grammar_expr(&e), prefix))
                 .collect();
             GrammarExpr::Exclude {
                 expr: Box::new(base_body),
@@ -8114,10 +8141,14 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn is_trivial_expr(expr: &GrammarExpr) -> bool {
-        matches!(
-            expr,
-            GrammarExpr::Ref(_) | GrammarExpr::Literal(_) | GrammarExpr::RawRegex(_)
-        ) || matches!(expr, GrammarExpr::Sequence(parts) if parts.is_empty())
+        match expr {
+            GrammarExpr::Ref(_) | GrammarExpr::Literal(_) | GrammarExpr::RawRegex(_) => true,
+            // Empty sequence = epsilon.
+            GrammarExpr::Sequence(parts) => parts.is_empty(),
+            // A choice between only trivial alternatives needs no named wrapper.
+            GrammarExpr::Choice(parts) => !parts.is_empty() && parts.iter().all(Self::is_trivial_expr),
+            _ => false,
+        }
     }
 
     fn extract_rule(&mut self, expr: GrammarExpr, prefix: &str) -> GrammarExpr {
