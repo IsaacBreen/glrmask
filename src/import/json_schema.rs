@@ -1833,7 +1833,12 @@ fn ap_key_any_string() -> bool {
 }
 
 fn shared_ap_key_exclusions_enabled() -> bool {
-    env_flag("GLRMASK_AP_SHARED_EXCLUSIONS")
+    std::env::var("GLRMASK_AP_SHARED_EXCLUSIONS")
+        .map(|v| {
+            let n = v.trim().to_ascii_lowercase();
+            !matches!(n.as_str(), "" | "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(true)
 }
 
 fn collect_shared_ap_literal_keys(root: &Value) -> BTreeSet<String> {

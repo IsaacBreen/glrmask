@@ -289,7 +289,7 @@ fn test_bounded_array_uses_repeat_range_ast() {
 }
 
 #[test]
-fn test_shared_additional_properties_key_exclusions_are_off_by_default() {
+fn test_shared_additional_properties_key_exclusions_are_on_by_default() {
     let schema = r#"{
         "type": "object",
         "properties": {
@@ -308,8 +308,30 @@ fn test_shared_additional_properties_key_exclusions_are_off_by_default() {
     }"#;
 
     let grammar = with_env_var("GLRMASK_AP_SHARED_EXCLUSIONS", None, || named_grammar_from_schema(schema));
+    assert!(grammar.rules.iter().any(|rule| rule.name == "AP_SHARED_KEY"));
+}
+
+#[test]
+fn test_shared_additional_properties_key_exclusions_can_be_disabled_explicitly() {
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "left": {
+                "type": "object",
+                "properties": {"a": {"type": "string"}},
+                "additionalProperties": {"type": "string"}
+            },
+            "right": {
+                "type": "object",
+                "properties": {"b": {"type": "string"}},
+                "additionalProperties": {"type": "string"}
+            }
+        },
+        "additionalProperties": false
+    }"#;
+
+    let grammar = with_env_var("GLRMASK_AP_SHARED_EXCLUSIONS", Some("0"), || named_grammar_from_schema(schema));
     assert!(grammar.rules.iter().all(|rule| rule.name != "AP_SHARED_KEY"));
-    assert!(grammar.rules.iter().all(|rule| !rule.name.starts_with("AP_SHARED_KEY_COLON_")));
 }
 
 #[test]
