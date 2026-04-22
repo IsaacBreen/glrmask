@@ -75,11 +75,12 @@ fn byte_vocab() -> Vocab {
 
 fn anyof_object_schema_with_n_branches(n: usize) -> String {
     // Minimal reproducing schema: shared "id" property + unique "k{i}" per branch.
-    // No type annotations, no required, no explicit additionalProperties (defaults to true).
+    // Use boolean-true schemas for property values (equivalent to unconstrained schemas).
+    // No required, no explicit additionalProperties (defaults to true).
     // additionalProperties:true is what causes ambiguity: when parsing {"id":0,"k0":0},
     // branch 0 treats k0 as a known property; branches 1..N-1 treat it as additional.
     let branches: Vec<String> = (0..n)
-        .map(|i| format!(r#"    {{"properties":{{"id":{{}},"k{i}":{{}}}}}}"#))
+        .map(|i| format!(r#"    {{"properties":{{"id":true,"k{i}":true}}}}"#))
         .collect();
 
     format!(
