@@ -3705,34 +3705,27 @@ impl<'a> SchemaCtx<'a> {
         );
         self.insert_rule(
             JSON_OBJECT_RULE,
-            choice_or_single(vec![
-                sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]),
-                sequence_or_single(vec![
-                    literal_expr(b"{"),
-                    GrammarExpr::Ref(JSON_KV_RULE.into()),
-                    repeat_expr(
-                        sequence_or_single(vec![self.json_item_separator_expr(), GrammarExpr::Ref(JSON_KV_RULE.into())]),
-                        0,
-                        None,
-                    ),
-                    literal_expr(b"}"),
-                ]),
+            sequence_or_single(vec![
+                literal_expr(b"{"),
+                GrammarExpr::SeparatedSequence {
+                    items: vec![(
+                        GrammarExpr::Repeat(Box::new(GrammarExpr::Ref(JSON_KV_RULE.into()))),
+                        true,
+                    )],
+                    separator: Box::new(self.json_item_separator_expr()),
+                },
+                literal_expr(b"}"),
             ]),
         );
         self.insert_rule(
             JSON_ARRAY_RULE,
-            choice_or_single(vec![
-                sequence_or_single(vec![literal_expr(b"["), literal_expr(b"]")]),
-                sequence_or_single(vec![
-                    literal_expr(b"["),
-                    self.json_value_ref(),
-                    repeat_expr(
-                        sequence_or_single(vec![self.json_item_separator_expr(), self.json_value_ref()]),
-                        0,
-                        None,
-                    ),
-                    literal_expr(b"]"),
-                ]),
+            sequence_or_single(vec![
+                literal_expr(b"["),
+                GrammarExpr::SeparatedSequence {
+                    items: vec![(GrammarExpr::Repeat(Box::new(self.json_value_ref())), true)],
+                    separator: Box::new(self.json_item_separator_expr()),
+                },
+                literal_expr(b"]"),
             ]),
         );
         self.insert_rule(
