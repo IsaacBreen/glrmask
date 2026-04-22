@@ -7917,15 +7917,18 @@ impl<'a> SchemaCtx<'a> {
             })
         };
 
-        let additional_list_expr = if additional_pair_exprs.is_empty() {
+        let additional_pair_choice = if additional_pair_exprs.is_empty() {
             None
         } else {
-            let pair = choice_or_single(additional_pair_exprs);
-            Some(GrammarExpr::SeparatedSequence {
+            Some(choice_or_single(additional_pair_exprs))
+        };
+
+        let additional_list_expr = additional_pair_choice.clone().map(|pair| {
+            GrammarExpr::SeparatedSequence {
                 items: vec![(GrammarExpr::Repeat(Box::new(pair)), true)],
                 separator: Box::new(self.json_item_separator_expr()),
-            })
-        };
+            }
+        });
 
         if !Self::exact_closed_object_disabled()
             && !ordered.is_empty()
@@ -7952,6 +7955,15 @@ impl<'a> SchemaCtx<'a> {
         });
         let additional_list_rule = additional_list_expr.map(|expr| {
             self.insert_rule(format!("{base_name}_ap_list"), expr)
+        });
+        let additional_nonempty_list_rule = additional_pair_choice.map(|pair| {
+            self.insert_rule(
+                format!("{base_name}_ap_list_nonempty"),
+                GrammarExpr::SeparatedSequence {
+                    items: vec![(GrammarExpr::RepeatOne(Box::new(pair)), true)],
+                    separator: Box::new(self.json_item_separator_expr()),
+                },
+            )
         });
 
         let mut np_item_rules = Vec::<(String, bool)>::new();
@@ -7994,7 +8006,26 @@ impl<'a> SchemaCtx<'a> {
             return Ok(sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]));
         }
 
-        let body_expr = if body_items.len() == 1 {
+        let np_guaranteed_nonempty = !ordered.is_empty() && ordered.iter().any(|(_, _, required)| *required);
+
+        let body_expr = if pattern_list_rule.is_none()
+            && np_guaranteed_nonempty
+            && named_props_list_rule.is_some()
+            && additional_nonempty_list_rule.is_some()
+        {
+            // Emit an explicit non-nullable form to avoid transient GLR ambiguity from
+            // nullable list composition in SeparatedSequence lowering.
+            let np_rule = named_props_list_rule.clone().unwrap();
+            let ap_nonempty_rule = additional_nonempty_list_rule.clone().unwrap();
+            choice_or_single(vec![
+                GrammarExpr::Ref(np_rule.clone()),
+                sequence_or_single(vec![
+                    GrammarExpr::Ref(np_rule),
+                    self.json_item_separator_expr(),
+                    GrammarExpr::Ref(ap_nonempty_rule),
+                ]),
+            ])
+        } else if body_items.len() == 1 {
             body_items.into_iter().next().unwrap().0
         } else {
             GrammarExpr::SeparatedSequence {
