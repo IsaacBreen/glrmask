@@ -41,7 +41,7 @@
 //! | `(e)`                          | Grouping                             |
 //! | `a - b`                        | GrammarExpr::Exclude                 |
 //! | `a & b`                        | GrammarExpr::Intersect               |
-//! | `seqsep(sep, i1?, i2, i3?)`   | SeparatedSequence                    |
+//! | `sep ~ ( i1? i2 i3? )`           | SeparatedSequence                    |
 
 use crate::GlrMaskError;
 use crate::ds::u8set::U8Set;
@@ -155,8 +155,8 @@ fn dump_nt_atom(expr: &GrammarExpr) -> String {
                     if *req { s } else { format!("{}?", s) }
                 })
                 .collect::<Vec<_>>()
-                .join(", ");
-            format!("seqsep({}, {})", sep_str, items_str)
+                .join(" ");
+            format!("{} ~ ( {} )", sep_str, items_str)
         }
         // For compound exprs that need parens as atoms:
         GrammarExpr::Sequence(_) | GrammarExpr::Choice(_) => {
@@ -215,7 +215,7 @@ pub fn from_glrm(input: &str) -> Result<NamedGrammar, GlrMaskError> {
 #[derive(Debug, Clone, PartialEq)]
 enum Tok {
     /// Identifier or keyword: `nt`, `t`, `internal`, `start`, `ignore`,
-    /// `seqsep`, `eps`
+    /// `eps`
     Ident(String),
     /// String literal: `"..."` — bytes, after escape processing
     StringLit(Vec<u8>),
@@ -243,6 +243,8 @@ enum Tok {
     Amp,
     /// `-`
     Minus,
+    /// `~`
+    Tilde,
     /// `*`
     Star,
     /// `+`
@@ -444,6 +446,7 @@ impl<'a> Lexer<'a> {
                         b'|' => tokens.push(Tok::Pipe),
                         b'&' => tokens.push(Tok::Amp),
                         b'-' => tokens.push(Tok::Minus),
+                        b'~' => tokens.push(Tok::Tilde),
                         b'*' => tokens.push(Tok::Star),
                         b'+' => tokens.push(Tok::Plus),
                         b'?' => tokens.push(Tok::Quest),
@@ -664,6 +667,32 @@ impl GlrmParser {
 
     fn parse_nt_postfix(&mut self, allow_raw_regex: bool) -> Result<GrammarExpr, GlrMaskError> {
         let atom = self.parse_nt_atom(allow_raw_regex)?;
+        // `sep ~ ( items... )` — SeparatedSequence
+        if matches!(self.peek(), Tok::Tilde) {
+            self.advance(); // consume `~`
+            self.consume(&Tok::LParen)?;
+            let mut items = Vec::new();
+            loop {
+                let item_expr = self.parse_nt_atom(allow_raw_regex)?;
+                let optional = if matches!(self.peek(), Tok::Quest) {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
+                items.push((item_expr, !optional)); // is_required = !optional
+                if self.can_start_nt_atom() {
+                    // more items
+                } else {
+                    break;
+                }
+            }
+            self.consume(&Tok::RParen)?;
+            return self.apply_nt_quantifier(GrammarExpr::SeparatedSequence {
+                items,
+                separator: Box::new(atom),
+            });
+        }
         self.apply_nt_quantifier(atom)
     }
 
@@ -729,34 +758,6 @@ impl GlrmParser {
             }
             Tok::Ident(ref kw) => {
                 match kw.as_str() {
-                    "seqsep" => {
-                        self.advance();
-                        self.consume(&Tok::LParen)?;
-                        let sep = self.parse_nt_atom(allow_raw_regex)?;
-                        self.consume(&Tok::Comma)?;
-                        let mut items = Vec::new();
-                        loop {
-                            // Each item is a nt_atom optionally followed by `?`
-                            let item_expr = self.parse_nt_atom(allow_raw_regex)?;
-                            let optional = if matches!(self.peek(), Tok::Quest) {
-                                self.advance();
-                                true
-                            } else {
-                                false
-                            };
-                            items.push((item_expr, !optional)); // is_required = !optional
-                            if matches!(self.peek(), Tok::Comma) {
-                                self.advance();
-                            } else {
-                                break;
-                            }
-                        }
-                        self.consume(&Tok::RParen)?;
-                        Ok(GrammarExpr::SeparatedSequence {
-                            items,
-                            separator: Box::new(sep),
-                        })
-                    }
                     "eps" => {
                         self.advance();
                         Ok(GrammarExpr::Epsilon)
@@ -970,6 +971,68 @@ nt start ::= /abc/;
         let err = from_glrm(src).expect_err("nt raw regex must be rejected");
         let msg = err.to_string();
         assert!(msg.contains("raw regex literals are only allowed in terminal"));
+    }
+
+    #[test]
+    fn test_roundtrip_separated_sequence() {
+        // "," ~ ( A B? C (D E F)? )
+        let sep = GrammarExpr::Literal(b",".to_vec());
+        let items = vec![
+            (GrammarExpr::Ref("A".to_string()), true),
+            (GrammarExpr::Ref("B".to_string()), false), // optional
+            (GrammarExpr::Ref("C".to_string()), true),
+            (GrammarExpr::Sequence(vec![
+                GrammarExpr::Ref("D".to_string()),
+                GrammarExpr::Ref("E".to_string()),
+                GrammarExpr::Ref("F".to_string()),
+            ]), false), // optional
+        ];
+        let expr = GrammarExpr::SeparatedSequence {
+            items,
+            separator: Box::new(sep),
+        };
+        let g = simple_grammar(vec![
+            ("A", GrammarExpr::Literal(b"a".to_vec()), false, false),
+            ("B", GrammarExpr::Literal(b"b".to_vec()), false, false),
+            ("C", GrammarExpr::Literal(b"c".to_vec()), false, false),
+            ("D", GrammarExpr::Literal(b"d".to_vec()), false, false),
+            ("E", GrammarExpr::Literal(b"e".to_vec()), false, false),
+            ("F", GrammarExpr::Literal(b"f".to_vec()), false, false),
+            ("start", expr, false, false),
+        ], "start");
+        let dumped = to_glrm(&g);
+        // Verify the tilde syntax appears in the dump
+        assert!(dumped.contains('~'), "dump should contain '~': {dumped}");
+        assert!(!dumped.contains("seqsep"), "dump must not contain 'seqsep': {dumped}");
+        // Roundtrip
+        let g2 = from_glrm(&dumped)
+            .unwrap_or_else(|e| panic!("parse failed: {e}\n\ndumped:\n{dumped}"));
+        let start_rule = g2.rules.iter().find(|r| r.name == "start").unwrap();
+        assert!(matches!(start_rule.expr, GrammarExpr::SeparatedSequence { .. }));
+    }
+
+    #[test]
+    fn test_parse_tilde_from_source() {
+        let src = r#"
+start start;
+
+nt A ::= "a";
+nt B ::= "b";
+nt C ::= "c";
+nt start ::= "," ~ ( A B? C );
+"#;
+        let g = from_glrm(src).expect("tilde syntax should parse");
+        let start = g.rules.iter().find(|r| r.name == "start").unwrap();
+        match &start.expr {
+            GrammarExpr::SeparatedSequence { items, separator } => {
+                assert!(matches!(**separator, GrammarExpr::Literal(_)));
+                assert_eq!(items.len(), 3);
+                assert!(items[0].1, "A is required");
+                assert!(!items[1].1, "B is optional");
+                assert!(items[2].1, "C is required");
+            }
+            other => panic!("expected SeparatedSequence, got {other:?}"),
+        }
     }
 
     #[test]
