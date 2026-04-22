@@ -9565,6 +9565,25 @@ mod tests {
     }
 
     #[test]
+    fn test_minimal_properties_pattern_and_additional_interaction() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"}
+            },
+            "patternProperties": {
+                "^m": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                }
+            },
+            "additionalProperties": {"type": "string"}
+        }"#;
+        assert!(accepts_sequence(schema, &[b"{\"a\": \"x\", \"m\": [\"s\"], \"z\": \"y\"}"]));
+        assert!(!accepts_sequence(schema, &[b"{\"a\": \"x\", \"m\": \"s\", \"z\": \"y\"}"]));
+    }
+
+    #[test]
     fn test_array_paths_pack_native_item_separator_literal() {
         let schema: Value = serde_json::from_str(r#"{
             "type": "array",
