@@ -115,6 +115,68 @@ impl NamedGrammar {
             .collect()
     }
 
+    /// Remove rules that are not reachable from the start rule (or ignore rule).
+    ///
+    /// Traverses `GrammarExpr::Ref` edges to find all rules reachable from
+    /// `self.start` (and `self.ignore` if set), then returns a new grammar
+    /// containing only those rules in their original order.
+    pub fn prune_unreachable(&self) -> Self {
+        fn collect_refs(expr: &GrammarExpr, out: &mut HashSet<String>) {
+            match expr {
+                GrammarExpr::Ref(name) => { out.insert(name.clone()); }
+                GrammarExpr::Sequence(items) => { for e in items { collect_refs(e, out); } }
+                GrammarExpr::Choice(alts) => { for e in alts { collect_refs(e, out); } }
+                GrammarExpr::Exclude { expr, exclude } => {
+                    collect_refs(expr, out); collect_refs(exclude, out);
+                }
+                GrammarExpr::Intersect { expr, intersect } => {
+                    collect_refs(expr, out); collect_refs(intersect, out);
+                }
+                GrammarExpr::Optional(e) | GrammarExpr::Repeat(e) | GrammarExpr::RepeatOne(e) => {
+                    collect_refs(e, out);
+                }
+                GrammarExpr::RepeatRange { expr, .. } => collect_refs(expr, out),
+                GrammarExpr::SeparatedSequence { items, separator } => {
+                    for (e, _) in items { collect_refs(e, out); }
+                    collect_refs(separator, out);
+                }
+                GrammarExpr::TerminalExpr(_) | GrammarExpr::Literal(_)
+                | GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_)
+                | GrammarExpr::AnyByte => {}
+            }
+        }
+
+        let rule_map: HashMap<String, &NamedRule> = self.rules.iter()
+            .map(|r| (r.name.clone(), r))
+            .collect();
+
+        let mut reachable: HashSet<String> = HashSet::new();
+        let mut worklist: Vec<String> = vec![self.start.clone()];
+        if let Some(ref ign) = self.ignore {
+            worklist.push(ign.clone());
+        }
+
+        while let Some(name) = worklist.pop() {
+            if !reachable.insert(name.clone()) { continue; }
+            if let Some(rule) = rule_map.get(&name) {
+                let mut refs = HashSet::new();
+                collect_refs(&rule.expr, &mut refs);
+                for r in refs {
+                    if !reachable.contains(&r) {
+                        worklist.push(r);
+                    }
+                }
+            }
+        }
+
+        let rules = self.rules.iter()
+            .filter(|r| reachable.contains(&r.name))
+            .cloned()
+            .collect();
+
+        NamedGrammar { rules, start: self.start.clone(), ignore: self.ignore.clone() }
+    }
+
     /// Dump the grammar in a Lark-like human-readable format.
     ///
     /// `GrammarExpr` variants with no direct Lark equivalent (e.g. `Exclude`,

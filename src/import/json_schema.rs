@@ -9473,16 +9473,6 @@ mod tests {
             },
             "additionalProperties": {"type": "string"}
         }"#;
-        // Sub-tests: single key
-        eprintln!("a only: {}", accepts_sequence(schema, &[b"{\"a\": \"x\"}"]));
-        eprintln!("b only: {}", accepts_sequence(schema, &[b"{\"b\": \"y\"}"]));
-        eprintln!("c only: {}", accepts_sequence(schema, &[b"{\"c\": \"z\"}"]));
-        // Sub-tests: two keys
-        eprintln!("a+b: {}", accepts_sequence(schema, &[b"{\"a\": \"x\", \"b\": \"y\"}"]));
-        eprintln!("a+c: {}", accepts_sequence(schema, &[b"{\"a\": \"x\", \"c\": \"z\"}"]));
-        eprintln!("b+c: {}", accepts_sequence(schema, &[b"{\"b\": \"y\", \"c\": \"z\"}"]));
-        // Sub-test: three keys
-        eprintln!("a+b+c: {}", accepts_sequence(schema, &[b"{\"a\": \"x\", \"b\": \"y\", \"c\": \"z\"}"]));
         assert!(accepts_sequence(schema, &[b"{\"a\": \"x\", \"b\": \"y\", \"c\": \"z\"}"]));
         assert!(!accepts_sequence(schema, &[b"TODO"]));
     }
