@@ -7763,58 +7763,32 @@ impl<'a> SchemaCtx<'a> {
             Some(self.insert_rule(format!("{base_name}_tree"), tree_expr))
         };
 
-        let mut body_variants: Vec<GrammarExpr> = Vec::new();
-
+        let mut body_items: Vec<(GrammarExpr, bool)> = Vec::new();
         if let Some(tree_rule) = &tree_rule {
-            let tree_ref = GrammarExpr::Ref(tree_rule.clone());
-            body_variants.push(tree_ref.clone());
-
-            if let Some(pp_rule) = &pattern_list_rule {
-                body_variants.push(sequence_or_single(vec![
-                    tree_ref.clone(),
-                    self.json_item_separator_expr(),
-                    GrammarExpr::Ref(pp_rule.clone()),
-                ]));
-            }
-            if let Some(ap_rule) = &additional_list_rule {
-                body_variants.push(sequence_or_single(vec![
-                    tree_ref.clone(),
-                    self.json_item_separator_expr(),
-                    GrammarExpr::Ref(ap_rule.clone()),
-                ]));
-            }
-            if let (Some(pp_rule), Some(ap_rule)) = (&pattern_list_rule, &additional_list_rule) {
-                body_variants.push(sequence_or_single(vec![
-                    tree_ref,
-                    self.json_item_separator_expr(),
-                    GrammarExpr::Ref(pp_rule.clone()),
-                    self.json_item_separator_expr(),
-                    GrammarExpr::Ref(ap_rule.clone()),
-                ]));
-            }
+            body_items.push((GrammarExpr::Ref(tree_rule.clone()), !tree_can_be_empty));
+        }
+        if let Some(pp_rule) = &pattern_list_rule {
+            body_items.push((GrammarExpr::Ref(pp_rule.clone()), false));
+        }
+        if let Some(ap_rule) = &additional_list_rule {
+            body_items.push((GrammarExpr::Ref(ap_rule.clone()), false));
         }
 
-        if ordered.is_empty() || tree_can_be_empty {
-            if let Some(pp_rule) = &pattern_list_rule {
-                body_variants.push(GrammarExpr::Ref(pp_rule.clone()));
-            }
-            if let Some(ap_rule) = &additional_list_rule {
-                body_variants.push(GrammarExpr::Ref(ap_rule.clone()));
-            }
-            if let (Some(pp_rule), Some(ap_rule)) = (&pattern_list_rule, &additional_list_rule) {
-                body_variants.push(sequence_or_single(vec![
-                    GrammarExpr::Ref(pp_rule.clone()),
-                    self.json_item_separator_expr(),
-                    GrammarExpr::Ref(ap_rule.clone()),
-                ]));
-            }
-        }
-
-        if body_variants.is_empty() {
+        if body_items.is_empty() {
             return Ok(sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]));
         }
 
-        let body_rule = self.insert_rule(format!("{base_name}_body"), choice_or_single(body_variants));
+        let body_can_be_empty = body_items.iter().all(|(_, is_required)| !*is_required);
+        let body_expr = if body_items.len() == 1 {
+            body_items.into_iter().next().unwrap().0
+        } else {
+            GrammarExpr::SeparatedSequence {
+                items: body_items,
+                separator: Box::new(self.json_item_separator_expr()),
+            }
+        };
+
+        let body_rule = self.insert_rule(format!("{base_name}_body"), body_expr);
         let nonempty_object_rule = self.insert_rule(
             format!("{base_name}_obj_nonempty"),
             sequence_or_single(vec![
@@ -7824,7 +7798,7 @@ impl<'a> SchemaCtx<'a> {
             ]),
         );
 
-        let object_expr = if ordered.is_empty() || tree_can_be_empty {
+        let object_expr = if body_can_be_empty {
             choice_or_single(vec![
                 GrammarExpr::Ref(nonempty_object_rule),
                 sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]),

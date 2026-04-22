@@ -497,6 +497,12 @@ struct Lowerer {
     generated_nonterminal_counter: u32,
     terminal_names: BTreeMap<TerminalID, String>,
     internal_terminal_names: HashSet<String>,
+    named_rule_exprs: HashMap<String, GrammarExpr>,
+    named_rule_is_terminal: HashMap<String, bool>,
+    rule_nullable: HashMap<String, bool>,
+    terminal_bodies: HashMap<String, GrammarExpr>,
+    terminal_expr_cache: HashMap<String, Arc<Expr>>,
+    nonnullable_named_rule_cache: HashMap<String, NonterminalID>,
     /// Shared cache for repeat-exact nonterminals, keyed by (symbol, count).
     repeat_exact_cache: BTreeMap<(Symbol, usize), NonterminalID>,
     /// Shared cache for repeat-range nonterminals, keyed by (symbol, min, max).
@@ -594,6 +600,12 @@ impl Lowerer {
             generated_nonterminal_counter: 0,
             terminal_names: BTreeMap::new(),
             internal_terminal_names: HashSet::new(),
+            named_rule_exprs: HashMap::new(),
+            named_rule_is_terminal: HashMap::new(),
+            rule_nullable: HashMap::new(),
+            terminal_bodies: HashMap::new(),
+            terminal_expr_cache: HashMap::new(),
+            nonnullable_named_rule_cache: HashMap::new(),
             repeat_exact_cache: BTreeMap::new(),
             repeat_range_cache: BTreeMap::new(),
             repeat_max_cache: BTreeMap::new(),
@@ -616,6 +628,210 @@ impl Lowerer {
         self.generated_nonterminal_counter += 1;
         let id = self.nonterminal_id(&name);
         (name, id)
+    }
+
+    fn expr_is_nullable(&self, expr: &GrammarExpr) -> bool {
+        grammar_expr_is_nullable(expr, &self.rule_nullable)
+    }
+
+    fn resolve_terminal_expr(
+        &mut self,
+        owner_name: Option<&str>,
+        expr: &GrammarExpr,
+    ) -> Result<Expr, GlrMaskError> {
+        let mut visiting = HashSet::new();
+        if let Some(name) = owner_name {
+            visiting.insert(name.to_string());
+        }
+        grammar_expr_to_expr(
+            expr,
+            &self.terminal_bodies,
+            &mut self.terminal_expr_cache,
+            &mut visiting,
+        )
+    }
+
+    fn nonnullable_terminal_symbol(
+        &mut self,
+        expr: &GrammarExpr,
+    ) -> Result<Option<Symbol>, GlrMaskError> {
+        match expr {
+            GrammarExpr::Literal(bytes) => {
+                if bytes.is_empty() {
+                    return Ok(None);
+                }
+                let pattern = bytes.iter().map(|&b| regex_escape_byte(b)).collect::<String>();
+                let tid = self.terminal_id(&String::from_utf8_lossy(bytes), &pattern, false);
+                Ok(Some(Symbol::Terminal(tid)))
+            }
+            GrammarExpr::CharClass { .. }
+            | GrammarExpr::RawRegex(_)
+            | GrammarExpr::AnyByte
+            | GrammarExpr::Exclude { .. }
+            | GrammarExpr::Intersect { .. } => {
+                let expr = self.resolve_terminal_expr(None, expr)?;
+                let expr = if expr.is_nullable() {
+                    Expr::Exclude {
+                        expr: Box::new(expr),
+                        exclude: Box::new(Expr::Epsilon),
+                    }
+                    .optimize()
+                } else {
+                    expr
+                };
+                let name = format!("__nonnullable_terminal_{}", self.generated_nonterminal_counter);
+                let tid = self.register_terminal_expr(&name, expr);
+                Ok(Some(Symbol::Terminal(tid)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn lower_nonnullable_named_rule(&mut self, name: &str) -> Result<Symbol, GlrMaskError> {
+        if let Some(&nt) = self.nonnullable_named_rule_cache.get(name) {
+            return Ok(Symbol::Nonterminal(nt));
+        }
+
+        let expr = self
+            .named_rule_exprs
+            .get(name)
+            .cloned()
+            .ok_or_else(|| GlrMaskError::GrammarParse(format!("unknown rule referenced from SeparatedSequence: {name}")))?;
+        let is_terminal = *self.named_rule_is_terminal.get(name).unwrap_or(&false);
+        let (_, nt) = self.fresh_nonterminal("nonnullable_rule");
+        self.nonnullable_named_rule_cache.insert(name.to_string(), nt);
+
+        if is_terminal {
+            if let Some(symbol) = self.lower_nonnullable_expr_symbol(&expr)? {
+                self.rules.push(Rule { lhs: nt, rhs: vec![symbol] });
+            }
+        } else {
+            self.emit_nonnullable_expr(nt, &expr)?;
+        }
+
+        Ok(Symbol::Nonterminal(nt))
+    }
+
+    fn lower_nonnullable_expr_symbol(
+        &mut self,
+        expr: &GrammarExpr,
+    ) -> Result<Option<Symbol>, GlrMaskError> {
+        match expr {
+            GrammarExpr::Epsilon => Ok(None),
+            GrammarExpr::Literal(bytes) if bytes.is_empty() => Ok(None),
+            GrammarExpr::Ref(name) => Ok(Some(self.lower_nonnullable_named_rule(name)?)),
+            GrammarExpr::Optional(inner) => self.lower_nonnullable_expr_symbol(inner),
+            GrammarExpr::Literal(_)
+            | GrammarExpr::CharClass { .. }
+            | GrammarExpr::RawRegex(_)
+            | GrammarExpr::AnyByte
+            | GrammarExpr::Exclude { .. }
+            | GrammarExpr::Intersect { .. } => self.nonnullable_terminal_symbol(expr),
+            _ => {
+                let (_, nt) = self.fresh_nonterminal("nonnullable_expr");
+                self.emit_nonnullable_expr(nt, expr)?;
+                Ok(Some(Symbol::Nonterminal(nt)))
+            }
+        }
+    }
+
+    fn emit_nonnullable_sequence(
+        &mut self,
+        lhs: NonterminalID,
+        parts: &[GrammarExpr],
+    ) -> Result<(), GlrMaskError> {
+        for (nonempty_index, nonempty_part) in parts.iter().enumerate() {
+            let Some(nonempty_symbol) = self.lower_nonnullable_expr_symbol(nonempty_part)? else {
+                continue;
+            };
+
+            let mut rhs = Vec::with_capacity(parts.len());
+            for (index, part) in parts.iter().enumerate() {
+                if index == nonempty_index {
+                    rhs.push(nonempty_symbol.clone());
+                } else {
+                    rhs.push(self.lower_expr_terminalish(part)?);
+                }
+            }
+            self.rules.push(Rule { lhs, rhs });
+        }
+        Ok(())
+    }
+
+    fn emit_nonnullable_expr(
+        &mut self,
+        lhs: NonterminalID,
+        expr: &GrammarExpr,
+    ) -> Result<(), GlrMaskError> {
+        match expr {
+            GrammarExpr::Ref(name) => {
+                let symbol = self.lower_nonnullable_named_rule(name)?;
+                self.rules.push(Rule { lhs, rhs: vec![symbol] });
+            }
+            GrammarExpr::Literal(_)
+            | GrammarExpr::CharClass { .. }
+            | GrammarExpr::RawRegex(_)
+            | GrammarExpr::AnyByte
+            | GrammarExpr::Exclude { .. }
+            | GrammarExpr::Intersect { .. } => {
+                if let Some(symbol) = self.nonnullable_terminal_symbol(expr)? {
+                    self.rules.push(Rule { lhs, rhs: vec![symbol] });
+                }
+            }
+            GrammarExpr::Sequence(parts) => {
+                self.emit_nonnullable_sequence(lhs, parts)?;
+            }
+            GrammarExpr::Choice(options) => {
+                for option in options {
+                    self.emit_nonnullable_expr(lhs, option)?;
+                }
+            }
+            GrammarExpr::Optional(inner) => {
+                self.emit_nonnullable_expr(lhs, inner)?;
+            }
+            GrammarExpr::Repeat(inner) | GrammarExpr::RepeatOne(inner) => {
+                if let Some(symbol) = self.lower_nonnullable_expr_symbol(inner)? {
+                    self.rules.push(Rule {
+                        lhs,
+                        rhs: vec![symbol.clone()],
+                    });
+                    self.rules.push(Rule {
+                        lhs,
+                        rhs: vec![Symbol::Nonterminal(lhs), symbol],
+                    });
+                }
+            }
+            GrammarExpr::RepeatRange { expr, min, max } => {
+                let Some(symbol) = self.lower_nonnullable_expr_symbol(expr)? else {
+                    return Ok(());
+                };
+                let adjusted_min = if self.expr_is_nullable(expr) {
+                    1
+                } else {
+                    *min
+                };
+                if adjusted_min > *max {
+                    return Ok(());
+                }
+                let shape = repeat_tree_shape();
+                let range_nonterminal = self.repeat_range_nonterminal(
+                    &symbol,
+                    adjusted_min,
+                    *max,
+                    shape,
+                );
+                self.rules.push(Rule {
+                    lhs,
+                    rhs: vec![Symbol::Nonterminal(range_nonterminal)],
+                });
+            }
+            GrammarExpr::SeparatedSequence { .. } => {
+                let symbol = self.lower_expr(expr);
+                self.rules.push(Rule { lhs, rhs: vec![symbol] });
+            }
+            GrammarExpr::Epsilon => {}
+        }
+        Ok(())
     }
 
     fn terminal_id(&mut self, name: &str, pattern: &str, utf8: bool) -> TerminalID {
@@ -1046,13 +1262,18 @@ impl Lowerer {
 
         if items.len() == 1 {
             let (item_expr, is_required) = &items[0];
-            let item_sym = self.lower_expr_terminalish(item_expr)?;
+            let item_sym = if self.expr_is_nullable(item_expr) {
+                self.lower_nonnullable_expr_symbol(item_expr)?
+            } else {
+                Some(self.lower_expr_terminalish(item_expr)?)
+            };
             // Return can_be_empty=true for optional items as a signal to the parent to add
             // a "without this item and its preceding separator" alternative.  We do NOT emit
             // an epsilon rule here — that would create dangling separators in the parent rule
             // (e.g. "key": , ).  The caller of lower_separated_sequence_inner handles the
             // all-optional empty case via an explicit separate alternative (e.g. "{}").
-            return Ok((item_sym, !is_required));
+            let can_be_empty = !is_required || self.expr_is_nullable(item_expr);
+            return Ok((item_sym.unwrap_or_else(|| self.lower_expr(&GrammarExpr::Epsilon)), can_be_empty));
         }
 
         let mid = match shape {
@@ -1205,6 +1426,64 @@ fn grammar_expr_to_expr(
             ));
         }
     })
+}
+
+fn grammar_expr_is_nullable(
+    expr: &GrammarExpr,
+    rule_nullable: &HashMap<String, bool>,
+) -> bool {
+    match expr {
+        GrammarExpr::Ref(name) => rule_nullable.get(name).copied().unwrap_or(false),
+        GrammarExpr::Sequence(parts) => parts.iter().all(|part| grammar_expr_is_nullable(part, rule_nullable)),
+        GrammarExpr::Choice(options) => options.iter().any(|option| grammar_expr_is_nullable(option, rule_nullable)),
+        GrammarExpr::Epsilon => true,
+        GrammarExpr::Exclude { expr, exclude } => {
+            grammar_expr_is_nullable(expr, rule_nullable)
+                && !grammar_expr_is_nullable(exclude, rule_nullable)
+        }
+        GrammarExpr::Intersect { expr, intersect } => {
+            grammar_expr_is_nullable(expr, rule_nullable)
+                && grammar_expr_is_nullable(intersect, rule_nullable)
+        }
+        GrammarExpr::Optional(_) | GrammarExpr::Repeat(_) => true,
+        GrammarExpr::RepeatOne(inner) => grammar_expr_is_nullable(inner, rule_nullable),
+        GrammarExpr::RepeatRange { expr, min, .. } => {
+            *min == 0 || grammar_expr_is_nullable(expr, rule_nullable)
+        }
+        GrammarExpr::Literal(bytes) => bytes.is_empty(),
+        GrammarExpr::CharClass { def, negate, utf8 } => {
+            parse_regex(&char_class_pattern(def, *negate), *utf8).is_nullable()
+        }
+        GrammarExpr::RawRegex(pattern) => parse_regex(pattern, true).is_nullable(),
+        GrammarExpr::AnyByte => false,
+        GrammarExpr::SeparatedSequence { items, .. } => items
+            .iter()
+            .all(|(item, is_required)| !*is_required || grammar_expr_is_nullable(item, rule_nullable)),
+    }
+}
+
+fn compute_rule_nullability(grammar: &NamedGrammar) -> HashMap<String, bool> {
+    let mut nullable = grammar
+        .rules
+        .iter()
+        .map(|rule| (rule.name.clone(), false))
+        .collect::<HashMap<_, _>>();
+
+    loop {
+        let mut changed = false;
+        for rule in &grammar.rules {
+            let is_nullable = grammar_expr_is_nullable(&rule.expr, &nullable);
+            if is_nullable && !nullable.get(&rule.name).copied().unwrap_or(false) {
+                nullable.insert(rule.name.clone(), true);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    nullable
 }
 
 /// Convert a lexer-level [`Expr`] into an equivalent [`GrammarExpr`].
@@ -1404,6 +1683,17 @@ fn promote_expr_literals(
 
 pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
     let mut lowerer = Lowerer::new();
+    lowerer.named_rule_exprs = grammar
+        .rules
+        .iter()
+        .map(|rule| (rule.name.clone(), rule.expr.clone()))
+        .collect();
+    lowerer.named_rule_is_terminal = grammar
+        .rules
+        .iter()
+        .map(|rule| (rule.name.clone(), rule.is_terminal))
+        .collect();
+    lowerer.rule_nullable = compute_rule_nullability(grammar);
 
     // Collect internal terminal names for validation.
     lowerer.internal_terminal_names = grammar
@@ -1421,28 +1711,20 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
     }
 
     // Build a map of terminal rule bodies for resolving Ref nodes inside terminal exprs.
-    let terminal_bodies: HashMap<String, GrammarExpr> = grammar
+    lowerer.terminal_bodies = grammar
         .rules
         .iter()
         .filter(|r| r.is_terminal)
         .map(|r| (r.name.clone(), r.expr.clone()))
         .collect();
-    let mut terminal_expr_cache: HashMap<String, Arc<Expr>> = HashMap::new();
 
     for rule in &grammar.rules {
         // Terminal rules: convert the entire body to a single Terminal::Expr.
         // Refs to other terminal rules are resolved via Expr::Shared.
         if rule.is_terminal {
-            let mut visiting = HashSet::new();
-            visiting.insert(rule.name.clone());
-            let expr = grammar_expr_to_expr(
-                &rule.expr,
-                &terminal_bodies,
-                &mut terminal_expr_cache,
-                &mut visiting,
-            )?;
+            let expr = lowerer.resolve_terminal_expr(Some(&rule.name), &rule.expr)?;
             let arc = Arc::new(expr.clone());
-            terminal_expr_cache.insert(rule.name.clone(), arc);
+            lowerer.terminal_expr_cache.insert(rule.name.clone(), arc);
 
             if rule.is_internal {
                 // Internal-only: cached for Shared resolution, no terminal or production.
@@ -2000,5 +2282,69 @@ mod tests {
         // No epsilon rules.
         let any_epsilon = gdef.rules.iter().any(|r| r.rhs.is_empty());
         assert!(!any_epsilon, "single optional item must not produce an epsilon rule");
+    }
+
+    #[test]
+    fn test_separated_sequence_nullable_required_item_skips_separator_when_empty() {
+        let g = make_sep_seq_grammar(
+            vec![
+                (GrammarExpr::Literal(b"a".to_vec()), true),
+                (
+                    GrammarExpr::Optional(Box::new(GrammarExpr::Literal(b"b".to_vec()))),
+                    true,
+                ),
+                (GrammarExpr::Literal(b"c".to_vec()), true),
+            ],
+            GrammarExpr::Literal(b",".to_vec()),
+        );
+        let gdef = lower(&g).unwrap();
+
+        let sep_tid = sep_terminal_id(&gdef);
+        let b_tid = item_terminal_id(&gdef, b'b');
+
+        let mut memo = BTreeMap::new();
+        let sep_counts = derivable_terminal_counts(&gdef, sep_tid, gdef.start, &mut memo);
+        assert_eq!(
+            sep_counts,
+            BTreeSet::from([1usize, 2]),
+            "nullable required middle item should not force a doubled separator when empty"
+        );
+
+        memo.clear();
+        let b_counts = derivable_terminal_counts(&gdef, b_tid, gdef.start, &mut memo);
+        assert_eq!(b_counts, BTreeSet::from([0usize, 1]), "nullable middle item should still allow omission");
+    }
+
+    #[test]
+    fn test_separated_sequence_nullable_terminal_ref_skips_separator_when_empty() {
+        let g = NamedGrammar {
+            rules: vec![
+                nt(
+                    "start",
+                    GrammarExpr::SeparatedSequence {
+                        items: vec![
+                            (GrammarExpr::Literal(b"a".to_vec()), true),
+                            (GrammarExpr::Ref("MAYBE_B".into()), true),
+                            (GrammarExpr::Literal(b"c".to_vec()), true),
+                        ],
+                        separator: Box::new(GrammarExpr::Literal(b",".to_vec())),
+                    },
+                ),
+                term("MAYBE_B", GrammarExpr::RawRegex("b?".into())),
+            ],
+            start: "start".into(),
+            ignore: None,
+        };
+        let gdef = lower(&g).unwrap();
+
+        let sep_tid = sep_terminal_id(&gdef);
+
+        let mut memo = BTreeMap::new();
+        let sep_counts = derivable_terminal_counts(&gdef, sep_tid, gdef.start, &mut memo);
+        assert_eq!(
+            sep_counts,
+            BTreeSet::from([1usize, 2]),
+            "nullable terminal refs inside SeparatedSequence should not emit doubled separators"
+        );
     }
 }
