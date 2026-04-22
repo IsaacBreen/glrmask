@@ -2788,6 +2788,8 @@ struct SchemaCtx<'a> {
     json_string_exact_cache: BTreeMap<usize, String>,
     json_string_upto_cache: BTreeMap<usize, String>,
     shared_ap_literal_keys: BTreeSet<String>,
+    shared_ap_key_body_expr: Option<GrammarExpr>,
+    shared_ap_key_body_rule_cache: BTreeMap<Vec<String>, String>,
     shared_ap_key_colon_expr: Option<GrammarExpr>,
     shared_ap_key_rule_cache: BTreeMap<Vec<String>, String>,
     draft_stack: Vec<JsonSchemaDraft>,
@@ -2812,6 +2814,8 @@ impl<'a> SchemaCtx<'a> {
             json_string_exact_cache: BTreeMap::new(),
             json_string_upto_cache: BTreeMap::new(),
             shared_ap_literal_keys: collect_shared_ap_literal_keys(root),
+            shared_ap_key_body_expr: None,
+            shared_ap_key_body_rule_cache: BTreeMap::new(),
             shared_ap_key_colon_expr: None,
             shared_ap_key_rule_cache: BTreeMap::new(),
             draft_stack: vec![DEFAULT_JSON_SCHEMA_DRAFT],
@@ -6821,6 +6825,66 @@ impl<'a> SchemaCtx<'a> {
         Ok(expr)
     }
 
+    fn shared_additional_key_body_expr(&mut self) -> GrammarExpr {
+        if let Some(expr) = &self.shared_ap_key_body_expr {
+            return expr.clone();
+        }
+
+        let excluded = self
+            .shared_ap_literal_keys
+            .iter()
+            .map(|key| literal_expr(&key_colon_literal_body_bytes(key)))
+            .collect::<Vec<_>>();
+
+        let body = if excluded.is_empty() {
+            GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())
+        } else {
+            GrammarExpr::Exclude {
+                expr: Box::new(GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())),
+                exclude: Box::new(choice_or_single(excluded)),
+            }
+        };
+
+        let expr = self.insert_named_terminal_rule("AP_SHARED_KEY", body);
+        self.shared_ap_key_body_expr = Some(expr.clone());
+        expr
+    }
+
+    fn build_shared_additional_key_body_choice_expr(
+        &mut self,
+        excluded_literal_keys: &BTreeSet<String>,
+        prefix: &str,
+    ) -> GrammarExpr {
+        let allowed_back_keys: Vec<String> = self
+            .shared_ap_literal_keys
+            .iter()
+            .filter(|key| !excluded_literal_keys.contains(*key))
+            .cloned()
+            .collect();
+
+        if allowed_back_keys.is_empty() {
+            return self.shared_additional_key_body_expr();
+        }
+
+        if let Some(rule_name) = self.shared_ap_key_body_rule_cache.get(&allowed_back_keys) {
+            return GrammarExpr::Ref(rule_name.clone());
+        }
+
+        let mut options = Vec::with_capacity(1 + allowed_back_keys.len());
+        options.push(self.shared_additional_key_body_expr());
+        options.extend(
+            allowed_back_keys
+                .iter()
+                .map(|key| literal_expr(&key_colon_literal_body_bytes(key))),
+        );
+
+        let rule_name = self.fresh_rule_name(prefix);
+        self.insert_rule(rule_name.clone(), choice_or_single(options));
+        self.shared_ap_key_body_rule_cache
+            .insert(allowed_back_keys, rule_name.clone());
+        GrammarExpr::Ref(rule_name)
+    }
+
     fn build_shared_additional_key_choice_expr(
         &mut self,
         excluded_literal_keys: &BTreeSet<String>,
@@ -7622,30 +7686,36 @@ impl<'a> SchemaCtx<'a> {
         let mut additional_pair_exprs = Vec::<GrammarExpr>::new();
         let has_additional_properties = additional_properties_schema.is_some();
         if let Some(schema) = additional_properties_schema {
-            let mut excluded_ap_exprs = Vec::<GrammarExpr>::new();
-            if let Some(np_terminal) = &np_terminal {
-                excluded_ap_exprs.push(np_terminal.clone());
-            }
-            if let Some(pattern_terminal) = &pattern_terminal {
-                excluded_ap_exprs.push(pattern_terminal.clone());
-            }
-
-            let ap_body = if excluded_ap_exprs.is_empty() {
-                GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())
+            let ap_key_expr = if shared_ap_key_exclusions_enabled() && !ap_key_any_string() {
+                self.build_shared_additional_key_body_choice_expr(
+                    &fixed_literal_keys,
+                    &format!("{base_name}_ap_key"),
+                )
             } else {
-                GrammarExpr::Exclude {
-                    expr: Box::new(GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())),
-                    exclude: Box::new(choice_or_single(excluded_ap_exprs)),
+                let mut excluded_ap_exprs = Vec::<GrammarExpr>::new();
+                if let Some(np_terminal) = &np_terminal {
+                    excluded_ap_exprs.push(np_terminal.clone());
                 }
+                if let Some(pattern_terminal) = &pattern_terminal {
+                    excluded_ap_exprs.push(pattern_terminal.clone());
+                }
+
+                let ap_body = if excluded_ap_exprs.is_empty() {
+                    GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())
+                } else {
+                    GrammarExpr::Exclude {
+                        expr: Box::new(GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())),
+                        exclude: Box::new(choice_or_single(excluded_ap_exprs)),
+                    }
+                };
+                self.insert_named_terminal_rule(format!("{upper_base_name}_AP"), ap_body)
             };
-            let ap_terminal =
-                self.insert_named_terminal_rule(format!("{upper_base_name}_AP"), ap_body);
 
             {
                 let additional_value_expr = self.convert_schema(&schema)?;
                 additional_pair_exprs.push(sequence_or_single(vec![
                     literal_expr(b"\""),
-                    ap_terminal,
+                    ap_key_expr,
                     literal_expr(b": "),
                     additional_value_expr,
                 ]));
