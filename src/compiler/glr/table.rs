@@ -125,7 +125,7 @@ fn unit_reduction_inlining_enabled() -> bool {
     *ENABLED.get_or_init(|| {
         std::env::var("GLRMASK_DISABLE_UNIT_REDUCTION_INLINING")
             .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
-            .unwrap_or(true)
+            .unwrap_or(false)
     })
 }
 
