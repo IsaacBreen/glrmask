@@ -106,16 +106,11 @@ fn schema_like_ambiguous_ebnf_with_n_branches(n: usize) -> String {
     // s_i adds branch i by either matching specific key i or fallback/additional key 0.
     // The required z-prefix keeps branch states distinct after key classification.
     for i in 1..n {
-        let spec_suffix = i
-            .to_string()
-            .chars()
-            .map(|c| format!("'{c}'"))
-            .collect::<Vec<_>>()
-            .join(" ");
         let z_prefix = (0..i).map(|_| "'z'").collect::<Vec<_>>().join(" ");
         lines.push(format!(
-            "s_{i} ::= s_{} | {spec_suffix} {z_prefix} zstar | '0' {z_prefix} zstar",
-            i - 1
+            "s_{i} ::= s_{} | '{}' {z_prefix} zstar | '0' {z_prefix} zstar",
+            i - 1,
+            i
         ));
     }
 
