@@ -134,11 +134,18 @@ fn dump_nt_atom(expr: &GrammarExpr) -> String {
         GrammarExpr::AnyByte => ".".to_string(),
         GrammarExpr::Epsilon => "eps".to_string(),
         GrammarExpr::Exclude { expr: inner, exclude } => {
-            format!(
-                "({} - {})",
-                dump_set_operand(inner),
-                dump_set_operand(exclude)
-            )
+            let lhs = dump_set_operand(inner);
+            match exclude.as_ref() {
+                GrammarExpr::Choice(alts) if !alts.is_empty() => {
+                    let rhs = alts
+                        .iter()
+                        .map(dump_set_operand)
+                        .collect::<Vec<_>>()
+                        .join(" - ");
+                    format!("({} - {})", lhs, rhs)
+                }
+                _ => format!("({} - {})", lhs, dump_set_operand(exclude)),
+            }
         }
         GrammarExpr::Intersect { expr: inner, intersect } => {
             format!(
@@ -614,16 +621,25 @@ impl GlrmParser {
     }
 
     fn parse_nt_exclude(&mut self, allow_raw_regex: bool) -> Result<GrammarExpr, GlrMaskError> {
-        let mut expr = self.parse_nt_intersect(allow_raw_regex)?;
+        let expr = self.parse_nt_intersect(allow_raw_regex)?;
+        let mut excludes = Vec::new();
         while matches!(self.peek(), Tok::Minus) {
             self.advance();
-            let rhs = self.parse_nt_intersect(allow_raw_regex)?;
-            expr = GrammarExpr::Exclude {
-                expr: Box::new(expr),
-                exclude: Box::new(rhs),
-            };
+            excludes.push(self.parse_nt_intersect(allow_raw_regex)?);
         }
-        Ok(expr)
+        if excludes.is_empty() {
+            Ok(expr)
+        } else {
+            let exclude_expr = if excludes.len() == 1 {
+                excludes.into_iter().next().unwrap()
+            } else {
+                GrammarExpr::Choice(excludes)
+            };
+            Ok(GrammarExpr::Exclude {
+                expr: Box::new(expr),
+                exclude: Box::new(exclude_expr),
+            })
+        }
     }
 
     fn parse_nt_intersect(&mut self, allow_raw_regex: bool) -> Result<GrammarExpr, GlrMaskError> {
@@ -1016,6 +1032,48 @@ nt start ::= (TM & "b") - "a";
         assert_eq!(g.start, "start");
         assert_eq!(g.rules.len(), 2);
         assert!(matches!(g.rules[1].expr, GrammarExpr::Exclude { .. }));
+    }
+
+    #[test]
+    fn test_parse_exclude_chain_as_union() {
+        let src = r#"
+start start;
+
+nt start ::= key - a - b;
+nt key ::= "k";
+nt a ::= "a";
+nt b ::= "b";
+"#;
+        let g = from_glrm(src).expect("exclude chain should parse");
+        let start = g.rules.iter().find(|r| r.name == "start").unwrap();
+        match &start.expr {
+            GrammarExpr::Exclude { exclude, .. } => {
+                assert!(matches!(exclude.as_ref(), GrammarExpr::Choice(alts) if alts.len() == 2));
+            }
+            other => panic!("expected Exclude, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_dump_exclude_union_as_chain() {
+        let expr = GrammarExpr::Exclude {
+            expr: Box::new(GrammarExpr::Ref("key".into())),
+            exclude: Box::new(GrammarExpr::Choice(vec![
+                GrammarExpr::Ref("a".into()),
+                GrammarExpr::Ref("b".into()),
+            ])),
+        };
+        let g = simple_grammar(
+            vec![
+                ("start", expr, false, false),
+                ("key", GrammarExpr::Literal(b"k".to_vec()), false, false),
+                ("a", GrammarExpr::Literal(b"a".to_vec()), false, false),
+                ("b", GrammarExpr::Literal(b"b".to_vec()), false, false),
+            ],
+            "start",
+        );
+        let dumped = to_glrm(&g);
+        assert!(dumped.contains("key - a - b"), "expected chained dump form, got: {dumped}");
     }
 
     #[test]
