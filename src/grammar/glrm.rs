@@ -39,8 +39,8 @@
 //! | `e?`, `e*`, `e+`              | Optional / Repeat / RepeatOne        |
 //! | `e{n}`, `e{n,m}`              | RepeatRange                          |
 //! | `(e)`                          | Grouping                             |
-//! | `exclude(a, b)`                | GrammarExpr::Exclude                 |
-//! | `intersect(a, b)`              | GrammarExpr::Intersect               |
+//! | `a - b`                        | GrammarExpr::Exclude                 |
+//! | `a & b`                        | GrammarExpr::Intersect               |
 //! | `seqsep(sep, i1?, i2, i3?)`   | SeparatedSequence                    |
 
 use crate::GlrMaskError;
@@ -134,10 +134,18 @@ fn dump_nt_atom(expr: &GrammarExpr) -> String {
         GrammarExpr::AnyByte => ".".to_string(),
         GrammarExpr::Epsilon => "eps".to_string(),
         GrammarExpr::Exclude { expr: inner, exclude } => {
-            format!("exclude({}, {})", dump_nt_expr(inner, false), dump_nt_expr(exclude, false))
+            format!(
+                "({} - {})",
+                dump_set_operand(inner),
+                dump_set_operand(exclude)
+            )
         }
         GrammarExpr::Intersect { expr: inner, intersect } => {
-            format!("intersect({}, {})", dump_nt_expr(inner, false), dump_nt_expr(intersect, false))
+            format!(
+                "({} & {})",
+                dump_set_operand(inner),
+                dump_set_operand(intersect)
+            )
         }
         GrammarExpr::SeparatedSequence { items, separator } => {
             let sep_str = dump_nt_atom(separator);
@@ -159,6 +167,13 @@ fn dump_nt_atom(expr: &GrammarExpr) -> String {
         | GrammarExpr::RepeatRange { .. } => {
             format!("({})", dump_nt_postfix(expr))
         }
+    }
+}
+
+fn dump_set_operand(expr: &GrammarExpr) -> String {
+    match expr {
+        GrammarExpr::Choice(_) => format!("({})", dump_nt_expr(expr, false)),
+        _ => dump_nt_expr(expr, false),
     }
 }
 
@@ -199,8 +214,8 @@ pub fn from_glrm(input: &str) -> Result<NamedGrammar, GlrMaskError> {
 
 #[derive(Debug, Clone, PartialEq)]
 enum Tok {
-    /// Identifier or keyword: `nt`, `tm`, `internal`, `start`, `ignore`,
-    /// `exclude`, `intersect`, `seqsep`, `t`, `eps`
+    /// Identifier or keyword: `nt`, `t`, `internal`, `start`, `ignore`,
+    /// `seqsep`, `eps`
     Ident(String),
     /// String literal: `"..."` — bytes, after escape processing
     StringLit(Vec<u8>),
@@ -224,6 +239,10 @@ enum Tok {
     RBrace,
     /// `|`
     Pipe,
+    /// `&`
+    Amp,
+    /// `-`
+    Minus,
     /// `*`
     Star,
     /// `+`
@@ -423,6 +442,8 @@ impl<'a> Lexer<'a> {
                         b'{' => tokens.push(Tok::LBrace),
                         b'}' => tokens.push(Tok::RBrace),
                         b'|' => tokens.push(Tok::Pipe),
+                        b'&' => tokens.push(Tok::Amp),
+                        b'-' => tokens.push(Tok::Minus),
                         b'*' => tokens.push(Tok::Star),
                         b'+' => tokens.push(Tok::Plus),
                         b'?' => tokens.push(Tok::Quest),
@@ -559,17 +580,17 @@ impl GlrmParser {
         let name = self.expect_ident()?;
         self.consume(&Tok::DeclEq)?;
         // The expression can be empty (ε-only rule), so we don't require an atom.
-        let expr = self.parse_nt_expr()?;
+        let expr = self.parse_nt_expr(is_terminal)?;
         self.consume(&Tok::Semi)?;
         Ok(NamedRule { name, expr, is_terminal, is_internal })
     }
 
     // ---- NT expression parsing ---------------------------------------------
 
-    fn parse_nt_expr(&mut self) -> Result<GrammarExpr, GlrMaskError> {
+    fn parse_nt_expr(&mut self, allow_raw_regex: bool) -> Result<GrammarExpr, GlrMaskError> {
         // An alternative can be empty (ε), so try to parse even if no atom is visible.
         let first = if self.can_start_nt_atom() {
-            self.parse_nt_seq()?
+            self.parse_nt_exclude(allow_raw_regex)?
         } else {
             GrammarExpr::Sequence(vec![]) // empty / ε
         };
@@ -580,7 +601,7 @@ impl GlrmParser {
         while matches!(self.peek(), Tok::Pipe) {
             self.advance(); // consume `|`
             let alt = if self.can_start_nt_atom() {
-                self.parse_nt_seq()?
+                self.parse_nt_exclude(allow_raw_regex)?
             } else {
                 GrammarExpr::Sequence(vec![]) // empty / ε
             };
@@ -589,7 +610,33 @@ impl GlrmParser {
         Ok(GrammarExpr::Choice(alts))
     }
 
-    fn parse_nt_seq(&mut self) -> Result<GrammarExpr, GlrMaskError> {
+    fn parse_nt_exclude(&mut self, allow_raw_regex: bool) -> Result<GrammarExpr, GlrMaskError> {
+        let mut expr = self.parse_nt_intersect(allow_raw_regex)?;
+        while matches!(self.peek(), Tok::Minus) {
+            self.advance();
+            let rhs = self.parse_nt_intersect(allow_raw_regex)?;
+            expr = GrammarExpr::Exclude {
+                expr: Box::new(expr),
+                exclude: Box::new(rhs),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_nt_intersect(&mut self, allow_raw_regex: bool) -> Result<GrammarExpr, GlrMaskError> {
+        let mut expr = self.parse_nt_seq(allow_raw_regex)?;
+        while matches!(self.peek(), Tok::Amp) {
+            self.advance();
+            let rhs = self.parse_nt_seq(allow_raw_regex)?;
+            expr = GrammarExpr::Intersect {
+                expr: Box::new(expr),
+                intersect: Box::new(rhs),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_nt_seq(&mut self, allow_raw_regex: bool) -> Result<GrammarExpr, GlrMaskError> {
         let mut items = Vec::new();
         loop {
             // A new item can start with: Ident, StringLit, RegexLit, CharClass,
@@ -597,7 +644,7 @@ impl GlrmParser {
             if !self.can_start_nt_atom() {
                 break;
             }
-            items.push(self.parse_nt_postfix()?);
+            items.push(self.parse_nt_postfix(allow_raw_regex)?);
         }
         match items.len() {
             0 => Err(err("expected at least one expression item")),
@@ -615,8 +662,8 @@ impl GlrmParser {
         }
     }
 
-    fn parse_nt_postfix(&mut self) -> Result<GrammarExpr, GlrMaskError> {
-        let atom = self.parse_nt_atom()?;
+    fn parse_nt_postfix(&mut self, allow_raw_regex: bool) -> Result<GrammarExpr, GlrMaskError> {
+        let atom = self.parse_nt_atom(allow_raw_regex)?;
         self.apply_nt_quantifier(atom)
     }
 
@@ -651,13 +698,16 @@ impl GlrmParser {
         }
     }
 
-    fn parse_nt_atom(&mut self) -> Result<GrammarExpr, GlrMaskError> {
+    fn parse_nt_atom(&mut self, allow_raw_regex: bool) -> Result<GrammarExpr, GlrMaskError> {
         match self.peek().clone() {
             Tok::StringLit(bytes) => {
                 self.advance();
                 Ok(GrammarExpr::Literal(bytes))
             }
             Tok::RegexLit(pat) => {
+                if !allow_raw_regex {
+                    return Err(err("raw regex literals are only allowed in terminal (`t`) rules"));
+                }
                 self.advance();
                 Ok(GrammarExpr::RawRegex(pat))
             }
@@ -673,45 +723,21 @@ impl GlrmParser {
             }
             Tok::LParen => {
                 self.advance();
-                let inner = self.parse_nt_expr()?;
+                let inner = self.parse_nt_expr(allow_raw_regex)?;
                 self.consume(&Tok::RParen)?;
                 Ok(inner)
             }
             Tok::Ident(ref kw) => {
                 match kw.as_str() {
-                    "exclude" => {
-                        self.advance();
-                        self.consume(&Tok::LParen)?;
-                        let base = self.parse_nt_expr()?;
-                        self.consume(&Tok::Comma)?;
-                        let excl = self.parse_nt_expr()?;
-                        self.consume(&Tok::RParen)?;
-                        Ok(GrammarExpr::Exclude {
-                            expr: Box::new(base),
-                            exclude: Box::new(excl),
-                        })
-                    }
-                    "intersect" => {
-                        self.advance();
-                        self.consume(&Tok::LParen)?;
-                        let base = self.parse_nt_expr()?;
-                        self.consume(&Tok::Comma)?;
-                        let other = self.parse_nt_expr()?;
-                        self.consume(&Tok::RParen)?;
-                        Ok(GrammarExpr::Intersect {
-                            expr: Box::new(base),
-                            intersect: Box::new(other),
-                        })
-                    }
                     "seqsep" => {
                         self.advance();
                         self.consume(&Tok::LParen)?;
-                        let sep = self.parse_nt_atom()?;
+                        let sep = self.parse_nt_atom(allow_raw_regex)?;
                         self.consume(&Tok::Comma)?;
                         let mut items = Vec::new();
                         loop {
                             // Each item is a nt_atom optionally followed by `?`
-                            let item_expr = self.parse_nt_atom()?;
+                            let item_expr = self.parse_nt_atom(allow_raw_regex)?;
                             let optional = if matches!(self.peek(), Tok::Quest) {
                                 self.advance();
                                 true
@@ -918,6 +944,32 @@ mod tests {
         ], "start");
         let g2 = roundtrip(&g);
         assert!(matches!(g2.rules[1].expr, GrammarExpr::Intersect { .. }));
+    }
+
+    #[test]
+    fn test_parse_infix_intersect_and_exclude() {
+        let src = r#"
+start start;
+
+t TM ::= "a" | "b" | "c";
+nt start ::= (TM & "b") - "a";
+"#;
+        let g = from_glrm(src).expect("infix operators should parse");
+        assert_eq!(g.start, "start");
+        assert_eq!(g.rules.len(), 2);
+        assert!(matches!(g.rules[1].expr, GrammarExpr::Exclude { .. }));
+    }
+
+    #[test]
+    fn test_nt_rule_rejects_raw_regex() {
+        let src = r#"
+start start;
+
+nt start ::= /abc/;
+"#;
+        let err = from_glrm(src).expect_err("nt raw regex must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("raw regex literals are only allowed in terminal"));
     }
 
     #[test]

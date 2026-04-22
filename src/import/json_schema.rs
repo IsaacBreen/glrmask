@@ -3671,37 +3671,15 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn ensure_base_rules(&mut self) {
-        let open = split_open_quote();
-        let close = split_close_quote();
-        let colon = split_colon_space();
-
         self.insert_rule(JSON_STRING_CHAR_RULE, regex_expr(JSON_STRING_CHAR_PATTERN));
 
-        // JSON_STRING_BODY_RULE: the body regex used in split paths.
-        let body_regex = if close {
-            JSON_STRING_BODY_ONLY_REGEX // body chars only, no closing "
-        } else {
-            JSON_STRING_BODY_REGEX // body chars + closing "
-        };
-        self.insert_rule(JSON_STRING_BODY_RULE, regex_expr(body_regex));
+        // JSON_STRING_BODY_RULE: split-aware body regex terminal used by
+        // json_string so the nonterminal does not embed raw regex.
+        let body_regex = string_value_body_regex(JSON_STRING_BODY_ONLY_REGEX);
+        self.insert_rule(JSON_STRING_BODY_RULE, regex_expr(&body_regex));
 
-        // JSON_STRING_RULE: 4-way based on open × close.
-        let json_string_expr = match (open, close) {
-            (false, false) => regex_expr(JSON_STRING_FULL_REGEX),
-            (true, false) => sequence_or_single(vec![
-                literal_expr(b"\""),
-                GrammarExpr::Ref(JSON_STRING_BODY_RULE.into()),
-            ]),
-            (false, true) => sequence_or_single(vec![
-                regex_expr(JSON_STRING_OPEN_BODY_REGEX),
-                literal_expr(b"\""),
-            ]),
-            (true, true) => sequence_or_single(vec![
-                literal_expr(b"\""),
-                GrammarExpr::Ref(JSON_STRING_BODY_RULE.into()),
-                literal_expr(b"\""),
-            ]),
-        };
+        // JSON_STRING_RULE: always assembled from literals + named terminals.
+        let json_string_expr = wrap_string_value_terminal(GrammarExpr::Ref(JSON_STRING_BODY_RULE.into()));
         self.insert_rule(JSON_STRING_RULE, json_string_expr);
         self.insert_rule(JSON_INTEGER_RULE, regex_expr(r#"-?(0|[1-9][0-9]*)"#));
         self.insert_rule(JSON_NUMBER_RULE, regex_expr(JSON_NUMBER_NONINTEGER_REGEX));
@@ -3713,17 +3691,12 @@ impl<'a> SchemaCtx<'a> {
         );
         self.insert_rule(JSON_NULL_RULE, literal_expr(b"null"));
 
-        // JSON_KEY_COLON_BODY_RULE: the key body regex.
-        // If close or colon is split, body doesn't include `"\": "` suffix.
-        let kc_body_regex = if close || colon {
-            JSON_STRING_BODY_ONLY_REGEX
-        } else {
-            JSON_KEY_COLON_BODY_REGEX // body + `"\": `
-        };
-        self.insert_rule(JSON_KEY_COLON_BODY_RULE, regex_expr(kc_body_regex));
+        // JSON_KEY_COLON_BODY_RULE: split-aware key-colon body regex terminal.
+        let kc_body_regex = key_colon_body_regex(JSON_STRING_BODY_ONLY_REGEX);
+        self.insert_rule(JSON_KEY_COLON_BODY_RULE, regex_expr(&kc_body_regex));
 
-        // JSON_KEY_COLON_RULE: respects all split flags.
-        let json_key_colon_expr = wrap_key_colon_regex(JSON_STRING_BODY_ONLY_REGEX);
+        // JSON_KEY_COLON_RULE: always assembled from literals + named terminals.
+        let json_key_colon_expr = wrap_key_colon_terminal(GrammarExpr::Ref(JSON_KEY_COLON_BODY_RULE.into()));
         self.insert_rule(JSON_KEY_COLON_RULE, json_key_colon_expr);
         self.insert_rule(
             JSON_KV_RULE,
