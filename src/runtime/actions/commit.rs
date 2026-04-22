@@ -195,6 +195,31 @@ fn queue_parser_state(
     }
 }
 
+fn finalize_pending_state(mut pending_state: ParserStatesByTokenizer) -> BTreeMap<u32, ParserGSS> {
+    match pending_state.len() {
+        0 => BTreeMap::new(),
+        1 => {
+            let (tokenizer_state, parser_state) = pending_state.drain().next().unwrap();
+            let fused = parser_state.fuse(Some(1));
+            if fused.is_empty() {
+                BTreeMap::new()
+            } else {
+                let mut new_state = BTreeMap::new();
+                new_state.insert(tokenizer_state, fused);
+                new_state
+            }
+        }
+        _ => {
+            let mut new_state: BTreeMap<u32, ParserGSS> = pending_state.into_iter().collect();
+            for parser_state in new_state.values_mut() {
+                *parser_state = parser_state.fuse(Some(1));
+            }
+            new_state.retain(|_, parser_state| !parser_state.is_empty());
+            new_state
+        }
+    }
+}
+
 fn apply_future_terminal_disallow(
     constraint: &Constraint,
     exec_result: &TokenizerExecResult,
@@ -640,11 +665,7 @@ fn commit_bytes_impl(
                         }
                     }
 
-                    let mut new_state: BTreeMap<u32, ParserGSS> = bufs.pending_state.drain().collect();
-                    for parser_state in new_state.values_mut() {
-                        *parser_state = parser_state.fuse(Some(1));
-                    }
-                    new_state.retain(|_, parser_state| !parser_state.is_empty());
+                    let new_state = finalize_pending_state(std::mem::take(&mut bufs.pending_state));
 
                     *state = new_state;
                     bufs.processing_queue = processing_queue;
@@ -828,11 +849,7 @@ fn commit_bytes_impl(
         }
     }
 
-    let mut new_state: BTreeMap<u32, ParserGSS> = bufs.pending_state.drain().collect();
-    for parser_state in new_state.values_mut() {
-        *parser_state = parser_state.fuse(Some(1));
-    }
-    new_state.retain(|_, parser_state| !parser_state.is_empty());
+    let new_state = finalize_pending_state(std::mem::take(&mut bufs.pending_state));
 
     *state = new_state;
     bufs.processing_queue = processing_queue;
@@ -1048,17 +1065,38 @@ fn commit_bytes_impl_profiled(
     let queue_ns = t_queue.elapsed().as_nanos() as u64;
 
     let t_fuse = Instant::now();
-    let t_fuse_convert = Instant::now();
-    let mut new_state: BTreeMap<u32, ParserGSS> = pending_state.into_iter().collect();
-    let fuse_convert_ns = t_fuse_convert.elapsed().as_nanos() as u64;
-    let t_fuse_core = Instant::now();
-    for parser_state in new_state.values_mut() {
-        *parser_state = parser_state.fuse(Some(1));
-    }
-    let fuse_core_ns = t_fuse_core.elapsed().as_nanos() as u64;
-    let t_fuse_retain = Instant::now();
-    new_state.retain(|_, parser_state| !parser_state.is_empty());
-    let fuse_retain_ns = t_fuse_retain.elapsed().as_nanos() as u64;
+    let (new_state, fuse_convert_ns, fuse_core_ns, fuse_retain_ns) = match pending_state.len() {
+        0 => (BTreeMap::new(), 0, 0, 0),
+        1 => {
+            let t_fuse_convert = Instant::now();
+            let (tokenizer_state, parser_state) = pending_state.into_iter().next().unwrap();
+            let fuse_convert_ns = t_fuse_convert.elapsed().as_nanos() as u64;
+            let t_fuse_core = Instant::now();
+            let fused = parser_state.fuse(Some(1));
+            let fuse_core_ns = t_fuse_core.elapsed().as_nanos() as u64;
+            let t_fuse_retain = Instant::now();
+            let mut retained_state = BTreeMap::new();
+            if !fused.is_empty() {
+                retained_state.insert(tokenizer_state, fused);
+            }
+            let fuse_retain_ns = t_fuse_retain.elapsed().as_nanos() as u64;
+            (retained_state, fuse_convert_ns, fuse_core_ns, fuse_retain_ns)
+        }
+        _ => {
+            let t_fuse_convert = Instant::now();
+            let mut new_state: BTreeMap<u32, ParserGSS> = pending_state.into_iter().collect();
+            let fuse_convert_ns = t_fuse_convert.elapsed().as_nanos() as u64;
+            let t_fuse_core = Instant::now();
+            for parser_state in new_state.values_mut() {
+                *parser_state = parser_state.fuse(Some(1));
+            }
+            let fuse_core_ns = t_fuse_core.elapsed().as_nanos() as u64;
+            let t_fuse_retain = Instant::now();
+            new_state.retain(|_, parser_state| !parser_state.is_empty());
+            let fuse_retain_ns = t_fuse_retain.elapsed().as_nanos() as u64;
+            (new_state, fuse_convert_ns, fuse_core_ns, fuse_retain_ns)
+        }
+    };
     let fuse_ns = t_fuse.elapsed().as_nanos() as u64;
 
     *state = new_state;
@@ -1295,11 +1333,7 @@ fn commit_bytes_per_advance(
     }
 
     // Fuse
-    let mut new_state: BTreeMap<u32, ParserGSS> = pending_state.into_iter().collect();
-    for parser_state in new_state.values_mut() {
-        *parser_state = parser_state.fuse(Some(1));
-    }
-    new_state.retain(|_, parser_state| !parser_state.is_empty());
+    let new_state = finalize_pending_state(pending_state);
 
     let final_stacks: Vec<(u32, Vec<Vec<u32>>)> = new_state.iter().map(|(&ts, gss)| {
         (ts, gss.to_stacks().into_iter().map(|(s, _)| s).collect())

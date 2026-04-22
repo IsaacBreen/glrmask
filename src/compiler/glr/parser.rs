@@ -102,6 +102,24 @@ fn reduce_sources(gss: &ParserGSS, state: u32, rhs_len: usize) -> ReduceSources 
     gss.isolate_pop_bases(state, rhs_len as isize)
 }
 
+fn reduce_sources_from_isolated(gss: &ParserGSS, rhs_len: usize) -> ReduceSources {
+    let popped = gss.popn(rhs_len as isize);
+    if popped.is_empty() {
+        return SmallVec::new();
+    }
+    if let Some(v) = popped.single_top_value() {
+        let mut result = SmallVec::new();
+        result.push((v, popped));
+        return result;
+    }
+    let top_vals = popped.peek_values();
+    let mut result = SmallVec::new();
+    for v in top_vals {
+        result.push((v, popped.isolate(Some(v))));
+    }
+    result
+}
+
 /// Advance an ambiguous frontier.
 ///
 /// `closure` accumulates unshifted branches that still need GLR reduce-closure
@@ -126,6 +144,7 @@ fn advance_nondeterministically(
                 continue;
             };
             let mut isolated = closure.isolate(Some(state));
+            let reduce_base = isolated.clone();
             if advance_deterministically(table, &mut isolated, token) {
                 shifted = shifted.merge(&isolated);
                 continue;
@@ -142,7 +161,7 @@ fn advance_nondeterministically(
             }
 
             action.for_each_reduce(|nt, len| {
-                for (goto_from, base) in reduce_sources(&closure, state, len as usize) {
+                for (goto_from, base) in reduce_sources_from_isolated(&reduce_base, len as usize) {
                     let Some((target, is_replace)) = table.goto_target(goto_from, nt) else {
                         continue;
                     };
@@ -635,6 +654,7 @@ fn advance_nondeterministically_profiled(
             let t_isolate = Instant::now();
             let mut isolated = closure.isolate(Some(state));
             profile.nondet_isolate_ns += t_isolate.elapsed().as_nanos() as u64;
+            let reduce_base = isolated.clone();
 
             let t_nd_det = Instant::now();
             let mut nd_det_profile = AdvanceProfile::default();
@@ -679,7 +699,7 @@ fn advance_nondeterministically_profiled(
 
             action.for_each_reduce(|nt, len| {
                 let t_rs = Instant::now();
-                let sources = reduce_sources(&closure, state, len as usize);
+                let sources = reduce_sources_from_isolated(&reduce_base, len as usize);
                 profile.nondet_reduce_sources_ns += t_rs.elapsed().as_nanos() as u64;
                 for (goto_from, base) in sources {
                     profile.n_nondet_reduce_ops += 1;
