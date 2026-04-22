@@ -6275,6 +6275,19 @@ impl<'a> SchemaCtx<'a> {
             return (empty_expr(), true);
         }
 
+        if ordered.len() == 1 {
+            let (key, value_expr, is_required) = &ordered[0];
+            let item = self.build_merged_literal_key_value_expr(b"", key, value_expr.clone());
+            return if *is_required {
+                (item, false)
+            } else {
+                // Keep the tree item itself non-nullable for readability; the
+                // caller handles empty-object/body variants when `can_be_empty`
+                // is true.
+                (item, true)
+            };
+        }
+
         let items = ordered
             .iter()
             .map(|(key, value_expr, is_required)| {
@@ -7543,7 +7556,7 @@ impl<'a> SchemaCtx<'a> {
         let mut base_index = self.generated_object_rule_counter;
         let base_name = loop {
             let candidate = format!("obj_ord_{base_index}");
-            if !self.used_rule_names.contains(&format!("{candidate}_0_nc")) {
+            if !self.used_rule_names.contains(&format!("{candidate}_obj")) {
                 break candidate;
             }
             base_index += 1;
@@ -7606,7 +7619,7 @@ impl<'a> SchemaCtx<'a> {
                 let key_expr = self.build_excluding_key_colon_expr_internal(
                     key_expr,
                     excluded_exprs,
-                    &format!("{}_PP_SUBSET_{}_KEY", base_name.to_uppercase(), subset_idx),
+                    &format!("{}_PP{}_KEY", base_name.to_uppercase(), subset_idx),
                 );
 
                 let subset_schemas = subset
@@ -7687,17 +7700,6 @@ impl<'a> SchemaCtx<'a> {
             }
         }
 
-        // Keep all properties (required AND optional) in the ordered tree so
-        // that property ordering is always enforced.  The GLR parser handles
-        // the resulting LR(2) ambiguity (`, ` after an optional tree leaf could
-        // continue to the next tree property OR to the continuation chain) by
-        // forking and pruning dead paths automatically.
-        //
-        // Previously, optional properties were moved to the unordered "free"
-        // continuation chain when additionalProperties or patternProperties
-        // existed, which destroyed property ordering and caused false-accepts.
-        let _has_continuation = !additional_pair_exprs.is_empty() || !pattern_pair_exprs.is_empty();
-
         let pattern_list_expr = if pattern_pair_exprs.is_empty() {
             None
         } else {
@@ -7746,55 +7748,65 @@ impl<'a> SchemaCtx<'a> {
             return Ok(self.build_closed_required_ordered_object_expr(&ordered));
         }
 
+        let pattern_list_rule = pattern_list_expr.map(|expr| {
+            self.insert_rule(format!("{base_name}_pp_list"), expr)
+        });
+        let additional_list_rule = additional_list_expr.map(|expr| {
+            self.insert_rule(format!("{base_name}_ap_list"), expr)
+        });
+
         let (tree_expr, tree_can_be_empty) =
             self.build_ordered_object_body_separated_sequence_expr(&ordered);
+        let tree_rule = if ordered.is_empty() {
+            None
+        } else {
+            Some(self.insert_rule(format!("{base_name}_tree"), tree_expr))
+        };
 
         let mut body_variants: Vec<GrammarExpr> = Vec::new();
 
-        if !ordered.is_empty() {
-            let mut ordered_variants = vec![tree_expr.clone()];
-            if let Some(pattern_list_expr) = &pattern_list_expr {
-                let with_pattern = ordered_variants
-                    .iter()
-                    .map(|expr| {
-                        sequence_or_single(vec![
-                            expr.clone(),
-                            self.json_item_separator_expr(),
-                            pattern_list_expr.clone(),
-                        ])
-                    })
-                    .collect::<Vec<_>>();
-                ordered_variants.extend(with_pattern);
+        if let Some(tree_rule) = &tree_rule {
+            let tree_ref = GrammarExpr::Ref(tree_rule.clone());
+            body_variants.push(tree_ref.clone());
+
+            if let Some(pp_rule) = &pattern_list_rule {
+                body_variants.push(sequence_or_single(vec![
+                    tree_ref.clone(),
+                    self.json_item_separator_expr(),
+                    GrammarExpr::Ref(pp_rule.clone()),
+                ]));
             }
-            if let Some(additional_list_expr) = &additional_list_expr {
-                let with_additional = ordered_variants
-                    .iter()
-                    .map(|expr| {
-                        sequence_or_single(vec![
-                            expr.clone(),
-                            self.json_item_separator_expr(),
-                            additional_list_expr.clone(),
-                        ])
-                    })
-                    .collect::<Vec<_>>();
-                ordered_variants.extend(with_additional);
+            if let Some(ap_rule) = &additional_list_rule {
+                body_variants.push(sequence_or_single(vec![
+                    tree_ref.clone(),
+                    self.json_item_separator_expr(),
+                    GrammarExpr::Ref(ap_rule.clone()),
+                ]));
             }
-            body_variants.extend(ordered_variants);
+            if let (Some(pp_rule), Some(ap_rule)) = (&pattern_list_rule, &additional_list_rule) {
+                body_variants.push(sequence_or_single(vec![
+                    tree_ref,
+                    self.json_item_separator_expr(),
+                    GrammarExpr::Ref(pp_rule.clone()),
+                    self.json_item_separator_expr(),
+                    GrammarExpr::Ref(ap_rule.clone()),
+                ]));
+            }
         }
 
         if ordered.is_empty() || tree_can_be_empty {
-            if let Some(pattern_list_expr) = &pattern_list_expr {
-                body_variants.push(pattern_list_expr.clone());
-                if let Some(additional_list_expr) = &additional_list_expr {
-                    body_variants.push(sequence_or_single(vec![
-                        pattern_list_expr.clone(),
-                        self.json_item_separator_expr(),
-                        additional_list_expr.clone(),
-                    ]));
-                }
+            if let Some(pp_rule) = &pattern_list_rule {
+                body_variants.push(GrammarExpr::Ref(pp_rule.clone()));
             }
-            if let Some(additional_list_expr) = &additional_list_expr {
-                body_variants.push(additional_list_expr.clone());
+            if let Some(ap_rule) = &additional_list_rule {
+                body_variants.push(GrammarExpr::Ref(ap_rule.clone()));
+            }
+            if let (Some(pp_rule), Some(ap_rule)) = (&pattern_list_rule, &additional_list_rule) {
+                body_variants.push(sequence_or_single(vec![
+                    GrammarExpr::Ref(pp_rule.clone()),
+                    self.json_item_separator_expr(),
+                    GrammarExpr::Ref(ap_rule.clone()),
+                ]));
             }
         }
 
@@ -7802,16 +7814,27 @@ impl<'a> SchemaCtx<'a> {
             return Ok(sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]));
         }
 
-        let mut object_variants = body_variants
-            .into_iter()
-            .map(|body| sequence_or_single(vec![literal_expr(b"{"), body, literal_expr(b"}")]))
-            .collect::<Vec<_>>();
+        let body_rule = self.insert_rule(format!("{base_name}_body"), choice_or_single(body_variants));
+        let nonempty_object_rule = self.insert_rule(
+            format!("{base_name}_obj_nonempty"),
+            sequence_or_single(vec![
+                literal_expr(b"{"),
+                GrammarExpr::Ref(body_rule),
+                literal_expr(b"}"),
+            ]),
+        );
 
-        if ordered.is_empty() || tree_can_be_empty {
-            object_variants.push(sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]));
-        }
+        let object_expr = if ordered.is_empty() || tree_can_be_empty {
+            choice_or_single(vec![
+                GrammarExpr::Ref(nonempty_object_rule),
+                sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]),
+            ])
+        } else {
+            GrammarExpr::Ref(nonempty_object_rule)
+        };
 
-        Ok(choice_or_single(object_variants))
+        let object_rule = self.insert_rule(format!("{base_name}_obj"), object_expr);
+        Ok(GrammarExpr::Ref(object_rule))
     }
 
     fn property_name_pattern(property_names: &Value) -> Result<&str, GlrMaskError> {
