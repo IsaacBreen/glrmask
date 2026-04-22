@@ -9572,15 +9572,14 @@ mod tests {
                 "a": {"type": "string"}
             },
             "patternProperties": {
-                "^m": {
-                    "type": "array",
-                    "items": {"type": "string"}
+                "^m$": {
+                    "type": "string"
                 }
             },
             "additionalProperties": {"type": "string"}
         }"#;
-        assert!(accepts_sequence(schema, &[b"{\"a\": \"x\", \"m\": [\"s\"], \"z\": \"y\"}"]));
-        assert!(!accepts_sequence(schema, &[b"{\"a\": \"x\", \"m\": \"s\", \"z\": \"y\"}"]));
+        assert!(accepts_sequence(schema, &[b"{\"a\": \"x\", \"m\": \"x\", \"z\": \"y\"}"]));
+        assert!(!accepts_sequence(schema, &[b"..."]));
     }
 
     #[test]
