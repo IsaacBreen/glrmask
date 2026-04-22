@@ -96,12 +96,14 @@ fn schema_like_ambiguous_ebnf_with_n_branches(n: usize) -> String {
     lines.push(format!("start ::= s_{}", n - 1));
     lines.push("zstar ::= 'z' zstar | ''".to_string());
 
-    // Base branch (i=0): known key x0 and additional key x0 coincide,
-    // so this branch has the same known-vs-additional ambiguity source as schema case.
-    lines.push("s_0 ::= 'p' 'x' '0' zstar 'q' | 'p' 'x' '0' zstar 'q'".to_string());
+    // Minimal core analogue of known-vs-additional ambiguity:
+    // - specific key for branch i is decimal literal i
+    // - shared fallback/additional key is 0
+    // For i=0, specific and fallback coincide, yielding two roles on the same token.
+    lines.push("s_0 ::= '0' zstar | '0' zstar".to_string());
 
     // One extra line per extra N:
-    // s_i adds branch i by either matching specific key x{i} or fallback/additional key x0.
+    // s_i adds branch i by either matching specific key i or fallback/additional key 0.
     // The required z-prefix keeps branch states distinct after key classification.
     for i in 1..n {
         let spec_suffix = i
@@ -112,7 +114,7 @@ fn schema_like_ambiguous_ebnf_with_n_branches(n: usize) -> String {
             .join(" ");
         let z_prefix = (0..i).map(|_| "'z'").collect::<Vec<_>>().join(" ");
         lines.push(format!(
-            "s_{i} ::= s_{} | 'p' 'x' {spec_suffix} {z_prefix} zstar 'q' | 'p' 'x' '0' {z_prefix} zstar 'q'",
+            "s_{i} ::= s_{} | {spec_suffix} {z_prefix} zstar | '0' {z_prefix} zstar",
             i - 1
         ));
     }
@@ -383,10 +385,9 @@ fn test_ebnf_ambiguity_grows_with_n_not_log_n() {
     let mut observations = Vec::new();
     for &n in &ns {
         let grammar = schema_like_ambiguous_ebnf_with_n_branches(n);
-        let input = [b'p', b'x', b'0']
+        let input = [b'0']
             .into_iter()
             .chain(std::iter::repeat_n(b'z', n))
-            .chain([b'q'])
             .collect::<Vec<u8>>();
         let constraint = Constraint::from_ebnf(&grammar, &vocab).unwrap();
         let max_paths = max_parser_paths_over_bytes(&constraint, &input);
