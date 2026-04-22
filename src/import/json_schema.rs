@@ -7585,90 +7585,21 @@ impl<'a> SchemaCtx<'a> {
             )
         });
 
-        let key_expr_needed = !pattern_properties.is_empty() || property_names.is_some();
-        let (base_key_colon_expr, pattern_key_colon_exprs) = if key_expr_needed {
-            (
-                Some(Self::scoped_key_colon_expr(property_names)?),
-                pattern_properties
-                    .iter()
-                    .map(|(pattern, _)| Self::pattern_key_colon_expr(pattern))
-                    .collect::<Vec<_>>(),
-            )
-        } else {
-            (None, Vec::new())
-        };
-        let fixed_key_union_expr = Self::literal_key_colon_union_expr(&fixed_literal_keys);
+        let pattern_key_colon_exprs = pattern_properties
+            .iter()
+            .map(|(pattern, _)| Self::pattern_key_colon_expr(pattern))
+            .collect::<Vec<_>>();
 
         let mut pattern_pair_variants = Vec::<(GrammarExpr, GrammarExpr)>::new();
         let mut pattern_key_terminals = Vec::<GrammarExpr>::new();
-        let mut pattern_terminal_safe_for_ap = false;
-        let mut prebuilt_pattern_terminal: Option<GrammarExpr> = None;
-
-        if pattern_properties.len() == 1 && property_names.is_none() {
-            let pattern_key = self.insert_named_terminal_rule(
-                format!("{upper_base_name}_PP"),
-                expr_to_grammar_expr(&Self::pattern_key_colon_expr(&pattern_properties[0].0)),
-            );
-            let value_expr = self.convert_schema(&pattern_properties[0].1)?;
-            prebuilt_pattern_terminal = Some(pattern_key.clone());
-            pattern_pair_variants.push((pattern_key, value_expr));
-            pattern_terminal_safe_for_ap = true;
-        } else if !pattern_properties.is_empty() {
-            let mut subsets = Vec::<Vec<usize>>::new();
-            let mut current = Vec::<usize>::new();
-            Self::collect_nonempty_index_subsets(
-                pattern_properties.len(),
-                0,
-                &mut current,
-                &mut subsets,
-            );
-
-            for (subset_idx, subset) in subsets.into_iter().enumerate() {
-                let mut key_expr = base_key_colon_expr
-                    .as_ref()
-                    .expect("pattern/property-name expr should exist when needed")
-                    .clone();
-                for pattern_idx in &subset {
-                    key_expr = LexerExpr::Intersect {
-                        expr: Box::new(key_expr),
-                        intersect: Box::new(pattern_key_colon_exprs[*pattern_idx].clone()),
-                    };
-                }
-
-                let subset_members: BTreeSet<usize> = subset.iter().copied().collect();
-                let mut excluded_exprs: Vec<LexerExpr> = Vec::new();
-                if let Some(ref fk_expr) = fixed_key_union_expr {
-                    excluded_exprs.push(fk_expr.clone());
-                }
-                for (pattern_idx, pattern_expr) in pattern_key_colon_exprs.iter().enumerate() {
-                    if !subset_members.contains(&pattern_idx) {
-                        excluded_exprs.push(pattern_expr.clone());
-                    }
-                }
-
-                let excluded_key_exprs = excluded_exprs
-                    .into_iter()
-                    .map(|e| {
-                        self.extract_terminal_rule(
-                            expr_to_grammar_expr(&e),
-                            &format!("{}_PP{}_KEY", upper_base_name, subset_idx),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-
-                let key_expr = self.build_excluding_key_body_expr_internal(
-                    key_expr,
-                    excluded_key_exprs,
-                    &format!("{}_PP{}_KEY", base_name.to_uppercase(), subset_idx),
+        if !pattern_properties.is_empty() {
+            for (pattern_idx, (_, pattern_schema)) in pattern_properties.iter().enumerate() {
+                let key_expr = self.insert_named_terminal_rule(
+                    format!("{}_PP{}_KEY", upper_base_name, pattern_idx),
+                    expr_to_grammar_expr(&pattern_key_colon_exprs[pattern_idx]),
                 );
 
-                let subset_schemas = subset
-                    .iter()
-                    .map(|idx| pattern_properties[*idx].1.clone())
-                    .collect::<Vec<_>>();
-                let subset_schema = Self::schema_all_of(subset_schemas);
-
-                let value_expr = match self.convert_schema(&subset_schema) {
+                let value_expr = match self.convert_schema(pattern_schema) {
                     Ok(expr) => expr,
                     Err(err) if is_unsat_schema_error(&err) => continue,
                     Err(err) => return Err(err),
@@ -7679,9 +7610,7 @@ impl<'a> SchemaCtx<'a> {
             }
         }
 
-        let pattern_terminal = if let Some(prebuilt) = prebuilt_pattern_terminal {
-            Some(prebuilt)
-        } else if pattern_key_terminals.is_empty() {
+        let pattern_terminal = if pattern_key_terminals.is_empty() {
             None
         } else {
             Some(self.insert_named_terminal_rule(
@@ -7697,25 +7626,18 @@ impl<'a> SchemaCtx<'a> {
             if let Some(np_terminal) = &np_terminal {
                 excluded_ap_exprs.push(np_terminal.clone());
             }
-            if pattern_terminal_safe_for_ap {
-                if let Some(pattern_terminal) = &pattern_terminal {
-                    excluded_ap_exprs.push(pattern_terminal.clone());
-                }
+            if let Some(pattern_terminal) = &pattern_terminal {
+                excluded_ap_exprs.push(pattern_terminal.clone());
             }
 
-            let ap_base_expr = if ap_key_any_string() {
-                Self::scoped_key_colon_expr(property_names)?
-            } else if let Some(base) = base_key_colon_expr.clone() {
-                base
+            let ap_body = if excluded_ap_exprs.is_empty() {
+                GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())
             } else {
-                Self::scoped_key_colon_expr(property_names)?
+                GrammarExpr::Exclude {
+                    expr: Box::new(GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())),
+                    exclude: Box::new(choice_or_single(excluded_ap_exprs)),
+                }
             };
-
-            let ap_body = self.build_excluding_key_body_expr_internal(
-                ap_base_expr,
-                excluded_ap_exprs,
-                &format!("{upper_base_name}_AP"),
-            );
             let ap_terminal =
                 self.insert_named_terminal_rule(format!("{upper_base_name}_AP"), ap_body);
 
