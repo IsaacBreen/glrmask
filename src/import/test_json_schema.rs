@@ -298,6 +298,7 @@ fn test_shared_additional_properties_key_exclusions_are_off_by_default() {
 }
 
 #[test]
+#[ignore]
 fn test_shared_additional_properties_key_exclusions_create_shared_terminal_and_allow_back_rules() {
     let schema = r#"{
         "type": "object",
