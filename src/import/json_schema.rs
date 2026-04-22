@@ -7,14 +7,14 @@ use crate::automata::lexer::ast::Expr as LexerExpr;
 use crate::automata::lexer::compile::build_regex;
 use crate::automata::lexer::regex::parse_regex;
 use crate::grammar::flat::GrammarDef;
-use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, lower, promote_large_literal_alts};
+use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, lower, promote_large_literal_alts, expr_to_grammar_expr};
 
 // WARNING: Do NOT break terminals containing repeats of multi-char subexpressions
 // into grammar-level repeats of single characters. Doing so creates terminals of
 // byte-length 1, which catastrophically bloats the terminal DWA (the parser must
 // track every possible single-byte terminal match at every position). Instead,
 // keep repeated character patterns fused into chunked multi-char terminals
-// (e.g. char{1024}) and use TerminalExpr(Repeat{...}) to trigger the direct
+// (e.g. char{1024}) and use RepeatRange to trigger the direct
 // bounded-repeat DFA construction path, which avoids NFA→DFA blowup.
 
 const JSON_VALUE_RULE: &str = "json_value";
@@ -559,7 +559,7 @@ fn finite_literal_alternatives(
             dedup_literal_alternatives(out)
         }
         GrammarExpr::Ref(_)
-        | GrammarExpr::TerminalExpr(_)
+        | GrammarExpr::Epsilon
         | GrammarExpr::Exclude { .. }
         | GrammarExpr::Repeat(_)
         | GrammarExpr::RepeatOne(_)
@@ -2972,11 +2972,11 @@ impl<'a> SchemaCtx<'a> {
                 }
 
                 let char_expr = parse_regex(JSON_STRING_CHAR_PATTERN, true);
-                let expr = GrammarExpr::TerminalExpr(LexerExpr::Repeat {
-                    expr: Box::new(char_expr),
+                let expr = GrammarExpr::RepeatRange {
+                    expr: Box::new(expr_to_grammar_expr(&char_expr)),
                     min: count,
-                    max: Some(count),
-                });
+                    max: count,
+                };
 
                 let rule = self.extract_terminal_rule(expr, &format!("JSON_STRING_CHAR_EXACT_{count}"));
                 if let GrammarExpr::Ref(rule_name) = &rule {
@@ -2997,11 +2997,11 @@ impl<'a> SchemaCtx<'a> {
                 }
 
                 let char_expr = parse_regex(JSON_STRING_CHAR_PATTERN, true);
-                let expr = GrammarExpr::TerminalExpr(LexerExpr::Repeat {
-                    expr: Box::new(char_expr),
+                let expr = GrammarExpr::RepeatRange {
+                    expr: Box::new(expr_to_grammar_expr(&char_expr)),
                     min: 0,
-                    max: Some(max),
-                });
+                    max,
+                };
 
                 let rule = self.extract_terminal_rule(expr, &format!("JSON_STRING_CHAR_UPTO_{max}"));
                 if let GrammarExpr::Ref(rule_name) = &rule {
@@ -6711,7 +6711,7 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn build_lexer_expr(&mut self, expr: &LexerExpr, prefix: &str) -> GrammarExpr {
-        self.extract_terminal_rule(GrammarExpr::TerminalExpr(expr.clone()), prefix)
+        self.extract_terminal_rule(expr_to_grammar_expr(expr), prefix)
     }
 
     fn add_option_expr(slot: &mut Option<LexerExpr>, new_expr: LexerExpr) {
@@ -6736,13 +6736,13 @@ impl<'a> SchemaCtx<'a> {
         excluded_exprs: Vec<LexerExpr>,
         prefix: &str,
     ) -> GrammarExpr {
-        let base_body = GrammarExpr::TerminalExpr(base_expr);
+        let base_body = expr_to_grammar_expr(&base_expr);
         let body = if excluded_exprs.is_empty() {
             base_body
         } else {
             let excluded_grammar_exprs: Vec<GrammarExpr> = excluded_exprs
                 .into_iter()
-                .map(GrammarExpr::TerminalExpr)
+                .map(|e| expr_to_grammar_expr(&e))
                 .collect();
             GrammarExpr::Exclude {
                 expr: Box::new(base_body),
@@ -8173,7 +8173,7 @@ fn collect_grammar_visible_refs(
             GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
-            | GrammarExpr::TerminalExpr(_)
+            | GrammarExpr::Epsilon
             | GrammarExpr::AnyByte
             | GrammarExpr::Intersect { .. }
             | GrammarExpr::SeparatedSequence { .. } => {}

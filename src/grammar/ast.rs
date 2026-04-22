@@ -14,7 +14,9 @@ pub enum GrammarExpr {
     Ref(String),
     Sequence(Vec<GrammarExpr>),
     Choice(Vec<GrammarExpr>),
-    TerminalExpr(Expr),
+    /// Empty string / epsilon. Equivalent to `Sequence([])` for grammar purposes;
+    /// maps to `Expr::Epsilon` in terminal-expression context.
+    Epsilon,
     Exclude {
         expr: Box<GrammarExpr>,
         exclude: Box<GrammarExpr>,
@@ -140,7 +142,7 @@ impl NamedGrammar {
                     for (e, _) in items { collect_refs(e, out); }
                     collect_refs(separator, out);
                 }
-                GrammarExpr::TerminalExpr(_) | GrammarExpr::Literal(_)
+                GrammarExpr::Epsilon | GrammarExpr::Literal(_)
                 | GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_)
                 | GrammarExpr::AnyByte => {}
             }
@@ -308,9 +310,8 @@ fn grammar_expr_to_lark_with_indent(
             grammar_expr_to_lark_with_indent(inner, out, true, indent);
             write!(out, "~{}..{}", min, max).unwrap();
         }
-        GrammarExpr::TerminalExpr(terminal_expr) => {
-            // No direct Lark equivalent — emit as comment with a compact pretty repr.
-            write!(out, "/*TerminalExpr:{}*/", format_terminal_expr(terminal_expr)).unwrap();
+        GrammarExpr::Epsilon => {
+            out.push_str("/*eps*/");
         }
         GrammarExpr::Exclude { expr: inner, exclude } => {
             write!(out, "/*Exclude(").unwrap();
@@ -955,6 +956,9 @@ impl Lowerer {
                     let (sym, _) = lowerer.lower_separated_sequence_inner(items, separator, shape)?;
                     lowerer.rules.push(Rule { lhs, rhs: vec![sym] });
                 }
+                GrammarExpr::Epsilon => {
+                    lowerer.rules.push(Rule { lhs, rhs: Vec::new() });
+                }
                 _ => {
                     let symbol = lowerer.lower_expr_terminalish(expr)?;
                     lowerer.rules.push(Rule {
@@ -994,8 +998,11 @@ impl Lowerer {
                 // assume utf8 true for raw regex from lark/ebnf
                 Symbol::Terminal(self.terminal_id(pattern, pattern, true))
             }
-            GrammarExpr::TerminalExpr(expr) => {
-                Symbol::Terminal(self.register_terminal_expr("<expr>", expr.clone()))
+            GrammarExpr::Epsilon => {
+                // Epsilon as an inline NT atom: create a nonterminal with an empty production.
+                let (_, nt) = self.fresh_nonterminal("eps");
+                self.rules.push(Rule { lhs: nt, rhs: Vec::new() });
+                Symbol::Nonterminal(nt)
             }
             GrammarExpr::Exclude { .. } => {
                 return Err(GlrMaskError::GrammarParse(
@@ -1124,7 +1131,7 @@ fn grammar_expr_to_expr(
         }
         GrammarExpr::RawRegex(pattern) => parse_regex(pattern, true),
         GrammarExpr::AnyByte => Expr::U8Class(U8Set::from_range(0, 255)),
-        GrammarExpr::TerminalExpr(expr) => expr.clone(),
+        GrammarExpr::Epsilon => Expr::Epsilon,
         GrammarExpr::Sequence(parts) => {
             let exprs: Vec<Expr> = parts.iter().map(|p| grammar_expr_to_expr(p, terminal_bodies, terminal_expr_cache, visiting)).collect::<Result<_, _>>()?;
             if exprs.len() == 1 {
@@ -1198,6 +1205,104 @@ fn grammar_expr_to_expr(
             ));
         }
     })
+}
+
+/// Convert a lexer-level [`Expr`] into an equivalent [`GrammarExpr`].
+///
+/// Every `Expr` variant has a `GrammarExpr` counterpart, so this is lossless.
+/// `Expr::U8Class(U8Set)` is converted to `GrammarExpr::CharClass` using a
+/// range-encoded string representation.
+pub fn expr_to_grammar_expr(expr: &Expr) -> GrammarExpr {
+    match expr {
+        Expr::U8Seq(bytes) => GrammarExpr::Literal(bytes.clone()),
+        Expr::U8Class(set) => GrammarExpr::CharClass {
+            def: u8set_to_class_def(set),
+            negate: false,
+            utf8: false,
+        },
+        Expr::Epsilon => GrammarExpr::Epsilon,
+        Expr::Seq(parts) => {
+            let items: Vec<_> = parts.iter().map(expr_to_grammar_expr).collect();
+            match items.len() {
+                0 => GrammarExpr::Epsilon,
+                1 => items.into_iter().next().unwrap(),
+                _ => GrammarExpr::Sequence(items),
+            }
+        }
+        Expr::Choice(alts) => {
+            let items: Vec<_> = alts.iter().map(expr_to_grammar_expr).collect();
+            match items.len() {
+                0 => GrammarExpr::Epsilon,
+                1 => items.into_iter().next().unwrap(),
+                _ => GrammarExpr::Choice(items),
+            }
+        }
+        Expr::Exclude { expr, exclude } => GrammarExpr::Exclude {
+            expr: Box::new(expr_to_grammar_expr(expr)),
+            exclude: Box::new(expr_to_grammar_expr(exclude)),
+        },
+        Expr::Intersect { expr, intersect } => GrammarExpr::Intersect {
+            expr: Box::new(expr_to_grammar_expr(expr)),
+            intersect: Box::new(expr_to_grammar_expr(intersect)),
+        },
+        Expr::Repeat { expr: inner, min, max } => {
+            let g = expr_to_grammar_expr(inner);
+            match (*min, *max) {
+                (0, None) => GrammarExpr::Repeat(Box::new(g)),
+                (1, None) => GrammarExpr::RepeatOne(Box::new(g)),
+                (0, Some(1)) => GrammarExpr::Optional(Box::new(g)),
+                (n, Some(m)) => GrammarExpr::RepeatRange { expr: Box::new(g), min: n, max: m },
+                (n, None) => {
+                    // n+ : express as exactly-n followed by zero-or-more
+                    GrammarExpr::Sequence(vec![
+                        GrammarExpr::RepeatRange { expr: Box::new(g.clone()), min: n, max: n },
+                        GrammarExpr::Repeat(Box::new(g)),
+                    ])
+                }
+            }
+        }
+        Expr::Shared(inner) => expr_to_grammar_expr(inner),
+    }
+}
+
+/// Encode a [`U8Set`] as a character-class definition string (without the surrounding `[...]`).
+///
+/// Uses range notation where possible. Always produces a non-negated form.
+pub(crate) fn u8set_to_class_def(set: &U8Set) -> String {
+    let mut out = String::new();
+    let bytes: Vec<u8> = set.iter().collect();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let start = bytes[i];
+        let mut end = start;
+        i += 1;
+        while i < bytes.len() && bytes[i] == end.wrapping_add(1) && end < 255 {
+            end = bytes[i];
+            i += 1;
+        }
+        push_class_char(&mut out, start);
+        if end != start {
+            if end == start + 1 {
+                push_class_char(&mut out, end);
+            } else {
+                out.push('-');
+                push_class_char(&mut out, end);
+            }
+        }
+    }
+    out
+}
+
+fn push_class_char(out: &mut String, b: u8) {
+    use std::fmt::Write;
+    match b {
+        b'\\' => out.push_str("\\\\"),
+        b']' => out.push_str("\\]"),
+        b'-' => out.push_str("\\-"),
+        b'^' => out.push_str("\\^"),
+        0x20..=0x7E => out.push(b as char),
+        _ => write!(out, "\\x{:02X}", b).unwrap(),
+    }
 }
 
 /// Promote large alternations of literals in non-terminal rules to terminal rules.

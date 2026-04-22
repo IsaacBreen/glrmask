@@ -1,7 +1,7 @@
 //! GLRM: Glrmask Grammar Format
 //!
 //! A fully-featured, human-readable grammar format that can represent every
-//! construct in [`NamedGrammar`] / [`GrammarExpr`] / [`Expr`], including
+//! construct in [`NamedGrammar`] / [`GrammarExpr`], including
 //! `Exclude`, `Intersect`, internal terminals, and `SeparatedSequence`.
 //!
 //! # Format overview
@@ -14,16 +14,16 @@
 //! [ignore <TM-NAME>;]
 //!
 //! // Nonterminal rules
-//! nt rule_name ::= <nt-expr>;
+//! nt rule_name ::= <expr>;
 //!
-//! // Terminal rules
-//! tm TERM_NAME ::= <nt-expr>;
+//! // Terminal rules (RHS uses the same expression syntax)
+//! t TERM_NAME ::= <expr>;
 //!
 //! // Internal terminal rules (shared between other terminals)
-//! internal tm TERM_NAME ::= <nt-expr>;
+//! internal t TERM_NAME ::= <expr>;
 //! ```
 //!
-//! ## NT expressions
+//! ## Expressions (used for both NT and terminal rule bodies)
 //!
 //! | Syntax                          | Meaning                              |
 //! |--------------------------------|--------------------------------------|
@@ -33,6 +33,7 @@
 //! | `[class]`, `[^class]`          | Byte character class                 |
 //! | `[class]/utf8`                 | UTF-8 character class                |
 //! | `.`                            | Any byte                             |
+//! | `eps`                          | Epsilon (empty string)               |
 //! | `a b c`                        | Sequence                             |
 //! | `a \| b \| c`                  | Choice                               |
 //! | `e?`, `e*`, `e+`              | Optional / Repeat / RepeatOne        |
@@ -41,18 +42,8 @@
 //! | `exclude(a, b)`                | GrammarExpr::Exclude                 |
 //! | `intersect(a, b)`              | GrammarExpr::Intersect               |
 //! | `seqsep(sep, i1?, i2, i3?)`   | SeparatedSequence                    |
-//! | `t(te-expr)`                   | TerminalExpr wrapping a terminal expr|
-//!
-//! ## Terminal expressions (inside `t(...)`)
-//!
-//! Same syntax as NT expressions with the following exceptions:
-//! - Atoms are terminal atoms: `"bytes"`, `[class]`, `eps`
-//! - `exclude(a, b)` → `Expr::Exclude`
-//! - `intersect(a, b)` → `Expr::Intersect`
-//! - References are not allowed (no `Expr::Ref` equivalent)
 
 use crate::GlrMaskError;
-use crate::automata::lexer::ast::Expr;
 use crate::ds::u8set::U8Set;
 use crate::grammar::ast::{GrammarExpr, NamedGrammar, NamedRule};
 
@@ -71,8 +62,8 @@ pub fn to_glrm(grammar: &NamedGrammar) -> String {
 
     for rule in &grammar.rules {
         let prefix = match (rule.is_terminal, rule.is_internal) {
-            (true, true) => "internal tm",
-            (true, false) => "tm",
+            (true, true) => "internal t",
+            (true, false) => "t",
             (false, _) => "nt",
         };
         let body = dump_nt_expr(&rule.expr, false);
@@ -141,7 +132,7 @@ fn dump_nt_atom(expr: &GrammarExpr) -> String {
             format!("[{}]{}", inner, suffix)
         }
         GrammarExpr::AnyByte => ".".to_string(),
-        GrammarExpr::TerminalExpr(te) => format!("t({})", dump_te_expr(te, false)),
+        GrammarExpr::Epsilon => "eps".to_string(),
         GrammarExpr::Exclude { expr: inner, exclude } => {
             format!("exclude({}, {})", dump_nt_expr(inner, false), dump_nt_expr(exclude, false))
         }
@@ -171,74 +162,6 @@ fn dump_nt_atom(expr: &GrammarExpr) -> String {
     }
 }
 
-// ---- Terminal-expression dumper --------------------------------------------
-
-fn dump_te_expr(expr: &Expr, needs_parens: bool) -> String {
-    match expr {
-        Expr::Choice(alts) => {
-            let inner = alts.iter()
-                .map(|a| dump_te_seq(a))
-                .collect::<Vec<_>>()
-                .join(" | ");
-            if needs_parens && alts.len() > 1 {
-                format!("({})", inner)
-            } else {
-                inner
-            }
-        }
-        _ => dump_te_seq(expr),
-    }
-}
-
-fn dump_te_seq(expr: &Expr) -> String {
-    match expr {
-        Expr::Seq(parts) => {
-            parts.iter()
-                .map(|e| dump_te_postfix(e))
-                .collect::<Vec<_>>()
-                .join(" ")
-        }
-        _ => dump_te_postfix(expr),
-    }
-}
-
-fn dump_te_postfix(expr: &Expr) -> String {
-    match expr {
-        Expr::Repeat { expr: inner, min, max } => {
-            let atom = dump_te_atom(inner);
-            match (*min, *max) {
-                (0, None) => format!("{}*", atom),
-                (1, None) => format!("{}+", atom),
-                (0, Some(1)) => format!("{}?", atom),
-                (m, Some(n)) if m == n => format!("{}{{{}}}", atom, m),
-                (m, Some(n)) => format!("{}{{{},{}}}", atom, m, n),
-                (m, None) => format!("{}{{{},}}", atom, m),
-            }
-        }
-        _ => dump_te_atom(expr),
-    }
-}
-
-fn dump_te_atom(expr: &Expr) -> String {
-    match expr {
-        Expr::U8Seq(bytes) => format!("\"{}\"", escape_bytes_for_string(bytes)),
-        Expr::U8Class(set) => format!("[{}]", dump_u8class(set)),
-        Expr::Epsilon => "eps".to_string(),
-        Expr::Exclude { expr: inner, exclude } => {
-            format!("exclude({}, {})", dump_te_expr(inner, false), dump_te_expr(exclude, false))
-        }
-        Expr::Intersect { expr: inner, intersect } => {
-            format!("intersect({}, {})", dump_te_expr(inner, false), dump_te_expr(intersect, false))
-        }
-        Expr::Shared(inner) => dump_te_atom(inner),
-        // Compound exprs need parens as atoms:
-        Expr::Seq(_) | Expr::Choice(_) => {
-            format!("({})", dump_te_expr(expr, false))
-        }
-        Expr::Repeat { .. } => format!("({})", dump_te_postfix(expr)),
-    }
-}
-
 // ---- Helpers ---------------------------------------------------------------
 
 fn escape_bytes_for_string(bytes: &[u8]) -> String {
@@ -259,43 +182,6 @@ fn escape_bytes_for_string(bytes: &[u8]) -> String {
 
 fn escape_regex_for_slash(pat: &str) -> String {
     pat.replace('/', "\\/")
-}
-
-fn dump_u8class(set: &U8Set) -> String {
-    let mut out = String::new();
-    let bytes: Vec<u8> = set.iter().collect();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let start = bytes[i];
-        let mut end = start;
-        i += 1;
-        while i < bytes.len() && bytes[i] == end.wrapping_add(1) && end < 255 {
-            end = bytes[i];
-            i += 1;
-        }
-        push_class_byte(&mut out, start);
-        if end != start {
-            if end == start + 1 {
-                // Don't use range notation for pairs — just write both
-                push_class_byte(&mut out, end);
-            } else {
-                out.push('-');
-                push_class_byte(&mut out, end);
-            }
-        }
-    }
-    out
-}
-
-fn push_class_byte(out: &mut String, b: u8) {
-    match b {
-        b'\\' => out.push_str("\\\\"),
-        b']' => out.push_str("\\]"),
-        b'-' => out.push_str("\\-"),
-        b'^' => out.push_str("\\^"),
-        0x20..=0x7E => out.push(b as char),
-        _ => out.push_str(&format!("\\x{:02X}", b)),
-    }
 }
 
 // ============================================================
@@ -646,16 +532,16 @@ impl GlrmParser {
                         self.advance();
                         rules.push(self.parse_rule(false, false)?);
                     }
-                    "tm" => {
+                    "t" => {
                         self.advance();
                         rules.push(self.parse_rule(true, false)?);
                     }
                     "internal" => {
                         self.advance();
-                        // Expect `tm`
+                        // Expect `t`
                         match self.advance().clone() {
-                            Tok::Ident(ref kw2) if kw2 == "tm" => {}
-                            other => return Err(err(&format!("expected 'tm' after 'internal', got {:?}", other))),
+                            Tok::Ident(ref kw2) if kw2 == "t" => {}
+                            other => return Err(err(&format!("expected 't' after 'internal', got {:?}", other))),
                         }
                         rules.push(self.parse_rule(true, true)?);
                     }
@@ -721,9 +607,12 @@ impl GlrmParser {
     }
 
     fn can_start_nt_atom(&self) -> bool {
-        matches!(self.peek(),
+        match self.peek() {
+            Tok::Ident(s) if s == "eps" => true,
             Tok::Ident(_) | Tok::StringLit(_) | Tok::RegexLit(_)
-            | Tok::CharClass(_, _) | Tok::Dot | Tok::LParen)
+            | Tok::CharClass(_, _) | Tok::Dot | Tok::LParen => true,
+            _ => false,
+        }
     }
 
     fn parse_nt_postfix(&mut self) -> Result<GrammarExpr, GlrMaskError> {
@@ -842,12 +731,9 @@ impl GlrmParser {
                             separator: Box::new(sep),
                         })
                     }
-                    "t" => {
+                    "eps" => {
                         self.advance();
-                        self.consume(&Tok::LParen)?;
-                        let te = self.parse_te_expr()?;
-                        self.consume(&Tok::RParen)?;
-                        Ok(GrammarExpr::TerminalExpr(te))
+                        Ok(GrammarExpr::Epsilon)
                     }
                     _ => {
                         // Generic identifier = Ref
@@ -858,117 +744,6 @@ impl GlrmParser {
                 }
             }
             other => Err(err(&format!("unexpected token {:?} in NT expression", other))),
-        }
-    }
-
-    // ---- Terminal expression parsing ---------------------------------------
-
-    fn parse_te_expr(&mut self) -> Result<Expr, GlrMaskError> {
-        let first = self.parse_te_seq()?;
-        if !matches!(self.peek(), Tok::Pipe) {
-            return Ok(first);
-        }
-        let mut alts = vec![first];
-        while matches!(self.peek(), Tok::Pipe) {
-            self.advance();
-            alts.push(self.parse_te_seq()?);
-        }
-        Ok(Expr::Choice(alts))
-    }
-
-    fn parse_te_seq(&mut self) -> Result<Expr, GlrMaskError> {
-        let mut items = Vec::new();
-        loop {
-            if !self.can_start_te_atom() {
-                break;
-            }
-            items.push(self.parse_te_postfix()?);
-        }
-        match items.len() {
-            0 => Err(err("expected at least one terminal expression item")),
-            1 => Ok(items.pop().unwrap()),
-            _ => Ok(Expr::Seq(items)),
-        }
-    }
-
-    fn can_start_te_atom(&self) -> bool {
-        match self.peek() {
-            Tok::StringLit(_) | Tok::CharClass(_, _) | Tok::LParen => true,
-            Tok::Ident(s) if matches!(s.as_str(), "eps" | "exclude" | "intersect") => true,
-            _ => false,
-        }
-    }
-
-    fn parse_te_postfix(&mut self) -> Result<Expr, GlrMaskError> {
-        let atom = self.parse_te_atom()?;
-        self.apply_te_quantifier(atom)
-    }
-
-    fn apply_te_quantifier(&mut self, atom: Expr) -> Result<Expr, GlrMaskError> {
-        match self.peek() {
-            Tok::Quest => { self.advance(); Ok(Expr::Repeat { expr: Box::new(atom), min: 0, max: Some(1) }) }
-            Tok::Star  => { self.advance(); Ok(Expr::Repeat { expr: Box::new(atom), min: 0, max: None }) }
-            Tok::Plus  => { self.advance(); Ok(Expr::Repeat { expr: Box::new(atom), min: 1, max: None }) }
-            Tok::LBrace => {
-                self.advance();
-                let min = self.expect_int()?;
-                let max = if matches!(self.peek(), Tok::Comma) {
-                    self.advance();
-                    if matches!(self.peek(), Tok::RBrace) {
-                        self.consume(&Tok::RBrace)?;
-                        return Ok(Expr::Repeat { expr: Box::new(atom), min, max: None });
-                    }
-                    Some(self.expect_int()?)
-                } else {
-                    Some(min)
-                };
-                self.consume(&Tok::RBrace)?;
-                Ok(Expr::Repeat { expr: Box::new(atom), min, max })
-            }
-            _ => Ok(atom),
-        }
-    }
-
-    fn parse_te_atom(&mut self) -> Result<Expr, GlrMaskError> {
-        match self.peek().clone() {
-            Tok::StringLit(bytes) => {
-                self.advance();
-                Ok(Expr::U8Seq(bytes))
-            }
-            Tok::CharClass(def, _is_utf8) => {
-                self.advance();
-                let set = parse_byte_class(&def)?;
-                Ok(Expr::U8Class(set))
-            }
-            Tok::LParen => {
-                self.advance();
-                let inner = self.parse_te_expr()?;
-                self.consume(&Tok::RParen)?;
-                Ok(inner)
-            }
-            Tok::Ident(ref kw) => match kw.as_str() {
-                "eps" => { self.advance(); Ok(Expr::Epsilon) }
-                "exclude" => {
-                    self.advance();
-                    self.consume(&Tok::LParen)?;
-                    let base = self.parse_te_expr()?;
-                    self.consume(&Tok::Comma)?;
-                    let excl = self.parse_te_expr()?;
-                    self.consume(&Tok::RParen)?;
-                    Ok(Expr::Exclude { expr: Box::new(base), exclude: Box::new(excl) })
-                }
-                "intersect" => {
-                    self.advance();
-                    self.consume(&Tok::LParen)?;
-                    let base = self.parse_te_expr()?;
-                    self.consume(&Tok::Comma)?;
-                    let other = self.parse_te_expr()?;
-                    self.consume(&Tok::RParen)?;
-                    Ok(Expr::Intersect { expr: Box::new(base), intersect: Box::new(other) })
-                }
-                other => Err(err(&format!("unexpected identifier '{}' in terminal expression", other))),
-            },
-            other => Err(err(&format!("unexpected token {:?} in terminal expression", other))),
         }
     }
 }
@@ -1111,16 +886,12 @@ mod tests {
 
     #[test]
     fn test_roundtrip_exclude() {
-        let base = GrammarExpr::TerminalExpr(Expr::Repeat {
-            expr: Box::new(Expr::U8Class({
-                let mut s = U8Set::all();
-                s.remove(b'"');
-                s
-            })),
-            min: 0,
-            max: None,
-        });
-        let excl = GrammarExpr::TerminalExpr(Expr::U8Seq(b"bad".to_vec()));
+        let base = GrammarExpr::Repeat(Box::new(GrammarExpr::CharClass {
+            def: "^\"" .to_string(),
+            negate: true,
+            utf8: false,
+        }));
+        let excl = GrammarExpr::Literal(b"bad".to_vec());
         let expr = GrammarExpr::Exclude {
             expr: Box::new(base),
             exclude: Box::new(excl),
@@ -1137,19 +908,16 @@ mod tests {
 
     #[test]
     fn test_roundtrip_intersect_te() {
-        use crate::automata::lexer::ast::Expr;
-        let e1 = Expr::Repeat { expr: Box::new(Expr::U8Seq(b"x".to_vec())), min: 0, max: None };
-        let e2 = Expr::U8Seq(b"xx".to_vec());
-        let isect = GrammarExpr::TerminalExpr(Expr::Intersect {
-            expr: Box::new(e1),
-            intersect: Box::new(e2),
-        });
+        let isect = GrammarExpr::Intersect {
+            expr: Box::new(GrammarExpr::Repeat(Box::new(GrammarExpr::Literal(b"x".to_vec())))),
+            intersect: Box::new(GrammarExpr::Literal(b"xx".to_vec())),
+        };
         let g = simple_grammar(vec![
             ("start", GrammarExpr::Ref("TM".to_string()), false, false),
             ("TM", isect, true, false),
         ], "start");
         let g2 = roundtrip(&g);
-        assert!(matches!(g2.rules[1].expr, GrammarExpr::TerminalExpr(Expr::Intersect { .. })));
+        assert!(matches!(g2.rules[1].expr, GrammarExpr::Intersect { .. }));
     }
 
     #[test]

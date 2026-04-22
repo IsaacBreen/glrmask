@@ -15,9 +15,8 @@ fn contains_regex_features(expr: &GrammarExpr) -> bool {
     match expr {
         GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
-        | GrammarExpr::TerminalExpr(_)
         | GrammarExpr::AnyByte => true,
-        GrammarExpr::Literal(_) | GrammarExpr::Ref(_) => false,
+        GrammarExpr::Literal(_) | GrammarExpr::Ref(_) | GrammarExpr::Epsilon => false,
         GrammarExpr::Sequence(exprs) | GrammarExpr::Choice(exprs) => {
             exprs.iter().any(contains_regex_features)
         }
@@ -271,7 +270,7 @@ impl ChoiceFactorer {
             GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
-            | GrammarExpr::TerminalExpr(_)
+            | GrammarExpr::Epsilon
             | GrammarExpr::AnyByte => {}
             GrammarExpr::SeparatedSequence { items, separator } => {
                 for (item, _) in items {
@@ -412,7 +411,7 @@ impl ChoiceFactorer {
             GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
-            | GrammarExpr::TerminalExpr(_)
+            | GrammarExpr::Epsilon
             | GrammarExpr::AnyByte => {}
             GrammarExpr::SeparatedSequence { items, separator } => {
                 for (item, _) in items {
