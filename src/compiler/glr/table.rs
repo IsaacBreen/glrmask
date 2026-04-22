@@ -120,9 +120,18 @@ struct TableRowKey {
     goto: Vec<(NonterminalID, (u32, bool))>,
 }
 
+fn unit_reduction_inlining_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLRMASK_DISABLE_UNIT_REDUCTION_INLINING")
+            .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+            .unwrap_or(true)
+    })
+}
+
 impl GLRTable {
     pub fn build(grammar: &AnalyzedGrammar) -> Self {
-        Self::build_with_unit_reduction_inlining(grammar, true)
+        Self::build_with_unit_reduction_inlining(grammar, unit_reduction_inlining_enabled())
     }
 
     pub(crate) fn build_with_unit_reduction_inlining(
