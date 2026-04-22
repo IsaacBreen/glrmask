@@ -9466,6 +9466,7 @@ mod tests {
     #[test]
     fn test_minimal_properties_pattern_and_additional_interaction() {
         let schema = r#"{
+            "type": "object",
             "properties": {
                 "a": {"type": "string"}
             },
@@ -9477,7 +9478,9 @@ mod tests {
             "additionalProperties": {"type": "string"}
         }"#;
         assert!(accepts_sequence(schema, &[b"{\"a\": \"x\", \"b\": \"y\", \"c\": \"z\"}"]));
-        assert!(!accepts_sequence(schema, &[b"TODO"]));
+        assert!(!accepts_sequence(schema, &[b"\"x\""]));
+        assert!(!accepts_sequence(schema, &[b"0"]));
+        assert!(!accepts_sequence(schema, &[b"false"]));
     }
 
     #[test]
