@@ -93,38 +93,28 @@ fn schema_like_ambiguous_ebnf_with_n_branches(n: usize) -> String {
     assert!(n > 0, "n must be > 0");
 
     let mut lines = Vec::new();
-    lines.push(format!(
-        "start ::= {}",
-        (0..n)
-            .map(|i| format!("obj_{i}"))
-            .collect::<Vec<_>>()
-            .join(" | ")
-    ));
-    lines.push("add_key ::= 'x' '0'".to_string());
+    lines.push(format!("start ::= s_{}", n - 1));
     lines.push("zstar ::= 'z' zstar | ''".to_string());
-    lines.push("tail_0 ::= zstar 'q'".to_string());
 
-    // Recursive simplification: tail_i requires one more leading 'z' than tail_{i-1}.
+    // Base branch (i=0): known key x0 and additional key x0 coincide,
+    // so this branch has the same known-vs-additional ambiguity source as schema case.
+    lines.push("s_0 ::= 'p' 'x' '0' zstar 'q' | 'p' 'x' '0' zstar 'q'".to_string());
+
+    // One extra line per extra N:
+    // s_i adds branch i by either matching specific key x{i} or fallback/additional key x0.
+    // The required z-prefix keeps branch states distinct after key classification.
     for i in 1..n {
-        lines.push(format!("tail_{i} ::= 'z' tail_{}", i - 1));
-    }
-
-    // Schema analogue:
-    // - obj_i has a branch-specific known key spec_i (x{i})
-    // - all obj_i also accept the fallback/additional key x0
-    // Input uses key x0, so obj_0 can parse it as known OR additional,
-    // while obj_1..obj_{N-1} parse it as additional.
-    for i in 0..n {
         let spec_suffix = i
             .to_string()
             .chars()
             .map(|c| format!("'{c}'"))
             .collect::<Vec<_>>()
             .join(" ");
-        let spec = format!("'x' {spec_suffix}");
-        lines.push(format!("obj_{i} ::= 'p' key_{i} tail_{i}"));
-        lines.push(format!("key_{i} ::= spec_{i} | add_key"));
-        lines.push(format!("spec_{i} ::= {spec}"));
+        let z_prefix = (0..i).map(|_| "'z'").collect::<Vec<_>>().join(" ");
+        lines.push(format!(
+            "s_{i} ::= s_{} | 'p' 'x' {spec_suffix} {z_prefix} zstar 'q' | 'p' 'x' '0' {z_prefix} zstar 'q'",
+            i - 1
+        ));
     }
 
     lines.join("\n") + "\n"
