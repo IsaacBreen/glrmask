@@ -4758,6 +4758,112 @@ impl<'a> SchemaCtx<'a> {
         Ok(Some(wrap_with_type_alternatives(self, object_expr)))
     }
 
+    /// For `anyOf` of open objects, detect when one variant's language dominates the union
+    /// and compile just that variant to eliminate GLR ambiguity.
+    ///
+    /// For open objects (no `additionalProperties: false`), `language(A) ⊆ language(B)` iff:
+    ///   1. `B.required ⊆ A.required`  (B requires fewer keys → accepts more objects)
+    ///   2. `B.properties.keys() ⊆ A.properties.keys()`  (B has fewer typed constraints)
+    ///   3. For every key `k` shared by both: `B.properties[k] == A.properties[k]`
+    ///
+    /// When these hold for all `i ≠ j`, `anyOf[A₀…Aₙ] = B` exactly, so compiling just `B`
+    /// is language-preserving and eliminates the ambiguous GLR branching.
+    fn try_reduce_anyof_open_objects(
+        &mut self,
+        schema: &Map<String, Value>,
+        options: &[Value],
+    ) -> Result<Option<GrammarExpr>, GlrMaskError> {
+        if options.len() < 2 {
+            return Ok(None);
+        }
+
+        // Resolve each option to a concrete schema map (owned).
+        let resolved: Vec<Map<String, Value>> = options
+            .iter()
+            .map(|opt| {
+                if has_structural_keywords(schema) {
+                    let base = Self::schema_without_keys(schema, &["anyOf", "oneOf"]);
+                    self.merge_resolved_subschemas(&base, std::slice::from_ref(opt))
+                } else {
+                    self.schema_for_intersection(opt)
+                }
+            })
+            .collect();
+
+        // Guard: every variant must be a plain open object with no complex sub-keywords.
+        for v in &resolved {
+            if v.get("type").and_then(Value::as_str) != Some("object") {
+                return Ok(None);
+            }
+            if matches!(v.get("additionalProperties"), Some(Value::Bool(false))) {
+                return Ok(None);
+            }
+            for key in &["patternProperties", "anyOf", "oneOf", "allOf", "$ref",
+                         "minProperties", "maxProperties", "if", "then", "else"] {
+                if v.contains_key(*key) {
+                    return Ok(None);
+                }
+            }
+        }
+
+        // Extract (required_keys, property_keys) as owned Vecs for each variant.
+        let info: Vec<(Vec<String>, Vec<String>)> = resolved
+            .iter()
+            .map(|v| {
+                let required: Vec<String> = v
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .map(|arr| arr.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                    .unwrap_or_default();
+                let prop_keys: Vec<String> = v
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .map(|m| m.keys().cloned().collect())
+                    .unwrap_or_default();
+                (required, prop_keys)
+            })
+            .collect();
+
+        // Find a dominant variant j such that for all i ≠ j: language(i) ⊆ language(j).
+        let empty_props = Map::new();
+        let dominant_idx = (0..resolved.len()).find(|&j| {
+            let (req_j, keys_j) = &info[j];
+            let req_j_set: std::collections::BTreeSet<&str> =
+                req_j.iter().map(String::as_str).collect();
+            let keys_j_set: std::collections::BTreeSet<&str> =
+                keys_j.iter().map(String::as_str).collect();
+            let props_j = resolved[j]
+                .get("properties")
+                .and_then(Value::as_object)
+                .unwrap_or(&empty_props);
+
+            (0..resolved.len()).all(|i| {
+                if i == j { return true; }
+                let (req_i, keys_i) = &info[i];
+                let req_i_set: std::collections::BTreeSet<&str> =
+                    req_i.iter().map(String::as_str).collect();
+                let keys_i_set: std::collections::BTreeSet<&str> =
+                    keys_i.iter().map(String::as_str).collect();
+                if !req_j_set.is_subset(&req_i_set) { return false; }
+                if !keys_j_set.is_subset(&keys_i_set) { return false; }
+                let props_i = resolved[i]
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .unwrap_or(&empty_props);
+                props_j.iter().all(|(k, sv)| {
+                    props_i.get(k).map_or(true, |sv2| sv == sv2)
+                })
+            })
+        });
+
+        let Some(j) = dominant_idx else {
+            return Ok(None);
+        };
+
+        let dominant = Value::Object(resolved[j].clone());
+        Ok(Some(self.convert_schema(&dominant)?))
+    }
+
     fn convert_structural_branches(
         &mut self,
         schema: &Map<String, Value>,
@@ -4790,6 +4896,15 @@ impl<'a> SchemaCtx<'a> {
         if std::env::var("GLRMASK_MERGE_ANYOF").map_or(false, |v| v == "1") {
             if let Some(merged) = self.try_merge_anyof_closed_objects(schema, options)? {
                 return Ok(Some(merged));
+            }
+        }
+
+        // Open-object anyOf dominance reduction (language-preserving).
+        // When all variants are open objects and one variant's language covers the union,
+        // compile just that dominant variant to eliminate GLR ambiguity.
+        if keyword == "anyOf" {
+            if let Some(expr) = self.try_reduce_anyof_open_objects(schema, options)? {
+                return Ok(Some(expr));
             }
         }
 
