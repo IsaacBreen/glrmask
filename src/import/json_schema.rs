@@ -5,13 +5,11 @@ use serde_json::{Map, Value};
 use crate::GlrMaskError;
 use crate::automata::lexer::ast::Expr as LexerExpr;
 use crate::automata::lexer::compile::build_regex;
-use crate::automata::lexer::dfa;
+use crate::automata::lexer::dfa::DFA as LexerDfa;
 use crate::automata::lexer::regex::parse_regex;
 use crate::grammar::flat::GrammarDef;
 use crate::ds::bitset::BitSet;
 use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, lower, promote_large_literal_alts};
-
-type LexerDfa = dfa::DFA;
 
 // WARNING: Do NOT break terminals containing repeats of multi-char subexpressions
 // into grammar-level repeats of single characters. Doing so creates terminals of
@@ -190,13 +188,33 @@ fn factored_open_object_max_keys() -> usize {
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OrderedObjectShape {
+    Right,
+    Balanced,
+    Left,
+    LeftBalanced,
+}
+
+fn ordered_object_shape() -> OrderedObjectShape {
+    match std::env::var("GLRMASK_ORDERED_OBJECT_SHAPE")
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("left") => OrderedObjectShape::Left,
+        Some("balanced") => OrderedObjectShape::Balanced,
+        Some("left-balanced") | Some("left_balanced") | Some("leftbalanced") => {
+            OrderedObjectShape::LeftBalanced
+        }
+        Some("right") | Some("factored") => OrderedObjectShape::Right,
+        None => OrderedObjectShape::Balanced,
+        Some(_) => OrderedObjectShape::Balanced,
+    }
+}
+
 fn factored_ordered_object_enabled() -> bool {
-    // Default to true: use the separator-merged left-recursive grammar
-    // which is deterministic at key boundaries, reducing TBM and TTFM.
-    // Disable via GLRMASK_ENABLE_FACTORED_ORDERED_OBJECT=0.
-    std::env::var("GLRMASK_ENABLE_FACTORED_ORDERED_OBJECT")
-        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off"))
-        .unwrap_or(true)
+    env_flag("GLRMASK_ENABLE_FACTORED_ORDERED_OBJECT")
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -545,14 +563,12 @@ fn finite_literal_alternatives(
         GrammarExpr::Ref(_)
         | GrammarExpr::TerminalExpr(_)
         | GrammarExpr::Exclude { .. }
-        | GrammarExpr::Intersect { .. }
         | GrammarExpr::Repeat(_)
         | GrammarExpr::RepeatOne(_)
         | GrammarExpr::RepeatRange { .. }
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
-        | GrammarExpr::AnyByte
-        | GrammarExpr::SeparatedSequence { .. } => return None,
+        | GrammarExpr::AnyByte => return None,
     };
 
     let total_bytes = alts.iter().map(Vec::len).sum::<usize>();
@@ -879,6 +895,7 @@ fn regex_byte_length_bounds(expr: &crate::automata::lexer::ast::Expr) -> (usize,
     match expr {
         Expr::U8Seq(bytes) => (bytes.len(), Some(bytes.len())),
         Expr::U8Class(_) => (1, Some(1)),
+        Expr::Dfa(_) => (0, None),
         Expr::Seq(parts) => {
             let mut min_total = 0usize;
             let mut max_total = Some(0usize);
@@ -908,18 +925,6 @@ fn regex_byte_length_bounds(expr: &crate::automata::lexer::ast::Expr) -> (usize,
             } else {
                 (min_total, max_total)
             }
-        }
-        Expr::Intersect { expr, intersect } => {
-            let (left_min, left_max) = regex_byte_length_bounds(expr);
-            let (right_min, right_max) = regex_byte_length_bounds(intersect);
-            let min_total = left_min.max(right_min);
-            let max_total = match (left_max, right_max) {
-                (Some(left), Some(right)) => Some(left.min(right)),
-                (Some(left), None) => Some(left),
-                (None, Some(right)) => Some(right),
-                (None, None) => None,
-            };
-            (min_total, max_total)
         }
         Expr::Exclude { expr, .. } => regex_byte_length_bounds(expr),
         Expr::Repeat { expr, min, max } => {
@@ -1767,8 +1772,6 @@ fn key_colon_literal_body_bytes(text: &str) -> Vec<u8> {
 }
 
 /// Build the colon-space suffix expression for keys.
-/// Accepts both compact (`":"`) and spaced (`": "`) JSON, since JSON allows
-/// optional whitespace after the colon in key-value pairs.
 fn key_colon_suffix_expr() -> GrammarExpr {
     if split_colon_from_space() {
         sequence_or_single(vec![literal_expr(b":"), literal_expr(b" ")])
@@ -2123,36 +2126,9 @@ fn json_wrapped_fullmatch_pattern(pattern: &str) -> GrammarExpr {
     wrap_string_value_regex(&inner)
 }
 
-fn format_terminal_rule_prefix(format_name: &str) -> String {
-    let mut out = String::from("JSON_FORMAT_");
-    for ch in format_name.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_uppercase());
-        } else {
-            out.push('_');
-        }
-    }
-    out
-}
-
 fn json_wrapped_key_colon_pattern(pattern: &str) -> GrammarExpr {
     let inner = json_search_pattern(pattern);
     wrap_key_colon_regex(&inner)
-}
-
-fn property_name_pattern_terminal_prefix(pattern: &str) -> String {
-    let mut out = String::from("JSON_PROP_NAME_PATTERN_");
-    for ch in pattern.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_uppercase());
-        } else {
-            out.push('_');
-        }
-        if out.len() >= 80 {
-            break;
-        }
-    }
-    out
 }
 
 /// Build a GrammarExpr body for a string value, fusing non-split quotes
@@ -3942,12 +3918,10 @@ impl<'a> SchemaCtx<'a> {
     }
 
     /// Returns true when the separator-merged left-recursive grammar for
-    /// closed objects with optional keys is enabled.  On by default; disable
-    /// via `GLRMASK_ENABLE_FACTORED_CLOSED_OBJECT=0`.
+    /// closed objects with optional keys is enabled.  Off by default; opt-in
+    /// via `GLRMASK_ENABLE_FACTORED_CLOSED_OBJECT=1`.
     fn factored_closed_object_enabled() -> bool {
-        std::env::var("GLRMASK_ENABLE_FACTORED_CLOSED_OBJECT")
-            .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off"))
-            .unwrap_or(true)
+        env_flag("GLRMASK_ENABLE_FACTORED_CLOSED_OBJECT")
     }
 
     fn collect_ordered_closed_object_schema_variant(
@@ -4140,7 +4114,7 @@ impl<'a> SchemaCtx<'a> {
                     let Some(value_expr) = key_exprs.get(key).cloned() else {
                         return Ok(None);
                     };
-                    let kv_expr = self.build_fused_merged_literal_key_value_expr(b"", key, value_expr);
+                    let kv_expr = self.build_merged_literal_key_value_expr(b"", key, value_expr);
                     alts.push(sequence_or_single(vec![
                         kv_expr,
                         GrammarExpr::Ref(after_rule_names[*next_idx].clone()),
@@ -4200,7 +4174,7 @@ impl<'a> SchemaCtx<'a> {
                 let Some(value_expr) = key_exprs.get(key).cloned() else {
                     return Ok(None);
                 };
-                let kv_expr = self.build_fused_merged_literal_key_value_expr(b"", key, value_expr);
+                let kv_expr = self.build_merged_literal_key_value_expr(b"", key, value_expr);
                 if Self::ordered_subset_close_allowed(mode, &variants, &states[*next_idx]) {
                     alts.push(kv_expr.clone());
                 }
@@ -4719,15 +4693,13 @@ impl<'a> SchemaCtx<'a> {
         let (tree_expr, tree_can_be_empty) = if ordered.is_empty() {
             (empty_expr(), true)
         } else {
-            let items: Vec<(GrammarExpr, bool)> = ordered.iter()
-                .map(|(key, value_expr, is_required)| {
-                    let item_expr = self.build_merged_literal_key_value_expr(b"", key, value_expr.clone());
-                    (item_expr, *is_required)
-                })
-                .collect();
-            let can_be_empty = items.iter().all(|(_, req)| !req);
-            let separator = self.json_item_separator_expr();
-            (GrammarExpr::SeparatedSequence { items, separator: Box::new(separator) }, can_be_empty)
+            let mut next_idx = 0usize;
+            self.build_object_tree(
+                &base_name,
+                &ordered,
+                &mut next_idx,
+                ordered_object_shape(),
+            )?
         };
 
         // Helper: wrap an object-only expression with non-object alternatives
@@ -5616,10 +5588,7 @@ impl<'a> SchemaCtx<'a> {
                 if min_len > 0 || max_len.is_some() {
                     return Ok(self.build_bounded_string_from_unit_regex(&unit_pattern, min_len, max_len));
                 }
-                return Ok(self.extract_wrapped_fullmatch_pattern(
-                    &format!("{}+", unit_pattern),
-                    "JSON_STRING_PATTERN_FULLMATCH",
-                ));
+                return Ok(json_wrapped_fullmatch_pattern(&format!("{}+", unit_pattern)));
             }
             // Fixed-length unanchored pattern optimization:
             // When an unanchored pattern has a fixed byte length *and* the string's
@@ -5634,10 +5603,7 @@ impl<'a> SchemaCtx<'a> {
                     let pat_len = pat_min_bytes;
                     if min_len == pat_len && max_len == Some(pat_len)
                     {
-                        return Ok(self.extract_wrapped_fullmatch_pattern(
-                            &pattern,
-                            "JSON_STRING_PATTERN_FULLMATCH",
-                        ));
+                        return Ok(json_wrapped_fullmatch_pattern(&pattern));
                     }
                 }
             }
@@ -5650,26 +5616,22 @@ impl<'a> SchemaCtx<'a> {
                 // enforce minLength (e.g. pattern ^(.*)$ can match "").
                 let pattern_min = pattern_min_char_count(&pattern).unwrap_or(0);
                 if pattern_min >= min_len {
-                    return Ok(self.extract_wrapped_search_pattern(
-                        &pattern,
-                        "JSON_STRING_PATTERN_SEARCH",
-                    ));
+                    return Ok(json_wrapped_pattern(&pattern));
                 }
                 // Pattern can produce strings shorter than minLength.
                 // Intersect with a minimum-length regex.  Use {min,} to
                 // keep the length DFA small (avoids explosion from large
                 // maxLength values).
                 let search_regex = string_value_body_regex(&json_search_pattern(&pattern));
+                let search_dfa = build_regex(&[parse_regex(&search_regex, true)]).dfa;
                 let length_inner = match max_len {
                     Some(ml) if ml <= 100 => format!(r#"(?:{}){{{},{}}}"#, JSON_STRING_CHAR_PATTERN, min_len, ml),
                     _ => format!(r#"(?:{}){{{},}}"#, JSON_STRING_CHAR_PATTERN, min_len),
                 };
                 let length_regex = string_value_body_regex(&length_inner);
-                let intersected = LexerExpr::Intersect {
-                    expr: Box::new(parse_regex(&search_regex, true)),
-                    intersect: Box::new(parse_regex(&length_regex, true)),
-                };
-                let body = self.build_lexer_expr(&intersected, "JSON_STRING_PATTERN_ANCHORED_BOUNDED");
+                let length_dfa = build_regex(&[parse_regex(&length_regex, true)]).dfa;
+                let intersected = Self::intersect_lexer_dfa(&search_dfa, &length_dfa);
+                let body = self.build_lexer_dfa_expr(&intersected, "JSON_STRING_PATTERN_ANCHORED_BOUNDED");
                 return Ok(wrap_string_value_terminal(body));
             }
             if min_len > 0 || max_len.is_some() {
@@ -5683,12 +5645,11 @@ impl<'a> SchemaCtx<'a> {
                 if let Some(ml) = max_len {
                     if ml <= MAX_BOUNDED_SEARCH_TAIL {
                         let search_regex = string_value_body_regex(&json_search_pattern(&pattern));
+                        let search_dfa = build_regex(&[parse_regex(&search_regex, true)]).dfa;
                         let length_regex = json_wrapped_string_length_regex(min_len, ml);
-                        let intersected = LexerExpr::Intersect {
-                            expr: Box::new(parse_regex(&search_regex, true)),
-                            intersect: Box::new(parse_regex(&length_regex, true)),
-                        };
-                        let body = self.build_lexer_expr(&intersected, "JSON_STRING_PATTERN_BOUNDED");
+                        let length_dfa = build_regex(&[parse_regex(&length_regex, true)]).dfa;
+                        let intersected = Self::intersect_lexer_dfa(&search_dfa, &length_dfa);
+                        let body = self.build_lexer_dfa_expr(&intersected, "JSON_STRING_PATTERN_BOUNDED");
                         return Ok(wrap_string_value_terminal(body));
                     }
                 }
@@ -5697,24 +5658,17 @@ impl<'a> SchemaCtx<'a> {
                 // DFA explosion).
                 if min_len > 0 {
                     let search_regex = string_value_body_regex(&json_search_pattern(&pattern));
+                    let search_dfa = build_regex(&[parse_regex(&search_regex, true)]).dfa;
                     let length_inner = format!(r#"(?:{}){{{},}}"#, JSON_STRING_CHAR_PATTERN, min_len);
                     let length_regex = string_value_body_regex(&length_inner);
-                    let intersected = LexerExpr::Intersect {
-                        expr: Box::new(parse_regex(&search_regex, true)),
-                        intersect: Box::new(parse_regex(&length_regex, true)),
-                    };
-                    let body = self.build_lexer_expr(&intersected, "JSON_STRING_PATTERN_MINLEN");
+                    let length_dfa = build_regex(&[parse_regex(&length_regex, true)]).dfa;
+                    let intersected = Self::intersect_lexer_dfa(&search_dfa, &length_dfa);
+                    let body = self.build_lexer_dfa_expr(&intersected, "JSON_STRING_PATTERN_MINLEN");
                     return Ok(wrap_string_value_terminal(body));
                 }
-                return Ok(self.extract_wrapped_search_pattern(
-                    &pattern,
-                    "JSON_STRING_PATTERN_SEARCH",
-                ));
+                return Ok(json_wrapped_pattern(&pattern));
             } else {
-                return Ok(self.extract_wrapped_search_pattern(
-                    &pattern,
-                    "JSON_STRING_PATTERN_SEARCH",
-                ));
+                return Ok(json_wrapped_pattern(&pattern));
             }
         }
 
@@ -5842,32 +5796,10 @@ impl<'a> SchemaCtx<'a> {
             "uri" if use_structured_uri() => {
                 Ok(self.build_structured_uri_expr())
             }
-            _ => {
-                let pattern = json_format_pattern(format_name)
-                    .ok_or_else(|| GlrMaskError::GrammarParse(format!("Unknown format: {format_name}")))?;
-                let prefix = format_terminal_rule_prefix(format_name);
-                Ok(self.extract_wrapped_fullmatch_pattern(pattern, &prefix))
-            }
+            _ => json_format_pattern(format_name)
+                .map(json_wrapped_fullmatch_pattern)
+                .ok_or_else(|| GlrMaskError::GrammarParse(format!("Unknown format: {format_name}"))),
         }
-    }
-
-    fn extract_wrapped_search_pattern(&mut self, pattern: &str, prefix: &str) -> GrammarExpr {
-        let inner = json_search_pattern(pattern);
-        self.extract_wrapped_string_regex(&inner, prefix)
-    }
-
-    fn extract_wrapped_fullmatch_pattern(&mut self, pattern: &str, prefix: &str) -> GrammarExpr {
-        let inner = jsonify_regex_dot(pattern);
-        self.extract_wrapped_string_regex(&inner, prefix)
-    }
-
-    fn extract_wrapped_string_regex(&mut self, inner_regex: &str, prefix: &str) -> GrammarExpr {
-        self.extract_terminal_rule(wrap_string_value_regex(inner_regex), prefix)
-    }
-
-    fn extract_wrapped_key_colon_search_pattern(&mut self, pattern: &str, prefix: &str) -> GrammarExpr {
-        let inner = json_search_pattern(pattern);
-        self.extract_terminal_rule(wrap_key_colon_regex(&inner), prefix)
     }
 
 fn build_structured_uri_expr(&mut self) -> GrammarExpr {
@@ -5881,25 +5813,78 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
             .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
             .unwrap_or_default();
         let ablated = |name: &str| ablate.contains(name);
-        // --- Multi-char regex run terminals ---
-        // Each fires once per run instead of once per byte.
+        // --- Character classes ---
 
-        // pchar run (1+): unreserved + sub-delims + ":" + "@" + pct-encoded
-        // Used for segment (*pchar) and segment-nz (1*pchar)
-        let pchar_run = regex_expr(r#"(?:[a-zA-Z0-9\-._~!$&'()*+,;=:@]|%[0-9a-fA-F]{2})+"#);
+        // HEXDIG = DIGIT / "A"-"F" / "a"-"f"
+        let hexdig = GrammarExpr::CharClass {
+            def: "0-9a-fA-F".into(),
+            negate: false,
+            utf8: true,
+        };
 
-        // qf_run (1+): query/fragment chars (pchar + "/" + "?") + pct-encoded
-        let qf_run = regex_expr(r#"(?:[a-zA-Z0-9\-._~!$&'()*+,;=:@/?]|%[0-9a-fA-F]{2})+"#);
+        // pct-encoded = "%" HEXDIG HEXDIG
+        let pct_encoded = self.extract_rule(
+            sequence_or_single(vec![
+                literal_expr(b"%"),
+                GrammarExpr::RepeatRange {
+                    expr: Box::new(hexdig.clone()),
+                    min: 2,
+                    max: 2,
+                },
+            ]),
+            "uri_pct",
+        );
+
+        // pchar = unreserved / pct-encoded / sub-delims / ":" / "@"
+        // Char class for pchar (all pchar chars except pct-encoded)
+        let pchar_cc = GrammarExpr::CharClass {
+            def: r"a-zA-Z0-9\-._~!$&'()*+,;=:@".into(),
+            negate: false,
+            utf8: true,
+        };
+        let pchar = self.extract_rule(
+            choice_or_single(vec![pchar_cc, pct_encoded.clone()]),
+            "uri_pchar",
+        );
+
+        // Query/fragment char: pchar / "/" / "?"  (plus pct-encoded)
+        let qf_cc = GrammarExpr::CharClass {
+            def: r"a-zA-Z0-9\-._~!$&'()*+,;=:@/?".into(),
+            negate: false,
+            utf8: true,
+        };
+        let qf_char = self.extract_rule(
+            choice_or_single(vec![qf_cc, pct_encoded.clone()]),
+            "uri_qfc",
+        );
 
         // --- scheme ---
-        // scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
-        let scheme = regex_expr(r#"[a-zA-Z][a-zA-Z0-9+\-.]*"#);
+        // scheme = ALPHA *( ALPA / DIGIT / "+" / "-" / "." )
+        let scheme = sequence_or_single(vec![
+            GrammarExpr::CharClass {
+                def: "a-zA-Z".into(),
+                negate: false,
+                utf8: true,
+            },
+            GrammarExpr::Repeat(Box::new(GrammarExpr::CharClass {
+                def: "a-zA-Z0-9+\\-.".into(),
+                negate: false,
+                utf8: true,
+            })),
+        ]);
 
         // --- userinfo ---
         // userinfo = *( unreserved / pct-encoded / sub-delims / ":" )
-        let userinfo = GrammarExpr::Optional(Box::new(
-            regex_expr(r#"(?:[a-zA-Z0-9\-._~!$&'()*+,;=:]|%[0-9a-fA-F]{2})+"#),
-        ));
+        // Char class = unreserved + sub-delims + ":" (i.e. pchar minus "@")
+        let userinfo_cc = GrammarExpr::CharClass {
+            def: r"a-zA-Z0-9\-._~!$&'()*+,;=:".into(),
+            negate: false,
+            utf8: true,
+        };
+        let userinfo = GrammarExpr::Repeat(Box::new(choice_or_single(vec![
+            userinfo_cc,
+            pct_encoded.clone(),
+        ])));
         let userinfo_at = GrammarExpr::Optional(Box::new(sequence_or_single(vec![
             userinfo,
             literal_expr(b"@"),
@@ -5911,15 +5896,29 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         // IPvFuture = "v" 1*HEXDIG "." 1*( unreserved / sub-delims / ":" )
         let ipv_future = sequence_or_single(vec![
             literal_expr(b"v"),
-            regex_expr("[0-9a-fA-F]+"),
+            GrammarExpr::RepeatOne(Box::new(hexdig.clone())),
             literal_expr(b"."),
-            regex_expr(r#"[a-zA-Z0-9\-._~!$&'()*+,;=:]+"#),
+            GrammarExpr::RepeatOne(Box::new(GrammarExpr::CharClass {
+                def: r"a-zA-Z0-9\-._~!$&'()*+,;=:".into(),
+                negate: false,
+                utf8: true,
+            })),
         ]);
 
-        // h16 = 1*4 HEXDIG (regex terminal: fires once per h16 group)
-        let h16 = regex_expr("[0-9a-fA-F]{1,4}");
-        let h16_colon = regex_expr("[0-9a-fA-F]{1,4}:");
-        let colon_h16 = regex_expr(":[0-9a-fA-F]{1,4}");
+        // h16 = 1*4 HEXDIG
+        let h16 = GrammarExpr::RepeatRange {
+            expr: Box::new(hexdig.clone()),
+            min: 1,
+            max: 4,
+        };
+        let h16_colon = self.extract_rule(
+            sequence_or_single(vec![h16.clone(), literal_expr(b":")]),
+            "uri_h16c",
+        );
+        let colon_h16 = self.extract_rule(
+            sequence_or_single(vec![literal_expr(b":"), h16.clone()]),
+            "uri_ch16",
+        );
 
         // IPv6 address — 10 alternatives from RFC 3986 Appendix A
         let ipv6_alts = vec![
@@ -6007,16 +6006,22 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         ]);
 
         // reg-name = *( unreserved / pct-encoded / sub-delims )
-        let re_name = GrammarExpr::Optional(Box::new(
-            regex_expr(r#"(?:[a-zA-Z0-9\-._~!$&'()*+,;=]|%[0-9a-fA-F]{2})+"#),
-        ));
+        let reg_name_cc = GrammarExpr::CharClass {
+            def: r"a-zA-Z0-9\-._~!$&'()*+,;=".into(),
+            negate: false,
+            utf8: true,
+        };
+        let re_name = GrammarExpr::Repeat(Box::new(choice_or_single(vec![
+            reg_name_cc,
+            pct_encoded.clone(),
+        ])));
 
         let mut host_alts: Vec<GrammarExpr> = Vec::new();
         if !ablated("ip_literal") { host_alts.push(ip_literal); }
         if !ablated("ipv4") { host_alts.push(ipv4_address); }
         if !ablated("reg_name") { host_alts.push(re_name); } else {
             // Keep at least one host alternative (single letter) so URI is parseable.
-            host_alts.push(regex_expr("[a-zA-Z]"));
+            host_alts.push(GrammarExpr::CharClass { def: "a-zA-Z".into(), negate: false, utf8: true });
         }
         let host = choice_or_single(host_alts);
 
@@ -6024,7 +6029,11 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         // port = *DIGIT
         let port = GrammarExpr::Optional(Box::new(sequence_or_single(vec![
             literal_expr(b":"),
-            GrammarExpr::Optional(Box::new(regex_expr("[0-9]+"))),
+            GrammarExpr::Repeat(Box::new(GrammarExpr::CharClass {
+                def: "0-9".into(),
+                negate: false,
+                utf8: true,
+            })),
         ])));
 
         // authority = [ userinfo "@" ] host [ ":" port ]
@@ -6033,10 +6042,10 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         let authority = sequence_or_single(vec![userinfo_part, host, port_part]);
 
         // --- path ---
-        // segment = *pchar → Optional(run) so empty segments don't fire any terminal
-        let segment = GrammarExpr::Optional(Box::new(pchar_run.clone()));
+        // segment = *pchar
+        let segment = GrammarExpr::Repeat(Box::new(pchar.clone()));
         // segment-nz = 1*pchar
-        let segment_nz = pchar_run.clone();
+        let segment_nz = GrammarExpr::RepeatOne(Box::new(pchar.clone()));
 
         // path-abempty = *( "/" segment )
         let path_abempty = GrammarExpr::Repeat(Box::new(sequence_or_single(vec![
@@ -6087,13 +6096,13 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         // query = "?" *( pchar / "/" / "?" )  [optional group]
         let query = GrammarExpr::Optional(Box::new(sequence_or_single(vec![
             literal_expr(b"?"),
-            GrammarExpr::Optional(Box::new(qf_run.clone())),
+            GrammarExpr::Repeat(Box::new(qf_char.clone())),
         ])));
 
         // fragment = "#" *( pchar / "/" / "?" )  [optional group]
         let fragment = GrammarExpr::Optional(Box::new(sequence_or_single(vec![
             literal_expr(b"#"),
-            GrammarExpr::Optional(Box::new(qf_run)),
+            GrammarExpr::Repeat(Box::new(qf_char)),
         ])));
 
         // URI = scheme ":" hier-part query fragment
@@ -6120,13 +6129,9 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
     }
 
     fn fused_json_key_colon_literal(&self, text: &str) -> GrammarExpr {
-        let mut no_space = json_string_literal_bytes(text);
-        no_space.push(b':');
-
-        let mut with_space = no_space.clone();
-        with_space.push(b' ');
-
-        choice_or_single(vec![literal_expr(&no_space), literal_expr(&with_space)])
+        let mut bytes = json_string_literal_bytes(text);
+        bytes.extend_from_slice(b": ");
+        literal_expr(&bytes)
     }
 
     fn build_merged_literal_key_value_expr(
@@ -6204,7 +6209,7 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
             merged.extend_from_slice(leading_literal);
             merged.extend_from_slice(first);
             *first = merged;
-        } else if !leading_literal.is_empty() {
+        } else {
             parts.insert(0, literal_expr(leading_literal));
         }
 
@@ -6296,20 +6301,8 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         &self,
         ordered: &[(String, GrammarExpr, bool)],
     ) -> GrammarExpr {
-        // Use fused key literals so compact JSON (no space after colon) is accepted
-        // alongside spaced JSON. The fused form is Choice([key":], [key": ]).
-        let mut parts = vec![literal_expr(b"{")];
-        for (index, (key, value_expr, _)) in ordered.iter().enumerate() {
-            let leading: &[u8] = if index == 0 { b"" } else { JSON_ITEM_SEPARATOR };
-            parts.push(self.build_fused_merged_literal_key_value_expr(
-                leading,
-                key,
-                value_expr.clone(),
-            ));
-        }
-        parts.push(literal_expr(b"}"));
         maybe_fuse_finite_literal_expr(
-            sequence_or_single(parts),
+            self.build_required_ordered_object_body_expr(ordered, Some(b"}")),
             &format!("closed_required_ordered_object:items={}", ordered.len()),
         )
     }
@@ -6556,17 +6549,6 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         Ok(regex.dfa.finalizers(state).contains(0))
     }
 
-    fn scoped_key_colon_expr(property_names: Option<&Value>) -> Result<LexerExpr, GlrMaskError> {
-        let pattern = if let Some(property_names) = property_names {
-            key_colon_body_regex(
-                &json_search_pattern(Self::property_name_pattern(property_names)?),
-            )
-        } else {
-            key_colon_body_regex(JSON_STRING_BODY_ONLY_REGEX)
-        };
-        Ok(parse_regex(&pattern, true))
-    }
-
     fn scoped_key_colon_dfa(property_names: Option<&Value>) -> Result<LexerDfa, GlrMaskError> {
         let pattern = if let Some(property_names) = property_names {
             key_colon_body_regex(
@@ -6578,31 +6560,10 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         Ok(build_regex(&[parse_regex(&pattern, true)]).dfa)
     }
 
-    fn pattern_key_colon_expr(pattern: &str) -> LexerExpr {
-        let inner = json_search_pattern(pattern);
-        let pat = key_colon_body_regex(&inner);
-        parse_regex(&pat, true)
-    }
-
     fn pattern_key_colon_dfa(pattern: &str) -> LexerDfa {
         let inner = json_search_pattern(pattern);
         let pat = key_colon_body_regex(&inner);
         build_regex(&[parse_regex(&pat, true)]).dfa
-    }
-
-    fn literal_key_colon_union_expr(keys: &BTreeSet<String>) -> Option<LexerExpr> {
-        if keys.is_empty() {
-            return None;
-        }
-        let exprs = keys
-            .iter()
-            .map(|key| LexerExpr::U8Seq(key_colon_literal_body_bytes(key)))
-            .collect::<Vec<_>>();
-        Some(if exprs.len() == 1 {
-            exprs.into_iter().next().unwrap()
-        } else {
-            LexerExpr::Choice(exprs)
-        })
     }
 
     fn literal_key_colon_union_dfa(keys: &BTreeSet<String>) -> Option<LexerDfa> {
@@ -6702,109 +6663,47 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         )
     }
 
-    fn build_lexer_expr(&mut self, expr: &LexerExpr, prefix: &str) -> GrammarExpr {
-        self.extract_terminal_rule(GrammarExpr::TerminalExpr(expr.clone()), prefix)
-    }
-
-    fn dfa_to_expr(dfa: &LexerDfa) -> LexerExpr {
-        let n = dfa.num_states();
-        let final_idx = n;
-        let size = n + 1;
-        let mut r: Vec<Vec<Option<LexerExpr>>> = vec![vec![None; size]; size];
-
-        for (state_id, state) in dfa.states().iter().enumerate() {
-            let mut by_target: HashMap<usize, crate::ds::u8set::U8Set> = HashMap::new();
-            for (byte, &target) in state.transitions.iter() {
-                by_target
-                    .entry(target as usize)
-                    .or_insert_with(crate::ds::u8set::U8Set::empty)
-                    .insert(byte);
-            }
-            for (target, set) in by_target {
-                Self::add_option_expr(&mut r[state_id][target], LexerExpr::U8Class(set));
-            }
-            if !state.finalizers.is_empty() {
-                Self::add_option_expr(&mut r[state_id][final_idx], LexerExpr::Epsilon);
-            }
-        }
-
-        for k in (1..n).rev() {
-            let kk_star: Option<LexerExpr> = r[k][k].take().map(|loop_expr| LexerExpr::Repeat {
-                expr: Box::new(loop_expr),
-                min: 0,
-                max: None,
-            });
-
-            let sources: Vec<(usize, LexerExpr)> = (0..size)
-                .filter(|&i| i != k)
-                .filter_map(|i| r[i][k].take().map(|e| (i, e)))
-                .collect();
-
-            let targets: Vec<(usize, Option<LexerExpr>)> = (0..size)
-                .filter(|&j| j != k)
-                .map(|j| (j, r[k][j].clone()))
-                .collect();
-
-            for (i, ik_expr) in sources {
-                for (j, kj_opt) in &targets {
-                    let kj_expr = match kj_opt {
-                        Some(e) => e.clone(),
-                        None => continue,
-                    };
-                    let bridge = match &kk_star {
-                        Some(star) => LexerExpr::make_seq(vec![ik_expr.clone(), star.clone(), kj_expr]),
-                        None => LexerExpr::make_seq(vec![ik_expr.clone(), kj_expr]),
-                    };
-                    Self::add_option_expr(&mut r[i][*j], bridge);
-                }
-            }
-        }
-
-        r[0][final_idx]
-            .take()
-            .unwrap_or_else(|| LexerExpr::Choice(vec![]))
-    }
-
-    fn add_option_expr(slot: &mut Option<LexerExpr>, new_expr: LexerExpr) {
-        match slot {
-            None => *slot = Some(new_expr),
-            Some(existing) => {
-                *existing = LexerExpr::make_choice(vec![existing.clone(), new_expr]);
-            }
-        }
-    }
-
     fn build_lexer_dfa_expr(&mut self, dfa: &LexerDfa, prefix: &str) -> GrammarExpr {
-        let expr = Self::dfa_to_expr(dfa);
-        self.build_lexer_expr(&expr, prefix)
+        if !Self::dfa_accepts_any(dfa) {
+            return never_expr();
+        }
+
+        self.extract_terminal_rule(
+            GrammarExpr::TerminalExpr(LexerExpr::Dfa(dfa.clone())),
+            prefix,
+        )
     }
 
-    /// Convert a DFA to an expression and wrap it in a terminal rule.
-    /// Build a grammar expression for a key-colon expression, wrapping it with
-    /// the split-off literal parts (opening quote, close quote, colon-space).
-    fn build_key_colon_expr(&mut self, expr: &LexerExpr, prefix: &str) -> GrammarExpr {
-        self.build_excluding_key_colon_expr_internal(expr.clone(), vec![], prefix)
+    /// Build a grammar expression for a key-colon DFA, wrapping it with
+    /// the split-off literal parts (opening quote, close quote, colon-space)
+    /// just like `wrap_key_colon_regex` does for regex-based keys.
+    fn build_key_colon_dfa_expr(&mut self, dfa: &LexerDfa, prefix: &str) -> GrammarExpr {
+        self.build_excluding_key_colon_dfa_expr(dfa, &[], prefix)
     }
 
-    /// Build a key-colon terminal from a base expression, excluding any keys matched
-    /// by the `excluded` expressions. Builds the exclusion directly into the Expr tree.
-    fn build_excluding_key_colon_expr_internal(
+    /// Build a key-colon terminal from a base DFA, excluding any keys matched
+    /// by the `excluded` DFAs.  Uses `GrammarExpr::Exclude` instead of
+    /// DFA-level subtraction so that the grammar compiler handles exclusion.
+    fn build_excluding_key_colon_dfa_expr(
         &mut self,
-        base_expr: LexerExpr,
-        excluded_exprs: Vec<LexerExpr>,
+        base_dfa: &LexerDfa,
+        excluded_dfas: &[&LexerDfa],
         prefix: &str,
     ) -> GrammarExpr {
-        let base_body = GrammarExpr::TerminalExpr(base_expr);
-        let body = if excluded_exprs.is_empty() {
+        if !Self::dfa_accepts_any(base_dfa) {
+            return never_expr();
+        }
+        let base_body = GrammarExpr::TerminalExpr(LexerExpr::Dfa(base_dfa.clone()));
+        let body = if excluded_dfas.is_empty() {
             base_body
         } else {
-            let excluded_grammar_exprs: Vec<GrammarExpr> = excluded_exprs
-                .into_iter()
-                .map(|expr| GrammarExpr::TerminalExpr(expr))
+            let excluded_exprs: Vec<GrammarExpr> = excluded_dfas
+                .iter()
+                .map(|dfa| GrammarExpr::TerminalExpr(LexerExpr::Dfa((*dfa).clone())))
                 .collect();
             GrammarExpr::Exclude {
                 expr: Box::new(base_body),
-                exclude: Box::new(choice_or_single(excluded_grammar_exprs)),
+                exclude: Box::new(choice_or_single(excluded_exprs)),
             }
         };
         let body_terminal = self.extract_terminal_rule(body, prefix);
@@ -6836,15 +6735,15 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         let expr = if self.shared_ap_literal_keys.is_empty() {
             self.json_key_colon_ref()
         } else {
-            let key_expr = Self::scoped_key_colon_expr(None)?;
-            let shared_excluded_expr = Self::literal_key_colon_union_expr(&self.shared_ap_literal_keys);
-            let mut excluded_exprs: Vec<LexerExpr> = Vec::new();
-            if let Some(expr) = shared_excluded_expr {
-                excluded_exprs.push(expr);
+            let key_dfa = Self::scoped_key_colon_dfa(None)?;
+            let shared_excluded_dfa = Self::literal_key_colon_union_dfa(&self.shared_ap_literal_keys);
+            let mut excluded_dfas: Vec<&LexerDfa> = Vec::new();
+            if let Some(ref dfa) = shared_excluded_dfa {
+                excluded_dfas.push(dfa);
             }
-            self.build_excluding_key_colon_expr_internal(
-                key_expr,
-                excluded_exprs,
+            self.build_excluding_key_colon_dfa_expr(
+                &key_dfa,
+                &excluded_dfas,
                 "AP_SHARED_KEY_COLON",
             )
         };
@@ -7231,10 +7130,10 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
             if ap_key_any_string() {
                 // Skip key exclusion — AP keys accept any JSON string.
                 // Each object still gets its own uniquely-named terminal.
-                let full_key_expr = Self::scoped_key_colon_expr(None)?;
+                let full_key_dfa = Self::scoped_key_colon_dfa(None)?;
                 Some(sequence_or_single(vec![
-                    self.build_key_colon_expr(
-                        &full_key_expr,
+                    self.build_key_colon_dfa_expr(
+                        &full_key_dfa,
                         &format!("{}_KEY_COLON", base_name.to_uppercase()),
                     ),
                     extra_value_expr,
@@ -7254,16 +7153,16 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
                 let mut excluded_literal_keys = BTreeSet::<String>::new();
                 excluded_literal_keys.extend(properties.keys().cloned());
                 excluded_literal_keys.extend(required_list.iter().cloned());
-                let key_expr = Self::scoped_key_colon_expr(None)?;
-                let mut excluded_exprs: Vec<LexerExpr> = Vec::new();
-                let excluded_literal_expr = Self::literal_key_colon_union_expr(&excluded_literal_keys);
-                if let Some(expr) = excluded_literal_expr {
-                    excluded_exprs.push(expr);
+                let key_dfa = Self::scoped_key_colon_dfa(None)?;
+                let mut excluded_dfas: Vec<&LexerDfa> = Vec::new();
+                let excluded_literal_dfa = Self::literal_key_colon_union_dfa(&excluded_literal_keys);
+                if let Some(ref dfa) = excluded_literal_dfa {
+                    excluded_dfas.push(dfa);
                 }
                 Some(sequence_or_single(vec![
-                    self.build_excluding_key_colon_expr_internal(
-                        key_expr,
-                        excluded_exprs,
+                    self.build_excluding_key_colon_dfa_expr(
+                        &key_dfa,
+                        &excluded_dfas,
                         &format!("{}_KEY_COLON", base_name.to_uppercase()),
                     ),
                     extra_value_expr,
@@ -7615,18 +7514,18 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         };
         self.generated_object_rule_counter = base_index + 1;
 
-        let key_expr_needed = !pattern_properties.is_empty()
+        let key_dfa_needed = !pattern_properties.is_empty()
             || property_names.is_some()
             || !additional_excluded_literal_keys.is_empty();
-        let (base_key_colon_expr, fixed_key_union_expr, additional_fixed_key_union_expr, pattern_key_colon_exprs) =
-            if key_expr_needed {
+        let (base_key_colon_dfa, fixed_key_union_dfa, additional_fixed_key_union_dfa, pattern_key_colon_dfas) =
+            if key_dfa_needed {
                 (
-                    Some(Self::scoped_key_colon_expr(property_names)?),
-                    Self::literal_key_colon_union_expr(&fixed_literal_keys),
-                    Self::literal_key_colon_union_expr(&additional_excluded_literal_keys),
+                    Some(Self::scoped_key_colon_dfa(property_names)?),
+                    Self::literal_key_colon_union_dfa(&fixed_literal_keys),
+                    Self::literal_key_colon_union_dfa(&additional_excluded_literal_keys),
                     pattern_properties
                         .iter()
-                        .map(|(pattern, _)| Self::pattern_key_colon_expr(pattern))
+                        .map(|(pattern, _)| Self::pattern_key_colon_dfa(pattern))
                         .collect::<Vec<_>>(),
                 )
             } else {
@@ -7646,38 +7545,35 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
             );
 
             for (subset_idx, subset) in subsets.into_iter().enumerate() {
-                // Collect key expressions to exclude via GrammarExpr::Exclude.
-                let subset_members: BTreeSet<usize> = subset.iter().copied().collect();
-                let subset_expr = if subset.len() == 1 {
-                    pattern_key_colon_exprs[subset[0]].clone()
-                } else {
-                    let subset_exprs = subset
-                        .iter()
-                        .map(|idx| pattern_key_colon_exprs[*idx].clone())
-                        .collect::<Vec<_>>();
-                    LexerExpr::Choice(subset_exprs)
-                };
-                let base_expr = if let Some(scoped_base) = base_key_colon_expr.as_ref() {
-                    LexerExpr::Intersect {
-                        expr: Box::new(scoped_base.clone()),
-                        intersect: Box::new(subset_expr),
+                let mut key_dfa = base_key_colon_dfa
+                    .as_ref()
+                    .expect("pattern/property-name DFA should exist when needed")
+                    .clone();
+                for pattern_idx in &subset {
+                    key_dfa = Self::intersect_lexer_dfa(&key_dfa, &pattern_key_colon_dfas[*pattern_idx]);
+                    if !Self::dfa_accepts_any(&key_dfa) {
+                        break;
                     }
-                } else {
-                    subset_expr
-                };
-                let mut excluded_exprs: Vec<LexerExpr> = Vec::new();
-                if let Some(ref fk_expr) = fixed_key_union_expr {
-                    excluded_exprs.push(fk_expr.clone());
                 }
-                for (pattern_idx, pattern_expr) in pattern_key_colon_exprs.iter().enumerate() {
+                if !Self::dfa_accepts_any(&key_dfa) {
+                    continue;
+                }
+
+                // Collect DFAs to exclude via GrammarExpr::Exclude
+                let subset_members: BTreeSet<usize> = subset.iter().copied().collect();
+                let mut excluded_dfas: Vec<&LexerDfa> = Vec::new();
+                if let Some(ref fk_dfa) = fixed_key_union_dfa {
+                    excluded_dfas.push(fk_dfa);
+                }
+                for (pattern_idx, pattern_dfa) in pattern_key_colon_dfas.iter().enumerate() {
                     if !subset_members.contains(&pattern_idx) {
-                        excluded_exprs.push(pattern_expr.clone());
+                        excluded_dfas.push(pattern_dfa);
                     }
                 }
 
-                let key_expr = self.build_excluding_key_colon_expr_internal(
-                    base_expr,
-                    excluded_exprs,
+                let key_expr = self.build_excluding_key_colon_dfa_expr(
+                    &key_dfa,
+                    &excluded_dfas,
                     &format!("{}_PP_SUBSET_{}_KEY", base_name.to_uppercase(), subset_idx),
                 );
 
@@ -7703,9 +7599,9 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
             let additional_key_expr = if ap_key_any_string() {
                 // Skip key exclusion — AP keys accept any JSON string.
                 // Each object still gets its own uniquely-named terminal to preserve grammar structure.
-                let full_key_expr = Self::scoped_key_colon_expr(property_names)?;
-                Some(self.build_key_colon_expr(
-                    &full_key_expr,
+                let full_key_dfa = Self::scoped_key_colon_dfa(property_names)?;
+                Some(self.build_key_colon_dfa_expr(
+                    &full_key_dfa,
                     &format!("{}_AP_KEY", base_name.to_uppercase()),
                 ))
             } else if shared_ap_key_exclusions_enabled()
@@ -7716,38 +7612,22 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
                     &additional_excluded_literal_keys,
                     &format!("{base_name}_ap_key"),
                 )?)
-            } else if key_expr_needed {
-                if pattern_properties.is_empty() && property_names.is_none() {
-                    // Literal-only AP exclusions are more stable when kept as
-                    // expression trees; the DFA->Expr->Exclude path can lose
-                    // precision for split key-colon terminals.
-                    let key_expr = Self::scoped_key_colon_expr(None)?;
-                    let mut excluded_exprs: Vec<LexerExpr> = Vec::new();
-                    if let Some(expr) = Self::literal_key_colon_union_expr(&additional_excluded_literal_keys) {
-                        excluded_exprs.push(expr);
-                    }
-                    Some(self.build_excluding_key_colon_expr_internal(
-                        key_expr,
-                        excluded_exprs,
-                        &format!("{}_AP_KEY", base_name.to_uppercase()),
-                    ))
-                } else {
-                    let additional_key_expr = base_key_colon_expr
-                        .as_ref()
-                        .expect("additional-properties key expression should exist when needed");
-                    let mut excluded_exprs: Vec<LexerExpr> = Vec::new();
-                    if let Some(ref fk_expr) = additional_fixed_key_union_expr {
-                        excluded_exprs.push(fk_expr.clone());
-                    }
-                    for pattern_expr in &pattern_key_colon_exprs {
-                        excluded_exprs.push(pattern_expr.clone());
-                    }
-                    Some(self.build_excluding_key_colon_expr_internal(
-                        additional_key_expr.clone(),
-                        excluded_exprs,
-                        &format!("{}_AP_KEY", base_name.to_uppercase()),
-                    ))
+            } else if key_dfa_needed {
+                let additional_key_dfa = base_key_colon_dfa
+                    .as_ref()
+                    .expect("additional-properties DFA should exist when needed");
+                let mut excluded_dfas: Vec<&LexerDfa> = Vec::new();
+                if let Some(ref fk_dfa) = additional_fixed_key_union_dfa {
+                    excluded_dfas.push(fk_dfa);
                 }
+                for pattern_dfa in &pattern_key_colon_dfas {
+                    excluded_dfas.push(pattern_dfa);
+                }
+                Some(self.build_excluding_key_colon_dfa_expr(
+                    additional_key_dfa,
+                    &excluded_dfas,
+                    &format!("{}_AP_KEY", base_name.to_uppercase()),
+                ))
             } else {
                 Some(self.json_key_colon_ref())
             };
@@ -7832,6 +7712,19 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         // Separator-merged left-recursive grammar for ordered objects with optional keys.
         // Off by default; opt-in via GLRMASK_ENABLE_FACTORED_ORDERED_OBJECT=1
         // and GLRMASK_ENABLE_FACTORED_CLOSED_OBJECT=1.
+        //
+        // Open ordered objects need their optional suffix to stay right-leaning so
+        // the additional/pattern-property continuation remains live after consuming
+        // an optional branch. Balanced trees can strand the continuation after a
+        // shared optional object leaf, which rejects tokens like ` {},` even though
+        // the object still permits another property.
+        let object_shape = if ordered.iter().any(|(_, _, required)| !*required)
+            && (has_additional_properties || !pattern_properties.is_empty())
+        {
+            OrderedObjectShape::Right
+        } else {
+            ordered_object_shape()
+        };
 
         if factored_ordered_object_enabled()
             && Self::factored_closed_object_enabled()
@@ -7867,15 +7760,14 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
             }
         }
 
-        let items: Vec<(GrammarExpr, bool)> = ordered.iter()
-            .map(|(key, value_expr, is_required)| {
-                let item_expr = self.build_merged_literal_key_value_expr(b"", key, value_expr.clone());
-                (item_expr, *is_required)
-            })
-            .collect();
-        let tree_can_be_empty = items.iter().all(|(_, req)| !req);
-        let separator = self.json_item_separator_expr();
-        let tree_expr = GrammarExpr::SeparatedSequence { items, separator: Box::new(separator) };
+        let mut next_tree_rule_index = 0usize;
+        let (tree_expr, tree_can_be_empty) =
+            self.build_object_tree(
+                &base_name,
+                &ordered,
+                &mut next_tree_rule_index,
+                object_shape,
+            )?;
         let tree_prefix = sequence_or_single(vec![literal_expr(b"{"), tree_expr]);
         let with_tree_prefix = sequence_or_single(vec![
             tree_prefix,
@@ -7896,6 +7788,69 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         }
 
         Ok(with_tree_prefix)
+    }
+
+    fn build_object_tree(
+        &mut self,
+        base_name: &str,
+        items: &[(String, GrammarExpr, bool)],
+        next_rule_index: &mut usize,
+        shape: OrderedObjectShape,
+    ) -> Result<(GrammarExpr, bool), GlrMaskError> {
+
+        if items.len() == 1 {
+            let (key, value_expr, is_required) = &items[0];
+            let kv_expr = self.build_merged_literal_key_value_expr(b"", key, value_expr.clone());
+            if *is_required {
+                return Ok((kv_expr, false));
+            }
+
+            let rule_name = format!("{base_name}_t{}", *next_rule_index);
+            *next_rule_index += 1;
+            self.insert_rule(rule_name.clone(), kv_expr);
+            return Ok((GrammarExpr::Ref(rule_name), true));
+        }
+
+        let mid = match shape {
+            OrderedObjectShape::Balanced => items.len() / 2,
+            OrderedObjectShape::Left => items.len() - 1,
+            OrderedObjectShape::Right => 1,
+            OrderedObjectShape::LeftBalanced => {
+                let first_optional = items
+                    .iter()
+                    .position(|(_, _, required)| !*required);
+                match first_optional {
+                    None => items.len() - 1,
+                    Some(0) => items.len() / 2,
+                    Some(idx) => idx,
+                }
+            }
+        };
+        let (left_expr, left_can_be_empty) =
+            self.build_object_tree(base_name, &items[..mid], next_rule_index, shape)?;
+        let (right_expr, right_can_be_empty) =
+            self.build_object_tree(base_name, &items[mid..], next_rule_index, shape)?;
+
+        let mut options = vec![sequence_or_single(vec![
+            left_expr.clone(),
+            self.json_item_separator_expr(),
+            right_expr.clone(),
+        ])];
+        if right_can_be_empty {
+            options.push(left_expr.clone());
+        }
+        if left_can_be_empty {
+            options.push(right_expr.clone());
+        }
+
+        if options.len() == 1 {
+            return Ok((options.pop().unwrap(), false));
+        }
+
+        let rule_name = format!("{base_name}_t{}", *next_rule_index);
+        *next_rule_index += 1;
+        self.insert_rule(rule_name.clone(), choice_or_single(options));
+        Ok((GrammarExpr::Ref(rule_name), left_can_be_empty && right_can_be_empty))
     }
 
     fn property_name_pattern(property_names: &Value) -> Result<&str, GlrMaskError> {
@@ -7926,11 +7881,7 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         value_expr: GrammarExpr,
     ) -> Result<GrammarExpr, GlrMaskError> {
         let pattern = Self::property_name_pattern(property_names)?;
-        let prefix = property_name_pattern_terminal_prefix(pattern);
-        let pair = sequence_or_single(vec![
-            self.extract_wrapped_key_colon_search_pattern(pattern, &prefix),
-            value_expr,
-        ]);
+        let pair = sequence_or_single(vec![json_wrapped_key_colon_pattern(pattern), value_expr]);
         Ok(self.build_repeated_object_pairs(pair))
     }
 
@@ -7943,11 +7894,7 @@ fn build_structured_uri_expr(&mut self) -> GrammarExpr {
     ) -> Result<GrammarExpr, GlrMaskError> {
         let pattern = Self::property_name_pattern(property_names)?;
         let matched_key_colon_body = regex_expr(key_colon_body_regex(&json_search_pattern(pattern)));
-        let prefix = property_name_pattern_terminal_prefix(pattern);
-        let matched_key_colon_full = self.extract_terminal_rule(
-            wrap_key_colon_terminal(matched_key_colon_body.clone()),
-            &prefix,
-        );
+        let matched_key_colon_full = wrap_key_colon_terminal(matched_key_colon_body.clone());
         let matched_pair = sequence_or_single(vec![
             matched_key_colon_full,
             matched_value_expr,
@@ -8171,21 +8118,11 @@ fn collect_grammar_visible_refs(
                 walk(expr, terminal_names, out);
                 walk(exclude, terminal_names, out);
             }
-            GrammarExpr::Intersect { expr, intersect } => {
-                walk(expr, terminal_names, out);
-                walk(intersect, terminal_names, out);
-            }
             GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::TerminalExpr(_)
             | GrammarExpr::AnyByte => {}
-            GrammarExpr::SeparatedSequence { items, separator } => {
-                for (item, _) in items {
-                    walk(item, terminal_names, out);
-                }
-                walk(separator, terminal_names, out);
-            }
         }
     }
     let mut visible = BTreeSet::new();

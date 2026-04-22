@@ -1029,13 +1029,9 @@ fn test_closed_object_single_variant_collapses_optional_tail_paths() {
         fallback_max, 1,
         "factored DFA builder should collapse the optional-tail split"
     );
-    // The exact single-variant builder uses fused key literals with
-    // Choice([no_space, with_space]) to accept both compact and spaced JSON.
-    // At the ':' position the parser briefly holds 2 states (compact vs. spaced
-    // form), but the optional-tail split is still fully collapsed.
-    assert!(
-        exact_max <= 2,
-        "exact single-variant builder should collapse the optional-tail split (got {exact_max} paths)"
+    assert_eq!(
+        exact_max, 1,
+        "exact single-variant builder should collapse the optional-tail split"
     );
 }
 
@@ -1156,14 +1152,12 @@ fn test_conversion_allof_merges_object_properties() {
     let named = named_grammar_from_schema(schema);
 
     assert!(
-        // Both properties now use fused key literals (compact + spaced choice) in the
-        // closed required object builder: Choice([Literal("\"a\":"), Literal("\"a\": ")])
-        named.rules.iter().any(|r| contains_literal(&r.expr, b"\"a\":")),
-        "allOf merge should preserve property a fused literal in grammar"
+        named.rules.iter().any(|r| contains_literal(&r.expr, b"a\"")),
+        "allOf merge should preserve property a body literal"
     );
     assert!(
-        named.rules.iter().any(|r| contains_literal(&r.expr, b"\"b\":")),
-        "allOf merge should preserve property b fused literal in grammar"
+        named.rules.iter().any(|r| contains_literal(&r.expr, b"b\"")),
+        "allOf merge should preserve property b body literal"
     );
 }
 
