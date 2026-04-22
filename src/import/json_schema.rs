@@ -6783,9 +6783,18 @@ impl<'a> SchemaCtx<'a> {
             }
         }
 
-        r[0][final_idx]
+        // If state 0 has a self-loop (e.g. "any char" in an unrestricted key body DFA),
+        // it is never eliminated by the k-loop above (k starts at 1).  Fold it in now
+        // so the start-state self-loop is reflected in the result expression.
+        let base = r[0][final_idx]
             .take()
-            .unwrap_or_else(|| LexerExpr::Choice(vec![]))
+            .unwrap_or_else(|| LexerExpr::Choice(vec![]));
+        if let Some(loop_expr) = r[0][0].take() {
+            let star = LexerExpr::Repeat { expr: Box::new(loop_expr), min: 0, max: None };
+            LexerExpr::make_seq(vec![star, base])
+        } else {
+            base
+        }
     }
 
     /// Build a grammar expression for a key-colon DFA, wrapping it with
@@ -9567,19 +9576,18 @@ mod tests {
     #[test]
     fn test_minimal_properties_pattern_and_additional_interaction() {
         let schema = r#"{
-            "type": "object",
             "properties": {
                 "a": {"type": "string"}
             },
             "patternProperties": {
-                "^m$": {
-                    "type": "string"
+                "m": {
+                    "type": "array"
                 }
             },
             "additionalProperties": {"type": "string"}
         }"#;
-        assert!(accepts_sequence(schema, &[b"{\"a\": \"x\", \"m\": \"x\", \"z\": \"y\"}"]));
-        assert!(!accepts_sequence(schema, &[b"..."]));
+        assert!(accepts_sequence(schema, &[b"{\"a\": \"x\", \"m\": [], \"z\": \"y\"}"]));
+        assert!(!accepts_sequence(schema, &[b"{\"a\": \"x\", \"m\": \"x\", \"z\": \"y\"}"]));
     }
 
     #[test]
