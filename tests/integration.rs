@@ -68,6 +68,43 @@ fn commit_all(state: &mut ConstraintState<'_>, tokens: &[u32]) {
     }
 }
 
+fn byte_vocab() -> Vocab {
+    let entries: Vec<(u32, Vec<u8>)> = (0..=255u32).map(|b| (b, vec![b as u8])).collect();
+    Vocab::new(entries, None)
+}
+
+fn anyof_object_schema_with_n_branches(n: usize) -> String {
+    let branches: Vec<String> = (0..n)
+        .map(|i| {
+            format!(
+                r#"    {{"type":"object","properties":{{"id":{{"type":"string"}},"k{i}":{{"type":"string"}}}},"required":["id"],"additionalProperties":true}}"#
+            )
+        })
+        .collect();
+
+    format!(
+        "{{\n  \"anyOf\": [\n{}\n  ]\n}}",
+        branches.join(",\n")
+    )
+}
+
+fn max_parser_paths_over_bytes(constraint: &Constraint, input: &[u8]) -> usize {
+    let mut state = constraint.start();
+    let mut max_paths = state.parser_path_count(1_000_000);
+    for &byte in input {
+        let mask = state.mask();
+        assert!(
+            token_allowed(&mask, byte as usize),
+            "expected byte token {:?} to be allowed; allowed={:?}",
+            byte,
+            iter_allowed(&mask)
+        );
+        state.commit_token(byte as u32).unwrap();
+        max_paths = max_paths.max(state.parser_path_count(1_000_000));
+    }
+    max_paths
+}
+
 #[test]
 fn test_ebnf_simple_literal() {
     let constraint = ebnf_constraint(&["a", "b"], r#"start ::= "a" "b""#);
@@ -264,6 +301,46 @@ fn test_json_schema_bare_object_accepts_compact_empty_object_token() {
 
     commit_all(&mut state, &[0]);
     assert!(state.is_finished(), "should accept after compact '{{}}' token");
+}
+
+#[test]
+fn test_json_schema_anyof_ambiguity_grows_with_n_not_log_n() {
+    let vocab = byte_vocab();
+    let input = br#"{"id": "x", "k0": "y"}"#;
+    let ns = [2usize, 4, 8, 16];
+
+    let mut observations = Vec::new();
+    for &n in &ns {
+        let schema = anyof_object_schema_with_n_branches(n);
+        let constraint = Constraint::from_json_schema(&schema, &vocab).unwrap();
+        let max_paths = max_parser_paths_over_bytes(&constraint, input);
+        println!("N={n} max_paths={max_paths}\n{schema}\n");
+        observations.push((n, max_paths));
+    }
+
+    for pair in observations.windows(2) {
+        let (n0, p0) = pair[0];
+        let (n1, p1) = pair[1];
+        assert!(
+            p1 > p0,
+            "max parser paths should increase with N: N={n0} -> {p0}, N={n1} -> {p1}"
+        );
+    }
+
+    for (n, max_paths) in observations {
+        let log2_n_plus_1 = ((n + 1) as f64).log2();
+        assert!(
+            max_paths >= n,
+            "expected at least linear lower bound on this family: N={n}, max_paths={max_paths}"
+        );
+        if n >= 8 {
+            assert!(
+                (max_paths as f64) > 3.0 * log2_n_plus_1,
+                "growth should be clearly above logarithmic for larger N: N={n}, max_paths={max_paths}, 3*log2(N+1)={}",
+                3.0 * log2_n_plus_1
+            );
+        }
+    }
 }
 
 #[test]
