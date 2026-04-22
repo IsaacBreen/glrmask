@@ -7814,7 +7814,6 @@ impl<'a> SchemaCtx<'a> {
             );
             np_item_rules.push((np_item_rule, *is_required));
         }
-        let named_props_can_be_empty = np_item_rules.iter().all(|(_, is_required)| !*is_required);
         let named_props_list_rule = if np_item_rules.is_empty() {
             None
         } else {
@@ -7833,18 +7832,14 @@ impl<'a> SchemaCtx<'a> {
         };
 
         let mut body_items: Vec<(GrammarExpr, bool)> = Vec::new();
-        let mut body_can_be_empty = true;
         if let Some(np_rule) = &named_props_list_rule {
             body_items.push((GrammarExpr::Ref(np_rule.clone()), true));
-            body_can_be_empty &= named_props_can_be_empty;
         }
         if let Some(pp_rule) = &pattern_list_rule {
             body_items.push((GrammarExpr::Ref(pp_rule.clone()), true));
-            body_can_be_empty &= true;
         }
         if let Some(ap_rule) = &additional_list_rule {
             body_items.push((GrammarExpr::Ref(ap_rule.clone()), true));
-            body_can_be_empty &= true;
         }
 
         if body_items.is_empty() {
@@ -7861,23 +7856,11 @@ impl<'a> SchemaCtx<'a> {
         };
 
         let body_rule = self.insert_rule(format!("{base_name}_body"), body_expr);
-        let nonempty_object_rule = self.insert_rule(
-            format!("{base_name}_obj_nonempty"),
-            sequence_or_single(vec![
-                literal_expr(b"{"),
-                GrammarExpr::Ref(body_rule),
-                literal_expr(b"}"),
-            ]),
-        );
-
-        let object_expr = if body_can_be_empty {
-            choice_or_single(vec![
-                GrammarExpr::Ref(nonempty_object_rule),
-                sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]),
-            ])
-        } else {
-            GrammarExpr::Ref(nonempty_object_rule)
-        };
+        let object_expr = sequence_or_single(vec![
+            literal_expr(b"{"),
+            GrammarExpr::Ref(body_rule),
+            literal_expr(b"}"),
+        ]);
 
         let object_rule = self.insert_rule(format!("{base_name}_obj"), object_expr);
         Ok(GrammarExpr::Ref(object_rule))

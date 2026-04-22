@@ -702,8 +702,24 @@ impl Lowerer {
         self.nonnullable_named_rule_cache.insert(name.to_string(), nt);
 
         if is_terminal {
-            if let Some(symbol) = self.lower_nonnullable_expr_symbol(&expr)? {
-                self.rules.push(Rule { lhs: nt, rhs: vec![symbol] });
+            let terminal_expr = self.resolve_terminal_expr(Some(name), &expr)?;
+            let terminal_expr = if terminal_expr.is_nullable() {
+                Expr::Exclude {
+                    expr: Box::new(terminal_expr),
+                    exclude: Box::new(Expr::Epsilon),
+                }
+                .optimize()
+            } else {
+                terminal_expr
+            };
+
+            if !matches!(terminal_expr, Expr::Epsilon) {
+                let terminal_name = format!("__nonnullable_ref_{name}");
+                let tid = self.register_terminal_expr(&terminal_name, terminal_expr);
+                self.rules.push(Rule {
+                    lhs: nt,
+                    rhs: vec![Symbol::Terminal(tid)],
+                });
             }
         } else {
             self.emit_nonnullable_expr(nt, &expr)?;
