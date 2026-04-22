@@ -5,10 +5,8 @@ use serde_json::{Map, Value};
 use crate::GlrMaskError;
 use crate::automata::lexer::ast::Expr as LexerExpr;
 use crate::automata::lexer::compile::build_regex;
-use crate::automata::lexer::dfa::DFA as LexerDfa;
 use crate::automata::lexer::regex::parse_regex;
 use crate::grammar::flat::GrammarDef;
-use crate::ds::bitset::BitSet;
 use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, lower, promote_large_literal_alts};
 
 // WARNING: Do NOT break terminals containing repeats of multi-char subexpressions
@@ -2012,10 +2010,10 @@ fn power_of_ten_multiple_scale(value: f64) -> Option<usize> {
     None
 }
 
-fn integer_multiple_dfa(multiple: u64, allow_fractional_zero: bool) -> LexerDfa {
+fn integer_multiple_expr(multiple: u64, allow_fractional_zero: bool) -> LexerExpr {
     assert!(multiple > 0);
 
-    SchemaCtx::build_product_lexer_dfa(
+    SchemaCtx::build_state_machine_expr(
         IntegerMultipleState::Start,
         |state| match state {
             IntegerMultipleState::Zero => true,
@@ -2067,10 +2065,10 @@ fn integer_multiple_dfa(multiple: u64, allow_fractional_zero: bool) -> LexerDfa 
     )
 }
 
-fn reciprocal_power_of_ten_dfa(scale: usize) -> LexerDfa {
+fn reciprocal_power_of_ten_expr(scale: usize) -> LexerExpr {
     assert!(scale > 0);
 
-    SchemaCtx::build_product_lexer_dfa(
+    SchemaCtx::build_state_machine_expr(
         ReciprocalPow10State::Start,
         |state| match state {
             ReciprocalPow10State::Zero
@@ -2126,12 +2124,16 @@ fn reciprocal_power_of_ten_dfa(scale: usize) -> LexerDfa {
     )
 }
 
-fn compile_regex_union_dfa(regexes: &[String]) -> LexerDfa {
+fn compile_regex_union_expr(regexes: &[String]) -> LexerExpr {
     let exprs = regexes
         .iter()
         .map(|regex| parse_regex(regex, true))
         .collect::<Vec<_>>();
-    build_regex(&exprs).dfa
+    if exprs.len() == 1 {
+        exprs.into_iter().next().unwrap()
+    } else {
+        LexerExpr::Choice(exprs)
+    }
 }
 
 fn json_wrapped_fullmatch_pattern(pattern: &str) -> GrammarExpr {
@@ -5403,17 +5405,20 @@ impl<'a> SchemaCtx<'a> {
             supported: SupportedMultipleOf,
             allow_fractional_zero: bool,
         | {
-            let base_dfa = compile_regex_union_dfa(&regexes);
-            let multiple_dfa = match supported {
+            let base_expr = compile_regex_union_expr(&regexes);
+            let multiple_expr = match supported {
                 SupportedMultipleOf::Integer(multiple) => {
-                    integer_multiple_dfa(multiple, allow_fractional_zero)
+                    integer_multiple_expr(multiple, allow_fractional_zero)
                 }
                 SupportedMultipleOf::ReciprocalPowerOfTen(scale) => {
-                    reciprocal_power_of_ten_dfa(scale)
+                    reciprocal_power_of_ten_expr(scale)
                 }
             };
-            let intersected = Self::intersect_lexer_dfa(&base_dfa, &multiple_dfa);
-            this.build_lexer_dfa_expr(&intersected, "JSON_NUMBER_MULTIPLE_OF")
+            let intersected = LexerExpr::Intersect {
+                expr: Box::new(base_expr),
+                intersect: Box::new(multiple_expr),
+            };
+            this.build_lexer_expr(&intersected, "JSON_NUMBER_MULTIPLE_OF")
         };
 
         let (left, left_inclusive, right, right_inclusive) = normalize_numeric_bounds(schema);
@@ -6591,54 +6596,17 @@ impl<'a> SchemaCtx<'a> {
         })
     }
 
-    fn scoped_key_colon_dfa(property_names: Option<&Value>) -> Result<LexerDfa, GlrMaskError> {
-        let pattern = if let Some(property_names) = property_names {
-            key_colon_body_regex(
-                &json_search_pattern(Self::property_name_pattern(property_names)?),
-            )
-        } else {
-            key_colon_body_regex(JSON_STRING_BODY_ONLY_REGEX)
-        };
-        Ok(build_regex(&[parse_regex(&pattern, true)]).dfa)
-    }
-
-    fn pattern_key_colon_dfa(pattern: &str) -> LexerDfa {
-        let inner = json_search_pattern(pattern);
-        let pat = key_colon_body_regex(&inner);
-        build_regex(&[parse_regex(&pat, true)]).dfa
-    }
-
     fn pattern_key_colon_expr(pattern: &str) -> LexerExpr {
         let inner = json_search_pattern(pattern);
         let pat = key_colon_body_regex(&inner);
         parse_regex(&pat, true)
     }
 
-    fn literal_key_colon_union_dfa(keys: &BTreeSet<String>) -> Option<LexerDfa> {
-        if keys.is_empty() {
-            return None;
-        }
-        let exprs = keys
-            .iter()
-            .map(|key| LexerExpr::U8Seq(key_colon_literal_body_bytes(key)))
-            .collect::<Vec<_>>();
-        let expr = if exprs.len() == 1 {
-            exprs.into_iter().next().unwrap()
-        } else {
-            LexerExpr::Choice(exprs)
-        };
-        Some(build_regex(&[expr]).dfa)
-    }
-
-    fn dfa_accepts_any(dfa: &LexerDfa) -> bool {
-        dfa.states().iter().any(|state| !state.finalizers.is_empty())
-    }
-
-    fn build_product_lexer_dfa<State, IsAccepting, Transitions>(
+    fn build_state_machine_expr<State, IsAccepting, Transitions>(
         start: State,
         mut is_accepting: IsAccepting,
         mut transitions_for: Transitions,
-    ) -> LexerDfa
+    ) -> LexerExpr
     where
         State: Copy + Eq + std::hash::Hash,
         IsAccepting: FnMut(State) -> bool,
@@ -6646,7 +6614,7 @@ impl<'a> SchemaCtx<'a> {
     {
         let mut state_ids = HashMap::<State, usize>::new();
         let mut worklist = VecDeque::<State>::new();
-        let mut transitions = Vec::<Vec<(u8, u32)>>::new();
+        let mut transitions = Vec::<Vec<(u8, usize)>>::new();
         let mut accepting = Vec::<bool>::new();
 
         state_ids.insert(start, 0);
@@ -6670,89 +6638,34 @@ impl<'a> SchemaCtx<'a> {
                     accepting.push(false);
                     new_state_id
                 };
-                entries.push((byte, next_result_state_id as u32));
+                entries.push((byte, next_result_state_id));
             }
             transitions[result_state_id] = entries;
         }
 
-        let mut dfa = LexerDfa::new(transitions.len());
-        dfa.ensure_group_capacity(1);
-        for (state_id, entries) in transitions.into_iter().enumerate() {
-            dfa.set_transitions_from_sorted_entries(state_id as u32, entries);
-            let mut finalizers = BitSet::new(1);
-            if accepting[state_id] {
-                finalizers.set(0);
-            }
-            dfa.overwrite_state_metadata(state_id as u32, finalizers, BitSet::new(1));
-        }
-        let start_u8set = dfa.get_u8set(0);
-        dfa.set_group_u8set(0, start_u8set);
-        dfa.minimize()
-    }
-
-    fn intersect_lexer_dfa(left: &LexerDfa, right: &LexerDfa) -> LexerDfa {
-        Self::build_product_lexer_dfa(
-            (0u32, 0u32),
-            |(left_state_id, right_state_id)| {
-                !left.states()[left_state_id as usize].finalizers.is_empty()
-                    && !right.states()[right_state_id as usize].finalizers.is_empty()
-            },
-            |(left_state_id, right_state_id)| {
-                left.states()[left_state_id as usize]
-                    .transitions
-                    .iter()
-                    .filter_map(|(byte, &left_next)| {
-                        right
-                            .step(right_state_id, byte)
-                            .map(|right_next| (byte, (left_next, right_next)))
-                    })
-                    .collect()
-            },
-        )
-    }
-
-    fn build_lexer_dfa_expr(&mut self, dfa: &LexerDfa, prefix: &str) -> GrammarExpr {
-        let expr = Self::dfa_to_expr(dfa);
-        self.build_lexer_expr(&expr, prefix)
-    }
-
-    fn build_lexer_expr(&mut self, expr: &LexerExpr, prefix: &str) -> GrammarExpr {
-        self.extract_terminal_rule(GrammarExpr::TerminalExpr(expr.clone()), prefix)
-    }
-
-    fn add_option_expr(slot: &mut Option<LexerExpr>, new_expr: LexerExpr) {
-        match slot {
-            None => *slot = Some(new_expr),
-            Some(existing) => {
-                *existing = LexerExpr::make_choice(vec![existing.clone(), new_expr]);
-            }
-        }
-    }
-
-    fn dfa_to_expr(dfa: &LexerDfa) -> LexerExpr {
-        let n = dfa.num_states();
+        let n = transitions.len();
         let final_idx = n;
         let size = n + 1;
         let mut r: Vec<Vec<Option<LexerExpr>>> = vec![vec![None; size]; size];
 
-        for (state_id, state) in dfa.states().iter().enumerate() {
+        for (state_id, entries) in transitions.into_iter().enumerate() {
             let mut by_target: HashMap<usize, crate::ds::u8set::U8Set> = HashMap::new();
-            for (byte, &target) in state.transitions.iter() {
+            for (byte, target) in entries {
                 by_target
-                    .entry(target as usize)
+                    .entry(target)
                     .or_insert_with(crate::ds::u8set::U8Set::empty)
                     .insert(byte);
             }
             for (target, set) in by_target {
                 Self::add_option_expr(&mut r[state_id][target], LexerExpr::U8Class(set));
             }
-            if !state.finalizers.is_empty() {
+            if accepting[state_id] {
                 Self::add_option_expr(&mut r[state_id][final_idx], LexerExpr::Epsilon);
             }
         }
 
         for k in (1..n).rev() {
-            let kk_star: Option<LexerExpr> = r[k][k].take().map(|loop_expr| LexerExpr::Repeat {
+            let kk_star = r[k][k].take().map(|loop_expr| LexerExpr::Repeat {
                 expr: Box::new(loop_expr),
                 min: 0,
                 max: None,
@@ -6770,9 +6683,8 @@ impl<'a> SchemaCtx<'a> {
 
             for (i, ik_expr) in sources {
                 for (j, kj_opt) in &targets {
-                    let kj_expr = match kj_opt {
-                        Some(e) => e.clone(),
-                        None => continue,
+                    let Some(kj_expr) = kj_opt.clone() else {
+                        continue;
                     };
                     let bridge = match &kk_star {
                         Some(star) => LexerExpr::make_seq(vec![ik_expr.clone(), star.clone(), kj_expr]),
@@ -6783,17 +6695,31 @@ impl<'a> SchemaCtx<'a> {
             }
         }
 
-        // If state 0 has a self-loop (e.g. "any char" in an unrestricted key body DFA),
-        // it is never eliminated by the k-loop above (k starts at 1).  Fold it in now
-        // so the start-state self-loop is reflected in the result expression.
         let base = r[0][final_idx]
             .take()
             .unwrap_or_else(|| LexerExpr::Choice(vec![]));
         if let Some(loop_expr) = r[0][0].take() {
-            let star = LexerExpr::Repeat { expr: Box::new(loop_expr), min: 0, max: None };
+            let star = LexerExpr::Repeat {
+                expr: Box::new(loop_expr),
+                min: 0,
+                max: None,
+            };
             LexerExpr::make_seq(vec![star, base])
         } else {
             base
+        }
+    }
+
+    fn build_lexer_expr(&mut self, expr: &LexerExpr, prefix: &str) -> GrammarExpr {
+        self.extract_terminal_rule(GrammarExpr::TerminalExpr(expr.clone()), prefix)
+    }
+
+    fn add_option_expr(slot: &mut Option<LexerExpr>, new_expr: LexerExpr) {
+        match slot {
+            None => *slot = Some(new_expr),
+            Some(existing) => {
+                *existing = LexerExpr::make_choice(vec![existing.clone(), new_expr]);
+            }
         }
     }
 
@@ -6821,39 +6747,6 @@ impl<'a> SchemaCtx<'a> {
             GrammarExpr::Exclude {
                 expr: Box::new(base_body),
                 exclude: Box::new(choice_or_single(excluded_grammar_exprs)),
-            }
-        };
-        let body_terminal = self.extract_terminal_rule(body, prefix);
-        wrap_key_colon_terminal(body_terminal)
-    }
-
-    fn build_key_colon_dfa_expr(&mut self, dfa: &LexerDfa, prefix: &str) -> GrammarExpr {
-        self.build_excluding_key_colon_dfa_expr(dfa, &[], prefix)
-    }
-
-    /// Build a key-colon terminal from a base DFA, excluding any keys matched
-    /// by the `excluded` DFAs.  Uses `GrammarExpr::Exclude` instead of
-    /// DFA-level subtraction so that the grammar compiler handles exclusion.
-    fn build_excluding_key_colon_dfa_expr(
-        &mut self,
-        base_dfa: &LexerDfa,
-        excluded_dfas: &[&LexerDfa],
-        prefix: &str,
-    ) -> GrammarExpr {
-        if !Self::dfa_accepts_any(base_dfa) {
-            return never_expr();
-        }
-        let base_body = GrammarExpr::TerminalExpr(Self::dfa_to_expr(base_dfa));
-        let body = if excluded_dfas.is_empty() {
-            base_body
-        } else {
-            let excluded_exprs: Vec<GrammarExpr> = excluded_dfas
-                .iter()
-                .map(|dfa| GrammarExpr::TerminalExpr(Self::dfa_to_expr(dfa)))
-                .collect();
-            GrammarExpr::Exclude {
-                expr: Box::new(base_body),
-                exclude: Box::new(choice_or_single(excluded_exprs)),
             }
         };
         let body_terminal = self.extract_terminal_rule(body, prefix);
@@ -7663,18 +7556,18 @@ impl<'a> SchemaCtx<'a> {
         };
         self.generated_object_rule_counter = base_index + 1;
 
-        let key_dfa_needed = !pattern_properties.is_empty()
+        let key_expr_needed = !pattern_properties.is_empty()
             || property_names.is_some()
             || !additional_excluded_literal_keys.is_empty();
-        let (base_key_colon_dfa, fixed_key_union_dfa, additional_fixed_key_union_dfa, pattern_key_colon_dfas) =
-            if key_dfa_needed {
+        let (base_key_colon_expr, fixed_key_union_expr, additional_fixed_key_union_expr, pattern_key_colon_exprs) =
+            if key_expr_needed {
                 (
-                    Some(Self::scoped_key_colon_dfa(property_names)?),
-                    Self::literal_key_colon_union_dfa(&fixed_literal_keys),
-                    Self::literal_key_colon_union_dfa(&additional_excluded_literal_keys),
+                    Some(Self::scoped_key_colon_expr(property_names)?),
+                    Self::literal_key_colon_union_expr(&fixed_literal_keys),
+                    Self::literal_key_colon_union_expr(&additional_excluded_literal_keys),
                     pattern_properties
                         .iter()
-                        .map(|(pattern, _)| Self::pattern_key_colon_dfa(pattern))
+                        .map(|(pattern, _)| Self::pattern_key_colon_expr(pattern))
                         .collect::<Vec<_>>(),
                 )
             } else {
@@ -7694,35 +7587,31 @@ impl<'a> SchemaCtx<'a> {
             );
 
             for (subset_idx, subset) in subsets.into_iter().enumerate() {
-                let mut key_dfa = base_key_colon_dfa
+                let mut key_expr = base_key_colon_expr
                     .as_ref()
-                    .expect("pattern/property-name DFA should exist when needed")
+                    .expect("pattern/property-name expr should exist when needed")
                     .clone();
                 for pattern_idx in &subset {
-                    key_dfa = Self::intersect_lexer_dfa(&key_dfa, &pattern_key_colon_dfas[*pattern_idx]);
-                    if !Self::dfa_accepts_any(&key_dfa) {
-                        break;
-                    }
-                }
-                if !Self::dfa_accepts_any(&key_dfa) {
-                    continue;
+                    key_expr = LexerExpr::Intersect {
+                        expr: Box::new(key_expr),
+                        intersect: Box::new(pattern_key_colon_exprs[*pattern_idx].clone()),
+                    };
                 }
 
-                // Collect DFAs to exclude via GrammarExpr::Exclude
                 let subset_members: BTreeSet<usize> = subset.iter().copied().collect();
-                let mut excluded_dfas: Vec<&LexerDfa> = Vec::new();
-                if let Some(ref fk_dfa) = fixed_key_union_dfa {
-                    excluded_dfas.push(fk_dfa);
+                let mut excluded_exprs: Vec<LexerExpr> = Vec::new();
+                if let Some(ref fk_expr) = fixed_key_union_expr {
+                    excluded_exprs.push(fk_expr.clone());
                 }
-                for (pattern_idx, pattern_dfa) in pattern_key_colon_dfas.iter().enumerate() {
+                for (pattern_idx, pattern_expr) in pattern_key_colon_exprs.iter().enumerate() {
                     if !subset_members.contains(&pattern_idx) {
-                        excluded_dfas.push(pattern_dfa);
+                        excluded_exprs.push(pattern_expr.clone());
                     }
                 }
 
-                let key_expr = self.build_excluding_key_colon_dfa_expr(
-                    &key_dfa,
-                    &excluded_dfas,
+                let key_expr = self.build_excluding_key_colon_expr_internal(
+                    key_expr,
+                    excluded_exprs,
                     &format!("{}_PP_SUBSET_{}_KEY", base_name.to_uppercase(), subset_idx),
                 );
 
@@ -7761,11 +7650,8 @@ impl<'a> SchemaCtx<'a> {
                     &additional_excluded_literal_keys,
                     &format!("{base_name}_ap_key"),
                 )?)
-            } else if key_dfa_needed {
+            } else if key_expr_needed {
                 if pattern_properties.is_empty() && property_names.is_none() {
-                    // Literal-only AP exclusions are more stable when kept as
-                    // expression trees; the DFA->Expr->Exclude path can lose
-                    // precision for split key-colon terminals.
                     let key_expr = Self::scoped_key_colon_expr(None)?;
                     let mut excluded_exprs: Vec<LexerExpr> = Vec::new();
                     if let Some(expr) = Self::literal_key_colon_union_expr(&additional_excluded_literal_keys) {
@@ -7777,19 +7663,20 @@ impl<'a> SchemaCtx<'a> {
                         &format!("{}_AP_KEY", base_name.to_uppercase()),
                     ))
                 } else {
-                    let additional_key_dfa = base_key_colon_dfa
+                    let additional_key_expr = base_key_colon_expr
                         .as_ref()
-                        .expect("additional-properties DFA should exist when needed");
-                    let mut excluded_dfas: Vec<&LexerDfa> = Vec::new();
-                    if let Some(ref fk_dfa) = additional_fixed_key_union_dfa {
-                        excluded_dfas.push(fk_dfa);
+                        .expect("additional-properties expr should exist when needed")
+                        .clone();
+                    let mut excluded_exprs: Vec<LexerExpr> = Vec::new();
+                    if let Some(ref fk_expr) = additional_fixed_key_union_expr {
+                        excluded_exprs.push(fk_expr.clone());
                     }
-                    for pattern_dfa in &pattern_key_colon_dfas {
-                        excluded_dfas.push(pattern_dfa);
+                    for pattern_expr in &pattern_key_colon_exprs {
+                        excluded_exprs.push(pattern_expr.clone());
                     }
-                    Some(self.build_excluding_key_colon_dfa_expr(
-                        additional_key_dfa,
-                        &excluded_dfas,
+                    Some(self.build_excluding_key_colon_expr_internal(
+                        additional_key_expr,
+                        excluded_exprs,
                         &format!("{}_AP_KEY", base_name.to_uppercase()),
                     ))
                 }
@@ -9730,7 +9617,6 @@ mod tests {
             "multipleOf": 5
         }"#;
 
-        assert!(lexer_dfa_accepts(&integer_multiple_dfa(5, true), b"10.0"));
         assert!(accepts_sequence(schema, &[b"10"]));
         assert!(accepts_sequence(schema, &[b"10.0"]));
         assert!(accepts_sequence(schema, &[b"10.000"]));
@@ -9746,7 +9632,6 @@ mod tests {
             "multipleOf": 0.01
         }"#;
 
-        assert!(lexer_dfa_accepts(&reciprocal_power_of_ten_dfa(2), b"10.99"));
         assert!(accepts_sequence(schema, &[b"10.99"]));
         assert!(accepts_sequence(schema, &[b"10.0"]));
         assert!(accepts_sequence(schema, &[b"10.000"]));
@@ -9762,7 +9647,6 @@ mod tests {
             "multipleOf": 0.01
         }"#;
 
-        assert!(lexer_dfa_accepts(&reciprocal_power_of_ten_dfa(2), b"10.0"));
         assert!(accepts_sequence(schema, &[b"10"]));
         assert!(accepts_sequence(schema, &[b"10.0"]));
         assert!(accepts_sequence(schema, &[b"10.000"]));
@@ -9850,17 +9734,6 @@ mod tests {
             state = next;
         }
         dfa.finalizers(state).contains(0)
-    }
-
-    fn lexer_dfa_accepts(dfa: &LexerDfa, text: &[u8]) -> bool {
-        let mut state = 0u32;
-        for &byte in text {
-            let Some(next) = dfa.step(state, byte) else {
-                return false;
-            };
-            state = next;
-        }
-        !dfa.finalizers(state).is_empty()
     }
 
     fn accepts_ebnf_sequence(ebnf: &str, tokens: &[&[u8]]) -> bool {
