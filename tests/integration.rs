@@ -91,6 +91,9 @@ fn anyof_object_schema_with_n_branches(n: usize) -> String {
 
 fn schema_like_ambiguous_ebnf_with_n_branches(n: usize) -> String {
     assert!(n > 0, "n must be > 0");
+    // Supports up to N=32 in the current test set with unique single-char keys.
+    assert!(n <= 32, "n too large for single-char key simplification");
+    const KEYS: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUV";
 
     let mut lines = Vec::new();
     lines.push(format!("start ::= s_{}", n - 1));
@@ -106,11 +109,11 @@ fn schema_like_ambiguous_ebnf_with_n_branches(n: usize) -> String {
     // s_i adds branch i by either matching specific key i or fallback/additional key 0.
     // The required z-prefix keeps branch states distinct after key classification.
     for i in 1..n {
+        let key = KEYS[i] as char;
         let z_prefix = (0..i).map(|_| "'z'").collect::<Vec<_>>().join(" ");
         lines.push(format!(
-            "s_{i} ::= s_{} | '{}' {z_prefix} zstar | '0' {z_prefix} zstar",
+            "s_{i} ::= s_{} | '{key}' {z_prefix} zstar | '0' {z_prefix} zstar",
             i - 1,
-            i
         ));
     }
 
