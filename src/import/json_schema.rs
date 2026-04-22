@@ -186,31 +186,6 @@ fn factored_open_object_max_keys() -> usize {
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OrderedObjectShape {
-    Right,
-    Balanced,
-    Left,
-    LeftBalanced,
-}
-
-fn ordered_object_shape() -> OrderedObjectShape {
-    match std::env::var("GLRMASK_ORDERED_OBJECT_SHAPE")
-        .ok()
-        .map(|v| v.trim().to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("left") => OrderedObjectShape::Left,
-        Some("balanced") => OrderedObjectShape::Balanced,
-        Some("left-balanced") | Some("left_balanced") | Some("leftbalanced") => {
-            OrderedObjectShape::LeftBalanced
-        }
-        Some("right") | Some("factored") => OrderedObjectShape::Right,
-        None => OrderedObjectShape::Balanced,
-        Some(_) => OrderedObjectShape::Balanced,
-    }
-}
-
 fn factored_ordered_object_enabled() -> bool {
     env_flag("GLRMASK_ENABLE_FACTORED_ORDERED_OBJECT")
 }
@@ -4678,17 +4653,8 @@ impl<'a> SchemaCtx<'a> {
             ])));
         }
 
-        let (tree_expr, tree_can_be_empty) = if ordered.is_empty() {
-            (empty_expr(), true)
-        } else {
-            let mut next_idx = 0usize;
-            self.build_object_tree(
-                &base_name,
-                &ordered,
-                &mut next_idx,
-                ordered_object_shape(),
-            )?
-        };
+        let (tree_expr, tree_can_be_empty) =
+            self.build_ordered_object_body_separated_sequence_expr(&ordered);
 
         // Helper: wrap an object-only expression with non-object alternatives
         // when the resolved variants don't restrict to type: "object".
@@ -6301,6 +6267,34 @@ impl<'a> SchemaCtx<'a> {
         )
     }
 
+    fn build_ordered_object_body_separated_sequence_expr(
+        &self,
+        ordered: &[(String, GrammarExpr, bool)],
+    ) -> (GrammarExpr, bool) {
+        if ordered.is_empty() {
+            return (empty_expr(), true);
+        }
+
+        let items = ordered
+            .iter()
+            .map(|(key, value_expr, is_required)| {
+                (
+                    self.build_merged_literal_key_value_expr(b"", key, value_expr.clone()),
+                    *is_required,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let can_be_empty = items.iter().all(|(_, is_required)| !*is_required);
+        (
+            GrammarExpr::SeparatedSequence {
+                items,
+                separator: Box::new(self.json_item_separator_expr()),
+            },
+            can_be_empty,
+        )
+    }
+
     fn json_item_separator_expr(&self) -> GrammarExpr {
         literal_expr(JSON_ITEM_SEPARATOR)
     }
@@ -7761,23 +7755,6 @@ impl<'a> SchemaCtx<'a> {
             ]));
         }
 
-        // Separator-merged left-recursive grammar for ordered objects with optional keys.
-        // Off by default; opt-in via GLRMASK_ENABLE_FACTORED_ORDERED_OBJECT=1
-        // and GLRMASK_ENABLE_FACTORED_CLOSED_OBJECT=1.
-        //
-        // Open ordered objects need their optional suffix to stay right-leaning so
-        // the additional/pattern-property continuation remains live after consuming
-        // an optional branch. Balanced trees can strand the continuation after a
-        // shared optional object leaf, which rejects tokens like ` {},` even though
-        // the object still permits another property.
-        let object_shape = if ordered.iter().any(|(_, _, required)| !*required)
-            && (has_additional_properties || !pattern_properties.is_empty())
-        {
-            OrderedObjectShape::Right
-        } else {
-            ordered_object_shape()
-        };
-
         if factored_ordered_object_enabled()
             && Self::factored_closed_object_enabled()
             && !Self::exact_closed_object_disabled()
@@ -7812,14 +7789,8 @@ impl<'a> SchemaCtx<'a> {
             }
         }
 
-        let mut next_tree_rule_index = 0usize;
         let (tree_expr, tree_can_be_empty) =
-            self.build_object_tree(
-                &base_name,
-                &ordered,
-                &mut next_tree_rule_index,
-                object_shape,
-            )?;
+            self.build_ordered_object_body_separated_sequence_expr(&ordered);
         let tree_prefix = sequence_or_single(vec![literal_expr(b"{"), tree_expr]);
         let with_tree_prefix = sequence_or_single(vec![
             tree_prefix,
@@ -7840,69 +7811,6 @@ impl<'a> SchemaCtx<'a> {
         }
 
         Ok(with_tree_prefix)
-    }
-
-    fn build_object_tree(
-        &mut self,
-        base_name: &str,
-        items: &[(String, GrammarExpr, bool)],
-        next_rule_index: &mut usize,
-        shape: OrderedObjectShape,
-    ) -> Result<(GrammarExpr, bool), GlrMaskError> {
-
-        if items.len() == 1 {
-            let (key, value_expr, is_required) = &items[0];
-            let kv_expr = self.build_merged_literal_key_value_expr(b"", key, value_expr.clone());
-            if *is_required {
-                return Ok((kv_expr, false));
-            }
-
-            let rule_name = format!("{base_name}_t{}", *next_rule_index);
-            *next_rule_index += 1;
-            self.insert_rule(rule_name.clone(), kv_expr);
-            return Ok((GrammarExpr::Ref(rule_name), true));
-        }
-
-        let mid = match shape {
-            OrderedObjectShape::Balanced => items.len() / 2,
-            OrderedObjectShape::Left => items.len() - 1,
-            OrderedObjectShape::Right => 1,
-            OrderedObjectShape::LeftBalanced => {
-                let first_optional = items
-                    .iter()
-                    .position(|(_, _, required)| !*required);
-                match first_optional {
-                    None => items.len() - 1,
-                    Some(0) => items.len() / 2,
-                    Some(idx) => idx,
-                }
-            }
-        };
-        let (left_expr, left_can_be_empty) =
-            self.build_object_tree(base_name, &items[..mid], next_rule_index, shape)?;
-        let (right_expr, right_can_be_empty) =
-            self.build_object_tree(base_name, &items[mid..], next_rule_index, shape)?;
-
-        let mut options = vec![sequence_or_single(vec![
-            left_expr.clone(),
-            self.json_item_separator_expr(),
-            right_expr.clone(),
-        ])];
-        if right_can_be_empty {
-            options.push(left_expr.clone());
-        }
-        if left_can_be_empty {
-            options.push(right_expr.clone());
-        }
-
-        if options.len() == 1 {
-            return Ok((options.pop().unwrap(), false));
-        }
-
-        let rule_name = format!("{base_name}_t{}", *next_rule_index);
-        *next_rule_index += 1;
-        self.insert_rule(rule_name.clone(), choice_or_single(options));
-        Ok((GrammarExpr::Ref(rule_name), left_can_be_empty && right_can_be_empty))
     }
 
     fn property_name_pattern(property_names: &Value) -> Result<&str, GlrMaskError> {
@@ -8174,13 +8082,18 @@ fn collect_grammar_visible_refs(
                 walk(expr, terminal_names, out);
                 walk(exclude, terminal_names, out);
             }
+            GrammarExpr::SeparatedSequence { items, separator } => {
+                for (item_expr, _) in items {
+                    walk(item_expr, terminal_names, out);
+                }
+                walk(separator, terminal_names, out);
+            }
             GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::Epsilon
             | GrammarExpr::AnyByte
-            | GrammarExpr::Intersect { .. }
-            | GrammarExpr::SeparatedSequence { .. } => {}
+            | GrammarExpr::Intersect { .. } => {}
         }
     }
     let mut visible = BTreeSet::new();
@@ -9072,10 +8985,8 @@ mod tests {
             "additionalProperties": {"type": "string"}
         }"#).unwrap();
         let grammar = schema_to_named_grammar(&schema).unwrap();
-        // With colon-space splitting (default), the key body includes the close
-        // quote but the colon-space suffix is a separate literal:
-        // literal_expr(b"\"") + literal_expr(b"opacity\"") + literal_expr(b": ")
-        assert!(named_grammar_has_literal(&grammar, b"opacity\""));
+        // With SeparatedSequence-based ordered object emission, key bytes may
+        // be carried by named terminals rather than packed literals.
         assert!(named_grammar_has_literal(&grammar, b": "));
     }
 
