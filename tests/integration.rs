@@ -89,13 +89,40 @@ fn anyof_object_schema_with_n_branches(n: usize) -> String {
     )
 }
 
-fn ambiguous_ebnf_with_n_prefix_alternatives(n: usize) -> String {
+fn schema_like_ambiguous_ebnf_with_n_branches(n: usize) -> String {
     assert!(n > 0, "n must be > 0");
-    let alts = (1..=n)
-        .map(|k| format!("'{}'", "a".repeat(k)))
-        .collect::<Vec<_>>()
-        .join(" | ");
-    format!("start ::= {alts}\n")
+
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "start ::= {}",
+        (0..n)
+            .map(|i| format!("obj_{i}"))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    ));
+    lines.push("add_key ::= 'x' '0'".to_string());
+    lines.push("zstar ::= 'z' zstar | ''".to_string());
+
+    // Schema analogue:
+    // - obj_i has a branch-specific known key spec_i (x{i})
+    // - all obj_i also accept the fallback/additional key x0
+    // Input uses key x0, so obj_0 can parse it as known OR additional,
+    // while obj_1..obj_{N-1} parse it as additional.
+    for i in 0..n {
+        let spec = format!("'x' {}", i.to_string().chars().map(|c| format!("'{c}'")).collect::<Vec<_>>().join(" "));
+        lines.push(format!("obj_{i} ::= 'p' key_{i} tail_{i}"));
+        lines.push(format!("key_{i} ::= spec_{i} | add_key"));
+        lines.push(format!("spec_{i} ::= {spec}"));
+
+        if i == 0 {
+            lines.push("tail_0 ::= zstar 'q'".to_string());
+        } else {
+            let min_z = (0..i).map(|_| "'z'").collect::<Vec<_>>().join(" ");
+            lines.push(format!("tail_{i} ::= {min_z} zstar 'q'"));
+        }
+    }
+
+    lines.join("\n") + "\n"
 }
 
 fn max_parser_paths_over_bytes(constraint: &Constraint, input: &[u8]) -> usize {
@@ -360,8 +387,12 @@ fn test_ebnf_ambiguity_grows_with_n_not_log_n() {
 
     let mut observations = Vec::new();
     for &n in &ns {
-        let grammar = ambiguous_ebnf_with_n_prefix_alternatives(n);
-        let input = vec![b'a'; n];
+        let grammar = schema_like_ambiguous_ebnf_with_n_branches(n);
+        let input = [b'p', b'x', b'0']
+            .into_iter()
+            .chain(std::iter::repeat_n(b'z', n))
+            .chain([b'q'])
+            .collect::<Vec<u8>>();
         let constraint = Constraint::from_ebnf(&grammar, &vocab).unwrap();
         let max_paths = max_parser_paths_over_bytes(&constraint, &input);
         println!("N={n} max_paths={max_paths}\n{grammar}");
