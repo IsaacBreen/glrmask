@@ -200,6 +200,20 @@ fn contains_ref(expr: &GrammarExpr, target: &str) -> bool {
     }
 }
 
+fn count_ref(expr: &GrammarExpr, target: &str) -> usize {
+    match expr {
+        GrammarExpr::Ref(name) => usize::from(name == target),
+        GrammarExpr::Sequence(parts) => parts.iter().map(|part| count_ref(part, target)).sum(),
+        GrammarExpr::Choice(options) => options.iter().map(|option| count_ref(option, target)).sum(),
+        GrammarExpr::Exclude { expr, exclude } => count_ref(expr, target) + count_ref(exclude, target),
+        GrammarExpr::Optional(inner)
+        | GrammarExpr::Repeat(inner)
+        | GrammarExpr::RepeatOne(inner)
+        | GrammarExpr::RepeatRange { expr: inner, .. } => count_ref(inner, target),
+        _ => 0,
+    }
+}
+
 fn contains_literal_prefix(expr: &GrammarExpr, prefix: &[u8]) -> bool {
     match expr {
         GrammarExpr::Literal(bytes) => bytes.starts_with(prefix),
@@ -336,6 +350,57 @@ fn test_shared_additional_properties_key_exclusions_create_shared_terminal_and_a
     assert!(ap_key_rules.iter().all(|rule| contains_ref(&rule.expr, shared_rule_name)));
     assert!(ap_key_rules.iter().any(|rule| contains_literal_prefix(&rule.expr, b"a\"")));
     assert!(ap_key_rules.iter().any(|rule| contains_literal_prefix(&rule.expr, b"b\"")));
+}
+
+#[test]
+fn test_pattern_key_terminal_uses_json_string_middle_for_unanchored_sides() {
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "a": {"type": "string"}
+        },
+        "patternProperties": {
+            "b": {"type": "string"}
+        },
+        "additionalProperties": false
+    }"#;
+
+    let grammar = named_grammar_from_schema(schema);
+    assert!(grammar.rules.iter().any(|rule| rule.name == "JSON_STRING_MIDDLE"));
+    assert!(grammar.rules.iter().any(|rule| rule.name == "JSON_STRING_MIDDLE_END"));
+
+    let pp_key_rule = grammar
+        .rules
+        .iter()
+        .find(|rule| rule.name.contains("_PP0_KEY"))
+        .expect("expected pattern key terminal rule");
+
+    assert!(contains_ref(&pp_key_rule.expr, "JSON_STRING_MIDDLE"));
+    assert!(contains_literal(&pp_key_rule.expr, b"\""));
+    assert_eq!(count_ref(&pp_key_rule.expr, "JSON_STRING_MIDDLE"), 2);
+}
+
+#[test]
+fn test_pattern_key_terminal_anchor_controls_middle_side_inclusion() {
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "a": {"type": "string"}
+        },
+        "patternProperties": {
+            "^b": {"type": "string"}
+        },
+        "additionalProperties": false
+    }"#;
+
+    let grammar = named_grammar_from_schema(schema);
+    let pp_key_rule = grammar
+        .rules
+        .iter()
+        .find(|rule| rule.name.contains("_PP0_KEY"))
+        .expect("expected pattern key terminal rule");
+
+    assert_eq!(count_ref(&pp_key_rule.expr, "JSON_STRING_MIDDLE"), 1);
 }
 
 /// Adapted from `test_ebnf_object_member_after_brace`.

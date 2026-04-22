@@ -23,6 +23,8 @@ const JSON_ARRAY_RULE: &str = "json_array";
 const JSON_KV_RULE: &str = "json_kv";
 const JSON_STRING_RULE: &str = "json_string";
 const JSON_STRING_BODY_RULE: &str = "JSON_STRING_BODY";
+const JSON_STRING_MIDDLE_RULE: &str = "JSON_STRING_MIDDLE";
+const JSON_STRING_MIDDLE_END_RULE: &str = "JSON_STRING_MIDDLE_END";
 const JSON_STRING_CHAR_RULE: &str = "JSON_STRING_CHAR";
 const JSON_INTEGER_RULE: &str = "JSON_INTEGER";
 const JSON_NUMBER_RULE: &str = "JSON_NUMBER";
@@ -3663,6 +3665,20 @@ impl<'a> SchemaCtx<'a> {
         let body_regex = string_value_body_regex(JSON_STRING_BODY_ONLY_REGEX);
         self.insert_rule(JSON_STRING_BODY_RULE, regex_expr(&body_regex));
 
+        // JSON_STRING_MIDDLE_RULE: reusable middle fragment used to build
+        // readable pattern-property key terminals.
+        self.insert_rule(
+            JSON_STRING_MIDDLE_RULE,
+            regex_expr(&format!("(?:{})", JSON_STRING_BODY_ONLY_REGEX)),
+        );
+        self.insert_rule(
+            JSON_STRING_MIDDLE_END_RULE,
+            sequence_or_single(vec![
+                GrammarExpr::Ref(JSON_STRING_MIDDLE_RULE.into()),
+                literal_expr(b"\""),
+            ]),
+        );
+
         // JSON_STRING_RULE: always assembled from literals + named terminals.
         let json_string_expr = wrap_string_value_terminal(GrammarExpr::Ref(JSON_STRING_BODY_RULE.into()));
         self.insert_rule(JSON_STRING_RULE, json_string_expr);
@@ -6586,10 +6602,37 @@ impl<'a> SchemaCtx<'a> {
         })
     }
 
-    fn pattern_key_colon_expr(pattern: &str) -> LexerExpr {
-        let inner = json_search_pattern(pattern);
-        let pat = key_colon_body_regex(&inner);
-        parse_regex(&pat, true)
+    fn pattern_key_colon_expr(pattern: &str) -> GrammarExpr {
+        let branches = split_top_level_regex_branches(pattern);
+        let mut options = Vec::with_capacity(branches.len());
+
+        for branch in branches {
+            let (anchored_start, anchored_end, core) = strip_branch_outer_anchors(branch);
+            let inner = jsonify_regex_dot(core);
+
+            let mut parts = Vec::new();
+            if !anchored_start {
+                parts.push(GrammarExpr::Ref(JSON_STRING_MIDDLE_RULE.into()));
+            }
+
+            if core.is_empty() {
+                parts.push(empty_expr());
+            } else {
+                parts.push(regex_expr(&inner));
+            }
+
+            if !anchored_end {
+                parts.push(GrammarExpr::Ref(JSON_STRING_MIDDLE_RULE.into()));
+            }
+
+            if !split_close_quote() {
+                parts.push(literal_expr(b"\""));
+            }
+
+            options.push(sequence_or_single(parts));
+        }
+
+        choice_or_single(options)
     }
 
     fn build_state_machine_expr<State, IsAccepting, Transitions>(
@@ -7660,7 +7703,7 @@ impl<'a> SchemaCtx<'a> {
             for (pattern_idx, (_, pattern_schema)) in pattern_properties.iter().enumerate() {
                 let key_expr = self.insert_named_terminal_rule(
                     format!("{}_PP{}_KEY", upper_base_name, pattern_idx),
-                    expr_to_grammar_expr(&pattern_key_colon_exprs[pattern_idx]),
+                    pattern_key_colon_exprs[pattern_idx].clone(),
                 );
 
                 let value_expr = match self.convert_schema(pattern_schema) {
