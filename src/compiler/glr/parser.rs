@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 #[cfg(any(test, debug_assertions))]
 use std::collections::VecDeque;
+use std::sync::OnceLock;
 #[cfg(test)]
 use std::sync::Arc;
 
@@ -21,6 +22,18 @@ pub type ParserGSS = LeveledGSS<u32, TerminalsDisallowed>;
 
 type ReduceSources = SmallVec<[(u32, ParserGSS); 4]>;
 type GotoBatch = SmallVec<[(u32, ParserGSS); 8]>;
+
+fn detailed_advance_profile_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLRMASK_DETAILED_ADVANCE_PROFILE")
+            .map(|v| {
+                let n = v.trim().to_ascii_lowercase();
+                matches!(n.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false)
+    })
+}
 
 
 pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> ParserGSS {
@@ -370,6 +383,7 @@ pub(crate) fn advance_stacks_profiled(
     token: TerminalID,
 ) -> (ParserGSS, AdvanceProfile) {
     use std::time::Instant;
+    let detailed_profile = detailed_advance_profile_enabled();
     let t_total = Instant::now();
     let mut profile = AdvanceProfile::default();
 
@@ -377,12 +391,15 @@ pub(crate) fn advance_stacks_profiled(
     let mut gss = stack.clone();
     profile.clone_ns = t_clone.elapsed().as_nanos() as u64;
 
-    // summary() is profiling-only overhead — not in the production path
-    let t_summary = Instant::now();
-    let summary = stack.summary();
-    profile.top_states = stack.peek_values().len() as u32;
-    profile.gss_depth = summary.max_depth;
-    profile.summary_ns = t_summary.elapsed().as_nanos() as u64;
+    // summary() is profiling-only overhead. Keep it behind an explicit flag so
+    // default profiled commits stay close to production behavior.
+    if detailed_profile {
+        let t_summary = Instant::now();
+        let summary = stack.summary();
+        profile.top_states = stack.peek_values().len() as u32;
+        profile.gss_depth = summary.max_depth;
+        profile.summary_ns = t_summary.elapsed().as_nanos() as u64;
+    }
 
     // Fast path: single state with a pure shift action
     let t_fast_path = Instant::now();
@@ -403,7 +420,11 @@ pub(crate) fn advance_stacks_profiled(
 
     // Try deterministic path
     let t_det = Instant::now();
-    let det_result = advance_deterministically_profiled(table, &mut gss, token, &mut profile);
+    let det_result = if detailed_profile {
+        advance_deterministically_profiled(table, &mut gss, token, &mut profile)
+    } else {
+        advance_deterministically(table, &mut gss, token)
+    };
     profile.det_ns = t_det.elapsed().as_nanos() as u64;
 
     if det_result {
@@ -415,7 +436,11 @@ pub(crate) fn advance_stacks_profiled(
     // Nondeterministic
     let t_nondet = Instant::now();
     profile.nondeterministic_entered = true;
-    let result = advance_nondeterministically_profiled(table, gss, token, &mut profile);
+    let result = if detailed_profile {
+        advance_nondeterministically_profiled(table, gss, token, &mut profile)
+    } else {
+        advance_nondeterministically(table, gss, token)
+    };
     profile.nondet_ns = t_nondet.elapsed().as_nanos() as u64;
     profile.total_ns = t_total.elapsed().as_nanos() as u64;
     (result, profile)
