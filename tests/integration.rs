@@ -3949,7 +3949,6 @@ nt start ::= (("{" obj_ord_0_t0) obj_ord_0_free_c "}" | "{" "}" | "{" obj_ord_0_
 /// where `{"a": "x", "b": "y", "c": "z"}` is rejected even though all three
 /// keys are valid under the schema.
 #[test]
-#[ignore = "known bug: 3-key object rejected by grammar; unfix this when the bug is resolved"]
 fn test_mre_props_pattern_ap_glrm_single_token() {
     // Vocab: single token containing the full object literal.
     let tokens = &[
