@@ -124,8 +124,11 @@ fn unit_reduction_inlining_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("GLRMASK_DISABLE_UNIT_REDUCTION_INLINING")
-            .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
-            .unwrap_or(false)
+            .map(|v| {
+                let n = v.trim().to_ascii_lowercase();
+                matches!(n.as_str(), "" | "0" | "false" | "no" | "off")
+            })
+            .unwrap_or(true)
     })
 }
 
