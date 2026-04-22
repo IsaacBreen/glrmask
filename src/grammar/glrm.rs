@@ -151,7 +151,7 @@ fn dump_nt_atom(expr: &GrammarExpr) -> String {
             let sep_str = dump_nt_atom(separator);
             let items_str = items.iter()
                 .map(|(e, req)| {
-                    let s = dump_nt_atom(e);
+                    let s = dump_nt_postfix(e);
                     if *req { s } else { format!("{}?", s) }
                 })
                 .collect::<Vec<_>>()
@@ -673,7 +673,7 @@ impl GlrmParser {
             self.consume(&Tok::LParen)?;
             let mut items = Vec::new();
             loop {
-                let item_expr = self.parse_nt_atom(allow_raw_regex)?;
+                let item_expr = self.parse_sepseq_item(allow_raw_regex)?;
                 let optional = if matches!(self.peek(), Tok::Quest) {
                     self.advance();
                     true
@@ -688,12 +688,69 @@ impl GlrmParser {
                 }
             }
             self.consume(&Tok::RParen)?;
-            return self.apply_nt_quantifier(GrammarExpr::SeparatedSequence {
+            if matches!(self.peek(), Tok::Quest | Tok::Star | Tok::Plus | Tok::LBrace) {
+                return Err(err(
+                    "quantifiers cannot be applied directly to SeparatedSequence; wrap it in a named rule instead",
+                ));
+            }
+            return Ok(GrammarExpr::SeparatedSequence {
                 items,
                 separator: Box::new(atom),
             });
         }
         self.apply_nt_quantifier(atom)
+    }
+
+    fn parse_sepseq_item(&mut self, allow_raw_regex: bool) -> Result<GrammarExpr, GlrMaskError> {
+        let mut atom = match self.peek() {
+            Tok::LParen => {
+                self.advance();
+                let inner = self.parse_nt_expr(allow_raw_regex)?;
+                self.consume(&Tok::RParen)?;
+                // Preserve explicit grouping in sepseq items so lowering can
+                // distinguish grouped repeats from top-level repeat items.
+                GrammarExpr::Sequence(vec![inner])
+            }
+            _ => self.parse_nt_atom(allow_raw_regex)?,
+        };
+
+        // Inside `sep ~ ( ... )`, `?` is reserved for item optionality.
+        atom = match self.peek() {
+            Tok::Star => {
+                self.advance();
+                GrammarExpr::Repeat(Box::new(atom))
+            }
+            Tok::Plus => {
+                self.advance();
+                GrammarExpr::RepeatOne(Box::new(atom))
+            }
+            Tok::LBrace => {
+                self.advance(); // `{`
+                let min = self.expect_int()?;
+                let max = if matches!(self.peek(), Tok::Comma) {
+                    self.advance(); // `,`
+                    if matches!(self.peek(), Tok::RBrace) {
+                        self.consume(&Tok::RBrace)?;
+                        return Ok(GrammarExpr::RepeatRange {
+                            expr: Box::new(atom),
+                            min,
+                            max: min,
+                        });
+                    }
+                    self.expect_int()?
+                } else {
+                    min
+                };
+                self.consume(&Tok::RBrace)?;
+                GrammarExpr::RepeatRange {
+                    expr: Box::new(atom),
+                    min,
+                    max,
+                }
+            }
+            _ => atom,
+        };
+        Ok(atom)
     }
 
     fn apply_nt_quantifier(&mut self, atom: GrammarExpr) -> Result<GrammarExpr, GlrMaskError> {
@@ -1033,6 +1090,45 @@ nt start ::= "," ~ ( A B? C );
             }
             other => panic!("expected SeparatedSequence, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_parse_tilde_with_repeat_items() {
+        let src = r#"
+start start;
+
+nt a ::= "a";
+nt b ::= "b";
+nt c ::= "c";
+nt d ::= "d";
+nt e ::= "e";
+nt start ::= "," ~ ( a b* c+ d{2,4} (e{2,3}) );
+"#;
+        let g = from_glrm(src).expect("repeated sepseq items should parse");
+        let start = g.rules.iter().find(|r| r.name == "start").unwrap();
+        match &start.expr {
+            GrammarExpr::SeparatedSequence { items, .. } => {
+                assert_eq!(items.len(), 5);
+                assert!(matches!(items[1].0, GrammarExpr::Repeat(_)));
+                assert!(matches!(items[2].0, GrammarExpr::RepeatOne(_)));
+                assert!(matches!(items[3].0, GrammarExpr::RepeatRange { min: 2, max: 4, .. }));
+                assert!(matches!(items[4].0, GrammarExpr::Sequence(_)));
+            }
+            other => panic!("expected SeparatedSequence, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_reject_quantified_separated_sequence() {
+        let src = r#"
+start start;
+
+nt a ::= "a";
+nt b ::= "b";
+nt start ::= "," ~ ( a b ){2,4};
+"#;
+        let err = from_glrm(src).expect_err("quantified sepseq should be rejected");
+        assert!(err.to_string().contains("SeparatedSequence"));
     }
 
     #[test]

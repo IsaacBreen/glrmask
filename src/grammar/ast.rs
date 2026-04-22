@@ -1245,6 +1245,94 @@ impl Lowerer {
         })
     }
 
+    fn lower_sepseq_repetition_item_nonempty_symbol(
+        &mut self,
+        inner: &GrammarExpr,
+        separator: &GrammarExpr,
+        min: usize,
+        max: Option<usize>,
+    ) -> Result<Option<Symbol>, GlrMaskError> {
+        let Some(item_sym) = self.lower_nonnullable_expr_symbol(inner)? else {
+            return Ok(None);
+        };
+
+        let sep_sym = self.lower_expr_terminalish(separator)?;
+        let (_, pair_nt) = self.fresh_nonterminal("sep_rep_pair");
+        self.rules.push(Rule {
+            lhs: pair_nt,
+            rhs: vec![sep_sym, item_sym.clone()],
+        });
+        let pair_symbol = Symbol::Nonterminal(pair_nt);
+        let shape = repeat_tree_shape();
+
+        if max.is_none() {
+            let (_, rep_nt) = self.fresh_nonterminal("sep_rep_plus");
+            self.rules.push(Rule {
+                lhs: rep_nt,
+                rhs: vec![item_sym.clone()],
+            });
+            self.rules.push(Rule {
+                lhs: rep_nt,
+                rhs: vec![Symbol::Nonterminal(rep_nt), pair_symbol],
+            });
+            return Ok(Some(Symbol::Nonterminal(rep_nt)));
+        }
+
+        let max = max.expect("finite bound expected when max.is_none() is false");
+        if min > max {
+            return Ok(None);
+        }
+        if max == 0 {
+            return Ok(None);
+        }
+
+        let min = min.max(1);
+
+        let prefix_sym = if min == 1 {
+            item_sym.clone()
+        } else {
+            let (_, prefix_nt) = self.fresh_nonterminal("sep_rep_prefix");
+            let prefix_tail_nt = self.repeat_exact_nonterminal(&pair_symbol, min - 1, shape);
+            self.rules.push(Rule {
+                lhs: prefix_nt,
+                rhs: vec![item_sym.clone(), Symbol::Nonterminal(prefix_tail_nt)],
+            });
+            Symbol::Nonterminal(prefix_nt)
+        };
+
+        if min == max {
+            return Ok(Some(prefix_sym));
+        }
+
+        let extra_nt = self.repeat_range_nonterminal(&pair_symbol, 0, max - min, shape);
+        let (_, result_nt) = self.fresh_nonterminal("sep_rep_range");
+        self.rules.push(Rule {
+            lhs: result_nt,
+            rhs: vec![prefix_sym, Symbol::Nonterminal(extra_nt)],
+        });
+        Ok(Some(Symbol::Nonterminal(result_nt)))
+    }
+
+    fn lower_sepseq_item_nonempty_symbol(
+        &mut self,
+        item_expr: &GrammarExpr,
+        separator: &GrammarExpr,
+    ) -> Result<Option<Symbol>, GlrMaskError> {
+        match item_expr {
+            GrammarExpr::Repeat(inner) => {
+                self.lower_sepseq_repetition_item_nonempty_symbol(inner, separator, 1, None)
+            }
+            GrammarExpr::RepeatOne(inner) => {
+                self.lower_sepseq_repetition_item_nonempty_symbol(inner, separator, 1, None)
+            }
+            GrammarExpr::RepeatRange { expr, min, max } => {
+                let required = (*min).max(1);
+                self.lower_sepseq_repetition_item_nonempty_symbol(expr, separator, required, Some(*max))
+            }
+            _ => self.lower_nonnullable_expr_symbol(item_expr),
+        }
+    }
+
     /// Lower a `SeparatedSequence` into a grammar symbol.
     ///
     /// Returns `(symbol, can_be_empty)` where `can_be_empty` is `true` if the
@@ -1263,7 +1351,7 @@ impl Lowerer {
         if items.len() == 1 {
             let (item_expr, is_required) = &items[0];
             let item_sym = if self.expr_is_nullable(item_expr) {
-                self.lower_nonnullable_expr_symbol(item_expr)?
+                self.lower_sepseq_item_nonempty_symbol(item_expr, separator)?
             } else {
                 Some(self.lower_expr_terminalish(item_expr)?)
             };
@@ -2345,6 +2433,64 @@ mod tests {
             sep_counts,
             BTreeSet::from([1usize, 2]),
             "nullable terminal refs inside SeparatedSequence should not emit doubled separators"
+        );
+    }
+
+    #[test]
+    fn test_separated_sequence_repeat_range_inserts_internal_separators() {
+        let g = make_sep_seq_grammar(
+            vec![
+                (GrammarExpr::Literal(b"a".to_vec()), true),
+                (
+                    GrammarExpr::RepeatRange {
+                        expr: Box::new(GrammarExpr::Literal(b"b".to_vec())),
+                        min: 0,
+                        max: 3,
+                    },
+                    true,
+                ),
+                (GrammarExpr::Literal(b"c".to_vec()), true),
+            ],
+            GrammarExpr::Literal(b",".to_vec()),
+        );
+        let gdef = lower(&g).unwrap();
+
+        let sep_tid = sep_terminal_id(&gdef);
+        let mut memo = BTreeMap::new();
+        let sep_counts = derivable_terminal_counts(&gdef, sep_tid, gdef.start, &mut memo);
+        assert_eq!(
+            sep_counts,
+            BTreeSet::from([1usize, 2, 3, 4]),
+            "b{{0,3}} inside sepseq should become b (sep b){{0,2}} when present"
+        );
+    }
+
+    #[test]
+    fn test_separated_sequence_grouped_repeat_range_does_not_insert_internal_separators() {
+        let g = make_sep_seq_grammar(
+            vec![
+                (GrammarExpr::Literal(b"a".to_vec()), true),
+                (
+                    GrammarExpr::Sequence(vec![GrammarExpr::RepeatRange {
+                        expr: Box::new(GrammarExpr::Literal(b"b".to_vec())),
+                        min: 2,
+                        max: 3,
+                    }]),
+                    true,
+                ),
+                (GrammarExpr::Literal(b"c".to_vec()), true),
+            ],
+            GrammarExpr::Literal(b",".to_vec()),
+        );
+        let gdef = lower(&g).unwrap();
+
+        let sep_tid = sep_terminal_id(&gdef);
+        let mut memo = BTreeMap::new();
+        let sep_counts = derivable_terminal_counts(&gdef, sep_tid, gdef.start, &mut memo);
+        assert_eq!(
+            sep_counts,
+            BTreeSet::from([2usize]),
+            "grouped repeat item should stay a single sepseq item"
         );
     }
 }
