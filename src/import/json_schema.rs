@@ -7698,25 +7698,33 @@ impl<'a> SchemaCtx<'a> {
         // existed, which destroyed property ordering and caused false-accepts.
         let _has_continuation = !additional_pair_exprs.is_empty() || !pattern_pair_exprs.is_empty();
 
-        // Save pair exprs for the factored DFA dispatch before they are moved.
-        let additional_pair_exprs_for_dispatch = additional_pair_exprs.clone();
-        let free_pair_exprs_for_dispatch = pattern_pair_exprs.clone();
+        let pattern_list_expr = if pattern_pair_exprs.is_empty() {
+            None
+        } else {
+            let pair = choice_or_single(pattern_pair_exprs);
+            Some(sequence_or_single(vec![
+                pair.clone(),
+                repeat_expr(
+                    sequence_or_single(vec![self.json_item_separator_expr(), pair]),
+                    0,
+                    None,
+                ),
+            ]))
+        };
 
-        let (additional_nc, additional_c) = self.build_object_pair_tail(
-            &base_name,
-            "ap",
-            additional_pair_exprs,
-            empty_expr(),
-            empty_expr(),
-        );
-        let free_pair_exprs = pattern_pair_exprs;
-        let (free_nc, free_c) = self.build_object_pair_tail(
-            &base_name,
-            "free",
-            free_pair_exprs,
-            GrammarExpr::Ref(additional_nc.clone()),
-            GrammarExpr::Ref(additional_c.clone()),
-        );
+        let additional_list_expr = if additional_pair_exprs.is_empty() {
+            None
+        } else {
+            let pair = choice_or_single(additional_pair_exprs);
+            Some(sequence_or_single(vec![
+                pair.clone(),
+                repeat_expr(
+                    sequence_or_single(vec![self.json_item_separator_expr(), pair]),
+                    0,
+                    None,
+                ),
+            ]))
+        };
 
         if !Self::exact_closed_object_disabled()
             && !ordered.is_empty()
@@ -7738,79 +7746,72 @@ impl<'a> SchemaCtx<'a> {
             return Ok(self.build_closed_required_ordered_object_expr(&ordered));
         }
 
-        if !ordered.is_empty() && ordered.iter().all(|(_, _, required)| *required) {
-            let prefix = self.build_required_ordered_object_body_expr(&ordered, None);
-            return Ok(sequence_or_single(vec![
-                prefix,
-                GrammarExpr::Ref(free_c.clone()),
-                literal_expr(b"}"),
-            ]));
-        }
-
-        if ordered.is_empty() {
-            return Ok(sequence_or_single(vec![
-                literal_expr(b"{"),
-                GrammarExpr::Ref(free_nc),
-                literal_expr(b"}"),
-            ]));
-        }
-
-        if factored_ordered_object_enabled()
-            && Self::factored_closed_object_enabled()
-            && !Self::exact_closed_object_disabled()
-            && !has_additional_properties
-            && ordered.iter().any(|(_, _, required)| !*required)
-            && pattern_properties.is_empty()
-            && property_names.is_none()
-        {
-            if let Some(expr) = self.try_build_factored_ordered_object(
-                &ordered,
-                &free_c,
-                &free_nc,
-                &[],
-                &[],
-                &additional_c,
-            )? {
-                return Ok(expr);
-            }
-        }
-
-        // Factored left-recursive grammar for open objects (with additional/pattern properties).
-        if factored_ordered_object_enabled() && ordered.iter().any(|(_, _, required)| !*required) {
-            if let Some(expr) = self.try_build_factored_ordered_object(
-                &ordered,
-                &free_c,
-                &free_nc,
-                &free_pair_exprs_for_dispatch,
-                &additional_pair_exprs_for_dispatch,
-                &additional_c,
-            )? {
-                return Ok(expr);
-            }
-        }
-
         let (tree_expr, tree_can_be_empty) =
             self.build_ordered_object_body_separated_sequence_expr(&ordered);
-        let tree_prefix = sequence_or_single(vec![literal_expr(b"{"), tree_expr]);
-        let with_tree_prefix = sequence_or_single(vec![
-            tree_prefix,
-            GrammarExpr::Ref(free_c.clone()),
-            literal_expr(b"}"),
-        ]);
 
-        if tree_can_be_empty {
-            return Ok(choice_or_single(vec![
-                with_tree_prefix,
-                sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]),
-                sequence_or_single(vec![
-                    literal_expr(b"{"),
-                    GrammarExpr::Ref(free_nc),
-                    literal_expr(b"}"),
-                ]),
-            ]));
+        let mut body_variants: Vec<GrammarExpr> = Vec::new();
+
+        if !ordered.is_empty() {
+            let mut ordered_variants = vec![tree_expr.clone()];
+            if let Some(pattern_list_expr) = &pattern_list_expr {
+                let with_pattern = ordered_variants
+                    .iter()
+                    .map(|expr| {
+                        sequence_or_single(vec![
+                            expr.clone(),
+                            self.json_item_separator_expr(),
+                            pattern_list_expr.clone(),
+                        ])
+                    })
+                    .collect::<Vec<_>>();
+                ordered_variants.extend(with_pattern);
+            }
+            if let Some(additional_list_expr) = &additional_list_expr {
+                let with_additional = ordered_variants
+                    .iter()
+                    .map(|expr| {
+                        sequence_or_single(vec![
+                            expr.clone(),
+                            self.json_item_separator_expr(),
+                            additional_list_expr.clone(),
+                        ])
+                    })
+                    .collect::<Vec<_>>();
+                ordered_variants.extend(with_additional);
+            }
+            body_variants.extend(ordered_variants);
         }
 
-        Ok(with_tree_prefix)
+        if ordered.is_empty() || tree_can_be_empty {
+            if let Some(pattern_list_expr) = &pattern_list_expr {
+                body_variants.push(pattern_list_expr.clone());
+                if let Some(additional_list_expr) = &additional_list_expr {
+                    body_variants.push(sequence_or_single(vec![
+                        pattern_list_expr.clone(),
+                        self.json_item_separator_expr(),
+                        additional_list_expr.clone(),
+                    ]));
+                }
+            }
+            if let Some(additional_list_expr) = &additional_list_expr {
+                body_variants.push(additional_list_expr.clone());
+            }
+        }
+
+        if body_variants.is_empty() {
+            return Ok(sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]));
+        }
+
+        let mut object_variants = body_variants
+            .into_iter()
+            .map(|body| sequence_or_single(vec![literal_expr(b"{"), body, literal_expr(b"}")]))
+            .collect::<Vec<_>>();
+
+        if ordered.is_empty() || tree_can_be_empty {
+            object_variants.push(sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]));
+        }
+
+        Ok(choice_or_single(object_variants))
     }
 
     fn property_name_pattern(property_names: &Value) -> Result<&str, GlrMaskError> {
