@@ -580,22 +580,23 @@ fn collect_possible_matches_dense_serial(
     let mut computer = DensePossibleMatchesComputer::new(tokenizer, num_internal_tokens);
     let mut possible_matches_by_state: BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>> = BTreeMap::new();
     let root_key = root as *const VocabPrefixTreeNode as usize;
+    let num_words = (num_internal_tokens as usize + 63) / 64;
 
-    for (internal_tsid, representative_state) in tokenizer_state_ids
-        .iter_representative_ids()
-        .enumerate()
-        .map(|(i, s)| (i as u32, s))
-    {
-        let _ = computer.possible_matches_for_node(root, representative_state);
-        let matches_for_state = computer
-            .cache
-            .remove(&(root_key, representative_state))
-            .expect("root possible-match map should be cached");
-        let map = match Rc::try_unwrap(matches_for_state) {
-            Ok(map) => map,
-            Err(shared) => (*shared).clone(),
-        };
-        possible_matches_by_state.insert(internal_tsid, map);
+    for (internal_tsid, original_states) in tokenizer_state_ids.internal_to_originals.iter().enumerate() {
+        let mut merged = DensePossibleMatchMap::default();
+        for &original_state in original_states {
+            let _ = computer.possible_matches_for_node(root, original_state);
+            let matches_for_state = computer
+                .cache
+                .remove(&(root_key, original_state))
+                .expect("root possible-match map should be cached");
+            let map = match Rc::try_unwrap(matches_for_state) {
+                Ok(map) => map,
+                Err(shared) => (*shared).clone(),
+            };
+            merge_dense_maps(&mut merged, &map, num_words);
+        }
+        possible_matches_by_state.insert(internal_tsid as u32, merged);
     }
 
     (possible_matches_by_state, computer.profile())
@@ -639,11 +640,17 @@ fn collect_possible_matches_dense_batched(
     let mut reachable_bitmaps: FxHashMap<usize, Vec<u64>> = FxHashMap::default();
     precompute_reachable_bitmaps(root, num_words, &mut reachable_bitmaps);
 
-    // Gather entries: (internal_tsid, representative_state)
+    // Gather entries: (internal_tsid, original_state)
     let entries: Vec<(u32, u32)> = tokenizer_state_ids
-        .iter_representative_ids()
+        .internal_to_originals
+        .iter()
         .enumerate()
-        .map(|(i, s)| (i as u32, s))
+        .flat_map(|(internal_tsid, originals)| {
+            originals
+                .iter()
+                .copied()
+                .map(move |original_state| (internal_tsid as u32, original_state))
+        })
         .collect();
 
     let n = entries.len();
@@ -670,11 +677,14 @@ fn collect_possible_matches_dense_batched(
         &reachable_bitmaps,
     );
 
-    let possible_matches_by_state: BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>> = results
-        .into_iter()
-        .enumerate()
-        .map(|(i, map)| (entries[i].0, map))
-        .collect();
+    let mut possible_matches_by_state: BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>> = BTreeMap::new();
+    for (i, map) in results.into_iter().enumerate() {
+        merge_dense_maps(
+            possible_matches_by_state.entry(entries[i].0).or_default(),
+            &map,
+            num_words,
+        );
+    }
 
     (possible_matches_by_state, PossibleMatchesProfile::default())
 }
@@ -818,16 +828,22 @@ fn collect_possible_matches_dense_parallel(
     let reachable_cache: DashMap<usize, Arc<Vec<u64>>> = DashMap::new();
 
     let entries: Vec<(u32, u32)> = tokenizer_state_ids
-        .iter_representative_ids()
+        .internal_to_originals
+        .iter()
         .enumerate()
-        .map(|(i, s)| (i as u32, s))
+        .flat_map(|(internal_tsid, originals)| {
+            originals
+                .iter()
+                .copied()
+                .map(move |original_state| (internal_tsid as u32, original_state))
+        })
         .collect();
 
     let results: Vec<(u32, DensePossibleMatchMap)> = entries
         .par_iter()
-        .map(|&(internal_tsid, representative_state)| {
+        .map(|&(internal_tsid, original_state)| {
             let result = possible_matches_for_node_concurrent(
-                tokenizer, root, representative_state,
+                tokenizer, root, original_state,
                 num_words, &flat_transitions, &self_loop_bytes,
                 &cache, &reachable_cache,
             );
@@ -836,8 +852,15 @@ fn collect_possible_matches_dense_parallel(
         })
         .collect();
 
-    let possible_matches_by_state: BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>> =
-        results.into_iter().collect();
+    let mut possible_matches_by_state: BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>> =
+        BTreeMap::new();
+    for (internal_tsid, map) in results {
+        merge_dense_maps(
+            possible_matches_by_state.entry(internal_tsid).or_default(),
+            &map,
+            num_words,
+        );
+    }
 
     (possible_matches_by_state, PossibleMatchesProfile::default())
 }
