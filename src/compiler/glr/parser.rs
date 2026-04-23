@@ -1053,55 +1053,58 @@ mod tests {
         assert_eq!(stacks[0].1, acc);
     }
 
-    #[test]
-    fn test_profiled_advance_manual_split_from_single_stack() {
-        // Artificial setup that mirrors the reported shape:
-        // incoming: [0, 1, 229]
-        // token 46 (") => pure shift/replace to [0, 1, 41]
-        // token 8 (,) => split action: shift to [0, 1, 41, 5] and reduce to [0, 1, 384]
+    fn build_manual_o1051_faithful_table_and_stack() -> (GLRTable, ParserGSS) {
         let mut action: Vec<rustc_hash::FxHashMap<TerminalID, Action>> =
             vec![Default::default(); 385];
         let mut goto: Vec<rustc_hash::FxHashMap<u32, (u32, bool)>> =
             vec![Default::default(); 385];
 
-        // token 46 is quote: replace top 229 -> 41
-        action[229].insert(46, Action::Shift(41, true));
-
-        // token 8 is comma: split into
-        // - shift branch to state 5
-        // - reduce branch (nt=7, len=1) then goto from state 1 -> 384
-        action[41].insert(
+        action[142].insert(47, Action::Shift(229, true));
+        action[229].insert(8, Action::Reduce(39, 1));
+        goto[1].insert(39, (7, false));
+        action[7].insert(
             8,
             Action::Split {
-                shift: Some((5, false)),
-                reduces: vec![(7, 1)],
+                shift: Some((384, true)),
+                reduces: vec![(411, 1)],
                 accept: false,
             },
         );
-        goto[1].insert(7, (384, false));
-        action[384].insert(8, Action::Shift(384, true));
+        goto[1].insert(411, (41, false));
+        action[41].insert(8, Action::Shift(5, false));
 
         let table = GLRTable {
             action,
             goto,
             num_states: 385,
-            num_terminals: 47,
+            num_terminals: 48,
             num_rules: 0,
             rules: Vec::new(),
             forwarded_shifts: rustc_hash::FxHashSet::default(),
         };
 
-        let gss0 = ParserGSS::from_stacks(&[(vec![0, 1, 229], TerminalsDisallowed::new())]);
+        let gss0 = ParserGSS::from_stacks(&[(vec![0, 1, 142], TerminalsDisallowed::new())]);
+        (table, gss0)
+    }
 
-        let (gss1, p1) = advance_stacks_profiled(&table, &gss0, 46);
+    #[test]
+    fn test_profiled_advance_manual_o1051_second_advance_faithful() {
+        // Faithful synthetic reproduction of the traced path on b899aa0:
+        //   token 47 from [0,1,142]: Shift(229, replace)
+        //   token 8 from [0,1,229]: Reduce(39,1) -> goto(1,39)=7 -> Split
+        //       shift branch: Shift(384, replace) => [0,1,384]
+        //       reduce branch: Reduce(411,1) -> goto(1,411)=41 -> Shift(5,false) => [0,1,41,5]
+        let (table, gss0) = build_manual_o1051_faithful_table_and_stack();
+
+        let (gss1, p1) = advance_stacks_profiled(&table, &gss0, 47);
         assert!(p1.pure_shift, "first advance should be pure shift");
         assert!(
             !p1.nondeterministic_entered,
-            "first advance should not enter nondet path"
+            "first advance should stay deterministic"
         );
         let s1 = gss1.to_stacks();
         assert_eq!(s1.len(), 1);
-        assert_eq!(s1[0].0, vec![0, 1, 41]);
+        assert_eq!(s1[0].0, vec![0, 1, 229]);
 
         let (gss2, p2) = advance_stacks_profiled(&table, &gss1, 8);
         assert!(p2.nondeterministic_entered, "second advance should enter nondet path");
@@ -1109,30 +1112,90 @@ mod tests {
         let mut stacks2: Vec<Vec<u32>> = gss2.to_stacks().into_iter().map(|(s, _)| s).collect();
         stacks2.sort();
         assert_eq!(stacks2, vec![vec![0, 1, 41, 5], vec![0, 1, 384]]);
+    }
 
-        // Timing loop for a stable per-advance number on this tiny artificial case.
-        let iters = std::env::var("GLRMASK_TOY_SPLIT_ADVANCE_ITERS")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(20_000);
-        let wall_start = std::time::Instant::now();
-        let mut total_ns = 0u64;
-        let mut nondet_ns = 0u64;
+    #[test]
+    fn test_profiled_advance_manual_o1051_second_advance_faithful_timing() {
+        use std::hint::black_box;
+        use std::time::Instant;
 
-        for _ in 0..iters {
-            let (g, p) = advance_stacks_profiled(&table, &gss1, 8);
-            total_ns = total_ns.saturating_add(p.total_ns);
-            nondet_ns = nondet_ns.saturating_add(p.nondet_ns);
-            assert_eq!(g.to_stacks().len(), 2);
+        let (table, gss0) = build_manual_o1051_faithful_table_and_stack();
+        let (gss1_base, p1) = advance_stacks_profiled(&table, &gss0, 47);
+        assert!(p1.pure_shift);
+
+        let warmup = 2_000usize;
+        let warm_iters = 20_000usize;
+        let cold_iters = 400usize;
+
+        for _ in 0..warmup {
+            let _ = advance_stacks_profiled(&table, &gss1_base, 8);
         }
 
-        let wall_ns = wall_start.elapsed().as_nanos() as u64;
+        let mut warm_wall_ns: u128 = 0;
+        let mut warm_total_ns: u128 = 0;
+        let mut warm_det_ns: u128 = 0;
+        let mut warm_nondet_ns: u128 = 0;
+
+        for _ in 0..warm_iters {
+            let t0 = Instant::now();
+            let (gss2, p2) = advance_stacks_profiled(&table, &gss1_base, 8);
+            warm_wall_ns += t0.elapsed().as_nanos();
+            warm_total_ns += p2.total_ns as u128;
+            warm_det_ns += p2.det_ns as u128;
+            warm_nondet_ns += p2.nondet_ns as u128;
+
+            let mut stacks2: Vec<Vec<u32>> = gss2.to_stacks().into_iter().map(|(s, _)| s).collect();
+            stacks2.sort();
+            assert_eq!(stacks2, vec![vec![0, 1, 41, 5], vec![0, 1, 384]]);
+            assert!(p2.nondeterministic_entered);
+        }
+
+        // Cold approximation: touch a large buffer before each sample to evict
+        // parser data from CPU caches.
+        let mut cache_thrash = vec![0u8; 32 * 1024 * 1024];
+        let mut thrash_checksum: u64 = 0;
+        let mut cold_wall_ns: u128 = 0;
+        let mut cold_total_ns: u128 = 0;
+        let mut cold_det_ns: u128 = 0;
+        let mut cold_nondet_ns: u128 = 0;
+
+        for iter in 0..cold_iters {
+            let salt = (iter as u8).wrapping_mul(17).wrapping_add(3);
+            for i in (0..cache_thrash.len()).step_by(64) {
+                cache_thrash[i] = cache_thrash[i].wrapping_add(salt);
+                thrash_checksum = thrash_checksum.wrapping_add(cache_thrash[i] as u64);
+            }
+
+            let t0 = Instant::now();
+            let (gss2, p2) = advance_stacks_profiled(&table, &gss1_base, 8);
+            cold_wall_ns += t0.elapsed().as_nanos();
+            cold_total_ns += p2.total_ns as u128;
+            cold_det_ns += p2.det_ns as u128;
+            cold_nondet_ns += p2.nondet_ns as u128;
+
+            let mut stacks2: Vec<Vec<u32>> = gss2.to_stacks().into_iter().map(|(s, _)| s).collect();
+            stacks2.sort();
+            assert_eq!(stacks2, vec![vec![0, 1, 41, 5], vec![0, 1, 384]]);
+            assert!(p2.nondeterministic_entered);
+        }
+
+        black_box(thrash_checksum);
+
+        let warm_inv = 1.0 / warm_iters as f64;
+        let cold_inv = 1.0 / cold_iters as f64;
         eprintln!(
-            "[glrmask/toy_manual_split] iters={} avg_wall_us={:.3} avg_total_us={:.3} avg_nondet_us={:.3}",
-            iters,
-            wall_ns as f64 / iters as f64 / 1_000.0,
-            total_ns as f64 / iters as f64 / 1_000.0,
-            nondet_ns as f64 / iters as f64 / 1_000.0,
+            "[profiled_advance_manual_o1051_faithful][warm] avg_wall_us={:.3} avg_total_us={:.3} avg_det_us={:.3} avg_nondet_us={:.3}",
+            (warm_wall_ns as f64) * warm_inv / 1_000.0,
+            (warm_total_ns as f64) * warm_inv / 1_000.0,
+            (warm_det_ns as f64) * warm_inv / 1_000.0,
+            (warm_nondet_ns as f64) * warm_inv / 1_000.0,
+        );
+        eprintln!(
+            "[profiled_advance_manual_o1051_faithful][cold] avg_wall_us={:.3} avg_total_us={:.3} avg_det_us={:.3} avg_nondet_us={:.3} cold_method=thrash_32MiB_stride64",
+            (cold_wall_ns as f64) * cold_inv / 1_000.0,
+            (cold_total_ns as f64) * cold_inv / 1_000.0,
+            (cold_det_ns as f64) * cold_inv / 1_000.0,
+            (cold_nondet_ns as f64) * cold_inv / 1_000.0,
         );
     }
 
