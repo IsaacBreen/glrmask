@@ -351,15 +351,19 @@ impl<'a> ConstraintState<'a> {
             return Some(DenseMaskAcc(BTreeMap::from([(internal_tsid, dense)])));
         }
 
-        let mut dense: Vec<u64> = universe.to_vec();
+        let mut dense: Vec<u64> = vec![0u64; universe.len()];
         for (&orig_tokenizer_state, disallowed_in_state) in terminals_disallowed.iter() {
             let tsid = self.constraint.internal_tsid_for_state(orig_tokenizer_state);
+            let mut allowed_for_state = universe.to_vec();
             for &terminal_id in disallowed_in_state {
                 if let Some(mask) = terminal_masks.get(&(tsid, terminal_id)) {
-                    for (dense_word, mask_word) in dense.iter_mut().zip(mask.iter()) {
-                        *dense_word &= !mask_word;
+                    for (allowed_word, mask_word) in allowed_for_state.iter_mut().zip(mask.iter()) {
+                        *allowed_word &= !mask_word;
                     }
                 }
+            }
+            for (dense_word, allowed_word) in dense.iter_mut().zip(allowed_for_state.iter()) {
+                *dense_word |= *allowed_word;
             }
         }
 
