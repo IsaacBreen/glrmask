@@ -277,8 +277,7 @@ fn test_uri_reg_name_chunking_regression_repro_commit_rejects_on_valid_prefix() 
 
 #[cfg(debug_assertions)]
 #[test]
-#[should_panic(expected = "terminals in any conflict=[")]
-fn test_debug_ab_overlap_follow_check_reports_terminals_for_uri_schema() {
+fn test_debug_ab_overlap_follow_check_passes_for_uri_schema() {
         let schema = r#"
         {
             "type": "object",
@@ -295,6 +294,7 @@ fn test_debug_ab_overlap_follow_check_reports_terminals_for_uri_schema() {
         "#;
 
         // This must go through from_json_schema so the debug-only post-build check runs.
+        // The check should not panic for this schema.
         let _ = schema_constraint(schema);
 }
 
