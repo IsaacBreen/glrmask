@@ -207,6 +207,7 @@ impl Constraint {
         self.weight_token_dense_masks = dense_masks;
         self.dwa_fast_transitions = fast_transitions;
         self.build_seed_dense_masks();
+        self.table.build_dense();
     }
 
     fn compute_buf_masks(&self) -> Vec<InternalTokenBufMasks> {

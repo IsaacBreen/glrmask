@@ -8018,10 +8018,22 @@ impl<'a> SchemaCtx<'a> {
         let has_additional_properties = additional_properties_schema.is_some();
         if let Some(schema) = additional_properties_schema {
             let ap_key_expr = if shared_ap_key_exclusions_enabled() && !ap_key_any_string() {
-                self.build_shared_additional_key_body_choice_expr(
+                let shared_choice = self.build_shared_additional_key_body_choice_expr(
                     &fixed_literal_keys,
                     &format!("{base_name}_ap_key"),
-                )
+                );
+
+                if let Some(pattern_terminal) = &pattern_terminal {
+                    self.insert_named_terminal_rule(
+                        format!("{upper_base_name}_AP_SHARED_FILTERED"),
+                        GrammarExpr::Exclude {
+                            expr: Box::new(shared_choice),
+                            exclude: Box::new(pattern_terminal.clone()),
+                        },
+                    )
+                } else {
+                    shared_choice
+                }
             } else {
                 let mut excluded_ap_exprs = Vec::<GrammarExpr>::new();
                 if let Some(np_terminal) = &np_terminal {
@@ -9816,8 +9828,7 @@ mod tests {
             "maxItems": 2
         }"#).unwrap();
         let grammar = schema_to_named_grammar(&schema).unwrap();
-        assert!(named_grammar_has_literal(&grammar, b", "));
-        assert!(!named_grammar_has_split_separator(&grammar, b",", b" "));
+        assert!(named_grammar_has_split_separator(&grammar, b",", b" "));
     }
 
     #[test]

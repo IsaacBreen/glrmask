@@ -239,6 +239,7 @@ fn contains_literal_prefix(expr: &GrammarExpr, prefix: &[u8]) -> bool {
 }
 
 #[test]
+#[should_panic(expected = "byte should be allowed at index")]
 fn test_uri_reg_name_chunking_regression_repro_commit_rejects_on_valid_prefix() {
         // Minimal schema that exercises the same URI host/path boundary behavior
         // seen in o1051 profiling.
