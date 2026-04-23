@@ -1917,9 +1917,42 @@ fn max_string_length_cap() -> Option<usize> {
 }
 
 fn use_structured_uri() -> bool {
-    std::env::var("GLRMASK_STRUCT_URI_FORMAT")
-        .map(|v| v != "0" && v.to_lowercase() != "false")
-    .unwrap_or(false)
+    env_flag_default("GLRMASK_STRUCT_URI_FORMAT", true)
+}
+
+fn env_flag_default(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            let n = v.trim().to_ascii_lowercase();
+            !matches!(n.as_str(), "" | "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(default)
+}
+
+fn uri_rule_should_be_terminal(name: &str) -> Option<bool> {
+    match name {
+        "uri_scheme" => Some(env_flag_default("GLRMASK_URI_SCHEME_TERMINAL", false)),
+        "uri_alpha_char" => Some(env_flag_default("GLRMASK_URI_ALPHA_CHAR_TERMINAL", true)),
+        "uri_scheme_char" => Some(env_flag_default("GLRMASK_URI_SCHEME_CHAR_TERMINAL", true)),
+        "uri_reg_name_char" => Some(env_flag_default("GLRMASK_URI_REG_NAME_CHAR_TERMINAL", true)),
+        "uri_pchar_char" => Some(env_flag_default("GLRMASK_URI_PCHAR_CHAR_TERMINAL", false)),
+        "uri_query_frag_char" => {
+            Some(env_flag_default("GLRMASK_URI_QUERY_FRAG_CHAR_TERMINAL", true))
+        }
+        "uri_pchar" => Some(env_flag_default("GLRMASK_URI_PCHAR_TERMINAL", false)),
+        "uri_query_frag" => Some(env_flag_default("GLRMASK_URI_QUERY_FRAG_TERMINAL", false)),
+        "uri_query" => Some(env_flag_default("GLRMASK_URI_QUERY_TERMINAL", false)),
+        "uri_fragment" => Some(env_flag_default("GLRMASK_URI_FRAGMENT_TERMINAL", false)),
+        "uri_ipv6_address" => Some(env_flag_default("GLRMASK_URI_IPV6_ADDRESS_TERMINAL", false)),
+        "uri_pct_encoded" => Some(env_flag_default("GLRMASK_URI_PCT_ENCODED_TERMINAL", false)),
+        "uri_h16_colon" => Some(env_flag_default("GLRMASK_URI_H16_COLON_TERMINAL", false)),
+        "uri_colon_h16" => Some(env_flag_default("GLRMASK_URI_COLON_H16_TERMINAL", false)),
+        _ => None,
+    }
+}
+
+fn uri_ipv6_alt_nonterminals() -> bool {
+    env_flag("GLRMASK_URI_IPV6_ALT_NONTERMINALS")
 }
 
 fn uri_run_chunk_max() -> usize {
@@ -2850,13 +2883,7 @@ struct SchemaCtx<'a> {
 }
 
 fn rule_name_is_terminal(name: &str) -> bool {
-    matches!(
-        name,
-        "uri_scheme"
-            | "uri_pct_encoded"
-            | "uri_h16_colon"
-            | "uri_colon_h16"
-    ) || (!name.is_empty()
+    uri_rule_should_be_terminal(name).unwrap_or(!name.is_empty()
         && name
             .chars()
             .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()))
@@ -2864,13 +2891,7 @@ fn rule_name_is_terminal(name: &str) -> bool {
 
 fn rule_name_force_visible_terminal(name: &str) -> bool {
     name.starts_with("URI_")
-        || matches!(
-            name,
-            "uri_scheme"
-                | "uri_pct_encoded"
-                | "uri_h16_colon"
-                | "uri_colon_h16"
-        )
+        || uri_rule_should_be_terminal(name) == Some(true)
 }
 
 impl<'a> SchemaCtx<'a> {
@@ -2988,6 +3009,15 @@ impl<'a> SchemaCtx<'a> {
         let name = name.into();
         self.insert_rule(name.clone(), expr);
         GrammarExpr::Ref(name)
+    }
+
+    fn insert_uri_rule(&mut self, name: &str, expr: GrammarExpr) -> GrammarExpr {
+        if uri_rule_should_be_terminal(name).unwrap_or(false) {
+            self.insert_named_terminal_rule(name.to_string(), expr)
+        } else {
+            self.insert_rule(name.to_string(), expr);
+            GrammarExpr::Ref(name.into())
+        }
     }
 
     fn extract_pattern_terminal_rule(&mut self, expr: GrammarExpr, prefix: &str) -> GrammarExpr {
@@ -6065,7 +6095,7 @@ impl<'a> SchemaCtx<'a> {
                 utf8: true,
             },
         );
-        let uri_alpha = self.insert_named_terminal_rule(
+        let uri_alpha_terminal = self.insert_named_terminal_rule(
             "URI_ALPHA",
             GrammarExpr::CharClass {
                 def: "a-zA-Z".into(),
@@ -6073,10 +6103,13 @@ impl<'a> SchemaCtx<'a> {
                 utf8: true,
             },
         );
-        let uri_scheme_char = self.insert_named_terminal_rule(
+        let uri_scheme_char_terminal = self.insert_named_terminal_rule(
             "URI_SCHEME_CHAR",
             regex_expr(&uri_charclass_run_regex("a-zA-Z0-9+\\-.", run_chunk_max)),
         );
+        let uri_alpha = self.insert_uri_rule("uri_alpha_char", uri_alpha_terminal.clone());
+        let uri_scheme_char =
+            self.insert_uri_rule("uri_scheme_char", uri_scheme_char_terminal.clone());
         let uri_userinfo = self.insert_named_terminal_rule(
             "URI_USERINFO",
             regex_expr(r#"(?:[a-zA-Z0-9\-._~!$&'()*+,;=:]|%[0-9A-Fa-f]{2})*@"#),
@@ -6093,7 +6126,7 @@ impl<'a> SchemaCtx<'a> {
             "URI_DEC_OCTET",
             regex_expr(r#"(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"#),
         );
-        let uri_reg_name_char = self.insert_named_terminal_rule(
+        let uri_reg_name_char_terminal = self.insert_named_terminal_rule(
             "URI_REG_NAME_CHAR",
             regex_expr(&uri_charclass_run_regex(r"a-zA-Z0-9\-._~!$&'()*+,;=", run_chunk_max)),
         );
@@ -6101,16 +6134,22 @@ impl<'a> SchemaCtx<'a> {
             "URI_PORT",
             regex_expr(&uri_charclass_run_regex("0-9", run_chunk_max)),
         );
-        let uri_pchar_base = self.insert_named_terminal_rule(
+        let uri_pchar_base_terminal = self.insert_named_terminal_rule(
             "URI_PCHAR",
             regex_expr(&uri_charclass_run_regex(r"a-zA-Z0-9\-._~!$&'()*+,;=:@", run_chunk_max)),
         );
-        let uri_query_frag_char = self.insert_named_terminal_rule(
+        let uri_query_frag_char_terminal = self.insert_named_terminal_rule(
             "URI_QUERY_FRAG_CHAR",
             regex_expr(&uri_charclass_run_regex(r"a-zA-Z0-9\-._~!$&'()*+,;=:@/?", run_chunk_max)),
         );
+        let uri_pchar_base =
+            self.insert_uri_rule("uri_pchar_char", uri_pchar_base_terminal.clone());
+        let uri_query_frag_char =
+            self.insert_uri_rule("uri_query_frag_char", uri_query_frag_char_terminal.clone());
+        let uri_reg_name_char =
+            self.insert_uri_rule("uri_reg_name_char", uri_reg_name_char_terminal.clone());
 
-        let uri_pct_encoded = self.insert_named_terminal_rule(
+        let uri_pct_encoded = self.insert_uri_rule(
             "uri_pct_encoded",
             sequence_or_single(vec![
                 literal_expr(b"%"),
@@ -6121,17 +6160,15 @@ impl<'a> SchemaCtx<'a> {
                 },
             ]),
         );
-        self.insert_rule(
+        let uri_pchar = self.insert_uri_rule(
             "uri_pchar",
             choice_or_single(vec![uri_pchar_base.clone(), uri_pct_encoded.clone()]),
         );
-        let uri_pchar = GrammarExpr::Ref("uri_pchar".into());
-        self.insert_rule(
+        let uri_query_frag = self.insert_uri_rule(
             "uri_query_frag",
             choice_or_single(vec![uri_query_frag_char.clone(), uri_pct_encoded.clone()]),
         );
-        let uri_query_frag = GrammarExpr::Ref("uri_query_frag".into());
-        let uri_h16_colon = self.insert_named_terminal_rule(
+        let uri_h16_colon = self.insert_uri_rule(
             "uri_h16_colon",
             sequence_or_single(vec![
                 GrammarExpr::RepeatRange {
@@ -6142,7 +6179,7 @@ impl<'a> SchemaCtx<'a> {
                 literal_expr(b":"),
             ]),
         );
-        let uri_colon_h16 = self.insert_named_terminal_rule(
+        let uri_colon_h16 = self.insert_uri_rule(
             "uri_colon_h16",
             sequence_or_single(vec![
                 literal_expr(b":"),
@@ -6154,10 +6191,12 @@ impl<'a> SchemaCtx<'a> {
             ]),
         );
 
+        let uri_ipv6_address_is_terminal =
+            uri_rule_should_be_terminal("uri_ipv6_address").unwrap_or(false);
         let uri_ipv6_address_expr = if ablated("ipv6") {
             literal_expr(b"::")
         } else {
-            choice_or_single(vec![
+            let ipv6_alts = vec![
                 sequence_or_single(vec![
                     GrammarExpr::RepeatRange {
                         expr: Box::new(uri_h16_colon.clone()),
@@ -6261,12 +6300,25 @@ impl<'a> SchemaCtx<'a> {
                     },
                 ]),
                 literal_expr(b"::"),
-            ])
+            ];
+            if uri_ipv6_alt_nonterminals() && !uri_ipv6_address_is_terminal {
+                let alt_refs = ipv6_alts
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, expr)| {
+                        let name = format!("uri_ipv6_alt_{}", index + 1);
+                        self.insert_rule(name.clone(), expr);
+                        GrammarExpr::Ref(name)
+                    })
+                    .collect::<Vec<_>>();
+                choice_or_single(alt_refs)
+            } else {
+                choice_or_single(ipv6_alts)
+            }
         };
-        self.insert_rule("uri_ipv6_address", uri_ipv6_address_expr);
-        let uri_ipv6_address = GrammarExpr::Ref("uri_ipv6_address".into());
+        let uri_ipv6_address = self.insert_uri_rule("uri_ipv6_address", uri_ipv6_address_expr);
 
-        let uri_scheme = self.insert_named_terminal_rule(
+        let uri_scheme = self.insert_uri_rule(
             "uri_scheme",
             if ablated("scheme_rich") {
                 uri_alpha.clone()
@@ -6277,22 +6329,20 @@ impl<'a> SchemaCtx<'a> {
                 ])
             },
         );
-        self.insert_rule(
+        let uri_query = self.insert_uri_rule(
             "uri_query",
             sequence_or_single(vec![
                 literal_expr(b"?"),
                 GrammarExpr::Repeat(Box::new(uri_query_frag.clone())),
             ]),
         );
-        let uri_query = GrammarExpr::Ref("uri_query".into());
-        self.insert_rule(
+        let uri_fragment = self.insert_uri_rule(
             "uri_fragment",
             sequence_or_single(vec![
                 literal_expr(b"#"),
                 GrammarExpr::Repeat(Box::new(uri_query_frag.clone())),
             ]),
         );
-        let uri_fragment = GrammarExpr::Ref("uri_fragment".into());
 
         self.insert_rule(
             "uri_ipv_future",
