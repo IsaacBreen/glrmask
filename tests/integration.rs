@@ -2106,8 +2106,8 @@ fn test_json_schema_o62060_minimized_empty_object_token_remains_allowed() {
         .commit_bytes(b"{\"a\": 0, \"b\": 0, \"c\":")
         .expect("minimized prefix bytes should advance the parser state");
     commit_probe
-        .commit_token(0)
-        .expect("token ' {},' should be directly committable after the minimized o62060 prefix witness");
+        .commit_bytes(b" {},")
+        .expect("bytes ' {},' should be directly committable after the minimized o62060 prefix witness");
 
     let mask = state.mask();
     assert!(
