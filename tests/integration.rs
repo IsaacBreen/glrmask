@@ -2092,21 +2092,33 @@ ap ::= 'd'"#,
 
 #[test]
 fn test_json_schema_o62060_minimized_empty_object_token_remains_allowed() {
-    let schema = r#"{"type":"object","properties":{"a":{},"b":{},"d":{},"c":{"type":"object"},"e":{},"f":{},"g":{},"h":{},"i":{},"j":{},"k":{},"l":{},"m":{},"n":{},"o":{},"p":{},"q":{},"r":{},"s":{},"t":{},"u":{},"v":{},"w":{},"x":{}},"required":["a","b","e","c"],"additionalProperties":false}"#;
+    const PREFIX: &[u8] = b"{\"a\": 0, \"b\": 0, \"c\":";
+    const EMPTY_OBJECT_TOKEN: &[u8] = b" {},";
+
+    let tail = (b'e'..=b'x')
+        .map(|key| format!("\"{}\":{{}}", key as char))
+        .collect::<Vec<_>>()
+        .join(",");
+    let schema = [
+        "{\"type\":\"object\",\"properties\":{\"a\":{},\"b\":{},\"d\":{},\"c\":{\"type\":\"object\"},",
+        &tail,
+        "},\"required\":[\"a\",\"b\",\"e\",\"c\"],\"additionalProperties\":false}",
+    ]
+    .concat();
     let vocab = Vocab::new(vec![(0u32, b" {},".to_vec())], None);
-    let constraint = Constraint::from_json_schema(schema, &vocab).unwrap();
+    let constraint = Constraint::from_json_schema(&schema, &vocab).unwrap();
 
     let mut state = constraint.start();
     state
-        .commit_bytes(b"{\"a\": 0, \"b\": 0, \"c\":")
+        .commit_bytes(PREFIX)
         .expect("minimized prefix bytes should advance the parser state");
 
     let mut commit_probe = constraint.start();
     commit_probe
-        .commit_bytes(b"{\"a\": 0, \"b\": 0, \"c\":")
+        .commit_bytes(PREFIX)
         .expect("minimized prefix bytes should advance the parser state");
     commit_probe
-        .commit_bytes(b" {},")
+        .commit_bytes(EMPTY_OBJECT_TOKEN)
         .expect("bytes ' {},' should be directly committable after the minimized o62060 prefix witness");
 
     let mask = state.mask();
