@@ -112,111 +112,6 @@ pub struct GLRTable {
     /// transfer mechanism.  The characterization should treat these as
     /// non-replace to avoid creating pop-0 reduces in the template NFA.
     pub forwarded_shifts: FxHashSet<(u32, TerminalID)>,
-    /// Dense flat arrays for O(1) action/goto lookups (not serialized; rebuilt on load).
-    #[serde(skip)]
-    dense: DenseTables,
-}
-
-/// Flat dense lookup tables for fast O(1) action and goto access.
-///
-/// `action_flat[state * action_stride + terminal]`:
-///   0 = no action; otherwise `action_pool[value - 1]`
-///
-/// `goto_flat[state * goto_stride + nt]`:
-///   0 = no goto; otherwise `((target_state + 1) << 1) | is_replace`
-#[derive(Debug, Clone, Default)]
-struct DenseTables {
-    action_flat: Vec<u32>,
-    action_pool: Vec<Action>,
-    action_stride: u32,
-    goto_flat: Vec<u32>,
-    goto_stride: u32,
-}
-
-impl DenseTables {
-    fn build(
-        action: &[FxHashMap<TerminalID, Action>],
-        goto: &[FxHashMap<NonterminalID, (u32, bool)>],
-        num_states: u32,
-        num_terminals: u32,
-    ) -> Self {
-        let action_stride = num_terminals as usize;
-        let nstates = num_states as usize;
-        let mut action_flat = vec![0u32; nstates * action_stride];
-        let mut action_pool: Vec<Action> = Vec::new();
-
-        for (state, row) in action.iter().enumerate() {
-            for (&tid, act) in row {
-                if (tid as usize) < action_stride {
-                    let idx = if let Some(pos) = action_pool.iter().position(|a| a == act) {
-                        pos as u32
-                    } else {
-                        let pos = action_pool.len() as u32;
-                        action_pool.push(act.clone());
-                        pos
-                    };
-                    action_flat[state * action_stride + tid as usize] = idx + 1;
-                }
-            }
-        }
-
-        // Compute goto_stride from goto keys.
-        let mut max_nt: u32 = 0;
-        for row in goto {
-            for &nt in row.keys() {
-                if nt > max_nt { max_nt = nt; }
-            }
-        }
-        let goto_stride = if goto.is_empty() { 1 } else { (max_nt + 1) as usize };
-        let mut goto_flat = vec![0u32; nstates * goto_stride];
-
-        for (state, row) in goto.iter().enumerate() {
-            for (&nt, &(target, is_replace)) in row {
-                let encoded = ((target + 1) << 1) | (is_replace as u32);
-                goto_flat[state * goto_stride + nt as usize] = encoded;
-            }
-        }
-
-        DenseTables {
-            action_flat,
-            action_pool,
-            action_stride: action_stride as u32,
-            goto_flat,
-            goto_stride: goto_stride as u32,
-        }
-    }
-
-    #[inline(always)]
-    fn action(&self, state: u32, terminal: u32) -> Option<&Action> {
-        if terminal >= self.action_stride {
-            return None;
-        }
-        // SAFETY: bounds checked above; state is always valid if caller upholds invariants.
-        let idx = unsafe {
-            *self.action_flat.get_unchecked(state as usize * self.action_stride as usize + terminal as usize)
-        };
-        if idx == 0 {
-            None
-        } else {
-            Some(unsafe { self.action_pool.get_unchecked((idx - 1) as usize) })
-        }
-    }
-
-    #[inline(always)]
-    fn goto_target(&self, state: u32, nt: u32) -> Option<(u32, bool)> {
-        if nt >= self.goto_stride {
-            return None;
-        }
-        // SAFETY: bounds checked above.
-        let encoded = unsafe {
-            *self.goto_flat.get_unchecked(state as usize * self.goto_stride as usize + nt as usize)
-        };
-        if encoded == 0 {
-            None
-        } else {
-            Some(((encoded >> 1) - 1, (encoded & 1) != 0))
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -295,19 +190,7 @@ impl GLRTable {
             );
         }
 
-        table.build_dense();
         table
-    }
-
-    /// Build (or rebuild) the dense flat-array lookup tables.
-    /// Must be called after any modification to `action`, `goto`, or `num_states`.
-    pub fn build_dense(&mut self) {
-        self.dense = DenseTables::build(
-            &self.action,
-            &self.goto,
-            self.num_states,
-            self.num_terminals,
-        );
     }
 
     #[inline]
@@ -1655,7 +1538,6 @@ fn finish_table(
         num_rules: grammar.rules.len() as u32,
         rules: grammar.rules.clone(),
         forwarded_shifts,
-        dense: DenseTables::default(),
     }
 }
 
@@ -2663,7 +2545,6 @@ fn merge_same_core_lr1_states(table: GLRTable, core_keys: &[Vec<Item>]) -> GLRTa
         num_rules: table.num_rules,
         rules: table.rules,
         forwarded_shifts,
-        dense: DenseTables::default(),
     }
 }
 
