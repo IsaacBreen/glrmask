@@ -1651,6 +1651,11 @@ fn split_colon_from_space() -> bool {
     env_flag("GLRMASK_SPLIT_COLON_FROM_SPACE")
 }
 
+fn split_item_separator() -> bool {
+    // Default to fused JSON_ITEM_SEPARATOR literal unless explicitly enabled.
+    env_flag("GLRMASK_SPLIT_ITEM_SEPARATOR")
+}
+
 // ---------------------------------------------------------------------------
 // Hierarchical string / key-colon construction
 // ---------------------------------------------------------------------------
@@ -6453,10 +6458,12 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn json_item_separator_expr(&self) -> GrammarExpr {
-        // Must remain a single fused literal token — do NOT split into "," + " ".
-        // Splitting creates two separate terminals which breaks the CFA hot-path
-        // and causes test_array_paths_pack_native_item_separator_literal to fail.
-        literal_expr(JSON_ITEM_SEPARATOR)
+        if split_item_separator() {
+            sequence_or_single(vec![literal_expr(b","), literal_expr(b" ")])
+        } else {
+            // Default: keep as a single fused literal token.
+            literal_expr(JSON_ITEM_SEPARATOR)
+        }
     }
 
     fn normalized_additional_properties_schema(
