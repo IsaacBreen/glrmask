@@ -1,11 +1,270 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::hash::Hash;
+use std::marker::PhantomData;
+use std::ops::Index;
 use std::sync::OnceLock;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
+use serde::de::{MapAccess, Visitor};
+use serde::ser::SerializeMap;
+use smallvec::SmallVec;
 
 use super::analysis::{EOF, AnalyzedGrammar};
 use crate::grammar::flat::{NonterminalID, Rule, Symbol, TerminalID};
+
+const INLINE_ROW_CAPACITY: usize = 8;
+
+#[derive(Debug, Clone)]
+pub(crate) enum SparseRow<K: Copy + Eq + Hash, V: Clone> {
+    Inline(SmallVec<[(K, V); INLINE_ROW_CAPACITY]>),
+    Large(FxHashMap<K, V>),
+}
+
+impl<K: Copy + Eq + Hash, V: Clone> Default for SparseRow<K, V> {
+    fn default() -> Self {
+        Self::Inline(SmallVec::new())
+    }
+}
+
+impl<K: Copy + Eq + Hash, V: Clone> SparseRow<K, V> {
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Inline(entries) => entries.len(),
+            Self::Large(entries) => entries.len(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, key: &K) -> Option<&V> {
+        match self {
+            Self::Inline(entries) => entries.iter().find(|(entry_key, _)| entry_key == key).map(|(_, value)| value),
+            Self::Large(entries) => entries.get(key),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        match self {
+            Self::Inline(entries) => entries.iter_mut().find(|(entry_key, _)| entry_key == key).map(|(_, value)| value),
+            Self::Large(entries) => entries.get_mut(key),
+        }
+    }
+
+    pub(crate) fn insert(&mut self, key: K, value: V) -> Option<V> {
+        match self {
+            Self::Inline(entries) => {
+                for (entry_key, entry_value) in entries.iter_mut() {
+                    if *entry_key == key {
+                        return Some(std::mem::replace(entry_value, value));
+                    }
+                }
+                if entries.len() < INLINE_ROW_CAPACITY {
+                    entries.push((key, value));
+                    None
+                } else {
+                    let mut large = FxHashMap::default();
+                    for (entry_key, entry_value) in entries.drain(..) {
+                        large.insert(entry_key, entry_value);
+                    }
+                    let previous = large.insert(key, value);
+                    *self = Self::Large(large);
+                    previous
+                }
+            }
+            Self::Large(entries) => entries.insert(key, value),
+        }
+    }
+
+    pub(crate) fn remove(&mut self, key: &K) -> Option<V> {
+        match self {
+            Self::Inline(entries) => {
+                let position = entries.iter().position(|(entry_key, _)| entry_key == key)?;
+                Some(entries.swap_remove(position).1)
+            }
+            Self::Large(entries) => entries.remove(key),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn contains_key(&self, key: &K) -> bool {
+        self.get(key).is_some()
+    }
+
+    #[inline]
+    pub(crate) fn iter(&self) -> SparseRowIter<'_, K, V> {
+        match self {
+            Self::Inline(entries) => SparseRowIter::Inline(entries.iter()),
+            Self::Large(entries) => SparseRowIter::Large(entries.iter()),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn keys(&self) -> SparseRowKeys<'_, K, V> {
+        match self {
+            Self::Inline(entries) => SparseRowKeys::Inline(entries.iter()),
+            Self::Large(entries) => SparseRowKeys::Large(entries.keys()),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn values(&self) -> SparseRowValues<'_, K, V> {
+        match self {
+            Self::Inline(entries) => SparseRowValues::Inline(entries.iter()),
+            Self::Large(entries) => SparseRowValues::Large(entries.values()),
+        }
+    }
+}
+
+impl<K: Copy + Eq + Hash, V: Clone + PartialEq> PartialEq for SparseRow<K, V> {
+    fn eq(&self, other: &Self) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+        self.iter().all(|(key, value)| other.get(key) == Some(value))
+    }
+}
+
+impl<K: Copy + Eq + Hash, V: Clone + Eq> Eq for SparseRow<K, V> {}
+
+impl<K, V> Serialize for SparseRow<K, V>
+where
+    K: Copy + Eq + Hash + Serialize,
+    V: Clone + Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(self.len()))?;
+        for (key, value) in self.iter() {
+            map.serialize_entry(key, value)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de, K, V> Deserialize<'de> for SparseRow<K, V>
+where
+    K: Copy + Eq + Hash + Deserialize<'de>,
+    V: Clone + Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct SparseRowVisitor<K, V>(PhantomData<(K, V)>);
+
+        impl<'de, K, V> Visitor<'de> for SparseRowVisitor<K, V>
+        where
+            K: Copy + Eq + Hash + Deserialize<'de>,
+            V: Clone + Deserialize<'de>,
+        {
+            type Value = SparseRow<K, V>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a sparse row map")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut row = SparseRow::default();
+                while let Some((key, value)) = map.next_entry()? {
+                    row.insert(key, value);
+                }
+                Ok(row)
+            }
+        }
+
+        deserializer.deserialize_map(SparseRowVisitor::<K, V>(PhantomData))
+    }
+}
+
+impl<'a, K: Copy + Eq + Hash, V: Clone> IntoIterator for &'a SparseRow<K, V> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = SparseRowIter<'a, K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<K: Copy + Eq + Hash, V: Clone> Index<&K> for SparseRow<K, V> {
+    type Output = V;
+
+    fn index(&self, index: &K) -> &Self::Output {
+        self.get(index).expect("sparse row index missing key")
+    }
+}
+
+impl<K: Copy + Eq + Hash, V: Clone> FromIterator<(K, V)> for SparseRow<K, V> {
+    fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
+        let mut row = Self::default();
+        for (key, value) in iter {
+            row.insert(key, value);
+        }
+        row
+    }
+}
+
+pub(crate) enum SparseRowIter<'a, K: Copy + Eq + Hash, V: Clone> {
+    Inline(std::slice::Iter<'a, (K, V)>),
+    Large(std::collections::hash_map::Iter<'a, K, V>),
+}
+
+impl<'a, K: Copy + Eq + Hash, V: Clone> Iterator for SparseRowIter<'a, K, V> {
+    type Item = (&'a K, &'a V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Inline(entries) => entries.next().map(|(key, value)| (key, value)),
+            Self::Large(entries) => entries.next(),
+        }
+    }
+}
+
+pub(crate) enum SparseRowKeys<'a, K: Copy + Eq + Hash, V: Clone> {
+    Inline(std::slice::Iter<'a, (K, V)>),
+    Large(std::collections::hash_map::Keys<'a, K, V>),
+}
+
+impl<'a, K: Copy + Eq + Hash, V: Clone> Iterator for SparseRowKeys<'a, K, V> {
+    type Item = &'a K;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Inline(entries) => entries.next().map(|(key, _)| key),
+            Self::Large(entries) => entries.next(),
+        }
+    }
+}
+
+pub(crate) enum SparseRowValues<'a, K: Copy + Eq + Hash, V: Clone> {
+    Inline(std::slice::Iter<'a, (K, V)>),
+    Large(std::collections::hash_map::Values<'a, K, V>),
+}
+
+impl<'a, K: Copy + Eq + Hash, V: Clone> Iterator for SparseRowValues<'a, K, V> {
+    type Item = &'a V;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Inline(entries) => entries.next().map(|(_, value)| value),
+            Self::Large(entries) => entries.next(),
+        }
+    }
+}
+
+pub(crate) type ActionRow = SparseRow<TerminalID, Action>;
+pub(crate) type GotoRow = SparseRow<NonterminalID, (u32, bool)>;
 
 fn env_flag_enabled(key: &str) -> bool {
     std::env::var(key).map_or(false, |v| v == "1")
@@ -102,8 +361,8 @@ impl Action {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GLRTable {
-    pub action: Vec<FxHashMap<TerminalID, Action>>,
-    pub goto: Vec<FxHashMap<NonterminalID, (u32, bool)>>,
+    pub action: Vec<ActionRow>,
+    pub goto: Vec<GotoRow>,
     pub num_states: u32,
     pub num_terminals: u32,
     pub num_rules: u32,
@@ -397,8 +656,8 @@ impl GLRTable {
                 // Rewrite goto entries: merge columns.
                 for state in 0..nstates {
                     let old = std::mem::take(&mut self.goto[state]);
-                    let mut new_goto: FxHashMap<NonterminalID, (u32, bool)> = FxHashMap::default();
-                    for (nt, target) in old {
+                    let mut new_goto = GotoRow::default();
+                    for (&nt, &target) in old.iter() {
                         let canon_nt = nt_remap.get(&nt).copied().unwrap_or(nt);
                         // All remapped NTs should have the same target; just insert.
                         new_goto.insert(canon_nt, target);
@@ -409,25 +668,25 @@ impl GLRTable {
                 // Rewrite nonterminal IDs in action entries (Reduce and Split reduces).
                 for state in 0..nstates {
                     let old = std::mem::take(&mut self.action[state]);
-                    let new_action: FxHashMap<TerminalID, Action> = old
-                        .into_iter()
-                        .map(|(tid, action)| {
+                    let new_action: ActionRow = old
+                        .iter()
+                        .map(|(&tid, action)| {
                             let remapped = match action {
                                 Action::Reduce(nt, len) => {
-                                    let canon = nt_remap.get(&nt).copied().unwrap_or(nt);
-                                    Action::Reduce(canon, len)
+                                    let canon = nt_remap.get(&nt).copied().unwrap_or(*nt);
+                                    Action::Reduce(canon, *len)
                                 }
                                 Action::Split { shift, reduces, accept } => {
                                     let reduces = reduces
                                         .into_iter()
                                         .map(|(nt, len)| {
-                                            let canon = nt_remap.get(&nt).copied().unwrap_or(nt);
-                                            (canon, len)
+                                            let canon = nt_remap.get(nt).copied().unwrap_or(*nt);
+                                            (canon, *len)
                                         })
                                         .collect();
-                                    Action::Split { shift, reduces, accept }
+                                    Action::Split { shift: *shift, reduces, accept: *accept }
                                 }
-                                other => other,
+                                other => other.clone(),
                             };
                             (tid, remapped)
                         })
@@ -805,8 +1064,8 @@ impl GLRTable {
 }
 
 fn row_key(
-    action_row: &FxHashMap<TerminalID, Action>,
-    goto_row: &FxHashMap<NonterminalID, (u32, bool)>,
+    action_row: &ActionRow,
+    goto_row: &GotoRow,
 ) -> TableRowKey {
     TableRowKey {
         action: action_row
@@ -957,7 +1216,7 @@ fn build_merged_action_row(
     constituent_sets: &mut Vec<BTreeSet<u32>>,
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
-) -> Result<FxHashMap<TerminalID, Action>, ()> {
+) -> Result<ActionRow, ()> {
     let mut terminals = BTreeSet::new();
     for &state in subset {
         for &tid in table.action[state as usize].keys() {
@@ -965,7 +1224,7 @@ fn build_merged_action_row(
         }
     }
 
-    let mut row = FxHashMap::default();
+    let mut row = ActionRow::default();
     for tid in terminals {
         let mut pending = PendingAction::default();
         for &state in subset {
@@ -994,7 +1253,7 @@ fn build_merged_goto_row(
     constituent_sets: &mut Vec<BTreeSet<u32>>,
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
-) -> Result<FxHashMap<NonterminalID, (u32, bool)>, ()> {
+) -> Result<GotoRow, ()> {
     let mut nts = BTreeSet::new();
     for &state in subset {
         for &nt in table.goto[state as usize].keys() {
@@ -1002,7 +1261,7 @@ fn build_merged_goto_row(
         }
     }
 
-    let mut row = FxHashMap::default();
+    let mut row = GotoRow::default();
     for nt in nts {
         let mut replace: Option<bool> = None;
         let mut target_subset = BTreeSet::new();
@@ -1059,8 +1318,8 @@ fn ensure_subset_state(
 
     let state = table.num_states;
     table.num_states += 1;
-    table.action.push(FxHashMap::default());
-    table.goto.push(FxHashMap::default());
+    table.action.push(ActionRow::default());
+    table.goto.push(GotoRow::default());
     constituent_sets.push(subset.clone());
     subset_to_state.insert(key.clone(), state);
 
@@ -1519,7 +1778,7 @@ fn finish_table(
     goto: Vec<FxHashMap<NonterminalID, (u32, bool)>>,
     forwarded_shifts: FxHashSet<(u32, TerminalID)>,
 ) -> GLRTable {
-    let action: Vec<FxHashMap<TerminalID, Action>> = pending
+    let action: Vec<ActionRow> = pending
         .into_iter()
         .map(|by_terminal| {
             by_terminal
@@ -1528,6 +1787,7 @@ fn finish_table(
                 .collect()
         })
         .collect();
+    let goto: Vec<GotoRow> = goto.into_iter().map(IntoIterator::into_iter).map(Iterator::collect).collect();
     let num_states = action.len() as u32;
 
     GLRTable {

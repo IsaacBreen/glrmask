@@ -1140,6 +1140,7 @@ pub(crate) fn valid_terminals_for_stacks(table: &GLRTable, stack: &ParserGSS) ->
 mod tests {
     use super::*;
     use crate::compiler::glr::analysis::AnalyzedGrammar;
+    use crate::compiler::glr::table::{ActionRow, GotoRow};
     use crate::grammar::flat::tests::*;
     use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
@@ -1228,10 +1229,8 @@ mod tests {
     }
 
     fn build_manual_o1051_faithful_table_and_stack() -> (GLRTable, ParserGSS) {
-        let mut action: Vec<rustc_hash::FxHashMap<TerminalID, Action>> =
-            vec![Default::default(); 385];
-        let mut goto: Vec<rustc_hash::FxHashMap<u32, (u32, bool)>> =
-            vec![Default::default(); 385];
+        let mut action: Vec<ActionRow> = vec![Default::default(); 385];
+        let mut goto: Vec<GotoRow> = vec![Default::default(); 385];
 
         action[142].insert(47, Action::Shift(229, true));
         action[229].insert(8, Action::Reduce(39, 1));
