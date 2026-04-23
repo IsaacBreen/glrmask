@@ -353,7 +353,7 @@ fn advance_nondeterministically(
                     if det_ok {
                         if let Some(stack) = branch.try_virtual_stack() {
                             let current = std::mem::replace(&mut shifted, ParserGSS::empty());
-                            shifted = current.absorb_vstack_same_acc(&stack);
+                            shifted = current.absorb_vstack_same_acc_owned(stack);
                         } else {
                             merge_into(&mut shifted, branch);
                         }
@@ -898,7 +898,7 @@ fn advance_nondeterministically_profiled(
                     if det_ok2 {
                         if let Some(stack) = branch.try_virtual_stack() {
                             let current = std::mem::replace(&mut shifted, ParserGSS::empty());
-                            shifted = current.absorb_vstack_same_acc(&stack);
+                            shifted = current.absorb_vstack_same_acc_owned(stack);
                         } else {
                             merge_into(&mut shifted, branch);
                         }
@@ -1364,6 +1364,67 @@ mod tests {
             (cold_total_ns as f64) * cold_inv / 1_000.0,
             (cold_det_ns as f64) * cold_inv / 1_000.0,
             (cold_nondet_ns as f64) * cold_inv / 1_000.0,
+        );
+    }
+
+    #[test]
+    fn test_advance_manual_o1051_second_advance_faithful_timing() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let (table, gss0) = build_manual_o1051_faithful_table_and_stack();
+        let gss1_base = advance_stacks(&table, &gss0, 47);
+
+        let warmup = 2_000usize;
+        let warm_iters = 50_000usize;
+        let cold_iters = 1_000usize;
+
+        for _ in 0..warmup {
+            let _ = advance_stacks(&table, &gss1_base, 8);
+        }
+
+        let mut warm_wall_ns: u128 = 0;
+        for _ in 0..warm_iters {
+            let t0 = Instant::now();
+            let gss2 = advance_stacks(&table, &gss1_base, 8);
+            warm_wall_ns += t0.elapsed().as_nanos();
+
+            let mut stacks2: Vec<Vec<u32>> = gss2.to_stacks().into_iter().map(|(s, _)| s).collect();
+            stacks2.sort();
+            assert_eq!(stacks2, vec![vec![0, 1, 41, 5], vec![0, 1, 384]]);
+        }
+
+        let mut cache_thrash = vec![0u8; 32 * 1024 * 1024];
+        let mut thrash_checksum: u64 = 0;
+        let mut cold_wall_ns: u128 = 0;
+
+        for iter in 0..cold_iters {
+            let salt = (iter as u8).wrapping_mul(17).wrapping_add(3);
+            for i in (0..cache_thrash.len()).step_by(64) {
+                cache_thrash[i] = cache_thrash[i].wrapping_add(salt);
+                thrash_checksum = thrash_checksum.wrapping_add(cache_thrash[i] as u64);
+            }
+
+            let t0 = Instant::now();
+            let gss2 = advance_stacks(&table, &gss1_base, 8);
+            cold_wall_ns += t0.elapsed().as_nanos();
+
+            let mut stacks2: Vec<Vec<u32>> = gss2.to_stacks().into_iter().map(|(s, _)| s).collect();
+            stacks2.sort();
+            assert_eq!(stacks2, vec![vec![0, 1, 41, 5], vec![0, 1, 384]]);
+        }
+
+        black_box(thrash_checksum);
+
+        let warm_inv = 1.0 / warm_iters as f64;
+        let cold_inv = 1.0 / cold_iters as f64;
+        eprintln!(
+            "[advance_manual_o1051_faithful][warm] avg_wall_us={:.3}",
+            (warm_wall_ns as f64) * warm_inv / 1_000.0,
+        );
+        eprintln!(
+            "[advance_manual_o1051_faithful][cold] avg_wall_us={:.3} cold_method=thrash_32MiB_stride64",
+            (cold_wall_ns as f64) * cold_inv / 1_000.0,
         );
     }
 

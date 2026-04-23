@@ -2864,6 +2864,58 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         self.merge(&stack.into_gss())
     }
 
+    pub fn absorb_vstack_same_acc_owned(mut self, mut stack: VirtualStack<T, A>) -> Self {
+        stack.flush_pending();
+
+        if stack.values.is_empty() {
+            return self;
+        }
+        if self.is_empty() {
+            return stack.into_gss();
+        }
+
+        let top = stack.values.last().unwrap().clone();
+        let child_node = if stack.values.len() == 1 {
+            stack.next.clone()
+        } else {
+            new_segment(stack.values.take(stack.values.len() - 1), stack.next.clone())
+        };
+        let child_depth = child_node.max_depth();
+
+        let inner_mut = Arc::make_mut(&mut self.inner);
+        if let Upper::Interface(self_iface_arc) = inner_mut {
+            let iface_mut = Arc::make_mut(self_iface_arc);
+            if iface_mut.acc == stack.acc {
+                let lower_mut = Arc::make_mut(&mut iface_mut.inner);
+                lower_mut.ensure_general();
+                match lower_mut {
+                    Lower::General { children, max_depth, .. } => {
+                        if let Some(existing_ordmap) = children.get_mut(&top) {
+                            match existing_ordmap.get(&child_depth).cloned() {
+                                Some(existing_child) => {
+                                    existing_ordmap.insert(child_depth, merge_lower(&existing_child, &child_node));
+                                }
+                                None => {
+                                    existing_ordmap.insert(child_depth, child_node);
+                                }
+                            }
+                        } else {
+                            children.insert(top, CompactOrdMap::unit(child_depth, child_node));
+                        }
+
+                        if child_depth + 1 > *max_depth {
+                            *max_depth = child_depth + 1;
+                        }
+                    }
+                    Lower::Segment(_) => unreachable!(),
+                }
+                return self;
+            }
+        }
+
+        self.merge(&stack.into_gss())
+    }
+
     fn absorb_push_interface_inplace(
         mut self,
         value: T,
