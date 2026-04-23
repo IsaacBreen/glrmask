@@ -6453,7 +6453,10 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn json_item_separator_expr(&self) -> GrammarExpr {
-        sequence_or_single(vec![literal_expr(b","), literal_expr(b" ")])
+        // Must remain a single fused literal token — do NOT split into "," + " ".
+        // Splitting creates two separate terminals which breaks the CFA hot-path
+        // and causes test_array_paths_pack_native_item_separator_literal to fail.
+        literal_expr(JSON_ITEM_SEPARATOR)
     }
 
     fn normalized_additional_properties_schema(
@@ -9828,7 +9831,8 @@ mod tests {
             "maxItems": 2
         }"#).unwrap();
         let grammar = schema_to_named_grammar(&schema).unwrap();
-        assert!(named_grammar_has_split_separator(&grammar, b",", b" "));
+        assert!(named_grammar_has_literal(&grammar, b", "));
+        assert!(!named_grammar_has_split_separator(&grammar, b",", b" "));
     }
 
     #[test]
