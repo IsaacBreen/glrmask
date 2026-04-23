@@ -291,7 +291,8 @@ fn advance_deterministically(
                     stack.replace_top(*target);
                     *gss = stack.into_gss();
                 } else {
-                    *gss = stack.into_gss().push(*target);
+                    stack.push(*target);
+                    *gss = stack.into_gss();
                 }
                 return true;
             }
@@ -606,7 +607,8 @@ fn advance_deterministically_profiled(
                     stack.replace_top(*target);
                     *gss = stack.into_gss();
                 } else {
-                    *gss = stack.into_gss().push(*target);
+                    stack.push(*target);
+                    *gss = stack.into_gss();
                 }
                 profile.det_exit_reason = 1; // shift (finished)
                 return true;

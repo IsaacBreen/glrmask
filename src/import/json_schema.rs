@@ -1913,6 +1913,18 @@ fn use_structured_uri() -> bool {
         .unwrap_or(true)
 }
 
+fn uri_run_chunk_max() -> usize {
+    std::env::var("GLRMASK_URI_RUN_CHUNK_MAX")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(24)
+}
+
+fn uri_charclass_run_regex(def: &str, max_run: usize) -> String {
+    format!(r#"(?:[{def}]{{1,{max_run}}})"#)
+}
+
 fn json_wrapped_pattern(pattern: &str) -> GrammarExpr {
     let inner = json_search_pattern(pattern);
     wrap_string_value_regex(&inner)
@@ -5915,6 +5927,7 @@ impl<'a> SchemaCtx<'a> {
             .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
             .unwrap_or_default();
         let ablated = |name: &str| ablate.contains(name);
+        let run_chunk_max = uri_run_chunk_max();
         // --- Character classes ---
 
         // HEXDIG = DIGIT / "A"-"F" / "a"-"f"
@@ -5939,58 +5952,49 @@ impl<'a> SchemaCtx<'a> {
 
         // pchar = unreserved / pct-encoded / sub-delims / ":" / "@"
         // Char class for pchar (all pchar chars except pct-encoded)
-        let pchar_cc = GrammarExpr::CharClass {
-            def: r"a-zA-Z0-9\-._~!$&'()*+,;=:@".into(),
-            negate: false,
-            utf8: true,
-        };
+        let pchar_cc_def = r"a-zA-Z0-9\-._~!$&'()*+,;=:@";
+        let pchar_run = self.extract_terminal_rule(
+            regex_expr(&uri_charclass_run_regex(pchar_cc_def, run_chunk_max)),
+            "URI_PCHAR_RUN",
+        );
         let pchar = self.extract_rule(
-            choice_or_single(vec![pchar_cc, pct_encoded.clone()]),
+            choice_or_single(vec![pchar_run, pct_encoded.clone()]),
             "uri_pchar",
         );
 
         // Query/fragment char: pchar / "/" / "?"  (plus pct-encoded)
-        let qf_cc = GrammarExpr::CharClass {
-            def: r"a-zA-Z0-9\-._~!$&'()*+,;=:@/?".into(),
-            negate: false,
-            utf8: true,
-        };
+        let qf_cc_def = r"a-zA-Z0-9\-._~!$&'()*+,;=:@/?";
+        let qf_run = self.extract_terminal_rule(
+            regex_expr(&uri_charclass_run_regex(qf_cc_def, run_chunk_max)),
+            "URI_QFC_RUN",
+        );
         let qf_char = self.extract_rule(
-            choice_or_single(vec![qf_cc, pct_encoded.clone()]),
+            choice_or_single(vec![qf_run, pct_encoded.clone()]),
             "uri_qfc",
         );
 
         // --- scheme ---
         // scheme = ALPHA *( ALPA / DIGIT / "+" / "-" / "." )
+        let scheme_tail_chunk = self.extract_terminal_rule(
+            regex_expr(&uri_charclass_run_regex("a-zA-Z0-9+\\-.", run_chunk_max)),
+            "URI_SCHEME_TAIL_CHUNK",
+        );
         let scheme = sequence_or_single(vec![
             GrammarExpr::CharClass {
                 def: "a-zA-Z".into(),
                 negate: false,
                 utf8: true,
             },
-            GrammarExpr::Repeat(Box::new(GrammarExpr::CharClass {
-                def: "a-zA-Z0-9+\\-.".into(),
-                negate: false,
-                utf8: true,
-            })),
+            GrammarExpr::Repeat(Box::new(scheme_tail_chunk)),
         ]);
 
         // --- userinfo ---
         // userinfo = *( unreserved / pct-encoded / sub-delims / ":" )
         // Char class = unreserved + sub-delims + ":" (i.e. pchar minus "@")
-        let userinfo_cc = GrammarExpr::CharClass {
-            def: r"a-zA-Z0-9\-._~!$&'()*+,;=:".into(),
-            negate: false,
-            utf8: true,
-        };
-        let userinfo = GrammarExpr::Repeat(Box::new(choice_or_single(vec![
-            userinfo_cc,
-            pct_encoded.clone(),
-        ])));
-        let userinfo_at = GrammarExpr::Optional(Box::new(sequence_or_single(vec![
-            userinfo,
-            literal_expr(b"@"),
-        ])));
+        let userinfo_at = GrammarExpr::Optional(Box::new(self.extract_terminal_rule(
+            regex_expr(r#"(?:[a-zA-Z0-9\-._~!$&'()*+,;=:]|%[0-9A-Fa-f]{2})*@"#),
+            "URI_USERINFO_AT",
+        )));
 
         // --- host ---
         // host = IP-literal / IPv4address / reg-name
@@ -6108,13 +6112,12 @@ impl<'a> SchemaCtx<'a> {
         ]);
 
         // reg-name = *( unreserved / pct-encoded / sub-delims )
-        let reg_name_cc = GrammarExpr::CharClass {
-            def: r"a-zA-Z0-9\-._~!$&'()*+,;=".into(),
-            negate: false,
-            utf8: true,
-        };
+        let reg_name_run = self.extract_terminal_rule(
+            regex_expr(&uri_charclass_run_regex(r"a-zA-Z0-9\-._~!$&'()*+,;=", run_chunk_max)),
+            "URI_REG_NAME_RUN",
+        );
         let re_name = GrammarExpr::Repeat(Box::new(choice_or_single(vec![
-            reg_name_cc,
+            reg_name_run,
             pct_encoded.clone(),
         ])));
 
@@ -6131,11 +6134,10 @@ impl<'a> SchemaCtx<'a> {
         // port = *DIGIT
         let port = GrammarExpr::Optional(Box::new(sequence_or_single(vec![
             literal_expr(b":"),
-            GrammarExpr::Repeat(Box::new(GrammarExpr::CharClass {
-                def: "0-9".into(),
-                negate: false,
-                utf8: true,
-            })),
+            GrammarExpr::Repeat(Box::new(self.extract_terminal_rule(
+                regex_expr(&uri_charclass_run_regex("0-9", run_chunk_max)),
+                "URI_PORT_DIGIT_RUN",
+            ))),
         ])));
 
         // authority = [ userinfo "@" ] host [ ":" port ]
