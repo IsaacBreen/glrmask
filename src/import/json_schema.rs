@@ -1825,6 +1825,10 @@ fn wrap_key_colon_regex(inner_regex: &str) -> GrammarExpr {
     wrap_key_colon_terminal(regex_expr(key_colon_body_regex(inner_regex)))
 }
 
+fn parsed_regex_expr(pattern: &str, utf8: bool) -> GrammarExpr {
+    expr_to_grammar_expr(&parse_regex(pattern, utf8))
+}
+
 fn no_additional_properties() -> bool {
     env_flag("GLRMASK_NO_ADDITIONAL_PROPERTIES")
 }
@@ -2137,12 +2141,13 @@ fn compile_regex_union_expr(regexes: &[String]) -> LexerExpr {
 
 fn json_wrapped_fullmatch_pattern(pattern: &str) -> GrammarExpr {
     let inner = jsonify_regex_dot(pattern);
-    wrap_string_value_regex(&inner)
+    quoted_expr(parsed_regex_expr(&inner, true))
 }
 
 fn json_wrapped_key_colon_pattern(pattern: &str) -> GrammarExpr {
     let inner = json_search_pattern(pattern);
-    wrap_key_colon_regex(&inner)
+    let body = parsed_regex_expr(&key_colon_body_regex(&inner), true);
+    wrap_key_colon_terminal(body)
 }
 
 /// Build a GrammarExpr body for a string value, fusing non-split quotes
@@ -2174,6 +2179,28 @@ fn wrap_string_value_expr_parts(body: GrammarExpr) -> (GrammarExpr, Box<dyn FnOn
     (terminal_body, Box::new(wrap))
 }
 
+fn wrap_key_colon_expr_parts(body: GrammarExpr) -> (GrammarExpr, Box<dyn FnOnce(GrammarExpr) -> GrammarExpr>) {
+    let open = split_open_quote();
+    let close = split_close_quote();
+    let colon = split_colon_space();
+    let terminal_body = {
+        let mut inner_parts = Vec::new();
+        if !open {
+            inner_parts.push(literal_expr(b"\""));
+        }
+        inner_parts.push(body);
+        if !close {
+            inner_parts.push(literal_expr(b"\""));
+        }
+        if !colon {
+            inner_parts.push(key_colon_suffix_expr());
+        }
+        sequence_or_single(inner_parts)
+    };
+    let wrap = move |term: GrammarExpr| -> GrammarExpr { wrap_key_colon_terminal(term) };
+    (terminal_body, Box::new(wrap))
+}
+
 /// Wrap an arbitrary GrammarExpr body as a quoted string value.
 ///
 /// Equivalent to composing `wrap_string_value_expr_parts` but for cases
@@ -2191,7 +2218,7 @@ fn quoted_expr(inner: GrammarExpr) -> GrammarExpr {
 }
 
 fn json_date_body_expr() -> GrammarExpr {
-    let year = regex_expr(r#"[0-9]{4}"#);
+    let year = parsed_regex_expr(r#"[0-9]{4}"#, true);
     let sep = literal_expr(b"-");
     let month_31 = choice_or_single(
         ["01", "03", "05", "07", "08", "10", "12"]
@@ -2206,9 +2233,9 @@ fn json_date_body_expr() -> GrammarExpr {
             .collect(),
     );
     let february = literal_expr(b"02");
-    let day_31 = regex_expr(r#"(?:0[1-9]|[12][0-9]|3[01])"#);
-    let day_30 = regex_expr(r#"(?:0[1-9]|[12][0-9]|30)"#);
-    let day_29 = regex_expr(r#"(?:0[1-9]|1[0-9]|2[0-9])"#);
+    let day_31 = parsed_regex_expr(r#"(?:0[1-9]|[12][0-9]|3[01])"#, true);
+    let day_30 = parsed_regex_expr(r#"(?:0[1-9]|[12][0-9]|30)"#, true);
+    let day_29 = parsed_regex_expr(r#"(?:0[1-9]|1[0-9]|2[0-9])"#, true);
 
     choice_or_single(vec![
         sequence_or_single(vec![
@@ -2236,12 +2263,12 @@ fn json_date_body_expr() -> GrammarExpr {
 }
 
 fn json_time_body_expr() -> GrammarExpr {
-    let hour = regex_expr(r#"(?:[01][0-9]|2[0-3])"#);
-    let minute = regex_expr(r#"[0-5][0-9]"#);
-    let second = regex_expr(r#"(?:[0-5][0-9]|60)"#);
+    let hour = parsed_regex_expr(r#"(?:[01][0-9]|2[0-3])"#, true);
+    let minute = parsed_regex_expr(r#"[0-5][0-9]"#, true);
+    let second = parsed_regex_expr(r#"(?:[0-5][0-9]|60)"#, true);
     let fraction = GrammarExpr::Optional(Box::new(sequence_or_single(vec![
         literal_expr(b"."),
-        regex_expr(r#"[0-9]+"#),
+        parsed_regex_expr(r#"[0-9]+"#, true),
     ])));
     let offset = sequence_or_single(vec![
         choice_or_single(vec![literal_expr(b"+"), literal_expr(b"-")]),
@@ -2757,16 +2784,12 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
     let convert_ms = t3.elapsed().as_secs_f64() * 1000.0;
 
     ctx.insert_rule("start", start_expr);
+    ctx.hoist_pattern_terminals_in_nonterminals();
     let terminal_names: BTreeSet<String> = ctx
         .rules
         .iter()
         .map(|(name, _)| name.as_str())
-        .filter(|name| {
-            !name.is_empty()
-                && name
-                    .chars()
-                    .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
-        })
+        .filter(|name| rule_name_is_terminal(name))
         .map(|s| s.to_string())
         .collect();
     let rules: Vec<NamedRule> = ctx.rules.into_iter().map(|(name, expr)| {
@@ -2779,7 +2802,10 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
     // sub-expressions of other terminal rules (resolved via Expr::Shared).
     let grammar_visible = collect_grammar_visible_refs(&rules, &terminal_names);
     let rules = rules.into_iter().map(|mut rule| {
-        if rule.is_terminal && !grammar_visible.contains(&rule.name) {
+        if rule.is_terminal
+            && !grammar_visible.contains(&rule.name)
+            && !rule_name_force_visible_terminal(&rule.name)
+        {
             rule.is_internal = true;
         }
         rule
@@ -2821,6 +2847,30 @@ struct SchemaCtx<'a> {
     /// Cache for `convert_schema`: identical sub-schemas produce the same
     /// grammar expression, avoiding duplicate rule generation.
     schema_convert_cache: BTreeMap<String, GrammarExpr>,
+}
+
+fn rule_name_is_terminal(name: &str) -> bool {
+    matches!(
+        name,
+        "uri_scheme"
+            | "uri_pct_encoded"
+            | "uri_h16_colon"
+            | "uri_colon_h16"
+    ) || (!name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()))
+}
+
+fn rule_name_force_visible_terminal(name: &str) -> bool {
+    name.starts_with("URI_")
+        || matches!(
+            name,
+            "uri_scheme"
+                | "uri_pct_encoded"
+                | "uri_h16_colon"
+                | "uri_colon_h16"
+        )
 }
 
 impl<'a> SchemaCtx<'a> {
@@ -2940,6 +2990,84 @@ impl<'a> SchemaCtx<'a> {
         GrammarExpr::Ref(name)
     }
 
+    fn extract_pattern_terminal_rule(&mut self, expr: GrammarExpr, prefix: &str) -> GrammarExpr {
+        let key = expr_key(&expr);
+        if let Some(rule_name) = self.expr_dedup_cache.get(&key) {
+            return GrammarExpr::Ref(rule_name.clone());
+        }
+
+        let rule_name = self.fresh_rule_name(prefix);
+        self.insert_rule(rule_name.clone(), expr);
+        self.expr_dedup_cache.insert(key, rule_name.clone());
+        GrammarExpr::Ref(rule_name)
+    }
+
+    fn hoist_patterns_in_expr(&mut self, expr: GrammarExpr, prefix: &str) -> GrammarExpr {
+        match expr {
+            GrammarExpr::Ref(_) | GrammarExpr::Literal(_) | GrammarExpr::Epsilon => expr,
+            GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_) | GrammarExpr::AnyByte => {
+                self.extract_pattern_terminal_rule(expr, prefix)
+            }
+            GrammarExpr::Sequence(parts) => sequence_or_single(
+                parts
+                    .into_iter()
+                    .map(|part| self.hoist_patterns_in_expr(part, prefix))
+                    .collect(),
+            ),
+            GrammarExpr::Choice(parts) => choice_or_single(
+                parts
+                    .into_iter()
+                    .map(|part| self.hoist_patterns_in_expr(part, prefix))
+                    .collect(),
+            ),
+            GrammarExpr::Optional(inner) => {
+                GrammarExpr::Optional(Box::new(self.hoist_patterns_in_expr(*inner, prefix)))
+            }
+            GrammarExpr::Repeat(inner) => {
+                GrammarExpr::Repeat(Box::new(self.hoist_patterns_in_expr(*inner, prefix)))
+            }
+            GrammarExpr::RepeatOne(inner) => {
+                GrammarExpr::RepeatOne(Box::new(self.hoist_patterns_in_expr(*inner, prefix)))
+            }
+            GrammarExpr::RepeatRange { expr, min, max } => GrammarExpr::RepeatRange {
+                expr: Box::new(self.hoist_patterns_in_expr(*expr, prefix)),
+                min,
+                max,
+            },
+            GrammarExpr::Exclude { expr, exclude } => GrammarExpr::Exclude {
+                expr: Box::new(self.hoist_patterns_in_expr(*expr, prefix)),
+                exclude: Box::new(self.hoist_patterns_in_expr(*exclude, prefix)),
+            },
+            GrammarExpr::Intersect { expr, intersect } => GrammarExpr::Intersect {
+                expr: Box::new(self.hoist_patterns_in_expr(*expr, prefix)),
+                intersect: Box::new(self.hoist_patterns_in_expr(*intersect, prefix)),
+            },
+            GrammarExpr::SeparatedSequence { items, separator } => GrammarExpr::SeparatedSequence {
+                items: items
+                    .into_iter()
+                    .map(|(item_expr, required)| {
+                        (self.hoist_patterns_in_expr(item_expr, prefix), required)
+                    })
+                    .collect(),
+                separator: Box::new(self.hoist_patterns_in_expr(*separator, prefix)),
+            },
+        }
+    }
+
+    fn hoist_pattern_terminals_in_nonterminals(&mut self) {
+        let rule_names: Vec<String> = self.rules.iter().map(|(name, _)| name.clone()).collect();
+        for rule_name in rule_names {
+            if rule_name_is_terminal(&rule_name) {
+                continue;
+            }
+            let Some(&index) = self.rule_indices.get(&rule_name) else {
+                continue;
+            };
+            let expr = self.rules[index].1.clone();
+            self.rules[index].1 = self.hoist_patterns_in_expr(expr, "INLINE_PATTERN");
+        }
+    }
+
     fn fresh_rule_name(&mut self, prefix: &str) -> String {
         let prefix = sanitize_rule_name(prefix);
         loop {
@@ -2980,9 +3108,8 @@ impl<'a> SchemaCtx<'a> {
                     return GrammarExpr::Ref(rule_name.clone());
                 }
 
-                let char_expr = parse_regex(JSON_STRING_CHAR_PATTERN, true);
                 let expr = GrammarExpr::RepeatRange {
-                    expr: Box::new(expr_to_grammar_expr(&char_expr)),
+                    expr: Box::new(self.json_string_char_ref()),
                     min: count,
                     max: count,
                 };
@@ -3005,9 +3132,8 @@ impl<'a> SchemaCtx<'a> {
                     return GrammarExpr::Ref(rule_name.clone());
                 }
 
-                let char_expr = parse_regex(JSON_STRING_CHAR_PATTERN, true);
                 let expr = GrammarExpr::RepeatRange {
-                    expr: Box::new(expr_to_grammar_expr(&char_expr)),
+                    expr: Box::new(self.json_string_char_ref()),
                     min: 0,
                     max,
                 };
@@ -3682,17 +3808,14 @@ impl<'a> SchemaCtx<'a> {
     fn ensure_base_rules(&mut self) {
         self.insert_rule(JSON_STRING_CHAR_RULE, regex_expr(JSON_STRING_CHAR_PATTERN));
 
-        // JSON_STRING_BODY_RULE: split-aware body regex terminal used by
-        // json_string so the nonterminal does not embed raw regex.
-        let body_regex = string_value_body_regex(JSON_STRING_BODY_ONLY_REGEX);
-        self.insert_rule(JSON_STRING_BODY_RULE, regex_expr(&body_regex));
+        // JSON_STRING_BODY_RULE: split-aware body terminal used by json_string
+        // so the nonterminal does not embed the character body directly.
+        let (body_expr, _) = wrap_string_value_expr_parts(GrammarExpr::Repeat(Box::new(self.json_string_char_ref())));
+        self.insert_rule(JSON_STRING_BODY_RULE, body_expr);
 
         // JSON_STRING_MIDDLE_RULE: reusable middle fragment used to build
         // readable pattern-property key terminals.
-        self.insert_rule(
-            JSON_STRING_MIDDLE_RULE,
-            regex_expr(&format!("(?:{})", JSON_STRING_BODY_ONLY_REGEX)),
-        );
+        self.insert_rule(JSON_STRING_MIDDLE_RULE, GrammarExpr::Repeat(Box::new(self.json_string_char_ref())));
         self.insert_rule(
             JSON_STRING_MIDDLE_END_RULE,
             sequence_or_single(vec![
@@ -3714,9 +3837,9 @@ impl<'a> SchemaCtx<'a> {
         );
         self.insert_rule(JSON_NULL_RULE, literal_expr(b"null"));
 
-        // JSON_KEY_COLON_BODY_RULE: split-aware key-colon body regex terminal.
-        let kc_body_regex = key_colon_body_regex(JSON_STRING_BODY_ONLY_REGEX);
-        self.insert_rule(JSON_KEY_COLON_BODY_RULE, regex_expr(&kc_body_regex));
+        // JSON_KEY_COLON_BODY_RULE: split-aware key-colon body terminal.
+        let (kc_body_expr, _) = wrap_key_colon_expr_parts(GrammarExpr::Repeat(Box::new(self.json_string_char_ref())));
+        self.insert_rule(JSON_KEY_COLON_BODY_RULE, kc_body_expr);
 
         // JSON_KEY_COLON_RULE: always assembled from literals + named terminals.
         let json_key_colon_expr = wrap_key_colon_terminal(GrammarExpr::Ref(JSON_KEY_COLON_BODY_RULE.into()));
@@ -5857,7 +5980,7 @@ impl<'a> SchemaCtx<'a> {
         max_len: Option<usize>,
     ) -> GrammarExpr {
         let unit_expr = self.extract_terminal_rule(
-            regex_expr(unit_pattern.to_string()),
+            parsed_regex_expr(unit_pattern, true),
             "JSON_STRING_PATTERN_CHAR",
         );
         let bounded_body = match max_len {
@@ -5901,7 +6024,7 @@ impl<'a> SchemaCtx<'a> {
             }
             "hostname" => {
                 let label = self.extract_terminal_rule(
-                    regex_expr(json_hostname_label_pattern()),
+                    parsed_regex_expr(json_hostname_label_pattern(), true),
                     "JSON_FORMAT_HOSTNAME_LABEL",
                 );
                 Ok(quoted_expr(sequence_or_single(vec![
@@ -5933,299 +6056,417 @@ impl<'a> SchemaCtx<'a> {
             .unwrap_or_default();
         let ablated = |name: &str| ablate.contains(name);
         let run_chunk_max = uri_run_chunk_max();
-        // --- Character classes ---
 
-        // HEXDIG = DIGIT / "A"-"F" / "a"-"f"
-        let hexdig = GrammarExpr::CharClass {
-            def: "0-9a-fA-F".into(),
-            negate: false,
-            utf8: true,
-        };
-
-        // pct-encoded = "%" HEXDIG HEXDIG
-        let pct_encoded = self.extract_rule(
-            sequence_or_single(vec![
-                literal_expr(b"%"),
-                GrammarExpr::RepeatRange {
-                    expr: Box::new(hexdig.clone()),
-                    min: 2,
-                    max: 2,
-                },
-            ]),
-            "uri_pct",
+        let uri_hexdig = self.insert_named_terminal_rule(
+            "URI_HEXDIG",
+            GrammarExpr::CharClass {
+                def: "0-9a-fA-F".into(),
+                negate: false,
+                utf8: true,
+            },
         );
-
-        // pchar = unreserved / pct-encoded / sub-delims / ":" / "@"
-        // Char class for pchar (all pchar chars except pct-encoded)
-        let pchar_cc_def = r"a-zA-Z0-9\-._~!$&'()*+,;=:@";
-        let pchar_run = self.extract_terminal_rule(
-            regex_expr(&uri_charclass_run_regex(pchar_cc_def, run_chunk_max)),
-            "URI_PCHAR_RUN",
-        );
-        let pchar = self.extract_rule(
-            choice_or_single(vec![pchar_run, pct_encoded.clone()]),
-            "uri_pchar",
-        );
-
-        // Query/fragment char: pchar / "/" / "?"  (plus pct-encoded)
-        let qf_cc_def = r"a-zA-Z0-9\-._~!$&'()*+,;=:@/?";
-        let qf_run = self.extract_terminal_rule(
-            regex_expr(&uri_charclass_run_regex(qf_cc_def, run_chunk_max)),
-            "URI_QFC_RUN",
-        );
-        let qf_char = self.extract_rule(
-            choice_or_single(vec![qf_run, pct_encoded.clone()]),
-            "uri_qfc",
-        );
-
-        // --- scheme ---
-        // scheme = ALPHA *( ALPA / DIGIT / "+" / "-" / "." )
-        let scheme_tail_chunk = self.extract_terminal_rule(
-            regex_expr(&uri_charclass_run_regex("a-zA-Z0-9+\\-.", run_chunk_max)),
-            "URI_SCHEME_TAIL_CHUNK",
-        );
-        let scheme = sequence_or_single(vec![
+        let uri_alpha = self.insert_named_terminal_rule(
+            "URI_ALPHA",
             GrammarExpr::CharClass {
                 def: "a-zA-Z".into(),
                 negate: false,
                 utf8: true,
             },
-            GrammarExpr::Repeat(Box::new(scheme_tail_chunk)),
-        ]);
-
-        // --- userinfo ---
-        // userinfo = *( unreserved / pct-encoded / sub-delims / ":" )
-        // Char class = unreserved + sub-delims + ":" (i.e. pchar minus "@")
-        let userinfo_at = GrammarExpr::Optional(Box::new(self.extract_terminal_rule(
+        );
+        let uri_scheme_char = self.insert_named_terminal_rule(
+            "URI_SCHEME_CHAR",
+            regex_expr(&uri_charclass_run_regex("a-zA-Z0-9+\\-.", run_chunk_max)),
+        );
+        let uri_userinfo = self.insert_named_terminal_rule(
+            "URI_USERINFO",
             regex_expr(r#"(?:[a-zA-Z0-9\-._~!$&'()*+,;=:]|%[0-9A-Fa-f]{2})*@"#),
-            "URI_USERINFO_AT",
-        )));
-
-        // --- host ---
-        // host = IP-literal / IPv4address / reg-name
-
-        // IPvFuture = "v" 1*HEXDIG "." 1*( unreserved / sub-delims / ":" )
-        let ipv_future = sequence_or_single(vec![
-            literal_expr(b"v"),
-            GrammarExpr::RepeatOne(Box::new(hexdig.clone())),
-            literal_expr(b"."),
-            GrammarExpr::RepeatOne(Box::new(GrammarExpr::CharClass {
+        );
+        let uri_ipvfuture_char = self.insert_named_terminal_rule(
+            "URI_IPVFUTURE_CHAR",
+            GrammarExpr::CharClass {
                 def: r"a-zA-Z0-9\-._~!$&'()*+,;=:".into(),
                 negate: false,
                 utf8: true,
-            })),
-        ]);
-
-        // h16 = 1*4 HEXDIG
-        let h16 = GrammarExpr::RepeatRange {
-            expr: Box::new(hexdig.clone()),
-            min: 1,
-            max: 4,
-        };
-        let h16_colon = self.extract_rule(
-            sequence_or_single(vec![h16.clone(), literal_expr(b":")]),
-            "uri_h16c",
+            },
         );
-        let colon_h16 = self.extract_rule(
-            sequence_or_single(vec![literal_expr(b":"), h16.clone()]),
-            "uri_ch16",
+        let uri_dec_octet = self.insert_named_terminal_rule(
+            "URI_DEC_OCTET",
+            regex_expr(r#"(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"#),
+        );
+        let uri_reg_name_char = self.insert_named_terminal_rule(
+            "URI_REG_NAME_CHAR",
+            regex_expr(&uri_charclass_run_regex(r"a-zA-Z0-9\-._~!$&'()*+,;=", run_chunk_max)),
+        );
+        let uri_port_digit = self.insert_named_terminal_rule(
+            "URI_PORT",
+            regex_expr(&uri_charclass_run_regex("0-9", run_chunk_max)),
+        );
+        let uri_pchar_base = self.insert_named_terminal_rule(
+            "URI_PCHAR",
+            regex_expr(&uri_charclass_run_regex(r"a-zA-Z0-9\-._~!$&'()*+,;=:@", run_chunk_max)),
+        );
+        let uri_query_frag_char = self.insert_named_terminal_rule(
+            "URI_QUERY_FRAG_CHAR",
+            regex_expr(&uri_charclass_run_regex(r"a-zA-Z0-9\-._~!$&'()*+,;=:@/?", run_chunk_max)),
         );
 
-        // IPv6 address — 10 alternatives from RFC 3986 Appendix A
-        let ipv6_alts = vec![
-            // 1: h16:h16:h16:h16:h16:h16:h16:h16  (full address)
+        let uri_pct_encoded = self.insert_named_terminal_rule(
+            "uri_pct_encoded",
             sequence_or_single(vec![
-                GrammarExpr::RepeatRange { expr: Box::new(h16_colon.clone()), min: 7, max: 7 },
-                h16.clone(),
+                literal_expr(b"%"),
+                GrammarExpr::RepeatRange {
+                    expr: Box::new(uri_hexdig.clone()),
+                    min: 2,
+                    max: 2,
+                },
             ]),
-            // 2: (:: at end) (h16 ":"){1,7} ":"
+        );
+        self.insert_rule(
+            "uri_pchar",
+            choice_or_single(vec![uri_pchar_base.clone(), uri_pct_encoded.clone()]),
+        );
+        let uri_pchar = GrammarExpr::Ref("uri_pchar".into());
+        self.insert_rule(
+            "uri_query_frag",
+            choice_or_single(vec![uri_query_frag_char.clone(), uri_pct_encoded.clone()]),
+        );
+        let uri_query_frag = GrammarExpr::Ref("uri_query_frag".into());
+        let uri_h16_colon = self.insert_named_terminal_rule(
+            "uri_h16_colon",
             sequence_or_single(vec![
-                GrammarExpr::RepeatRange { expr: Box::new(h16_colon.clone()), min: 1, max: 7 },
+                GrammarExpr::RepeatRange {
+                    expr: Box::new(uri_hexdig.clone()),
+                    min: 1,
+                    max: 4,
+                },
                 literal_expr(b":"),
             ]),
-            // 3 (h16 ":"){1,6} ":" h16
-            sequence_or_single(vec![
-                GrammarExpr::RepeatRange { expr: Box::new(h16_colon.clone()), min: 1, max: 6 },
-                literal_expr(b":"),
-                h16.clone(),
-            ]),
-            // 4 (h16 ":"){1,5} (":" h16){1,2}
-            sequence_or_single(vec![
-                GrammarExpr::RepeatRange { expr: Box::new(h16_colon.clone()), min: 1, max: 5 },
-                GrammarExpr::RepeatRange { expr: Box::new(colon_h16.clone()), min: 1, max: 2 },
-            ]),
-            // 5 (h16 ":"){1,4} (":" h16){1,3}
-            sequence_or_single(vec![
-                GrammarExpr::RepeatRange { expr: Box::new(h16_colon.clone()), min: 1, max: 4 },
-                GrammarExpr::RepeatRange { expr: Box::new(colon_h16.clone()), min: 1, max: 3 },
-            ]),
-            // 6 (h16 ":"){1,3} (":" h16){1,4}
-            sequence_or_single(vec![
-                GrammarExpr::RepeatRange { expr: Box::new(h16_colon.clone()), min: 1, max: 3 },
-                GrammarExpr::RepeatRange { expr: Box::new(colon_h16.clone()), min: 1, max: 4 },
-            ]),
-            // 7 (h16 ":"){1,2} (":" h16){1,5}
-            sequence_or_single(vec![
-                GrammarExpr::RepeatRange { expr: Box::new(h16_colon.clone()), min: 1, max: 2 },
-                GrammarExpr::RepeatRange { expr: Box::new(colon_h16.clone()), min: 1, max: 5 },
-            ]),
-            // 8 h16 ":" (":" h16){1,6}
-            sequence_or_single(vec![
-                h16.clone(),
-                literal_expr(b":"),
-                GrammarExpr::RepeatRange { expr: Box::new(colon_h16.clone()), min: 1, max: 6 },
-            ]),
-            // 9 ":" (":" h16){1,7}
+        );
+        let uri_colon_h16 = self.insert_named_terminal_rule(
+            "uri_colon_h16",
             sequence_or_single(vec![
                 literal_expr(b":"),
-                GrammarExpr::RepeatRange { expr: Box::new(colon_h16.clone()), min: 1, max: 7 },
+                GrammarExpr::RepeatRange {
+                    expr: Box::new(uri_hexdig.clone()),
+                    min: 1,
+                    max: 4,
+                },
             ]),
-            // 10 :: alone
-            literal_expr(b"::"),
-        ];
-        let ipv6_address = if ablated("ipv6") {
+        );
+
+        let uri_ipv6_address_expr = if ablated("ipv6") {
             literal_expr(b"::")
         } else {
-            choice_or_single(ipv6_alts)
+            choice_or_single(vec![
+                sequence_or_single(vec![
+                    GrammarExpr::RepeatRange {
+                        expr: Box::new(uri_h16_colon.clone()),
+                        min: 7,
+                        max: 7,
+                    },
+                    GrammarExpr::RepeatRange {
+                        expr: Box::new(uri_hexdig.clone()),
+                        min: 1,
+                        max: 4,
+                    },
+                ]),
+                sequence_or_single(vec![
+                    GrammarExpr::RepeatRange {
+                        expr: Box::new(uri_h16_colon.clone()),
+                        min: 1,
+                        max: 7,
+                    },
+                    literal_expr(b":"),
+                ]),
+                sequence_or_single(vec![
+                    GrammarExpr::RepeatRange {
+                        expr: Box::new(uri_h16_colon.clone()),
+                        min: 1,
+                        max: 6,
+                    },
+                    literal_expr(b":"),
+                    GrammarExpr::RepeatRange {
+                        expr: Box::new(uri_hexdig.clone()),
+                        min: 1,
+                        max: 4,
+                    },
+                ]),
+                sequence_or_single(vec![
+                    GrammarExpr::RepeatRange {
+                        expr: Box::new(uri_h16_colon.clone()),
+                        min: 1,
+                        max: 5,
+                    },
+                    GrammarExpr::RepeatRange {
+                        expr: Box::new(uri_colon_h16.clone()),
+                        min: 1,
+                        max: 2,
+                    },
+                ]),
+                sequence_or_single(vec![
+                    GrammarExpr::RepeatRange {
+                        expr: Box::new(uri_h16_colon.clone()),
+                        min: 1,
+                        max: 4,
+                    },
+                    GrammarExpr::RepeatRange {
+                        expr: Box::new(uri_colon_h16.clone()),
+                        min: 1,
+                        max: 3,
+                    },
+                ]),
+                sequence_or_single(vec![
+                    GrammarExpr::RepeatRange {
+                        expr: Box::new(uri_h16_colon.clone()),
+                        min: 1,
+                        max: 3,
+                    },
+                    GrammarExpr::RepeatRange {
+                        expr: Box::new(uri_colon_h16.clone()),
+                        min: 1,
+                        max: 4,
+                    },
+                ]),
+                sequence_or_single(vec![
+                    GrammarExpr::RepeatRange {
+                        expr: Box::new(uri_h16_colon.clone()),
+                        min: 1,
+                        max: 2,
+                    },
+                    GrammarExpr::RepeatRange {
+                        expr: Box::new(uri_colon_h16.clone()),
+                        min: 1,
+                        max: 5,
+                    },
+                ]),
+                sequence_or_single(vec![
+                    GrammarExpr::RepeatRange {
+                        expr: Box::new(uri_hexdig.clone()),
+                        min: 1,
+                        max: 4,
+                    },
+                    literal_expr(b":"),
+                    GrammarExpr::RepeatRange {
+                        expr: Box::new(uri_colon_h16.clone()),
+                        min: 1,
+                        max: 6,
+                    },
+                ]),
+                sequence_or_single(vec![
+                    literal_expr(b":"),
+                    GrammarExpr::RepeatRange {
+                        expr: Box::new(uri_colon_h16.clone()),
+                        min: 1,
+                        max: 7,
+                    },
+                ]),
+                literal_expr(b"::"),
+            ])
         };
+        self.insert_rule("uri_ipv6_address", uri_ipv6_address_expr);
+        let uri_ipv6_address = GrammarExpr::Ref("uri_ipv6_address".into());
 
-        // IP-literal = "[" ( IPv6address / IPvFuture ) "]"
-        let ip_literal_choice = if ablated("ipv_future") {
-            ipv6_address
-        } else {
-            choice_or_single(vec![ipv6_address, ipv_future])
-        };
-        let ip_literal = sequence_or_single(vec![
-            literal_expr(b"["),
-            ip_literal_choice,
-            literal_expr(b"]"),
-        ]);
-
-        // IPv4address = dec-octet "." dec-octet "." dec-octet "." dec-octet
-        let dec_octet = self.extract_terminal_rule(
-            regex_expr(r#"(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"#),
-            "URI_DEC_OCTET",
+        let uri_scheme = self.insert_named_terminal_rule(
+            "uri_scheme",
+            if ablated("scheme_rich") {
+                uri_alpha.clone()
+            } else {
+                sequence_or_single(vec![
+                    uri_alpha.clone(),
+                    GrammarExpr::Repeat(Box::new(uri_scheme_char.clone())),
+                ])
+            },
         );
-        let ipv4_address = sequence_or_single(vec![
-            dec_octet.clone(),
-            literal_expr(b"."),
-            dec_octet.clone(),
-            literal_expr(b"."),
-            dec_octet.clone(),
-            literal_expr(b"."),
-            dec_octet,
-        ]);
-
-        // reg-name = *( unreserved / pct-encoded / sub-delims )
-        let reg_name_run = self.extract_terminal_rule(
-            regex_expr(&uri_charclass_run_regex(r"a-zA-Z0-9\-._~!$&'()*+,;=", run_chunk_max)),
-            "URI_REG_NAME_RUN",
+        self.insert_rule(
+            "uri_query",
+            sequence_or_single(vec![
+                literal_expr(b"?"),
+                GrammarExpr::Repeat(Box::new(uri_query_frag.clone())),
+            ]),
         );
-        let re_name = GrammarExpr::Repeat(Box::new(self.extract_rule(
-            choice_or_single(vec![reg_name_run, pct_encoded.clone()]),
-            "uri_reg_name_unit",
-        )));
+        let uri_query = GrammarExpr::Ref("uri_query".into());
+        self.insert_rule(
+            "uri_fragment",
+            sequence_or_single(vec![
+                literal_expr(b"#"),
+                GrammarExpr::Repeat(Box::new(uri_query_frag.clone())),
+            ]),
+        );
+        let uri_fragment = GrammarExpr::Ref("uri_fragment".into());
 
-        let mut host_alts: Vec<GrammarExpr> = Vec::new();
-        if !ablated("ip_literal") { host_alts.push(ip_literal); }
-        if !ablated("ipv4") { host_alts.push(ipv4_address); }
-        if !ablated("reg_name") { host_alts.push(re_name); } else {
-            // Keep at least one host alternative (single letter) so URI is parseable.
-            host_alts.push(GrammarExpr::CharClass { def: "a-zA-Z".into(), negate: false, utf8: true });
-        }
-        let host = choice_or_single(host_alts);
+        self.insert_rule(
+            "uri_ipv_future",
+            sequence_or_single(vec![
+                literal_expr(b"v"),
+                GrammarExpr::RepeatOne(Box::new(uri_hexdig.clone())),
+                literal_expr(b"."),
+                GrammarExpr::RepeatOne(Box::new(uri_ipvfuture_char.clone())),
+            ]),
+        );
+        let uri_ipv_future = GrammarExpr::Ref("uri_ipv_future".into());
 
-        // --- port ---
-        // port = *DIGIT
-        let port = GrammarExpr::Optional(Box::new(sequence_or_single(vec![
-            literal_expr(b":"),
-            GrammarExpr::Repeat(Box::new(self.extract_terminal_rule(
-                regex_expr(&uri_charclass_run_regex("0-9", run_chunk_max)),
-                "URI_PORT_DIGIT_RUN",
-            ))),
-        ])));
+        self.insert_rule(
+            "uri_ipv4_address",
+            sequence_or_single(vec![
+                uri_dec_octet.clone(),
+                literal_expr(b"."),
+                uri_dec_octet.clone(),
+                literal_expr(b"."),
+                uri_dec_octet.clone(),
+                literal_expr(b"."),
+                uri_dec_octet.clone(),
+            ]),
+        );
+        let uri_ipv4_address = GrammarExpr::Ref("uri_ipv4_address".into());
 
-        // authority = [ userinfo "@" ] host [ ":" port ]
-        let userinfo_part = if ablated("userinfo") { GrammarExpr::Sequence(vec![]) } else { userinfo_at };
-        let port_part = if ablated("port") { GrammarExpr::Sequence(vec![]) } else { port };
-        let authority = sequence_or_single(vec![userinfo_part, host, port_part]);
-
-        // --- path ---
-        // segment = *pchar
-        let segment = GrammarExpr::Repeat(Box::new(pchar.clone()));
-        // segment-nz = 1*pchar
-        let segment_nz = GrammarExpr::RepeatOne(Box::new(pchar.clone()));
-
-        // path-abempty = *( "/" segment )
-        let path_abempty = GrammarExpr::Repeat(Box::new(sequence_or_single(vec![
-            literal_expr(b"/"),
-            segment.clone(),
-        ])));
-
-        // path-absolute = "/" [ segment-nz *( "/" segment ) ]
-        let path_absolute = sequence_or_single(vec![
-            literal_expr(b"/"),
-            GrammarExpr::Optional(Box::new(sequence_or_single(vec![
-                segment_nz.clone(),
-                GrammarExpr::Repeat(Box::new(sequence_or_single(vec![
-                    literal_expr(b"/"),
-                    segment.clone(),
-                ]))),
+        self.insert_rule(
+            "uri_reg_name",
+            GrammarExpr::Repeat(Box::new(choice_or_single(vec![
+                uri_reg_name_char.clone(),
+                uri_pct_encoded.clone(),
             ]))),
-        ]);
+        );
+        let uri_reg_name = GrammarExpr::Ref("uri_reg_name".into());
 
-        // path-rootless = segment-nz *( "/" segment )
-        let path_rootless = sequence_or_single(vec![
-            segment_nz,
+        let ip_literal_choice = if ablated("ipv_future") {
+            uri_ipv6_address.clone()
+        } else {
+            choice_or_single(vec![uri_ipv6_address.clone(), uri_ipv_future.clone()])
+        };
+        self.insert_rule(
+            "uri_ip_literal",
+            sequence_or_single(vec![
+                literal_expr(b"["),
+                ip_literal_choice,
+                literal_expr(b"]"),
+            ]),
+        );
+        let uri_ip_literal = GrammarExpr::Ref("uri_ip_literal".into());
+
+        self.insert_rule(
+            "uri_host",
+            if ablated("reg_name") && ablated("ip_literal") && ablated("ipv4") {
+                uri_alpha.clone()
+            } else {
+                let mut host_alts = Vec::new();
+                if !ablated("ip_literal") {
+                    host_alts.push(uri_ip_literal.clone());
+                }
+                if !ablated("ipv4") {
+                    host_alts.push(uri_ipv4_address.clone());
+                }
+                if !ablated("reg_name") {
+                    host_alts.push(uri_reg_name.clone());
+                }
+                choice_or_single(host_alts)
+            },
+        );
+        let uri_host = GrammarExpr::Ref("uri_host".into());
+
+        self.insert_rule(
+            "uri_port",
+            sequence_or_single(vec![
+                literal_expr(b":"),
+                GrammarExpr::Repeat(Box::new(uri_port_digit.clone())),
+            ]),
+        );
+        let uri_port = GrammarExpr::Ref("uri_port".into());
+
+        self.insert_rule(
+            "uri_authority",
+            sequence_or_single(vec![
+                if ablated("userinfo") {
+                    empty_expr()
+                } else {
+                    GrammarExpr::Optional(Box::new(uri_userinfo.clone()))
+                },
+                uri_host.clone(),
+                if ablated("port") {
+                    empty_expr()
+                } else {
+                    GrammarExpr::Optional(Box::new(uri_port.clone()))
+                },
+            ]),
+        );
+        let uri_authority = GrammarExpr::Ref("uri_authority".into());
+
+        self.insert_rule(
+            "uri_path_abempty",
             GrammarExpr::Repeat(Box::new(sequence_or_single(vec![
                 literal_expr(b"/"),
-                segment,
+                GrammarExpr::Repeat(Box::new(uri_pchar.clone())),
             ]))),
-        ]);
+        );
+        let uri_path_abempty = GrammarExpr::Ref("uri_path_abempty".into());
 
-        // hier-part = "//" authority path-abempty
-        //           / path-absolute
-        //           / path-rootless
-        //           / path-empty
-        let mut hier_alts: Vec<GrammarExpr> = Vec::new();
-        let path_abempty_part = if ablated("path_abempty") { GrammarExpr::Sequence(vec![]) } else { path_abempty };
-        hier_alts.push(sequence_or_single(vec![
+        self.insert_rule(
+            "uri_path_absolute",
+            sequence_or_single(vec![
+                literal_expr(b"/"),
+                GrammarExpr::Optional(Box::new(sequence_or_single(vec![
+                    GrammarExpr::RepeatOne(Box::new(uri_pchar.clone())),
+                    GrammarExpr::Repeat(Box::new(sequence_or_single(vec![
+                        literal_expr(b"/"),
+                        GrammarExpr::Repeat(Box::new(uri_pchar.clone())),
+                    ]))),
+                ]))),
+            ]),
+        );
+        let uri_path_absolute = GrammarExpr::Ref("uri_path_absolute".into());
+
+        self.insert_rule(
+            "uri_path_rootless",
+            sequence_or_single(vec![
+                GrammarExpr::RepeatOne(Box::new(uri_pchar.clone())),
+                GrammarExpr::Repeat(Box::new(sequence_or_single(vec![
+                    literal_expr(b"/"),
+                    GrammarExpr::Repeat(Box::new(uri_pchar.clone())),
+                ]))),
+            ]),
+        );
+        let uri_path_rootless = GrammarExpr::Ref("uri_path_rootless".into());
+
+        let mut hier_alts = vec![sequence_or_single(vec![
             literal_expr(b"//"),
-            authority,
-            path_abempty_part,
-        ]));
+            uri_authority,
+            if ablated("path_abempty") {
+                empty_expr()
+            } else {
+                uri_path_abempty.clone()
+            },
+        ])];
         if !ablated("hier_part_extra") {
-            if !ablated("path_absolute") { hier_alts.push(path_absolute); }
-            if !ablated("path_rootless") { hier_alts.push(path_rootless); }
-            hier_alts.push(GrammarExpr::Sequence(vec![])); // path-empty
+            if !ablated("path_absolute") {
+                hier_alts.push(uri_path_absolute);
+            }
+            if !ablated("path_rootless") {
+                hier_alts.push(uri_path_rootless);
+            }
+            hier_alts.push(empty_expr());
         }
-        let hier_part = choice_or_single(hier_alts);
+        self.insert_rule("uri_hier_part", choice_or_single(hier_alts));
+        let uri_hier_part = GrammarExpr::Ref("uri_hier_part".into());
 
-        // --- query & fragment ---
-        // query = "?" *( pchar / "/" / "?" )  [optional group]
-        let query = GrammarExpr::Optional(Box::new(sequence_or_single(vec![
-            literal_expr(b"?"),
-            GrammarExpr::Repeat(Box::new(qf_char.clone())),
-        ])));
+        self.insert_rule(
+            "uri",
+            sequence_or_single(vec![
+                uri_scheme,
+                literal_expr(b":"),
+                uri_hier_part,
+                if ablated("query") {
+                    empty_expr()
+                } else {
+                    GrammarExpr::Optional(Box::new(uri_query))
+                },
+                if ablated("fragment") {
+                    empty_expr()
+                } else {
+                    GrammarExpr::Optional(Box::new(uri_fragment))
+                },
+            ]),
+        );
 
-        // fragment = "#" *( pchar / "/" / "?" )  [optional group]
-        let fragment = GrammarExpr::Optional(Box::new(sequence_or_single(vec![
-            literal_expr(b"#"),
-            GrammarExpr::Repeat(Box::new(qf_char)),
-        ])));
-
-        // URI = scheme ":" hier-part query fragment
-        let query_part = if ablated("query") { GrammarExpr::Sequence(vec![]) } else { query };
-        let fragment_part = if ablated("fragment") { GrammarExpr::Sequence(vec![]) } else { fragment };
-        let uri_body = sequence_or_single(vec![
-            scheme,
-            literal_expr(b":"),
-            hier_part,
-            query_part,
-            fragment_part,
-        ]);
-
-        quoted_expr(uri_body)
+        quoted_expr(GrammarExpr::Ref("uri".into()))
     }
 
     fn json_literal(&self, value: &Value) -> GrammarExpr {
