@@ -1054,6 +1054,89 @@ mod tests {
     }
 
     #[test]
+    fn test_profiled_advance_manual_split_from_single_stack() {
+        // Artificial setup that mirrors the reported shape:
+        // incoming: [0, 1, 229]
+        // token 46 (") => pure shift/replace to [0, 1, 41]
+        // token 8 (,) => split action: shift to [0, 1, 41, 5] and reduce to [0, 1, 384]
+        let mut action: Vec<rustc_hash::FxHashMap<TerminalID, Action>> =
+            vec![Default::default(); 385];
+        let mut goto: Vec<rustc_hash::FxHashMap<u32, (u32, bool)>> =
+            vec![Default::default(); 385];
+
+        // token 46 is quote: replace top 229 -> 41
+        action[229].insert(46, Action::Shift(41, true));
+
+        // token 8 is comma: split into
+        // - shift branch to state 5
+        // - reduce branch (nt=7, len=1) then goto from state 1 -> 384
+        action[41].insert(
+            8,
+            Action::Split {
+                shift: Some((5, false)),
+                reduces: vec![(7, 1)],
+                accept: false,
+            },
+        );
+        goto[1].insert(7, (384, false));
+        action[384].insert(8, Action::Shift(384, true));
+
+        let table = GLRTable {
+            action,
+            goto,
+            num_states: 385,
+            num_terminals: 47,
+            num_rules: 0,
+            rules: Vec::new(),
+            forwarded_shifts: rustc_hash::FxHashSet::default(),
+        };
+
+        let gss0 = ParserGSS::from_stacks(&[(vec![0, 1, 229], TerminalsDisallowed::new())]);
+
+        let (gss1, p1) = advance_stacks_profiled(&table, &gss0, 46);
+        assert!(p1.pure_shift, "first advance should be pure shift");
+        assert!(
+            !p1.nondeterministic_entered,
+            "first advance should not enter nondet path"
+        );
+        let s1 = gss1.to_stacks();
+        assert_eq!(s1.len(), 1);
+        assert_eq!(s1[0].0, vec![0, 1, 41]);
+
+        let (gss2, p2) = advance_stacks_profiled(&table, &gss1, 8);
+        assert!(p2.nondeterministic_entered, "second advance should enter nondet path");
+
+        let mut stacks2: Vec<Vec<u32>> = gss2.to_stacks().into_iter().map(|(s, _)| s).collect();
+        stacks2.sort();
+        assert_eq!(stacks2, vec![vec![0, 1, 41, 5], vec![0, 1, 384]]);
+
+        // Timing loop for a stable per-advance number on this tiny artificial case.
+        let iters = std::env::var("GLRMASK_TOY_SPLIT_ADVANCE_ITERS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(20_000);
+        let wall_start = std::time::Instant::now();
+        let mut total_ns = 0u64;
+        let mut nondet_ns = 0u64;
+
+        for _ in 0..iters {
+            let (g, p) = advance_stacks_profiled(&table, &gss1, 8);
+            total_ns = total_ns.saturating_add(p.total_ns);
+            nondet_ns = nondet_ns.saturating_add(p.nondet_ns);
+            assert_eq!(g.to_stacks().len(), 2);
+        }
+
+        let wall_ns = wall_start.elapsed().as_nanos() as u64;
+        eprintln!(
+            "[glrmask/toy_manual_split] iters={} avg_wall_us={:.3} avg_total_us={:.3} avg_nondet_us={:.3}",
+            iters,
+            wall_ns as f64 / iters as f64 / 1_000.0,
+            total_ns as f64 / iters as f64 / 1_000.0,
+            nondet_ns as f64 / iters as f64 / 1_000.0,
+        );
+    }
+
+    #[test]
     fn test_vstack_matches_reference_raw_o9788_n10_prefix() {
         const T_A: u32 = 0;
         const T_C: u32 = 1;
