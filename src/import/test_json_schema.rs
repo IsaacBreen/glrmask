@@ -4,7 +4,7 @@
 //! assertions stay omitted.
 
 use crate::import::ast::{GrammarExpr, NamedGrammar};
-use crate::import::json_schema::schema_to_named_grammar;
+use crate::import::json_schema::{json_schema_to_grammar, schema_to_named_grammar};
 use crate::runtime::{Constraint, ConstraintState};
 use crate::Vocab;
 use std::path::Path;
@@ -40,6 +40,14 @@ fn schema_constraint(schema: &str) -> Constraint {
 fn schema_constraint_with_vocab(schema: &str, vocab: &Vocab) -> Constraint {
     Constraint::from_json_schema(schema, vocab)
         .unwrap_or_else(|error| panic!("schema should compile: {error}"))
+}
+
+// Bypass Constraint::from_json_schema so debug-only import checks do not short-circuit
+// this targeted regression reproduction.
+fn schema_constraint_direct_compile(schema: &str, vocab: &Vocab) -> Constraint {
+    let grammar = json_schema_to_grammar(schema)
+        .unwrap_or_else(|error| panic!("schema should compile to grammar: {error}"));
+    crate::compiler::compile::compile(&grammar, vocab)
 }
 
 fn named_grammar_from_schema(schema: &str) -> NamedGrammar {
@@ -228,6 +236,43 @@ fn contains_literal_prefix(expr: &GrammarExpr, prefix: &[u8]) -> bool {
         | GrammarExpr::RepeatRange { expr: inner, .. } => contains_literal_prefix(inner, prefix),
         _ => false,
     }
+}
+
+#[test]
+fn test_uri_reg_name_chunking_regression_repro_commit_rejects_on_valid_prefix() {
+        // Minimal schema that exercises the same URI host/path boundary behavior
+        // seen in o1051 profiling.
+        let schema = r#"
+        {
+            "type": "object",
+            "properties": {
+                "portrait": {
+                    "type": "string",
+                    "format": "uri",
+                    "maxLength": 255
+                }
+            },
+            "required": ["portrait"],
+            "additionalProperties": false
+        }
+        "#;
+
+        let vocab = byte_vocab();
+        let constraint = schema_constraint_direct_compile(schema, &vocab);
+        let mut state = constraint.start();
+
+        let payload = br#"{"portrait":"https://www.example.com/h"}"#;
+        for (idx, &byte) in payload.iter().enumerate() {
+                let mask = state.mask();
+                assert_token_allowed(
+                        &mask,
+                        byte as usize,
+                        &format!("byte should be allowed at index {idx}: {byte:?}"),
+                );
+                state
+                        .commit_token(byte as u32)
+                        .unwrap_or_else(|error| panic!("regression reproduced at byte index {idx} ({byte:?}): {error}"));
+        }
 }
 
 fn env_lock() -> &'static Mutex<()> {

@@ -6116,10 +6116,23 @@ impl<'a> SchemaCtx<'a> {
             regex_expr(&uri_charclass_run_regex(r"a-zA-Z0-9\-._~!$&'()*+,;=", run_chunk_max)),
             "URI_REG_NAME_RUN",
         );
-        let re_name = GrammarExpr::Repeat(Box::new(choice_or_single(vec![
-            reg_name_run,
-            pct_encoded.clone(),
-        ])));
+        let reg_name_unit = self.extract_rule(
+            choice_or_single(vec![reg_name_run, pct_encoded.clone()]),
+            "uri_reg_name_unit",
+        );
+        // Aggressive chunking of reg-name to reduce intermediate acceptance points.
+        let reg_name_quad = self.extract_rule(
+            repeat_expr(reg_name_unit.clone(), 4, Some(4)),
+            "uri_reg_name_quad",
+        );
+        let reg_name_tail = self.extract_rule(
+            repeat_expr(reg_name_unit.clone(), 0, Some(3)),
+            "uri_reg_name_tail",
+        );
+        let re_name = sequence_or_single(vec![
+            GrammarExpr::Repeat(Box::new(reg_name_quad)),
+            reg_name_tail,
+        ]);
 
         let mut host_alts: Vec<GrammarExpr> = Vec::new();
         if !ablated("ip_literal") { host_alts.push(ip_literal); }
