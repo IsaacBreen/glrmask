@@ -304,12 +304,11 @@ impl<'a> ConstraintState<'a> {
         all_empty
     }
 
-    fn token_bytes_for_id(&self, token_id: u32) -> Option<&[u8]> {
+    fn internal_token_bytes(&self, internal_token: u32) -> Option<&[u8]> {
         self.constraint
-            .token_bytes_dense
-            .get(token_id as usize)
-            .and_then(|bytes| bytes.as_deref())
-            .or_else(|| self.constraint.token_bytes.get(&token_id).map(Vec::as_slice))
+            .internal_token_bytes
+            .get(&internal_token)
+            .map(Vec::as_slice)
     }
 
     fn supplement_mask_from_raw_parser(&self, merged: &mut [u64]) {
@@ -318,18 +317,20 @@ impl<'a> ConstraintState<'a> {
                 continue;
             }
 
-            let possible_matches = self.constraint.possible_matches_for_state(tokenizer_state);
-            if possible_matches.is_empty() {
+            let Some(possible_matches) = self
+                .constraint
+                .possible_matches_for_state_internal(tokenizer_state)
+            else {
                 continue;
-            }
+            };
 
             let candidate_tokens: BTreeSet<u32> = possible_matches
                 .values()
                 .flat_map(|token_ids| token_ids.iter())
                 .collect();
 
-            for token_id in candidate_tokens {
-                let Some(token_bytes) = self.token_bytes_for_id(token_id) else {
+            for internal_token in candidate_tokens {
+                let Some(token_bytes) = self.internal_token_bytes(internal_token) else {
                     continue;
                 };
                 let exec = self.constraint.tokenizer.execute_from_state(token_bytes, tokenizer_state);
@@ -341,7 +342,7 @@ impl<'a> ConstraintState<'a> {
                     continue;
                 }
 
-                let internal_token = self.constraint.internal_token_for_original(token_id) as usize;
+                let internal_token = internal_token as usize;
                 let word = internal_token / 64;
                 let bit = internal_token % 64;
                 if let Some(slot) = merged.get_mut(word) {
