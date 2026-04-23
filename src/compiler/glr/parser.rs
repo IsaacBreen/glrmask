@@ -351,11 +351,14 @@ fn advance_nondeterministically(
                         token,
                     );
                     if det_ok {
-                        if let Some(stack) = branch.try_virtual_stack() {
-                            let current = std::mem::replace(&mut shifted, ParserGSS::empty());
-                            shifted = current.absorb_vstack_same_acc_owned(stack);
-                        } else {
-                            merge_into(&mut shifted, branch);
+                        match branch.into_virtual_stack() {
+                            Ok(stack) => {
+                                let current = std::mem::replace(&mut shifted, ParserGSS::empty());
+                                shifted = current.absorb_vstack_same_acc_owned(stack);
+                            }
+                            Err(branch) => {
+                                merge_into(&mut shifted, branch);
+                            }
                         }
                     } else {
                         merge_into(&mut next, branch);
@@ -896,11 +899,14 @@ fn advance_nondeterministically_profiled(
                     );
                     let t_merge = Instant::now();
                     if det_ok2 {
-                        if let Some(stack) = branch.try_virtual_stack() {
-                            let current = std::mem::replace(&mut shifted, ParserGSS::empty());
-                            shifted = current.absorb_vstack_same_acc_owned(stack);
-                        } else {
-                            merge_into(&mut shifted, branch);
+                        match branch.into_virtual_stack() {
+                            Ok(stack) => {
+                                let current = std::mem::replace(&mut shifted, ParserGSS::empty());
+                                shifted = current.absorb_vstack_same_acc_owned(stack);
+                            }
+                            Err(branch) => {
+                                merge_into(&mut shifted, branch);
+                            }
                         }
                     } else {
                         merge_into(&mut next, branch);

@@ -3514,6 +3514,37 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         Some(VirtualStack { values, next, acc: interface.acc.clone(), pending_top: None })
     }
 
+    pub fn into_virtual_stack(self) -> Result<VirtualStack<T, A>, Self> {
+        match Arc::try_unwrap(self.inner) {
+            Ok(Upper::Interface(iface_arc)) => match Arc::try_unwrap(iface_arc) {
+                Ok(Interface { inner, acc }) => match Arc::try_unwrap(inner) {
+                    Ok(Lower::Segment(seg)) => {
+                        let seg = Arc::try_unwrap(seg).unwrap_or_else(|arc| (*arc).clone());
+                        Ok(VirtualStack {
+                        values: seg.values,
+                        next: seg.next,
+                        acc,
+                        pending_top: None,
+                    })
+                    }
+                    Ok(lower) => Err(LeveledGSS {
+                        inner: new_interface(Arc::new(lower), acc),
+                    }),
+                    Err(inner) => Err(LeveledGSS {
+                        inner: new_interface(inner, acc),
+                    }),
+                },
+                Err(iface_arc) => Err(LeveledGSS {
+                    inner: Arc::new(Upper::Interface(iface_arc)),
+                }),
+            },
+            Ok(upper) => Err(LeveledGSS {
+                inner: Arc::new(upper),
+            }),
+            Err(inner) => Err(LeveledGSS { inner }),
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         match &*self.inner {
             Upper::Branch(b) => b.children.is_empty() && b.empty.is_none(),
