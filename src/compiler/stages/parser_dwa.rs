@@ -30,7 +30,7 @@ use crate::ds::weight::Weight;
 type TerminalBundle = BTreeMap<TerminalID, Weight>;
 type BundleSignature = Vec<(TerminalID, Weight)>;
 type ComposeMemo = Vec<Option<Option<NwaBody>>>;
-type ConcatMemo = HashMap<(usize, u32), Option<NwaBody>>;
+type ConcatMemo = FxHashMap<(usize, u32), Option<NwaBody>>;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct ParserDwaPhaseProfile {
@@ -131,7 +131,7 @@ fn build_state_summaries(
 ) -> Vec<StateSummary> {
     let mut pending_branches_by_state: Vec<Vec<PendingBranch>> =
         Vec::with_capacity(terminal_dwa.states.len());
-    let mut bundle_ids_by_signature: HashMap<BundleSignature, usize> = HashMap::new();
+    let mut bundle_ids_by_signature: FxHashMap<BundleSignature, usize> = FxHashMap::default();
     let mut unique_bundles: Vec<TerminalBundle> = Vec::new();
 
     for (state_id, _state) in terminal_dwa.states.iter().enumerate() {
@@ -1272,7 +1272,7 @@ fn build_parser_nwa_from_terminal_dwa(
 
     let mut arena = NWA::new(0, 0);
     let mut body_memo = vec![None; states.len()];
-    let mut concatenated_branches = HashMap::new();
+    let mut concatenated_branches: ConcatMemo = FxHashMap::default();
     let compose_started_at = Instant::now();
     let parser_body = compose_state(
         terminal_dwa.start_state,
