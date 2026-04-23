@@ -2092,52 +2092,8 @@ ap ::= 'd'"#,
 
 #[test]
 fn test_json_schema_o62060_minimized_empty_object_token_remains_allowed() {
-    let schema = r#"{
-        "type": "object",
-        "properties": {
-            "a": {},
-            "b": {},
-            "d": {},
-            "c": {"type": "object"},
-            "e": {},
-            "f": {},
-            "g": {},
-            "h": {},
-            "i": {},
-            "j": {},
-            "k": {},
-            "l": {},
-            "m": {},
-            "n": {},
-            "o": {},
-            "p": {},
-            "q": {},
-            "r": {},
-            "s": {},
-            "t": {},
-            "u": {},
-            "v": {},
-            "w": {},
-            "x": {}
-        },
-        "required": ["a", "b", "e", "c"],
-        "additionalProperties": false
-    }"#;
-    let vocab = Vocab::new(
-        vec![
-            (0u32, b" {},".to_vec()),
-            (1u32, b"{\"".to_vec()),
-            (2u32, b"a".to_vec()),
-            (3u32, b"\":".to_vec()),
-            (4u32, b" ".to_vec()),
-            (5u32, b"0".to_vec()),
-            (6u32, b",".to_vec()),
-            (7u32, b" \"".to_vec()),
-            (8u32, b"b".to_vec()),
-            (9u32, b"c".to_vec()),
-        ],
-        None,
-    );
+    let schema = r#"{"type":"object","properties":{"a":{},"b":{},"d":{},"c":{"type":"object"},"e":{},"f":{},"g":{},"h":{},"i":{},"j":{},"k":{},"l":{},"m":{},"n":{},"o":{},"p":{},"q":{},"r":{},"s":{},"t":{},"u":{},"v":{},"w":{},"x":{}},"required":["a","b","e","c"],"additionalProperties":false}"#;
+    let vocab = Vocab::new(vec![(0u32, b" {},".to_vec())], None);
     let constraint = Constraint::from_json_schema(schema, &vocab).unwrap();
 
     let mut state = constraint.start();
