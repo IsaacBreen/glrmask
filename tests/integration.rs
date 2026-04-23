@@ -2147,34 +2147,6 @@ fn test_glrm_grammar_o62060_abstract_committable_token_is_masked() {
     assert!(token_allowed(&mask, 0), "token 'b' should remain allowed after prefix 'a'");
 }
 
-#[test]
-#[ignore]
-fn debug_schema_o62060_post_prefix_state() {
-    const PREFIX: &[u8] = b"{\"a\": 0, \"b\": 0, \"c\":";
-    const DISPUTED_TOKEN: &[u8] = b" {},";
-
-    let tail = (b'e'..=b'x')
-        .map(|key| format!("\"{}\":{{}}", key as char))
-        .collect::<Vec<_>>()
-        .join(",");
-    let schema = [
-        "{\"type\":\"object\",\"properties\":{\"a\":{},\"b\":{},\"d\":{},\"c\":{\"type\":\"object\"},",
-        &tail,
-        "},\"required\":[\"a\",\"b\",\"e\",\"c\"],\"additionalProperties\":false}",
-    ]
-    .concat();
-    let vocab = Vocab::new(vec![(0u32, DISPUTED_TOKEN.to_vec())], None);
-    let constraint = Constraint::from_json_schema(&schema, &vocab).unwrap();
-
-    let mut state = constraint.start();
-    state.commit_bytes(PREFIX).unwrap();
-
-    println!("post_prefix_stacks={:?}", state.debug_parser_stacks());
-    let mut probe = state.clone();
-    println!("post_prefix_commit_disputed={:?}", probe.commit_bytes(DISPUTED_TOKEN));
-    println!("post_prefix_mask={:?}", state.mask());
-}
-
 // Scaffolding test kept to validate commit_bytes path also fails for the schema.
 #[test]
 #[ignore]
@@ -2214,11 +2186,7 @@ fn test_schema_commit_bytes_vs_commit_token() {
             "commit_bytes: token1 ' {{}},' should be in mask after prefix bytes"
         );
         state.commit_token(1).unwrap();
-        println!("after_token1_stacks={:?}", state.debug_parser_stacks());
-        let mut probe = state.clone();
-        println!("after_token1_commit_bytes_token2={:?}", probe.commit_bytes(token2));
         let mask = state.mask();
-        println!("after_token1_mask={mask:?}");
         assert!(token_allowed(&mask, 2), "commit_bytes: token2 should be in mask after token1");
         state.commit_token(2).unwrap();
         assert!(state.is_finished());

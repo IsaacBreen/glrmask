@@ -1,10 +1,11 @@
 use crate::runtime::state::ConstraintState;
 use crate::compiler::glr::labels::{encode_positive_label, DEFAULT_LABEL};
+use crate::compiler::glr::parser::stack_may_advance_on;
 use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use crate::ds::weight::Weight;
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 type DenseTokenMaskCache = FxHashMap<usize, Box<[u64]>>;
@@ -293,6 +294,63 @@ fn update_eos_mask(buf: &mut [u32], eos_token_id: Option<u32>, is_complete: bool
 }
 
 impl<'a> ConstraintState<'a> {
+    fn gss_accumulators_empty(gss: &crate::compiler::glr::parser::ParserGSS) -> bool {
+        let mut all_empty = true;
+        gss.for_each_acc(|acc| {
+            if !acc.is_empty() {
+                all_empty = false;
+            }
+        });
+        all_empty
+    }
+
+    fn token_bytes_for_id(&self, token_id: u32) -> Option<&[u8]> {
+        self.constraint
+            .token_bytes_dense
+            .get(token_id as usize)
+            .and_then(|bytes| bytes.as_deref())
+            .or_else(|| self.constraint.token_bytes.get(&token_id).map(Vec::as_slice))
+    }
+
+    fn supplement_mask_from_raw_parser(&self, merged: &mut [u64]) {
+        for (&tokenizer_state, gss) in &self.state {
+            if gss.is_empty() || !Self::gss_accumulators_empty(gss) {
+                continue;
+            }
+
+            let possible_matches = self.constraint.possible_matches_for_state(tokenizer_state);
+            if possible_matches.is_empty() {
+                continue;
+            }
+
+            let candidate_tokens: BTreeSet<u32> = possible_matches
+                .values()
+                .flat_map(|token_ids| token_ids.iter())
+                .collect();
+
+            for token_id in candidate_tokens {
+                let Some(token_bytes) = self.token_bytes_for_id(token_id) else {
+                    continue;
+                };
+                let exec = self.constraint.tokenizer.execute_from_state(token_bytes, tokenizer_state);
+                if !exec
+                    .matches
+                    .iter()
+                    .any(|matched| stack_may_advance_on(&self.constraint.table, gss, matched.id))
+                {
+                    continue;
+                }
+
+                let internal_token = self.constraint.internal_token_for_original(token_id) as usize;
+                let word = internal_token / 64;
+                let bit = internal_token % 64;
+                if let Some(slot) = merged.get_mut(word) {
+                    *slot |= 1u64 << bit;
+                }
+            }
+        }
+    }
+
     /// Merge final_weight contribution into internal token bitmap instead of buf.
     fn merge_final_weight_to_internal(
         &self,
@@ -398,10 +456,11 @@ impl<'a> ConstraintState<'a> {
                 let Some(mut acc) = self.terminals_disallowed_to_dense_acc(parser_acc, internal_tsid) else {
                     continue;
                 };
+                let mut chain_merged = vec![0u64; merged.len()];
 
                 // Merge start FW contribution
                 if let Some(final_weight) = start_final_weight {
-                    self.merge_final_weight_to_internal(final_weight, &acc, precomputed, merged);
+                    self.merge_final_weight_to_internal(final_weight, &acc, precomputed, &mut chain_merged);
                 }
 
                 // Walk chain: first state goes through start_fast_trans,
@@ -409,7 +468,13 @@ impl<'a> ConstraintState<'a> {
                 let mut cur_wa_state = parser_dwa.start_state;
                 let mut alive = true;
 
-                for parser_state in chain_states.iter() {
+                for (index, parser_state) in chain_states.iter().enumerate() {
+                    if index == 0
+                        && cur_wa_state == parser_dwa.start_state
+                        && *parser_state == 0
+                    {
+                        continue;
+                    }
                     let cur_fast_trans = &self.constraint.dwa_fast_transitions[cur_wa_state as usize];
                     let labels = transition_labels(*parser_state);
                     let mut found_target = None;
@@ -440,12 +505,15 @@ impl<'a> ConstraintState<'a> {
 
                     // Merge FW at the new DWA state
                     if let Some(final_weight) = &next_dwa_state.final_weight {
-                        self.merge_final_weight_to_internal(final_weight, &acc, precomputed, merged);
+                        self.merge_final_weight_to_internal(final_weight, &acc, precomputed, &mut chain_merged);
                     }
                 }
 
                 // Enqueue tail if chain walk completed successfully
                 if alive && !acc.is_empty() {
+                    for (merged_word, chain_word) in merged.iter_mut().zip(chain_merged.iter()) {
+                        *merged_word |= *chain_word;
+                    }
                     let cur_fast_trans = &self.constraint.dwa_fast_transitions[cur_wa_state as usize];
                     let tail_gss = DenseMaskGSS::from_chain_tail_and_acc(tail, acc);
                     if !tail_gss.is_empty() {
@@ -459,9 +527,9 @@ impl<'a> ConstraintState<'a> {
                             );
                         });
                     }
-                }
 
-                continue;
+                    continue;
+                }
             }
 
             // General path: apply_transform_and_decompose for non-chain GSS.
@@ -560,6 +628,7 @@ impl<'a> ConstraintState<'a> {
                     let mut acc = chain_acc.clone();
                     let mut cur_wa_state = wa_state;
                     let mut alive = true;
+                    let mut chain_merged = vec![0u64; merged.len()];
 
                     for parser_state in chain_states.iter() {
                         let cur_fast_trans = &self.constraint.dwa_fast_transitions[cur_wa_state as usize];
@@ -593,12 +662,15 @@ impl<'a> ConstraintState<'a> {
 
                         // Merge final weight at the new DWA state
                         if let Some(final_weight) = &next_dwa_state.final_weight {
-                            self.merge_final_weight_to_internal(final_weight, &acc, precomputed, &mut merged);
+                            self.merge_final_weight_to_internal(final_weight, &acc, precomputed, &mut chain_merged);
                         }
                     }
 
                     // Enqueue the tail if the chain walk completed successfully
                     if alive && !acc.is_empty() {
+                        for (merged_word, chain_word) in merged.iter_mut().zip(chain_merged.iter()) {
+                            *merged_word |= *chain_word;
+                        }
                         let cur_fast_trans = &self.constraint.dwa_fast_transitions[cur_wa_state as usize];
                         let tail_gss = DenseMaskGSS::from_chain_tail_and_acc(tail_lower, acc);
                         if !tail_gss.is_empty() {
@@ -612,21 +684,25 @@ impl<'a> ConstraintState<'a> {
                                 );
                             });
                         }
+
+                        continue;
                     }
-                } else {
-                    // Standard path: decompose one level at a time.
-                    gss.for_each_decomposed(|parser_state, popped| {
-                        enqueue_parser_state_transitions(
-                            &mut queue,
-                            fast_trans,
-                            parser_state,
-                            &popped,
-                            precomputed,
-                        );
-                    });
                 }
+
+                // Standard path: decompose one level at a time.
+                gss.for_each_decomposed(|parser_state, popped| {
+                    enqueue_parser_state_transitions(
+                        &mut queue,
+                        fast_trans,
+                        parser_state,
+                        &popped,
+                        precomputed,
+                    );
+                });
             }
         }
+
+        self.supplement_mask_from_raw_parser(&mut merged);
 
         // Convert merged internal token bitmap to output buffer.
         // Try incremental update from cached mask if delta is small.
