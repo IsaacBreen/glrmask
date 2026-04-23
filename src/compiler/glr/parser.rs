@@ -242,6 +242,61 @@ fn advance_reduce_branch(
     }
 }
 
+fn accumulate_det_profile(dst: &mut AdvanceProfile, src: &AdvanceProfile) {
+    dst.nondet_det_action_lookup_ns += src.det_action_lookup_ns;
+    dst.nondet_det_goto_lookup_ns += src.det_goto_lookup_ns;
+    dst.nondet_det_pop_ns += src.det_pop_ns;
+    dst.nondet_det_push_ns += src.det_push_ns;
+    dst.nondet_det_floor_cross_ns += src.det_floor_cross_ns;
+    dst.nondet_det_floor_sources_ns += src.det_floor_sources_ns;
+    dst.nondet_det_floor_rebuild_ns += src.det_floor_rebuild_ns;
+    dst.nondet_det_floor_try_vstack_ns += src.det_floor_try_vstack_ns;
+}
+
+fn advance_reduce_branch_profiled(
+    table: &GLRTable,
+    base: ParserGSS,
+    target: u32,
+    is_replace: bool,
+    token: TerminalID,
+    profile: &mut AdvanceProfile,
+) -> (ParserGSS, bool) {
+    use std::time::Instant;
+
+    if let Some(mut stack) = base.try_virtual_stack() {
+        let t_push = Instant::now();
+        if is_replace {
+            stack.replace_top(target);
+        } else {
+            stack.push(target);
+        }
+        profile.nondet_push_ns += t_push.elapsed().as_nanos() as u64;
+
+        let t_nd_det = Instant::now();
+        let mut det_profile = AdvanceProfile::default();
+        let mut branch = stack.into_gss();
+        let det_ok = advance_deterministically_profiled(table, &mut branch, token, &mut det_profile);
+        profile.nondet_det_ns += t_nd_det.elapsed().as_nanos() as u64;
+        accumulate_det_profile(profile, &det_profile);
+        return (branch, det_ok);
+    }
+
+    let t_push = Instant::now();
+    let mut branch = if is_replace {
+        base.popn(1).push(target)
+    } else {
+        base.push(target)
+    };
+    profile.nondet_push_ns += t_push.elapsed().as_nanos() as u64;
+
+    let t_nd_det = Instant::now();
+    let mut det_profile = AdvanceProfile::default();
+    let det_ok = advance_deterministically_profiled(table, &mut branch, token, &mut det_profile);
+    profile.nondet_det_ns += t_nd_det.elapsed().as_nanos() as u64;
+    accumulate_det_profile(profile, &det_profile);
+    (branch, det_ok)
+}
+
 /// Advance an ambiguous frontier.
 ///
 /// `closure` accumulates unshifted branches that still need GLR reduce-closure
@@ -296,7 +351,12 @@ fn advance_nondeterministically(
                         token,
                     );
                     if det_ok {
-                        merge_into(&mut shifted, branch);
+                        if let Some(stack) = branch.try_virtual_stack() {
+                            let current = std::mem::replace(&mut shifted, ParserGSS::empty());
+                            shifted = current.absorb_vstack_same_acc(&stack);
+                        } else {
+                            merge_into(&mut shifted, branch);
+                        }
                     } else {
                         merge_into(&mut next, branch);
                     }
@@ -793,14 +853,7 @@ fn advance_nondeterministically_profiled(
                 &mut nd_det_profile,
             );
             profile.nondet_det_ns += t_nd_det.elapsed().as_nanos() as u64;
-            profile.nondet_det_action_lookup_ns += nd_det_profile.det_action_lookup_ns;
-            profile.nondet_det_goto_lookup_ns += nd_det_profile.det_goto_lookup_ns;
-            profile.nondet_det_pop_ns += nd_det_profile.det_pop_ns;
-            profile.nondet_det_push_ns += nd_det_profile.det_push_ns;
-            profile.nondet_det_floor_cross_ns += nd_det_profile.det_floor_cross_ns;
-            profile.nondet_det_floor_sources_ns += nd_det_profile.det_floor_sources_ns;
-            profile.nondet_det_floor_rebuild_ns += nd_det_profile.det_floor_rebuild_ns;
-            profile.nondet_det_floor_try_vstack_ns += nd_det_profile.det_floor_try_vstack_ns;
+            accumulate_det_profile(profile, &nd_det_profile);
             if det_ok {
                 profile.n_nondet_merges += 1;
                 let t_merge = Instant::now();
@@ -832,34 +885,23 @@ fn advance_nondeterministically_profiled(
                 for (goto_from, base) in sources {
                     profile.n_nondet_reduce_ops += 1;
                     let Some((target, is_replace)) = table.goto_target(goto_from, nt) else { continue; };
-                    let t_push = Instant::now();
-                    let mut branch = if is_replace {
-                        base.popn(1).push(target)
-                    } else {
-                        base.push(target)
-                    };
-                    profile.nondet_push_ns += t_push.elapsed().as_nanos() as u64;
                     profile.n_nondet_merges += 1;
-                    let t_nd_det2 = Instant::now();
-                    let mut nd_det_profile = AdvanceProfile::default();
-                    let det_ok2 = advance_deterministically_profiled(
+                    let (branch, det_ok2) = advance_reduce_branch_profiled(
                         table,
-                        &mut branch,
+                        base,
+                        target,
+                        is_replace,
                         token,
-                        &mut nd_det_profile,
+                        profile,
                     );
-                    profile.nondet_det_ns += t_nd_det2.elapsed().as_nanos() as u64;
-                    profile.nondet_det_action_lookup_ns += nd_det_profile.det_action_lookup_ns;
-                    profile.nondet_det_goto_lookup_ns += nd_det_profile.det_goto_lookup_ns;
-                    profile.nondet_det_pop_ns += nd_det_profile.det_pop_ns;
-                    profile.nondet_det_push_ns += nd_det_profile.det_push_ns;
-                    profile.nondet_det_floor_cross_ns += nd_det_profile.det_floor_cross_ns;
-                    profile.nondet_det_floor_sources_ns += nd_det_profile.det_floor_sources_ns;
-                    profile.nondet_det_floor_rebuild_ns += nd_det_profile.det_floor_rebuild_ns;
-                    profile.nondet_det_floor_try_vstack_ns += nd_det_profile.det_floor_try_vstack_ns;
                     let t_merge = Instant::now();
                     if det_ok2 {
-                        merge_into(&mut shifted, branch);
+                        if let Some(stack) = branch.try_virtual_stack() {
+                            let current = std::mem::replace(&mut shifted, ParserGSS::empty());
+                            shifted = current.absorb_vstack_same_acc(&stack);
+                        } else {
+                            merge_into(&mut shifted, branch);
+                        }
                     } else {
                         merge_into(&mut next, branch);
                     }
