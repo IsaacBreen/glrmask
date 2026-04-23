@@ -7346,6 +7346,163 @@ impl<'a> SchemaCtx<'a> {
         ]))
     }
 
+    fn build_open_object_required_mask_expr(
+        &mut self,
+        ordered: &[(String, GrammarExpr, bool)],
+        additional_properties_schema: Option<Value>,
+    ) -> Result<GrammarExpr, GlrMaskError> {
+        let mut base_index = self.generated_object_rule_counter;
+        let base_name = loop {
+            let candidate = format!("obj_open_reqmask_{base_index}");
+            if !self.used_rule_names.contains(&format!("{candidate}_nc_0")) {
+                break candidate;
+            }
+            base_index += 1;
+        };
+        self.generated_object_rule_counter = base_index + 1;
+
+        let required_entries: Vec<(String, GrammarExpr)> = ordered
+            .iter()
+            .filter(|(_, _, is_required)| *is_required)
+            .map(|(key, value_expr, _)| (key.clone(), value_expr.clone()))
+            .collect();
+        let optional_pair_exprs: Vec<GrammarExpr> = ordered
+            .iter()
+            .filter(|(_, _, is_required)| !*is_required)
+            .map(|(key, value_expr, _)| {
+                sequence_or_single(vec![self.json_key_colon_literal(key), value_expr.clone()])
+            })
+            .collect();
+
+        let mut repeatable_pair_exprs = optional_pair_exprs;
+        if let Some(schema) = additional_properties_schema {
+            let extra_value_expr = self.convert_schema(&schema)?;
+            if ap_key_any_string() {
+                let full_key_expr = Self::scoped_key_colon_expr(None)?;
+                repeatable_pair_exprs.push(sequence_or_single(vec![
+                    self.build_key_colon_expr(
+                        &full_key_expr,
+                        &format!("{}_KEY_COLON", base_name.to_uppercase()),
+                    ),
+                    extra_value_expr,
+                ]));
+            } else if shared_ap_key_exclusions_enabled() {
+                let excluded_literal_keys = ordered
+                    .iter()
+                    .map(|(key, _, _)| key.clone())
+                    .collect::<BTreeSet<_>>();
+                repeatable_pair_exprs.push(sequence_or_single(vec![
+                    self.build_shared_additional_key_choice_expr(
+                        &excluded_literal_keys,
+                        &format!("{base_name}_ap_key"),
+                    )?,
+                    extra_value_expr,
+                ]));
+            } else {
+                let excluded_literal_keys = ordered
+                    .iter()
+                    .map(|(key, _, _)| key.clone())
+                    .collect::<BTreeSet<_>>();
+                let key_expr = Self::scoped_key_colon_expr(None)?;
+                let mut excluded_exprs = Vec::new();
+                if let Some(expr) = Self::literal_key_colon_union_expr(&excluded_literal_keys) {
+                    excluded_exprs.push(expr);
+                }
+                repeatable_pair_exprs.push(sequence_or_single(vec![
+                    self.build_excluding_key_colon_expr_internal(
+                        key_expr,
+                        excluded_exprs,
+                        &format!("{}_KEY_COLON", base_name.to_uppercase()),
+                    ),
+                    extra_value_expr,
+                ]));
+            }
+        }
+
+        let full_mask: Vec<usize> = (0..required_entries.len()).collect();
+        let mut masks = Vec::<Vec<usize>>::new();
+        let mut mask_indices = BTreeMap::<Vec<usize>, usize>::new();
+        let mut pending = vec![full_mask.clone()];
+        while let Some(mask) = pending.pop() {
+            if mask_indices.contains_key(&mask) {
+                continue;
+            }
+            let index = masks.len();
+            mask_indices.insert(mask.clone(), index);
+            masks.push(mask.clone());
+            for &item in &mask {
+                let next_mask = mask
+                    .iter()
+                    .copied()
+                    .filter(|candidate| *candidate != item)
+                    .collect::<Vec<_>>();
+                if !mask_indices.contains_key(&next_mask) {
+                    pending.push(next_mask);
+                }
+            }
+        }
+
+        for mask in masks.clone() {
+            let mask_index = *mask_indices.get(&mask).unwrap();
+            let nc_name = format!("{base_name}_nc_{mask_index}");
+            let c_name = format!("{base_name}_c_{mask_index}");
+            let mut nc_alts = Vec::new();
+            let mut c_alts = Vec::new();
+
+            for pair_expr in &repeatable_pair_exprs {
+                nc_alts.push(sequence_or_single(vec![
+                    pair_expr.clone(),
+                    GrammarExpr::Ref(c_name.clone()),
+                ]));
+                c_alts.push(sequence_or_single(vec![
+                    self.json_item_separator_expr(),
+                    pair_expr.clone(),
+                    GrammarExpr::Ref(c_name.clone()),
+                ]));
+            }
+
+            for &item in &mask {
+                let (key, value_expr) = &required_entries[item];
+                let pair_expr = sequence_or_single(vec![
+                    self.json_key_colon_literal(key),
+                    value_expr.clone(),
+                ]);
+                let next_mask = mask
+                    .iter()
+                    .copied()
+                    .filter(|candidate| *candidate != item)
+                    .collect::<Vec<_>>();
+                let next_index = *mask_indices.get(&next_mask).unwrap();
+                nc_alts.push(sequence_or_single(vec![
+                    pair_expr.clone(),
+                    GrammarExpr::Ref(format!("{base_name}_c_{next_index}")),
+                ]));
+                c_alts.push(sequence_or_single(vec![
+                    self.json_item_separator_expr(),
+                    pair_expr,
+                    GrammarExpr::Ref(format!("{base_name}_c_{next_index}")),
+                ]));
+            }
+
+            if mask.is_empty() {
+                nc_alts.push(empty_expr());
+                c_alts.push(empty_expr());
+            }
+
+            self.insert_rule(nc_name, choice_or_single(nc_alts));
+            self.insert_rule(c_name, choice_or_single(c_alts));
+        }
+
+        Ok(sequence_or_single(vec![
+            literal_expr(b"{"),
+            GrammarExpr::Ref(format!(
+                "{base_name}_nc_{}",
+                mask_indices.get(&full_mask).copied().unwrap_or(0)
+            )),
+            literal_expr(b"}"),
+        ]))
+    }
+
     fn build_literal_properties_any_order_object_expr(
         &mut self,
         properties: &Map<String, Value>,
@@ -7790,6 +7947,19 @@ impl<'a> SchemaCtx<'a> {
             return Ok(sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]));
         }
 
+        let required_prefix_len = ordered.iter().take_while(|(_, _, is_required)| *is_required).count();
+        let required_keys_are_prefix = ordered[required_prefix_len..]
+            .iter()
+            .all(|(_, _, is_required)| !*is_required);
+
+        if pattern_properties.is_empty()
+            && property_names.is_none()
+            && additional_properties_schema.is_some()
+            && !required_keys_are_prefix
+        {
+            return self.build_open_object_required_mask_expr(&ordered, additional_properties_schema);
+        }
+
         let mut base_index = self.generated_object_rule_counter;
         let base_name = loop {
             let candidate = format!("obj_ord_{base_index}");
@@ -8020,14 +8190,16 @@ impl<'a> SchemaCtx<'a> {
             // nullable list composition in SeparatedSequence lowering.
             let np_rule = named_props_list_rule.clone().unwrap();
             let ap_nonempty_rule = additional_nonempty_list_rule.clone().unwrap();
-            choice_or_single(vec![
+            let options = vec![
                 GrammarExpr::Ref(np_rule.clone()),
                 sequence_or_single(vec![
                     GrammarExpr::Ref(np_rule),
                     self.json_item_separator_expr(),
-                    GrammarExpr::Ref(ap_nonempty_rule),
+                    GrammarExpr::Ref(ap_nonempty_rule.clone()),
                 ]),
-            ])
+            ];
+
+            choice_or_single(options)
         } else if body_items.len() == 1 {
             body_items.into_iter().next().unwrap().0
         } else {
