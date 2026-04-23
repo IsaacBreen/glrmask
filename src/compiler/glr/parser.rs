@@ -353,7 +353,7 @@ fn advance_nondeterministically(
                     if det_ok {
                         match branch.into_virtual_stack() {
                             Ok(stack) => {
-                                let current = std::mem::replace(&mut shifted, ParserGSS::empty());
+                            let current = std::mem::replace(&mut shifted, ParserGSS::empty());
                                 shifted = current.absorb_vstack_same_acc_owned(stack);
                             }
                             Err(branch) => {
@@ -1431,6 +1431,98 @@ mod tests {
         eprintln!(
             "[advance_manual_o1051_faithful][cold] avg_wall_us={:.3} cold_method=thrash_32MiB_stride64",
             (cold_wall_ns as f64) * cold_inv / 1_000.0,
+        );
+    }
+
+    #[test]
+    fn test_advance_manual_o1051_second_advance_component_timing() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let (table, gss0) = build_manual_o1051_faithful_table_and_stack();
+        let gss1 = advance_stacks(&table, &gss0, 47);
+        let iters = 50_000usize;
+
+        let mut det_prelude_ns: u128 = 0;
+        let mut split_det_probe_ns: u128 = 0;
+        let mut shift_absorb_ns: u128 = 0;
+        let mut reduce_sources_ns: u128 = 0;
+        let mut reduce_branch_ns: u128 = 0;
+        let mut reduce_absorb_ns: u128 = 0;
+        let mut checksum: u64 = 0;
+
+        for _ in 0..iters {
+            let mut closure = gss1.clone();
+
+            let t0 = Instant::now();
+            let det_done = advance_deterministically(&table, &mut closure, 8);
+            det_prelude_ns += t0.elapsed().as_nanos();
+            assert!(!det_done);
+
+            let state = closure.single_exclusive_top_value().unwrap();
+            assert_eq!(state, 7);
+            let action = table.action(state, 8).unwrap();
+
+            let mut isolated = closure.isolate(Some(state));
+            let reduce_base = isolated.clone();
+
+            let t1 = Instant::now();
+            let split_det_done = advance_deterministically(&table, &mut isolated, 8);
+            split_det_probe_ns += t1.elapsed().as_nanos();
+            assert!(!split_det_done);
+
+            let shift_target = action.shift_target().unwrap();
+            let shift_base = isolated.popn(1);
+            let t2 = Instant::now();
+            let mut shifted = ParserGSS::empty().absorb_push_same_acc(shift_target, &shift_base);
+            shift_absorb_ns += t2.elapsed().as_nanos();
+
+            let mut reduce_pair = None;
+            action.for_each_reduce(|nt, len| {
+                reduce_pair = Some((nt, len));
+            });
+            let (nt, len) = reduce_pair.unwrap();
+
+            let t3 = Instant::now();
+            let sources = reduce_sources_from_isolated(&reduce_base, len as usize);
+            reduce_sources_ns += t3.elapsed().as_nanos();
+            assert_eq!(sources.len(), 1);
+
+            let (goto_from, base) = sources.into_iter().next().unwrap();
+            let (target, is_replace) = table.goto_target(goto_from, nt).unwrap();
+
+            let t4 = Instant::now();
+            let (branch, det_ok) = advance_reduce_branch(&table, base, target, is_replace, 8);
+            reduce_branch_ns += t4.elapsed().as_nanos();
+            assert!(det_ok);
+
+            let t5 = Instant::now();
+            match branch.into_virtual_stack() {
+                Ok(stack) => {
+                    shifted = shifted.absorb_vstack_same_acc_owned(stack);
+                }
+                Err(branch) => {
+                    merge_into(&mut shifted, branch);
+                }
+            }
+            reduce_absorb_ns += t5.elapsed().as_nanos();
+
+            let mut stacks2: Vec<Vec<u32>> = shifted.to_stacks().into_iter().map(|(s, _)| s).collect();
+            stacks2.sort();
+            assert_eq!(stacks2, vec![vec![0, 1, 41, 5], vec![0, 1, 384]]);
+            checksum = checksum.wrapping_add(stacks2.len() as u64);
+        }
+
+        black_box(checksum);
+        let inv = 1.0 / iters as f64;
+        eprintln!(
+            "[advance_manual_o1051_components][warm] det_prelude_us={:.3} split_det_probe_us={:.3} shift_absorb_us={:.3} reduce_sources_us={:.3} reduce_branch_us={:.3} reduce_absorb_us={:.3}",
+            (det_prelude_ns as f64) * inv / 1_000.0,
+            (split_det_probe_ns as f64) * inv / 1_000.0,
+            (shift_absorb_ns as f64) * inv / 1_000.0,
+            (reduce_sources_ns as f64) * inv / 1_000.0,
+            (reduce_branch_ns as f64) * inv / 1_000.0,
+            (reduce_absorb_ns as f64) * inv / 1_000.0,
         );
     }
 
