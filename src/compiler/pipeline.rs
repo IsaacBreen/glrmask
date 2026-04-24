@@ -9,7 +9,7 @@ use crate::automata::lexer::regex::parse_regex;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::regex::Expr;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
-use crate::compiler::glr::table::GLRTable;
+use crate::compiler::glr::table::{GLRTable, emit_glr_table_debug_dump};
 use crate::compiler::grammar::transforms::prepare_grammar_transforms_only;
 use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
@@ -24,7 +24,7 @@ use crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalColoring;
 use crate::compiler::stages::parser_dwa::build_parser_dwa_from_terminal_dwa_with_precomputed_templates;
 use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::characterize_terminals;
-use crate::compiler::stages::templates::compile_dfa::emit_template_profile_summary;
+use crate::compiler::stages::templates::compile_dfa::{emit_template_profile_summary, emit_templates_debug_dump};
 use crate::compiler::stages::terminal_dwa_compat::build_terminal_dwa_for_existing_id_map_with_possible_matches_and_coloring;
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::{GrammarDef, Terminal};
@@ -49,6 +49,10 @@ pub(crate) fn compile_profile_enabled() -> bool {
 
 fn debug_verbose_enabled() -> bool {
     env_flag_enabled("GLRMASK_DEBUG_VERBOSE")
+}
+
+fn strict_one_flag_enabled(name: &str) -> bool {
+    std::env::var(name).map_or(false, |value| value == "1")
 }
 
 fn elapsed_ms(started_at: Instant) -> f64 {
@@ -416,6 +420,10 @@ fn compile_prepared_with_profile(
             );
         }
 
+        if strict_one_flag_enabled("GLRMASK_DEBUG_DUMP_GLR_TABLE") {
+            emit_glr_table_debug_dump(&table);
+        }
+
         if env_flag_enabled("GLRMASK_WARN_PROBLEMATIC_BYTE_TERMINALS") {
             let warn_started_at = Instant::now();
             warn_problematic_byte_terminals(&tokenizer, vocab);
@@ -629,6 +637,9 @@ fn compile_prepared_with_profile(
                 }
             },
         );
+        if strict_one_flag_enabled("GLRMASK_DEBUG_DUMP_TEMPLATES") {
+            emit_templates_debug_dump(&templates);
+        }
         let (mut internal_ids, prebuilt_terminal_dwa, mut terminal_phase_profile) = match id_map_build_result {
             IdMapBuildResult::Ready {
                 global,

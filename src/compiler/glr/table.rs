@@ -395,7 +395,6 @@ impl GLRTable {
     pub fn build(grammar: &AnalyzedGrammar) -> Self {
         Self::build_with_unit_reduction_inlining(grammar, unit_reduction_inlining_enabled())
     }
-
     pub(crate) fn build_with_unit_reduction_inlining(
         grammar: &AnalyzedGrammar,
         inline_unit_reductions: bool,
@@ -1059,6 +1058,30 @@ impl GLRTable {
             if self.num_states == prev_states {
                 break;
             }
+        }
+    }
+}
+
+pub(crate) fn emit_glr_table_debug_dump(table: &GLRTable) {
+    eprintln!("=== GLR Table ===");
+    eprintln!(
+        "num_states={} num_terminals={} num_rules={}",
+        table.num_states, table.num_terminals, table.num_rules
+    );
+    for (index, rule) in table.rules.iter().enumerate() {
+        eprintln!("table rule {}: lhs={} rhs={:?}", index, rule.lhs, rule.rhs);
+    }
+    for state in 0..table.num_states as usize {
+        eprintln!("state {}", state);
+        let mut actions = table.action[state].iter().collect::<Vec<_>>();
+        actions.sort_by_key(|(terminal, _)| **terminal);
+        for (terminal, action) in actions {
+            eprintln!("  action T{} -> {:?}", terminal, action);
+        }
+        let mut gotos = table.goto[state].iter().collect::<Vec<_>>();
+        gotos.sort_by_key(|(nonterminal, _)| **nonterminal);
+        for (nonterminal, (target, replace)) in gotos {
+            eprintln!("  goto N{} -> state {} replace={}", nonterminal, target, replace);
         }
     }
 }

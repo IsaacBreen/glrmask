@@ -29,6 +29,8 @@ This document lists all `GLRMASK_*` environment variables used in this crate, gr
 | `GLRMASK_PROFILE_PHASES` | truthy bool | off |
 | `GLRMASK_DEBUG_PROFILE` | truthy bool | off |
 | `GLRMASK_DEBUG_VERBOSE` | truthy bool | off |
+| `GLRMASK_DEBUG_DUMP_GLR_TABLE` | strict `1` bool | off |
+| `GLRMASK_DEBUG_DUMP_TEMPLATES` | strict `1` bool | off |
 | `GLRMASK_WARN_PROBLEMATIC_BYTE_TERMINALS` | truthy bool | off |
 | `GLRMASK_DISABLE_TERMINAL_COLORING` | truthy bool | off |
 | `GLRMASK_L1_IDMAP` | strict `1` bool | off |
