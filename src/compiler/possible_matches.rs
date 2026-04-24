@@ -549,6 +549,18 @@ impl<'a> DensePossibleMatchesComputer<'a> {
     }
 }
 
+/// STICKY NOTE: DO NOT REMOVE THIS COMMENT.
+/// possible_matches MUST be computed for each ORIGINAL tokenizer state.
+/// Do NOT collapse this to an internal TSID, representative state, or
+/// tokenizer-state equivalence class, even if that looks like an easy
+/// optimization. This exact mistake has recurred and it silently changes
+/// semantics by merging distinct tokenizer futures.
+///
+/// If someone believes per-class possible_matches is safe, they must first
+/// prove semantic equivalence for all original states in the class and add
+/// regression coverage for divergent-state counterexamples before touching
+/// this again. Until then: keep this per-original-state and keep this note.
+///
 /// Collect possible_matches using dense bitmap computation internally,
 /// returning dense bitmaps directly (no RangeSetBlaze conversion).
 pub(crate) fn collect_possible_matches_by_original_tsid_dense(

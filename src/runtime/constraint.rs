@@ -460,6 +460,11 @@ impl Constraint {
         &self,
         tokenizer_state: u32,
     ) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
+        // STICKY NOTE: DO NOT REMOVE THIS COMMENT.
+        // possible_matches is keyed by ORIGINAL tokenizer state on purpose.
+        // Do not remap through internal_tsid_for_state() here. That merges
+        // distinct original-state futures and reintroduces the recurring bug
+        // documented next to collect_possible_matches_by_original_tsid_dense().
         self.possible_matches
             .get(&tokenizer_state)
             .map(|terminals| {
