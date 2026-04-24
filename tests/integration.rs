@@ -4111,6 +4111,40 @@ fn glrm_constraint(entries: &[&str], grammar: &str) -> Constraint {
     Constraint::from_glrm_grammar(grammar, &vocab).unwrap()
 }
 
+const O62058_ABSTRACT_SCHEMA_GLRM: &str = r#"
+start start;
+
+nt json_object ::= "{" "}";
+nt obj_ord_0_np_0 ::= "\"" "a\"" ": " "0";
+nt obj_ord_0_np_1 ::= "\"" "b\"" ": " "0";
+nt obj_ord_0_np_2 ::= "\"" "d\"" ": " "0";
+nt obj_ord_0_np_3 ::= "\"" "c\"" ": " json_object;
+nt obj_ord_0_np_4 ::= "\"" "e\"" ": " "0";
+nt obj_ord_0_np_5 ::= "\"" "f\"" ": " "0";
+nt obj_ord_0_np_6 ::= "\"" "g\"" ": " "0";
+nt obj_ord_0_np_7 ::= "\"" "h\"" ": " "0";
+nt obj_ord_0_np_8 ::= "\"" "i\"" ": " "0";
+nt obj_ord_0_np_9 ::= "\"" "j\"" ": " "0";
+nt obj_ord_0_np_10 ::= "\"" "k\"" ": " "0";
+nt obj_ord_0_np_11 ::= "\"" "l\"" ": " "0";
+nt obj_ord_0_np_12 ::= "\"" "m\"" ": " "0";
+nt obj_ord_0_np_13 ::= "\"" "n\"" ": " "0";
+nt obj_ord_0_np_14 ::= "\"" "o\"" ": " "0";
+nt obj_ord_0_np_15 ::= "\"" "p\"" ": " "0";
+nt obj_ord_0_np_16 ::= "\"" "q\"" ": " "0";
+nt obj_ord_0_np_17 ::= "\"" "r\"" ": " "0";
+nt obj_ord_0_np_18 ::= "\"" "s\"" ": " "0";
+nt obj_ord_0_np_19 ::= "\"" "t\"" ": " "0";
+nt obj_ord_0_np_20 ::= "\"" "u\"" ": " "0";
+nt obj_ord_0_np_21 ::= "\"" "v\"" ": " "0";
+nt obj_ord_0_np_22 ::= "\"" "w\"" ": " "0";
+nt obj_ord_0_np_23 ::= "\"" "x\"" ": " "0";
+nt obj_ord_0_np_list ::= ", " ~ ( obj_ord_0_np_0 obj_ord_0_np_1 obj_ord_0_np_2? obj_ord_0_np_3 obj_ord_0_np_4 obj_ord_0_np_5? obj_ord_0_np_6? obj_ord_0_np_7? obj_ord_0_np_8? obj_ord_0_np_9? obj_ord_0_np_10? obj_ord_0_np_11? obj_ord_0_np_12? obj_ord_0_np_13? obj_ord_0_np_14? obj_ord_0_np_15? obj_ord_0_np_16? obj_ord_0_np_17? obj_ord_0_np_18? obj_ord_0_np_19? obj_ord_0_np_20? obj_ord_0_np_21? obj_ord_0_np_22? obj_ord_0_np_23? );
+nt obj_ord_0_body ::= obj_ord_0_np_list;
+nt obj_ord_0_obj ::= "{" obj_ord_0_body "}";
+nt start ::= obj_ord_0_obj;
+"#;
+
 /// GLRM grammar for the schema:
 /// ```json
 /// {
@@ -4587,4 +4621,96 @@ fn test_github_ultra_o62058_incongruent_mask_commit_207b7d2c() {
         assert_eq!(commit_accepts, true, "Expected commit vote True for token ' {{}},' (id=16857) at prefix='{{\"analyticsAvailable\": true, \"apiAccess\": true, \"auditInformationProvided\":'; incongruence=mask_rejects_commit_allows.");
         assert_ne!(mask_accepts, commit_accepts, "Expected mask and commit to disagree for token ' {{}},' (id=16857) at prefix='{{\"analyticsAvailable\": true, \"apiAccess\": true, \"auditInformationProvided\":'; incongruence=mask_rejects_commit_allows.");
 }
+
+#[test]
+fn test_o62058_incongruent_mask_commit_abstract_schema() {
+    let vocab = Vocab::new(
+        vec![
+            (0u32, b" {},".to_vec()),
+            (1u32, b" ".to_vec()),
+        ],
+        None,
+    );
+        let schema = r#"
+{
+    "additionalProperties": false,
+    "properties": {
+        "a": {},
+        "b": {},
+        "d": {},
+        "c": {
+            "type": "object"
+        },
+        "e": {},
+        "f": {},
+        "g": {},
+        "h": {},
+        "i": {},
+        "j": {},
+        "k": {},
+        "l": {},
+        "m": {},
+        "n": {},
+        "o": {},
+        "p": {},
+        "q": {},
+        "r": {},
+        "s": {},
+        "t": {},
+        "u": {},
+        "v": {},
+        "w": {},
+        "x": {}
+    },
+    "required": [
+        "a",
+        "b",
+        "e",
+        "c"
+    ],
+    "type": "object"
+}
+"#;
+
+        let c = Constraint::from_json_schema(schema, &vocab).unwrap();
+
+        let mut mask_state = c.start();
+        mask_state.commit_bytes(b"{\"a\": 0, \"b\": 0, \"c\":").unwrap();
+        let mask = mask_state.mask();
+        let mask_accepts = token_allowed(&mask, 0);
+    assert!(token_allowed(&mask, 1), "space token should remain allowed in the reduced abstract repro");
+
+        let mut commit_state = c.start();
+        commit_state.commit_bytes(b"{\"a\": 0, \"b\": 0, \"c\":").unwrap();
+        let commit_accepts = commit_state.commit_token(0u32).is_ok();
+
+        assert!(!mask_accepts, "abstract schema repro should still reject token in mask");
+        assert!(commit_accepts, "abstract schema repro should still allow the same token via commit");
+        assert_ne!(mask_accepts, commit_accepts, "abstract schema repro should preserve the mask/commit incongruence");
+}
+
+    #[test]
+    fn test_o62058_incongruent_mask_commit_abstract_glrm() {
+        let vocab = Vocab::new(
+            vec![
+                (0u32, b" {},".to_vec()),
+                (1u32, b" ".to_vec()),
+            ],
+            None,
+        );
+        let c = Constraint::from_glrm_grammar(O62058_ABSTRACT_SCHEMA_GLRM, &vocab).unwrap();
+
+        let mut mask_state = c.start();
+        mask_state.commit_bytes(b"{\"a\": 0, \"b\": 0, \"c\":").unwrap();
+        let mask = mask_state.mask();
+        let mask_accepts = token_allowed(&mask, 0);
+
+        let mut commit_state = c.start();
+        commit_state.commit_bytes(b"{\"a\": 0, \"b\": 0, \"c\":").unwrap();
+        let commit_accepts = commit_state.commit_token(0u32).is_ok();
+
+        assert!(!mask_accepts, "abstract GLRM repro should reject the disputed token in the mask");
+        assert!(commit_accepts, "abstract GLRM repro should still allow the disputed token via commit");
+        assert_ne!(mask_accepts, commit_accepts, "abstract GLRM repro should preserve the mask/commit incongruence");
+    }
 
