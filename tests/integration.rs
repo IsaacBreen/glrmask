@@ -4665,16 +4665,14 @@ fn test_o62058_incongruent_mask_commit_abstract_schema() {
         let grammar = r#"
 start start;
 
-    nt json_object ::= "a" "d";
     nt p0 ::= "A" "ef" "0";
     nt p1 ::= "B" "ef" "0";
     nt p2 ::= "D" "ef" "0";
-    nt p3 ::= "C" "ef" json_object;
+    nt p3 ::= "C" "ef" ("a" "d");
     nt p4 ::= "E" "ef" "0";
     nt p5 ::= "F" "ef" "0";
     nt fields ::= "bc" ~ (p0 p1 p2? p3 p4 p5?);
-    nt obj ::= "a" fields "d";
-nt start ::= obj;
+    nt start ::= "a" fields "d";
 "#;
         let c = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
 
