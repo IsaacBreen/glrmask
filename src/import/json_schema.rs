@@ -5945,7 +5945,11 @@ impl<'a> SchemaCtx<'a> {
         }
 
         if let Some(format_name) = schema.get("format").and_then(Value::as_str) {
-            return self.build_format_string_expr(format_name);
+            // Email regexes currently leak byte-level lexical structure into
+            // parser-visible terminals. Keep them on the regular string path.
+            if format_name != "email" {
+                return self.build_format_string_expr(format_name);
+            }
         }
         if min_len == 0 && max_len.is_none() {
             return Ok(self.json_string_ref());

@@ -965,6 +965,28 @@ fn test_conversion_simple_object() {
     assert_eq!(named.start, "start");
 }
 
+#[test]
+fn test_email_format_uses_plain_bounded_string_lowering() {
+    let schema = r#"{
+        "type": "string",
+        "format": "email",
+        "maxLength": 5
+    }"#;
+    let named = named_grammar_from_schema(schema);
+
+    assert!(
+        named
+            .rules
+            .iter()
+            .any(|rule| rule.name.starts_with("JSON_STRING_BOUNDED_")),
+        "email strings should reuse bounded-string helper terminals"
+    );
+    assert!(
+        named.rules.iter().all(|rule| rule.name != "JSON_FORMAT_STRING"),
+        "email strings should not lower through the regex format terminal path"
+    );
+}
+
 /// Adapted from `test_conversion_any_of`.
 ///
 /// Checks that an anyOf schema produces a non-empty grammar.
