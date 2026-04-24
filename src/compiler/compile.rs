@@ -1786,4 +1786,43 @@ mod tests {
             "token ' {{}},' should remain both masked-in and committable after the minimized o62060 prefix witness"
         );
     }
+
+    #[test]
+    fn test_json_schema_o62060_minimized_empty_object_bridge_commit_full_prefix_and_comma_space() {
+        const FULL_TERMINALS: &[u32] = &[
+            7,  // {
+            1,  // "
+            12, // a"
+            6,  // : 
+            2,  // JSON_INTEGER
+            8,  // , 
+            1,  // "
+            13, // b"
+            6,  // : 
+            2,  // JSON_INTEGER
+            8,  // , 
+            1,  // "
+            15, // c"
+            6,  // : 
+            7,  // {
+            9,  // }
+            8,  // , 
+        ];
+
+        let grammar: GrammarDef = serde_json::from_str(include_str!("../../tests/data/o62060_minimized_empty_object_bridge_grammar.json"))
+            .expect("fixture grammar json should parse");
+        let (prepared, _tokenizer) = prepare_grammar_for_compile(&grammar);
+        let analyzed = AnalyzedGrammar::from_grammar_def(&prepared);
+        let table = GLRTable::build(&analyzed);
+        let mut state = ParserGSS::from_stacks(&[(vec![0u32], TerminalsDisallowed::new())]);
+
+        for &terminal in FULL_TERMINALS {
+            state = advance_stacks(&table, &state, terminal);
+        }
+
+        assert!(
+            !state.is_empty(),
+            "direct GLR table drive should keep the full minimized terminal witness through ' {{}}, ' alive"
+        );
+    }
 }
