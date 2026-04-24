@@ -1719,20 +1719,32 @@ mod tests {
         let grammar = json_schema_to_grammar(&schema).expect("schema should lower to a grammar");
         let vocab = Vocab::new(vec![(0u32, b" {},".to_vec())], None);
         let constraint = compile(&grammar, &vocab);
-        let mut state = constraint.start();
+        let mut mask_state = constraint.start();
 
-        state
+        mask_state
             .commit_bytes(PREFIX)
             .expect("minimized prefix bytes should advance the parser state");
 
-        let mask = state.mask();
-        assert!(
-            mask_has_token(&mask, 0),
-            "token ' {{}},' should remain allowed after the minimized o62060 prefix witness"
+        let mask = mask_state.mask();
+        let mask_accepts = mask_has_token(&mask, 0);
+
+        let mut commit_state = constraint.start();
+        commit_state
+            .commit_bytes(PREFIX)
+            .expect("minimized prefix bytes should advance the parser state");
+        let commit_accepts = commit_state.commit_token(0u32).is_ok();
+
+        println!("state before: {:?}", mask_state.debug_parser_stacks());
+        println!("state after:  {:?}", commit_state.debug_parser_stacks());
+
+        assert_eq!(
+            (mask_accepts, commit_accepts),
+            (true, true),
+            "token ' {{}},' should remain both masked-in and committable after the minimized o62060 prefix witness"
         );
     }
 
-        #[test]
+    #[test]
     fn test_json_schema_o62060_minimized_empty_object_bridge_up_to_x() {
         const PREFIX: &[u8] = b"{\"a\": 0, \"b\": 0, \"c\":";
 
@@ -1750,16 +1762,28 @@ mod tests {
         let grammar = json_schema_to_grammar(&schema).expect("schema should lower to a grammar");
         let vocab = Vocab::new(vec![(0u32, b" {},".to_vec())], None);
         let constraint = compile(&grammar, &vocab);
-        let mut state = constraint.start();
+        let mut mask_state = constraint.start();
 
-        state
+        mask_state
             .commit_bytes(PREFIX)
             .expect("minimized prefix bytes should advance the parser state");
 
-        let mask = state.mask();
-        assert!(
-            mask_has_token(&mask, 0),
-            "token ' {{}},' should remain allowed after the minimized o62060 prefix witness"
+        let mask = mask_state.mask();
+        let mask_accepts = mask_has_token(&mask, 0);
+
+        let mut commit_state = constraint.start();
+        commit_state
+            .commit_bytes(PREFIX)
+            .expect("minimized prefix bytes should advance the parser state");
+        let commit_accepts = commit_state.commit_token(0u32).is_ok();
+
+        println!("state before: {:?}", mask_state.debug_parser_stacks());
+        println!("state after:  {:?}", commit_state.debug_parser_stacks());
+
+        assert_eq!(
+            (mask_accepts, commit_accepts),
+            (true, true),
+            "token ' {{}},' should remain both masked-in and committable after the minimized o62060 prefix witness"
         );
     }
 }
