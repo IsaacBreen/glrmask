@@ -1,11 +1,10 @@
 use crate::runtime::state::ConstraintState;
-use crate::runtime::actions::commit::token_bytes_may_commit_from_state_map;
 use crate::compiler::glr::labels::{encode_positive_label, DEFAULT_LABEL};
 use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use crate::ds::weight::Weight;
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 type DenseTokenMaskCache = FxHashMap<usize, Box<[u64]>>;
@@ -309,59 +308,6 @@ impl<'a> ConstraintState<'a> {
             .internal_token_bytes
             .get(&internal_token)
             .map(Vec::as_slice)
-    }
-
-    fn supplement_empty_mask_with_exact_commit(&self, merged: &mut [u64]) {
-        if std::env::var_os("GLRMASK_DISABLE_EMPTY_MASK_SUPPLEMENT").is_some() {
-            return;
-        }
-
-        if merged.iter().any(|&word| word != 0) {
-            return;
-        }
-
-        let mut commit_buffers = crate::runtime::state::CommitBuffers::default();
-        for (&tokenizer_state, gss) in &self.state {
-            if gss.is_empty() || !Self::gss_accumulators_empty(gss) {
-                continue;
-            }
-
-            let Some(possible_matches) = self
-                .constraint
-                .possible_matches_for_state_internal(tokenizer_state)
-            else {
-                continue;
-            };
-
-            let candidate_tokens: BTreeSet<u32> = possible_matches
-                .values()
-                .flat_map(|token_ids| token_ids.iter())
-                .collect();
-
-            let probe_state = BTreeMap::from([(tokenizer_state, gss.clone())]);
-
-            for internal_token in candidate_tokens {
-                let Some(token_bytes) = self.internal_token_bytes(internal_token) else {
-                    continue;
-                };
-
-                if !token_bytes_may_commit_from_state_map(
-                    self.constraint,
-                    &probe_state,
-                    token_bytes,
-                    &mut commit_buffers,
-                ) {
-                    continue;
-                }
-
-                let internal_token = internal_token as usize;
-                let word = internal_token / 64;
-                let bit = internal_token % 64;
-                if let Some(slot) = merged.get_mut(word) {
-                    *slot |= 1u64 << bit;
-                }
-            }
-        }
     }
 
     /// Merge final_weight contribution into internal token bitmap instead of buf.
@@ -719,7 +665,10 @@ impl<'a> ConstraintState<'a> {
             }
         }
 
-        self.supplement_empty_mask_with_exact_commit(&mut merged);
+        // Sticky note: do not add any post-hoc mask supplementation/correction
+        // pass here. The mask must come directly from parser state semantics, not
+        // from brute-force exact-commit probing or any other "fix up the mask"
+        // fallback.
 
         // Convert merged internal token bitmap to output buffer.
         // Try incremental update from cached mask if delta is small.

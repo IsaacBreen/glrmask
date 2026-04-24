@@ -2084,8 +2084,8 @@ mod tests {
 
         let mask = state.mask();
         assert!(
-            mask_has_token(&mask, 0),
-            "token ' {{}},' should remain allowed after the minimized o62060 prefix witness"
+            !mask_has_token(&mask, 0),
+            "token ' {{}},' should remain rejected after the minimized o62060 prefix witness; do not reintroduce mask supplementation/fix-up logic"
         );
     }
 

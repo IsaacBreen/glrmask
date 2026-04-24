@@ -2091,7 +2091,7 @@ ap ::= 'd'"#,
 }
 
 #[test]
-fn test_json_schema_o62060_minimized_empty_object_token_remains_allowed() {
+fn test_json_schema_o62060_minimized_empty_object_token_remains_masked() {
     const PREFIX: &[u8] = b"{\"a\": 0, \"b\": 0, \"c\":";
     const EMPTY_OBJECT_TOKEN: &[u8] = b" {},";
 
@@ -2123,8 +2123,8 @@ fn test_json_schema_o62060_minimized_empty_object_token_remains_allowed() {
 
     let mask = state.mask();
     assert!(
-        token_allowed(&mask, 0),
-        "token ' {{}},' should remain allowed after the minimized o62060 prefix witness"
+        !token_allowed(&mask, 0),
+        "token ' {{}},' should remain masked after the minimized o62060 prefix witness; do not reintroduce mask supplementation/fix-up logic"
     );
 }
 
@@ -4617,9 +4617,7 @@ fn test_github_ultra_o62058_incongruent_mask_commit_207b7d2c() {
         commit_state.commit_bytes(b"{\"analyticsAvailable\": true, \"apiAccess\": true, \"auditInformationProvided\":").unwrap();
         let commit_accepts = commit_state.commit_token(16857u32).is_ok();
 
-        assert_eq!(mask_accepts, false, "Expected mask vote False for token ' {{}},' (id=16857) at prefix='{{\"analyticsAvailable\": true, \"apiAccess\": true, \"auditInformationProvided\":'; incongruence=mask_rejects_commit_allows.");
-        assert_eq!(commit_accepts, true, "Expected commit vote True for token ' {{}},' (id=16857) at prefix='{{\"analyticsAvailable\": true, \"apiAccess\": true, \"auditInformationProvided\":'; incongruence=mask_rejects_commit_allows.");
-        assert_ne!(mask_accepts, commit_accepts, "Expected mask and commit to disagree for token ' {{}},' (id=16857) at prefix='{{\"analyticsAvailable\": true, \"apiAccess\": true, \"auditInformationProvided\":'; incongruence=mask_rejects_commit_allows.");
+        assert_eq!(mask_accepts, commit_accepts, "bug repro: mask/commit incongruence");
 }
 
 #[test]
@@ -4684,9 +4682,7 @@ fn test_o62058_incongruent_mask_commit_abstract_schema() {
         commit_state.commit_bytes(b"{\"a\": 0, \"b\": 0, \"c\":").unwrap();
         let commit_accepts = commit_state.commit_token(0u32).is_ok();
 
-        assert!(!mask_accepts, "abstract schema repro should still reject token in mask");
-        assert!(commit_accepts, "abstract schema repro should still allow the same token via commit");
-        assert_ne!(mask_accepts, commit_accepts, "abstract schema repro should preserve the mask/commit incongruence");
+        assert_eq!(mask_accepts, commit_accepts, "bug repro: mask/commit incongruence");
 }
 
     #[test]
@@ -4709,8 +4705,6 @@ fn test_o62058_incongruent_mask_commit_abstract_schema() {
         commit_state.commit_bytes(b"{\"a\": 0, \"b\": 0, \"c\":").unwrap();
         let commit_accepts = commit_state.commit_token(0u32).is_ok();
 
-        assert!(!mask_accepts, "abstract GLRM repro should reject the disputed token in the mask");
-        assert!(commit_accepts, "abstract GLRM repro should still allow the disputed token via commit");
-        assert_ne!(mask_accepts, commit_accepts, "abstract GLRM repro should preserve the mask/commit incongruence");
+        assert_eq!(mask_accepts, commit_accepts, "bug repro: mask/commit incongruence");
     }
 
