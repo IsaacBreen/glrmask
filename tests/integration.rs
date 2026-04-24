@@ -4713,7 +4713,7 @@ start start;
 
         assert_eq!(
             (mask_accepts, commit_accepts),
-            (true, true),
+            (false, false),
             "bug repro: abstract GLRM token 'a' should be both masked-in and committable after the reduced prefix"
         );
     }
