@@ -1439,7 +1439,10 @@ fn unit_reduce_destination(
 
     let mut reduce_dst: Option<u32> = None;
     for pred in relevant_preds {
-        let (dst, _) = table.goto[pred as usize][&lhs];
+        let (dst, is_replace) = table.goto[pred as usize][&lhs];
+        if is_replace {
+            return None;
+        }
         if table.goto[dst as usize] != table.goto[state as usize] {
             return None;
         }
