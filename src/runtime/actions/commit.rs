@@ -37,6 +37,16 @@ fn token_bytes_for_id(constraint: &Constraint, token_id: u32) -> Option<&[u8]> {
         .or_else(|| constraint.token_bytes.get(&token_id).map(Vec::as_slice))
 }
 
+#[inline]
+fn end_state_may_advance(constraint: &Constraint, gss: &ParserGSS, end_state: u32) -> bool {
+    end_state == constraint.tokenizer.initial_state()
+        || stack_may_advance_on_any(
+            &constraint.table,
+            gss,
+            constraint.tokenizer.possible_future_terminals(end_state),
+        )
+}
+
 enum ActionableTerminals {
     SingleState(u32),
     Many(FxHashSet<u32>),
@@ -322,8 +332,7 @@ fn commit_bytes_fast_path(
 
     // Check if end_state needs processing
     if let Some(end_state) = exec_result.end_state {
-        let future_terminals = constraint.tokenizer.possible_future_terminals(end_state);
-        if stack_may_advance_on_any(&constraint.table, gss, future_terminals) {
+        if end_state_may_advance(constraint, gss, end_state) {
             return None;
         }
     }
@@ -464,8 +473,7 @@ fn commit_bytes_linear_fast_path(
         };
 
         if let Some(end_state) = exec_result.end_state {
-            let future_terminals = constraint.tokenizer.possible_future_terminals(end_state);
-            if stack_may_advance_on_any(&constraint.table, &gss, future_terminals) {
+            if end_state_may_advance(constraint, &gss, end_state) {
                 return if offset > 0 {
                     LinearFastPathResult::Continue { gss, offset }
                 } else {
@@ -647,9 +655,7 @@ fn commit_bytes_impl(
                             }
 
                             if let Some(end_state) = exec_result.end_state {
-                                let future_terminals = constraint.tokenizer.possible_future_terminals(end_state);
-                                if !stack_may_advance_on_any(&constraint.table, &gss_at_offset, future_terminals)
-                                {
+                                if !end_state_may_advance(constraint, &gss_at_offset, end_state) {
                                     continue;
                                 }
 
@@ -831,9 +837,7 @@ fn commit_bytes_impl(
             }
 
             if let Some(end_state) = exec_result.end_state {
-                let future_terminals = constraint.tokenizer.possible_future_terminals(end_state);
-                if !stack_may_advance_on_any(&constraint.table, &gss_at_offset, future_terminals)
-                {
+                if !end_state_may_advance(constraint, &gss_at_offset, end_state) {
                     continue;
                 }
 
@@ -1057,9 +1061,8 @@ fn commit_bytes_impl_profiled(
             }
 
             if let Some(end_state) = exec_result.end_state {
-                let future_terminals = constraint.tokenizer.possible_future_terminals(end_state);
                 let t_may = Instant::now();
-                let may_advance = stack_may_advance_on_any(&constraint.table, &gss_at_offset, future_terminals);
+                let may_advance = end_state_may_advance(constraint, &gss_at_offset, end_state);
                 may_advance_ns += t_may.elapsed().as_nanos() as u64;
                 if !may_advance {
                     continue;
@@ -1331,8 +1334,7 @@ fn commit_bytes_per_advance(
             }
 
             if let Some(end_state) = exec_result.end_state {
-                let future_terminals = constraint.tokenizer.possible_future_terminals(end_state);
-                if stack_may_advance_on_any(&constraint.table, &gss_at_offset, future_terminals) {
+                if end_state_may_advance(constraint, &gss_at_offset, end_state) {
                     queue_parser_state(
                         &mut processing_queue, &mut pending_state, bytes.len(), bytes.len(),
                         end_state, gss_at_offset.clone(),
