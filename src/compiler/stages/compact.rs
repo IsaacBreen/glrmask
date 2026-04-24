@@ -588,7 +588,28 @@ fn build_token_merge_permutation_ranged(weights: &[&Weight], num_tokens: u32) ->
         perm[i as usize] = current_group;
     }
 
-    (perm, num_groups as usize)
+    densify_used_group_ids(perm)
+}
+
+fn densify_used_group_ids(perm: Vec<u32>) -> (Vec<u32>, usize) {
+    if perm.is_empty() {
+        return (perm, 0);
+    }
+
+    let mut remap = rustc_hash::FxHashMap::default();
+    let mut next_dense = 0u32;
+    let dense_perm = perm
+        .into_iter()
+        .map(|group| {
+            *remap.entry(group).or_insert_with(|| {
+                let dense = next_dense;
+                next_dense += 1;
+                dense
+            })
+        })
+        .collect();
+
+    (dense_perm, next_dense as usize)
 }
 
 /// Merge elements with identical profiles, then sort by profile.
