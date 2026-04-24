@@ -36,11 +36,7 @@ mod tests {
         prepare_grammar_for_compile,
         prepare_owned_grammar_for_compile,
     };
-    use crate::compiler::glr::analysis::AnalyzedGrammar;
     use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::combined::analyze_equivalences;
-    use crate::compiler::glr::table::GLRTable;
-    use crate::compiler::glr::labels::{encode_positive_label, DEFAULT_LABEL};
-    use crate::compiler::stages::templates::characterize::characterize_terminals;
     use crate::import::json_schema::json_schema_to_grammar;
     use std::collections::BTreeMap;
     use std::fs;
@@ -1706,10 +1702,41 @@ mod tests {
     }
 
     #[test]
-    fn test_json_schema_o62060_minimized_empty_object_bridge() {
+    fn test_json_schema_o62060_minimized_empty_object_bridge_up_to_w() {
         const PREFIX: &[u8] = b"{\"a\": 0, \"b\": 0, \"c\":";
 
         let tail = (b'e'..=b'x')
+            .map(|key| format!("\"{}\":{{}}", key as char))
+            .collect::<Vec<_>>()
+            .join(",");
+        let schema = [
+            "{\"type\":\"object\",\"properties\":{\"a\":{},\"b\":{},\"d\":{},\"c\":{\"type\":\"object\"},",
+            &tail,
+            "},\"required\":[\"a\",\"b\",\"e\",\"c\"],\"additionalProperties\":false}",
+        ]
+            .concat();
+
+        let grammar = json_schema_to_grammar(&schema).expect("schema should lower to a grammar");
+        let vocab = Vocab::new(vec![(0u32, b" {},".to_vec())], None);
+        let constraint = compile(&grammar, &vocab);
+        let mut state = constraint.start();
+
+        state
+            .commit_bytes(PREFIX)
+            .expect("minimized prefix bytes should advance the parser state");
+
+        let mask = state.mask();
+        assert!(
+            mask_has_token(&mask, 0),
+            "token ' {{}},' should remain allowed after the minimized o62060 prefix witness"
+        );
+    }
+
+        #[test]
+    fn test_json_schema_o62060_minimized_empty_object_bridge_up_to_x() {
+        const PREFIX: &[u8] = b"{\"a\": 0, \"b\": 0, \"c\":";
+
+        let tail = (b'e'..=b'w')
             .map(|key| format!("\"{}\":{{}}", key as char))
             .collect::<Vec<_>>()
             .join(",");
@@ -1729,364 +1756,10 @@ mod tests {
             .commit_bytes(PREFIX)
             .expect("minimized prefix bytes should advance the parser state");
 
-        if std::env::var_os("GLRMASK_DEBUG_O62060_MRE").is_some() {
-            eprintln!("terminals: {:?}", grammar.terminals);
-            eprintln!("rules: {:?}", grammar.rules);
-            eprintln!("parser_stacks: {:?}", state.debug_parser_stacks());
-            eprintln!("walk_dfa(' {{}},'): {:?}", constraint.debug_walk_dfa(b" {},"));
-            for (tokenizer_state, _) in state.debug_parser_stacks() {
-                eprintln!(
-                    "possible_matches_internal[{}]: {:?}",
-                    tokenizer_state,
-                    constraint.possible_matches_for_state_internal(tokenizer_state)
-                );
-            }
-            let mut byte_probe = constraint.start();
-            byte_probe
-                .commit_bytes(PREFIX)
-                .expect("debug prefix should advance the parser state");
-            for chunk in [b" ".as_slice(), b"{".as_slice(), b"}".as_slice(), b",".as_slice()] {
-                byte_probe
-                    .commit_bytes(chunk)
-                    .expect("debug byte should commit");
-                let current_tokenizer_state = byte_probe
-                    .debug_parser_stacks()
-                    .first()
-                    .map(|(tokenizer_state, _)| *tokenizer_state)
-                    .expect("debug tokenizer state should exist");
-                eprintln!(
-                    "after_byte={:?} parser_stacks={:?} possible_matches_internal={:?}",
-                    std::str::from_utf8(chunk).unwrap(),
-                    byte_probe.debug_parser_stacks(),
-                    constraint.possible_matches_for_state_internal(current_tokenizer_state)
-                );
-            }
-
-            for tail_end in b'e'..=b'x' {
-                let debug_tail = (b'e'..=tail_end)
-                    .map(|key| format!("\"{}\":{{}}", key as char))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let debug_schema = [
-                    "{\"type\":\"object\",\"properties\":{\"a\":{},\"b\":{},\"d\":{},\"c\":{\"type\":\"object\"},",
-                    &debug_tail,
-                    "},\"required\":[\"a\",\"b\",\"e\",\"c\"],\"additionalProperties\":false}",
-                ]
-                .concat();
-                let debug_grammar = json_schema_to_grammar(&debug_schema).expect("debug schema should lower");
-                let debug_constraint = compile(&debug_grammar, &vocab);
-                let mut debug_state = debug_constraint.start();
-                debug_state
-                    .commit_bytes(PREFIX)
-                    .expect("debug prefix should advance the parser state");
-                let debug_mask = debug_state.mask();
-                eprintln!(
-                    "tail_end={} allowed={}",
-                    tail_end as char,
-                    mask_has_token(&debug_mask, 0)
-                );
-                if tail_end == b'w' || tail_end == b'x' {
-                    let (prepared_debug_grammar, _) = prepare_grammar_for_compile(&debug_grammar);
-                    let analyzed_debug_grammar = AnalyzedGrammar::from_grammar_def(&prepared_debug_grammar);
-                    let debug_table = GLRTable::build(&analyzed_debug_grammar);
-                    let debug_characterizations = characterize_terminals(&debug_table, &analyzed_debug_grammar);
-                    let debug_templates = crate::compiler::stages::templates::compile_dfa::Templates::from_characterizations(&debug_characterizations);
-                    if let Some(terminal6) = debug_characterizations.get(&6) {
-                        eprintln!(
-                            "tail_end={} terminal6 escapes={:?} reduces={:?} nt_escapes={:?} nt_rereduces={:?}",
-                            tail_end as char,
-                            terminal6
-                                .escapes
-                                .iter()
-                                .filter(|(state, _)| *state == 173 || *state == 208)
-                                .collect::<Vec<_>>(),
-                            terminal6
-                                .reduces
-                                .iter()
-                                .filter(|(state, _, _)| *state == 173 || *state == 208)
-                                .collect::<Vec<_>>(),
-                            terminal6
-                                .nt_escapes
-                                .iter()
-                                .filter(|(_, revealed, _)| *revealed == 173 || *revealed == 208 || *revealed == 228)
-                                .collect::<Vec<_>>(),
-                            terminal6
-                                .nt_rereduces
-                                .iter()
-                                .filter(|(_, revealed, _, _)| *revealed == 173 || *revealed == 208 || *revealed == 228)
-                                .collect::<Vec<_>>(),
-                        );
-                        if let (Some(template6_dfa), Some(template6_nwa)) = (
-                            debug_templates.by_terminal.get(&6),
-                            debug_templates.by_terminal_nwa.get(&6),
-                        ) {
-                            let dfa_states = template6_dfa
-                                .states
-                                .iter()
-                                .enumerate()
-                                .map(|(state_id, state)| {
-                                    (
-                                        state_id,
-                                        state.is_accepting,
-                                        state.transitions.iter().map(|(label, target)| (*label, *target)).collect::<Vec<_>>(),
-                                    )
-                                })
-                                .collect::<Vec<_>>();
-                            let nwa_states = template6_nwa
-                                .states
-                                .iter()
-                                .enumerate()
-                                .map(|(state_id, state)| {
-                                    (
-                                        state_id,
-                                        state.final_weight.is_some(),
-                                        state.transitions.iter().map(|(label, targets)| (*label, targets.clone())).collect::<Vec<_>>(),
-                                    )
-                                })
-                                .collect::<Vec<_>>();
-                            eprintln!(
-                                "tail_end={} template6 dfa={:?} nwa={:?}",
-                                tail_end as char,
-                                dfa_states,
-                                nwa_states,
-                            );
-                        }
-                    }
-                    if let Some(terminal7) = debug_characterizations.get(&7) {
-                        eprintln!(
-                            "tail_end={} terminal7 escapes={:?} reduces={:?} nt_escapes={:?} nt_rereduces={:?}",
-                            tail_end as char,
-                            terminal7
-                                .escapes
-                                .iter()
-                                .filter(|(state, _)| *state == 211 || *state == 228)
-                                .collect::<Vec<_>>(),
-                            terminal7
-                                .reduces
-                                .iter()
-                                .filter(|(state, _, _)| *state == 211 || *state == 228)
-                                .collect::<Vec<_>>(),
-                            terminal7
-                                .nt_escapes
-                                .iter()
-                                .filter(|(_, revealed, _)| *revealed == 211 || *revealed == 228)
-                                .collect::<Vec<_>>(),
-                            terminal7
-                                .nt_rereduces
-                                .iter()
-                                .filter(|(_, revealed, _, _)| *revealed == 211 || *revealed == 228)
-                                .collect::<Vec<_>>(),
-                        );
-                        if let (Some(template7_dfa), Some(template7_nwa)) = (
-                            debug_templates.by_terminal.get(&7),
-                            debug_templates.by_terminal_nwa.get(&7),
-                        ) {
-                            let dfa_states = template7_dfa
-                                .states
-                                .iter()
-                                .enumerate()
-                                .map(|(state_id, state)| {
-                                    (
-                                        state_id,
-                                        state.is_accepting,
-                                        state.transitions.iter().map(|(label, target)| (*label, *target)).collect::<Vec<_>>(),
-                                    )
-                                })
-                                .collect::<Vec<_>>();
-                            let nwa_states = template7_nwa
-                                .states
-                                .iter()
-                                .enumerate()
-                                .map(|(state_id, state)| {
-                                    (
-                                        state_id,
-                                        state.final_weight.is_some(),
-                                        state.transitions.iter().map(|(label, targets)| (*label, targets.clone())).collect::<Vec<_>>(),
-                                    )
-                                })
-                                .collect::<Vec<_>>();
-                            eprintln!(
-                                "tail_end={} template7 dfa={:?} nwa={:?}",
-                                tail_end as char,
-                                dfa_states,
-                                nwa_states,
-                            );
-                        }
-                    }
-
-                    let internal_token = debug_constraint.internal_token_for_original(0);
-                    let (_, debug_tokenizer) = prepare_grammar_for_compile(&debug_grammar);
-                    let debug_id_map = crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::combined::analyze_equivalences(
-                        &debug_tokenizer,
-                        &vocab,
-                        &std::collections::BTreeMap::new(),
-                        None,
-                        None,
-                    );
-                    let debug_internal_token = debug_id_map.vocab_tokens.original_to_internal[0];
-                    let debug_terminal_dwa = crate::compiler::stages::terminal_dwa_compat::build_terminal_dwa_for_existing_id_map(
-                        &analyzed_debug_grammar,
-                        &debug_tokenizer,
-                        &vocab,
-                        &debug_id_map,
-                        None,
-                    );
-                    let debug_parser_nwa = crate::compiler::stages::parser_dwa::debug_build_parser_nwa_from_terminal_dwa(
-                        &debug_terminal_dwa,
-                        &analyzed_debug_grammar,
-                        debug_templates.clone(),
-                    )
-                    .expect("debug parser NWA should build");
-                    let debug_tsid_17 = debug_id_map.tokenizer_states.original_to_internal[17];
-                    let debug_tsid_0 = debug_id_map.tokenizer_states.original_to_internal[0];
-                    let terminal6_edges = debug_terminal_dwa
-                        .states
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(state_id, state)| {
-                            state.transitions.get(&6).and_then(|(target, weight)| {
-                                weight
-                                    .tokens_for_tsid(debug_tsid_17)
-                                    .contains(debug_internal_token)
-                                    .then_some((state_id as u32, *target, weight.clone()))
-                            })
-                        })
-                        .collect::<Vec<_>>();
-                    let terminal7_edges_after_6 = terminal6_edges
-                        .iter()
-                        .filter_map(|(_, target, _)| {
-                            debug_terminal_dwa
-                                .states
-                                .get(*target as usize)
-                                .and_then(|state| state.transitions.get(&7))
-                                .and_then(|(next_target, weight)| {
-                                    weight
-                                    .tokens_for_tsid(debug_tsid_0)
-                                        .contains(debug_internal_token)
-                                        .then_some((*target, *next_target, weight.clone()))
-                                })
-                        })
-                        .collect::<Vec<_>>();
-                    let terminal6_targets = terminal6_edges
-                        .iter()
-                        .map(|(_, target, _)| {
-                            let state = &debug_terminal_dwa.states[*target as usize];
-                            let outgoing = state
-                                .transitions
-                                .iter()
-                                .map(|(label, (next_target, weight))| (*label, *next_target, weight.clone()))
-                                .collect::<Vec<_>>();
-                            (*target, state.final_weight.clone(), outgoing)
-                        })
-                        .collect::<Vec<_>>();
-                    eprintln!(
-                        "tail_end={} terminal_dwa start={} label6_edges={:?} label7_after_6={:?} targets={:?}",
-                        tail_end as char,
-                        debug_terminal_dwa.start_state,
-                        terminal6_edges,
-                        terminal7_edges_after_6,
-                        terminal6_targets,
-                    );
-                    let parser_nwa_states = debug_parser_nwa
-                        .states
-                        .iter()
-                        .enumerate()
-                        .map(|(state_id, state)| {
-                            (
-                                state_id,
-                                state.final_weight.is_some(),
-                                state.transitions.iter().map(|(label, targets)| (*label, targets.clone())).collect::<Vec<_>>(),
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    eprintln!(
-                        "tail_end={} parser_nwa start_states={:?} states={:?}",
-                        tail_end as char,
-                        debug_parser_nwa.start_states,
-                        parser_nwa_states,
-                    );
-                    eprintln!(
-                        "tail_end={} pos_label={:?} default_label={:?}",
-                        tail_end as char,
-                        debug_constraint.debug_parser_dwa_transition_token(
-                            debug_constraint.parser_dwa().start_state,
-                            encode_positive_label(208),
-                            17,
-                            internal_token,
-                        ),
-                        debug_constraint.debug_parser_dwa_transition_token(
-                            debug_constraint.parser_dwa().start_state,
-                            DEFAULT_LABEL,
-                            17,
-                            internal_token,
-                        ),
-                    );
-                    if tail_end == b'w' || tail_end == b'x' {
-                        let post6_state = if tail_end == b'w' { 10 } else { 39 };
-                        eprintln!(
-                            "tail_end={} post6_parser_dwa_state={:?} label7_from_post6 original17={:?} raw0={:?}",
-                            tail_end as char,
-                            debug_constraint.debug_parser_dwa_state(post6_state),
-                            debug_constraint.debug_parser_dwa_transition_token(
-                                post6_state,
-                                encode_positive_label(if tail_end == b'w' { 211 } else { 228 }),
-                                17,
-                                internal_token,
-                            ),
-                            debug_constraint.debug_parser_dwa_transition_token(
-                                post6_state,
-                                encode_positive_label(if tail_end == b'w' { 211 } else { 228 }),
-                                0,
-                                internal_token,
-                            ),
-                        );
-                    }
-
-                    let mut traced_state = debug_constraint.start();
-                    traced_state
-                        .commit_bytes(PREFIX)
-                        .expect("trace prefix should advance the parser state");
-                    let mut dwa_state = debug_constraint.parser_dwa().start_state;
-                    for chunk in [b" ".as_slice(), b"{".as_slice(), b"}".as_slice(), b",".as_slice()] {
-                        let stacks = traced_state.debug_parser_stacks();
-                        let (tokenizer_state, stack) = stacks
-                            .first()
-                            .and_then(|(tokenizer_state, stacks)| {
-                                stacks.first().map(|(stack, _)| (*tokenizer_state, stack.clone()))
-                            })
-                            .expect("trace stack should exist");
-                        let parser_state = *stack.last().expect("trace parser stack should be non-empty");
-                        let transition = debug_constraint.debug_parser_dwa_transition_token(
-                            dwa_state,
-                            encode_positive_label(parser_state),
-                            tokenizer_state,
-                            internal_token,
-                        );
-                        eprintln!(
-                            "tail_end={} before_byte={:?} dwa_state={} tokenizer_state={} parser_state={} transition={:?}",
-                            tail_end as char,
-                            std::str::from_utf8(chunk).unwrap(),
-                            dwa_state,
-                            tokenizer_state,
-                            parser_state,
-                            transition,
-                        );
-                        if let Some((target, _, _, _)) = transition {
-                            dwa_state = target;
-                        }
-                        traced_state
-                            .commit_bytes(chunk)
-                            .expect("trace byte should commit");
-                    }
-                }
-            }
-        }
-
         let mask = state.mask();
         assert!(
             mask_has_token(&mask, 0),
             "token ' {{}},' should remain allowed after the minimized o62060 prefix witness"
         );
     }
-
 }
