@@ -384,12 +384,20 @@ pub(crate) fn build_terminal_dwa_for_existing_id_map_with_possible_matches_and_c
     let always_allowed_ms = always_allowed_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let collapse_started_at = std::time::Instant::now();
-    let _ = collapse_always_allowed(&mut nwa, &always_allowed_by_label, grammar.num_terminals as usize);
+    let disable_collapse_always_allowed = std::env::var_os("GLRMASK_DISABLE_TERMINAL_DWA_COLLAPSE_ALWAYS_ALLOWED").is_some();
+    let _ = if disable_collapse_always_allowed {
+        false
+    } else {
+        collapse_always_allowed(&mut nwa, &always_allowed_by_label, grammar.num_terminals as usize)
+    };
     let collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let disallowed_started_at = std::time::Instant::now();
-    let df = compute_disallowed_follows(grammar);
-    apply_disallowed_follow_constraints(&mut nwa, &df, grammar.num_terminals as usize);
+    let disable_disallowed_follows = std::env::var_os("GLRMASK_DISABLE_TERMINAL_DWA_DISALLOWED_FOLLOWS").is_some();
+    if !disable_disallowed_follows {
+        let df = compute_disallowed_follows(grammar);
+        apply_disallowed_follow_constraints(&mut nwa, &df, grammar.num_terminals as usize);
+    }
     let disallowed_ms = disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let coreachable_prune_started_at = std::time::Instant::now();

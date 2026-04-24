@@ -994,21 +994,65 @@ pub(crate) fn collect_possible_matches_by_state(
 }
 
 pub(crate) fn collect_possible_matches_by_internal_tsid(
-    tokenizer: &Tokenizer,
+    _tokenizer: &Tokenizer,
     root: &VocabPrefixTreeNode,
     computer: &mut PossibleMatchesComputer<'_>,
     tokenizer_state_ids: &ManyToOneIdMap,
 ) -> PossibleMatchesByState {
-    collect_possible_matches_by_keys(
-        tokenizer,
-        root,
-        computer,
-        tokenizer_state_ids
-            .iter_representative_ids()
-            .enumerate()
-            .map(|(internal_tsid, representative_state)| (internal_tsid as u32, representative_state)),
-        tokenizer_state_ids.num_internal_ids(),
-    )
+    let mut possible_matches_by_state = BTreeMap::new();
+    let root_key = root as *const VocabPrefixTreeNode as usize;
+    let debug_profile = debug_profile_enabled();
+    let summary_profile = computer.summary_profile_enabled;
+    let started_at = Instant::now();
+
+    for (index, original_states) in tokenizer_state_ids.internal_to_originals.iter().enumerate() {
+        let mut merged = PossibleMatchMap::default();
+        for &original_state in original_states {
+            let cache_key = (root_key, original_state);
+            let root_compute_started_at = summary_profile.then(Instant::now);
+            let _ = computer.possible_matches_for_node(root, original_state);
+            if let Some(started_at) = root_compute_started_at {
+                computer.profile.root_compute_ms += elapsed_ms(started_at);
+            }
+            let materialize_started_at = summary_profile.then(Instant::now);
+            let matches_for_state = computer
+                .cache
+                .remove(&cache_key)
+                .expect("root possible-match map should be cached");
+            match Rc::try_unwrap(matches_for_state) {
+                Ok(map) => merge_possible_match_maps(&mut merged, &map),
+                Err(shared) => merge_possible_match_maps(&mut merged, &shared),
+            }
+            if let Some(started_at) = materialize_started_at {
+                computer.profile.materialize_output_ms += elapsed_ms(started_at);
+            }
+        }
+        possible_matches_by_state.insert(index as u32, merged.into_iter().collect());
+
+        let states_done = index as u32 + 1;
+        if debug_profile
+            && ((states_done % 100_000 == 0) || states_done == tokenizer_state_ids.num_internal_ids())
+        {
+            let profile = computer.profile();
+            eprintln!(
+                "[glrmask/debug][possible_matches] states_done={} total_states={} elapsed_ms={:.3} cache_entries={} reachable_cache_entries={} cache_hits={} cache_misses={} child_segments={} byte_steps={} recursive_descents={} self_loop_subtrees_skipped={} terminal_insertions={}",
+                states_done,
+                tokenizer_state_ids.num_internal_ids(),
+                started_at.elapsed().as_secs_f64() * 1000.0,
+                profile.cache_entries,
+                profile.reachable_cache_entries,
+                profile.cache_hits,
+                profile.cache_misses,
+                profile.child_segments_visited,
+                profile.byte_steps,
+                profile.recursive_descents,
+                profile.self_loop_subtrees_skipped,
+                profile.terminal_insertions,
+            );
+        }
+    }
+
+    possible_matches_by_state
 }
 
 fn collect_possible_matches_by_keys(

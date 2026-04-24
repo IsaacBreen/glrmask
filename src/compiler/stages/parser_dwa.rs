@@ -1289,6 +1289,15 @@ fn build_parser_nwa_from_terminal_dwa(
 }
 
 #[cfg(test)]
+pub(crate) fn debug_build_parser_nwa_from_terminal_dwa(
+    terminal_dwa: &DWA,
+    grammar: &AnalyzedGrammar,
+    templates: Templates,
+) -> Option<NWA> {
+    build_parser_nwa_from_terminal_dwa(terminal_dwa, grammar, templates).map(|(nwa, _)| nwa)
+}
+
+#[cfg(test)]
 pub(crate) fn build_parser_dwa(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
@@ -1376,25 +1385,33 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     profile.viable_suffix_ms = elapsed_ms(viable_suffix_started_at);
 
     let optimize_defaults_started_at = Instant::now();
-    optimize_parser_dwa_defaults(
-        &mut parser_dwa_pre_minimize,
-        &possible_by_state,
-        table.num_states,
-    );
+    if std::env::var_os("GLRMASK_DISABLE_PARSER_DWA_DEFAULTS_OPT").is_none() {
+        optimize_parser_dwa_defaults(
+            &mut parser_dwa_pre_minimize,
+            &possible_by_state,
+            table.num_states,
+        );
+    }
     profile.optimize_defaults_ms = elapsed_ms(optimize_defaults_started_at);
 
     let subtract_final_started_at = Instant::now();
-    subtract_final_weights_from_outgoing_dwa(&mut parser_dwa_pre_minimize);
+    if std::env::var_os("GLRMASK_DISABLE_PARSER_DWA_SUBTRACT_FINAL").is_none() {
+        subtract_final_weights_from_outgoing_dwa(&mut parser_dwa_pre_minimize);
+    }
     profile.subtract_final_ms = elapsed_ms(subtract_final_started_at);
 
     profile.determinize_after_defaults_ms = 0.0;
 
     let minimize_started_at = Instant::now();
-    let minimized = minimize_from_env(
-        &parser_dwa_pre_minimize,
-        "GLRMASK_MINIMIZE_PARSER_DWA",
-        minimize_fast,
-    );
+    let minimized = if std::env::var_os("GLRMASK_DISABLE_PARSER_DWA_MINIMIZE").is_some() {
+        parser_dwa_pre_minimize.clone()
+    } else {
+        minimize_from_env(
+            &parser_dwa_pre_minimize,
+            "GLRMASK_MINIMIZE_PARSER_DWA",
+            minimize_fast,
+        )
+    };
     profile.minimize_ms = elapsed_ms(minimize_started_at);
     profile.total_ms = elapsed_ms(total_started_at);
 

@@ -1,6 +1,6 @@
 use crate::runtime::state::ConstraintState;
+use crate::runtime::actions::commit::token_bytes_may_commit_from_state_map;
 use crate::compiler::glr::labels::{encode_positive_label, DEFAULT_LABEL};
-use crate::compiler::glr::parser::stack_may_advance_on;
 use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use crate::ds::weight::Weight;
 use range_set_blaze::RangeSetBlaze;
@@ -311,7 +311,16 @@ impl<'a> ConstraintState<'a> {
             .map(Vec::as_slice)
     }
 
-    fn supplement_mask_from_raw_parser(&self, merged: &mut [u64]) {
+    fn supplement_empty_mask_with_exact_commit(&self, merged: &mut [u64]) {
+        if std::env::var_os("GLRMASK_DISABLE_EMPTY_MASK_SUPPLEMENT").is_some() {
+            return;
+        }
+
+        if merged.iter().any(|&word| word != 0) {
+            return;
+        }
+
+        let mut commit_buffers = crate::runtime::state::CommitBuffers::default();
         for (&tokenizer_state, gss) in &self.state {
             if gss.is_empty() || !Self::gss_accumulators_empty(gss) {
                 continue;
@@ -329,16 +338,19 @@ impl<'a> ConstraintState<'a> {
                 .flat_map(|token_ids| token_ids.iter())
                 .collect();
 
+            let probe_state = BTreeMap::from([(tokenizer_state, gss.clone())]);
+
             for internal_token in candidate_tokens {
                 let Some(token_bytes) = self.internal_token_bytes(internal_token) else {
                     continue;
                 };
-                let exec = self.constraint.tokenizer.execute_from_state(token_bytes, tokenizer_state);
-                if !exec
-                    .matches
-                    .iter()
-                    .any(|matched| stack_may_advance_on(&self.constraint.table, gss, matched.id))
-                {
+
+                if !token_bytes_may_commit_from_state_map(
+                    self.constraint,
+                    &probe_state,
+                    token_bytes,
+                    &mut commit_buffers,
+                ) {
                     continue;
                 }
 
@@ -453,7 +465,9 @@ impl<'a> ConstraintState<'a> {
 
             // Chain fast path: extract chain from parser GSS and walk DWA inline,
             // avoiding intermediate DenseMaskGSS allocations and BFS queue round-trips.
-            if let Some((chain_states, parser_acc, tail)) = gss.extract_chain_and_tail() {
+            if std::env::var_os("GLRMASK_DISABLE_MASK_CHAIN_FAST_PATH").is_none()
+                && let Some((chain_states, parser_acc, tail)) = gss.extract_chain_and_tail()
+            {
                 let Some(mut acc) = self.terminals_disallowed_to_dense_acc(parser_acc, internal_tsid) else {
                     continue;
                 };
@@ -625,7 +639,9 @@ impl<'a> ConstraintState<'a> {
                 // Chain optimization: if the GSS has a long chain of single-path
                 // levels, walk through them directly instead of decomposing one
                 // level at a time. This avoids intermediate GSS allocations.
-                if let Some((chain_states, chain_acc, tail_lower)) = gss.extract_chain_and_tail() {
+                if std::env::var_os("GLRMASK_DISABLE_MASK_CHAIN_FAST_PATH").is_none()
+                    && let Some((chain_states, chain_acc, tail_lower)) = gss.extract_chain_and_tail()
+                {
                     let mut acc = chain_acc.clone();
                     let mut cur_wa_state = wa_state;
                     let mut alive = true;
@@ -703,7 +719,7 @@ impl<'a> ConstraintState<'a> {
             }
         }
 
-        self.supplement_mask_from_raw_parser(&mut merged);
+        self.supplement_empty_mask_with_exact_commit(&mut merged);
 
         // Convert merged internal token bitmap to output buffer.
         // Try incremental update from cached mask if delta is small.
