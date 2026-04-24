@@ -751,17 +751,16 @@ fn compile_prepared_with_profile(
                     let trie = crate::ds::vocab_prefix_tree::VocabPrefixTree::build_owned(token_entries);
                     let trie_build_ms = elapsed_ms(trie_build_started_at);
                     let collect_started_at = Instant::now();
-                    let (pm_by_tsid, dense_profile) = crate::compiler::possible_matches::collect_possible_matches_by_internal_tsid_dense(
+                    let (pm_by_tsid, dense_profile) = crate::compiler::possible_matches::collect_possible_matches_by_original_tsid_dense(
                         &tokenizer,
                         &trie.root,
-                        &internal_ids.tokenizer_states,
                         internal_ids.vocab_tokens.num_internal_ids(),
                     );
                     let collect_ms = elapsed_ms(collect_started_at);
                     crate::compiler::possible_matches::emit_possible_matches_profile_summary(
-                        "internal_tsid",
+                        "original_tsid",
                         internal_token_bytes.len(),
-                        internal_ids.tokenizer_states.num_internal_ids(),
+                        tokenizer.num_states(),
                         trie_build_ms,
                         collect_ms,
                         &dense_profile,

@@ -370,7 +370,7 @@ impl<'a> ConstraintState<'a> {
 
         let mut dense: Vec<u64> = vec![0u64; universe.len()];
         for (&orig_tokenizer_state, disallowed_in_state) in terminals_disallowed.iter() {
-            let tsid = self.constraint.internal_tsid_for_state(orig_tokenizer_state);
+            let tsid = orig_tokenizer_state;
             let mut allowed_for_state = universe.to_vec();
             for &terminal_id in disallowed_in_state {
                 if let Some(mask) = terminal_masks.get(&(tsid, terminal_id)) {

@@ -460,9 +460,8 @@ impl Constraint {
         &self,
         tokenizer_state: u32,
     ) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
-        let internal_tsid = self.internal_tsid_for_state(tokenizer_state);
         self.possible_matches
-            .get(&internal_tsid)
+            .get(&tokenizer_state)
             .map(|terminals| {
                 terminals
                     .iter()
@@ -517,8 +516,7 @@ impl Constraint {
         &self,
         tokenizer_state: u32,
     ) -> Option<BTreeMap<TerminalID, RangeSetBlaze<u32>>> {
-        let internal_tsid = self.internal_tsid_for_state(tokenizer_state);
-        self.possible_matches.get(&internal_tsid).map(|terminals| {
+        self.possible_matches.get(&tokenizer_state).map(|terminals| {
             terminals
                 .iter()
                 .map(|(&terminal, bitmap)| (terminal, bitmap_to_rangeset(bitmap)))
@@ -542,10 +540,10 @@ impl Constraint {
 
     fn build_seed_terminal_dense_masks(&self) -> SeedTerminalDenseMasks {
         let mut terminal_masks = SeedTerminalDenseMasks::default();
-        for (&internal_tsid, terminals) in &self.possible_matches {
+        for (&tokenizer_state, terminals) in &self.possible_matches {
             for (&terminal_id, bitmap) in terminals {
                 terminal_masks.insert(
-                    (internal_tsid, terminal_id),
+                    (tokenizer_state, terminal_id),
                     bitmap.clone(),
                 );
             }
@@ -835,7 +833,7 @@ impl Constraint {
     ) -> Option<(u32, bool, bool, bool)> {
         let state = self.parser_dwa.states.get(dwa_state as usize)?;
         let (target, weight) = state.transitions.get(&label)?;
-        let internal_tsid = self.internal_tsid_for_state(tokenizer_state);
+        let internal_tsid = tokenizer_state;
         let transition_is_full = weight.is_full();
         let transition_allows = transition_is_full
             || weight

@@ -568,7 +568,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
 
     if std::env::var("GLRMASK_DEBUG_DWA_DUMP").map_or(false, |v| v == "1") {
         emit_merged_token_map(&merged.dwa, vocab, &merged.id_map);
-        emit_merged_dwa_dump(&merged.dwa, &merged.id_map);
+        emit_merged_dwa_dump(&merged.dwa);
     }
 
     (merged.id_map, merged.dwa, profile)
@@ -597,88 +597,15 @@ fn emit_merged_token_map(dwa: &DWA, vocab: &Vocab, id_map: &InternalIdMap) {
             let originals = id_map.vocab_tokens.internal_to_originals.get(*tid as usize)
                 .map(|v| v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","))
                 .unwrap_or_else(|| "?".into());
-            let representative = id_map
-                .vocab_tokens
-                .representative_original_id_for_internal(*tid)
-                .map_or_else(|| "?".to_string(), |id| id.to_string());
             eprintln!(
-                "[glrmask/debug][terminal_dwa][token_map] repr={} internal={} originals=[{}] bytes={:?}",
-                representative, tid, originals, String::from_utf8_lossy(bytes)
+                "[glrmask/debug][terminal_dwa][token_map] internal={} originals=[{}] bytes={:?}",
+                tid, originals, String::from_utf8_lossy(bytes)
             );
         }
     }
 }
 
-fn format_debug_id_ranges(ids: impl IntoIterator<Item = u32>, wrap_in_braces: bool) -> String {
-    let mut ids: Vec<u32> = ids.into_iter().collect();
-    ids.sort_unstable();
-    ids.dedup();
-
-    let body = if ids.is_empty() {
-        String::new()
-    } else {
-        let mut parts = Vec::new();
-        let mut start = ids[0];
-        let mut end = ids[0];
-        for &id in &ids[1..] {
-            if end.checked_add(1) == Some(id) {
-                end = id;
-                continue;
-            }
-            if start == end {
-                parts.push(start.to_string());
-            } else {
-                parts.push(format!("{}..={}", start, end));
-            }
-            start = id;
-            end = id;
-        }
-        if start == end {
-            parts.push(start.to_string());
-        } else {
-            parts.push(format!("{}..={}", start, end));
-        }
-        parts.join(",")
-    };
-
-    if wrap_in_braces {
-        format!("{{{body}}}")
-    } else {
-        body
-    }
-}
-
-fn format_debug_weight(weight: &crate::ds::weight::Weight, id_map: &InternalIdMap) -> String {
-    if weight.is_empty() || weight.is_full() {
-        return weight.to_string();
-    }
-
-    weight
-        .compact_entries()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(start, end, tokens)| {
-            let tsids = (start..=end).filter_map(|internal| {
-                id_map
-                    .tokenizer_states
-                    .representative_original_id_for_internal(internal)
-            });
-            let token_ids = tokens.iter().filter_map(|internal| {
-                id_map
-                    .vocab_tokens
-                    .representative_original_id_for_internal(internal)
-            });
-            format!(
-                "{}→{}",
-                format_debug_id_ranges(tsids, false),
-                format_debug_id_ranges(token_ids, true)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
-}
-
-fn emit_merged_dwa_dump(dwa: &DWA, id_map: &InternalIdMap) {
+fn emit_merged_dwa_dump(dwa: &DWA) {
     let num_states = dwa.num_states() as usize;
     let start_state = dwa.start_state as usize;
     let mut incoming_counts = vec![0usize; num_states];
@@ -729,18 +656,11 @@ fn emit_merged_dwa_dump(dwa: &DWA, id_map: &InternalIdMap) {
             .values()
             .filter(|(to, _)| *to as usize == state_id)
             .count();
-        let final_weight = state.final_weight.as_ref().map_or_else(
-            || "none".to_string(),
-            |weight| {
-                let debug_weight = format_debug_weight(weight, id_map);
-                let internal_weight = weight.to_string();
-                if debug_weight == internal_weight {
-                    debug_weight
-                } else {
-                    format!("{debug_weight} [internal {internal_weight}]")
-                }
-            },
-        );
+        let final_weight = state
+            .final_weight
+            .as_ref()
+            .map(|weight| format!("{weight}"))
+            .unwrap_or_else(|| "none".to_string());
         let start_mark = if state_id == start_state {
             " [START]"
         } else {
@@ -760,13 +680,7 @@ fn emit_merged_dwa_dump(dwa: &DWA, id_map: &InternalIdMap) {
 
         for (label, (target, weight)) in &state.transitions {
             eprintln!("    {label} -> State {target}");
-            let debug_weight = format_debug_weight(weight, id_map);
-            let internal_weight = weight.to_string();
-            if debug_weight == internal_weight {
-                eprintln!("      weight: {debug_weight}");
-            } else {
-                eprintln!("      weight: {debug_weight} [internal {internal_weight}]");
-            }
+            eprintln!("      weight: {weight}");
         }
     }
 }
