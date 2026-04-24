@@ -4665,14 +4665,9 @@ fn test_o62058_incongruent_mask_commit_abstract_schema() {
         let grammar = r#"
 start start;
 
-    nt p0 ::= "a";
-    nt p1 ::= "a";
     nt p2 ::= "a";
     nt p3 ::= "a" "a";
-    nt p4 ::= "a";
-    nt p5 ::= "a";
-    nt fields ::= "ab" ~ (p0 p1 p2? p3 p4 p5?);
-    nt start ::= fields;
+    nt start ::= "ab" ~ (("a") ("a") p2? p3 ("a") ("a")?);
 "#;
         let c = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
 
@@ -5509,6 +5504,183 @@ start start;
     nt p4 ::= "a";
     nt fields ::= "ab" ~ (p0 p1 p2? p3 p4);
     nt start ::= fields;
+"#,
+                prefix: b"aabaabaa",
+                token: b"a",
+            },
+            Candidate {
+                label: "mono_a_sep_a_short_p3_token_a",
+                grammar: r#"
+start start;
+
+    nt p0 ::= "a";
+    nt p1 ::= "a";
+    nt p2 ::= "a";
+    nt p3 ::= "a" "a";
+    nt p4 ::= "a";
+    nt p5 ::= "a";
+    nt fields ::= "a" ~ (p0 p1 p2? p3 p4 p5?);
+    nt start ::= fields;
+"#,
+                prefix: b"aaaaaa",
+                token: b"a",
+            },
+            Candidate {
+                label: "mono_a_sep_b_short_p3_token_a",
+                grammar: r#"
+start start;
+
+    nt p0 ::= "a";
+    nt p1 ::= "a";
+    nt p2 ::= "a";
+    nt p3 ::= "a" "a";
+    nt p4 ::= "a";
+    nt p5 ::= "a";
+    nt fields ::= "b" ~ (p0 p1 p2? p3 p4 p5?);
+    nt start ::= fields;
+"#,
+                prefix: b"ababaa",
+                token: b"a",
+            },
+            Candidate {
+                label: "mono_a_no_sep_short_p3_token_a",
+                grammar: r#"
+start start;
+
+    nt p0 ::= "a";
+    nt p1 ::= "a";
+    nt p2 ::= "a";
+    nt p3 ::= "a" "a";
+    nt p4 ::= "a";
+    nt p5 ::= "a";
+    nt fields ::= p0 p1 p2? p3 p4 p5?;
+    nt start ::= fields;
+"#,
+                prefix: b"aaaa",
+                token: b"a",
+            },
+            Candidate {
+                label: "mono_a_sep_ab_short_p3_all_required_token_a",
+                grammar: r#"
+start start;
+
+    nt p0 ::= "a";
+    nt p1 ::= "a";
+    nt p2 ::= "a";
+    nt p3 ::= "a" "a";
+    nt p4 ::= "a";
+    nt p5 ::= "a";
+    nt fields ::= "ab" ~ (p0 p1 p2 p3 p4 p5);
+    nt start ::= fields;
+"#,
+                prefix: b"aabaabaabaa",
+                token: b"a",
+            },
+            Candidate {
+                label: "mono_a_no_sep_short_p3_all_required_token_a",
+                grammar: r#"
+start start;
+
+    nt p0 ::= "a";
+    nt p1 ::= "a";
+    nt p2 ::= "a";
+    nt p3 ::= "a" "a";
+    nt p4 ::= "a";
+    nt p5 ::= "a";
+    nt fields ::= p0 p1 p2 p3 p4 p5;
+    nt start ::= fields;
+"#,
+                prefix: b"aaaaa",
+                token: b"a",
+            },
+            Candidate {
+                label: "mono_a_sep_ab_short_p3_inline_fields_rhs",
+                grammar: r#"
+start start;
+
+    nt start ::= "ab" ~ (("a") ("a") ("a")? ("a" "a") ("a") ("a")?);
+"#,
+                prefix: b"aabaabaa",
+                token: b"a",
+            },
+            Candidate {
+                label: "mono_a_sep_ab_short_p3_inline_p_into_fields",
+                grammar: r#"
+start start;
+
+    nt fields ::= "ab" ~ (("a") ("a") ("a")? ("a" "a") ("a") ("a")?);
+    nt start ::= fields;
+"#,
+                prefix: b"aabaabaa",
+                token: b"a",
+            },
+            Candidate {
+                label: "mono_a_sep_ab_short_p3_keep_p_inline_fields_into_start",
+                grammar: r#"
+start start;
+
+    nt p0 ::= "a";
+    nt p1 ::= "a";
+    nt p2 ::= "a";
+    nt p3 ::= "a" "a";
+    nt p4 ::= "a";
+    nt p5 ::= "a";
+    nt start ::= "ab" ~ (p0 p1 p2? p3 p4 p5?);
+"#,
+                prefix: b"aabaabaa",
+                token: b"a",
+            },
+            Candidate {
+                label: "mono_a_sep_ab_short_p3_inline_p0_p1",
+                grammar: r#"
+start start;
+
+    nt p2 ::= "a";
+    nt p3 ::= "a" "a";
+    nt p4 ::= "a";
+    nt p5 ::= "a";
+    nt start ::= "ab" ~ (("a") ("a") p2? p3 p4 p5?);
+"#,
+                prefix: b"aabaabaa",
+                token: b"a",
+            },
+            Candidate {
+                label: "mono_a_sep_ab_short_p3_inline_p4_p5",
+                grammar: r#"
+start start;
+
+    nt p0 ::= "a";
+    nt p1 ::= "a";
+    nt p2 ::= "a";
+    nt p3 ::= "a" "a";
+    nt start ::= "ab" ~ (p0 p1 p2? p3 ("a") ("a")?);
+"#,
+                prefix: b"aabaabaa",
+                token: b"a",
+            },
+            Candidate {
+                label: "mono_a_sep_ab_short_p3_inline_p0_p1_p4_p5",
+                grammar: r#"
+start start;
+
+    nt p2 ::= "a";
+    nt p3 ::= "a" "a";
+    nt start ::= "ab" ~ (("a") ("a") p2? p3 ("a") ("a")?);
+"#,
+                prefix: b"aabaabaa",
+                token: b"a",
+            },
+            Candidate {
+                label: "mono_a_sep_ab_short_p3_inline_only_p2",
+                grammar: r#"
+start start;
+
+    nt p0 ::= "a";
+    nt p1 ::= "a";
+    nt p3 ::= "a" "a";
+    nt p4 ::= "a";
+    nt p5 ::= "a";
+    nt start ::= "ab" ~ (p0 p1 ("a")? p3 p4 p5?);
 "#,
                 prefix: b"aabaabaa",
                 token: b"a",
