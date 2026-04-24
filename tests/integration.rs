@@ -4690,6 +4690,35 @@ start start;
     }
 
     #[test]
+    fn test_o62058_incongruent_mask_commit_abstract_glrm2() {
+        let vocab = Vocab::new(vec![(0u32, b"a".to_vec())], None);
+        let grammar = r#"
+start start;
+
+    nt start ::= "a" "a";
+"#;
+        let c = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+
+        let mut mask_state = c.start();
+        mask_state.commit_bytes(b"aa").unwrap();
+        let mask = mask_state.mask();
+        let mask_accepts = token_allowed(&mask, 0);
+
+        let mut commit_state = c.start();
+        commit_state.commit_bytes(b"aa").unwrap();
+        let commit_accepts = commit_state.commit_token(0u32).is_ok();
+
+        println!("state before: {:?}", mask_state.debug_parser_stacks());
+        println!("state after:  {:?}", commit_state.debug_parser_stacks());
+
+        assert_eq!(
+            (mask_accepts, commit_accepts),
+            (true, true),
+            "bug repro: abstract GLRM token 'a' should be both masked-in and committable after the reduced prefix"
+        );
+    }
+
+    #[test]
     fn test_o62058_incongruent_mask_commit_abstract_glrm_candidates() {
         struct Candidate {
             label: &'static str,
