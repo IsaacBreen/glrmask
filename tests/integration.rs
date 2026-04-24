@@ -4665,9 +4665,9 @@ fn test_o62058_incongruent_mask_commit_abstract_schema() {
         let grammar = r#"
 start start;
 
-    nt p2 ::= "a";
-    nt p3 ::= "a" "a";
-    nt start ::= "ab" ~ (("a") ("a") p2? p3 ("a") ("a")?);
+    nt a1 ::= "a";
+    nt a2 ::= "a" "a";
+    nt start ::= "ab" ~ ("a" "a" a1? a2 "a" "a"?);
 "#;
         let c = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
 
