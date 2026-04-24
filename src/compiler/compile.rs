@@ -1705,7 +1705,7 @@ mod tests {
     fn test_json_schema_o62060_minimized_empty_object_bridge_up_to_w() {
         const PREFIX: &[u8] = b"{\"a\": 0, \"b\": 0, \"c\":";
 
-        let tail = (b'e'..=b'x')
+        let tail = (b'e'..=b'w')
             .map(|key| format!("\"{}\":{{}}", key as char))
             .collect::<Vec<_>>()
             .join(",");
@@ -1736,7 +1736,7 @@ mod tests {
     fn test_json_schema_o62060_minimized_empty_object_bridge_up_to_x() {
         const PREFIX: &[u8] = b"{\"a\": 0, \"b\": 0, \"c\":";
 
-        let tail = (b'e'..=b'w')
+        let tail = (b'e'..=b'x')
             .map(|key| format!("\"{}\":{{}}", key as char))
             .collect::<Vec<_>>()
             .join(",");
