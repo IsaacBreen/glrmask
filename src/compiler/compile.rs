@@ -27,6 +27,10 @@ pub(crate) fn compile(grammar: &GrammarDef, vocab: &Vocab) -> Constraint {
 mod tests {
     use super::*;
     use crate::automata::regex::Expr;
+    use crate::compiler::glr::accumulator::TerminalsDisallowed;
+    use crate::compiler::glr::analysis::AnalyzedGrammar;
+    use crate::compiler::glr::parser::{ParserGSS, advance_stacks};
+    use crate::compiler::glr::table::GLRTable;
     use crate::grammar::flat::tests::*;
     use crate::grammar::flat::{NonterminalID, Rule, Symbol, Terminal};
     use crate::compiler::grammar::transforms::{
@@ -1734,9 +1738,6 @@ mod tests {
             .expect("minimized prefix bytes should advance the parser state");
         let commit_accepts = commit_state.commit_token(0u32).is_ok();
 
-        println!("state before: {:?}", mask_state.debug_parser_stacks());
-        println!("state after:  {:?}", commit_state.debug_parser_stacks());
-
         assert_eq!(
             (mask_accepts, commit_accepts),
             (true, true),
@@ -1813,16 +1814,31 @@ mod tests {
             .expect("fixture grammar json should parse");
         let (prepared, _tokenizer) = prepare_grammar_for_compile(&grammar);
         let analyzed = AnalyzedGrammar::from_grammar_def(&prepared);
-        let table = GLRTable::build(&analyzed);
-        let mut state = ParserGSS::from_stacks(&[(vec![0u32], TerminalsDisallowed::new())]);
 
-        for &terminal in FULL_TERMINALS {
-            state = advance_stacks(&table, &state, terminal);
+        for (label, table) in [
+            ("no_inline", GLRTable::build_with_unit_reduction_inlining(&analyzed, false)),
+            ("inline", GLRTable::build_with_unit_reduction_inlining(&analyzed, true)),
+        ] {
+            let mut state = ParserGSS::from_stacks(&[(vec![0u32], TerminalsDisallowed::new())]);
+
+            for (step, &terminal) in FULL_TERMINALS.iter().enumerate() {
+                let before_tops = state.peek_values();
+                state = advance_stacks(&table, &state, terminal);
+                assert!(
+                    !state.is_empty(),
+                    "{} direct GLR table drive died at step {} on terminal {} with incoming tops {:?}",
+                    label,
+                    step,
+                    terminal,
+                    before_tops,
+                );
+            }
+
+            assert!(
+                !state.is_empty(),
+                "{} direct GLR table drive should keep the full minimized terminal witness through ' {{}}, ' alive",
+                label,
+            );
         }
-
-        assert!(
-            !state.is_empty(),
-            "direct GLR table drive should keep the full minimized terminal witness through ' {{}}, ' alive"
-        );
     }
 }
