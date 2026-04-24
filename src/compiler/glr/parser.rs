@@ -932,7 +932,7 @@ pub(crate) fn stack_may_advance_on_any(
     stack.peek_values().into_iter().any(|state| {
         table.action.get(state as usize).is_some_and(|actions| {
             actions.keys().any(|&terminal| {
-                terminals.contains(terminal as usize) || terminal == EOF
+                terminals.contains(terminal as usize)
             })
         })
     })
@@ -943,19 +943,12 @@ pub(crate) fn stacks_finished(table: &GLRTable, stack: &ParserGSS) -> bool {
         return false;
     }
 
-    #[cfg(any(test, debug_assertions))]
-    {
-        return stacks_accept(table, &stack_vectors(stack));
-    }
-
-    #[cfg(not(any(test, debug_assertions)))]
-    {
     let has_eof_action = stack
         .peek_values()
         .iter()
         .any(|&state| table.action(state, EOF).is_some());
-        has_eof_action
-    }
+
+    has_eof_action
 }
 
 
