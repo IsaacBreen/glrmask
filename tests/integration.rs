@@ -4667,7 +4667,7 @@ start start;
 
     nt a1 ::= "a";
     nt a2 ::= "a" "a";
-    nt start ::= "ab" ~ ("a" "a" a1? a2 "a" "a"?);
+    nt start ::= "ab" ~ ("a" "a" a1? a2);
 "#;
         let c = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
 
@@ -4679,6 +4679,8 @@ start start;
         let mut commit_state = c.start();
         commit_state.commit_bytes(b"aabaabaa").unwrap();
         let commit_accepts = commit_state.commit_token(0u32).is_ok();
+
+        println!("state: {:?}", mask_state.debug_parser_stacks());
 
         assert_eq!(
             (mask_accepts, commit_accepts),
