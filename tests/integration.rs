@@ -2091,7 +2091,7 @@ ap ::= 'd'"#,
 }
 
 #[test]
-fn test_json_schema_o62060_minimized_empty_object_token_remains_masked() {
+fn test_json_schema_o62060_minimized_empty_object_token_remains_allowed() {
     const PREFIX: &[u8] = b"{\"a\": 0, \"b\": 0, \"c\":";
     const EMPTY_OBJECT_TOKEN: &[u8] = b" {},";
 
@@ -2123,8 +2123,8 @@ fn test_json_schema_o62060_minimized_empty_object_token_remains_masked() {
 
     let mask = state.mask();
     assert!(
-        !token_allowed(&mask, 0),
-        "token ' {{}},' should remain masked after the minimized o62060 prefix witness; do not reintroduce mask supplementation/fix-up logic"
+        token_allowed(&mask, 0),
+        "token ' {{}},' should remain allowed after the minimized o62060 prefix witness"
     );
 }
 
@@ -4617,7 +4617,11 @@ fn test_github_ultra_o62058_incongruent_mask_commit_207b7d2c() {
         commit_state.commit_bytes(b"{\"analyticsAvailable\": true, \"apiAccess\": true, \"auditInformationProvided\":").unwrap();
         let commit_accepts = commit_state.commit_token(16857u32).is_ok();
 
-        assert_eq!(mask_accepts, commit_accepts, "bug repro: mask/commit incongruence");
+        assert_eq!(
+            (mask_accepts, commit_accepts),
+            (true, true),
+            "bug repro: token ' {{}},' should be both masked-in and committable after the o62058 prefix"
+        );
 }
 
 #[test]
@@ -4682,7 +4686,11 @@ fn test_o62058_incongruent_mask_commit_abstract_schema() {
         commit_state.commit_bytes(b"{\"a\": 0, \"b\": 0, \"c\":").unwrap();
         let commit_accepts = commit_state.commit_token(0u32).is_ok();
 
-        assert_eq!(mask_accepts, commit_accepts, "bug repro: mask/commit incongruence");
+        assert_eq!(
+            (mask_accepts, commit_accepts),
+            (true, true),
+            "bug repro: abstract schema token ' {{}},' should be both masked-in and committable after the reduced prefix"
+        );
 }
 
     #[test]
@@ -4705,6 +4713,10 @@ fn test_o62058_incongruent_mask_commit_abstract_schema() {
         commit_state.commit_bytes(b"{\"a\": 0, \"b\": 0, \"c\":").unwrap();
         let commit_accepts = commit_state.commit_token(0u32).is_ok();
 
-        assert_eq!(mask_accepts, commit_accepts, "bug repro: mask/commit incongruence");
+        assert_eq!(
+            (mask_accepts, commit_accepts),
+            (true, true),
+            "bug repro: abstract GLRM token ' {{}},' should be both masked-in and committable after the reduced prefix"
+        );
     }
 
