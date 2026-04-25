@@ -7436,6 +7436,27 @@ impl<'a> SchemaCtx<'a> {
             }
         }
 
+        let additional_schema = self.normalized_additional_properties_schema(additional_properties);
+
+        let only_dynamic_properties = properties.map(|map| map.is_empty()).unwrap_or(true)
+            && required_list.is_empty()
+            && pattern_properties.is_none()
+            && property_names.is_none();
+
+        if only_dynamic_properties {
+            let min_pairs = min_properties.map(|value| value as usize).unwrap_or(0);
+            let max_pairs = max_properties.map(|value| value as usize);
+            let Some(schema) = additional_schema.clone() else {
+                if min_pairs > 0 {
+                    return Err(unsat_schema_error());
+                }
+                return Ok(sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]));
+            };
+
+            let value_expr = self.convert_schema(&schema)?;
+            return Ok(self.build_repeated_dynamic_object_pairs(value_expr, min_pairs, max_pairs));
+        }
+
         if let Some(properties) = properties {
             if min_properties.is_some() || max_properties.is_some() {
                 if let Some(expr) = self.build_min_max_properties_special_case(
@@ -7459,8 +7480,6 @@ impl<'a> SchemaCtx<'a> {
             }
 
             let pattern_property_entries = Self::pattern_property_entries(pattern_properties);
-            let additional_schema =
-                self.normalized_additional_properties_schema(additional_properties);
 
             return self.build_ordered_properties_object_expr(
                 properties,
@@ -7470,22 +7489,6 @@ impl<'a> SchemaCtx<'a> {
                 additional_schema,
                 property_names,
             );
-        }
-
-        let additional_schema = self.normalized_additional_properties_schema(additional_properties);
-
-        if property_names.is_none() && pattern_properties.is_none() && (min_properties.is_some() || max_properties.is_some()) {
-            let min_pairs = min_properties.map(|value| value as usize).unwrap_or(0);
-            let max_pairs = max_properties.map(|value| value as usize);
-            let Some(schema) = additional_schema.clone() else {
-                if min_pairs > 0 {
-                    return Err(unsat_schema_error());
-                }
-                return Ok(sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]));
-            };
-
-            let value_expr = self.convert_schema(&schema)?;
-            return Ok(self.build_repeated_dynamic_object_pairs(value_expr, min_pairs, max_pairs));
         }
 
         if !required_list.is_empty() && pattern_properties.is_none() && property_names.is_none() {

@@ -1247,6 +1247,42 @@ fn test_closed_object_single_variant_collapses_optional_tail_paths() {
     );
 }
 
+#[test]
+fn test_nested_dynamic_object_prefix_stays_single_path() {
+    let schema = r#"{
+        "type": "object",
+        "additionalProperties": {
+            "type": "object",
+            "properties": {
+                "layers": {
+                    "type": "object",
+                    "additionalProperties": {"type": "boolean"}
+                },
+                "patches": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                            "repo": {"type": "string"},
+                            "path": {"type": "string"}
+                        },
+                        "required": ["path"]
+                    }
+                }
+            }
+        }
+    }"#;
+    let prefix = br#"{"kas": {"layers": {"meta-kas": true, "meta-openembedded": true}, "patches": {"kas-patch": {"repo": "r", "path": "p"}}"#;
+
+    let constraint = schema_constraint(schema);
+    let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
+
+    assert_eq!(
+        max_paths, 1,
+        "pure dynamic-key object lowering should avoid close-brace path waves"
+    );
+}
+
 /// Adapted from `test_conversion_enum`.
 ///
 /// Checks that an enum schema produces grammar rules containing the
