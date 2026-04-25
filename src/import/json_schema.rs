@@ -8261,7 +8261,7 @@ impl<'a> SchemaCtx<'a> {
         additional_properties_schema: Option<Value>,
         property_names: Option<&Value>,
         allow_empty_named_props_list: bool,
-        allow_exact_closed_object_optimization: bool,
+        _allow_exact_closed_object_optimization: bool,
     ) -> Result<GrammarExpr, GlrMaskError> {
         let property_names_pattern = property_names
             .map(Self::property_name_pattern)
@@ -8474,19 +8474,10 @@ impl<'a> SchemaCtx<'a> {
 
 
 
-        if allow_exact_closed_object_optimization
-            && !Self::exact_closed_object_disabled()
-            && !ordered.is_empty()
-            && ordered.iter().any(|(_, _, required)| !*required)
-            && ordered.iter().any(|(_, _, required)| *required)
-            && pattern_properties.is_empty()
-            && !has_additional_properties
-            && property_names.is_none()
-        {
-            if let Some(expr) = self.try_build_exact_closed_object(&ordered)? {
-                return Ok(expr);
-            }
-        }
+        // NOTE: try_build_exact_closed_object (the DFA/quotient strategy) is
+        // intentionally bypassed. It produces state rules where every alternative
+        // starts with the shared `"\""` token, causing N-way GLR forks at each
+        // key boundary. SeparatedSequence (below) handles all cases cleanly.
 
         if !ordered.is_empty()
             && ordered.iter().all(|(_, _, required)| *required)
