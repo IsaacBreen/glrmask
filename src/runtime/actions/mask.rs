@@ -705,7 +705,6 @@ impl<'a> ConstraintState<'a> {
                 }
 
                 let t_path = if PROFILE { Some(std::time::Instant::now()) } else { None };
-                let mut took_fast_path = false;
 
                 // Chain optimization: if the GSS has a long chain of single-path
                 // levels, walk through them directly instead of decomposing one
@@ -713,7 +712,6 @@ impl<'a> ConstraintState<'a> {
                 if std::env::var_os("GLRMASK_DISABLE_MASK_CHAIN_FAST_PATH").is_none()
                     && let Some((chain_states, chain_acc, tail_lower)) = gss.extract_chain_and_tail()
                 {
-                    took_fast_path = true;
                     let mut acc = chain_acc.clone();
                     let mut cur_wa_state = wa_state;
                     let mut alive = true;
@@ -782,29 +780,28 @@ impl<'a> ConstraintState<'a> {
                                 );
                             });
                         }
+
+                        if let (Some(c), Some(t)) = (counters.as_mut(), t_path) {
+                            c.bfs_fast_path_ns += t.elapsed().as_nanos() as u64;
+                        }
+                        continue;
                     }
                 }
 
-                if !took_fast_path {
-                    // Standard path: decompose one level at a time.
-                    gss.for_each_decomposed(|parser_state, popped| {
-                        enqueue_parser_state_transitions(
-                            &mut queue,
-                            fast_trans,
-                            parser_state,
-                            &popped,
-                            precomputed,
-                            counters.as_mut(),
-                        );
-                    });
-                }
+                // Standard path: decompose one level at a time.
+                gss.for_each_decomposed(|parser_state, popped| {
+                    enqueue_parser_state_transitions(
+                        &mut queue,
+                        fast_trans,
+                        parser_state,
+                        &popped,
+                        precomputed,
+                        counters.as_mut(),
+                    );
+                });
 
                 if let (Some(c), Some(t)) = (counters.as_mut(), t_path) {
-                    if took_fast_path {
-                        c.bfs_fast_path_ns += t.elapsed().as_nanos() as u64;
-                    } else {
-                        c.bfs_standard_path_ns += t.elapsed().as_nanos() as u64;
-                    }
+                    c.bfs_standard_path_ns += t.elapsed().as_nanos() as u64;
                 }
             }
         }
