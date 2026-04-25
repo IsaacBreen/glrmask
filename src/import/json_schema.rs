@@ -3105,6 +3105,12 @@ impl<'a> SchemaCtx<'a> {
         )
     }
 
+    fn normalized_allof_schema(&self, schema: &Map<String, Value>) -> Option<Value> {
+        let all_of = schema.get("allOf")?.as_array()?;
+        let base = Self::schema_without_keys(schema, &["allOf"]);
+        Some(Value::Object(self.merge_resolved_subschemas(&base, all_of)))
+    }
+
     fn schemas_are_verifiably_disjoint(&self, left: &Value, right: &Value) -> bool {
         if left == &Value::Bool(false) || right == &Value::Bool(false) {
             return true;
@@ -3131,6 +3137,13 @@ impl<'a> SchemaCtx<'a> {
                 return self.schemas_are_verifiably_disjoint(left, target);
             }
             return false;
+        }
+
+        if let Some(normalized) = self.normalized_allof_schema(left_object) {
+            return self.schemas_are_verifiably_disjoint(&normalized, right);
+        }
+        if let Some(normalized) = self.normalized_allof_schema(right_object) {
+            return self.schemas_are_verifiably_disjoint(left, &normalized);
         }
 
         if let (Some(left_const), Some(right_const)) = (

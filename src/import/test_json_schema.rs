@@ -1385,6 +1385,64 @@ fn test_ref_oneof_with_required_pattern_discriminator_compiles() {
 }
 
 #[test]
+fn test_ref_oneof_with_allof_const_discriminator_compiles() {
+    let _guard = env_lock().lock().expect("env lock should not be poisoned");
+    let schema = r##"{
+        "definitions": {
+            "item": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"}
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            },
+            "plate": {
+                "allOf": [
+                    {"$ref": "#/definitions/item"},
+                    {
+                        "properties": {
+                            "kind": {"const": "plate"}
+                        },
+                        "required": ["kind"]
+                    }
+                ]
+            },
+            "tipbox": {
+                "allOf": [
+                    {"$ref": "#/definitions/item"},
+                    {
+                        "properties": {
+                            "kind": {"const": "tipbox"}
+                        },
+                        "required": ["kind"]
+                    }
+                ]
+            }
+        },
+        "oneOf": [
+            {"$ref": "#/definitions/plate"},
+            {"$ref": "#/definitions/tipbox"}
+        ]
+    }"##;
+
+    schema_accepts(
+        schema,
+        &[
+            r#"{"id": "x", "kind": "plate"}"#,
+            r#"{"id": "x", "kind": "tipbox"}"#,
+        ],
+    );
+    schema_rejects(
+        schema,
+        &[
+            r#"{"id": "x"}"#,
+            r#"{"id": "x", "kind": "other"}"#,
+        ],
+    );
+}
+
+#[test]
 fn test_o47674_top_level_oneof_matches_llguidance_permissiveness() {
     let _guard = env_lock().lock().expect("env lock should not be poisoned");
     let schema_path = Path::new(
@@ -1394,6 +1452,24 @@ fn test_o47674_top_level_oneof_matches_llguidance_permissiveness() {
         &std::fs::read_to_string(schema_path).expect("o47674 fixture should be readable"),
     )
     .expect("o47674 fixture should parse");
+    let schema = fixture
+        .get("schema")
+        .expect("fixture should contain schema")
+        .to_string();
+
+    let _constraint = schema_constraint(&schema);
+}
+
+#[test]
+fn test_o29389_top_level_oneof_matches_llguidance_permissiveness() {
+    let _guard = env_lock().lock().expect("env lock should not be poisoned");
+    let schema_path = Path::new(
+        "/Users/isaacbreen/Projects2/constraint-framework-analysis/data/sources/jsonschemabench/maskbench/data/Github_hard---o29389.json",
+    );
+    let fixture: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(schema_path).expect("o29389 fixture should be readable"),
+    )
+    .expect("o29389 fixture should parse");
     let schema = fixture
         .get("schema")
         .expect("fixture should contain schema")
