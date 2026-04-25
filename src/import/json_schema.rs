@@ -7117,25 +7117,17 @@ impl<'a> SchemaCtx<'a> {
             return sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]);
         }
 
-        let nonempty = sequence_or_single(vec![
-            literal_expr(b"{"),
-            pair.clone(),
-            repeat_expr(
-                sequence_or_single(vec![self.json_item_separator_expr(), pair]),
-                min_pairs.saturating_sub(1),
-                max_pairs.map(|max| max.saturating_sub(1)),
-            ),
-            literal_expr(b"}"),
-        ]);
+        let body = GrammarExpr::SeparatedSequence {
+            items: vec![(repeat_expr(pair, min_pairs, max_pairs), true)],
+            separator: Box::new(self.json_item_separator_expr()),
+            allow_empty: min_pairs == 0,
+        };
 
-        if min_pairs == 0 {
-            choice_or_single(vec![
-                sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]),
-                nonempty,
-            ])
-        } else {
-            nonempty
-        }
+        sequence_or_single(vec![
+            literal_expr(b"{"),
+            body,
+            literal_expr(b"}"),
+        ])
     }
 
     fn build_repeated_dynamic_object_pairs(
@@ -8917,23 +8909,46 @@ impl<'a> SchemaCtx<'a> {
             unmatched_value_expr,
         ]);
         let base_name = self.fresh_rule_name("obj_pat_mix");
-        let (additional_nc, additional_c) = self.build_object_pair_tail(
-            &base_name,
-            "ap",
-            vec![unmatched_pair],
-            empty_expr(),
-            empty_expr(),
+        let matched_pair_rule = self.insert_shared_rule(
+            format!("{base_name}_pp_kv"),
+            matched_pair,
         );
-        let (matched_nc, _) = self.build_object_pair_tail(
-            &base_name,
-            "pp",
-            vec![matched_pair],
-            GrammarExpr::Ref(additional_nc),
-            GrammarExpr::Ref(additional_c),
+        let unmatched_pair_rule = self.insert_shared_rule(
+            format!("{base_name}_ap_kv"),
+            unmatched_pair,
+        );
+        let matched_list_nonempty = self.insert_shared_rule(
+            format!("{base_name}_pp_list"),
+            GrammarExpr::SeparatedSequence {
+                items: vec![(GrammarExpr::RepeatOne(Box::new(GrammarExpr::Ref(matched_pair_rule))), true)],
+                separator: Box::new(self.json_item_separator_expr()),
+                allow_empty: false,
+            },
+        );
+        let unmatched_list_nonempty = self.insert_shared_rule(
+            format!("{base_name}_ap_list"),
+            GrammarExpr::SeparatedSequence {
+                items: vec![(GrammarExpr::RepeatOne(Box::new(GrammarExpr::Ref(unmatched_pair_rule))), true)],
+                separator: Box::new(self.json_item_separator_expr()),
+                allow_empty: false,
+            },
+        );
+        let body_rule = self.insert_shared_rule(
+            format!("{base_name}_body"),
+            choice_or_single(vec![
+                empty_expr(),
+                GrammarExpr::Ref(matched_list_nonempty.clone()),
+                GrammarExpr::Ref(unmatched_list_nonempty.clone()),
+                sequence_or_single(vec![
+                    GrammarExpr::Ref(matched_list_nonempty),
+                    self.json_item_separator_expr(),
+                    GrammarExpr::Ref(unmatched_list_nonempty),
+                ]),
+            ]),
         );
         Ok(sequence_or_single(vec![
             literal_expr(b"{"),
-            GrammarExpr::Ref(matched_nc),
+            GrammarExpr::Ref(body_rule),
             literal_expr(b"}"),
         ]))
     }
@@ -9334,6 +9349,14 @@ mod tests {
             .iter()
             .filter(|rule| !rule.is_terminal)
             .any(|rule| expr_has_ref_then_literal(&rule.expr, literal))
+    }
+
+    fn named_grammar_has_rule_with_prefix(grammar: &NamedGrammar, prefix: &str) -> bool {
+        grammar.rules.iter().any(|rule| rule.name.starts_with(prefix))
+    }
+
+    fn named_grammar_has_rule_with_suffix(grammar: &NamedGrammar, suffix: &str) -> bool {
+        grammar.rules.iter().any(|rule| rule.name.ends_with(suffix))
     }
 
     #[test]
@@ -10395,6 +10418,26 @@ mod tests {
             "additionalProperties": {"type": "string"}
         }"#;
         assert!(accepts_sequence(schema, &[b"{\"other\": \"x\"}"]));
+    }
+
+    #[test]
+    fn test_mixed_pattern_single_pattern_uses_simple_lists_not_tail_ladder() {
+        let schema: Value = serde_json::from_str(r#"{
+            "type": "object",
+            "patternProperties": {
+                "[a-z]{1,2}": {
+                    "type": "string"
+                }
+            }
+        }"#).unwrap();
+        let grammar = schema_to_named_grammar(&schema).unwrap();
+
+        assert!(!named_grammar_has_rule_with_suffix(&grammar, "_pp_nc"));
+        assert!(!named_grammar_has_rule_with_suffix(&grammar, "_pp_c"));
+        assert!(!named_grammar_has_rule_with_suffix(&grammar, "_ap_nc"));
+        assert!(!named_grammar_has_rule_with_suffix(&grammar, "_ap_c"));
+        assert!(named_grammar_has_rule_with_suffix(&grammar, "_pp_list"));
+        assert!(named_grammar_has_rule_with_suffix(&grammar, "_ap_list"));
     }
 
     #[test]
