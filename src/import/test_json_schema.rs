@@ -1259,6 +1259,66 @@ fn test_closed_object_single_variant_collapses_optional_tail_paths() {
 }
 
 #[test]
+fn test_closed_object_oneof_dead_end_prefixes_still_uses_exact_union() {
+    let _guard = env_lock().lock().expect("env lock should not be poisoned");
+    let schema = r#"{
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "help": {"type": "string"},
+                    "label": {"type": "string"},
+                    "type": {"const": "email"}
+                },
+                "required": ["label"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "help": {"type": "string"},
+                    "label": {"type": "string"},
+                    "type": {"const": "time"}
+                },
+                "required": ["label"],
+                "additionalProperties": false
+            }
+        ]
+    }"#;
+
+    let named = named_grammar_from_schema(schema);
+    assert!(
+        named.rules.iter().any(|rule| rule.name.contains("obj_ord_q_")),
+        "oneOf with shared dead-end prefixes should still use the exact closed-object union lowering"
+    );
+
+    schema_accepts(
+        schema,
+        &[
+            r#"{"label": "x", "type": "email"}"#,
+            r#"{"label": "x", "type": "time"}"#,
+            r#"{"help": "h", "label": "x", "type": "email"}"#,
+        ],
+    );
+    schema_rejects(
+        schema,
+        &[
+            r#"{}"#,
+            r#"{"label": "x"}"#,
+            r#"{"help": "h", "label": "x"}"#,
+        ],
+    );
+
+    let prefix = br#"{"help": "h", "label": "x""#;
+    let constraint = schema_constraint(schema);
+    let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
+    assert_eq!(
+        max_paths, 1,
+        "shared dead-end prefixes should stay single-path until the discriminating key value"
+    );
+}
+
+#[test]
 fn test_nested_dynamic_object_prefix_stays_single_path() {
     let schema = r#"{
         "type": "object",

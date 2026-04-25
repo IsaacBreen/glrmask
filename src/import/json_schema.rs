@@ -4071,14 +4071,20 @@ impl<'a> SchemaCtx<'a> {
     fn collect_ordered_closed_object_schema_variant(
         &mut self,
         variant: &Map<String, Value>,
+        allow_implicit_object: bool,
     ) -> Result<Option<OrderedClosedObjectSchemaVariant>, GlrMaskError> {
-        // Require explicit "type": "object".  Without it, object keywords
-        // like properties/additionalProperties only constrain *if* the value
-        // is an object; non-object values (string, array, etc.) remain valid.
-        // The exact closed-object path emits object-only grammar, so it must
-        // not intercept schemas that also allow non-object values.
-        if variant.get("type").and_then(Value::as_str) != Some("object") {
-            return Ok(None);
+        // By default require explicit `type: object`. Without it, object keywords
+        // only constrain object instances and non-objects remain valid.
+        // For oneOf, a union of multiple such closed-object branches still rejects
+        // non-objects because all branches match them, so the exact closed-object
+        // union path may safely intercept that specific implicit-object pattern.
+        match variant.get("type").and_then(Value::as_str) {
+            Some("object") => {}
+            None if allow_implicit_object
+                && variant.contains_key("properties")
+                && !variant.contains_key("patternProperties")
+                && !variant.contains_key("propertyNames") => {}
+            _ => return Ok(None),
         }
         match variant.get("additionalProperties") {
             Some(Value::Bool(false)) => {}
@@ -4264,6 +4270,36 @@ impl<'a> SchemaCtx<'a> {
             transitions[state_idx] = edges;
         }
 
+        let mut reverse_edges: Vec<Vec<usize>> = vec![Vec::new(); states.len()];
+        for (state_idx, edges) in transitions.iter().enumerate() {
+            for (_, _, next_idx) in edges {
+                reverse_edges[*next_idx].push(state_idx);
+            }
+        }
+
+        let mut viable = vec![false; states.len()];
+        let mut viable_queue = VecDeque::new();
+        for (state_idx, state) in states.iter().enumerate() {
+            if Self::ordered_subset_close_allowed(mode, &variants, state) {
+                viable[state_idx] = true;
+                viable_queue.push_back(state_idx);
+            }
+        }
+
+        while let Some(state_idx) = viable_queue.pop_front() {
+            for &prev_idx in &reverse_edges[state_idx] {
+                if viable[prev_idx] {
+                    continue;
+                }
+                viable[prev_idx] = true;
+                viable_queue.push_back(prev_idx);
+            }
+        }
+
+        if !viable[0] {
+            return Ok(None);
+        }
+
         let mut base_index = self.generated_object_rule_counter;
         let base_name = loop {
             let candidate = format!("obj_ord_q_{base_index}");
@@ -4273,59 +4309,48 @@ impl<'a> SchemaCtx<'a> {
             base_index += 1;
         };
         self.generated_object_rule_counter = base_index + 1;
-        let prefix_rule_names: Vec<String> = (0..states.len())
+        let state_rule_names: Vec<String> = (0..states.len())
             .map(|idx| format!("{base_name}_p{idx}"))
             .collect();
-        let mut incoming: Vec<Vec<(usize, String, GrammarExpr)>> = vec![Vec::new(); states.len()];
-        for (state_idx, edges) in transitions.iter().enumerate() {
-            for (key, value_expr, next_idx) in edges {
-                incoming[*next_idx].push((state_idx, key.clone(), value_expr.clone()));
-            }
-        }
 
-        for state_idx in 1..states.len() {
+        // Emit the exact-union DFA as forward continuation states.
+        // This keeps each consumed prefix in a single grammar state, rather than
+        // encoding the same suffix transition through multiple historical prefixes.
+        for state_idx in 0..states.len() {
+            if !viable[state_idx] {
+                continue;
+            }
+
             let mut alts = Vec::new();
-            for (prev_idx, key, value_expr) in &incoming[state_idx] {
-                if *prev_idx == 0 {
-                    alts.push(self.build_fused_merged_literal_key_value_expr(
-                        b"",
+            if Self::ordered_subset_close_allowed(mode, &variants, &states[state_idx]) {
+                alts.push(empty_expr());
+            }
+
+            for (key, value_expr, next_idx) in &transitions[state_idx] {
+                if !viable[*next_idx] {
+                    continue;
+                }
+
+                let sep: &[u8] = if state_idx == 0 { b"" } else { b", " };
+                alts.push(sequence_or_single(vec![
+                    self.build_fused_merged_literal_key_value_expr(
+                        sep,
                         key,
                         value_expr.clone(),
-                    ));
-                } else {
-                    alts.push(sequence_or_single(vec![
-                        GrammarExpr::Ref(prefix_rule_names[*prev_idx].clone()),
-                        self.build_fused_merged_literal_key_value_expr(
-                            b", ",
-                            key,
-                            value_expr.clone(),
-                        ),
-                    ]));
-                }
+                    ),
+                    GrammarExpr::Ref(state_rule_names[*next_idx].clone()),
+                ]));
             }
 
             if alts.is_empty() {
                 return Ok(None);
             }
-            self.insert_rule(prefix_rule_names[state_idx].clone(), choice_or_single(alts));
-        }
-
-        let mut body_alts = Vec::new();
-        if Self::ordered_subset_close_allowed(mode, &variants, &states[0]) {
-            body_alts.push(empty_expr());
-        }
-        for state_idx in 1..states.len() {
-            if Self::ordered_subset_close_allowed(mode, &variants, &states[state_idx]) {
-                body_alts.push(GrammarExpr::Ref(prefix_rule_names[state_idx].clone()));
-            }
-        }
-        if body_alts.is_empty() {
-            return Ok(None);
+            self.insert_rule(state_rule_names[state_idx].clone(), choice_or_single(alts));
         }
 
         Ok(Some(sequence_or_single(vec![
             literal_expr(b"{"),
-            choice_or_single(body_alts),
+            GrammarExpr::Ref(state_rule_names[0].clone()),
             literal_expr(b"}"),
         ])))
     }
@@ -4587,7 +4612,10 @@ impl<'a> SchemaCtx<'a> {
 
         let mut schema_variants = Vec::with_capacity(resolved.len());
         for variant in &resolved {
-            let Some(ordered) = self.collect_ordered_closed_object_schema_variant(variant)? else {
+            let Some(ordered) = self.collect_ordered_closed_object_schema_variant(
+                variant,
+                mode == StructuralBranchMode::OneOf,
+            )? else {
                 return Ok(None);
             };
             schema_variants.push(ordered);
@@ -8425,17 +8453,21 @@ impl<'a> SchemaCtx<'a> {
 
 
 
-        // NOTE: try_build_exact_closed_object (the DFA/quotient strategy) is
-        // intentionally bypassed. It produces state rules where every alternative
-        // starts with the shared `"\""` token, causing N-way GLR forks at each
-        // key boundary. SeparatedSequence (below) handles all cases cleanly.
-
         if !ordered.is_empty()
             && ordered.iter().all(|(_, _, required)| *required)
             && pattern_properties.is_empty()
             && !has_additional_properties
         {
             return Ok(self.build_closed_required_ordered_object_expr(&ordered));
+        }
+
+        if !ordered.is_empty()
+            && pattern_properties.is_empty()
+            && !has_additional_properties
+        {
+            if let Some(expr) = self.try_build_exact_closed_object(&ordered)? {
+                return Ok(expr);
+            }
         }
 
         let pattern_list_rule = pattern_list_expr.map(|expr| {
