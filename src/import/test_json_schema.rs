@@ -460,7 +460,7 @@ fn test_shared_additional_properties_key_exclusions_create_shared_terminal_and_a
 }
 
 #[test]
-fn test_pattern_key_terminal_uses_json_string_middle_for_unanchored_sides() {
+fn test_pattern_key_terminal_is_extracted_for_unanchored_sides() {
     let schema = r#"{
         "type": "object",
         "properties": {
@@ -473,21 +473,18 @@ fn test_pattern_key_terminal_uses_json_string_middle_for_unanchored_sides() {
     }"#;
 
     let grammar = named_grammar_from_schema(schema);
-    assert!(grammar.rules.iter().any(|rule| rule.name == "JSON_STRING_MIDDLE"));
-    assert!(grammar.rules.iter().any(|rule| rule.name == "JSON_STRING_MIDDLE_END"));
     let pp_key_rule = grammar
         .rules
         .iter()
         .find(|rule| rule.name.contains("_PP0_KEY"))
         .expect("expected pattern key terminal rule");
 
-    assert!(contains_ref(&pp_key_rule.expr, "JSON_STRING_MIDDLE"));
-    assert!(contains_literal(&pp_key_rule.expr, b"\""));
-    assert_eq!(count_ref(&pp_key_rule.expr, "JSON_STRING_MIDDLE"), 2);
+    assert!(pp_key_rule.is_terminal, "pattern key wrapper should be a terminal rule");
+    assert!(!contains_ref(&pp_key_rule.expr, "JSON_STRING_MIDDLE"));
 }
 
 #[test]
-fn test_pattern_key_terminal_anchor_controls_middle_side_inclusion() {
+fn test_pattern_key_terminal_anchor_controls_extracted_body_shape() {
     let schema = r#"{
         "type": "object",
         "properties": {
@@ -506,7 +503,8 @@ fn test_pattern_key_terminal_anchor_controls_middle_side_inclusion() {
         .find(|rule| rule.name.contains("_PP0_KEY"))
         .expect("expected pattern key terminal rule");
 
-    assert_eq!(count_ref(&pp_key_rule.expr, "JSON_STRING_MIDDLE"), 1);
+    assert!(pp_key_rule.is_terminal, "pattern key wrapper should be a terminal rule");
+    assert!(!contains_ref(&pp_key_rule.expr, "JSON_STRING_MIDDLE"));
 }
 
 /// Adapted from `test_ebnf_object_member_after_brace`.

@@ -1972,11 +1972,6 @@ fn json_wrapped_pattern_bounded(pattern: &str, max_tail: usize) -> GrammarExpr {
     wrap_string_value_regex(&inner)
 }
 
-fn json_wrapped_pattern(pattern: &str) -> GrammarExpr {
-    let inner = json_search_pattern(pattern);
-    wrap_string_value_regex(&inner)
-}
-
 fn json_wrapped_string_length_regex(min_len: usize, max_len: usize) -> String {
     let inner = if min_len == max_len {
         format!(r#"(?:{}){{{}}}"# , JSON_STRING_CHAR_PATTERN, min_len)
@@ -2170,17 +2165,6 @@ fn compile_regex_union_expr(regexes: &[String]) -> LexerExpr {
     } else {
         LexerExpr::Choice(exprs)
     }
-}
-
-fn json_wrapped_fullmatch_pattern(pattern: &str) -> GrammarExpr {
-    let inner = jsonify_regex_dot(pattern);
-    quoted_expr(parsed_regex_expr(&inner, true))
-}
-
-fn json_wrapped_key_colon_pattern(pattern: &str) -> GrammarExpr {
-    let inner = json_search_pattern(pattern);
-    let body = parsed_regex_expr(&key_colon_body_regex(&inner), true);
-    wrap_key_colon_terminal(body)
 }
 
 /// Build a GrammarExpr body for a string value, fusing non-split quotes
@@ -5860,7 +5844,10 @@ impl<'a> SchemaCtx<'a> {
                 if min_len > 0 || max_len.is_some() {
                     return Ok(self.build_bounded_string_from_unit_regex(&unit_pattern, min_len, max_len));
                 }
-                return Ok(json_wrapped_fullmatch_pattern(&format!("{}+", unit_pattern)));
+                return Ok(self.build_json_wrapped_fullmatch_pattern(
+                    &format!("{}+", unit_pattern),
+                    "JSON_STRING_PATTERN_FULLMATCH",
+                ));
             }
             // Fixed-length unanchored pattern optimization:
             // When an unanchored pattern has a fixed byte length *and* the string's
@@ -5875,7 +5862,10 @@ impl<'a> SchemaCtx<'a> {
                     let pat_len = pat_min_bytes;
                     if min_len == pat_len && max_len == Some(pat_len)
                     {
-                        return Ok(json_wrapped_fullmatch_pattern(&pattern));
+                        return Ok(self.build_json_wrapped_fullmatch_pattern(
+                            &pattern,
+                            "JSON_STRING_PATTERN_FULLMATCH",
+                        ));
                     }
                 }
             }
@@ -5888,7 +5878,7 @@ impl<'a> SchemaCtx<'a> {
                 // enforce minLength (e.g. pattern ^(.*)$ can match "").
                 let pattern_min = pattern_min_char_count(&pattern).unwrap_or(0);
                 if pattern_min >= min_len {
-                    return Ok(json_wrapped_pattern(&pattern));
+                    return Ok(self.build_json_wrapped_pattern(&pattern, "JSON_STRING_PATTERN"));
                 }
                 // Pattern can produce strings shorter than minLength.
                 // Intersect with a minimum-length regex.  Use {min,} to
@@ -5941,9 +5931,9 @@ impl<'a> SchemaCtx<'a> {
                     let body = self.build_lexer_expr(&intersected, "JSON_STRING_PATTERN_MINLEN");
                     return Ok(wrap_string_value_terminal(body));
                 }
-                return Ok(json_wrapped_pattern(&pattern));
+                return Ok(self.build_json_wrapped_pattern(&pattern, "JSON_STRING_PATTERN"));
             } else {
-                return Ok(json_wrapped_pattern(&pattern));
+                return Ok(self.build_json_wrapped_pattern(&pattern, "JSON_STRING_PATTERN"));
             }
         }
 
@@ -6076,7 +6066,7 @@ impl<'a> SchemaCtx<'a> {
                 Ok(self.build_structured_uri_expr())
             }
             _ => json_format_pattern(format_name)
-                .map(json_wrapped_fullmatch_pattern)
+                .map(|pattern| self.build_json_wrapped_fullmatch_pattern(&pattern, "JSON_FORMAT_STRING"))
                 .ok_or_else(|| GlrMaskError::GrammarParse(format!("Unknown format: {format_name}"))),
         }
     }
@@ -7030,7 +7020,7 @@ impl<'a> SchemaCtx<'a> {
         })
     }
 
-    fn pattern_key_colon_expr(pattern: &str) -> GrammarExpr {
+    fn pattern_key_colon_body_expr(&mut self, pattern: &str, prefix: &str) -> GrammarExpr {
         let branches = split_top_level_regex_branches(pattern);
         let mut options = Vec::with_capacity(branches.len());
 
@@ -7040,7 +7030,7 @@ impl<'a> SchemaCtx<'a> {
 
             let mut parts = Vec::new();
             if !anchored_start {
-                parts.push(GrammarExpr::Ref(JSON_STRING_MIDDLE_RULE.into()));
+                parts.push(GrammarExpr::Repeat(Box::new(self.json_string_char_ref())));
             }
 
             if core.is_empty() {
@@ -7050,17 +7040,38 @@ impl<'a> SchemaCtx<'a> {
             }
 
             if !anchored_end {
-                parts.push(GrammarExpr::Ref(JSON_STRING_MIDDLE_RULE.into()));
-            }
-
-            if !split_close_quote() {
-                parts.push(literal_expr(b"\""));
+                parts.push(GrammarExpr::Repeat(Box::new(self.json_string_char_ref())));
             }
 
             options.push(sequence_or_single(parts));
         }
 
-        choice_or_single(options)
+        self.extract_terminal_rule(choice_or_single(options), prefix)
+    }
+
+    fn build_pattern_key_colon_expr(&mut self, pattern: &str, prefix: &str) -> GrammarExpr {
+        let body = self.pattern_key_colon_body_expr(pattern, &format!("{prefix}_BODY"));
+        let (terminal_body, wrap) = wrap_key_colon_expr_parts(body);
+        let term = self.extract_terminal_rule(terminal_body, prefix);
+        wrap(term)
+    }
+
+    fn build_json_wrapped_pattern(&mut self, pattern: &str, prefix: &str) -> GrammarExpr {
+        let inner = json_search_pattern(pattern);
+        let (terminal_body, wrap) = wrap_string_value_expr_parts(parsed_regex_expr(&inner, true));
+        let term = self.extract_terminal_rule(terminal_body, prefix);
+        wrap(term)
+    }
+
+    fn build_json_wrapped_fullmatch_pattern(
+        &mut self,
+        pattern: &str,
+        prefix: &str,
+    ) -> GrammarExpr {
+        let inner = jsonify_regex_dot(pattern);
+        let (terminal_body, wrap) = wrap_string_value_expr_parts(parsed_regex_expr(&inner, true));
+        let term = self.extract_terminal_rule(terminal_body, prefix);
+        wrap(term)
     }
 
     fn build_state_machine_expr<State, IsAccepting, Transitions>(
@@ -8329,7 +8340,7 @@ impl<'a> SchemaCtx<'a> {
 
         let pattern_key_colon_exprs = pattern_properties
             .iter()
-            .map(|(pattern, _)| Self::pattern_key_colon_expr(pattern))
+            .map(|(pattern, _)| self.pattern_key_colon_body_expr(pattern, "PP_KEY_COLON_BODY"))
             .collect::<Vec<_>>();
 
         let mut pattern_pair_variants = Vec::<(GrammarExpr, GrammarExpr)>::new();
@@ -8615,7 +8626,10 @@ impl<'a> SchemaCtx<'a> {
         value_expr: GrammarExpr,
     ) -> Result<GrammarExpr, GlrMaskError> {
         let pattern = Self::property_name_pattern(property_names)?;
-        let pair = sequence_or_single(vec![json_wrapped_key_colon_pattern(pattern), value_expr]);
+        let pair = sequence_or_single(vec![
+            self.build_pattern_key_colon_expr(pattern, "PP_KEY_COLON"),
+            value_expr,
+        ]);
         Ok(self.build_repeated_object_pairs(pair))
     }
 
@@ -8627,8 +8641,9 @@ impl<'a> SchemaCtx<'a> {
         unmatched_value_expr: GrammarExpr,
     ) -> Result<GrammarExpr, GlrMaskError> {
         let pattern = Self::property_name_pattern(property_names)?;
-        let matched_key_colon_body = regex_expr(key_colon_body_regex(&json_search_pattern(pattern)));
-        let matched_key_colon_full = wrap_key_colon_terminal(matched_key_colon_body.clone());
+        let matched_key_colon_body = self.pattern_key_colon_body_expr(pattern, "PP_KEY_COLON_BODY");
+        let (matched_terminal_body, wrap) = wrap_key_colon_expr_parts(matched_key_colon_body.clone());
+        let matched_key_colon_full = wrap(self.extract_terminal_rule(matched_terminal_body, "PP_KEY_COLON"));
         let matched_pair = sequence_or_single(vec![
             matched_key_colon_full,
             matched_value_expr,
