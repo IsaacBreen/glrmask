@@ -188,7 +188,18 @@ fn contains_repeat_range(expr: &GrammarExpr) -> bool {
         GrammarExpr::Optional(inner)
         | GrammarExpr::Repeat(inner)
         | GrammarExpr::RepeatOne(inner) => contains_repeat_range(inner),
-        _ => false,
+        GrammarExpr::SeparatedSequence { items, separator, .. } => {
+            items.iter().any(|(item, _)| contains_repeat_range(item))
+                || contains_repeat_range(separator)
+        }
+        GrammarExpr::Intersect { expr, intersect } => contains_repeat_range(expr) || contains_repeat_range(intersect),
+
+        GrammarExpr::Ref(_) => false,
+        GrammarExpr::Epsilon => false,
+        GrammarExpr::Literal(_) => false,
+        GrammarExpr::CharClass { .. } => false,
+        GrammarExpr::RawRegex(_) => false,
+        GrammarExpr::AnyByte => false,
     }
 }
 
