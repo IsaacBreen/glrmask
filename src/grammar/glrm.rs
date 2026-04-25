@@ -183,7 +183,7 @@ fn dump_nt_atom(expr: &GrammarExpr) -> String {
                 dump_set_operand(intersect)
             )
         }
-        GrammarExpr::SeparatedSequence { items, separator } => {
+        GrammarExpr::SeparatedSequence { items, separator, allow_empty } => {
             let sep_str = dump_nt_atom(separator);
             let items_str = items.iter()
                 .map(|(e, req)| {
@@ -192,7 +192,11 @@ fn dump_nt_atom(expr: &GrammarExpr) -> String {
                 })
                 .collect::<Vec<_>>()
                 .join(" ");
-            format!("{} ~ ( {} )", sep_str, items_str)
+            if *allow_empty {
+                format!("{} ~ ( {} )", sep_str, items_str)
+            } else {
+                format!("{} ~+ ( {} )", sep_str, items_str)
+            }
         }
         // For compound exprs that need parens as atoms:
         GrammarExpr::Sequence(_) | GrammarExpr::Choice(_) => {
@@ -714,9 +718,15 @@ impl GlrmParser {
 
     fn parse_nt_postfix(&mut self, allow_raw_regex: bool) -> Result<GrammarExpr, GlrMaskError> {
         let atom = self.parse_nt_atom(allow_raw_regex)?;
-        // `sep ~ ( items... )` — SeparatedSequence
+        // `sep ~ ( items... )` / `sep ~+ ( items... )` — SeparatedSequence
         if matches!(self.peek(), Tok::Tilde) {
             self.advance(); // consume `~`
+            let allow_empty = if matches!(self.peek(), Tok::Plus) {
+                self.advance();
+                false
+            } else {
+                true
+            };
             self.consume(&Tok::LParen)?;
             let mut items = Vec::new();
             loop {
@@ -743,6 +753,7 @@ impl GlrmParser {
             return Ok(GrammarExpr::SeparatedSequence {
                 items,
                 separator: Box::new(atom),
+                allow_empty,
             });
         }
         self.apply_nt_quantifier(atom)
@@ -1140,6 +1151,7 @@ nt start ::= /abc/;
         let expr = GrammarExpr::SeparatedSequence {
             items,
             separator: Box::new(sep),
+            allow_empty: true,
         };
         let g = simple_grammar(vec![
             ("A", GrammarExpr::Literal(b"a".to_vec()), false, false),
@@ -1174,8 +1186,9 @@ nt start ::= "," ~ ( A B? C );
         let g = from_glrm(src).expect("tilde syntax should parse");
         let start = g.rules.iter().find(|r| r.name == "start").unwrap();
         match &start.expr {
-            GrammarExpr::SeparatedSequence { items, separator } => {
+            GrammarExpr::SeparatedSequence { items, separator, allow_empty } => {
                 assert!(matches!(**separator, GrammarExpr::Literal(_)));
+                assert!(*allow_empty);
                 assert_eq!(items.len(), 3);
                 assert!(items[0].1, "A is required");
                 assert!(!items[1].1, "B is optional");
@@ -1200,12 +1213,33 @@ nt start ::= "," ~ ( a b* c+ d{2,4} (e{2,3}) );
         let g = from_glrm(src).expect("repeated sepseq items should parse");
         let start = g.rules.iter().find(|r| r.name == "start").unwrap();
         match &start.expr {
-            GrammarExpr::SeparatedSequence { items, .. } => {
+            GrammarExpr::SeparatedSequence { items, allow_empty, .. } => {
                 assert_eq!(items.len(), 5);
+                assert!(*allow_empty);
                 assert!(matches!(items[1].0, GrammarExpr::Repeat(_)));
                 assert!(matches!(items[2].0, GrammarExpr::RepeatOne(_)));
                 assert!(matches!(items[3].0, GrammarExpr::RepeatRange { min: 2, max: 4, .. }));
                 assert!(matches!(items[4].0, GrammarExpr::Sequence(_)));
+            }
+            other => panic!("expected SeparatedSequence, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_nonempty_tilde_from_source() {
+        let src = r#"
+start start;
+
+nt A ::= "a";
+nt B ::= "b";
+nt start ::= "," ~+ ( A? B? );
+"#;
+        let g = from_glrm(src).expect("nonempty tilde syntax should parse");
+        let start = g.rules.iter().find(|r| r.name == "start").unwrap();
+        match &start.expr {
+            GrammarExpr::SeparatedSequence { items, allow_empty, .. } => {
+                assert_eq!(items.len(), 2);
+                assert!(!*allow_empty);
             }
             other => panic!("expected SeparatedSequence, got {other:?}"),
         }

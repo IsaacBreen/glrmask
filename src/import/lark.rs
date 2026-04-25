@@ -655,7 +655,7 @@ fn expand_lark_expr(
         GrammarExpr::RawRegex(pattern) => GrammarExpr::RawRegex(pattern.clone()),
         GrammarExpr::Epsilon => GrammarExpr::Epsilon,
         GrammarExpr::AnyByte => GrammarExpr::AnyByte,
-        GrammarExpr::SeparatedSequence { items, separator } => {
+        GrammarExpr::SeparatedSequence { items, separator, allow_empty } => {
             let new_items = items
                 .iter()
                 .map(|(item, req)| {
@@ -685,6 +685,7 @@ fn expand_lark_expr(
             GrammarExpr::SeparatedSequence {
                 items: new_items,
                 separator: Box::new(new_separator),
+                allow_empty: *allow_empty,
             }
         }
     })

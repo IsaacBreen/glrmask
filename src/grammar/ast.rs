@@ -49,6 +49,7 @@ pub enum GrammarExpr {
     SeparatedSequence {
         items: Vec<(GrammarExpr, bool)>,
         separator: Box<GrammarExpr>,
+        allow_empty: bool,
     },
 }
 
@@ -138,7 +139,7 @@ impl NamedGrammar {
                     collect_refs(e, out);
                 }
                 GrammarExpr::RepeatRange { expr, .. } => collect_refs(expr, out),
-                GrammarExpr::SeparatedSequence { items, separator } => {
+                GrammarExpr::SeparatedSequence { items, separator, .. } => {
                     for (e, _) in items { collect_refs(e, out); }
                     collect_refs(separator, out);
                 }
@@ -343,10 +344,10 @@ fn grammar_expr_to_lark_with_indent(
         GrammarExpr::AnyByte => {
             out.push_str("/./ /*AnyByte*/");
         }
-        GrammarExpr::SeparatedSequence { items, separator } => {
+        GrammarExpr::SeparatedSequence { items, separator, allow_empty } => {
             write!(out, "/*SeparatedSequence(sep=").unwrap();
             grammar_expr_to_lark_with_indent(separator, out, false, indent);
-            write!(out, ", items=[").unwrap();
+            write!(out, ", allow_empty={}, items=[", allow_empty).unwrap();
             for (i, (item, required)) in items.iter().enumerate() {
                 if i > 0 { write!(out, ", ").unwrap(); }
                 grammar_expr_to_lark_with_indent(item, out, true, indent);
@@ -1183,12 +1184,12 @@ impl Lowerer {
                 GrammarExpr::RepeatRange { expr, min, max } => {
                     lowerer.emit_repeat_range(lhs, expr, *min, *max)?;
                 }
-                GrammarExpr::SeparatedSequence { items, separator } => {
+                GrammarExpr::SeparatedSequence { items, separator, allow_empty } => {
                     let shape = comma_sep_shape();
                     let (sym, can_be_empty) =
                         lowerer.lower_separated_sequence_inner(items, separator, shape)?;
                     lowerer.rules.push(Rule { lhs, rhs: vec![sym] });
-                    if can_be_empty {
+                    if *allow_empty && can_be_empty {
                         lowerer.rules.push(Rule { lhs, rhs: Vec::new() });
                     }
                 }
@@ -1564,9 +1565,12 @@ fn grammar_expr_is_nullable(
         }
         GrammarExpr::RawRegex(pattern) => parse_regex(pattern, true).is_nullable(),
         GrammarExpr::AnyByte => false,
-        GrammarExpr::SeparatedSequence { items, .. } => items
-            .iter()
-            .all(|(item, is_required)| !*is_required || grammar_expr_is_nullable(item, rule_nullable)),
+        GrammarExpr::SeparatedSequence { items, allow_empty, .. } => {
+            *allow_empty
+                && items
+                    .iter()
+                    .all(|(item, is_required)| !*is_required || grammar_expr_is_nullable(item, rule_nullable))
+        }
     }
 }
 
@@ -1779,7 +1783,7 @@ fn promote_expr_literals(
         | GrammarExpr::RepeatRange { expr: inner, .. } => {
             promote_expr_literals(inner, threshold, new_rules, cache, counter);
         }
-        GrammarExpr::SeparatedSequence { items, separator } => {
+        GrammarExpr::SeparatedSequence { items, separator, .. } => {
             for (item, _) in items.iter_mut() {
                 promote_expr_literals(item, threshold, new_rules, cache, counter);
             }
@@ -2248,7 +2252,11 @@ mod tests {
         NamedGrammar {
             rules: vec![nt(
                 "start",
-                GrammarExpr::SeparatedSequence { items, separator: Box::new(sep) },
+                GrammarExpr::SeparatedSequence {
+                    items,
+                    separator: Box::new(sep),
+                    allow_empty: true,
+                },
             )],
             start: "start".into(),
             ignore: None,
@@ -2436,6 +2444,7 @@ mod tests {
                             (GrammarExpr::Literal(b"c".to_vec()), true),
                         ],
                         separator: Box::new(GrammarExpr::Literal(b",".to_vec())),
+                        allow_empty: true,
                     },
                 ),
                 term("MAYBE_B", GrammarExpr::RawRegex("b?".into())),

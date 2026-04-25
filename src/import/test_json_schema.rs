@@ -192,6 +192,22 @@ fn contains_repeat_range(expr: &GrammarExpr) -> bool {
     }
 }
 
+fn contains_nonempty_sepseq(expr: &GrammarExpr) -> bool {
+    match expr {
+        GrammarExpr::SeparatedSequence { allow_empty, .. } => !*allow_empty,
+        GrammarExpr::Sequence(parts) => parts.iter().any(contains_nonempty_sepseq),
+        GrammarExpr::Choice(options) => options.iter().any(contains_nonempty_sepseq),
+        GrammarExpr::Exclude { expr, exclude } => {
+            contains_nonempty_sepseq(expr) || contains_nonempty_sepseq(exclude)
+        }
+        GrammarExpr::Optional(inner)
+        | GrammarExpr::Repeat(inner)
+        | GrammarExpr::RepeatOne(inner)
+        | GrammarExpr::RepeatRange { expr: inner, .. } => contains_nonempty_sepseq(inner),
+        _ => false,
+    }
+}
+
 fn contains_ref(expr: &GrammarExpr, target: &str) -> bool {
     match expr {
         GrammarExpr::Ref(name) => name == target,
@@ -459,7 +475,6 @@ fn test_pattern_key_terminal_uses_json_string_middle_for_unanchored_sides() {
     let grammar = named_grammar_from_schema(schema);
     assert!(grammar.rules.iter().any(|rule| rule.name == "JSON_STRING_MIDDLE"));
     assert!(grammar.rules.iter().any(|rule| rule.name == "JSON_STRING_MIDDLE_END"));
-
     let pp_key_rule = grammar
         .rules
         .iter()
@@ -984,6 +999,26 @@ fn test_email_format_uses_plain_bounded_string_lowering() {
     assert!(
         named.rules.iter().all(|rule| rule.name != "JSON_FORMAT_STRING"),
         "email strings should not lower through the regex format terminal path"
+    );
+}
+
+#[test]
+fn test_closed_object_min_properties_uses_nonempty_sepseq() {
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "a": {"type": "string"},
+            "b": {"type": "string"},
+            "c": {"type": "string"}
+        },
+        "minProperties": 1,
+        "additionalProperties": false
+    }"#;
+    let named = named_grammar_from_schema(schema);
+
+    assert!(
+        named.rules.iter().any(|rule| contains_nonempty_sepseq(&rule.expr)),
+        "closed-object minProperties lowering should force a nonempty SeparatedSequence"
     );
 }
 

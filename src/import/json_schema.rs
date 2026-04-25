@@ -1967,13 +1967,13 @@ fn uri_charclass_run_regex(def: &str, max_run: usize) -> String {
     format!(r#"(?:[{def}]{{1,{max_run}}})"#)
 }
 
-fn json_wrapped_pattern(pattern: &str) -> GrammarExpr {
-    let inner = json_search_pattern(pattern);
+fn json_wrapped_pattern_bounded(pattern: &str, max_tail: usize) -> GrammarExpr {
+    let inner = json_search_pattern_bounded(pattern, max_tail);
     wrap_string_value_regex(&inner)
 }
 
-fn json_wrapped_pattern_bounded(pattern: &str, max_tail: usize) -> GrammarExpr {
-    let inner = json_search_pattern_bounded(pattern, max_tail);
+fn json_wrapped_pattern(pattern: &str) -> GrammarExpr {
+    let inner = json_search_pattern(pattern);
     wrap_string_value_regex(&inner)
 }
 
@@ -3072,7 +3072,7 @@ impl<'a> SchemaCtx<'a> {
                 expr: Box::new(self.hoist_patterns_in_expr(*expr, prefix)),
                 intersect: Box::new(self.hoist_patterns_in_expr(*intersect, prefix)),
             },
-            GrammarExpr::SeparatedSequence { items, separator } => GrammarExpr::SeparatedSequence {
+            GrammarExpr::SeparatedSequence { items, separator, allow_empty } => GrammarExpr::SeparatedSequence {
                 items: items
                     .into_iter()
                     .map(|(item_expr, required)| {
@@ -3080,6 +3080,7 @@ impl<'a> SchemaCtx<'a> {
                     })
                     .collect(),
                 separator: Box::new(self.hoist_patterns_in_expr(*separator, prefix)),
+                allow_empty,
             },
         }
     }
@@ -3888,6 +3889,7 @@ impl<'a> SchemaCtx<'a> {
                         true,
                     )],
                     separator: Box::new(self.json_item_separator_expr()),
+                    allow_empty: true,
                 },
                 literal_expr(b"}"),
             ]),
@@ -3899,6 +3901,7 @@ impl<'a> SchemaCtx<'a> {
                 GrammarExpr::SeparatedSequence {
                     items: vec![(GrammarExpr::Repeat(Box::new(self.json_value_ref())), true)],
                     separator: Box::new(self.json_item_separator_expr()),
+                    allow_empty: true,
                 },
                 literal_expr(b"]"),
             ]),
@@ -4848,7 +4851,7 @@ impl<'a> SchemaCtx<'a> {
         }
 
         let (tree_expr, tree_can_be_empty) =
-            self.build_ordered_object_body_separated_sequence_expr(&ordered);
+            self.build_ordered_object_body_separated_sequence_expr(&ordered, true);
 
         // Helper: wrap an object-only expression with non-object alternatives
         // when the resolved variants don't restrict to type: "object".
@@ -6714,9 +6717,10 @@ impl<'a> SchemaCtx<'a> {
     fn build_ordered_object_body_separated_sequence_expr(
         &self,
         ordered: &[(String, GrammarExpr, bool)],
+        allow_empty: bool,
     ) -> (GrammarExpr, bool) {
         if ordered.is_empty() {
-            return (empty_expr(), true);
+            return (empty_expr(), allow_empty);
         }
 
         if ordered.len() == 1 {
@@ -6728,7 +6732,7 @@ impl<'a> SchemaCtx<'a> {
                 // Keep the tree item itself non-nullable for readability; the
                 // caller handles empty-object/body variants when `can_be_empty`
                 // is true.
-                (item, true)
+                (item, allow_empty)
             };
         }
 
@@ -6747,8 +6751,9 @@ impl<'a> SchemaCtx<'a> {
             GrammarExpr::SeparatedSequence {
                 items,
                 separator: Box::new(self.json_item_separator_expr()),
+                allow_empty,
             },
-            can_be_empty,
+            allow_empty && can_be_empty,
         )
     }
 
@@ -8105,7 +8110,7 @@ impl<'a> SchemaCtx<'a> {
         }
 
         let supports_exactly_or_at_most_one = residual_min <= 1 && residual_max == Some(1);
-        let supports_at_least_one = residual_min == 1 && residual_max.is_none();
+        let supports_at_least_one = residual_min >= 1 && residual_max.is_none();
         if !(supports_exactly_or_at_most_one || supports_at_least_one) {
             return Ok(None);
         }
@@ -8152,23 +8157,37 @@ impl<'a> SchemaCtx<'a> {
             return Ok(Some(choice_or_single(options)));
         }
 
-        for optional_key in &optional_keys {
-            let option_required = required_list
-                .iter()
-                .cloned()
-                .chain(std::iter::once(optional_key.clone()))
-                .collect::<Vec<_>>();
-            let option_required_keys = option_required.iter().cloned().collect::<BTreeSet<_>>();
-            options.push(self.build_ordered_properties_object_expr(
-                properties,
-                &option_required,
-                &option_required_keys,
-                &empty_patterns,
-                None,
-                property_names,
-            )?);
-        }
-        Ok(Some(choice_or_single(options)))
+        Ok(Some(self.build_ordered_properties_object_expr_with_options(
+            properties,
+            required_list,
+            required_keys,
+            &empty_patterns,
+            None,
+            property_names,
+            false,
+        )?))
+    }
+
+    fn build_ordered_properties_object_expr_with_options(
+        &mut self,
+        properties: &Map<String, Value>,
+        required_list: &[String],
+        required_keys: &BTreeSet<String>,
+        pattern_properties: &[(String, Value)],
+        additional_properties_schema: Option<Value>,
+        property_names: Option<&Value>,
+        allow_empty_named_props_list: bool,
+    ) -> Result<GrammarExpr, GlrMaskError> {
+        self.build_ordered_properties_object_expr_impl(
+            properties,
+            required_list,
+            required_keys,
+            pattern_properties,
+            additional_properties_schema,
+            property_names,
+            allow_empty_named_props_list,
+            false,
+        )
     }
 
     fn build_ordered_properties_object_expr(
@@ -8179,6 +8198,29 @@ impl<'a> SchemaCtx<'a> {
         pattern_properties: &[(String, Value)],
         additional_properties_schema: Option<Value>,
         property_names: Option<&Value>,
+    ) -> Result<GrammarExpr, GlrMaskError> {
+        self.build_ordered_properties_object_expr_impl(
+            properties,
+            required_list,
+            required_keys,
+            pattern_properties,
+            additional_properties_schema,
+            property_names,
+            true,
+            true,
+        )
+    }
+
+    fn build_ordered_properties_object_expr_impl(
+        &mut self,
+        properties: &Map<String, Value>,
+        required_list: &[String],
+        required_keys: &BTreeSet<String>,
+        pattern_properties: &[(String, Value)],
+        additional_properties_schema: Option<Value>,
+        property_names: Option<&Value>,
+        allow_empty_named_props_list: bool,
+        allow_exact_closed_object_optimization: bool,
     ) -> Result<GrammarExpr, GlrMaskError> {
         let property_names_pattern = property_names
             .map(Self::property_name_pattern)
@@ -8406,6 +8448,7 @@ impl<'a> SchemaCtx<'a> {
             Some(GrammarExpr::SeparatedSequence {
                 items: vec![(GrammarExpr::Repeat(Box::new(pair)), true)],
                 separator: Box::new(self.json_item_separator_expr()),
+                allow_empty: true,
             })
         };
 
@@ -8419,10 +8462,12 @@ impl<'a> SchemaCtx<'a> {
             GrammarExpr::SeparatedSequence {
                 items: vec![(GrammarExpr::Repeat(Box::new(pair)), true)],
                 separator: Box::new(self.json_item_separator_expr()),
+                allow_empty: true,
             }
         });
 
-        if !Self::exact_closed_object_disabled()
+        if allow_exact_closed_object_optimization
+            && !Self::exact_closed_object_disabled()
             && !ordered.is_empty()
             && ordered.iter().any(|(_, _, required)| !*required)
             && pattern_properties.is_empty()
@@ -8454,6 +8499,7 @@ impl<'a> SchemaCtx<'a> {
                 GrammarExpr::SeparatedSequence {
                     items: vec![(GrammarExpr::RepeatOne(Box::new(pair)), true)],
                     separator: Box::new(self.json_item_separator_expr()),
+                    allow_empty: true,
                 },
             )
         });
@@ -8479,6 +8525,7 @@ impl<'a> SchemaCtx<'a> {
                         })
                         .collect(),
                     separator: Box::new(self.json_item_separator_expr()),
+                    allow_empty: allow_empty_named_props_list,
                 },
             ))
         };
@@ -8525,6 +8572,7 @@ impl<'a> SchemaCtx<'a> {
             GrammarExpr::SeparatedSequence {
                 items: body_items,
                 separator: Box::new(self.json_item_separator_expr()),
+                allow_empty: true,
             }
         };
 
@@ -8808,7 +8856,7 @@ fn collect_grammar_visible_refs(
                 walk(expr, terminal_names, out);
                 walk(exclude, terminal_names, out);
             }
-            GrammarExpr::SeparatedSequence { items, separator } => {
+            GrammarExpr::SeparatedSequence { items, separator, .. } => {
                 for (item_expr, _) in items {
                     walk(item_expr, terminal_names, out);
                 }
