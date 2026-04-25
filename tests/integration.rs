@@ -3594,6 +3594,29 @@ fn max_parser_paths_for_text(constraint: &Constraint, text: &str) -> usize {
     max_paths.max(state.parser_path_count(1_000_000))
 }
 
+fn max_parser_paths_for_text_capped(constraint: &Constraint, text: &str, limit: usize) -> usize {
+    let mut state = constraint.start();
+    let mut max_paths = state.parser_path_count(limit);
+    if max_paths == limit {
+        return limit;
+    }
+
+    for &byte in text.as_bytes() {
+        let mask = state.mask();
+        assert!(
+            token_allowed(&mask, byte as usize),
+            "byte token {byte} must be allowed while replaying example text"
+        );
+        max_paths = max_paths.max(state.parser_path_count(limit));
+        if max_paths == limit {
+            return limit;
+        }
+        state.commit_token(byte as u32).unwrap();
+    }
+
+    max_paths.max(state.parser_path_count(limit))
+}
+
 /// MRE for ordered-optional-property ambiguity (the o58906 mechanism).
 ///
 /// A closed object with N optional keys and `minProperties: 1` causes the
@@ -3695,7 +3718,8 @@ fn test_mre_ordered_optional_object_ambiguity() {
 #[test]
 fn test_mre_nested_anyof_pattern_object_ambiguity_grows_with_depth() {
     let vocab = make_byte_vocab();
-    let depths = [0usize, 1, 2, 3, 4];
+    let depths = [0usize, 1, 2, 3, 4, 8, 16];
+    let path_limit = 256usize;
 
     let mut observations = Vec::new();
     for depth in depths {
@@ -3703,8 +3727,10 @@ fn test_mre_nested_anyof_pattern_object_ambiguity_grows_with_depth() {
         let example = nested_anyof_pattern_object_json_example(depth);
         let glrm = glrmask::dump_json_schema_grammar_glrm(&schema).unwrap();
         let constraint = Constraint::from_json_schema(&schema, &vocab).unwrap();
-        let max_paths = max_parser_paths_for_text(&constraint, &example);
-        println!("depth={depth} max_paths={max_paths}\n{glrm}\nexample={example}\n");
+        let max_paths = max_parser_paths_for_text_capped(&constraint, &example, path_limit);
+        println!(
+            "depth={depth} max_paths={max_paths} path_limit={path_limit}\n{glrm}\nexample={example}\n"
+        );
         observations.push((depth, max_paths));
     }
 
@@ -3721,7 +3747,10 @@ fn test_mre_nested_anyof_pattern_object_ambiguity_grows_with_depth() {
 #[test]
 fn test_mre_nested_anyof_pattern_object_direct_glrm_grows_with_depth() {
     let vocab = make_byte_vocab();
+    // Keep the default test bounded. This family blows up fast enough that
+    // deeper depths are useful only for manual stress runs.
     let depths = [0usize, 1, 2, 3, 4];
+    let path_limit = 256usize;
 
     let mut observations = Vec::new();
     for depth in depths {
@@ -3736,8 +3765,10 @@ fn test_mre_nested_anyof_pattern_object_direct_glrm_grows_with_depth() {
 
         let example = nested_anyof_pattern_object_direct_example(depth);
         let constraint = Constraint::from_glrm_grammar(&direct_glrm, &vocab).unwrap();
-        let max_paths = max_parser_paths_for_text(&constraint, &example);
-        println!("depth={depth} max_paths={max_paths}\n{direct_glrm}\nexample={example}\n");
+        let max_paths = max_parser_paths_for_text_capped(&constraint, &example, path_limit);
+        println!(
+            "depth={depth} max_paths={max_paths} path_limit={path_limit}\n{direct_glrm}\nexample={example}\n"
+        );
         observations.push((depth, max_paths));
     }
 
