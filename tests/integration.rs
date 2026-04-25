@@ -89,6 +89,79 @@ fn anyof_object_schema_with_n_branches(n: usize) -> String {
     )
 }
 
+fn nested_anyof_pattern_object_schema(depth: usize) -> String {
+    fn node(depth: usize) -> String {
+        if depth == 0 {
+            return r#"{
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "left": {"type": "integer"},
+                    "right": {"type": "integer"}
+                },
+                "required": ["id"],
+                "anyOf": [
+                    {"required": ["left"]},
+                    {"required": ["right"]}
+                ],
+                "additionalProperties": false
+            }"#
+            .to_string();
+        }
+
+        let child = node(depth - 1);
+        format!(
+            r#"{{
+                "type": "object",
+                "properties": {{
+                    "id": {{"type": "integer"}},
+                    "tag": {{"type": "integer"}},
+                    "children": {{
+                        "type": "object",
+                        "patternProperties": {{
+                            "^k$": {child}
+                        }},
+                        "additionalProperties": false
+                    }}
+                }},
+                "required": ["id"],
+                "anyOf": [
+                    {{"required": ["tag"]}},
+                    {{"required": ["children"]}}
+                ],
+                "additionalProperties": false
+            }}"#
+        )
+    }
+
+    format!(
+        r#"{{
+            "type": "object",
+            "properties": {{
+                "root": {}
+            }},
+            "required": ["root"],
+            "additionalProperties": false
+        }}"#,
+        node(depth)
+    )
+}
+
+fn nested_anyof_pattern_object_example(depth: usize) -> String {
+    fn node(depth: usize) -> String {
+        if depth == 0 {
+            return r#"{"id": 0, "left": 0, "right": 0}"#.to_string();
+        }
+
+        format!(
+            r#"{{"id": 0, "tag": 0, "children": {{"k": {}}}}}"#,
+            node(depth - 1)
+        )
+    }
+
+    format!(r#"{{"root": {}}}"#, node(depth))
+}
+
 fn schema_like_ambiguous_ebnf_with_n_branches(n: usize) -> String {
     assert!(n > 0, "n must be > 0");
     // Supports up to N=32 in the current test set with unique single-char keys.
@@ -3497,6 +3570,39 @@ fn test_mre_ordered_optional_object_ambiguity() {
         let c = Constraint::from_json_schema(&optional_ordered_object_schema(n), &vocab).unwrap();
         assert_eq!(max_parser_paths_for_text(&c, &ordered_object_example(n)), if n <= 4 { 1 } else { 2 },
             "n={n}: expected exactly 1 concurrent stack");
+    }
+}
+
+/// Minimal nested close-brace ambiguity family analogous to o47674.
+///
+/// Each added depth contributes one more object whose `anyOf` branches both
+/// remain valid for the chosen example. The example also nests through a
+/// single-key `patternProperties` map, so the ambiguity collapses only as the
+/// parser commits the trailing `}` tokens on the way back out.
+///
+/// Dimension: nesting depth. To make it blow up more, add another level.
+#[test]
+fn test_mre_nested_anyof_pattern_object_ambiguity_grows_with_depth() {
+    let vocab = make_byte_vocab();
+    let depths = [0usize, 1, 2, 3];
+
+    let mut observations = Vec::new();
+    for depth in depths {
+        let schema = nested_anyof_pattern_object_schema(depth);
+        let example = nested_anyof_pattern_object_example(depth);
+        let constraint = Constraint::from_json_schema(&schema, &vocab).unwrap();
+        let max_paths = max_parser_paths_for_text(&constraint, &example);
+        println!("depth={depth} max_paths={max_paths}\n{example}\n");
+        observations.push((depth, max_paths));
+    }
+
+    for pair in observations.windows(2) {
+        let (d0, p0) = pair[0];
+        let (d1, p1) = pair[1];
+        assert!(
+            p1 > p0,
+            "max parser paths should increase with nesting depth: depth={d0} -> {p0}, depth={d1} -> {p1}"
+        );
     }
 }
 
