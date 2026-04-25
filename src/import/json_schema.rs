@@ -6956,6 +6956,25 @@ impl<'a> SchemaCtx<'a> {
         GrammarExpr::Ref(rule_name)
     }
 
+    /// Extract a terminal rule even if it's trivial (like a literal or raw regex).
+    /// Used for exclusions to ensure they resolve to a named terminal reference,
+    /// avoiding inline `- /regex/` or `- "literal"` subtraction syntax.
+    fn force_extract_terminal_rule(&mut self, expr: GrammarExpr, prefix: &str) -> GrammarExpr {
+        if matches!(expr, GrammarExpr::Ref(_)) {
+            return expr;
+        }
+
+        let key = expr_key(&expr);
+        if let Some(rule_name) = self.expr_dedup_cache.get(&key) {
+            return GrammarExpr::Ref(rule_name.clone());
+        }
+
+        let rule_name = self.fresh_rule_name(prefix);
+        self.insert_rule(rule_name.clone(), expr);
+        self.expr_dedup_cache.insert(key, rule_name.clone());
+        GrammarExpr::Ref(rule_name)
+    }
+
     fn schema_all_of(schemas: Vec<Value>) -> Value {
         match schemas.len() {
             0 => serde_json::json!({}),
@@ -7237,7 +7256,7 @@ impl<'a> SchemaCtx<'a> {
     ) -> GrammarExpr {
         let excluded_grammar_exprs: Vec<GrammarExpr> = excluded_exprs
             .into_iter()
-            .map(|e| self.extract_terminal_rule(expr_to_grammar_expr(&e), prefix))
+            .map(|e| self.force_extract_terminal_rule(expr_to_grammar_expr(&e), prefix))
             .collect();
         let body_terminal = self.build_excluding_key_body_expr_internal(
             base_expr,
@@ -7257,9 +7276,13 @@ impl<'a> SchemaCtx<'a> {
         let body = if excluded_exprs.is_empty() {
             base_body
         } else {
+            let excluded_refs: Vec<GrammarExpr> = excluded_exprs
+                .into_iter()
+                .map(|e| self.force_extract_terminal_rule(e, prefix))
+                .collect();
             GrammarExpr::Exclude {
                 expr: Box::new(base_body),
-                exclude: Box::new(choice_or_single(excluded_exprs)),
+                exclude: Box::new(choice_or_single(excluded_refs)),
             }
         };
         self.extract_terminal_rule(body, prefix)
@@ -7271,12 +7294,16 @@ impl<'a> SchemaCtx<'a> {
         excluded_key_colon_body_exprs: Vec<GrammarExpr>,
         prefix: &str,
     ) -> GrammarExpr {
-        let expr = if excluded_key_colon_body_exprs.is_empty() {
+        let excluded_refs: Vec<GrammarExpr> = excluded_key_colon_body_exprs
+            .into_iter()
+            .map(|e| self.force_extract_terminal_rule(e, prefix))
+            .collect();
+        let expr = if excluded_refs.is_empty() {
             base_key_colon_body_expr
         } else {
             GrammarExpr::Exclude {
                 expr: Box::new(base_key_colon_body_expr),
-                exclude: Box::new(choice_or_single(excluded_key_colon_body_exprs)),
+                exclude: Box::new(choice_or_single(excluded_refs)),
             }
         };
         wrap_key_colon_terminal(self.extract_terminal_rule(expr, prefix))
@@ -7312,10 +7339,10 @@ impl<'a> SchemaCtx<'a> {
             return expr.clone();
         }
 
-        let excluded = self
-            .shared_ap_literal_keys
+        let excluded_keys: Vec<String> = self.shared_ap_literal_keys.iter().cloned().collect();
+        let excluded = excluded_keys
             .iter()
-            .map(|key| literal_expr(&key_colon_literal_body_bytes(key)))
+            .map(|key| self.force_extract_terminal_rule(literal_expr(&key_colon_literal_body_bytes(key)), "AP_SHARED_LITERAL_KEY"))
             .collect::<Vec<_>>();
 
         let body = if excluded.is_empty() {
@@ -8646,7 +8673,7 @@ impl<'a> SchemaCtx<'a> {
         let pattern = Self::property_name_pattern(property_names)?;
         let matched_key_colon_body = self.pattern_key_colon_body_expr(pattern, "PP_KEY_COLON_BODY");
         let (matched_terminal_body, wrap) = wrap_key_colon_expr_parts(matched_key_colon_body.clone());
-        let matched_key_colon_full = wrap(self.extract_terminal_rule(matched_terminal_body, "PP_KEY_COLON"));
+        let matched_key_colon_full = wrap(self.extract_terminal_rule(matched_terminal_body.clone(), "PP_KEY_COLON"));
         let matched_pair = sequence_or_single(vec![
             matched_key_colon_full,
             matched_value_expr,
@@ -8654,7 +8681,7 @@ impl<'a> SchemaCtx<'a> {
         let unmatched_pair = sequence_or_single(vec![
             self.build_excluding_key_colon_expr(
                 unmatched_key_colon_body,
-                vec![matched_key_colon_body],
+                vec![matched_terminal_body],
                 "PP_KEY_COLON",
             ),
             unmatched_value_expr,
