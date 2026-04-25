@@ -1259,6 +1259,35 @@ fn optimize_parser_default_transitions(
     any_changed
 }
 
+fn ensure_default_transitions_are_fallbacks(nwa: &mut NWA) {
+    for state_id in 0..nwa.states().len() {
+        let state = &nwa.states()[state_id];
+
+        let Some(default_targets) = state.transitions.get(&DEFAULT_LABEL).cloned() else {
+            continue;
+        };
+
+        if default_targets.is_empty() {
+            continue;
+        }
+
+        // Identify all explicit labels out of this state
+        let explicit_labels: Vec<i32> = state.transitions
+            .keys()
+            .copied()
+            .filter(|&label| label != DEFAULT_LABEL)
+            .collect();
+
+        // For every explicit label, add parallel transitions to the DEFAULT targets
+        for label in explicit_labels {
+            let state_mut = &mut nwa.states_mut()[state_id];
+            for (dst, weight) in &default_targets {
+                add_or_union_transition(state_mut, label, *dst, weight.clone());
+            }
+        }
+    }
+}
+
 fn build_parser_nwa_from_terminal_dwa(
     terminal_dwa: &DWA,
     grammar: &AnalyzedGrammar,
@@ -1400,7 +1429,15 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     }
     profile.subtract_final_ms = elapsed_ms(subtract_final_started_at);
 
-    profile.determinize_after_defaults_ms = 0.0;
+    let ensure_fallback_started_at = Instant::now();
+    let mut nwa_for_fallback = parser_dwa_pre_minimize.to_nwa();
+    ensure_default_transitions_are_fallbacks(&mut nwa_for_fallback);
+
+    // Determinize back to DWA to collapse the duplicated edges
+    parser_dwa_pre_minimize = crate::automata::weighted_u32::determinize::determinize(&nwa_for_fallback)
+        .expect("NWA remains acyclic after fallback transformation");
+
+    profile.determinize_after_defaults_ms = elapsed_ms(ensure_fallback_started_at);
 
     let minimize_started_at = Instant::now();
     let minimized = if std::env::var_os("GLRMASK_DISABLE_PARSER_DWA_MINIMIZE").is_some() {

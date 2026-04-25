@@ -290,9 +290,7 @@ fn enqueue_gss(
         .or_insert(gss);
 }
 
-fn transition_labels(parser_state: u32) -> [i32; 2] {
-    [encode_positive_label(parser_state), DEFAULT_LABEL]
-}
+// DEFAULT transitions are now guaranteed by the compiler to be fallbacks.
 
 fn enqueue_weighted_transition(
     queue: &mut MaskQueue,
@@ -339,10 +337,11 @@ fn enqueue_parser_state_transitions(
     precomputed: &DenseTokenMaskCache,
     mut counters: Option<&mut ProfileCounters>,
 ) {
-    for label in transition_labels(parser_state) {
-        let Some((target, weight)) = fast_trans.get(&label) else {
-            continue;
-        };
+    let positive_label = encode_positive_label(parser_state);
+
+    if let Some((target, weight)) = fast_trans.get(&positive_label) {
+        enqueue_weighted_transition(queue, popped, *target, weight, precomputed, counters.as_mut().map(|c| &mut **c));
+    } else if let Some((target, weight)) = fast_trans.get(&DEFAULT_LABEL) {
         enqueue_weighted_transition(queue, popped, *target, weight, precomputed, counters.as_mut().map(|c| &mut **c));
     }
 }
@@ -515,30 +514,30 @@ impl<'a> ConstraintState<'a> {
                         continue;
                     }
                     let cur_fast_trans = &self.constraint.dwa_fast_transitions[cur_wa_state as usize];
-                    let labels = transition_labels(*parser_state);
+                    let positive_label = encode_positive_label(*parser_state);
+                    let target_weight_pair = cur_fast_trans.get(&positive_label)
+                        .or_else(|| cur_fast_trans.get(&DEFAULT_LABEL));
+
                     let mut found_target = None;
-                    for label in labels {
-                        if let Some((target, weight)) = cur_fast_trans.get(&label) {
-                            if weight.is_full() {
-                                found_target = Some(*target);
-                            } else {
-                                if let Some(c) = counters.as_mut() {
-                                    c.weight_intersections += 1;
+                    if let Some((target, weight)) = target_weight_pair {
+                        if weight.is_full() {
+                            found_target = Some(*target);
+                        } else {
+                            if let Some(c) = counters.as_mut() {
+                                c.weight_intersections += 1;
+                            }
+                            match acc.intersect_with_weight(weight, precomputed) {
+                                Some(new_acc) => {
+                                    acc = new_acc;
+                                    found_target = Some(*target);
                                 }
-                                match acc.intersect_with_weight(weight, precomputed) {
-                                    Some(new_acc) => {
-                                        acc = new_acc;
-                                        found_target = Some(*target);
+                                None => {
+                                    if let Some(c) = counters.as_mut() {
+                                        c.weight_pruned += 1;
                                     }
-                                    None => {
-                                        if let Some(c) = counters.as_mut() {
-                                            c.weight_pruned += 1;
-                                        }
-                                        break;
-                                    }
+                                    break;
                                 }
                             }
-                            break;
                         }
                     }
 
@@ -720,30 +719,30 @@ impl<'a> ConstraintState<'a> {
                     for parser_state in chain_states.iter() {
                         let cur_fast_trans = &self.constraint.dwa_fast_transitions[cur_wa_state as usize];
                         // Look up transition for this parser state
-                        let labels = transition_labels(*parser_state);
+                        let positive_label = encode_positive_label(*parser_state);
+                        let target_weight_pair = cur_fast_trans.get(&positive_label)
+                            .or_else(|| cur_fast_trans.get(&DEFAULT_LABEL));
+
                         let mut found_target = None;
-                        for label in labels {
-                            if let Some((target, weight)) = cur_fast_trans.get(&label) {
-                                if weight.is_full() {
-                                    found_target = Some(*target);
-                                } else {
-                                    if let Some(c) = counters.as_mut() {
-                                        c.weight_intersections += 1;
+                        if let Some((target, weight)) = target_weight_pair {
+                            if weight.is_full() {
+                                found_target = Some(*target);
+                            } else {
+                                if let Some(c) = counters.as_mut() {
+                                    c.weight_intersections += 1;
+                                }
+                                match acc.intersect_with_weight(weight, precomputed) {
+                                    Some(new_acc) => {
+                                        acc = new_acc;
+                                        found_target = Some(*target);
                                     }
-                                    match acc.intersect_with_weight(weight, precomputed) {
-                                        Some(new_acc) => {
-                                            acc = new_acc;
-                                            found_target = Some(*target);
+                                    None => {
+                                        if let Some(c) = counters.as_mut() {
+                                            c.weight_pruned += 1;
                                         }
-                                        None => {
-                                            if let Some(c) = counters.as_mut() {
-                                                c.weight_pruned += 1;
-                                            }
-                                            break;
-                                        }
+                                        break;
                                     }
                                 }
-                                break;
                             }
                         }
 
