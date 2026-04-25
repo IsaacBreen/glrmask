@@ -3584,7 +3584,7 @@ fn test_mre_ordered_optional_object_ambiguity() {
 #[test]
 fn test_mre_nested_anyof_pattern_object_ambiguity_grows_with_depth() {
     let vocab = make_byte_vocab();
-    let depths = [0usize, 1, 2, 3];
+    let depths = [0usize, 1, 2, 3, 4, 8, 16];
 
     let mut observations = Vec::new();
     for depth in depths {
