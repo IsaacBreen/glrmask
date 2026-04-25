@@ -1294,6 +1294,50 @@ fn test_nested_dynamic_object_prefix_stays_single_path() {
     );
 }
 
+#[test]
+fn test_closed_object_anyof_shared_key_value_variants_stays_single_path() {
+    let _guard = env_lock().lock().expect("env lock should not be poisoned");
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "uuid": {"type": "string"},
+            "name": {"type": "string"},
+            "parent_id": {"type": ["string", "null"]}
+        },
+        "required": ["uuid"],
+        "additionalProperties": false,
+        "anyOf": [
+            {
+                "properties": {
+                    "parent_id": {"type": "null"}
+                },
+                "required": ["parent_id"]
+            },
+            {
+                "properties": {
+                    "parent_id": {"type": "string"}
+                },
+                "required": ["name", "parent_id"]
+            }
+        ]
+    }"#;
+
+    let named = named_grammar_from_schema(schema);
+    assert!(
+        named.rules.iter().any(|rule| rule.name.contains("obj_ord_q_")),
+        "shared-key anyOf should use the exact closed-object union lowering"
+    );
+
+    let prefix = br#"{"uuid": "u", "name": "n", "parent_id": "p""#;
+    let constraint = schema_constraint(schema);
+    let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
+
+    assert_eq!(
+        max_paths, 1,
+        "shared-key anyOf with differing value schemas should stay single-path"
+    );
+}
+
 /// Adapted from `test_conversion_enum`.
 ///
 /// Checks that an enum schema produces grammar rules containing the
