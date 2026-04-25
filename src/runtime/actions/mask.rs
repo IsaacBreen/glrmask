@@ -38,6 +38,11 @@ pub struct FillMaskTimings {
     pub seed_tokenizer_states: u64,
     pub seed_chain_hits: u64,
     pub seed_chain_misses: u64,
+
+    // Sub-phase timings
+    pub bfs_fast_path_ns: u64,
+    pub bfs_standard_path_ns: u64,
+    pub bfs_fw_merge_ns: u64,
 }
 
 
@@ -50,6 +55,11 @@ struct ProfileCounters {
     seed_tokenizer_states: u64,
     seed_chain_hits: u64,
     seed_chain_misses: u64,
+
+    // Sub-phase timings
+    bfs_fast_path_ns: u64,
+    bfs_standard_path_ns: u64,
+    bfs_fw_merge_ns: u64,
 }
 
 
@@ -685,10 +695,17 @@ impl<'a> ConstraintState<'a> {
                 let dwa_state = &parser_dwa.states[wa_state as usize];
                 let fast_trans = &self.constraint.dwa_fast_transitions[wa_state as usize];
 
+                let t_fw = if PROFILE { Some(std::time::Instant::now()) } else { None };
                 // Merge final weight contribution into internal token bitmap.
                 if let Some(final_weight) = &dwa_state.final_weight {
                     self.merge_final_weight_for_gss(final_weight, &gss, precomputed, &mut merged);
                 }
+                if let (Some(c), Some(t)) = (counters.as_mut(), t_fw) {
+                    c.bfs_fw_merge_ns += t.elapsed().as_nanos() as u64;
+                }
+
+                let t_path = if PROFILE { Some(std::time::Instant::now()) } else { None };
+                let mut took_fast_path = false;
 
                 // Chain optimization: if the GSS has a long chain of single-path
                 // levels, walk through them directly instead of decomposing one
@@ -696,6 +713,7 @@ impl<'a> ConstraintState<'a> {
                 if std::env::var_os("GLRMASK_DISABLE_MASK_CHAIN_FAST_PATH").is_none()
                     && let Some((chain_states, chain_acc, tail_lower)) = gss.extract_chain_and_tail()
                 {
+                    took_fast_path = true;
                     let mut acc = chain_acc.clone();
                     let mut cur_wa_state = wa_state;
                     let mut alive = true;
@@ -764,22 +782,30 @@ impl<'a> ConstraintState<'a> {
                                 );
                             });
                         }
-
-                        continue;
                     }
                 }
 
-                // Standard path: decompose one level at a time.
-                gss.for_each_decomposed(|parser_state, popped| {
-                    enqueue_parser_state_transitions(
-                        &mut queue,
-                        fast_trans,
-                        parser_state,
-                        &popped,
-                        precomputed,
-                        counters.as_mut(),
-                    );
-                });
+                if !took_fast_path {
+                    // Standard path: decompose one level at a time.
+                    gss.for_each_decomposed(|parser_state, popped| {
+                        enqueue_parser_state_transitions(
+                            &mut queue,
+                            fast_trans,
+                            parser_state,
+                            &popped,
+                            precomputed,
+                            counters.as_mut(),
+                        );
+                    });
+                }
+
+                if let (Some(c), Some(t)) = (counters.as_mut(), t_path) {
+                    if took_fast_path {
+                        c.bfs_fast_path_ns += t.elapsed().as_nanos() as u64;
+                    } else {
+                        c.bfs_standard_path_ns += t.elapsed().as_nanos() as u64;
+                    }
+                }
             }
         }
         let bfs_ns = if PROFILE { t_bfs.unwrap().elapsed().as_nanos() as u64 } else { 0 };
@@ -922,6 +948,9 @@ impl<'a> ConstraintState<'a> {
                 seed_tokenizer_states: c.seed_tokenizer_states,
                 seed_chain_hits: c.seed_chain_hits,
                 seed_chain_misses: c.seed_chain_misses,
+                bfs_fast_path_ns: c.bfs_fast_path_ns,
+                bfs_standard_path_ns: c.bfs_standard_path_ns,
+                bfs_fw_merge_ns: c.bfs_fw_merge_ns,
                 ..Default::default()
             })
         } else {

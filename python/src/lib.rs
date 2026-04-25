@@ -299,6 +299,9 @@ impl PyConstraintState {
         dict.set_item("seed_tokenizer_states", t.seed_tokenizer_states)?;
         dict.set_item("seed_chain_hits", t.seed_chain_hits)?;
         dict.set_item("seed_chain_misses", t.seed_chain_misses)?;
+        dict.set_item("bfs_fast_path_ns", t.bfs_fast_path_ns)?;
+        dict.set_item("bfs_standard_path_ns", t.bfs_standard_path_ns)?;
+        dict.set_item("bfs_fw_merge_ns", t.bfs_fw_merge_ns)?;
         Ok(dict)
     }
 
