@@ -5033,19 +5033,9 @@ impl<'a> SchemaCtx<'a> {
             return Ok(None);
         }
 
-        let exact_union_disabled = Self::exact_closed_object_disabled();
-        if !exact_union_disabled {
-            let mode = match keyword {
-                "anyOf" => Some(StructuralBranchMode::AnyOf),
-                "oneOf" => Some(StructuralBranchMode::OneOf),
-                _ => None,
-            };
-            if let Some(mode) = mode {
-                if let Some(expr) = self.try_build_exact_closed_object_union(schema, options, mode)? {
-                    return Ok(Some(expr));
-                }
-            }
-        }
+        // NOTE: try_build_exact_closed_object_union (the anyOf/oneOf DFA strategy) is
+        // intentionally bypassed — same shared `"\""` prefix problem as the single-object
+        // DFA. Falls through to plain branch conversion below.
 
         // Closed-object merge optimization (experimental, disabled by default).
         // Currently changes the accepted language (introduces false positives).
