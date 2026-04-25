@@ -290,6 +290,15 @@ impl PyConstraintState {
         dict.set_item("bfs_ns", t.bfs_ns)?;
         dict.set_item("convert_ns", t.convert_ns)?;
         dict.set_item("total_ns", t.total_ns)?;
+        dict.set_item("bfs_queue_pops", t.bfs_queue_pops)?;
+        dict.set_item("bfs_states_processed", t.bfs_states_processed)?;
+        dict.set_item("weight_intersections", t.weight_intersections)?;
+        dict.set_item("weight_pruned", t.weight_pruned)?;
+        dict.set_item("convert_incremental", t.convert_incremental)?;
+        dict.set_item("convert_delta_tokens", t.convert_delta_tokens)?;
+        dict.set_item("seed_tokenizer_states", t.seed_tokenizer_states)?;
+        dict.set_item("seed_chain_hits", t.seed_chain_hits)?;
+        dict.set_item("seed_chain_misses", t.seed_chain_misses)?;
         Ok(dict)
     }
 

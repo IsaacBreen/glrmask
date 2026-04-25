@@ -27,6 +27,29 @@ pub struct FillMaskTimings {
     pub convert_ns: u64,
     /// Total wall time for the entire `fill_mask_profiled` call.
     pub total_ns: u64,
+
+    // Diagnostic counters
+    pub bfs_queue_pops: u64,
+    pub bfs_states_processed: u64,
+    pub weight_intersections: u64,
+    pub weight_pruned: u64,
+    pub convert_incremental: bool,
+    pub convert_delta_tokens: u64,
+    pub seed_tokenizer_states: u64,
+    pub seed_chain_hits: u64,
+    pub seed_chain_misses: u64,
+}
+
+
+#[derive(Debug, Default)]
+struct ProfileCounters {
+    bfs_queue_pops: u64,
+    bfs_states_processed: u64,
+    weight_intersections: u64,
+    weight_pruned: u64,
+    seed_tokenizer_states: u64,
+    seed_chain_hits: u64,
+    seed_chain_misses: u64,
 }
 
 
@@ -267,18 +290,35 @@ fn enqueue_weighted_transition(
     target: u32,
     weight: &Weight,
     precomputed: &DenseTokenMaskCache,
+    counters: Option<&mut ProfileCounters>,
 ) {
     if weight.is_full() {
         enqueue_gss(queue, popped.max_depth(), target, popped.clone());
         return;
     }
-    let pruned = popped.apply_and_prune_no_promote(|allowed| {
-        allowed.intersect_with_weight(weight, precomputed)
-    });
-    if pruned.is_empty() {
-        return;
+
+    if let Some(c) = counters {
+        c.weight_intersections += 1;
+        let pruned = popped.apply_and_prune_no_promote(|allowed| {
+            let res = allowed.intersect_with_weight(weight, precomputed);
+            if res.is_none() {
+                c.weight_pruned += 1;
+            }
+            res
+        });
+        if pruned.is_empty() {
+            return;
+        }
+        enqueue_gss(queue, pruned.max_depth(), target, pruned);
+    } else {
+        let pruned = popped.apply_and_prune_no_promote(|allowed| {
+            allowed.intersect_with_weight(weight, precomputed)
+        });
+        if pruned.is_empty() {
+            return;
+        }
+        enqueue_gss(queue, pruned.max_depth(), target, pruned);
     }
-    enqueue_gss(queue, pruned.max_depth(), target, pruned);
 }
 
 fn enqueue_parser_state_transitions(
@@ -287,12 +327,13 @@ fn enqueue_parser_state_transitions(
     parser_state: u32,
     popped: &DenseMaskGSS,
     precomputed: &DenseTokenMaskCache,
+    mut counters: Option<&mut ProfileCounters>,
 ) {
     for label in transition_labels(parser_state) {
         let Some((target, weight)) = fast_trans.get(&label) else {
             continue;
         };
-        enqueue_weighted_transition(queue, popped, *target, weight, precomputed);
+        enqueue_weighted_transition(queue, popped, *target, weight, precomputed, counters.as_mut().map(|c| &mut **c));
     }
 }
 
@@ -419,10 +460,14 @@ impl<'a> ConstraintState<'a> {
         precomputed: &DenseTokenMaskCache,
         queue: &mut MaskQueue,
         merged: &mut [u64],
+        mut counters: Option<&mut ProfileCounters>,
     ) {
         let parser_dwa = self.constraint.parser_dwa();
 
         for (&tokenizer_state, gss) in &self.state {
+            if let Some(c) = counters.as_mut() {
+                c.seed_tokenizer_states += 1;
+            }
             if gss.is_empty() {
                 continue;
             }
@@ -434,6 +479,9 @@ impl<'a> ConstraintState<'a> {
             if std::env::var_os("GLRMASK_DISABLE_MASK_CHAIN_FAST_PATH").is_none()
                 && let Some((chain_states, parser_acc, tail)) = gss.extract_chain_and_tail()
             {
+                if let Some(c) = counters.as_mut() {
+                    c.seed_chain_hits += 1;
+                }
                 let Some(mut acc) = self.terminals_disallowed_to_dense_acc(parser_acc, internal_tsid) else {
                     continue;
                 };
@@ -464,12 +512,20 @@ impl<'a> ConstraintState<'a> {
                             if weight.is_full() {
                                 found_target = Some(*target);
                             } else {
+                                if let Some(c) = counters.as_mut() {
+                                    c.weight_intersections += 1;
+                                }
                                 match acc.intersect_with_weight(weight, precomputed) {
                                     Some(new_acc) => {
                                         acc = new_acc;
                                         found_target = Some(*target);
                                     }
-                                    None => break,
+                                    None => {
+                                        if let Some(c) = counters.as_mut() {
+                                            c.weight_pruned += 1;
+                                        }
+                                        break;
+                                    }
                                 }
                             }
                             break;
@@ -505,12 +561,15 @@ impl<'a> ConstraintState<'a> {
                                 ps,
                                 &popped,
                                 precomputed,
+                                counters.as_mut().map(|c| &mut **c),
                             );
                         });
                     }
 
                     continue;
                 }
+            } else if let Some(c) = counters.as_mut() {
+                c.seed_chain_misses += 1;
             }
 
             // General path: apply_transform_and_decompose for non-chain GSS.
@@ -536,6 +595,7 @@ impl<'a> ConstraintState<'a> {
                     *parser_state,
                     popped,
                     precomputed,
+                    counters.as_mut().map(|c| &mut **c),
                 );
             }
         }
@@ -549,6 +609,7 @@ impl<'a> ConstraintState<'a> {
         buf: &mut [u32],
     ) -> Option<FillMaskTimings> {
         let t_start = if PROFILE { Some(std::time::Instant::now()) } else { None };
+        let mut counters = if PROFILE { Some(ProfileCounters::default()) } else { None };
 
         // Cache check: if generation matches, state hasn't changed since last fill_mask.
         let t_cache = if PROFILE { Some(std::time::Instant::now()) } else { None };
@@ -607,13 +668,20 @@ impl<'a> ConstraintState<'a> {
             precomputed,
             &mut queue,
             &mut merged,
+            counters.as_mut(),
         );
         let seed_ns = if PROFILE { t_seed.unwrap().elapsed().as_nanos() as u64 } else { 0 };
 
         // Process DWA states depth-first.
         let t_bfs = if PROFILE { Some(std::time::Instant::now()) } else { None };
         while let Some((_depth, states_at_depth)) = queue.pop_last() {
+            if let Some(c) = counters.as_mut() {
+                c.bfs_queue_pops += 1;
+            }
             for (wa_state, gss) in states_at_depth {
+                if let Some(c) = counters.as_mut() {
+                    c.bfs_states_processed += 1;
+                }
                 let dwa_state = &parser_dwa.states[wa_state as usize];
                 let fast_trans = &self.constraint.dwa_fast_transitions[wa_state as usize];
 
@@ -643,12 +711,20 @@ impl<'a> ConstraintState<'a> {
                                 if weight.is_full() {
                                     found_target = Some(*target);
                                 } else {
+                                    if let Some(c) = counters.as_mut() {
+                                        c.weight_intersections += 1;
+                                    }
                                     match acc.intersect_with_weight(weight, precomputed) {
                                         Some(new_acc) => {
                                             acc = new_acc;
                                             found_target = Some(*target);
                                         }
-                                        None => break,
+                                        None => {
+                                            if let Some(c) = counters.as_mut() {
+                                                c.weight_pruned += 1;
+                                            }
+                                            break;
+                                        }
                                     }
                                 }
                                 break;
@@ -684,6 +760,7 @@ impl<'a> ConstraintState<'a> {
                                     ps,
                                     &popped,
                                     precomputed,
+                                    counters.as_mut(),
                                 );
                             });
                         }
@@ -700,6 +777,7 @@ impl<'a> ConstraintState<'a> {
                         parser_state,
                         &popped,
                         precomputed,
+                        counters.as_mut(),
                     );
                 });
             }
@@ -714,6 +792,9 @@ impl<'a> ConstraintState<'a> {
         // Convert merged internal token bitmap to output buffer.
         // Try incremental update from cached mask if delta is small.
         let t_convert = if PROFILE { Some(std::time::Instant::now()) } else { None };
+        let mut convert_incremental = false;
+        let mut convert_delta_tokens = 0;
+
         let did_incremental = {
             let cache = self.mask_cache.lock().unwrap();
             if let Some(ref cache_data) = *cache {
@@ -750,6 +831,8 @@ impl<'a> ConstraintState<'a> {
                     }
 
                     if delta_tokens > 0 && delta_cost < buf.len() {
+                        convert_incremental = true;
+                        convert_delta_tokens = delta_tokens as u64;
                         // Incremental: copy cached mask, apply delta.
                         buf.copy_from_slice(&cache_data.mask);
 
@@ -823,12 +906,22 @@ impl<'a> ConstraintState<'a> {
         });
 
         if PROFILE {
+            let c = counters.unwrap();
             Some(FillMaskTimings {
                 cache_miss_ns,
                 seed_ns,
                 bfs_ns,
                 convert_ns,
                 total_ns: t_start.unwrap().elapsed().as_nanos() as u64,
+                bfs_queue_pops: c.bfs_queue_pops,
+                bfs_states_processed: c.bfs_states_processed,
+                weight_intersections: c.weight_intersections,
+                weight_pruned: c.weight_pruned,
+                convert_incremental,
+                convert_delta_tokens,
+                seed_tokenizer_states: c.seed_tokenizer_states,
+                seed_chain_hits: c.seed_chain_hits,
+                seed_chain_misses: c.seed_chain_misses,
                 ..Default::default()
             })
         } else {
