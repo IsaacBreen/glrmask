@@ -114,9 +114,9 @@ pub struct Constraint {
     /// Used to avoid O(n_internal) cost analysis in the convert phase.
     #[serde(skip)]
     pub(crate) total_internal_buf_cost: usize,
-    /// Number of heavy internal tokens (those stored as dense masks).
+    /// Indices of heavy tokens for fast iteration. Length == n_heavy_tokens.
     #[serde(skip)]
-    pub(crate) n_heavy_tokens: usize,
+    pub(crate) heavy_token_indices: Vec<usize>,
     /// Total cost of all heavy tokens combined (n_heavy × buf_len).
     #[serde(skip)]
     pub(crate) heavy_total_cost: usize,
@@ -196,9 +196,9 @@ impl Constraint {
         } else {
             0
         };
-        self.n_heavy_tokens = self.heavy_token_dense_masks.iter().filter(|m| m.is_some()).count();
-        self.heavy_total_cost = self.n_heavy_tokens * buf_len;
-        let n_light = n_internal.saturating_sub(self.n_heavy_tokens);
+        self.heavy_token_indices = self.heavy_token_dense_masks.iter().enumerate().filter_map(|(i, m)| if m.is_some() { Some(i) } else { None }).collect();
+        self.heavy_total_cost = self.heavy_token_indices.len() * buf_len;
+        let n_light = n_internal.saturating_sub(self.heavy_token_indices.len());
         let light_total = self.total_internal_buf_cost.saturating_sub(self.heavy_total_cost);
         self.light_avg_cost_x256 = if n_light > 0 { (light_total * 256) / n_light } else { 0 };
 
@@ -599,11 +599,10 @@ impl Constraint {
         let n_missing = n_internal - n_set;
 
         // Fast O(n_heavy) estimation: count heavy set tokens, estimate rest from average.
-        let n_heavy_set = if self.n_heavy_tokens > 0 {
-            let n_heavy_check = heavy.len().min(n_internal);
+        let n_heavy_set = if !self.heavy_token_indices.is_empty() {
             let mut count = 0usize;
-            for idx in 0..n_heavy_check {
-                if heavy[idx].is_some() {
+            for &idx in &self.heavy_token_indices {
+                if idx < n_internal {
                     let wi = idx / 64;
                     let bit = idx % 64;
                     if wi < dense.len() && (dense[wi] >> bit) & 1 != 0 {
@@ -616,7 +615,7 @@ impl Constraint {
             0
         };
         let n_light_set = n_set.saturating_sub(n_heavy_set);
-        let n_heavy_missing = self.n_heavy_tokens.saturating_sub(n_heavy_set);
+        let n_heavy_missing = self.heavy_token_indices.len().saturating_sub(n_heavy_set);
 
         let est_set_cost = n_heavy_set * buf_len
             + (n_light_set * self.light_avg_cost_x256) / 256;

@@ -271,6 +271,28 @@ impl PyConstraintState {
         Ok(())
     }
 
+    fn fill_mask_profiled<'py>(
+        &self,
+        py: Python<'py>,
+        mut bitmask: PyReadwriteArray1<i32>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let slice = bitmask.as_slice_mut().map_err(|e| {
+            PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
+        })?;
+        let buf: &mut [u32] = unsafe {
+            std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
+        };
+        let t = self.inner.with_dependent(|_owner, state| state.fill_mask_profiled(buf));
+        let dict = pyo3::types::PyDict::new(py);
+        dict.set_item("cache_hit_ns", t.cache_hit_ns)?;
+        dict.set_item("cache_miss_ns", t.cache_miss_ns)?;
+        dict.set_item("seed_ns", t.seed_ns)?;
+        dict.set_item("bfs_ns", t.bfs_ns)?;
+        dict.set_item("convert_ns", t.convert_ns)?;
+        dict.set_item("total_ns", t.total_ns)?;
+        Ok(dict)
+    }
+
     fn commit_token(&mut self, token_id: u32) -> PyResult<()> {
         self.inner
             .with_dependent_mut(|_owner, state| string_result(state.commit_token(token_id)))

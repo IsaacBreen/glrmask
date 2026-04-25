@@ -807,10 +807,10 @@ fn compile_prepared_with_profile(
             seed_universe_dense: Box::new([]),
             dwa_fast_transitions: Vec::new(),
             heavy_token_dense_masks: Vec::new(),
+            heavy_token_indices: Vec::new(),
             internal_token_buf_flat: Box::new([]),
             internal_token_buf_offsets: Box::new([]),
             total_internal_buf_cost: 0,
-            n_heavy_tokens: 0,
             heavy_total_cost: 0,
             light_avg_cost_x256: 0,
         });

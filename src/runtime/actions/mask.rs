@@ -10,6 +10,26 @@ use std::sync::Arc;
 type DenseTokenMaskCache = FxHashMap<usize, Box<[u64]>>;
 type MaskQueue = BTreeMap<u32, FxHashMap<u32, DenseMaskGSS>>;
 
+/// Timings returned by [`ConstraintState::fill_mask_profiled`].
+/// All fields are in nanoseconds. Fields not relevant to the code path taken
+/// are left at zero (e.g. `cache_hit_ns` is only set on a cache hit).
+#[derive(Debug, Default, Clone)]
+pub struct FillMaskTimings {
+    /// Time spent on the cache-hit path (only set when mask was served from cache).
+    pub cache_hit_ns: u64,
+    /// Time spent checking the cache before a miss (only set on cache miss).
+    pub cache_miss_ns: u64,
+    /// Time spent in `seed_mask_queue_merged`.
+    pub seed_ns: u64,
+    /// Time spent in the BFS loop.
+    pub bfs_ns: u64,
+    /// Time spent converting the internal dense bitmap to the output buffer.
+    pub convert_ns: u64,
+    /// Total wall time for the entire `fill_mask_profiled` call.
+    pub total_ns: u64,
+}
+
+
 // DenseMaskAcc keeps mask traversal in dense bitmaps.
 
 /// Dense bitmap accumulator for the mask BFS. Stores the set of allowed internal
@@ -521,23 +541,34 @@ impl<'a> ConstraintState<'a> {
         }
     }
 
-    pub fn mask(&self) -> Vec<u32> {
-        let mut buf = vec![0u32; self.constraint.mask_len()];
-        self.fill_mask(&mut buf);
-        buf
-    }
+    /// Core mask computation. `PROFILE = false` is the hot path — the compiler
+    /// dead-strips all `Instant::now()` calls, leaving zero timing overhead.
+    /// `PROFILE = true` is used by `fill_mask_profiled`.
+    fn fill_mask_inner<const PROFILE: bool>(
+        &self,
+        buf: &mut [u32],
+    ) -> Option<FillMaskTimings> {
+        let t_start = if PROFILE { Some(std::time::Instant::now()) } else { None };
 
-    pub fn fill_mask(&self, buf: &mut [u32]) {
-        // Check mask cache: if generation matches, state hasn't changed since last fill_mask.
+        // Cache check: if generation matches, state hasn't changed since last fill_mask.
+        let t_cache = if PROFILE { Some(std::time::Instant::now()) } else { None };
         {
             let cache = self.mask_cache.lock().unwrap();
             if let Some(ref cache_data) = *cache {
                 if cache_data.generation == self.generation {
                     buf.copy_from_slice(&cache_data.mask);
-                    return;
+                    if PROFILE {
+                        return Some(FillMaskTimings {
+                            cache_hit_ns: t_cache.unwrap().elapsed().as_nanos() as u64,
+                            total_ns: t_start.unwrap().elapsed().as_nanos() as u64,
+                            ..Default::default()
+                        });
+                    }
+                    return None;
                 }
             }
         }
+        let cache_miss_ns = if PROFILE { t_cache.unwrap().elapsed().as_nanos() as u64 } else { 0 };
 
         let parser_dwa = self.constraint.parser_dwa();
         if self.state.is_empty() || parser_dwa.states.is_empty() {
@@ -547,7 +578,14 @@ impl<'a> ConstraintState<'a> {
                 mask: buf.to_vec(),
                 merged_dense: Vec::new(),
             });
-            return;
+            if PROFILE {
+                return Some(FillMaskTimings {
+                    cache_miss_ns,
+                    total_ns: t_start.unwrap().elapsed().as_nanos() as u64,
+                    ..Default::default()
+                });
+            }
+            return None;
         }
 
         let precomputed = &self.constraint.weight_token_dense_masks;
@@ -556,13 +594,13 @@ impl<'a> ConstraintState<'a> {
         // Merged internal token bitmap: collect all FW contributions here,
         // then convert to buf once at the end to avoid redundant complement-path passes.
         let mut merged = vec![0u64; dense_words];
-
         let mut queue = MaskQueue::new();
 
         let start_state = parser_dwa.start_state;
         let start_dwa_state = &parser_dwa.states[start_state as usize];
         let start_fast_trans = &self.constraint.dwa_fast_transitions[start_state as usize];
 
+        let t_seed = if PROFILE { Some(std::time::Instant::now()) } else { None };
         self.seed_mask_queue_merged(
             start_dwa_state.final_weight.as_ref(),
             start_fast_trans,
@@ -570,8 +608,10 @@ impl<'a> ConstraintState<'a> {
             &mut queue,
             &mut merged,
         );
+        let seed_ns = if PROFILE { t_seed.unwrap().elapsed().as_nanos() as u64 } else { 0 };
 
         // Process DWA states depth-first.
+        let t_bfs = if PROFILE { Some(std::time::Instant::now()) } else { None };
         while let Some((_depth, states_at_depth)) = queue.pop_last() {
             for (wa_state, gss) in states_at_depth {
                 let dwa_state = &parser_dwa.states[wa_state as usize];
@@ -664,6 +704,7 @@ impl<'a> ConstraintState<'a> {
                 });
             }
         }
+        let bfs_ns = if PROFILE { t_bfs.unwrap().elapsed().as_nanos() as u64 } else { 0 };
 
         // Sticky note: do not add any post-hoc mask supplementation/correction
         // pass here. The mask must come directly from parser state semantics, not
@@ -672,6 +713,7 @@ impl<'a> ConstraintState<'a> {
 
         // Convert merged internal token bitmap to output buffer.
         // Try incremental update from cached mask if delta is small.
+        let t_convert = if PROFILE { Some(std::time::Instant::now()) } else { None };
         let did_incremental = {
             let cache = self.mask_cache.lock().unwrap();
             if let Some(ref cache_data) = *cache {
@@ -771,6 +813,7 @@ impl<'a> ConstraintState<'a> {
         }
 
         update_eos_mask(buf, self.constraint.eos_token_id, self.is_complete());
+        let convert_ns = if PROFILE { t_convert.unwrap().elapsed().as_nanos() as u64 } else { 0 };
 
         // Update mask cache with current state + computed mask + merged bitvec.
         *self.mask_cache.lock().unwrap() = Some(crate::runtime::state::MaskCacheData {
@@ -778,5 +821,36 @@ impl<'a> ConstraintState<'a> {
             mask: buf.to_vec(),
             merged_dense: merged,
         });
+
+        if PROFILE {
+            Some(FillMaskTimings {
+                cache_miss_ns,
+                seed_ns,
+                bfs_ns,
+                convert_ns,
+                total_ns: t_start.unwrap().elapsed().as_nanos() as u64,
+                ..Default::default()
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn mask(&self) -> Vec<u32> {
+        let mut buf = vec![0u32; self.constraint.mask_len()];
+        self.fill_mask(&mut buf);
+        buf
+    }
+
+    pub fn fill_mask(&self, buf: &mut [u32]) {
+        self.fill_mask_inner::<false>(buf);
+    }
+
+    /// Like `fill_mask` but also returns internal phase timings measured in Rust.
+    /// All timings are in nanoseconds. Only call this from profiling code paths;
+    /// `fill_mask` has zero timing overhead.
+    pub fn fill_mask_profiled(&self, buf: &mut [u32]) -> FillMaskTimings {
+        // PROFILE=true: compiler emits Instant::now() calls, dead-strips them on false.
+        self.fill_mask_inner::<true>(buf).unwrap()
     }
 }
