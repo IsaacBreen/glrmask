@@ -1375,18 +1375,12 @@ impl Lowerer {
 
         if items.len() == 1 {
             let (item_expr, is_required) = &items[0];
-            // Always use lower_sepseq_item_nonempty_symbol for repetition types so
-            // that the separator is threaded through the repeated element.
+            // Always route through lower_sepseq_item_nonempty_symbol so that the
+            // separator is correctly threaded through repetition items.
             // e.g. RepeatOne(item) must become `item (sep item)*`, not bare `item+`.
-            let is_repetition = matches!(
-                item_expr,
-                GrammarExpr::Repeat(_) | GrammarExpr::RepeatOne(_) | GrammarExpr::RepeatRange { .. }
-            );
-            let item_sym = if is_repetition || self.expr_is_nullable(item_expr) {
-                self.lower_sepseq_item_nonempty_symbol(item_expr, separator)?
-            } else {
-                Some(self.lower_expr_terminalish(item_expr)?)
-            };
+            // For non-repetition items the function falls through to
+            // lower_nonnullable_expr_symbol which handles them correctly.
+            let item_sym = self.lower_sepseq_item_nonempty_symbol(item_expr, separator)?;
             // Return can_be_empty=true for optional items as a signal to the parent to add
             // a "without this item and its preceding separator" alternative.  We do NOT emit
             // an epsilon rule here — that would create dangling separators in the parent rule
