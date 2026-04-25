@@ -8368,19 +8368,14 @@ impl<'a> SchemaCtx<'a> {
             )
         });
 
-        let pattern_key_colon_exprs = pattern_properties
-            .iter()
-            .map(|(pattern, _)| self.pattern_key_colon_body_expr(pattern, "PP_KEY_COLON_BODY"))
-            .collect::<Vec<_>>();
-
-        let mut pattern_pair_variants = Vec::<(GrammarExpr, GrammarExpr)>::new();
+        let mut pp_kv_rules = Vec::new();
         let mut pattern_key_terminals = Vec::<GrammarExpr>::new();
         if !pattern_properties.is_empty() {
-            for (pattern_idx, (_, pattern_schema)) in pattern_properties.iter().enumerate() {
-                let key_expr = self.insert_named_terminal_rule(
-                    format!("{}_PP{}_KEY", upper_base_name, pattern_idx),
-                    pattern_key_colon_exprs[pattern_idx].clone(),
-                );
+            for (pattern_idx, (pattern, pattern_schema)) in pattern_properties.iter().enumerate() {
+                let body = self.pattern_key_colon_body_expr(pattern, &format!("{}_PP{}_KEY_BODY", upper_base_name, pattern_idx));
+                let (terminal_body, wrap) = wrap_key_colon_expr_parts(body);
+                let term_ref = self.extract_terminal_rule(terminal_body, &format!("{}_PP{}_KEY", upper_base_name, pattern_idx));
+                let key_expr = wrap(term_ref.clone());
 
                 let value_expr = match self.convert_schema(pattern_schema) {
                     Ok(expr) => expr,
@@ -8388,8 +8383,12 @@ impl<'a> SchemaCtx<'a> {
                     Err(err) => return Err(err),
                 };
 
-                pattern_key_terminals.push(key_expr.clone());
-                pattern_pair_variants.push((key_expr, value_expr));
+                let kv_rule = self.insert_rule(
+                    format!("{base_name}_pp_kv_{pattern_idx}"),
+                    sequence_or_single(vec![key_expr, value_expr]),
+                );
+                pp_kv_rules.push(GrammarExpr::Ref(kv_rule));
+                pattern_key_terminals.push(term_ref);
             }
         }
 
@@ -8402,7 +8401,7 @@ impl<'a> SchemaCtx<'a> {
             ))
         };
 
-        let mut additional_pair_exprs = Vec::<GrammarExpr>::new();
+        let mut ap_kv_rule = None;
         let has_additional_properties = additional_properties_schema.is_some();
         if let Some(schema) = additional_properties_schema {
             let ap_key_expr = if shared_ap_key_exclusions_enabled() && !ap_key_any_string() {
@@ -8442,70 +8441,38 @@ impl<'a> SchemaCtx<'a> {
                 self.insert_named_terminal_rule(format!("{upper_base_name}_AP"), ap_body)
             };
 
-            {
-                let additional_value_expr = self.convert_schema(&schema)?;
-                additional_pair_exprs.push(sequence_or_single(vec![
-                    literal_expr(b"\""),
-                    ap_key_expr,
-                    literal_expr(b": "),
-                    additional_value_expr,
-                ]));
-            }
+            let wrapped_ap_key = wrap_key_colon_terminal(ap_key_expr);
+            let additional_value_expr = self.convert_schema(&schema)?;
+            let kv_rule = self.insert_rule(
+                format!("{base_name}_ap_kv"),
+                sequence_or_single(vec![wrapped_ap_key, additional_value_expr]),
+            );
+            ap_kv_rule = Some(GrammarExpr::Ref(kv_rule));
         }
 
-        let pattern_list_expr = if pattern_pair_variants.is_empty() {
+        let pattern_list_expr = if pp_kv_rules.is_empty() {
             None
         } else {
-            let pair = if let Some(pp_terminal) = &pattern_terminal {
-                let all_same_value = pattern_pair_variants
-                    .iter()
-                    .map(|(_, value)| value)
-                    .all(|value| value == &pattern_pair_variants[0].1);
-                if all_same_value {
-                    sequence_or_single(vec![
-                        literal_expr(b"\""),
-                        pp_terminal.clone(),
-                        literal_expr(b": "),
-                        pattern_pair_variants[0].1.clone(),
-                    ])
-                } else {
-                    choice_or_single(
-                        pattern_pair_variants
-                            .iter()
-                            .map(|(key, value)| {
-                                sequence_or_single(vec![
-                                    literal_expr(b"\""),
-                                    key.clone(),
-                                    literal_expr(b": "),
-                                    value.clone(),
-                                ])
-                            })
-                            .collect(),
-                    )
-                }
-            } else {
-                unreachable!("pattern variants exist but pattern terminal missing")
-            };
+            let pp_alt = self.insert_rule(
+                format!("{base_name}_pp_alt"),
+                choice_or_single(pp_kv_rules),
+            );
             Some(GrammarExpr::SeparatedSequence {
-                items: vec![(GrammarExpr::Repeat(Box::new(pair)), true)],
+                items: vec![(GrammarExpr::Repeat(Box::new(GrammarExpr::Ref(pp_alt))), true)],
                 separator: Box::new(self.json_item_separator_expr()),
                 allow_empty: true,
             })
         };
 
-        let additional_pair_choice = if additional_pair_exprs.is_empty() {
-            None
-        } else {
-            Some(choice_or_single(additional_pair_exprs))
-        };
-
-        let additional_list_expr = additional_pair_choice.clone().map(|pair| {
+        let additional_list_expr = ap_kv_rule.clone().map(|pair| {
             GrammarExpr::SeparatedSequence {
                 items: vec![(GrammarExpr::Repeat(Box::new(pair)), true)],
                 separator: Box::new(self.json_item_separator_expr()),
                 allow_empty: true,
             }
         });
+
+
 
         if allow_exact_closed_object_optimization
             && !Self::exact_closed_object_disabled()
@@ -8534,7 +8501,7 @@ impl<'a> SchemaCtx<'a> {
         let additional_list_rule = additional_list_expr.map(|expr| {
             self.insert_rule(format!("{base_name}_ap_list"), expr)
         });
-        let additional_nonempty_list_rule = additional_pair_choice.map(|pair| {
+        let additional_nonempty_list_rule = ap_kv_rule.clone().map(|pair| {
             self.insert_rule(
                 format!("{base_name}_ap_list_nonempty"),
                 GrammarExpr::SeparatedSequence {
@@ -8772,8 +8739,11 @@ impl<'a> SchemaCtx<'a> {
                 }
             }
 
-            let mut sequence_cache = BTreeMap::new();
-            let body = self.build_array_item_sequence(&array_items, false, &mut sequence_cache, 0);
+            let body = GrammarExpr::SeparatedSequence {
+                items: array_items,
+                separator: Box::new(self.json_item_separator_expr()),
+                allow_empty: min_items == 0,
+            };
             return Ok(sequence_or_single(vec![
                 literal_expr(b"["),
                 body,
@@ -8820,24 +8790,36 @@ impl<'a> SchemaCtx<'a> {
         }
 
         let item_expr = self.extract_rule(item_expr, "arr_item");
-        let non_empty = sequence_or_single(vec![
-            literal_expr(b"["),
-            item_expr.clone(),
-            repeat_expr(
-                sequence_or_single(vec![self.json_item_separator_expr(), item_expr]),
-                min_items.saturating_sub(1),
-                max_items.map(|max_items| max_items.saturating_sub(1)),
-            ),
-            literal_expr(b"]"),
-        ]);
-        if min_items == 0 {
-            choice_or_single(vec![
-                sequence_or_single(vec![literal_expr(b"["), literal_expr(b"]")]),
-                non_empty,
-            ])
-        } else {
-            non_empty
+
+        let mut array_items = Vec::new();
+        match (min_items, max_items) {
+            (0, None) => array_items.push((GrammarExpr::Repeat(Box::new(item_expr)), true)),
+            (1, None) => array_items.push((GrammarExpr::RepeatOne(Box::new(item_expr)), true)),
+            (m, Some(n)) => array_items.push((GrammarExpr::RepeatRange {
+                expr: Box::new(item_expr),
+                min: m,
+                max: n,
+            }, true)),
+            (m, None) => {
+                array_items.push((GrammarExpr::RepeatRange {
+                    expr: Box::new(item_expr.clone()),
+                    min: m,
+                    max: m,
+                }, true));
+                array_items.push((GrammarExpr::Repeat(Box::new(item_expr)), true));
+            }
         }
+
+        let body = GrammarExpr::SeparatedSequence {
+            items: array_items,
+            separator: Box::new(self.json_item_separator_expr()),
+            allow_empty: min_items == 0,
+        };
+        sequence_or_single(vec![
+            literal_expr(b"["),
+            body,
+            literal_expr(b"]"),
+        ])
     }
 
     fn is_trivial_expr(expr: &GrammarExpr) -> bool {
