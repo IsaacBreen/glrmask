@@ -1556,6 +1556,28 @@ fn test_nested_dynamic_object_prefix_stays_single_path() {
 }
 
 #[test]
+fn test_minimized_dynamic_object_prefix_has_two_paths() {
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "p": {
+                "type": "object",
+                "additionalProperties": {"type": "string"}
+            }
+        }
+    }"#;
+    let prefix = br#"{"p": {"q": "y"}"#;
+
+    let constraint = schema_constraint(schema);
+    let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
+
+    assert_eq!(
+        max_paths, 2,
+        "optional named-property plus dynamic-object lowering should still expose the reduced two-path ambiguity"
+    );
+}
+
+#[test]
 fn test_closed_object_anyof_shared_key_value_variants_preserve_language() {
     let _guard = env_lock().lock().expect("env lock should not be poisoned");
     let schema = r#"{
