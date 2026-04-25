@@ -842,9 +842,13 @@ impl Lowerer {
                     rhs: vec![Symbol::Nonterminal(range_nonterminal)],
                 });
             }
-            GrammarExpr::SeparatedSequence { .. } => {
-                let symbol = self.lower_expr(expr);
-                self.rules.push(Rule { lhs, rhs: vec![symbol] });
+            GrammarExpr::SeparatedSequence { items, separator, .. } => {
+                let shape = comma_sep_shape();
+                let (symbol, _) = self.lower_separated_sequence_inner(items, separator, shape)?;
+                self.rules.push(Rule {
+                    lhs,
+                    rhs: vec![symbol],
+                });
             }
             GrammarExpr::Epsilon => {}
         }
