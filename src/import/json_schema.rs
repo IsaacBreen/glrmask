@@ -5033,9 +5033,19 @@ impl<'a> SchemaCtx<'a> {
             return Ok(None);
         }
 
-        // NOTE: try_build_exact_closed_object_union (the anyOf/oneOf DFA strategy) is
-        // intentionally bypassed — same shared `"\""` prefix problem as the single-object
-        // DFA. Falls through to plain branch conversion below.
+        if keyword == "oneOf" && !Self::exact_closed_object_disabled() {
+            if let Some(expr) = self.try_build_exact_closed_object_union(
+                schema,
+                options,
+                StructuralBranchMode::OneOf,
+            )? {
+                return Ok(Some(expr));
+            }
+        }
+
+        // NOTE: try_build_exact_closed_object_union is intentionally bypassed for anyOf.
+        // Its DFA states split object keys on the opening quote, so every alternative
+        // starts with the same `"\""` token and causes wide GLR forking.
 
         // Closed-object merge optimization (experimental, disabled by default).
         // Currently changes the accepted language (introduces false positives).
