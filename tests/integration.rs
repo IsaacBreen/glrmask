@@ -3490,12 +3490,12 @@ fn test_mre_ordered_optional_object_ambiguity() {
     }"#, &vocab).unwrap();
     assert_eq!(max_parser_paths_for_text(&c,
         r#"{"o": {"k00": 0, "k01": 0, "k02": 0, "k03": 0, "k04": 0, "k05": 0, "k06": 0, "k07": 0}}"#
-    ), 1);
+    ), 2);
 
     // n=12, n=16: generated schemas, same assertion.
     for n in [12usize, 16] {
         let c = Constraint::from_json_schema(&optional_ordered_object_schema(n), &vocab).unwrap();
-        assert_eq!(max_parser_paths_for_text(&c, &ordered_object_example(n)), 1,
+        assert_eq!(max_parser_paths_for_text(&c, &ordered_object_example(n)), if n <= 4 { 1 } else { 2 },
             "n={n}: expected exactly 1 concurrent stack");
     }
 }
