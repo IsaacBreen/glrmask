@@ -1375,7 +1375,14 @@ impl Lowerer {
 
         if items.len() == 1 {
             let (item_expr, is_required) = &items[0];
-            let item_sym = if self.expr_is_nullable(item_expr) {
+            // Always use lower_sepseq_item_nonempty_symbol for repetition types so
+            // that the separator is threaded through the repeated element.
+            // e.g. RepeatOne(item) must become `item (sep item)*`, not bare `item+`.
+            let is_repetition = matches!(
+                item_expr,
+                GrammarExpr::Repeat(_) | GrammarExpr::RepeatOne(_) | GrammarExpr::RepeatRange { .. }
+            );
+            let item_sym = if is_repetition || self.expr_is_nullable(item_expr) {
                 self.lower_sepseq_item_nonempty_symbol(item_expr, separator)?
             } else {
                 Some(self.lower_expr_terminalish(item_expr)?)
