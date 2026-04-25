@@ -156,7 +156,7 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
         );
         global_body = global_nwa.union_in_place(&nwa, &global_body);
     }
-    global_nwa.start_states = global_body.start_states;
+    global_nwa.set_start_states(global_body.start_states);
     let remap_union_ms = remap_union_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let determinize_started_at = Instant::now();
@@ -301,7 +301,7 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
         );
         global_body = global_nwa.union_in_place(&nwa, &global_body);
     }
-    global_nwa.start_states = global_body.start_states;
+    global_nwa.set_start_states(global_body.start_states);
     let remap_union_ms = remap_union_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // 2b. Optimize ID ordering to minimize weight range fragmentation.
@@ -317,7 +317,7 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
         .expect("merge terminal NWA determinization failed");
     let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let det_states = det.states.len();
+    let det_states = det.states().len();
     let minimize_started_at = Instant::now();
     let mut dwa = if label == "global" {
         minimize_from_env(&det, "GLRMASK_MINIMIZE_MERGE_GLOBAL", minimize)
@@ -325,7 +325,7 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
         minimize_from_env(&det, "GLRMASK_MINIMIZE_MERGE", minimize)
     };
     let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
-    let min_states = dwa.states.len();
+    let min_states = dwa.states().len();
 
     // 4. Compact.
     let mut global = global_id_map;
@@ -766,7 +766,7 @@ fn remap_nwa_with_maps(
 ) {
     let mut weight_cache = HashMap::<usize, Weight>::new();
 
-    for state in &mut nwa.states {
+    for state in  nwa.states_mut() {
         if let Some(final_weight) = state.final_weight.as_mut() {
             *final_weight = remap_weight_cached(
                 final_weight,
@@ -1011,7 +1011,7 @@ pub(crate) fn optimize_nwa_id_ordering(
         }
     };
 
-    for state in &nwa.states {
+    for state in nwa.states() {
         if let Some(ref w) = state.final_weight {
             register_weight(w);
         }
@@ -1059,7 +1059,7 @@ pub(crate) fn optimize_nwa_id_ordering(
 
     // 4. Apply permutations to NWA weights.
     let mut weight_cache: HashMap<usize, Weight> = HashMap::new();
-    for state in &mut nwa.states {
+    for state in  nwa.states_mut() {
         if let Some(ref w) = state.final_weight {
             let remapped = remap_weight_with_permutation(w, &tsid_perm, &token_perm, &mut weight_cache);
             if remapped.is_empty() {

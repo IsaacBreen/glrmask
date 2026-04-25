@@ -12,7 +12,7 @@ enum MinimizeStrategy {
 }
 
 fn should_skip_minimization(dwa: &DWA) -> bool {
-    dwa.states.is_empty() || !dwa.is_acyclic()
+    dwa.states().is_empty() || !dwa.is_acyclic()
 }
 
 fn minimize_if_acyclic(dwa: &DWA, minimize: impl FnOnce(&DWA) -> DWA) -> DWA {

@@ -39,12 +39,12 @@ fn test_determinize_simple_divergence() {
     let start = nwa.add_state();
     nwa.add_epsilon(start, s0, Weight::all());
     nwa.add_epsilon(start, s3, Weight::all());
-    nwa.start_states = vec![start];
+    nwa.set_start_states(vec![start]);
 
     let dwa = determinize::determinize(&nwa).expect("determinize failed");
     assert_eq!(dwa.eval_word(&['a' as Label, 'c' as Label]), weight_from_item(0));
     assert_eq!(dwa.eval_word(&['b' as Label, 'c' as Label]), weight_from_item(1));
-    assert!(dwa.states.len() <= 4);
+    assert!(dwa.states().len() <= 4);
 }
 
 // Epsilon Explosion Analysis Tests
@@ -57,7 +57,7 @@ fn test_determinize_handles_minimal_epsilon_fanout() {
     // LABELED: start --i--> intermediate --char--> final
     let mut nwa_labeled = NWA::new(0, 0);
     let start_labeled = nwa_labeled.add_state();
-    nwa_labeled.start_states = vec![start_labeled];
+    nwa_labeled.set_start_states(vec![start_labeled]);
 
     for i in 0..N {
         let intermediate = nwa_labeled.add_state();
@@ -72,7 +72,7 @@ fn test_determinize_handles_minimal_epsilon_fanout() {
     // EPSILON: start --eps--> intermediate --char--> final
     let mut nwa_epsilon = NWA::new(0, 0);
     let start_eps = nwa_epsilon.add_state();
-    nwa_epsilon.start_states = vec![start_eps];
+    nwa_epsilon.set_start_states(vec![start_eps]);
 
     for i in 0..N {
         let intermediate = nwa_epsilon.add_state();
@@ -93,7 +93,7 @@ fn test_determinize_handles_diverging_epsilon_paths() {
     // LABELED
     let mut nwa_labeled = NWA::new(0, 0);
     let start_labeled = nwa_labeled.add_state();
-    nwa_labeled.start_states = vec![start_labeled];
+    nwa_labeled.set_start_states(vec![start_labeled]);
 
     for i in 0..N {
         let q_i = nwa_labeled.add_state();
@@ -110,7 +110,7 @@ fn test_determinize_handles_diverging_epsilon_paths() {
     // EPSILON
     let mut nwa_epsilon = NWA::new(0, 0);
     let start_eps = nwa_epsilon.add_state();
-    nwa_epsilon.start_states = vec![start_eps];
+    nwa_epsilon.set_start_states(vec![start_eps]);
 
     for i in 0..N {
         let q_i = nwa_epsilon.add_state();
@@ -133,7 +133,7 @@ fn test_determinize_handles_overlapping_epsilon_depths() {
     // LABELED
     let mut nwa_labeled = NWA::new(0, 0);
     let start_labeled = nwa_labeled.add_state();
-    nwa_labeled.start_states = vec![start_labeled];
+    nwa_labeled.set_start_states(vec![start_labeled]);
 
     for i in 0..N {
         let mut prev = nwa_labeled.add_state();
@@ -153,7 +153,7 @@ fn test_determinize_handles_overlapping_epsilon_depths() {
     // EPSILON
     let mut nwa_epsilon = NWA::new(0, 0);
     let start_eps = nwa_epsilon.add_state();
-    nwa_epsilon.start_states = vec![start_eps];
+    nwa_epsilon.set_start_states(vec![start_eps]);
 
     for i in 0..N {
         let mut prev = nwa_epsilon.add_state();
@@ -179,7 +179,7 @@ fn test_determinize_handles_shared_second_hop() {
     // LABELED
     let mut nwa_labeled = NWA::new(0, 0);
     let start_labeled = nwa_labeled.add_state();
-    nwa_labeled.start_states = vec![start_labeled];
+    nwa_labeled.set_start_states(vec![start_labeled]);
     let shared_state = nwa_labeled.add_state();
     nwa_labeled.set_final_weight(shared_state, Weight::all());
     for i in 0..N {
@@ -193,7 +193,7 @@ fn test_determinize_handles_shared_second_hop() {
     // EPSILON
     let mut nwa_epsilon = NWA::new(0, 0);
     let start_eps = nwa_epsilon.add_state();
-    nwa_epsilon.start_states = vec![start_eps];
+    nwa_epsilon.set_start_states(vec![start_eps]);
     let shared_state_eps = nwa_epsilon.add_state();
     nwa_epsilon.set_final_weight(shared_state_eps, Weight::all());
     for i in 0..N {
@@ -212,7 +212,7 @@ fn test_determinize_handles_shared_then_diverging_paths() {
     // LABELED
     let mut nwa_labeled = NWA::new(0, 0);
     let start_labeled = nwa_labeled.add_state();
-    nwa_labeled.start_states = vec![start_labeled];
+    nwa_labeled.set_start_states(vec![start_labeled]);
     let shared_second = nwa_labeled.add_state();
     nwa_labeled.set_final_weight(shared_second, weight_from_item(999));
     for i in 0..N {
@@ -229,7 +229,7 @@ fn test_determinize_handles_shared_then_diverging_paths() {
     // EPSILON
     let mut nwa_epsilon = NWA::new(0, 0);
     let start_eps = nwa_epsilon.add_state();
-    nwa_epsilon.start_states = vec![start_eps];
+    nwa_epsilon.set_start_states(vec![start_eps]);
     let shared_second_eps = nwa_epsilon.add_state();
     nwa_epsilon.set_final_weight(shared_second_eps, weight_from_item(999));
     for i in 0..N {
@@ -251,7 +251,7 @@ fn test_determinize_handles_shared_merge_points() {
     // LABELED
     let mut nwa_labeled = NWA::new(0, 0);
     let start_labeled = nwa_labeled.add_state();
-    nwa_labeled.start_states = vec![start_labeled];
+    nwa_labeled.set_start_states(vec![start_labeled]);
     let final_state = nwa_labeled.add_state();
     nwa_labeled.set_final_weight(final_state, Weight::all());
 
@@ -274,7 +274,7 @@ fn test_determinize_handles_shared_merge_points() {
     // EPSILON
     let mut nwa_epsilon = NWA::new(0, 0);
     let start_eps = nwa_epsilon.add_state();
-    nwa_epsilon.start_states = vec![start_eps];
+    nwa_epsilon.set_start_states(vec![start_eps]);
     let final_state_eps = nwa_epsilon.add_state();
     nwa_epsilon.set_final_weight(final_state_eps, Weight::all());
 
@@ -303,7 +303,7 @@ fn test_determinize_handles_many_sources_same_label() {
     // LABELED
     let mut nwa_labeled = NWA::new(0, 0);
     let start_labeled = nwa_labeled.add_state();
-    nwa_labeled.start_states = vec![start_labeled];
+    nwa_labeled.set_start_states(vec![start_labeled]);
     for i in 0..N {
         let first_hop = nwa_labeled.add_state();
         nwa_labeled.add_transition(start_labeled, i as Label, first_hop, Weight::all());
@@ -317,7 +317,7 @@ fn test_determinize_handles_many_sources_same_label() {
     // EPSILON
     let mut nwa_epsilon = NWA::new(0, 0);
     let start_eps = nwa_epsilon.add_state();
-    nwa_epsilon.start_states = vec![start_eps];
+    nwa_epsilon.set_start_states(vec![start_eps]);
     for i in 0..N {
         let first_hop = nwa_epsilon.add_state();
         nwa_epsilon.add_epsilon(start_eps, first_hop, Weight::all());
@@ -338,7 +338,7 @@ fn test_determinize_handles_many_sources_with_shared_continuation() {
     // LABELED
     let mut nwa_labeled = NWA::new(0, 0);
     let start_labeled = nwa_labeled.add_state();
-    nwa_labeled.start_states = vec![start_labeled];
+    nwa_labeled.set_start_states(vec![start_labeled]);
     let shared_target = nwa_labeled.add_state();
     let after_shared = nwa_labeled.add_state();
     nwa_labeled.add_transition(shared_target, 'X' as Label, after_shared, Weight::all());
@@ -360,7 +360,7 @@ fn test_determinize_handles_many_sources_with_shared_continuation() {
     // EPSILON
     let mut nwa_epsilon = NWA::new(0, 0);
     let start_eps = nwa_epsilon.add_state();
-    nwa_epsilon.start_states = vec![start_eps];
+    nwa_epsilon.set_start_states(vec![start_eps]);
     let shared_target_eps = nwa_epsilon.add_state();
     let after_shared_eps = nwa_epsilon.add_state();
     nwa_epsilon.add_transition(shared_target_eps, 'X' as Label, after_shared_eps, Weight::all());
@@ -403,7 +403,7 @@ fn test_acyclic_determinize_shared_dest_no_weight_inflation() {
     let a = nwa.add_state(); // start
     let b = nwa.add_state(); // final
     let c = nwa.add_state(); // dead
-    nwa.start_states = vec![a];
+    nwa.set_start_states(vec![a]);
 
     nwa.add_transition(a, 0 as Label, b, weight_from_item(0));
     nwa.add_transition(a, 0 as Label, c, weight_from_item(1));

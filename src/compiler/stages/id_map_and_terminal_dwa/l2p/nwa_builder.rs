@@ -523,7 +523,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     pub(crate) fn flush_transition_buffer(&mut self) {
         let flush_start = std::time::Instant::now();
         let mut leaf_transition_buckets: Vec<FxHashMap<i32, BufferedLeafTransition>> =
-            (0..self.nwa.states.len()).map(|_| FxHashMap::default()).collect();
+            (0..self.nwa.states().len()).map(|_| FxHashMap::default()).collect();
 
         let leaf_buf_count = self.leaf_token_ids_buffer.len();
         for (from, labels_vec) in std::mem::take(&mut self.leaf_token_ids_buffer)
@@ -591,7 +591,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         for ((from, target), weight) in epsilon_entries {
             let state = self
                 .nwa
-                .states
+                .states_mut()
                 .get_mut(from as usize)
                 .expect("buffered epsilon source state must exist");
             state.epsilons.push((target, weight));
@@ -602,7 +602,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         for ((from, label, target), weight) in transition_entries {
             let state = self
                 .nwa
-                .states
+                .states_mut()
                 .get_mut(from as usize)
                 .expect("buffered transition source state must exist");
             state.transitions.entry(label).or_default().push((target, weight));
@@ -634,7 +634,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
 
             let state = self
                 .nwa
-                .states
+                .states_mut()
                 .get_mut(from)
                 .expect("buffered leaf transition source state must exist");
             for (label, weight) in finalized_entries {
@@ -1041,7 +1041,7 @@ pub(crate) fn build_nwa_via_trie_walk<'a>(
     if compile_profile_enabled() || debug_profile_enabled() {
         eprintln!(
             "[glrmask/profile][nwa_build] trie_walk_ms={:.3} flush_ms={:.3} total_ms={:.3} nwa_states={} future_additions={} match_additions={}",
-            trie_ms, flush_ms, trie_ms + flush_ms, nwa.states.len(),
+            trie_ms, flush_ms, trie_ms + flush_ms, nwa.states().len(),
             profile.future_terminal_additions, profile.match_transition_additions,
         );
     }

@@ -86,7 +86,7 @@ fn accepting_nwa(final_weight: &Weight) -> Option<NWA> {
 
     let mut nwa = NWA::new(0, 0);
     let start = nwa.add_state();
-    nwa.start_states.push(start);
+    nwa.start_states_mut().push(start);
     nwa.set_final_weight(start, final_weight.clone());
     Some(nwa)
 }
@@ -96,7 +96,7 @@ fn group_terminal_edges_by_target(
     grammar: &AnalyzedGrammar,
     state_id: u32,
 ) -> BTreeMap<u32, TerminalBundle> {
-    let Some(state) = terminal_dwa.states.get(state_id as usize) else {
+    let Some(state) = terminal_dwa.states().get(state_id as usize) else {
         return BTreeMap::new();
     };
 
@@ -130,11 +130,11 @@ fn build_state_summaries(
     templates: &Templates,
 ) -> Vec<StateSummary> {
     let mut pending_branches_by_state: Vec<Vec<PendingBranch>> =
-        Vec::with_capacity(terminal_dwa.states.len());
+        Vec::with_capacity(terminal_dwa.states().len());
     let mut bundle_ids_by_signature: FxHashMap<BundleSignature, usize> = FxHashMap::default();
     let mut unique_bundles: Vec<TerminalBundle> = Vec::new();
 
-    for (state_id, _state) in terminal_dwa.states.iter().enumerate() {
+    for (state_id, _state) in terminal_dwa.states().iter().enumerate() {
         let bundles_by_target = group_terminal_edges_by_target(terminal_dwa, grammar, state_id as u32);
         let mut pending_branches = Vec::with_capacity(bundles_by_target.len());
         for (target, bundle) in bundles_by_target {
@@ -155,7 +155,7 @@ fn build_state_summaries(
     if parser_dwa_profile_enabled() {
         eprintln!(
             "[glrmask/profile][parser_dwa_bundles] terminal_dwa_states={} unique_bundles={} total_branches={}",
-            terminal_dwa.states.len(),
+            terminal_dwa.states().len(),
             unique_bundles.len(),
             pending_branches_by_state.iter().map(|b| b.len()).sum::<usize>(),
         );
@@ -172,7 +172,7 @@ fn build_state_summaries(
                 if parser_dwa_profile_enabled() {
                     let build_ms = build_started_at.elapsed().as_secs_f64() * 1000.0;
                     let nwa_transitions: usize = nwa
-                        .states
+                        .states()
                         .iter()
                         .map(|s| {
                             s.transitions.values().map(|v| v.len()).sum::<usize>()
@@ -183,7 +183,7 @@ fn build_state_summaries(
                         "[glrmask/profile][parser_dwa_bundle] bundle={:>4} terminals={:>4} nwa_states={:>5} nwa_trans={:>6} build_ms={:>7.1}",
                         bundle_id,
                         bundle.len(),
-                        nwa.states.len(),
+                        nwa.states().len(),
                         nwa_transitions,
                         build_ms,
                     );
@@ -194,7 +194,7 @@ fn build_state_summaries(
     };
 
     terminal_dwa
-        .states
+        .states()
         .iter()
         .enumerate()
         .map(|(state_id, state)| {
@@ -350,7 +350,7 @@ fn build_possible_outgoing_ids_by_state(
     let num_parser_states = num_parser_states as usize;
     let all_parser_states = BitSet::all(num_parser_states);
     let state_outgoing_ids: Vec<OutgoingIds> = parser_nwa
-        .states
+        .states()
         .iter()
         .map(|state| {
             let mut ids = Vec::new();
@@ -436,7 +436,7 @@ fn local_epsilon_closure(
     }
     if seed.len() == 1 {
         let state_id = seed_states[0];
-        if let Some(state) = nwa.states.get(state_id as usize) {
+        if let Some(state) = nwa.states().get(state_id as usize) {
             if state.epsilons.is_empty() {
                 closure_queue.clear();
                 for &s in &seed_states {
@@ -450,7 +450,7 @@ fn local_epsilon_closure(
         let Some(current_weight) = weight_by_state[state_id as usize].clone() else {
             continue;
         };
-        let Some(state) = nwa.states.get(state_id as usize) else {
+        let Some(state) = nwa.states().get(state_id as usize) else {
             continue;
         };
         for (target, edge_weight) in &state.epsilons {
@@ -498,7 +498,7 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
     let mut prof_intersection_ns: u64 = 0;
     let mut prof_target_build_ns: u64 = 0;
 
-    let num_nwa_states = nwa.states.len();
+    let num_nwa_states = nwa.states().len();
 
     // Use flat arrays for epsilon closure when NWA is small enough.
     // weight_by_state[i] = Some(weight) means state i is in the closure.
@@ -522,7 +522,7 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
         // Fast path: single seed with no epsilons.
         if seed.len() == 1 {
             let state_id = seed_states[0];
-            if let Some(state) = nwa.states.get(state_id as usize) {
+            if let Some(state) = nwa.states().get(state_id as usize) {
                 if state.epsilons.is_empty() {
                     // Clean up and return early — seed is already populated.
                     closure_queue.clear();
@@ -538,7 +538,7 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
             let Some(current_weight) = weight_by_state[state_id as usize].clone() else {
                 continue;
             };
-            let Some(state) = nwa.states.get(state_id as usize) else {
+            let Some(state) = nwa.states().get(state_id as usize) else {
                 continue;
             };
             for (target, edge_weight) in &state.epsilons {
@@ -585,7 +585,7 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
     let mut supports = vec![Vec::new()];
 
     let mut start_subset = FxHashMap::default();
-    for &state_id in &nwa.start_states {
+    for &state_id in nwa.start_states() {
         let existing = start_subset.get(&state_id).cloned().unwrap_or_else(Weight::empty);
         start_subset.insert(state_id, existing.union(&Weight::all()));
     }
@@ -599,7 +599,7 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
 
     let mut subset_map: FxHashMap<Vec<(u32, usize)>, u32> = FxHashMap::default();
     let mut worklist: VecDeque<Vec<(u32, Weight)>> = VecDeque::new();
-    subset_map.insert(subset_key(&canon_buf), dwa.start_state);
+    subset_map.insert(subset_key(&canon_buf), dwa.start_state());
     worklist.push_back(canon_buf.clone());
 
     let mut raw_targets: FxHashMap<i32, FxHashMap<u32, Weight>> = FxHashMap::default();
@@ -633,7 +633,7 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
         // Only save entries whose NWA states have final weights.
         let t_fw = std::time::Instant::now();
         let has_finals: Vec<(u32, Weight)> = subset_entries.iter()
-            .filter(|(nwa_state_id, _)| nwa.states[*nwa_state_id as usize].final_weight.is_some())
+            .filter(|(nwa_state_id, _)| nwa.states()[*nwa_state_id as usize].final_weight.is_some())
             .map(|(id, w)| (*id, w.clone()))
             .collect();
         if !has_finals.is_empty() {
@@ -643,7 +643,7 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
 
         let t_intersect = std::time::Instant::now();
         for (nwa_state_id, path_weight) in &subset_entries {
-            let state = &nwa.states[*nwa_state_id as usize];
+            let state = &nwa.states()[*nwa_state_id as usize];
             for (&label, targets) in &state.transitions {
                 for (target, transition_weight) in targets {
                     if profile_enabled { prof_intersection_calls += 1; }
@@ -759,7 +759,7 @@ fn determinize_with_supports(nwa: &NWA) -> DeterminizedDwaWithSupports {
                 // Group by final weight pointer to leverage distributivity.
                 let mut final_groups: SmallVec<[(usize, &Weight, SmallVec<[&Weight; 4]>); 4]> = SmallVec::new();
                 for (nwa_state_id, path_weight) in entries {
-                    if let Some(state_final) = nwa.states[*nwa_state_id as usize].final_weight.as_ref() {
+                    if let Some(state_final) = nwa.states()[*nwa_state_id as usize].final_weight.as_ref() {
                         let key = state_final.ptr_key();
                         if let Some(group) = final_groups.iter_mut().find(|(k, _, _)| *k == key) {
                             group.2.push(path_weight);
@@ -825,7 +825,7 @@ fn optimize_parser_dwa_defaults(
                 continue;
             }
 
-            let state = &dwa.states[state_id];
+            let state = &dwa.states()[state_id];
 
             let mut actual_positive = BitSet::new(num_parser_states as usize);
             for &label in state.transitions.keys() {
@@ -903,7 +903,7 @@ fn optimize_parser_dwa_defaults(
                 continue;
             }
 
-            let state = &mut dwa.states[state_id];
+            let state = &mut dwa.states_mut()[state_id];
             let entry = state.transitions.entry(DEFAULT_LABEL);
             match entry {
                 std::collections::btree_map::Entry::Occupied(mut occ) => {
@@ -923,25 +923,25 @@ fn optimize_parser_dwa_defaults(
             }
         }
 
-        for state_id in 0..dwa.states.len() {
+        for state_id in 0..dwa.states().len() {
             let Some((default_target, default_weight)) =
-                dwa.states[state_id].transitions.get(&DEFAULT_LABEL).cloned()
+                dwa.states()[state_id].transitions.get(&DEFAULT_LABEL).cloned()
             else {
                 continue;
             };
 
-            let target_final = dwa.states[default_target as usize].final_weight.clone();
+            let target_final = dwa.states()[default_target as usize].final_weight.clone();
             let Some(target_final) = target_final else { continue };
             let lifted = default_weight.intersection(&target_final);
             if lifted.is_empty() {
                 continue;
             }
 
-            if union_final_weight(&mut dwa.states[state_id].final_weight, lifted.clone()) {
+            if union_final_weight(&mut dwa.states_mut()[state_id].final_weight, lifted.clone()) {
                 changed = true;
             }
 
-            let state = &mut dwa.states[state_id];
+            let state = &mut dwa.states_mut()[state_id];
             let mut to_remove = Vec::new();
             for (&label, (_, weight)) in state.transitions.iter_mut() {
                 let new_weight = weight.difference(&lifted);
@@ -958,16 +958,16 @@ fn optimize_parser_dwa_defaults(
             }
         }
 
-        for state_id in 0..dwa.states.len() {
+        for state_id in 0..dwa.states().len() {
             let Some(&(default_target, ref default_weight)) =
-                dwa.states[state_id].transitions.get(&DEFAULT_LABEL)
+                dwa.states()[state_id].transitions.get(&DEFAULT_LABEL)
             else {
                 continue;
             };
             let default_target = default_target;
             let default_weight = default_weight.clone();
 
-            let state = &mut dwa.states[state_id];
+            let state = &mut dwa.states_mut()[state_id];
             let mut to_remove = Vec::new();
             for (&label, (target, weight)) in state.transitions.iter_mut() {
                 if label == DEFAULT_LABEL {
@@ -997,14 +997,14 @@ fn optimize_parser_dwa_defaults(
 }
 
 fn subtract_final_weights_from_outgoing_dwa(dwa: &mut DWA) {
-    for state_id in 0..dwa.states.len() {
-        let Some(final_weight) = dwa.states[state_id].final_weight.clone() else {
+    for state_id in 0..dwa.states().len() {
+        let Some(final_weight) = dwa.states()[state_id].final_weight.clone() else {
             continue;
         };
         if final_weight.is_empty() {
             continue;
         }
-        let state = &mut dwa.states[state_id];
+        let state = &mut dwa.states_mut()[state_id];
         let mut to_remove = Vec::new();
         for (&label, (_, weight)) in state.transitions.iter_mut() {
             let new_weight = weight.difference(&final_weight);
@@ -1023,15 +1023,15 @@ fn subtract_final_weights_from_outgoing_dwa(dwa: &mut DWA) {
 
 fn dwa_to_nwa(dwa: &DWA) -> NWA {
     let mut nwa = NWA::new(0, 0);
-    nwa.states = vec![crate::automata::weighted::nwa::NWAState::default(); dwa.states.len()];
-    nwa.start_states = vec![dwa.start_state];
+    *nwa.states_mut() = vec![crate::automata::weighted::nwa::NWAState::default(); dwa.states().len()];
+    nwa.set_start_states(vec![dwa.start_state()]);
 
-    for (state_id, state) in dwa.states.iter().enumerate() {
+    for (state_id, state) in dwa.states().iter().enumerate() {
         if let Some(final_weight) = state.final_weight.clone() {
-            nwa.states[state_id].final_weight = Some(final_weight);
+            nwa.states_mut()[state_id].final_weight = Some(final_weight);
         }
         for (&label, (target, weight)) in &state.transitions {
-            nwa.states[state_id]
+            nwa.states_mut()[state_id]
                 .transitions
                 .entry(label)
                 .or_default()
@@ -1090,7 +1090,7 @@ fn optimize_parser_default_transitions(
             }
 
             let mut actual_positive = BitSet::new(num_parser_states as usize);
-            for &label in nwa.states[state_id].transitions.keys() {
+            for &label in nwa.states()[state_id].transitions.keys() {
                 if let Some(parser_state_id) = parser_state_label(label, num_parser_states) {
                     actual_positive.set(parser_state_id as usize);
                 }
@@ -1117,7 +1117,7 @@ fn optimize_parser_default_transitions(
                 PossibleOutgoingIds::Empty => continue,
                 PossibleOutgoingIds::All => {
                     for parser_state_id in 0..num_parser_states as i32 {
-                        let Some(targets) = nwa.states[state_id].transitions.get(&parser_state_id) else {
+                        let Some(targets) = nwa.states()[state_id].transitions.get(&parser_state_id) else {
                             valid = false;
                             break;
                         };
@@ -1144,7 +1144,7 @@ fn optimize_parser_default_transitions(
                 }
                 PossibleOutgoingIds::Some(ids) => {
                     for parser_state_id in ids.iter_ones().map(|state_id| state_id as i32) {
-                        let Some(targets) = nwa.states[state_id].transitions.get(&parser_state_id) else {
+                        let Some(targets) = nwa.states()[state_id].transitions.get(&parser_state_id) else {
                             valid = false;
                             break;
                         };
@@ -1181,13 +1181,13 @@ fn optimize_parser_default_transitions(
                 continue;
             }
 
-            if add_or_union_transition(&mut nwa.states[state_id], DEFAULT_LABEL, target, default_weight) {
+            if add_or_union_transition(&mut nwa.states_mut()[state_id], DEFAULT_LABEL, target, default_weight) {
                 changed = true;
             }
         }
 
-        for state_id in 0..nwa.states.len() {
-            let default_targets = nwa.states[state_id]
+        for state_id in 0..nwa.states().len() {
+            let default_targets = nwa.states()[state_id]
                 .transitions
                 .get(&DEFAULT_LABEL)
                 .cloned()
@@ -1198,7 +1198,7 @@ fn optimize_parser_default_transitions(
 
             let mut lifted_final = Weight::empty();
             for (_index, (target, weight)) in default_targets.iter().enumerate() {
-                let Some(target_final) = nwa.states[*target as usize].final_weight.as_ref() else {
+                let Some(target_final) = nwa.states()[*target as usize].final_weight.as_ref() else {
                     continue;
                 };
                 let lifted = weight.intersection(target_final);
@@ -1208,16 +1208,16 @@ fn optimize_parser_default_transitions(
                 lifted_final = lifted_final.union(&lifted);
             }
 
-            if union_final_weight(&mut nwa.states[state_id].final_weight, lifted_final.clone()) {
+            if union_final_weight(&mut nwa.states_mut()[state_id].final_weight, lifted_final.clone()) {
                 changed = true;
             }
 
-            if subtract_weight_from_outgoing(&mut nwa.states[state_id], &lifted_final) {
+            if subtract_weight_from_outgoing(&mut nwa.states_mut()[state_id], &lifted_final) {
                 changed = true;
             }
         }
 
-        for state in &mut nwa.states {
+        for state in  nwa.states_mut() {
             let mut default_by_target: HashMap<u32, Weight> = HashMap::new();
             if let Some(default_targets) = state.transitions.get(&DEFAULT_LABEL) {
                 for (target, weight) in default_targets {
@@ -1275,7 +1275,7 @@ fn build_parser_nwa_from_terminal_dwa(
     let mut concatenated_branches: ConcatMemo = FxHashMap::default();
     let compose_started_at = Instant::now();
     let parser_body = compose_state(
-        terminal_dwa.start_state,
+        terminal_dwa.start_state(),
         &states,
         &mut arena,
         &mut body_memo,
@@ -1283,7 +1283,7 @@ fn build_parser_nwa_from_terminal_dwa(
     )?;
     profile.compose_state_ms = elapsed_ms(compose_started_at);
 
-    arena.start_states = parser_body.start_states.clone();
+    arena.set_start_states(parser_body.start_states.clone());
 
     Some((arena, profile))
 }
@@ -1338,12 +1338,12 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     };
 
     if parser_dwa_profile_enabled() {
-        let nwa_transitions: usize = parser_nwa.states.iter()
+        let nwa_transitions: usize = parser_nwa.states().iter()
             .map(|s| s.transitions.values().map(|v| v.len()).sum::<usize>() + s.epsilons.len())
             .sum();
         eprintln!(
             "[glrmask/profile][parser_dwa_scale] phase=pre_resolve_negatives nwa_states={} nwa_transitions={} terminal_dwa_states={}",
-            parser_nwa.states.len(), nwa_transitions, terminal_dwa.states.len(),
+            parser_nwa.states().len(), nwa_transitions, terminal_dwa.states().len(),
         );
     }
 
@@ -1352,12 +1352,12 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     profile.resolve_negatives_ms = elapsed_ms(resolve_negatives_started_at);
 
     if parser_dwa_profile_enabled() {
-        let nwa_transitions: usize = parser_nwa.states.iter()
+        let nwa_transitions: usize = parser_nwa.states().iter()
             .map(|s| s.transitions.values().map(|v| v.len()).sum::<usize>() + s.epsilons.len())
             .sum();
         eprintln!(
             "[glrmask/profile][parser_dwa_scale] phase=post_resolve_negatives nwa_states={} nwa_transitions={} terminal_dwa_states={}",
-            parser_nwa.states.len(), nwa_transitions, terminal_dwa.states.len(),
+            parser_nwa.states().len(), nwa_transitions, terminal_dwa.states().len(),
         );
     }
 
@@ -1367,12 +1367,12 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     let mut parser_dwa_pre_minimize = determinized.dwa;
 
     if parser_dwa_profile_enabled() {
-        let dwa_transitions: usize = parser_dwa_pre_minimize.states.iter()
+        let dwa_transitions: usize = parser_dwa_pre_minimize.states().iter()
             .map(|s| s.transitions.len())
             .sum();
         eprintln!(
             "[glrmask/profile][parser_dwa_scale] dwa_states={} dwa_transitions={} minimized_later",
-            parser_dwa_pre_minimize.states.len(), dwa_transitions,
+            parser_dwa_pre_minimize.states().len(), dwa_transitions,
         );
     }
 
@@ -1501,13 +1501,13 @@ mod tests {
 
         assert!(optimize_parser_default_transitions(&mut nwa, &possible_by_state, 2));
 
-        let defaults = nwa.states[0].transitions.get(&DEFAULT_LABEL).expect("default edge");
+        let defaults = nwa.states()[0].transitions.get(&DEFAULT_LABEL).expect("default edge");
         assert_eq!(defaults.len(), 1);
         assert_eq!(defaults[0].0, accept);
         assert_eq!(defaults[0].1, token_weight(&[2]));
 
-        let explicit_zero = &nwa.states[0].transitions[&0][0];
-        let explicit_one = &nwa.states[0].transitions[&1][0];
+        let explicit_zero = &nwa.states()[0].transitions[&0][0];
+        let explicit_one = &nwa.states()[0].transitions[&1][0];
         assert_eq!(explicit_zero.1, token_weight(&[1]));
         assert_eq!(explicit_one.1, token_weight(&[3]));
     }
@@ -1515,21 +1515,21 @@ mod tests {
     #[test]
     fn test_optimize_parser_defaults_lifts_default_weight_into_source_final() {
         let mut nwa = NWA::new(0, 0);
-        nwa.states = vec![crate::automata::weighted::nwa::NWAState::default(); 2];
-        nwa.start_states = vec![0];
-        nwa.states[0]
+        *nwa.states_mut() = vec![crate::automata::weighted::nwa::NWAState::default(); 2];
+        nwa.set_start_states(vec![0]);
+        nwa.states_mut()[0]
             .transitions
             .entry(DEFAULT_LABEL)
             .or_default()
             .push((1, token_weight(&[1, 2])));
-        nwa.states[1].final_weight = Some(token_weight(&[2, 3]));
+        nwa.states_mut()[1].final_weight = Some(token_weight(&[2, 3]));
 
         let possible_by_state = vec![PossibleOutgoingIds::Empty, PossibleOutgoingIds::Empty];
 
         assert!(optimize_parser_default_transitions(&mut nwa, &possible_by_state, 4));
 
-        assert_eq!(nwa.states[0].final_weight, Some(token_weight(&[2])));
-        let defaults = nwa.states[0].transitions.get(&DEFAULT_LABEL).expect("default edge");
+        assert_eq!(nwa.states()[0].final_weight, Some(token_weight(&[2])));
+        let defaults = nwa.states()[0].transitions.get(&DEFAULT_LABEL).expect("default edge");
         assert_eq!(defaults.len(), 1);
         assert_eq!(defaults[0].1, token_weight(&[1]));
     }

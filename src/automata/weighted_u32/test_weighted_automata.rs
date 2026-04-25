@@ -24,9 +24,9 @@ use crate::ds::weight::Weight;
 /// Convert a DWA into an NWA (for use in union/concatenate).
 fn dwa_to_nwa(dwa: &DWA) -> NWA {
     let mut nwa = NWA::new(0, 0);
-    add_nwa_states(&mut nwa, dwa.states.len());
-    nwa.start_states = vec![dwa.start_state];
-    for (state_id, state) in dwa.states.iter().enumerate() {
+    add_nwa_states(&mut nwa, dwa.states().len());
+    nwa.set_start_states(vec![dwa.start_state()]);
+    for (state_id, state) in dwa.states().iter().enumerate() {
         if let Some(fw) = &state.final_weight {
             nwa.set_final_weight(state_id as u32, fw.clone());
         }
@@ -44,7 +44,7 @@ fn dwa_union(a: &DWA, b: &DWA) -> DWA {
     let mut combined = NWA::new(0, 0);
     let body_a = combined.append_with_body(&nwa_a);
     let body = combined.union_in_place(&nwa_b, &body_a);
-    combined.start_states = body.start_states;
+    combined.set_start_states(body.start_states);
     determinize::determinize(&combined).expect("determinize failed in dwa_union")
 }
 
@@ -55,15 +55,15 @@ fn dwa_concatenate(a: &DWA, b: &DWA) -> DWA {
     let mut combined = NWA::new(0, 0);
     let right_body = combined.append_with_body(&nwa_b);
     let left_body = combined.concatenate_in_place(&nwa_a, &right_body);
-    combined.start_states = left_body.start_states;
+    combined.set_start_states(left_body.start_states);
     determinize::determinize(&combined).expect("determinize failed in dwa_concatenate")
 }
 
 /// Apply a weight gate to a DWA's start state by cloning the start state with
 /// intersected weights.
 fn apply_weight_to_dwa(dwa: &mut DWA, w: &Weight) {
-    let start = dwa.start_state as usize;
-    let old_state = dwa.states[start].clone();
+    let start = dwa.start_state() as usize;
+    let old_state = dwa.states()[start].clone();
     let new_id = dwa.add_state();
     // Copy transitions with intersected weights
     for (&label, (target, edge_w)) in &old_state.transitions {
@@ -79,7 +79,7 @@ fn apply_weight_to_dwa(dwa: &mut DWA, w: &Weight) {
             dwa.set_final_weight(new_id, new_fw);
         }
     }
-    dwa.start_state = new_id;
+    dwa.set_start_state(new_id);
 }
 
 /// Enumerate all accepted words from a DWA (BFS), up to max_depth.
@@ -87,13 +87,13 @@ fn apply_weight_to_dwa(dwa: &mut DWA, w: &Weight) {
 fn enumerate_accepted(dwa: &DWA, max_depth: usize) -> Vec<(Vec<Label>, Weight)> {
     let mut result = Vec::new();
     let mut stack: Vec<(u32, Vec<Label>, Weight)> =
-        vec![(dwa.start_state, vec![], Weight::all())];
+        vec![(dwa.start_state(), vec![], Weight::all())];
 
     while let Some((state, word, acc)) = stack.pop() {
         if word.len() > max_depth {
             continue;
         }
-        let st = &dwa.states[state as usize];
+        let st = &dwa.states()[state as usize];
 
         // Check if accepting
         if let Some(fw) = &st.final_weight {
@@ -220,7 +220,7 @@ fn validate_concatenation(a: &DWA, b: &DWA, c: &DWA, max_depth: usize) {
 fn dwa_accepts_char(ch: char, final_weight: Weight) -> DWA {
     let mut dwa = DWA::new(0, 0);
     let final_state = dwa.add_state();
-    dwa.add_transition(dwa.start_state, ch as Label, final_state, Weight::all());
+    dwa.add_transition(dwa.start_state(), ch as Label, final_state, Weight::all());
     dwa.set_final_weight(final_state, final_weight);
     dwa
 }
@@ -228,7 +228,7 @@ fn dwa_accepts_char(ch: char, final_weight: Weight) -> DWA {
 /// Helper to create a DWA that accepts a string with a given final weight.
 fn dwa_from_str(s: &str, final_weight: Weight) -> DWA {
     let mut dwa = DWA::new(0, 0);
-    let mut current = dwa.start_state;
+    let mut current = dwa.start_state();
     for ch in s.chars() {
         let next = dwa.add_state();
         dwa.add_transition(current, ch as Label, next, Weight::all());
@@ -242,7 +242,7 @@ fn dwa_from_str(s: &str, final_weight: Weight) -> DWA {
 fn dwa_with_char_and_weights(ch: char, edge_weight: Weight, final_weight: Weight) -> DWA {
     let mut d = DWA::new(0, 0);
     let s = d.add_state();
-    d.add_transition(d.start_state, ch as Label, s, edge_weight);
+    d.add_transition(d.start_state(), ch as Label, s, edge_weight);
     d.set_final_weight(s, final_weight);
     d
 }
@@ -251,7 +251,7 @@ fn dwa_with_char_and_weights(ch: char, edge_weight: Weight, final_weight: Weight
 fn nwa_accepts_char(ch: char, weight: Weight) -> NWA {
     let mut nwa = NWA::new(0, 0);
     let start = nwa.add_state();
-    nwa.start_states.push(start);
+    nwa.start_states_mut().push(start);
     let final_state = nwa.add_state();
     nwa.add_transition(start, ch as Label, final_state, Weight::all());
     nwa.set_final_weight(final_state, weight);
@@ -268,23 +268,23 @@ fn neg(x: Label) -> Label {
 #[test]
 fn test_dwa_builder() {
     let mut dwa = DWA::new(0, 0);
-    assert_eq!(dwa.states.len(), 1);
-    assert_eq!(dwa.start_state, 0);
+    assert_eq!(dwa.states().len(), 1);
+    assert_eq!(dwa.start_state(), 0);
 
     let s1 = dwa.add_state();
     assert_eq!(s1, 1);
-    assert_eq!(dwa.states.len(), 2);
+    assert_eq!(dwa.states().len(), 2);
 
     dwa.set_final_weight(1, weight_from_item(20));
 
     assert_weights_eq(
-        dwa.states[1].final_weight.as_ref().unwrap(),
+        dwa.states()[1].final_weight.as_ref().unwrap(),
         &weight_from_item(20),
         "Final weight should be 20",
     );
 
     dwa.add_transition(0, 'a' as Label, 1, weight_from_item(30));
-    let (target, ref tw) = dwa.states[0].transitions[&('a' as Label)];
+    let (target, ref tw) = dwa.states()[0].transitions[&('a' as Label)];
     assert_eq!(target, 1);
     assert_weights_eq(tw, &weight_from_item(30), "Transition weight should be 30");
 }
@@ -308,13 +308,13 @@ fn test_minimize_redundant_states() {
     d.add_transition(s3, 'y' as Label, s4, Weight::all()); // Same behavior as s2
     d.set_final_weight(s4, weight_from_item(1));
 
-    assert_eq!(d.states.len(), 6);
+    assert_eq!(d.states().len(), 6);
     let d = minimize::minimize(&d);
     // s5 pruned (unreachable). s2 and s3 merged.
     assert!(
-        d.states.len() <= 5,
+        d.states().len() <= 5,
         "Should minimize to at most 5 states (optimal=4), got {}",
-        d.states.len()
+        d.states().len()
     );
 }
 
@@ -324,7 +324,7 @@ fn test_prune_unreachable_with_default_chain() {
     let mut d = DWA::new(0, 0);
     let s1 = d.add_state();
     let _s2 = d.add_state(); // Unused, unreachable
-    d.add_transition(d.start_state, 'y' as Label, s1, Weight::all());
+    d.add_transition(d.start_state(), 'y' as Label, s1, Weight::all());
     d.set_final_weight(s1, weight_from_item(1));
     d.add_transition(s1, 'x' as Label, s1, Weight::all());
 
@@ -332,9 +332,9 @@ fn test_prune_unreachable_with_default_chain() {
     let s_unreach = d.add_state();
     d.add_transition(s_unreach, 'z' as Label, s_unreach, Weight::all());
 
-    let before = d.states.len();
+    let before = d.states().len();
     let d = minimize::minimize(&d);
-    let after = d.states.len();
+    let after = d.states().len();
     assert!(after < before, "Unreachable states should be pruned");
     assert_eq!(after, 2, "Only start and s1 should remain reachable");
 }
@@ -401,8 +401,8 @@ fn test_minimize() {
     let w_1_2 = weight_from_iter(1..=2);
 
     // State 0 (start)
-    d.add_transition(d.start_state, 0, s1, w_all.clone());
-    d.add_transition(d.start_state, 1, s2, w_all.clone());
+    d.add_transition(d.start_state(), 0, s1, w_all.clone());
+    d.add_transition(d.start_state(), 1, s2, w_all.clone());
     // State 1
     d.add_transition(s1, 0, s3, w_1_2.clone());
     d.add_transition(s1, 3, s4, w_1_2.clone());
@@ -560,9 +560,9 @@ fn test_minimize_cross_height_merge_opportunity() {
     assert_weights_eq(&d_before, &d_after, "d path weight should be preserved");
     assert_weights_eq(&db_before, &db_after, "d,b path weight should be preserved");
     assert!(
-        minimized.states.len() <= 4,
+        minimized.states().len() <= 4,
         "Should produce at most 4 states, got {}",
-        minimized.states.len()
+        minimized.states().len()
     );
 }
 
@@ -593,9 +593,9 @@ fn test_minimize_disjoint_paths_merge() {
     assert_weights_eq(&ac_before, &ac_after, "a,c path weight should be preserved");
     assert_weights_eq(&bc_before, &bc_after, "b,c path weight should be preserved");
     assert!(
-        minimized.states.len() <= 5,
+        minimized.states().len() <= 5,
         "Should minimize to at most 5 states, got {}",
-        minimized.states.len()
+        minimized.states().len()
     );
 }
 
@@ -637,9 +637,9 @@ fn test_minimize_cross_height_via_relaxed_conditions() {
     assert_weights_eq(&c_before, &minimized.eval_word(&[b'c' as i32]), "c preserved");
     assert_weights_eq(&cd_before, &minimized.eval_word(&[b'c' as i32, b'd' as i32]), "c,d preserved");
     assert!(
-        minimized.states.len() <= 4,
+        minimized.states().len() <= 4,
         "Should achieve at most 4 states, got {}",
-        minimized.states.len()
+        minimized.states().len()
     );
 }
 
@@ -667,7 +667,7 @@ fn test_union_overlapping() {
     let d1 = dwa_accepts_char('a', weight_from_item(1));
     let mut d2 = dwa_accepts_char('b', weight_from_item(3));
     let s_a2 = d2.add_state();
-    d2.add_transition(d2.start_state, 'a' as Label, s_a2, Weight::all());
+    d2.add_transition(d2.start_state(), 'a' as Label, s_a2, Weight::all());
     d2.set_final_weight(s_a2, weight_from_item(2));
 
     let mut expected = DWA::new(0, 0);
@@ -704,8 +704,8 @@ fn test_union_transition_weight_union() {
 fn test_union_identical_cyclic() {
     // DWA that accepts a* with final weight [1].
     let mut d1 = DWA::new(0, 0);
-    d1.add_transition(d1.start_state, 'a' as Label, d1.start_state, Weight::all());
-    d1.set_final_weight(d1.start_state, weight_from_item(1));
+    d1.add_transition(d1.start_state(), 'a' as Label, d1.start_state(), Weight::all());
+    d1.set_final_weight(d1.start_state(), weight_from_item(1));
 
     let d2 = d1.clone();
 
@@ -790,7 +790,7 @@ fn test_union_handles_nested_shared_prefix_regression() {
 fn test_union_handles_large_mixed_label_regression() {
     let mut left = DWA::new(0, 0);
     add_dwa_states(&mut left, 9);
-    assert_eq!(left.states.len(), 10);
+    assert_eq!(left.states().len(), 10);
 
     left.set_final_weight(0, weight_from_item(2));
     left.add_transition(0, 0, 1, weight_from_item(1));
@@ -807,7 +807,7 @@ fn test_union_handles_large_mixed_label_regression() {
 
     let mut right = DWA::new(0, 0);
     add_dwa_states(&mut right, 12);
-    assert_eq!(right.states.len(), 13);
+    assert_eq!(right.states().len(), 13);
 
     right.add_transition(0, 1, 1, weight_from_item(3));
     right.add_transition(0, 2, 2, weight_from_item(3));
@@ -831,7 +831,7 @@ fn test_union_handles_large_mixed_label_regression() {
 fn test_union_handles_large_union_regression() {
     let mut a = DWA::new(0, 0);
     add_dwa_states(&mut a, 23);
-    assert_eq!(a.states.len(), 24);
+    assert_eq!(a.states().len(), 24);
 
     a.add_transition(0, 0, 1, weight_from_item(1));
     a.add_transition(0, 1, 2, weight_from_item(0));
@@ -875,7 +875,7 @@ fn test_union_handles_large_union_regression() {
 
     let mut b = DWA::new(0, 0);
     add_dwa_states(&mut b, 16);
-    assert_eq!(b.states.len(), 17);
+    assert_eq!(b.states().len(), 17);
 
     b.add_transition(0, 0, 1, weight_from_item(3));
     b.add_transition(0, 2, 2, weight_from_item(3));
@@ -1090,7 +1090,7 @@ fn test_union_complex_from_attachment_simplified() {
     // Build left DWA
     let mut left = DWA::new(0, 0);
     add_dwa_states(&mut left, 20);
-    assert_eq!(left.states.len(), 21);
+    assert_eq!(left.states().len(), 21);
 
     left.add_transition(0, 0, 1, weight_from_item(1));
     left.add_transition(0, 3, 2, weight_from_item(1));
@@ -1131,7 +1131,7 @@ fn test_union_complex_from_attachment_simplified() {
     // Build right DWA
     let mut right = DWA::new(0, 0);
     add_dwa_states(&mut right, 22);
-    assert_eq!(right.states.len(), 23);
+    assert_eq!(right.states().len(), 23);
 
     right.add_transition(0, 5, 1, weight_from_item(0));
     right.add_transition(0, 6, 2, weight_from_item(0));
@@ -1188,15 +1188,15 @@ fn test_concatenate_simple() {
 #[test]
 fn test_concatenate_left_start_is_final() {
     let mut left = DWA::new(0, 0);
-    left.set_final_weight(left.start_state, weight_from_iter([0, 1]));
+    left.set_final_weight(left.start_state(), weight_from_iter([0, 1]));
 
     let mut right = DWA::new(0, 0);
-    right.set_final_weight(right.start_state, weight_from_iter([1, 2]));
+    right.set_final_weight(right.start_state(), weight_from_iter([1, 2]));
 
     let c = dwa_concatenate(&left, &right);
 
     let mut expected = DWA::new(0, 0);
-    expected.set_final_weight(expected.start_state, weight_from_item(1));
+    expected.set_final_weight(expected.start_state(), weight_from_item(1));
 
     assert_dwa_equivalent(&c, &expected, 5);
 }
@@ -1205,7 +1205,7 @@ fn test_concatenate_left_start_is_final() {
 fn test_concatenate_disjoint_weights() {
     let word_a = vec![10, 5, 3, neg(3), neg(0), neg(9)];
     let mut dwa_a = DWA::new(0, 0);
-    let mut current = dwa_a.start_state;
+    let mut current = dwa_a.start_state();
     for &ch in &word_a {
         let next = dwa_a.add_state();
         dwa_a.add_transition(current, ch, next, Weight::all());
@@ -1215,7 +1215,7 @@ fn test_concatenate_disjoint_weights() {
 
     let word_b = vec![9, 3, neg(3), neg(5), neg(10), 9, 7, neg(7), neg(5), neg(10)];
     let mut dwa_b = DWA::new(0, 0);
-    current = dwa_b.start_state;
+    current = dwa_b.start_state();
     for &ch in &word_b {
         let next = dwa_b.add_state();
         dwa_b.add_transition(current, ch, next, Weight::all());
@@ -1242,12 +1242,12 @@ fn test_concatenate_disjoint_weights() {
 fn test_concatenate_default_path_to_final() {
     let mut a = DWA::new(0, 0);
     let s1a = a.add_state();
-    a.add_transition(a.start_state, 'a' as Label, s1a, Weight::all());
+    a.add_transition(a.start_state(), 'a' as Label, s1a, Weight::all());
     a.set_final_weight(s1a, weight_from_item(1));
 
     let mut b = DWA::new(0, 0);
     let s1b = b.add_state();
-    b.add_transition(b.start_state, 'x' as Label, s1b, Weight::all());
+    b.add_transition(b.start_state(), 'x' as Label, s1b, Weight::all());
     b.set_final_weight(s1b, weight_from_item(1));
 
     let c = dwa_concatenate(&a, &b);
@@ -1266,8 +1266,8 @@ fn test_concatenate_complex_from_attachment() {
 
     let mut left = DWA::new(0, 0);
     add_dwa_states(&mut left, 25);
-    left.start_state = 25;
-    assert_eq!(left.states.len(), 26);
+    left.set_start_state(25);
+    assert_eq!(left.states().len(), 26);
 
     left.add_transition(0, 2, 9, w_all.clone());
     left.add_transition(0, 4, 1, w_all.clone());
@@ -1322,7 +1322,7 @@ fn test_concatenate_complex_from_attachment() {
 fn test_concatenate_handles_weight_gated_regression() {
     let mut base_dwa = DWA::new(0, 0);
     add_dwa_states(&mut base_dwa, 12);
-    assert_eq!(base_dwa.states.len(), 13);
+    assert_eq!(base_dwa.states().len(), 13);
 
     base_dwa.add_transition(0, 6, 1, Weight::all());
     base_dwa.add_transition(0, 7, 4, Weight::all());
@@ -1362,8 +1362,8 @@ fn test_minimize_complex_dwa_from_attachment() {
 
     let mut left = DWA::new(0, 0);
     add_dwa_states(&mut left, 25);
-    left.start_state = 25;
-    assert_eq!(left.states.len(), 26);
+    left.set_start_state(25);
+    assert_eq!(left.states().len(), 26);
 
     left.add_transition(0, 2, 9, w_all.clone());
     left.add_transition(0, 4, 1, w_all.clone());
@@ -1415,7 +1415,7 @@ fn test_minimize_complex_dwa_from_attachment() {
 fn test_dwa_to_nwa_to_dwa_roundtrip() {
     let mut a = DWA::new(0, 0);
     add_dwa_states(&mut a, 23);
-    assert_eq!(a.states.len(), 24);
+    assert_eq!(a.states().len(), 24);
 
     a.add_transition(0, 0, 1, weight_from_item(1));
     a.add_transition(0, 1, 2, weight_from_item(0));
@@ -1497,7 +1497,7 @@ fn test_det_simple_char() {
 fn test_det_union_of_chars() {
     let mut nwa = NWA::new(0, 0);
     let start = nwa.add_state();
-    nwa.start_states.push(start);
+    nwa.start_states_mut().push(start);
     let s_a = nwa.add_state();
     let s_b = nwa.add_state();
     let final_a = nwa.add_state();
@@ -1514,8 +1514,8 @@ fn test_det_union_of_chars() {
     let mut expected = DWA::new(0, 0);
     let final_a_dwa = expected.add_state();
     let final_b_dwa = expected.add_state();
-    expected.add_transition(expected.start_state, 'a' as Label, final_a_dwa, Weight::all());
-    expected.add_transition(expected.start_state, 'b' as Label, final_b_dwa, Weight::all());
+    expected.add_transition(expected.start_state(), 'a' as Label, final_a_dwa, Weight::all());
+    expected.add_transition(expected.start_state(), 'b' as Label, final_b_dwa, Weight::all());
     expected.set_final_weight(final_a_dwa, weight_from_item(1));
     expected.set_final_weight(final_b_dwa, weight_from_item(2));
 
@@ -1526,7 +1526,7 @@ fn test_det_union_of_chars() {
 fn test_det_nondeterminism_on_char() {
     let mut nwa = NWA::new(0, 0);
     let start = nwa.add_state();
-    nwa.start_states.push(start);
+    nwa.start_states_mut().push(start);
     let f1 = nwa.add_state();
     let f2 = nwa.add_state();
     nwa.add_transition(start, 'a' as Label, f1, weight_from_item(1));
@@ -1538,7 +1538,7 @@ fn test_det_nondeterminism_on_char() {
 
     let mut expected = DWA::new(0, 0);
     let final_state = expected.add_state();
-    expected.add_transition(expected.start_state, 'a' as Label, final_state, weight_from_iter([1, 2]));
+    expected.add_transition(expected.start_state(), 'a' as Label, final_state, weight_from_iter([1, 2]));
     expected.set_final_weight(final_state, Weight::all());
 
     assert_dwa_equivalent(&dwa, &expected, 5);
@@ -1548,7 +1548,7 @@ fn test_det_nondeterminism_on_char() {
 fn test_det_weight_union_overapprox_paths() {
     let mut nwa = NWA::new(0, 0);
     let start = nwa.add_state();
-    nwa.start_states.push(start);
+    nwa.start_states_mut().push(start);
     let s1 = nwa.add_state();
     let s2 = nwa.add_state();
     let s3 = nwa.add_state();
@@ -1566,13 +1566,13 @@ fn test_det_weight_union_overapprox_paths() {
     let dwa = determinize::determinize(&nwa).expect("determinize failed");
 
     // After 'a', check that 'c' transition weight does NOT include token_a
-    let start_state = dwa.start_state as usize;
-    let (s_after_a, _) = dwa.states[start_state]
+    let start_state = dwa.start_state() as usize;
+    let (s_after_a, _) = dwa.states()[start_state]
         .transitions
         .get(&('a' as Label))
         .expect("expected 'a' transition after determinization");
 
-    let (_, weight_c) = dwa.states[*s_after_a as usize]
+    let (_, weight_c) = dwa.states()[*s_after_a as usize]
         .transitions
         .get(&('c' as Label))
         .expect("expected 'c' transition after determinization");
@@ -1587,7 +1587,7 @@ fn test_det_weight_union_overapprox_paths() {
 fn test_det_weight_partitioning() {
     let mut nwa = NWA::new(0, 0);
     let start = nwa.add_state();
-    nwa.start_states.push(start);
+    nwa.start_states_mut().push(start);
     let f1 = nwa.add_state();
     let f2 = nwa.add_state();
     nwa.add_transition(start, 'a' as Label, f1, weight_from_iter(0..=1));
@@ -1599,7 +1599,7 @@ fn test_det_weight_partitioning() {
 
     let mut expected = DWA::new(0, 0);
     let final_state = expected.add_state();
-    expected.add_transition(expected.start_state, 'a' as Label, final_state, weight_from_iter(0..=2));
+    expected.add_transition(expected.start_state(), 'a' as Label, final_state, weight_from_iter(0..=2));
     expected.set_final_weight(final_state, weight_from_iter(0..=2));
 
     assert_dwa_equivalent(&dwa, &expected, 5);
@@ -1610,9 +1610,9 @@ fn test_det_empty_nwa() {
     // Truly empty NWA (no states at all)
     let nwa = NWA::new(0, 0);
     let dwa = determinize::determinize(&nwa).expect("determinize failed");
-    assert_eq!(dwa.states.len(), 1);
-    assert!(dwa.states[dwa.start_state as usize].final_weight.is_none());
-    assert!(dwa.states[dwa.start_state as usize].transitions.is_empty());
+    assert_eq!(dwa.states().len(), 1);
+    assert!(dwa.states()[dwa.start_state() as usize].final_weight.is_none());
+    assert!(dwa.states()[dwa.start_state() as usize].transitions.is_empty());
 }
 
 #[test]
@@ -1620,7 +1620,7 @@ fn test_det_accepts_nothing() {
     // Start state, but no transitions and not final
     let mut nwa = NWA::new(0, 0);
     let s = nwa.add_state();
-    nwa.start_states.push(s);
+    nwa.start_states_mut().push(s);
     let dwa = determinize::determinize(&nwa).expect("determinize failed");
     let expected = DWA::new(0, 0);
     assert_dwa_equivalent(&dwa, &expected, 5);
@@ -1630,12 +1630,12 @@ fn test_det_accepts_nothing() {
 fn test_det_accepts_empty_word() {
     let mut nwa = NWA::new(0, 0);
     let s = nwa.add_state();
-    nwa.start_states.push(s);
+    nwa.start_states_mut().push(s);
     nwa.set_final_weight(s, weight_from_item(42));
     let dwa = determinize::determinize(&nwa).expect("determinize failed");
 
     let mut expected = DWA::new(0, 0);
-    expected.set_final_weight(expected.start_state, weight_from_item(42));
+    expected.set_final_weight(expected.start_state(), weight_from_item(42));
 
     assert_dwa_equivalent(&dwa, &expected, 5);
 }
@@ -1645,7 +1645,7 @@ fn test_det_accepts_empty_word() {
 fn test_determinize_complex_nwa_from_template() {
     let mut nwa = NWA::new(0, 0);
     add_nwa_states(&mut nwa, 39);
-    nwa.start_states.push(0);
+    nwa.start_states_mut().push(0);
 
     // State 0
     nwa.add_epsilon(0, 6, Weight::all());
@@ -1735,7 +1735,7 @@ fn test_determinize_complex_nwa_from_template() {
 fn test_determinize_minimal_failing_nwa() {
     let mut nwa = NWA::new(0, 0);
     add_nwa_states(&mut nwa, 34);
-    nwa.start_states.push(0);
+    nwa.start_states_mut().push(0);
 
     nwa.add_epsilon(0, 19, Weight::all());
     nwa.add_transition(19, 9, 4, Weight::all());
@@ -1774,7 +1774,7 @@ fn test_diamond_structure() {
         let b = nwa.add_state();
         let c = nwa.add_state();
         let end = nwa.add_state();
-        nwa.start_states = vec![start];
+        nwa.set_start_states(vec![start]);
 
         nwa.add_transition(start, l0, a, all.clone());
         nwa.add_transition(start, l1, b, all.clone());
@@ -1821,10 +1821,10 @@ fn test_diamond_structure() {
 
     // Verify no expansion
     assert!(
-        minimized.states.len() <= input.states.len(),
+        minimized.states().len() <= input.states().len(),
         "Minimization should not expand: {} → {}",
-        input.states.len(),
-        minimized.states.len()
+        input.states().len(),
+        minimized.states().len()
     );
 }
 
@@ -1833,8 +1833,8 @@ fn test_json_roundtrip_complex() {
     let mut d = DWA::new(0, 0);
     let s1 = d.add_state();
     let s2 = d.add_state();
-    d.add_transition(d.start_state, 'y' as Label, s1, weight_from_iter(vec![1, 2, 3]));
-    d.add_transition(d.start_state, 'x' as Label, s2, weight_from_item(99));
+    d.add_transition(d.start_state(), 'y' as Label, s1, weight_from_iter(vec![1, 2, 3]));
+    d.add_transition(d.start_state(), 'x' as Label, s2, weight_from_item(99));
     d.set_final_weight(s2, weight_from_iter(vec![5, 7]));
 
     let s = serde_json::to_string(&d).expect("Failed to serialize DWA");

@@ -13,8 +13,8 @@ pub struct NWAState {
 
 #[derive(Debug, Clone)]
 pub struct NWA {
-    pub states: Vec<NWAState>,
-    pub start_states: Vec<u32>,
+    states: Vec<NWAState>,
+    start_states: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -44,6 +44,33 @@ impl NWA {
             states: Vec::new(),
             start_states: Vec::new(),
         }
+    }
+
+    #[inline]
+    pub fn states(&self) -> &[NWAState] {
+        &self.states
+    }
+
+    #[inline]
+    pub fn states_mut(&mut self) -> &mut Vec<NWAState> {
+        &mut self.states
+    }
+
+    #[inline]
+    pub fn start_states(&self) -> &[u32] {
+        &self.start_states
+    }
+
+    pub fn from_parts(states: Vec<NWAState>, start_states: Vec<u32>) -> Self {
+        Self { states, start_states }
+    }
+
+    pub fn set_start_states(&mut self, states: Vec<u32>) {
+        self.start_states = states;
+    }
+
+    pub fn start_states_mut(&mut self) -> &mut Vec<u32> {
+        &mut self.start_states
     }
 
     pub fn add_state(&mut self) -> u32 {

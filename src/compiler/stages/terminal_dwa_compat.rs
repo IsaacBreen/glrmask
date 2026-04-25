@@ -74,20 +74,20 @@ fn merge_partition_nwas(
         }
     };
 
-    let mut merged = NWA {
-        states: Vec::with_capacity(total_states as usize),
-        start_states: partition_nwas[0].start_states.clone(),
-    };
+    let mut merged = NWA::from_parts(
+        Vec::with_capacity(total_states as usize),
+        partition_nwas[0].start_states().to_vec(),
+    );
 
     for s in 0..template_state_count as usize {
         let mut state = NWAStateType::default();
-        state.final_weight = partition_nwas[0].states[s].final_weight.clone();
+        state.final_weight = partition_nwas[0].states()[s].final_weight.clone();
 
         let mut eps_map: BTreeMap<u32, Weight> = BTreeMap::new();
         let mut trans_map: BTreeMap<i32, BTreeMap<u32, Weight>> = BTreeMap::new();
 
         for (p, nwa) in partition_nwas.iter().enumerate() {
-            let src = &nwa.states[s];
+            let src = &nwa.states()[s];
             for (&label, targets) in &src.transitions {
                 let m = trans_map.entry(label).or_default();
                 for &(target, ref weight) in targets {
@@ -113,12 +113,12 @@ fn merge_partition_nwas(
                 .insert(label, targets.into_iter().collect());
         }
 
-        merged.states.push(state);
+        merged.states_mut().push(state);
     }
 
     for (p, nwa) in partition_nwas.iter().enumerate() {
         for s in template_state_count as usize..nwa.num_states() as usize {
-            let src = &nwa.states[s];
+            let src = &nwa.states()[s];
             let mut state = NWAStateType::default();
             state.final_weight = src.final_weight.clone();
 
@@ -134,7 +134,7 @@ fn merge_partition_nwas(
                     .push((renumber(target, p), weight.clone()));
             }
 
-            merged.states.push(state);
+            merged.states_mut().push(state);
         }
     }
 
@@ -178,7 +178,7 @@ pub(crate) fn build_terminal_dwa_for_existing_id_map_with_possible_matches_and_c
     let leaf_state = nwa.add_state();
     nwa.set_final_weight(leaf_state, Weight::all());
     let start_state = nwa.add_state();
-    nwa.start_states.push(start_state);
+    nwa.start_states_mut().push(start_state);
 
     let setup_started_at = std::time::Instant::now();
     let mut internal_vocab = internal_vocab_entries(vocab, id_map);
@@ -496,7 +496,7 @@ fn emit_terminal_dwa_token_map(dwa: &DWA, vocab: &Vocab, id_map: &InternalIdMap)
     let internal_bytes: std::collections::BTreeMap<u32, &[u8]> =
         internal_vocab.iter().map(|(id, bytes)| (*id, bytes.as_slice())).collect();
     let mut referenced_tokens = std::collections::BTreeSet::new();
-    for state in &dwa.states {
+    for state in dwa.states() {
         for (_, (_, weight)) in &state.transitions {
             for tid in weight.token_union().iter() {
                 referenced_tokens.insert(tid);
@@ -523,7 +523,7 @@ fn emit_terminal_dwa_token_map(dwa: &DWA, vocab: &Vocab, id_map: &InternalIdMap)
 
 fn emit_terminal_dwa_debug_dump(dwa: &DWA) {
     let num_states = dwa.num_states() as usize;
-    let start_state = dwa.start_state as usize;
+    let start_state = dwa.start_state() as usize;
     let mut incoming_counts = vec![0usize; num_states];
     let mut outgoing_counts = vec![0usize; num_states];
     let mut final_states = 0usize;
@@ -532,7 +532,7 @@ fn emit_terminal_dwa_debug_dump(dwa: &DWA) {
     let mut transitions_from_start = 0usize;
     let mut transitions_from_start_to_start = 0usize;
 
-    for (state_id, state) in dwa.states.iter().enumerate() {
+    for (state_id, state) in dwa.states().iter().enumerate() {
         outgoing_counts[state_id] = state.transitions.len();
         for (_, (target, _)) in &state.transitions {
             incoming_counts[*target as usize] += 1;
@@ -559,7 +559,7 @@ fn emit_terminal_dwa_debug_dump(dwa: &DWA) {
         num_states, final_states, self_loops, transitions_to_start, transitions_from_start, transitions_from_start_to_start,
     );
 
-    for (state_id, state) in dwa.states.iter().enumerate() {
+    for (state_id, state) in dwa.states().iter().enumerate() {
         let incoming = incoming_counts[state_id];
         let outgoing = outgoing_counts[state_id];
         let to_start = state

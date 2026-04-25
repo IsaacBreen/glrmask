@@ -17,13 +17,13 @@ use crate::ds::weight::Weight;
 fn empty_bundle_nwa() -> NWA {
     let mut nwa = NWA::new(0, 0);
     let start_state = nwa.add_state();
-    nwa.start_states.push(start_state);
+    nwa.start_states_mut().push(start_state);
     nwa
 }
 
 fn instantiate_weighted_nwa_from_skeleton(skeleton: &NWA, weight: &Weight) -> NWA {
     let mut bundle = skeleton.clone();
-    for state in &mut bundle.states {
+    for state in  bundle.states_mut() {
         if state.final_weight.is_some() {
             state.final_weight = Some(weight.clone());
         }
@@ -294,7 +294,7 @@ fn union_unweighted_dfas<'a>(dfas: impl Iterator<Item = &'a UnweightedDfa>) -> U
 
 fn dwa_to_nwa(dwa: &DWA) -> NWA {
     let states = dwa
-        .states
+        .states()
         .iter()
         .map(|state| NWAState {
             final_weight: state.final_weight.clone(),
@@ -307,8 +307,8 @@ fn dwa_to_nwa(dwa: &DWA) -> NWA {
         })
         .collect();
 
-    NWA {
+    NWA::from_parts(
         states,
-        start_states: vec![dwa.start_state],
-    }
+        vec![dwa.start_state()],
+    )
 }

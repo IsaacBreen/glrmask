@@ -367,7 +367,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let leaf_state = nwa.add_state();
             nwa.set_final_weight(leaf_state, Weight::all());
             let start_state = nwa.add_state();
-            nwa.start_states.push(start_state);
+            nwa.start_states_mut().push(start_state);
 
             let roots = seed_root_nodes(
                 &mut nwa,
@@ -397,7 +397,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let always_allowed_started_at = Instant::now();
             let always_allowed = compute_always_allowed_follows(grammar);
             let always_allowed_ms = always_allowed_started_at.elapsed().as_secs_f64() * 1000.0;
-            let nwa_states_after_build = nwa.states.len();
+            let nwa_states_after_build = nwa.states().len();
 
             if debug_profile_enabled() {
                 let non_empty_count = always_allowed.iter().filter(|v| !v.is_empty()).count();
@@ -411,22 +411,22 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let collapse_started_at = Instant::now();
             collapse_always_allowed(&mut nwa, &always_allowed, grammar.num_terminals as usize);
             let collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
-            let nwa_states_after_collapse = nwa.states.len();
+            let nwa_states_after_collapse = nwa.states().len();
 
             let disallowed_started_at = Instant::now();
             apply_disallowed_follow_constraints(&mut nwa, disallowed_follows, grammar.num_terminals as usize);
             let disallowed_ms = disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
-            let nwa_states_after_disallowed = nwa.states.len();
+            let nwa_states_after_disallowed = nwa.states().len();
 
             let prune_started_at = Instant::now();
             prune_non_coreachable_states(&mut nwa);
             let prune_ms = prune_started_at.elapsed().as_secs_f64() * 1000.0;
-            let nwa_states_after_prune = nwa.states.len();
+            let nwa_states_after_prune = nwa.states().len();
 
             let canonicalize_started_at = Instant::now();
             canonicalize_acyclic_nwa(&mut nwa);
             let canonicalize_ms = canonicalize_started_at.elapsed().as_secs_f64() * 1000.0;
-            let nwa_states_after_canonicalize = nwa.states.len();
+            let nwa_states_after_canonicalize = nwa.states().len();
 
             // ---- Step 8: Determinize → minimize ----
             let determinize_started_at = Instant::now();

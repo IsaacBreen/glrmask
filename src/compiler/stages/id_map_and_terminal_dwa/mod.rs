@@ -102,7 +102,7 @@ fn maybe_print_terminal_mappings(grammar: &AnalyzedGrammar) {
 
 fn format_terminal_edge_symbol_counts(num_terminals: usize, dwa: &DWA) -> Vec<String> {
     let mut counts = vec![0usize; num_terminals];
-    for state in &dwa.states {
+    for state in dwa.states() {
         for (&label, _) in &state.transitions {
             if label >= 0 {
                 let label = label as usize;
@@ -121,7 +121,7 @@ fn format_terminal_edge_symbol_counts(num_terminals: usize, dwa: &DWA) -> Vec<St
 }
 
 fn terminal_dwa_edge_count(dwa: &DWA) -> usize {
-    dwa.states.iter().map(|state| state.transitions.len()).sum()
+    dwa.states().iter().map(|state| state.transitions.len()).sum()
 }
 
 fn emit_terminal_dwa_symbol_counts(label: &str, dwa: &DWA, grammar: &AnalyzedGrammar) {
@@ -580,7 +580,7 @@ fn emit_merged_token_map(dwa: &DWA, vocab: &Vocab, id_map: &InternalIdMap) {
     let internal_bytes: std::collections::BTreeMap<u32, &[u8]> =
         internal_vocab.iter().map(|(id, bytes)| (*id, bytes.as_slice())).collect();
     let mut referenced_tokens = std::collections::BTreeSet::new();
-    for state in &dwa.states {
+    for state in dwa.states() {
         for (_, (_, weight)) in &state.transitions {
             for tid in weight.token_union().iter() {
                 referenced_tokens.insert(tid);
@@ -607,7 +607,7 @@ fn emit_merged_token_map(dwa: &DWA, vocab: &Vocab, id_map: &InternalIdMap) {
 
 fn emit_merged_dwa_dump(dwa: &DWA) {
     let num_states = dwa.num_states() as usize;
-    let start_state = dwa.start_state as usize;
+    let start_state = dwa.start_state() as usize;
     let mut incoming_counts = vec![0usize; num_states];
     let mut outgoing_counts = vec![0usize; num_states];
     let mut final_states = 0usize;
@@ -616,7 +616,7 @@ fn emit_merged_dwa_dump(dwa: &DWA) {
     let mut transitions_from_start = 0usize;
     let mut transitions_from_start_to_start = 0usize;
 
-    for (state_id, state) in dwa.states.iter().enumerate() {
+    for (state_id, state) in dwa.states().iter().enumerate() {
         outgoing_counts[state_id] = state.transitions.len();
         for (_, (target, _)) in &state.transitions {
             incoming_counts[*target as usize] += 1;
@@ -643,7 +643,7 @@ fn emit_merged_dwa_dump(dwa: &DWA) {
         num_states, final_states, self_loops, transitions_to_start, transitions_from_start, transitions_from_start_to_start,
     );
 
-    for (state_id, state) in dwa.states.iter().enumerate() {
+    for (state_id, state) in dwa.states().iter().enumerate() {
         let incoming = incoming_counts[state_id];
         let outgoing = outgoing_counts[state_id];
         let to_start = state

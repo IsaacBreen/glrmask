@@ -1414,7 +1414,7 @@ fn build_l1_terminal_dwa(
     for result in group_results.into_iter().flatten() {
         let (tids, weight) = result;
         for &tid in &tids {
-            dwa.add_transition(dwa.start_state, tid as i32, end_state, weight.clone());
+            dwa.add_transition(dwa.start_state(), tid as i32, end_state, weight.clone());
             num_transitions += 1;
         }
     }

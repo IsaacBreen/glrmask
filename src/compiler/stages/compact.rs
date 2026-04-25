@@ -394,7 +394,7 @@ fn weight_refs(weights: &[Weight]) -> Vec<&Weight> {
 fn collect_unique_weights(dwa: &DWA) -> Vec<Weight> {
     let mut seen = std::collections::HashSet::new();
     let mut unique = Vec::new();
-    for state in &dwa.states {
+    for state in dwa.states() {
         for (_, (_, weight)) in &state.transitions {
             if seen.insert(Arc::as_ptr(&weight.0) as usize) {
                 unique.push(weight.clone());
@@ -956,7 +956,7 @@ fn apply_permutations_to_dwa(
         .collect();
     let weight_map: HashMap<usize, Weight> = weight_entries.into_iter().collect();
 
-    dwa.states.par_iter_mut().for_each(|state| {
+    dwa.states_mut().par_iter_mut().for_each(|state| {
         for (_, (_, weight)) in state.transitions.iter_mut() {
             let ptr = Arc::as_ptr(&weight.0) as usize;
             if let Some(new_w) = weight_map.get(&ptr) {

@@ -59,24 +59,24 @@ fn hash_weight(weight: &Weight, hasher: &mut impl Hasher) {
 }
 
 pub(crate) fn canonicalize_acyclic_nwa(nwa: &mut NWA) {
-    if nwa.states.len() <= 1 {
+    if nwa.states().len() <= 1 {
         return;
     }
 
     prune_unreachable_states(nwa);
     let topo_order = topological_order(nwa);
-    if topo_order.len() != nwa.states.len() {
+    if topo_order.len() != nwa.states().len() {
         return;
     }
 
-    let old_states = nwa.states.len();
+    let old_states = nwa.states().len();
     let mut remap = vec![u32::MAX; old_states];
     let mut canonical_states: Vec<NWAStateType> = Vec::with_capacity(old_states);
     let mut hash_buckets: HashMap<u64, Vec<u32>> = HashMap::new();
     let mut merged = 0usize;
 
     for old_state_id in topo_order.into_iter().rev() {
-        let old_state = &nwa.states[old_state_id];
+        let old_state = &nwa.states()[old_state_id];
 
         let mut epsilons: BTreeMap<u32, Weight> = BTreeMap::new();
         for (target, weight) in &old_state.epsilons {
@@ -133,17 +133,17 @@ pub(crate) fn canonicalize_acyclic_nwa(nwa: &mut NWA) {
         return;
     }
 
-    let mut start_states = Vec::with_capacity(nwa.start_states.len());
+    let mut start_states = Vec::with_capacity(nwa.start_states().len());
     let mut seen_start_states = HashSet::new();
-    for &start_state in &nwa.start_states {
+    for &start_state in nwa.start_states() {
         let canonical_start = remap[start_state as usize];
         if seen_start_states.insert(canonical_start) {
             start_states.push(canonical_start);
         }
     }
 
-    nwa.states = canonical_states;
-    nwa.start_states = start_states;
+    *nwa.states_mut() = canonical_states;
+    nwa.set_start_states(start_states);
 }
 
 // ─── Prune / Reachability ────────────────────────────────────────────────────
@@ -153,10 +153,10 @@ fn retain_nwa_states(nwa: &mut NWA, retain: &[bool], drop_empty_weights: bool) -
         return false;
     }
 
-    let mut remap = vec![u32::MAX; nwa.states.len()];
+    let mut remap = vec![u32::MAX; nwa.states().len()];
     let mut new_states = Vec::with_capacity(retain.iter().filter(|&&f| f).count());
 
-    for (old_id, state) in nwa.states.iter().enumerate() {
+    for (old_id, state) in nwa.states().iter().enumerate() {
         if retain[old_id] {
             remap[old_id] = new_states.len() as u32;
             new_states.push(state.clone());
@@ -182,22 +182,22 @@ fn retain_nwa_states(nwa: &mut NWA, retain: &[bool], drop_empty_weights: bool) -
         state.transitions.retain(|_, targets| !targets.is_empty());
     }
 
-    nwa.start_states = nwa
-        .start_states
+    nwa.set_start_states(nwa
+        .start_states()
         .iter()
         .copied()
         .filter(|state_id| retain[*state_id as usize])
         .map(|state_id| remap[state_id as usize])
-        .collect();
-    nwa.states = new_states;
+        .collect());
+    *nwa.states_mut() = new_states;
     true
 }
 
 fn compute_forward_reachable(nwa: &NWA) -> Vec<bool> {
-    let mut reachable = vec![false; nwa.states.len()];
+    let mut reachable = vec![false; nwa.states().len()];
     let mut queue = VecDeque::new();
 
-    for &start in &nwa.start_states {
+    for &start in nwa.start_states() {
         if let Some(flag) = reachable.get_mut(start as usize) {
             if !*flag {
                 *flag = true;
@@ -207,7 +207,7 @@ fn compute_forward_reachable(nwa: &NWA) -> Vec<bool> {
     }
 
     while let Some(state_id) = queue.pop_front() {
-        let state = &nwa.states[state_id as usize];
+        let state = &nwa.states()[state_id as usize];
         for (target, _) in &state.epsilons {
             if let Some(flag) = reachable.get_mut(*target as usize) {
                 if !*flag {
@@ -230,7 +230,7 @@ fn compute_forward_reachable(nwa: &NWA) -> Vec<bool> {
 }
 
 pub(crate) fn prune_unreachable_states(nwa: &mut NWA) -> bool {
-    if nwa.states.is_empty() {
+    if nwa.states().is_empty() {
         return false;
     }
     let reachable = compute_forward_reachable(nwa);
@@ -238,8 +238,8 @@ pub(crate) fn prune_unreachable_states(nwa: &mut NWA) -> bool {
 }
 
 fn topological_order(nwa: &NWA) -> Vec<usize> {
-    let mut in_degree = vec![0u32; nwa.states.len()];
-    for state in &nwa.states {
+    let mut in_degree = vec![0u32; nwa.states().len()];
+    for state in nwa.states() {
         for (dst, _) in &state.epsilons {
             in_degree[*dst as usize] += 1;
         }
@@ -257,10 +257,10 @@ fn topological_order(nwa: &NWA) -> Vec<usize> {
         }
     }
 
-    let mut order = Vec::with_capacity(nwa.states.len());
+    let mut order = Vec::with_capacity(nwa.states().len());
     while let Some(state_id) = queue.pop_front() {
         order.push(state_id);
-        let state = &nwa.states[state_id];
+        let state = &nwa.states()[state_id];
         for (dst, _) in &state.epsilons {
             in_degree[*dst as usize] -= 1;
             if in_degree[*dst as usize] == 0 {
@@ -281,12 +281,12 @@ fn topological_order(nwa: &NWA) -> Vec<usize> {
 }
 
 fn compute_coreachable_nwa(nwa: &NWA) -> Vec<bool> {
-    if nwa.states.is_empty() {
+    if nwa.states().is_empty() {
         return Vec::new();
     }
 
-    let mut reverse_edges: Vec<Vec<usize>> = vec![Vec::new(); nwa.states.len()];
-    for (state_id, state) in nwa.states.iter().enumerate() {
+    let mut reverse_edges: Vec<Vec<usize>> = vec![Vec::new(); nwa.states().len()];
+    for (state_id, state) in nwa.states().iter().enumerate() {
         for (dst, weight) in &state.epsilons {
             if !weight.is_empty() {
                 reverse_edges[*dst as usize].push(state_id);
@@ -301,9 +301,9 @@ fn compute_coreachable_nwa(nwa: &NWA) -> Vec<bool> {
         }
     }
 
-    let mut coreachable = vec![false; nwa.states.len()];
+    let mut coreachable = vec![false; nwa.states().len()];
     let mut queue = VecDeque::new();
-    for (state_id, state) in nwa.states.iter().enumerate() {
+    for (state_id, state) in nwa.states().iter().enumerate() {
         if state.final_weight.as_ref().is_some_and(|weight| !weight.is_empty()) {
             coreachable[state_id] = true;
             queue.push_back(state_id);
@@ -323,7 +323,7 @@ fn compute_coreachable_nwa(nwa: &NWA) -> Vec<bool> {
 }
 
 pub(crate) fn prune_non_coreachable_states(nwa: &mut NWA) -> bool {
-    if nwa.states.is_empty() {
+    if nwa.states().is_empty() {
         return false;
     }
     let coreachable = compute_coreachable_nwa(nwa);
@@ -336,11 +336,11 @@ fn propagate_incoming_labels(
     nwa: &NWA,
     terminals_count: usize,
 ) -> Vec<HashSet<TerminalID>> {
-    let mut incoming = vec![HashSet::new(); nwa.states.len()];
+    let mut incoming = vec![HashSet::new(); nwa.states().len()];
     let mut queue = VecDeque::new();
-    let mut in_queue = vec![false; nwa.states.len()];
+    let mut in_queue = vec![false; nwa.states().len()];
 
-    for &start in &nwa.start_states {
+    for &start in nwa.start_states() {
         queue.push_back(start);
         in_queue[start as usize] = true;
     }
@@ -349,7 +349,7 @@ fn propagate_incoming_labels(
         in_queue[state_id as usize] = false;
         let incoming_labels = incoming[state_id as usize].clone();
 
-        let state = &nwa.states[state_id as usize];
+        let state = &nwa.states()[state_id as usize];
 
         for (dst, _) in &state.epsilons {
             let labels_before = incoming[*dst as usize].len();
@@ -380,12 +380,12 @@ fn propagate_collapse_context(
     nwa: &NWA,
     terminals_count: usize,
 ) -> (Vec<HashSet<TerminalID>>, Vec<Weight>) {
-    let mut incoming = vec![HashSet::new(); nwa.states.len()];
-    let mut domain = vec![Weight::empty(); nwa.states.len()];
+    let mut incoming = vec![HashSet::new(); nwa.states().len()];
+    let mut domain = vec![Weight::empty(); nwa.states().len()];
     let mut queue = VecDeque::new();
-    let mut in_queue = vec![false; nwa.states.len()];
+    let mut in_queue = vec![false; nwa.states().len()];
 
-    for &start in &nwa.start_states {
+    for &start in nwa.start_states() {
         domain[start as usize] = Weight::all();
         queue.push_back(start);
         in_queue[start as usize] = true;
@@ -398,7 +398,7 @@ fn propagate_collapse_context(
             continue;
         }
 
-        let state = &nwa.states[state_id as usize];
+        let state = &nwa.states()[state_id as usize];
         let incoming_labels = incoming[state_id as usize].clone();
 
         for (dst, _) in &state.epsilons {
@@ -481,7 +481,7 @@ fn collapse_single_allowed_transitions(
     terminals_count: usize,
 ) -> bool {
     let mut final_weights: Vec<Option<Weight>> =
-        nwa.states.iter().map(|state| state.final_weight.clone()).collect();
+        nwa.states().iter().map(|state| state.final_weight.clone()).collect();
     let mut changed = false;
 
     for &state_id in topo_order.iter().rev() {
@@ -496,7 +496,7 @@ fn collapse_single_allowed_transitions(
             continue;
         }
 
-        let state = &mut nwa.states[state_id];
+        let state = &mut nwa.states_mut()[state_id];
         let mut state_final_weight = final_weights[state_id].clone();
         let mut labels_to_remove = Vec::new();
 
@@ -554,7 +554,7 @@ pub(crate) fn collapse_always_allowed(
     always_allowed_by_label: &[Vec<TerminalID>],
     terminals_count: usize,
 ) -> bool {
-    if always_allowed_by_label.is_empty() || terminals_count == 0 || nwa.states.is_empty() {
+    if always_allowed_by_label.is_empty() || terminals_count == 0 || nwa.states().is_empty() {
         return false;
     }
 
@@ -639,10 +639,7 @@ fn subtract_disallowed_dfa(nwa: &NWA, right: &crate::automata::unweighted::dfa::
 
     let right_start = (!right.states.is_empty()).then_some(right.start_state);
 
-    let mut result = NWA {
-        states: Vec::new(),
-        start_states: Vec::new(),
-    };
+    let mut result = NWA::new(0, 0);
     let mut state_ids: HashMap<ProdState, u32> = HashMap::new();
     let mut worklist: VecDeque<ProdState> = VecDeque::new();
 
@@ -661,15 +658,15 @@ fn subtract_disallowed_dfa(nwa: &NWA, right: &crate::automata::unweighted::dfa::
         }
     };
 
-    for &nwa_start in &nwa.start_states {
+    for &nwa_start in nwa.start_states() {
         let ps = (nwa_start, right_start);
         let id = get_or_create(&mut result, &mut state_ids, &mut worklist, ps);
-        result.start_states.push(id);
+        result.start_states_mut().push(id);
     }
 
     while let Some((nwa_sid, dfa_sid)) = worklist.pop_front() {
         let result_sid = state_ids[&(nwa_sid, dfa_sid)];
-        let nwa_state = &nwa.states[nwa_sid as usize];
+        let nwa_state = &nwa.states()[nwa_sid as usize];
         let dfa_accepting = dfa_sid
             .map(|s| right.states[s as usize].is_accepting)
             .unwrap_or(false);

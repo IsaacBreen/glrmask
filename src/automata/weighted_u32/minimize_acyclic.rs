@@ -32,8 +32,8 @@ fn mapped_target(old_to_new: &[u32], target: u32) -> Option<u32> {
 }
 
 fn compute_reachable_from_start(dwa: &DWA, start_state: usize) -> Vec<bool> {
-    let mut reachable = vec![false; dwa.states.len()];
-    if start_state >= dwa.states.len() {
+    let mut reachable = vec![false; dwa.states().len()];
+    if start_state >= dwa.states().len() {
         return reachable;
     }
 
@@ -44,9 +44,9 @@ fn compute_reachable_from_start(dwa: &DWA, start_state: usize) -> Vec<bool> {
         }
 
         reachable[state_id] = true;
-        for (target, _) in dwa.states[state_id].transitions.values() {
+        for (target, _) in dwa.states()[state_id].transitions.values() {
             let target = *target as usize;
-            if target < dwa.states.len() && !reachable[target] {
+            if target < dwa.states().len() && !reachable[target] {
                 stack.push(target);
             }
         }
@@ -102,7 +102,7 @@ fn memoized_intersection(
 ///
 /// Returns (changed, topo_order, reachable_sets) so callers can reuse them.
 pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
-    let n = dwa.states.len();
+    let n = dwa.states().len();
     if n == 0 {
         return (false, Some(Vec::new()), Vec::new());
     }
@@ -119,7 +119,7 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
     let mut intersection_cache = FxHashMap::default();
     let mut changed = false;
     for &u in topo.iter().rev() {
-        let state = &dwa.states[u];
+        let state = &dwa.states()[u];
         let mut acc = state.final_weight.as_ref().cloned().unwrap_or_else(Weight::empty);
         let mut acc_full = acc.is_full();
         let mut pushed: Vec<(Label, u32, Option<Weight>)> = Vec::new();
@@ -153,9 +153,9 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
 
         for (lbl, target, new_w_opt) in pushed {
             if let Some(new_w) = new_w_opt {
-                dwa.states[u].transitions.insert(lbl, (target, new_w));
+                dwa.states_mut()[u].transitions.insert(lbl, (target, new_w));
             } else {
-                dwa.states[u].transitions.remove(&lbl);
+                dwa.states_mut()[u].transitions.remove(&lbl);
             }
             changed = true;
         }
@@ -166,9 +166,9 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
 // Topological analysis.
 
 fn compute_topo_order(dwa: &DWA) -> Option<Vec<usize>> {
-    let n = dwa.states.len();
+    let n = dwa.states().len();
     let mut in_degree = vec![0u32; n];
-    for state in &dwa.states {
+    for state in dwa.states() {
         for (_, (target, _)) in &state.transitions {
             let t = *target as usize;
             if t < n {
@@ -190,7 +190,7 @@ fn compute_topo_order(dwa: &DWA) -> Option<Vec<usize>> {
         let u = queue[head];
         head += 1;
         topo.push(u);
-        for (_, (target, _)) in &dwa.states[u].transitions {
+        for (_, (target, _)) in &dwa.states()[u].transitions {
             let t = *target as usize;
             if t < n {
                 in_degree[t] -= 1;
@@ -211,10 +211,10 @@ fn compute_topo_order(dwa: &DWA) -> Option<Vec<usize>> {
 /// Needed sets: for each state, the set of tokens that can flow from that
 /// state to any accepting state.  Computed in topological order (leaves first).
 fn compute_needed_sets(dwa: &DWA, topo: &[usize]) -> Vec<Weight> {
-    let n = dwa.states.len();
+    let n = dwa.states().len();
     let mut needed = vec![Weight::empty(); n];
     for &u in topo.iter().rev() {
-        let state = &dwa.states[u];
+        let state = &dwa.states()[u];
         let mut acc = state.final_weight.as_ref().cloned().unwrap_or_else(Weight::empty);
         for (_, (target, w)) in &state.transitions {
             let t = *target as usize;
@@ -237,11 +237,11 @@ fn compute_needed_sets(dwa: &DWA, topo: &[usize]) -> Vec<Weight> {
 }
 
 fn compute_heights(dwa: &DWA, topo: &[usize]) -> Vec<usize> {
-    let n = dwa.states.len();
+    let n = dwa.states().len();
     let mut heights = vec![0usize; n];
     // Process in reverse topo order so children are resolved before parents
     for &u in topo.iter().rev() {
-        heights[u] = dwa.states[u]
+        heights[u] = dwa.states()[u]
             .transitions
             .values()
             .filter_map(|(target, _)| {
@@ -262,10 +262,10 @@ struct ProductiveTransition {
 }
 
 fn compute_productive_transitions(dwa: &DWA, needed: &[Weight]) -> Vec<Vec<ProductiveTransition>> {
-    let n = dwa.states.len();
+    let n = dwa.states().len();
     let mut result = Vec::with_capacity(n);
 
-    for state in &dwa.states {
+    for state in dwa.states() {
         let mut transitions = Vec::with_capacity(state.transitions.len());
         for (&label, (target, weight)) in &state.transitions {
             let t = *target as usize;
@@ -466,7 +466,7 @@ fn are_compatible(
     };
 
     // Check transitions — do target conflict detection first (cheap).
-    let n = dwa.states.len();
+    let n = dwa.states().len();
     let trans_u = &productive_transitions[u];
     let trans_v = &productive_transitions[v];
 
@@ -520,8 +520,8 @@ fn are_compatible(
     // This is a fast path that avoids computing the overlap weight entirely.
     {
         let mut all_equal = true;
-        let fw_u = dwa.states[u].final_weight.as_ref();
-        let fw_v = dwa.states[v].final_weight.as_ref();
+        let fw_u = dwa.states()[u].final_weight.as_ref();
+        let fw_v = dwa.states()[v].final_weight.as_ref();
         match (fw_u, fw_v) {
             (Some(wu), Some(wv)) if wu == wv => {}
             (None, None) => {}
@@ -560,8 +560,8 @@ fn are_compatible(
 
     // Check final weights on the overlapping domain
     {
-        let fw_u = dwa.states[u].final_weight.as_ref();
-        let fw_v = dwa.states[v].final_weight.as_ref();
+        let fw_u = dwa.states()[u].final_weight.as_ref();
+        let fw_v = dwa.states()[v].final_weight.as_ref();
         match (fw_u, fw_v) {
             (Some(wu), Some(wv)) => {
                 if !weights_equal_on_domain(wu, wv, &overlap) {
@@ -839,7 +839,7 @@ fn compute_state_signature(
     use std::hash::{Hash, Hasher};
     use rustc_hash::FxHasher;
 
-    let state = &dwa.states[state_id];
+    let state = &dwa.states()[state_id];
 
     let mut hasher = FxHasher::default();
 
@@ -1047,7 +1047,7 @@ fn build_and_color_hybrid(
                 let overlap = cn.intersection(&g.needed_union);
 
                 // Check final weights on overlap
-                let fw_class = dwa.states[rep].final_weight.as_ref();
+                let fw_class = dwa.states()[rep].final_weight.as_ref();
                 let weight_ok = match (fw_class, &g.merged_final_weight) {
                     (Some(fw), Some(gfw)) => weights_equal_on_domain(fw, gfw, &overlap),
                     (Some(fw), None) => fw.is_disjoint(&overlap),
@@ -1111,7 +1111,7 @@ fn build_and_color_hybrid(
             for &(label, target) in &tp {
                 g.target_map.insert(label, target);
             }
-            if let Some(fw) = &dwa.states[rep].final_weight {
+            if let Some(fw) = &dwa.states()[rep].final_weight {
                 g.merged_final_weight = Some(match g.merged_final_weight.take() {
                     Some(existing) => existing.union(fw),
                     None => fw.clone(),
@@ -1133,7 +1133,7 @@ fn build_and_color_hybrid(
             for &(label, target) in &tp {
                 target_map.insert(label, target);
             }
-            let merged_final_weight = dwa.states[rep].final_weight.clone();
+            let merged_final_weight = dwa.states()[rep].final_weight.clone();
             let mut merged_transition_weights = rustc_hash::FxHashMap::default();
             for pt in &productive_transitions[rep] {
                 merged_transition_weights.insert(pt.label, pt.weight.clone());
@@ -1229,7 +1229,7 @@ fn partition_refine_coloring(
     for idx in 0..nc {
         let c = candidates[idx];
         let mut hasher = FxHasher::default();
-        dwa.states[c].final_weight.hash(&mut hasher);
+        dwa.states()[c].final_weight.hash(&mut hasher);
         for pt in &productive_transitions[c] {
             pt.label.hash(&mut hasher);
             let mapped = old_to_new[pt.target as usize];
@@ -1376,7 +1376,7 @@ fn states_signature_equal(
     productive_transitions: &[Vec<ProductiveTransition>],
 ) -> bool {
     // Check final weights
-    if dwa.states[u].final_weight != dwa.states[v].final_weight {
+    if dwa.states()[u].final_weight != dwa.states()[v].final_weight {
         return false;
     }
 
@@ -1417,9 +1417,9 @@ fn partition_refine_coloring_raw(
     for idx in 0..nc {
         let c = candidates[idx];
         let mut hasher = FxHasher::default();
-        dwa.states[c].final_weight.hash(&mut hasher);
+        dwa.states()[c].final_weight.hash(&mut hasher);
         // Hash raw transitions (BTreeMap iterates in label order)
-        for (&label, (target, weight)) in &dwa.states[c].transitions {
+        for (&label, (target, weight)) in &dwa.states()[c].transitions {
             let Some(mapped) = mapped_target(old_to_new, *target) else {
                 continue;
             };
@@ -1427,7 +1427,7 @@ fn partition_refine_coloring_raw(
             mapped.hash(&mut hasher);
             weight.hash(&mut hasher);
         }
-        dwa.states[c].transitions.len().hash(&mut hasher);
+        dwa.states()[c].transitions.len().hash(&mut hasher);
 
         let sig = hasher.finish();
         hash_groups.entry(sig).or_default().push(idx);
@@ -1476,11 +1476,11 @@ fn states_raw_equal(
     dwa: &DWA,
     old_to_new: &[u32],
 ) -> bool {
-    if dwa.states[u].final_weight != dwa.states[v].final_weight {
+    if dwa.states()[u].final_weight != dwa.states()[v].final_weight {
         return false;
     }
-    let su = &dwa.states[u];
-    let sv = &dwa.states[v];
+    let su = &dwa.states()[u];
+    let sv = &dwa.states()[v];
     if su.transitions.len() != sv.transitions.len() {
         return false;
     }
@@ -1521,7 +1521,7 @@ fn try_all_compatible_height_0_coloring(
     }
     if !candidates
         .iter()
-        .all(|&id| dwa.states[id].transitions.is_empty())
+        .all(|&id| dwa.states()[id].transitions.is_empty())
     {
         return None;
     }
@@ -1600,7 +1600,7 @@ fn merge_state_into_builder(
     builders: &mut [MergedStateBuilder],
 ) {
     let builder = &mut builders[color];
-    let old_state = &dwa.states[old_id];
+    let old_state = &dwa.states()[old_id];
 
     // Union final weights
     if let Some(fw) = &old_state.final_weight {
@@ -1608,7 +1608,7 @@ fn merge_state_into_builder(
     }
 
     // Merge transitions
-    let n = dwa.states.len();
+    let n = dwa.states().len();
     for (&label, (target_raw, w_orig)) in &old_state.transitions {
         let t = *target_raw as usize;
         if t >= n {
@@ -1646,10 +1646,10 @@ fn reconstruct_dwa(start_old: usize, old_to_new: &[u32], builders: Vec<MergedSta
         .collect();
 
     let start_new = old_to_new[start_old];
-    DWA {
+    DWA::from_parts(
         states,
-        start_state: if start_new == UNMAPPED { 0 } else { start_new },
-    }
+        if start_new == UNMAPPED { 0 } else { start_new },
+    )
 }
 
 // Public API.
@@ -1668,7 +1668,7 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
 /// graph to partition-refinement coloring when a height bucket has more than
 /// `partition_refine_threshold` candidates.
 pub fn minimize_acyclic_with_threshold(dwa: &DWA, _partition_refine_threshold: usize) -> DWA {
-    if dwa.states.is_empty() {
+    if dwa.states().is_empty() {
         return dwa.clone();
     }
 
@@ -1699,8 +1699,8 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, _partition_refine_threshold: u
     let heights = compute_heights(&pushed, &topo);
     let max_height = heights.iter().max().copied().unwrap_or(0);
 
-    let n = pushed.states.len();
-    let start_state = pushed.start_state as usize;
+    let n = pushed.states().len();
+    let start_state = pushed.start_state() as usize;
 
     let reachable_from_start = compute_reachable_from_start(&pushed, start_state);
 
@@ -1797,7 +1797,7 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, _partition_refine_threshold: u
         let total_ms = t_start.elapsed().as_secs_f64() * 1000.0;
         let coloring_ms = total_ms - push_ms - prod_ms - recon_ms;
         eprintln!("[glrmask/debug][minimize_acyclic] states={} push_ms={:.1} prod_ms={:.1} coloring_ms={:.1} recon_ms={:.1} total_ms={:.1} minimized_states={}",
-            dwa.states.len(), push_ms, prod_ms, coloring_ms, recon_ms, total_ms, minimized.states.len());
+            dwa.states().len(), push_ms, prod_ms, coloring_ms, recon_ms, total_ms, minimized.states().len());
     }
     minimized
 }
@@ -1807,7 +1807,7 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, _partition_refine_threshold: u
 /// for signatures and weight merging. Much faster but may produce slightly
 /// larger output than the full graph-coloring approach.
 pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
-    if dwa.states.is_empty() {
+    if dwa.states().is_empty() {
         return dwa.clone();
     }
 
@@ -1817,8 +1817,8 @@ pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
     let heights = compute_heights(dwa, &topo);
     let max_height = heights.iter().max().copied().unwrap_or(0);
 
-    let n = dwa.states.len();
-    let start_state = dwa.start_state as usize;
+    let n = dwa.states().len();
+    let start_state = dwa.start_state() as usize;
 
     let reachable_from_start = compute_reachable_from_start(dwa, start_state);
 
@@ -1863,7 +1863,7 @@ pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
         let mut new_states: Vec<DWAState> = (0..total_new).map(|_| DWAState::default()).collect();
         for (old_id, &new_id) in old_to_new.iter().enumerate() {
             if new_id == UNMAPPED { continue; }
-            let old_state = &dwa.states[old_id];
+            let old_state = &dwa.states()[old_id];
             let ns = &mut new_states[new_id as usize];
             ns.final_weight = old_state.final_weight.clone();
             for (&label, (target_raw, w)) in &old_state.transitions {
@@ -1875,10 +1875,10 @@ pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
             }
         }
         let start_new = old_to_new[start_state];
-        DWA {
-            states: new_states,
-            start_state: if start_new == UNMAPPED { 0 } else { start_new },
-        }
+        DWA::from_parts(
+            new_states,
+            if start_new == UNMAPPED { 0 } else { start_new },
+        )
     } else {
         // Slow path: states were merged — use MergedStateBuilder.
         let mut new_states: Vec<MergedStateBuilder> = (0..next_new_id as usize)
@@ -1887,7 +1887,7 @@ pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
         for (old_id, &new_id) in old_to_new.iter().enumerate() {
             if new_id == UNMAPPED { continue; }
             let builder = &mut new_states[new_id as usize];
-            let old_state = &dwa.states[old_id];
+            let old_state = &dwa.states()[old_id];
 
             if let Some(fw) = &old_state.final_weight {
                 builder.add_final_weight(fw);
@@ -1926,7 +1926,7 @@ pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
 /// When some mergeable state pairs have *overlapping* needed sets (a strictly harder case),
 /// this function may produce a slightly larger DWA than full minimize. It is always correct.
 pub fn minimize_acyclic_partition_refine(dwa: &DWA) -> DWA {
-    if dwa.states.is_empty() {
+    if dwa.states().is_empty() {
         return dwa.clone();
     }
 
@@ -1936,8 +1936,8 @@ pub fn minimize_acyclic_partition_refine(dwa: &DWA) -> DWA {
 
     let heights = compute_heights(dwa, &topo);
     let max_height = heights.iter().max().copied().unwrap_or(0);
-    let n = dwa.states.len();
-    let start_state = dwa.start_state as usize;
+    let n = dwa.states().len();
+    let start_state = dwa.start_state() as usize;
 
     // Compute needed sets on the original DWA (no push_weights clone/modification).
     let needed = compute_needed_sets(dwa, &topo);
@@ -2009,13 +2009,13 @@ fn merge_state_with_needed_restriction(
     builders: &mut [MergedStateBuilder],
 ) {
     let builder = &mut builders[color];
-    let old_state = &dwa.states[old_id];
+    let old_state = &dwa.states()[old_id];
 
     if let Some(fw) = &old_state.final_weight {
         builder.add_final_weight(fw);
     }
 
-    let n = dwa.states.len();
+    let n = dwa.states().len();
     for (&label, (target_raw, w_orig)) in &old_state.transitions {
         let t = *target_raw as usize;
         if t >= n { continue; }
@@ -2062,7 +2062,7 @@ mod tests {
             candidates.push(candidate as usize);
         }
 
-        let mut needed = vec![Weight::empty(); dwa.states.len()];
+        let mut needed = vec![Weight::empty(); dwa.states().len()];
         needed[target_left as usize] = singleton_weight(10_000);
         needed[target_right as usize] = singleton_weight(10_001);
         for token in 0..101u32 {
@@ -2070,7 +2070,7 @@ mod tests {
         }
 
         let productive_transitions = compute_productive_transitions(&dwa, &needed);
-        let mut old_to_new = vec![UNMAPPED; dwa.states.len()];
+        let mut old_to_new = vec![UNMAPPED; dwa.states().len()];
         old_to_new[target_left as usize] = 9;
         old_to_new[target_right as usize] = 10;
 

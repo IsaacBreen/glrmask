@@ -30,7 +30,7 @@ fn union_state_weight(weights: &mut FxHashMap<u32, Weight>, state_id: u32, add: 
 
 fn subset_final_weight(nwa: &NWA, subset_entries: &[(u32, Weight)]) -> Weight {
     subset_entries.iter().fold(Weight::empty(), |final_weight, (state_id, path_weight)| {
-        let Some(state_final) = nwa.states[*state_id as usize].final_weight.as_ref() else {
+        let Some(state_final) = nwa.states()[*state_id as usize].final_weight.as_ref() else {
             return final_weight;
         };
 
@@ -40,7 +40,7 @@ fn subset_final_weight(nwa: &NWA, subset_entries: &[(u32, Weight)]) -> Weight {
 
 fn seed_start_subset(nwa: &NWA) -> FxHashMap<u32, Weight> {
     let mut start_subset = FxHashMap::default();
-    for &state_id in &nwa.start_states {
+    for &state_id in nwa.start_states() {
         union_state_weight(&mut start_subset, state_id, Weight::all());
     }
     start_subset
@@ -68,7 +68,7 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
         // Fast path: single-state seed with no epsilon transitions (99.6% of calls)
         if seed.len() == 1 {
             let (&state_id, _) = seed.iter().next().unwrap();
-            if let Some(state) = nwa.states.get(state_id as usize) {
+            if let Some(state) = nwa.states().get(state_id as usize) {
                 if state.epsilons.is_empty() {
                     return seed;
                 }
@@ -82,7 +82,7 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
             let Some(current_weight) = closure.get(&state_id).cloned() else {
                 continue;
             };
-            let Some(state) = nwa.states.get(state_id as usize) else {
+            let Some(state) = nwa.states().get(state_id as usize) else {
                 continue;
             };
             for (dst, edge_weight) in &state.epsilons {
@@ -102,7 +102,7 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     }
 
     let mut dwa = DWA::new(0, 0);
-    let start_id = dwa.start_state;
+    let start_id = dwa.start_state();
 
     let start_subset = epsilon_closure(nwa, seed_start_subset(nwa));
 
@@ -126,7 +126,7 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
         // and parallelized across all states.
 
         for (nwa_state_id, path_weight) in &subset_entries {
-            let state = &nwa.states[*nwa_state_id as usize];
+            let state = &nwa.states()[*nwa_state_id as usize];
             for (&label, targets) in &state.transitions {
                 for (dst, trans_weight) in targets {
                     let next_weight = path_weight.intersection(trans_weight);
@@ -209,15 +209,15 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     }
 
     if profile {
-        let max_weight_dim = dwa.states.iter()
+        let max_weight_dim = dwa.states().iter()
             .filter_map(|s| s.final_weight.as_ref())
             .map(|w| w.0.ranges_len())
             .max()
             .unwrap_or(0);
         eprintln!(
             "[glrmask/profile][determinize] nwa_states={} dwa_states={} subset_map_entries={} max_weight_dim={}",
-            nwa.states.len(),
-            dwa.states.len(),
+            nwa.states().len(),
+            dwa.states().len(),
             subset_map.len(),
             max_weight_dim,
         );

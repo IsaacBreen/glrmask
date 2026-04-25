@@ -127,7 +127,7 @@ pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
 }
 
 fn full_state_range(nwa: &NWA) -> std::ops::Range<u32> {
-    0..nwa.states.len() as u32
+    0..nwa.states().len() as u32
 }
 
 fn enqueue_cancellation_task(
@@ -318,7 +318,7 @@ fn compute_cancellations_range_inner(
     range: std::ops::Range<u32>,
     foreign_derived: Option<&DerivedEpsilons>,
 ) -> Vec<(u32, u32, Weight)> {
-    let state_count = nwa.states.len() as u32;
+    let state_count = nwa.states().len() as u32;
     if state_count == 0 {
         return Vec::new();
     }
@@ -333,7 +333,7 @@ fn compute_cancellations_range_inner(
             continue;
         }
 
-        for (&label, targets) in nwa.states[source_state as usize].transitions.range(..0) {
+        for (&label, targets) in nwa.states()[source_state as usize].transitions.range(..0) {
             let positive_label = negative_to_positive_label(label);
 
             for (target_state, weight) in targets {
@@ -378,7 +378,7 @@ fn compute_cancellations_range_inner(
             foreign_derived,
         );
 
-        if let Some(positive_targets) = nwa.states[current_state as usize]
+        if let Some(positive_targets) = nwa.states()[current_state as usize]
             .transitions
             .get(&positive_label)
         {
@@ -399,7 +399,7 @@ fn compute_cancellations_range_inner(
             }
         }
 
-        if let Some(default_targets) = nwa.states[current_state as usize]
+        if let Some(default_targets) = nwa.states()[current_state as usize]
             .transitions
             .get(&DEFAULT_LABEL)
         {
@@ -420,7 +420,7 @@ fn compute_cancellations_range_inner(
             }
         }
 
-        for (target_state, epsilon_weight) in &nwa.states[current_state as usize].epsilons {
+        for (target_state, epsilon_weight) in &nwa.states()[current_state as usize].epsilons {
             if *target_state >= state_count {
                 continue;
             }
@@ -507,11 +507,11 @@ fn for_each_live_finality_edge(
 }
 
 fn build_finality_preds_and_outdegree<'a>(nwa: &'a NWA) -> (Vec<Vec<PredEdge<'a>>>, Vec<usize>) {
-    let state_count = nwa.states.len();
+    let state_count = nwa.states().len();
     let mut preds = vec![Vec::<PredEdge<'a>>::new(); state_count];
     let mut outdegree = vec![0usize; state_count];
 
-    for (from_state, state) in nwa.states.iter().enumerate() {
+    for (from_state, state) in nwa.states().iter().enumerate() {
         for (target_state, weight) in &state.epsilons {
             if !is_live_finality_edge(*target_state, weight, state_count) {
                 continue;
@@ -572,7 +572,7 @@ fn build_finality_reverse_topo_order(
 }
 
 fn collect_initial_final_weights(nwa: &NWA) -> Vec<Option<Weight>> {
-    nwa.states
+    nwa.states()
         .iter()
         .map(|state| state.final_weight.clone().filter(|weight| !weight.is_empty()))
         .collect()
@@ -580,7 +580,7 @@ fn collect_initial_final_weights(nwa: &NWA) -> Vec<Option<Weight>> {
 
 fn write_final_weights(nwa: &mut NWA, reachable_final_weights: Vec<Option<Weight>>) {
     for (state_id, final_weight) in reachable_final_weights.into_iter().enumerate() {
-        nwa.states[state_id].final_weight = final_weight.filter(|weight| !weight.is_empty());
+        nwa.states_mut()[state_id].final_weight = final_weight.filter(|weight| !weight.is_empty());
     }
 }
 
@@ -607,7 +607,7 @@ fn apply_finality_fixpoint_worklist(
     preds: &[Vec<PredEdge<'_>>],
     reachable_final_weights: &mut [Option<Weight>],
 ) {
-    let n = nwa.states.len();
+    let n = nwa.states().len();
     let mut worklist = VecDeque::<usize>::new();
     let mut queued = vec![false; n];
 
@@ -652,7 +652,7 @@ fn apply_finality_fixpoint_acyclic(
 }
 
 pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
-    let n = nwa.states.len();
+    let n = nwa.states().len();
     if n == 0 {
         return;
     }
@@ -674,7 +674,7 @@ pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
 }
 
 pub(crate) fn remove_negative_transitions(nwa: &mut NWA) {
-    for state in &mut nwa.states {
+    for state in  nwa.states_mut() {
         state.transitions.retain(|label, _| !is_negative_label(*label));
     }
 }
@@ -711,7 +711,7 @@ fn default_targets_are_terminal(state: &NWAState, terminal_states: &[bool]) -> b
 fn grow_terminal_state_set(nwa: &NWA, terminal_states: &mut [bool]) {
     loop {
         let mut changed = false;
-        for (state_id, state) in nwa.states.iter().enumerate() {
+        for (state_id, state) in nwa.states().iter().enumerate() {
             if terminal_states[state_id] || !is_terminal_candidate(state) {
                 continue;
             }
@@ -729,7 +729,7 @@ fn grow_terminal_state_set(nwa: &NWA, terminal_states: &mut [bool]) {
 }
 
 fn prune_terminal_default_targets(nwa: &mut NWA, terminal_states: &[bool]) {
-    for state in &mut nwa.states {
+    for state in  nwa.states_mut() {
         if let Some(targets) = state.transitions.get_mut(&DEFAULT_LABEL) {
             targets.retain(|(target, _)| !terminal_states[*target as usize]);
         }
@@ -738,7 +738,7 @@ fn prune_terminal_default_targets(nwa: &mut NWA, terminal_states: &[bool]) {
 }
 
 pub(crate) fn remove_redundant_default_transitions(nwa: &mut NWA) {
-    let mut terminal_states: Vec<bool> = nwa.states.iter().map(is_terminal_candidate).collect();
+    let mut terminal_states: Vec<bool> = nwa.states().iter().map(is_terminal_candidate).collect();
 
     grow_terminal_state_set(nwa, &mut terminal_states);
     prune_terminal_default_targets(nwa, &terminal_states);
@@ -776,7 +776,7 @@ pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
 }
 
 fn apply_cancellations_parallel_fixpoint(nwa: &mut NWA) {
-    let state_count = nwa.states.len();
+    let state_count = nwa.states().len();
     if state_count == 0 {
         return;
     }
@@ -875,7 +875,7 @@ mod tests {
     use std::collections::{BTreeMap, HashMap, HashSet};
 
     fn compute_cancellations_reference(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
-        let n = nwa.states.len();
+        let n = nwa.states().len();
         if n == 0 {
             return Vec::new();
         }
@@ -903,7 +903,7 @@ mod tests {
         };
 
         for a in 0..n {
-            for (&label, targets) in &nwa.states[a].transitions {
+            for (&label, targets) in &nwa.states()[a].transitions {
                 if !is_negative_label(label) {
                     continue;
                 }
@@ -1000,7 +1000,7 @@ mod tests {
                 }
             };
 
-            if let Some(pos_targets) = nwa.states[s as usize].transitions.get(&c) {
+            if let Some(pos_targets) = nwa.states()[s as usize].transitions.get(&c) {
                 for (t, w_st) in pos_targets {
                     if *t as usize >= n {
                         continue;
@@ -1016,7 +1016,7 @@ mod tests {
                 }
             }
 
-            if let Some(default_targets) = nwa.states[s as usize].transitions.get(&DEFAULT_LABEL) {
+            if let Some(default_targets) = nwa.states()[s as usize].transitions.get(&DEFAULT_LABEL) {
                 for (target, weight) in default_targets {
                     if *target as usize >= n {
                         continue;
@@ -1032,7 +1032,7 @@ mod tests {
                 }
             }
 
-            for (t, w_st) in &nwa.states[s as usize].epsilons {
+            for (t, w_st) in &nwa.states()[s as usize].epsilons {
                 if *t as usize >= n {
                     continue;
                 }
@@ -1098,13 +1098,13 @@ mod tests {
     }
 
     fn apply_finality_fixpoint_reference(nwa: &mut NWA) {
-        let n = nwa.states.len();
+        let n = nwa.states().len();
         if n == 0 {
             return;
         }
 
         let mut preds = vec![Vec::<PredEdge<'_>>::new(); n];
-        for (from, state) in nwa.states.iter().enumerate() {
+        for (from, state) in nwa.states().iter().enumerate() {
             for (target, weight) in &state.epsilons {
                 if *target as usize >= n || weight.is_empty() {
                     continue;
@@ -1132,7 +1132,7 @@ mod tests {
 
         let mut future_final = vec![None::<Weight>; n];
         for state_id in 0..n {
-            if let Some(fw) = nwa.states[state_id].final_weight.clone() {
+            if let Some(fw) = nwa.states()[state_id].final_weight.clone() {
                 if fw.is_empty() {
                     continue;
                 }
@@ -1143,12 +1143,12 @@ mod tests {
         apply_finality_fixpoint_worklist(nwa, &preds, &mut future_final);
 
         for (state_id, final_weight) in future_final.into_iter().enumerate() {
-            nwa.states[state_id].final_weight = final_weight.filter(|weight| !weight.is_empty());
+            nwa.states_mut()[state_id].final_weight = final_weight.filter(|weight| !weight.is_empty());
         }
     }
 
     fn final_weights(nwa: &NWA) -> Vec<Option<Weight>> {
-        nwa.states.iter().map(|state| state.final_weight.clone()).collect()
+        nwa.states().iter().map(|state| state.final_weight.clone()).collect()
     }
 
     fn weight_1() -> Weight {
@@ -1288,7 +1288,7 @@ mod tests {
 
             let actual = normalize_cancellations(compute_cancellations_range(
                 &nwa,
-                0..nwa.states.len() as u32,
+                0..nwa.states().len() as u32,
             ));
             let expected = normalize_cancellations(compute_cancellations_reference(&nwa));
 

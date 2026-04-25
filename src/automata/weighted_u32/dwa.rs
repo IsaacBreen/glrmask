@@ -14,8 +14,8 @@ pub struct DWAState {
 
 #[derive(Debug, Clone)]
 pub struct DWA {
-    pub states: Vec<DWAState>,
-    pub start_state: u32,
+    states: Vec<DWAState>,
+    start_state: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -220,6 +220,29 @@ impl DWA {
         }
     }
 
+    #[inline]
+    pub fn states(&self) -> &[DWAState] {
+        &self.states
+    }
+
+    #[inline]
+    pub fn states_mut(&mut self) -> &mut Vec<DWAState> {
+        &mut self.states
+    }
+
+    #[inline]
+    pub fn start_state(&self) -> u32 {
+        self.start_state
+    }
+
+    pub fn from_parts(states: Vec<DWAState>, start_state: u32) -> Self {
+        Self { states, start_state }
+    }
+
+    pub fn set_start_state(&mut self, state: u32) {
+        self.start_state = state;
+    }
+
     pub fn add_state(&mut self) -> u32 {
         let id = self.states.len() as u32;
         self.states.push(DWAState::default());
@@ -397,10 +420,10 @@ impl DWA {
     /// Convert this DWA to an NWA representation.
     pub fn to_nwa(&self) -> super::nwa::NWA {
         use super::nwa::{NWA, NWAState};
-        let mut nwa = NWA {
-            states: Vec::with_capacity(self.states.len()),
-            start_states: vec![self.start_state],
-        };
+        let mut nwa = NWA::from_parts(
+            Vec::with_capacity(self.states.len()),
+            vec![self.start_state],
+        );
         for state in &self.states {
             let mut nwa_state = NWAState::default();
             nwa_state.final_weight = state.final_weight.clone();
@@ -411,7 +434,7 @@ impl DWA {
                     .or_default()
                     .push((*target, weight.clone()));
             }
-            nwa.states.push(nwa_state);
+            nwa.states_mut().push(nwa_state);
         }
         nwa
     }

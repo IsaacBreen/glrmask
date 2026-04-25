@@ -158,10 +158,10 @@ fn dfa_to_nwa_skeleton(dfa: &UnweightedDfa) -> NWA {
         })
         .collect();
 
-    NWA {
+    NWA::from_parts(
         states,
-        start_states: vec![dfa.start_state],
-    }
+        vec![dfa.start_state],
+    )
 }
 
 fn compile_template_with_profile(
@@ -339,8 +339,8 @@ fn emit_unweighted_dfa_debug_dump(label: &str, dfa: &UnweightedDfa) {
 }
 
 fn emit_weighted_nwa_debug_dump(label: &str, nwa: &NWA) {
-    eprintln!("{} start_states={:?}", label, nwa.start_states);
-    for (state_id, state) in nwa.states.iter().enumerate() {
+    eprintln!("{} start_states={:?}", label, nwa.start_states());
+    for (state_id, state) in nwa.states().iter().enumerate() {
         eprintln!(
             "  state {} final_weight={:?} epsilons={:?}",
             state_id, state.final_weight, state.epsilons
@@ -730,8 +730,8 @@ mod tests {
     }
 
     fn print_weighted_nwa(label: &str, nwa: &WeightedNwa) {
-        eprintln!("{} start_states={:?}", label, nwa.start_states);
-        for (state_id, state) in nwa.states.iter().enumerate() {
+        eprintln!("{} start_states={:?}", label, nwa.start_states());
+        for (state_id, state) in nwa.states().iter().enumerate() {
             eprintln!("  state {} final_weight={:?} epsilons={:?}", state_id, state.final_weight, state.epsilons);
             let mut transitions = state.transitions.iter().collect::<Vec<_>>();
             transitions.sort_by_key(|(edge_label, _)| **edge_label);
@@ -742,8 +742,8 @@ mod tests {
     }
 
     fn print_weighted_dwa(label: &str, dwa: &DWA) {
-        eprintln!("{} start_state={}", label, dwa.start_state);
-        for (state_id, state) in dwa.states.iter().enumerate() {
+        eprintln!("{} start_state={}", label, dwa.start_state());
+        for (state_id, state) in dwa.states().iter().enumerate() {
             eprintln!("  state {} final_weight={:?}", state_id, state.final_weight);
             let mut transitions = state.transitions.iter().collect::<Vec<_>>();
             transitions.sort_by_key(|(edge_label, _)| **edge_label);

@@ -504,12 +504,12 @@ impl<'a> ConstraintState<'a> {
 
                 // Walk chain: first state goes through start_fast_trans,
                 // subsequent states through the target DWA state's transitions.
-                let mut cur_wa_state = parser_dwa.start_state;
+                let mut cur_wa_state = parser_dwa.start_state();
                 let mut alive = true;
 
                 for (index, parser_state) in chain_states.iter().enumerate() {
                     if index == 0
-                        && cur_wa_state == parser_dwa.start_state
+                        && cur_wa_state == parser_dwa.start_state()
                         && *parser_state == 0
                     {
                         continue;
@@ -548,7 +548,7 @@ impl<'a> ConstraintState<'a> {
                     };
 
                     cur_wa_state = target;
-                    let next_dwa_state = &parser_dwa.states[cur_wa_state as usize];
+                    let next_dwa_state = &parser_dwa.states()[cur_wa_state as usize];
 
                     // Merge FW at the new DWA state
                     if let Some(final_weight) = &next_dwa_state.final_weight {
@@ -642,7 +642,7 @@ impl<'a> ConstraintState<'a> {
         let cache_miss_ns = if PROFILE { t_cache.unwrap().elapsed().as_nanos() as u64 } else { 0 };
 
         let parser_dwa = self.constraint.parser_dwa();
-        if self.state.is_empty() || parser_dwa.states.is_empty() {
+        if self.state.is_empty() || parser_dwa.states().is_empty() {
             buf.fill(0);
             *self.mask_cache.lock().unwrap() = Some(crate::runtime::state::MaskCacheData {
                 generation: self.generation,
@@ -667,8 +667,8 @@ impl<'a> ConstraintState<'a> {
         let mut merged = vec![0u64; dense_words];
         let mut queue = MaskQueue::new();
 
-        let start_state = parser_dwa.start_state;
-        let start_dwa_state = &parser_dwa.states[start_state as usize];
+        let start_state = parser_dwa.start_state();
+        let start_dwa_state = &parser_dwa.states()[start_state as usize];
         let start_fast_trans = &self.constraint.dwa_fast_transitions[start_state as usize];
 
         let t_seed = if PROFILE { Some(std::time::Instant::now()) } else { None };
@@ -692,7 +692,7 @@ impl<'a> ConstraintState<'a> {
                 if let Some(c) = counters.as_mut() {
                     c.bfs_states_processed += 1;
                 }
-                let dwa_state = &parser_dwa.states[wa_state as usize];
+                let dwa_state = &parser_dwa.states()[wa_state as usize];
                 let fast_trans = &self.constraint.dwa_fast_transitions[wa_state as usize];
 
                 let t_fw = if PROFILE { Some(std::time::Instant::now()) } else { None };
@@ -753,7 +753,7 @@ impl<'a> ConstraintState<'a> {
                         };
 
                         cur_wa_state = target;
-                        let next_dwa_state = &parser_dwa.states[cur_wa_state as usize];
+                        let next_dwa_state = &parser_dwa.states()[cur_wa_state as usize];
 
                         // Merge final weight at the new DWA state
                         if let Some(final_weight) = &next_dwa_state.final_weight {

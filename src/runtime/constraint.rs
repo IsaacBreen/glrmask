@@ -327,7 +327,7 @@ impl Constraint {
 
     fn compute_fast_transitions(&self) -> FastDwaTransitions {
         self.parser_dwa
-            .states
+            .states()
             .iter()
             .map(|state| {
                 state
@@ -346,7 +346,7 @@ impl Constraint {
         }
 
         let mut dense_masks = DenseWeightMaskCache::default();
-        for state in &self.parser_dwa.states {
+        for state in self.parser_dwa.states() {
             if let Some(final_weight) = &state.final_weight {
                 self.collect_weight_dense_masks(
                     final_weight,
@@ -809,15 +809,15 @@ impl Constraint {
     }
 
     pub fn debug_parser_dwa_num_states(&self) -> usize {
-        self.parser_dwa.states.len()
+        self.parser_dwa.states().len()
     }
 
     pub fn debug_parser_dwa_num_transitions(&self) -> usize {
-        self.parser_dwa.states.iter().map(|s| s.transitions.len()).sum()
+        self.parser_dwa.states().iter().map(|s| s.transitions.len()).sum()
     }
 
     pub fn debug_parser_dwa_state(&self, state: u32) -> (Vec<(i32, u32)>, bool) {
-        let Some(dwa_state) = self.parser_dwa.states.get(state as usize) else {
+        let Some(dwa_state) = self.parser_dwa.states().get(state as usize) else {
             return (Vec::new(), false);
         };
         let transitions = dwa_state
@@ -835,7 +835,7 @@ impl Constraint {
         tokenizer_state: u32,
         internal_token: u32,
     ) -> Option<(u32, bool, bool, bool)> {
-        let state = self.parser_dwa.states.get(dwa_state as usize)?;
+        let state = self.parser_dwa.states().get(dwa_state as usize)?;
         let (target, weight) = state.transitions.get(&label)?;
         let internal_tsid = tokenizer_state;
         let transition_is_full = weight.is_full();
@@ -847,7 +847,7 @@ impl Constraint {
                 .unwrap_or(false);
         let target_final_allows = self
             .parser_dwa
-            .states
+            .states()
             .get(*target as usize)
             .and_then(|target_state| target_state.final_weight.as_ref())
             .map(|final_weight| {
