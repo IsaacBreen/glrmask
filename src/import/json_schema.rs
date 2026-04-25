@@ -3042,6 +3042,69 @@ impl<'a> SchemaCtx<'a> {
         schema.as_object()?.get("const")
     }
 
+    fn unescape_json_schema_pattern_literal(pattern: &str) -> Option<String> {
+        let mut out = String::with_capacity(pattern.len());
+        let mut chars = pattern.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\\' {
+                let escaped = chars.next()?;
+                match escaped {
+                    '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '^'
+                    | '$' | '|' | '-' => out.push(escaped),
+                    _ => return None,
+                }
+            } else if matches!(ch, '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|')
+            {
+                return None;
+            } else {
+                out.push(ch);
+            }
+        }
+        Some(out)
+    }
+
+    fn schema_exact_string_literal<'b>(&self, schema: &'b Value) -> Option<String> {
+        let object = schema.as_object()?;
+
+        if let Some(Value::String(value)) = object.get("const") {
+            return Some(value.clone());
+        }
+
+        let types = self.schema_type_names(schema);
+        if let Some(types) = &types {
+            if !types.contains("string") {
+                return None;
+            }
+        }
+
+        let pattern = object.get("pattern")?.as_str()?;
+        let anchored = pattern.strip_prefix('^')?.strip_suffix('$')?;
+        Self::unescape_json_schema_pattern_literal(anchored)
+    }
+
+    fn resolved_structural_options(
+        &self,
+        schema: &Map<String, Value>,
+        keyword: &str,
+    ) -> Option<Vec<Value>> {
+        let options = schema.get(keyword)?.as_array()?;
+        let base = Self::schema_without_keys(schema, &["anyOf", "oneOf"]);
+        Some(
+            options
+                .iter()
+                .map(|option| {
+                    if base.is_empty() {
+                        Value::Object(self.schema_for_intersection(option))
+                    } else {
+                        Value::Object(
+                            self.merge_resolved_subschemas(&base, std::slice::from_ref(option)),
+                        )
+                    }
+                })
+                .collect(),
+        )
+    }
+
     fn schemas_are_verifiably_disjoint(&self, left: &Value, right: &Value) -> bool {
         if left == &Value::Bool(false) || right == &Value::Bool(false) {
             return true;
@@ -3100,22 +3163,29 @@ impl<'a> SchemaCtx<'a> {
                 .all(|left_value| !right_enum.iter().any(|right_value| right_value == left_value));
         }
 
-        if let Some(any_of) = left_object.get("anyOf").and_then(Value::as_array) {
+        if let (Some(left_literal), Some(right_literal)) = (
+            self.schema_exact_string_literal(left),
+            self.schema_exact_string_literal(right),
+        ) {
+            return left_literal != right_literal;
+        }
+
+        if let Some(any_of) = self.resolved_structural_options(left_object, "anyOf") {
             return any_of
                 .iter()
                 .all(|option| self.schemas_are_verifiably_disjoint(option, right));
         }
-        if let Some(one_of) = left_object.get("oneOf").and_then(Value::as_array) {
+        if let Some(one_of) = self.resolved_structural_options(left_object, "oneOf") {
             return one_of
                 .iter()
                 .all(|option| self.schemas_are_verifiably_disjoint(option, right));
         }
-        if let Some(any_of) = right_object.get("anyOf").and_then(Value::as_array) {
+        if let Some(any_of) = self.resolved_structural_options(right_object, "anyOf") {
             return any_of
                 .iter()
                 .all(|option| self.schemas_are_verifiably_disjoint(left, option));
         }
-        if let Some(one_of) = right_object.get("oneOf").and_then(Value::as_array) {
+        if let Some(one_of) = self.resolved_structural_options(right_object, "oneOf") {
             return one_of
                 .iter()
                 .all(|option| self.schemas_are_verifiably_disjoint(left, option));

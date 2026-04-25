@@ -1348,6 +1348,76 @@ fn test_explicit_coerce_oneof_is_treated_as_anyof() {
 }
 
 #[test]
+fn test_ref_oneof_with_required_pattern_discriminator_compiles() {
+    let _guard = env_lock().lock().expect("env lock should not be poisoned");
+    let schema = r##"{
+        "definitions": {
+            "ecu": {
+                "type": "object",
+                "properties": {
+                    "file_type": {
+                        "type": "string",
+                        "pattern": "^ecu$"
+                    },
+                    "name": {"type": "string"}
+                },
+                "required": ["name"],
+                "additionalProperties": false
+            },
+            "string_table": {
+                "type": "object",
+                "properties": {
+                    "file_type": {
+                        "type": "string",
+                        "pattern": "^string_table$"
+                    },
+                    "table_name": {"type": "string"}
+                },
+                "required": ["file_type", "table_name"],
+                "additionalProperties": false
+            }
+        },
+        "oneOf": [
+            {"$ref": "#/definitions/ecu"},
+            {"$ref": "#/definitions/string_table"}
+        ]
+    }"##;
+
+    schema_accepts(
+        schema,
+        &[
+            r#"{"name": "engine"}"#,
+            r#"{"file_type": "string_table", "table_name": "codes"}"#,
+        ],
+    );
+    schema_rejects(
+        schema,
+        &[
+            r#"{"file_type": "ecu", "table_name": "codes"}"#,
+            r#"{"file_type": "string_table", "name": "engine"}"#,
+        ],
+    );
+}
+
+#[test]
+fn test_o47674_top_level_oneof_matches_llguidance_permissiveness() {
+    let _guard = env_lock().lock().expect("env lock should not be poisoned");
+    let schema_path = Path::new(
+        "/Users/isaacbreen/Projects2/constraint-framework-analysis/data/sources/jsonschemabench/maskbench/data/Github_hard---o47674.json",
+    );
+    let fixture: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(schema_path).expect("o47674 fixture should be readable"),
+    )
+    .expect("o47674 fixture should parse");
+    let schema = fixture
+        .get("schema")
+        .expect("fixture should contain schema")
+        .to_string();
+
+    let _constraint = schema_constraint(&schema);
+}
+
+#[test]
 fn test_nested_dynamic_object_prefix_stays_single_path() {
     let schema = r#"{
         "type": "object",
