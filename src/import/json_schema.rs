@@ -8739,11 +8739,8 @@ impl<'a> SchemaCtx<'a> {
                 }
             }
 
-            let body = GrammarExpr::SeparatedSequence {
-                items: array_items,
-                separator: Box::new(self.json_item_separator_expr()),
-                allow_empty: min_items == 0,
-            };
+            let mut sequence_cache = BTreeMap::new();
+            let body = self.build_array_item_sequence(&array_items, false, &mut sequence_cache, 0);
             return Ok(sequence_or_single(vec![
                 literal_expr(b"["),
                 body,
