@@ -1150,7 +1150,7 @@ fn test_closed_object_anyof_preserves_ordered_language() {
 }
 
 #[test]
-fn test_closed_object_oneof_counts_accepting_variants_exactly() {
+fn test_overlapping_oneof_is_rejected_without_explicit_coercion() {
     let _guard = env_lock().lock().expect("env lock should not be poisoned");
     let schema = r#"{
         "oneOf": [
@@ -1172,19 +1172,10 @@ fn test_closed_object_oneof_counts_accepting_variants_exactly() {
         ]
     }"#;
 
-    schema_accepts(
-        schema,
-        &[
-            r#"{"b": "y"}"#,
-            r#"{"a": "x", "b": "y"}"#,
-        ],
-    );
-    schema_rejects(
-        schema,
-        &[
-            r#"{}"#,
-            r#"{"a": "x"}"#,
-        ],
+    let err = json_schema_to_grammar(schema).expect_err("overlapping oneOf should be rejected");
+    assert!(
+        err.to_string().contains("oneOf constraints are not supported"),
+        "expected llguidance-style oneOf rejection, got: {err}"
     );
 }
 
@@ -1259,7 +1250,7 @@ fn test_closed_object_single_variant_collapses_optional_tail_paths() {
 }
 
 #[test]
-fn test_closed_object_oneof_dead_end_prefixes_still_uses_exact_union() {
+fn test_disjoint_oneof_objects_compile_without_explicit_leniency() {
     let _guard = env_lock().lock().expect("env lock should not be poisoned");
     let schema = r#"{
         "oneOf": [
@@ -1270,7 +1261,7 @@ fn test_closed_object_oneof_dead_end_prefixes_still_uses_exact_union() {
                     "label": {"type": "string"},
                     "type": {"const": "email"}
                 },
-                "required": ["label"],
+                "required": ["label", "type"],
                 "additionalProperties": false
             },
             {
@@ -1280,17 +1271,11 @@ fn test_closed_object_oneof_dead_end_prefixes_still_uses_exact_union() {
                     "label": {"type": "string"},
                     "type": {"const": "time"}
                 },
-                "required": ["label"],
+                "required": ["label", "type"],
                 "additionalProperties": false
             }
         ]
     }"#;
-
-    let named = named_grammar_from_schema(schema);
-    assert!(
-        named.rules.iter().any(|rule| rule.name.contains("obj_ord_q_")),
-        "oneOf with shared dead-end prefixes should still use the exact closed-object union lowering"
-    );
 
     schema_accepts(
         schema,
@@ -1308,14 +1293,58 @@ fn test_closed_object_oneof_dead_end_prefixes_still_uses_exact_union() {
             r#"{"help": "h", "label": "x"}"#,
         ],
     );
+}
 
-    let prefix = br#"{"help": "h", "label": "x""#;
-    let constraint = schema_constraint(schema);
-    let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
-    assert_eq!(
-        max_paths, 1,
-        "shared dead-end prefixes should stay single-path until the discriminating key value"
+#[test]
+fn test_lenient_oneof_is_coerced_to_anyof() {
+    let _guard = env_lock().lock().expect("env lock should not be poisoned");
+    let schema = r#"{
+        "x-guidance": {
+            "lenient": true
+        },
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string"}
+                },
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string"},
+                    "b": {"type": "string"}
+                },
+                "additionalProperties": false
+            }
+        ]
+    }"#;
+
+    schema_accepts(
+        schema,
+        &[
+            r#"{"a": "x"}"#,
+            r#"{"a": "x", "b": "y"}"#,
+        ],
     );
+}
+
+#[test]
+fn test_explicit_coerce_oneof_is_treated_as_anyof() {
+    let _guard = env_lock().lock().expect("env lock should not be poisoned");
+    let schema = r#"{
+        "x-guidance": {
+            "coerce_one_of": true
+        },
+        "oneOf": [
+            {"type": "string"},
+            {"type": "integer"}
+        ]
+    }"#;
+
+    schema_accepts(schema, &[r#""value""#, r#"17"#]);
+    schema_rejects(schema, &[r#"true"#]);
 }
 
 #[test]
@@ -1355,7 +1384,7 @@ fn test_nested_dynamic_object_prefix_stays_single_path() {
 }
 
 #[test]
-fn test_closed_object_anyof_shared_key_value_variants_stays_single_path() {
+fn test_closed_object_anyof_shared_key_value_variants_preserve_language() {
     let _guard = env_lock().lock().expect("env lock should not be poisoned");
     let schema = r#"{
         "type": "object",
@@ -1382,19 +1411,19 @@ fn test_closed_object_anyof_shared_key_value_variants_stays_single_path() {
         ]
     }"#;
 
-    let named = named_grammar_from_schema(schema);
-    assert!(
-        named.rules.iter().any(|rule| rule.name.contains("obj_ord_q_")),
-        "shared-key anyOf should use the exact closed-object union lowering"
+    schema_accepts(
+        schema,
+        &[
+            r#"{"uuid": "u", "parent_id": null}"#,
+            r#"{"uuid": "u", "name": "n", "parent_id": "p"}"#,
+        ],
     );
-
-    let prefix = br#"{"uuid": "u", "name": "n", "parent_id": "p""#;
-    let constraint = schema_constraint(schema);
-    let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
-
-    assert_eq!(
-        max_paths, 1,
-        "shared-key anyOf with differing value schemas should stay single-path"
+    schema_rejects(
+        schema,
+        &[
+            r#"{"uuid": "u"}"#,
+            r#"{"uuid": "u", "parent_id": "p"}"#,
+        ],
     );
 }
 

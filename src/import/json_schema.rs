@@ -2844,6 +2844,8 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
 
 struct SchemaCtx<'a> {
     root_schema: &'a Value,
+    coerce_one_of: bool,
+    lenient_json_schema: bool,
     rules: Vec<(String, GrammarExpr)>,
     rule_indices: BTreeMap<String, usize>,
     used_rule_names: BTreeSet<String>,
@@ -2880,8 +2882,28 @@ fn rule_name_force_visible_terminal(name: &str) -> bool {
 
 impl<'a> SchemaCtx<'a> {
     fn new(root: &'a Value) -> Self {
+        let (coerce_one_of, lenient_json_schema) = root
+            .as_object()
+            .and_then(|object| object.get("x-guidance"))
+            .and_then(Value::as_object)
+            .map(|guidance| {
+                (
+                    guidance
+                        .get("coerce_one_of")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    guidance
+                        .get("lenient")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                )
+            })
+            .unwrap_or((false, false));
+
         let mut ctx = Self {
             root_schema: root,
+            coerce_one_of,
+            lenient_json_schema,
             rules: Vec::new(),
             rule_indices: BTreeMap::new(),
             used_rule_names: BTreeSet::new(),
@@ -2975,6 +2997,203 @@ impl<'a> SchemaCtx<'a> {
             )));
         }
         Ok(())
+    }
+
+    fn one_of_is_explicitly_coerced(&self) -> bool {
+        self.coerce_one_of || self.lenient_json_schema
+    }
+
+    fn schema_type_names<'b>(&self, schema: &'b Value) -> Option<BTreeSet<&'b str>> {
+        let object = schema.as_object()?;
+        match object.get("type") {
+            Some(Value::String(type_name)) => Some(BTreeSet::from([type_name.as_str()])),
+            Some(Value::Array(type_names)) => {
+                let names = type_names
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<BTreeSet<_>>();
+                if names.is_empty() {
+                    None
+                } else {
+                    Some(names)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn schema_object_property<'b>(&self, schema: &'b Value, key: &str) -> Option<&'b Value> {
+        schema
+            .as_object()?
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|properties| properties.get(key))
+    }
+
+    fn schema_enum_values<'b>(&self, schema: &'b Value) -> Option<&'b [Value]> {
+        schema
+            .as_object()?
+            .get("enum")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+    }
+
+    fn schema_const_value<'b>(&self, schema: &'b Value) -> Option<&'b Value> {
+        schema.as_object()?.get("const")
+    }
+
+    fn schemas_are_verifiably_disjoint(&self, left: &Value, right: &Value) -> bool {
+        if left == &Value::Bool(false) || right == &Value::Bool(false) {
+            return true;
+        }
+        if left == &Value::Bool(true) || right == &Value::Bool(true) {
+            return false;
+        }
+
+        let Some(left_object) = left.as_object() else {
+            return false;
+        };
+        let Some(right_object) = right.as_object() else {
+            return false;
+        };
+
+        if let Some(reference) = left_object.get("$ref").and_then(Value::as_str) {
+            if let Ok(target) = self.resolve_local_ref(reference) {
+                return self.schemas_are_verifiably_disjoint(target, right);
+            }
+            return false;
+        }
+        if let Some(reference) = right_object.get("$ref").and_then(Value::as_str) {
+            if let Ok(target) = self.resolve_local_ref(reference) {
+                return self.schemas_are_verifiably_disjoint(left, target);
+            }
+            return false;
+        }
+
+        if let (Some(left_const), Some(right_const)) = (
+            self.schema_const_value(left),
+            self.schema_const_value(right),
+        ) {
+            return left_const != right_const;
+        }
+
+        if let (Some(left_const), Some(right_enum)) = (
+            self.schema_const_value(left),
+            self.schema_enum_values(right),
+        ) {
+            return !right_enum.iter().any(|value| value == left_const);
+        }
+
+        if let (Some(left_enum), Some(right_const)) = (
+            self.schema_enum_values(left),
+            self.schema_const_value(right),
+        ) {
+            return !left_enum.iter().any(|value| value == right_const);
+        }
+
+        if let (Some(left_enum), Some(right_enum)) = (
+            self.schema_enum_values(left),
+            self.schema_enum_values(right),
+        ) {
+            return left_enum
+                .iter()
+                .all(|left_value| !right_enum.iter().any(|right_value| right_value == left_value));
+        }
+
+        if let Some(any_of) = left_object.get("anyOf").and_then(Value::as_array) {
+            return any_of
+                .iter()
+                .all(|option| self.schemas_are_verifiably_disjoint(option, right));
+        }
+        if let Some(one_of) = left_object.get("oneOf").and_then(Value::as_array) {
+            return one_of
+                .iter()
+                .all(|option| self.schemas_are_verifiably_disjoint(option, right));
+        }
+        if let Some(any_of) = right_object.get("anyOf").and_then(Value::as_array) {
+            return any_of
+                .iter()
+                .all(|option| self.schemas_are_verifiably_disjoint(left, option));
+        }
+        if let Some(one_of) = right_object.get("oneOf").and_then(Value::as_array) {
+            return one_of
+                .iter()
+                .all(|option| self.schemas_are_verifiably_disjoint(left, option));
+        }
+
+        let left_types = self.schema_type_names(left);
+        let right_types = self.schema_type_names(right);
+        if let (Some(left_types), Some(right_types)) = (&left_types, &right_types) {
+            let overlaps = left_types.iter().any(|left_type| {
+                right_types.iter().any(|right_type| {
+                    left_type == right_type
+                        || (*left_type == "integer" && *right_type == "number")
+                        || (*left_type == "number" && *right_type == "integer")
+                })
+            });
+            if !overlaps {
+                return true;
+            }
+        }
+
+        let left_is_object = left_types
+            .as_ref()
+            .map(|types| types.contains("object"))
+            .unwrap_or_else(|| {
+                left_object.contains_key("properties") || left_object.contains_key("required")
+            });
+        let right_is_object = right_types
+            .as_ref()
+            .map(|types| types.contains("object"))
+            .unwrap_or_else(|| {
+                right_object.contains_key("properties") || right_object.contains_key("required")
+            });
+        if left_is_object && right_is_object {
+            let mut keys = BTreeSet::new();
+            if let Some(required) = left_object.get("required").and_then(Value::as_array) {
+                keys.extend(required.iter().filter_map(Value::as_str).map(String::from));
+            }
+            if let Some(required) = right_object.get("required").and_then(Value::as_array) {
+                keys.extend(required.iter().filter_map(Value::as_str).map(String::from));
+            }
+
+            return keys.into_iter().any(|key| {
+                let left_prop = self
+                    .schema_object_property(left, &key)
+                    .unwrap_or(&Value::Bool(true));
+                let right_prop = self
+                    .schema_object_property(right, &key)
+                    .unwrap_or(&Value::Bool(true));
+                self.schemas_are_verifiably_disjoint(left_prop, right_prop)
+            });
+        }
+
+        false
+    }
+
+    fn one_of_options_are_safe_to_coerce(
+        &self,
+        schema: &Map<String, Value>,
+        options: &[Value],
+    ) -> bool {
+        let resolved: Vec<Value> = options
+            .iter()
+            .map(|option| {
+                if has_structural_keywords(schema) {
+                    let base = Self::schema_without_keys(schema, &["anyOf", "oneOf"]);
+                    Value::Object(self.merge_resolved_subschemas(&base, std::slice::from_ref(option)))
+                } else {
+                    Value::Object(self.schema_for_intersection(option))
+                }
+            })
+            .collect();
+
+        resolved.iter().enumerate().all(|(index, left)| {
+            resolved
+                .iter()
+                .skip(index + 1)
+                .all(|right| self.schemas_are_verifiably_disjoint(left, right))
+        })
     }
 
     fn insert_rule(&mut self, name: impl Into<String>, expr: GrammarExpr) -> String {
@@ -5009,43 +5228,30 @@ impl<'a> SchemaCtx<'a> {
             return Ok(None);
         }
 
-        if !Self::exact_closed_object_disabled() {
-            let mode = match keyword {
-                "anyOf" => Some(StructuralBranchMode::AnyOf),
-                "oneOf" => Some(StructuralBranchMode::OneOf),
-                _ => None,
-            };
-            if let Some(mode) = mode {
-                if let Some(expr) = self.try_build_exact_closed_object_union(schema, options, mode)? {
-                    return Ok(Some(expr));
-                }
-            }
-        }
-
-        // NOTE: the exact closed-object union path only intercepts schemas it can
-        // lower with fused per-key transitions. Other anyOf/oneOf schemas fall
-        // through to the generic branch conversion below.
-
-        // Closed-object merge optimization (experimental, disabled by default).
-        // Currently changes the accepted language (introduces false positives).
-        // Enable with GLRMASK_MERGE_ANYOF=1 for experimentation.
-        if std::env::var("GLRMASK_MERGE_ANYOF").map_or(false, |v| v == "1") {
-            if let Some(merged) = self.try_merge_anyof_closed_objects(schema, options)? {
-                return Ok(Some(merged));
-            }
-        }
-
-        // Open-object anyOf dominance reduction can be enabled for experimentation.
-        // Keep it opt-in because recent benchmarks show language discrepancies on
-        // real-world schemas when enabled by default.
-        if keyword == "anyOf"
-            && std::env::var("GLRMASK_ENABLE_ANYOF_OPEN_OBJECT_DOMINANCE")
-                .map_or(false, |v| v == "1")
+        if keyword == "oneOf"
+            && !self.one_of_is_explicitly_coerced()
+            && !self.one_of_options_are_safe_to_coerce(schema, options)
         {
-            if let Some(expr) = self.try_reduce_anyof_open_objects(schema, options)? {
-                return Ok(Some(expr));
-            }
+            return Err(GlrMaskError::GrammarParse(
+                "oneOf constraints are not supported. Enable 'coerce_one_of' option to approximate oneOf with anyOf".to_string(),
+            ));
         }
+
+        if keyword == "oneOf" && self.one_of_is_explicitly_coerced() {
+            // Match llguidance's behavior when oneOf coercion is explicitly enabled:
+            // compile the oneOf as a plain anyOf-style union of branches.
+        }
+
+        if keyword == "anyOf" {
+            // Deliberately keep anyOf lowering rudimentary for now: emit a plain
+            // choice over branch object definitions and accept the extra GLR
+            // ambiguity instead of trying to factor object unions.
+        } else if keyword != "oneOf" {
+            return Ok(None);
+        }
+
+        // Use the generic branch conversion below for both anyOf and the subset
+        // of oneOf cases we are willing to coerce.
 
         let option_exprs = if has_structural_keywords(schema) {
             let base = Self::schema_without_keys(schema, &["anyOf", "oneOf"]);
