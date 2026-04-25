@@ -94,10 +94,6 @@ fn nested_anyof_pattern_object_schema(depth: usize) -> String {
         if depth == 0 {
             return r#"{
                 "type": "object",
-                "anyOf": [
-                    {},
-                    {}
-                ],
                 "additionalProperties": false
             }"#
             .to_string();
@@ -110,8 +106,8 @@ fn nested_anyof_pattern_object_schema(depth: usize) -> String {
                 "properties": {{
                     "children": {{
                         "type": "object",
-                        "patternProperties": {{
-                            "^k$": {child}
+                        "properties": {{
+                            "k": {child}
                         }},
                         "additionalProperties": false
                     }}
