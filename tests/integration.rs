@@ -162,6 +162,57 @@ fn nested_anyof_pattern_object_example(depth: usize) -> String {
     format!(r#"{{"root": {}}}"#, node(depth))
 }
 
+fn nested_anyof_pattern_object_glrm(depth: usize) -> String {
+    let mut lines = vec![
+        "start start;".to_string(),
+        String::new(),
+        "t JSON_INTEGER ::= /-?(0|[1-9][0-9]*)/;".to_string(),
+        "nt obj_ord_0_np_0 ::= \"\\\"\" \"id\\\"\" \": \" JSON_INTEGER;".to_string(),
+        "nt obj_ord_0_np_1 ::= \"\\\"\" \"left\\\"\" \": \" JSON_INTEGER;".to_string(),
+        "nt obj_ord_0_np_2 ::= \"\\\"\" \"right\\\"\" \": \" JSON_INTEGER;".to_string(),
+        "nt obj_ord_0_np_list ::= \", \" ~ ( obj_ord_0_np_0 obj_ord_0_np_1 obj_ord_0_np_2? );".to_string(),
+        "nt obj_ord_0_body ::= obj_ord_0_np_list;".to_string(),
+        "nt obj_ord_0_obj ::= \"{\" obj_ord_0_body \"}\";".to_string(),
+        "nt obj_ord_1_np_list ::= \", \" ~ ( obj_ord_0_np_0 obj_ord_0_np_1? obj_ord_0_np_2 );".to_string(),
+        "nt obj_ord_1_body ::= obj_ord_1_np_list;".to_string(),
+        "nt obj_ord_1_obj ::= \"{\" obj_ord_1_body \"}\";".to_string(),
+    ];
+
+    if depth > 0 {
+        lines.push("t PP_KEY_COLON_0 ::= /k/ \"\\\"\";".to_string());
+        lines.push("nt obj_ord_2_np_1 ::= \"\\\"\" \"tag\\\"\" \": \" JSON_INTEGER;".to_string());
+
+        for level in 1..=depth {
+            let prev_even = if level == 1 { 0 } else { 2 * (level - 1) };
+            let prev_odd = prev_even + 1;
+            let current_even = 2 * level;
+            let current_odd = current_even + 1;
+
+            lines.push(format!(
+                "nt obj_ord_{current_even}_np_2 ::= \"\\\"\" \"children\\\"\" \": \" \"{{\" \", \" ~ ( ((\"\\\"\" PP_KEY_COLON_0 \": \") (obj_ord_{prev_even}_obj | obj_ord_{prev_odd}_obj))* ) \"}}\";"
+            ));
+            lines.push(format!(
+                "nt obj_ord_{current_even}_np_list ::= \", \" ~ ( obj_ord_0_np_0 obj_ord_2_np_1 obj_ord_{current_even}_np_2? );"
+            ));
+            lines.push(format!("nt obj_ord_{current_even}_body ::= obj_ord_{current_even}_np_list;"));
+            lines.push(format!("nt obj_ord_{current_even}_obj ::= \"{{\" obj_ord_{current_even}_body \"}}\";"));
+            lines.push(format!(
+                "nt obj_ord_{current_odd}_np_list ::= \", \" ~ ( obj_ord_0_np_0 obj_ord_2_np_1? obj_ord_{current_even}_np_2 );"
+            ));
+            lines.push(format!("nt obj_ord_{current_odd}_body ::= obj_ord_{current_odd}_np_list;"));
+            lines.push(format!("nt obj_ord_{current_odd}_obj ::= \"{{\" obj_ord_{current_odd}_body \"}}\";"));
+        }
+    }
+
+    let top_even = if depth == 0 { 0 } else { 2 * depth };
+    let top_odd = top_even + 1;
+    lines.push(format!(
+        "nt start ::= \"{{\" (\"\\\"\" \"root\\\"\" \": \" (obj_ord_{top_even}_obj | obj_ord_{top_odd}_obj)) \"}}\";"
+    ));
+
+    lines.join("\n") + "\n"
+}
+
 fn nested_anyof_like_glrm(depth: usize) -> String {
     let mut lines = Vec::new();
     lines.push("start start;".to_string());
@@ -3628,6 +3679,38 @@ fn test_mre_nested_anyof_pattern_object_ambiguity_grows_with_depth() {
         let constraint = Constraint::from_json_schema(&schema, &vocab).unwrap();
         let max_paths = max_parser_paths_for_text(&constraint, &example);
         println!("depth={depth} max_paths={max_paths}\n{glrm}\nexample={example}\n");
+        observations.push((depth, max_paths));
+    }
+
+    for pair in observations.windows(2) {
+        let (d0, p0) = pair[0];
+        let (d1, p1) = pair[1];
+        assert!(
+            p1 > p0,
+            "max parser paths should increase with nesting depth: depth={d0} -> {p0}, depth={d1} -> {p1}"
+        );
+    }
+}
+
+#[test]
+fn test_mre_nested_anyof_pattern_object_direct_glrm_grows_with_depth() {
+    let vocab = make_byte_vocab();
+    let depths = [0usize, 1, 2, 3, 4, 8, 16];
+
+    let mut observations = Vec::new();
+    for depth in depths {
+        let schema = nested_anyof_pattern_object_schema(depth);
+        let dumped_glrm = glrmask::dump_json_schema_grammar_glrm(&schema).unwrap();
+        let direct_glrm = nested_anyof_pattern_object_glrm(depth);
+        assert_eq!(
+            direct_glrm, dumped_glrm,
+            "direct GLRM generator should exactly match dumped schema grammar at depth={depth}"
+        );
+
+        let example = nested_anyof_pattern_object_example(depth);
+        let constraint = Constraint::from_glrm_grammar(&direct_glrm, &vocab).unwrap();
+        let max_paths = max_parser_paths_for_text(&constraint, &example);
+        println!("depth={depth} max_paths={max_paths}\n{direct_glrm}\nexample={example}\n");
         observations.push((depth, max_paths));
     }
 
