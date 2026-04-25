@@ -3291,6 +3291,17 @@ impl<'a> SchemaCtx<'a> {
         name
     }
 
+    fn insert_shared_rule(&mut self, name: impl Into<String>, expr: GrammarExpr) -> String {
+        let key = expr_key(&expr);
+        if let Some(rule_name) = self.expr_dedup_cache.get(&key) {
+            return rule_name.clone();
+        }
+
+        let name = self.insert_rule(name, expr);
+        self.expr_dedup_cache.insert(key, name.clone());
+        name
+    }
+
     fn insert_named_terminal_rule(&mut self, name: impl Into<String>, expr: GrammarExpr) -> GrammarExpr {
         let name = name.into();
         self.insert_rule(name.clone(), expr);
@@ -8708,7 +8719,7 @@ impl<'a> SchemaCtx<'a> {
 
             let wrapped_ap_key = wrap_key_colon_terminal(ap_key_expr);
             let additional_value_expr = self.convert_schema(&schema)?;
-            let kv_rule = self.insert_rule(
+            let kv_rule = self.insert_shared_rule(
                 format!("{base_name}_ap_kv"),
                 sequence_or_single(vec![wrapped_ap_key, additional_value_expr]),
             );
@@ -8718,7 +8729,7 @@ impl<'a> SchemaCtx<'a> {
         let pattern_list_expr = if pp_kv_rules.is_empty() {
             None
         } else {
-            let pp_alt = self.insert_rule(
+            let pp_alt = self.insert_shared_rule(
                 format!("{base_name}_pp_alt"),
                 choice_or_single(pp_kv_rules),
             );
@@ -8748,13 +8759,13 @@ impl<'a> SchemaCtx<'a> {
         }
 
         let pattern_list_rule = pattern_list_expr.map(|expr| {
-            self.insert_rule(format!("{base_name}_pp_list"), expr)
+            self.insert_shared_rule(format!("{base_name}_pp_list"), expr)
         });
         let additional_list_rule = additional_list_expr.map(|expr| {
-            self.insert_rule(format!("{base_name}_ap_list"), expr)
+            self.insert_shared_rule(format!("{base_name}_ap_list"), expr)
         });
         let additional_nonempty_list_rule = ap_kv_rule.clone().map(|pair| {
-            self.insert_rule(
+            self.insert_shared_rule(
                 format!("{base_name}_ap_list_nonempty"),
                 GrammarExpr::SeparatedSequence {
                     items: vec![(GrammarExpr::RepeatOne(Box::new(pair)), true)],
@@ -8766,7 +8777,7 @@ impl<'a> SchemaCtx<'a> {
 
         let mut np_item_rules = Vec::<(String, bool)>::new();
         for (idx, (key, value_expr, is_required)) in ordered.iter().enumerate() {
-            let np_item_rule = self.insert_rule(
+            let np_item_rule = self.insert_shared_rule(
                 format!("{base_name}_np_{idx}"),
                 self.build_merged_literal_key_value_expr(b"", key, value_expr.clone()),
             );
@@ -8775,7 +8786,7 @@ impl<'a> SchemaCtx<'a> {
         let named_props_list_rule = if np_item_rules.is_empty() {
             None
         } else {
-            Some(self.insert_rule(
+            Some(self.insert_shared_rule(
                 format!("{base_name}_np_list"),
                 GrammarExpr::SeparatedSequence {
                     items: np_item_rules
@@ -8836,14 +8847,14 @@ impl<'a> SchemaCtx<'a> {
             }
         };
 
-        let body_rule = self.insert_rule(format!("{base_name}_body"), body_expr);
+        let body_rule = self.insert_shared_rule(format!("{base_name}_body"), body_expr);
         let object_expr = sequence_or_single(vec![
             literal_expr(b"{"),
             GrammarExpr::Ref(body_rule),
             literal_expr(b"}"),
         ]);
 
-        let object_rule = self.insert_rule(format!("{base_name}_obj"), object_expr);
+        let object_rule = self.insert_shared_rule(format!("{base_name}_obj"), object_expr);
         Ok(GrammarExpr::Ref(object_rule))
     }
 
@@ -9156,7 +9167,11 @@ fn collect_grammar_visible_refs(
 }
 
 fn choice_or_single(alts: Vec<GrammarExpr>) -> GrammarExpr {
-    let mut alts = alts;
+    let mut seen = BTreeSet::new();
+    let mut alts: Vec<GrammarExpr> = alts
+        .into_iter()
+        .filter(|expr| seen.insert(expr_key(expr)))
+        .collect();
     if alts.is_empty() {
         empty_expr()
     } else if alts.len() == 1 {
