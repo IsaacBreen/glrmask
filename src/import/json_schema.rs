@@ -8482,7 +8482,6 @@ impl<'a> SchemaCtx<'a> {
             additional_properties_schema,
             property_names,
             allow_empty_named_props_list,
-            false,
         )
     }
 
@@ -8503,7 +8502,6 @@ impl<'a> SchemaCtx<'a> {
             additional_properties_schema,
             property_names,
             true,
-            true,
         )
     }
 
@@ -8516,7 +8514,6 @@ impl<'a> SchemaCtx<'a> {
         additional_properties_schema: Option<Value>,
         property_names: Option<&Value>,
         allow_empty_named_props_list: bool,
-        allow_exact_closed_object_optimization: bool,
     ) -> Result<GrammarExpr, GlrMaskError> {
         let property_names_pattern = property_names
             .map(Self::property_name_pattern)
@@ -8735,16 +8732,6 @@ impl<'a> SchemaCtx<'a> {
             && !has_additional_properties
         {
             return Ok(self.build_closed_required_ordered_object_expr(&ordered));
-        }
-
-        if allow_exact_closed_object_optimization
-            && !ordered.is_empty()
-            && pattern_properties.is_empty()
-            && !has_additional_properties
-        {
-            if let Some(expr) = self.try_build_exact_closed_object(&ordered)? {
-                return Ok(expr);
-            }
         }
 
         let pattern_list_rule = pattern_list_expr.map(|expr| {

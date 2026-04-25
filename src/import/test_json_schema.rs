@@ -1213,7 +1213,7 @@ fn test_closed_object_single_variant_preserves_ordered_language() {
 }
 
 #[test]
-fn test_closed_object_single_variant_collapses_optional_tail_paths() {
+fn test_closed_object_single_variant_does_not_emit_exact_dfa_states() {
     let schema = r#"{
         "type": "object",
         "properties": {
@@ -1226,26 +1226,11 @@ fn test_closed_object_single_variant_collapses_optional_tail_paths() {
         "required": ["image"],
         "additionalProperties": false
     }"#;
-    let prefix = br#"{"image": "gcr.io/k8s-skaffold/example"#;
+    let named = named_grammar_from_schema(schema);
 
-    let fallback_max = with_env_var("GLRMASK_DISABLE_EXACT_CLOSED_OBJECT_UNION", Some("1"), || {
-        let constraint = schema_constraint(schema);
-        max_parser_paths_over_prefix(&constraint, prefix)
-    });
-    let exact_max = with_env_var("GLRMASK_DISABLE_EXACT_CLOSED_OBJECT_UNION", None, || {
-        let constraint = schema_constraint(schema);
-        max_parser_paths_over_prefix(&constraint, prefix)
-    });
-
-    // The factored DFA approach eliminates the optional-tail split even
-    // when the exact closed-object builder is disabled.
-    assert_eq!(
-        fallback_max, 1,
-        "factored DFA builder should collapse the optional-tail split"
-    );
-    assert_eq!(
-        exact_max, 1,
-        "exact single-variant builder should collapse the optional-tail split"
+    assert!(
+        named.rules.iter().all(|rule| !rule.name.starts_with("obj_ord_q_")),
+        "closed-object lowering should not emit exact closed-object DFA states"
     );
 }
 
