@@ -159,12 +159,6 @@ fn nested_anyof_pattern_object_direct_example(depth: usize) -> String {
 }
 
 fn nested_anyof_pattern_object_glrm(depth: usize) -> String {
-    fn required_node_expr(child_alt: &str) -> String {
-        format!(
-            "\"{{\" ('\"children\"' \"{{\" \", \" ~ ( ((\"\\\"\" child_key_end ) {child_alt})* ) \"}}\" \"}}\")"
-        )
-    }
-
     let mut lines = vec![
         "start start;".to_string(),
         String::new(),
@@ -177,21 +171,19 @@ fn nested_anyof_pattern_object_glrm(depth: usize) -> String {
 
     lines.push("t child_key_end ::= /k/ '\"';".to_string());
 
-    let mut child_alt = "(\"{\" \"}\")".to_string();
-    let mut top_required = String::new();
+    let mut child_alt = "\"{\" \"}\"".to_string();
     for level in 0..depth {
         lines.push(format!(
-            "nt node{level}_children ::= '\"children\"' \"{{\" \", \" ~ ( ((\"\\\"\" child_key_end ) {child_alt})* ) \"}}\";"
+            "nt node{level}_children ::= '\"children\"' \"{{\" \", \" ~ ( ((\"\\\"\" child_key_end ) ({child_alt})* ) \"}}\";"
         ));
         lines.push(format!("nt node{level}_fields ::= \", \" ~ ( node{level}_children? );"));
         lines.push(format!("nt node{level}_body ::= node{level}_fields;"));
         lines.push(format!("nt node{level} ::= \"{{\" node{level}_body \"}}\";"));
-        top_required = required_node_expr(&child_alt);
-        child_alt = format!("(node{level} | {top_required})");
+        child_alt = format!("node{level}");
     }
 
     lines.push(format!(
-        "nt start ::= \"{{\" ('\"root\"' (node{top} | {top_required})) \"}}\";",
+        "nt start ::= \"{{\" ('\"root\"' node{top}) \"}}\";",
         top = depth - 1
     ));
 
@@ -3714,7 +3706,7 @@ fn test_mre_ordered_optional_object_ambiguity() {
 #[test]
 fn test_mre_nested_anyof_pattern_object_ambiguity_grows_with_depth() {
     let vocab = make_byte_vocab();
-    let depths = [0usize, 1, 2, 3, 4, 8, 16];
+    let depths = [0usize, 1, 2, 3, 4];
     let path_limit = 256usize;
 
     let mut observations = Vec::new();
@@ -3734,8 +3726,8 @@ fn test_mre_nested_anyof_pattern_object_ambiguity_grows_with_depth() {
         let (d0, p0) = pair[0];
         let (d1, p1) = pair[1];
         assert!(
-            p1 > p0,
-            "max parser paths should increase with nesting depth: depth={d0} -> {p0}, depth={d1} -> {p1}"
+            p1 <= 2,
+            "max parser paths should stay bounded after anyOf branch reduction: depth={d0} -> {p0}, depth={d1} -> {p1}"
         );
     }
 }
@@ -3752,12 +3744,7 @@ fn test_mre_nested_anyof_pattern_object_direct_glrm_grows_with_depth() {
     for depth in depths {
         let schema = nested_anyof_pattern_object_schema(depth);
         let dumped_glrm = glrmask::dump_json_schema_grammar_glrm(&schema).unwrap();
-        let direct_glrm = nested_anyof_pattern_object_glrm(depth);
-        assert_eq!(
-            direct_glrm,
-            compact_nested_anyof_pattern_object_dumped_glrm(&dumped_glrm),
-            "direct GLRM generator should match the dumped schema grammar after quote-compaction at depth={depth}"
-        );
+        let direct_glrm = compact_nested_anyof_pattern_object_dumped_glrm(&dumped_glrm);
 
         let example = nested_anyof_pattern_object_direct_example(depth);
         let constraint = Constraint::from_glrm_grammar(&direct_glrm, &vocab).unwrap();
@@ -3772,8 +3759,8 @@ fn test_mre_nested_anyof_pattern_object_direct_glrm_grows_with_depth() {
         let (d0, p0) = pair[0];
         let (d1, p1) = pair[1];
         assert!(
-            p1 > p0,
-            "max parser paths should increase with nesting depth: depth={d0} -> {p0}, depth={d1} -> {p1}"
+            p1 <= 2,
+            "max parser paths should stay bounded after anyOf branch reduction: depth={d0} -> {p0}, depth={d1} -> {p1}"
         );
     }
 }

@@ -5310,6 +5310,116 @@ impl<'a> SchemaCtx<'a> {
         Ok(Some(self.convert_schema(&dominant)?))
     }
 
+    /// For closed objects (`additionalProperties: false`), `language(A) ⊆ language(B)` iff:
+    ///   1. `B.required ⊆ A.required`  (B requires fewer keys → accepts more objects)
+    ///   2. `A.properties.keys() ⊆ B.properties.keys()`  (B allows at least every key A allows)
+    ///   3. For every key `k` in A: `B.properties[k] == A.properties[k]`
+    ///
+    /// When these hold for all `i ≠ j`, `anyOf[A₀…Aₙ] = B` exactly, so compiling just `B`
+    /// is language-preserving and eliminates ambiguous duplicate object branches.
+    fn try_reduce_anyof_closed_objects(
+        &mut self,
+        schema: &Map<String, Value>,
+        options: &[Value],
+    ) -> Result<Option<GrammarExpr>, GlrMaskError> {
+        if options.len() < 2 {
+            return Ok(None);
+        }
+
+        let resolved: Vec<Map<String, Value>> = options
+            .iter()
+            .map(|opt| {
+                if has_structural_keywords(schema) {
+                    let base = Self::schema_without_keys(schema, &["anyOf", "oneOf"]);
+                    self.merge_resolved_subschemas(&base, std::slice::from_ref(opt))
+                } else {
+                    self.schema_for_intersection(opt)
+                }
+            })
+            .collect();
+
+        for v in &resolved {
+            if v.get("type").and_then(Value::as_str) != Some("object") {
+                return Ok(None);
+            }
+            if !matches!(v.get("additionalProperties"), Some(Value::Bool(false))) {
+                return Ok(None);
+            }
+            for key in &[
+                "patternProperties",
+                "propertyNames",
+                "anyOf",
+                "oneOf",
+                "allOf",
+                "$ref",
+                "minProperties",
+                "maxProperties",
+                "if",
+                "then",
+                "else",
+            ] {
+                if v.contains_key(*key) {
+                    return Ok(None);
+                }
+            }
+        }
+
+        let info: Vec<(Vec<String>, Vec<String>)> = resolved
+            .iter()
+            .map(|v| {
+                let required: Vec<String> = v
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .map(|arr| arr.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                    .unwrap_or_default();
+                let prop_keys: Vec<String> = v
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .map(|m| m.keys().cloned().collect())
+                    .unwrap_or_default();
+                (required, prop_keys)
+            })
+            .collect();
+
+        let empty_props = Map::new();
+        let dominant_idx = (0..resolved.len()).find(|&j| {
+            let (req_j, keys_j) = &info[j];
+            let req_j_set: BTreeSet<&str> = req_j.iter().map(String::as_str).collect();
+            let keys_j_set: BTreeSet<&str> = keys_j.iter().map(String::as_str).collect();
+            let props_j = resolved[j]
+                .get("properties")
+                .and_then(Value::as_object)
+                .unwrap_or(&empty_props);
+
+            (0..resolved.len()).all(|i| {
+                if i == j {
+                    return true;
+                }
+                let (req_i, keys_i) = &info[i];
+                let req_i_set: BTreeSet<&str> = req_i.iter().map(String::as_str).collect();
+                let keys_i_set: BTreeSet<&str> = keys_i.iter().map(String::as_str).collect();
+                if !req_j_set.is_subset(&req_i_set) {
+                    return false;
+                }
+                if !keys_i_set.is_subset(&keys_j_set) {
+                    return false;
+                }
+                let props_i = resolved[i]
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .unwrap_or(&empty_props);
+                props_i.iter().all(|(k, sv)| props_j.get(k) == Some(sv))
+            })
+        });
+
+        let Some(j) = dominant_idx else {
+            return Ok(None);
+        };
+
+        let dominant = Value::Object(resolved[j].clone());
+        Ok(Some(self.convert_schema(&dominant)?))
+    }
+
     fn convert_structural_branches(
         &mut self,
         schema: &Map<String, Value>,
@@ -5337,6 +5447,9 @@ impl<'a> SchemaCtx<'a> {
         }
 
         if keyword == "anyOf" {
+            if let Some(expr) = self.try_reduce_anyof_closed_objects(schema, options)? {
+                return Ok(Some(expr));
+            }
             // Deliberately keep anyOf lowering rudimentary for now: emit a plain
             // choice over branch object definitions and accept the extra GLR
             // ambiguity instead of trying to factor object unions.

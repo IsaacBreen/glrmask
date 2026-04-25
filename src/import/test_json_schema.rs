@@ -1150,6 +1150,47 @@ fn test_closed_object_anyof_preserves_ordered_language() {
 }
 
 #[test]
+fn test_closed_object_anyof_prunes_required_subset_branch() {
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "root": {
+                "type": "object",
+                "properties": {
+                    "children": {
+                        "type": "object",
+                        "patternProperties": {
+                            "^k$": {
+                                "type": "object",
+                                "additionalProperties": false
+                            }
+                        },
+                        "additionalProperties": false
+                    }
+                },
+                "anyOf": [
+                    {},
+                    {"required": ["children"]}
+                ],
+                "additionalProperties": false
+            }
+        },
+        "required": ["root"],
+        "additionalProperties": false
+    }"#;
+
+    let constraint = schema_constraint(schema);
+    let max_paths = max_parser_paths_over_prefix(
+        &constraint,
+        br#"{"root": {"children": {"k": {}}}}"#,
+    );
+    assert!(
+        max_paths <= 2,
+        "anyOf should prune the stricter closed-object branch instead of keeping depth-driven duplicate alternatives; got max_paths={max_paths}"
+    );
+}
+
+#[test]
 fn test_overlapping_oneof_is_rejected_without_explicit_coercion() {
     let _guard = env_lock().lock().expect("env lock should not be poisoned");
     let schema = r#"{
