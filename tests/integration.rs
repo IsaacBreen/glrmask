@@ -3624,9 +3624,10 @@ fn test_mre_nested_anyof_pattern_object_ambiguity_grows_with_depth() {
     for depth in depths {
         let schema = nested_anyof_pattern_object_schema(depth);
         let example = nested_anyof_pattern_object_example(depth);
+        let glrm = glrmask::dump_json_schema_grammar_glrm(&schema).unwrap();
         let constraint = Constraint::from_json_schema(&schema, &vocab).unwrap();
         let max_paths = max_parser_paths_for_text(&constraint, &example);
-        println!("depth={depth} max_paths={max_paths}\n{example}\n");
+        println!("depth={depth} max_paths={max_paths}\n{glrm}\nexample={example}\n");
         observations.push((depth, max_paths));
     }
 
