@@ -362,7 +362,28 @@ pub(crate) fn bound_runtime_reduction_length(
             .get(&rule.lhs)
             .cloned()
             .unwrap_or_else(|| format!("N{}", rule.lhs));
-        let symbols = rule.rhs;
+        let mut symbols = rule.rhs;
+        let mut lhs = rule.lhs;
+
+        if symbols[0] == Symbol::Nonterminal(lhs) {
+            let tail_nt = next_nt;
+            next_nt += 1;
+            grammar.nonterminal_names.insert(tail_nt, format!("{lhs_name}__tail"));
+
+            rewritten.push(Rule {
+                lhs,
+                rhs: vec![Symbol::Nonterminal(lhs), Symbol::Nonterminal(tail_nt)],
+            });
+
+            symbols = symbols[1..].to_vec();
+            lhs = tail_nt;
+
+            if symbols.len() <= max_rhs_len {
+                rewritten.push(Rule { lhs, rhs: symbols });
+                continue;
+            }
+        }
+
         let mut consumed = 1usize;
         let mut stage = 0usize;
 
@@ -401,7 +422,7 @@ pub(crate) fn bound_runtime_reduction_length(
         final_rhs.push(Symbol::Nonterminal(prefix_nt));
         final_rhs.extend(symbols[consumed..].iter().cloned());
         rewritten.push(Rule {
-            lhs: rule.lhs,
+            lhs,
             rhs: final_rhs,
         });
     }
@@ -545,6 +566,83 @@ mod tests {
         Terminal::Literal {
             id,
             bytes: bytes.to_vec(),
+        }
+    }
+
+    #[test]
+    fn test_bound_runtime_reduction_length_preserves_direct_left_recursion() {
+        // A -> A a b c d
+        // With max_rhs_len = 3, this should be split into:
+        // A -> A Tail
+        // Tail -> a b c d  =>  P1 -> a, P2 -> P1 b, Tail -> P2 c d
+        // We want to ensure no indirect cycle like A -> Px -> Py -> A is created.
+        
+        let mut grammar = GrammarDef {
+            rules: vec![Rule {
+                lhs: 100, // A
+                rhs: vec![
+                    Symbol::Nonterminal(100),
+                    Symbol::Terminal(1), // a
+                    Symbol::Terminal(2), // b
+                    Symbol::Terminal(3), // c
+                    Symbol::Terminal(4), // d
+                ],
+            }],
+            start: 100,
+            terminals: vec![
+                literal(1, b"a"),
+                literal(2, b"b"),
+                literal(3, b"c"),
+                literal(4, b"d"),
+            ],
+            nonterminal_names: std::collections::BTreeMap::from([(100, "A".to_string())]),
+            ..Default::default()
+        };
+
+        bound_runtime_reduction_length(&mut grammar, 3);
+
+        // Verify all rules respect the length bound
+        for rule in &grammar.rules {
+            assert!(
+                rule.rhs.len() <= 3,
+                "Rule {} has length {} > 3",
+                grammar.nonterminal_names.get(&rule.lhs).unwrap_or(&rule.lhs.to_string()),
+                rule.rhs.len()
+            );
+        }
+
+        // Verify no indirect left-recursive cycles exist (a simple reachability check from LHS's first symbol)
+        // Find the rule for A
+        let mut a_rules = grammar.rules.iter().filter(|r| r.lhs == 100).peekable();
+        assert!(a_rules.peek().is_some(), "Original LHS 100 (A) must exist");
+
+        for rule in a_rules {
+            if let Symbol::Nonterminal(first_sym) = rule.rhs[0] {
+                // If it starts with itself, it's direct left recursion. That's fine.
+                if first_sym == 100 {
+                    continue;
+                }
+                
+                // Otherwise, check for indirect cycle.
+                let mut visited = std::collections::BTreeSet::new();
+                let mut stack = vec![first_sym];
+                
+                while let Some(nt) = stack.pop() {
+                    if !visited.insert(nt) {
+                        continue;
+                    }
+                    if nt == 100 {
+                        panic!("Indirect left-recursive cycle detected: A -> ... -> {} -> ... -> A", first_sym);
+                    }
+                    for r in &grammar.rules {
+                        if r.lhs == nt {
+                            if let Symbol::Nonterminal(next_first) = r.rhs[0] {
+                                stack.push(next_first);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
