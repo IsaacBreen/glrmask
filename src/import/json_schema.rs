@@ -8478,6 +8478,7 @@ impl<'a> SchemaCtx<'a> {
             && !Self::exact_closed_object_disabled()
             && !ordered.is_empty()
             && ordered.iter().any(|(_, _, required)| !*required)
+            && ordered.iter().any(|(_, _, required)| *required)
             && pattern_properties.is_empty()
             && !has_additional_properties
             && property_names.is_none()
