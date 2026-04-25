@@ -358,17 +358,18 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn lex_string(&mut self) -> Result<Vec<u8>, GlrMaskError> {
+    fn lex_string(&mut self, delim: u8) -> Result<Vec<u8>, GlrMaskError> {
         let mut bytes = Vec::new();
         loop {
             match self.advance() {
-                Some(b'"') => return Ok(bytes),
+                Some(b) if b == delim => return Ok(bytes),
                 Some(b'\\') => match self.advance() {
                     Some(b'n') => bytes.push(b'\n'),
                     Some(b't') => bytes.push(b'\t'),
                     Some(b'r') => bytes.push(b'\r'),
                     Some(b'\\') => bytes.push(b'\\'),
-                    Some(b'"') => bytes.push(b'"'),
+                    Some(b'"') if delim == b'"' => bytes.push(b'"'),
+                    Some(b'\'') if delim == b'\'' => bytes.push(b'\''),
                     Some(b'x') => {
                         let hi = self.advance().ok_or_else(|| err("incomplete hex escape in string"))?;
                         let lo = self.advance().ok_or_else(|| err("incomplete hex escape in string"))?;
@@ -500,8 +501,8 @@ impl<'a> Lexer<'a> {
                             if self.peek() == Some(b'=') { self.pos += 1; }
                             tokens.push(Tok::DeclEq);
                         }
-                        b'"' => {
-                            let bytes = self.lex_string()?;
+                        b'"' | b'\'' => {
+                            let bytes = self.lex_string(b)?;
                             tokens.push(Tok::StringLit(bytes));
                         }
                         b'/' => {
@@ -1195,6 +1196,21 @@ nt start ::= "," ~ ( A B? C );
                 assert!(items[2].1, "C is required");
             }
             other => panic!("expected SeparatedSequence, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_single_quoted_literals() {
+        let src = r#"
+start start;
+
+nt start ::= '"id"' ': ' '0';
+"#;
+        let g = from_glrm(src).expect("single-quoted literals should parse");
+        let start = g.rules.iter().find(|r| r.name == "start").unwrap();
+        match &start.expr {
+            GrammarExpr::Sequence(items) => assert_eq!(items.len(), 3),
+            other => panic!("expected Sequence, got {other:?}"),
         }
     }
 

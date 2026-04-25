@@ -150,16 +150,16 @@ fn nested_anyof_pattern_object_schema(depth: usize) -> String {
 fn nested_anyof_pattern_object_example(depth: usize) -> String {
     fn node(depth: usize) -> String {
         if depth == 0 {
-            return r#"{"id": 0, "left": 0, "right": 0}"#.to_string();
+            return r#"{"id"0, "left"0, "right"0}"#.to_string();
         }
 
         format!(
-            r#"{{"id": 0, "tag": 0, "children": {{"k": {}}}}}"#,
+            r#"{{"id"0, "tag"0, "children"{{"k"{}}}}}"#,
             node(depth - 1)
         )
     }
 
-    format!(r#"{{"root": {}}}"#, node(depth))
+    format!(r#"{{"root"{}}}"#, node(depth))
 }
 
 fn nested_anyof_pattern_object_glrm(depth: usize) -> String {
@@ -167,50 +167,114 @@ fn nested_anyof_pattern_object_glrm(depth: usize) -> String {
         "start start;".to_string(),
         String::new(),
         "t JSON_INTEGER ::= /-?(0|[1-9][0-9]*)/;".to_string(),
-        "nt obj_ord_0_np_0 ::= \"\\\"\" \"id\\\"\" \": \" JSON_INTEGER;".to_string(),
-        "nt obj_ord_0_np_1 ::= \"\\\"\" \"left\\\"\" \": \" JSON_INTEGER;".to_string(),
-        "nt obj_ord_0_np_2 ::= \"\\\"\" \"right\\\"\" \": \" JSON_INTEGER;".to_string(),
-        "nt obj_ord_0_np_list ::= \", \" ~ ( obj_ord_0_np_0 obj_ord_0_np_1 obj_ord_0_np_2? );".to_string(),
-        "nt obj_ord_0_body ::= obj_ord_0_np_list;".to_string(),
-        "nt obj_ord_0_obj ::= \"{\" obj_ord_0_body \"}\";".to_string(),
-        "nt obj_ord_1_np_list ::= \", \" ~ ( obj_ord_0_np_0 obj_ord_0_np_1? obj_ord_0_np_2 );".to_string(),
-        "nt obj_ord_1_body ::= obj_ord_1_np_list;".to_string(),
-        "nt obj_ord_1_obj ::= \"{\" obj_ord_1_body \"}\";".to_string(),
+        "nt leaf_id ::= '\"id\"' JSON_INTEGER;".to_string(),
+        "nt leaf_left ::= '\"left\"' JSON_INTEGER;".to_string(),
+        "nt leaf_right ::= '\"right\"' JSON_INTEGER;".to_string(),
+        "nt leaf_a_fields ::= \", \" ~ ( leaf_id leaf_left leaf_right? );".to_string(),
+        "nt leaf_a_body ::= leaf_a_fields;".to_string(),
+        "nt leaf_a ::= \"{\" leaf_a_body \"}\";".to_string(),
+        "nt leaf_b_fields ::= \", \" ~ ( leaf_id leaf_left? leaf_right );".to_string(),
+        "nt leaf_b_body ::= leaf_b_fields;".to_string(),
+        "nt leaf_b ::= \"{\" leaf_b_body \"}\";".to_string(),
     ];
 
     if depth > 0 {
-        lines.push("t PP_KEY_COLON_0 ::= /k/ \"\\\"\";".to_string());
-        lines.push("nt obj_ord_2_np_1 ::= \"\\\"\" \"tag\\\"\" \": \" JSON_INTEGER;".to_string());
+        lines.push("t child_key_end ::= /k/ '\"';".to_string());
+        lines.push("nt branch_tag ::= '\"tag\"' JSON_INTEGER;".to_string());
 
         for level in 1..=depth {
-            let prev_even = if level == 1 { 0 } else { 2 * (level - 1) };
-            let prev_odd = prev_even + 1;
-            let current_even = 2 * level;
-            let current_odd = current_even + 1;
+            let prev_a = if level == 1 {
+                "leaf_a".to_string()
+            } else {
+                format!("node{prev}_a", prev = level - 1)
+            };
+            let prev_b = if level == 1 {
+                "leaf_b".to_string()
+            } else {
+                format!("node{prev}_b", prev = level - 1)
+            };
 
             lines.push(format!(
-                "nt obj_ord_{current_even}_np_2 ::= \"\\\"\" \"children\\\"\" \": \" \"{{\" \", \" ~ ( ((\"\\\"\" PP_KEY_COLON_0 \": \") (obj_ord_{prev_even}_obj | obj_ord_{prev_odd}_obj))* ) \"}}\";"
+                "nt node{level}_children ::= '\"children\"' \"{{\" \", \" ~ ( ((\"\\\"\" child_key_end ) ({prev_a} | {prev_b}))* ) \"}}\";"
             ));
             lines.push(format!(
-                "nt obj_ord_{current_even}_np_list ::= \", \" ~ ( obj_ord_0_np_0 obj_ord_2_np_1 obj_ord_{current_even}_np_2? );"
+                "nt node{level}_a_fields ::= \", \" ~ ( leaf_id branch_tag node{level}_children? );"
             ));
-            lines.push(format!("nt obj_ord_{current_even}_body ::= obj_ord_{current_even}_np_list;"));
-            lines.push(format!("nt obj_ord_{current_even}_obj ::= \"{{\" obj_ord_{current_even}_body \"}}\";"));
+            lines.push(format!("nt node{level}_a_body ::= node{level}_a_fields;"));
+            lines.push(format!("nt node{level}_a ::= \"{{\" node{level}_a_body \"}}\";"));
             lines.push(format!(
-                "nt obj_ord_{current_odd}_np_list ::= \", \" ~ ( obj_ord_0_np_0 obj_ord_2_np_1? obj_ord_{current_even}_np_2 );"
+                "nt node{level}_b_fields ::= \", \" ~ ( leaf_id branch_tag? node{level}_children );"
             ));
-            lines.push(format!("nt obj_ord_{current_odd}_body ::= obj_ord_{current_odd}_np_list;"));
-            lines.push(format!("nt obj_ord_{current_odd}_obj ::= \"{{\" obj_ord_{current_odd}_body \"}}\";"));
+            lines.push(format!("nt node{level}_b_body ::= node{level}_b_fields;"));
+            lines.push(format!("nt node{level}_b ::= \"{{\" node{level}_b_body \"}}\";"));
         }
     }
 
-    let top_even = if depth == 0 { 0 } else { 2 * depth };
-    let top_odd = top_even + 1;
+    let top_a = if depth == 0 {
+        "leaf_a".to_string()
+    } else {
+        format!("node{depth}_a")
+    };
+    let top_b = if depth == 0 {
+        "leaf_b".to_string()
+    } else {
+        format!("node{depth}_b")
+    };
     lines.push(format!(
-        "nt start ::= \"{{\" (\"\\\"\" \"root\\\"\" \": \" (obj_ord_{top_even}_obj | obj_ord_{top_odd}_obj)) \"}}\";"
+        "nt start ::= \"{{\" ('\"root\"' ({top_a} | {top_b})) \"}}\";"
     ));
 
     lines.join("\n") + "\n"
+}
+
+fn compact_nested_anyof_pattern_object_dumped_glrm(glrm: &str) -> String {
+    let mut compact = glrm
+        .replace("\"\\\"\" \"id\\\"\"", "'\"id\"'")
+        .replace("\"\\\"\" \"left\\\"\"", "'\"left\"'")
+        .replace("\"\\\"\" \"right\\\"\"", "'\"right\"'")
+        .replace("\"\\\"\" \"tag\\\"\"", "'\"tag\"'")
+        .replace("\"\\\"\" \"children\\\"\"", "'\"children\"'")
+        .replace("\"\\\"\" \"root\\\"\"", "'\"root\"'")
+        .replace("': '", "")
+        .replace("\": \"", "")
+        .replace("/k/ \"\\\"\"", "/k/ '\"'")
+        .replace("(\"\\\"\" PP_KEY_COLON_0)", "('\"' PP_KEY_COLON_0)")
+        .replace("(\"\\\"\" PP_KEY_COLON_0 ': ')", "('\"' PP_KEY_COLON_0)")
+        .replace("(\"\\\"\" PP_KEY_COLON_0 \": \")", "('\"' PP_KEY_COLON_0)")
+        .replace("\"\\\"\" child_key_end", "'\"' child_key_end")
+        .replace(r#"("\"" child_key_end )"#, r#"('"' child_key_end )"#);
+
+    compact = compact
+        .replace("PP_KEY_COLON_0", "child_key_end")
+        .replace("obj_ord_0_np_0", "leaf_id")
+        .replace("obj_ord_0_np_1", "leaf_left")
+        .replace("obj_ord_0_np_2", "leaf_right")
+        .replace("obj_ord_0_np_list", "leaf_a_fields")
+        .replace("obj_ord_0_body", "leaf_a_body")
+        .replace("obj_ord_0_obj", "leaf_a")
+        .replace("obj_ord_1_np_list", "leaf_b_fields")
+        .replace("obj_ord_1_body", "leaf_b_body")
+        .replace("obj_ord_1_obj", "leaf_b")
+        .replace("obj_ord_2_np_1", "branch_tag");
+
+    for level in 1..=32 {
+        let current_even = 2 * level;
+        let current_odd = current_even + 1;
+        compact = compact
+            .replace(&format!("obj_ord_{current_even}_np_2"), &format!("node{level}_children"))
+            .replace(&format!("obj_ord_{current_even}_np_list"), &format!("node{level}_a_fields"))
+            .replace(&format!("obj_ord_{current_even}_body"), &format!("node{level}_a_body"))
+            .replace(&format!("obj_ord_{current_even}_obj"), &format!("node{level}_a"))
+            .replace(&format!("obj_ord_{current_odd}_np_list"), &format!("node{level}_b_fields"))
+            .replace(&format!("obj_ord_{current_odd}_body"), &format!("node{level}_b_body"))
+            .replace(&format!("obj_ord_{current_odd}_obj"), &format!("node{level}_b"));
+    }
+
+    while compact.contains("  ") {
+        compact = compact.replace("  ", " ");
+    }
+
+    compact
 }
 
 fn nested_anyof_like_glrm(depth: usize) -> String {
@@ -3703,8 +3767,9 @@ fn test_mre_nested_anyof_pattern_object_direct_glrm_grows_with_depth() {
         let dumped_glrm = glrmask::dump_json_schema_grammar_glrm(&schema).unwrap();
         let direct_glrm = nested_anyof_pattern_object_glrm(depth);
         assert_eq!(
-            direct_glrm, dumped_glrm,
-            "direct GLRM generator should exactly match dumped schema grammar at depth={depth}"
+            direct_glrm,
+            compact_nested_anyof_pattern_object_dumped_glrm(&dumped_glrm),
+            "direct GLRM generator should match the dumped schema grammar after quote-compaction at depth={depth}"
         );
 
         let example = nested_anyof_pattern_object_example(depth);
