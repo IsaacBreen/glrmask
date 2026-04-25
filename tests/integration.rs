@@ -165,45 +165,35 @@ fn nested_anyof_pattern_object_example(depth: usize) -> String {
 fn nested_anyof_like_glrm(depth: usize) -> String {
     let mut lines = Vec::new();
     lines.push("start start;".to_string());
-    lines.push("t J ::= \"0\";".to_string());
-    lines.push("t KQ ::= /k/ \"\\\"\";".to_string());
-    lines.push("nt i ::= \"\\\"\" \"i\\\"\" \": \" J;".to_string());
-    lines.push("nt l ::= \"\\\"\" \"l\\\"\" \": \" J;".to_string());
-    lines.push("nt r ::= \"\\\"\" \"r\\\"\" \": \" J;".to_string());
-    lines.push("nt t ::= \"\\\"\" \"t\\\"\" \": \" J;".to_string());
-    lines.push("nt b0 ::= \", \" ~ (i l r?);".to_string());
-    lines.push("nt o0 ::= \"{\" b0 \"}\";".to_string());
-    lines.push("nt b1 ::= \", \" ~ (i l? r);".to_string());
-    lines.push("nt o1 ::= \"{\" b1 \"}\";".to_string());
+    lines.push("nt o0 ::= \"i\" \"l\" \"r\"?;".to_string());
+    lines.push("nt o1 ::= \"i\" \"l\"? \"r\";".to_string());
 
     for level in 1..=depth {
         let prev_a = if level == 1 { "o0".to_string() } else { format!("o{level_prev}a", level_prev = level - 1) };
         let prev_b = if level == 1 { "o1".to_string() } else { format!("o{level_prev}b", level_prev = level - 1) };
         lines.push(format!(
-            "nt u{level} ::= \"\\\"\" \"u\\\"\" \": \" \"{{\" \", \" ~ (((\"\\\"\" KQ \": \" ) ({prev_a} | {prev_b}))* ) \"}}\";"
+            "nt u{level} ::= \"u\" ((\"k\" ({prev_a} | {prev_b}))*);"
         ));
-        lines.push(format!("nt b{level}a ::= \", \" ~ (i t u{level}?);"));
-        lines.push(format!("nt o{level}a ::= \"{{\" b{level}a \"}}\";"));
-        lines.push(format!("nt b{level}b ::= \", \" ~ (i t? u{level});"));
-        lines.push(format!("nt o{level}b ::= \"{{\" b{level}b \"}}\";"));
+        lines.push(format!("nt o{level}a ::= \"i\" \"t\" u{level}?;"));
+        lines.push(format!("nt o{level}b ::= \"i\" \"t\"? u{level};"));
     }
 
     let top_a = if depth == 0 { "o0".to_string() } else { format!("o{depth}a") };
     let top_b = if depth == 0 { "o1".to_string() } else { format!("o{depth}b") };
-    lines.push(format!("nt start ::= \"{{\" (\"\\\"\" \"r\\\"\" \": \" ({top_a} | {top_b})) \"}}\";"));
+    lines.push(format!("nt start ::= \"s\" ({top_a} | {top_b});"));
     lines.join("\n") + "\n"
 }
 
 fn nested_anyof_like_glrm_example(depth: usize) -> String {
     fn node(depth: usize) -> String {
         if depth == 0 {
-            return r#"{"i": 0, "l": 0, "r": 0}"#.to_string();
+            return "ilr".to_string();
         }
 
-        format!(r#"{{"i": 0, "t": 0, "u": {{"k": {}}}}}"#, node(depth - 1))
+        format!("ituk{}", node(depth - 1))
     }
 
-    format!(r#"{{"r": {}}}"#, node(depth))
+    format!("s{}", node(depth))
 }
 
 fn schema_like_ambiguous_ebnf_with_n_branches(n: usize) -> String {
@@ -3652,8 +3642,9 @@ fn test_mre_nested_anyof_pattern_object_ambiguity_grows_with_depth() {
 
 /// Compact grammar-only analogue of `nested_anyof_pattern_object_schema`.
 ///
-/// This keeps the same recursive object-vs-child-map shape and uses nesting
-/// depth as the blow-up dimension, but shortens field names and terminals.
+/// This keeps the same recursive object-vs-child-map shape while stripping the
+/// JSON punctuation down to bare tokens. The simplified analogue starts
+/// blowing up from depth 2 onward.
 #[test]
 fn test_mre_nested_brace_ambiguity_appears_in_grammar_only_form() {
     let vocab = byte_vocab();
@@ -3669,7 +3660,10 @@ fn test_mre_nested_brace_ambiguity_appears_in_grammar_only_form() {
         observations.push((depth, max_paths));
     }
 
-    for pair in observations.windows(2) {
+    assert_eq!(observations[0], (0, 1));
+    assert_eq!(observations[1], (1, 1));
+
+    for pair in observations[1..].windows(2) {
         let (d0, p0) = pair[0];
         let (d1, p1) = pair[1];
         assert!(
