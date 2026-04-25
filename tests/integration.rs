@@ -162,6 +162,50 @@ fn nested_anyof_pattern_object_example(depth: usize) -> String {
     format!(r#"{{"root": {}}}"#, node(depth))
 }
 
+fn nested_anyof_like_glrm(depth: usize) -> String {
+    let mut lines = Vec::new();
+    lines.push("start start;".to_string());
+    lines.push("t J ::= \"0\";".to_string());
+    lines.push("t KQ ::= /k/ \"\\\"\";".to_string());
+    lines.push("nt i ::= \"\\\"\" \"i\\\"\" \": \" J;".to_string());
+    lines.push("nt l ::= \"\\\"\" \"l\\\"\" \": \" J;".to_string());
+    lines.push("nt r ::= \"\\\"\" \"r\\\"\" \": \" J;".to_string());
+    lines.push("nt t ::= \"\\\"\" \"t\\\"\" \": \" J;".to_string());
+    lines.push("nt b0 ::= \", \" ~ (i l r?);".to_string());
+    lines.push("nt o0 ::= \"{\" b0 \"}\";".to_string());
+    lines.push("nt b1 ::= \", \" ~ (i l? r);".to_string());
+    lines.push("nt o1 ::= \"{\" b1 \"}\";".to_string());
+
+    for level in 1..=depth {
+        let prev_a = if level == 1 { "o0".to_string() } else { format!("o{level_prev}a", level_prev = level - 1) };
+        let prev_b = if level == 1 { "o1".to_string() } else { format!("o{level_prev}b", level_prev = level - 1) };
+        lines.push(format!(
+            "nt u{level} ::= \"\\\"\" \"u\\\"\" \": \" \"{{\" \", \" ~ (((\"\\\"\" KQ \": \" ) ({prev_a} | {prev_b}))* ) \"}}\";"
+        ));
+        lines.push(format!("nt b{level}a ::= \", \" ~ (i t u{level}?);"));
+        lines.push(format!("nt o{level}a ::= \"{{\" b{level}a \"}}\";"));
+        lines.push(format!("nt b{level}b ::= \", \" ~ (i t? u{level});"));
+        lines.push(format!("nt o{level}b ::= \"{{\" b{level}b \"}}\";"));
+    }
+
+    let top_a = if depth == 0 { "o0".to_string() } else { format!("o{depth}a") };
+    let top_b = if depth == 0 { "o1".to_string() } else { format!("o{depth}b") };
+    lines.push(format!("nt start ::= \"{{\" (\"\\\"\" \"r\\\"\" \": \" ({top_a} | {top_b})) \"}}\";"));
+    lines.join("\n") + "\n"
+}
+
+fn nested_anyof_like_glrm_example(depth: usize) -> String {
+    fn node(depth: usize) -> String {
+        if depth == 0 {
+            return r#"{"i": 0, "l": 0, "r": 0}"#.to_string();
+        }
+
+        format!(r#"{{"i": 0, "t": 0, "u": {{"k": {}}}}}"#, node(depth - 1))
+    }
+
+    format!(r#"{{"r": {}}}"#, node(depth))
+}
+
 fn schema_like_ambiguous_ebnf_with_n_branches(n: usize) -> String {
     assert!(n > 0, "n must be > 0");
     // Supports up to N=32 in the current test set with unique single-char keys.
@@ -3602,6 +3646,35 @@ fn test_mre_nested_anyof_pattern_object_ambiguity_grows_with_depth() {
         assert!(
             p1 > p0,
             "max parser paths should increase with nesting depth: depth={d0} -> {p0}, depth={d1} -> {p1}"
+        );
+    }
+}
+
+/// Compact grammar-only analogue of `nested_anyof_pattern_object_schema`.
+///
+/// This keeps the same recursive object-vs-child-map shape and uses nesting
+/// depth as the blow-up dimension, but shortens field names and terminals.
+#[test]
+fn test_mre_nested_brace_ambiguity_appears_in_grammar_only_form() {
+    let vocab = byte_vocab();
+    let depths = [0usize, 1, 2, 3, 4, 8, 16];
+
+    let mut observations = Vec::new();
+    for depth in depths {
+        let grammar = nested_anyof_like_glrm(depth);
+        let example = nested_anyof_like_glrm_example(depth);
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+        let max_paths = max_parser_paths_for_text(&constraint, &example);
+        println!("depth={depth} max_paths={max_paths}\n{grammar}\nexample={example}\n");
+        observations.push((depth, max_paths));
+    }
+
+    for pair in observations.windows(2) {
+        let (d0, p0) = pair[0];
+        let (d1, p1) = pair[1];
+        assert!(
+            p1 > p0,
+            "max parser paths should increase with depth: depth={d0} -> {p0}, depth={d1} -> {p1}"
         );
     }
 }
