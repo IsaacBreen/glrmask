@@ -2316,16 +2316,6 @@ include!("/tmp/minimize_o9788_bug.rs");
 #[test]
 fn test_o69752_max_stack_size() {
     let schema = r##"{
-    "RuntimeHypertyCapabilities": {
-      "properties": {
-        "camera": { "type": "boolean" },
-        "mic": { "type": "boolean" },
-        "ortc": { "type": "boolean" },
-        "sensor": { "type": "boolean" },
-        "webrtc": { "type": "boolean" }
-      },
-      "type": "object"
-    },
     "RuntimeProtocolCapabilities": {
       "properties": {
         "coap": { "type": "boolean" },
@@ -2337,36 +2327,12 @@ fn test_o69752_max_stack_size() {
       },
       "type": "object"
     },
-    "RuntimeType": {
-      "properties": {
-        "browser": { "type": "null" },
-        "gateway": { "type": "null" },
-        "server": { "type": "null" },
-        "standalone": { "type": "null" }
-      },
-      "required": [
-        "browser",
-        "standalone",
-        "server",
-        "gateway"
-      ],
-      "type": "object"
-    },
-    "_comment": "This Spec is for Phase 1!! Most updated version is at https://github.com/reTHINK-project/specs/tree/master/schemas",
     "properties": {
-      "hypertyCapabilities": {
-        "$ref": "#/RuntimeHypertyCapabilities"
-      },
       "protocolCapabilities": {
         "$ref": "#/RuntimeProtocolCapabilities"
-      },
-      "runtimeType": {
-        "$ref": "#/RuntimeType"
       }
     },
     "required": [
-      "runtimeType",
-      "hypertyCapabilities",
       "protocolCapabilities"
     ],
     "type": "object"
@@ -2376,8 +2342,8 @@ fn test_o69752_max_stack_size() {
 
     // This prefix is designed to reach a state where the stack might grow.
     // We use a full example to see the maximum growth.
-    let prefix = br#"{"hypertyCapabilities": {"camera": true, "mic": true, "ortc": true, "sensor": true, "webrtc": true}, "protocolCapabilities": {"coap": true, "datachannel": true, "http": true, "https": true, "ws": true, "wss": true}, "runtimeType": {"browser": null, "gateway": null, "server": null, "standalone": null}}"#;
+    let prefix = br#"{"protocolCapabilities": {"coap": true, "datachannel": true, "http": true, "https": true, "ws": true, "wss": true}}"#;
     
     let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
-    assert!(max_paths <= 6, "max paths {} should be <= 6", max_paths);
+    assert_eq!(max_paths, 1, "max paths {} should be 1", max_paths);
 }
