@@ -239,7 +239,9 @@ fn build_state_summaries(
                                 "[glrmask/profile][parser_dwa_bundle_determinize] ",
                                 "bundle={:>4} det_pop_state_ms={:>7.1} det_alive_ms={:>7.1} det_effective_ms={:>7.1} ",
                                 "det_final_ms={:>7.1} det_labels_ms={:>7.1} det_next_ms={:>7.1} det_edge_weight_ms={:>7.1} det_lookup_ms={:>7.1} det_add_transition_ms={:>7.1} ",
-                                "det_states={:>5} det_labels={:>6} det_transitions={:>6} det_worklist_peak={:>5} det_cache_entries={:>5}"
+                                "det_states={:>5} det_labels={:>6} det_transitions={:>6} det_worklist_peak={:>5} det_cache_entries={:>5} ",
+                                "edge_subset_total={:>6} edge_subset_max={:>4} edge_cache_hits={:>5} edge_cache_hit_subset_total={:>6} ",
+                                "edge_cache_misses={:>5} edge_cache_miss_subset_total={:>6}"
                             ),
                             bundle_id,
                             bundle_profile.determinize_pop_state_ms,
@@ -256,6 +258,12 @@ fn build_state_summaries(
                             bundle_profile.determinize_transitions_added,
                             bundle_profile.determinize_worklist_peak,
                             bundle_profile.determinize_cache_entries,
+                            bundle_profile.determinize_edge_subset_total,
+                            bundle_profile.determinize_edge_subset_max,
+                            bundle_profile.determinize_edge_cache_hits,
+                            bundle_profile.determinize_edge_cache_hit_subset_total,
+                            bundle_profile.determinize_edge_cache_misses,
+                            bundle_profile.determinize_edge_cache_miss_subset_total,
                         );
                     }
                 }

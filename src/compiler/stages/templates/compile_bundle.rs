@@ -16,6 +16,9 @@ use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::templates::compile_dfa::Templates;
 use crate::ds::weight::Weight;
 
+type SubsetKey = SmallVec<[u64; 4]>;
+const SUBSET_BLOCK_BITS: usize = 8;
+
 fn parser_dwa_bundle_determinize_profile_enabled() -> bool {
     std::env::var_os("GLRMASK_PROFILE_PARSER_DWA_BUNDLE_DETERMINIZE").is_some()
 }
@@ -46,24 +49,76 @@ fn instantiate_weighted_nwa_from_skeleton(skeleton: &NWA, weight: &Weight) -> NW
     bundle
 }
 
-fn compute_effective_group_weights(alive_groups: &[usize], normalized_weights: &[Weight]) -> Vec<Weight> {
-    let alive_union = Weight::union_all(alive_groups.iter().map(|&index| &normalized_weights[index]));
-    let complement_alive = alive_union.complement();
-    let mut is_alive = vec![false; normalized_weights.len()];
-    for &index in alive_groups {
-        is_alive[index] = true;
+fn clear_subset_key(key: &mut SubsetKey) {
+    for word in key.iter_mut() {
+        *word = 0;
     }
-    normalized_weights
-        .iter()
-        .enumerate()
-        .map(|(index, weight)| {
-            if is_alive[index] {
-                weight.union(&complement_alive)
-            } else {
-                Weight::empty()
+}
+
+fn set_subset_key_bit(key: &mut SubsetKey, index: usize) {
+    let word_index = index / 64;
+    let bit_index = index % 64;
+    key[word_index] |= 1u64 << bit_index;
+}
+
+fn cached_subset_union(
+    cache: &mut FxHashMap<SubsetKey, Weight>,
+    subset_key: &SubsetKey,
+    subset: &[usize],
+    group_weights: &[Weight],
+    block_unions: Option<&[Box<[Weight]>]>,
+) -> Weight {
+    match subset {
+        [] => return Weight::empty(),
+        [index] => return group_weights[*index].clone(),
+        _ => {}
+    }
+
+    if let Some(existing) = cache.get(subset_key) {
+        return existing.clone();
+    }
+
+    let result = if subset.len() >= SUBSET_BLOCK_BITS {
+        if let Some(block_unions) = block_unions {
+            subset_union_from_blocks(subset_key, block_unions)
+        } else {
+            Weight::union_all(subset.iter().map(|&index| &group_weights[index]))
+        }
+    } else {
+        Weight::union_all(subset.iter().map(|&index| &group_weights[index]))
+    };
+    cache.insert(subset_key.clone(), result.clone());
+    result
+}
+
+fn build_subset_block_unions(group_weights: &[Weight]) -> Vec<Box<[Weight]>> {
+    group_weights
+        .chunks(SUBSET_BLOCK_BITS)
+        .map(|chunk| {
+            let table_len = 1usize << chunk.len();
+            let mut unions = vec![Weight::empty(); table_len];
+            for mask in 1..table_len {
+                let bit = mask.trailing_zeros() as usize;
+                let prev = mask & (mask - 1);
+                unions[mask] = unions[prev].union(&chunk[bit]);
             }
+            unions.into_boxed_slice()
         })
         .collect()
+}
+
+fn subset_union_from_blocks(subset_key: &SubsetKey, block_unions: &[Box<[Weight]>]) -> Weight {
+    let mut parts = SmallVec::<[&Weight; 8]>::new();
+    for (block_index, block_table) in block_unions.iter().enumerate() {
+        let bit_offset = block_index * SUBSET_BLOCK_BITS;
+        let word_index = bit_offset / 64;
+        let bit_index = bit_offset % 64;
+        let mask = ((subset_key[word_index] >> bit_index) & 0xff) as usize;
+        if mask != 0 {
+            parts.push(&block_table[mask]);
+        }
+    }
+    Weight::union_all(parts)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -95,6 +150,12 @@ pub(crate) struct BundleBuildProfile {
     pub(crate) determinize_transitions_added: usize,
     pub(crate) determinize_worklist_peak: usize,
     pub(crate) determinize_cache_entries: usize,
+    pub(crate) determinize_edge_subset_total: usize,
+    pub(crate) determinize_edge_subset_max: usize,
+    pub(crate) determinize_edge_cache_hits: usize,
+    pub(crate) determinize_edge_cache_hit_subset_total: usize,
+    pub(crate) determinize_edge_cache_misses: usize,
+    pub(crate) determinize_edge_cache_miss_subset_total: usize,
     pub(crate) minimize_ms: f64,
     pub(crate) dwa_to_nwa_ms: f64,
     pub(crate) result_dwa_states: usize,
@@ -261,6 +322,12 @@ impl Templates {
         profile.determinize_transitions_added = determinize_profile.transitions_added;
         profile.determinize_worklist_peak = determinize_profile.worklist_peak;
         profile.determinize_cache_entries = determinize_profile.cache_entries;
+        profile.determinize_edge_subset_total = determinize_profile.edge_subset_total;
+        profile.determinize_edge_subset_max = determinize_profile.edge_subset_max;
+        profile.determinize_edge_cache_hits = determinize_profile.edge_cache_hits;
+        profile.determinize_edge_cache_hit_subset_total = determinize_profile.edge_cache_hit_subset_total;
+        profile.determinize_edge_cache_misses = determinize_profile.edge_cache_misses;
+        profile.determinize_edge_cache_miss_subset_total = determinize_profile.edge_cache_miss_subset_total;
         profile.result_dwa_states = bundle_dwa.states().len();
         profile.result_dwa_transitions = count_weighted_dwa_transitions(&bundle_dwa);
 
@@ -322,18 +389,13 @@ fn determinize_bundle_groups(groups: &[(&Weight, UnweightedDfa)]) -> DWA {
 
     const DEAD: u32 = u32::MAX;
 
-    let union_all = Weight::union_all(groups.iter().map(|(w, _)| *w));
-    let complement_all = union_all.complement();
-    let normalized_weights: Vec<Weight> = groups
-        .iter()
-        .map(|(w, _)| (*w).union(&complement_all))
-        .collect();
-    let start_effective_weights: Vec<Weight> = groups
+    let group_weights: Vec<Weight> = groups
         .iter()
         .map(|(weight, _)| (*weight).clone())
         .collect();
 
-    let mut alive_cache: FxHashMap<Vec<usize>, Vec<Weight>> = FxHashMap::default();
+    let mut subset_union_cache: FxHashMap<SubsetKey, Weight> = FxHashMap::default();
+    let block_unions = (n >= 32).then(|| build_subset_block_unions(&group_weights));
 
     let start_key: Vec<u32> = groups.iter().map(|(_, dfa)| dfa.start_state).collect();
 
@@ -344,9 +406,13 @@ fn determinize_bundle_groups(groups: &[(&Weight, UnweightedDfa)]) -> DWA {
     state_map.insert(start_key.clone(), 0);
     worklist.push_back(start_key.clone());
 
-    let mut is_start = true;
     let mut all_labels: BTreeSet<i32> = BTreeSet::new();
     let mut next_state: Vec<u32> = vec![DEAD; n];
+    let key_words = n.div_ceil(64);
+    let mut final_groups = SmallVec::<[usize; 8]>::new();
+    let mut final_key = SubsetKey::from_elem(0, key_words);
+    let mut edge_groups = SmallVec::<[usize; 8]>::new();
+    let mut edge_key = SubsetKey::from_elem(0, key_words);
 
     while let Some(product_state) = worklist.pop_front() {
         let dwa_state = state_map[&product_state];
@@ -355,23 +421,21 @@ fn determinize_bundle_groups(groups: &[(&Weight, UnweightedDfa)]) -> DWA {
             .filter(|&i| product_state[i] != DEAD)
             .collect();
 
-        let effective_weights: &Vec<Weight> = if is_start {
-            &start_effective_weights
-        } else {
-            alive_cache
-                .entry(alive_groups.clone())
-                .or_insert_with(|| {
-                    compute_effective_group_weights(&alive_groups, &normalized_weights)
-                })
-        };
-
-        let mut final_inputs = SmallVec::<[&Weight; 8]>::new();
+        final_groups.clear();
+        clear_subset_key(&mut final_key);
         for &i in &alive_groups {
             if groups[i].1.states[product_state[i] as usize].is_accepting {
-                final_inputs.push(&effective_weights[i]);
+                final_groups.push(i);
+                set_subset_key_bit(&mut final_key, i);
             }
         }
-        let final_w = Weight::union_all(final_inputs.iter().copied());
+        let final_w = cached_subset_union(
+            &mut subset_union_cache,
+            &final_key,
+            &final_groups,
+            &group_weights,
+            block_unions.as_deref(),
+        );
         if !final_w.is_empty() {
             dwa.set_final_weight(dwa_state, final_w);
         }
@@ -387,8 +451,10 @@ fn determinize_bundle_groups(groups: &[(&Weight, UnweightedDfa)]) -> DWA {
         }
 
         for &label in &all_labels {
+            edge_groups.clear();
+            clear_subset_key(&mut edge_key);
             for i in 0..n {
-                next_state[i] = if product_state[i] == DEAD {
+                let target = if product_state[i] == DEAD {
                     DEAD
                 } else if let Some(&target) = groups[i]
                     .1
@@ -400,15 +466,20 @@ fn determinize_bundle_groups(groups: &[(&Weight, UnweightedDfa)]) -> DWA {
                 } else {
                     DEAD
                 };
-            }
-
-            let mut edge_inputs = SmallVec::<[&Weight; 8]>::new();
-            for i in 0..n {
-                if next_state[i] != DEAD {
-                    edge_inputs.push(&effective_weights[i]);
+                next_state[i] = target;
+                if target != DEAD {
+                    edge_groups.push(i);
+                    set_subset_key_bit(&mut edge_key, i);
                 }
             }
-            let edge_w = Weight::union_all(edge_inputs.iter().copied());
+
+            let edge_w = cached_subset_union(
+                &mut subset_union_cache,
+                &edge_key,
+                &edge_groups,
+                &group_weights,
+                block_unions.as_deref(),
+            );
             if edge_w.is_empty() {
                 continue;
             }
@@ -425,8 +496,6 @@ fn determinize_bundle_groups(groups: &[(&Weight, UnweightedDfa)]) -> DWA {
 
             dwa.add_transition(dwa_state, label, to_dwa, edge_w);
         }
-
-        is_start = false;
     }
 
     dwa
@@ -448,6 +517,12 @@ struct DeterminizeBundleProfile {
     transitions_added: usize,
     worklist_peak: usize,
     cache_entries: usize,
+    edge_subset_total: usize,
+    edge_subset_max: usize,
+    edge_cache_hits: usize,
+    edge_cache_hit_subset_total: usize,
+    edge_cache_misses: usize,
+    edge_cache_miss_subset_total: usize,
 }
 
 fn determinize_bundle_groups_profiled(
@@ -464,18 +539,13 @@ fn determinize_bundle_groups_profiled(
 
     const DEAD: u32 = u32::MAX;
 
-    let union_all = Weight::union_all(groups.iter().map(|(w, _)| *w));
-    let complement_all = union_all.complement();
-    let normalized_weights: Vec<Weight> = groups
-        .iter()
-        .map(|(w, _)| (*w).union(&complement_all))
-        .collect();
-    let start_effective_weights: Vec<Weight> = groups
+    let group_weights: Vec<Weight> = groups
         .iter()
         .map(|(weight, _)| (*weight).clone())
         .collect();
 
-    let mut alive_cache: FxHashMap<Vec<usize>, Vec<Weight>> = FxHashMap::default();
+    let mut subset_union_cache: FxHashMap<SubsetKey, Weight> = FxHashMap::default();
+    let block_unions = (n >= 32).then(|| build_subset_block_unions(&group_weights));
 
     let start_key: Vec<u32> = groups.iter().map(|(_, dfa)| dfa.start_state).collect();
 
@@ -487,9 +557,13 @@ fn determinize_bundle_groups_profiled(
     worklist.push_back(start_key.clone());
     profile.worklist_peak = worklist.len();
 
-    let mut is_start = true;
     let mut all_labels: BTreeSet<i32> = BTreeSet::new();
     let mut next_state: Vec<u32> = vec![DEAD; n];
+    let key_words = n.div_ceil(64);
+    let mut final_groups = SmallVec::<[usize; 8]>::new();
+    let mut final_key = SubsetKey::from_elem(0, key_words);
+    let mut edge_groups = SmallVec::<[usize; 8]>::new();
+    let mut edge_key = SubsetKey::from_elem(0, key_words);
 
     while let Some(product_state) = worklist.pop_front() {
         profile.states_visited += 1;
@@ -504,25 +578,24 @@ fn determinize_bundle_groups_profiled(
         profile.alive_groups_ms += elapsed_ms(alive_started_at);
 
         let effective_started_at = Instant::now();
-        let effective_weights: &Vec<Weight> = if is_start {
-            &start_effective_weights
-        } else {
-            alive_cache
-                .entry(alive_groups.clone())
-                .or_insert_with(|| {
-                    compute_effective_group_weights(&alive_groups, &normalized_weights)
-                })
-        };
         profile.effective_weights_ms += elapsed_ms(effective_started_at);
 
         let final_started_at = Instant::now();
-        let mut final_inputs = SmallVec::<[&Weight; 8]>::new();
+        final_groups.clear();
+        clear_subset_key(&mut final_key);
         for &i in &alive_groups {
             if groups[i].1.states[product_state[i] as usize].is_accepting {
-                final_inputs.push(&effective_weights[i]);
+                final_groups.push(i);
+                set_subset_key_bit(&mut final_key, i);
             }
         }
-        let final_w = Weight::union_all(final_inputs.iter().copied());
+        let final_w = cached_subset_union(
+            &mut subset_union_cache,
+            &final_key,
+            &final_groups,
+            &group_weights,
+            block_unions.as_deref(),
+        );
         if !final_w.is_empty() {
             dwa.set_final_weight(dwa_state, final_w);
         }
@@ -543,8 +616,10 @@ fn determinize_bundle_groups_profiled(
 
         for &label in &all_labels {
             let next_state_started_at = Instant::now();
+            edge_groups.clear();
+            clear_subset_key(&mut edge_key);
             for i in 0..n {
-                next_state[i] = if product_state[i] == DEAD {
+                let target = if product_state[i] == DEAD {
                     DEAD
                 } else if let Some(&target) = groups[i]
                     .1
@@ -556,17 +631,33 @@ fn determinize_bundle_groups_profiled(
                 } else {
                     DEAD
                 };
+                next_state[i] = target;
+                if target != DEAD {
+                    edge_groups.push(i);
+                    set_subset_key_bit(&mut edge_key, i);
+                }
             }
             profile.next_state_ms += elapsed_ms(next_state_started_at);
 
-            let edge_weight_started_at = Instant::now();
-            let mut edge_inputs = SmallVec::<[&Weight; 8]>::new();
-            for i in 0..n {
-                if next_state[i] != DEAD {
-                    edge_inputs.push(&effective_weights[i]);
-                }
+            let edge_subset_len = edge_groups.len();
+            profile.edge_subset_total += edge_subset_len;
+            profile.edge_subset_max = profile.edge_subset_max.max(edge_subset_len);
+            if subset_union_cache.contains_key(&edge_key) {
+                profile.edge_cache_hits += 1;
+                profile.edge_cache_hit_subset_total += edge_subset_len;
+            } else {
+                profile.edge_cache_misses += 1;
+                profile.edge_cache_miss_subset_total += edge_subset_len;
             }
-            let edge_w = Weight::union_all(edge_inputs.iter().copied());
+
+            let edge_weight_started_at = Instant::now();
+            let edge_w = cached_subset_union(
+                &mut subset_union_cache,
+                &edge_key,
+                &edge_groups,
+                &group_weights,
+                block_unions.as_deref(),
+            );
             if edge_w.is_empty() {
                 profile.edge_weight_ms += elapsed_ms(edge_weight_started_at);
                 continue;
@@ -591,11 +682,9 @@ fn determinize_bundle_groups_profiled(
             profile.add_transition_ms += elapsed_ms(add_transition_started_at);
             profile.transitions_added += 1;
         }
-
-        is_start = false;
     }
 
-    profile.cache_entries = alive_cache.len();
+    profile.cache_entries = subset_union_cache.len();
 
     (dwa, profile)
 }
