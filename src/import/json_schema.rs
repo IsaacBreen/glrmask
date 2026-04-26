@@ -1910,6 +1910,8 @@ fn collect_shared_ap_literal_keys(root: &Value) -> BTreeSet<String> {
     collected
 }
 
+const SHARED_AP_MAX_ALLOW_BACK_KEYS: usize = 32;
+
 fn max_string_length_cap() -> Option<usize> {
     std::env::var("GLRMASK_MAX_STRING_LENGTH_CAP")
         .ok()
@@ -7808,6 +7810,21 @@ impl<'a> SchemaCtx<'a> {
         Ok(GrammarExpr::Ref(rule_name))
     }
 
+    fn use_shared_additional_key_exclusions(
+        &self,
+        excluded_literal_keys: &BTreeSet<String>,
+    ) -> bool {
+        if !shared_ap_key_exclusions_enabled() || ap_key_any_string() {
+            return false;
+        }
+
+        let allowed_back = self
+            .shared_ap_literal_keys
+            .len()
+            .saturating_sub(excluded_literal_keys.len());
+        allowed_back <= SHARED_AP_MAX_ALLOW_BACK_KEYS
+    }
+
     fn build_object_expr(&mut self, schema: &Map<String, Value>) -> Result<GrammarExpr, GlrMaskError> {
         let properties = schema.get("properties").and_then(Value::as_object);
         let required_list = schema
@@ -8114,6 +8131,10 @@ impl<'a> SchemaCtx<'a> {
         let mut repeatable_pair_exprs = optional_pair_exprs;
         if let Some(schema) = additional_properties_schema {
             let extra_value_expr = self.convert_schema(&schema)?;
+            let excluded_literal_keys = ordered
+                .iter()
+                .map(|(key, _, _)| key.clone())
+                .collect::<BTreeSet<_>>();
             if ap_key_any_string() {
                 let full_key_expr = Self::scoped_key_colon_expr(None)?;
                 repeatable_pair_exprs.push(sequence_or_single(vec![
@@ -8123,11 +8144,7 @@ impl<'a> SchemaCtx<'a> {
                     ),
                     extra_value_expr,
                 ]));
-            } else if shared_ap_key_exclusions_enabled() {
-                let excluded_literal_keys = ordered
-                    .iter()
-                    .map(|(key, _, _)| key.clone())
-                    .collect::<BTreeSet<_>>();
+            } else if self.use_shared_additional_key_exclusions(&excluded_literal_keys) {
                 repeatable_pair_exprs.push(sequence_or_single(vec![
                     self.build_shared_additional_key_choice_expr(
                         &excluded_literal_keys,
@@ -8136,10 +8153,6 @@ impl<'a> SchemaCtx<'a> {
                     extra_value_expr,
                 ]));
             } else {
-                let excluded_literal_keys = ordered
-                    .iter()
-                    .map(|(key, _, _)| key.clone())
-                    .collect::<BTreeSet<_>>();
                 let key_expr = Self::scoped_key_colon_expr(None)?;
                 let mut excluded_exprs = Vec::new();
                 if let Some(expr) = Self::literal_key_colon_union_expr(&excluded_literal_keys) {
@@ -8313,6 +8326,9 @@ impl<'a> SchemaCtx<'a> {
 
         let extra_pair = if let Some(schema) = additional_properties_schema {
             let extra_value_expr = self.convert_schema(&schema)?;
+            let mut excluded_literal_keys = BTreeSet::<String>::new();
+            excluded_literal_keys.extend(properties.keys().cloned());
+            excluded_literal_keys.extend(required_list.iter().cloned());
             if ap_key_any_string() {
                 // Skip key exclusion — AP keys accept any JSON string.
                 // Each object still gets its own uniquely-named terminal.
@@ -8324,10 +8340,7 @@ impl<'a> SchemaCtx<'a> {
                     ),
                     extra_value_expr,
                 ]))
-            } else if shared_ap_key_exclusions_enabled() {
-                let mut excluded_literal_keys = BTreeSet::<String>::new();
-                excluded_literal_keys.extend(properties.keys().cloned());
-                excluded_literal_keys.extend(required_list.iter().cloned());
+            } else if self.use_shared_additional_key_exclusions(&excluded_literal_keys) {
                 Some(sequence_or_single(vec![
                     self.build_shared_additional_key_choice_expr(
                         &excluded_literal_keys,
@@ -8336,9 +8349,6 @@ impl<'a> SchemaCtx<'a> {
                     extra_value_expr,
                 ]))
             } else {
-                let mut excluded_literal_keys = BTreeSet::<String>::new();
-                excluded_literal_keys.extend(properties.keys().cloned());
-                excluded_literal_keys.extend(required_list.iter().cloned());
                 let key_expr = Self::scoped_key_colon_expr(None)?;
                 let mut excluded_exprs: Vec<LexerExpr> = Vec::new();
                 if let Some(expr) = Self::literal_key_colon_union_expr(&excluded_literal_keys) {
@@ -8785,7 +8795,7 @@ impl<'a> SchemaCtx<'a> {
         let mut ap_kv_rule = None;
         let has_additional_properties = additional_properties_schema.is_some();
         if let Some(schema) = additional_properties_schema {
-            let ap_key_expr = if shared_ap_key_exclusions_enabled() && !ap_key_any_string() {
+            let ap_key_expr = if self.use_shared_additional_key_exclusions(&fixed_literal_keys) {
                 let shared_choice = self.build_shared_additional_key_body_choice_expr(
                     &fixed_literal_keys,
                     &format!("{base_name}_ap_key"),
