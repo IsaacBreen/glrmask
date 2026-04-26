@@ -1582,6 +1582,11 @@ fn test_minimized_o47674_shape_still_reaches_eighteen_paths() {
     let glrm = crate::dump_json_schema_grammar_glrm(&schema).unwrap();
     println!("Grammar:\n{}", glrm);
 
+    let prefix = br#"{"op":"#;
+    let constraint = schema_constraint(schema);
+    let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
+    assert_eq!(max_paths, 1);
+
     let prefix = br#"{"op": "#;
     let constraint = schema_constraint(schema);
     let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
