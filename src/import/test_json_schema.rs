@@ -1577,6 +1577,16 @@ fn test_minimized_o47674_shape_still_reaches_eighteen_paths() {
             }
         }
     }"#;
+
+
+    let prefix = br#"{"op": {"uuid":"#;
+
+    let constraint = schema_constraint(schema);
+    let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
+
+    assert_eq!(max_paths, 18);
+
+
     let prefix = br#"{"op": {"uuid": "u", "command": [], "results": {"r1": {"uuid": "u", "#;
 
     let constraint = schema_constraint(schema);
