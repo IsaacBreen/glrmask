@@ -1794,7 +1794,14 @@ fn try_inline_action_to_stack_shifts(
         return None;
     }
     if shifts.len() > 1 {
-        if let Some(delay_state) = try_create_delayed_stack_shift_state(table, &shifts, constituent_sets, 0) {
+        if let Some(delay_state) = try_create_delayed_stack_shift_state(
+            table,
+            predecessors,
+            state,
+            &shifts,
+            constituent_sets,
+            0,
+        ) {
             return Some(Action::Shift(delay_state, true));
         }
     }
@@ -1865,6 +1872,8 @@ fn stack_shift_action(shifts: Vec<StackShift>) -> Option<Action> {
 
 fn try_create_delayed_stack_shift_state(
     table: &mut GLRTable,
+    predecessors: &[BTreeSet<u32>],
+    origin_state: u32,
     shifts: &[StackShift],
     constituent_sets: &mut Vec<BTreeSet<u32>>,
     depth: u32,
@@ -1889,13 +1898,24 @@ fn try_create_delayed_stack_shift_state(
             let Some(action) = table.action[top as usize].get(&terminal).cloned() else {
                 continue;
             };
-            composed.extend(compose_stack_shift_with_action(shift, &action)?);
+            composed.extend(stack_shifts_for_action(
+                table,
+                predecessors,
+                origin_state,
+                terminal,
+                top,
+                &action,
+                StackEffectFrame { pop: shift.pop, pushes: shift.pushes.clone() },
+                &mut BTreeSet::new(),
+            )?);
         }
         composed.sort_by(|a, b| (a.pop, &a.pushes).cmp(&(b.pop, &b.pushes)));
         composed.dedup();
         let action = if composed.len() > 1 && composed.iter().all(|shift| shift.pop > 0) {
             if let Some(next_state) = try_create_delayed_stack_shift_state(
                 table,
+                predecessors,
+                origin_state,
                 &composed,
                 constituent_sets,
                 depth + 1,
