@@ -8462,6 +8462,17 @@ impl<'a> SchemaCtx<'a> {
         ]))
     }
 
+    fn supports_literal_properties_any_order_fast_path(expr: &GrammarExpr) -> bool {
+        matches!(
+            expr,
+            GrammarExpr::Ref(rule_name)
+                if matches!(
+                    rule_name.as_str(),
+                    JSON_BOOL_RULE | JSON_INTEGER_RULE | JSON_NUMBER_RULE | JSON_NULL_RULE
+                )
+        ) || matches!(expr, GrammarExpr::Literal(_))
+    }
+
     fn build_array_item_sequence(
         &mut self,
         items: &[(GrammarExpr, bool)],
@@ -8778,6 +8789,9 @@ impl<'a> SchemaCtx<'a> {
             && property_names.is_none()
             && additional_properties_schema.is_some()
             && ordered.iter().all(|(_, _, required)| !*required)
+            && ordered
+                .iter()
+                .all(|(_, value_expr, _)| Self::supports_literal_properties_any_order_fast_path(value_expr))
         {
             return self.build_literal_properties_any_order_object_expr(
                 properties,
