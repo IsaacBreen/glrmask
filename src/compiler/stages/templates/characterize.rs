@@ -105,6 +105,15 @@ fn record_initial_action(
             let pushes = if effective_replace { vec![*shift_state] } else { vec![state, *shift_state] };
             escapes.insert((state, pushes));
         }
+        Action::StackShifts(shifts) => {
+            for shift in shifts {
+                if shift.pop <= 1 {
+                    let mut pushes = if shift.pop == 0 { vec![state] } else { Vec::new() };
+                    pushes.extend_from_slice(&shift.pushes);
+                    escapes.insert((state, pushes));
+                }
+            }
+        }
         Action::Reduce(lhs, len) => {
             let rule_len = if is_forwarded { (*len as usize) + 1 } else { *len as usize };
             reduces.insert((state, rule_len, *lhs));
@@ -148,6 +157,20 @@ fn record_goto_action(
             if !*shift_replace { pushes.push(goto_state); }
             pushes.push(*shift_state);
             nt_escapes.insert((stack_nt, revealed_state, pushes));
+        }
+        Action::StackShifts(shifts) => {
+            for shift in shifts {
+                let mut pushes = Vec::new();
+                if !goto_replace {
+                    pushes.push(revealed_state);
+                }
+                pushes.push(goto_state);
+                if shift.pop as usize <= pushes.len() {
+                    pushes.truncate(pushes.len() - shift.pop as usize);
+                    pushes.extend_from_slice(&shift.pushes);
+                    nt_escapes.insert((stack_nt, revealed_state, pushes));
+                }
+            }
         }
         Action::Reduce(lhs, len) => {
             handle_reduce(
@@ -381,6 +404,18 @@ fn expand_zero_pop_action(
                 }
             }
             escapes.insert((initial_state, pushes));
+        }
+        Action::StackShifts(shifts) => {
+            for shift in shifts {
+                let mut pushes = Vec::new();
+                pushes.push(initial_state);
+                pushes.extend_from_slice(push_stack);
+                if shift.pop as usize <= pushes.len() {
+                    pushes.truncate(pushes.len() - shift.pop as usize);
+                    pushes.extend_from_slice(&shift.pushes);
+                    escapes.insert((initial_state, pushes));
+                }
+            }
         }
         Action::Reduce(nt2, len2) => {
             handle_zero_pop_reduce(

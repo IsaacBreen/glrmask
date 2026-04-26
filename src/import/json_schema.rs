@@ -4410,9 +4410,10 @@ impl<'a> SchemaCtx<'a> {
     }
 
     /// Returns true when the separator-merged left-recursive grammar for
-    /// closed objects with optional keys is enabled.
+    /// closed objects with optional keys is enabled.  Off by default; opt-in
+    /// via `GLRMASK_ENABLE_FACTORED_CLOSED_OBJECT=1`.
     fn factored_closed_object_enabled() -> bool {
-        !env_flag("GLRMASK_DISABLE_FACTORED_CLOSED_OBJECT")
+        env_flag("GLRMASK_ENABLE_FACTORED_CLOSED_OBJECT")
     }
 
     fn collect_ordered_closed_object_schema_variant(
@@ -8932,25 +8933,6 @@ impl<'a> SchemaCtx<'a> {
             return Ok(self.build_closed_required_ordered_object_expr(&ordered));
         }
 
-        if Self::factored_closed_object_enabled()
-            && !ordered.is_empty()
-            && allow_empty_named_props_list
-            && pattern_properties.is_empty()
-            && property_names.is_none()
-            && !has_additional_properties
-        {
-            if let Some(expr) = self.try_build_factored_ordered_object(
-                &ordered,
-                "",
-                "",
-                &[],
-                &[],
-                "",
-            )? {
-                return Ok(expr);
-            }
-        }
-
         let pattern_list_rule = pattern_list_expr.map(|expr| {
             self.insert_shared_rule(format!("{base_name}_pp_list"), expr)
         });
@@ -9645,44 +9627,6 @@ mod tests {
             }
         }"#).unwrap();
         assert!(!g.rules.is_empty());
-    }
-
-    #[test]
-    fn test_mixed_closed_ordered_object_uses_separator_merged_continuations_without_splits() {
-        let schema = r#"{
-            "type": "object",
-            "properties": {
-                "a": {"type": "string"},
-                "b": {"type": "string"},
-                "c": {"type": "string"},
-                "d": {"type": "string"},
-                "e": {"type": "string"},
-                "f": {"type": "string"}
-            },
-            "required": ["a", "b", "f"],
-            "additionalProperties": false
-        }"#;
-
-        let schema_value: Value = serde_json::from_str(schema).unwrap();
-        let named = schema_to_named_grammar(&schema_value).unwrap();
-        assert!(named_grammar_has_rule_with_prefix(&named, "obj_lrec_"));
-        assert!(named_grammar_has_literal(&named, br#", "d": "#));
-        assert!(!named_grammar_has_split_separator(&named, b",", b" "));
-
-        let grammar = json_schema_to_grammar(schema).unwrap();
-        let analyzed = crate::compiler::glr::analysis::AnalyzedGrammar::from_grammar_def(&grammar);
-        let table = crate::compiler::glr::table::GLRTable::build(&analyzed);
-        assert!(
-            table.action.iter().all(|row| {
-                row.values()
-                    .all(|action| !matches!(action, crate::compiler::glr::table::Action::Split { .. }))
-            }),
-            "separator-merged closed object should not create GLR split actions"
-        );
-
-        assert!(accepts_sequence(schema, &[br#"{"a": "x", "b": "y", "f": "z"}"#]));
-        assert!(accepts_sequence(schema, &[br#"{"a": "x", "b": "y", "d": "q", "f": "z"}"#]));
-        assert!(!accepts_sequence(schema, &[br#"{"a": "x", "d": "q", "f": "z"}"#]));
     }
 
     #[test]

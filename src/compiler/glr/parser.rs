@@ -64,6 +64,9 @@ fn advance_stacks_core(table: &GLRTable, mut gss: ParserGSS, token: TerminalID) 
                 gss.push(*target)
             };
         }
+            if let Some(Action::StackShifts(shifts)) = table.action(state, token) {
+                return apply_stack_shifts(gss, shifts);
+            }
     }
 
     if advance_deterministically(table, &mut gss, token) {
@@ -71,6 +74,18 @@ fn advance_stacks_core(table: &GLRTable, mut gss: ParserGSS, token: TerminalID) 
     }
 
     advance_nondeterministically(table, gss, token)
+}
+
+fn apply_stack_shifts(gss: ParserGSS, shifts: &[super::table::StackShift]) -> ParserGSS {
+    let mut out = ParserGSS::empty();
+    for shift in shifts {
+        let mut branch = gss.popn(shift.pop as isize);
+        for &state in &shift.pushes {
+            branch = branch.push(state);
+        }
+        merge_into(&mut out, branch);
+    }
+    out
 }
 
 fn shift_frontier(table: &GLRTable, gss: ParserGSS, token: TerminalID) -> ParserGSS {
@@ -210,6 +225,9 @@ fn advance_deterministically_from_vstack(
                 }
                 return (stack.into_gss(), true);
             }
+            Some(Action::StackShifts(shifts)) => {
+                return (apply_stack_shifts(stack.into_gss(), shifts), true);
+            }
             Some(Action::Split { .. }) | Some(Action::Accept) | None => break,
         }
     }
@@ -335,6 +353,10 @@ fn advance_nondeterministically(
                 } else {
                     shifted = shifted.absorb_push_same_acc(target, &isolated);
                 }
+            }
+
+            if let Action::StackShifts(shifts) = action {
+                merge_into(&mut shifted, apply_stack_shifts(isolated.clone(), shifts));
             }
 
             action.for_each_reduce(|nt, len| {
@@ -483,6 +505,10 @@ fn advance_deterministically(
                 }
                 return true;
             }
+            Some(Action::StackShifts(shifts)) => {
+                *gss = apply_stack_shifts(stack.into_gss(), shifts);
+                return true;
+            }
             Some(Action::Split { .. }) => {
                 break;
             }
@@ -619,6 +645,13 @@ pub(crate) fn advance_stacks_profiled(
             } else {
                 gss.push(*target)
             };
+            profile.total_ns = t_total.elapsed().as_nanos() as u64;
+            return (result, profile);
+        }
+        if let Some(Action::StackShifts(shifts)) = table.action(state, token) {
+            profile.pure_shift = true;
+            profile.fast_path_ns = t_fast_path.elapsed().as_nanos() as u64;
+            let result = apply_stack_shifts(gss, shifts);
             profile.total_ns = t_total.elapsed().as_nanos() as u64;
             return (result, profile);
         }
@@ -801,6 +834,11 @@ fn advance_deterministically_profiled(
                 profile.det_exit_reason = 1; // shift (finished)
                 return true;
             }
+            Some(Action::StackShifts(shifts)) => {
+                *gss = apply_stack_shifts(stack.into_gss(), shifts);
+                profile.det_exit_reason = 1; // stack shift (finished)
+                return true;
+            }
             Some(Action::Split { .. }) => {
                 profile.det_exit_reason = 2; // split
                 profile.det_exit_state = state;
@@ -878,6 +916,13 @@ fn advance_nondeterministically_profiled(
                 profile.nondet_push_ns += t_push.elapsed().as_nanos() as u64;
                 let t_merge = Instant::now();
                 shifted = shifted.absorb_push_same_acc(target, &shift_base);
+                profile.nondet_merge_ns += t_merge.elapsed().as_nanos() as u64;
+            }
+
+            if let Action::StackShifts(shifts) = action {
+                profile.n_nondet_merges += 1;
+                let t_merge = Instant::now();
+                merge_into(&mut shifted, apply_stack_shifts(isolated.clone(), shifts));
                 profile.nondet_merge_ns += t_merge.elapsed().as_nanos() as u64;
             }
 
@@ -1044,6 +1089,9 @@ fn reduce_closure_for_lookahead(
         let Some(action) = table.action(state, lookahead) else {
             continue;
         };
+        if let Action::StackShifts(_) = action {
+            continue;
+        }
         action.for_each_reduce(|nt, len| {
             let rhs_len = len as usize;
             if stack.len() < rhs_len + 1 {
@@ -1095,6 +1143,17 @@ fn advance_stack_vectors(
             }
             shifted.push(target);
             next.push(shifted);
+        }
+        if let Some(Action::StackShifts(shifts)) = table.action(state, token) {
+            for shift in shifts {
+                let mut shifted = stack.clone();
+                if shifted.len() < shift.pop as usize {
+                    continue;
+                }
+                shifted.truncate(shifted.len() - shift.pop as usize);
+                shifted.extend_from_slice(&shift.pushes);
+                next.push(shifted);
+            }
         }
     }
     dedup_stacks(next)
@@ -2553,6 +2612,11 @@ a ::= 'f'"#,
                         Action::Shift(_, false) => {
                             panic!(
                                 "State {state_id}: non-replace shift on terminal {terminal}"
+                            );
+                        }
+                        Action::StackShifts(_) => {
+                            panic!(
+                                "State {state_id}: StackShifts on terminal {terminal} — expected plain replace shifts"
                             );
                         }
                         Action::Reduce(nt, len) => {

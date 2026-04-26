@@ -302,8 +302,15 @@ fn local_forward_replace_enabled() -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct StackShift {
+    pub pop: u32,
+    pub pushes: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Action {
     Shift(u32, bool),
+    StackShifts(Vec<StackShift>),
     Reduce(NonterminalID, u32),
     Split {
         shift: Option<(u32, bool)>,
@@ -320,6 +327,9 @@ impl Action {
         match self {
             Action::Shift(t, _) => Some(*t),
             Action::Split { shift: Some((t, _)), .. } => Some(*t),
+            Action::StackShifts(shifts) if shifts.len() == 1 && shifts[0].pushes.len() == 1 => {
+                Some(shifts[0].pushes[0])
+            }
             _ => None,
         }
     }
@@ -330,7 +340,28 @@ impl Action {
         match self {
             Action::Shift(_, r) => *r,
             Action::Split { shift: Some((_, r)), .. } => *r,
+            Action::StackShifts(shifts) if shifts.len() == 1 => shifts[0].pop == 1,
             _ => false,
+        }
+    }
+
+    #[inline]
+    pub fn for_each_stack_shift(&self, mut f: impl FnMut(u32, &[u32])) {
+        match self {
+            Action::Shift(target, false) => f(0, std::slice::from_ref(target)),
+            Action::Shift(target, true) => f(1, std::slice::from_ref(target)),
+            Action::StackShifts(shifts) => {
+                for shift in shifts {
+                    f(shift.pop, &shift.pushes);
+                }
+            }
+            Action::Split { shift: Some((target, false)), .. } => {
+                f(0, std::slice::from_ref(target));
+            }
+            Action::Split { shift: Some((target, true)), .. } => {
+                f(1, std::slice::from_ref(target));
+            }
+            _ => {}
         }
     }
 
@@ -557,7 +588,7 @@ impl GLRTable {
                 &mut failed_subsets,
             );
 
-            let predecessors = build_state_predecessors(self, original_num_states, &constituent_sets);
+            let predecessors = build_runtime_state_predecessors(self, original_num_states, &constituent_sets);
             let nstates = original_num_states as usize;
             let mut changed = false;
 
@@ -675,6 +706,7 @@ impl GLRTable {
                                     let canon = nt_remap.get(&nt).copied().unwrap_or(*nt);
                                     Action::Reduce(canon, *len)
                                 }
+                                Action::StackShifts(shifts) => Action::StackShifts(shifts.clone()),
                                 Action::Split { shift, reduces, accept } => {
                                     let reduces = reduces
                                         .into_iter()
@@ -1130,6 +1162,65 @@ fn build_state_predecessors(
     predecessors
 }
 
+fn build_runtime_state_predecessors(
+    table: &GLRTable,
+    original_num_states: u32,
+    constituent_sets: &[BTreeSet<u32>],
+) -> Vec<BTreeSet<u32>> {
+    let mut predecessors = vec![BTreeSet::new(); table.num_states as usize];
+
+    for src in 0..table.num_states as usize {
+        for action in table.action[src].values() {
+            match action {
+                Action::Shift(dst, false) => {
+                    predecessors[*dst as usize].extend(constituent_sets[src].iter().copied());
+                }
+                Action::Split { shift: Some((dst, false)), .. } => {
+                    predecessors[*dst as usize].extend(constituent_sets[src].iter().copied());
+                }
+                _ => {}
+            }
+        }
+        for &(dst, replace) in table.goto[src].values() {
+            if !replace {
+                predecessors[dst as usize].extend(constituent_sets[src].iter().copied());
+            }
+        }
+    }
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for src in 0..original_num_states as usize {
+            let src_preds = predecessors[src].clone();
+            for action in table.action[src].values() {
+                match action {
+                    Action::Shift(dst, true) => {
+                        let before = predecessors[*dst as usize].len();
+                        predecessors[*dst as usize].extend(src_preds.iter().copied());
+                        changed |= predecessors[*dst as usize].len() != before;
+                    }
+                    Action::Split { shift: Some((dst, true)), .. } => {
+                        let before = predecessors[*dst as usize].len();
+                        predecessors[*dst as usize].extend(src_preds.iter().copied());
+                        changed |= predecessors[*dst as usize].len() != before;
+                    }
+                    _ => {}
+                }
+            }
+            for &(dst, replace) in table.goto[src].values() {
+                if replace {
+                    let before = predecessors[dst as usize].len();
+                    predecessors[dst as usize].extend(src_preds.iter().copied());
+                    changed |= predecessors[dst as usize].len() != before;
+                }
+            }
+        }
+    }
+
+    predecessors
+}
+
 fn subset_key(subset: &BTreeSet<u32>) -> Vec<u32> {
     subset.iter().copied().collect()
 }
@@ -1198,6 +1289,7 @@ fn merge_action_into_pending(
             subset_to_state,
             failed_subsets,
         ),
+        Action::StackShifts(_) => Err(()),
         Action::Reduce(nt, len) => {
             pending.push_reduce(*nt, *len);
             Ok(())
@@ -1456,6 +1548,263 @@ fn unit_reduce_destination(
     reduce_dst
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct StackEffectFrame {
+    pop: u32,
+    pushes: Vec<u32>,
+}
+
+enum ReduceFrameResult {
+    Dead,
+    Frame(StackEffectFrame),
+}
+
+fn states_at_depth(
+    predecessors: &[BTreeSet<u32>],
+    origin_state: u32,
+    depth: u32,
+) -> Option<BTreeSet<u32>> {
+    let mut states = BTreeSet::from([origin_state]);
+    for _ in 0..depth {
+        let mut next = BTreeSet::new();
+        for state in states {
+            next.extend(predecessors.get(state as usize)?.iter().copied());
+        }
+        if next.is_empty() {
+            return None;
+        }
+        states = next;
+    }
+    Some(states)
+}
+
+fn apply_reduce_to_frame(
+    table: &GLRTable,
+    predecessors: &[BTreeSet<u32>],
+    origin_state: u32,
+    mut frame: StackEffectFrame,
+    nt: NonterminalID,
+    len: u32,
+) -> Option<ReduceFrameResult> {
+    if len as usize <= frame.pushes.len() {
+        let keep = frame.pushes.len() - len as usize;
+        frame.pushes.truncate(keep);
+    } else {
+        frame.pop += len - frame.pushes.len() as u32;
+        frame.pushes.clear();
+    }
+
+    let goto_froms = if let Some(&state) = frame.pushes.last() {
+        BTreeSet::from([state])
+    } else {
+        states_at_depth(predecessors, origin_state, frame.pop)?
+    };
+
+    let mut goto: Option<(u32, bool)> = None;
+    let mut missing = 0usize;
+    for goto_from in goto_froms {
+        let Some(next) = table.goto[goto_from as usize].get(&nt).copied() else {
+            missing += 1;
+            continue;
+        };
+        match goto {
+            None => goto = Some(next),
+            Some(existing) if existing == next => {}
+            Some(_) => return None,
+        }
+    }
+
+    if missing > 0 {
+        return if goto.is_none() { Some(ReduceFrameResult::Dead) } else { None };
+    }
+
+    let (target, replace) = goto?;
+    if replace {
+        if let Some(top) = frame.pushes.last_mut() {
+            *top = target;
+        } else {
+            frame.pop += 1;
+            frame.pushes.push(target);
+        }
+    } else {
+        frame.pushes.push(target);
+    }
+    Some(ReduceFrameResult::Frame(frame))
+}
+
+fn stack_shifts_for_action(
+    table: &GLRTable,
+    predecessors: &[BTreeSet<u32>],
+    origin_state: u32,
+    tid: TerminalID,
+    state: u32,
+    action: &Action,
+    frame: StackEffectFrame,
+    visiting: &mut BTreeSet<(u32, TerminalID, u8, u32, Vec<u32>)>,
+) -> Option<Vec<StackShift>> {
+    let action_tag = match action {
+        Action::Shift(..) => 0,
+        Action::StackShifts(_) => 1,
+        Action::Reduce(..) => 2,
+        Action::Split { .. } => 3,
+        Action::Accept => 4,
+    };
+    let key = (state, tid, action_tag, frame.pop, frame.pushes.clone());
+    if !visiting.insert(key.clone()) {
+        return None;
+    }
+
+    let mut out = Vec::new();
+    match action {
+        Action::Shift(target, replace) => {
+            let mut frame = frame;
+            if *replace {
+                if let Some(top) = frame.pushes.last_mut() {
+                    *top = *target;
+                } else {
+                    frame.pop += 1;
+                    frame.pushes.push(*target);
+                }
+            } else {
+                frame.pushes.push(*target);
+            }
+            out.push(StackShift { pop: frame.pop, pushes: frame.pushes });
+        }
+        Action::StackShifts(shifts) => {
+            for shift in shifts {
+                let mut frame = frame.clone();
+                if shift.pop as usize <= frame.pushes.len() {
+                    frame.pushes.truncate(frame.pushes.len() - shift.pop as usize);
+                } else {
+                    frame.pop += shift.pop - frame.pushes.len() as u32;
+                    frame.pushes.clear();
+                }
+                frame.pushes.extend_from_slice(&shift.pushes);
+                out.push(StackShift { pop: frame.pop, pushes: frame.pushes });
+            }
+        }
+        Action::Reduce(nt, len) => {
+            let frame = match apply_reduce_to_frame(table, predecessors, origin_state, frame, *nt, *len)? {
+                ReduceFrameResult::Dead => {
+                    visiting.remove(&key);
+                    return Some(Vec::new());
+                }
+                ReduceFrameResult::Frame(frame) => frame,
+            };
+            let state = *frame.pushes.last()?;
+            let next = table.action[state as usize].get(&tid)?;
+            out.extend(stack_shifts_for_action(
+                table,
+                predecessors,
+                origin_state,
+                tid,
+                state,
+                next,
+                frame,
+                visiting,
+            )?);
+        }
+        Action::Split { shift, reduces, accept } => {
+            if *accept {
+                visiting.remove(&key);
+                return None;
+            }
+            if let Some((target, replace)) = shift {
+                let shift_action = Action::Shift(*target, *replace);
+                out.extend(stack_shifts_for_action(
+                    table,
+                    predecessors,
+                    origin_state,
+                    tid,
+                    state,
+                    &shift_action,
+                    frame.clone(),
+                    visiting,
+                )?);
+            }
+            for &(nt, len) in reduces {
+                let reduce_action = Action::Reduce(nt, len);
+                out.extend(stack_shifts_for_action(
+                    table,
+                    predecessors,
+                    origin_state,
+                    tid,
+                    state,
+                    &reduce_action,
+                    frame.clone(),
+                    visiting,
+                )?);
+            }
+        }
+        Action::Accept => {
+            visiting.remove(&key);
+            return None;
+        }
+    }
+
+    visiting.remove(&key);
+    out.sort_by(|a, b| (a.pop, &a.pushes).cmp(&(b.pop, &b.pushes)));
+    out.dedup();
+    Some(out)
+}
+
+fn try_inline_action_to_stack_shifts(
+    table: &GLRTable,
+    predecessors: &[BTreeSet<u32>],
+    state: u32,
+    tid: TerminalID,
+    action: &Action,
+) -> Option<Action> {
+    let Action::Split { shift: Some(_), reduces, accept: false } = action else {
+        return None;
+    };
+    if reduces.is_empty() || reduces.iter().any(|&(_, len)| len != 1) {
+        return None;
+    }
+    let preds = predecessors.get(state as usize)?;
+    if preds.is_empty() {
+        return None;
+    }
+    for &(lhs, _) in reduces {
+        let mut saw_relevant_pred = false;
+        for &pred in preds {
+            if let Some(&(_, is_replace)) = table.goto[pred as usize].get(&lhs) {
+                saw_relevant_pred = true;
+                if !is_replace {
+                    return None;
+                }
+            }
+        }
+        if !saw_relevant_pred {
+            return None;
+        }
+    }
+    let shifts = stack_shifts_for_action(
+        table,
+        predecessors,
+        state,
+        tid,
+        state,
+        action,
+        StackEffectFrame { pop: 0, pushes: Vec::new() },
+        &mut BTreeSet::new(),
+    )?;
+    if shifts.is_empty() {
+        return None;
+    }
+    if shifts.len() == 1 {
+        let shift = &shifts[0];
+        if shift.pushes.len() == 1 {
+            match shift.pop {
+                0 => return Some(Action::Shift(shift.pushes[0], false)),
+                1 => return Some(Action::Shift(shift.pushes[0], true)),
+                _ => {}
+            }
+        }
+    }
+    Some(Action::StackShifts(shifts))
+}
+
 fn try_inline_unit_reductions_for_cell(
     table: &mut GLRTable,
     predecessors: &[BTreeSet<u32>],
@@ -1466,6 +1815,10 @@ fn try_inline_unit_reductions_for_cell(
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
 ) -> Result<Option<CellUpdate>, ()> {
+    if let Some(action) = try_inline_action_to_stack_shifts(table, predecessors, state, tid, action) {
+        return Ok(Some(CellUpdate::Set(action)));
+    }
+
     match action {
         Action::Split {
             shift: Some(_),
@@ -1510,6 +1863,7 @@ fn try_inline_unit_reductions_for_cell_inner(
 
     match action {
         Action::Shift(target, replace) => pending.push_shift(*target, *replace),
+        Action::StackShifts(_) => return Ok(None),
         Action::Reduce(nt, len) => reduces.push((*nt, *len)),
         Action::Split {
             shift,
@@ -1593,6 +1947,15 @@ fn try_inline_unit_reductions_for_cell_inner(
 fn remap_action_targets(action: &Action, mapping: &[u32]) -> Action {
     match action {
         Action::Shift(target, replace) => Action::Shift(mapping[*target as usize], *replace),
+        Action::StackShifts(shifts) => Action::StackShifts(
+            shifts
+                .iter()
+                .map(|shift| StackShift {
+                    pop: shift.pop,
+                    pushes: shift.pushes.iter().map(|&state| mapping[state as usize]).collect(),
+                })
+                .collect(),
+        ),
         Action::Reduce(nt, len) => Action::Reduce(*nt, *len),
         Action::Split {
             shift,
@@ -2693,6 +3056,7 @@ fn lr1_core_key(items: &BTreeSet<LR1Item>) -> Vec<Item> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ActionSig {
     Shift(u32, bool),
+    StackShifts(Vec<(u32, Vec<u32>)>),
     Reduce(NonterminalID, u32),
     Split {
         shift: Option<(u32, bool)>,
@@ -2712,6 +3076,17 @@ struct RowSignature {
 fn remap_action_to_partition(action: &Action, partition: &[u32]) -> ActionSig {
     match action {
         Action::Shift(target, replace) => ActionSig::Shift(partition[*target as usize], *replace),
+        Action::StackShifts(shifts) => ActionSig::StackShifts(
+            shifts
+                .iter()
+                .map(|shift| {
+                    (
+                        shift.pop,
+                        shift.pushes.iter().map(|&state| partition[state as usize]).collect(),
+                    )
+                })
+                .collect(),
+        ),
         Action::Reduce(nt, len) => ActionSig::Reduce(*nt, *len),
         Action::Split {
             shift,
@@ -2966,6 +3341,48 @@ mod tests {
         assert!(
             has_conflict,
             "Expected shift/reduce conflict for ambiguous grammar"
+        );
+    }
+
+    #[test]
+    fn test_replace_goto_unit_reduce_split_inlines_to_stack_shifts() {
+        let mut action: Vec<ActionRow> = vec![ActionRow::default(); 8];
+        let mut goto: Vec<GotoRow> = vec![GotoRow::default(); 8];
+
+        action[0].insert(99, Action::Shift(1, false));
+        action[1].insert(8, Action::Shift(2, true));
+        goto[2].insert(10, (3, false));
+        action[3].insert(
+            8,
+            Action::Split {
+                shift: Some((4, true)),
+                reduces: vec![(20, 1)],
+                accept: false,
+            },
+        );
+        goto[2].insert(20, (5, true));
+        action[5].insert(8, Action::Reduce(30, 1));
+        goto[0].insert(30, (6, false));
+        action[6].insert(8, Action::Shift(7, true));
+
+        let mut table = GLRTable {
+            action,
+            goto,
+            num_states: 8,
+            num_terminals: 100,
+            num_rules: 0,
+            rules: Vec::new(),
+            forwarded_shifts: FxHashSet::default(),
+        };
+
+        table.collapse_sr_unit_reductions_with_compatible_gotos();
+
+        assert_eq!(
+            table.action(3, 8),
+            Some(&Action::StackShifts(vec![
+                StackShift { pop: 1, pushes: vec![4] },
+                StackShift { pop: 2, pushes: vec![7] },
+            ]))
         );
     }
 
