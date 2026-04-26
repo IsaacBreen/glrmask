@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use super::nwa::Label;
@@ -329,6 +330,48 @@ impl DWA {
             Some(final_weight) => weight.intersection(final_weight),
             None => Weight::empty(),
         }
+    }
+
+    pub fn max_accepting_path_length_with_nonempty_weight(&self) -> Option<usize> {
+        assert!(
+            self.is_acyclic(),
+            "max_accepting_path_length_with_nonempty_weight requires an acyclic DWA"
+        );
+
+        fn visit(
+            dwa: &DWA,
+            state: u32,
+            prefix_weight: Weight,
+            memo: &mut FxHashMap<(u32, Weight), Option<usize>>,
+        ) -> Option<usize> {
+            if let Some(cached) = memo.get(&(state, prefix_weight.clone())) {
+                return *cached;
+            }
+
+            let mut best = dwa.states[state as usize]
+                .final_weight
+                .as_ref()
+                .map(|final_weight| prefix_weight.intersection(final_weight))
+                .filter(|accepted_weight| !accepted_weight.is_empty())
+                .map(|_| 0usize);
+
+            for (next_state, edge_weight) in dwa.states[state as usize].transitions.values() {
+                let next_weight = prefix_weight.intersection(edge_weight);
+                if next_weight.is_empty() {
+                    continue;
+                }
+                if let Some(suffix_len) = visit(dwa, *next_state, next_weight, memo) {
+                    let candidate = suffix_len + 1;
+                    best = Some(best.map_or(candidate, |current| current.max(candidate)));
+                }
+            }
+
+            memo.insert((state, prefix_weight), best);
+            best
+        }
+
+        let mut memo: FxHashMap<(u32, Weight), Option<usize>> = FxHashMap::default();
+        visit(self, self.start_state, Weight::all(), &mut memo)
     }
 
     /// Clip all weights in the DWA so token sets contain only `0..=max_token`.
