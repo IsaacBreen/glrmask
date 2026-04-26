@@ -50,6 +50,10 @@ fn parser_dwa_profile_enabled() -> bool {
     std::env::var_os("GLRMASK_PROFILE_PARSER_DWA").is_some()
 }
 
+fn parser_dwa_bundle_determinize_profile_enabled() -> bool {
+    std::env::var_os("GLRMASK_PROFILE_PARSER_DWA_BUNDLE_DETERMINIZE").is_some()
+}
+
 fn elapsed_ms(started_at: Instant) -> f64 {
     started_at.elapsed().as_secs_f64() * 1000.0
 }
@@ -163,13 +167,20 @@ fn build_state_summaries(
 
     let built_bundles: Vec<Arc<NWA>> = {
         use rayon::prelude::*;
+        let profile_enabled = parser_dwa_profile_enabled();
+        let det_profile_enabled = parser_dwa_bundle_determinize_profile_enabled();
         unique_bundles
             .par_iter()
             .enumerate()
             .map(|(bundle_id, bundle)| {
+                if !profile_enabled {
+                    return Arc::new(templates.build_bundle(bundle));
+                }
+
                 let build_started_at = Instant::now();
-                let nwa = Arc::new(templates.build_bundle(bundle));
-                if parser_dwa_profile_enabled() {
+                let (built_nwa, bundle_profile) = templates.build_bundle_profiled(bundle);
+                let nwa = Arc::new(built_nwa);
+                {
                     let build_ms = build_started_at.elapsed().as_secs_f64() * 1000.0;
                     let nwa_transitions: usize = nwa
                         .states()
@@ -187,6 +198,66 @@ fn build_state_summaries(
                         nwa_transitions,
                         build_ms,
                     );
+                    eprintln!(
+                        concat!(
+                            "[glrmask/profile][parser_dwa_bundle_detail] ",
+                            "bundle={:>4} input_terminals={:>4} nonempty_terminals={:>4} ",
+                            "weight_groups={:>4} singleton_groups={:>4} multi_groups={:>4} largest_group={:>4} ",
+                            "group_dfas_ms={:>7.1} union_groups_ms={:>7.1} ",
+                            "slowest_group_terminals={:>4} slowest_group_dfa_states={:>5} slowest_group_dfa_trans={:>6} slowest_group_ms={:>7.1} ",
+                            "determinize_bundle_ms={:>7.1} minimize_ms={:>7.1} dwa_to_nwa_ms={:>7.1} ",
+                            "result_dwa_states={:>5} result_dwa_trans={:>6} result_nwa_states={:>5} result_nwa_trans={:>6} ",
+                            "fast_path={} total_ms={:>7.1}"
+                        ),
+                        bundle_id,
+                        bundle_profile.input_terminals,
+                        bundle_profile.nonempty_terminals,
+                        bundle_profile.weight_groups,
+                        bundle_profile.singleton_groups,
+                        bundle_profile.multi_terminal_groups,
+                        bundle_profile.largest_weight_group,
+                        bundle_profile.build_group_dfas_ms,
+                        bundle_profile.union_groups_ms,
+                        bundle_profile.slowest_group_terminals,
+                        bundle_profile.slowest_group_dfa_states,
+                        bundle_profile.slowest_group_dfa_transitions,
+                        bundle_profile.slowest_group_ms,
+                        bundle_profile.determinize_bundle_ms,
+                        bundle_profile.minimize_ms,
+                        bundle_profile.dwa_to_nwa_ms,
+                        bundle_profile.result_dwa_states,
+                        bundle_profile.result_dwa_transitions,
+                        bundle_profile.result_nwa_states,
+                        bundle_profile.result_nwa_transitions,
+                        bundle_profile.used_single_terminal_fast_path,
+                        bundle_profile.total_ms,
+                    );
+
+                    if det_profile_enabled {
+                        eprintln!(
+                            concat!(
+                                "[glrmask/profile][parser_dwa_bundle_determinize] ",
+                                "bundle={:>4} det_pop_state_ms={:>7.1} det_alive_ms={:>7.1} det_effective_ms={:>7.1} ",
+                                "det_final_ms={:>7.1} det_labels_ms={:>7.1} det_next_ms={:>7.1} det_edge_weight_ms={:>7.1} det_lookup_ms={:>7.1} det_add_transition_ms={:>7.1} ",
+                                "det_states={:>5} det_labels={:>6} det_transitions={:>6} det_worklist_peak={:>5} det_cache_entries={:>5}"
+                            ),
+                            bundle_id,
+                            bundle_profile.determinize_pop_state_ms,
+                            bundle_profile.determinize_alive_groups_ms,
+                            bundle_profile.determinize_effective_weights_ms,
+                            bundle_profile.determinize_final_weight_ms,
+                            bundle_profile.determinize_collect_labels_ms,
+                            bundle_profile.determinize_next_state_ms,
+                            bundle_profile.determinize_edge_weight_ms,
+                            bundle_profile.determinize_state_lookup_ms,
+                            bundle_profile.determinize_add_transition_ms,
+                            bundle_profile.determinize_states_visited,
+                            bundle_profile.determinize_labels_processed,
+                            bundle_profile.determinize_transitions_added,
+                            bundle_profile.determinize_worklist_peak,
+                            bundle_profile.determinize_cache_entries,
+                        );
+                    }
                 }
                 nwa
             })

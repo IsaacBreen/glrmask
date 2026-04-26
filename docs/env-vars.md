@@ -54,6 +54,7 @@ This document lists all `GLRMASK_*` environment variables used in this crate, gr
 | `GLRMASK_DEBUG_DWA_DUMP` | strict `1` bool | off |
 | `GLRMASK_PROFILE_TERMINAL_DWA` | presence toggle | off |
 | `GLRMASK_PROFILE_PARSER_DWA` | presence toggle | off |
+| `GLRMASK_PROFILE_PARSER_DWA_BUNDLE_DETERMINIZE` | presence toggle | off |
 | `GLRMASK_PROFILE_DETERMINIZE` | strict `1` bool | off |
 | `GLRMASK_PROFILE_COMPACT` | presence toggle | off |
 | `GLRMASK_DEBUG_CHARACTERIZE` | presence toggle | off |
@@ -135,6 +136,7 @@ This document lists all `GLRMASK_*` environment variables used in this crate, gr
 
 ## Notes
 
+- `GLRMASK_PROFILE_PARSER_DWA` includes per-bundle parser-DWA summary lines; `GLRMASK_PROFILE_PARSER_DWA_BUNDLE_DETERMINIZE` adds low-level determinizer substep breakdowns for those bundles.
 - For minimize strategy vars, invalid set values panic with a validation error.
 - For compact mode vars, unknown set values silently fall back to the per-callsite default.
 - `GLRMASK_AP_KEY_ANY_STRING` is effectively enabled if either itself or `GLRMASK_ADDPROP_NO_EXCLUSIONS` is enabled.
