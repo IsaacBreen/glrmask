@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::time::Instant;
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::unweighted_u32::nfa::NFA as UnweightedNfa;
@@ -364,12 +365,13 @@ fn determinize_bundle_groups(groups: &[(&Weight, UnweightedDfa)]) -> DWA {
                 })
         };
 
-        let mut final_w = Weight::empty();
+        let mut final_inputs = SmallVec::<[&Weight; 8]>::new();
         for &i in &alive_groups {
             if groups[i].1.states[product_state[i] as usize].is_accepting {
-                final_w = final_w.union(&effective_weights[i]);
+                final_inputs.push(&effective_weights[i]);
             }
         }
+        let final_w = Weight::union_all(final_inputs.iter().copied());
         if !final_w.is_empty() {
             dwa.set_final_weight(dwa_state, final_w);
         }
@@ -400,12 +402,13 @@ fn determinize_bundle_groups(groups: &[(&Weight, UnweightedDfa)]) -> DWA {
                 };
             }
 
-            let mut edge_w = Weight::empty();
+            let mut edge_inputs = SmallVec::<[&Weight; 8]>::new();
             for i in 0..n {
                 if next_state[i] != DEAD {
-                    edge_w = edge_w.union(&effective_weights[i]);
+                    edge_inputs.push(&effective_weights[i]);
                 }
             }
+            let edge_w = Weight::union_all(edge_inputs.iter().copied());
             if edge_w.is_empty() {
                 continue;
             }
@@ -513,12 +516,13 @@ fn determinize_bundle_groups_profiled(
         profile.effective_weights_ms += elapsed_ms(effective_started_at);
 
         let final_started_at = Instant::now();
-        let mut final_w = Weight::empty();
+        let mut final_inputs = SmallVec::<[&Weight; 8]>::new();
         for &i in &alive_groups {
             if groups[i].1.states[product_state[i] as usize].is_accepting {
-                final_w = final_w.union(&effective_weights[i]);
+                final_inputs.push(&effective_weights[i]);
             }
         }
+        let final_w = Weight::union_all(final_inputs.iter().copied());
         if !final_w.is_empty() {
             dwa.set_final_weight(dwa_state, final_w);
         }
@@ -556,12 +560,13 @@ fn determinize_bundle_groups_profiled(
             profile.next_state_ms += elapsed_ms(next_state_started_at);
 
             let edge_weight_started_at = Instant::now();
-            let mut edge_w = Weight::empty();
+            let mut edge_inputs = SmallVec::<[&Weight; 8]>::new();
             for i in 0..n {
                 if next_state[i] != DEAD {
-                    edge_w = edge_w.union(&effective_weights[i]);
+                    edge_inputs.push(&effective_weights[i]);
                 }
             }
+            let edge_w = Weight::union_all(edge_inputs.iter().copied());
             if edge_w.is_empty() {
                 profile.edge_weight_ms += elapsed_ms(edge_weight_started_at);
                 continue;
