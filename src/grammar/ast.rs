@@ -699,6 +699,15 @@ impl Lowerer {
             .cloned()
             .ok_or_else(|| GlrMaskError::GrammarParse(format!("unknown rule referenced from SeparatedSequence: {name}")))?;
         let is_terminal = *self.named_rule_is_terminal.get(name).unwrap_or(&false);
+
+        // If the referenced named rule is already nonnullable, reuse its
+        // ordinary lowered symbol instead of synthesizing a second alias.
+        if !self.rule_nullable.get(name).copied().unwrap_or(false)
+            && !(is_terminal && self.internal_terminal_names.contains(name))
+        {
+            return Ok(Symbol::Nonterminal(self.nonterminal_id(name)));
+        }
+
         let (_, nt) = self.fresh_nonterminal("nonnullable_rule");
         self.nonnullable_named_rule_cache.insert(name.to_string(), nt);
 
@@ -2467,6 +2476,53 @@ mod tests {
             sep_counts,
             BTreeSet::from([1usize, 2]),
             "nullable terminal refs inside SeparatedSequence should not emit doubled separators"
+        );
+    }
+
+    #[test]
+    fn test_separated_sequence_nonnullable_terminal_ref_reuses_named_wrapper() {
+        let g = NamedGrammar {
+            rules: vec![
+                nt(
+                    "start",
+                    GrammarExpr::SeparatedSequence {
+                        items: vec![(GrammarExpr::Ref("KEY".into()), true)],
+                        separator: Box::new(GrammarExpr::Literal(b",".to_vec())),
+                        allow_empty: true,
+                    },
+                ),
+                term("KEY", GrammarExpr::RawRegex("x".into())),
+            ],
+            start: "start".into(),
+            ignore: None,
+        };
+        let gdef = lower(&g).unwrap();
+
+        let key_nt = gdef
+            .nonterminal_names
+            .iter()
+            .find_map(|(id, name)| (name == "KEY").then_some(*id))
+            .expect("named terminal KEY should have a wrapper nonterminal");
+        let key_tid = gdef
+            .terminals
+            .iter()
+            .find_map(|terminal| (gdef.terminal_display_name(terminal.id()) == "KEY").then_some(terminal.id()))
+            .expect("named terminal KEY should exist");
+
+        let key_terminal_wrappers: Vec<_> = gdef
+            .rules
+            .iter()
+            .filter(|rule| rule.rhs == vec![Symbol::Terminal(key_tid)])
+            .collect();
+        assert_eq!(
+            key_terminal_wrappers.len(),
+            1,
+            "nonnullable terminal refs in SeparatedSequence should not synthesize an extra alias"
+        );
+        assert_eq!(
+            key_terminal_wrappers[0].lhs,
+            key_nt,
+            "the only terminal wrapper should be the named rule's own wrapper"
         );
     }
 
