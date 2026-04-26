@@ -89,6 +89,36 @@ fn max_parser_paths_over_prefix(constraint: &Constraint, prefix: &[u8]) -> usize
     max_paths
 }
 
+fn parser_paths_at_prefix_end(constraint: &Constraint, prefix: &[u8]) -> usize {
+    let mut state = constraint.start();
+    advance_byte_prefix(&mut state, prefix);
+    state.parser_path_count(1024)
+}
+
+fn trace_parser_stacks_over_prefix(constraint: &Constraint, prefix: &[u8]) -> usize {
+    let mut state = constraint.start();
+    let mut max_paths = state.parser_path_count(1024);
+    println!("start max_paths={max_paths} stacks={:?}", state.debug_parser_stacks());
+
+    for (index, &byte) in prefix.iter().enumerate() {
+        let mask = state.mask();
+        assert_token_allowed(
+            &mask,
+            byte as usize,
+            &format!("prefix byte {byte:?} should be allowed"),
+        );
+        state.commit_token(byte as u32).unwrap();
+        let paths = state.parser_path_count(1024);
+        max_paths = max_paths.max(paths);
+        println!(
+            "step={index} byte={byte:?} paths={paths} max_paths={max_paths} stacks={:?}",
+            state.debug_parser_stacks()
+        );
+    }
+
+    max_paths
+}
+
 fn read_fixture_schema(path: &Path) -> Option<String> {
     if !path.exists() {
         return None;
@@ -1502,6 +1532,108 @@ fn test_o47674_top_level_oneof_matches_llguidance_permissiveness() {
 }
 
 #[test]
+fn test_minimized_o47674_suffix_still_reaches_nine_paths() {
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "parent_id": {
+                "type": ["string", "null"]
+            },
+            "operations": {
+                "patternProperties": {
+                    "[a-z_0-9\\.\\-]*": {
+                        "type": "object",
+                        "properties": {
+                            "uuid": {"type": "string"},
+                            "parent_id": {"type": "string"},
+                            "command": {"type": "array"},
+                            "results": {
+                                "patternProperties": {
+                                    "[a-z_0-9\\.\\-]*": {
+                                        "type": "object",
+                                        "properties": {
+                                            "uuid": {"type": "string"},
+                                            "parent_id": {"type": "string"},
+                                            "type": {
+                                                "enum": ["string", "hex_string"]
+                                            },
+                                            "display": {
+                                                "anyOf": [
+                                                    {"enum": ["string", "hex_string"]},
+                                                    {"type": "string", "pattern": "^string_table\\:[A-Z0-9-]+$"}
+                                                ]
+                                            },
+                                            "start_pos": {"type": "integer"},
+                                            "length": {"type": "integer", "minimum": 1},
+                                            "mask": {"type": "string"},
+                                            "levels": {"type": "object"},
+                                            "rpn": {"type": "string"},
+                                            "units": {"type": "string"}
+                                        },
+                                        "required": ["uuid"],
+                                        "anyOf": [
+                                            {"required": ["parent_id"]},
+                                            {"required": ["type", "display", "start_pos", "length", "units"]}
+                                        ],
+                                        "additionalProperties": false
+                                    }
+                                }
+                            }
+                        },
+                        "required": ["uuid"],
+                        "anyOf": [
+                            {"required": ["parent_id"]},
+                            {"required": ["command", "results"]}
+                        ],
+                        "additionalProperties": false
+                    }
+                }
+            }
+        },
+        "additionalProperties": false,
+        "anyOf": [
+            {
+                "properties": {
+                    "parent_id": {"type": "null"}
+                },
+                "required": ["parent_id"]
+            },
+            {
+                "properties": {
+                    "parent_id": {"type": "string"},
+                    "address": {"type": "string"},
+                    "family": {"type": "string"},
+                    "part_number": {"type": "integer"},
+                    "coding_index": {"type": "string"},
+                    "hardware_number": {"type": "string"},
+                    "software_number": {"type": "string"},
+                    "endian": {"enum": ["big", "little"]}
+                },
+                "required": [
+                    "address",
+                    "family",
+                    "parent_id",
+                    "part_number",
+                    "coding_index",
+                    "hardware_number",
+                    "software_number",
+                    "endian"
+                ]
+            }
+        ]
+    }"#;
+    let prefix = br#"{"parent_id": null, "operations": {"operation1": {"uuid": "u", "command": [], "results": {"result1": {"uuid": "u", "type": "string", "display": "string", "start_pos": 0, "length": 1, "units": "u"}, "result2": {"uuid": "u", "type": "hex_string", "display": "hex_string", "start_pos": 10, "length": 10, "mask": "", "levels": {}, "rpn": "", "units": """#;
+
+    let constraint = schema_constraint(schema);
+    let paths_at_end = parser_paths_at_prefix_end(&constraint, prefix);
+
+    assert_eq!(
+        paths_at_end, 9,
+        "minimized o47674-shaped schema should still hit 9 live parser paths"
+    );
+}
+
+#[test]
 fn test_o29389_top_level_oneof_matches_llguidance_permissiveness() {
     let _guard = env_lock().lock().expect("env lock should not be poisoned");
     let schema_path = Path::new(
@@ -1569,7 +1701,7 @@ fn test_minimized_dynamic_object_prefix_has_two_paths() {
     let prefix = br#"{"p": {"q": "y"}"#;
 
     let constraint = schema_constraint(schema);
-    let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
+    let max_paths = trace_parser_stacks_over_prefix(&constraint, prefix);
 
     assert_eq!(
         max_paths, 2,
