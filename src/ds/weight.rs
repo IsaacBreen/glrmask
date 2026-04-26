@@ -9,6 +9,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
+use std::time::Instant;
 
 #[derive(Debug, Clone)]
 pub struct Weight(pub Arc<WeightMap>);
@@ -39,6 +40,65 @@ static ALL_WEIGHT: Lazy<Weight> = Lazy::new(|| {
     )));
     finalize_weight_map(map)
 });
+
+static WEIGHT_OP_PROFILE_ENABLED: Lazy<bool> = Lazy::new(|| {
+    std::env::var_os("GLRMASK_PROFILE_WEIGHT_OPS").is_some()
+});
+
+#[derive(Debug, Default)]
+struct WeightOpProfile {
+    union_calls: AtomicU64,
+    union_time_us: AtomicU64,
+    union_fast_full: AtomicU64,
+    union_fast_empty_left: AtomicU64,
+    union_fast_empty_right: AtomicU64,
+    union_fast_same_arc: AtomicU64,
+    union_fast_disjoint_tsid: AtomicU64,
+    union_memo_hits: AtomicU64,
+    union_computed: AtomicU64,
+    union_computed_single_single: AtomicU64,
+    union_computed_single_multi: AtomicU64,
+    union_computed_multi_single: AtomicU64,
+    union_computed_multi_multi: AtomicU64,
+    union_computed_single_single_time_us: AtomicU64,
+    union_computed_single_multi_time_us: AtomicU64,
+    union_computed_multi_single_time_us: AtomicU64,
+    union_computed_multi_multi_time_us: AtomicU64,
+    union_all_calls: AtomicU64,
+    union_all_time_us: AtomicU64,
+    union_all_inputs: AtomicU64,
+    complement_calls: AtomicU64,
+    complement_time_us: AtomicU64,
+}
+
+static WEIGHT_OP_PROFILE: Lazy<WeightOpProfile> = Lazy::new(WeightOpProfile::default);
+
+#[derive(Clone, Copy, Debug)]
+enum WeightUnionPath {
+    Full,
+    EmptyLeft,
+    EmptyRight,
+    SameArc,
+    DisjointTsid,
+    MemoHit,
+    Computed,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum WeightUnionComputedShape {
+    SingleSingle,
+    SingleMulti,
+    MultiSingle,
+    MultiMulti,
+}
+
+fn weight_op_profile_enabled() -> bool {
+    *WEIGHT_OP_PROFILE_ENABLED
+}
+
+fn micros_to_ms(micros: u64) -> f64 {
+    micros as f64 / 1000.0
+}
 
 fn prune_dead_token_sets() {
     GLOBAL_TOKEN_SETS.retain(|_, weak| weak.strong_count() > 0);
@@ -173,13 +233,36 @@ fn same_shared_token_set(left: &SharedTokenSet, right: &SharedTokenSet) -> bool 
     Arc::ptr_eq(left, right) || left.as_ref() == right.as_ref()
 }
 
+fn lookup_memoized_token_set_op(
+    kind: TokenSetOpKind,
+    left: &SharedTokenSet,
+    right: &SharedTokenSet,
+) -> Option<SharedTokenSet> {
+    with_weight_op_memo(|memo| memo.lookup_token_set(TokenSetOpKey::for_token_sets(kind, left, right)))
+}
+
+fn store_memoized_token_set_op(
+    kind: TokenSetOpKind,
+    left: &SharedTokenSet,
+    right: &SharedTokenSet,
+    result: &SharedTokenSet,
+) {
+    with_weight_op_memo(|memo| {
+        memo.store_token_set(TokenSetOpKey::for_token_sets(kind, left, right), left, right, result)
+    });
+}
+
 fn shared_token_union(left: &SharedTokenSet, right: &SharedTokenSet) -> SharedTokenSet {
     if same_shared_token_set(left, right) || left.as_ref().is_subset(right.as_ref()) {
         Arc::clone(right)
     } else if right.as_ref().is_subset(left.as_ref()) {
         Arc::clone(left)
+    } else if let Some(existing) = lookup_memoized_token_set_op(TokenSetOpKind::Union, left, right) {
+        existing
     } else {
-        shared_rangeset(left.as_ref().clone() | right.as_ref().clone())
+        let result = shared_rangeset(left.as_ref().clone() | right.as_ref().clone());
+        store_memoized_token_set_op(TokenSetOpKind::Union, left, right, &result);
+        result
     }
 }
 
@@ -257,8 +340,20 @@ enum WeightOpKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum TokenSetOpKind {
+    Union,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct WeightOpKey {
     kind: WeightOpKind,
+    left: usize,
+    right: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct TokenSetOpKey {
+    kind: TokenSetOpKind,
     left: usize,
     right: usize,
 }
@@ -280,6 +375,24 @@ impl WeightOpKey {
     }
 }
 
+impl TokenSetOpKey {
+    fn new(kind: TokenSetOpKind, left: usize, right: usize) -> Self {
+        if left > right {
+            Self {
+                kind,
+                left: right,
+                right: left,
+            }
+        } else {
+            Self { kind, left, right }
+        }
+    }
+
+    fn for_token_sets(kind: TokenSetOpKind, left: &SharedTokenSet, right: &SharedTokenSet) -> Self {
+        Self::new(kind, Arc::as_ptr(left) as usize, Arc::as_ptr(right) as usize)
+    }
+}
+
 /// Cached memo entry: stores the result AND weak references to both operands.
 /// The operand weak refs guard against the ABA problem: if either operand's
 /// Arc was dropped and a new Arc reuses the same address, the operand weak
@@ -290,6 +403,12 @@ struct WeightOpMemoEntry {
     right_operand: Weak<WeightMap>,
 }
 
+struct TokenSetOpMemoEntry {
+    result: Weak<RangeSetBlaze<u32>>,
+    left_operand: Weak<RangeSetBlaze<u32>>,
+    right_operand: Weak<RangeSetBlaze<u32>>,
+}
+
 /// Global generation counter. Incremented by `clear_weight_op_caches()` so
 /// that every thread's thread-local memo detects the invalidation on next access.
 static WEIGHT_OP_MEMO_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -297,6 +416,7 @@ static WEIGHT_OP_MEMO_GENERATION: AtomicU64 = AtomicU64::new(0);
 #[derive(Default)]
 struct WeightOpMemo {
     results: FxHashMap<WeightOpKey, WeightOpMemoEntry>,
+    token_set_results: FxHashMap<TokenSetOpKey, TokenSetOpMemoEntry>,
     inserts_since_cleanup: usize,
     /// The generation this memo was last synchronised with.
     generation: u64,
@@ -308,11 +428,14 @@ impl WeightOpMemo {
             return;
         }
         self.results.retain(|_, entry| entry.result.strong_count() > 0);
+        self.token_set_results
+            .retain(|_, entry| entry.result.strong_count() > 0);
         self.inserts_since_cleanup = 0;
     }
 
     fn clear_all(&mut self) {
         self.results.clear();
+        self.token_set_results.clear();
         self.inserts_since_cleanup = 0;
     }
 
@@ -334,6 +457,35 @@ impl WeightOpMemo {
                 result: Arc::downgrade(&result.0),
                 left_operand: Arc::downgrade(&left.0),
                 right_operand: Arc::downgrade(&right.0),
+            },
+        );
+        self.inserts_since_cleanup += 1;
+    }
+
+    fn lookup_token_set(&mut self, key: TokenSetOpKey) -> Option<SharedTokenSet> {
+        let entry = self.token_set_results.get(&key)?;
+        if entry.left_operand.strong_count() == 0 || entry.right_operand.strong_count() == 0 {
+            self.token_set_results.remove(&key);
+            return None;
+        }
+
+        entry.result.upgrade()
+    }
+
+    fn store_token_set(
+        &mut self,
+        key: TokenSetOpKey,
+        left: &SharedTokenSet,
+        right: &SharedTokenSet,
+        result: &SharedTokenSet,
+    ) {
+        self.maybe_cleanup();
+        self.token_set_results.insert(
+            key,
+            TokenSetOpMemoEntry {
+                result: Arc::downgrade(result),
+                left_operand: Arc::downgrade(left),
+                right_operand: Arc::downgrade(right),
             },
         );
         self.inserts_since_cleanup += 1;
@@ -378,6 +530,186 @@ pub fn clear_weight_op_caches() {
 pub fn clear_weight_caches() {
     clear_weight_op_caches();
     clear_all_weights();
+}
+
+fn record_union_profile(path: WeightUnionPath, micros: u64) {
+    if !weight_op_profile_enabled() {
+        return;
+    }
+    WEIGHT_OP_PROFILE.union_calls.fetch_add(1, Ordering::Relaxed);
+    WEIGHT_OP_PROFILE
+        .union_time_us
+        .fetch_add(micros, Ordering::Relaxed);
+    match path {
+        WeightUnionPath::Full => {
+            WEIGHT_OP_PROFILE.union_fast_full.fetch_add(1, Ordering::Relaxed);
+        }
+        WeightUnionPath::EmptyLeft => {
+            WEIGHT_OP_PROFILE
+                .union_fast_empty_left
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        WeightUnionPath::EmptyRight => {
+            WEIGHT_OP_PROFILE
+                .union_fast_empty_right
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        WeightUnionPath::SameArc => {
+            WEIGHT_OP_PROFILE
+                .union_fast_same_arc
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        WeightUnionPath::DisjointTsid => {
+            WEIGHT_OP_PROFILE
+                .union_fast_disjoint_tsid
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        WeightUnionPath::MemoHit => {
+            WEIGHT_OP_PROFILE.union_memo_hits.fetch_add(1, Ordering::Relaxed);
+        }
+        WeightUnionPath::Computed => {
+            WEIGHT_OP_PROFILE.union_computed.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+fn record_union_computed_shape(shape: WeightUnionComputedShape, micros: u64) {
+    if !weight_op_profile_enabled() {
+        return;
+    }
+    match shape {
+        WeightUnionComputedShape::SingleSingle => {
+            WEIGHT_OP_PROFILE
+                .union_computed_single_single
+                .fetch_add(1, Ordering::Relaxed);
+            WEIGHT_OP_PROFILE
+                .union_computed_single_single_time_us
+                .fetch_add(micros, Ordering::Relaxed);
+        }
+        WeightUnionComputedShape::SingleMulti => {
+            WEIGHT_OP_PROFILE
+                .union_computed_single_multi
+                .fetch_add(1, Ordering::Relaxed);
+            WEIGHT_OP_PROFILE
+                .union_computed_single_multi_time_us
+                .fetch_add(micros, Ordering::Relaxed);
+        }
+        WeightUnionComputedShape::MultiSingle => {
+            WEIGHT_OP_PROFILE
+                .union_computed_multi_single
+                .fetch_add(1, Ordering::Relaxed);
+            WEIGHT_OP_PROFILE
+                .union_computed_multi_single_time_us
+                .fetch_add(micros, Ordering::Relaxed);
+        }
+        WeightUnionComputedShape::MultiMulti => {
+            WEIGHT_OP_PROFILE
+                .union_computed_multi_multi
+                .fetch_add(1, Ordering::Relaxed);
+            WEIGHT_OP_PROFILE
+                .union_computed_multi_multi_time_us
+                .fetch_add(micros, Ordering::Relaxed);
+        }
+    }
+}
+
+fn record_union_all_profile(micros: u64, inputs: u64) {
+    if !weight_op_profile_enabled() {
+        return;
+    }
+    WEIGHT_OP_PROFILE.union_all_calls.fetch_add(1, Ordering::Relaxed);
+    WEIGHT_OP_PROFILE
+        .union_all_time_us
+        .fetch_add(micros, Ordering::Relaxed);
+    WEIGHT_OP_PROFILE
+        .union_all_inputs
+        .fetch_add(inputs, Ordering::Relaxed);
+}
+
+fn record_complement_profile(micros: u64) {
+    if !weight_op_profile_enabled() {
+        return;
+    }
+    WEIGHT_OP_PROFILE.complement_calls.fetch_add(1, Ordering::Relaxed);
+    WEIGHT_OP_PROFILE
+        .complement_time_us
+        .fetch_add(micros, Ordering::Relaxed);
+}
+
+pub(crate) fn clear_weight_op_profile() {
+    if !weight_op_profile_enabled() {
+        return;
+    }
+    WEIGHT_OP_PROFILE.union_calls.store(0, Ordering::Relaxed);
+    WEIGHT_OP_PROFILE.union_time_us.store(0, Ordering::Relaxed);
+    WEIGHT_OP_PROFILE.union_fast_full.store(0, Ordering::Relaxed);
+    WEIGHT_OP_PROFILE.union_fast_empty_left.store(0, Ordering::Relaxed);
+    WEIGHT_OP_PROFILE.union_fast_empty_right.store(0, Ordering::Relaxed);
+    WEIGHT_OP_PROFILE.union_fast_same_arc.store(0, Ordering::Relaxed);
+    WEIGHT_OP_PROFILE.union_fast_disjoint_tsid.store(0, Ordering::Relaxed);
+    WEIGHT_OP_PROFILE.union_memo_hits.store(0, Ordering::Relaxed);
+    WEIGHT_OP_PROFILE.union_computed.store(0, Ordering::Relaxed);
+    WEIGHT_OP_PROFILE
+        .union_computed_single_single
+        .store(0, Ordering::Relaxed);
+    WEIGHT_OP_PROFILE
+        .union_computed_single_multi
+        .store(0, Ordering::Relaxed);
+    WEIGHT_OP_PROFILE
+        .union_computed_multi_single
+        .store(0, Ordering::Relaxed);
+    WEIGHT_OP_PROFILE
+        .union_computed_multi_multi
+        .store(0, Ordering::Relaxed);
+    WEIGHT_OP_PROFILE
+        .union_computed_single_single_time_us
+        .store(0, Ordering::Relaxed);
+    WEIGHT_OP_PROFILE
+        .union_computed_single_multi_time_us
+        .store(0, Ordering::Relaxed);
+    WEIGHT_OP_PROFILE
+        .union_computed_multi_single_time_us
+        .store(0, Ordering::Relaxed);
+    WEIGHT_OP_PROFILE
+        .union_computed_multi_multi_time_us
+        .store(0, Ordering::Relaxed);
+    WEIGHT_OP_PROFILE.union_all_calls.store(0, Ordering::Relaxed);
+    WEIGHT_OP_PROFILE.union_all_time_us.store(0, Ordering::Relaxed);
+    WEIGHT_OP_PROFILE.union_all_inputs.store(0, Ordering::Relaxed);
+    WEIGHT_OP_PROFILE.complement_calls.store(0, Ordering::Relaxed);
+    WEIGHT_OP_PROFILE.complement_time_us.store(0, Ordering::Relaxed);
+}
+
+pub(crate) fn emit_weight_op_profile_summary() {
+    if !weight_op_profile_enabled() {
+        return;
+    }
+
+    eprintln!(
+        "[glrmask/profile][weight_ops] union_calls={} union_ms={:.3} union_fast_full={} union_fast_empty_left={} union_fast_empty_right={} union_fast_same_arc={} union_fast_disjoint_tsid={} union_memo_hits={} union_computed={} union_computed_single_single={} union_computed_single_single_ms={:.3} union_computed_single_multi={} union_computed_single_multi_ms={:.3} union_computed_multi_single={} union_computed_multi_single_ms={:.3} union_computed_multi_multi={} union_computed_multi_multi_ms={:.3} union_all_calls={} union_all_ms={:.3} union_all_inputs={} complement_calls={} complement_ms={:.3}",
+        WEIGHT_OP_PROFILE.union_calls.load(Ordering::Relaxed),
+        micros_to_ms(WEIGHT_OP_PROFILE.union_time_us.load(Ordering::Relaxed)),
+        WEIGHT_OP_PROFILE.union_fast_full.load(Ordering::Relaxed),
+        WEIGHT_OP_PROFILE.union_fast_empty_left.load(Ordering::Relaxed),
+        WEIGHT_OP_PROFILE.union_fast_empty_right.load(Ordering::Relaxed),
+        WEIGHT_OP_PROFILE.union_fast_same_arc.load(Ordering::Relaxed),
+        WEIGHT_OP_PROFILE.union_fast_disjoint_tsid.load(Ordering::Relaxed),
+        WEIGHT_OP_PROFILE.union_memo_hits.load(Ordering::Relaxed),
+        WEIGHT_OP_PROFILE.union_computed.load(Ordering::Relaxed),
+        WEIGHT_OP_PROFILE.union_computed_single_single.load(Ordering::Relaxed),
+        micros_to_ms(WEIGHT_OP_PROFILE.union_computed_single_single_time_us.load(Ordering::Relaxed)),
+        WEIGHT_OP_PROFILE.union_computed_single_multi.load(Ordering::Relaxed),
+        micros_to_ms(WEIGHT_OP_PROFILE.union_computed_single_multi_time_us.load(Ordering::Relaxed)),
+        WEIGHT_OP_PROFILE.union_computed_multi_single.load(Ordering::Relaxed),
+        micros_to_ms(WEIGHT_OP_PROFILE.union_computed_multi_single_time_us.load(Ordering::Relaxed)),
+        WEIGHT_OP_PROFILE.union_computed_multi_multi.load(Ordering::Relaxed),
+        micros_to_ms(WEIGHT_OP_PROFILE.union_computed_multi_multi_time_us.load(Ordering::Relaxed)),
+        WEIGHT_OP_PROFILE.union_all_calls.load(Ordering::Relaxed),
+        micros_to_ms(WEIGHT_OP_PROFILE.union_all_time_us.load(Ordering::Relaxed)),
+        WEIGHT_OP_PROFILE.union_all_inputs.load(Ordering::Relaxed),
+        WEIGHT_OP_PROFILE.complement_calls.load(Ordering::Relaxed),
+        micros_to_ms(WEIGHT_OP_PROFILE.complement_time_us.load(Ordering::Relaxed)),
+    );
 }
 
 fn lookup_memoized_weight_op(kind: WeightOpKind, left: &Weight, right: &Weight) -> Option<Weight> {
@@ -662,6 +994,40 @@ where
     builder.finish()
 }
 
+fn weight_tsid_span(weight: &Weight) -> Option<(u32, u32)> {
+    let mut ranges = weight.0.ranges();
+    let first = ranges.next()?;
+    let mut last_end = *first.end();
+    for range in ranges {
+        last_end = *range.end();
+    }
+    Some((*first.start(), last_end))
+}
+
+fn append_weight_entries(builder: &mut CompactRangeBuilder, weight: &Weight) {
+    for (range, tokens) in weight.0.range_values() {
+        builder.push(*range.start(), *range.end(), Arc::clone(tokens));
+    }
+}
+
+fn union_disjoint_tsid_ranges(left: &Weight, right: &Weight) -> Option<Weight> {
+    let (left_start, left_end) = weight_tsid_span(left)?;
+    let (right_start, right_end) = weight_tsid_span(right)?;
+
+    let mut builder = CompactRangeBuilder::new();
+    if left_end < right_start {
+        append_weight_entries(&mut builder, left);
+        append_weight_entries(&mut builder, right);
+        Some(builder.finish())
+    } else if right_end < left_start {
+        append_weight_entries(&mut builder, right);
+        append_weight_entries(&mut builder, left);
+        Some(builder.finish())
+    } else {
+        None
+    }
+}
+
 /// Direct multi-way union that avoids creating O(N) intermediate Weight objects.
 /// Uses a sweep-line approach: collects all range entries, sorts boundary points,
 /// and computes the union of active token sets at each boundary interval.
@@ -755,6 +1121,101 @@ fn union_all_single_tsid_entries(weights: &[&Weight]) -> Option<Weight> {
         builder.push(tsid, tsid, tokens);
     }
     Some(builder.finish())
+}
+
+fn union_compact_entries(left: &Weight, right: &Weight) -> Weight {
+    let left_entries = compact_entries(left);
+    let right_entries = compact_entries(right);
+
+    if left_entries.is_empty() {
+        return right.clone();
+    }
+    if right_entries.is_empty() {
+        return left.clone();
+    }
+
+    let mut builder = CompactRangeBuilder::new();
+    let mut left_index = 0usize;
+    let mut right_index = 0usize;
+    let mut left_current = Some(left_entries[left_index].clone());
+    let mut right_current = Some(right_entries[right_index].clone());
+
+    loop {
+        match (&mut left_current, &mut right_current) {
+            (Some(left_entry), Some(right_entry)) => {
+                if left_entry.end < right_entry.start {
+                    builder.push(left_entry.start, left_entry.end, Arc::clone(&left_entry.tokens));
+                    left_index += 1;
+                    left_current = left_entries.get(left_index).cloned();
+                    continue;
+                }
+                if right_entry.end < left_entry.start {
+                    builder.push(right_entry.start, right_entry.end, Arc::clone(&right_entry.tokens));
+                    right_index += 1;
+                    right_current = right_entries.get(right_index).cloned();
+                    continue;
+                }
+
+                if left_entry.start < right_entry.start {
+                    builder.push(
+                        left_entry.start,
+                        right_entry.start - 1,
+                        Arc::clone(&left_entry.tokens),
+                    );
+                    left_entry.start = right_entry.start;
+                } else if right_entry.start < left_entry.start {
+                    builder.push(
+                        right_entry.start,
+                        left_entry.start - 1,
+                        Arc::clone(&right_entry.tokens),
+                    );
+                    right_entry.start = left_entry.start;
+                }
+
+                let overlap_end = left_entry.end.min(right_entry.end);
+                builder.push(
+                    left_entry.start,
+                    overlap_end,
+                    shared_token_union(&left_entry.tokens, &right_entry.tokens),
+                );
+
+                match (left_entry.end == overlap_end, right_entry.end == overlap_end) {
+                    (true, true) => {
+                        left_index += 1;
+                        right_index += 1;
+                        left_current = left_entries.get(left_index).cloned();
+                        right_current = right_entries.get(right_index).cloned();
+                    }
+                    (true, false) => {
+                        let next_start = overlap_end + 1;
+                        right_entry.start = next_start;
+                        left_index += 1;
+                        left_current = left_entries.get(left_index).cloned();
+                    }
+                    (false, true) => {
+                        let next_start = overlap_end + 1;
+                        left_entry.start = next_start;
+                        right_index += 1;
+                        right_current = right_entries.get(right_index).cloned();
+                    }
+                    (false, false) => unreachable!(),
+                }
+            }
+            (Some(left_entry), None) => {
+                builder.push(left_entry.start, left_entry.end, Arc::clone(&left_entry.tokens));
+                left_index += 1;
+                left_current = left_entries.get(left_index).cloned();
+            }
+            (None, Some(right_entry)) => {
+                builder.push(right_entry.start, right_entry.end, Arc::clone(&right_entry.tokens));
+                right_index += 1;
+                right_current = right_entries.get(right_index).cloned();
+            }
+            (None, None) => break,
+        }
+    }
+
+    builder.finish()
 }
 
 fn combined_boundaries(left: &[WeightRangeEntry], right: &[WeightRangeEntry]) -> SmallVec<[u64; 32]> {
@@ -1026,32 +1487,82 @@ impl Weight {
     }
 
     pub fn union(&self, other: &Self) -> Self {
+        let profile_started_at = weight_op_profile_enabled().then(Instant::now);
         if self.is_full() || other.is_full() {
-            return Self::all();
+            let result = Self::all();
+            if let Some(started_at) = profile_started_at {
+                record_union_profile(WeightUnionPath::Full, started_at.elapsed().as_micros() as u64);
+            }
+            return result;
         }
         if self.is_empty() {
-            return other.clone();
+            let result = other.clone();
+            if let Some(started_at) = profile_started_at {
+                record_union_profile(WeightUnionPath::EmptyLeft, started_at.elapsed().as_micros() as u64);
+            }
+            return result;
         }
         if other.is_empty() {
-            return self.clone();
+            let result = self.clone();
+            if let Some(started_at) = profile_started_at {
+                record_union_profile(WeightUnionPath::EmptyRight, started_at.elapsed().as_micros() as u64);
+            }
+            return result;
         }
         if Arc::ptr_eq(&self.0, &other.0) {
-            return self.clone();
-        }
-        with_memoized_weight_op(WeightOpKind::Union, self, other, || {
-            if let (Some(left), Some(right)) = (single_compact_entry(self), single_compact_entry(other)) {
-                combine_single_entries(&left, &right, union_token_sets)
-            } else {
-                combine_compact_entries(self, other, union_token_sets)
+            let result = self.clone();
+            if let Some(started_at) = profile_started_at {
+                record_union_profile(WeightUnionPath::SameArc, started_at.elapsed().as_micros() as u64);
             }
-        })
+            return result;
+        }
+        if let Some(existing) = lookup_memoized_weight_op(WeightOpKind::Union, self, other) {
+            if let Some(started_at) = profile_started_at {
+                record_union_profile(WeightUnionPath::MemoHit, started_at.elapsed().as_micros() as u64);
+            }
+            return existing;
+        }
+        if let Some(result) = union_disjoint_tsid_ranges(self, other) {
+            store_memoized_weight_op(WeightOpKind::Union, self, other, &result);
+            if let Some(started_at) = profile_started_at {
+                record_union_profile(WeightUnionPath::DisjointTsid, started_at.elapsed().as_micros() as u64);
+            }
+            return result;
+        }
+
+        let left_single = single_compact_entry(self);
+        let right_single = single_compact_entry(other);
+        let computed_shape = match (&left_single, &right_single) {
+            (Some(_), Some(_)) => WeightUnionComputedShape::SingleSingle,
+            (Some(_), None) => WeightUnionComputedShape::SingleMulti,
+            (None, Some(_)) => WeightUnionComputedShape::MultiSingle,
+            (None, None) => WeightUnionComputedShape::MultiMulti,
+        };
+
+        let result = if let (Some(left), Some(right)) = (&left_single, &right_single) {
+            combine_single_entries(&left, &right, union_token_sets)
+        } else {
+            union_compact_entries(self, other)
+        };
+        store_memoized_weight_op(WeightOpKind::Union, self, other, &result);
+        if let Some(started_at) = profile_started_at {
+            let elapsed = started_at.elapsed().as_micros() as u64;
+            record_union_profile(WeightUnionPath::Computed, elapsed);
+            record_union_computed_shape(computed_shape, elapsed);
+        }
+        result
     }
 
     pub fn union_all<'a>(weights: impl IntoIterator<Item = &'a Self>) -> Self {
+        let profile_started_at = weight_op_profile_enabled().then(Instant::now);
         let mut meaningful = SmallVec::<[&Weight; 8]>::new();
         for weight in weights {
             if weight.is_full() {
-                return Self::all();
+                let result = Self::all();
+                if let Some(started_at) = profile_started_at {
+                    record_union_all_profile(started_at.elapsed().as_micros() as u64, meaningful.len() as u64);
+                }
+                return result;
             }
             if weight.is_empty() {
                 continue;
@@ -1059,39 +1570,47 @@ impl Weight {
             meaningful.push(weight);
         }
 
-        match meaningful.len() {
-            0 => return Self::empty(),
-            1 => return meaningful[0].clone(),
-            _ => {}
-        }
+        let input_count = meaningful.len() as u64;
 
-        // Dedup by Arc pointer: union(a, a) = a, so identical weights are redundant.
-        // Only worthwhile when there are enough inputs that duplicates are likely
-        // and the sort cost is amortized by skipping expensive union operations.
-        if meaningful.len() > 4 {
+        let result = match meaningful.len() {
+            0 => Self::empty(),
+            1 => meaningful[0].clone(),
+            _ if meaningful.len() > 4 => {
             meaningful.sort_unstable_by_key(|w| w.ptr_key());
             meaningful.dedup_by_key(|w| w.ptr_key());
             if meaningful.len() == 1 {
-                return meaningful[0].clone();
+                meaningful[0].clone()
+            } else if let Some(result) = union_all_single_tsid_entries(&meaningful) {
+                result
+            } else if meaningful.len() > 4 {
+                union_all_multiway(&meaningful)
+            } else {
+                let mut iter = meaningful.into_iter();
+                let mut acc = iter.next().unwrap().clone();
+                for weight in iter {
+                    acc = acc.union(weight);
+                }
+                acc
             }
-        }
+            }
+            _ => {
+                if let Some(result) = union_all_single_tsid_entries(&meaningful) {
+                    result
+                } else {
+                    let mut iter = meaningful.into_iter();
+                    let mut acc = iter.next().unwrap().clone();
+                    for weight in iter {
+                        acc = acc.union(weight);
+                    }
+                    acc
+                }
+            }
+        };
 
-        if let Some(result) = union_all_single_tsid_entries(&meaningful) {
-            return result;
+        if let Some(started_at) = profile_started_at {
+            record_union_all_profile(started_at.elapsed().as_micros() as u64, input_count);
         }
-
-        // For many inputs, use direct multiway sweep to avoid O(N) intermediate
-        // Weight allocations, interner locks, and memoization overhead.
-        if meaningful.len() > 4 {
-            return union_all_multiway(&meaningful);
-        }
-
-        let mut iter = meaningful.into_iter();
-        let mut acc = iter.next().unwrap().clone();
-        for weight in iter {
-            acc = acc.union(weight);
-        }
-        acc
+        result
     }
 
     pub fn intersection(&self, other: &Self) -> Self {
@@ -1143,10 +1662,19 @@ impl Weight {
     }
 
     pub fn complement(&self) -> Self {
+        let profile_started_at = weight_op_profile_enabled().then(Instant::now);
         if self.is_full() {
-            Self::empty()
+            let result = Self::empty();
+            if let Some(started_at) = profile_started_at {
+                record_complement_profile(started_at.elapsed().as_micros() as u64);
+            }
+            result
         } else if self.is_empty() {
-            Self::all()
+            let result = Self::all();
+            if let Some(started_at) = profile_started_at {
+                record_complement_profile(started_at.elapsed().as_micros() as u64);
+            }
+            result
         } else {
             // Cannot compute a proper per-TSID complement without an explicit
             // token/TSID universe.  Returning empty() makes the determinization
@@ -1156,7 +1684,11 @@ impl Weight {
             // was `all().difference(self)` which always returned `all()` due to
             // the sentinel representation, causing target subsets to collapse
             // into `Weight::all()` and producing false positives.
-            Self::empty()
+            let result = Self::empty();
+            if let Some(started_at) = profile_started_at {
+                record_complement_profile(started_at.elapsed().as_micros() as u64);
+            }
+            result
         }
     }
 
