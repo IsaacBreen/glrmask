@@ -1538,17 +1538,9 @@ fn test_minimized_o47674_shape_splits_1_then_2_then_3() {
         "patternProperties": {
             "op": {
                 "type": "object",
-                "properties": {
-                    "a": {},
-                    "b": {},
-                    "c": {},
-                    "d": {}
-                },
+                "properties": {"a": {}, "b": {}, "c": {}, "d": {}},
                 "required": ["a"],
-                "anyOf": [
-                    {"required": ["b"]},
-                    {"required": ["c", "d"]}
-                ],
+                "anyOf": [{"required": ["b"]}, {"required": ["c", "d"]}],
                 "additionalProperties": false
             }
         }
