@@ -1021,6 +1021,10 @@ fn dedup_rules(rules: &mut Vec<Rule>) {
     });
 }
 
+fn is_reflexive_unit_rule(rule: &Rule) -> bool {
+    matches!(rule.rhs.as_slice(), [Symbol::Nonterminal(nonterminal)] if *nonterminal == rule.lhs)
+}
+
 pub(crate) fn merge_identical_nonterminals(
     rules: &[Rule],
     start: NonterminalID,
@@ -1380,6 +1384,9 @@ pub(crate) fn merge_identical_nonterminals(
             })
             .collect();
         let merged = Rule { lhs, rhs };
+        if is_reflexive_unit_rule(&merged) {
+            continue;
+        }
         if seen.insert(merged.clone()) {
             result.push(merged);
         }
@@ -1966,6 +1973,45 @@ mod tests {
         );
         assert!(rules.iter().any(|rule| rule.lhs == 69));
         assert!(rules.iter().any(|rule| rule.lhs == 72));
+    }
+
+    #[test]
+    fn test_merge_identical_nonterminals_drops_reflexive_unit_rules_created_by_merge() {
+        let rules = vec![
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Nonterminal(10)],
+            },
+            Rule {
+                lhs: 10,
+                rhs: vec![Symbol::Nonterminal(20)],
+            },
+            Rule {
+                lhs: 11,
+                rhs: vec![Symbol::Nonterminal(10)],
+            },
+            Rule {
+                lhs: 20,
+                rhs: vec![Symbol::Terminal(0)],
+            },
+        ];
+
+        let merged = merge_identical_nonterminals(&rules, 0);
+
+        assert!(!merged.iter().any(is_reflexive_unit_rule));
+        assert!(merged.iter().all(|rule| rule.lhs != 11));
+
+        let grammar = GrammarDef {
+            rules: merged,
+            start: 0,
+            terminals: vec![Terminal::Literal {
+                id: 0,
+                bytes: b"a".to_vec(),
+            }],
+            ..Default::default()
+        };
+        let analyzed = AnalyzedGrammar::from_grammar_def(&grammar);
+        assert!(analyzed.check_recursion_boundedness().is_ok());
     }
 
     /// Split checks: check_no_nullable_nonterminals returns Ok for non-nullable grammar.
