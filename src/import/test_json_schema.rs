@@ -6,7 +6,7 @@
 use crate::import::ast::{GrammarExpr, NamedGrammar};
 use crate::import::json_schema::{json_schema_to_grammar, schema_to_named_grammar};
 use crate::runtime::{Constraint, ConstraintState};
-use crate::Vocab;
+use crate::{dump_json_schema_grammar_glrm, Vocab};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
@@ -2314,7 +2314,7 @@ include!("/tmp/cfa_rust_test_o9788.rs");
 include!("/tmp/minimize_o9788_bug.rs");
 
 #[test]
-fn test_o69752_max_stack_size() {
+fn test_o69752_max_stack_size1() {
     let schema = r##"{
     "RuntimeProtocolCapabilities": {
       "properties": {
@@ -2339,11 +2339,48 @@ fn test_o69752_max_stack_size() {
   }"##;
     let vocab = byte_vocab();
     let constraint = schema_constraint_direct_compile(schema, &vocab);
+    let glrm = dump_json_schema_grammar_glrm(&schema).unwrap();
+    println!("GLRM:\n{}", glrm);
 
     // This prefix is designed to reach a state where the stack might grow.
     // We use a full example to see the maximum growth.
     let prefix = br#"{"protocolCapabilities": {"coap": true, "datachannel": true, "http": true, "https": true, "ws": true, "wss": true}}"#;
-    
+
+    let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
+    assert_eq!(max_paths, 1, "max paths {} should be 1", max_paths);
+}
+
+#[test]
+fn test_o69752_max_stack_size2() {
+    let schema = r##"
+    {
+        "properties": {
+            "protocolCapabilities": {
+                "properties": {
+                    "coap": { "type": "boolean" },
+                    "datachannel": { "type": "boolean" },
+                    "http": { "type": "boolean" },
+                    "https": { "type": "boolean" },
+                    "ws": { "type": "boolean" },
+                    "wss": { "type": "boolean" }
+                },
+                "type": "object"
+            }
+        },
+        "required": [
+            "protocolCapabilities"
+        ],
+        "type": "object"
+    }"##;
+    let vocab = byte_vocab();
+    let constraint = schema_constraint_direct_compile(schema, &vocab);
+    let glrm = dump_json_schema_grammar_glrm(&schema).unwrap();
+    println!("GLRM:\n{}", glrm);
+
+    // This prefix is designed to reach a state where the stack might grow.
+    // We use a full example to see the maximum growth.
+    let prefix = br#"{"protocolCapabilities": {"coap": true, "datachannel": true, "http": true, "https": true, "ws": true, "wss": true}}"#;
+
     let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
     assert_eq!(max_paths, 1, "max paths {} should be 1", max_paths);
 }
