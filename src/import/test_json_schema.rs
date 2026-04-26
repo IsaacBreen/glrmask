@@ -1537,7 +1537,7 @@ fn test_o47674_top_level_oneof_matches_llguidance_permissiveness() {
 }
 
 #[test]
-fn test_minimized_o47674_shape_splits_1_then_2_then_3() {
+fn test_minimized_o47674_shape_stays_single_path_through_prefixes() {
     let schema = r#"{
         "type": "object",
         "patternProperties": {
@@ -1573,7 +1573,7 @@ fn test_minimized_o47674_shape_splits_1_then_2_then_3() {
 }
 
 #[test]
-fn test_minimized_o47674_glrm_splits_1_then_2_then_3() {
+fn test_minimized_o47674_glrm_stays_single_path_through_prefixes() {
     let grammar = r#"start start;
 
 t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]|\\["\\\/bfnrt]|\\u[0-9A-Fa-f]{4}/;
