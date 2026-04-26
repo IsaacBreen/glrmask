@@ -1532,104 +1532,59 @@ fn test_o47674_top_level_oneof_matches_llguidance_permissiveness() {
 }
 
 #[test]
-fn test_minimized_o47674_suffix_still_reaches_nine_paths() {
+fn test_minimized_o47674_shape_still_reaches_eighteen_paths() {
     let schema = r#"{
         "type": "object",
-        "properties": {
-            "parent_id": {
-                "type": ["string", "null"]
-            },
-            "operations": {
-                "patternProperties": {
-                    "[a-z_0-9\\.\\-]*": {
-                        "type": "object",
-                        "properties": {
-                            "uuid": {"type": "string"},
-                            "parent_id": {"type": "string"},
-                            "command": {"type": "array"},
-                            "results": {
-                                "patternProperties": {
-                                    "[a-z_0-9\\.\\-]*": {
-                                        "type": "object",
-                                        "properties": {
-                                            "uuid": {"type": "string"},
-                                            "parent_id": {"type": "string"},
-                                            "type": {
-                                                "enum": ["string", "hex_string"]
-                                            },
-                                            "display": {
-                                                "anyOf": [
-                                                    {"enum": ["string", "hex_string"]},
-                                                    {"type": "string", "pattern": "^string_table\\:[A-Z0-9-]+$"}
-                                                ]
-                                            },
-                                            "start_pos": {"type": "integer"},
-                                            "length": {"type": "integer", "minimum": 1},
-                                            "mask": {"type": "string"},
-                                            "levels": {"type": "object"},
-                                            "rpn": {"type": "string"},
-                                            "units": {"type": "string"}
-                                        },
-                                        "required": ["uuid"],
-                                        "anyOf": [
-                                            {"required": ["parent_id"]},
-                                            {"required": ["type", "display", "start_pos", "length", "units"]}
-                                        ],
-                                        "additionalProperties": false
-                                    }
-                                }
-                            }
-                        },
-                        "required": ["uuid"],
-                        "anyOf": [
-                            {"required": ["parent_id"]},
-                            {"required": ["command", "results"]}
-                        ],
-                        "additionalProperties": false
-                    }
-                }
-            }
-        },
-        "additionalProperties": false,
-        "anyOf": [
-            {
+        "patternProperties": {
+            "[a-z_0-9\\.\\-]*": {
+                "type": "object",
                 "properties": {
-                    "parent_id": {"type": "null"}
-                },
-                "required": ["parent_id"]
-            },
-            {
-                "properties": {
+                    "uuid": {"type": "string"},
                     "parent_id": {"type": "string"},
-                    "address": {"type": "string"},
-                    "family": {"type": "string"},
-                    "part_number": {"type": "integer"},
-                    "coding_index": {"type": "string"},
-                    "hardware_number": {"type": "string"},
-                    "software_number": {"type": "string"},
-                    "endian": {"enum": ["big", "little"]}
+                    "command": {"type": "array"},
+                    "results": {
+                        "patternProperties": {
+                            "[a-z_0-9\\.\\-]*": {
+                                "type": "object",
+                                "properties": {
+                                    "uuid": {"type": "string"},
+                                    "parent_id": {"type": "string"},
+                                    "type": {"enum": ["string", "hex_string"]},
+                                    "display": {"enum": ["string", "hex_string"]},
+                                    "start_pos": {"type": "integer"},
+                                    "length": {"type": "integer", "minimum": 1},
+                                    "mask": {"type": "string"},
+                                    "levels": {"type": "object"},
+                                    "rpn": {"type": "string"},
+                                    "units": {"type": "string"}
+                                },
+                                "required": ["uuid"],
+                                "anyOf": [
+                                    {"required": ["parent_id"]},
+                                    {"required": ["type", "display", "start_pos", "length", "units"]}
+                                ],
+                                "additionalProperties": false
+                            }
+                        }
+                    }
                 },
-                "required": [
-                    "address",
-                    "family",
-                    "parent_id",
-                    "part_number",
-                    "coding_index",
-                    "hardware_number",
-                    "software_number",
-                    "endian"
-                ]
+                "required": ["uuid"],
+                "anyOf": [
+                    {"required": ["parent_id"]},
+                    {"required": ["command", "results"]}
+                ],
+                "additionalProperties": false
             }
-        ]
+        }
     }"#;
-    let prefix = br#"{"parent_id": null, "operations": {"operation1": {"uuid": "u", "command": [], "results": {"result1": {"uuid": "u", "type": "string", "display": "string", "start_pos": 0, "length": 1, "units": "u"}, "result2": {"uuid": "u", "type": "hex_string", "display": "hex_string", "start_pos": 10, "length": 10, "mask": "", "levels": {}, "rpn": "", "units": """#;
+    let prefix = br#"{"op": {"uuid": "u", "command": [], "results": {"r1": {"uuid": "u", "#;
 
     let constraint = schema_constraint(schema);
-    let paths_at_end = parser_paths_at_prefix_end(&constraint, prefix);
+    let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
 
     assert_eq!(
-        paths_at_end, 9,
-        "minimized o47674-shaped schema should still hit 9 live parser paths"
+        max_paths, 18,
+        "simplified o47674-shaped schema should still reach 18 live parser paths"
     );
 }
 
