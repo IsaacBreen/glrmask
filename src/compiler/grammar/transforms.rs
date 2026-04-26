@@ -384,7 +384,8 @@ pub(crate) fn bound_runtime_reduction_length(
             }
         }
 
-        let mut consumed = 1usize;
+        let first_chunk_len = max_rhs_len.min(symbols.len());
+        let mut consumed = first_chunk_len;
         let mut stage = 0usize;
 
         let first_helper = next_nt;
@@ -396,7 +397,7 @@ pub(crate) fn bound_runtime_reduction_length(
             .or_insert_with(|| format!("{lhs_name}__prefix_{stage}"));
         rewritten.push(Rule {
             lhs: first_helper,
-            rhs: vec![symbols[0].clone()],
+            rhs: symbols[..first_chunk_len].to_vec(),
         });
 
         let mut prefix_nt = first_helper;
@@ -574,7 +575,7 @@ mod tests {
         // A -> A a b c d
         // With max_rhs_len = 3, this should be split into:
         // A -> A Tail
-        // Tail -> a b c d  =>  P1 -> a, P2 -> P1 b, Tail -> P2 c d
+        // Tail -> a b c d  =>  P1 -> a b c, Tail -> P1 d
         // We want to ensure no indirect cycle like A -> Px -> Py -> A is created.
         
         let mut grammar = GrammarDef {
@@ -674,31 +675,27 @@ mod tests {
         bound_runtime_reduction_length(&mut grammar, 3);
 
         assert!(grammar.rules.iter().all(|rule| rule.rhs.len() <= 3));
-        assert_eq!(grammar.rules.len(), 3);
+        assert_eq!(grammar.rules.len(), 2);
         assert_eq!(grammar.rules[0].lhs, 1);
-        assert_eq!(grammar.rules[0].rhs, vec![Symbol::Terminal(0)]);
-        assert_eq!(grammar.rules[1].lhs, 2);
         assert_eq!(
-            grammar.rules[1].rhs,
+            grammar.rules[0].rhs,
             vec![
-                Symbol::Nonterminal(1),
+                Symbol::Terminal(0),
                 Symbol::Terminal(1),
                 Symbol::Terminal(2),
             ]
         );
+        assert_eq!(grammar.rules[1].lhs, 0);
         assert_eq!(
-            grammar.rules[2],
-            Rule {
-                lhs: 0,
-                rhs: vec![
-                    Symbol::Nonterminal(2),
-                    Symbol::Terminal(3),
-                    Symbol::Terminal(4),
-                ],
-            }
+            grammar.rules[1].rhs,
+            vec![
+                Symbol::Nonterminal(1),
+                Symbol::Terminal(3),
+                Symbol::Terminal(4),
+            ]
         );
         assert_eq!(grammar.nonterminal_names.get(&1).map(String::as_str), Some("Start__prefix_1"));
-        assert_eq!(grammar.nonterminal_names.get(&2).map(String::as_str), Some("Start__prefix_2"));
+        assert_eq!(grammar.nonterminal_names.get(&2), None);
     }
 
     #[test]

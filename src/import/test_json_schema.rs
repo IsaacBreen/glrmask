@@ -1569,7 +1569,7 @@ fn test_minimized_o47674_shape_splits_1_then_2_then_3() {
     let prefix = b"{\"op\": {\"";
     let constraint = schema_constraint(schema);
     let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
-    assert_eq!(max_paths, 3);
+    assert_eq!(max_paths, 2);
 }
 
 #[test]
@@ -1623,7 +1623,7 @@ nt start ::= "{" obj_pat_mix_3_body "}";
     let prefix = b"{\"op\": {\"";
     let constraint = glrm_constraint(grammar);
     let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
-    assert_eq!(max_paths, 3);
+    assert_eq!(max_paths, 2);
 }
 
 #[test]
