@@ -360,6 +360,130 @@ pub(crate) fn inline_single_use_nonterminals(
     }
 }
 
+fn inline_post_bound_single_use_nonterminals(
+    rules: &mut Vec<Rule>,
+    protected_nonterminals: &BTreeSet<NonterminalID>,
+    max_rhs_len: usize,
+) {
+    let inline_protected_nonterminals = env_var_enabled(INLINE_PROTECTED_NONTERMINALS_ENV, true);
+
+    loop {
+        let mut productions_by_lhs = BTreeMap::<NonterminalID, Vec<usize>>::new();
+        let mut use_counts = BTreeMap::<NonterminalID, usize>::new();
+        let mut position_0_users = BTreeMap::<NonterminalID, BTreeSet<NonterminalID>>::new();
+
+        for (index, rule) in rules.iter().enumerate() {
+            productions_by_lhs.entry(rule.lhs).or_default().push(index);
+            for symbol in &rule.rhs {
+                if let Symbol::Nonterminal(nonterminal) = symbol {
+                    *use_counts.entry(*nonterminal).or_default() += 1;
+                }
+            }
+            if let Some(Symbol::Nonterminal(first_nt)) = rule.rhs.first() {
+                position_0_users.entry(*first_nt).or_default().insert(rule.lhs);
+            }
+        }
+
+        let mut candidate = None;
+
+        for (&nonterminal, production_indexes) in &productions_by_lhs {
+            if production_indexes.len() != 1 {
+                continue;
+            }
+
+            let use_count = use_counts.get(&nonterminal).copied().unwrap_or(0);
+            if use_count != 1 {
+                continue;
+            }
+
+            if protected_nonterminals.contains(&nonterminal) && !inline_protected_nonterminals {
+                continue;
+            }
+
+            let candidate_rule_index = production_indexes[0];
+            let candidate_rule = &rules[candidate_rule_index];
+            if candidate_rule.rhs.is_empty()
+                || candidate_rule
+                    .rhs
+                    .iter()
+                    .any(|symbol| matches!(symbol, Symbol::Nonterminal(id) if *id == nonterminal))
+            {
+                continue;
+            }
+
+            let creates_direct_left_recursion = if let Some(Symbol::Nonterminal(first)) = candidate_rule.rhs.first() {
+                position_0_users
+                    .get(&nonterminal)
+                    .map_or(false, |lhss| lhss.contains(first))
+            } else {
+                false
+            };
+            if creates_direct_left_recursion {
+                continue;
+            }
+
+            let Some((user_index, user_rule)) = rules
+                .iter()
+                .enumerate()
+                .find(|(_, rule)| {
+                    rule.rhs.iter().any(|symbol| {
+                        matches!(symbol, Symbol::Nonterminal(id) if *id == nonterminal)
+                    })
+                })
+            else {
+                continue;
+            };
+
+            let mut new_rhs = Vec::with_capacity(user_rule.rhs.len() + candidate_rule.rhs.len());
+            for symbol in &user_rule.rhs {
+                if let Symbol::Nonterminal(id) = symbol {
+                    if *id == nonterminal {
+                        new_rhs.extend(candidate_rule.rhs.iter().cloned());
+                        continue;
+                    }
+                }
+                new_rhs.push(symbol.clone());
+            }
+
+            if new_rhs.len() > max_rhs_len {
+                continue;
+            }
+
+            candidate = Some((candidate_rule_index, user_index, nonterminal, new_rhs));
+            break;
+        }
+
+        let Some((candidate_rule_index, user_index, nonterminal, new_rhs)) = candidate else {
+            break;
+        };
+
+        let mut rewritten = Vec::with_capacity(rules.len().saturating_sub(1));
+        for (index, rule) in rules.iter().enumerate() {
+            if index == candidate_rule_index {
+                continue;
+            }
+            if index == user_index {
+                rewritten.push(Rule {
+                    lhs: rule.lhs,
+                    rhs: new_rhs.clone(),
+                });
+            } else {
+                rewritten.push(rule.clone());
+            }
+        }
+
+        *rules = rewritten;
+
+        if !rules.iter().any(|rule| {
+            rule.rhs
+                .iter()
+                .any(|symbol| matches!(symbol, Symbol::Nonterminal(id) if *id == nonterminal))
+        }) {
+            continue;
+        }
+    }
+}
+
 pub(crate) fn bound_runtime_reduction_length(
     grammar: &mut GrammarDef,
     max_rhs_len: usize,
@@ -527,6 +651,14 @@ fn prepare_grammar_transforms_impl(
     let bound_ms = t4.elapsed().as_secs_f64() * 1000.0;
 
     let t5 = std::time::Instant::now();
+    inline_post_bound_single_use_nonterminals(
+        &mut normalized.rules,
+        &protected_nonterminals,
+        max_reduction_len,
+    );
+    let inline2_ms = t5.elapsed().as_secs_f64() * 1000.0;
+
+    let t6 = std::time::Instant::now();
     loop {
         let prev_len = normalized.rules.len();
         normalized.rules = merge_identical_nonterminals(&normalized.rules, normalized.start);
@@ -534,16 +666,16 @@ fn prepare_grammar_transforms_impl(
             break;
         }
     }
-    let merge2_ms = t5.elapsed().as_secs_f64() * 1000.0;
+    let merge2_ms = t6.elapsed().as_secs_f64() * 1000.0;
 
-    let t6 = std::time::Instant::now();
+    let t7 = std::time::Instant::now();
     compact_unused_terminals(normalized);
-    let compact_ms = t6.elapsed().as_secs_f64() * 1000.0;
+    let compact_ms = t7.elapsed().as_secs_f64() * 1000.0;
 
     if debug_profile {
         eprintln!(
-            "[glrmask/debug][prepare_transforms] expand_ms={:.3} normalize_ms={:.3} inline_ms={:.3} merge1_ms={:.3} bound_ms={:.3} merge2_ms={:.3} compact_ms={:.3}",
-            expand_ms, normalize_ms, inline_ms, merge1_ms, bound_ms, merge2_ms, compact_ms,
+            "[glrmask/debug][prepare_transforms] expand_ms={:.3} normalize_ms={:.3} inline_ms={:.3} merge1_ms={:.3} bound_ms={:.3} inline2_ms={:.3} merge2_ms={:.3} compact_ms={:.3}",
+            expand_ms, normalize_ms, inline_ms, merge1_ms, bound_ms, inline2_ms, merge2_ms, compact_ms,
         );
     }
 }
@@ -807,5 +939,73 @@ mod tests {
             lhs: 0,
             rhs: vec![Symbol::Nonterminal(1)],
         }));
+    }
+
+    #[test]
+    fn test_inline_post_bound_single_use_nonterminals_inlines_safe_helpers() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+
+        let mut rules = vec![
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(3)],
+            },
+            Rule {
+                lhs: 1,
+                rhs: vec![
+                    Symbol::Terminal(0),
+                    Symbol::Terminal(1),
+                    Symbol::Terminal(2),
+                ],
+            },
+        ];
+
+        with_env_var(INLINE_PROTECTED_NONTERMINALS_ENV, None, || {
+            inline_post_bound_single_use_nonterminals(&mut rules, &BTreeSet::from([0, 1]), 4);
+        });
+
+        assert_eq!(
+            rules,
+            vec![Rule {
+                lhs: 0,
+                rhs: vec![
+                    Symbol::Terminal(0),
+                    Symbol::Terminal(1),
+                    Symbol::Terminal(2),
+                    Symbol::Terminal(3),
+                ],
+            }]
+        );
+    }
+
+    #[test]
+    fn test_inline_post_bound_single_use_nonterminals_preserves_rhs_bound() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+
+        let original = vec![
+            Rule {
+                lhs: 0,
+                rhs: vec![
+                    Symbol::Nonterminal(1),
+                    Symbol::Terminal(3),
+                    Symbol::Terminal(4),
+                ],
+            },
+            Rule {
+                lhs: 1,
+                rhs: vec![
+                    Symbol::Terminal(0),
+                    Symbol::Terminal(1),
+                    Symbol::Terminal(2),
+                ],
+            },
+        ];
+        let mut rules = original.clone();
+
+        with_env_var(INLINE_PROTECTED_NONTERMINALS_ENV, None, || {
+            inline_post_bound_single_use_nonterminals(&mut rules, &BTreeSet::from([0, 1]), 4);
+        });
+
+        assert_eq!(rules, original);
     }
 }
