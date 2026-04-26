@@ -1578,20 +1578,28 @@ fn test_minimized_o47674_shape_still_reaches_eighteen_paths() {
         }
     }"#;
 
+    // Print the grammar
+    let glrm = crate::dump_json_schema_grammar_glrm(&schema).unwrap();
+    println!("Grammar:\n{}", glrm);
 
-    let prefix = br#"{"op": {"uuid":"#;
-
+    let prefix = br#"{"op": "#;
     let constraint = schema_constraint(schema);
     let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
+    assert_eq!(max_paths, 2);
 
-    assert_eq!(max_paths, 18);
+    let prefix = br#"{"op": {""#;
+    let constraint = schema_constraint(schema);
+    let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
+    assert_eq!(max_paths, 3);
 
+    let prefix = br#"{"op": {"uuid": "u", "#;
+    let constraint = schema_constraint(schema);
+    let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
+    assert_eq!(max_paths, 6);
 
     let prefix = br#"{"op": {"uuid": "u", "command": [], "results": {"r1": {"uuid": "u", "#;
-
     let constraint = schema_constraint(schema);
     let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
-
     assert_eq!(
         max_paths, 18,
         "simplified o47674-shaped schema should still reach 18 live parser paths"
