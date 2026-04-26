@@ -9,6 +9,16 @@ use crate::grammar::flat::{Rule, Symbol, TerminalID};
 use crate::automata::lexer::tokenizer::Tokenizer;
 
 const MAX_RUNTIME_REDUCTION_LEN: usize = 5;
+const INLINE_PROTECTED_NONTERMINALS_ENV: &str = "GLRMASK_INLINE_PROTECTED_NONTERMINALS";
+
+fn env_var_enabled(key: &str, default: bool) -> bool {
+    std::env::var(key)
+        .map(|v| {
+            let n = v.trim().to_ascii_lowercase();
+            !matches!(n.as_str(), "" | "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(default)
+}
 
 // ── Nullable terminal expansion ─────────────────────────────────────────────
 
@@ -199,6 +209,8 @@ pub(crate) fn inline_single_use_nonterminals(
     rules: &mut Vec<Rule>,
     protected_nonterminals: &BTreeSet<NonterminalID>,
 ) {
+    let inline_protected_nonterminals = env_var_enabled(INLINE_PROTECTED_NONTERMINALS_ENV, true);
+
     loop {
         // Build indexes
         let mut productions_by_lhs = BTreeMap::<NonterminalID, Vec<usize>>::new();
@@ -222,7 +234,7 @@ pub(crate) fn inline_single_use_nonterminals(
         let mut inline_candidates = BTreeMap::<NonterminalID, (usize, Vec<Symbol>)>::new();
 
         for (&nonterminal, production_indexes) in &productions_by_lhs {
-            if protected_nonterminals.contains(&nonterminal) || production_indexes.len() != 1 {
+            if production_indexes.len() != 1 {
                 continue;
             }
 
@@ -235,8 +247,16 @@ pub(crate) fn inline_single_use_nonterminals(
             {
                 continue;
             }
-
             let use_count = use_counts.get(&nonterminal).copied().unwrap_or(0);
+            if use_count == 0 {
+                // Nothing references this nonterminal, so there is nowhere to inline it.
+                continue;
+            }
+
+            if protected_nonterminals.contains(&nonterminal) && !inline_protected_nonterminals {
+                continue;
+            }
+
             let should_inline = rule.rhs.len() == 1 || use_count == 1;
             if !should_inline {
                 continue;
@@ -562,6 +582,29 @@ fn prepare_owned_grammar_for_compile_impl(
 mod tests {
     use super::*;
     use crate::grammar::flat::Terminal;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_env_var<R>(key: &str, value: Option<&str>, f: impl FnOnce() -> R) -> R {
+        let previous = std::env::var(key).ok();
+        match value {
+            Some(val) => unsafe { std::env::set_var(key, val) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+
+        let result = f();
+
+        match previous.as_deref() {
+            Some(val) => unsafe { std::env::set_var(key, val) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+
+        result
+    }
 
     fn literal(id: u32, bytes: &[u8]) -> Terminal {
         Terminal::Literal {
@@ -720,5 +763,49 @@ mod tests {
         bound_runtime_reduction_length(&mut grammar, 2);
 
         assert_eq!(grammar.rules, original_rules);
+    }
+
+    #[test]
+    fn test_inline_single_use_nonterminals_can_inline_protected_nonterminals_via_env() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+
+        let rules = vec![
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Nonterminal(1)],
+            },
+            Rule {
+                lhs: 1,
+                rhs: vec![Symbol::Nonterminal(2)],
+            },
+            Rule {
+                lhs: 2,
+                rhs: vec![Symbol::Terminal(7)],
+            },
+        ];
+        let protected = BTreeSet::from([0, 1, 2]);
+
+        let mut default_rules = rules.clone();
+        with_env_var(INLINE_PROTECTED_NONTERMINALS_ENV, None, || {
+            inline_single_use_nonterminals(&mut default_rules, &protected);
+        });
+        assert_eq!(
+            default_rules,
+            vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(7)],
+            }]
+        );
+
+        let mut env_rules = rules;
+        with_env_var(INLINE_PROTECTED_NONTERMINALS_ENV, Some("0"), || {
+            inline_single_use_nonterminals(&mut env_rules, &protected);
+        });
+        assert!(env_rules.iter().any(|rule| rule.lhs == 1));
+        assert!(env_rules.iter().any(|rule| rule.lhs == 2));
+        assert!(env_rules.contains(&Rule {
+            lhs: 0,
+            rhs: vec![Symbol::Nonterminal(1)],
+        }));
     }
 }
