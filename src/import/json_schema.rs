@@ -1850,11 +1850,69 @@ fn shared_ap_key_exclusions_enabled() -> bool {
         .unwrap_or(true)
 }
 
+fn decode_local_ref_token(token: &str) -> String {
+    token.replace("~1", "/").replace("~0", "~")
+}
+
+fn find_local_ref_target<'v>(node: &'v Value, ref_value: &str) -> Option<&'v Value> {
+    match node {
+        Value::Object(map) => {
+            if map.get("id").and_then(Value::as_str) == Some(ref_value)
+                || map.get("$id").and_then(Value::as_str) == Some(ref_value)
+            {
+                return Some(node);
+            }
+            if let Some(anchor_name) = ref_value.strip_prefix('#') {
+                if map.get("$anchor").and_then(Value::as_str) == Some(anchor_name) {
+                    return Some(node);
+                }
+            }
+            for value in map.values() {
+                if let Some(target) = find_local_ref_target(value, ref_value) {
+                    return Some(target);
+                }
+            }
+            None
+        }
+        Value::Array(items) => items
+            .iter()
+            .find_map(|value| find_local_ref_target(value, ref_value)),
+        _ => None,
+    }
+}
+
+fn resolve_shared_ap_ref_target<'a>(root: &'a Value, ref_value: &str) -> Option<&'a Value> {
+    if !ref_value.starts_with('#') {
+        return None;
+    }
+
+    if ref_value == "#" {
+        return Some(root);
+    }
+
+    if !ref_value.starts_with("#/") {
+        return find_local_ref_target(root, ref_value);
+    }
+
+    let mut current = root;
+    for token in ref_value[2..].split('/') {
+        let key = decode_local_ref_token(token);
+        current = current.get(&key)?;
+    }
+    Some(current)
+}
+
 fn collect_shared_ap_literal_keys(root: &Value) -> BTreeSet<String> {
     let mut collected = BTreeSet::new();
     let mut queue = VecDeque::from([root]);
+    let mut visited = BTreeSet::new();
 
     while let Some(node) = queue.pop_front() {
+        let node_id = node as *const Value as usize;
+        if !visited.insert(node_id) {
+            continue;
+        }
+
         let Some(object) = node.as_object() else {
             continue;
         };
@@ -1875,6 +1933,12 @@ fn collect_shared_ap_literal_keys(root: &Value) -> BTreeSet<String> {
         }
         if let Some(pattern_properties) = object.get("patternProperties").and_then(Value::as_object) {
             queue.extend(pattern_properties.values());
+        }
+
+        if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+            if let Some(target) = resolve_shared_ap_ref_target(root, reference) {
+                queue.push_back(target);
+            }
         }
 
         for keyword in [
@@ -4249,37 +4313,6 @@ impl<'a> SchemaCtx<'a> {
         Ok(())
     }
 
-    fn decode_ref_token(token: &str) -> String {
-        token.replace("~1", "/").replace("~0", "~")
-    }
-
-    fn find_local_anchor_target<'v>(node: &'v Value, ref_value: &str) -> Option<&'v Value> {
-        match node {
-            Value::Object(map) => {
-                if map.get("id").and_then(Value::as_str) == Some(ref_value)
-                    || map.get("$id").and_then(Value::as_str) == Some(ref_value)
-                {
-                    return Some(node);
-                }
-                if let Some(anchor_name) = ref_value.strip_prefix('#') {
-                    if map.get("$anchor").and_then(Value::as_str) == Some(anchor_name) {
-                        return Some(node);
-                    }
-                }
-                for value in map.values() {
-                    if let Some(target) = Self::find_local_anchor_target(value, ref_value) {
-                        return Some(target);
-                    }
-                }
-                None
-            }
-            Value::Array(items) => items
-                .iter()
-                .find_map(|value| Self::find_local_anchor_target(value, ref_value)),
-            _ => None,
-        }
-    }
-
     fn resolve_local_ref(&self, ref_value: &str) -> Result<&Value, GlrMaskError> {
         if !ref_value.starts_with('#') {
             return Err(GlrMaskError::GrammarParse(format!(
@@ -4292,7 +4325,7 @@ impl<'a> SchemaCtx<'a> {
         }
 
         if !ref_value.starts_with("#/") {
-            return Self::find_local_anchor_target(self.root_schema, ref_value)
+            return find_local_ref_target(self.root_schema, ref_value)
                 .ok_or_else(|| {
                     GlrMaskError::GrammarParse(format!("unknown $ref target '{ref_value}'"))
                 });
@@ -4300,7 +4333,7 @@ impl<'a> SchemaCtx<'a> {
 
         let mut current = self.root_schema;
         for token in ref_value[2..].split('/') {
-            let key = Self::decode_ref_token(token);
+            let key = decode_local_ref_token(token);
             current = current.get(&key).ok_or_else(|| {
                 GlrMaskError::GrammarParse(format!("unknown $ref target '{ref_value}'"))
             })?;
@@ -8739,6 +8772,19 @@ impl<'a> SchemaCtx<'a> {
             && !required_keys_are_prefix
         {
             return self.build_open_object_required_mask_expr(&ordered, additional_properties_schema);
+        }
+
+        if pattern_properties.is_empty()
+            && property_names.is_none()
+            && additional_properties_schema.is_some()
+            && ordered.iter().all(|(_, _, required)| !*required)
+        {
+            return self.build_literal_properties_any_order_object_expr(
+                properties,
+                required_list,
+                required_keys,
+                additional_properties_schema,
+            );
         }
 
         let mut base_index = self.generated_object_rule_counter;

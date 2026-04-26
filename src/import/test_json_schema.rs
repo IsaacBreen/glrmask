@@ -506,6 +506,82 @@ fn test_shared_additional_properties_key_exclusions_create_shared_terminal_and_a
 }
 
 #[test]
+fn test_shared_additional_properties_key_exclusions_follow_local_id_refs() {
+    let schema = r##"{
+        "type": "object",
+        "properties": {
+            "left": {
+                "type": "object",
+                "properties": {"a": {"type": "string"}},
+                "additionalProperties": {"type": "string"}
+            },
+            "right": {"$ref": "#node"}
+        },
+        "definitions": {
+            "node": {
+                "$id": "#node",
+                "type": "object",
+                "properties": {"via_id": {"type": "string"}},
+                "additionalProperties": {"type": "string"}
+            }
+        },
+        "additionalProperties": false
+    }"##;
+
+    let grammar = with_env_var("GLRMASK_AP_SHARED_EXCLUSIONS", Some("1"), || named_grammar_from_schema(schema));
+    let ap_key_rules: Vec<_> = grammar
+        .rules
+        .iter()
+        .filter(|rule| rule.name.contains("_ap_key_") && !rule.is_terminal)
+        .collect();
+
+    assert!(
+        ap_key_rules.iter().any(|rule| contains_literal_prefix(&rule.expr, b"via_id\"")),
+        "expected allow-back rules to include literals collected through local $id refs"
+    );
+}
+
+#[test]
+fn test_shared_additional_properties_key_exclusions_follow_anchors_in_arrays() {
+    let schema = r##"{
+        "type": "object",
+        "properties": {
+            "left": {
+                "type": "object",
+                "properties": {"a": {"type": "string"}},
+                "additionalProperties": {"type": "string"}
+            },
+            "right": {"$ref": "#bag"}
+        },
+        "anyOf": [
+            {
+                "items": [
+                    {
+                        "$anchor": "bag",
+                        "type": "object",
+                        "properties": {"via_anchor": {"type": "string"}},
+                        "additionalProperties": {"type": "string"}
+                    }
+                ]
+            }
+        ],
+        "additionalProperties": false
+    }"##;
+
+    let grammar = with_env_var("GLRMASK_AP_SHARED_EXCLUSIONS", Some("1"), || named_grammar_from_schema(schema));
+    let ap_key_rules: Vec<_> = grammar
+        .rules
+        .iter()
+        .filter(|rule| rule.name.contains("_ap_key_") && !rule.is_terminal)
+        .collect();
+
+    assert!(
+        ap_key_rules.iter().any(|rule| contains_literal_prefix(&rule.expr, b"via_anchor\"")),
+        "expected allow-back rules to include literals collected through array-nested anchors"
+    );
+}
+
+#[test]
 fn test_pattern_key_terminal_is_extracted_for_unanchored_sides() {
     let schema = r#"{
         "type": "object",
