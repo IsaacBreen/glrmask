@@ -1551,17 +1551,17 @@ fn test_minimized_o47674_shape_splits_1_then_2_then_3() {
         }
     }"#;
 
-    let prefix = br#"{"op":"#;
+    let prefix = b"{\"op\":";
     let constraint = schema_constraint(schema);
     let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
     assert_eq!(max_paths, 1);
 
-    let prefix = br#"{"op": "#;
+    let prefix = b"{\"op\": ";
     let constraint = schema_constraint(schema);
     let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
     assert_eq!(max_paths, 2);
 
-    let prefix = br#"{"op": {""#;
+    let prefix = b"{\"op\": {\"";
     let constraint = schema_constraint(schema);
     let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
     assert_eq!(max_paths, 3);
@@ -1571,19 +1571,14 @@ fn test_minimized_o47674_shape_splits_1_then_2_then_3() {
 fn test_minimized_o47674_glrm_splits_1_then_2_then_3() {
     let grammar = r#"start start;
 
-internal t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]|\\["\\\/bfnrt]|\\u[0-9A-Fa-f]{4}/;
+t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]|\\["\\\/bfnrt]|\\u[0-9A-Fa-f]{4}/;
 t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
 nt json_string ::= "\"" JSON_STRING_BODY;
-t JSON_INTEGER ::= /-?(0|[1-9][0-9]*)/;
-t JSON_NUMBER ::= /-?(0|[1-9][0-9]*)(\.[0-9]+([eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+)/;
-t JSON_BOOL ::= "true" | "false";
-t JSON_NULL ::= "null";
 t JSON_KEY_COLON_BODY ::= JSON_STRING_CHAR* "\"";
 nt json_key_colon ::= "\"" JSON_KEY_COLON_BODY ": ";
 nt json_kv ::= json_key_colon json_value;
 nt json_object ::= "{" ", " ~ ( json_kv* ) "}";
-nt json_array ::= "[" ", " ~ ( json_value* ) "]";
-nt json_value ::= json_object | json_array | json_string | JSON_NUMBER | JSON_INTEGER | JSON_BOOL | JSON_NULL;
+nt json_value ::= json_object | json_string;
 nt obj_ord_0_np_0 ::= "\"" "a\"" ": " json_value;
 nt obj_ord_0_np_1 ::= "\"" "b\"" ": " json_value;
 nt obj_ord_0_np_2 ::= "\"" "c\"" ": " json_value;
@@ -1605,17 +1600,17 @@ nt obj_pat_mix_3_body ::=  | obj_pat_mix_3_pp_list | obj_pat_mix_3_ap_list | obj
 nt start ::= "{" obj_pat_mix_3_body "}";
 "#;
 
-    let prefix = br#"{"op":"#;
+    let prefix = b"{\"op\":";
     let constraint = glrm_constraint(grammar);
     let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
     assert_eq!(max_paths, 1);
 
-    let prefix = br#"{"op": "#;
+    let prefix = b"{\"op\": ";
     let constraint = glrm_constraint(grammar);
     let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
     assert_eq!(max_paths, 2);
 
-    let prefix = br#"{"op": {""#;
+    let prefix = b"{\"op\": {\"";
     let constraint = glrm_constraint(grammar);
     let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
     assert_eq!(max_paths, 3);
