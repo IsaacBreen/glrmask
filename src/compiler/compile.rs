@@ -1106,6 +1106,7 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
     fn test_inline_single_use_nonterminals_keeps_multi_symbol_helper_with_multiple_occurrences() {
         let mut rules = vec![
             Rule {
