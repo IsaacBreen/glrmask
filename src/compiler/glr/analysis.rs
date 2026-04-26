@@ -876,10 +876,149 @@ fn remove_unreachable_rules(rules: &[Rule], start: NonterminalID) -> Vec<Rule> {
         .collect()
 }
 
+fn build_rhs_by_lhs(rules: &[Rule]) -> BTreeMap<NonterminalID, BTreeSet<Vec<Symbol>>> {
+    let mut rhs_by_lhs = BTreeMap::<NonterminalID, BTreeSet<Vec<Symbol>>>::new();
+    for rule in rules {
+        rhs_by_lhs
+            .entry(rule.lhs)
+            .or_default()
+            .insert(rule.rhs.clone());
+    }
+    rhs_by_lhs
+}
+
+fn compute_expandable_single_productions(
+    rhs_by_lhs: &BTreeMap<NonterminalID, BTreeSet<Vec<Symbol>>>,
+) -> (BTreeMap<NonterminalID, Vec<Symbol>>, BTreeSet<NonterminalID>) {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum VisitState {
+        Visiting,
+        Expandable,
+        NotExpandable,
+    }
+
+    fn visit(
+        nt: NonterminalID,
+        unique_rhs_by_lhs: &BTreeMap<NonterminalID, Vec<Symbol>>,
+        state: &mut BTreeMap<NonterminalID, VisitState>,
+    ) -> bool {
+        if let Some(existing) = state.get(&nt).copied() {
+            return match existing {
+                VisitState::Visiting => false,
+                VisitState::Expandable => true,
+                VisitState::NotExpandable => false,
+            };
+        }
+
+        let Some(rhs) = unique_rhs_by_lhs.get(&nt) else {
+            return false;
+        };
+
+        state.insert(nt, VisitState::Visiting);
+        let expandable = rhs.iter().all(|symbol| match symbol {
+            Symbol::Terminal(_) => true,
+            Symbol::Nonterminal(child) => {
+                if unique_rhs_by_lhs.contains_key(child) {
+                    visit(*child, unique_rhs_by_lhs, state)
+                } else {
+                    true
+                }
+            }
+        });
+        state.insert(
+            nt,
+            if expandable {
+                VisitState::Expandable
+            } else {
+                VisitState::NotExpandable
+            },
+        );
+        expandable
+    }
+
+    let unique_rhs_by_lhs: BTreeMap<NonterminalID, Vec<Symbol>> = rhs_by_lhs
+        .iter()
+        .filter_map(|(&nt, rhss)| {
+            if rhss.len() == 1 {
+                rhss.iter().next().cloned().map(|rhs| (nt, rhs))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut state = BTreeMap::<NonterminalID, VisitState>::new();
+    let mut expandable = BTreeSet::new();
+    for &nt in unique_rhs_by_lhs.keys() {
+        if visit(nt, &unique_rhs_by_lhs, &mut state) {
+            expandable.insert(nt);
+        }
+    }
+
+    (unique_rhs_by_lhs, expandable)
+}
+
+fn flatten_rhs_symbols(
+    rhs: &[Symbol],
+    unique_rhs_by_lhs: &BTreeMap<NonterminalID, Vec<Symbol>>,
+    expandable_single_productions: &BTreeSet<NonterminalID>,
+) -> Vec<Symbol> {
+    fn flatten_symbol(
+        symbol: &Symbol,
+        out: &mut Vec<Symbol>,
+        unique_rhs_by_lhs: &BTreeMap<NonterminalID, Vec<Symbol>>,
+        expandable_single_productions: &BTreeSet<NonterminalID>,
+    ) {
+        match symbol {
+            Symbol::Terminal(_) => out.push(symbol.clone()),
+            Symbol::Nonterminal(nt)
+                if expandable_single_productions.contains(nt) =>
+            {
+                if let Some(expanded_rhs) = unique_rhs_by_lhs.get(nt) {
+                    for expanded_symbol in expanded_rhs {
+                        flatten_symbol(
+                            expanded_symbol,
+                            out,
+                            unique_rhs_by_lhs,
+                            expandable_single_productions,
+                        );
+                    }
+                } else {
+                    out.push(symbol.clone());
+                }
+            }
+            Symbol::Nonterminal(_) => out.push(symbol.clone()),
+        }
+    }
+
+    let mut flattened = Vec::new();
+    for symbol in rhs {
+        flatten_symbol(
+            symbol,
+            &mut flattened,
+            unique_rhs_by_lhs,
+            expandable_single_productions,
+        );
+    }
+    flattened
+}
+
 /// Deduplicate rules, preserving order of first occurrence.
 fn dedup_rules(rules: &mut Vec<Rule>) {
+    let rhs_by_lhs = build_rhs_by_lhs(rules);
+    let (unique_rhs_by_lhs, expandable_single_productions) =
+        compute_expandable_single_productions(&rhs_by_lhs);
     let mut seen = HashSet::with_capacity(rules.len());
-    rules.retain(|r| seen.insert(r.clone()));
+    rules.retain(|rule| {
+        seen.insert((
+            rule.lhs,
+            flatten_rhs_symbols(
+                &rule.rhs,
+                &unique_rhs_by_lhs,
+                &expandable_single_productions,
+            ),
+        ))
+    });
 }
 
 pub(crate) fn merge_identical_nonterminals(
@@ -890,13 +1029,7 @@ pub(crate) fn merge_identical_nonterminals(
     use std::hash::{Hash, Hasher};
 
     // Build rhs_by_lhs: the set of productions for each nonterminal.
-    let mut rhs_by_lhs = BTreeMap::<NonterminalID, BTreeSet<Vec<Symbol>>>::new();
-    for rule in rules {
-        rhs_by_lhs
-            .entry(rule.lhs)
-            .or_default()
-            .insert(rule.rhs.clone());
-    }
+    let rhs_by_lhs = build_rhs_by_lhs(rules);
 
     if rhs_by_lhs.len() <= 1 {
         return rules.to_vec();
@@ -916,6 +1049,23 @@ pub(crate) fn merge_identical_nonterminals(
     // Pre-index production sets for O(1) access by NT index.
     let rhs_by_idx: Vec<&BTreeSet<Vec<Symbol>>> =
         nts.iter().map(|nt| &rhs_by_lhs[nt]).collect();
+    let (unique_rhs_by_lhs, expandable_single_productions) =
+        compute_expandable_single_productions(&rhs_by_lhs);
+    let flattened_rhs_by_idx: Vec<Vec<Vec<Symbol>>> = nts
+        .iter()
+        .map(|nt| {
+            rhs_by_lhs[nt]
+                .iter()
+                .map(|rhs| {
+                    flatten_rhs_symbols(
+                        rhs,
+                        &unique_rhs_by_lhs,
+                        &expandable_single_productions,
+                    )
+                })
+                .collect()
+        })
+        .collect();
 
     // ── Partition refinement (top-down) ──────────────────────────────────
     //
@@ -941,7 +1091,7 @@ pub(crate) fn merge_identical_nonterminals(
     let hash_nt = |nt_idx: usize, class_of: &[u64]| -> u64 {
         let nt = nts[nt_idx];
         let mut sig: u64 = 0;
-        for rhs in rhs_by_idx[nt_idx].iter() {
+        for rhs in &flattened_rhs_by_idx[nt_idx] {
             let mut h = DefaultHasher::new();
             for s in rhs {
                 match s {
@@ -999,7 +1149,7 @@ pub(crate) fn merge_identical_nonterminals(
                 // Use the NT's own index as its class (finest partition).
                 let nt = nts[i];
                 let mut sig: u64 = 0;
-                for rhs in rhs_by_idx[i].iter() {
+                for rhs in &flattened_rhs_by_idx[i] {
                     let mut h = DefaultHasher::new();
                     for s in rhs {
                         match s {
@@ -1737,6 +1887,85 @@ mod tests {
         let g = AnalyzedGrammar::from_grammar_def(&norm);
         assert!(g.debug_check_grammar_preconditions().is_ok(),
             "normalized grammar should pass all precondition checks");
+    }
+
+    #[test]
+    fn test_merge_identical_nonterminals_flattens_deterministic_helper_chains() {
+        let rules = vec![
+            Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1)] },
+            Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(2)] },
+            Rule {
+                lhs: 1,
+                rhs: vec![
+                    Symbol::Terminal(0),
+                    Symbol::Terminal(11),
+                    Symbol::Terminal(1),
+                ],
+            },
+            Rule {
+                lhs: 2,
+                rhs: vec![
+                    Symbol::Terminal(0),
+                    Symbol::Nonterminal(69),
+                    Symbol::Terminal(1),
+                ],
+            },
+            Rule { lhs: 69, rhs: vec![Symbol::Nonterminal(70)] },
+            Rule { lhs: 70, rhs: vec![Symbol::Terminal(11)] },
+        ];
+
+        let merged = merge_identical_nonterminals(&rules, 0);
+
+        assert!(merged.iter().all(|rule| rule.lhs != 2));
+        assert!(merged.iter().all(|rule| rule.lhs != 70));
+        assert_eq!(
+            merged
+                .iter()
+                .filter(|rule| rule.lhs == 0)
+                .collect::<Vec<_>>(),
+            vec![&Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Nonterminal(1)],
+            }]
+        );
+        assert!(merged.contains(&Rule {
+            lhs: 1,
+            rhs: vec![
+                Symbol::Terminal(0),
+                Symbol::Terminal(11),
+                Symbol::Terminal(1),
+            ],
+        }));
+        assert!(merged.contains(&Rule {
+            lhs: 69,
+            rhs: vec![Symbol::Terminal(11)],
+        }));
+    }
+
+    #[test]
+    fn test_dedup_rules_flattens_equivalent_alternatives_within_nonterminal() {
+        let mut rules = vec![
+            Rule { lhs: 68, rhs: vec![Symbol::Terminal(0), Symbol::Terminal(11), Symbol::Terminal(1)] },
+            Rule { lhs: 68, rhs: vec![Symbol::Terminal(0), Symbol::Nonterminal(69), Symbol::Terminal(1)] },
+            Rule { lhs: 68, rhs: vec![Symbol::Terminal(0), Symbol::Nonterminal(72), Symbol::Terminal(1)] },
+            Rule { lhs: 69, rhs: vec![Symbol::Terminal(11)] },
+            Rule { lhs: 72, rhs: vec![Symbol::Nonterminal(73), Symbol::Nonterminal(74)] },
+            Rule { lhs: 73, rhs: vec![Symbol::Terminal(11)] },
+            Rule { lhs: 74, rhs: vec![] },
+        ];
+
+        dedup_rules(&mut rules);
+
+        let n68_rules: Vec<_> = rules.iter().filter(|rule| rule.lhs == 68).cloned().collect();
+        assert_eq!(
+            n68_rules,
+            vec![Rule {
+                lhs: 68,
+                rhs: vec![Symbol::Terminal(0), Symbol::Terminal(11), Symbol::Terminal(1)],
+            }]
+        );
+        assert!(rules.iter().any(|rule| rule.lhs == 69));
+        assert!(rules.iter().any(|rule| rule.lhs == 72));
     }
 
     /// Split checks: check_no_nullable_nonterminals returns Ok for non-nullable grammar.
