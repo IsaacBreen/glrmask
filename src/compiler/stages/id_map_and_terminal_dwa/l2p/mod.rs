@@ -18,6 +18,7 @@ use std::time::Instant;
 use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
+use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::minimize::{minimize_from_env, minimize_with_threshold};
 use crate::automata::weighted::nwa::NWA;
@@ -42,6 +43,150 @@ use postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
     prune_non_coreachable_states,
 };
+
+const L2P_PATH_VALIDATION_ENV: &str = "GLRMASK_VALIDATE_L2P_TERMINAL_DWA_PATH_LENGTHS";
+const L2P_PATH_VALIDATION_WALKS: u64 = 128;
+const L2P_PATH_VALIDATION_TOKENS_PER_WEIGHT: usize = 8;
+
+fn l2p_path_validation_enabled() -> bool {
+    cfg!(debug_assertions) || std::env::var_os(L2P_PATH_VALIDATION_ENV).is_some()
+}
+
+fn mixed_walk_index(seed: u64, step: usize, state: u32, options: usize) -> usize {
+    debug_assert!(options > 0);
+    let mut value = seed
+        ^ ((step as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+        ^ ((state as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F));
+    value ^= value >> 33;
+    value = value.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    value ^= value >> 33;
+    value = value.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
+    value ^= value >> 33;
+    (value as usize) % options
+}
+
+fn sampled_internal_tokens(weight: &Weight, max_samples: usize) -> Vec<u32> {
+    assert!(
+        !weight.is_full(),
+        "L2P terminal DWA validation expected concrete internal-token weights, got Weight::all()"
+    );
+    weight.token_union().iter().take(max_samples).collect()
+}
+
+fn validate_sampled_path_token_lengths(
+    path: &[i32],
+    accepted_weight: &Weight,
+    id_map: &crate::compiler::stages::equiv_types::InternalIdMap,
+    vocab: &Vocab,
+) {
+    for internal_token_id in sampled_internal_tokens(accepted_weight, L2P_PATH_VALIDATION_TOKENS_PER_WEIGHT) {
+        let representative = id_map
+            .vocab_tokens
+            .representative_original_id_for_internal(internal_token_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "L2P terminal DWA validation could not map internal token {} to a representative original token",
+                    internal_token_id,
+                )
+            });
+        let representative_bytes = vocab.entries.get(&representative).unwrap_or_else(|| {
+            panic!(
+                "L2P terminal DWA validation could not find bytes for representative original token {} (internal token {})",
+                representative,
+                internal_token_id,
+            )
+        });
+        assert!(
+            path.len() <= representative_bytes.len(),
+            "L2P terminal DWA validation failed: sampled accepting path {:?} has {} terminals, but representative token {} (internal {}) has only {} bytes",
+            path,
+            path.len(),
+            representative,
+            internal_token_id,
+            representative_bytes.len(),
+        );
+    }
+}
+
+fn validate_sampled_terminal_dwa_paths(
+    dwa: &DWA,
+    id_map: &crate::compiler::stages::equiv_types::InternalIdMap,
+    vocab: &Vocab,
+) {
+    if dwa.states().is_empty() {
+        return;
+    }
+
+    let max_rep_bytes = id_map
+        .vocab_tokens
+        .iter_representative_ids()
+        .filter_map(|token_id| vocab.entries.get(&token_id).map(Vec::len))
+        .max()
+        .unwrap_or(0);
+    if max_rep_bytes == 0 {
+        return;
+    }
+
+    let max_path_len = max_rep_bytes.saturating_add(1);
+    let mut sampled_paths = 0usize;
+    let mut sampled_tokens = 0usize;
+
+    for seed in 0..L2P_PATH_VALIDATION_WALKS {
+        let mut state = dwa.start_state();
+        let mut path: Vec<i32> = Vec::new();
+        let mut prefix_weight = Weight::all();
+
+        for step in 0..max_path_len {
+            if !path.is_empty() {
+                if let Some(final_weight) = dwa.states()[state as usize].final_weight.as_ref() {
+                    let accepted_weight = prefix_weight.intersection(final_weight);
+                    if !accepted_weight.is_empty() {
+                        sampled_paths += 1;
+                        let sampled = sampled_internal_tokens(
+                            &accepted_weight,
+                            L2P_PATH_VALIDATION_TOKENS_PER_WEIGHT,
+                        );
+                        sampled_tokens += sampled.len();
+                        validate_sampled_path_token_lengths(&path, &accepted_weight, id_map, vocab);
+                    }
+                }
+            }
+
+            let transitions = &dwa.states()[state as usize].transitions;
+            if transitions.is_empty() {
+                break;
+            }
+
+            let index = mixed_walk_index(seed, step, state, transitions.len());
+            let (&label, (next_state, edge_weight)) = transitions.iter().nth(index).unwrap();
+            assert!(
+                label >= 0,
+                "L2P terminal DWA validation expected terminal labels, got negative label {} on path {:?}",
+                label,
+                path,
+            );
+
+            let next_weight = prefix_weight.intersection(edge_weight);
+            if next_weight.is_empty() {
+                break;
+            }
+
+            path.push(label);
+            prefix_weight = next_weight;
+            state = *next_state;
+        }
+    }
+
+    if debug_profile_enabled() {
+        eprintln!(
+            "[glrmask/debug][l2p_path_validation] sampled_paths={} sampled_tokens={} max_path_len={} walks={}",
+            sampled_paths,
+            sampled_tokens,
+            max_path_len,
+            L2P_PATH_VALIDATION_WALKS,
+        );
+    }
+}
 
 fn build_partition_pruned_tokenizer(
     tokenizer: &Tokenizer,
@@ -509,6 +654,10 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         );
     }
 
+    if l2p_path_validation_enabled() {
+        validate_sampled_terminal_dwa_paths(&dwa, &simplified_id_map, vocab);
+    }
+
     Some(LocalIdMapTerminalDwa {
         id_map: simplified_id_map,
         dwa,
@@ -526,4 +675,80 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             compact_ms: 0.0,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grammar::flat::GrammarDef;
+
+    #[test]
+    fn test_build_terminal_dwa_has_one_clean_match_and_one_incomplete_future_edge() {
+        let gdef = GrammarDef {
+            rules: vec![
+                crate::grammar::flat::Rule {
+                    lhs: 0,
+                    rhs: vec![crate::grammar::flat::Symbol::Terminal(0)],
+                },
+                crate::grammar::flat::Rule {
+                    lhs: 0,
+                    rhs: vec![crate::grammar::flat::Symbol::Terminal(1)],
+                },
+            ],
+            start: 0,
+            terminals: vec![
+                crate::grammar::flat::Terminal::Literal {
+                    id: 0,
+                    bytes: b"a".to_vec(),
+                },
+                crate::grammar::flat::Terminal::Literal {
+                    id: 1,
+                    bytes: b"ab".to_vec(),
+                },
+            ],
+            ..Default::default()
+        };
+        let analyzed = AnalyzedGrammar::from_grammar_def(&gdef);
+        let tokenizer = crate::compiler::compile::build_tokenizer(&gdef);
+        let vocab = Vocab::new(vec![(0, b"a".to_vec())], None);
+        let active_terminals = vec![true, true];
+        let terminal_coloring = TerminalColoring::identity(analyzed.num_terminals as usize);
+
+        let built = build_l2p_id_map_and_terminal_dwa(
+            "test",
+            &tokenizer,
+            &vocab,
+            &terminal_coloring,
+            false,
+            None,
+            &analyzed,
+            &active_terminals,
+            &BTreeMap::new(),
+            None,
+            None,
+        )
+        .expect("L2P terminal DWA should build for overlapping-prefix test case");
+        let terminal_dwa = built.dwa;
+
+        assert_eq!(terminal_dwa.num_transitions(), 2);
+
+        let start_state = terminal_dwa.start_state() as usize;
+        let start_transitions: Vec<(i32, u32)> = terminal_dwa.states()[start_state]
+            .transitions
+            .iter()
+            .map(|(&label, (target, _))| (label, *target))
+            .collect();
+        assert_eq!(start_transitions.len(), 2);
+        assert_eq!(
+            start_transitions.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+
+        let clean_target = start_transitions
+            .iter()
+            .find(|(label, _)| *label == 0)
+            .map(|(_, target)| *target)
+            .expect("clean terminal edge should exist");
+        assert!(terminal_dwa.states()[clean_target as usize].final_weight.is_some());
+    }
 }
