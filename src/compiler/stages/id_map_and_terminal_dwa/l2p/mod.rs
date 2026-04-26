@@ -49,7 +49,7 @@ const L2P_PATH_VALIDATION_WALKS: u64 = 128;
 const L2P_PATH_VALIDATION_TOKENS_PER_WEIGHT: usize = 8;
 
 fn l2p_path_validation_enabled() -> bool {
-    cfg!(debug_assertions) || std::env::var_os(L2P_PATH_VALIDATION_ENV).is_some()
+    std::env::var_os(L2P_PATH_VALIDATION_ENV).is_some()
 }
 
 fn mixed_walk_index(seed: u64, step: usize, state: u32, options: usize) -> usize {
