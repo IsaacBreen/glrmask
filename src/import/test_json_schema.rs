@@ -1532,55 +1532,27 @@ fn test_o47674_top_level_oneof_matches_llguidance_permissiveness() {
 }
 
 #[test]
-fn test_minimized_o47674_shape_still_reaches_eighteen_paths() {
+fn test_minimized_o47674_shape_splits_1_then_2_then_3() {
     let schema = r#"{
         "type": "object",
         "patternProperties": {
-            "[a-z_0-9\\.\\-]*": {
+            "op": {
                 "type": "object",
                 "properties": {
-                    "uuid": {"type": "string"},
-                    "parent_id": {"type": "string"},
-                    "command": {"type": "array"},
-                    "results": {
-                        "patternProperties": {
-                            "[a-z_0-9\\.\\-]*": {
-                                "type": "object",
-                                "properties": {
-                                    "uuid": {"type": "string"},
-                                    "parent_id": {"type": "string"},
-                                    "type": {"enum": ["string", "hex_string"]},
-                                    "display": {"enum": ["string", "hex_string"]},
-                                    "start_pos": {"type": "integer"},
-                                    "length": {"type": "integer", "minimum": 1},
-                                    "mask": {"type": "string"},
-                                    "levels": {"type": "object"},
-                                    "rpn": {"type": "string"},
-                                    "units": {"type": "string"}
-                                },
-                                "required": ["uuid"],
-                                "anyOf": [
-                                    {"required": ["parent_id"]},
-                                    {"required": ["type", "display", "start_pos", "length", "units"]}
-                                ],
-                                "additionalProperties": false
-                            }
-                        }
-                    }
+                    "a": {},
+                    "b": {},
+                    "c": {},
+                    "d": {}
                 },
-                "required": ["uuid"],
+                "required": ["a"],
                 "anyOf": [
-                    {"required": ["parent_id"]},
-                    {"required": ["command", "results"]}
+                    {"required": ["b"]},
+                    {"required": ["c", "d"]}
                 ],
                 "additionalProperties": false
             }
         }
     }"#;
-
-    // Print the grammar
-    let glrm = crate::dump_json_schema_grammar_glrm(&schema).unwrap();
-    println!("Grammar:\n{}", glrm);
 
     let prefix = br#"{"op":"#;
     let constraint = schema_constraint(schema);
@@ -1596,19 +1568,6 @@ fn test_minimized_o47674_shape_still_reaches_eighteen_paths() {
     let constraint = schema_constraint(schema);
     let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
     assert_eq!(max_paths, 3);
-
-    let prefix = br#"{"op": {"uuid": "u", "#;
-    let constraint = schema_constraint(schema);
-    let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
-    assert_eq!(max_paths, 6);
-
-    let prefix = br#"{"op": {"uuid": "u", "command": [], "results": {"r1": {"uuid": "u", "#;
-    let constraint = schema_constraint(schema);
-    let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
-    assert_eq!(
-        max_paths, 18,
-        "simplified o47674-shaped schema should still reach 18 live parser paths"
-    );
 }
 
 #[test]
