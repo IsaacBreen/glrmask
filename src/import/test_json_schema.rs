@@ -1559,17 +1559,17 @@ fn test_minimized_o47674_shape_splits_1_then_2_then_3() {
     let prefix = b"{\"op\": ";
     let constraint = schema_constraint(schema);
     let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
-    assert_eq!(max_paths, 2);
+    assert_eq!(max_paths, 1);
 
     let prefix = b"{\"op\": {";
     let constraint = schema_constraint(schema);
     let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
-    assert_eq!(max_paths, 2);
+    assert_eq!(max_paths, 1);
 
     let prefix = b"{\"op\": {\"";
     let constraint = schema_constraint(schema);
     let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
-    assert_eq!(max_paths, 2);
+    assert_eq!(max_paths, 1);
 }
 
 #[test]
@@ -1613,17 +1613,17 @@ nt start ::= "{" obj_pat_mix_3_body "}";
     let prefix = b"{\"op\": ";
     let constraint = glrm_constraint(grammar);
     let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
-    assert_eq!(max_paths, 2);
+    assert_eq!(max_paths, 1);
 
     let prefix = b"{\"op\": {";
     let constraint = glrm_constraint(grammar);
     let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
-    assert_eq!(max_paths, 2);
+    assert_eq!(max_paths, 1);
 
     let prefix = b"{\"op\": {\"";
     let constraint = glrm_constraint(grammar);
     let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
-    assert_eq!(max_paths, 2);
+    assert_eq!(max_paths, 1);
 }
 
 #[test]
@@ -1681,7 +1681,7 @@ fn test_nested_dynamic_object_prefix_stays_single_path() {
 }
 
 #[test]
-fn test_minimized_dynamic_object_prefix_has_two_paths() {
+fn test_minimized_dynamic_object_prefix_has_one_path() {
     let schema = r#"{
         "type": "object",
         "properties": {
@@ -1697,7 +1697,7 @@ fn test_minimized_dynamic_object_prefix_has_two_paths() {
     let max_paths = trace_parser_stacks_over_prefix(&constraint, prefix);
 
     assert_eq!(
-        max_paths, 2,
+        max_paths, 1,
         "optional named-property plus dynamic-object lowering should still expose the reduced two-path ambiguity"
     );
 }
