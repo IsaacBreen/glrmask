@@ -1101,7 +1101,13 @@ pub(crate) fn emit_glr_table_debug_dump(table: &GLRTable) {
         table.num_states, table.num_terminals, table.num_rules
     );
     for (index, rule) in table.rules.iter().enumerate() {
-        eprintln!("table rule {}: lhs={} rhs={:?}", index, rule.lhs, rule.rhs);
+        let rhs_str = rule
+            .rhs
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        eprintln!("table rule {}: lhs={} rhs={}", index, rule.lhs, rhs_str);
     }
     for state in 0..table.num_states as usize {
         eprintln!("state {}", state);
