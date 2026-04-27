@@ -1080,14 +1080,9 @@ fn test_hideous_ambiguity() {
 
 #[test]
 fn test_large_exact_repetition() {
-    // IDs: "a" -> 0
-    let vocab = make_vocab(&["a"]);
-
-    // A grammar requiring exactly 1 billion 'a's.
-    // This specifically tests that the Lowerer uses logarithmic decomposition (Binary Tree)
-    // rather than linear decomposition, which would cause a stack overflow.
-    let lark = r#"start: "a" ~1000000000..1000000000"#;
-    let constraint = lark_constraint(&["a"], lark);
+    // A grammar requiring exactly 1 billion 'a's followed by 'b'.
+    let lark = r#"start: "a" ~1000000000..1000000000 "b""#;
+    let constraint = lark_constraint(&["a", "b"], lark);
 
     let num_states = constraint.debug_num_states();
     assert!(num_states < 500, "Num states should be logarithmic: {num_states}");
@@ -1107,7 +1102,6 @@ fn test_large_exact_repetition() {
     assert_mask_allows(&mask, &[0]);
 
     // 2. Commit a few tokens.
-    // Even after a few commits, we should still be far from the billion-token goal.
     commit_all(&mut state, &[0, 0, 0]);
 
     let mask_after = state.mask();
@@ -1117,10 +1111,8 @@ fn test_large_exact_repetition() {
 
 #[test]
 fn test_large_max_repetition() {
-    let vocab = make_vocab(&["a"]);
-
-    let lark = r#"start: "a" ~0..1000000000"#;
-    let constraint = lark_constraint(&["a"], lark);
+    let lark = r#"start: "a" ~0..1000000000 "b""#;
+    let constraint = lark_constraint(&["a", "b"], lark);
 
     let num_states = constraint.debug_num_states();
     assert!(num_states < 500, "Num states should be logarithmic: {num_states}");
@@ -1136,13 +1128,13 @@ fn test_large_max_repetition() {
     assert!(max_depth < 100, "Stack depth should be logarithmic: {max_depth}");
 
     let mask = state.mask();
-    assert_mask_allows(&mask, &[0]);
+    assert_mask_allows(&mask, &[0, 1]); // allow 'a' or 'b' (since min=0)
 
     commit_all(&mut state, &[0, 0, 0]);
 
     let mask_after = state.mask();
-    assert_mask_allows(&mask_after, &[0]);
-    assert!(state.is_finished(), "Should be finished after 3 tokens (3 >= min=0)");
+    assert_mask_allows(&mask_after, &[0, 1]);
+    assert!(!state.is_finished(), "Should not be finished until 'b' is committed");
 }
 #[test]
 fn test_exact_repetition_growth() {
