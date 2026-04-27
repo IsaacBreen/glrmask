@@ -316,7 +316,7 @@ fn predecessor_sensitive_unit_reduce_stack_shift_branch_limit() -> usize {
 }
 
 fn delayed_stack_shift_compression_branch_limit() -> usize {
-    256
+    24
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
