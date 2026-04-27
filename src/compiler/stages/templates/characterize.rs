@@ -114,6 +114,7 @@ fn record_initial_action(
                 }
             }
         }
+        Action::GuardedStackShifts(_) => {}
         Action::Reduce(lhs, len) => {
             let rule_len = if is_forwarded { (*len as usize) + 1 } else { *len as usize };
             reduces.insert((state, rule_len, *lhs));
@@ -172,6 +173,7 @@ fn record_goto_action(
                 }
             }
         }
+        Action::GuardedStackShifts(_) => {}
         Action::Reduce(lhs, len) => {
             handle_reduce(
                 table,
@@ -417,6 +419,7 @@ fn expand_zero_pop_action(
                 }
             }
         }
+        Action::GuardedStackShifts(_) => {}
         Action::Reduce(nt2, len2) => {
             handle_zero_pop_reduce(
                 table, terminal, initial_state, *nt2, *len2 as usize,

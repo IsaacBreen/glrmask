@@ -307,10 +307,25 @@ pub struct StackShift {
     pub pushes: Vec<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct StackShiftGuard {
+    pub pop: u32,
+    pub states: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct GuardedStackShift {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guards: Vec<StackShiftGuard>,
+    pub pop: u32,
+    pub pushes: Vec<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Action {
     Shift(u32, bool),
     StackShifts(Vec<StackShift>),
+    GuardedStackShifts(Vec<GuardedStackShift>),
     Reduce(NonterminalID, u32),
     Split {
         shift: Option<(u32, bool)>,
@@ -321,15 +336,21 @@ pub enum Action {
 }
 
 impl Action {
-    /// The shift target, if any. Works for both Shift and Split.
+    /// The shift target, if any. Works for Shift, Split, and single-effect
+    /// StackShifts that are representable as ordinary shift or replace-shift.
     #[inline]
     pub fn shift_target(&self) -> Option<u32> {
         match self {
             Action::Shift(t, _) => Some(*t),
             Action::Split { shift: Some((t, _)), .. } => Some(*t),
-            Action::StackShifts(shifts) if shifts.len() == 1 && shifts[0].pushes.len() == 1 => {
+            Action::StackShifts(shifts)
+                if shifts.len() == 1
+                    && shifts[0].pushes.len() == 1
+                    && shifts[0].pop <= 1 =>
+            {
                 Some(shifts[0].pushes[0])
             }
+            Action::GuardedStackShifts(_) => None,
             _ => None,
         }
     }
@@ -340,7 +361,10 @@ impl Action {
         match self {
             Action::Shift(_, r) => *r,
             Action::Split { shift: Some((_, r)), .. } => *r,
-            Action::StackShifts(shifts) if shifts.len() == 1 => shifts[0].pop == 1,
+            Action::StackShifts(shifts) if shifts.len() == 1 => {
+                shifts[0].pop == 1 && shifts[0].pushes.len() == 1
+            }
+            Action::GuardedStackShifts(_) => false,
             _ => false,
         }
     }
@@ -355,6 +379,7 @@ impl Action {
                     f(shift.pop, &shift.pushes);
                 }
             }
+            Action::GuardedStackShifts(_) => {}
             Action::Split { shift: Some((target, false)), .. } => {
                 f(0, std::slice::from_ref(target));
             }
@@ -707,6 +732,7 @@ impl GLRTable {
                                     Action::Reduce(canon, *len)
                                 }
                                 Action::StackShifts(shifts) => Action::StackShifts(shifts.clone()),
+                                Action::GuardedStackShifts(shifts) => Action::GuardedStackShifts(shifts.clone()),
                                 Action::Split { shift, reduces, accept } => {
                                     let reduces = reduces
                                         .into_iter()
@@ -1297,6 +1323,7 @@ fn merge_action_into_pending(
             failed_subsets,
         ),
         Action::StackShifts(_) => Err(()),
+        Action::GuardedStackShifts(_) => Err(()),
         Action::Reduce(nt, len) => {
             pending.push_reduce(*nt, *len);
             Ok(())
@@ -1559,11 +1586,12 @@ fn unit_reduce_destination(
 struct StackEffectFrame {
     pop: u32,
     pushes: Vec<u32>,
+    guards: Vec<StackShiftGuard>,
 }
 
 enum ReduceFrameResult {
     Dead,
-    Frame(StackEffectFrame),
+    Frames(Vec<StackEffectFrame>),
 }
 
 fn states_at_depth(
@@ -1585,47 +1613,44 @@ fn states_at_depth(
     Some(states)
 }
 
-fn apply_reduce_to_frame(
-    table: &GLRTable,
-    predecessors: &[BTreeSet<u32>],
-    origin_state: u32,
-    mut frame: StackEffectFrame,
-    nt: NonterminalID,
-    len: u32,
-) -> Option<ReduceFrameResult> {
-    if len as usize <= frame.pushes.len() {
-        let keep = frame.pushes.len() - len as usize;
+fn normalize_states(mut states: Vec<u32>) -> Vec<u32> {
+    states.sort_unstable();
+    states.dedup();
+    states
+}
+
+fn add_guard_to_frame(
+    frame: &mut StackEffectFrame,
+    pop: u32,
+    states: impl IntoIterator<Item = u32>,
+) -> bool {
+    let states = normalize_states(states.into_iter().collect());
+    if states.is_empty() {
+        return false;
+    }
+
+    if let Some(existing) = frame.guards.iter_mut().find(|guard| guard.pop == pop) {
+        let wanted: BTreeSet<u32> = states.into_iter().collect();
+        existing.states.retain(|state| wanted.contains(state));
+        return !existing.states.is_empty();
+    }
+
+    frame.guards.push(StackShiftGuard { pop, states });
+    frame.guards.sort_by_key(|guard| guard.pop);
+    true
+}
+
+fn pop_frame(frame: &mut StackEffectFrame, pop: u32) {
+    if pop as usize <= frame.pushes.len() {
+        let keep = frame.pushes.len() - pop as usize;
         frame.pushes.truncate(keep);
     } else {
-        frame.pop += len - frame.pushes.len() as u32;
+        frame.pop += pop - frame.pushes.len() as u32;
         frame.pushes.clear();
     }
+}
 
-    let goto_froms = if let Some(&state) = frame.pushes.last() {
-        BTreeSet::from([state])
-    } else {
-        states_at_depth(predecessors, origin_state, frame.pop)?
-    };
-
-    let mut goto: Option<(u32, bool)> = None;
-    let mut missing = 0usize;
-    for goto_from in goto_froms {
-        let Some(next) = table.goto[goto_from as usize].get(&nt).copied() else {
-            missing += 1;
-            continue;
-        };
-        match goto {
-            None => goto = Some(next),
-            Some(existing) if existing == next => {}
-            Some(_) => return None,
-        }
-    }
-
-    if missing > 0 {
-        return if goto.is_none() { Some(ReduceFrameResult::Dead) } else { None };
-    }
-
-    let (target, replace) = goto?;
+fn push_transition_to_frame(frame: &mut StackEffectFrame, target: u32, replace: bool) {
     if replace {
         if let Some(top) = frame.pushes.last_mut() {
             *top = target;
@@ -1636,10 +1661,145 @@ fn apply_reduce_to_frame(
     } else {
         frame.pushes.push(target);
     }
-    Some(ReduceFrameResult::Frame(frame))
 }
 
-fn stack_shifts_for_action(
+fn frame_to_guarded_shift(frame: StackEffectFrame) -> GuardedStackShift {
+    GuardedStackShift {
+        guards: frame.guards,
+        pop: frame.pop,
+        pushes: frame.pushes,
+    }
+}
+
+fn apply_reduce_to_frame(
+    table: &GLRTable,
+    predecessors: &[BTreeSet<u32>],
+    origin_state: u32,
+    mut frame: StackEffectFrame,
+    nt: NonterminalID,
+    len: u32,
+) -> Option<ReduceFrameResult> {
+    pop_frame(&mut frame, len);
+
+    let goto_froms = if let Some(&state) = frame.pushes.last() {
+        BTreeSet::from([state])
+    } else {
+        states_at_depth(predecessors, origin_state, frame.pop)?
+    };
+
+    let guard_pop = frame.pop;
+    let mut target: Option<u32> = None;
+    let mut by_replace: BTreeMap<bool, BTreeSet<u32>> = BTreeMap::new();
+    let mut missing = 0usize;
+    for goto_from in goto_froms {
+        let Some((next_target, replace)) = table.goto[goto_from as usize].get(&nt).copied() else {
+            missing += 1;
+            continue;
+        };
+        match target {
+            None => target = Some(next_target),
+            Some(existing) if existing == next_target => {}
+            Some(existing) => {
+                if env_flag_enabled("GLRMASK_DEBUG_STACK_SHIFT_LOWER") {
+                    eprintln!(
+                        "[stack-shift-lower] context-dependent goto target origin_state={} nt={} len={} existing_target={} next_target={}",
+                        origin_state,
+                        nt,
+                        len,
+                        existing,
+                        next_target
+                    );
+                }
+                return None;
+            }
+        }
+        by_replace.entry(replace).or_default().insert(goto_from);
+    }
+
+    if missing > 0 && by_replace.is_empty() {
+        return Some(ReduceFrameResult::Dead);
+    }
+
+    let target = target?;
+    let needs_guard = missing > 0 || by_replace.len() > 1;
+    if missing > 0 && env_flag_enabled("GLRMASK_DEBUG_STACK_SHIFT_LOWER") {
+        eprintln!(
+            "[stack-shift-lower] guarded mixed missing/present goto origin_state={} nt={} len={} target={} guard_pop={} groups={:?} missing={}",
+            origin_state,
+            nt,
+            len,
+            target,
+            guard_pop,
+            by_replace,
+            missing
+        );
+    }
+    if by_replace.len() > 1 && env_flag_enabled("GLRMASK_DEBUG_STACK_SHIFT_LOWER") {
+        eprintln!(
+            "[stack-shift-lower] guarded same-target goto origin_state={} nt={} len={} target={} guard_pop={} groups={:?}",
+            origin_state,
+            nt,
+            len,
+            target,
+            guard_pop,
+            by_replace
+        );
+    }
+
+    let mut frames = Vec::new();
+    for (replace, froms) in by_replace {
+        let mut next_frame = frame.clone();
+        if needs_guard && !add_guard_to_frame(&mut next_frame, guard_pop, froms.into_iter()) {
+            continue;
+        }
+        push_transition_to_frame(&mut next_frame, target, replace);
+        frames.push(next_frame);
+    }
+
+    if frames.is_empty() {
+        Some(ReduceFrameResult::Dead)
+    } else {
+        frames.sort();
+        frames.dedup();
+        Some(ReduceFrameResult::Frames(frames))
+    }
+}
+
+fn compose_guarded_shift_with_frame(
+    mut frame: StackEffectFrame,
+    shift: &GuardedStackShift,
+) -> Option<Option<StackEffectFrame>> {
+    let pushed_len = frame.pushes.len() as u32;
+
+    for guard in &shift.guards {
+        if guard.states.is_empty() {
+            return Some(None);
+        }
+
+        if guard.pop < pushed_len {
+            let idx = (pushed_len - 1 - guard.pop) as usize;
+            let known_state = frame.pushes[idx];
+            if guard.states.binary_search(&known_state).is_err() {
+                return Some(None);
+            }
+        } else {
+            let translated_pop = frame.pop + (guard.pop - pushed_len);
+            if !add_guard_to_frame(&mut frame, translated_pop, guard.states.iter().copied()) {
+                return Some(None);
+            }
+        }
+    }
+
+    if shift.pop < shift.guards.iter().map(|guard| guard.pop).max().unwrap_or(0) {
+        return None;
+    }
+
+    pop_frame(&mut frame, shift.pop);
+    frame.pushes.extend_from_slice(&shift.pushes);
+    Some(Some(frame))
+}
+
+fn stack_effects_for_action(
     table: &GLRTable,
     predecessors: &[BTreeSet<u32>],
     origin_state: u32,
@@ -1647,16 +1807,17 @@ fn stack_shifts_for_action(
     state: u32,
     action: &Action,
     frame: StackEffectFrame,
-    visiting: &mut BTreeSet<(u32, TerminalID, u8, u32, Vec<u32>)>,
-) -> Option<Vec<StackShift>> {
+    visiting: &mut BTreeSet<(u32, TerminalID, u8, u32, Vec<u32>, Vec<StackShiftGuard>)>,
+) -> Option<Vec<GuardedStackShift>> {
     let action_tag = match action {
         Action::Shift(..) => 0,
         Action::StackShifts(_) => 1,
-        Action::Reduce(..) => 2,
-        Action::Split { .. } => 3,
-        Action::Accept => 4,
+        Action::GuardedStackShifts(_) => 2,
+        Action::Reduce(..) => 3,
+        Action::Split { .. } => 4,
+        Action::Accept => 5,
     };
-    let key = (state, tid, action_tag, frame.pop, frame.pushes.clone());
+    let key = (state, tid, action_tag, frame.pop, frame.pushes.clone(), frame.guards.clone());
     if !visiting.insert(key.clone()) {
         return None;
     }
@@ -1665,51 +1826,52 @@ fn stack_shifts_for_action(
     match action {
         Action::Shift(target, replace) => {
             let mut frame = frame;
-            if *replace {
-                if let Some(top) = frame.pushes.last_mut() {
-                    *top = *target;
-                } else {
-                    frame.pop += 1;
-                    frame.pushes.push(*target);
-                }
-            } else {
-                frame.pushes.push(*target);
-            }
-            out.push(StackShift { pop: frame.pop, pushes: frame.pushes });
+            let effective_replace = *replace && !table.forwarded_shifts.contains(&(state, tid));
+            push_transition_to_frame(&mut frame, *target, effective_replace);
+            out.push(frame_to_guarded_shift(frame));
         }
         Action::StackShifts(shifts) => {
             for shift in shifts {
                 let mut frame = frame.clone();
-                if shift.pop as usize <= frame.pushes.len() {
-                    frame.pushes.truncate(frame.pushes.len() - shift.pop as usize);
-                } else {
-                    frame.pop += shift.pop - frame.pushes.len() as u32;
-                    frame.pushes.clear();
-                }
+                pop_frame(&mut frame, shift.pop);
                 frame.pushes.extend_from_slice(&shift.pushes);
-                out.push(StackShift { pop: frame.pop, pushes: frame.pushes });
+                out.push(frame_to_guarded_shift(frame));
+            }
+        }
+        Action::GuardedStackShifts(shifts) => {
+            for shift in shifts {
+                match compose_guarded_shift_with_frame(frame.clone(), shift)? {
+                    None => {}
+                    Some(frame) => out.push(frame_to_guarded_shift(frame)),
+                }
             }
         }
         Action::Reduce(nt, len) => {
-            let frame = match apply_reduce_to_frame(table, predecessors, origin_state, frame, *nt, *len)? {
+            let frames = match apply_reduce_to_frame(table, predecessors, origin_state, frame, *nt, *len)? {
                 ReduceFrameResult::Dead => {
                     visiting.remove(&key);
                     return Some(Vec::new());
                 }
-                ReduceFrameResult::Frame(frame) => frame,
+                ReduceFrameResult::Frames(frames) => frames,
             };
-            let state = *frame.pushes.last()?;
-            let next = table.action[state as usize].get(&tid)?;
-            out.extend(stack_shifts_for_action(
-                table,
-                predecessors,
-                origin_state,
-                tid,
-                state,
-                next,
-                frame,
-                visiting,
-            )?);
+            for frame in frames {
+                let Some(&next_state) = frame.pushes.last() else {
+                    continue;
+                };
+                let Some(next) = table.action[next_state as usize].get(&tid) else {
+                    continue;
+                };
+                out.extend(stack_effects_for_action(
+                    table,
+                    predecessors,
+                    origin_state,
+                    tid,
+                    next_state,
+                    next,
+                    frame,
+                    visiting,
+                )?);
+            }
         }
         Action::Split { shift, reduces, accept } => {
             if *accept {
@@ -1718,7 +1880,7 @@ fn stack_shifts_for_action(
             }
             if let Some((target, replace)) = shift {
                 let shift_action = Action::Shift(*target, *replace);
-                out.extend(stack_shifts_for_action(
+                out.extend(stack_effects_for_action(
                     table,
                     predecessors,
                     origin_state,
@@ -1731,7 +1893,7 @@ fn stack_shifts_for_action(
             }
             for &(nt, len) in reduces {
                 let reduce_action = Action::Reduce(nt, len);
-                out.extend(stack_shifts_for_action(
+                out.extend(stack_effects_for_action(
                     table,
                     predecessors,
                     origin_state,
@@ -1750,9 +1912,48 @@ fn stack_shifts_for_action(
     }
 
     visiting.remove(&key);
-    out.sort_by(|a, b| (a.pop, &a.pushes).cmp(&(b.pop, &b.pushes)));
+    out.sort();
     out.dedup();
     Some(out)
+}
+
+fn normalize_guarded_effects(effects: &mut Vec<GuardedStackShift>) {
+    for effect in effects.iter_mut() {
+        for guard in effect.guards.iter_mut() {
+            guard.states.sort_unstable();
+            guard.states.dedup();
+        }
+        effect.guards.retain(|guard| !guard.states.is_empty());
+        effect.guards.sort_by_key(|guard| guard.pop);
+        effect.guards.dedup();
+    }
+    effects.retain(|effect| !effect.pushes.is_empty());
+    effects.sort();
+    effects.dedup();
+}
+
+fn stack_effect_action(mut effects: Vec<GuardedStackShift>) -> Option<Action> {
+    normalize_guarded_effects(&mut effects);
+    if effects.is_empty() {
+        return None;
+    }
+    if effects.iter().all(|effect| effect.guards.is_empty()) {
+        let shifts = effects
+            .into_iter()
+            .map(|effect| StackShift {
+                pop: effect.pop,
+                pushes: effect.pushes,
+            })
+            .collect();
+        return stack_shift_action(shifts);
+    }
+    Some(Action::GuardedStackShifts(effects))
+}
+
+fn effects_can_be_delayed(effects: &[GuardedStackShift]) -> bool {
+    effects.len() > 1
+        && effects.iter().all(|effect| effect.pop > 0 && !effect.pushes.is_empty())
+        && effects.iter().any(|effect| effect.guards.is_empty())
 }
 
 fn try_inline_action_to_stack_shifts(
@@ -1763,31 +1964,28 @@ fn try_inline_action_to_stack_shifts(
     action: &Action,
     constituent_sets: &mut Vec<BTreeSet<u32>>,
 ) -> Option<Action> {
-    let Action::Split { shift: Some(_), reduces, accept: false } = action else {
+    let Action::Split {
+        reduces,
+        accept: false,
+        ..
+    } = action
+    else {
         return None;
     };
-    if reduces.is_empty() || reduces.iter().any(|&(_, len)| len != 1) {
+    if reduces.is_empty() {
         return None;
     }
-    let preds = predecessors.get(state as usize)?;
-    if preds.is_empty() {
-        return None;
+
+    if env_flag_enabled("GLRMASK_DEBUG_STACK_SHIFT_LOWER") {
+        eprintln!(
+            "[stack-shift-lower] candidate state={} terminal={} action={:?}",
+            state,
+            tid,
+            action
+        );
     }
-    for &(lhs, _) in reduces {
-        let mut saw_relevant_pred = false;
-        for &pred in preds {
-            if let Some(&(_, is_replace)) = table.goto[pred as usize].get(&lhs) {
-                saw_relevant_pred = true;
-                if !is_replace {
-                    return None;
-                }
-            }
-        }
-        if !saw_relevant_pred {
-            return None;
-        }
-    }
-    let shifts = stack_shifts_for_action(
+
+    let effects = stack_effects_for_action(
         table,
         predecessors,
         state,
@@ -1797,70 +1995,62 @@ fn try_inline_action_to_stack_shifts(
         StackEffectFrame {
             pop: 0,
             pushes: Vec::new(),
+            guards: Vec::new(),
         },
         &mut BTreeSet::new(),
     )?;
-    if shifts.is_empty() {
+    if effects.is_empty() {
+        if env_flag_enabled("GLRMASK_DEBUG_STACK_SHIFT_LOWER") {
+            eprintln!(
+                "[stack-shift-lower] dead candidate state={} terminal={} action={:?}",
+                state,
+                tid,
+                action
+            );
+        }
         return None;
     }
-    if shifts.len() > 1 {
+    if effects_can_be_delayed(&effects) {
+        if effects.iter().any(|effect| effect.pop == 0) {
+            if env_flag_enabled("GLRMASK_DEBUG_STACK_SHIFT_LOWER") {
+                eprintln!(
+                    "[stack-shift-lower] pop0-delayed-block state={} terminal={} effects={:?}",
+                    state,
+                    tid,
+                    effects
+                );
+            }
+            return None;
+        }
         if let Some(delay_state) = try_create_delayed_stack_shift_state(
             table,
             predecessors,
             state,
-            &shifts,
+            &effects,
             constituent_sets,
             0,
         ) {
+            if env_flag_enabled("GLRMASK_DEBUG_STACK_SHIFT_LOWER") {
+                eprintln!(
+                    "[stack-shift-lower] lowered-to-delayed state={} terminal={} effects={:?} delay_state={}",
+                    state,
+                    tid,
+                    effects,
+                    delay_state
+                );
+            }
             return Some(Action::Shift(delay_state, true));
         }
     }
-    if shifts.len() == 1 {
-        let shift = &shifts[0];
-        if shift.pushes.len() == 1 {
-            match shift.pop {
-                0 => return Some(Action::Shift(shift.pushes[0], false)),
-                1 => return Some(Action::Shift(shift.pushes[0], true)),
-                _ => {}
-            }
-        }
+    if env_flag_enabled("GLRMASK_DEBUG_STACK_SHIFT_LOWER") {
+        eprintln!(
+            "[stack-shift-lower] lowered state={} terminal={} effects={:?}",
+            state,
+            tid,
+            effects
+        );
     }
-    Some(Action::StackShifts(shifts))
-}
-
-fn compose_stack_shift_with_action(shift: &StackShift, action: &Action) -> Option<Vec<StackShift>> {
-    match action {
-        Action::Shift(target, replace) => {
-            let mut out = shift.clone();
-            if *replace {
-                if let Some(top) = out.pushes.last_mut() {
-                    *top = *target;
-                } else {
-                    out.pop += 1;
-                    out.pushes.push(*target);
-                }
-            } else {
-                out.pushes.push(*target);
-            }
-            Some(vec![out])
-        }
-        Action::StackShifts(inner) => {
-            let mut out = Vec::new();
-            for inner_shift in inner {
-                let mut composed = shift.clone();
-                if inner_shift.pop as usize <= composed.pushes.len() {
-                    composed.pushes.truncate(composed.pushes.len() - inner_shift.pop as usize);
-                } else {
-                    composed.pop += inner_shift.pop - composed.pushes.len() as u32;
-                    composed.pushes.clear();
-                }
-                composed.pushes.extend_from_slice(&inner_shift.pushes);
-                out.push(composed);
-            }
-            Some(out)
-        }
-        _ => None,
-    }
+    stack_effect_action(effects)
 }
 
 fn stack_shift_action(shifts: Vec<StackShift>) -> Option<Action> {
@@ -1884,17 +2074,17 @@ fn try_create_delayed_stack_shift_state(
     table: &mut GLRTable,
     predecessors: &[BTreeSet<u32>],
     origin_state: u32,
-    shifts: &[StackShift],
+    effects: &[GuardedStackShift],
     constituent_sets: &mut Vec<BTreeSet<u32>>,
     depth: u32,
 ) -> Option<u32> {
-    if depth >= 8 || shifts.len() <= 1 || shifts.iter().any(|shift| shift.pop == 0 || shift.pushes.is_empty()) {
+    if depth >= 8 || effects.len() <= 1 || effects.iter().any(|effect| effect.pop == 0 || effect.pushes.is_empty()) {
         return None;
     }
 
     let mut terminals = BTreeSet::new();
-    for shift in shifts {
-        let top = *shift.pushes.last()?;
+    for effect in effects {
+        let top = *effect.pushes.last()?;
         for &terminal in table.action.get(top as usize)?.keys() {
             terminals.insert(terminal);
         }
@@ -1903,12 +2093,12 @@ fn try_create_delayed_stack_shift_state(
     let mut row = ActionRow::default();
     for terminal in terminals {
         let mut composed = Vec::new();
-        for shift in shifts {
-            let top = *shift.pushes.last()?;
+        for effect in effects {
+            let top = *effect.pushes.last()?;
             let Some(action) = table.action[top as usize].get(&terminal).cloned() else {
                 continue;
             };
-            composed.extend(stack_shifts_for_action(
+            composed.extend(stack_effects_for_action(
                 table,
                 predecessors,
                 origin_state,
@@ -1916,15 +2106,15 @@ fn try_create_delayed_stack_shift_state(
                 top,
                 &action,
                 StackEffectFrame {
-                    pop: shift.pop,
-                    pushes: shift.pushes.clone(),
+                    pop: effect.pop,
+                    pushes: effect.pushes.clone(),
+                    guards: effect.guards.clone(),
                 },
                 &mut BTreeSet::new(),
             )?);
         }
-        composed.sort_by(|a, b| (a.pop, &a.pushes).cmp(&(b.pop, &b.pushes)));
-        composed.dedup();
-        let action = if composed.len() > 1 && composed.iter().all(|shift| shift.pop > 0) {
+        normalize_guarded_effects(&mut composed);
+        let action = if effects_can_be_delayed(&composed) {
             if let Some(next_state) = try_create_delayed_stack_shift_state(
                 table,
                 predecessors,
@@ -1935,10 +2125,10 @@ fn try_create_delayed_stack_shift_state(
             ) {
                 Action::Shift(next_state, true)
             } else {
-                stack_shift_action(composed)?
+                stack_effect_action(composed)?
             }
         } else {
-            stack_shift_action(composed)?
+            stack_effect_action(composed)?
         };
         row.insert(terminal, action);
     }
@@ -2021,6 +2211,7 @@ fn try_inline_unit_reductions_for_cell_inner(
     match action {
         Action::Shift(target, replace) => pending.push_shift(*target, *replace),
         Action::StackShifts(_) => return Ok(None),
+        Action::GuardedStackShifts(_) => return Ok(None),
         Action::Reduce(nt, len) => reduces.push((*nt, *len)),
         Action::Split {
             shift,
@@ -2108,6 +2299,32 @@ fn remap_action_targets(action: &Action, mapping: &[u32]) -> Action {
             shifts
                 .iter()
                 .map(|shift| StackShift {
+                    pop: shift.pop,
+                    pushes: shift.pushes.iter().map(|&state| mapping[state as usize]).collect(),
+                })
+                .collect(),
+        ),
+        Action::GuardedStackShifts(shifts) => Action::GuardedStackShifts(
+            shifts
+                .iter()
+                .map(|shift| GuardedStackShift {
+                    guards: shift
+                        .guards
+                        .iter()
+                        .map(|guard| {
+                            let mut states: Vec<u32> = guard
+                                .states
+                                .iter()
+                                .map(|&state| mapping[state as usize])
+                                .collect();
+                            states.sort_unstable();
+                            states.dedup();
+                            StackShiftGuard {
+                                pop: guard.pop,
+                                states,
+                            }
+                        })
+                        .collect(),
                     pop: shift.pop,
                     pushes: shift.pushes.iter().map(|&state| mapping[state as usize]).collect(),
                 })
@@ -3214,6 +3431,7 @@ fn lr1_core_key(items: &BTreeSet<LR1Item>) -> Vec<Item> {
 enum ActionSig {
     Shift(u32, bool),
     StackShifts(Vec<(u32, Vec<u32>)>),
+    GuardedStackShifts(Vec<(Vec<(u32, Vec<u32>)>, u32, Vec<u32>)>),
     Reduce(NonterminalID, u32),
     Split {
         shift: Option<(u32, bool)>,
@@ -3241,6 +3459,33 @@ fn remap_action_to_partition(action: &Action, partition: &[u32]) -> ActionSig {
                         shift.pop,
                         shift.pushes.iter().map(|&state| partition[state as usize]).collect(),
                     )
+                })
+                .collect(),
+        ),
+        Action::GuardedStackShifts(shifts) => ActionSig::GuardedStackShifts(
+            shifts
+                .iter()
+                .map(|shift| {
+                    let guards = shift
+                        .guards
+                        .iter()
+                        .map(|guard| {
+                            let mut states: Vec<u32> = guard
+                                .states
+                                .iter()
+                                .map(|&state| partition[state as usize])
+                                .collect();
+                            states.sort_unstable();
+                            states.dedup();
+                            (guard.pop, states)
+                        })
+                        .collect();
+                    let pushes = shift
+                        .pushes
+                        .iter()
+                        .map(|&state| partition[state as usize])
+                        .collect();
+                    (guards, shift.pop, pushes)
                 })
                 .collect(),
         ),
@@ -3598,6 +3843,68 @@ mod tests {
             Some(&Action::StackShifts(vec![StackShift { pop: 2, pushes: vec![7, 11] }]))
         );
     }
+
+    #[test]
+    fn test_same_target_different_replace_goto_lowers_to_guarded_delay() {
+        let mut action: Vec<ActionRow> = vec![ActionRow::default(); 20];
+        let mut goto: Vec<GotoRow> = vec![GotoRow::default(); 20];
+
+        const T_COMMA: u32 = 8;
+        const T_NEXT: u32 = 1;
+
+        action[0].insert(99, Action::Shift(1, false));
+        action[1].insert(T_COMMA, Action::Shift(2, true));
+        goto[2].insert(10, (3, false));
+        action[12].insert(98, Action::Shift(13, false));
+        action[13].insert(T_COMMA, Action::Shift(14, true));
+        goto[14].insert(11, (3, false));
+
+        action[3].insert(
+            T_COMMA,
+            Action::Split {
+                shift: Some((6, true)),
+                reduces: vec![(20, 1)],
+                accept: false,
+            },
+        );
+
+        goto[2].insert(20, (5, false));
+        goto[14].insert(20, (5, true));
+        action[5].insert(T_COMMA, Action::Shift(6, true));
+        action[6].insert(T_NEXT, Action::Shift(7, false));
+
+        let mut table = GLRTable {
+            action,
+            goto,
+            num_states: 20,
+            num_terminals: 100,
+            num_rules: 0,
+            rules: Vec::new(),
+            forwarded_shifts: FxHashSet::default(),
+        };
+
+        table.collapse_sr_unit_reductions_with_compatible_gotos();
+
+        let delay_state = match table.action(3, T_COMMA) {
+            Some(Action::Shift(state, true)) => *state,
+            other => panic!("expected delayed replace shift, got {other:?}"),
+        };
+
+        let effects = match table.action(delay_state, T_NEXT) {
+            Some(Action::GuardedStackShifts(effects)) => effects,
+            other => panic!("expected guarded stack effects, got {other:?}"),
+        };
+
+        assert!(effects.iter().any(|effect| {
+            effect.guards.is_empty() && effect.pop == 1 && effect.pushes == vec![6, 7]
+        }));
+        assert!(effects.iter().any(|effect| {
+            effect.guards == vec![StackShiftGuard { pop: 1, states: vec![14] }]
+                && effect.pop == 2
+                && effect.pushes == vec![6, 7]
+        }));
+    }
+
     #[test]
     fn test_pending_action_finish_normalizes_pure_cases() {
         let mut shift = PendingAction::default();

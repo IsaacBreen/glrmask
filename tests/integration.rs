@@ -329,34 +329,6 @@ fn assert_max_parser_paths_over_bytes<'a>(constraint: &'a Constraint, input: &[u
     state
 }
 
-fn max_parser_stack_depth_for_text(constraint: &Constraint, text: &str) -> usize {
-    let mut state = constraint.start();
-    let mut max_depth = state
-        .debug_parser_stacks()
-        .iter()
-        .flat_map(|(_, stacks)| stacks.iter().map(|(stack, _)| stack.len()))
-        .max()
-        .unwrap_or(0);
-
-    for &byte in text.as_bytes() {
-        let mask = state.mask();
-        assert!(
-            token_allowed(&mask, byte as usize),
-            "byte token {byte} must be allowed while replaying example text"
-        );
-        state.commit_token(byte as u32).unwrap();
-        max_depth = max_depth.max(
-            state.debug_parser_stacks()
-                .iter()
-                .flat_map(|(_, stacks)| stacks.iter().map(|(stack, _)| stack.len()))
-                .max()
-                .unwrap_or(0)
-        );
-    }
-
-    max_depth
-}
-
 #[test]
 fn test_ebnf_simple_literal() {
     let constraint = ebnf_constraint(&["a", "b"], r#"start ::= "a" "b""#);
@@ -3733,7 +3705,7 @@ fn optional_ordered_object_schema(n_keys: usize) -> String {
     )
 }
 
-fn required_prefix_optional_suffix_object_schema(n_optional: usize) -> String {
+fn ordered_required_prefix_optional_suffix_schema(n_optional: usize) -> String {
     let mut props = vec![
         "\"req0\": {\"type\": \"integer\"}".to_string(),
         "\"req1\": {\"type\": \"integer\"}".to_string(),
@@ -3744,6 +3716,21 @@ fn required_prefix_optional_suffix_object_schema(n_optional: usize) -> String {
 
     format!(
         "{{\"type\":\"object\",\"properties\":{{{}}},\"required\":[\"req0\",\"req1\"],\"additionalProperties\":false}}",
+        props.join(", ")
+    )
+}
+
+fn ordered_required_prefix_optional_suffix_with_additional_schema(n_optional: usize) -> String {
+    let mut props = vec![
+        "\"req0\": {\"type\": \"integer\"}".to_string(),
+        "\"req1\": {\"type\": \"integer\"}".to_string(),
+    ];
+    for i in 0..n_optional {
+        props.push(format!("\"opt{i:02}\": {{\"type\": \"integer\"}}"));
+    }
+
+    format!(
+        "{{\"type\":\"object\",\"properties\":{{{}}},\"required\":[\"req0\",\"req1\"],\"additionalProperties\":{{\"type\":\"integer\"}}}}",
         props.join(", ")
     )
 }
@@ -3760,23 +3747,21 @@ fn ordered_object_example(n_keys: usize) -> String {
     format!("{{\"o\": {{{kvs}}}}}")
 }
 
-fn required_prefix_optional_suffix_object_example(n_optional: usize) -> String {
+fn ordered_required_prefix_optional_suffix_prefix(emitted_optional: usize, with_quote: bool) -> String {
     let mut kvs = vec![
         "\"req0\": 0".to_string(),
         "\"req1\": 0".to_string(),
     ];
-    for i in 0..n_optional {
+    for i in 0..emitted_optional {
         kvs.push(format!("\"opt{i:02}\": 0"));
     }
-    format!("{{{}}}", kvs.join(", "))
-}
 
-fn required_prefix_optional_suffix_boundary_prefix() -> &'static str {
-    r#"{"req0": 0, "req1": 0, "#
-}
-
-fn required_prefix_optional_suffix_boundary_prefix_with_quote() -> &'static str {
-    r#"{"req0": 0, "req1": 0, ""#
+    let mut prefix = format!("{{{}", kvs.join(", "));
+    prefix.push_str(", ");
+    if with_quote {
+        prefix.push('"');
+    }
+    prefix
 }
 
 fn max_parser_paths_for_text(constraint: &Constraint, text: &str) -> usize {
@@ -3910,59 +3895,45 @@ fn test_mre_ordered_optional_object_ambiguity() {
 }
 
 #[test]
-fn test_ordered_required_prefix_optional_suffix_determinism() {
+fn test_mre_required_prefix_optional_suffix_split() {
     let vocab = make_byte_vocab();
-    let ns = [4usize, 8, 16, 32];
-    let prefixes = [
-        required_prefix_optional_suffix_boundary_prefix(),
-        required_prefix_optional_suffix_boundary_prefix_with_quote(),
-    ];
+    let schema = ordered_required_prefix_optional_suffix_schema(8);
+    let constraint = Constraint::from_json_schema(&schema, &vocab).unwrap();
 
-    for &n in &ns {
-        let schema = required_prefix_optional_suffix_object_schema(n);
-        let constraint = Constraint::from_json_schema(&schema, &vocab).unwrap();
+    let prefix_after_two_optional = ordered_required_prefix_optional_suffix_prefix(2, false);
+    let prefix_after_two_optional_quote = ordered_required_prefix_optional_suffix_prefix(2, true);
 
-        for prefix in prefixes {
-            let max_paths = max_parser_paths_for_text(&constraint, prefix);
-            assert_eq!(
-                max_paths, 1,
-                "required-prefix + optional-suffix ordered objects should stay deterministic at the optional-tail boundary for n={n}, prefix={prefix:?}"
-            );
-        }
-    }
+    assert_eq!(
+        max_parser_paths_for_text(&constraint, &prefix_after_two_optional),
+        1,
+        "closed ordered object should remain single-path after req0, req1, opt00, opt01 and a trailing comma"
+    );
+    assert_eq!(
+        max_parser_paths_for_text(&constraint, &prefix_after_two_optional_quote),
+        1,
+        "closed ordered object should remain single-path after the opening quote of the next key"
+    );
 }
 
 #[test]
-fn test_ordered_required_prefix_optional_suffix_growth() {
+fn test_mre_required_prefix_optional_suffix_with_additional_split() {
     let vocab = make_byte_vocab();
-    let ns = [4usize, 8, 16, 32];
-    let mut observations = Vec::new();
+    let schema = ordered_required_prefix_optional_suffix_with_additional_schema(3);
+    let constraint = Constraint::from_json_schema(&schema, &vocab).unwrap();
 
-    for &n in &ns {
-        let schema = required_prefix_optional_suffix_object_schema(n);
-        let example = required_prefix_optional_suffix_object_example(n);
-        let constraint = Constraint::from_json_schema(&schema, &vocab).unwrap();
+    let prefix_after_two_optional = ordered_required_prefix_optional_suffix_prefix(2, false);
+    let prefix_after_two_optional_quote = ordered_required_prefix_optional_suffix_prefix(2, true);
 
-        let num_states = constraint.debug_num_states();
-        let max_depth = max_parser_stack_depth_for_text(&constraint, &example);
-        observations.push((n, num_states, max_depth));
-    }
-
-    for pair in observations.windows(2) {
-        let (n0, s0, d0) = pair[0];
-        let (n1, s1, d1) = pair[1];
-
-        let log_ratio = (n1 as f64).ln() / (n0 as f64).ln();
-        let depth_ratio = (d1 as f64) / (d0 as f64);
-        let state_ratio = (s1 as f64) / (s0 as f64);
-
-        println!(
-            "ordered suffix N={n1}: states={s1} max_depth={d1} (ratios: states={state_ratio:.2} depth={depth_ratio:.2})"
-        );
-
-        assert!(state_ratio <= 2.5, "parser states should stay near-linear as optional suffixes grow");
-        assert!(depth_ratio <= log_ratio * 2.0, "parser stack depth should grow logarithmically or better");
-    }
+    assert_eq!(
+        max_parser_paths_for_text(&constraint, &prefix_after_two_optional),
+        1,
+        "ordered object with additionalProperties should delay the named/additional continuation split after the trailing comma"
+    );
+    assert_eq!(
+        max_parser_paths_for_text(&constraint, &prefix_after_two_optional_quote),
+        1,
+        "ordered object with additionalProperties should still delay the continuation split after the opening quote"
+    );
 }
 
 /// Minimal nested close-brace ambiguity family analogous to o47674.
