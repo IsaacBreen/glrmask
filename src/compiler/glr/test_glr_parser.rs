@@ -511,14 +511,24 @@ fn test_single_terminal_production() {
 }
 
 fn assert_no_splits(table: &GLRTable) {
-    for row in &table.action {
-        for action in row.values() {
+    for (state, row) in table.action.iter().enumerate() {
+        for (&terminal, action) in row.iter() {
             match action {
                 Action::Split { .. } => {
-                    panic!("Found split action in table: {:?}", action);
+                    panic!(
+                        "Found split action in table at state {} terminal {}: {:?}",
+                        state,
+                        terminal,
+                        action
+                    );
                 }
                 Action::StackShifts(shifts) if shifts.len() > 1 => {
-                    panic!("Found multiple stack shifts (split) in table: {:?}", action);
+                    panic!(
+                        "Found multiple stack shifts in table at state {} terminal {}: {:?}",
+                        state,
+                        terminal,
+                        action
+                    );
                 }
                 _ => {}
             }
@@ -546,6 +556,21 @@ fn test_glrm_up_to_repetition_determinism() {
     let analyzed = AnalyzedGrammar::from_grammar_def(&gdef);
     let table = GLRTable::build(&analyzed);
     assert_no_splits(&table);
+}
+
+#[test]
+fn test_glrm_up_to_repetition_determinism_binary_edges() {
+    let maxima = [0usize, 1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 32];
+
+    for max in maxima {
+        let grammar_str = format!("start S; nt S ::= \"a\"{{0,{max}}} \"$\";");
+        let named = crate::grammar::glrm::from_glrm(&grammar_str).unwrap();
+        let factored = crate::grammar::factoring::factor_named_grammar(named);
+        let gdef = crate::grammar::ast::lower(&factored).unwrap();
+        let analyzed = AnalyzedGrammar::from_grammar_def(&gdef);
+        let table = GLRTable::build(&analyzed);
+        assert_no_splits(&table);
+    }
 }
 
 #[test]

@@ -586,6 +586,11 @@ fn range_repeat_split(min: usize, max: usize, shape: RepeatTreeShape) -> (usize,
     }
 }
 
+fn highest_power_of_two_le(n: usize) -> usize {
+    debug_assert!(n > 0);
+    1usize << ((usize::BITS - 1 - n.leading_zeros()) as usize)
+}
+
 fn char_class_pattern(def: &str, negate: bool) -> String {
     if negate {
         format!("[^{def}]")
@@ -955,22 +960,57 @@ impl Lowerer {
         let (_, nt) = self.fresh_nonterminal("repeat_max");
         self.repeat_max_cache.insert(key, nt);
 
-        if max == 1 {
-            self.rules.push(Rule { lhs: nt, rhs: Vec::new() });
-            self.rules.push(Rule { lhs: nt, rhs: vec![symbol.clone()] });
-        } else {
-            // Unambiguous split: 0..half elements use repeat_max_half;
-            // half+1..max elements require exactly `half` up front then 1..max-half more.
-            // The two alternatives are disjoint → no GSS path explosion.
-            let half = max / 2;
-            let half_nt = self.repeat_max_nonterminal(symbol, half);
-            let exact_half_nt = self.repeat_exact_nonterminal(symbol, half, RepeatTreeShape::LeftBalanced);
-            let min1_tail_nt = self.repeat_min1_max_nonterminal(symbol, max - half);
-            self.rules.push(Rule { lhs: nt, rhs: vec![Symbol::Nonterminal(half_nt)] });
+        if let Some(span) = max.checked_add(1).filter(|span| span.is_power_of_two()) {
+            let high = span / 2;
+            debug_assert!(high > 0);
+
+            let low_nt = self.repeat_max_nonterminal(symbol, high - 1);
+            let exact_high_nt =
+                self.repeat_exact_nonterminal(symbol, high, RepeatTreeShape::LeftBalanced);
+
             self.rules.push(Rule {
                 lhs: nt,
-                rhs: vec![Symbol::Nonterminal(exact_half_nt), Symbol::Nonterminal(min1_tail_nt)],
+                rhs: vec![Symbol::Nonterminal(low_nt)],
             });
+
+            let rhs = if high == 1 {
+                vec![Symbol::Nonterminal(exact_high_nt)]
+            } else {
+                vec![
+                    Symbol::Nonterminal(exact_high_nt),
+                    Symbol::Nonterminal(low_nt),
+                ]
+            };
+            self.rules.push(Rule { lhs: nt, rhs });
+        } else {
+            let high = highest_power_of_two_le(max);
+            debug_assert!(high > 0);
+            debug_assert!(high <= max);
+
+            let below_nt = self.repeat_max_nonterminal(symbol, high - 1);
+            let exact_high_nt =
+                self.repeat_exact_nonterminal(symbol, high, RepeatTreeShape::LeftBalanced);
+
+            self.rules.push(Rule {
+                lhs: nt,
+                rhs: vec![Symbol::Nonterminal(below_nt)],
+            });
+
+            if max == high {
+                self.rules.push(Rule {
+                    lhs: nt,
+                    rhs: vec![Symbol::Nonterminal(exact_high_nt)],
+                });
+            } else {
+                let tail_nt = self.repeat_max_nonterminal(symbol, max - high);
+                self.rules.push(Rule {
+                    lhs: nt,
+                    rhs: vec![
+                        Symbol::Nonterminal(exact_high_nt),
+                        Symbol::Nonterminal(tail_nt),
+                    ],
+                });
+            }
         }
 
         nt
@@ -1158,11 +1198,11 @@ impl Lowerer {
             return self.repeat_exact_nonterminal(symbol, min, shape);
         }
         let delta = max - min;
-        let exact_nt = self.repeat_exact_nonterminal(symbol, min, shape);
         let max_nt = self.repeat_max_nonterminal(symbol, delta);
         if min == 0 {
             max_nt
         } else {
+            let exact_nt = self.repeat_exact_nonterminal(symbol, min, shape);
             let (_, result_nt) = self.fresh_nonterminal("repeat_range");
             self.rules.push(Rule {
                 lhs: result_nt,

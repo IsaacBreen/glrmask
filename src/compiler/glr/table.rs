@@ -1,126 +1,126 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::hash::Hash;
-use std::marker::PhantomData;
-use std::ops::Index;
-use std::sync::OnceLock;
+        use std::collections::{BTreeMap, BTreeSet, VecDeque};
+        use std::hash::Hash;
+        use std::marker::PhantomData;
+        use std::ops::Index;
+        use std::sync::OnceLock;
 
-use rustc_hash::{FxHashMap, FxHashSet};
-use serde::{Deserialize, Serialize};
-use serde::de::{MapAccess, Visitor};
-use serde::ser::SerializeMap;
-use smallvec::SmallVec;
+        use rustc_hash::{FxHashMap, FxHashSet};
+        use serde::{Deserialize, Serialize};
+        use serde::de::{MapAccess, Visitor};
+        use serde::ser::SerializeMap;
+        use smallvec::SmallVec;
 
-use super::analysis::{EOF, AnalyzedGrammar};
-use crate::grammar::flat::{NonterminalID, Rule, Symbol, TerminalID};
+        use super::analysis::{EOF, AnalyzedGrammar};
+        use crate::grammar::flat::{NonterminalID, Rule, Symbol, TerminalID};
 
-const INLINE_ROW_CAPACITY: usize = 8;
+        const INLINE_ROW_CAPACITY: usize = 8;
 
-#[derive(Debug, Clone)]
-pub(crate) enum SparseRow<K: Copy + Eq + Hash, V: Clone> {
-    Inline(SmallVec<[(K, V); INLINE_ROW_CAPACITY]>),
-    Large(FxHashMap<K, V>),
-}
-
-impl<K: Copy + Eq + Hash, V: Clone> Default for SparseRow<K, V> {
-    fn default() -> Self {
-        Self::Inline(SmallVec::new())
-    }
-}
-
-impl<K: Copy + Eq + Hash, V: Clone> SparseRow<K, V> {
-    #[inline]
-    pub(crate) fn len(&self) -> usize {
-        match self {
-            Self::Inline(entries) => entries.len(),
-            Self::Large(entries) => entries.len(),
+        #[derive(Debug, Clone)]
+        pub(crate) enum SparseRow<K: Copy + Eq + Hash, V: Clone> {
+            Inline(SmallVec<[(K, V); INLINE_ROW_CAPACITY]>),
+            Large(FxHashMap<K, V>),
         }
-    }
 
-    #[inline]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    #[inline]
-    pub(crate) fn get(&self, key: &K) -> Option<&V> {
-        match self {
-            Self::Inline(entries) => entries.iter().find(|(entry_key, _)| entry_key == key).map(|(_, value)| value),
-            Self::Large(entries) => entries.get(key),
+        impl<K: Copy + Eq + Hash, V: Clone> Default for SparseRow<K, V> {
+            fn default() -> Self {
+                Self::Inline(SmallVec::new())
+            }
         }
-    }
 
-    #[inline]
-    pub(crate) fn get_mut(&mut self, key: &K) -> Option<&mut V> {
-        match self {
-            Self::Inline(entries) => entries.iter_mut().find(|(entry_key, _)| entry_key == key).map(|(_, value)| value),
-            Self::Large(entries) => entries.get_mut(key),
-        }
-    }
-
-    pub(crate) fn insert(&mut self, key: K, value: V) -> Option<V> {
-        match self {
-            Self::Inline(entries) => {
-                for (entry_key, entry_value) in entries.iter_mut() {
-                    if *entry_key == key {
-                        return Some(std::mem::replace(entry_value, value));
-                    }
-                }
-                if entries.len() < INLINE_ROW_CAPACITY {
-                    entries.push((key, value));
-                    None
-                } else {
-                    let mut large = FxHashMap::default();
-                    for (entry_key, entry_value) in entries.drain(..) {
-                        large.insert(entry_key, entry_value);
-                    }
-                    let previous = large.insert(key, value);
-                    *self = Self::Large(large);
-                    previous
+        impl<K: Copy + Eq + Hash, V: Clone> SparseRow<K, V> {
+            #[inline]
+            pub(crate) fn len(&self) -> usize {
+                match self {
+                    Self::Inline(entries) => entries.len(),
+                    Self::Large(entries) => entries.len(),
                 }
             }
-            Self::Large(entries) => entries.insert(key, value),
-        }
-    }
 
-    pub(crate) fn remove(&mut self, key: &K) -> Option<V> {
-        match self {
-            Self::Inline(entries) => {
-                let position = entries.iter().position(|(entry_key, _)| entry_key == key)?;
-                Some(entries.swap_remove(position).1)
+            #[inline]
+            pub(crate) fn is_empty(&self) -> bool {
+                self.len() == 0
             }
-            Self::Large(entries) => entries.remove(key),
-        }
-    }
 
-    #[inline]
-    pub(crate) fn contains_key(&self, key: &K) -> bool {
-        self.get(key).is_some()
-    }
+            #[inline]
+            pub(crate) fn get(&self, key: &K) -> Option<&V> {
+                match self {
+                    Self::Inline(entries) => entries.iter().find(|(entry_key, _)| entry_key == key).map(|(_, value)| value),
+                    Self::Large(entries) => entries.get(key),
+                }
+            }
 
-    #[inline]
-    pub(crate) fn iter(&self) -> SparseRowIter<'_, K, V> {
-        match self {
-            Self::Inline(entries) => SparseRowIter::Inline(entries.iter()),
-            Self::Large(entries) => SparseRowIter::Large(entries.iter()),
-        }
-    }
+            #[inline]
+            pub(crate) fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+                match self {
+                    Self::Inline(entries) => entries.iter_mut().find(|(entry_key, _)| entry_key == key).map(|(_, value)| value),
+                    Self::Large(entries) => entries.get_mut(key),
+                }
+            }
 
-    #[inline]
-    pub(crate) fn keys(&self) -> SparseRowKeys<'_, K, V> {
-        match self {
-            Self::Inline(entries) => SparseRowKeys::Inline(entries.iter()),
-            Self::Large(entries) => SparseRowKeys::Large(entries.keys()),
-        }
-    }
+            pub(crate) fn insert(&mut self, key: K, value: V) -> Option<V> {
+                match self {
+                    Self::Inline(entries) => {
+                        for (entry_key, entry_value) in entries.iter_mut() {
+                            if *entry_key == key {
+                                return Some(std::mem::replace(entry_value, value));
+                            }
+                        }
+                        if entries.len() < INLINE_ROW_CAPACITY {
+                            entries.push((key, value));
+                            None
+                        } else {
+                            let mut large = FxHashMap::default();
+                            for (entry_key, entry_value) in entries.drain(..) {
+                                large.insert(entry_key, entry_value);
+                            }
+                            let previous = large.insert(key, value);
+                            *self = Self::Large(large);
+                            previous
+                        }
+                    }
+                    Self::Large(entries) => entries.insert(key, value),
+                }
+            }
 
-    #[inline]
-    pub(crate) fn values(&self) -> SparseRowValues<'_, K, V> {
-        match self {
-            Self::Inline(entries) => SparseRowValues::Inline(entries.iter()),
-            Self::Large(entries) => SparseRowValues::Large(entries.values()),
+            pub(crate) fn remove(&mut self, key: &K) -> Option<V> {
+                match self {
+                    Self::Inline(entries) => {
+                        let position = entries.iter().position(|(entry_key, _)| entry_key == key)?;
+                        Some(entries.swap_remove(position).1)
+                    }
+                    Self::Large(entries) => entries.remove(key),
+                }
+            }
+
+            #[inline]
+            pub(crate) fn contains_key(&self, key: &K) -> bool {
+                self.get(key).is_some()
+            }
+
+            #[inline]
+            pub(crate) fn iter(&self) -> SparseRowIter<'_, K, V> {
+                match self {
+                    Self::Inline(entries) => SparseRowIter::Inline(entries.iter()),
+                    Self::Large(entries) => SparseRowIter::Large(entries.iter()),
+                }
+            }
+
+            #[inline]
+            pub(crate) fn keys(&self) -> SparseRowKeys<'_, K, V> {
+                match self {
+                    Self::Inline(entries) => SparseRowKeys::Inline(entries.iter()),
+                    Self::Large(entries) => SparseRowKeys::Large(entries.keys()),
+                }
+            }
+
+            #[inline]
+            pub(crate) fn values(&self) -> SparseRowValues<'_, K, V> {
+                match self {
+                    Self::Inline(entries) => SparseRowValues::Inline(entries.iter()),
+                    Self::Large(entries) => SparseRowValues::Large(entries.values()),
+                }
+            }
         }
-    }
-}
 
 impl<K: Copy + Eq + Hash, V: Clone + PartialEq> PartialEq for SparseRow<K, V> {
     fn eq(&self, other: &Self) -> bool {
@@ -1794,7 +1794,10 @@ fn try_inline_action_to_stack_shifts(
         tid,
         state,
         action,
-        StackEffectFrame { pop: 0, pushes: Vec::new() },
+        StackEffectFrame {
+            pop: 0,
+            pushes: Vec::new(),
+        },
         &mut BTreeSet::new(),
     )?;
     if shifts.is_empty() {
@@ -1912,7 +1915,10 @@ fn try_create_delayed_stack_shift_state(
                 terminal,
                 top,
                 &action,
-                StackEffectFrame { pop: shift.pop, pushes: shift.pushes.clone() },
+                StackEffectFrame {
+                    pop: shift.pop,
+                    pushes: shift.pushes.clone(),
+                },
                 &mut BTreeSet::new(),
             )?);
         }
@@ -3592,7 +3598,6 @@ mod tests {
             Some(&Action::StackShifts(vec![StackShift { pop: 2, pushes: vec![7, 11] }]))
         );
     }
-
     #[test]
     fn test_pending_action_finish_normalizes_pure_cases() {
         let mut shift = PendingAction::default();
