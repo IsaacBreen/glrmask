@@ -15,6 +15,12 @@ pub(crate) struct MaskCacheData {
     pub merged_dense: Vec<u64>,
 }
 
+#[derive(Default)]
+pub(crate) struct MaskScratch {
+    pub merged_dense: Vec<u64>,
+    pub chain_merged_dense: Vec<u64>,
+}
+
 /// Reusable scratch buffers for `commit_bytes_impl`, retained between calls
 /// to avoid repeated heap allocation.
 #[derive(Debug, Default)]
@@ -61,6 +67,8 @@ pub struct ConstraintState<'a> {
     /// Cached fill_mask result: returned directly when state matches cached snapshot.
     /// Not cloned — clone starts with empty cache.
     pub(crate) mask_cache: Mutex<Option<MaskCacheData>>,
+    /// Reusable scratch buffers for fill_mask to avoid per-call allocation.
+    pub(crate) mask_scratch: Mutex<MaskScratch>,
 }
 
 impl<'a> Clone for ConstraintState<'a> {
@@ -71,6 +79,7 @@ impl<'a> Clone for ConstraintState<'a> {
             buffers: self.buffers.clone(),
             generation: self.generation,
             mask_cache: Mutex::new(None),
+            mask_scratch: Mutex::new(MaskScratch::default()),
         }
     }
 }

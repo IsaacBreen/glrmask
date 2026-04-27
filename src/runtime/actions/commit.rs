@@ -1395,9 +1395,16 @@ impl<'a> ConstraintState<'a> {
         &mut self,
         token_id: u32,
     ) -> Result<u64, String> {
-        let (total_ns, ..) = self.commit_token_profiled(token_id)?;
+        let constraint = self.constraint;
+        let bytes = token_bytes_for_id(constraint, token_id)
+            .ok_or_else(|| {
+                format!("commit_token: token_id {token_id} not in vocabulary")
+            })?;
+        let t_start = std::time::Instant::now();
+        let result = commit_bytes_impl(constraint, &mut self.state, bytes, &mut self.buffers);
+        let elapsed_ns = t_start.elapsed().as_nanos() as u64;
         self.generation += 1;
-        Ok(total_ns)
+        result.map(|()| elapsed_ns)
     }
 
     /// Like commit_token but returns profiling stats.

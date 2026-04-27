@@ -469,6 +469,7 @@ impl<'a> ConstraintState<'a> {
         precomputed: &DenseTokenMaskCache,
         queue: &mut MaskQueue,
         merged: &mut [u64],
+        chain_merged: &mut Vec<u64>,
         mut counters: Option<&mut ProfileCounters>,
     ) {
         let parser_dwa = self.constraint.parser_dwa();
@@ -494,11 +495,12 @@ impl<'a> ConstraintState<'a> {
                 let Some(mut acc) = self.terminals_disallowed_to_dense_acc(parser_acc, internal_tsid) else {
                     continue;
                 };
-                let mut chain_merged = vec![0u64; merged.len()];
+                chain_merged.clear();
+                chain_merged.resize(merged.len(), 0);
 
                 // Merge start FW contribution
                 if let Some(final_weight) = start_final_weight {
-                    self.merge_final_weight_to_internal(final_weight, &acc, precomputed, &mut chain_merged);
+                    self.merge_final_weight_to_internal(final_weight, &acc, precomputed, chain_merged);
                 }
 
                 // Walk chain: first state goes through start_fast_trans,
@@ -551,7 +553,7 @@ impl<'a> ConstraintState<'a> {
 
                     // Merge FW at the new DWA state
                     if let Some(final_weight) = &next_dwa_state.final_weight {
-                        self.merge_final_weight_to_internal(final_weight, &acc, precomputed, &mut chain_merged);
+                        self.merge_final_weight_to_internal(final_weight, &acc, precomputed, chain_merged);
                     }
                 }
 
@@ -663,7 +665,11 @@ impl<'a> ConstraintState<'a> {
 
         // Merged internal token bitmap: collect all FW contributions here,
         // then convert to buf once at the end to avoid redundant complement-path passes.
-        let mut merged = vec![0u64; dense_words];
+        let mut scratch = self.mask_scratch.lock().unwrap();
+        let mut merged = std::mem::take(&mut scratch.merged_dense);
+        let mut chain_merged = std::mem::take(&mut scratch.chain_merged_dense);
+        merged.clear();
+        merged.resize(dense_words, 0);
         let mut queue = MaskQueue::new();
 
         let start_state = parser_dwa.start_state();
@@ -677,6 +683,7 @@ impl<'a> ConstraintState<'a> {
             precomputed,
             &mut queue,
             &mut merged,
+            &mut chain_merged,
             counters.as_mut(),
         );
         let seed_ns = if PROFILE { t_seed.unwrap().elapsed().as_nanos() as u64 } else { 0 };
@@ -714,7 +721,8 @@ impl<'a> ConstraintState<'a> {
                     let mut acc = chain_acc.clone();
                     let mut cur_wa_state = wa_state;
                     let mut alive = true;
-                    let mut chain_merged = vec![0u64; merged.len()];
+                    chain_merged.clear();
+                    chain_merged.resize(merged.len(), 0);
 
                     for parser_state in chain_states.iter() {
                         let cur_fast_trans = &self.constraint.dwa_fast_transitions[cur_wa_state as usize];
@@ -914,17 +922,19 @@ impl<'a> ConstraintState<'a> {
 
         if !did_incremental {
             buf.fill(0);
-            self.constraint.or_internal_dense_to_buf(&merged, buf);
+            self.constraint.or_internal_dense_to_buf(&merged, buf, true);
         }
 
         update_eos_mask(buf, self.constraint.eos_token_id, self.is_complete());
         let convert_ns = if PROFILE { t_convert.unwrap().elapsed().as_nanos() as u64 } else { 0 };
 
         // Update mask cache with current state + computed mask + merged bitvec.
+        scratch.merged_dense = merged.clone();
+        scratch.chain_merged_dense = chain_merged;
         *self.mask_cache.lock().unwrap() = Some(crate::runtime::state::MaskCacheData {
             generation: self.generation,
             mask: buf.to_vec(),
-            merged_dense: merged,
+            merged_dense: merged.clone(),
         });
 
         if PROFILE {
@@ -965,7 +975,9 @@ impl<'a> ConstraintState<'a> {
     }
 
     pub fn fill_mask_timed_ns(&self, buf: &mut [u32]) -> u64 {
-        self.fill_mask_profiled(buf).total_ns
+        let t_start = std::time::Instant::now();
+        self.fill_mask(buf);
+        t_start.elapsed().as_nanos() as u64
     }
 
     /// Like `fill_mask` but also returns internal phase timings measured in Rust.

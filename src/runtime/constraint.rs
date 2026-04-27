@@ -164,6 +164,12 @@ fn andnot_dense_buf(buf: &mut [u32], mask: &[u32]) {
     }
 }
 
+#[inline(always)]
+fn copy_dense_buf(buf: &mut [u32], mask: &[u32]) {
+    let n = buf.len().min(mask.len());
+    buf[..n].copy_from_slice(&mask[..n]);
+}
+
 impl Constraint {
     pub(crate) fn rebuild_runtime_caches(&mut self) {
         let (internal_token_buf_masks, ((dense_mask_words, dense_masks), fast_transitions)) = rayon::join(
@@ -437,7 +443,14 @@ impl Constraint {
 
     pub fn start(&self) -> ConstraintState<'_> {
         let state = self.initial_state_map();
-        ConstraintState { constraint: self, state, buffers: Default::default(), generation: 0, mask_cache: Mutex::new(None) }
+        ConstraintState {
+            constraint: self,
+            state,
+            buffers: Default::default(),
+            generation: 0,
+            mask_cache: Mutex::new(None),
+            mask_scratch: Mutex::new(Default::default()),
+        }
     }
 
     pub fn mask_len(&self) -> usize {
@@ -567,7 +580,7 @@ impl Constraint {
     /// Uses a contiguous flat entry array for cache-friendly sequential access,
     /// with word_group fast paths for fully-set 64-bit words and heavy token
     /// dense masks for tokens with many buf entries.
-    pub(crate) fn or_internal_dense_to_buf(&self, dense: &[u64], buf: &mut [u32]) {
+    pub(crate) fn or_internal_dense_to_buf(&self, dense: &[u64], buf: &mut [u32], buf_zeroed: bool) {
         let all_mask = &self.all_tokens_buf_mask;
         let offsets = &self.internal_token_buf_offsets;
         let flat = &self.internal_token_buf_flat;
@@ -582,7 +595,11 @@ impl Constraint {
 
         // Super-fast path: all internal tokens set → OR all_tokens_buf_mask.
         if n_set >= n_internal && !all_mask.is_empty() {
-            or_dense_buf(buf, all_mask);
+            if buf_zeroed {
+                copy_dense_buf(buf, all_mask);
+            } else {
+                or_dense_buf(buf, all_mask);
+            }
             return;
         }
 
@@ -626,7 +643,11 @@ impl Constraint {
 
         if !all_mask.is_empty() && est_missing_cost + copy_overhead < est_set_cost {
             // Complement-sparse path: start from all_tokens, subtract missing tokens.
-            or_dense_buf(buf, all_mask);
+            if buf_zeroed {
+                copy_dense_buf(buf, all_mask);
+            } else {
+                or_dense_buf(buf, all_mask);
+            }
             for (wi, &w) in dense.iter().enumerate() {
                 if wi * 64 >= n_internal {
                     break;
