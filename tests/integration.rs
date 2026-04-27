@@ -5042,7 +5042,7 @@ start start;
     fn test_glrm_exact_repetition_determinism() {
         let vocab = Vocab::new(vec![(0u32, b"a".to_vec())], None);
         let N = 16;
-        let grammar = format!("start S; nt S ::= \"a\"{{0,{}}} \"$\";", N);
+        let grammar = format!("start S; nt S ::= \"a\"{{{},{}}} \"$\";", N, N);
         let constraint = Constraint::from_glrm_grammar(&*grammar, &vocab).unwrap();
         let input = vec![b'a'; N];
         assert_max_parser_paths_over_bytes(&constraint, &input, 1);
