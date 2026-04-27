@@ -1559,7 +1559,6 @@ fn unit_reduce_destination(
 struct StackEffectFrame {
     pop: u32,
     pushes: Vec<u32>,
-    marker_base: Option<u32>,
 }
 
 enum ReduceFrameResult {
@@ -1604,13 +1603,6 @@ fn apply_reduce_to_frame(
 
     let goto_froms = if let Some(&state) = frame.pushes.last() {
         BTreeSet::from([state])
-    } else if let Some(base) = frame.marker_base {
-        let underlying_depth = frame.pop.checked_sub(1)?;
-        if underlying_depth == 0 {
-            BTreeSet::from([base])
-        } else {
-            states_at_depth(predecessors, origin_state, underlying_depth)?
-        }
     } else {
         states_at_depth(predecessors, origin_state, frame.pop)?
     };
@@ -1655,7 +1647,7 @@ fn stack_shifts_for_action(
     state: u32,
     action: &Action,
     frame: StackEffectFrame,
-    visiting: &mut BTreeSet<(u32, TerminalID, u8, u32, Vec<u32>, Option<u32>)>,
+    visiting: &mut BTreeSet<(u32, TerminalID, u8, u32, Vec<u32>)>,
 ) -> Option<Vec<StackShift>> {
     let action_tag = match action {
         Action::Shift(..) => 0,
@@ -1664,14 +1656,7 @@ fn stack_shifts_for_action(
         Action::Split { .. } => 3,
         Action::Accept => 4,
     };
-    let key = (
-        state,
-        tid,
-        action_tag,
-        frame.pop,
-        frame.pushes.clone(),
-        frame.marker_base,
-    );
+    let key = (state, tid, action_tag, frame.pop, frame.pushes.clone());
     if !visiting.insert(key.clone()) {
         return None;
     }
@@ -1778,9 +1763,30 @@ fn try_inline_action_to_stack_shifts(
     action: &Action,
     constituent_sets: &mut Vec<BTreeSet<u32>>,
 ) -> Option<Action> {
-    let Action::Split { shift: Some(_), accept: false, .. } = action else {
+    let Action::Split { shift: Some(_), reduces, accept: false } = action else {
         return None;
     };
+    if reduces.is_empty() || reduces.iter().any(|&(_, len)| len != 1) {
+        return None;
+    }
+    let preds = predecessors.get(state as usize)?;
+    if preds.is_empty() {
+        return None;
+    }
+    for &(lhs, _) in reduces {
+        let mut saw_relevant_pred = false;
+        for &pred in preds {
+            if let Some(&(_, is_replace)) = table.goto[pred as usize].get(&lhs) {
+                saw_relevant_pred = true;
+                if !is_replace {
+                    return None;
+                }
+            }
+        }
+        if !saw_relevant_pred {
+            return None;
+        }
+    }
     let shifts = stack_shifts_for_action(
         table,
         predecessors,
@@ -1788,26 +1794,33 @@ fn try_inline_action_to_stack_shifts(
         tid,
         state,
         action,
-        StackEffectFrame {
-            pop: 0,
-            pushes: Vec::new(),
-            marker_base: None,
-        },
+        StackEffectFrame { pop: 0, pushes: Vec::new() },
         &mut BTreeSet::new(),
     )?;
     if shifts.is_empty() {
         return None;
     }
-    if let Some(action) = try_strict_stack_shift_action(
-        table,
-        predecessors,
-        state,
-        &shifts,
-        constituent_sets,
-        0,
-        None,
-    ) {
-        return Some(action);
+    if shifts.len() > 1 {
+        if let Some(delay_state) = try_create_delayed_stack_shift_state(
+            table,
+            predecessors,
+            state,
+            &shifts,
+            constituent_sets,
+            0,
+        ) {
+            return Some(Action::Shift(delay_state, true));
+        }
+    }
+    if shifts.len() == 1 {
+        let shift = &shifts[0];
+        if shift.pushes.len() == 1 {
+            match shift.pop {
+                0 => return Some(Action::Shift(shift.pushes[0], false)),
+                1 => return Some(Action::Shift(shift.pushes[0], true)),
+                _ => {}
+            }
+        }
     }
     Some(Action::StackShifts(shifts))
 }
@@ -1864,60 +1877,6 @@ fn stack_shift_action(shifts: Vec<StackShift>) -> Option<Action> {
     Some(Action::StackShifts(shifts))
 }
 
-fn try_strict_stack_shift_action(
-    table: &mut GLRTable,
-    predecessors: &[BTreeSet<u32>],
-    origin_state: u32,
-    shifts: &[StackShift],
-    constituent_sets: &mut Vec<BTreeSet<u32>>,
-    depth: u32,
-    marker_base: Option<u32>,
-) -> Option<Action> {
-    if shifts.is_empty() {
-        return None;
-    }
-    if shifts.len() == 1 {
-        return stack_shift_action(shifts.to_vec());
-    }
-
-    if shifts.iter().all(|shift| shift.pop > 0 && !shift.pushes.is_empty()) {
-        if let Some(delay_state) = try_create_delayed_stack_shift_state(
-            table,
-            predecessors,
-            origin_state,
-            shifts,
-            constituent_sets,
-            depth,
-            marker_base,
-        ) {
-            return Some(Action::Shift(delay_state, true));
-        }
-    }
-
-    if marker_base.is_none() && shifts.iter().all(|shift| !shift.pushes.is_empty()) {
-        let marker_shifts: Vec<StackShift> = shifts
-            .iter()
-            .map(|shift| StackShift {
-                pop: shift.pop + 1,
-                pushes: shift.pushes.clone(),
-            })
-            .collect();
-        if let Some(delay_state) = try_create_delayed_stack_shift_state(
-            table,
-            predecessors,
-            origin_state,
-            &marker_shifts,
-            constituent_sets,
-            depth,
-            Some(origin_state),
-        ) {
-            return Some(Action::Shift(delay_state, false));
-        }
-    }
-
-    None
-}
-
 fn try_create_delayed_stack_shift_state(
     table: &mut GLRTable,
     predecessors: &[BTreeSet<u32>],
@@ -1925,7 +1884,6 @@ fn try_create_delayed_stack_shift_state(
     shifts: &[StackShift],
     constituent_sets: &mut Vec<BTreeSet<u32>>,
     depth: u32,
-    marker_base: Option<u32>,
 ) -> Option<u32> {
     if depth >= 8 || shifts.len() <= 1 || shifts.iter().any(|shift| shift.pop == 0 || shift.pushes.is_empty()) {
         return None;
@@ -1954,25 +1912,28 @@ fn try_create_delayed_stack_shift_state(
                 terminal,
                 top,
                 &action,
-                StackEffectFrame {
-                    pop: shift.pop,
-                    pushes: shift.pushes.clone(),
-                    marker_base,
-                },
+                StackEffectFrame { pop: shift.pop, pushes: shift.pushes.clone() },
                 &mut BTreeSet::new(),
             )?);
         }
         composed.sort_by(|a, b| (a.pop, &a.pushes).cmp(&(b.pop, &b.pushes)));
         composed.dedup();
-        let action = try_strict_stack_shift_action(
-            table,
-            predecessors,
-            origin_state,
-            &composed,
-            constituent_sets,
-            depth + 1,
-            marker_base,
-        )?;
+        let action = if composed.len() > 1 && composed.iter().all(|shift| shift.pop > 0) {
+            if let Some(next_state) = try_create_delayed_stack_shift_state(
+                table,
+                predecessors,
+                origin_state,
+                &composed,
+                constituent_sets,
+                depth + 1,
+            ) {
+                Action::Shift(next_state, true)
+            } else {
+                stack_shift_action(composed)?
+            }
+        } else {
+            stack_shift_action(composed)?
+        };
         row.insert(terminal, action);
     }
 
@@ -1998,22 +1959,6 @@ fn try_inline_unit_reductions_for_cell(
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
 ) -> Result<Option<CellUpdate>, ()> {
-    if let Action::StackShifts(shifts) = action {
-        if shifts.len() > 1 {
-            if let Some(action) = try_strict_stack_shift_action(
-                table,
-                predecessors,
-                state,
-                shifts,
-                constituent_sets,
-                0,
-                None,
-            ) {
-                return Ok(Some(CellUpdate::Set(action)));
-            }
-        }
-    }
-
     if let Some(action) = try_inline_action_to_stack_shifts(
         table,
         predecessors,
@@ -3157,11 +3102,23 @@ fn inline_zero_pop_reduces(
                         if tpa.accept {
                             pa.push_accept();
                         }
-                        changed = true;
+
+                        // Propagate gotos needed for any zero-pop reduces
+                        // we just inlined from the target state.
+                        for &(nt, len) in &tpa.reduces {
+                            if len == 0 {
+                                if let Some(&goto_entry) = goto[target as usize].get(&nt) {
+                                    goto[state].entry(nt).or_insert(goto_entry);
+                                }
+                            }
+                        }
                     }
+
+                    changed = true;
                 }
             }
         }
+
         if !changed {
             break;
         }
@@ -3174,10 +3131,16 @@ fn build_lr1_table(
     transitions: &[BTreeMap<Symbol, (u32, bool, bool)>],
 ) -> GLRTable {
     let (pending, goto, forwarded_shifts) = initialize_pending_and_goto(transitions);
+
+    // Replace flags are now carried in the transitions map from
+    // build_lr1_item_sets, so we don't need to recompute them here.
+
     let mut pending = pending;
     let mut goto = goto;
     for (state_id, items) in item_sets.iter().enumerate() {
+
         for item in items {
+            // Transferred items do not generate reduces.
             if item.transferred {
                 continue;
             }
@@ -3198,6 +3161,13 @@ fn build_lr1_table(
         }
     }
 
+    // Post-process: convert non-replace transitions to replace where
+    // possible by following the dot-1 items through to their reduce
+    // states and rewriting sd=1 reduces to sd=0 with forwarded gotos.
+    // Only safe for grammars that are:
+    // - not using the transferred-item mechanism
+    // - non-recursive (no shared reduce states)
+    // - non-nullable (no epsilon productions that create split actions)
     let local_forward_enabled = local_forward_replace_enabled();
     let has_forwarded = transitions.iter().any(|t| t.values().any(|&(_, _, f)| f));
     let has_nullable = grammar.nullable.iter().any(|&n| n != 0);
@@ -3215,6 +3185,8 @@ fn build_lr1_table(
             &grammar.rules,
         );
     }
+    // For non-forwarded grammars (apply_local_forward_replace path),
+    // inline the zero-pop reduces it created.
     if local_forward_enabled && !has_forwarded && !has_recursion && !has_nullable {
         inline_zero_pop_reduces(&mut pending, &mut goto);
     }
