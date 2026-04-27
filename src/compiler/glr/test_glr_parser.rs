@@ -8,6 +8,7 @@
 use super::analysis::AnalyzedGrammar;
 use super::parser::{stacks_finished, GLRParser};
 use super::table::{Action, GLRTable};
+use crate::import::lark;
 use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal, TerminalID};
 
 fn literal_terminal(id: u32, name: &str) -> Terminal {
@@ -595,4 +596,26 @@ fn test_glrm_up_to_repetition_recognition() {
         &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
         "seventeen repetitions followed by dollar should be rejected",
     );
+}
+
+#[test]
+fn test_ordered_optional_object_determinism() {
+    let grammar_str = r#"
+start: "{" obj_ord_0_0_nc "}"
+obj_ord_0_2_nc: "\"id\"" ":" JSON_STRING
+obj_ord_0_2_c: "," "\"id\"" ":" JSON_STRING
+obj_ord_0_1_nc: "\"couponCode\"" ":" str_or_null obj_ord_0_2_c | obj_ord_0_2_nc
+obj_ord_0_0_nc: "\"affiliation\"" ":" str_or_null obj_ord_0_1_c | obj_ord_0_1_nc
+obj_ord_0_1_c: "," "\"couponCode\"" ":" str_or_null obj_ord_0_2_c | obj_ord_0_2_c
+obj_ord_0_0_c: "," "\"affiliation\"" ":" str_or_null obj_ord_0_1_c | obj_ord_0_1_c
+str_or_null: JSON_STRING | JSON_NULL
+JSON_NULL: "null"
+JSON_STRING: /\"[^\"\\]*\"/
+"#;
+    let named = lark::parse_lark_to_named(grammar_str).unwrap();
+    let factored = crate::grammar::factoring::factor_named_grammar(named);
+    let gdef = crate::grammar::ast::lower(&factored).unwrap();
+    let analyzed = AnalyzedGrammar::from_grammar_def(&gdef);
+    let table = GLRTable::build(&analyzed);
+    assert_no_splits(&table);
 }
