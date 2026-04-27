@@ -20,7 +20,10 @@ use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::{
     compute_ever_allowed_follows,
     compute_terminal_coloring,
 };
-use crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalColoring;
+use crate::compiler::stages::id_map_and_terminal_dwa::maybe_print_terminal_mappings;
+use crate::compiler::stages::id_map_and_terminal_dwa::types::{
+    debug_terminal_mapping_enabled, TerminalColoring,
+};
 use crate::compiler::stages::parser_dwa::build_parser_dwa_from_terminal_dwa_with_precomputed_templates;
 use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::characterize_terminals;
@@ -420,6 +423,10 @@ fn compile_prepared_with_profile(
                 glr_table_ms,
                 disallowed_follows_ms,
             );
+        }
+
+        if debug_terminal_mapping_enabled() {
+            maybe_print_terminal_mappings(&analyzed_grammar);
         }
 
         if strict_one_flag_enabled("GLRMASK_DEBUG_DUMP_GLR_TABLE") {

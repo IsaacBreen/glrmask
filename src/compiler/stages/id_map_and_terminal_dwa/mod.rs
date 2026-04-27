@@ -90,7 +90,7 @@ fn l2p_auto_min_grammar_terminals_from_env() -> usize {
         .unwrap_or(12)
 }
 
-fn maybe_print_terminal_mappings(grammar: &AnalyzedGrammar) {
+pub(crate) fn maybe_print_terminal_mappings(grammar: &AnalyzedGrammar) {
     for terminal_id in 0..grammar.num_terminals {
         eprintln!(
             "[glrmask/debug][terminal_mapping] id={:>4} name={}",
@@ -179,9 +179,6 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     let force_all_l2p = std::env::var("GLRMASK_FORCE_ALL_L2P").map_or(false, |v| v == "1");
     let mut profile = TerminalDwaPhaseProfile::default();
 
-    if debug_terminal_mapping_enabled() {
-        maybe_print_terminal_mappings(grammar);
-    }
 
     // Shared cache for terminal classification byte sets. The DFA scanning
     // (reachable_bytes, first_bytes, last_bytes) is identical across partitions;
