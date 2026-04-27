@@ -309,6 +309,39 @@ fn max_parser_paths_over_bytes(constraint: &Constraint, input: &[u8]) -> usize {
     max_paths
 }
 
+fn assert_max_parser_paths_over_bytes<'a>(constraint: &'a Constraint, input: &[u8], expected_max: usize) -> ConstraintState<'a> {
+    let mut state = constraint.start();
+    let initial_paths = state.parser_path_count(1_000_000);
+    assert!(
+        initial_paths <= expected_max,
+        "initial paths {} exceeded max {} at start",
+        initial_paths,
+        expected_max
+    );
+
+    for (i, &byte) in input.iter().enumerate() {
+        let mask = state.mask();
+        assert!(
+            token_allowed(&mask, byte as usize),
+            "expected byte token {:?} to be allowed at byte {}; allowed={:?}",
+            byte as char,
+            i,
+            iter_allowed(&mask)
+        );
+        state.commit_token(byte as u32).unwrap();
+        let current_paths = state.parser_path_count(1_000_000);
+        assert!(
+            current_paths <= expected_max,
+            "paths {} exceeded max {} at byte {} (char {:?})",
+            current_paths,
+            expected_max,
+            i,
+            byte as char
+        );
+    }
+    state
+}
+
 #[test]
 fn test_ebnf_simple_literal() {
     let constraint = ebnf_constraint(&["a", "b"], r#"start ::= "a" "b""#);
@@ -5014,4 +5047,15 @@ start start;
             (false, false),
             "bug repro: abstract GLRM token 'a' should be both masked-in and committable after the reduced prefix"
         );
+    }
+
+    #[test]
+    #[ignore = "exposes known ambiguity in LeftBalanced repetition lowering"]
+    fn test_glrm_repetition_determinism() {
+        let vocab = byte_vocab();
+        let grammar = "start S; nt S ::= \"a\"{0,100};";
+        let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+        let input = vec![b'a'; 100];
+        let state = assert_max_parser_paths_over_bytes(&constraint, &input, 1);
+        assert!(state.is_finished(), "grammar should have fully accepted the 100 'a's");
     }
