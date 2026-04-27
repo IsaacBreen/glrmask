@@ -1182,12 +1182,14 @@ fn test_exact_repetition_growth() {
         let ratio_s = (s1 as f64) / (s0 as f64);
         let ratio_d = (d1 as f64) / (d0 as f64);
 
+        let log_ratio = (n1 as f64).ln() / (n0 as f64).ln();
+
         println!(
             "Exact N={n1}: states={s1} max_depth={d1} (ratios: N={ratio_n:.1} states={ratio_s:.2} depth={ratio_d:.2})"
         );
 
-        assert!(ratio_s < ratio_n * 0.5, "Parser states should grow sublinearly");
-        assert!(ratio_d < ratio_n * 0.5, "Stack depth should grow sublinearly");
+        assert!(ratio_s <= log_ratio * 2.0, "Parser states should grow logarithmically or better");
+        assert!(ratio_d <= log_ratio * 2.0, "Stack depth should grow logarithmically or better");
     }
 }
 
@@ -1244,12 +1246,13 @@ fn test_up_to_repetition_growth() {
     for i in 1..observations.len() {
         let (n0, s0, d0) = observations[i - 1];
         let (n1, s1, d1) = observations[i];
-        let ratio_n = (n1 as f64) / (n0 as f64);
         let ratio_s = (s1 as f64) / (s0 as f64);
         let ratio_d = (d1 as f64) / (d0 as f64);
 
-        assert!(ratio_s < ratio_n * 0.8, "Parser states should grow sublinearly (N={n1}, states={s1})");
-        assert!(ratio_d < ratio_n * 0.8, "Stack depth should grow sublinearly (N={n1}, depth={d1})");
+        let log_ratio = (n1 as f64).ln() / (n0 as f64).ln();
+
+        assert!(ratio_s <= log_ratio * 2.0, "Parser states should grow logarithmically or better (N={n1}, states={s1})");
+        assert!(ratio_d <= log_ratio * 2.0, "Stack depth should grow logarithmically or better (N={n1}, depth={d1})");
     }
 }
 
