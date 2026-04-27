@@ -547,3 +547,27 @@ fn test_glrm_up_to_repetition_determinism() {
     let table = GLRTable::build(&analyzed);
     assert_no_splits(&table);
 }
+
+#[test]
+fn test_glrm_up_to_repetition_recognition() {
+    let grammar_str = "start S; nt S ::= \"a\"{0,16} \"$\";";
+    let named = crate::grammar::glrm::from_glrm(grammar_str).unwrap();
+    let factored = crate::grammar::factoring::factor_named_grammar(named);
+    let gdef = crate::grammar::ast::lower(&factored).unwrap();
+    let parser = parser_for(&gdef);
+
+    assert_accepts(&parser, &[1], "zero repetitions followed by dollar should be accepted");
+    assert_accepts(&parser, &[0, 1], "one repetition followed by dollar should be accepted");
+    assert_accepts(
+        &parser,
+        &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+        "sixteen repetitions followed by dollar should be accepted",
+    );
+    assert_rejects(&parser, &[], "empty input should be rejected");
+    assert_rejects(&parser, &[0], "missing dollar should be rejected");
+    assert_rejects(
+        &parser,
+        &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+        "seventeen repetitions followed by dollar should be rejected",
+    );
+}

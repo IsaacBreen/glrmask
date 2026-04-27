@@ -522,6 +522,8 @@ enum RepeatTreeShape {
     Balanced,
     Left,
     Right,
+    /// Deterministic bounded-range lowering that uses a countdown chain.
+    Countdown,
     /// Balanced exact decomposition (O(log N) tree depth) with balanced
     /// range alternation (O(log N) close-bracket resolution).
     LeftBalanced,
@@ -530,7 +532,7 @@ enum RepeatTreeShape {
 fn repeat_tree_shape() -> RepeatTreeShape {
     match std::env::var("GLRMASK_REPEAT_TREE_SHAPE").ok().as_deref() {
         Some(v) => repeat_tree_shape_from_value(v),
-        None => RepeatTreeShape::LeftBalanced,
+        None => RepeatTreeShape::Countdown,
     }
 }
 
@@ -538,6 +540,7 @@ fn repeat_tree_shape_from_value(value: &str) -> RepeatTreeShape {
     match value {
         "left" => RepeatTreeShape::Left,
         "balanced" => RepeatTreeShape::Balanced,
+        "countdown" | "deterministic" => RepeatTreeShape::Countdown,
         "leftbalanced" | "left_balanced" => RepeatTreeShape::LeftBalanced,
         _ => RepeatTreeShape::Right,
     }
@@ -560,7 +563,7 @@ fn left_repeat_range_back_bucket() -> usize {
 fn exact_repeat_split(count: usize, shape: RepeatTreeShape) -> (usize, usize) {
     debug_assert!(count > 1);
     match shape {
-        RepeatTreeShape::Balanced | RepeatTreeShape::LeftBalanced => {
+        RepeatTreeShape::Balanced | RepeatTreeShape::Countdown | RepeatTreeShape::LeftBalanced => {
             let left = count / 2;
             (left, count - left)
         }
@@ -573,7 +576,7 @@ fn range_repeat_split(min: usize, max: usize, shape: RepeatTreeShape) -> (usize,
     debug_assert!(min < max);
     let width = max - min + 1;
     match shape {
-        RepeatTreeShape::Balanced | RepeatTreeShape::LeftBalanced => {
+        RepeatTreeShape::Balanced | RepeatTreeShape::Countdown | RepeatTreeShape::LeftBalanced => {
             let left_width = width / 2;
             let split = min + left_width - 1;
             (split, width - left_width)
@@ -1014,6 +1017,15 @@ impl Lowerer {
             return self.repeat_exact_nonterminal(symbol, min, shape);
         }
 
+        let key = (symbol.clone(), min, max);
+        if let Some(&nonterminal) = self.repeat_range_cache.get(&key) {
+            return nonterminal;
+        }
+
+        if shape == RepeatTreeShape::Countdown {
+            return self.repeat_range_nonterminal_countdown(symbol, min, max, shape);
+        }
+
         match shape {
             RepeatTreeShape::LeftBalanced | RepeatTreeShape::Balanced => {
                 return self.repeat_range_nonterminal_balanced(symbol, min, max, shape);
@@ -1021,13 +1033,9 @@ impl Lowerer {
             _ => {}
         }
 
-        let key = (symbol.clone(), min, max);
-        if let Some(&nonterminal) = self.repeat_range_cache.get(&key) {
-            return nonterminal;
-        }
-
         let (_, nonterminal) = self.fresh_nonterminal("repeat_range");
         self.repeat_range_cache.insert(key, nonterminal);
+
         match shape {
             RepeatTreeShape::Right if (max - min + 1) > right_repeat_range_front_bucket() => {
                 let cutoff = (min + right_repeat_range_front_bucket() - 1).min(max);
@@ -1099,6 +1107,40 @@ impl Lowerer {
         self.rules.push(Rule {
             lhs: nonterminal,
             rhs: vec![Symbol::Nonterminal(right_nonterminal)],
+        });
+        nonterminal
+    }
+
+    fn repeat_range_nonterminal_countdown(
+        &mut self,
+        symbol: &Symbol,
+        min: usize,
+        max: usize,
+        shape: RepeatTreeShape,
+    ) -> NonterminalID {
+        let key = (symbol.clone(), min, max);
+        if let Some(&nonterminal) = self.repeat_range_cache.get(&key) {
+            return nonterminal;
+        }
+
+        let (_, nonterminal) = self.fresh_nonterminal("repeat_range");
+        self.repeat_range_cache.insert(key, nonterminal);
+
+        if min == 0 {
+            self.rules.push(Rule {
+                lhs: nonterminal,
+                rhs: Vec::new(),
+            });
+        }
+
+        let tail_nonterminal = if min > 0 {
+            self.repeat_range_nonterminal(symbol, min - 1, max - 1, shape)
+        } else {
+            self.repeat_range_nonterminal(symbol, 0, max - 1, shape)
+        };
+        self.rules.push(Rule {
+            lhs: nonterminal,
+            rhs: vec![symbol.clone(), Symbol::Nonterminal(tail_nonterminal)],
         });
         nonterminal
     }
@@ -2151,6 +2193,18 @@ mod tests {
         assert_eq!(repeat_tree_shape_from_value("left"), RepeatTreeShape::Left);
         assert_eq!(exact_repeat_split(13, RepeatTreeShape::Left), (12, 1));
         assert_eq!(range_repeat_split(3, 13, RepeatTreeShape::Left), (12, 1));
+    }
+
+    #[test]
+    fn test_repeat_tree_shape_parses_countdown() {
+        assert_eq!(
+            repeat_tree_shape_from_value("countdown"),
+            RepeatTreeShape::Countdown,
+        );
+        assert_eq!(
+            repeat_tree_shape_from_value("deterministic"),
+            RepeatTreeShape::Countdown,
+        );
     }
 
     #[test]
