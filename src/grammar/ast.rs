@@ -1481,6 +1481,38 @@ impl Lowerer {
             return Ok((item_sym.unwrap_or_else(|| self.lower_expr(&GrammarExpr::Epsilon)), can_be_empty));
         }
 
+        let first_optional = items.iter().position(|(_, required)| !required);
+        if let Some(split_idx) = first_optional {
+            let required_prefix = &items[..split_idx];
+            let optional_suffix = &items[split_idx..];
+            let required_prefix_is_nonnullable = !required_prefix.is_empty()
+                && required_prefix
+                    .iter()
+                    .all(|(expr, required)| *required && !self.expr_is_nullable(expr));
+            let suffix_is_all_optional = optional_suffix.iter().all(|(_, required)| !*required);
+
+            if required_prefix_is_nonnullable && suffix_is_all_optional {
+                let sep_sym = self.lower_expr_terminalish(separator)?;
+                let (prefix_sym, _) =
+                    self.lower_separated_sequence_inner(required_prefix, separator, shape)?;
+                let (suffix_sym, suffix_can_be_empty) =
+                    self.lower_separated_sequence_inner(optional_suffix, separator, shape)?;
+
+                debug_assert!(suffix_can_be_empty);
+
+                let (_, nt) = self.fresh_nonterminal("sep_seq");
+                self.rules.push(Rule {
+                    lhs: nt,
+                    rhs: vec![prefix_sym.clone()],
+                });
+                self.rules.push(Rule {
+                    lhs: nt,
+                    rhs: vec![prefix_sym, sep_sym, suffix_sym],
+                });
+                return Ok((Symbol::Nonterminal(nt), false));
+            }
+        }
+
         let mid = match shape {
             CommaSepShape::Balanced => items.len() / 2,
             CommaSepShape::Left => items.len() - 1,
