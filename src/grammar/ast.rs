@@ -532,7 +532,7 @@ enum RepeatTreeShape {
 fn repeat_tree_shape() -> RepeatTreeShape {
     match std::env::var("GLRMASK_REPEAT_TREE_SHAPE").ok().as_deref() {
         Some(v) => repeat_tree_shape_from_value(v),
-        None => RepeatTreeShape::Countdown,
+        None => RepeatTreeShape::LeftBalanced,
     }
 }
 
