@@ -5051,7 +5051,7 @@ start start;
     #[test]
     fn test_glrm_up_to_repetition_determinism() {
         let vocab = Vocab::new(vec![(0u32, b"a".to_vec())], None);
-        let N = 2;
+        let N = 16;
         let grammar = format!("start S; nt S ::= \"a\"{{0,{}}} \"$\";", N);
         let constraint = Constraint::from_glrm_grammar(&*grammar, &vocab).unwrap();
         let input = vec![b'a'; N];
