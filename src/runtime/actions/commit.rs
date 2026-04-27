@@ -930,7 +930,7 @@ fn commit_bytes_impl_profiled(
     let mut n_queue_entries: u64 = 0;
     let mut exec_ns: u64 = 0;
     let mut advance_ns: u64 = 0;
-    let mut advance_may_check_ns: u64 = 0;
+    let advance_may_check_ns: u64 = 0;
     let mut advance_core_ns: u64 = 0;
     let mut advance_future_disallow_ns: u64 = 0;
     let mut actionable_ns: u64 = 0;
@@ -1002,14 +1002,6 @@ fn commit_bytes_impl_profiled(
 
                 let t_adv = Instant::now();
                 // Inline profiled advance (skip cache for profiling)
-                let t_adv_may = Instant::now();
-                let may_advance_now = stack_may_advance_on(&constraint.table, &gss_at_offset, matched.id);
-                advance_may_check_ns += t_adv_may.elapsed().as_nanos() as u64;
-                if !may_advance_now {
-                    advance_ns += t_adv.elapsed().as_nanos() as u64;
-                    n_advances += 1;
-                    continue;
-                }
                 let t_adv_core = Instant::now();
                 let (advanced, sub_profile) = advance_stacks_profiled(
                     &constraint.table, &gss_at_offset, matched.id,
