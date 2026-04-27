@@ -1089,7 +1089,18 @@ fn test_large_exact_repetition() {
     let lark = r#"start: "a" ~1000000000..1000000000"#;
     let constraint = lark_constraint(&["a"], lark);
 
+    let num_states = constraint.debug_num_states();
+    assert!(num_states < 500, "Num states should be logarithmic: {num_states}");
+
     let mut state = constraint.start();
+
+    let max_depth = state
+        .debug_parser_stacks()
+        .iter()
+        .flat_map(|(_, stacks)| stacks.iter().map(|(stack, _)| stack.len()))
+        .max()
+        .unwrap_or(0);
+    assert!(max_depth < 100, "Stack depth should be logarithmic: {max_depth}");
 
     // 1. Check initial mask: 'a' must be allowed.
     let mask = state.mask();
@@ -1111,7 +1122,18 @@ fn test_large_max_repetition() {
     let lark = r#"start: "a" ~0..1000000000"#;
     let constraint = lark_constraint(&["a"], lark);
 
+    let num_states = constraint.debug_num_states();
+    assert!(num_states < 500, "Num states should be logarithmic: {num_states}");
+
     let mut state = constraint.start();
+
+    let max_depth = state
+        .debug_parser_stacks()
+        .iter()
+        .flat_map(|(_, stacks)| stacks.iter().map(|(stack, _)| stack.len()))
+        .max()
+        .unwrap_or(0);
+    assert!(max_depth < 100, "Stack depth should be logarithmic: {max_depth}");
 
     let mask = state.mask();
     assert_mask_allows(&mask, &[0]);
@@ -1122,7 +1144,106 @@ fn test_large_max_repetition() {
     assert_mask_allows(&mask_after, &[0]);
     assert!(state.is_finished(), "Should be finished after 3 tokens (3 >= min=0)");
 }
+#[test]
+fn test_exact_repetition_growth() {
+    let ns = [10, 100, 1000, 10000];
+    let mut observations = Vec::new();
 
+    for &n in &ns {
+        let lark = format!("start: \"a\" ~{n}..{n}");
+        let constraint = lark_constraint(&["a"], &lark);
+        let num_states = constraint.debug_num_states();
+
+        let mut state = constraint.start();
+        // Consume a few tokens to see the stack depth
+        for _ in 0..(n / 2).min(5) {
+            state.commit_token(0).unwrap();
+        }
+
+        let max_depth = state
+            .debug_parser_stacks()
+            .iter()
+            .flat_map(|(_, stacks)| stacks.iter().map(|(stack, _)| stack.len()))
+            .max()
+            .unwrap_or(0);
+
+        observations.push((n, num_states, max_depth));
+    }
+
+    for i in 1..observations.len() {
+        let (n0, s0, d0) = observations[i - 1];
+        let (n1, s1, d1) = observations[i];
+
+        let ratio_n = (n1 as f64) / (n0 as f64);
+        let ratio_s = (s1 as f64) / (s0 as f64);
+        let ratio_d = (d1 as f64) / (d0 as f64);
+
+        println!(
+            "Exact N={n1}: states={s1} depth={d1} (ratios: N={ratio_n:.1} states={ratio_s:.2} depth={ratio_d:.2})"
+        );
+
+        // For N=10->100 (10x), log N ratio is 2.0 (log2(100)/log2(10)).
+        // Linear growth would be 10x.
+        // We expect states and depth to grow much slower than N.
+        assert!(
+            ratio_s < ratio_n * 0.5,
+            "Parser states should grow sublinearly: N={n0}->{n1}, states={s0}->{s1}"
+        );
+        assert!(
+            ratio_d < ratio_n * 0.5,
+            "Stack depth should grow sublinearly: N={n0}->{n1}, depth={d0}->{d1}"
+        );
+    }
+}
+
+#[test]
+fn test_up_to_repetition_growth() {
+    let ns = [10, 100, 1000, 10000];
+    let mut observations = Vec::new();
+
+    for &n in &ns {
+        let lark = format!("start: \"a\" ~0..{n}");
+        let constraint = lark_constraint(&["a"], &lark);
+        let num_states = constraint.debug_num_states();
+
+        let mut state = constraint.start();
+        // Consume a few tokens to see the stack depth
+        for _ in 0..(n / 2).min(5) {
+            state.commit_token(0).unwrap();
+        }
+
+        let max_depth = state
+            .debug_parser_stacks()
+            .iter()
+            .flat_map(|(_, stacks)| stacks.iter().map(|(stack, _)| stack.len()))
+            .max()
+            .unwrap_or(0);
+
+        observations.push((n, num_states, max_depth));
+    }
+
+    for i in 1..observations.len() {
+        let (n0, s0, d0) = observations[i - 1];
+        let (n1, s1, d1) = observations[i];
+
+        let ratio_n = (n1 as f64) / (n0 as f64);
+        let ratio_s = (s1 as f64) / (s0 as f64);
+        let ratio_d = (d1 as f64) / (d0 as f64);
+
+        println!(
+            "Up-to N={n1}: states={s1} depth={d1} (ratios: N={ratio_n:.1} states={ratio_s:.2} depth={ratio_d:.2})"
+        );
+
+        assert!(
+            ratio_s < ratio_n * 0.5,
+            "Parser states should grow sublinearly: N={n0}->{n1}, states={s0}->{s1}"
+        );
+        assert!(
+            ratio_d < ratio_n * 0.5,
+            "Stack depth should grow sublinearly: N={n0}->{n1}, depth={d0}->{d1}"
+        );
+    }
+}
 
 /// Grammar: s ::= DEF_T; DEF_T ::= "def".
 /// Verifies that the multi-byte vocab token "def" is allowed at token id 0.
