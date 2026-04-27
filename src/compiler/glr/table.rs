@@ -1097,7 +1097,7 @@ impl GLRTable {
 pub(crate) fn emit_glr_table_debug_dump(table: &GLRTable) {
     eprintln!("=== GLR Table ===");
     eprintln!(
-        "num_states={} num_terminals={} num_rules={}",
+        "num_states={} num_terminals={} num_rules={} start_state=0",
         table.num_states, table.num_terminals, table.num_rules
     );
     for (index, rule) in table.rules.iter().enumerate() {
@@ -1107,10 +1107,11 @@ pub(crate) fn emit_glr_table_debug_dump(table: &GLRTable) {
             .map(|s| s.to_string())
             .collect::<Vec<_>>()
             .join(" ");
-        eprintln!("table rule {}: lhs={} rhs={}", index, rule.lhs, rhs_str);
+        eprintln!("({}) N{} -> {}", index, rule.lhs, rhs_str);
     }
     for state in 0..table.num_states as usize {
-        eprintln!("state {}", state);
+        let start_mark = if state == 0 { " [START]" } else { "" };
+        eprintln!("state {}{}", state, start_mark);
         let mut actions = table.action[state].iter().collect::<Vec<_>>();
         actions.sort_by_key(|(terminal, _)| **terminal);
         for (terminal, action) in actions {

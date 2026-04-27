@@ -37,7 +37,7 @@ impl std::fmt::Display for Symbol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Symbol::Terminal(id) => write!(f, "T{}", id),
-            Symbol::Nonterminal(id) => write!(f, "NT{}", id),
+            Symbol::Nonterminal(id) => write!(f, "N{}", id),
         }
     }
 }

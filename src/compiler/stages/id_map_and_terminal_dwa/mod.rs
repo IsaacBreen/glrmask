@@ -93,7 +93,7 @@ fn l2p_auto_min_grammar_terminals_from_env() -> usize {
 pub(crate) fn maybe_print_terminal_mappings(grammar: &AnalyzedGrammar) {
     for terminal_id in 0..grammar.num_terminals {
         eprintln!(
-            "[glrmask/debug][terminal_mapping] id={:>4} name={}",
+            "[glrmask/debug][terminal_mapping] id=   T{} name={}",
             terminal_id,
             grammar.terminal_display_name(terminal_id),
         );
