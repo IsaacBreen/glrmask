@@ -273,13 +273,6 @@ fn advance_terminal_match(
     let advanced = if let Some((_, cached)) = advance_result_cache.get(&advance_cache_key) {
         cached.clone()
     } else {
-        if !stack_may_advance_on(&constraint.table, gss_at_offset, terminal) {
-            let empty = ParserGSS::empty();
-            advance_result_cache.insert(advance_cache_key, (gss_at_offset.clone(), empty.clone()));
-            terminal_result_cache.insert(terminal, empty);
-            return None;
-        }
-
         let advanced = advance_stacks(&constraint.table, gss_at_offset, terminal);
         advance_result_cache.insert(advance_cache_key, (gss_at_offset.clone(), advanced.clone()));
         advanced
@@ -563,6 +556,14 @@ fn commit_bytes_impl(
             .values()
             .next()
             .is_some_and(|gss| gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()))
+            && !exec_result
+                .end_state
+                .is_some_and(|end_state| {
+                    state
+                        .values()
+                        .next()
+                        .is_some_and(|gss| end_state_may_advance(constraint, gss, end_state))
+                })
         {
             let start_gss = state.values().next().unwrap().clone();
             match commit_bytes_linear_fast_path(
@@ -1388,6 +1389,15 @@ impl<'a> ConstraintState<'a> {
         let result = commit_bytes_impl(constraint, &mut self.state, bytes, &mut self.buffers);
         self.generation += 1;
         result
+    }
+
+    pub fn commit_token_timed_ns(
+        &mut self,
+        token_id: u32,
+    ) -> Result<u64, String> {
+        let (total_ns, ..) = self.commit_token_profiled(token_id)?;
+        self.generation += 1;
+        Ok(total_ns)
     }
 
     /// Like commit_token but returns profiling stats.

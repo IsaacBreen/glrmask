@@ -964,6 +964,10 @@ impl<'a> ConstraintState<'a> {
         self.fill_mask_inner::<false>(buf);
     }
 
+    pub fn fill_mask_timed_ns(&self, buf: &mut [u32]) -> u64 {
+        self.fill_mask_profiled(buf).total_ns
+    }
+
     /// Like `fill_mask` but also returns internal phase timings measured in Rust.
     /// All timings are in nanoseconds. Only call this from profiling code paths;
     /// `fill_mask` has zero timing overhead.
