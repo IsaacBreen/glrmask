@@ -513,8 +513,14 @@ fn test_single_terminal_production() {
 fn assert_no_splits(table: &GLRTable) {
     for row in &table.action {
         for action in row.values() {
-            if matches!(action, Action::Split { .. }) {
-                panic!("Found split action in table: {:?}", action);
+            match action {
+                Action::Split { .. } => {
+                    panic!("Found split action in table: {:?}", action);
+                }
+                Action::StackShifts(shifts) if shifts.len() > 1 => {
+                    panic!("Found multiple stack shifts (split) in table: {:?}", action);
+                }
+                _ => {}
             }
         }
     }
@@ -533,9 +539,6 @@ fn test_glrm_exact_repetition_determinism() {
 
 #[test]
 fn test_glrm_up_to_repetition_determinism() {
-    // Note: this test fails with the default RepeatTreeShape::Balanced because 
-    // balanced up-to repetitions are inherently ambiguous in LR(1).
-    // Use GLRMASK_REPEAT_TREE_SHAPE=Right to make it deterministic.
     let grammar_str = "start S; nt S ::= \"a\"{0,16} \"$\";";
     let named = crate::grammar::glrm::from_glrm(grammar_str).unwrap();
     let factored = crate::grammar::factoring::factor_named_grammar(named);
