@@ -5052,9 +5052,10 @@ start start;
     #[test]
     #[ignore = "exposes known ambiguity in LeftBalanced repetition lowering"]
     fn test_glrm_repetition_determinism() {
-        let vocab = byte_vocab();
-        let grammar = "start S; nt S ::= \"a\"{0,100};";
-        let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+        let vocab = Vocab::new(vec![(0u32, b"a".to_vec())], None);
+        let N = 100;
+        let grammar = format!("start S; nt S ::= \"a\"{{0,{}}};", N);
+        let constraint = Constraint::from_glrm_grammar(&*grammar, &vocab).unwrap();
         let input = vec![b'a'; 100];
         let state = assert_max_parser_paths_over_bytes(&constraint, &input, 1);
         assert!(state.is_finished(), "grammar should have fully accepted the 100 'a's");
