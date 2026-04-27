@@ -511,14 +511,24 @@ fn test_single_terminal_production() {
 }
 
 fn assert_no_splits(table: &GLRTable) {
-    for row in &table.action {
-        for action in row.values() {
+    for (state, row) in table.action.iter().enumerate() {
+        for (&terminal, action) in row {
             match action {
                 Action::Split { .. } => {
-                    panic!("Found split action in table: {:?}", action);
+                    panic!(
+                        "Found split action in table at state {} terminal {}: {:?}",
+                        state,
+                        terminal,
+                        action,
+                    );
                 }
                 Action::StackShifts(shifts) if shifts.len() > 1 => {
-                    panic!("Found multiple stack shifts (split) in table: {:?}", action);
+                    panic!(
+                        "Found multiple stack shifts (split) in table at state {} terminal {}: {:?}",
+                        state,
+                        terminal,
+                        action,
+                    );
                 }
                 _ => {}
             }
