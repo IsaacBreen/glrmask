@@ -268,7 +268,7 @@ fn schema_like_ambiguous_ebnf_with_n_branches(n: usize) -> String {
     const KEYS: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUV";
 
     let mut lines = Vec::new();
-    lines.push(format!("start ::= s_{}", n - 1));
+    lines.push(format!("start ::= s_{} \"$\"", n - 1));
     lines.push("zstar ::= 'z' zstar | ''".to_string());
 
     // Minimal core analogue of known-vs-additional ambiguity:
@@ -294,11 +294,10 @@ fn schema_like_ambiguous_ebnf_with_n_branches(n: usize) -> String {
 
 fn max_parser_paths_over_bytes(constraint: &Constraint, input: &[u8]) -> usize {
     let mut state = constraint.start();
-    assert!(!state.is_finished(), "should not be finished at start");
     let mut max_paths = state.parser_path_count(1_000_000);
     for (i, &byte) in input.iter().enumerate() {
-        state.commit_bytes(&[byte]).unwrap();
         assert!(!state.is_finished(), "should not be finished after byte {} (char {:?}) at position {}", byte, byte as char, i);
+        state.commit_bytes(&[byte]).unwrap();
         max_paths = max_paths.max(state.parser_path_count(1_000_000));
     }
     max_paths
@@ -306,7 +305,6 @@ fn max_parser_paths_over_bytes(constraint: &Constraint, input: &[u8]) -> usize {
 
 fn assert_max_parser_paths_over_bytes<'a>(constraint: &'a Constraint, input: &[u8], expected_max: usize) -> ConstraintState<'a> {
     let mut state = constraint.start();
-    assert!(!state.is_finished(), "should not be finished at start");
     let initial_paths = state.parser_path_count(1_000_000);
     assert!(
         initial_paths <= expected_max,
@@ -316,8 +314,8 @@ fn assert_max_parser_paths_over_bytes<'a>(constraint: &'a Constraint, input: &[u
     );
 
     for (i, &byte) in input.iter().enumerate() {
-        state.commit_bytes(&[byte]).unwrap();
         assert!(!state.is_finished(), "should not be finished after byte {} (char {:?}) at position {}", byte, byte as char, i);
+        state.commit_bytes(&[byte]).unwrap();
         let current_paths = state.parser_path_count(1_000_000);
         assert!(
             current_paths <= expected_max,
