@@ -1481,17 +1481,7 @@ impl Lowerer {
             return Ok((item_sym.unwrap_or_else(|| self.lower_expr(&GrammarExpr::Epsilon)), can_be_empty));
         }
 
-        // Balanced object splits can reintroduce recognizer ambiguity once an
-        // ordered required prefix is followed by optional fields. In that case,
-        // prefer the right/factored form, which keeps the prefix committed
-        // before branching into the optional tail.
-        let effective_shape = if items.iter().any(|(_, required)| !required) {
-            CommaSepShape::Right
-        } else {
-            shape
-        };
-
-        let mid = match effective_shape {
+        let mid = match shape {
             CommaSepShape::Balanced => items.len() / 2,
             CommaSepShape::Left => items.len() - 1,
             CommaSepShape::Right => 1,
@@ -1507,9 +1497,9 @@ impl Lowerer {
 
         let sep_sym = self.lower_expr_terminalish(separator)?;
         let (left_sym, left_can_be_empty) =
-            self.lower_separated_sequence_inner(&items[..mid], separator, effective_shape)?;
+            self.lower_separated_sequence_inner(&items[..mid], separator, shape)?;
         let (right_sym, right_can_be_empty) =
-            self.lower_separated_sequence_inner(&items[mid..], separator, effective_shape)?;
+            self.lower_separated_sequence_inner(&items[mid..], separator, shape)?;
 
         let (_, nt) = self.fresh_nonterminal("sep_seq");
 
