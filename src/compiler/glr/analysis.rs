@@ -615,6 +615,30 @@ fn compress_nullable_runs_with_optional_tree(rules: &[Rule], num_nt: u32) -> Vec
         return rules.to_vec();
     }
 
+    let debug_stage_trace = std::env::var("GLRMASK_DEBUG_INLINE_NULL_STAGES")
+        .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
+        .unwrap_or(false);
+    let mut run_count = 0usize;
+    let mut max_run_len = 0usize;
+    for rule in rules {
+        for (start, end) in find_nullable_runs(&rule.rhs, &nullable, 1) {
+            run_count += 1;
+            max_run_len = max_run_len.max(end - start + 1);
+        }
+    }
+    if debug_stage_trace {
+        eprintln!(
+            "[glrmask/debug][inline_null] compress_start rules={} nullable_nts={} nullable_runs={} max_run_len={}",
+            rules.len(),
+            nullable.len(),
+            run_count,
+            max_run_len,
+        );
+    }
+    if run_count == 0 {
+        return rules.to_vec();
+    }
+
     let mut by_lhs = BTreeMap::<NonterminalID, Vec<Vec<Symbol>>>::new();
     for rule in rules {
         by_lhs.entry(rule.lhs).or_default().push(rule.rhs.clone());
@@ -785,8 +809,31 @@ fn get_or_create_non_nullable_nt(
 /// existing exhaustive elimination, to avoid the raw power-set blowups that
 /// occur when many nullable nonterminals appear consecutively.
 pub(crate) fn inline_null_productions(rules: &[Rule], num_nt: u32) -> Vec<Rule> {
+    let debug_stage_trace = std::env::var("GLRMASK_DEBUG_INLINE_NULL_STAGES")
+        .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
+        .unwrap_or(false);
+    let preprocess_started_at = std::time::Instant::now();
     let preprocessed = compress_nullable_runs_with_optional_tree(rules, num_nt);
-    inline_null_productions_exhaustive(&preprocessed, max_nt_id(&preprocessed) + 1)
+    if debug_stage_trace {
+        eprintln!(
+            "[glrmask/debug][inline_null] preprocess_done in_rules={} out_rules={} ms={:.3}",
+            rules.len(),
+            preprocessed.len(),
+            preprocess_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    let exhaustive_started_at = std::time::Instant::now();
+    let result = inline_null_productions_exhaustive(&preprocessed, max_nt_id(&preprocessed) + 1);
+    if debug_stage_trace {
+        eprintln!(
+            "[glrmask/debug][inline_null] exhaustive_done in_rules={} out_rules={} ms={:.3}",
+            preprocessed.len(),
+            result.len(),
+            exhaustive_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    result
 }
 
 /// Eliminate hidden left recursion.
@@ -962,27 +1009,51 @@ fn flatten_rhs_symbols(
     rhs: &[Symbol],
     unique_rhs_by_lhs: &BTreeMap<NonterminalID, Vec<Symbol>>,
     expandable_single_productions: &BTreeSet<NonterminalID>,
+    flatten_cache: &mut HashMap<NonterminalID, Option<Vec<Symbol>>>,
 ) -> Vec<Symbol> {
+    const MAX_FLATTENED_RHS_LEN: usize = 4096;
+
     fn flatten_symbol(
         symbol: &Symbol,
         out: &mut Vec<Symbol>,
         unique_rhs_by_lhs: &BTreeMap<NonterminalID, Vec<Symbol>>,
         expandable_single_productions: &BTreeSet<NonterminalID>,
+        flatten_cache: &mut HashMap<NonterminalID, Option<Vec<Symbol>>>,
     ) {
         match symbol {
             Symbol::Terminal(_) => out.push(symbol.clone()),
             Symbol::Nonterminal(nt)
                 if expandable_single_productions.contains(nt) =>
             {
+                if let Some(cached) = flatten_cache.get(nt) {
+                    match cached {
+                        Some(flattened) if out.len() + flattened.len() <= MAX_FLATTENED_RHS_LEN => {
+                            out.extend(flattened.iter().cloned());
+                        }
+                        _ => out.push(symbol.clone()),
+                    }
+                    return;
+                }
+
                 if let Some(expanded_rhs) = unique_rhs_by_lhs.get(nt) {
+                    let mut flattened_nt = Vec::new();
                     for expanded_symbol in expanded_rhs {
                         flatten_symbol(
                             expanded_symbol,
-                            out,
+                            &mut flattened_nt,
                             unique_rhs_by_lhs,
                             expandable_single_productions,
+                            flatten_cache,
                         );
+                        if flattened_nt.len() > MAX_FLATTENED_RHS_LEN {
+                            flatten_cache.insert(*nt, None);
+                            out.push(symbol.clone());
+                            return;
+                        }
                     }
+
+                    flatten_cache.insert(*nt, Some(flattened_nt.clone()));
+                    out.extend(flattened_nt);
                 } else {
                     out.push(symbol.clone());
                 }
@@ -998,7 +1069,11 @@ fn flatten_rhs_symbols(
             &mut flattened,
             unique_rhs_by_lhs,
             expandable_single_productions,
+            flatten_cache,
         );
+        if flattened.len() > MAX_FLATTENED_RHS_LEN {
+            return rhs.to_vec();
+        }
     }
     flattened
 }
@@ -1009,16 +1084,23 @@ fn dedup_rules(rules: &mut Vec<Rule>) {
     let (unique_rhs_by_lhs, expandable_single_productions) =
         compute_expandable_single_productions(&rhs_by_lhs);
     let mut seen = HashSet::with_capacity(rules.len());
-    rules.retain(|rule| {
-        seen.insert((
+    let mut flatten_cache = HashMap::<NonterminalID, Option<Vec<Symbol>>>::new();
+    let mut deduped = Vec::with_capacity(rules.len());
+    for rule in rules.drain(..) {
+        let key = (
             rule.lhs,
             flatten_rhs_symbols(
                 &rule.rhs,
                 &unique_rhs_by_lhs,
                 &expandable_single_productions,
+                &mut flatten_cache,
             ),
-        ))
-    });
+        );
+        if seen.insert(key) {
+            deduped.push(rule);
+        }
+    }
+    *rules = deduped;
 }
 
 fn is_reflexive_unit_rule(rule: &Rule) -> bool {
@@ -1055,6 +1137,7 @@ pub(crate) fn merge_identical_nonterminals(
         nts.iter().map(|nt| &rhs_by_lhs[nt]).collect();
     let (unique_rhs_by_lhs, expandable_single_productions) =
         compute_expandable_single_productions(&rhs_by_lhs);
+    let mut flatten_cache = HashMap::<NonterminalID, Option<Vec<Symbol>>>::new();
     let flattened_rhs_by_idx: Vec<Vec<Vec<Symbol>>> = nts
         .iter()
         .map(|nt| {
@@ -1065,6 +1148,7 @@ pub(crate) fn merge_identical_nonterminals(
                         rhs,
                         &unique_rhs_by_lhs,
                         &expandable_single_productions,
+                        &mut flatten_cache,
                     )
                 })
                 .collect()
@@ -1424,6 +1508,9 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
     let debug_profile = std::env::var("GLRMASK_DEBUG_PROFILE")
         .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
         .unwrap_or(false);
+    let debug_stage_trace = std::env::var("GLRMASK_DEBUG_NORMALIZE_STAGES")
+        .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
+        .unwrap_or(false);
 
     let next_nt = Cell::new(max_nt_id(rules) + 1);
     let mut fresh_nt = || {
@@ -1441,12 +1528,18 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
         let t0 = std::time::Instant::now();
         replace_rules_with_resync(rules, &next_nt, inline_null_productions);
         let inline_null_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        if debug_stage_trace {
+            eprintln!("[glrmask/debug][normalize_stage] iter={} inline_null_done rules={} ms={:.3}", iteration, rules.len(), inline_null_ms);
+        }
 
         let t1 = std::time::Instant::now();
         with_resynced_next_nonterminal(rules, &next_nt, |rules| {
             eliminate_right_recursion(rules, &mut fresh_nt);
         });
         let elim_right_ms = t1.elapsed().as_secs_f64() * 1000.0;
+        if debug_stage_trace {
+            eprintln!("[glrmask/debug][normalize_stage] iter={} elim_right_done rules={} ms={:.3}", iteration, rules.len(), elim_right_ms);
+        }
 
         let t2 = std::time::Instant::now();
         with_resynced_next_nonterminal(rules, &next_nt, |rules| {
@@ -1454,10 +1547,16 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
             eliminate_hidden_left_recursion(rules, &nullable);
         });
         let elim_hidden_ms = t2.elapsed().as_secs_f64() * 1000.0;
+        if debug_stage_trace {
+            eprintln!("[glrmask/debug][normalize_stage] iter={} elim_hidden_done rules={} ms={:.3}", iteration, rules.len(), elim_hidden_ms);
+        }
 
         let t3 = std::time::Instant::now();
         dedup_rules(rules);
         let dedup_ms = t3.elapsed().as_secs_f64() * 1000.0;
+        if debug_stage_trace {
+            eprintln!("[glrmask/debug][normalize_stage] iter={} dedup_done rules={} ms={:.3}", iteration, rules.len(), dedup_ms);
+        }
 
         let t4 = std::time::Instant::now();
         let converged = *rules == snap;
@@ -1480,14 +1579,23 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
     let post_t0 = std::time::Instant::now();
     replace_rules_with_resync(rules, &next_nt, inline_null_productions);
     let post_inline_null_ms = post_t0.elapsed().as_secs_f64() * 1000.0;
+    if debug_stage_trace {
+        eprintln!("[glrmask/debug][normalize_stage] post inline_null_done rules={} ms={:.3}", rules.len(), post_inline_null_ms);
+    }
 
     let post_t1 = std::time::Instant::now();
     *rules = remove_unreachable_rules(rules, start);
     let post_remove_ms = post_t1.elapsed().as_secs_f64() * 1000.0;
+    if debug_stage_trace {
+        eprintln!("[glrmask/debug][normalize_stage] post remove_unreachable_done rules={} ms={:.3}", rules.len(), post_remove_ms);
+    }
 
     let post_t2 = std::time::Instant::now();
     dedup_rules(rules);
     let post_dedup_ms = post_t2.elapsed().as_secs_f64() * 1000.0;
+    if debug_stage_trace {
+        eprintln!("[glrmask/debug][normalize_stage] post dedup_done rules={} ms={:.3}", rules.len(), post_dedup_ms);
+    }
 
     if debug_profile {
         eprintln!(

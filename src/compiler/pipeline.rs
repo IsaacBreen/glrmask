@@ -55,6 +55,10 @@ fn debug_verbose_enabled() -> bool {
     env_flag_enabled("GLRMASK_DEBUG_VERBOSE")
 }
 
+fn debug_compile_stages_enabled() -> bool {
+    env_flag_enabled("GLRMASK_DEBUG_COMPILE_STAGES")
+}
+
 fn strict_one_flag_enabled(name: &str) -> bool {
     std::env::var(name).map_or(false, |value| value == "1")
 }
@@ -340,6 +344,7 @@ fn compile_prepared_with_profile(
         clear_weight_op_profile();
         let compile_started_at = Instant::now();
         let mut profile = CompilePhaseProfile::default();
+        let debug_compile_stages = debug_compile_stages_enabled();
 
         let analysis_started_at = Instant::now();
         let (
@@ -408,6 +413,16 @@ fn compile_prepared_with_profile(
         profile.terminal_coloring_ms = terminal_coloring_ms;
         profile.disallowed_follows_ms = disallowed_follows_ms;
         profile.analysis_wall_ms = elapsed_ms(analysis_started_at);
+        if debug_compile_stages {
+            eprintln!(
+                "[glrmask/debug][compile_stage] analysis_done wall_ms={:.3} analyze_ms={:.3} glr_ms={:.3} coloring_ms={:.3} disallowed_ms={:.3}",
+                profile.analysis_wall_ms,
+                analyze_grammar_ms,
+                glr_table_ms,
+                terminal_coloring_ms,
+                disallowed_follows_ms,
+            );
+        }
 
         let debug_profile = std::env::var("GLRMASK_DEBUG_PROFILE")
             .map(|v| {
@@ -494,6 +509,12 @@ fn compile_prepared_with_profile(
             Some(&shared_classify_cache),
         );
         profile.classify_ms = elapsed_ms(classify_started_at);
+        if debug_compile_stages {
+            eprintln!(
+                "[glrmask/debug][compile_stage] classify_done ms={:.3}",
+                profile.classify_ms,
+            );
+        }
         if compile_profile_enabled() {
             use crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalPathLength;
             let n0 = terminal_path_lengths
@@ -661,6 +682,15 @@ fn compile_prepared_with_profile(
             } => (global, Some(terminal_dwa), phase_profile),
         };
         profile.templates_ms = templates_ms;
+        if debug_compile_stages {
+            eprintln!(
+                "[glrmask/debug][compile_stage] id_map_templates_done id_map_ms={:.3} terminal_dwa_ms={:.3} compact_ms={:.3} templates_ms={:.3}",
+                terminal_phase_profile.id_map_ms,
+                terminal_phase_profile.terminal_dwa_ms,
+                terminal_phase_profile.compact_ms,
+                profile.templates_ms,
+            );
+        }
         let token_bytes = vocab.entries.clone();
 
         let (mut terminal_dwa, already_compacted) = if let Some(dwa) = prebuilt_terminal_dwa {
@@ -711,6 +741,14 @@ fn compile_prepared_with_profile(
         profile.id_map_ms = terminal_phase_profile.id_map_ms;
         profile.terminal_dwa_ms = terminal_phase_profile.terminal_dwa_ms;
         profile.compact_ms = terminal_phase_profile.compact_ms;
+        if debug_compile_stages {
+            eprintln!(
+                "[glrmask/debug][compile_stage] terminal_dwa_done id_map_ms={:.3} terminal_dwa_ms={:.3} compact_ms={:.3}",
+                profile.id_map_ms,
+                profile.terminal_dwa_ms,
+                profile.compact_ms,
+            );
+        }
 
         if let Ok(dump_path) = std::env::var("GLRMASK_ORACLE_DUMP") {
             let mut canonical_state_reps = vec![u32::MAX; internal_ids.num_tsids() as usize];
@@ -791,6 +829,14 @@ fn compile_prepared_with_profile(
         profile.parser_dwa_ms = parser_dwa_ms;
         profile.permute_possible_matches_ms = permute_possible_matches_ms;
         profile.internal_token_bytes_ms = internal_token_bytes_ms;
+        if debug_compile_stages {
+            eprintln!(
+                "[glrmask/debug][compile_stage] parser_possible_matches_done parser_dwa_ms={:.3} possible_matches_ms={:.3} internal_token_bytes_ms={:.3}",
+                profile.parser_dwa_ms,
+                profile.permute_possible_matches_ms,
+                profile.internal_token_bytes_ms,
+            );
+        }
 
         let finalize_started_at = Instant::now();
         let constraint = finalize_constraint(Constraint {
@@ -825,6 +871,13 @@ fn compile_prepared_with_profile(
         });
         profile.finalize_ms = elapsed_ms(finalize_started_at);
         profile.compile_ms = elapsed_ms(compile_started_at);
+        if debug_compile_stages {
+            eprintln!(
+                "[glrmask/debug][compile_stage] finalize_done finalize_ms={:.3} compile_ms={:.3}",
+                profile.finalize_ms,
+                profile.compile_ms,
+            );
+        }
 
         (constraint, profile)
     })

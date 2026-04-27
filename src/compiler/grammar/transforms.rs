@@ -619,18 +619,30 @@ fn prepare_grammar_transforms_impl(
     let debug_profile = std::env::var("GLRMASK_DEBUG_PROFILE")
         .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
         .unwrap_or(false);
+    let debug_stage_trace = std::env::var("GLRMASK_DEBUG_PREPARE_STAGES")
+        .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
+        .unwrap_or(false);
     let t0 = std::time::Instant::now();
     expand_nullable_terminals(&mut normalized.rules, nullable_terminals);
     let expand_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    if debug_stage_trace {
+        eprintln!("[glrmask/debug][prepare_stage] expand_done rules={} ms={:.3}", normalized.rules.len(), expand_ms);
+    }
 
     let t1 = std::time::Instant::now();
     normalize_grammar(&mut normalized.rules, normalized.start);
     let normalize_ms = t1.elapsed().as_secs_f64() * 1000.0;
+    if debug_stage_trace {
+        eprintln!("[glrmask/debug][prepare_stage] normalize_done rules={} ms={:.3}", normalized.rules.len(), normalize_ms);
+    }
 
     let t2 = std::time::Instant::now();
     let protected_nonterminals = collect_protected_nonterminals(normalized);
     inline_single_use_nonterminals(&mut normalized.rules, &protected_nonterminals);
     let inline_ms = t2.elapsed().as_secs_f64() * 1000.0;
+    if debug_stage_trace {
+        eprintln!("[glrmask/debug][prepare_stage] inline1_done rules={} ms={:.3}", normalized.rules.len(), inline_ms);
+    }
 
     let t3 = std::time::Instant::now();
     loop {
@@ -641,6 +653,9 @@ fn prepare_grammar_transforms_impl(
         }
     }
     let merge1_ms = t3.elapsed().as_secs_f64() * 1000.0;
+    if debug_stage_trace {
+        eprintln!("[glrmask/debug][prepare_stage] merge1_done rules={} ms={:.3}", normalized.rules.len(), merge1_ms);
+    }
 
     let t4 = std::time::Instant::now();
     let max_reduction_len = std::env::var("GLRMASK_MAX_RUNTIME_REDUCTION_LEN")
@@ -649,6 +664,9 @@ fn prepare_grammar_transforms_impl(
         .unwrap_or(MAX_RUNTIME_REDUCTION_LEN);
     bound_runtime_reduction_length(normalized, max_reduction_len);
     let bound_ms = t4.elapsed().as_secs_f64() * 1000.0;
+    if debug_stage_trace {
+        eprintln!("[glrmask/debug][prepare_stage] bound_done rules={} ms={:.3}", normalized.rules.len(), bound_ms);
+    }
 
     let t5 = std::time::Instant::now();
     inline_post_bound_single_use_nonterminals(
@@ -657,6 +675,9 @@ fn prepare_grammar_transforms_impl(
         max_reduction_len,
     );
     let inline2_ms = t5.elapsed().as_secs_f64() * 1000.0;
+    if debug_stage_trace {
+        eprintln!("[glrmask/debug][prepare_stage] inline2_done rules={} ms={:.3}", normalized.rules.len(), inline2_ms);
+    }
 
     let t6 = std::time::Instant::now();
     loop {
@@ -667,10 +688,16 @@ fn prepare_grammar_transforms_impl(
         }
     }
     let merge2_ms = t6.elapsed().as_secs_f64() * 1000.0;
+    if debug_stage_trace {
+        eprintln!("[glrmask/debug][prepare_stage] merge2_done rules={} ms={:.3}", normalized.rules.len(), merge2_ms);
+    }
 
     let t7 = std::time::Instant::now();
     compact_unused_terminals(normalized);
     let compact_ms = t7.elapsed().as_secs_f64() * 1000.0;
+    if debug_stage_trace {
+        eprintln!("[glrmask/debug][prepare_stage] compact_done rules={} terminals={} ms={:.3}", normalized.rules.len(), normalized.terminals.len(), compact_ms);
+    }
 
     if debug_profile {
         eprintln!(
