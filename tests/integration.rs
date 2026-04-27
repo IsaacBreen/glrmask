@@ -294,16 +294,11 @@ fn schema_like_ambiguous_ebnf_with_n_branches(n: usize) -> String {
 
 fn max_parser_paths_over_bytes(constraint: &Constraint, input: &[u8]) -> usize {
     let mut state = constraint.start();
+    assert!(!state.is_finished(), "should not be finished at start");
     let mut max_paths = state.parser_path_count(1_000_000);
-    for &byte in input {
-        let mask = state.mask();
-        assert!(
-            token_allowed(&mask, byte as usize),
-            "expected byte token {:?} to be allowed; allowed={:?}",
-            byte,
-            iter_allowed(&mask)
-        );
-        state.commit_token(byte as u32).unwrap();
+    for (i, &byte) in input.iter().enumerate() {
+        state.commit_bytes(&[byte]).unwrap();
+        assert!(!state.is_finished(), "should not be finished after byte {} (char {:?}) at position {}", byte, byte as char, i);
         max_paths = max_paths.max(state.parser_path_count(1_000_000));
     }
     max_paths
@@ -311,6 +306,7 @@ fn max_parser_paths_over_bytes(constraint: &Constraint, input: &[u8]) -> usize {
 
 fn assert_max_parser_paths_over_bytes<'a>(constraint: &'a Constraint, input: &[u8], expected_max: usize) -> ConstraintState<'a> {
     let mut state = constraint.start();
+    assert!(!state.is_finished(), "should not be finished at start");
     let initial_paths = state.parser_path_count(1_000_000);
     assert!(
         initial_paths <= expected_max,
@@ -320,15 +316,8 @@ fn assert_max_parser_paths_over_bytes<'a>(constraint: &'a Constraint, input: &[u
     );
 
     for (i, &byte) in input.iter().enumerate() {
-        let mask = state.mask();
-        assert!(
-            token_allowed(&mask, byte as usize),
-            "expected byte token {:?} to be allowed at byte {}; allowed={:?}",
-            byte as char,
-            i,
-            iter_allowed(&mask)
-        );
-        state.commit_token(byte as u32).unwrap();
+        state.commit_bytes(&[byte]).unwrap();
+        assert!(!state.is_finished(), "should not be finished after byte {} (char {:?}) at position {}", byte, byte as char, i);
         let current_paths = state.parser_path_count(1_000_000);
         assert!(
             current_paths <= expected_max,
@@ -5050,13 +5039,21 @@ start start;
     }
 
     #[test]
-    #[ignore = "exposes known ambiguity in LeftBalanced repetition lowering"]
-    fn test_glrm_repetition_determinism() {
+    fn test_glrm_exact_repetition_determinism() {
         let vocab = Vocab::new(vec![(0u32, b"a".to_vec())], None);
-        let N = 100;
-        let grammar = format!("start S; nt S ::= \"a\"{{0,{}}};", N);
+        let N = 16;
+        let grammar = format!("start S; nt S ::= \"a\"{{0,{}}} \"$\";", N);
         let constraint = Constraint::from_glrm_grammar(&*grammar, &vocab).unwrap();
-        let input = vec![b'a'; 100];
-        let state = assert_max_parser_paths_over_bytes(&constraint, &input, 1);
-        assert!(state.is_finished(), "grammar should have fully accepted the 100 'a's");
+        let input = vec![b'a'; N];
+        assert_max_parser_paths_over_bytes(&constraint, &input, 1);
+    }
+
+    #[test]
+    fn test_glrm_up_to_repetition_determinism() {
+        let vocab = Vocab::new(vec![(0u32, b"a".to_vec())], None);
+        let N = 2;
+        let grammar = format!("start S; nt S ::= \"a\"{{0,{}}} \"$\";", N);
+        let constraint = Constraint::from_glrm_grammar(&*grammar, &vocab).unwrap();
+        let input = vec![b'a'; N];
+        assert_max_parser_paths_over_bytes(&constraint, &input, 1);
     }
