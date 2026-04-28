@@ -817,8 +817,7 @@ fn scan_o82710_inline_glrm_continuation_ladder() {
 #[ignore = "expert experiment: split the closing token across the boundary"]
 #[test]
 fn scan_o82710_inline_glrm_split_token_boundary() {
-    let tokens: [&[u8]; 1] = [b"aaaaa\""];
-    let vocab = make_vocab(&tokens);
+    let vocab = make_vocab(&[b"aaaaa\""]);
     let constraint = Constraint::from_glrm_grammar(r#"
         start start;
 
@@ -831,24 +830,26 @@ fn scan_o82710_inline_glrm_split_token_boundary() {
         internal t JSON_STRING_CHAR_UPTO_136_3 ::= JSON_STRING_CHAR{0,136};
         t JSON_STRING_CHAR_UPTO_CLOSE_4 ::= JSON_STRING_CHAR_UPTO_136_3 "\"";
         nt json_string_bounded_split_5 ::= "\"" (JSON_STRING_CHAR_EXACT_256_2{0,18} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{19} JSON_STRING_CHAR_UPTO_CLOSE_4);
-        nt obj_open_reqmask_0_nc_0 ::= (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_0 | (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
-        nt obj_open_reqmask_0_c_0 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_0 | ", " (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
-        nt obj_open_reqmask_0_c_1 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_1 | ;
+        nt obj_open_reqmask_0_nc_0 ::= (json_string_bounded_split_5) obj_open_reqmask_0_c_0 | (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+        nt obj_open_reqmask_0_c_0 ::= ", " (json_string_bounded_split_5) obj_open_reqmask_0_c_0 | ", " (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+        nt obj_open_reqmask_0_c_1 ::= ", " (json_string_bounded_split_5) obj_open_reqmask_0_c_1 | ;
         nt start ::= obj_open_reqmask_0_nc_0 "}";
     "#, &vocab).unwrap();
-    let content = &vec![b'a'; 2300];
-    let mut prefix = b"\"description\": \"".to_vec();
-    prefix.extend_from_slice(content);
+    let mut prefix = b"\"".to_vec();
+    prefix.extend_from_slice(&vec![b'a'; 2300]);
     let tail = b", \"id\": \"\"}";
 
     let (full_mask, full_commit_token, full_commit_bytes, full_complete) =
-        classify_constraint(&constraint, &prefix, tokens[0], 0, Some(tail));
+        classify_constraint(&constraint, &prefix, [b"aaaaa\""][0], 0, Some(tail));
     println!(
         "split_full_token mask={} commit_token={} commit_bytes={} complete_after_token={}",
         full_mask,
         full_commit_token,
         full_commit_bytes,
         full_complete,
+    );
+    assert!(
+        full_mask && full_commit_token && full_commit_bytes && full_complete
     );
 
 }
