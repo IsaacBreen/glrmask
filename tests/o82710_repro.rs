@@ -825,7 +825,7 @@ fn scan_o82710_inline_glrm_split_token_boundary() {
         nt json_string_bounded_split_5 ::= (JSON_STRING_CHAR_EXACT_256_2{0,18} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{19});
         nt start ::= json_string_bounded_split_5+ | "," ? json_string_bounded_split_5 ;
     "#, &vocab).unwrap();
-    let prefix = vec![b'a'; 2300/2];
+    let prefix = vec![b'a'; 1150];
 
     let (full_mask, full_commit_token, full_commit_bytes, full_complete) =
         classify_constraint(&constraint, &prefix, [b"aaaaa\""][0], 0, Some(b""));
