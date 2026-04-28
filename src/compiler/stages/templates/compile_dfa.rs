@@ -682,6 +682,8 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
 mod tests {
     use super::*;
 
+    use std::collections::BTreeSet;
+
     use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
     use crate::automata::unweighted_u32::nfa::NFAState;
     use crate::automata::weighted::dwa::DWA;
@@ -763,6 +765,72 @@ mod tests {
         for (edge_label, targets) in transitions {
             eprintln!("    {} -> {:?}", describe_label(*edge_label), targets);
         }
+    }
+
+    fn epsilon_closure(nfa: &NFA, active: &mut BTreeSet<u32>) {
+        let mut worklist = active.iter().copied().collect::<Vec<_>>();
+        while let Some(state_id) = worklist.pop() {
+            for &target in &nfa.states[state_id as usize].epsilons {
+                if active.insert(target) {
+                    worklist.push(target);
+                }
+            }
+        }
+    }
+
+    fn nfa_accepts_chain(nfa: &NFA, chain_states: &[u32]) -> bool {
+        let mut active = nfa.start_states.iter().copied().collect::<BTreeSet<_>>();
+        epsilon_closure(nfa, &mut active);
+
+        for (index, parser_state) in chain_states.iter().copied().enumerate() {
+            if index == 0 && parser_state == 0 {
+                continue;
+            }
+
+            let label = encode_positive_label(parser_state);
+            let mut next = BTreeSet::new();
+            for state_id in &active {
+                let state = &nfa.states[*state_id as usize];
+                if let Some(targets) = state.transitions.get(&label) {
+                    next.extend(targets.iter().copied());
+                }
+                if let Some(targets) = state.transitions.get(&DEFAULT_LABEL) {
+                    next.extend(targets.iter().copied());
+                }
+            }
+
+            if next.is_empty() {
+                return false;
+            }
+            epsilon_closure(nfa, &mut next);
+            active = next;
+        }
+
+        active
+            .into_iter()
+            .any(|state_id| nfa.states[state_id as usize].is_accepting)
+    }
+
+    fn dfa_accepts_chain(dfa: &UnweightedDfa, chain_states: &[u32]) -> bool {
+        let mut state_id = dfa.start_state;
+        for (index, parser_state) in chain_states.iter().copied().enumerate() {
+            if index == 0 && parser_state == 0 {
+                continue;
+            }
+
+            let state = &dfa.states[state_id as usize];
+            let label = encode_positive_label(parser_state);
+            let Some(&target) = state
+                .transitions
+                .get(&label)
+                .or_else(|| state.transitions.get(&DEFAULT_LABEL))
+            else {
+                return false;
+            };
+            state_id = target;
+        }
+
+        dfa.states[state_id as usize].is_accepting
     }
 
     fn print_weighted_nwa(label: &str, nwa: &WeightedNwa) {
@@ -952,5 +1020,66 @@ mod tests {
     fn dump_minimal_goto_repro_artifacts() {
         dump_case("FAILING_MINIMAL", minimal_repro_grammar());
         dump_case("PASSING_BOUNDARY", minimal_boundary_pass_grammar());
+    }
+
+    #[test]
+    #[ignore = "diagnostic for the minimized split-boundary characterization vs template compilation boundary"]
+    fn diagnose_minimized_split_boundary_template_compilation_boundary() {
+        let vocab = Vocab::new(vec![(0, b"aa\"".to_vec())], None);
+        let constraint = Constraint::from_glrm_grammar(r#"
+start start;
+t A_EXACT ::= "a"{32};
+t A_UP_TO_32 ::= "a"{1,2} "\"";
+nt start ::= (A_EXACT{4} | A_EXACT{5}) A_UP_TO_32;
+"#, &vocab).expect("grammar should compile");
+
+        let prefix = [b'a'; 159];
+        let mut state = constraint.start();
+        state.commit_bytes(&prefix).expect("prefix should keep the parser state live");
+
+        let (&tokenizer_state, gss) = state
+            .state
+            .iter()
+            .next()
+            .expect("expected a live tokenizer/parser state");
+        let (chain_states, _acc, _tail) = gss.extract_chain_and_tail().expect("expected chain-shaped live GSS");
+
+        let candidate_terminal = constraint
+            .possible_matches_for_state(tokenizer_state)
+            .into_iter()
+            .find_map(|(terminal, tokens)| {
+                (tokens.contains(0) && crate::compiler::glr::parser::stack_may_advance_on(&constraint.table, gss, terminal))
+                    .then_some(terminal)
+            })
+            .expect("expected a parser-actionable terminal carrying token 0");
+
+        let grammar = crate::grammar::glrm::from_glrm(r#"
+start start;
+t A_EXACT ::= "a"{32};
+t A_UP_TO_32 ::= "a"{1,2} "\"";
+nt start ::= (A_EXACT{4} | A_EXACT{5}) A_UP_TO_32;
+"#).expect("glrm grammar should parse");
+        let factored = crate::grammar::factoring::factor_named_grammar(grammar);
+        let gdef = crate::grammar::ast::lower(&factored).expect("grammar should lower");
+        let analyzed = AnalyzedGrammar::from_grammar_def(&gdef);
+        let table = GLRTable::build(&analyzed);
+        let characterizations = characterize_terminals(&table, &analyzed);
+        let characterization = characterizations
+            .get(&candidate_terminal)
+            .expect("candidate terminal characterization should exist");
+
+        let template_nfa = build_template_nfa(characterization);
+        let determinized_template = determinize(&template_nfa);
+        let minimized_template = minimize_dfa(&determinized_template);
+
+        let nfa_accepts = nfa_accepts_chain(&template_nfa, &chain_states);
+        let determinized_accepts = dfa_accepts_chain(&determinized_template, &chain_states);
+        let minimized_accepts = dfa_accepts_chain(&minimized_template, &chain_states);
+
+        assert_eq!(
+            (nfa_accepts, determinized_accepts, minimized_accepts),
+            (false, false, false),
+            "candidate_terminal={candidate_terminal} chain_states={chain_states:?} characterization={characterization:#?}"
+        );
     }
 }

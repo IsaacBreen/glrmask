@@ -2045,7 +2045,8 @@ mod tests {
         let constraint = Constraint::from_glrm_grammar(r#"
 start start;
 t A_EXACT ::= "a"{32};
-nt start ::= (A_EXACT{4} ("a"{0,32} "\"") | A_EXACT{5}) ("a"{0,32} "\"");
+t A_UP_TO_32 ::= "a"{1,2} "\"";
+nt start ::= (A_EXACT{4} | A_EXACT{5}) A_UP_TO_32;
 "#, &vocab).expect("grammar should compile");
 
         let prefix = [b'a'; 159];
@@ -2177,7 +2178,8 @@ nt start ::= (A_EXACT{4} ("a"{0,32} "\"") | A_EXACT{5}) ("a"{0,32} "\"");
             let constraint = Constraint::from_glrm_grammar(r#"
 start start;
 t A_EXACT ::= "a"{32};
-nt start ::= (A_EXACT{4} ("a"{0,32} "\"") | A_EXACT{5}) ("a"{0,32} "\"");
+t A_UP_TO_32 ::= "a"{1,2} "\"";
+nt start ::= (A_EXACT{4} | A_EXACT{5}) A_UP_TO_32;
 "#, &vocab).expect("grammar should compile");
             let prefix = [b'a'; 159];
 

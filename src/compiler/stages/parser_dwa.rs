@@ -1777,7 +1777,8 @@ mod tests {
         let grammar_str = r#"
 start start;
 t A_EXACT ::= "a"{32};
-nt start ::= (A_EXACT{4} ("a"{0,32} "\"") | A_EXACT{5}) ("a"{0,32} "\"");
+t A_UP_TO_32 ::= "a"{1,2} "\"";
+nt start ::= (A_EXACT{4} | A_EXACT{5}) A_UP_TO_32;
 "#;
         let named = crate::grammar::glrm::from_glrm(grammar_str).unwrap();
         let factored = crate::grammar::factoring::factor_named_grammar(named);
