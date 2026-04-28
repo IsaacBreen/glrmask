@@ -822,8 +822,8 @@ fn scan_o82710_inline_glrm_split_token_boundary() {
     let constraint = Constraint::from_glrm_grammar(r#"
         start start;
         t A_EXACT ::= "a"{32};
-        t A_UP_TO_32 ::= "a"{0,32} "\"";
-        nt start ::= (A_EXACT{4} A_UP_TO_32 | A_EXACT{5}) A_UP_TO_32;
+        t A_UP_TO_32 ::= "a"{1,2} "\"";
+        nt start ::= (A_EXACT{4} | A_EXACT{5}) A_UP_TO_32;
     "#, &vocab).unwrap();
     let prefix = [b'a'; 159];
 
