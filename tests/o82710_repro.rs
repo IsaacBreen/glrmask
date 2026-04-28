@@ -828,11 +828,11 @@ nt start ::= (A_EXACT{4} ("a"{0,32} "\"") | A_EXACT{5}) ("a"{0,32} "\"");
 
     let mut mask_state = constraint.start();
     mask_state.commit_bytes(&prefix).unwrap();
-    let full_mask = mask_state.mask().first().map(|word| (word & 1) != 0).unwrap_or(false);
+    let mask = mask_state.mask().first().is_some_and(|word| (word & 1) != 0);
 
     let mut commit_token_state = constraint.start();
     commit_token_state.commit_bytes(&prefix).unwrap();
-    let full_commit_token = match catch_unwind(AssertUnwindSafe(|| commit_token_state.commit_token(0))) {
+    let commit_token = match catch_unwind(AssertUnwindSafe(|| commit_token_state.commit_token(0))) {
         Ok(Ok(())) => true,
         Ok(Err(_)) => false,
         Err(_) => true,
@@ -840,15 +840,9 @@ nt start ::= (A_EXACT{4} ("a"{0,32} "\"") | A_EXACT{5}) ("a"{0,32} "\"");
 
     let mut commit_bytes_state = constraint.start();
     commit_bytes_state.commit_bytes(&prefix).unwrap();
-    let full_commit_bytes = commit_bytes_state.commit_bytes(token).is_ok();
+    let commit_bytes = commit_bytes_state.commit_bytes(token).is_ok();
 
-    println!(
-        "split_full_token mask={} commit_token={} commit_bytes={}",
-        full_mask,
-        full_commit_token,
-        full_commit_bytes,
-    );
-    assert!(!full_mask && full_commit_token && full_commit_bytes);
+    assert!(!mask && commit_token && commit_bytes);
 }
 
 #[ignore = "scanner for smaller counted-repeat chunk sizes in the split-token-boundary MRE"]
