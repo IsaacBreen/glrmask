@@ -92,7 +92,7 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
         let compact_tsids_before = input.id_map.num_tsids();
         let compact_tokens_before = input.id_map.num_internal_tokens();
         let compact_started_at = Instant::now();
-        compact_from_env(&mut input.dwa, &mut input.id_map, "GLRMASK_COMPACT_MERGE", CompactMode::Fast, false);
+        compact_from_env(&mut input.dwa, &mut input.id_map, "GLRMASK_COMPACT_MERGE", CompactMode::None, false);
         let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
         let compact_tsids_after = input.id_map.num_tsids();
         let compact_tokens_after = input.id_map.num_internal_tokens();
@@ -172,7 +172,7 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
     let compact_tsids_before = global.num_tsids();
     let compact_tokens_before = global.num_internal_tokens();
     let compact_started_at = Instant::now();
-    compact_from_env(&mut dwa, &mut global, "GLRMASK_COMPACT_MERGE", CompactMode::Fast, false);
+    compact_from_env(&mut dwa, &mut global, "GLRMASK_COMPACT_MERGE", CompactMode::None, false);
     let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
     let compact_tsids_after = global.num_tsids();
     let compact_tokens_after = global.num_internal_tokens();
@@ -239,7 +239,7 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
         let compact_tsids_before = input.id_map.num_tsids();
         let compact_tokens_before = input.id_map.num_internal_tokens();
         let compact_started_at = Instant::now();
-        compact_from_env(&mut input.dwa, &mut input.id_map, "GLRMASK_COMPACT_MERGE_GLOBAL", CompactMode::Fast, false);
+        compact_from_env(&mut input.dwa, &mut input.id_map, "GLRMASK_COMPACT_MERGE_GLOBAL", CompactMode::None, false);
         let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
         let compact_tsids_after = input.id_map.num_tsids();
         let compact_tokens_after = input.id_map.num_internal_tokens();
@@ -332,7 +332,7 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     let compact_tsids_before = global.num_tsids();
     let compact_tokens_before = global.num_internal_tokens();
     let compact_started_at = Instant::now();
-    compact_from_env(&mut dwa, &mut global, "GLRMASK_COMPACT_MERGE_GLOBAL", CompactMode::Fast, false);
+    compact_from_env(&mut dwa, &mut global, "GLRMASK_COMPACT_MERGE_GLOBAL", CompactMode::None, false);
     let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
     let compact_tsids_after = global.num_tsids();
     let compact_tokens_after = global.num_internal_tokens();

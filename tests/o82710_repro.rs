@@ -843,7 +843,7 @@ fn scan_o82710_inline_glrm_split_token_boundary() {
     commit_bytes_state.commit_bytes(&prefix).unwrap();
     let commit_bytes = commit_bytes_state.commit_bytes(token).is_ok();
 
-    assert!(!mask && commit_token && commit_bytes);
+    assert!(mask && commit_token && commit_bytes);
 }
 
 #[ignore = "scanner for smaller counted-repeat chunk sizes in the split-token-boundary MRE"]

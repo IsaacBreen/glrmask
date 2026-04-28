@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -12,7 +12,7 @@ use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::{minimize_fast, minimize_from_env};
 use crate::automata::weighted::nwa::{NWA, NwaBody};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
-use crate::compiler::glr::labels::DEFAULT_LABEL;
+use crate::compiler::glr::labels::{DEFAULT_LABEL, encode_positive_label};
 use crate::compiler::glr::table::GLRTable;
 use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::equiv_types::InternalIdMap;
@@ -1336,7 +1336,11 @@ fn optimize_parser_default_transitions(
     any_changed
 }
 
-fn ensure_default_transitions_are_fallbacks(nwa: &mut NWA) {
+fn ensure_default_transitions_are_fallbacks(
+    nwa: &mut NWA,
+    possible_by_state: &[PossibleOutgoingIds],
+    num_parser_states: u32,
+) {
     for state_id in 0..nwa.states().len() {
         let state = &nwa.states()[state_id];
 
@@ -1348,15 +1352,28 @@ fn ensure_default_transitions_are_fallbacks(nwa: &mut NWA) {
             continue;
         }
 
-        // Identify all explicit labels out of this state
-        let explicit_labels: Vec<i32> = state.transitions
-            .keys()
-            .copied()
-            .filter(|&label| label != DEFAULT_LABEL)
-            .collect();
+        let mut fallback_labels = BTreeSet::new();
+        for &label in state.transitions.keys() {
+            if label != DEFAULT_LABEL {
+                fallback_labels.insert(label);
+            }
+        }
 
-        // For every explicit label, add parallel transitions to the DEFAULT targets
-        for label in explicit_labels {
+        match possible_by_state.get(state_id) {
+            Some(PossibleOutgoingIds::Empty) | None => {}
+            Some(PossibleOutgoingIds::All) => {
+                for parser_state_id in 0..num_parser_states {
+                    fallback_labels.insert(encode_positive_label(parser_state_id));
+                }
+            }
+            Some(PossibleOutgoingIds::Some(ids)) => {
+                for parser_state_id in ids.iter_ones() {
+                    fallback_labels.insert(encode_positive_label(parser_state_id as u32));
+                }
+            }
+        }
+
+        for label in fallback_labels {
             let state_mut = &mut nwa.states_mut()[state_id];
             for (dst, weight) in &default_targets {
                 add_or_union_transition(state_mut, label, *dst, weight.clone());
@@ -1512,7 +1529,7 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
 
     let ensure_fallback_started_at = Instant::now();
     let mut nwa_for_fallback = parser_dwa_pre_minimize.to_nwa();
-    ensure_default_transitions_are_fallbacks(&mut nwa_for_fallback);
+    ensure_default_transitions_are_fallbacks(&mut nwa_for_fallback, &possible_by_state, table.num_states);
 
     // Determinize back to DWA to collapse the duplicated edges
     parser_dwa_pre_minimize = crate::automata::weighted_u32::determinize::determinize(&nwa_for_fallback)
