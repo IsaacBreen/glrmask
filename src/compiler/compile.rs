@@ -28,9 +28,10 @@ mod tests {
     use super::*;
     use crate::automata::regex::Expr;
     use crate::compiler::glr::accumulator::TerminalsDisallowed;
+    use crate::compiler::glr::labels::{DEFAULT_LABEL, encode_positive_label};
     use crate::compiler::glr::analysis::AnalyzedGrammar;
-    use crate::compiler::glr::parser::{ParserGSS, advance_stacks};
-    use crate::compiler::glr::table::GLRTable;
+    use crate::compiler::glr::parser::{ParserGSS, advance_stacks, stack_may_advance_on};
+    use crate::compiler::glr::table::{Action, GLRTable};
     use crate::grammar::flat::tests::*;
     use crate::grammar::flat::{NonterminalID, Rule, Symbol, Terminal};
     use crate::compiler::grammar::transforms::{
@@ -41,6 +42,8 @@ mod tests {
         prepare_owned_grammar_for_compile,
     };
     use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::combined::analyze_equivalences;
+    use crate::compiler::stages::templates::compile_dfa::Templates;
+    use crate::compiler::stages::templates::characterize::characterize_terminals;
     use crate::import::json_schema::json_schema_to_grammar;
     use std::collections::BTreeMap;
     use std::fs;
@@ -1841,5 +1844,197 @@ mod tests {
                 label,
             );
         }
+    }
+
+    #[ignore = "known parser-DWA mask/commit mismatch repro for native JSON-schema required-open-object path"]
+    #[test]
+    fn test_json_schema_required_open_object_string_token_matches_commit() {
+        let schema = r##"{
+            "type": "object",
+            "properties": {
+                "aside": { "type": "boolean" },
+                "autoplay": { "type": "boolean" },
+                "css_class": {
+                    "type": "string",
+                    "pattern": "^[\\w\\s-]+$"
+                },
+                "description": {
+                    "type": "string",
+                    "minLength": 0,
+                    "maxLength": 5000
+                }
+            },
+            "required": ["id"],
+            "additionalProperties": true
+        }"##;
+
+        let grammar = json_schema_to_grammar(schema).expect("schema should lower to a grammar");
+        let vocab = Vocab::new(vec![(0u32, b"'];?>\"".to_vec()), (1u32, b" Vimeo".to_vec())], None);
+        let constraint = compile(&grammar, &vocab);
+
+        let mut prefix = Vec::from(
+            b"{\"aside\": true, \"autoplay\": false, \"css_class\": \"vimeo-video-block\", \"description\": \"".as_slice(),
+        );
+        prefix.extend(std::iter::repeat(b"This is a Vimeo video block. ".as_slice()).take(79).flatten().copied());
+        prefix.extend_from_slice(b"This is a");
+
+        let mut mask_state = constraint.start();
+        mask_state
+            .commit_bytes(&prefix)
+            .expect("prefix should keep the parser state live");
+        let mask = mask_state.mask();
+        let mask_accepts = mask_has_token(&mask, 0);
+
+        let mut parser_accepts_candidate = false;
+        let mut candidate_terminal_actions = Vec::new();
+        for (&tokenizer_state, gss) in &mask_state.state {
+            let terminals = constraint.possible_matches_for_state(tokenizer_state);
+            for (terminal, tokens) in terminals {
+                if !tokens.contains(0) || !stack_may_advance_on(&constraint.table, gss, terminal) {
+                    continue;
+                }
+                parser_accepts_candidate = true;
+                let mut actions = Vec::new();
+                for parser_state in gss.peek_values() {
+                    let action_kind = match constraint.table.action(parser_state, terminal) {
+                        Some(Action::Shift(_, _)) => "shift",
+                        Some(Action::StackShifts(_)) => "stack_shifts",
+                        Some(Action::GuardedStackShifts(_)) => "guarded_stack_shifts",
+                        Some(Action::Reduce(_, _)) => "reduce",
+                        Some(Action::Split { .. }) => "split",
+                        Some(Action::Accept) => "accept",
+                        None => continue,
+                    };
+                    actions.push((parser_state, action_kind));
+                }
+                candidate_terminal_actions.push((tokenizer_state, terminal, actions));
+            }
+        }
+
+        let mut commit_state = constraint.start();
+        commit_state
+            .commit_bytes(&prefix)
+            .expect("prefix should keep the parser state live");
+        let commit_accepts = commit_state.commit_bytes(b"'];?>\"").is_ok();
+
+        let start_possible_matches = constraint
+            .possible_matches_for_state(constraint.tokenizer.initial_state());
+        let possible_matches_accept = start_possible_matches
+            .values()
+            .any(|tokens| tokens.contains(0));
+
+        let (prepared, _tokenizer) = prepare_grammar_for_compile(&grammar);
+        let analyzed = AnalyzedGrammar::from_grammar_def(&prepared);
+        let table = GLRTable::build(&analyzed);
+        let characterizations = characterize_terminals(&table, &analyzed);
+        let templates = Templates::from_characterizations(&characterizations);
+        let terminal_characterization = characterizations
+            .get(&14)
+            .expect("terminal 14 characterization should exist");
+        let terminal_template = templates
+            .by_terminal
+            .get(&14)
+            .expect("terminal 14 template should exist");
+        let stack_shift_action = table.action(115, 14).cloned();
+        let has_initial_escape_from_115 = terminal_characterization
+            .escapes
+            .iter()
+            .any(|(source_state, _, _)| *source_state == 115);
+        let internal_tsid = constraint.internal_tsid_for_state(7311);
+        let internal_token_0 = constraint.original_token_to_internal[0 as usize];
+        let parser_dwa = constraint.parser_dwa();
+        let mut parser_dwa_token_0_reachable = false;
+        let mut parser_dwa_stack_walks = Vec::new();
+        let mut template_accepting_walks = Vec::new();
+        if let Some(gss) = mask_state.state.get(&7311) {
+            if let Some((chain_states, _acc, _tail)) = gss.extract_chain_and_tail() {
+                let mut template_state = terminal_template.start_state;
+                let mut template_visited = vec![template_state];
+                let mut template_accepting_states = Vec::new();
+                let mut template_alive = true;
+                for (index, parser_state) in chain_states.iter().copied().enumerate() {
+                    if index == 0 && template_state == terminal_template.start_state && parser_state == 0 {
+                        continue;
+                    }
+                    let template_node = &terminal_template.states[template_state as usize];
+                    let positive_label = encode_positive_label(parser_state);
+                    let Some(&target) = template_node
+                        .transitions
+                        .get(&positive_label)
+                        .or_else(|| template_node.transitions.get(&DEFAULT_LABEL))
+                    else {
+                        template_alive = false;
+                        break;
+                    };
+                    template_state = target;
+                    template_visited.push(template_state);
+                    if terminal_template.states[template_state as usize].is_accepting {
+                        template_accepting_states.push((parser_state, template_state));
+                    }
+                }
+                template_accepting_walks.push((chain_states.clone(), template_visited, template_accepting_states, template_alive));
+
+                let mut wa_state = parser_dwa.start_state();
+                let mut visited_states = vec![wa_state];
+                let mut intermediate_final_tokens = Vec::new();
+                let mut alive = true;
+
+                for (index, parser_state) in chain_states.iter().copied().enumerate() {
+                    if index == 0 && wa_state == parser_dwa.start_state() && parser_state == 0 {
+                        continue;
+                    }
+
+                    let dwa_state = &parser_dwa.states()[wa_state as usize];
+                    let positive_label = encode_positive_label(parser_state);
+                    let Some((target, _weight)) = dwa_state
+                        .transitions
+                        .get(&positive_label)
+                        .or_else(|| dwa_state.transitions.get(&DEFAULT_LABEL))
+                    else {
+                        alive = false;
+                        break;
+                    };
+                    wa_state = *target;
+                    visited_states.push(wa_state);
+
+                    let final_tokens = parser_dwa.states()[wa_state as usize]
+                        .final_weight
+                        .as_ref()
+                        .map(|weight| weight.tokens_for_tsid(internal_tsid))
+                        .unwrap_or_default();
+                    if final_tokens.contains(internal_token_0) {
+                        parser_dwa_token_0_reachable = true;
+                    }
+                    intermediate_final_tokens.push((parser_state, wa_state, final_tokens));
+                }
+
+                let final_tokens = if alive {
+                    parser_dwa.states()[wa_state as usize]
+                        .final_weight
+                        .as_ref()
+                        .map(|weight| weight.tokens_for_tsid(internal_tsid))
+                        .unwrap_or_default()
+                } else {
+                    Default::default()
+                };
+                if final_tokens.contains(internal_token_0) {
+                    parser_dwa_token_0_reachable = true;
+                }
+                parser_dwa_stack_walks.push((chain_states, visited_states, intermediate_final_tokens, alive, final_tokens));
+            }
+        }
+
+        assert!(
+            parser_accepts_candidate,
+            "expected at least one parser-actionable terminal containing token 0 after the prefix"
+        );
+
+        assert_eq!(
+            (mask_accepts, commit_accepts),
+            (true, true),
+            "token b\"'];?>\\\"\" should remain both masked-in and committable; parser_accepts_candidate={parser_accepts_candidate} candidate_terminal_actions={candidate_terminal_actions:?} stack_shift_action={stack_shift_action:?} has_initial_escape_from_115={has_initial_escape_from_115} template_accepting_walks={template_accepting_walks:?} parser_dwa_token_0_reachable={parser_dwa_token_0_reachable} parser_dwa_stack_walks={parser_dwa_stack_walks:?} possible_matches_accept={possible_matches_accept} tokenizer_states={} parser_dwa_states={}",
+            constraint.tokenizer.num_states(),
+            constraint.parser_dwa().states().len(),
+        );
     }
 }

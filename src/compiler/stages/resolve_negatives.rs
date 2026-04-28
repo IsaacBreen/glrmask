@@ -746,6 +746,8 @@ pub(crate) fn remove_redundant_default_transitions(nwa: &mut NWA) {
 
 pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
     let profile_enabled = std::env::var_os("GLRMASK_PROFILE_RESOLVE_NEGATIVES").is_some();
+    let disable_redundant_default_pruning =
+        std::env::var_os("GLRMASK_DISABLE_REDUNDANT_DEFAULT_PRUNING").is_some();
 
     let cancellations_started_at = std::time::Instant::now();
     apply_cancellations_parallel_fixpoint(nwa);
@@ -760,7 +762,9 @@ pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
     let remove_negative_ms = remove_negative_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let remove_default_started_at = std::time::Instant::now();
-    remove_redundant_default_transitions(nwa);
+    if !disable_redundant_default_pruning {
+        remove_redundant_default_transitions(nwa);
+    }
     let remove_default_ms = remove_default_started_at.elapsed().as_secs_f64() * 1000.0;
 
     if profile_enabled {
