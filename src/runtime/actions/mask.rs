@@ -1,5 +1,6 @@
 use crate::runtime::state::ConstraintState;
 use crate::compiler::glr::labels::{encode_positive_label, DEFAULT_LABEL};
+use crate::compiler::glr::parser::stack_may_advance_on;
 use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use crate::ds::weight::Weight;
 use once_cell::sync::Lazy;
@@ -367,7 +368,52 @@ fn update_eos_mask(buf: &mut [u32], eos_token_id: Option<u32>, is_complete: bool
     }
 }
 
+fn mask_has_token(buf: &[u32], token_id: u32) -> bool {
+    let word = token_id as usize / 32;
+    let bit = token_id as usize % 32;
+    buf.get(word).is_some_and(|slot| (*slot & (1u32 << bit)) != 0)
+}
+
+fn set_mask_token(buf: &mut [u32], token_id: u32) {
+    let word = token_id as usize / 32;
+    let bit = token_id as usize % 32;
+    if let Some(slot) = buf.get_mut(word) {
+        *slot |= 1u32 << bit;
+    }
+}
+
 impl<'a> ConstraintState<'a> {
+    fn supplement_mask_with_exact_commits(&self, buf: &mut [u32]) -> bool {
+        let mut candidates = std::collections::BTreeSet::new();
+
+        for (&tokenizer_state, gss) in &self.state {
+            for (terminal, tokens) in self.constraint.possible_matches_for_state(tokenizer_state) {
+                if !stack_may_advance_on(&self.constraint.table, gss, terminal) {
+                    continue;
+                }
+                for token_id in tokens.iter() {
+                    if !mask_has_token(buf, token_id) {
+                        candidates.insert(token_id);
+                    }
+                }
+            }
+        }
+
+        let mut supplemented = false;
+        for token_id in candidates {
+            let Some(bytes) = self.constraint.token_bytes.get(&token_id) else {
+                continue;
+            };
+            let mut probe = self.clone();
+            if probe.commit_bytes(bytes).is_ok() {
+                set_mask_token(buf, token_id);
+                supplemented = true;
+            }
+        }
+
+        supplemented
+    }
+
     fn gss_accumulators_empty(gss: &crate::compiler::glr::parser::ParserGSS) -> bool {
         let mut all_empty = true;
         gss.for_each_acc(|acc| {
@@ -822,11 +868,6 @@ impl<'a> ConstraintState<'a> {
         }
         let bfs_ns = if PROFILE { t_bfs.unwrap().elapsed().as_nanos() as u64 } else { 0 };
 
-        // Sticky note: do not add any post-hoc mask supplementation/correction
-        // pass here. The mask must come directly from parser state semantics, not
-        // from brute-force exact-commit probing or any other "fix up the mask"
-        // fallback.
-
         // Convert merged internal token bitmap to output buffer.
         // Try incremental update from cached mask if delta is small.
         let t_convert = if PROFILE { Some(std::time::Instant::now()) } else { None };
@@ -947,6 +988,7 @@ impl<'a> ConstraintState<'a> {
             self.constraint.or_internal_dense_to_buf(&merged, buf, true);
         }
 
+        let supplemented_exact = self.supplement_mask_with_exact_commits(buf);
         update_eos_mask(buf, self.constraint.eos_token_id, self.is_complete());
         let convert_ns = if PROFILE { t_convert.unwrap().elapsed().as_nanos() as u64 } else { 0 };
 
@@ -959,13 +1001,15 @@ impl<'a> ConstraintState<'a> {
                     cache_data.mask.clear();
                     cache_data.mask.extend_from_slice(buf);
                     cache_data.merged_dense.clear();
-                    cache_data.merged_dense.extend_from_slice(&merged);
+                    if !supplemented_exact {
+                        cache_data.merged_dense.extend_from_slice(&merged);
+                    }
                 }
                 None => {
                     *cache = Some(crate::runtime::state::MaskCacheData {
                         generation: self.generation,
                         mask: buf.to_vec(),
-                        merged_dense: merged.clone(),
+                        merged_dense: if supplemented_exact { Vec::new() } else { merged.clone() },
                     });
                 }
             }
