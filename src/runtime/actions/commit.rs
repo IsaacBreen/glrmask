@@ -41,6 +41,9 @@ fn token_bytes_for_id(constraint: &Constraint, token_id: u32) -> Option<&[u8]> {
 fn commit_mask_assert_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
+        if cfg!(debug_assertions) {
+            return true;
+        }
         std::env::var("GLRMASK_ASSERT_COMMIT_TOKEN_MASK_EQUIVALENCE")
             .map(|value| {
                 let normalized = value.trim().to_ascii_lowercase();
