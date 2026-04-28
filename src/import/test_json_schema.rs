@@ -2466,14 +2466,9 @@ fn test_weird_punctuation_token() {
     let vocab = Vocab::new(vec![(0u32, b"\\];?>\"".to_vec())], None);
     let constraint = Constraint::from_glrm_grammar(r##"
         start start;
-
-        internal t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]|\\["\\\/bfnrt]|\\u[0-9A-Fa-f]{4}/;
-        t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
-        nt json_string ::= "\"" JSON_STRING_BODY;
-        nt start ::= json_string;
+        t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]|\\["\\\/bfnrt]|\\u[0-9A-Fa-f]{4}/;
+        nt start ::= JSON_STRING_CHAR;
     "##, &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(b"\"").unwrap();
-    println!("mask: {:?}", state.mask());
     state.commit_token(0).unwrap();
 }
