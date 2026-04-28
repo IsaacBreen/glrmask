@@ -2037,4 +2037,226 @@ mod tests {
             constraint.parser_dwa().states().len(),
         );
     }
+
+    #[ignore = "diagnostic for the minimized split-boundary mask/commit mismatch"]
+    #[test]
+    fn diagnose_minimized_split_boundary_mask_commit_mismatch() {
+        let vocab = Vocab::new(vec![(0, b"aa\"".to_vec())], None);
+        let constraint = Constraint::from_glrm_grammar(r#"
+start start;
+t A_EXACT ::= "a"{32};
+nt start ::= (A_EXACT{4} ("a"{0,32} "\"") | A_EXACT{5}) ("a"{0,32} "\"");
+"#, &vocab).expect("grammar should compile");
+
+        let prefix = [b'a'; 159];
+
+        let mut mask_state = constraint.start();
+        mask_state
+            .commit_bytes(&prefix)
+            .expect("prefix should keep the parser state live");
+        let mask = mask_state.mask();
+        let mask_accepts = mask_has_token(&mask, 0);
+
+        let mut commit_state = constraint.start();
+        commit_state
+            .commit_bytes(&prefix)
+            .expect("prefix should keep commit path live");
+        let commit_accepts = commit_state.commit_bytes(b"aa\"").is_ok();
+
+        let prefix_possible_matches: Vec<_> = mask_state
+            .state
+            .iter()
+            .map(|(&tokenizer_state, gss)| {
+                let terminals = constraint.possible_matches_for_state(tokenizer_state);
+                let matching_terminals: Vec<_> = terminals
+                    .iter()
+                    .filter(|(_, tokens)| tokens.contains(0))
+                    .map(|(&terminal, tokens)| {
+                        let stack_actionable = stack_may_advance_on(&constraint.table, gss, terminal);
+                        let parser_actions: Vec<_> = gss
+                            .peek_values()
+                            .into_iter()
+                            .filter_map(|parser_state| {
+                                constraint.table.action(parser_state, terminal).map(|action| {
+                                    let label = match action {
+                                        Action::Shift(_, _) => "shift",
+                                        Action::StackShifts(_) => "stack_shifts",
+                                        Action::GuardedStackShifts(_) => "guarded_stack_shifts",
+                                        Action::Reduce(_, _) => "reduce",
+                                        Action::Split { .. } => "split",
+                                        Action::Accept => "accept",
+                                    };
+                                    (parser_state, label)
+                                })
+                            })
+                            .collect();
+                        (terminal, stack_actionable, parser_actions, tokens.clone())
+                    })
+                    .collect();
+                (tokenizer_state, matching_terminals)
+            })
+            .collect();
+
+        let internal_token_0 = constraint.original_token_to_internal[0usize];
+        let parser_dwa = constraint.parser_dwa();
+        let mut parser_dwa_walks = Vec::new();
+        let mut parser_dwa_token_0_reachable = false;
+        for (&tokenizer_state, gss) in &mask_state.state {
+            if let Some((chain_states, _acc, _tail)) = gss.extract_chain_and_tail() {
+                let internal_tsid = constraint.internal_tsid_for_state(tokenizer_state);
+                let mut wa_state = parser_dwa.start_state();
+                let mut visited = vec![wa_state];
+                let mut finals = Vec::new();
+                let mut alive = true;
+
+                for (index, parser_state) in chain_states.iter().copied().enumerate() {
+                    if index == 0 && wa_state == parser_dwa.start_state() && parser_state == 0 {
+                        continue;
+                    }
+                    let dwa_state = &parser_dwa.states()[wa_state as usize];
+                    let positive_label = encode_positive_label(parser_state);
+                    let Some((target, _weight)) = dwa_state
+                        .transitions
+                        .get(&positive_label)
+                        .or_else(|| dwa_state.transitions.get(&DEFAULT_LABEL))
+                    else {
+                        alive = false;
+                        break;
+                    };
+                    wa_state = *target;
+                    visited.push(wa_state);
+                    let final_tokens = parser_dwa.states()[wa_state as usize]
+                        .final_weight
+                        .as_ref()
+                        .map(|weight| weight.tokens_for_tsid(internal_tsid))
+                        .unwrap_or_default();
+                    if final_tokens.contains(internal_token_0) {
+                        parser_dwa_token_0_reachable = true;
+                    }
+                    finals.push((parser_state, wa_state, final_tokens));
+                }
+
+                parser_dwa_walks.push((tokenizer_state, chain_states, visited, alive, finals));
+            }
+        }
+
+        assert_eq!(
+            (mask_accepts, commit_accepts),
+            (false, true),
+            "expected the minimized witness to preserve the mismatch"
+        );
+        assert!(
+            prefix_possible_matches
+                .iter()
+                .any(|(_, matches)| !matches.is_empty()),
+            "expected the live tokenizer state to have at least one possible-match terminal containing token 0; prefix_possible_matches={prefix_possible_matches:?} parser_dwa_walks={parser_dwa_walks:?} parser_dwa_token_0_reachable={parser_dwa_token_0_reachable}"
+        );
+        assert!(
+            !parser_dwa_token_0_reachable,
+            "hypothesis failed: token 0 is already parser-DWA reachable; prefix_possible_matches={prefix_possible_matches:?} parser_dwa_walks={parser_dwa_walks:?}"
+        );
+    }
+
+    #[ignore = "diagnostic for which parser-DWA stage drops the minimized split-boundary token"]
+    #[test]
+    fn diagnose_minimized_split_boundary_parser_dwa_stage() {
+        fn run_case(disable_defaults: bool, disable_subtract_final: bool, disable_minimize: bool) -> (bool, bool) {
+            fn set_flag(name: &str, enabled: bool) {
+                if enabled {
+                    unsafe { std::env::set_var(name, "1"); }
+                } else {
+                    unsafe { std::env::remove_var(name); }
+                }
+            }
+
+            set_flag("GLRMASK_DISABLE_PARSER_DWA_DEFAULTS_OPT", disable_defaults);
+            set_flag("GLRMASK_DISABLE_PARSER_DWA_SUBTRACT_FINAL", disable_subtract_final);
+            set_flag("GLRMASK_DISABLE_PARSER_DWA_MINIMIZE", disable_minimize);
+
+            let vocab = Vocab::new(vec![(0, b"aa\"".to_vec())], None);
+            let constraint = Constraint::from_glrm_grammar(r#"
+start start;
+t A_EXACT ::= "a"{32};
+nt start ::= (A_EXACT{4} ("a"{0,32} "\"") | A_EXACT{5}) ("a"{0,32} "\"");
+"#, &vocab).expect("grammar should compile");
+            let prefix = [b'a'; 159];
+
+            let mut mask_state = constraint.start();
+            mask_state.commit_bytes(&prefix).unwrap();
+            let mask_accepts = mask_has_token(&mask_state.mask(), 0);
+
+            let internal_token_0 = constraint.original_token_to_internal[0usize];
+            let parser_dwa = constraint.parser_dwa();
+            let mut parser_dwa_token_0_reachable = false;
+            for (&tokenizer_state, gss) in &mask_state.state {
+                if let Some((chain_states, _acc, _tail)) = gss.extract_chain_and_tail() {
+                    let internal_tsid = constraint.internal_tsid_for_state(tokenizer_state);
+                    let mut wa_state = parser_dwa.start_state();
+                    for (index, parser_state) in chain_states.iter().copied().enumerate() {
+                        if index == 0 && wa_state == parser_dwa.start_state() && parser_state == 0 {
+                            continue;
+                        }
+                        let dwa_state = &parser_dwa.states()[wa_state as usize];
+                        let positive_label = encode_positive_label(parser_state);
+                        let Some((target, _weight)) = dwa_state
+                            .transitions
+                            .get(&positive_label)
+                            .or_else(|| dwa_state.transitions.get(&DEFAULT_LABEL))
+                        else {
+                            break;
+                        };
+                        wa_state = *target;
+                        let final_tokens = parser_dwa.states()[wa_state as usize]
+                            .final_weight
+                            .as_ref()
+                            .map(|weight| weight.tokens_for_tsid(internal_tsid))
+                            .unwrap_or_default();
+                        if final_tokens.contains(internal_token_0) {
+                            parser_dwa_token_0_reachable = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            set_flag("GLRMASK_DISABLE_PARSER_DWA_DEFAULTS_OPT", false);
+            set_flag("GLRMASK_DISABLE_PARSER_DWA_SUBTRACT_FINAL", false);
+            set_flag("GLRMASK_DISABLE_PARSER_DWA_MINIMIZE", false);
+
+            (mask_accepts, parser_dwa_token_0_reachable)
+        }
+
+        let cases = [
+            ("baseline", false, false, false),
+            ("no_defaults", true, false, false),
+            ("no_subtract_final", false, true, false),
+            ("no_minimize", false, false, true),
+            ("no_defaults_no_subtract", true, true, false),
+            ("no_defaults_no_minimize", true, false, true),
+            ("no_subtract_no_minimize", false, true, true),
+            ("all_disabled", true, true, true),
+        ];
+
+        let mut results = Vec::new();
+        for (label, disable_defaults, disable_subtract_final, disable_minimize) in cases {
+            let (mask_accepts, parser_dwa_token_0_reachable) =
+                run_case(disable_defaults, disable_subtract_final, disable_minimize);
+            results.push((label, mask_accepts, parser_dwa_token_0_reachable));
+        }
+
+        assert_eq!(
+            results,
+            vec![
+                ("baseline", false, false),
+                ("no_defaults", false, false),
+                ("no_subtract_final", false, false),
+                ("no_minimize", false, false),
+                ("no_defaults_no_subtract", false, false),
+                ("no_defaults_no_minimize", false, false),
+                ("no_subtract_no_minimize", false, false),
+                ("all_disabled", false, false),
+            ],
+            "the token is already lost before defaults optimization, final-weight subtraction, and minimization; results={results:?}"
+        );
+    }
 }

@@ -1671,7 +1671,10 @@ fn emit_parser_dwa_debug_dump(dwa: &DWA) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Constraint;
     use crate::compiler::glr::analysis::AnalyzedGrammar;
+    use crate::compiler::glr::labels::{DEFAULT_LABEL, encode_positive_label};
+    use crate::compiler::glr::parser::stack_may_advance_on;
     use crate::grammar::flat::GrammarDef;
     use crate::grammar::flat::tests::*;
     use range_set_blaze::RangeSetBlaze;
@@ -1766,5 +1769,155 @@ mod tests {
         let defaults = nwa.states()[0].transitions.get(&DEFAULT_LABEL).expect("default edge");
         assert_eq!(defaults.len(), 1);
         assert_eq!(defaults[0].1, token_weight(&[1]));
+    }
+
+    #[ignore = "diagnostic for whether the minimized split-boundary token is lost before or during determinization"]
+    #[test]
+    fn diagnose_minimized_split_boundary_nwa_vs_determinized() {
+        let grammar_str = r#"
+start start;
+t A_EXACT ::= "a"{32};
+nt start ::= (A_EXACT{4} ("a"{0,32} "\"") | A_EXACT{5}) ("a"{0,32} "\"");
+"#;
+        let named = crate::grammar::glrm::from_glrm(grammar_str).unwrap();
+        let factored = crate::grammar::factoring::factor_named_grammar(named);
+        let gdef = crate::grammar::ast::lower(&factored).unwrap();
+        let analyzed = AnalyzedGrammar::from_grammar_def(&gdef);
+        let table = GLRTable::build(&analyzed);
+        let tokenizer = crate::compiler::compile::build_tokenizer(&gdef);
+        let vocab = Vocab::new(vec![(0, b"aa\"".to_vec())], None);
+        let id_map = crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::combined::analyze_equivalences(
+            &tokenizer,
+            &vocab,
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+        );
+        let terminal_dwa = build_terminal_dwa_for_existing_id_map(&analyzed, &tokenizer, &vocab, &id_map, None);
+        let templates = Templates::from_characterizations(&characterize_terminals(&table, &analyzed));
+        let parser_nwa = debug_build_parser_nwa_from_terminal_dwa(&terminal_dwa, &analyzed, templates.clone())
+            .expect("parser NWA should build");
+        let determinized = determinize_with_supports(&parser_nwa);
+
+        let constraint = Constraint::from_glrm_grammar(grammar_str, &vocab).unwrap();
+        let prefix = [b'a'; 159];
+        let mut mask_state = constraint.start();
+        mask_state.commit_bytes(&prefix).unwrap();
+        let (&tokenizer_state, gss) = mask_state.state.iter().next().expect("live prefix tokenizer state");
+        let (chain_states, _acc, _tail) = gss.extract_chain_and_tail().expect("expected chain-shaped live GSS");
+        let internal_tsid = constraint.internal_tsid_for_state(tokenizer_state);
+        let internal_token_0 = constraint.original_token_to_internal[0usize];
+
+        let candidate_terminals: Vec<_> = constraint
+            .possible_matches_for_state(tokenizer_state)
+            .into_iter()
+            .filter(|(terminal, tokens)| tokens.contains(0) && stack_may_advance_on(&constraint.table, gss, *terminal))
+            .map(|(terminal, _)| terminal)
+            .collect();
+        let mut template_accepts_candidate = false;
+        for terminal in &candidate_terminals {
+            let template = templates.by_terminal.get(terminal).expect("candidate terminal template");
+            let mut template_state = template.start_state;
+            let mut alive = true;
+            for (index, parser_state) in chain_states.iter().copied().enumerate() {
+                if index == 0 && template_state == template.start_state && parser_state == 0 {
+                    continue;
+                }
+                let node = &template.states[template_state as usize];
+                let label = encode_positive_label(parser_state);
+                let Some(&target) = node.transitions.get(&label).or_else(|| node.transitions.get(&DEFAULT_LABEL)) else {
+                    alive = false;
+                    break;
+                };
+                template_state = target;
+            }
+            if alive && template.states[template_state as usize].is_accepting {
+                template_accepts_candidate = true;
+            }
+        }
+
+        let mut current_subset = rustc_hash::FxHashMap::<u32, Weight>::default();
+        for &state_id in parser_nwa.start_states() {
+            current_subset.insert(state_id, Weight::all());
+        }
+        local_epsilon_closure(&parser_nwa, &mut vec![None; parser_nwa.states().len()], &mut std::collections::VecDeque::new(), &mut current_subset);
+
+        let mut nwa_token_0_reachable = false;
+        for (index, parser_state) in chain_states.iter().copied().enumerate() {
+            if index == 0 && parser_state == 0 {
+                continue;
+            }
+
+            let label = encode_positive_label(parser_state);
+            let mut next_subset = rustc_hash::FxHashMap::<u32, Weight>::default();
+            for (&nwa_state_id, path_weight) in &current_subset {
+                let state = &parser_nwa.states()[nwa_state_id as usize];
+                for candidate_label in [label, DEFAULT_LABEL] {
+                    let Some(targets) = state.transitions.get(&candidate_label) else {
+                        continue;
+                    };
+                    for (target, edge_weight) in targets {
+                        let contribution = path_weight.intersection(edge_weight);
+                        if contribution.is_empty() {
+                            continue;
+                        }
+                        let entry = next_subset.entry(*target).or_insert_with(Weight::empty);
+                        *entry = entry.union(&contribution);
+                    }
+                }
+            }
+
+            local_epsilon_closure(
+                &parser_nwa,
+                &mut vec![None; parser_nwa.states().len()],
+                &mut std::collections::VecDeque::new(),
+                &mut next_subset,
+            );
+            current_subset = next_subset;
+
+            for (&nwa_state_id, path_weight) in &current_subset {
+                let Some(final_weight) = parser_nwa.states()[nwa_state_id as usize].final_weight.as_ref() else {
+                    continue;
+                };
+                let contribution = path_weight.intersection(final_weight);
+                if contribution.tokens_for_tsid(internal_tsid).contains(internal_token_0) {
+                    nwa_token_0_reachable = true;
+                }
+            }
+        }
+
+        let mut dwa_token_0_reachable = false;
+        let parser_dwa = &determinized.dwa;
+        let mut wa_state = parser_dwa.start_state();
+        for (index, parser_state) in chain_states.iter().copied().enumerate() {
+            if index == 0 && parser_state == 0 {
+                continue;
+            }
+            let state = &parser_dwa.states()[wa_state as usize];
+            let label = encode_positive_label(parser_state);
+            let Some((target, _weight)) = state.transitions.get(&label).or_else(|| state.transitions.get(&DEFAULT_LABEL)) else {
+                break;
+            };
+            wa_state = *target;
+            let final_tokens = parser_dwa.states()[wa_state as usize]
+                .final_weight
+                .as_ref()
+                .map(|weight| weight.tokens_for_tsid(internal_tsid))
+                .unwrap_or_default();
+            if final_tokens.contains(internal_token_0) {
+                dwa_token_0_reachable = true;
+            }
+        }
+
+        assert_eq!(
+            (nwa_token_0_reachable, dwa_token_0_reachable),
+            (false, false),
+            "the minimized witness token is already lost before determinization"
+        );
+        assert!(!candidate_terminals.is_empty(), "expected at least one live candidate terminal carrying token 0");
+        assert!(
+            !template_accepts_candidate,
+            "candidate terminal template unexpectedly accepts the live chain; candidate_terminals={candidate_terminals:?}"
+        );
     }
 }
