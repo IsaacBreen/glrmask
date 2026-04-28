@@ -5262,10 +5262,10 @@ fn test_temp_name() {
     let schema = r##"{
         "type": "object",
         "properties": {
-            "a": {"type": "string"},
-            "b": {"type": "string"},
-            "bcd": {"type": "string"},
-            "e": {"type": "string"}
+            "a": {"constant": "x"},
+            "b": {"constant": "x"},
+            "bcd": {"constant": "x"},
+            "e": {"constant": "x"}
         },
         "required": ["a", "bcd", "e"],
         "additionalProperties": false
@@ -5279,10 +5279,5 @@ fn test_temp_name() {
     );
     let constraint = crate::Constraint::from_json_schema(schema, &vocab).unwrap();
     let mut state = constraint.start();
-    let mask_allows = |mask: &[u32], token_id: u32| {
-        let (word_idx, bit_idx) = (token_id as usize / 32, token_id as usize % 32);
-        word_idx < mask.len() && ((mask[word_idx] >> bit_idx) & 1) != 0
-    };
-
     state.commit_token(0).unwrap();
 }
