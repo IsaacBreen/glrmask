@@ -943,13 +943,27 @@ impl<'a> ConstraintState<'a> {
         let convert_ns = if PROFILE { t_convert.unwrap().elapsed().as_nanos() as u64 } else { 0 };
 
         // Update mask cache with current state + computed mask + merged bitvec.
-        scratch.merged_dense = merged.clone();
+        {
+            let mut cache = self.mask_cache.lock().unwrap();
+            match cache.as_mut() {
+                Some(cache_data) => {
+                    cache_data.generation = self.generation;
+                    cache_data.mask.clear();
+                    cache_data.mask.extend_from_slice(buf);
+                    cache_data.merged_dense.clear();
+                    cache_data.merged_dense.extend_from_slice(&merged);
+                }
+                None => {
+                    *cache = Some(crate::runtime::state::MaskCacheData {
+                        generation: self.generation,
+                        mask: buf.to_vec(),
+                        merged_dense: merged.clone(),
+                    });
+                }
+            }
+        }
+        scratch.merged_dense = merged;
         scratch.chain_merged_dense = chain_merged;
-        *self.mask_cache.lock().unwrap() = Some(crate::runtime::state::MaskCacheData {
-            generation: self.generation,
-            mask: buf.to_vec(),
-            merged_dense: merged.clone(),
-        });
 
         if PROFILE {
             let c = counters.unwrap();
