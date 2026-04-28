@@ -821,12 +821,12 @@ fn scan_o82710_inline_glrm_split_token_boundary() {
     let vocab = make_vocab(&[v]);
     let constraint = Constraint::from_glrm_grammar(r#"
         start start;
-        t JSON_STRING_CHAR_UPTO_CLOSE_1 ::= "a"{0,128} "\"";
-        t JSON_STRING_CHAR_EXACT_256_2 ::= "a"{128};
-        nt json_string_bounded_split_5 ::= (JSON_STRING_CHAR_EXACT_256_2{0,18} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{19});
+        t JSON_STRING_CHAR_UPTO_CLOSE_1 ::= "a"{0,32} "\"";
+        t JSON_STRING_CHAR_EXACT_256_2 ::= "a"{32};
+        nt json_string_bounded_split_5 ::= (JSON_STRING_CHAR_EXACT_256_2{0,4} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{5});
         nt start ::= json_string_bounded_split_5+ | "," ? json_string_bounded_split_5 ;
     "#, &vocab).unwrap();
-    let prefix = vec![b'a'; 1150];
+    let prefix = vec![b'a'; 158];
 
     let (full_mask, full_commit_token, full_commit_bytes, full_complete) =
         classify_constraint(&constraint, &prefix, v, 0, Some(b""));
@@ -838,9 +838,192 @@ fn scan_o82710_inline_glrm_split_token_boundary() {
         full_complete,
     );
     assert!(
-        full_mask && full_commit_token && full_commit_bytes && full_complete
+        !full_mask && full_commit_token && full_commit_bytes && full_complete
     );
 
+}
+
+#[ignore = "scanner for smaller counted-repeat chunk sizes in the split-token-boundary MRE"]
+#[test]
+fn scan_o82710_inline_glrm_split_token_boundary_small_chunks() {
+    for exact in [128usize, 64, 32, 16, 8, 4, 2, 1] {
+        let token_body_len = 3usize;
+        let prefix_len = 9 * exact - 2;
+        let token = format!("{}\"", "a".repeat(token_body_len));
+        let vocab = make_vocab(&[token.as_bytes()]);
+        let grammar = format!(
+            r#"
+start start;
+t JSON_STRING_CHAR_UPTO_CLOSE_1 ::= "a"{{0,{exact}}} "\"";
+t JSON_STRING_CHAR_EXACT_256_2 ::= "a"{{{exact}}};
+nt json_string_bounded_split_5 ::= (JSON_STRING_CHAR_EXACT_256_2{{0,18}} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{{19}});
+nt start ::= json_string_bounded_split_5+ | "," ? json_string_bounded_split_5 ;
+"#,
+        );
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+        let prefix = vec![b'a'; prefix_len];
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts, can_complete_after_token) =
+            classify_constraint(&constraint, &prefix, token.as_bytes(), 0, Some(b""));
+        println!(
+            "small_chunk exact={} prefix_len={} residue={} token_len={} mask={} commit_token={} commit_bytes={} complete_after_token={}",
+            exact,
+            prefix_len,
+            prefix_len % exact.max(1),
+            token.len(),
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+            can_complete_after_token,
+        );
+    }
+}
+
+#[ignore = "scanner for smaller exact-count and repeat-count combinations in the split-token-boundary MRE"]
+#[test]
+fn scan_o82710_inline_glrm_split_token_boundary_parameter_search() {
+    let token = b"aaa\"";
+    for exact in [32usize, 24, 16, 12, 8, 6, 4] {
+        for repeat_cap in 0usize..=18 {
+            let full_repeat = repeat_cap + 1;
+            let grammar = format!(
+                r#"
+start start;
+t JSON_STRING_CHAR_UPTO_CLOSE_1 ::= "a"{{0,{exact}}} "\"";
+t JSON_STRING_CHAR_EXACT_256_2 ::= "a"{{{exact}}};
+nt json_string_bounded_split_5 ::= (JSON_STRING_CHAR_EXACT_256_2{{0,{repeat_cap}}} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{{{full_repeat}}});
+nt start ::= json_string_bounded_split_5+ | "," ? json_string_bounded_split_5 ;
+"#,
+            );
+            let vocab = make_vocab(&[token]);
+            let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+
+            let mut found = None;
+            let max_prefix = exact * (full_repeat + 1);
+            for prefix_len in 0usize..=max_prefix {
+                let prefix = vec![b'a'; prefix_len];
+                let (mask_accepts, commit_token_accepts, commit_bytes_accepts, can_complete_after_token) =
+                    classify_constraint(&constraint, &prefix, token, 0, Some(b""));
+                if !mask_accepts
+                    && commit_token_accepts
+                    && commit_bytes_accepts
+                    && can_complete_after_token
+                {
+                    found = Some(prefix_len);
+                    break;
+                }
+            }
+
+            if let Some(prefix_len) = found {
+                println!(
+                    "parameter_search exact={} repeat_cap={} full_repeat={} prefix_len={} residue={} token_len={}",
+                    exact,
+                    repeat_cap,
+                    full_repeat,
+                    prefix_len,
+                    prefix_len % exact.max(1),
+                    token.len(),
+                );
+            }
+        }
+    }
+}
+
+#[ignore = "scanner for token body length in the smaller split-token-boundary MRE"]
+#[test]
+fn scan_o82710_inline_glrm_split_token_boundary_token_lengths() {
+    let exact = 32usize;
+    let repeat_cap = 4usize;
+    let full_repeat = repeat_cap + 1;
+
+    for token_body_len in 0usize..=6 {
+        let token = format!("{}\"", "a".repeat(token_body_len));
+        let vocab = make_vocab(&[token.as_bytes()]);
+        let grammar = format!(
+            r#"
+start start;
+t JSON_STRING_CHAR_UPTO_CLOSE_1 ::= "a"{{0,{exact}}} "\"";
+t JSON_STRING_CHAR_EXACT_256_2 ::= "a"{{{exact}}};
+nt json_string_bounded_split_5 ::= (JSON_STRING_CHAR_EXACT_256_2{{0,{repeat_cap}}} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{{{full_repeat}}});
+nt start ::= json_string_bounded_split_5+ | "," ? json_string_bounded_split_5 ;
+"#,
+        );
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+
+        let mut found = None;
+        for prefix_len in 0usize..=(exact * (full_repeat + 1) + token_body_len + 2) {
+            let prefix = vec![b'a'; prefix_len];
+            let (mask_accepts, commit_token_accepts, commit_bytes_accepts, can_complete_after_token) =
+                classify_constraint(&constraint, &prefix, token.as_bytes(), 0, Some(b""));
+            if !mask_accepts
+                && commit_token_accepts
+                && commit_bytes_accepts
+                && can_complete_after_token
+            {
+                found = Some(prefix_len);
+                break;
+            }
+        }
+
+        println!(
+            "token_length_search token_body_len={} token_len={} first_prefix={:?}",
+            token_body_len,
+            token.len(),
+            found,
+        );
+    }
+}
+
+#[ignore = "scanner for under-32 exact sizes in the split-token-boundary MRE"]
+#[test]
+fn scan_o82710_inline_glrm_split_token_boundary_under_32_search() {
+    for exact in [24usize, 16, 12, 8, 6, 4, 3, 2, 1] {
+        for repeat_cap in 0usize..=18 {
+            let full_repeat = repeat_cap + 1;
+            for token_body_len in 0usize..=8 {
+                let token = format!("{}\"", "a".repeat(token_body_len));
+                let vocab = make_vocab(&[token.as_bytes()]);
+                let grammar = format!(
+                    r#"
+start start;
+t JSON_STRING_CHAR_UPTO_CLOSE_1 ::= "a"{{0,{exact}}} "\"";
+t JSON_STRING_CHAR_EXACT_256_2 ::= "a"{{{exact}}};
+nt json_string_bounded_split_5 ::= (JSON_STRING_CHAR_EXACT_256_2{{0,{repeat_cap}}} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{{{full_repeat}}});
+nt start ::= json_string_bounded_split_5+ | "," ? json_string_bounded_split_5 ;
+"#,
+                );
+                let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+
+                let search_limit = exact * (full_repeat + 1) + token_body_len + 4;
+                let mut found = None;
+                for prefix_len in 0usize..=search_limit {
+                    let prefix = vec![b'a'; prefix_len];
+                    let (mask_accepts, commit_token_accepts, commit_bytes_accepts, can_complete_after_token) =
+                        classify_constraint(&constraint, &prefix, token.as_bytes(), 0, Some(b""));
+                    if !mask_accepts
+                        && commit_token_accepts
+                        && commit_bytes_accepts
+                        && can_complete_after_token
+                    {
+                        found = Some(prefix_len);
+                        break;
+                    }
+                }
+
+                if let Some(prefix_len) = found {
+                    println!(
+                        "under32_search exact={} repeat_cap={} full_repeat={} token_body_len={} token_len={} prefix_len={} residue={}",
+                        exact,
+                        repeat_cap,
+                        full_repeat,
+                        token_body_len,
+                        token.len(),
+                        prefix_len,
+                        prefix_len % exact.max(1),
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[ignore = "scanner for aggressively minimized native open-object mismatch"]
