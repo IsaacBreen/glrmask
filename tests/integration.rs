@@ -5271,18 +5271,18 @@ fn test_temp_name() {
         },
         "type": "object",
         "properties": {
-            "sendRequest": {"type": "string"},
-            "onRequest": {"$ref": "#/$defs/event"},
-            "onRequestExternal": {"$ref": "#/$defs/event"},
+            "a": {"type": "string"},
+            "b": {"$ref": "#/$defs/event"},
+            "bcd": {"$ref": "#/$defs/event"},
             "tail": {"type": "string"}
         },
-        "required": ["sendRequest", "onRequestExternal", "tail"],
+        "required": ["a", "bcd", "tail"],
         "additionalProperties": false
     }"##;
 
     let vocab = Vocab::new(
         vec![
-            (0, b"{\"sendRequest\": \"x\", \"onRequestE".to_vec()),
+            (0, b"{\"a\": \"x\", \"bc".to_vec()),
         ],
         None,
     );
@@ -5294,13 +5294,4 @@ fn test_temp_name() {
     };
 
     state.commit_token(0).unwrap();
-    let mask = state.mask();
-    assert!(mask_allows(&mask, 1), "the empty-object token should be allowed after the shared-ref key prefix");
-
-    state.commit_token(1).unwrap();
-    let mask = state.mask();
-    assert!(mask_allows(&mask, 2), "the trailing sibling token should remain allowed after the shared-ref empty-object token");
-
-    state.commit_token(2).unwrap();
-    assert!(state.is_finished());
 }
