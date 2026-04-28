@@ -285,6 +285,82 @@ nt start ::= "{{" (("\"" "description\"" ": ") {variant}) ", " (("\"" "id\"" ": 
     )
 }
 
+fn explicit_8_9_object_glrm(reverse_order: bool) -> String {
+    let bounded = if reverse_order {
+        "(EXACT_256{9} CLOSE_256 | EXACT_256{8} CLOSE_256)"
+    } else {
+        "(EXACT_256{8} CLOSE_256 | EXACT_256{9} CLOSE_256)"
+    };
+    format!(
+        r#"
+start start;
+
+t C ::= /a/;
+t BODY ::= C* "\"";
+nt json_string ::= "\"" BODY;
+internal t UPTO_256 ::= C{{0,256}};
+t CLOSE_256 ::= UPTO_256 "\"";
+t EXACT_256 ::= C{{256}};
+nt json_string_bounded_split_5 ::= "\"" {bounded};
+nt obj_open_reqmask_0_nc_0 ::= (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_0 | (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_0 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_0 | ", " (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_1 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_1 | ;
+nt start ::= "{{" obj_open_reqmask_0_nc_0 "}}";
+"#,
+    )
+}
+
+fn counted_repeat_object_glrm_a_only() -> &'static str {
+    a_only_inline_glrm()
+}
+
+fn bounded_string_only_glrm() -> &'static str {
+    r#"
+start start;
+
+t C ::= /a/;
+internal t UPTO_256 ::= C{0,256};
+t CLOSE_256 ::= UPTO_256 "\"";
+t EXACT_256 ::= C{256};
+internal t UPTO_136 ::= C{0,136};
+t CLOSE_136 ::= UPTO_136 "\"";
+nt bounded ::= "\"" (EXACT_256{0,18} CLOSE_256 | EXACT_256{19} CLOSE_136);
+nt start ::= bounded;
+"#
+}
+
+fn object_close_glrm() -> &'static str {
+    r#"
+start start;
+
+t C ::= /a/;
+internal t UPTO_256 ::= C{0,256};
+t CLOSE_256 ::= UPTO_256 "\"";
+t EXACT_256 ::= C{256};
+internal t UPTO_136 ::= C{0,136};
+t CLOSE_136 ::= UPTO_136 "\"";
+nt bounded ::= "\"" (EXACT_256{0,18} CLOSE_256 | EXACT_256{19} CLOSE_136);
+nt start ::= "{" (("\"" "description\"" ": ") bounded) "}";
+"#
+}
+
+fn object_required_id_nonrecursive_glrm() -> &'static str {
+    r#"
+start start;
+
+t C ::= /a/;
+t BODY ::= C* "\"";
+nt json_string ::= "\"" BODY;
+internal t UPTO_256 ::= C{0,256};
+t CLOSE_256 ::= UPTO_256 "\"";
+t EXACT_256 ::= C{256};
+internal t UPTO_136 ::= C{0,136};
+t CLOSE_136 ::= UPTO_136 "\"";
+nt bounded ::= "\"" (EXACT_256{0,18} CLOSE_256 | EXACT_256{19} CLOSE_136);
+nt start ::= "{" (("\"" "description\"" ": ") bounded) ", " (("\"" "id\"" ": ") json_string) "}";
+"#
+}
+
 fn classify_constraint(
     constraint: &Constraint,
     prefix: &[u8],
@@ -591,6 +667,173 @@ fn scan_o82710_inline_glrm_fixed8_fixed9_alternatives() {
             can_complete_after_token,
         );
     }
+}
+
+#[ignore = "expert experiment: explicit 8|9 alternatives versus counted-repeat lowering"]
+#[test]
+fn scan_o82710_inline_glrm_explicit_8_9_vs_counted_repeat() {
+    let token = b"aaaaa\"";
+    let tail = b", \"id\": \"\"}";
+    let vocab = make_vocab(&[token]);
+    let prefix = direct_glrm_prefix_with_content(&vec![b'a'; 2300]);
+
+    for (label, grammar) in [
+        ("counted_repeat", counted_repeat_object_glrm_a_only().to_string()),
+        ("explicit_8_9", explicit_8_9_object_glrm(false)),
+        ("explicit_9_8", explicit_8_9_object_glrm(true)),
+    ] {
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts, can_complete_after_token) =
+            classify_constraint(&constraint, &prefix, token, 0, Some(tail));
+        println!(
+            "explicit_compare={} mask={} commit_token={} commit_bytes={} complete_after_token={}",
+            label,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+            can_complete_after_token,
+        );
+    }
+}
+
+#[ignore = "expert experiment: no-quote boundary crossing tokens versus close-quote token"]
+#[test]
+fn scan_o82710_inline_glrm_no_quote_crossing_tokens() {
+    let tokens: [&[u8]; 4] = [b"aaaa", b"aaaaa", b"aaaaaa", b"aaaaa\""];
+    let vocab = make_vocab(&tokens);
+    let constraint = Constraint::from_glrm_grammar(a_only_inline_glrm(), &vocab).unwrap();
+    let prefix = direct_glrm_prefix_with_content(&vec![b'a'; 2300]);
+    let tail = b", \"id\": \"\"}";
+
+    for (token_id, token) in tokens.iter().enumerate() {
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts, can_complete_after_token) =
+            classify_constraint(&constraint, &prefix, token, token_id as u32, Some(tail));
+        println!(
+            "crossing_token={:?} mask={} commit_token={} commit_bytes={} complete_after_token={}",
+            String::from_utf8_lossy(token),
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+            can_complete_after_token,
+        );
+    }
+}
+
+#[ignore = "expert experiment: continuation ladder from pure string to recursive required-id object"]
+#[test]
+fn scan_o82710_inline_glrm_continuation_ladder() {
+    let token = b"aaaaa\"";
+    let vocab = make_vocab(&[token]);
+    let content = vec![b'a'; 2300];
+
+    for (label, grammar, prefix, tail) in [
+        (
+            "pure_bounded_string",
+            bounded_string_only_glrm().to_string(),
+            {
+                let mut p = vec![b'"'];
+                p.extend_from_slice(&content);
+                p
+            },
+            None,
+        ),
+        (
+            "object_immediate_close",
+            object_close_glrm().to_string(),
+            direct_glrm_prefix_with_content(&content),
+            Some(b"}".as_slice()),
+        ),
+        (
+            "object_required_id_nonrecursive",
+            object_required_id_nonrecursive_glrm().to_string(),
+            direct_glrm_prefix_with_content(&content),
+            Some(b", \"id\": \"\"}".as_slice()),
+        ),
+        (
+            "object_required_id_recursive",
+            a_only_inline_glrm().to_string(),
+            direct_glrm_prefix_with_content(&content),
+            Some(b", \"id\": \"\"}".as_slice()),
+        ),
+    ] {
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts, can_complete_after_token) =
+            classify_constraint(&constraint, &prefix, token, 0, tail);
+        println!(
+            "ladder={} mask={} commit_token={} commit_bytes={} complete_after_token={}",
+            label,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+            can_complete_after_token,
+        );
+    }
+}
+
+#[ignore = "expert experiment: split the closing token across the boundary"]
+#[test]
+fn scan_o82710_inline_glrm_split_token_boundary() {
+    let tokens: [&[u8]; 3] = [b"aaaaa\"", b"aaaa", b"a\""];
+    let vocab = make_vocab(&tokens);
+    let constraint = Constraint::from_glrm_grammar(a_only_inline_glrm(), &vocab).unwrap();
+    let prefix = direct_glrm_prefix_with_content(&vec![b'a'; 2300]);
+    let tail = b", \"id\": \"\"}";
+
+    let (full_mask, full_commit_token, full_commit_bytes, full_complete) =
+        classify_constraint(&constraint, &prefix, tokens[0], 0, Some(tail));
+    println!(
+        "split_full_token mask={} commit_token={} commit_bytes={} complete_after_token={}",
+        full_mask,
+        full_commit_token,
+        full_commit_bytes,
+        full_complete,
+    );
+
+    let (part1_mask, part1_commit_token, part1_commit_bytes, _) =
+        classify_constraint(&constraint, &prefix, tokens[1], 1, None);
+    println!(
+        "split_part1 mask={} commit_token={} commit_bytes={}",
+        part1_mask,
+        part1_commit_token,
+        part1_commit_bytes,
+    );
+
+    let mut state = constraint.start();
+    state.commit_bytes(&prefix).unwrap();
+    let part1_progress = state.commit_token(1).is_ok();
+    let part2_mask = if part1_progress {
+        token_allowed(&state.mask(), 2)
+    } else {
+        false
+    };
+    let part2_commit_token = if part1_progress {
+        match catch_unwind(AssertUnwindSafe(|| state.commit_token(2))) {
+            Ok(Ok(())) => true,
+            Ok(Err(_)) => false,
+            Err(_) => true,
+        }
+    } else {
+        false
+    };
+    let complete_after_split = if part1_progress {
+        let mut state2 = constraint.start();
+        state2.commit_bytes(&prefix).unwrap();
+        if state2.commit_token(1).is_err() {
+            false
+        } else if state2.commit_token(2).is_err() {
+            false
+        } else {
+            state2.commit_bytes(tail).is_ok()
+        }
+    } else {
+        false
+    };
+    println!(
+        "split_after_part1 part2_mask={} part2_commit_token={} complete_after_split={}",
+        part2_mask,
+        part2_commit_token,
+        complete_after_split,
+    );
 }
 
 #[ignore = "scanner for aggressively minimized native open-object mismatch"]
