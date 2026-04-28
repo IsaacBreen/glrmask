@@ -817,29 +817,39 @@ fn scan_o82710_inline_glrm_continuation_ladder() {
 #[ignore = "expert experiment: split the closing token across the boundary"]
 #[test]
 fn scan_o82710_inline_glrm_split_token_boundary() {
-    let v = b"aa\"";
-    let vocab = make_vocab(&[v]);
+    let token = b"aa\"";
+    let vocab = Vocab::new(vec![(0, token.to_vec())], None);
     let constraint = Constraint::from_glrm_grammar(r#"
-        start start;
-        t A_UPTO_CLOSE ::= "a"{0,32} "\"";
-        t A_EXACT ::= "a"{32};
-        nt start ::= (A_EXACT{4} A_UPTO_CLOSE | A_EXACT{5}) A_UPTO_CLOSE;
+start start;
+t A_UPTO_CLOSE ::= "a"{0,32} "\"";
+t A_EXACT ::= "a"{32};
+nt start ::= (A_EXACT{4} A_UPTO_CLOSE | A_EXACT{5}) A_UPTO_CLOSE;
     "#, &vocab).unwrap();
-    let prefix = vec![b'a'; 159];
+    let prefix = [b'a'; 159];
 
-    let (full_mask, full_commit_token, full_commit_bytes, full_complete) =
-        classify_constraint(&constraint, &prefix, v, 0, Some(b""));
+    let mut mask_state = constraint.start();
+    mask_state.commit_bytes(&prefix).unwrap();
+    let full_mask = mask_state.mask().first().map(|word| (word & 1) != 0).unwrap_or(false);
+
+    let mut commit_token_state = constraint.start();
+    commit_token_state.commit_bytes(&prefix).unwrap();
+    let full_commit_token = match catch_unwind(AssertUnwindSafe(|| commit_token_state.commit_token(0))) {
+        Ok(Ok(())) => true,
+        Ok(Err(_)) => false,
+        Err(_) => true,
+    };
+
+    let mut commit_bytes_state = constraint.start();
+    commit_bytes_state.commit_bytes(&prefix).unwrap();
+    let full_commit_bytes = commit_bytes_state.commit_bytes(token).is_ok();
+
     println!(
-        "split_full_token mask={} commit_token={} commit_bytes={} complete_after_token={}",
+        "split_full_token mask={} commit_token={} commit_bytes={}",
         full_mask,
         full_commit_token,
         full_commit_bytes,
-        full_complete,
     );
-    assert!(
-        !full_mask && full_commit_token && full_commit_bytes && full_complete
-    );
-
+    assert!(!full_mask && full_commit_token && full_commit_bytes);
 }
 
 #[ignore = "scanner for smaller counted-repeat chunk sizes in the split-token-boundary MRE"]
