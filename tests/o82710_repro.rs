@@ -1530,6 +1530,120 @@ t A_EXACT ::= "a"{{32}};
     }
 }
 
+#[ignore = "focused scanner for replacing repeated exact chunks with explicit long terminals"]
+#[test]
+fn scan_o82710_inline_glrm_split_token_boundary_explicit_long_terminals() {
+    let token = b"aa\"";
+    let vocab = Vocab::new(vec![(0, token.to_vec())], None);
+
+    for (label, grammar) in [
+        (
+            "counted_repeat",
+            r#"
+start start;
+t A_UPTO_CLOSE ::= "a"{0,32} "\"";
+t A_EXACT ::= "a"{32};
+nt start ::= (A_EXACT{4} A_UPTO_CLOSE | A_EXACT{5}) A_UPTO_CLOSE;
+"#,
+        ),
+        (
+            "explicit_long_terminals",
+            r#"
+start start;
+t A_UPTO_CLOSE ::= "a"{0,32} "\"";
+t A_128 ::= "a"{128};
+t A_160 ::= "a"{160};
+nt start ::= (A_128 A_UPTO_CLOSE | A_160) A_UPTO_CLOSE;
+"#,
+        ),
+    ] {
+        let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+        let prefix = [b'a'; 159];
+
+        let mut mask_state = constraint.start();
+        mask_state.commit_bytes(&prefix).unwrap();
+        let mask_accepts = mask_state.mask().first().map(|word| (word & 1) != 0).unwrap_or(false);
+
+        let mut commit_token_state = constraint.start();
+        commit_token_state.commit_bytes(&prefix).unwrap();
+        let commit_token_accepts = match catch_unwind(AssertUnwindSafe(|| commit_token_state.commit_token(0))) {
+            Ok(Ok(())) => true,
+            Ok(Err(_)) => false,
+            Err(_) => true,
+        };
+
+        let mut commit_bytes_state = constraint.start();
+        commit_bytes_state.commit_bytes(&prefix).unwrap();
+        let commit_bytes_accepts = commit_bytes_state.commit_bytes(token).is_ok();
+
+        println!(
+            "explicit_long_terminals_shape={} mask={} commit_token={} commit_bytes={}",
+            label,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+        );
+    }
+}
+
+#[ignore = "focused scanner for spelling out the exact chunks explicitly"]
+#[test]
+fn scan_o82710_inline_glrm_split_token_boundary_explicit_chunk_sequence() {
+    let token = b"aa\"";
+    let vocab = Vocab::new(vec![(0, token.to_vec())], None);
+
+    for (label, grammar) in [
+        (
+            "counted_repeat",
+            r#"
+start start;
+t A_UPTO_CLOSE ::= "a"{0,32} "\"";
+t A_EXACT ::= "a"{32};
+nt start ::= (A_EXACT{4} A_UPTO_CLOSE | A_EXACT{5}) A_UPTO_CLOSE;
+"#,
+        ),
+        (
+            "explicit_chunk_sequence",
+            r#"
+start start;
+t A_UPTO_CLOSE ::= "a"{0,32} "\"";
+t A_EXACT ::= "a"{32};
+nt start ::= (
+    A_EXACT A_EXACT A_EXACT A_EXACT A_UPTO_CLOSE
+    | A_EXACT A_EXACT A_EXACT A_EXACT A_EXACT
+) A_UPTO_CLOSE;
+"#,
+        ),
+    ] {
+        let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+        let prefix = [b'a'; 159];
+
+        let mut mask_state = constraint.start();
+        mask_state.commit_bytes(&prefix).unwrap();
+        let mask_accepts = mask_state.mask().first().map(|word| (word & 1) != 0).unwrap_or(false);
+
+        let mut commit_token_state = constraint.start();
+        commit_token_state.commit_bytes(&prefix).unwrap();
+        let commit_token_accepts = match catch_unwind(AssertUnwindSafe(|| commit_token_state.commit_token(0))) {
+            Ok(Ok(())) => true,
+            Ok(Err(_)) => false,
+            Err(_) => true,
+        };
+
+        let mut commit_bytes_state = constraint.start();
+        commit_bytes_state.commit_bytes(&prefix).unwrap();
+        let commit_bytes_accepts = commit_bytes_state.commit_bytes(token).is_ok();
+
+        println!(
+            "explicit_chunk_sequence_shape={} mask={} commit_token={} commit_bytes={}",
+            label,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+        );
+    }
+}
+
 #[ignore = "scanner for aggressively minimized native open-object mismatch"]
 #[test]
 fn scan_o82710_minimal_open_object_schema_single_token_vocab() {
