@@ -6,11 +6,11 @@ use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{Action, GLRTable};
 use crate::grammar::flat::{NonterminalID, TerminalID};
 
-type InitialEscape = (u32, Vec<u32>);
+type InitialEscape = (u32, usize, Vec<u32>);
 
 type InitialReduce = (u32, usize, NonterminalID);
 
-type NtEscape = (NonterminalID, u32, Vec<u32>);
+type NtEscape = (NonterminalID, u32, usize, Vec<u32>);
 
 type NtRereduce = (NonterminalID, u32, usize, NonterminalID);
 
@@ -103,15 +103,14 @@ fn record_initial_action(
         Action::Shift(shift_state, replace) => {
             let effective_replace = *replace;
             let pushes = if effective_replace { vec![*shift_state] } else { vec![state, *shift_state] };
-            escapes.insert((state, pushes));
+            escapes.insert((state, 0, pushes));
         }
         Action::StackShifts(shifts) => {
             for shift in shifts {
-                if shift.pop <= 1 {
-                    let mut pushes = if shift.pop == 0 { vec![state] } else { Vec::new() };
-                    pushes.extend_from_slice(&shift.pushes);
-                    escapes.insert((state, pushes));
-                }
+                let extra_pops = shift.pop.saturating_sub(1) as usize;
+                let mut pushes = if shift.pop == 0 { vec![state] } else { Vec::new() };
+                pushes.extend_from_slice(&shift.pushes);
+                escapes.insert((state, extra_pops, pushes));
             }
         }
         Action::GuardedStackShifts(_) => {}
@@ -127,7 +126,7 @@ fn record_initial_action(
             if let Some((shift_state, replace)) = shift {
                 let effective_replace = *replace;
                 let pushes = if effective_replace { vec![*shift_state] } else { vec![state, *shift_state] };
-                escapes.insert((state, pushes));
+                escapes.insert((state, 0, pushes));
             }
             for &(lhs, len) in split_reduces {
                 let rule_len = if is_forwarded { (len as usize) + 1 } else { len as usize };
@@ -157,7 +156,7 @@ fn record_goto_action(
             if !goto_replace { pushes.push(revealed_state); }
             if !*shift_replace { pushes.push(goto_state); }
             pushes.push(*shift_state);
-            nt_escapes.insert((stack_nt, revealed_state, pushes));
+            nt_escapes.insert((stack_nt, revealed_state, 0, pushes));
         }
         Action::StackShifts(shifts) => {
             for shift in shifts {
@@ -166,11 +165,12 @@ fn record_goto_action(
                     pushes.push(revealed_state);
                 }
                 pushes.push(goto_state);
-                if shift.pop as usize <= pushes.len() {
-                    pushes.truncate(pushes.len() - shift.pop as usize);
-                    pushes.extend_from_slice(&shift.pushes);
-                    nt_escapes.insert((stack_nt, revealed_state, pushes));
-                }
+                let base_pops = pushes.len();
+                let extra_pops = shift.pop.saturating_sub(base_pops as u32) as usize;
+                let retained = base_pops.saturating_sub(shift.pop as usize);
+                pushes.truncate(retained);
+                pushes.extend_from_slice(&shift.pushes);
+                nt_escapes.insert((stack_nt, revealed_state, extra_pops, pushes));
             }
         }
         Action::GuardedStackShifts(_) => {}
@@ -199,7 +199,7 @@ fn record_goto_action(
                 if !goto_replace { pushes.push(revealed_state); }
                 if !*shift_replace { pushes.push(goto_state); }
                 pushes.push(*shift_state);
-                nt_escapes.insert((stack_nt, revealed_state, pushes));
+                nt_escapes.insert((stack_nt, revealed_state, 0, pushes));
             }
             for &(lhs, len) in split_reduces {
                 handle_reduce(
@@ -405,18 +405,19 @@ fn expand_zero_pop_action(
                     *top = *shift_state;
                 }
             }
-            escapes.insert((initial_state, pushes));
+            escapes.insert((initial_state, 0, pushes));
         }
         Action::StackShifts(shifts) => {
             for shift in shifts {
                 let mut pushes = Vec::new();
                 pushes.push(initial_state);
                 pushes.extend_from_slice(push_stack);
-                if shift.pop as usize <= pushes.len() {
-                    pushes.truncate(pushes.len() - shift.pop as usize);
-                    pushes.extend_from_slice(&shift.pushes);
-                    escapes.insert((initial_state, pushes));
-                }
+                let base_pops = pushes.len();
+                let extra_pops = shift.pop.saturating_sub(base_pops as u32) as usize;
+                let retained = base_pops.saturating_sub(shift.pop as usize);
+                pushes.truncate(retained);
+                pushes.extend_from_slice(&shift.pushes);
+                escapes.insert((initial_state, extra_pops, pushes));
             }
         }
         Action::GuardedStackShifts(_) => {}
@@ -442,7 +443,7 @@ fn expand_zero_pop_action(
                         *top = *shift_state;
                     }
                 }
-                escapes.insert((initial_state, pushes));
+                escapes.insert((initial_state, 0, pushes));
             }
             for &(nt2, len2) in split_reduces {
                 let mut ps = push_stack.clone();
@@ -559,9 +560,9 @@ fn characterize_terminal_with_initial(
             for (&inheritor, targets) in &inheritances {
                 for &target in targets {
                     // Copy nt_escapes: (nt, target, pushes) → (nt, inheritor, pushes)
-                    for &(nt, revealed, ref pushes) in &nt_escapes {
+                    for &(nt, revealed, extra_pops, ref pushes) in &nt_escapes {
                         if revealed == target {
-                            let inherited = (nt, inheritor, pushes.clone());
+                            let inherited = (nt, inheritor, extra_pops, pushes.clone());
                             if !nt_escapes.contains(&inherited) {
                                 new_escapes.insert(inherited);
                             }
@@ -591,7 +592,7 @@ fn characterize_terminal_with_initial(
     for &(_, _, nt) in &normal_reduces {
         referenced_nts.insert(nt);
     }
-    for &(src_nt, _, _) in &nt_escapes {
+    for &(src_nt, _, _, _) in &nt_escapes {
         referenced_nts.insert(src_nt);
     }
     for &(src_nt, _, _, target_nt) in &nt_rereduces {

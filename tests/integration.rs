@@ -5297,6 +5297,7 @@ fn test_temp_name_glrm() {
     );
     let constraint = crate::Constraint::from_glrm_grammar(glrm, &vocab).unwrap();
     let mut state = constraint.start();
+    assert_mask_allows(&state.mask(), &[0]);
     state.commit_token(0).unwrap();
 }
 

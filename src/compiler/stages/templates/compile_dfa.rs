@@ -535,7 +535,7 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
     // `pos_target`, yet still represent logically distinct escapes; we dedupe
     // purely to avoid inserting the same transition twice when the
     // characterization contains exact duplicates.
-    let mut emitted_escapes: BTreeSet<(u32, u32, Vec<u32>)> = BTreeSet::new();
+    let mut emitted_escapes: BTreeSet<(u32, u32, usize, Vec<u32>)> = BTreeSet::new();
 
     // Resolve (or build) the pos-target for a `pushes` suffix by walking
     // it in reverse through the suffix trie rooted at `accept_root`.
@@ -564,18 +564,52 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
             cur
         };
 
-    // Initial escapes: start → positive(initial_state) → [shared suffix tail] → accept_root
-    for &(initial_state, ref pushes) in &characterization.escapes {
-        if !emitted_escapes.insert((start, initial_state, pushes.to_vec())) {
+    let add_escape_path =
+        |nfa: &mut NFA,
+         source: u32,
+         revealed_state: u32,
+         extra_pops: usize,
+         pushes: &[u32],
+         pos_target_cache: &mut BTreeMap<Vec<u32>, u32>,
+         suffix_trie: &mut BTreeMap<(u32, u32), u32>| {
+            let pos_target = resolve_pos_target(
+                nfa,
+                pos_target_cache,
+                suffix_trie,
+                pushes,
+            );
+            if extra_pops == 0 {
+                nfa.add_transition(source, encode_positive_label(revealed_state), pos_target);
+                return;
+            }
+
+            let mut current = nfa.add_state();
+            nfa.add_transition(source, encode_positive_label(revealed_state), current);
+            for index in 0..extra_pops {
+                let next = if index + 1 == extra_pops {
+                    pos_target
+                } else {
+                    nfa.add_state()
+                };
+                nfa.add_transition(current, DEFAULT_LABEL, next);
+                current = next;
+            }
+        };
+
+    // Initial escapes: start → positive(initial_state) → [extra DEFAULT pops] → [shared suffix tail] → accept_root
+    for &(initial_state, extra_pops, ref pushes) in &characterization.escapes {
+        if !emitted_escapes.insert((start, initial_state, extra_pops, pushes.to_vec())) {
             continue;
         }
-        let pos_target = resolve_pos_target(
+        add_escape_path(
             &mut nfa,
+            start,
+            initial_state,
+            extra_pops,
+            pushes,
             &mut pos_target_cache,
             &mut suffix_trie,
-            pushes,
         );
-        nfa.add_transition(start, encode_positive_label(initial_state), pos_target);
     }
 
     for &(initial_state, pop_count, nonterminal) in &characterization.reduces {
@@ -602,20 +636,22 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
     // agrees on the `pushes` tail; the positive transition is added directly
     // from the source, with dedup against exact `(source, revealed, pushes)`
     // duplicates.
-    for &(source_nonterminal, revealed_state, ref pushes) in &characterization.nt_escapes {
+    for &(source_nonterminal, revealed_state, extra_pops, ref pushes) in &characterization.nt_escapes {
         let Some(&source_state) = nonterminal_nodes.get(&source_nonterminal) else {
             continue;
         };
-        if !emitted_escapes.insert((source_state, revealed_state, pushes.to_vec())) {
+        if !emitted_escapes.insert((source_state, revealed_state, extra_pops, pushes.to_vec())) {
             continue;
         }
-        let pos_target = resolve_pos_target(
+        add_escape_path(
             &mut nfa,
+            source_state,
+            revealed_state,
+            extra_pops,
+            pushes,
             &mut pos_target_cache,
             &mut suffix_trie,
-            pushes,
         );
-        nfa.add_transition(source_state, encode_positive_label(revealed_state), pos_target);
     }
 
     for &(source_nonterminal, revealed_state, pop_count, target_nonterminal) in &characterization.nt_rereduces {
