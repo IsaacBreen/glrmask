@@ -2460,3 +2460,19 @@ fn test_o69752_max_stack_size2() {
     let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
     assert_eq!(max_paths, 1, "max paths {} should be 1", max_paths);
 }
+
+#[test]
+fn test_weird_punctuation_token() {
+    let vocab = Vocab::new(vec![(0u32, b"\\];?>\"".to_vec())], None);
+    let constraint = Constraint::from_json_schema(r##"
+    {
+      "maxLength": 2400,
+      "minLength": 0,
+      "type": "string"
+    }
+    "##, &vocab).unwrap();
+    let mut state = constraint.start();
+    state.commit_bytes(b"\"").unwrap();
+    println!("mask: {:?}", state.mask());
+    state.commit_token(0).unwrap();
+}
