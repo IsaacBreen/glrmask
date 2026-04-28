@@ -834,10 +834,12 @@ impl<'a> ConstraintState<'a> {
                     let offsets = &self.constraint.internal_token_buf_offsets;
                     let flat = &self.constraint.internal_token_buf_flat;
                     let n_internal = if offsets.len() > 1 { offsets.len() - 1 } else { 0 };
+                    let threshold = buf.len();
 
                     // Compute delta cost (total entries for changed tokens).
                     let mut delta_cost: usize = 0;
                     let mut delta_tokens: usize = 0;
+                    let mut delta_too_expensive = false;
                     for (wi, (&old_w, &new_w)) in cache_data
                         .merged_dense
                         .iter()
@@ -855,14 +857,26 @@ impl<'a> ConstraintState<'a> {
                             let internal_token = wi * 64 + bit;
                             if internal_token < n_internal {
                                 delta_cost += (offsets[internal_token + 1] - offsets[internal_token]) as usize;
+                                if delta_cost >= threshold {
+                                    delta_too_expensive = true;
+                                    break;
+                                }
                             }
                             bits &= bits - 1;
                         }
+                        if delta_too_expensive {
+                            break;
+                        }
                     }
 
-                    if delta_tokens > 0 && delta_cost < buf.len() {
+                    convert_delta_tokens = delta_tokens as u64;
+
+                    if delta_tokens == 0 {
                         convert_incremental = true;
-                        convert_delta_tokens = delta_tokens as u64;
+                        buf.copy_from_slice(&cache_data.mask);
+                        true
+                    } else if !delta_too_expensive && delta_cost < threshold {
+                        convert_incremental = true;
                         // Incremental: copy cached mask, apply delta.
                         buf.copy_from_slice(&cache_data.mask);
 

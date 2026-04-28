@@ -612,7 +612,6 @@ impl Constraint {
         // Use precomputed averages + O(n_heavy) heavy check for fast path decision.
         let heavy = &self.heavy_token_dense_masks;
         let buf_len = buf.len();
-        let word_groups = &self.word_group_buf_masks;
         let n_missing = n_internal - n_set;
 
         // Fast O(n_heavy) estimation: count heavy set tokens, estimate rest from average.
@@ -679,13 +678,6 @@ impl Constraint {
             for (wi, &w) in dense.iter().enumerate() {
                 if w == 0 {
                     continue;
-                }
-                // Word-group fast path: all 64 internal tokens in this word are set.
-                if w == !0u64 {
-                    if let Some(group) = word_groups.get(wi) {
-                        or_dense_buf(buf, group);
-                        continue;
-                    }
                 }
                 let mut bits = w;
                 while bits != 0 {
