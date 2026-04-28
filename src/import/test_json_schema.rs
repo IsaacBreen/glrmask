@@ -2462,6 +2462,7 @@ fn test_o69752_max_stack_size2() {
 }
 
 #[test]
+#[should_panic]
 fn test_weird_punctuation_token() {
     let vocab = Vocab::new(vec![(0u32, b"\\]".to_vec())], None);
     let constraint = Constraint::from_glrm_grammar(r##"
