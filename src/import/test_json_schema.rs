@@ -2464,12 +2464,13 @@ fn test_o69752_max_stack_size2() {
 #[test]
 fn test_weird_punctuation_token() {
     let vocab = Vocab::new(vec![(0u32, b"\\];?>\"".to_vec())], None);
-    let constraint = Constraint::from_json_schema(r##"
-    {
-      "maxLength": 2400,
-      "minLength": 0,
-      "type": "string"
-    }
+    let constraint = Constraint::from_glrm_grammar(r##"
+        start start;
+
+        internal t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]|\\["\\\/bfnrt]|\\u[0-9A-Fa-f]{4}/;
+        t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
+        nt json_string ::= "\"" JSON_STRING_BODY;
+        nt start ::= json_string;
     "##, &vocab).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(b"\"").unwrap();
