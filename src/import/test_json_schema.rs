@@ -2470,5 +2470,11 @@ fn test_weird_punctuation_token() {
         nt start ::= JSON_STRING_CHAR;
     "##, &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_token(0).unwrap();
+    let mask = state.mask();
+    assert_token_disallowed(
+        &mask,
+        0,
+        "token should not be in mask because it is not a single JSON_STRING_CHAR",
+    );
+    assert!(state.commit_token(0).is_err());
 }
