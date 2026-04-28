@@ -841,37 +841,4 @@ impl Constraint {
         (transitions, dwa_state.final_weight.is_some())
     }
 
-    pub fn debug_parser_dwa_transition_token(
-        &self,
-        dwa_state: u32,
-        label: i32,
-        tokenizer_state: u32,
-        internal_token: u32,
-    ) -> Option<(u32, bool, bool, bool)> {
-        let state = self.parser_dwa.states().get(dwa_state as usize)?;
-        let (target, weight) = state.transitions.get(&label)?;
-        let internal_tsid = tokenizer_state;
-        let transition_is_full = weight.is_full();
-        let transition_allows = transition_is_full
-            || weight
-                .0
-                .get(internal_tsid)
-                .map(|tokens| tokens.contains(internal_token))
-                .unwrap_or(false);
-        let target_final_allows = self
-            .parser_dwa
-            .states()
-            .get(*target as usize)
-            .and_then(|target_state| target_state.final_weight.as_ref())
-            .map(|final_weight| {
-                final_weight.is_full()
-                    || final_weight
-                        .0
-                        .get(internal_tsid)
-                        .map(|tokens| tokens.contains(internal_token))
-                        .unwrap_or(false)
-            })
-            .unwrap_or(false);
-        Some((*target, transition_is_full, transition_allows, target_final_allows))
-    }
 }
