@@ -199,6 +199,32 @@ fn o82710_minimal_required_object_prefix() -> Vec<u8> {
     prefix.into_bytes()
 }
 
+fn constraint_mismatch_predicate(constraint: &Constraint, prefix: &[u8], token_id: u32) -> bool {
+    let mut mask_state = constraint.start();
+    if mask_state.commit_bytes(prefix).is_err() {
+        return false;
+    }
+    let mask_accepts = token_allowed(&mask_state.mask(), token_id as usize);
+
+    let mut commit_state = constraint.start();
+    if commit_state.commit_bytes(prefix).is_err() {
+        return false;
+    }
+    let commit_accepts = match catch_unwind(AssertUnwindSafe(|| commit_state.commit_token(token_id))) {
+        Ok(Ok(())) => true,
+        Ok(Err(_)) => false,
+        Err(_) => true,
+    };
+
+    !mask_accepts && commit_accepts
+}
+
+fn direct_glrm_prefix_with_content(content: &[u8]) -> Vec<u8> {
+    let mut prefix = b"{\"description\": \"".to_vec();
+    prefix.extend_from_slice(content);
+    prefix
+}
+
 #[test]
 fn test_o82710_step_580_allows_disputed_token_in_small_vocab() {
     let vocab = make_vocab(&[b"'];?>\"", b" Vimeo"]);
@@ -310,7 +336,7 @@ fn test_o82710_minimal_required_object_inline_glrm_mask_commit_mismatch() {
     let grammar = r#"
 start start;
 
-internal t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]|\\["\\\/bfnrt]|\\u[0-9A-Fa-f]{4}/;
+t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]|\\["\\\/bfnrt]|\\u[0-9A-Fa-f]{4}/;
 t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
 nt json_string ::= "\"" JSON_STRING_BODY;
 internal t JSON_STRING_CHAR_UPTO_256_0 ::= JSON_STRING_CHAR{0,256};
@@ -328,10 +354,7 @@ nt start ::= "{" obj_open_reqmask_0_nc_0 "}";
     let vocab = make_vocab(&[b"'];?>\""]);
     let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
 
-    let mut prefix = String::from("{\"description\": \"");
-    prefix.push_str(&"This is a Vimeo video block. ".repeat(79));
-    prefix.push_str("This is a");
-    let prefix = prefix.into_bytes();
+    let prefix = direct_glrm_prefix_with_content(&vec![b'a'; 2300]);
 
     let mut mask_state = constraint.start();
     mask_state.commit_bytes(&prefix).unwrap();
@@ -348,6 +371,68 @@ nt start ::= "{" obj_open_reqmask_0_nc_0 "}";
         Ok(Err(error)) => panic!("expected minimized inline-GLRM repro token to commit, got {error:?}"),
         Err(_) => {}
     }
+}
+
+#[ignore = "scanner for smaller direct-GLRM prefix/content repros"]
+#[test]
+fn scan_o82710_minimal_required_object_inline_glrm_prefix() {
+    std::panic::set_hook(Box::new(|_| {}));
+
+    let grammar = r#"
+start start;
+
+t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]|\\["\\\/bfnrt]|\\u[0-9A-Fa-f]{4}/;
+t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
+nt json_string ::= "\"" JSON_STRING_BODY;
+internal t JSON_STRING_CHAR_UPTO_256_0 ::= JSON_STRING_CHAR{0,256};
+t JSON_STRING_CHAR_UPTO_CLOSE_1 ::= JSON_STRING_CHAR_UPTO_256_0 "\"";
+t JSON_STRING_CHAR_EXACT_256_2 ::= JSON_STRING_CHAR{256};
+internal t JSON_STRING_CHAR_UPTO_136_3 ::= JSON_STRING_CHAR{0,136};
+t JSON_STRING_CHAR_UPTO_CLOSE_4 ::= JSON_STRING_CHAR_UPTO_136_3 "\"";
+nt json_string_bounded_split_5 ::= "\"" (JSON_STRING_CHAR_EXACT_256_2{0,18} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{19} JSON_STRING_CHAR_UPTO_CLOSE_4);
+nt obj_open_reqmask_0_nc_0 ::= (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_0 | (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_0 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_0 | ", " (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_1 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_1 | ;
+nt start ::= "{" obj_open_reqmask_0_nc_0 "}";
+"#;
+
+    let vocab = make_vocab(&[b"'];?>\""]);
+    let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+    let mut found = None;
+
+    for len in 0..=2400 {
+        let content = vec![b'a'; len];
+        let prefix = direct_glrm_prefix_with_content(&content);
+        if constraint_mismatch_predicate(&constraint, &prefix, 0) {
+            found = Some(("all_a_bytes", len, prefix));
+            break;
+        }
+    }
+
+    if found.is_none() {
+        let unit = b"This is a Vimeo video block. ";
+        for repeats in 0..=79 {
+            let mut content = std::iter::repeat(unit)
+                .take(repeats)
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>();
+            content.extend_from_slice(b"This is a");
+            let prefix = direct_glrm_prefix_with_content(&content);
+            if constraint_mismatch_predicate(&constraint, &prefix, 0) {
+                found = Some(("phrase_repeats", repeats, prefix));
+                break;
+            }
+        }
+    }
+
+    let Some((label, size, prefix)) = found else {
+        panic!("expected direct GLRM scanner to find a smaller reproducing prefix");
+    };
+
+    println!("direct_glrm_prefix_mode={label}");
+    println!("direct_glrm_prefix_size={size}");
+    println!("direct_glrm_prefix={:?}", String::from_utf8_lossy(&prefix));
 }
 
 #[ignore = "scanner for aggressively minimized native open-object mismatch"]
