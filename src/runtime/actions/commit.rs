@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 
 use crate::automata::lexer::tokenizer::TokenizerExecResult;
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
@@ -35,6 +36,52 @@ fn token_bytes_for_id(constraint: &Constraint, token_id: u32) -> Option<&[u8]> {
         .get(token_id as usize)
         .and_then(|bytes| bytes.as_deref())
         .or_else(|| constraint.token_bytes.get(&token_id).map(Vec::as_slice))
+}
+
+fn commit_mask_assert_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLRMASK_ASSERT_COMMIT_TOKEN_MASK_EQUIVALENCE")
+            .map(|value| {
+                let normalized = value.trim().to_ascii_lowercase();
+                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn token_in_mask(mask: &[u32], token_id: u32) -> bool {
+    let word_idx = token_id as usize / 32;
+    let bit_idx = token_id as usize % 32;
+    word_idx < mask.len() && ((mask[word_idx] >> bit_idx) & 1) != 0
+}
+
+fn snapshot_mask_membership(state: &ConstraintState<'_>, token_id: u32) -> Option<bool> {
+    if !commit_mask_assert_enabled() {
+        return None;
+    }
+    let mut mask = vec![0u32; state.constraint.mask_len()];
+    state.fill_mask(&mut mask);
+    Some(token_in_mask(&mask, token_id))
+}
+
+fn assert_mask_commit_equivalence(
+    token_id: u32,
+    token_bytes: &[u8],
+    was_in_mask: Option<bool>,
+    commit_succeeded: bool,
+) {
+    let Some(was_in_mask) = was_in_mask else {
+        return;
+    };
+    assert!(
+        commit_succeeded == was_in_mask,
+        "commit/mask mismatch for token_id {} bytes {:?}: token_in_mask={} commit_succeeded={}",
+        token_id,
+        token_bytes,
+        was_in_mask,
+        commit_succeeded,
+    );
 }
 
 #[inline]
@@ -1386,8 +1433,10 @@ impl<'a> ConstraintState<'a> {
             .ok_or_else(|| {
                 format!("commit_token: token_id {token_id} not in vocabulary")
             })?;
+        let was_in_mask = snapshot_mask_membership(self, token_id);
         let result = commit_bytes_impl(constraint, &mut self.state, bytes, &mut self.buffers);
         self.generation += 1;
+        assert_mask_commit_equivalence(token_id, bytes, was_in_mask, result.is_ok());
         result
     }
 
@@ -1400,10 +1449,12 @@ impl<'a> ConstraintState<'a> {
             .ok_or_else(|| {
                 format!("commit_token: token_id {token_id} not in vocabulary")
             })?;
+        let was_in_mask = snapshot_mask_membership(self, token_id);
         let t_start = std::time::Instant::now();
         let result = commit_bytes_impl(constraint, &mut self.state, bytes, &mut self.buffers);
         let elapsed_ns = t_start.elapsed().as_nanos() as u64;
         self.generation += 1;
+        assert_mask_commit_equivalence(token_id, bytes, was_in_mask, result.is_ok());
         result.map(|()| elapsed_ns)
     }
 
@@ -1418,7 +1469,10 @@ impl<'a> ConstraintState<'a> {
             .ok_or_else(|| {
                 format!("commit_token: token_id {token_id} not in vocabulary")
             })?;
-        commit_bytes_impl_profiled(constraint, &mut self.state, bytes)
+        let was_in_mask = snapshot_mask_membership(self, token_id);
+        let result = commit_bytes_impl_profiled(constraint, &mut self.state, bytes);
+        assert_mask_commit_equivalence(token_id, bytes, was_in_mask, result.is_ok());
+        result
     }
 
     /// Like commit_token_profiled but returns per-advance entries.
@@ -1433,7 +1487,10 @@ impl<'a> ConstraintState<'a> {
             .ok_or_else(|| {
                 format!("commit_token: token_id {token_id} not in vocabulary")
             })?;
-        commit_bytes_per_advance(constraint, &mut self.state, bytes)
+        let was_in_mask = snapshot_mask_membership(self, token_id);
+        let result = commit_bytes_per_advance(constraint, &mut self.state, bytes);
+        assert_mask_commit_equivalence(token_id, bytes, was_in_mask, result.is_ok());
+        result
     }
 
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
