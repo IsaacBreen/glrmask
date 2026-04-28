@@ -830,14 +830,14 @@ fn scan_o82710_inline_glrm_split_token_boundary() {
         internal t JSON_STRING_CHAR_UPTO_136_3 ::= JSON_STRING_CHAR{0,136};
         t JSON_STRING_CHAR_UPTO_CLOSE_4 ::= JSON_STRING_CHAR_UPTO_136_3 "\"";
         nt json_string_bounded_split_5 ::= "\"" (JSON_STRING_CHAR_EXACT_256_2{0,18} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{19} JSON_STRING_CHAR_UPTO_CLOSE_4);
-        nt obj_open_reqmask_0_nc_0 ::= (json_string_bounded_split_5) obj_open_reqmask_0_c_0 | (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
-        nt obj_open_reqmask_0_c_0 ::= ", " (json_string_bounded_split_5) obj_open_reqmask_0_c_0 | ", " (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
-        nt obj_open_reqmask_0_c_1 ::= ", " (json_string_bounded_split_5) obj_open_reqmask_0_c_1 | ;
+        nt obj_open_reqmask_0_nc_0 ::= (json_string_bounded_split_5) obj_open_reqmask_0_c_0;
+        nt obj_open_reqmask_0_c_0 ::= (json_string_bounded_split_5) obj_open_reqmask_0_c_0;
+        nt obj_open_reqmask_0_c_1 ::= (json_string_bounded_split_5) obj_open_reqmask_0_c_1 | ;
         nt start ::= obj_open_reqmask_0_nc_0 "}";
     "#, &vocab).unwrap();
     let mut prefix = b"\"".to_vec();
     prefix.extend_from_slice(&vec![b'a'; 2300]);
-    let tail = b", \"id\": \"\"}";
+    let tail = b"";
 
     let (full_mask, full_commit_token, full_commit_bytes, full_complete) =
         classify_constraint(&constraint, &prefix, [b"aaaaa\""][0], 0, Some(tail));
