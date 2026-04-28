@@ -821,18 +821,16 @@ fn scan_o82710_inline_glrm_split_token_boundary() {
     let constraint = Constraint::from_glrm_grammar(r#"
         start start;
 
-        t JSON_STRING_CHAR ::= /a/;
-        t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
-        nt json_string ::= "\"" JSON_STRING_BODY;
+        t JSON_STRING_CHAR ::= "a";
         internal t JSON_STRING_CHAR_UPTO_256_0 ::= JSON_STRING_CHAR{0,256};
         t JSON_STRING_CHAR_UPTO_CLOSE_1 ::= JSON_STRING_CHAR_UPTO_256_0 "\"";
         t JSON_STRING_CHAR_EXACT_256_2 ::= JSON_STRING_CHAR{256};
         internal t JSON_STRING_CHAR_UPTO_136_3 ::= JSON_STRING_CHAR{0,136};
         t JSON_STRING_CHAR_UPTO_CLOSE_4 ::= JSON_STRING_CHAR_UPTO_136_3 "\"";
-        nt json_string_bounded_split_5 ::= "\"" (JSON_STRING_CHAR_EXACT_256_2{0,18} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{19} JSON_STRING_CHAR_UPTO_CLOSE_4);
-        nt start ::= json_string_bounded_split_5+ | ( "," json_string_bounded_split_5 ) * ;
+        nt json_string_bounded_split_5 ::= (JSON_STRING_CHAR_EXACT_256_2{0,18} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{19} JSON_STRING_CHAR_UPTO_CLOSE_4);
+        nt start ::= json_string_bounded_split_5+ | "," json_string_bounded_split_5 ;
     "#, &vocab).unwrap();
-    let mut prefix = b"\"".to_vec();
+    let mut prefix = b"".to_vec();
     prefix.extend_from_slice(&vec![b'a'; 2300]);
     let tail = b"";
 
