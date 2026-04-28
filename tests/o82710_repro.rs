@@ -817,15 +817,15 @@ fn scan_o82710_inline_glrm_continuation_ladder() {
 #[ignore = "expert experiment: split the closing token across the boundary"]
 #[test]
 fn scan_o82710_inline_glrm_split_token_boundary() {
-    let vocab = make_vocab(&[b"aaaaa\""]);
+    let vocab = make_vocab(&[b"aaa\""]);
     let constraint = Constraint::from_glrm_grammar(r#"
         start start;
-        t JSON_STRING_CHAR_UPTO_CLOSE_1 ::= "a"{0,256} "\"";
-        t JSON_STRING_CHAR_EXACT_256_2 ::= "a"{256};
+        t JSON_STRING_CHAR_UPTO_CLOSE_1 ::= "a"{0,128} "\"";
+        t JSON_STRING_CHAR_EXACT_256_2 ::= "a"{128};
         nt json_string_bounded_split_5 ::= (JSON_STRING_CHAR_EXACT_256_2{0,18} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{19});
         nt start ::= json_string_bounded_split_5+ | "," ? json_string_bounded_split_5 ;
     "#, &vocab).unwrap();
-    let prefix = vec![b'a'; 2300];
+    let prefix = vec![b'a'; 2300/2];
 
     let (full_mask, full_commit_token, full_commit_bytes, full_complete) =
         classify_constraint(&constraint, &prefix, [b"aaaaa\""][0], 0, Some(b""));
