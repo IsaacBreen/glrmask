@@ -824,7 +824,7 @@ fn scan_o82710_inline_glrm_split_token_boundary() {
         t JSON_STRING_CHAR_UPTO_CLOSE_1 ::= "a"{0,32} "\"";
         t JSON_STRING_CHAR_EXACT_256_2 ::= "a"{32};
         nt json_string_bounded_split_5 ::= (JSON_STRING_CHAR_EXACT_256_2{0,4} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{5});
-        nt start ::= json_string_bounded_split_5+ | "," ? json_string_bounded_split_5 ;
+        nt start ::= json_string_bounded_split_5 JSON_STRING_CHAR_UPTO_CLOSE_1 ;
     "#, &vocab).unwrap();
     let prefix = vec![b'a'; 158];
 
@@ -1023,6 +1023,172 @@ nt start ::= json_string_bounded_split_5+ | "," ? json_string_bounded_split_5 ;
                 }
             }
         }
+    }
+}
+
+#[ignore = "focused scanner for smaller exact sizes near the current total-run boundary"]
+#[test]
+fn scan_o82710_inline_glrm_split_token_boundary_constant_total_budget() {
+    let target_totals = [128usize, 144, 160, 192];
+    for exact in [24usize, 16, 12, 10, 8, 6, 5, 4, 3, 2, 1] {
+        for target_total in target_totals {
+            if target_total % exact != 0 {
+                continue;
+            }
+            let full_repeat = target_total / exact;
+            if full_repeat == 0 || full_repeat > 19 {
+                continue;
+            }
+            let repeat_cap = full_repeat - 1;
+            for token_body_len in 2usize..=8 {
+                let token = format!("{}\"", "a".repeat(token_body_len));
+                let vocab = make_vocab(&[token.as_bytes()]);
+                let grammar = format!(
+                    r#"
+start start;
+t JSON_STRING_CHAR_UPTO_CLOSE_1 ::= "a"{{0,{exact}}} "\"";
+t JSON_STRING_CHAR_EXACT_256_2 ::= "a"{{{exact}}};
+nt json_string_bounded_split_5 ::= (JSON_STRING_CHAR_EXACT_256_2{{0,{repeat_cap}}} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{{{full_repeat}}});
+nt start ::= json_string_bounded_split_5+ | "," ? json_string_bounded_split_5 ;
+"#,
+                );
+                let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+                let predicted_prefix = target_total.saturating_sub(token_body_len - 1);
+                let window_start = predicted_prefix.saturating_sub(4);
+                let window_end = predicted_prefix + 4;
+
+                for prefix_len in window_start..=window_end {
+                    let prefix = vec![b'a'; prefix_len];
+                    let (mask_accepts, commit_token_accepts, commit_bytes_accepts, can_complete_after_token) =
+                        classify_constraint(&constraint, &prefix, token.as_bytes(), 0, Some(b""));
+                    if !mask_accepts
+                        && commit_token_accepts
+                        && commit_bytes_accepts
+                        && can_complete_after_token
+                    {
+                        println!(
+                            "constant_budget exact={} repeat_cap={} full_repeat={} target_total={} token_body_len={} token_len={} prefix_len={} residue={}",
+                            exact,
+                            repeat_cap,
+                            full_repeat,
+                            target_total,
+                            token_body_len,
+                            token.len(),
+                            prefix_len,
+                            prefix_len % exact.max(1),
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[ignore = "focused scanner for direct exact-run then close-run sequences"]
+#[test]
+fn scan_o82710_inline_glrm_split_token_boundary_direct_two_piece_sequences() {
+    for exact in [32usize, 24, 16, 12, 10, 8, 6, 5, 4, 3, 2, 1] {
+        for exact_repeats in 1usize..=19 {
+            for token_body_len in 2usize..=8 {
+                let token = format!("{}\"", "a".repeat(token_body_len));
+                let vocab = make_vocab(&[token.as_bytes()]);
+                let grammar = format!(
+                    r#"
+start start;
+t A_UPTO_CLOSE ::= "a"{{0,{exact}}} "\"";
+t A_EXACT ::= "a"{{{exact}}};
+nt start ::= A_EXACT{{{exact_repeats}}} A_UPTO_CLOSE;
+"#,
+                );
+                let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+                let predicted_prefix = (exact * exact_repeats).saturating_sub(token_body_len - 1);
+                let window_start = predicted_prefix.saturating_sub(4);
+                let window_end = predicted_prefix + 4;
+
+                for prefix_len in window_start..=window_end {
+                    let prefix = vec![b'a'; prefix_len];
+                    let (mask_accepts, commit_token_accepts, commit_bytes_accepts, can_complete_after_token) =
+                        classify_constraint(&constraint, &prefix, token.as_bytes(), 0, Some(b""));
+                    if !mask_accepts
+                        && commit_token_accepts
+                        && commit_bytes_accepts
+                        && can_complete_after_token
+                    {
+                        println!(
+                            "direct_two_piece exact={} exact_repeats={} token_body_len={} token_len={} prefix_len={} residue={}",
+                            exact,
+                            exact_repeats,
+                            token_body_len,
+                            token.len(),
+                            prefix_len,
+                            prefix_len % exact.max(1),
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[ignore = "focused scanner for simpler start-rule shapes around the current chunk witness"]
+#[test]
+fn scan_o82710_inline_glrm_split_token_boundary_start_rule_shapes() {
+    let token = b"aaa\"";
+    let vocab = make_vocab(&[token]);
+    let exact = 32usize;
+    let repeat_cap = 4usize;
+    let full_repeat = repeat_cap + 1;
+
+    for (label, start_rule, prefix_len) in [
+        (
+            "current",
+            "nt start ::= json_string_bounded_split_5+ | \",\" ? json_string_bounded_split_5 ;",
+            158usize,
+        ),
+        (
+            "two_chunks",
+            "nt start ::= json_string_bounded_split_5 json_string_bounded_split_5 ;",
+            158usize,
+        ),
+        (
+            "exact_then_chunk",
+            "nt start ::= JSON_STRING_CHAR_EXACT_256_2{5} json_string_bounded_split_5 ;",
+            158usize,
+        ),
+        (
+            "chunk_then_close",
+            "nt start ::= json_string_bounded_split_5 JSON_STRING_CHAR_UPTO_CLOSE_1 ;",
+            158usize,
+        ),
+        (
+            "five_exact_then_close",
+            "nt start ::= JSON_STRING_CHAR_EXACT_256_2{5} JSON_STRING_CHAR_UPTO_CLOSE_1 ;",
+            158usize,
+        ),
+    ] {
+        let grammar = format!(
+            r#"
+start start;
+t JSON_STRING_CHAR_UPTO_CLOSE_1 ::= "a"{{0,{exact}}} "\"";
+t JSON_STRING_CHAR_EXACT_256_2 ::= "a"{{{exact}}};
+nt json_string_bounded_split_5 ::= (JSON_STRING_CHAR_EXACT_256_2{{0,{repeat_cap}}} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{{{full_repeat}}});
+{start_rule}
+"#,
+        );
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+        let prefix = vec![b'a'; prefix_len];
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts, can_complete_after_token) =
+            classify_constraint(&constraint, &prefix, token, 0, Some(b""));
+        println!(
+            "start_rule_shape={} mask={} commit_token={} commit_bytes={} complete_after_token={}",
+            label,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+            can_complete_after_token,
+        );
     }
 }
 
