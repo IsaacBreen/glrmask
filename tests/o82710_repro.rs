@@ -820,18 +820,15 @@ fn scan_o82710_inline_glrm_split_token_boundary() {
     let vocab = make_vocab(&[b"aaaaa\""]);
     let constraint = Constraint::from_glrm_grammar(r#"
         start start;
-
         t JSON_STRING_CHAR_UPTO_CLOSE_1 ::= "a"{0,256} "\"";
         t JSON_STRING_CHAR_EXACT_256_2 ::= "a"{256};
         nt json_string_bounded_split_5 ::= (JSON_STRING_CHAR_EXACT_256_2{0,18} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{19});
         nt start ::= json_string_bounded_split_5+ | "," ? json_string_bounded_split_5 ;
     "#, &vocab).unwrap();
-    let mut prefix = b"".to_vec();
-    prefix.extend_from_slice(&vec![b'a'; 2300]);
-    let tail = b"";
+    let prefix = vec![b'a'; 2300];
 
     let (full_mask, full_commit_token, full_commit_bytes, full_complete) =
-        classify_constraint(&constraint, &prefix, [b"aaaaa\""][0], 0, Some(tail));
+        classify_constraint(&constraint, &prefix, [b"aaaaa\""][0], 0, Some(b""));
     println!(
         "split_full_token mask={} commit_token={} commit_bytes={} complete_after_token={}",
         full_mask,
