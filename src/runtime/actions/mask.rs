@@ -2,6 +2,7 @@ use crate::runtime::state::ConstraintState;
 use crate::compiler::glr::labels::{encode_positive_label, DEFAULT_LABEL};
 use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use crate::ds::weight::Weight;
+use once_cell::sync::Lazy;
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
@@ -9,6 +10,10 @@ use std::sync::Arc;
 
 type DenseTokenMaskCache = FxHashMap<usize, Box<[u64]>>;
 type MaskQueue = BTreeMap<u32, FxHashMap<u32, DenseMaskGSS>>;
+
+static DISABLE_MASK_CHAIN_FAST_PATH: Lazy<bool> = Lazy::new(|| {
+    std::env::var_os("GLRMASK_DISABLE_MASK_CHAIN_FAST_PATH").is_some()
+});
 
 /// Timings returned by [`ConstraintState::fill_mask_profiled`].
 /// All fields are in nanoseconds. Fields not relevant to the code path taken
@@ -440,10 +445,9 @@ impl<'a> ConstraintState<'a> {
 
         let mut dense: Vec<u64> = vec![0u64; universe.len()];
         for (&orig_tokenizer_state, disallowed_in_state) in terminals_disallowed.iter() {
-            let tsid = orig_tokenizer_state;
             let mut allowed_for_state = universe.to_vec();
             for &terminal_id in disallowed_in_state {
-                if let Some(mask) = terminal_masks.get(&(tsid, terminal_id)) {
+                if let Some(mask) = terminal_masks.get(&(orig_tokenizer_state, terminal_id)) {
                     for (allowed_word, mask_word) in allowed_for_state.iter_mut().zip(mask.iter()) {
                         *allowed_word &= !mask_word;
                     }
@@ -486,7 +490,7 @@ impl<'a> ConstraintState<'a> {
 
             // Chain fast path: extract chain from parser GSS and walk DWA inline,
             // avoiding intermediate DenseMaskGSS allocations and BFS queue round-trips.
-            if std::env::var_os("GLRMASK_DISABLE_MASK_CHAIN_FAST_PATH").is_none()
+            if !*DISABLE_MASK_CHAIN_FAST_PATH
                 && let Some((chain_states, parser_acc, tail)) = gss.extract_chain_and_tail()
             {
                 if let Some(c) = counters.as_mut() {
@@ -665,9 +669,13 @@ impl<'a> ConstraintState<'a> {
 
         // Merged internal token bitmap: collect all FW contributions here,
         // then convert to buf once at the end to avoid redundant complement-path passes.
-        let mut scratch = self.mask_scratch.lock().unwrap();
-        let mut merged = std::mem::take(&mut scratch.merged_dense);
-        let mut chain_merged = std::mem::take(&mut scratch.chain_merged_dense);
+        let (mut merged, mut chain_merged) = {
+            let mut scratch = self.mask_scratch.lock().unwrap();
+            (
+                std::mem::take(&mut scratch.merged_dense),
+                std::mem::take(&mut scratch.chain_merged_dense),
+            )
+        };
         merged.clear();
         merged.resize(dense_words, 0);
         let mut queue = MaskQueue::new();
@@ -715,7 +723,7 @@ impl<'a> ConstraintState<'a> {
                 // Chain optimization: if the GSS has a long chain of single-path
                 // levels, walk through them directly instead of decomposing one
                 // level at a time. This avoids intermediate GSS allocations.
-                if std::env::var_os("GLRMASK_DISABLE_MASK_CHAIN_FAST_PATH").is_none()
+                if !*DISABLE_MASK_CHAIN_FAST_PATH
                     && let Some((chain_states, chain_acc, tail_lower)) = gss.extract_chain_and_tail()
                 {
                     let mut acc = chain_acc.clone();
@@ -962,8 +970,11 @@ impl<'a> ConstraintState<'a> {
                 }
             }
         }
-        scratch.merged_dense = merged;
-        scratch.chain_merged_dense = chain_merged;
+        {
+            let mut scratch = self.mask_scratch.lock().unwrap();
+            scratch.merged_dense = merged;
+            scratch.chain_merged_dense = chain_merged;
+        }
 
         if PROFILE {
             let c = counters.unwrap();
