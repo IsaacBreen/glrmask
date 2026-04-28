@@ -5262,10 +5262,10 @@ fn test_temp_name() {
     let schema = r##"{
         "type": "object",
         "properties": {
-            "a": {"constant": "x"},
-            "b": {"constant": "x"},
-            "bcd": {"constant": "x"},
-            "e": {"constant": "x"}
+            "a": {"type": "string", "const": "x"},
+            "b": {"type": "string", "const": "x"},
+            "bcd": {"type": "string", "const": "x"},
+            "e": {"type": "string", "const": "x"}
         },
         "required": ["a", "bcd", "e"],
         "additionalProperties": false
@@ -5281,3 +5281,22 @@ fn test_temp_name() {
     let mut state = constraint.start();
     state.commit_token(0).unwrap();
 }
+
+#[test]
+fn test_temp_name_glrm() {
+    let glrm = r##"
+        start start;
+        nt start ::= "s" "," ~ ( "a" "b"? "bc" "e" );
+    "##;
+
+    let vocab = Vocab::new(
+        vec![
+            (0, b"sa,bc".to_vec()),
+        ],
+        None,
+    );
+    let constraint = crate::Constraint::from_glrm_grammar(glrm, &vocab).unwrap();
+    let mut state = constraint.start();
+    state.commit_token(0).unwrap();
+}
+
