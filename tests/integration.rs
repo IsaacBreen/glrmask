@@ -5286,12 +5286,12 @@ fn test_temp_name() {
 fn test_temp_name_glrm() {
     let glrm = r##"
         start start;
-        nt start ::= "s" "," ~ ( "a" "b"? "bc" "e" );
+        nt start ::= "a" "b" ~ ( "a" "a"? "b" "a" );
     "##;
 
     let vocab = Vocab::new(
         vec![
-            (0, b"sa,bc".to_vec()),
+            (0, b"aabb".to_vec()),
         ],
         None,
     );
