@@ -1854,6 +1854,193 @@ nt start ::= (("a"{32}){4} ("a"{0,32} "\"") | ("a"{32}){5}) ("a"{0,32} "\"");
     }
 }
 
+#[ignore = "focused scanner for smaller exact sizes in the current inline-close witness"]
+#[test]
+fn scan_o82710_inline_glrm_split_token_boundary_inline_close_exact_range() {
+    let token = b"aa\"";
+
+    for exact in 1usize..=32 {
+        let vocab = Vocab::new(vec![(0, token.to_vec())], None);
+        let grammar = format!(
+            r#"
+start start;
+t A_EXACT ::= "a"{{{exact}}};
+nt start ::= (A_EXACT{{4}} ("a"{{0,{exact}}} "\"") | A_EXACT{{5}}) ("a"{{0,{exact}}} "\"");
+"#,
+        );
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+
+        let predicted_prefix = (5 * exact).saturating_sub(1);
+        let window_start = predicted_prefix.saturating_sub(8);
+        let window_end = predicted_prefix + 8;
+
+        for prefix_len in window_start..=window_end {
+            let prefix = vec![b'a'; prefix_len];
+
+            let mut mask_state = constraint.start();
+            if mask_state.commit_bytes(&prefix).is_err() {
+                continue;
+            }
+            let mask_accepts = mask_state.mask().first().is_some_and(|word| (word & 1) != 0);
+
+            let mut commit_token_state = constraint.start();
+            if commit_token_state.commit_bytes(&prefix).is_err() {
+                continue;
+            }
+            let commit_token_accepts = match catch_unwind(AssertUnwindSafe(|| commit_token_state.commit_token(0))) {
+                Ok(Ok(())) => true,
+                Ok(Err(_)) => false,
+                Err(_) => true,
+            };
+
+            let mut commit_bytes_state = constraint.start();
+            if commit_bytes_state.commit_bytes(&prefix).is_err() {
+                continue;
+            }
+            let commit_bytes_accepts = commit_bytes_state.commit_bytes(token).is_ok();
+
+            if !mask_accepts && commit_token_accepts && commit_bytes_accepts {
+                println!(
+                    "inline_close_exact_hit exact={} prefix_len={} residue={}",
+                    exact,
+                    prefix_len,
+                    prefix_len % exact,
+                );
+                break;
+            }
+        }
+    }
+}
+
+#[ignore = "focused scanner for shorter tokens in the current inline-close witness"]
+#[test]
+fn scan_o82710_inline_glrm_split_token_boundary_inline_close_token_lengths() {
+    for token_body_len in 0usize..=5 {
+        let token = format!("{}\"", "a".repeat(token_body_len));
+        let vocab = Vocab::new(vec![(0, token.as_bytes().to_vec())], None);
+        let constraint = Constraint::from_glrm_grammar(r#"
+start start;
+t A_EXACT ::= "a"{32};
+nt start ::= (A_EXACT{4} ("a"{0,32} "\"") | A_EXACT{5}) ("a"{0,32} "\"");
+"#, &vocab).unwrap();
+
+        let predicted_prefix = 160usize.saturating_sub(token_body_len.saturating_sub(1));
+        let window_start = predicted_prefix.saturating_sub(8);
+        let window_end = predicted_prefix + 8;
+
+        for prefix_len in window_start..=window_end {
+            let prefix = vec![b'a'; prefix_len];
+
+            let mut mask_state = constraint.start();
+            if mask_state.commit_bytes(&prefix).is_err() {
+                continue;
+            }
+            let mask_accepts = mask_state.mask().first().is_some_and(|word| (word & 1) != 0);
+
+            let mut commit_token_state = constraint.start();
+            if commit_token_state.commit_bytes(&prefix).is_err() {
+                continue;
+            }
+            let commit_token_accepts = match catch_unwind(AssertUnwindSafe(|| commit_token_state.commit_token(0))) {
+                Ok(Ok(())) => true,
+                Ok(Err(_)) => false,
+                Err(_) => true,
+            };
+
+            let mut commit_bytes_state = constraint.start();
+            if commit_bytes_state.commit_bytes(&prefix).is_err() {
+                continue;
+            }
+            let commit_bytes_accepts = commit_bytes_state.commit_bytes(token.as_bytes()).is_ok();
+
+            if !mask_accepts && commit_token_accepts && commit_bytes_accepts {
+                println!(
+                    "inline_close_token_hit token_body_len={} token_len={} prefix_len={} residue={}",
+                    token_body_len,
+                    token.len(),
+                    prefix_len,
+                    prefix_len % 32,
+                );
+                break;
+            }
+        }
+    }
+}
+
+#[ignore = "focused scanner for simpler equivalent-looking grammar shapes in the current witness family"]
+#[test]
+fn scan_o82710_inline_glrm_split_token_boundary_simpler_shapes() {
+    let token = b"aa\"";
+    let vocab = Vocab::new(vec![(0, token.to_vec())], None);
+
+    for (label, grammar) in [
+        (
+            "current",
+            r#"
+start start;
+t A_EXACT ::= "a"{32};
+nt start ::= (A_EXACT{4} ("a"{0,32} "\"") | A_EXACT{5}) ("a"{0,32} "\"");
+"#,
+        ),
+        (
+            "factored_prefix",
+            r#"
+start start;
+t A_EXACT ::= "a"{32};
+nt start ::= A_EXACT{4} (("a"{0,32} "\"") | A_EXACT) ("a"{0,32} "\"");
+"#,
+        ),
+        (
+            "tail_nonterminal",
+            r#"
+start start;
+t A_EXACT ::= "a"{32};
+nt TAIL ::= (("a"{0,32} "\"") | A_EXACT) ("a"{0,32} "\"");
+nt start ::= A_EXACT{4} TAIL;
+"#,
+        ),
+        (
+            "explicit_alt_tail",
+            r#"
+start start;
+t A_EXACT ::= "a"{32};
+nt TAIL ::= ("a"{0,32} "\"") ("a"{0,32} "\"") | A_EXACT ("a"{0,32} "\"");
+nt start ::= A_EXACT{4} TAIL;
+"#,
+        ),
+    ] {
+        let Ok(constraint) = Constraint::from_glrm_grammar(grammar, &vocab) else {
+            println!("simpler_shape={} compile=false", label);
+            continue;
+        };
+        let prefix = [b'a'; 159];
+
+        let mut mask_state = constraint.start();
+        mask_state.commit_bytes(&prefix).unwrap();
+        let mask_accepts = mask_state.mask().first().is_some_and(|word| (word & 1) != 0);
+
+        let mut commit_token_state = constraint.start();
+        commit_token_state.commit_bytes(&prefix).unwrap();
+        let commit_token_accepts = match catch_unwind(AssertUnwindSafe(|| commit_token_state.commit_token(0))) {
+            Ok(Ok(())) => true,
+            Ok(Err(_)) => false,
+            Err(_) => true,
+        };
+
+        let mut commit_bytes_state = constraint.start();
+        commit_bytes_state.commit_bytes(&prefix).unwrap();
+        let commit_bytes_accepts = commit_bytes_state.commit_bytes(token).is_ok();
+
+        println!(
+            "simpler_shape={} mask={} commit_token={} commit_bytes={}",
+            label,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+        );
+    }
+}
+
 #[ignore = "scanner for aggressively minimized native open-object mismatch"]
 #[test]
 fn scan_o82710_minimal_open_object_schema_single_token_vocab() {
