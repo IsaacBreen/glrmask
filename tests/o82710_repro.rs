@@ -1862,11 +1862,11 @@ fn scan_o82710_inline_glrm_split_token_boundary_inline_close_exact_range() {
     for exact in 1usize..=32 {
         let vocab = Vocab::new(vec![(0, token.to_vec())], None);
         let grammar = format!(
-            r#"
-start start;
-t A_EXACT ::= "a"{{{exact}}};
-nt start ::= (A_EXACT{{4}} ("a"{{0,{exact}}} "\"") | A_EXACT{{5}}) ("a"{{0,{exact}}} "\"");
-"#,
+        r#"
+            start start;
+            t A_EXACT ::= "a"{{{exact}}};
+            nt start ::= (A_EXACT{{4}} ("a"{{0,{exact}}} "\"") | A_EXACT{{5}}) ("a"{{0,{exact}}} "\"");
+        "#,
         );
         let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
 
