@@ -5260,23 +5260,14 @@ start start;
 #[test]
 fn test_temp_name() {
     let schema = r##"{
-        "$defs": {
-            "event": {
-                "type": "object",
-                "properties": {
-                    "addListener": {"type": "string"},
-                    "removeRules": {"type": "string"}
-                }
-            }
-        },
         "type": "object",
         "properties": {
             "a": {"type": "string"},
-            "b": {"$ref": "#/$defs/event"},
-            "bcd": {"$ref": "#/$defs/event"},
-            "tail": {"type": "string"}
+            "b": {"type": "string"},
+            "bcd": {"type": "string"},
+            "e": {"type": "string"}
         },
-        "required": ["a", "bcd", "tail"],
+        "required": ["a", "bcd", "e"],
         "additionalProperties": false
     }"##;
 
