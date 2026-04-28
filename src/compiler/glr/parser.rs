@@ -12,9 +12,7 @@ use std::sync::Arc;
 
 use super::accumulator::TerminalsDisallowed;
 use super::analysis::EOF;
-use super::table::{Action, GLRTable, GuardedStackShift};
-#[cfg(test)]
-use super::table::StackShiftGuard;
+use super::table::{Action, GLRTable, GuardedStackShift, StackShiftGuard};
 use crate::grammar::flat::TerminalID;
 use crate::ds::bitset::BitSet;
 use crate::ds::leveled_gss::{LeveledGSS, VirtualStack};
@@ -142,6 +140,49 @@ fn apply_guarded_stack_shifts(gss: ParserGSS, shifts: &[GuardedStackShift]) -> P
     }
 
     out
+}
+
+#[inline]
+fn virtual_stack_satisfies_guards(
+    stack: &VirtualStack<u32, TerminalsDisallowed>,
+    guards: &[StackShiftGuard],
+) -> bool {
+    let mut cursor = stack.clone();
+    let mut depth = 0u32;
+
+    for guard in guards {
+        if guard.pop < depth {
+            return false;
+        }
+
+        if cursor.pop((guard.pop - depth) as usize) != 0 {
+            return false;
+        }
+
+        let Some(&state) = cursor.top() else {
+            return false;
+        };
+        if guard.states.binary_search(&state).is_err() {
+            return false;
+        }
+
+        depth = guard.pop;
+    }
+
+    true
+}
+
+#[inline]
+fn virtual_stack_may_apply_guarded_shift(
+    stack: &VirtualStack<u32, TerminalsDisallowed>,
+    shift: &GuardedStackShift,
+) -> bool {
+    if !virtual_stack_satisfies_guards(stack, &shift.guards) {
+        return false;
+    }
+
+    let mut cursor = stack.clone();
+    cursor.pop(shift.pop as usize) == 0
 }
 
 fn shift_frontier(table: &GLRTable, gss: ParserGSS, token: TerminalID) -> ParserGSS {
@@ -587,15 +628,23 @@ fn advance_deterministically(
 }
 
 pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
+    let virtual_stack = stack.try_virtual_stack();
     stack.peek_values().into_iter().any(|state| {
         let Some(action) = table.action(state, token) else {
             return false;
         };
         match action {
-            Action::GuardedStackShifts(shifts) => {
-                let isolated = stack.isolate(Some(state));
-                !apply_guarded_stack_shifts(isolated, shifts).is_empty()
-            }
+            Action::GuardedStackShifts(shifts) => virtual_stack
+                .as_ref()
+                .is_some_and(|vstack| {
+                    shifts
+                        .iter()
+                        .any(|shift| virtual_stack_may_apply_guarded_shift(vstack, shift))
+                })
+                || {
+                    let isolated = stack.isolate(Some(state));
+                    !apply_guarded_stack_shifts(isolated, shifts).is_empty()
+                },
             _ => true,
         }
     })
@@ -1060,6 +1109,7 @@ pub(crate) fn stack_may_advance_on_any(
     stack: &ParserGSS,
     terminals: &BitSet,
 ) -> bool {
+    let virtual_stack = stack.try_virtual_stack();
     stack.peek_values().into_iter().any(|state| {
         table.action.get(state as usize).is_some_and(|actions| {
             actions.iter().any(|(&terminal, action)| {
@@ -1067,10 +1117,17 @@ pub(crate) fn stack_may_advance_on_any(
                     return false;
                 }
                 match action {
-                    Action::GuardedStackShifts(shifts) => {
-                        let isolated = stack.isolate(Some(state));
-                        !apply_guarded_stack_shifts(isolated, shifts).is_empty()
-                    }
+                    Action::GuardedStackShifts(shifts) => virtual_stack
+                        .as_ref()
+                        .is_some_and(|vstack| {
+                            shifts
+                                .iter()
+                                .any(|shift| virtual_stack_may_apply_guarded_shift(vstack, shift))
+                        })
+                        || {
+                            let isolated = stack.isolate(Some(state));
+                            !apply_guarded_stack_shifts(isolated, shifts).is_empty()
+                        },
                     _ => true,
                 }
             })
@@ -1268,7 +1325,6 @@ fn advance_stack_vectors(
     dedup_stacks(next)
 }
 
-#[cfg(test)]
 fn stack_satisfies_guards(stack: &[u32], guards: &[StackShiftGuard]) -> bool {
     for guard in guards {
         let Some(index) = stack.len().checked_sub(guard.pop as usize + 1) else {
