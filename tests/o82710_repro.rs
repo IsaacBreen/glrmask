@@ -304,6 +304,65 @@ fn test_o82710_minimal_required_object_prepared_grammar_mask_commit_mismatch() {
     }
 }
 
+#[ignore = "known minimized direct-GLRM mismatch: mask rejects token that commit accepts"]
+#[test]
+fn test_o82710_minimal_required_object_inline_glrm_mask_commit_mismatch() {
+    let grammar = r#"
+start start;
+
+internal t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]|\\["\\\/bfnrt]|\\u[0-9A-Fa-f]{4}/;
+t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
+nt json_string ::= "\"" JSON_STRING_BODY;
+t JSON_INTEGER ::= /-?(0|[1-9][0-9]*)/;
+t JSON_NUMBER ::= /-?(0|[1-9][0-9]*)(\.[0-9]+([eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+)/;
+t JSON_BOOL ::= "true" | "false";
+t JSON_NULL ::= "null";
+t JSON_KEY_COLON_BODY ::= JSON_STRING_CHAR* "\"";
+nt json_key_colon ::= "\"" JSON_KEY_COLON_BODY ": ";
+nt json_kv ::= json_key_colon json_value;
+nt json_object ::= "{" ", " ~ ( json_kv* ) "}";
+nt json_array ::= "[" ", " ~ ( json_value* ) "]";
+nt json_value ::= json_object | json_array | json_string | JSON_NUMBER | JSON_INTEGER | JSON_BOOL | JSON_NULL;
+internal t JSON_STRING_CHAR_UPTO_256_0 ::= JSON_STRING_CHAR{0,256};
+t JSON_STRING_CHAR_UPTO_CLOSE_1 ::= JSON_STRING_CHAR_UPTO_256_0 "\"";
+t JSON_STRING_CHAR_EXACT_256_2 ::= JSON_STRING_CHAR{256};
+internal t JSON_STRING_CHAR_UPTO_136_3 ::= JSON_STRING_CHAR{0,136};
+t JSON_STRING_CHAR_UPTO_CLOSE_4 ::= JSON_STRING_CHAR_UPTO_136_3 "\"";
+nt json_string_bounded_split_5 ::= "\"" (JSON_STRING_CHAR_EXACT_256_2{0,18} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{19} JSON_STRING_CHAR_UPTO_CLOSE_4);
+internal t AP_SHARED_KEY_COLON_6 ::= "description\"" | "id\"";
+internal t AP_SHARED_KEY_COLON_7 ::= (([ !#-[\]-~] | [\xC2-\xDF] [\x80-\xBF] | [\xE0] [\xA0-\xBF] [\x80-\xBF] | [\xE1-\xEC] [\x80-\xBF] [\x80-\xBF] | [\xED] [\x80-\x9F] [\x80-\xBF] | [\xEE\xEF] [\x80-\xBF] [\x80-\xBF] | [\xF0] [\x90-\xBF] [\x80-\xBF] [\x80-\xBF] | [\xF1-\xF3] [\x80-\xBF] [\x80-\xBF] [\x80-\xBF] | [\xF4] [\x80-\x8F] [\x80-\xBF] [\x80-\xBF]) | "\\" ["/\\bfnrt] | "\\" "u" [0-9A-Fa-f]{4})* "\"";
+t AP_SHARED_KEY_COLON_8 ::= AP_SHARED_KEY_COLON_7 - AP_SHARED_KEY_COLON_6;
+nt obj_open_reqmask_0_nc_0 ::= (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_0 | (("\"" AP_SHARED_KEY_COLON_8 ": ") json_value) obj_open_reqmask_0_c_0 | (("\"" "id\"" ": ") json_value) obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_0 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_0 | ", " (("\"" AP_SHARED_KEY_COLON_8 ": ") json_value) obj_open_reqmask_0_c_0 | ", " (("\"" "id\"" ": ") json_value) obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_1 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_1 | ", " (("\"" AP_SHARED_KEY_COLON_8 ": ") json_value) obj_open_reqmask_0_c_1 | ;
+nt start ::= "{" obj_open_reqmask_0_nc_0 "}";
+"#;
+
+    let vocab = make_vocab(&[b"'];?>\""]);
+    let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+
+    let mut prefix = String::from("{\"description\": \"");
+    prefix.push_str(&"This is a Vimeo video block. ".repeat(79));
+    prefix.push_str("This is a");
+    let prefix = prefix.into_bytes();
+
+    let mut mask_state = constraint.start();
+    mask_state.commit_bytes(&prefix).unwrap();
+    assert!(
+        !token_allowed(&mask_state.mask(), 0),
+        "expected minimized inline-GLRM repro token to be absent from mask"
+    );
+
+    let mut commit_state = constraint.start();
+    commit_state.commit_bytes(&prefix).unwrap();
+    let commit_result = catch_unwind(AssertUnwindSafe(|| commit_state.commit_token(0)));
+    match commit_result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => panic!("expected minimized inline-GLRM repro token to commit, got {error:?}"),
+        Err(_) => {}
+    }
+}
+
 #[ignore = "scanner for aggressively minimized native open-object mismatch"]
 #[test]
 fn scan_o82710_minimal_open_object_schema_single_token_vocab() {
