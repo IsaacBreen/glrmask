@@ -796,6 +796,8 @@ fn compile_prepared_with_profile(
                         &analyzed_grammar,
                         &terminal_dwa,
                         templates,
+                        vocab,
+                        &internal_ids,
                     );
                     (parser_dwa, elapsed_ms(parser_dwa_started_at))
                 },

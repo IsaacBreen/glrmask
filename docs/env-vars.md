@@ -52,6 +52,7 @@ This document lists all `GLRMASK_*` environment variables used in this crate, gr
 |---|---|---|
 | `GLRMASK_FORCE_ALL_L2P` | strict `1` bool | off |
 | `GLRMASK_DEBUG_DWA_DUMP` | strict `1` bool | off |
+| `GLRMASK_DEBUG_PARSER_DWA_DUMP` | strict `1` bool | off |
 | `GLRMASK_PROFILE_TERMINAL_DWA` | presence toggle | off |
 | `GLRMASK_PROFILE_PARSER_DWA` | presence toggle | off |
 | `GLRMASK_PROFILE_PARSER_DWA_BUNDLE_DETERMINIZE` | presence toggle | off |

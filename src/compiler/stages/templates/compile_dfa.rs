@@ -894,6 +894,8 @@ mod tests {
             &analyzed,
             &terminal_dwa,
             templates,
+            &vocab,
+            &id_map,
         );
         eprintln!("=== Parser DWA ===");
         print_weighted_dwa("parser_dwa", &parser_dwa);

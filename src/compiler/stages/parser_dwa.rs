@@ -5,7 +5,6 @@ use std::time::Instant;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
-#[cfg(test)]
 use crate::Vocab;
 #[cfg(test)]
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -16,7 +15,6 @@ use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::compiler::glr::table::GLRTable;
 use crate::grammar::flat::TerminalID;
-#[cfg(test)]
 use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::compiler::stages::resolve_negatives::resolve_negative_codes_in_nwa;
 #[cfg(test)]
@@ -1427,6 +1425,8 @@ pub(crate) fn build_parser_dwa(
         grammar,
         &terminal_dwa,
         templates,
+        vocab,
+        id_map,
     );
     parser_dwa.clip_weights(id_map.max_internal_token_id());
     parser_dwa
@@ -1437,6 +1437,8 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     grammar: &AnalyzedGrammar,
     terminal_dwa: &DWA,
     templates: Templates,
+    vocab: &Vocab,
+    id_map: &InternalIdMap,
 ) -> DWA {
     let total_started_at = Instant::now();
     let Some((mut parser_nwa, mut profile)) =
@@ -1547,7 +1549,123 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
         );
     }
 
+    if std::env::var("GLRMASK_DEBUG_PARSER_DWA_DUMP").map_or(false, |v| v == "1") {
+        emit_parser_dwa_token_map(&minimized, vocab, id_map);
+        emit_parser_dwa_debug_dump(&minimized);
+    }
+
     minimized
+}
+
+fn emit_parser_dwa_token_map(dwa: &DWA, vocab: &Vocab, id_map: &InternalIdMap) {
+    use super::id_map_and_terminal_dwa::l2p::nwa_builder::internal_vocab_entries;
+    let internal_vocab = internal_vocab_entries(vocab, id_map);
+    let internal_bytes: std::collections::BTreeMap<u32, &[u8]> =
+        internal_vocab.iter().map(|(id, bytes)| (*id, bytes.as_slice())).collect();
+    let mut referenced_tokens = std::collections::BTreeSet::new();
+    for state in dwa.states() {
+        for (_, (_, weight)) in &state.transitions {
+            for tid in weight.token_union().iter() {
+                referenced_tokens.insert(tid);
+            }
+        }
+        if let Some(fw) = &state.final_weight {
+            for tid in fw.token_union().iter() {
+                referenced_tokens.insert(tid);
+            }
+        }
+    }
+    for tid in &referenced_tokens {
+        if let Some(bytes) = internal_bytes.get(tid) {
+            let originals = id_map.vocab_tokens.internal_to_originals.get(*tid as usize)
+                .map(|v| v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","))
+                .unwrap_or_else(|| "?".into());
+            eprintln!(
+                "[glrmask/debug][parser_dwa][token_map] internal={} originals=[{}] bytes={:?}",
+                tid, originals, String::from_utf8_lossy(bytes)
+            );
+        }
+    }
+}
+
+fn emit_parser_dwa_debug_dump(dwa: &DWA) {
+    let num_states = dwa.num_states() as usize;
+    let start_state = dwa.start_state() as usize;
+    let mut incoming_counts = vec![0usize; num_states];
+    let mut outgoing_counts = vec![0usize; num_states];
+    let mut final_states = 0usize;
+    let mut self_loops = 0usize;
+    let mut transitions_to_start = 0usize;
+    let mut transitions_from_start = 0usize;
+    let mut transitions_from_start_to_start = 0usize;
+
+    for (state_id, state) in dwa.states().iter().enumerate() {
+        outgoing_counts[state_id] = state.transitions.len();
+        for (_, (target, _)) in &state.transitions {
+            incoming_counts[*target as usize] += 1;
+            if *target as usize == start_state {
+                transitions_to_start += 1;
+            }
+            if state_id == start_state {
+                transitions_from_start += 1;
+            }
+            if state_id == start_state && *target as usize == start_state {
+                transitions_from_start_to_start += 1;
+            }
+            if *target as usize == state_id {
+                self_loops += 1;
+            }
+        }
+        if state.final_weight.is_some() {
+            final_states += 1;
+        }
+    }
+
+    eprintln!(
+        "[glrmask/debug][parser_dwa][dump] states={} final_states={} self_loops={} to_start={} from_start={} from_start_to_start={}",
+        num_states, final_states, self_loops, transitions_to_start, transitions_from_start, transitions_from_start_to_start,
+    );
+
+    for (state_id, state) in dwa.states().iter().enumerate() {
+        let incoming = incoming_counts[state_id];
+        let outgoing = outgoing_counts[state_id];
+        let to_start = state
+            .transitions
+            .values()
+            .filter(|(to, _)| *to as usize == start_state)
+            .count();
+        let self_loop_count = state
+            .transitions
+            .values()
+            .filter(|(to, _)| *to as usize == state_id)
+            .count();
+        let final_weight = state
+            .final_weight
+            .as_ref()
+            .map(|weight| format!("{weight}"))
+            .unwrap_or_else(|| "none".to_string());
+        let start_mark = if state_id == start_state {
+            " [START]"
+        } else {
+            ""
+        };
+
+        eprintln!(
+            "[glrmask/debug][parser_dwa][state] id={}{} incoming={} outgoing={} to_start={} self_loops={} final={}",
+            state_id,
+            start_mark,
+            incoming,
+            outgoing,
+            to_start,
+            self_loop_count,
+            final_weight,
+        );
+
+        for (label, (target, weight)) in &state.transitions {
+            eprintln!("    {label} -> State {target}");
+            eprintln!("      weight: {weight}");
+        }
+    }
 }
 
 #[cfg(test)]
