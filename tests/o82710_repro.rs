@@ -823,7 +823,7 @@ fn scan_o82710_inline_glrm_split_token_boundary() {
         start start;
         t A_UPTO_CLOSE ::= "a"{0,32} "\"";
         t A_EXACT ::= "a"{32};
-        nt start ::= (A_EXACT{0,4} A_UPTO_CLOSE | A_EXACT{5}) A_UPTO_CLOSE;
+        nt start ::= (A_EXACT{4} A_UPTO_CLOSE | A_EXACT{5}) A_UPTO_CLOSE;
     "#, &vocab).unwrap();
     let prefix = vec![b'a'; 159];
 
@@ -1329,6 +1329,188 @@ nt start ::= (A_EXACT{0,4} A_UPTO_CLOSE | A_EXACT{5}) A_UPTO_CLOSE;
             classify_constraint(&constraint, &prefix, token, 0, Some(b""));
         println!(
             "inline_start_shape={} mask={} commit_token={} commit_bytes={} complete_after_token={}",
+            label,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+            can_complete_after_token,
+        );
+    }
+}
+
+#[ignore = "focused scanner for the minimal exact count in the current inline-start family"]
+#[test]
+fn scan_o82710_inline_glrm_split_token_boundary_inline_start_exact_range() {
+    let token = b"aa\"";
+
+    for exact in 1usize..=32 {
+        let vocab = make_vocab(&[token]);
+        let grammar = format!(
+            r#"
+start start;
+t A_UPTO_CLOSE ::= "a"{{0,{exact}}} "\"";
+t A_EXACT ::= "a"{{{exact}}};
+nt start ::= (A_EXACT{{0,4}} A_UPTO_CLOSE | A_EXACT{{5}}) A_UPTO_CLOSE;
+"#,
+        );
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+        let predicted_prefix = (5 * exact).saturating_sub(1);
+        let window_start = predicted_prefix.saturating_sub(6);
+        let window_end = predicted_prefix + 6;
+
+        for prefix_len in window_start..=window_end {
+            let prefix = vec![b'a'; prefix_len];
+            let (mask_accepts, commit_token_accepts, commit_bytes_accepts, can_complete_after_token) =
+                classify_constraint(&constraint, &prefix, token, 0, Some(b""));
+            if !mask_accepts
+                && commit_token_accepts
+                && commit_bytes_accepts
+                && can_complete_after_token
+            {
+                println!(
+                    "inline_start_exact_hit exact={} prefix_len={} residue={}",
+                    exact,
+                    prefix_len,
+                    prefix_len % exact,
+                );
+                break;
+            }
+        }
+    }
+}
+
+#[ignore = "focused scanner for the minimal repeat cap in the current inline-start family"]
+#[test]
+fn scan_o82710_inline_glrm_split_token_boundary_inline_start_repeat_caps() {
+    let token = b"aa\"";
+    let vocab = make_vocab(&[token]);
+    let exact = 32usize;
+
+    for repeat_cap in 0usize..=12 {
+        let grammar = format!(
+            r#"
+start start;
+t A_UPTO_CLOSE ::= "a"{{0,{exact}}} "\"";
+t A_EXACT ::= "a"{{{exact}}};
+nt start ::= (A_EXACT{{0,{repeat_cap}}} A_UPTO_CLOSE | A_EXACT{{{}}}) A_UPTO_CLOSE;
+"#,
+            repeat_cap + 1,
+        );
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+        let predicted_prefix = ((repeat_cap + 1) * exact).saturating_sub(1);
+        let window_start = predicted_prefix.saturating_sub(6);
+        let window_end = predicted_prefix + 6;
+
+        for prefix_len in window_start..=window_end {
+            let prefix = vec![b'a'; prefix_len];
+            let (mask_accepts, commit_token_accepts, commit_bytes_accepts, can_complete_after_token) =
+                classify_constraint(&constraint, &prefix, token, 0, Some(b""));
+            if !mask_accepts
+                && commit_token_accepts
+                && commit_bytes_accepts
+                && can_complete_after_token
+            {
+                println!(
+                    "inline_start_repeat_cap_hit repeat_cap={} prefix_len={} residue={}",
+                    repeat_cap,
+                    prefix_len,
+                    prefix_len % exact,
+                );
+                break;
+            }
+        }
+    }
+}
+
+#[ignore = "focused scanner for sparse close-side branch sets in the inline-start family"]
+#[test]
+fn scan_o82710_inline_glrm_split_token_boundary_inline_start_sparse_branches() {
+    let token = b"aa\"";
+    let vocab = make_vocab(&[token]);
+
+    for (label, start_rule) in [
+        (
+            "range_0_4",
+            "nt start ::= (A_EXACT{0,4} A_UPTO_CLOSE | A_EXACT{5}) A_UPTO_CLOSE;",
+        ),
+        (
+            "only_4",
+            "nt start ::= (A_EXACT{4} A_UPTO_CLOSE | A_EXACT{5}) A_UPTO_CLOSE;",
+        ),
+        (
+            "only_3_or_4",
+            "nt start ::= ((A_EXACT{3} | A_EXACT{4}) A_UPTO_CLOSE | A_EXACT{5}) A_UPTO_CLOSE;",
+        ),
+        (
+            "only_2_3_4",
+            "nt start ::= ((A_EXACT{2} | A_EXACT{3} | A_EXACT{4}) A_UPTO_CLOSE | A_EXACT{5}) A_UPTO_CLOSE;",
+        ),
+        (
+            "only_0_or_4",
+            "nt start ::= ((A_EXACT{0} | A_EXACT{4}) A_UPTO_CLOSE | A_EXACT{5}) A_UPTO_CLOSE;",
+        ),
+    ] {
+        let grammar = format!(
+            r#"
+start start;
+t A_UPTO_CLOSE ::= "a"{{0,32}} "\"";
+t A_EXACT ::= "a"{{32}};
+{start_rule}
+"#,
+        );
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+
+        for prefix_len in 152usize..=164 {
+            let prefix = vec![b'a'; prefix_len];
+            let (mask_accepts, commit_token_accepts, commit_bytes_accepts, can_complete_after_token) =
+                classify_constraint(&constraint, &prefix, token, 0, Some(b""));
+            if !mask_accepts
+                && commit_token_accepts
+                && commit_bytes_accepts
+                && can_complete_after_token
+            {
+                println!(
+                    "inline_start_sparse_branches_hit label={} prefix_len={} residue={}",
+                    label,
+                    prefix_len,
+                    prefix_len % 32,
+                );
+                break;
+            }
+        }
+    }
+}
+
+#[ignore = "focused scanner for factoring the common exact-prefix in the current MRE"]
+#[test]
+fn scan_o82710_inline_glrm_split_token_boundary_factored_prefix() {
+    let token = b"aa\"";
+    let vocab = make_vocab(&[token]);
+
+    for (label, start_rule) in [
+        (
+            "single_branch",
+            "nt start ::= (A_EXACT{4} A_UPTO_CLOSE | A_EXACT{5}) A_UPTO_CLOSE;",
+        ),
+        (
+            "factored_prefix",
+            "nt start ::= A_EXACT{4} (A_UPTO_CLOSE | A_EXACT) A_UPTO_CLOSE;",
+        ),
+    ] {
+        let grammar = format!(
+            r#"
+start start;
+t A_UPTO_CLOSE ::= "a"{{0,32}} "\"";
+t A_EXACT ::= "a"{{32}};
+{start_rule}
+"#,
+        );
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+        let prefix = vec![b'a'; 159];
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts, can_complete_after_token) =
+            classify_constraint(&constraint, &prefix, token, 0, Some(b""));
+        println!(
+            "factored_prefix_shape={} mask={} commit_token={} commit_bytes={} complete_after_token={}",
             label,
             mask_accepts,
             commit_token_accepts,
