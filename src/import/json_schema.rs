@@ -10363,54 +10363,6 @@ mod tests {
     }
 
     #[test]
-    fn test_temp_name() {
-        let schema = r##"{
-            "$defs": {
-                "event": {
-                    "type": "object",
-                    "properties": {
-                        "addListener": {"type": "string"},
-                        "removeRules": {"type": "string"}
-                    }
-                }
-            },
-            "type": "object",
-            "properties": {
-                "sendRequest": {"type": "string"},
-                "onRequest": {"$ref": "#/$defs/event"},
-                "onRequestExternal": {"$ref": "#/$defs/event"},
-                "tail": {"type": "string"}
-            },
-            "required": ["sendRequest", "onRequestExternal", "tail"],
-            "additionalProperties": false
-        }"##;
-
-        let vocab = Vocab::new(
-            vec![
-                (0, b"{\"sendRequest\": \"x\", \"onRequestE".to_vec()),
-            ],
-            None,
-        );
-        let constraint = crate::Constraint::from_json_schema(schema, &vocab).unwrap();
-        let mut state = constraint.start();
-        let mask_allows = |mask: &[u32], token_id: u32| {
-            let (word_idx, bit_idx) = (token_id as usize / 32, token_id as usize % 32);
-            word_idx < mask.len() && ((mask[word_idx] >> bit_idx) & 1) != 0
-        };
-
-        state.commit_token(0).unwrap();
-        let mask = state.mask();
-        assert!(mask_allows(&mask, 1), "the empty-object token should be allowed after the shared-ref key prefix");
-
-        state.commit_token(1).unwrap();
-        let mask = state.mask();
-        assert!(mask_allows(&mask, 2), "the trailing sibling token should remain allowed after the shared-ref empty-object token");
-
-        state.commit_token(2).unwrap();
-        assert!(state.is_finished());
-    }
-
-    #[test]
     fn test_shared_nested_event_ref_allows_empty_object_token_for_later_optional_sibling() {
         let schema = r##"{
             "$defs": {
