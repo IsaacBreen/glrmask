@@ -817,16 +817,15 @@ fn scan_o82710_inline_glrm_continuation_ladder() {
 #[ignore = "expert experiment: split the closing token across the boundary"]
 #[test]
 fn scan_o82710_inline_glrm_split_token_boundary() {
-    let v = b"aaa\"";
+    let v = b"aa\"";
     let vocab = make_vocab(&[v]);
     let constraint = Constraint::from_glrm_grammar(r#"
         start start;
-        t JSON_STRING_CHAR_UPTO_CLOSE_1 ::= "a"{0,32} "\"";
-        t JSON_STRING_CHAR_EXACT_256_2 ::= "a"{32};
-        nt json_string_bounded_split_5 ::= (JSON_STRING_CHAR_EXACT_256_2{0,4} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{5});
-        nt start ::= json_string_bounded_split_5 JSON_STRING_CHAR_UPTO_CLOSE_1 ;
+        t A_UPTO_CLOSE ::= "a"{0,32} "\"";
+        t A_EXACT ::= "a"{32};
+        nt start ::= (A_EXACT{0,4} A_UPTO_CLOSE | A_EXACT{5}) A_UPTO_CLOSE;
     "#, &vocab).unwrap();
-    let prefix = vec![b'a'; 158];
+    let prefix = vec![b'a'; 159];
 
     let (full_mask, full_commit_token, full_commit_bytes, full_complete) =
         classify_constraint(&constraint, &prefix, v, 0, Some(b""));
@@ -1183,6 +1182,153 @@ nt json_string_bounded_split_5 ::= (JSON_STRING_CHAR_EXACT_256_2{{0,{repeat_cap}
             classify_constraint(&constraint, &prefix, token, 0, Some(b""));
         println!(
             "start_rule_shape={} mask={} commit_token={} commit_bytes={} complete_after_token={}",
+            label,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+            can_complete_after_token,
+        );
+    }
+}
+
+#[ignore = "focused scanner for simpler left-chunk definitions in the split-boundary MRE"]
+#[test]
+fn scan_o82710_inline_glrm_split_token_boundary_left_chunk_shapes() {
+    let token = b"aaa\"";
+    let vocab = make_vocab(&[token]);
+    let exact = 32usize;
+
+    for (label, chunk_def, prefix_len) in [
+        (
+            "current_chunk",
+            "nt json_string_bounded_split_5 ::= (JSON_STRING_CHAR_EXACT_256_2{0,4} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{5});",
+            158usize,
+        ),
+        (
+            "close_or_five_exact",
+            "nt json_string_bounded_split_5 ::= (JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{5});",
+            158usize,
+        ),
+        (
+            "close_or_exact_exact",
+            "nt json_string_bounded_split_5 ::= (JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2 JSON_STRING_CHAR_EXACT_256_2 JSON_STRING_CHAR_EXACT_256_2 JSON_STRING_CHAR_EXACT_256_2 JSON_STRING_CHAR_EXACT_256_2);",
+            158usize,
+        ),
+        (
+            "two_close_branches_or_five_exact",
+            "nt json_string_bounded_split_5 ::= (JSON_STRING_CHAR_EXACT_256_2{0,1} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{5});",
+            158usize,
+        ),
+        (
+            "four_close_branches_or_five_exact",
+            "nt json_string_bounded_split_5 ::= (JSON_STRING_CHAR_EXACT_256_2{0,3} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{5});",
+            158usize,
+        ),
+    ] {
+        let grammar = format!(
+            r#"
+start start;
+t JSON_STRING_CHAR_UPTO_CLOSE_1 ::= "a"{{0,{exact}}} "\"";
+t JSON_STRING_CHAR_EXACT_256_2 ::= "a"{{{exact}}};
+{chunk_def}
+nt start ::= json_string_bounded_split_5 JSON_STRING_CHAR_UPTO_CLOSE_1 ;
+"#,
+        );
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+        let prefix = vec![b'a'; prefix_len];
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts, can_complete_after_token) =
+            classify_constraint(&constraint, &prefix, token, 0, Some(b""));
+        println!(
+            "left_chunk_shape={} mask={} commit_token={} commit_bytes={} complete_after_token={}",
+            label,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+            can_complete_after_token,
+        );
+    }
+}
+
+#[ignore = "focused scanner for scale reductions in the chunk-then-close MRE family"]
+#[test]
+fn scan_o82710_inline_glrm_split_token_boundary_chunk_then_close_scale() {
+    for exact in [32usize, 24, 16, 12, 10, 8, 6, 5, 4, 3, 2, 1] {
+        for token_body_len in 1usize..=6 {
+            let token = format!("{}\"", "a".repeat(token_body_len));
+            let vocab = make_vocab(&[token.as_bytes()]);
+            let grammar = format!(
+                r#"
+start start;
+t JSON_STRING_CHAR_UPTO_CLOSE_1 ::= "a"{{0,{exact}}} "\"";
+t JSON_STRING_CHAR_EXACT_256_2 ::= "a"{{{exact}}};
+nt json_string_bounded_split_5 ::= (JSON_STRING_CHAR_EXACT_256_2{{0,4}} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{{5}});
+nt start ::= json_string_bounded_split_5 JSON_STRING_CHAR_UPTO_CLOSE_1 ;
+"#,
+            );
+            let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+            let predicted_prefix = (5 * exact).saturating_sub(token_body_len - 1);
+            let window_start = predicted_prefix.saturating_sub(4);
+            let window_end = predicted_prefix + 4;
+
+            for prefix_len in window_start..=window_end {
+                let prefix = vec![b'a'; prefix_len];
+                let (mask_accepts, commit_token_accepts, commit_bytes_accepts, can_complete_after_token) =
+                    classify_constraint(&constraint, &prefix, token.as_bytes(), 0, Some(b""));
+                if !mask_accepts
+                    && commit_token_accepts
+                    && commit_bytes_accepts
+                    && can_complete_after_token
+                {
+                    println!(
+                        "chunk_then_close_scale exact={} token_body_len={} token_len={} prefix_len={} residue={}",
+                        exact,
+                        token_body_len,
+                        token.len(),
+                        prefix_len,
+                        prefix_len % exact.max(1),
+                    );
+                    break;
+                }
+            }
+        }
+    }
+}
+
+#[ignore = "focused scanner for inlining the left chunk directly into start"]
+#[test]
+fn scan_o82710_inline_glrm_split_token_boundary_inline_start() {
+    let token = b"aa\"";
+    let vocab = make_vocab(&[token]);
+
+    for (label, grammar, prefix_len) in [
+        (
+            "chunk_nonterminal",
+            r#"
+start start;
+t A_UPTO_CLOSE ::= "a"{0,32} "\"";
+t A_EXACT ::= "a"{32};
+nt chunk ::= (A_EXACT{0,4} A_UPTO_CLOSE | A_EXACT{5});
+nt start ::= chunk A_UPTO_CLOSE;
+"#,
+            159usize,
+        ),
+        (
+            "inline_start",
+            r#"
+start start;
+t A_UPTO_CLOSE ::= "a"{0,32} "\"";
+t A_EXACT ::= "a"{32};
+nt start ::= (A_EXACT{0,4} A_UPTO_CLOSE | A_EXACT{5}) A_UPTO_CLOSE;
+"#,
+            159usize,
+        ),
+    ] {
+        let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+        let prefix = vec![b'a'; prefix_len];
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts, can_complete_after_token) =
+            classify_constraint(&constraint, &prefix, token, 0, Some(b""));
+        println!(
+            "inline_start_shape={} mask={} commit_token={} commit_bytes={} complete_after_token={}",
             label,
             mask_accepts,
             commit_token_accepts,
