@@ -245,26 +245,6 @@ nt start ::= "{" obj_open_reqmask_0_nc_0 "}";
 "#
 }
 
-fn a_only_inline_glrm() -> &'static str {
-    r#"
-start start;
-
-t JSON_STRING_CHAR ::= /a/;
-t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
-nt json_string ::= "\"" JSON_STRING_BODY;
-internal t JSON_STRING_CHAR_UPTO_256_0 ::= JSON_STRING_CHAR{0,256};
-t JSON_STRING_CHAR_UPTO_CLOSE_1 ::= JSON_STRING_CHAR_UPTO_256_0 "\"";
-t JSON_STRING_CHAR_EXACT_256_2 ::= JSON_STRING_CHAR{256};
-internal t JSON_STRING_CHAR_UPTO_136_3 ::= JSON_STRING_CHAR{0,136};
-t JSON_STRING_CHAR_UPTO_CLOSE_4 ::= JSON_STRING_CHAR_UPTO_136_3 "\"";
-nt json_string_bounded_split_5 ::= "\"" (JSON_STRING_CHAR_EXACT_256_2{0,18} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{19} JSON_STRING_CHAR_UPTO_CLOSE_4);
-nt obj_open_reqmask_0_nc_0 ::= (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_0 | (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
-nt obj_open_reqmask_0_c_0 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_0 | ", " (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
-nt obj_open_reqmask_0_c_1 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_1 | ;
-nt start ::= "{" obj_open_reqmask_0_nc_0 "}";
-"#
-}
-
 fn fixed_chunk_object_glrm(variant: &str) -> String {
     format!(
         r#"
@@ -311,7 +291,23 @@ nt start ::= "{{" obj_open_reqmask_0_nc_0 "}}";
 }
 
 fn counted_repeat_object_glrm_a_only() -> &'static str {
-    a_only_inline_glrm()
+    r#"
+start start;
+
+t JSON_STRING_CHAR ::= /a/;
+t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
+nt json_string ::= "\"" JSON_STRING_BODY;
+internal t JSON_STRING_CHAR_UPTO_256_0 ::= JSON_STRING_CHAR{0,256};
+t JSON_STRING_CHAR_UPTO_CLOSE_1 ::= JSON_STRING_CHAR_UPTO_256_0 "\"";
+t JSON_STRING_CHAR_EXACT_256_2 ::= JSON_STRING_CHAR{256};
+internal t JSON_STRING_CHAR_UPTO_136_3 ::= JSON_STRING_CHAR{0,136};
+t JSON_STRING_CHAR_UPTO_CLOSE_4 ::= JSON_STRING_CHAR_UPTO_136_3 "\"";
+nt json_string_bounded_split_5 ::= "\"" (JSON_STRING_CHAR_EXACT_256_2{0,18} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{19} JSON_STRING_CHAR_UPTO_CLOSE_4);
+nt obj_open_reqmask_0_nc_0 ::= (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_0 | (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_0 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_0 | ", " (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_1 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_1 | ;
+nt start ::= "{" obj_open_reqmask_0_nc_0 "}";
+"#
 }
 
 fn bounded_string_only_glrm() -> &'static str {
@@ -620,7 +616,23 @@ fn scan_o82710_inline_glrm_token_length_matrix() {
             token
         };
         let vocab = make_vocab(&[token_bytes.as_slice()]);
-        let constraint = Constraint::from_glrm_grammar(a_only_inline_glrm(), &vocab).unwrap();
+        let constraint = Constraint::from_glrm_grammar(r#"
+    start start;
+
+    t JSON_STRING_CHAR ::= /a/;
+    t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
+    nt json_string ::= "\"" JSON_STRING_BODY;
+    internal t JSON_STRING_CHAR_UPTO_256_0 ::= JSON_STRING_CHAR{0,256};
+    t JSON_STRING_CHAR_UPTO_CLOSE_1 ::= JSON_STRING_CHAR_UPTO_256_0 "\"";
+    t JSON_STRING_CHAR_EXACT_256_2 ::= JSON_STRING_CHAR{256};
+    internal t JSON_STRING_CHAR_UPTO_136_3 ::= JSON_STRING_CHAR{0,136};
+    t JSON_STRING_CHAR_UPTO_CLOSE_4 ::= JSON_STRING_CHAR_UPTO_136_3 "\"";
+    nt json_string_bounded_split_5 ::= "\"" (JSON_STRING_CHAR_EXACT_256_2{0,18} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{19} JSON_STRING_CHAR_UPTO_CLOSE_4);
+    nt obj_open_reqmask_0_nc_0 ::= (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_0 | (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+    nt obj_open_reqmask_0_c_0 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_0 | ", " (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+    nt obj_open_reqmask_0_c_1 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_1 | ;
+    nt start ::= "{" obj_open_reqmask_0_nc_0 "}";
+    "#, &vocab).unwrap();
 
         for len in 2297usize..=2305 {
             let prefix = direct_glrm_prefix_with_content(&vec![b'a'; len]);
@@ -701,7 +713,23 @@ fn scan_o82710_inline_glrm_explicit_8_9_vs_counted_repeat() {
 fn scan_o82710_inline_glrm_no_quote_crossing_tokens() {
     let tokens: [&[u8]; 4] = [b"aaaa", b"aaaaa", b"aaaaaa", b"aaaaa\""];
     let vocab = make_vocab(&tokens);
-    let constraint = Constraint::from_glrm_grammar(a_only_inline_glrm(), &vocab).unwrap();
+    let constraint = Constraint::from_glrm_grammar(r#"
+start start;
+
+t JSON_STRING_CHAR ::= /a/;
+t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
+nt json_string ::= "\"" JSON_STRING_BODY;
+internal t JSON_STRING_CHAR_UPTO_256_0 ::= JSON_STRING_CHAR{0,256};
+t JSON_STRING_CHAR_UPTO_CLOSE_1 ::= JSON_STRING_CHAR_UPTO_256_0 "\"";
+t JSON_STRING_CHAR_EXACT_256_2 ::= JSON_STRING_CHAR{256};
+internal t JSON_STRING_CHAR_UPTO_136_3 ::= JSON_STRING_CHAR{0,136};
+t JSON_STRING_CHAR_UPTO_CLOSE_4 ::= JSON_STRING_CHAR_UPTO_136_3 "\"";
+nt json_string_bounded_split_5 ::= "\"" (JSON_STRING_CHAR_EXACT_256_2{0,18} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{19} JSON_STRING_CHAR_UPTO_CLOSE_4);
+nt obj_open_reqmask_0_nc_0 ::= (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_0 | (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_0 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_0 | ", " (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_1 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_1 | ;
+nt start ::= "{" obj_open_reqmask_0_nc_0 "}";
+"#, &vocab).unwrap();
     let prefix = direct_glrm_prefix_with_content(&vec![b'a'; 2300]);
     let tail = b", \"id\": \"\"}";
 
@@ -751,7 +779,23 @@ fn scan_o82710_inline_glrm_continuation_ladder() {
         ),
         (
             "object_required_id_recursive",
-            a_only_inline_glrm().to_string(),
+            r#"
+        start start;
+
+        t JSON_STRING_CHAR ::= /a/;
+        t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
+        nt json_string ::= "\"" JSON_STRING_BODY;
+        internal t JSON_STRING_CHAR_UPTO_256_0 ::= JSON_STRING_CHAR{0,256};
+        t JSON_STRING_CHAR_UPTO_CLOSE_1 ::= JSON_STRING_CHAR_UPTO_256_0 "\"";
+        t JSON_STRING_CHAR_EXACT_256_2 ::= JSON_STRING_CHAR{256};
+        internal t JSON_STRING_CHAR_UPTO_136_3 ::= JSON_STRING_CHAR{0,136};
+        t JSON_STRING_CHAR_UPTO_CLOSE_4 ::= JSON_STRING_CHAR_UPTO_136_3 "\"";
+        nt json_string_bounded_split_5 ::= "\"" (JSON_STRING_CHAR_EXACT_256_2{0,18} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{19} JSON_STRING_CHAR_UPTO_CLOSE_4);
+        nt obj_open_reqmask_0_nc_0 ::= (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_0 | (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+        nt obj_open_reqmask_0_c_0 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_0 | ", " (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+        nt obj_open_reqmask_0_c_1 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_1 | ;
+        nt start ::= "{" obj_open_reqmask_0_nc_0 "}";
+        "#.to_string(),
             direct_glrm_prefix_with_content(&content),
             Some(b", \"id\": \"\"}".as_slice()),
         ),
@@ -773,10 +817,28 @@ fn scan_o82710_inline_glrm_continuation_ladder() {
 #[ignore = "expert experiment: split the closing token across the boundary"]
 #[test]
 fn scan_o82710_inline_glrm_split_token_boundary() {
-    let tokens: [&[u8]; 3] = [b"aaaaa\"", b"aaaa", b"a\""];
+    let tokens: [&[u8]; 1] = [b"aaaaa\""];
     let vocab = make_vocab(&tokens);
-    let constraint = Constraint::from_glrm_grammar(a_only_inline_glrm(), &vocab).unwrap();
-    let prefix = direct_glrm_prefix_with_content(&vec![b'a'; 2300]);
+    let constraint = Constraint::from_glrm_grammar(r#"
+        start start;
+
+        t JSON_STRING_CHAR ::= /a/;
+        t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
+        nt json_string ::= "\"" JSON_STRING_BODY;
+        internal t JSON_STRING_CHAR_UPTO_256_0 ::= JSON_STRING_CHAR{0,256};
+        t JSON_STRING_CHAR_UPTO_CLOSE_1 ::= JSON_STRING_CHAR_UPTO_256_0 "\"";
+        t JSON_STRING_CHAR_EXACT_256_2 ::= JSON_STRING_CHAR{256};
+        internal t JSON_STRING_CHAR_UPTO_136_3 ::= JSON_STRING_CHAR{0,136};
+        t JSON_STRING_CHAR_UPTO_CLOSE_4 ::= JSON_STRING_CHAR_UPTO_136_3 "\"";
+        nt json_string_bounded_split_5 ::= "\"" (JSON_STRING_CHAR_EXACT_256_2{0,18} JSON_STRING_CHAR_UPTO_CLOSE_1 | JSON_STRING_CHAR_EXACT_256_2{19} JSON_STRING_CHAR_UPTO_CLOSE_4);
+        nt obj_open_reqmask_0_nc_0 ::= (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_0 | (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+        nt obj_open_reqmask_0_c_0 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_0 | ", " (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+        nt obj_open_reqmask_0_c_1 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_5) obj_open_reqmask_0_c_1 | ;
+        nt start ::= obj_open_reqmask_0_nc_0 "}";
+    "#, &vocab).unwrap();
+    let content = &vec![b'a'; 2300];
+    let mut prefix = b"\"description\": \"".to_vec();
+    prefix.extend_from_slice(content);
     let tail = b", \"id\": \"\"}";
 
     let (full_mask, full_commit_token, full_commit_bytes, full_complete) =
@@ -789,51 +851,6 @@ fn scan_o82710_inline_glrm_split_token_boundary() {
         full_complete,
     );
 
-    let (part1_mask, part1_commit_token, part1_commit_bytes, _) =
-        classify_constraint(&constraint, &prefix, tokens[1], 1, None);
-    println!(
-        "split_part1 mask={} commit_token={} commit_bytes={}",
-        part1_mask,
-        part1_commit_token,
-        part1_commit_bytes,
-    );
-
-    let mut state = constraint.start();
-    state.commit_bytes(&prefix).unwrap();
-    let part1_progress = state.commit_token(1).is_ok();
-    let part2_mask = if part1_progress {
-        token_allowed(&state.mask(), 2)
-    } else {
-        false
-    };
-    let part2_commit_token = if part1_progress {
-        match catch_unwind(AssertUnwindSafe(|| state.commit_token(2))) {
-            Ok(Ok(())) => true,
-            Ok(Err(_)) => false,
-            Err(_) => true,
-        }
-    } else {
-        false
-    };
-    let complete_after_split = if part1_progress {
-        let mut state2 = constraint.start();
-        state2.commit_bytes(&prefix).unwrap();
-        if state2.commit_token(1).is_err() {
-            false
-        } else if state2.commit_token(2).is_err() {
-            false
-        } else {
-            state2.commit_bytes(tail).is_ok()
-        }
-    } else {
-        false
-    };
-    println!(
-        "split_after_part1 part2_mask={} part2_commit_token={} complete_after_split={}",
-        part2_mask,
-        part2_commit_token,
-        complete_after_split,
-    );
 }
 
 #[ignore = "scanner for aggressively minimized native open-object mismatch"]
