@@ -1652,6 +1652,10 @@ fn reconstruct_dwa(start_old: usize, old_to_new: &[u32], builders: Vec<MergedSta
     )
 }
 
+fn canonical_dead_dwa() -> DWA {
+    DWA::new(0, 0)
+}
+
 // Public API.
 
 /// Default threshold: always use the full incompatibility graph approach.
@@ -1692,7 +1696,11 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, _partition_refine_threshold: u
     // compute_needed_sets on pushed DWA uses the same recurrence (since
     // w_pushed = w_orig ∩ reachable[t], and A ∩ A = A in the needed recurrence).
     // Both produce identical results, so we skip the redundant recomputation.
+    let start_state = pushed.start_state() as usize;
     let needed = reachable_from_push;
+    if needed[start_state].is_empty() {
+        return canonical_dead_dwa();
+    }
     let t1 = if debug { std::time::Instant::now() } else { t_start };
     let productive_transitions = compute_productive_transitions(&pushed, &needed);
     let prod_ms = if debug { t1.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
@@ -1700,7 +1708,6 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, _partition_refine_threshold: u
     let max_height = heights.iter().max().copied().unwrap_or(0);
 
     let n = pushed.states().len();
-    let start_state = pushed.start_state() as usize;
 
     let reachable_from_start = compute_reachable_from_start(&pushed, start_state);
 
@@ -1710,7 +1717,7 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, _partition_refine_threshold: u
         if !reachable_from_start[id] {
             continue;
         }
-        if needed[id].is_empty() && id != start_state {
+        if needed[id].is_empty() {
             continue;
         }
         states_by_height[h].push(id);
@@ -1819,12 +1826,17 @@ pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
 
     let n = dwa.states().len();
     let start_state = dwa.start_state() as usize;
+    let needed = compute_needed_sets(dwa, &topo);
+    if needed[start_state].is_empty() {
+        return canonical_dead_dwa();
+    }
 
     let reachable_from_start = compute_reachable_from_start(dwa, start_state);
 
     let mut states_by_height: Vec<Vec<usize>> = vec![vec![]; max_height + 1];
     for (id, &h) in heights.iter().enumerate() {
         if !reachable_from_start[id] { continue; }
+        if needed[id].is_empty() { continue; }
         states_by_height[h].push(id);
     }
 
@@ -1941,6 +1953,9 @@ pub fn minimize_acyclic_partition_refine(dwa: &DWA) -> DWA {
 
     // Compute needed sets on the original DWA (no push_weights clone/modification).
     let needed = compute_needed_sets(dwa, &topo);
+    if needed[start_state].is_empty() {
+        return canonical_dead_dwa();
+    }
     let productive_transitions = compute_productive_transitions(dwa, &needed);
 
     let reachable_from_start = compute_reachable_from_start(dwa, start_state);
@@ -1948,7 +1963,7 @@ pub fn minimize_acyclic_partition_refine(dwa: &DWA) -> DWA {
     let mut states_by_height: Vec<Vec<usize>> = vec![vec![]; max_height + 1];
     for (id, &h) in heights.iter().enumerate() {
         if !reachable_from_start[id] { continue; }
-        if needed[id].is_empty() && id != start_state { continue; }
+        if needed[id].is_empty() { continue; }
         states_by_height[h].push(id);
     }
 
@@ -2087,5 +2102,40 @@ mod tests {
             adj[0].contains(&1) && adj[1].contains(&0),
             "disjoint-needed candidates with the same label but different remapped targets must be incompatible"
         );
+    }
+
+    fn dead_language_dwa() -> DWA {
+        let mut dwa = DWA::new(0, 0);
+        let s1 = dwa.add_state();
+        let s2 = dwa.add_state();
+        dwa.add_transition(dwa.start_state(), 0, s1, Weight::all());
+        dwa.add_transition(dwa.start_state(), 1, s2, Weight::all());
+        dwa.add_transition(s1, 2, s2, Weight::all());
+        dwa
+    }
+
+    fn assert_canonical_dead_dwa(dwa: &DWA) {
+        assert_eq!(dwa.states().len(), 1);
+        assert_eq!(dwa.start_state(), 0);
+        assert!(dwa.states()[0].transitions.is_empty());
+        assert!(dwa.states()[0].final_weight.is_none());
+    }
+
+    #[test]
+    fn test_minimize_acyclic_collapses_dead_language() {
+        let minimized = minimize_acyclic(&dead_language_dwa());
+        assert_canonical_dead_dwa(&minimized);
+    }
+
+    #[test]
+    fn test_minimize_acyclic_fast_collapses_dead_language() {
+        let minimized = minimize_acyclic_fast(&dead_language_dwa());
+        assert_canonical_dead_dwa(&minimized);
+    }
+
+    #[test]
+    fn test_minimize_acyclic_partition_refine_collapses_dead_language() {
+        let minimized = minimize_acyclic_partition_refine(&dead_language_dwa());
+        assert_canonical_dead_dwa(&minimized);
     }
 }
