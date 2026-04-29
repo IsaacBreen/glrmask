@@ -5337,10 +5337,14 @@ fn test_o82710_minimized_inline_glrm_mask_allows_committable_token() {
         let word = 0usize / 32;
         word < mask.len() && ((mask[word] >> (0usize % 32)) & 1) != 0
     };
+    dbg!(token_in_mask);
+
+    let commit_accepts = mask_state.commit_token(0u32).is_ok();
+    dbg!(commit_accepts);
 
     assert!(
-        token_in_mask,
-        "token 0 should be in the mask because its bytes are committable after the same prefix; mask={mask:?}"
+        (token_in_mask, commit_accepts) == (true, true),
+        "the minimized witness should both mask-in and commit the disputed token after the reproducing prefix; token_in_mask={token_in_mask}, commit_accepts={commit_accepts}"
     );
 }
 
