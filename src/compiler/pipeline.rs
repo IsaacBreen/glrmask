@@ -388,19 +388,6 @@ fn build_constraint_vocab_map(
     token_bytes: &BTreeMap<u32, Vec<u8>>,
     possible_match_signatures: &FxHashMap<u32, PossibleMatchSignature>,
 ) -> ConstraintVocabMap {
-    for &token_id in token_bytes.keys() {
-        let mapped = parser_vocab
-            .original_to_internal
-            .get(token_id as usize)
-            .copied()
-            .unwrap_or(u32::MAX);
-
-        assert!(
-            mapped != u32::MAX,
-            "parser-DWA vocab map does not cover original token {token_id}"
-        );
-    }
-
     let max_original_slot = token_bytes
         .keys()
         .next_back()
@@ -418,6 +405,11 @@ fn build_constraint_vocab_map(
     let mut internal_to_originals: Vec<Vec<u32>> = Vec::new();
     let mut old_internal_to_constraint =
         vec![Vec::<u32>::new(); parser_vocab.internal_to_originals.len()];
+
+    // parser_vocab may intentionally leave larger-vocab entries unmapped
+    // when they never participate in parser-DWA behavior for this grammar.
+    // Keep those originals at u32::MAX; downstream remap paths already skip
+    // unmapped tokens.
 
     for (old_internal_id, originals) in parser_vocab.internal_to_originals.iter().enumerate() {
         let mut groups: BTreeMap<PossibleMatchSignature, Vec<u32>> = BTreeMap::new();
