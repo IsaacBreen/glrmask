@@ -11,7 +11,7 @@ const CONTROL_TOKEN_BYTES: &[u8] = b" Vimeo";
 const SPARSE_SCHEMA_GLRM: &str = r#"
 start start;
 
-internal t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]|\\["\\\/bfnrt]|\\u[0-9A-Fa-f]{4}/;
+internal t JSON_STRING_CHAR ::= "a" | " " | "V" | "i" | "m" | "e" | "o" | "'" | "]" | ";" | "?" | ">";
 t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
 nt json_string ::= "\"" JSON_STRING_BODY;
 t JSON_INTEGER ::= /-?(0|[1-9][0-9]*)/;
@@ -45,8 +45,6 @@ start start;
 internal t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]|\\["\\\/bfnrt]|\\u[0-9A-Fa-f]{4}/;
 t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
 nt json_string ::= "\"" JSON_STRING_BODY;
-t JSON_BOOL ::= "true" | "false";
-t JSON_STRING_PATTERN_FULLMATCH_0 ::= ([ \-0-9A-Z_a-z] | "\xC2" "\x85" | "\xC2" "\xA0" | "\\" "t" | "\\" "u" "0" "0" "0" "9" | "\\" "n" | "\\" "u" "0" "0" "0" [Aa] | "\\" "u" "0" "0" "0" [Bb] | "\\" "f" | "\\" "u" "0" "0" "0" [Cc] | "\\" "r" | "\\" "u" "0" "0" "0" [Dd])+ "\"";
 internal t JSON_STRING_CHAR_UPTO_256_1 ::= JSON_STRING_CHAR{0,256};
 t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= JSON_STRING_CHAR_UPTO_256_1 "\"";
 t JSON_STRING_CHAR_EXACT_256_3 ::= JSON_STRING_CHAR{256};
