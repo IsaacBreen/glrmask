@@ -53,9 +53,9 @@ t JSON_STRING_CHAR_EXACT_256_3 ::= JSON_STRING_CHAR{256};
 internal t JSON_STRING_CHAR_UPTO_136_4 ::= JSON_STRING_CHAR{0,136};
 t JSON_STRING_CHAR_UPTO_CLOSE_5 ::= JSON_STRING_CHAR_UPTO_136_4 "\"";
 nt json_string_bounded_split_6 ::= "\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} JSON_STRING_CHAR_UPTO_CLOSE_5);
-nt obj_open_reqmask_0_nc_0 ::= (("\"" "aside\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_0 | (("\"" "autoplay\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_0 | (("\"" "css_class\"" ": ") ("\"" JSON_STRING_PATTERN_FULLMATCH_0)) obj_open_reqmask_0_c_0 | (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
-nt obj_open_reqmask_0_c_0 ::= ", " (("\"" "aside\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_0 | ", " (("\"" "autoplay\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_0 | ", " (("\"" "css_class\"" ": ") ("\"" JSON_STRING_PATTERN_FULLMATCH_0)) obj_open_reqmask_0_c_0 | ", " (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | ", " (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
-nt obj_open_reqmask_0_c_1 ::= ", " (("\"" "aside\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_1 | ", " (("\"" "autoplay\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_1 | ", " (("\"" "css_class\"" ": ") ("\"" JSON_STRING_PATTERN_FULLMATCH_0)) obj_open_reqmask_0_c_1 | ", " (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_1 | ;
+nt obj_open_reqmask_0_nc_0 ::= (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_0 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | ", " (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_1 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_1 | ;
 nt start ::= "{" obj_open_reqmask_0_nc_0 "}";
 "#;
 
@@ -263,9 +263,12 @@ fn benchmark_prefix_at_discrepancy() -> Vec<u8> {
 }
 
 fn description_only_prefix() -> Vec<u8> {
+    description_only_prefix_with_ascii_repeat(2300)
+}
+
+fn description_only_prefix_with_ascii_repeat(content_len: usize) -> Vec<u8> {
     let mut prefix = Vec::from(b"{\"description\": \"".as_slice());
-    prefix.extend(std::iter::repeat(b"This is a Vimeo video block. ".as_slice()).take(79).flatten().copied());
-    prefix.extend_from_slice(b"This is a");
+    prefix.extend(std::iter::repeat(b'a').take(content_len));
     prefix
 }
 
@@ -402,6 +405,59 @@ nt json_string_bounded_split_6 ::= "\"" (JSON_STRING_CHAR_EXACT_256_3{{0,18}} JS
 nt obj_open_reqmask_0_nc_0 ::= {nc_known} | (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
 nt obj_open_reqmask_0_c_0 ::= {c0_known} | ", " (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
 nt obj_open_reqmask_0_c_1 ::= {c1_known} | ;
+nt start ::= "{{" obj_open_reqmask_0_nc_0 "}}";
+"#,
+    )
+}
+
+fn desc_id_reqmask_variant(
+    start_allows_id_first: bool,
+    pre_id_allows_desc_repeat: bool,
+    post_id_allows_desc_repeat: bool,
+) -> String {
+    let start_desc = "((\"\\\"\" \"description\\\"\" \": \") json_string_bounded_split_6) obj_open_reqmask_0_c_0";
+    let start_id = "((\"\\\"\" \"id\\\"\" \": \") json_string) obj_open_reqmask_0_c_1";
+
+    let nc0 = if start_allows_id_first {
+        format!("{start_desc} | {start_id}")
+    } else {
+        start_desc.to_string()
+    };
+
+    let c0 = if pre_id_allows_desc_repeat {
+        format!("\", \" {start_desc} | \", \" {start_id}")
+    } else {
+        format!("\", \" {start_id}")
+    };
+
+    let c1 = if post_id_allows_desc_repeat {
+        format!("\", \" {start_desc} | ")
+    } else {
+        String::from(";")
+    };
+
+    let c1_rule = if post_id_allows_desc_repeat {
+        format!("nt obj_open_reqmask_0_c_1 ::= {c1};")
+    } else {
+        String::from("nt obj_open_reqmask_0_c_1 ::= ;")
+    };
+
+    format!(
+        r#"
+start start;
+
+internal t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]|\\["\\\/bfnrt]|\\u[0-9A-Fa-f]{{4}}/;
+t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
+nt json_string ::= "\"" JSON_STRING_BODY;
+internal t JSON_STRING_CHAR_UPTO_256_1 ::= JSON_STRING_CHAR{{0,256}};
+t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= JSON_STRING_CHAR_UPTO_256_1 "\"";
+t JSON_STRING_CHAR_EXACT_256_3 ::= JSON_STRING_CHAR{{256}};
+internal t JSON_STRING_CHAR_UPTO_136_4 ::= JSON_STRING_CHAR{{0,136}};
+t JSON_STRING_CHAR_UPTO_CLOSE_5 ::= JSON_STRING_CHAR_UPTO_136_4 "\"";
+nt json_string_bounded_split_6 ::= "\"" (JSON_STRING_CHAR_EXACT_256_3{{0,18}} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{{19}} JSON_STRING_CHAR_UPTO_CLOSE_5);
+nt obj_open_reqmask_0_nc_0 ::= {nc0};
+nt obj_open_reqmask_0_c_0 ::= {c0};
+{c1_rule}
 nt start ::= "{{" obj_open_reqmask_0_nc_0 "}}";
 "#,
     )
@@ -582,6 +638,64 @@ fn scan_o82710_recursive_known_field_subsets() {
     }
 }
 
+#[ignore = "diagnostic for desc/id reqmask structure minimization"]
+#[test]
+fn scan_o82710_desc_id_reqmask_structure() {
+    let vocab = reduced_two_token_vocab();
+    let prefix = description_only_prefix();
+
+    for start_allows_id_first in [false, true] {
+        for pre_id_allows_desc_repeat in [false, true] {
+            for post_id_allows_desc_repeat in [false, true] {
+                let grammar = desc_id_reqmask_variant(
+                    start_allows_id_first,
+                    pre_id_allows_desc_repeat,
+                    post_id_allows_desc_repeat,
+                );
+                let label = format!(
+                    "start_id_first={} pre_desc_repeat={} post_desc_repeat={}",
+                    start_allows_id_first,
+                    pre_id_allows_desc_repeat,
+                    post_id_allows_desc_repeat,
+                );
+                let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+                let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
+                    classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES);
+                println!(
+                    "desc_id_variant={} mask={} commit_token={} commit_bytes={}",
+                    label,
+                    mask_accepts,
+                    commit_token_accepts,
+                    commit_bytes_accepts,
+                );
+            }
+        }
+    }
+}
+
+#[ignore = "diagnostic for desc-only prefix length minimization against the current recursive-core witness"]
+#[test]
+fn scan_o82710_description_only_ascii_prefix_lengths() {
+    let vocab = reduced_two_token_vocab();
+    let constraint = Constraint::from_glrm_grammar(MINIMIZED_INLINE_GLRM_CANDIDATE, &vocab).unwrap();
+    let token_content_len = DISPUTED_TOKEN_BYTES.len() - 1;
+
+    for content_len in [252usize, 508, 764, 1020, 1276, 1532, 1788, 2044, 2300] {
+        let prefix = description_only_prefix_with_ascii_repeat(content_len);
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
+            classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES);
+        println!(
+            "desc_ascii_len={} close_len={} close_mod_256={} mask={} commit_token={} commit_bytes={}",
+            content_len,
+            content_len + token_content_len,
+            (content_len + token_content_len) % 256,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+        );
+    }
+}
+
 #[ignore = "expensive full-vocab benchmark witness for the current false negative"]
 #[test]
 fn test_o82710_exact_schema_full_llama3_vocab_false_negative() {
@@ -667,7 +781,7 @@ fn test_o82710_sparse_schema_inline_glrm_two_token_vocab_false_negative() {
 fn test_o82710_minimized_inline_glrm_candidate_two_token_vocab_false_negative() {
     let vocab = reduced_two_token_vocab();
     let constraint = Constraint::from_glrm_grammar(MINIMIZED_INLINE_GLRM_CANDIDATE, &vocab).unwrap();
-    let prefix = benchmark_prefix_at_discrepancy();
+    let prefix = description_only_prefix();
 
     let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
         classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES);
