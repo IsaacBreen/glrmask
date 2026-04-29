@@ -3884,7 +3884,7 @@ fn test_mre_ordered_optional_object_ambiguity() {
     }"#, &vocab).unwrap();
     assert_eq!(max_parser_paths_for_text(&c,
         r#"{"o": {"k00": 0, "k01": 0, "k02": 0, "k03": 0, "k04": 0, "k05": 0, "k06": 0, "k07": 0}}"#
-    ), 2);
+    ), 1);
 
     // n=12, n=16: generated schemas, same assertion.
     for n in [12usize, 16] {
