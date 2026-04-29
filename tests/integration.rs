@@ -5302,6 +5302,20 @@ fn test_temp_name_glrm() {
 }
 
 #[test]
+#[should_panic]
+fn test_undefined_rule_causes_grammar_load_panic() {
+    let vocab = Vocab::new(
+        vec![
+            (0u32, b"a".to_vec()),
+        ],
+        None,
+    );
+    let grammar = r#"
+        start start;
+        nt start ::= x;
+    "#;
+    Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+}
 fn test_o82710_minimized_inline_glrm_mask_allows_committable_token() {
     let vocab = Vocab::new(
         vec![
