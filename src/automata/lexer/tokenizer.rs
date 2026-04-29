@@ -772,15 +772,14 @@ impl Tokenizer {
             }
         }
 
-        // When a partition has few active terminals, skipping the
-        // relevant_bytes pruning gives a dramatically smaller simplified
-        // DFA: minimizing the active-only DFA collapses states equivalent
-        // in the active language (often close to an optimal from-scratch
-        // build), whereas relevant_bytes pruning leaves the continuation
-        // graph behind pruned bytes, which the alias stage clones wholesale.
-        // For partitions where most terminals are active, the alias stage
-        // stays small and relevant_bytes pruning dominates the reduction,
-        // so keep that path.
+        // When a partition does not contain a strong majority of terminals,
+        // skipping `relevant_bytes` pruning tends to produce a better quotient
+        // for the downstream L2P build: minimizing the active-only DFA keeps
+        // active-language distinctions while still collapsing dead inactive
+        // structure. When most terminals in the tokenizer are active, the
+        // relevant-bytes path remains worthwhile because the filtered DFA stays
+        // close to the original language and the pruned transition set buys a
+        // meaningful reduction.
         let relevant_bytes = if std::env::var_os("GLRMASK_FORCE_RELEVANT_BYTES").is_some() {
             relevant_bytes
         } else if std::env::var_os("GLRMASK_NO_RELEVANT_BYTES").is_some() {
@@ -790,7 +789,7 @@ impl Tokenizer {
                 Some(rb) => {
                     let num_active = active_terminals.iter().filter(|&&a| a).count();
                     let num_total = active_terminals.len();
-                    if num_active * 2 <= num_total { None } else { Some(rb) }
+                    if num_active * 3 <= num_total * 2 { None } else { Some(rb) }
                 }
                 None => None,
             }
