@@ -53,13 +53,9 @@ t JSON_STRING_CHAR_EXACT_256_3 ::= JSON_STRING_CHAR{256};
 internal t JSON_STRING_CHAR_UPTO_136_4 ::= JSON_STRING_CHAR{0,136};
 t JSON_STRING_CHAR_UPTO_CLOSE_5 ::= JSON_STRING_CHAR_UPTO_136_4 "\"";
 nt json_string_bounded_split_6 ::= "\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} JSON_STRING_CHAR_UPTO_CLOSE_5);
-internal t AP_SHARED_KEY_COLON_7 ::= "aside\"" | "autoplay\"" | "css_class\"" | "description\"" | "id\"";
-internal t AP_SHARED_KEY_COLON_8 ::= ((([ !#-[\]-~] | [\xC2-\xDF] [\x80-\xBF] | [\xE0] [\xA0-\xBF] [\x80-\xBF] | [\xE1-\xEC] [\x80-\xBF] [\x80-\xBF] | [\xED] [\x80-\x9F] [\x80-\xBF] | [\xEE\xEF] [\x80-\xBF] [\x80-\xBF] | [\xF0] [\x90-\xBF] [\x80-\xBF] [\x80-\xBF] | [\xF1-\xF3] [\x80-\xBF] [\x80-\xBF] [\x80-\xBF] | [\xF4] [\x80-\x8F] [\x80-\xBF] [\x80-\xBF]) | "\\" ["/\\bfnrt] | "\\" "u" [0-9A-Fa-f]{4})* "\"");
-t AP_SHARED_KEY_COLON_9 ::= AP_SHARED_KEY_COLON_8 - AP_SHARED_KEY_COLON_7;
-nt json_value ::= json_string | JSON_BOOL;
-nt obj_open_reqmask_0_nc_0 ::= (("\"" "aside\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_0 | (("\"" "autoplay\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_0 | (("\"" "css_class\"" ": ") ("\"" JSON_STRING_PATTERN_FULLMATCH_0)) obj_open_reqmask_0_c_0 | (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | (("\"" AP_SHARED_KEY_COLON_9 ": ") json_value) obj_open_reqmask_0_c_0 | (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
-nt obj_open_reqmask_0_c_0 ::= ", " (("\"" "aside\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_0 | ", " (("\"" "autoplay\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_0 | ", " (("\"" "css_class\"" ": ") ("\"" JSON_STRING_PATTERN_FULLMATCH_0)) obj_open_reqmask_0_c_0 | ", " (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | ", " (("\"" AP_SHARED_KEY_COLON_9 ": ") json_value) obj_open_reqmask_0_c_0 | ", " (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
-nt obj_open_reqmask_0_c_1 ::= ", " (("\"" "aside\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_1 | ", " (("\"" "autoplay\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_1 | ", " (("\"" "css_class\"" ": ") ("\"" JSON_STRING_PATTERN_FULLMATCH_0)) obj_open_reqmask_0_c_1 | ", " (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_1 | ", " (("\"" AP_SHARED_KEY_COLON_9 ": ") json_value) obj_open_reqmask_0_c_1 | ;
+nt obj_open_reqmask_0_nc_0 ::= (("\"" "aside\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_0 | (("\"" "autoplay\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_0 | (("\"" "css_class\"" ": ") ("\"" JSON_STRING_PATTERN_FULLMATCH_0)) obj_open_reqmask_0_c_0 | (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_0 ::= ", " (("\"" "aside\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_0 | ", " (("\"" "autoplay\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_0 | ", " (("\"" "css_class\"" ": ") ("\"" JSON_STRING_PATTERN_FULLMATCH_0)) obj_open_reqmask_0_c_0 | ", " (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | ", " (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_1 ::= ", " (("\"" "aside\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_1 | ", " (("\"" "autoplay\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_1 | ", " (("\"" "css_class\"" ": ") ("\"" JSON_STRING_PATTERN_FULLMATCH_0)) obj_open_reqmask_0_c_1 | ", " (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_1 | ;
 nt start ::= "{" obj_open_reqmask_0_nc_0 "}";
 "#;
 
@@ -264,6 +260,326 @@ fn benchmark_prefix_at_discrepancy() -> Vec<u8> {
     prefix.extend(std::iter::repeat(b"This is a Vimeo video block. ".as_slice()).take(79).flatten().copied());
     prefix.extend_from_slice(b"This is a");
     prefix
+}
+
+fn description_only_prefix() -> Vec<u8> {
+    let mut prefix = Vec::from(b"{\"description\": \"".as_slice());
+    prefix.extend(std::iter::repeat(b"This is a Vimeo video block. ".as_slice()).take(79).flatten().copied());
+    prefix.extend_from_slice(b"This is a");
+    prefix
+}
+
+fn aside_description_prefix() -> Vec<u8> {
+    let mut prefix = Vec::from(b"{\"aside\": true, \"description\": \"".as_slice());
+    prefix.extend(std::iter::repeat(b"This is a Vimeo video block. ".as_slice()).take(79).flatten().copied());
+    prefix.extend_from_slice(b"This is a");
+    prefix
+}
+
+fn fixed_order_subset_prefix(include_aside: bool, include_autoplay: bool, include_css_class: bool) -> Vec<u8> {
+    let mut prefix = b"{".to_vec();
+    let mut first = true;
+    if include_aside {
+        prefix.extend_from_slice(if first { b"\"aside\": true" } else { b", \"aside\": true" });
+        first = false;
+    }
+    if include_autoplay {
+        prefix.extend_from_slice(if first { b"\"autoplay\": false" } else { b", \"autoplay\": false" });
+        first = false;
+    }
+    if include_css_class {
+        prefix.extend_from_slice(
+            if first {
+                b"\"css_class\": \"vimeo-video-block\""
+            } else {
+                b", \"css_class\": \"vimeo-video-block\""
+            },
+        );
+        first = false;
+    }
+    prefix.extend_from_slice(if first { b"\"description\": \"" } else { b", \"description\": \"" });
+    prefix.extend(std::iter::repeat(b"This is a Vimeo video block. ".as_slice()).take(79).flatten().copied());
+    prefix.extend_from_slice(b"This is a");
+    prefix
+}
+
+fn fixed_order_subset_glrm(include_aside: bool, include_autoplay: bool, include_css_class: bool) -> String {
+    let mut pieces = Vec::new();
+    if include_aside {
+        pieces.push("(\"\\\"\" \"aside\\\"\" \": \") JSON_BOOL".to_string());
+    }
+    if include_autoplay {
+        pieces.push("(\"\\\"\" \"autoplay\\\"\" \": \") JSON_BOOL".to_string());
+    }
+    if include_css_class {
+        pieces.push("(\"\\\"\" \"css_class\\\"\" \": \") (\"\\\"\" JSON_STRING_PATTERN_FULLMATCH_0)".to_string());
+    }
+    pieces.push("(\"\\\"\" \"description\\\"\" \": \") json_string_bounded_split_6".to_string());
+    pieces.push("(\"\\\"\" \"id\\\"\" \": \") json_string".to_string());
+
+    let mut body = String::new();
+    for (index, piece) in pieces.iter().enumerate() {
+        if index > 0 {
+            body.push_str(" \", \" ");
+        }
+        body.push_str(piece);
+    }
+
+    format!(
+        r#"
+start start;
+
+internal t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]|\\["\\\/bfnrt]|\\u[0-9A-Fa-f]{{4}}/;
+t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
+nt json_string ::= "\"" JSON_STRING_BODY;
+t JSON_BOOL ::= "true" | "false";
+t JSON_STRING_PATTERN_FULLMATCH_0 ::= ([ \-0-9A-Z_a-z] | "\xC2" "\x85" | "\xC2" "\xA0" | "\\" "t" | "\\" "u" "0" "0" "0" "9" | "\\" "n" | "\\" "u" "0" "0" "0" [Aa] | "\\" "u" "0" "0" "0" [Bb] | "\\" "f" | "\\" "u" "0" "0" "0" [Cc] | "\\" "r" | "\\" "u" "0" "0" "0" [Dd])+ "\"";
+internal t JSON_STRING_CHAR_UPTO_256_1 ::= JSON_STRING_CHAR{{0,256}};
+t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= JSON_STRING_CHAR_UPTO_256_1 "\"";
+t JSON_STRING_CHAR_EXACT_256_3 ::= JSON_STRING_CHAR{{256}};
+internal t JSON_STRING_CHAR_UPTO_136_4 ::= JSON_STRING_CHAR{{0,136}};
+t JSON_STRING_CHAR_UPTO_CLOSE_5 ::= JSON_STRING_CHAR_UPTO_136_4 "\"";
+nt json_string_bounded_split_6 ::= "\"" (JSON_STRING_CHAR_EXACT_256_3{{0,18}} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{{19}} JSON_STRING_CHAR_UPTO_CLOSE_5);
+nt start ::= "{{" {body} "}}";
+"#,
+    )
+}
+
+fn recursive_known_subset_glrm(
+    include_aside: bool,
+    include_autoplay: bool,
+    include_css_class: bool,
+    css_class_uses_pattern: bool,
+) -> String {
+    let mut known_branches = Vec::new();
+    if include_aside {
+        known_branches.push("((\"\\\"\" \"aside\\\"\" \": \") JSON_BOOL)".to_string());
+    }
+    if include_autoplay {
+        known_branches.push("((\"\\\"\" \"autoplay\\\"\" \": \") JSON_BOOL)".to_string());
+    }
+    if include_css_class {
+        let value = if css_class_uses_pattern {
+            "(\"\\\"\" JSON_STRING_PATTERN_FULLMATCH_0)"
+        } else {
+            "json_string"
+        };
+        known_branches.push(format!("((\"\\\"\" \"css_class\\\"\" \": \") {value})"));
+    }
+    known_branches.push("((\"\\\"\" \"description\\\"\" \": \") json_string_bounded_split_6)".to_string());
+
+    let nc_known = known_branches
+        .iter()
+        .map(|branch| format!("{branch} obj_open_reqmask_0_c_0"))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let c0_known = known_branches
+        .iter()
+        .map(|branch| format!("\", \" {branch} obj_open_reqmask_0_c_0"))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let c1_known = known_branches
+        .iter()
+        .map(|branch| format!("\", \" {branch} obj_open_reqmask_0_c_1"))
+        .collect::<Vec<_>>()
+        .join(" | ");
+
+    format!(
+        r#"
+start start;
+
+internal t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]|\\["\\\/bfnrt]|\\u[0-9A-Fa-f]{{4}}/;
+t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
+nt json_string ::= "\"" JSON_STRING_BODY;
+t JSON_BOOL ::= "true" | "false";
+t JSON_STRING_PATTERN_FULLMATCH_0 ::= ([ \-0-9A-Z_a-z] | "\xC2" "\x85" | "\xC2" "\xA0" | "\\" "t" | "\\" "u" "0" "0" "0" "9" | "\\" "n" | "\\" "u" "0" "0" "0" [Aa] | "\\" "u" "0" "0" "0" [Bb] | "\\" "f" | "\\" "u" "0" "0" "0" [Cc] | "\\" "r" | "\\" "u" "0" "0" "0" [Dd])+ "\"";
+internal t JSON_STRING_CHAR_UPTO_256_1 ::= JSON_STRING_CHAR{{0,256}};
+t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= JSON_STRING_CHAR_UPTO_256_1 "\"";
+t JSON_STRING_CHAR_EXACT_256_3 ::= JSON_STRING_CHAR{{256}};
+internal t JSON_STRING_CHAR_UPTO_136_4 ::= JSON_STRING_CHAR{{0,136}};
+t JSON_STRING_CHAR_UPTO_CLOSE_5 ::= JSON_STRING_CHAR_UPTO_136_4 "\"";
+nt json_string_bounded_split_6 ::= "\"" (JSON_STRING_CHAR_EXACT_256_3{{0,18}} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{{19}} JSON_STRING_CHAR_UPTO_CLOSE_5);
+nt obj_open_reqmask_0_nc_0 ::= {nc_known} | (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_0 ::= {c0_known} | ", " (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_1 ::= {c1_known} | ;
+nt start ::= "{{" obj_open_reqmask_0_nc_0 "}}";
+"#,
+    )
+}
+
+#[ignore = "diagnostic for more aggressive recursive o82710 inline-GLRM minimization"]
+#[test]
+fn scan_o82710_inline_glrm_more_minimal_variants() {
+    let vocab = reduced_two_token_vocab();
+
+    for (label, grammar, prefix) in [
+        (
+            "description_id_only",
+            r#"
+start start;
+
+internal t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]|\\["\\\/bfnrt]|\\u[0-9A-Fa-f]{4}/;
+t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
+nt json_string ::= "\"" JSON_STRING_BODY;
+internal t JSON_STRING_CHAR_UPTO_256_1 ::= JSON_STRING_CHAR{0,256};
+t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= JSON_STRING_CHAR_UPTO_256_1 "\"";
+t JSON_STRING_CHAR_EXACT_256_3 ::= JSON_STRING_CHAR{256};
+internal t JSON_STRING_CHAR_UPTO_136_4 ::= JSON_STRING_CHAR{0,136};
+t JSON_STRING_CHAR_UPTO_CLOSE_5 ::= JSON_STRING_CHAR_UPTO_136_4 "\"";
+nt json_string_bounded_split_6 ::= "\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} JSON_STRING_CHAR_UPTO_CLOSE_5);
+nt start ::= "{" "\"description\": " json_string_bounded_split_6 ", " "\"id\": " json_string "}";
+"#,
+            description_only_prefix(),
+        ),
+        (
+            "aside_description_id",
+            r#"
+start start;
+
+internal t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]|\\["\\\/bfnrt]|\\u[0-9A-Fa-f]{4}/;
+t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
+nt json_string ::= "\"" JSON_STRING_BODY;
+t JSON_BOOL ::= "true" | "false";
+internal t JSON_STRING_CHAR_UPTO_256_1 ::= JSON_STRING_CHAR{0,256};
+t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= JSON_STRING_CHAR_UPTO_256_1 "\"";
+t JSON_STRING_CHAR_EXACT_256_3 ::= JSON_STRING_CHAR{256};
+internal t JSON_STRING_CHAR_UPTO_136_4 ::= JSON_STRING_CHAR{0,136};
+t JSON_STRING_CHAR_UPTO_CLOSE_5 ::= JSON_STRING_CHAR_UPTO_136_4 "\"";
+nt json_string_bounded_split_6 ::= "\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} JSON_STRING_CHAR_UPTO_CLOSE_5);
+nt start ::= "{" "\"aside\": " JSON_BOOL ", " "\"description\": " json_string_bounded_split_6 ", " "\"id\": " json_string "}";
+"#,
+            aside_description_prefix(),
+        ),
+        (
+            "no_shared_branch",
+            r#"
+start start;
+
+internal t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]|\\["\\\/bfnrt]|\\u[0-9A-Fa-f]{4}/;
+t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
+nt json_string ::= "\"" JSON_STRING_BODY;
+t JSON_BOOL ::= "true" | "false";
+t JSON_STRING_PATTERN_FULLMATCH_0 ::= ([ \-0-9A-Z_a-z] | "\xC2" "\x85" | "\xC2" "\xA0" | "\\" "t" | "\\" "u" "0" "0" "0" "9" | "\\" "n" | "\\" "u" "0" "0" "0" [Aa] | "\\" "u" "0" "0" "0" [Bb] | "\\" "f" | "\\" "u" "0" "0" "0" [Cc] | "\\" "r" | "\\" "u" "0" "0" "0" [Dd])+ "\"";
+internal t JSON_STRING_CHAR_UPTO_256_1 ::= JSON_STRING_CHAR{0,256};
+t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= JSON_STRING_CHAR_UPTO_256_1 "\"";
+t JSON_STRING_CHAR_EXACT_256_3 ::= JSON_STRING_CHAR{256};
+internal t JSON_STRING_CHAR_UPTO_136_4 ::= JSON_STRING_CHAR{0,136};
+t JSON_STRING_CHAR_UPTO_CLOSE_5 ::= JSON_STRING_CHAR_UPTO_136_4 "\"";
+nt json_string_bounded_split_6 ::= "\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} JSON_STRING_CHAR_UPTO_CLOSE_5);
+nt obj_open_reqmask_0_nc_0 ::= (("\"" "aside\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_0 | (("\"" "autoplay\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_0 | (("\"" "css_class\"" ": ") ("\"" JSON_STRING_PATTERN_FULLMATCH_0)) obj_open_reqmask_0_c_0 | (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_0 ::= ", " (("\"" "aside\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_0 | ", " (("\"" "autoplay\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_0 | ", " (("\"" "css_class\"" ": ") ("\"" JSON_STRING_PATTERN_FULLMATCH_0)) obj_open_reqmask_0_c_0 | ", " (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | ", " (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_1 ::= ", " (("\"" "aside\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_1 | ", " (("\"" "autoplay\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_1 | ", " (("\"" "css_class\"" ": ") ("\"" JSON_STRING_PATTERN_FULLMATCH_0)) obj_open_reqmask_0_c_1 | ", " (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_1 | ;
+nt start ::= "{" obj_open_reqmask_0_nc_0 "}";
+"#,
+            benchmark_prefix_at_discrepancy(),
+        ),
+        (
+            "no_post_id_knowns",
+            r#"
+start start;
+
+internal t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]|\\["\\\/bfnrt]|\\u[0-9A-Fa-f]{4}/;
+t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
+nt json_string ::= "\"" JSON_STRING_BODY;
+t JSON_BOOL ::= "true" | "false";
+t JSON_STRING_PATTERN_FULLMATCH_0 ::= ([ \-0-9A-Z_a-z] | "\xC2" "\x85" | "\xC2" "\xA0" | "\\" "t" | "\\" "u" "0" "0" "0" "9" | "\\" "n" | "\\" "u" "0" "0" "0" [Aa] | "\\" "u" "0" "0" "0" [Bb] | "\\" "f" | "\\" "u" "0" "0" "0" [Cc] | "\\" "r" | "\\" "u" "0" "0" "0" [Dd])+ "\"";
+internal t JSON_STRING_CHAR_UPTO_256_1 ::= JSON_STRING_CHAR{0,256};
+t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= JSON_STRING_CHAR_UPTO_256_1 "\"";
+t JSON_STRING_CHAR_EXACT_256_3 ::= JSON_STRING_CHAR{256};
+internal t JSON_STRING_CHAR_UPTO_136_4 ::= JSON_STRING_CHAR{0,136};
+t JSON_STRING_CHAR_UPTO_CLOSE_5 ::= JSON_STRING_CHAR_UPTO_136_4 "\"";
+nt json_string_bounded_split_6 ::= "\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} JSON_STRING_CHAR_UPTO_CLOSE_5);
+internal t AP_SHARED_KEY_COLON_7 ::= "aside\"" | "autoplay\"" | "css_class\"" | "description\"" | "id\"";
+internal t AP_SHARED_KEY_COLON_8 ::= ((([ !#-[\]-~] | [\xC2-\xDF] [\x80-\xBF] | [\xE0] [\xA0-\xBF] [\x80-\xBF] | [\xE1-\xEC] [\x80-\xBF] [\x80-\xBF] | [\xED] [\x80-\x9F] [\x80-\xBF] | [\xEE\xEF] [\x80-\xBF] [\x80-\xBF] | [\xF0] [\x90-\xBF] [\x80-\xBF] [\x80-\xBF] | [\xF1-\xF3] [\x80-\xBF] [\x80-\xBF] [\x80-\xBF] | [\xF4] [\x80-\x8F] [\x80-\xBF] [\x80-\xBF]) | "\\" ["/\\bfnrt] | "\\" "u" [0-9A-Fa-f]{4})* "\"");
+t AP_SHARED_KEY_COLON_9 ::= AP_SHARED_KEY_COLON_8 - AP_SHARED_KEY_COLON_7;
+nt json_value ::= json_string | JSON_BOOL;
+nt obj_open_reqmask_0_nc_0 ::= (("\"" "aside\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_0 | (("\"" "autoplay\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_0 | (("\"" "css_class\"" ": ") ("\"" JSON_STRING_PATTERN_FULLMATCH_0)) obj_open_reqmask_0_c_0 | (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | (("\"" AP_SHARED_KEY_COLON_9 ": ") json_value) obj_open_reqmask_0_c_0 | (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_0 ::= ", " (("\"" "aside\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_0 | ", " (("\"" "autoplay\"" ": ") JSON_BOOL) obj_open_reqmask_0_c_0 | ", " (("\"" "css_class\"" ": ") ("\"" JSON_STRING_PATTERN_FULLMATCH_0)) obj_open_reqmask_0_c_0 | ", " (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | ", " (("\"" AP_SHARED_KEY_COLON_9 ": ") json_value) obj_open_reqmask_0_c_0 | ", " (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_1 ::= ;
+nt start ::= "{" obj_open_reqmask_0_nc_0 "}";
+"#,
+            benchmark_prefix_at_discrepancy(),
+        ),
+    ] {
+        let Ok(constraint) = Constraint::from_glrm_grammar(grammar, &vocab) else {
+            println!("variant={label} compile=false");
+            continue;
+        };
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
+            classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES);
+        println!(
+            "variant={label} mask={} commit_token={} commit_bytes={}",
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+        );
+    }
+}
+
+#[ignore = "diagnostic for fixed-order subset minimization of the current o82710 inline GLRM"]
+#[test]
+fn scan_o82710_fixed_order_field_subsets() {
+    let vocab = reduced_two_token_vocab();
+
+    for mask in 0u8..8 {
+        let include_aside = (mask & 0b001) != 0;
+        let include_autoplay = (mask & 0b010) != 0;
+        let include_css_class = (mask & 0b100) != 0;
+        let label = format!(
+            "aside={} autoplay={} css_class={}",
+            include_aside, include_autoplay, include_css_class
+        );
+        let grammar = fixed_order_subset_glrm(include_aside, include_autoplay, include_css_class);
+        let prefix = fixed_order_subset_prefix(include_aside, include_autoplay, include_css_class);
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
+            classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES);
+        println!(
+            "fixed_order_subset={} mask={} commit_token={} commit_bytes={}",
+            label,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+        );
+    }
+}
+
+#[ignore = "diagnostic for recursive known-field subset minimization of the current o82710 inline GLRM"]
+#[test]
+fn scan_o82710_recursive_known_field_subsets() {
+    let vocab = reduced_two_token_vocab();
+
+    for mask in 0u8..8 {
+        let include_aside = (mask & 0b001) != 0;
+        let include_autoplay = (mask & 0b010) != 0;
+        let include_css_class = (mask & 0b100) != 0;
+        for css_class_uses_pattern in [true, false] {
+            let label = format!(
+                "aside={} autoplay={} css_class={} css_pattern={}",
+                include_aside, include_autoplay, include_css_class, css_class_uses_pattern
+            );
+            let grammar = recursive_known_subset_glrm(
+                include_aside,
+                include_autoplay,
+                include_css_class,
+                css_class_uses_pattern,
+            );
+            let prefix = fixed_order_subset_prefix(include_aside, include_autoplay, include_css_class);
+            let Ok(constraint) = Constraint::from_glrm_grammar(&grammar, &vocab) else {
+                println!("recursive_subset={} compile=false", label);
+                continue;
+            };
+            let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
+                classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES);
+            println!(
+                "recursive_subset={} mask={} commit_token={} commit_bytes={}",
+                label,
+                mask_accepts,
+                commit_token_accepts,
+                commit_bytes_accepts,
+            );
+        }
+    }
 }
 
 #[ignore = "expensive full-vocab benchmark witness for the current false negative"]
