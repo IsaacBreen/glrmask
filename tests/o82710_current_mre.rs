@@ -47,10 +47,10 @@ internal t JSON_STRING_CHAR_UPTO_256_1 ::= JSON_STRING_CHAR{0,256};
 t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= JSON_STRING_CHAR_UPTO_256_1 "\"";
 t JSON_STRING_CHAR_EXACT_256_3 ::= JSON_STRING_CHAR{256};
 nt json_string_bounded_split_6 ::= "\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} "\"");
-nt obj_open_reqmask_0_nc_0 ::= (("\"" "a\"" ":") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | (("\"" "b\"" ":") "\"x\"") obj_open_reqmask_0_c_1;
-nt obj_open_reqmask_0_c_0 ::= "," (("\"" "a\"" ":") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | "," (("\"" "b\"" ":") "\"x\"") obj_open_reqmask_0_c_1;
-nt obj_open_reqmask_0_c_1 ::= "," (("\"" "a\"" ":") json_string_bounded_split_6) obj_open_reqmask_0_c_1 | ;
-nt start ::= "{" obj_open_reqmask_0_nc_0 "}";
+nt obj_open_reqmask_0_nc_0 ::= ("a" json_string_bounded_split_6) obj_open_reqmask_0_c_0 | "\"\"" obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_0 ::= ("a" json_string_bounded_split_6) obj_open_reqmask_0_c_0 | "\"\"" obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_1 ::= ("a" json_string_bounded_split_6) obj_open_reqmask_0_c_1 | ;
+nt start ::= obj_open_reqmask_0_nc_0;
 "#;
 
 fn token_allowed(mask: &[u32], id: usize) -> bool {
@@ -261,7 +261,7 @@ fn description_only_prefix() -> Vec<u8> {
 }
 
 fn description_only_prefix_with_ascii_repeat(content_len: usize) -> Vec<u8> {
-    let mut prefix = Vec::from(b"{\"a\":\"".as_slice());
+    let mut prefix = Vec::from(b"a\"".as_slice());
     prefix.extend(std::iter::repeat(b'a').take(content_len));
     prefix
 }
@@ -462,6 +462,7 @@ fn minimized_key_literal_variant(
     id_key: &str,
     colon_sep: &str,
     comma_sep: &str,
+    id_literal: &str,
 ) -> String {
     format!(
         r#"
@@ -472,12 +473,40 @@ internal t JSON_STRING_CHAR_UPTO_256_1 ::= JSON_STRING_CHAR{{0,256}};
 t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= JSON_STRING_CHAR_UPTO_256_1 "\"";
 t JSON_STRING_CHAR_EXACT_256_3 ::= JSON_STRING_CHAR{{256}};
 nt json_string_bounded_split_6 ::= "\"" (JSON_STRING_CHAR_EXACT_256_3{{0,18}} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{{19}} "\"");
-nt obj_open_reqmask_0_nc_0 ::= (("\"" "{description_key}\"" "{colon_sep}") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | (("\"" "{id_key}\"" "{colon_sep}") "\"x\"") obj_open_reqmask_0_c_1;
-nt obj_open_reqmask_0_c_0 ::= "{comma_sep}" (("\"" "{description_key}\"" "{colon_sep}") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | "{comma_sep}" (("\"" "{id_key}\"" "{colon_sep}") "\"x\"") obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_nc_0 ::= (("\"" "{description_key}\"" "{colon_sep}") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | (("\"" "{id_key}\"" "{colon_sep}") "{id_literal}") obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_0 ::= "{comma_sep}" (("\"" "{description_key}\"" "{colon_sep}") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | "{comma_sep}" (("\"" "{id_key}\"" "{colon_sep}") "{id_literal}") obj_open_reqmask_0_c_1;
 nt obj_open_reqmask_0_c_1 ::= "{comma_sep}" (("\"" "{description_key}\"" "{colon_sep}") json_string_bounded_split_6) obj_open_reqmask_0_c_1 | ;
 nt start ::= "{{" obj_open_reqmask_0_nc_0 "}}";
 "#,
     )
+}
+
+fn minimized_shell_variant(
+    start_prefix: &str,
+    description_head: &str,
+    id_head: &str,
+    comma_sep: &str,
+    start_suffix: &str,
+) -> String {
+    format!(
+        r#"
+start start;
+
+internal t JSON_STRING_CHAR ::= "a";
+internal t JSON_STRING_CHAR_UPTO_256_1 ::= JSON_STRING_CHAR{{0,256}};
+t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= JSON_STRING_CHAR_UPTO_256_1 "\"";
+t JSON_STRING_CHAR_EXACT_256_3 ::= JSON_STRING_CHAR{{256}};
+nt json_string_bounded_split_6 ::= "\"" (JSON_STRING_CHAR_EXACT_256_3{{0,18}} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{{19}} "\"");
+nt obj_open_reqmask_0_nc_0 ::= ("{description_head}" json_string_bounded_split_6) obj_open_reqmask_0_c_0 | ("{id_head}" "\"\"") obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_0 ::= "{comma_sep}" ("{description_head}" json_string_bounded_split_6) obj_open_reqmask_0_c_0 | "{comma_sep}" ("{id_head}" "\"\"") obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_1 ::= "{comma_sep}" ("{description_head}" json_string_bounded_split_6) obj_open_reqmask_0_c_1 | ;
+nt start ::= "{start_prefix}" obj_open_reqmask_0_nc_0 "{start_suffix}";
+"#,
+    )
+}
+
+fn minimized_branch_marker_variant(description_head: &str, id_head: &str, comma_sep: &str) -> String {
+    minimized_shell_variant("", description_head, id_head, comma_sep, "")
 }
 
 #[ignore = "diagnostic for more aggressive recursive o82710 inline-GLRM minimization"]
@@ -926,7 +955,7 @@ fn scan_o82710_key_literal_variants() {
 
     let vocab = reduced_two_token_vocab();
     for (label, description_key, id_key, colon_sep, comma_sep) in variants {
-        let grammar = minimized_key_literal_variant(description_key, id_key, colon_sep, comma_sep);
+        let grammar = minimized_key_literal_variant(description_key, id_key, colon_sep, comma_sep, "\\\"x\\\"");
         let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
         let mut prefix = format!("{{\"{description_key}\"{colon_sep}\"").into_bytes();
         prefix.extend(std::iter::repeat(b'a').take(2303));
@@ -934,6 +963,99 @@ fn scan_o82710_key_literal_variants() {
             classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES);
         println!(
             "key_variant={} mask={} commit_token={} commit_bytes={}",
+            label,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+        );
+    }
+}
+
+#[ignore = "diagnostic for minimizing the post-disputed id literal in the current o82710 witness"]
+#[test]
+fn scan_o82710_id_literal_variants() {
+    let variants = [
+        ("empty", "\\\"\\\""),
+        ("a", "\\\"a\\\""),
+        ("x", "\\\"x\\\""),
+        ("aa", "\\\"aa\\\""),
+    ];
+
+    let vocab = reduced_two_token_vocab();
+    let prefix = description_only_prefix();
+    for (label, id_literal) in variants {
+        let grammar = minimized_key_literal_variant("a", "b", ":", ",", id_literal);
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
+            classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES);
+        println!(
+            "id_literal_variant={} mask={} commit_token={} commit_bytes={}",
+            label,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+        );
+    }
+}
+
+#[ignore = "diagnostic for minimizing the remaining shell punctuation in the current o82710 witness"]
+#[test]
+fn scan_o82710_shell_punctuation_variants() {
+    let variants = [
+        ("current", "{", "\"a\":", "\"b\":", ",", "}", b"{\"a\":\"".as_slice()),
+        ("no_braces", "", "\"a\":", "\"b\":", ",", "", b"\"a\":\"".as_slice()),
+        ("bare_keys", "", "a:", "b:", ",", "", b"a:\"".as_slice()),
+        ("bare_keys_no_colon", "", "a", "b", ",", "", b"a\"".as_slice()),
+    ];
+
+    let vocab = reduced_two_token_vocab();
+    for (label, start_prefix, description_head, id_head, comma_sep, start_suffix, prefix_head) in variants {
+        let grammar = minimized_shell_variant(start_prefix, description_head, id_head, comma_sep, start_suffix);
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+        let mut prefix = prefix_head.to_vec();
+        prefix.extend(std::iter::repeat(b'a').take(2303));
+        let mut prefix_state = constraint.start();
+        if let Err(error) = prefix_state.commit_bytes(&prefix) {
+            println!("shell_variant={} prefix_rejected={}", label, error);
+            continue;
+        }
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
+            classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES);
+        println!(
+            "shell_variant={} mask={} commit_token={} commit_bytes={}",
+            label,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+        );
+    }
+}
+
+#[ignore = "diagnostic for minimizing the remaining branch markers in the current o82710 witness"]
+#[test]
+fn scan_o82710_branch_marker_variants() {
+    let variants = [
+        ("current", "a", "b", ",", b"a\"".as_slice()),
+        ("empty_id_head", "a", "", ",", b"a\"".as_slice()),
+        ("empty_separator", "a", "b", "", b"a\"".as_slice()),
+        ("empty_id_and_separator", "a", "", "", b"a\"".as_slice()),
+    ];
+
+    let vocab = reduced_two_token_vocab();
+    for (label, description_head, id_head, comma_sep, prefix_head) in variants {
+        let grammar = minimized_branch_marker_variant(description_head, id_head, comma_sep);
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+        let mut prefix = prefix_head.to_vec();
+        prefix.extend(std::iter::repeat(b'a').take(2303));
+        let mut prefix_state = constraint.start();
+        if let Err(error) = prefix_state.commit_bytes(&prefix) {
+            println!("branch_marker_variant={} prefix_rejected={}", label, error);
+            continue;
+        }
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
+            classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES);
+        println!(
+            "branch_marker_variant={} mask={} commit_token={} commit_bytes={}",
             label,
             mask_accepts,
             commit_token_accepts,
