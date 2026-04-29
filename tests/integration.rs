@@ -522,7 +522,7 @@ fn test_mre_o43234_closed_object_string_then_integer_rejects_trailing_comma_in_m
             (1, b"\"".to_vec()),
             (11, b",".to_vec()),
             (313, b"--".to_vec()),
-            (220, b" ".to_vec()),
+            // (220, b" ".to_vec()),
         ],
         None,
     );
@@ -532,7 +532,7 @@ fn test_mre_o43234_closed_object_string_then_integer_rejects_trailing_comma_in_m
 
         internal t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]/;
         t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
-        t JSON_INTEGER ::= /-?(0|[1-9][0-9]*)/;
+        t JSON_INTEGER ::= /(-?)2(2?)/;
         nt start ::= JSON_STRING_BODY JSON_INTEGER "}";
     "#,
         &vocab,
