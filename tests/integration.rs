@@ -5315,7 +5315,7 @@ fn test_o82710_minimized_inline_glrm_mask_allows_committable_token() {
 
         t q ::= "\"";
         t e ::= "a"{32};
-        nt p ::= (e{0,18} "a"{0,32} | e{19}) q;
+        nt p ::= (e{0,17} "a"{0,32} | e{18}) q;
         nt start ::= p* q p*;
     "#;
     let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
