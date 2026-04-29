@@ -42,6 +42,11 @@ fn partition_by_finalizers(dfa: &DFA) -> (Vec<u32>, Vec<Vec<u32>>) {
     (partition, blocks)
 }
 
+fn clear_possible_futures_for_minimization(dfa: &mut DFA) {
+    let empty = BitSet::new(dfa.num_groups());
+    dfa.mask_possible_futures(&empty);
+}
+
 fn dedup_adjacency(dfa: &DFA) -> Vec<Vec<usize>> {
     dfa.states()
         .iter()
@@ -589,6 +594,7 @@ impl DFA {
         } else {
             (0..orig_n as u32).collect()
         };
+        clear_possible_futures_for_minimization(&mut working);
         let n = working.states().len();
 
         if n <= 1 {
@@ -616,6 +622,7 @@ impl DFA {
 
         let mut working = self.clone();
         let old_to_working = working.remove_unreachable_states_with_roots_with_mapping(extra_roots);
+        clear_possible_futures_for_minimization(&mut working);
         let n = working.states().len();
 
         if n <= 1 {
@@ -642,6 +649,7 @@ impl DFA {
         } else {
             (0..orig_n as u32).collect()
         };
+        clear_possible_futures_for_minimization(&mut working);
         let n = working.states().len();
 
         if n <= 1 {
@@ -695,6 +703,7 @@ impl DFA {
 
         let mut working = self.clone();
         let old_to_working = working.remove_unreachable_states_with_roots_with_mapping(extra_roots);
+        clear_possible_futures_for_minimization(&mut working);
         let n = working.states().len();
 
         if n <= 1 {
