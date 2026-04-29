@@ -4,9 +4,9 @@ use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 
-const DISPUTED_TOKEN_ID: u32 = 68439;
+const DISPUTED_TOKEN_ID: u32 = 0;
 const DISPUTED_TOKEN_BYTES: &[u8] = b"'];?>\"";
-const CONTROL_TOKEN_ID: u32 = 99925;
+const CONTROL_TOKEN_ID: u32 = 1;
 const CONTROL_TOKEN_BYTES: &[u8] = b"a";
 const SPARSE_SCHEMA_GLRM: &str = r#"
 start start;
@@ -725,6 +725,39 @@ fn scan_o82710_control_token_variants() {
             commit_token_accepts,
             commit_bytes_accepts,
         );
+    }
+}
+
+#[ignore = "diagnostic for minimizing token ids in the current o82710 witness"]
+#[test]
+fn scan_o82710_token_id_variants() {
+    let id_variants = [0u32, 1, 31, 32, 33, 63, 64, DISPUTED_TOKEN_ID];
+
+    for disputed_id in id_variants {
+        for control_id in id_variants {
+            if disputed_id == control_id {
+                continue;
+            }
+            let vocab = Vocab::new(
+                vec![
+                    (disputed_id, DISPUTED_TOKEN_BYTES.to_vec()),
+                    (control_id, CONTROL_TOKEN_BYTES.to_vec()),
+                ],
+                None,
+            );
+            let constraint = Constraint::from_glrm_grammar(MINIMIZED_INLINE_GLRM_CANDIDATE, &vocab).unwrap();
+            let prefix = description_only_prefix();
+            let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
+                classify_constraint(&constraint, &prefix, disputed_id, DISPUTED_TOKEN_BYTES);
+            println!(
+                "id_variant=disputed:{} control:{} mask={} commit_token={} commit_bytes={}",
+                disputed_id,
+                control_id,
+                mask_accepts,
+                commit_token_accepts,
+                commit_bytes_accepts,
+            );
+        }
     }
 }
 
