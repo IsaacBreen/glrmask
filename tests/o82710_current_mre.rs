@@ -47,10 +47,7 @@ internal t JSON_STRING_CHAR_UPTO_256_1 ::= JSON_STRING_CHAR{0,256};
 t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= JSON_STRING_CHAR_UPTO_256_1 "\"";
 t JSON_STRING_CHAR_EXACT_256_3 ::= JSON_STRING_CHAR{256};
 nt json_string_bounded_split_6 ::= "\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} "\"");
-nt obj_open_reqmask_0_nc_0 ::= ("a" json_string_bounded_split_6) obj_open_reqmask_0_c_0 | "\"\"" obj_open_reqmask_0_c_1;
-nt obj_open_reqmask_0_c_0 ::= ("a" json_string_bounded_split_6) obj_open_reqmask_0_c_0 | "\"\"" obj_open_reqmask_0_c_1;
-nt obj_open_reqmask_0_c_1 ::= ("a" json_string_bounded_split_6) obj_open_reqmask_0_c_1 | ;
-nt start ::= obj_open_reqmask_0_nc_0;
+nt start ::= json_string_bounded_split_6+ "\"\"" json_string_bounded_split_6*;
 "#;
 
 fn token_allowed(mask: &[u32], id: usize) -> bool {
@@ -261,7 +258,7 @@ fn description_only_prefix() -> Vec<u8> {
 }
 
 fn description_only_prefix_with_ascii_repeat(content_len: usize) -> Vec<u8> {
-    let mut prefix = Vec::from(b"a\"".as_slice());
+    let mut prefix = Vec::from(b"\"".as_slice());
     prefix.extend(std::iter::repeat(b'a').take(content_len));
     prefix
 }
@@ -507,6 +504,27 @@ nt start ::= "{start_prefix}" obj_open_reqmask_0_nc_0 "{start_suffix}";
 
 fn minimized_branch_marker_variant(description_head: &str, id_head: &str, comma_sep: &str) -> String {
     minimized_shell_variant("", description_head, id_head, comma_sep, "")
+}
+
+fn minimized_flat_shell_variant(start_rule: &str) -> String {
+    format!(
+        r#"
+start start;
+
+internal t JSON_STRING_CHAR ::= "a";
+internal t JSON_STRING_CHAR_UPTO_256_1 ::= JSON_STRING_CHAR{{0,256}};
+t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= JSON_STRING_CHAR_UPTO_256_1 "\"";
+t JSON_STRING_CHAR_EXACT_256_3 ::= JSON_STRING_CHAR{{256}};
+nt json_string_bounded_split_6 ::= "\"" (JSON_STRING_CHAR_EXACT_256_3{{0,18}} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{{19}} "\"");
+nt start ::= {start_rule};
+"#,
+    )
+}
+
+fn description_only_prefix_with_head(head: &[u8], content_len: usize) -> Vec<u8> {
+    let mut prefix = Vec::from(head);
+    prefix.extend(std::iter::repeat(b'a').take(content_len));
+    prefix
 }
 
 #[ignore = "diagnostic for more aggressive recursive o82710 inline-GLRM minimization"]
@@ -1056,6 +1074,94 @@ fn scan_o82710_branch_marker_variants() {
             classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES);
         println!(
             "branch_marker_variant={} mask={} commit_token={} commit_bytes={}",
+            label,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+        );
+    }
+}
+
+#[ignore = "diagnostic for flattening the remaining recursive shell in the current o82710 witness"]
+#[test]
+fn scan_o82710_shell_flatten_variants() {
+    let variants = [
+        (
+            "current_flat_equivalent",
+            r#"("a" json_string_bounded_split_6)* "\"\"" ("a" json_string_bounded_split_6)*"#,
+        ),
+        (
+            "requires_prefix_arm",
+            r#"("a" json_string_bounded_split_6)+ "\"\"" ("a" json_string_bounded_split_6)*"#,
+        ),
+        (
+            "quoted_middle_then_suffix",
+            r#"("a" json_string_bounded_split_6)* "\"\"""#,
+        ),
+    ];
+
+    let vocab = reduced_two_token_vocab();
+    let prefix = description_only_prefix();
+    for (label, start_rule) in variants {
+        let grammar = minimized_flat_shell_variant(start_rule);
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+        let mut prefix_state = constraint.start();
+        if let Err(error) = prefix_state.commit_bytes(&prefix) {
+            println!("flat_shell_variant={} prefix_rejected={}", label, error);
+            continue;
+        }
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
+            classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES);
+        println!(
+            "flat_shell_variant={} mask={} commit_token={} commit_bytes={}",
+            label,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+        );
+    }
+}
+
+#[ignore = "diagnostic for minimizing the flat shell core in the current o82710 witness"]
+#[test]
+fn scan_o82710_flat_core_variants() {
+    let variants = [
+        (
+            "current_flat",
+            r#"("a" json_string_bounded_split_6)+ "\"\"" ("a" json_string_bounded_split_6)*"#,
+            b"a\"".as_slice(),
+        ),
+        (
+            "no_middle_empty",
+            r#"("a" json_string_bounded_split_6)+"#,
+            b"a\"".as_slice(),
+        ),
+        (
+            "no_leading_marker",
+            r#"json_string_bounded_split_6+ "\"\"" json_string_bounded_split_6*"#,
+            b"\"".as_slice(),
+        ),
+        (
+            "no_leading_marker_no_middle",
+            r#"json_string_bounded_split_6+"#,
+            b"\"".as_slice(),
+        ),
+    ];
+
+    let vocab = reduced_two_token_vocab();
+    for (label, start_rule, prefix_head) in variants {
+        let grammar = minimized_flat_shell_variant(start_rule);
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+        let prefix = description_only_prefix_with_head(prefix_head, 2303);
+        let mut prefix_state = constraint.start();
+        if let Err(error) = prefix_state.commit_bytes(&prefix) {
+            println!("flat_core_variant={} prefix_rejected={}", label, error);
+            continue;
+        }
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
+            classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES);
+        println!(
+            "flat_core_variant={} mask={} commit_token={} commit_bytes={}",
             label,
             mask_accepts,
             commit_token_accepts,
