@@ -515,24 +515,14 @@ fn test_json_schema_enum() {
     assert_mask_allows(&constraint.start().mask(), &[0]);
 }
 
-#[ignore = "known o43234 GLRM trailing-comma mask false positive MRE"]
 #[test]
 fn test_mre_o43234_closed_object_string_then_integer_rejects_trailing_comma_in_mask() {
     let vocab = Vocab::new(
         vec![
             (1, b"\"".to_vec()),
             (11, b",".to_vec()),
-            (17, b"2".to_vec()),
             (313, b"--".to_vec()),
-            (64, b"a".to_vec()),
-            (65, b"b".to_vec()),
-            (87, b"x".to_vec()),
-            (92, b"}".to_vec()),
             (220, b" ".to_vec()),
-            (330, b" \"".to_vec()),
-            (498, b"\",".to_vec()),
-            (794, b"\":".to_vec()),
-            (5018, b"{\"".to_vec()),
         ],
         None,
     );
@@ -572,8 +562,8 @@ nt start ::= "{" ("\"" "a\"" ": " json_string) (", \"" "b\"" ": " JSON_INTEGER) 
 
     assert_eq!(
         (mask_accepts, commit_token_accepts, commit_bytes_accepts),
-        (true, false, false),
-        "o43234 minimized GLRM MRE should preserve the current trailing-comma mask/commit mismatch; mask={mask_accepts} commit_token={commit_token_accepts} commit_bytes={commit_bytes_accepts}",
+        (false, false, false),
+        "o43234 trailing comma should be rejected consistently by both mask and commit; mask={mask_accepts} commit_token={commit_token_accepts} commit_bytes={commit_bytes_accepts}",
     );
 }
 
