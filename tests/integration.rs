@@ -5405,6 +5405,56 @@ fn test_o82710_minimized_inline_glrm_mask_allows_committable_token_17() {
         word < mask.len() && ((mask[word] >> (0usize % 32)) & 1) != 0
     };
     dbg!(token_in_mask);
+    println!("state on mask gen: {:?}", mask_state.debug_parser_stacks());
+
+    let commit_accepts = mask_state.commit_token(0u32).is_ok();
+    dbg!(commit_accepts);
+
+    assert!(
+        (token_in_mask, commit_accepts) == (true, true),
+        "the minimized witness should both mask-in and commit the disputed token after the reproducing prefix; token_in_mask={token_in_mask}, commit_accepts={commit_accepts}"
+    );
+}
+
+#[test]
+fn test_o82710_minimized_inline_glrm_mask_allows_committable_token_17_var1() {
+    let vocab = Vocab::new(
+        vec![
+            (0u32, b"aa\"".to_vec()),
+            (1u32, b"a".to_vec()),
+        ],
+
+        None,
+    );
+    let grammar = r#"
+        start start;
+
+        t q ::= "\"";
+        t a_exact_32 ::= "a"{32};
+        t a_up_to_32 ::= "a"{0,32};
+        nt p ::= (a_exact_32{0,17} a_up_to_32 | a_exact_32{18}) q;
+        nt start ::= p? q p*;
+    "#;
+    let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+
+    let mut prefix = Vec::from(b"\"".as_slice());
+    prefix.extend(std::iter::repeat(b'a').take(287));
+
+    let mut bytes_state = constraint.start();
+    bytes_state.commit_bytes(&prefix).unwrap();
+    assert!(
+        bytes_state.commit_bytes(b"aa\"").is_ok(),
+        "the minimized witness should accept the disputed token bytes after the reproducing prefix"
+    );
+
+    let mut mask_state = constraint.start();
+    mask_state.commit_bytes(&prefix).unwrap();
+    let mask = mask_state.mask();
+    let token_in_mask = {
+        let word = 0usize / 32;
+        word < mask.len() && ((mask[word] >> (0usize % 32)) & 1) != 0
+    };
+    dbg!(token_in_mask);
 
     let commit_accepts = mask_state.commit_token(0u32).is_ok();
     dbg!(commit_accepts);
