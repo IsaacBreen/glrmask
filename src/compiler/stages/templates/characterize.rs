@@ -1,20 +1,46 @@
 //! Terminal characterization for template construction.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::compiler::glr::analysis::AnalyzedGrammar;
-use crate::compiler::glr::table::{Action, GLRTable};
+use crate::compiler::glr::table::{Action, GLRTable, GuardedStackShift, StackShiftGuard};
 use crate::grammar::flat::{NonterminalID, TerminalID};
 
-type InitialEscape = (u32, usize, Vec<u32>);
-
-type InitialReduce = (u32, usize, NonterminalID);
-
-type NtEscape = (NonterminalID, u32, usize, Vec<u32>);
-
-type NtRereduce = (NonterminalID, u32, usize, NonterminalID);
-
 type NtAdjacency = BTreeMap<NonterminalID, BTreeSet<NonterminalID>>;
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum StackMatcher {
+    Any,
+    State(u32),
+    States(Vec<u32>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InitialEscape {
+    pub pop: Vec<StackMatcher>,
+    pub pushes: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InitialReduce {
+    pub pop: Vec<StackMatcher>,
+    pub nonterminal: NonterminalID,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NtEscape {
+    pub source_nonterminal: NonterminalID,
+    pub pop: Vec<StackMatcher>,
+    pub pushes: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NtRereduce {
+    pub source_nonterminal: NonterminalID,
+    pub pop: Vec<StackMatcher>,
+    pub target_nonterminal: NonterminalID,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TerminalCharacterization {
@@ -25,6 +51,79 @@ pub struct TerminalCharacterization {
     pub all_nts: BTreeSet<NonterminalID>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct RelationConfig {
+    input: Vec<StackMatcher>,
+    segment: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CharacterizationSource {
+    Initial,
+    Nonterminal(NonterminalID),
+}
+
+#[derive(Debug, Default)]
+struct CharacterizationOutput {
+    escapes: BTreeSet<InitialEscape>,
+    reduces: BTreeSet<InitialReduce>,
+    nt_escapes: BTreeSet<NtEscape>,
+    nt_rereduces: BTreeSet<NtRereduce>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct StackEdit {
+    pop: Vec<StackMatcher>,
+    pushes: Vec<u32>,
+}
+
+impl CharacterizationOutput {
+    fn emit_escape(
+        &mut self,
+        source: CharacterizationSource,
+        pop: Vec<StackMatcher>,
+        pushes: Vec<u32>,
+    ) {
+        match source {
+            CharacterizationSource::Initial => {
+                self.escapes.insert(InitialEscape { pop, pushes });
+            }
+            CharacterizationSource::Nonterminal(source_nonterminal) => {
+                self.nt_escapes.insert(NtEscape {
+                    source_nonterminal,
+                    pop,
+                    pushes,
+                });
+            }
+        }
+    }
+
+    fn emit_reduce(
+        &mut self,
+        source: CharacterizationSource,
+        pop: Vec<StackMatcher>,
+        nonterminal: NonterminalID,
+    ) {
+        debug_assert!(
+            !pop.is_empty(),
+            "terminal characterization should not emit zero-length reduce paths"
+        );
+
+        match source {
+            CharacterizationSource::Initial => {
+                self.reduces.insert(InitialReduce { pop, nonterminal });
+            }
+            CharacterizationSource::Nonterminal(source_nonterminal) => {
+                self.nt_rereduces.insert(NtRereduce {
+                    source_nonterminal,
+                    pop,
+                    target_nonterminal: nonterminal,
+                });
+            }
+        }
+    }
+}
+
 impl TerminalCharacterization {
     pub fn find_cycle(&self) -> Option<Vec<NonterminalID>> {
         find_nonterminal_cycle(&build_rereduce_adjacency(&self.nt_rereduces))
@@ -33,11 +132,11 @@ impl TerminalCharacterization {
 
 fn build_rereduce_adjacency(nt_rereduces: &[NtRereduce]) -> NtAdjacency {
     let mut adjacency = NtAdjacency::new();
-    for (source_nonterminal, _revealed_state, _pop_count, target_nonterminal) in nt_rereduces {
+    for rereduce in nt_rereduces {
         adjacency
-            .entry(*source_nonterminal)
+            .entry(rereduce.source_nonterminal)
             .or_default()
-            .insert(*target_nonterminal);
+            .insert(rereduce.target_nonterminal);
     }
     adjacency
 }
@@ -90,180 +189,519 @@ fn find_nonterminal_cycle(adjacency: &NtAdjacency) -> Option<Vec<NonterminalID>>
     None
 }
 
-fn record_initial_action(
-    _table: &GLRTable,
-    state: u32,
-    _terminal: TerminalID,
-    action: &Action,
-    is_forwarded: bool,
-    escapes: &mut BTreeSet<InitialEscape>,
-    reduces: &mut BTreeSet<InitialReduce>,
-) {
-    fn record_initial_stack_shift_effect(
-        state: u32,
-        pop: u32,
-        shifted_pushes: &[u32],
-        escapes: &mut BTreeSet<InitialEscape>,
-    ) {
-        let extra_pops = pop.saturating_sub(1) as usize;
-        let mut pushes = if pop == 0 { vec![state] } else { Vec::new() };
-        pushes.extend_from_slice(shifted_pushes);
-        escapes.insert((state, extra_pops, pushes));
+fn sorted_dedup(mut states: Vec<u32>) -> Vec<u32> {
+    states.sort_unstable();
+    states.dedup();
+    states
+}
+
+fn states_matcher(states: Vec<u32>) -> Option<StackMatcher> {
+    let states = sorted_dedup(states);
+    match states.len() {
+        0 => None,
+        1 => Some(StackMatcher::State(states[0])),
+        _ => Some(StackMatcher::States(states)),
+    }
+}
+
+fn intersect_sorted(a: &[u32], b: &[u32]) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    let mut j = 0;
+
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            Ordering::Less => i += 1,
+            Ordering::Greater => j += 1,
+            Ordering::Equal => {
+                out.push(a[i]);
+                i += 1;
+                j += 1;
+            }
+        }
     }
 
+    out
+}
+
+fn constrain_matcher(matcher: &mut StackMatcher, allowed: &[u32]) -> bool {
+    let allowed = sorted_dedup(allowed.to_vec());
+
+    let next = match matcher {
+        StackMatcher::Any => states_matcher(allowed),
+        StackMatcher::State(state) => {
+            if allowed.binary_search(state).is_ok() {
+                Some(StackMatcher::State(*state))
+            } else {
+                None
+            }
+        }
+        StackMatcher::States(states) => states_matcher(intersect_sorted(states, &allowed)),
+    };
+
+    if let Some(next) = next {
+        *matcher = next;
+        true
+    } else {
+        false
+    }
+}
+
+fn finite_states(matcher: &StackMatcher) -> Option<Vec<u32>> {
+    match matcher {
+        StackMatcher::Any => None,
+        StackMatcher::State(state) => Some(vec![*state]),
+        StackMatcher::States(states) => Some(states.clone()),
+    }
+}
+
+fn assert_well_formed_guarded_shift(shift: &GuardedStackShift) {
+    debug_assert!(
+        shift.guards.windows(2).all(|w| w[0].pop <= w[1].pop),
+        "GuardedStackShift guards must be sorted by pop"
+    );
+    debug_assert!(
+        shift.guards.iter().all(|guard| guard.pop <= shift.pop),
+        "GuardedStackShift guard.pop must be <= shift.pop"
+    );
+    debug_assert!(
+        shift.guards.iter().all(|guard| !guard.states.is_empty()),
+        "GuardedStackShift guards must have nonempty state sets"
+    );
+    debug_assert!(
+        shift.guards.iter().all(|guard| guard.states.windows(2).all(|w| w[0] < w[1])),
+        "GuardedStackShift guard.states must be sorted and deduplicated"
+    );
+}
+
+fn identity_config(top_state: u32) -> RelationConfig {
+    RelationConfig {
+        input: vec![StackMatcher::State(top_state)],
+        segment: vec![top_state],
+    }
+}
+
+fn start_relation_after_goto(
+    revealed_state: u32,
+    goto_state: u32,
+    goto_replace: bool,
+) -> RelationConfig {
+    RelationConfig {
+        input: vec![StackMatcher::State(revealed_state)],
+        segment: if goto_replace {
+            vec![goto_state]
+        } else {
+            vec![revealed_state, goto_state]
+        },
+    }
+}
+
+fn apply_goto_to_relation_config(
+    config: &RelationConfig,
+    reveal_index: usize,
+    goto_state: u32,
+    goto_replace: bool,
+) -> RelationConfig {
+    let mut segment = config.segment[..=reveal_index].to_vec();
+    if goto_replace {
+        segment.pop();
+    }
+    segment.push(goto_state);
+
+    RelationConfig {
+        input: config.input.clone(),
+        segment,
+    }
+}
+
+fn reduce_crossing_pattern(config: &RelationConfig, reduce_len: usize) -> Vec<StackMatcher> {
+    debug_assert!(reduce_len >= config.segment.len());
+
+    let mut pop = config.input.clone();
+    pop.extend(std::iter::repeat(StackMatcher::Any).take(reduce_len - config.segment.len()));
+    pop
+}
+
+fn ensure_input_len(input: &mut Vec<StackMatcher>, len: usize) {
+    while input.len() < len {
+        input.push(StackMatcher::Any);
+    }
+}
+
+fn guard_constraints(
+    shift_pop: usize,
+    guards: &[StackShiftGuard],
+) -> Option<BTreeMap<usize, Vec<u32>>> {
+    let mut out: BTreeMap<usize, Vec<u32>> = BTreeMap::new();
+    let mut previous_pop = None;
+
+    for guard in guards {
+        let depth = guard.pop as usize;
+
+        if let Some(previous) = previous_pop {
+            if depth < previous {
+                return None;
+            }
+        }
+        previous_pop = Some(depth);
+
+        if depth > shift_pop {
+            return None;
+        }
+
+        let states = sorted_dedup(guard.states.clone());
+        if states.is_empty() {
+            return None;
+        }
+
+        out.entry(depth)
+            .and_modify(|existing| {
+                *existing = intersect_sorted(existing, &states);
+            })
+            .or_insert(states);
+
+        if out.get(&depth).is_some_and(|states| states.is_empty()) {
+            return None;
+        }
+    }
+
+    Some(out)
+}
+
+fn stack_effect_edits(
+    config: &RelationConfig,
+    shift_pop: usize,
+    shifted_pushes: &[u32],
+    guards: &[StackShiftGuard],
+) -> Vec<StackEdit> {
+    let Some(guards) = guard_constraints(shift_pop, guards) else {
+        return Vec::new();
+    };
+
+    let segment_len = config.segment.len();
+    let base_input_len = config.input.len();
+    let mut input = config.input.clone();
+
+    for (&depth, allowed) in &guards {
+        if depth < segment_len {
+            let state = config.segment[segment_len - 1 - depth];
+            if allowed.binary_search(&state).is_err() {
+                return Vec::new();
+            }
+        } else {
+            let below_segment_index = depth - segment_len;
+            let input_index = base_input_len + below_segment_index;
+            ensure_input_len(&mut input, input_index + 1);
+            if !constrain_matcher(&mut input[input_index], allowed) {
+                return Vec::new();
+            }
+        }
+    }
+
+    let unknown_popped = shift_pop.saturating_sub(segment_len);
+    ensure_input_len(&mut input, base_input_len + unknown_popped);
+
+    if shift_pop < segment_len {
+        let mut pushes = config.segment[..segment_len - shift_pop].to_vec();
+        pushes.extend_from_slice(shifted_pushes);
+        return vec![StackEdit { pop: input, pushes }];
+    }
+
+    if guards.contains_key(&shift_pop) {
+        let revealed_input_index = base_input_len + unknown_popped;
+        ensure_input_len(&mut input, revealed_input_index + 1);
+        let Some(revealed_states) = finite_states(&input[revealed_input_index]) else {
+            unreachable!("revealed guard should have constrained matcher to a finite state set");
+        };
+
+        let mut edits = Vec::new();
+        for revealed_state in revealed_states {
+            let mut branch_input = input.clone();
+            branch_input[revealed_input_index] = StackMatcher::State(revealed_state);
+            let mut pushes = Vec::with_capacity(1 + shifted_pushes.len());
+            pushes.push(revealed_state);
+            pushes.extend_from_slice(shifted_pushes);
+            edits.push(StackEdit {
+                pop: branch_input,
+                pushes,
+            });
+        }
+        edits
+    } else {
+        vec![StackEdit {
+            pop: input,
+            pushes: shifted_pushes.to_vec(),
+        }]
+    }
+}
+
+fn process_reduce_from_config(
+    table: &GLRTable,
+    source: CharacterizationSource,
+    config: &RelationConfig,
+    lhs: NonterminalID,
+    reduce_len: usize,
+    output: &mut CharacterizationOutput,
+    seen: &mut BTreeSet<RelationConfig>,
+    worklist: &mut VecDeque<RelationConfig>,
+) {
+    if reduce_len == 0 {
+        let Some(&top_state) = config.segment.last() else {
+            return;
+        };
+
+        let Some((goto_state, goto_replace)) = table.goto_target(top_state, lhs) else {
+            return;
+        };
+
+        let next = apply_goto_to_relation_config(
+            config,
+            config.segment.len() - 1,
+            goto_state,
+            goto_replace,
+        );
+        if seen.insert(next.clone()) {
+            worklist.push_back(next);
+        }
+        return;
+    }
+
+    if reduce_len < config.segment.len() {
+        let reveal_index = config.segment.len() - reduce_len - 1;
+        let revealed_state = config.segment[reveal_index];
+        let Some((goto_state, goto_replace)) = table.goto_target(revealed_state, lhs) else {
+            return;
+        };
+
+        let next = apply_goto_to_relation_config(config, reveal_index, goto_state, goto_replace);
+        if seen.insert(next.clone()) {
+            worklist.push_back(next);
+        }
+        return;
+    }
+
+    output.emit_reduce(source, reduce_crossing_pattern(config, reduce_len), lhs);
+}
+
+fn emit_stack_effect_from_config(
+    source: CharacterizationSource,
+    config: &RelationConfig,
+    shift_pop: usize,
+    shifted_pushes: &[u32],
+    guards: &[StackShiftGuard],
+    output: &mut CharacterizationOutput,
+) {
+    for edit in stack_effect_edits(config, shift_pop, shifted_pushes, guards) {
+        output.emit_escape(source, edit.pop, edit.pushes);
+    }
+}
+
+fn process_action_from_config(
+    table: &GLRTable,
+    source: CharacterizationSource,
+    config: &RelationConfig,
+    action: &Action,
+    reduce_len_adjustment: usize,
+    output: &mut CharacterizationOutput,
+    seen: &mut BTreeSet<RelationConfig>,
+    worklist: &mut VecDeque<RelationConfig>,
+) {
     match action {
         Action::Shift(shift_state, replace) => {
-            let effective_replace = *replace;
-            let pushes = if effective_replace { vec![*shift_state] } else { vec![state, *shift_state] };
-            escapes.insert((state, 0, pushes));
+            if *replace {
+                emit_stack_effect_from_config(source, config, 1, &[*shift_state], &[], output);
+            } else {
+                emit_stack_effect_from_config(source, config, 0, &[*shift_state], &[], output);
+            }
         }
         Action::StackShifts(shifts) => {
             for shift in shifts {
-                record_initial_stack_shift_effect(state, shift.pop, &shift.pushes, escapes);
+                emit_stack_effect_from_config(
+                    source,
+                    config,
+                    shift.pop as usize,
+                    &shift.pushes,
+                    &[],
+                    output,
+                );
             }
         }
         Action::GuardedStackShifts(shifts) => {
             for shift in shifts {
-                record_initial_stack_shift_effect(state, shift.pop, &shift.pushes, escapes);
+                assert_well_formed_guarded_shift(shift);
+                emit_stack_effect_from_config(
+                    source,
+                    config,
+                    shift.pop as usize,
+                    &shift.pushes,
+                    &shift.guards,
+                    output,
+                );
             }
         }
         Action::Reduce(lhs, len) => {
-            let rule_len = if is_forwarded { (*len as usize) + 1 } else { *len as usize };
-            reduces.insert((state, rule_len, *lhs));
+            process_reduce_from_config(
+                table,
+                source,
+                config,
+                *lhs,
+                (*len as usize) + reduce_len_adjustment,
+                output,
+                seen,
+                worklist,
+            );
         }
         Action::Split {
             shift,
-            reduces: split_reduces,
-            ..
+            reduces,
+            accept: _,
         } => {
             if let Some((shift_state, replace)) = shift {
-                let effective_replace = *replace;
-                let pushes = if effective_replace { vec![*shift_state] } else { vec![state, *shift_state] };
-                escapes.insert((state, 0, pushes));
+                if *replace {
+                    emit_stack_effect_from_config(source, config, 1, &[*shift_state], &[], output);
+                } else {
+                    emit_stack_effect_from_config(source, config, 0, &[*shift_state], &[], output);
+                }
             }
-            for &(lhs, len) in split_reduces {
-                let rule_len = if is_forwarded { (len as usize) + 1 } else { len as usize };
-                reduces.insert((state, rule_len, lhs));
+
+            for &(lhs, len) in reduces {
+                process_reduce_from_config(
+                    table,
+                    source,
+                    config,
+                    lhs,
+                    (len as usize) + reduce_len_adjustment,
+                    output,
+                    seen,
+                    worklist,
+                );
             }
         }
         Action::Accept => {}
     }
 }
 
-fn record_goto_action(
+fn drain_nonconsuming_worklist(
     table: &GLRTable,
-    stack_nt: NonterminalID,
-    revealed_state: u32,
-    goto_state: u32,
-    action: &Action,
-    goto_replace: bool,
-    visited: &mut BTreeSet<(u32, bool)>,
-    worklist: &mut VecDeque<(u32, bool)>,
-    nt_escapes: &mut BTreeSet<NtEscape>,
-    nt_rereduces: &mut BTreeSet<NtRereduce>,
-    inheritances: &mut BTreeMap<u32, BTreeSet<u32>>,
+    terminal: TerminalID,
+    source: CharacterizationSource,
+    output: &mut CharacterizationOutput,
+    seen: &mut BTreeSet<RelationConfig>,
+    worklist: &mut VecDeque<RelationConfig>,
 ) {
-    fn record_goto_stack_shift_effect(
-        stack_nt: NonterminalID,
-        revealed_state: u32,
-        goto_state: u32,
-        goto_replace: bool,
-        pop: u32,
-        shifted_pushes: &[u32],
-        nt_escapes: &mut BTreeSet<NtEscape>,
-    ) {
-        let mut pushes = Vec::new();
-        if !goto_replace {
-            pushes.push(revealed_state);
-        }
-        pushes.push(goto_state);
-        let base_pops = pushes.len();
-        let extra_pops = pop.saturating_sub(base_pops as u32) as usize;
-        let retained = base_pops.saturating_sub(pop as usize);
-        pushes.truncate(retained);
-        pushes.extend_from_slice(shifted_pushes);
-        nt_escapes.insert((stack_nt, revealed_state, extra_pops, pushes));
-    }
+    while let Some(config) = worklist.pop_front() {
+        let Some(&top_state) = config.segment.last() else {
+            continue;
+        };
+        let Some(action) = table.action(top_state, terminal) else {
+            continue;
+        };
 
-    match action {
-        Action::Shift(shift_state, shift_replace) => {
-            let mut pushes = Vec::new();
-            if !goto_replace { pushes.push(revealed_state); }
-            if !*shift_replace { pushes.push(goto_state); }
-            pushes.push(*shift_state);
-            nt_escapes.insert((stack_nt, revealed_state, 0, pushes));
-        }
-        Action::StackShifts(shifts) => {
-            for shift in shifts {
-                record_goto_stack_shift_effect(
-                    stack_nt,
-                    revealed_state,
-                    goto_state,
-                    goto_replace,
-                    shift.pop,
-                    &shift.pushes,
-                    nt_escapes,
-                );
-            }
-        }
-        Action::GuardedStackShifts(shifts) => {
-            for shift in shifts {
-                record_goto_stack_shift_effect(
-                    stack_nt,
-                    revealed_state,
-                    goto_state,
-                    goto_replace,
-                    shift.pop,
-                    &shift.pushes,
-                    nt_escapes,
-                );
-            }
-        }
-        Action::Reduce(lhs, len) => {
-            handle_reduce(
+        process_action_from_config(table, source, &config, action, 0, output, seen, worklist);
+    }
+}
+
+fn characterize_initial_actions_for_terminal(
+    table: &GLRTable,
+    terminal: TerminalID,
+    output: &mut CharacterizationOutput,
+) {
+    for state in 0..table.num_states {
+        let Some(action) = table.action(state, terminal) else {
+            continue;
+        };
+
+        let config = identity_config(state);
+        let mut seen = BTreeSet::from([config.clone()]);
+        let mut worklist = VecDeque::new();
+        let reduce_len_adjustment = usize::from(table.forwarded_shifts.contains(&(state, terminal)));
+
+        process_action_from_config(
+            table,
+            CharacterizationSource::Initial,
+            &config,
+            action,
+            reduce_len_adjustment,
+            output,
+            &mut seen,
+            &mut worklist,
+        );
+
+        drain_nonconsuming_worklist(
+            table,
+            terminal,
+            CharacterizationSource::Initial,
+            output,
+            &mut seen,
+            &mut worklist,
+        );
+    }
+}
+
+fn characterize_nt_continuations_for_terminal(
+    table: &GLRTable,
+    terminal: TerminalID,
+    output: &mut CharacterizationOutput,
+) {
+    for revealed_state in 0..table.num_states {
+        let Some(gotos) = table.goto.get(revealed_state as usize) else {
+            continue;
+        };
+
+        for (&nonterminal, &(goto_state, goto_replace)) in gotos {
+            let config = start_relation_after_goto(revealed_state, goto_state, goto_replace);
+            let mut seen = BTreeSet::from([config.clone()]);
+            let mut worklist = VecDeque::from([config]);
+
+            drain_nonconsuming_worklist(
                 table,
-                stack_nt,
-                revealed_state,
-                goto_state,
-                *len as usize,
-                *lhs,
-                goto_replace,
-                visited,
-                worklist,
-                nt_rereduces,
-                inheritances,
+                terminal,
+                CharacterizationSource::Nonterminal(nonterminal),
+                output,
+                &mut seen,
+                &mut worklist,
             );
         }
-        Action::Split {
-            shift,
-            reduces: split_reduces,
-            ..
-        } => {
-            if let Some((shift_state, shift_replace)) = shift {
-                let mut pushes = Vec::new();
-                if !goto_replace { pushes.push(revealed_state); }
-                if !*shift_replace { pushes.push(goto_state); }
-                pushes.push(*shift_state);
-                nt_escapes.insert((stack_nt, revealed_state, 0, pushes));
-            }
-            for &(lhs, len) in split_reduces {
-                handle_reduce(
-                    table,
-                    stack_nt,
-                    revealed_state,
-                    goto_state,
-                    len as usize,
-                    lhs,
-                    goto_replace,
-                    visited,
-                    worklist,
-                    nt_rereduces,
-                    inheritances,
-                );
-            }
-        }
-        Action::Accept => {}
     }
+}
+
+fn characterize_terminal(
+    table: &GLRTable,
+    terminal: TerminalID,
+) -> TerminalCharacterization {
+    let mut output = CharacterizationOutput::default();
+    characterize_initial_actions_for_terminal(table, terminal, &mut output);
+    characterize_nt_continuations_for_terminal(table, terminal, &mut output);
+
+    let mut referenced_nts = BTreeSet::new();
+    for reduce in &output.reduces {
+        referenced_nts.insert(reduce.nonterminal);
+    }
+    for nt_escape in &output.nt_escapes {
+        referenced_nts.insert(nt_escape.source_nonterminal);
+    }
+    for nt_rereduce in &output.nt_rereduces {
+        referenced_nts.insert(nt_rereduce.source_nonterminal);
+        referenced_nts.insert(nt_rereduce.target_nonterminal);
+    }
+
+    let characterization = TerminalCharacterization {
+        escapes: output.escapes.into_iter().collect(),
+        reduces: output.reduces.into_iter().collect(),
+        nt_escapes: output.nt_escapes.into_iter().collect(),
+        nt_rereduces: output.nt_rereduces.into_iter().collect(),
+        all_nts: referenced_nts,
+    };
+
+    if let Some(cycle) = characterization.find_cycle() {
+        panic!(
+            "terminal characterization for terminal {} contains a reduction cycle: {:?}",
+            terminal,
+            cycle
+        );
+    }
+
+    characterization
 }
 
 pub(crate) fn characterize_terminals(
@@ -271,7 +709,6 @@ pub(crate) fn characterize_terminals(
     grammar: &AnalyzedGrammar,
 ) -> BTreeMap<TerminalID, TerminalCharacterization> {
     let debug = std::env::var("GLRMASK_DEBUG_PROFILE").is_ok();
-    let initial_actions = collect_initial_actions_by_terminal(table, grammar.num_terminals);
 
     if debug {
         let total_gotos: usize = table.goto.iter().map(|g| g.len()).sum();
@@ -281,14 +718,10 @@ pub(crate) fn characterize_terminals(
         );
     }
 
-    initial_actions
-        .into_iter()
-        .enumerate()
-        .map(|(terminal, (escapes, reduces))| {
-            let terminal = terminal as TerminalID;
+    (0..grammar.num_terminals)
+        .map(|terminal| {
             let t0 = std::time::Instant::now();
-            let characterization =
-                characterize_terminal_with_initial(table, grammar, terminal, escapes, reduces);
+            let characterization = characterize_terminal(table, terminal);
             if debug {
                 let ms = t0.elapsed().as_secs_f64() * 1000.0;
                 let total_entries = characterization.escapes.len()
@@ -314,467 +747,228 @@ pub(crate) fn characterize_terminals(
         .collect()
 }
 
-fn collect_initial_actions_by_terminal(
-    table: &GLRTable,
-    num_terminals: u32,
-) -> Vec<(BTreeSet<InitialEscape>, BTreeSet<InitialReduce>)> {
-    let mut per_terminal = vec![(BTreeSet::new(), BTreeSet::new()); num_terminals as usize];
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    for state in 0..table.num_states {
-        let Some(action_row) = table.action.get(state as usize) else {
-            continue;
-        };
-        for (&terminal, action) in action_row {
-            let Some((escapes, reduces)) = per_terminal.get_mut(terminal as usize) else {
-                continue;
-            };
-            let is_forwarded = table.forwarded_shifts.contains(&(state, terminal));
-            record_initial_action(table, state, terminal, action, is_forwarded, escapes, reduces);
+    use rustc_hash::FxHashSet;
+
+    use crate::compiler::glr::analysis::AnalyzedGrammar;
+    use crate::compiler::glr::table::{ActionRow, GotoRow, GLRTable};
+    use crate::grammar::flat::Rule;
+
+    fn empty_table(num_states: u32, num_terminals: u32) -> GLRTable {
+        GLRTable {
+            action: vec![ActionRow::default(); num_states as usize],
+            goto: vec![GotoRow::default(); num_states as usize],
+            num_states,
+            num_terminals,
+            num_rules: 0,
+            rules: Vec::new(),
+            forwarded_shifts: FxHashSet::default(),
         }
     }
 
-    per_terminal
-}
-
-/// Expand a pop-0 initial reduce by following the goto chain.
-///
-/// Tracks a `push_stack` of states pushed by non-replace gotos during
-/// the chain.  When a shift is reached, emits an initial escape.  When a
-/// reduce pops more states than were pushed, emits a normal initial
-/// reduce with the excess as its pop count.
-fn expand_zero_pop_initial_reduce(
-    table: &GLRTable,
-    terminal: TerminalID,
-    initial_state: u32,
-    nonterminal: NonterminalID,
-    escapes: &mut BTreeSet<InitialEscape>,
-    reduces: &mut BTreeSet<InitialReduce>,
-    visited: &mut BTreeSet<(u32, NonterminalID)>,
-) {
-    if !visited.insert((initial_state, nonterminal)) {
-        return; // cycle
-    }
-
-    let mut push_stack: Vec<u32> = Vec::new();
-    expand_zero_pop_chain(
-        table,
-        terminal,
-        initial_state,
-        nonterminal,
-        &mut push_stack,
-        escapes,
-        reduces,
-        visited,
-    );
-}
-
-fn expand_zero_pop_chain(
-    table: &GLRTable,
-    terminal: TerminalID,
-    initial_state: u32,
-    nonterminal: NonterminalID,
-    push_stack: &mut Vec<u32>,
-    escapes: &mut BTreeSet<InitialEscape>,
-    reduces: &mut BTreeSet<InitialReduce>,
-    visited: &mut BTreeSet<(u32, NonterminalID)>,
-) {
-    // Follow the goto for `nonterminal` from the current "top" state.
-    let current_state = push_stack.last().copied().unwrap_or(initial_state);
-    let Some(&(goto_state, goto_replace)) = table
-        .goto
-        .get(current_state as usize)
-        .and_then(|g| g.get(&nonterminal))
-    else {
-        return;
-    };
-
-    // Track the goto's push.
-    if !goto_replace {
-        push_stack.push(goto_state);
-    } else {
-        // Replace goto: the goto_state replaces the current top.
-        // If push_stack is non-empty, replace the top. Otherwise, the
-        // initial_state is conceptually replaced.
-        if let Some(top) = push_stack.last_mut() {
-            *top = goto_state;
-        }
-        // If push_stack is empty and goto replaces initial_state, we model
-        // this by not pushing (the replace consumed the initial_state slot).
-    }
-
-    let Some(action) = table.action(goto_state, terminal) else {
-        // Undo the push for clean state if we need to backtrack.
-        if !goto_replace && !push_stack.is_empty() {
-            push_stack.pop();
-        }
-        return;
-    };
-
-    expand_zero_pop_action(
-        table, terminal, initial_state, action, goto_state, goto_replace,
-        push_stack, escapes, reduces, visited,
-    );
-
-    // Undo the push so that the caller's push_stack is unchanged.
-    // (Each branch of a Split gets its own clone, but for non-split we
-    //  need to restore.)
-    // Actually, since we only call this once per nonterminal and don't
-    // return to use push_stack again in the caller, this is fine.
-}
-
-fn expand_zero_pop_action(
-    table: &GLRTable,
-    terminal: TerminalID,
-    initial_state: u32,
-    action: &Action,
-    _goto_state: u32,
-    _goto_replace: bool,
-    push_stack: &mut Vec<u32>,
-    escapes: &mut BTreeSet<InitialEscape>,
-    reduces: &mut BTreeSet<InitialReduce>,
-    visited: &mut BTreeSet<(u32, NonterminalID)>,
-) {
-    fn record_zero_pop_stack_shift_effect(
-        initial_state: u32,
-        push_stack: &[u32],
-        pop: u32,
-        shifted_pushes: &[u32],
-        escapes: &mut BTreeSet<InitialEscape>,
-    ) {
-        let mut pushes = Vec::new();
-        pushes.push(initial_state);
-        pushes.extend_from_slice(push_stack);
-        let base_pops = pushes.len();
-        let extra_pops = pop.saturating_sub(base_pops as u32) as usize;
-        let retained = base_pops.saturating_sub(pop as usize);
-        pushes.truncate(retained);
-        pushes.extend_from_slice(shifted_pushes);
-        escapes.insert((initial_state, extra_pops, pushes));
-    }
-
-    match action {
-        Action::Shift(shift_state, shift_replace) => {
-            // Build the escape pushes from the accumulated push_stack.
-            let mut pushes = Vec::new();
-            pushes.push(initial_state); // re-push initial (since positive(initial) will pop it)
-            pushes.extend_from_slice(push_stack);
-            if !*shift_replace {
-                // The shift pushes its target; if replace, it replaces the
-                // top which is already in push_stack (or goto_state).
-                pushes.push(*shift_state);
-            } else {
-                // Replace shift: replace the top of pushes with shift_state.
-                if let Some(top) = pushes.last_mut() {
-                    *top = *shift_state;
-                }
-            }
-            escapes.insert((initial_state, 0, pushes));
-        }
-        Action::StackShifts(shifts) => {
-            for shift in shifts {
-                record_zero_pop_stack_shift_effect(
-                    initial_state,
-                    push_stack,
-                    shift.pop,
-                    &shift.pushes,
-                    escapes,
-                );
-            }
-        }
-        Action::GuardedStackShifts(shifts) => {
-            for shift in shifts {
-                record_zero_pop_stack_shift_effect(
-                    initial_state,
-                    push_stack,
-                    shift.pop,
-                    &shift.pushes,
-                    escapes,
-                );
-            }
-        }
-        Action::Reduce(nt2, len2) => {
-            handle_zero_pop_reduce(
-                table, terminal, initial_state, *nt2, *len2 as usize,
-                push_stack, escapes, reduces, visited,
-            );
-        }
-        Action::Split {
-            shift,
-            reduces: split_reduces,
-            ..
-        } => {
-            if let Some((shift_state, shift_replace)) = shift {
-                let mut pushes = Vec::new();
-                pushes.push(initial_state);
-                pushes.extend_from_slice(push_stack);
-                if !*shift_replace {
-                    pushes.push(*shift_state);
-                } else {
-                    if let Some(top) = pushes.last_mut() {
-                        *top = *shift_state;
-                    }
-                }
-                escapes.insert((initial_state, 0, pushes));
-            }
-            for &(nt2, len2) in split_reduces {
-                let mut ps = push_stack.clone();
-                handle_zero_pop_reduce(
-                    table, terminal, initial_state, nt2, len2 as usize,
-                    &mut ps, escapes, reduces, visited,
-                );
-            }
-        }
-        Action::Accept => {}
-    }
-}
-
-fn handle_zero_pop_reduce(
-    table: &GLRTable,
-    terminal: TerminalID,
-    initial_state: u32,
-    reduce_nt: NonterminalID,
-    reduce_len: usize,
-    push_stack: &mut Vec<u32>,
-    escapes: &mut BTreeSet<InitialEscape>,
-    reduces: &mut BTreeSet<InitialReduce>,
-    visited: &mut BTreeSet<(u32, NonterminalID)>,
-) {
-    if reduce_len <= push_stack.len() {
-        // The reduce pops within the pushed states — no net NFA pop needed.
-        push_stack.truncate(push_stack.len() - reduce_len);
-        // Continue by following the goto for reduce_nt from the new "top".
-        if !visited.contains(&(push_stack.last().copied().unwrap_or(initial_state), reduce_nt)) {
-            expand_zero_pop_chain(
-                table, terminal, initial_state, reduce_nt,
-                push_stack, escapes, reduces, visited,
-            );
-        }
-    } else {
-        // The reduce pops more than we've pushed — the excess becomes the
-        // NFA pop count. Record as a normal initial reduce.
-        let nfa_pops = reduce_len - push_stack.len();
-        reduces.insert((initial_state, nfa_pops, reduce_nt));
-    }
-}
-
-fn characterize_terminal_with_initial(
-    table: &GLRTable,
-    _grammar: &AnalyzedGrammar,
-    terminal: TerminalID,
-    mut escapes: BTreeSet<InitialEscape>,
-    reduces: BTreeSet<InitialReduce>,
-) -> TerminalCharacterization {
-    let mut normal_reduces: BTreeSet<InitialReduce> = BTreeSet::new();
-    for &(initial_state, pop_count, nonterminal) in &reduces {
-        if pop_count == 0 {
-            let mut visited = BTreeSet::new();
-            expand_zero_pop_initial_reduce(
-                table,
-                terminal,
-                initial_state,
-                nonterminal,
-                &mut escapes,
-                &mut normal_reduces,
-                &mut visited,
-            );
-        } else {
-            normal_reduces.insert((initial_state, pop_count, nonterminal));
+    fn test_grammar() -> AnalyzedGrammar {
+        AnalyzedGrammar {
+            rules: Vec::<Rule>::new(),
+            start: 0,
+            num_terminals: 1,
+            terminal_display_names: vec!["t0".to_string()],
+            num_nonterminals: 64,
+            nullable: BTreeSet::new(),
+            first: vec![BTreeSet::new(); 64],
+            follow: vec![BTreeSet::new(); 64],
+            rules_by_lhs: vec![Vec::new(); 64],
         }
     }
 
-    let mut nt_escapes = BTreeSet::new();
-    let mut nt_rereduces = BTreeSet::new();
-    let mut inheritances: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
-
-    for revealed_state in 0..table.num_states {
-        if let Some(gotos) = table.goto.get(revealed_state as usize) {
-            for (&nonterminal, &(goto_state, goto_replace)) in gotos {
-                // Skip traversals where the goto target has no action for this
-                // terminal — the BFS would immediately return with no effect.
-                if table.action(goto_state, terminal).is_none() {
-                    continue;
-                }
-                explore_from_goto(
-                    table,
-                    terminal,
-                    nonterminal,
-                    revealed_state,
-                    goto_state,
-                    goto_replace,
-                    &mut nt_escapes,
-                    &mut nt_rereduces,
-                    &mut inheritances,
-                );
-            }
-        }
+    fn characterize_one(table: &GLRTable, terminal: TerminalID) -> TerminalCharacterization {
+        characterize_terminals(table, &test_grammar())
+            .remove(&terminal)
+            .expect("terminal characterization should exist")
     }
 
-    // Debug: print nt_escapes before inheritance
-    if std::env::var("GLRMASK_DEBUG_CHARACTERIZE").is_ok() {
-        eprintln!("[debug characterize] terminal={} nt_escapes_before_inherit={:?}", terminal, nt_escapes);
-        eprintln!("[debug characterize] terminal={} inheritances={:?}", terminal, inheritances);
+    fn state(state: u32) -> StackMatcher {
+        StackMatcher::State(state)
     }
 
-    // Distribute inheritances: when revealed_state R inherits from R2 (due to
-    // a replace goto R → R2), copy all nt_escapes and nt_rereduces that have
-    // R2 as their revealed_state to also use R.  Repeat until no new entries.
-    if !inheritances.is_empty() {
-        loop {
-            let mut new_escapes = BTreeSet::new();
-            let mut new_rereduces = BTreeSet::new();
+    #[test]
+    fn test_initial_zero_pop_replace_goto_preserves_replacement_state() {
+        let terminal = 0;
+        let reduce_nt = 10;
+        let mut table = empty_table(4, 1);
+        table.action[1].insert(terminal, Action::Reduce(reduce_nt, 0));
+        table.goto[1].insert(reduce_nt, (2, true));
+        table.action[2].insert(terminal, Action::Shift(3, false));
 
-            for (&inheritor, targets) in &inheritances {
-                for &target in targets {
-                    // Copy nt_escapes: (nt, target, pushes) → (nt, inheritor, pushes)
-                    for &(nt, revealed, extra_pops, ref pushes) in &nt_escapes {
-                        if revealed == target {
-                            let inherited = (nt, inheritor, extra_pops, pushes.clone());
-                            if !nt_escapes.contains(&inherited) {
-                                new_escapes.insert(inherited);
-                            }
-                        }
-                    }
-                    // Copy nt_rereduces: (nt, target, pop, tgt_nt) → (nt, inheritor, pop, tgt_nt)
-                    for &(nt, revealed, pop, tgt_nt) in &nt_rereduces {
-                        if revealed == target {
-                            let inherited = (nt, inheritor, pop, tgt_nt);
-                            if !nt_rereduces.contains(&inherited) {
-                                new_rereduces.insert(inherited);
-                            }
-                        }
-                    }
-                }
-            }
-
-            if new_escapes.is_empty() && new_rereduces.is_empty() {
-                break;
-            }
-            nt_escapes.extend(new_escapes);
-            nt_rereduces.extend(new_rereduces);
-        }
+        let characterization = characterize_one(&table, terminal);
+        assert!(characterization.reduces.is_empty());
+        assert!(characterization.escapes.contains(&InitialEscape {
+            pop: vec![state(1)],
+            pushes: vec![2, 3],
+        }));
+        assert!(!characterization.escapes.contains(&InitialEscape {
+            pop: vec![state(1)],
+            pushes: vec![1, 3],
+        }));
     }
 
-    let mut referenced_nts = BTreeSet::new();
-    for &(_, _, nt) in &normal_reduces {
-        referenced_nts.insert(nt);
-    }
-    for &(src_nt, _, _, _) in &nt_escapes {
-        referenced_nts.insert(src_nt);
-    }
-    for &(src_nt, _, _, target_nt) in &nt_rereduces {
-        referenced_nts.insert(src_nt);
-        referenced_nts.insert(target_nt);
+    #[test]
+    fn test_goto_zero_pop_chain_preserves_replaced_segment_geometry() {
+        let terminal = 0;
+        let stack_nt = 20;
+        let reduce_b = 31;
+        let mut table = empty_table(5, 1);
+
+        table.goto[0].insert(stack_nt, (1, true));
+        table.action[1].insert(terminal, Action::Reduce(reduce_b, 0));
+        table.goto[1].insert(reduce_b, (2, false));
+        table.action[2].insert(terminal, Action::Shift(3, false));
+
+        let characterization = characterize_one(&table, terminal);
+        assert!(characterization.nt_rereduces.is_empty());
+        assert!(characterization.nt_escapes.contains(&NtEscape {
+            source_nonterminal: stack_nt,
+            pop: vec![state(0)],
+            pushes: vec![1, 2, 3],
+        }));
     }
 
-    let characterization = TerminalCharacterization {
-        escapes: escapes.into_iter().collect(),
-        reduces: normal_reduces.into_iter().collect(),
-        nt_escapes: nt_escapes.into_iter().collect(),
-        nt_rereduces: nt_rereduces.into_iter().collect(),
-        all_nts: referenced_nts,
-    };
-
-    if let Some(cycle) = characterization.find_cycle() {
-        panic!(
-            "terminal characterization for terminal {} contains a reduction cycle: {:?}",
+    #[test]
+    fn test_guard_inside_popped_region_constrains_escape() {
+        let terminal = 0;
+        let mut table = empty_table(64, 1);
+        table.action[10].insert(
             terminal,
-            cycle
+            Action::GuardedStackShifts(vec![GuardedStackShift {
+                guards: vec![StackShiftGuard {
+                    pop: 1,
+                    states: vec![3],
+                }],
+                pop: 2,
+                pushes: vec![40],
+            }]),
+        );
+
+        let characterization = characterize_one(&table, terminal);
+        assert!(characterization.escapes.contains(&InitialEscape {
+            pop: vec![state(10), state(3)],
+            pushes: vec![40],
+        }));
+        assert!(!characterization.escapes.contains(&InitialEscape {
+            pop: vec![state(10), StackMatcher::Any],
+            pushes: vec![40],
+        }));
+    }
+
+    #[test]
+    fn test_guard_at_revealed_state_is_checked_and_preserved() {
+        let terminal = 0;
+        let mut table = empty_table(64, 1);
+        table.action[10].insert(
+            terminal,
+            Action::GuardedStackShifts(vec![GuardedStackShift {
+                guards: vec![StackShiftGuard {
+                    pop: 1,
+                    states: vec![3],
+                }],
+                pop: 1,
+                pushes: vec![40],
+            }]),
+        );
+
+        let characterization = characterize_one(&table, terminal);
+        assert!(characterization.escapes.contains(&InitialEscape {
+            pop: vec![state(10), state(3)],
+            pushes: vec![3, 40],
+        }));
+    }
+
+    #[test]
+    fn test_guarded_revealed_state_branches_exactly() {
+        let terminal = 0;
+        let mut table = empty_table(64, 1);
+        table.action[10].insert(
+            terminal,
+            Action::GuardedStackShifts(vec![GuardedStackShift {
+                guards: vec![StackShiftGuard {
+                    pop: 1,
+                    states: vec![3, 7],
+                }],
+                pop: 1,
+                pushes: vec![40],
+            }]),
+        );
+
+        let characterization = characterize_one(&table, terminal);
+        assert!(characterization.escapes.contains(&InitialEscape {
+            pop: vec![state(10), state(3)],
+            pushes: vec![3, 40],
+        }));
+        assert!(characterization.escapes.contains(&InitialEscape {
+            pop: vec![state(10), state(7)],
+            pushes: vec![7, 40],
+        }));
+        assert_eq!(characterization.escapes.len(), 2);
+    }
+
+    #[test]
+    fn test_duplicate_guard_depths_intersect() {
+        let terminal = 0;
+        let mut table = empty_table(64, 1);
+        table.action[10].insert(
+            terminal,
+            Action::GuardedStackShifts(vec![GuardedStackShift {
+                guards: vec![
+                    StackShiftGuard {
+                        pop: 1,
+                        states: vec![3, 7],
+                    },
+                    StackShiftGuard {
+                        pop: 1,
+                        states: vec![7, 9],
+                    },
+                ],
+                pop: 1,
+                pushes: vec![40],
+            }]),
+        );
+
+        let characterization = characterize_one(&table, terminal);
+        assert_eq!(
+            characterization.escapes,
+            vec![InitialEscape {
+                pop: vec![state(10), state(7)],
+                pushes: vec![7, 40],
+            }]
         );
     }
 
-    characterization
-}
+    #[test]
+    fn test_guard_after_zero_pop_goto_uses_preserved_segment_state() {
+        let terminal = 0;
+        let reduce_nt = 10;
+        let mut table = empty_table(8, 1);
 
-fn explore_from_goto(
-    table: &GLRTable,
-    terminal: TerminalID,
-    stack_nt: NonterminalID,
-    revealed_state: u32,
-    start_state: u32,
-    goto_replace: bool,
-    nt_escapes: &mut BTreeSet<NtEscape>,
-    nt_rereduces: &mut BTreeSet<NtRereduce>,
-    inheritances: &mut BTreeMap<u32, BTreeSet<u32>>,
-) {
-    let mut worklist = VecDeque::new();
-    let mut visited = BTreeSet::new();
-
-    visited.insert((start_state, goto_replace));
-    worklist.push_back((start_state, goto_replace));
-
-    let debug_char = std::env::var("GLRMASK_DEBUG_CHARACTERIZE").is_ok();
-    while let Some((goto_state, current_replace)) = worklist.pop_front() {
-        let Some(action) = table.action(goto_state, terminal) else {
-            continue;
-        };
-        if debug_char && stack_nt == 1 && revealed_state == 0 {
-            eprintln!("[debug N1@0] BFS pop goto_state={} replace={} action={:?}", goto_state, current_replace, action);
-        }
-        record_goto_action(
-            table,
-            stack_nt,
-            revealed_state,
-            goto_state,
-            action,
-            current_replace,
-            &mut visited,
-            &mut worklist,
-            nt_escapes,
-            nt_rereduces,
-            inheritances,
+        table.action[1].insert(terminal, Action::Reduce(reduce_nt, 0));
+        table.goto[1].insert(reduce_nt, (2, false));
+        table.action[2].insert(
+            terminal,
+            Action::GuardedStackShifts(vec![GuardedStackShift {
+                guards: vec![StackShiftGuard {
+                    pop: 1,
+                    states: vec![1],
+                }],
+                pop: 1,
+                pushes: vec![3],
+            }]),
         );
-    }
-}
 
-fn handle_reduce(
-    table: &GLRTable,
-    stack_nt: NonterminalID,
-    revealed_state: u32,
-    goto_state: u32,
-    len: usize,
-    reduce_nt: NonterminalID,
-    goto_replace: bool,
-    visited: &mut BTreeSet<(u32, bool)>,
-    worklist: &mut VecDeque<(u32, bool)>,
-    nt_rereduces: &mut BTreeSet<NtRereduce>,
-    inheritances: &mut BTreeMap<u32, BTreeSet<u32>>,
-) {
-    if len == 0 {
-        // A zero-pop reduce leaves the current goto target on top of the
-        // parser stack, even when the incoming goto was a replace. Continue
-        // from that current top state rather than revealing an older one.
-        if let Some((next_goto_state, next_replace)) = table.goto_target(goto_state, reduce_nt) {
-            if visited.insert((next_goto_state, next_replace)) {
-                worklist.push_back((next_goto_state, next_replace));
-            }
-        }
-        return;
-    }
-
-    // If the incoming goto was a replace, its target occupied the revealed
-    // slot instead of being pushed above it. Any positive-length reduce that
-    // pops through that target therefore reveals one additional older state
-    // from the template's perspective.
-    let effective_len = if goto_replace { len + 1 } else { len };
-    match effective_len {
-        0 => unreachable!("zero-pop reduces return early before effective_len matching"),
-        1 => {
-            if let Some((next_goto_state, next_replace)) = table.goto_target(revealed_state, reduce_nt) {
-                if next_replace {
-                    // The goto from revealed_state is replace — revealed_state
-                    // inherits all escapes/rereduces of next_goto_state.
-                    inheritances
-                        .entry(revealed_state)
-                        .or_default()
-                        .insert(next_goto_state);
-                }
-                if visited.insert((next_goto_state, next_replace)) {
-                    worklist.push_back((next_goto_state, next_replace));
-                }
-            }
-        }
-        2.. => {
-            nt_rereduces.insert((stack_nt, revealed_state, effective_len - 1, reduce_nt));
-        }
+        let characterization = characterize_one(&table, terminal);
+        assert!(characterization.escapes.contains(&InitialEscape {
+            pop: vec![state(1)],
+            pushes: vec![1, 3],
+        }));
     }
 }

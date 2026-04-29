@@ -14,7 +14,7 @@ use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic as minim
 use crate::automata::unweighted_u32::nfa::NFA;
 use crate::compiler::glr::labels::{DEFAULT_LABEL, encode_negative_label, encode_positive_label, is_negative_label, negative_to_positive_label};
 use crate::grammar::flat::TerminalID;
-use crate::compiler::stages::templates::characterize::TerminalCharacterization;
+use crate::compiler::stages::templates::characterize::{StackMatcher, TerminalCharacterization};
 use crate::ds::weight::Weight;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -485,6 +485,76 @@ fn add_positive_transition_chain_shared(
     nfa.add_transition(from, encode_positive_label(revealed_state), entry);
 }
 
+fn add_matcher_transition(nfa: &mut NFA, from: u32, matcher: &StackMatcher, to: u32) {
+    match matcher {
+        StackMatcher::Any => {
+            nfa.add_transition(from, DEFAULT_LABEL, to);
+        }
+        StackMatcher::State(state) => {
+            nfa.add_transition(from, encode_positive_label(*state), to);
+        }
+        StackMatcher::States(states) => {
+            for &state in states {
+                nfa.add_transition(from, encode_positive_label(state), to);
+            }
+        }
+    }
+}
+
+fn add_pop_pattern_path(nfa: &mut NFA, from: u32, pop: &[StackMatcher], to: u32) {
+    if pop.is_empty() {
+        nfa.add_epsilon(from, to);
+        return;
+    }
+
+    let mut current = from;
+    for (index, matcher) in pop.iter().enumerate() {
+        let next = if index + 1 == pop.len() {
+            to
+        } else {
+            nfa.add_state()
+        };
+        add_matcher_transition(nfa, current, matcher, next);
+        current = next;
+    }
+}
+
+fn simple_exact_then_any(pop: &[StackMatcher]) -> Option<(u32, usize)> {
+    let (first, rest) = pop.split_first()?;
+    let StackMatcher::State(first_state) = first else {
+        return None;
+    };
+
+    if rest.iter().all(|matcher| matches!(matcher, StackMatcher::Any)) {
+        Some((*first_state, pop.len()))
+    } else {
+        None
+    }
+}
+
+fn add_reduce_pattern_path(
+    nfa: &mut NFA,
+    pool: &mut PopChainPool,
+    from: u32,
+    pop: &[StackMatcher],
+    target_nt: u32,
+    target_state: u32,
+) {
+    if let Some((first_state, pop_count)) = simple_exact_then_any(pop) {
+        add_positive_transition_chain_shared(
+            nfa,
+            pool,
+            from,
+            first_state,
+            pop_count,
+            target_nt,
+            target_state,
+        );
+    } else {
+        add_pop_pattern_path(nfa, from, pop, target_state);
+    }
+}
+
 /// Build an unweighted NFA from a terminal characterization.
 ///
 /// Each shift/reduce/escape/re-reduce path gets its own fresh intermediate
@@ -535,7 +605,7 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
     // `pos_target`, yet still represent logically distinct escapes; we dedupe
     // purely to avoid inserting the same transition twice when the
     // characterization contains exact duplicates.
-    let mut emitted_escapes: BTreeSet<(u32, u32, usize, Vec<u32>)> = BTreeSet::new();
+    let mut emitted_escapes: BTreeSet<(u32, Vec<StackMatcher>, Vec<u32>)> = BTreeSet::new();
 
     // Resolve (or build) the pos-target for a `pushes` suffix by walking
     // it in reverse through the suffix trie rooted at `accept_root`.
@@ -564,69 +634,31 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
             cur
         };
 
-    let add_escape_path =
-        |nfa: &mut NFA,
-         source: u32,
-         revealed_state: u32,
-         extra_pops: usize,
-         pushes: &[u32],
-         pos_target_cache: &mut BTreeMap<Vec<u32>, u32>,
-         suffix_trie: &mut BTreeMap<(u32, u32), u32>| {
-            let pos_target = resolve_pos_target(
-                nfa,
-                pos_target_cache,
-                suffix_trie,
-                pushes,
-            );
-            if extra_pops == 0 {
-                nfa.add_transition(source, encode_positive_label(revealed_state), pos_target);
-                return;
-            }
-
-            let mut current = nfa.add_state();
-            nfa.add_transition(source, encode_positive_label(revealed_state), current);
-            for index in 0..extra_pops {
-                let next = if index + 1 == extra_pops {
-                    pos_target
-                } else {
-                    nfa.add_state()
-                };
-                nfa.add_transition(current, DEFAULT_LABEL, next);
-                current = next;
-            }
-        };
-
     // Initial escapes: start → positive(initial_state) → [extra DEFAULT pops] → [shared suffix tail] → accept_root
-    for &(initial_state, extra_pops, ref pushes) in &characterization.escapes {
-        if !emitted_escapes.insert((start, initial_state, extra_pops, pushes.to_vec())) {
+    for escape in &characterization.escapes {
+        if !emitted_escapes.insert((start, escape.pop.clone(), escape.pushes.clone())) {
             continue;
         }
-        add_escape_path(
+        let pos_target = resolve_pos_target(
             &mut nfa,
-            start,
-            initial_state,
-            extra_pops,
-            pushes,
             &mut pos_target_cache,
             &mut suffix_trie,
+            &escape.pushes,
         );
+        add_pop_pattern_path(&mut nfa, start, &escape.pop, pos_target);
     }
 
-    for &(initial_state, pop_count, nonterminal) in &characterization.reduces {
-        let Some(&target_nonterminal_state) = nonterminal_nodes.get(&nonterminal) else {
+    for reduce in &characterization.reduces {
+        let Some(&target_nonterminal_state) = nonterminal_nodes.get(&reduce.nonterminal) else {
             continue;
         };
 
-        // Emit the reduce chain directly from `start`; no staging state is
-        // needed because `start` is already the common source for every
-        // `reduces` entry, and the chain itself handles the pop/reveal split.
-        add_positive_transition_chain_shared(
+        add_reduce_pattern_path(
             &mut nfa,
             &mut pool,
             start,
-            initial_state,
-            pop_count,
-            nonterminal,
+            &reduce.pop,
+            reduce.nonterminal,
             target_nonterminal_state,
         );
     }
@@ -636,41 +668,38 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
     // agrees on the `pushes` tail; the positive transition is added directly
     // from the source, with dedup against exact `(source, revealed, pushes)`
     // duplicates.
-    for &(source_nonterminal, revealed_state, extra_pops, ref pushes) in &characterization.nt_escapes {
-        let Some(&source_state) = nonterminal_nodes.get(&source_nonterminal) else {
+    for nt_escape in &characterization.nt_escapes {
+        let Some(&source_state) = nonterminal_nodes.get(&nt_escape.source_nonterminal) else {
             continue;
         };
-        if !emitted_escapes.insert((source_state, revealed_state, extra_pops, pushes.to_vec())) {
+        if !emitted_escapes.insert((source_state, nt_escape.pop.clone(), nt_escape.pushes.clone())) {
             continue;
         }
-        add_escape_path(
+        let pos_target = resolve_pos_target(
             &mut nfa,
-            source_state,
-            revealed_state,
-            extra_pops,
-            pushes,
             &mut pos_target_cache,
             &mut suffix_trie,
+            &nt_escape.pushes,
         );
+        add_pop_pattern_path(&mut nfa, source_state, &nt_escape.pop, pos_target);
     }
 
-    for &(source_nonterminal, revealed_state, pop_count, target_nonterminal) in &characterization.nt_rereduces {
+    for nt_rereduce in &characterization.nt_rereduces {
         let (Some(&source_state), Some(&target_state)) =
-            (nonterminal_nodes.get(&source_nonterminal), nonterminal_nodes.get(&target_nonterminal))
+            (
+                nonterminal_nodes.get(&nt_rereduce.source_nonterminal),
+                nonterminal_nodes.get(&nt_rereduce.target_nonterminal),
+            )
         else {
             continue;
         };
 
-        // Emit the rereduce chain directly from `source_state`; per-entry
-        // staging states are redundant (the chain's own states disambiguate
-        // distinct entries).
-        add_positive_transition_chain_shared(
+        add_reduce_pattern_path(
             &mut nfa,
             &mut pool,
             source_state,
-            revealed_state,
-            pop_count,
-            target_nonterminal,
+            &nt_rereduce.pop,
+            nt_rereduce.target_nonterminal,
             target_state,
         );
     }

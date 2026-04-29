@@ -43,7 +43,7 @@ mod tests {
     };
     use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::combined::analyze_equivalences;
     use crate::compiler::stages::templates::compile_dfa::Templates;
-    use crate::compiler::stages::templates::characterize::characterize_terminals;
+    use crate::compiler::stages::templates::characterize::{StackMatcher, characterize_terminals};
     use crate::import::json_schema::json_schema_to_grammar;
     use std::collections::BTreeMap;
     use std::fs;
@@ -1939,7 +1939,7 @@ mod tests {
         let has_initial_escape_from_115 = terminal_characterization
             .escapes
             .iter()
-            .any(|(source_state, _, _)| *source_state == 115);
+            .any(|escape| matches!(escape.pop.first(), Some(StackMatcher::State(115))));
         let internal_tsid = constraint.internal_tsid_for_state(7311);
         let internal_token_0 = constraint.original_token_to_internal[0 as usize];
         let parser_dwa = constraint.parser_dwa();
