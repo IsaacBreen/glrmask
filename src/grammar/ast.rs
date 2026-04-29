@@ -1311,6 +1311,11 @@ impl Lowerer {
     fn lower_expr_terminalish(&mut self, expr: &GrammarExpr) -> Result<Symbol, GlrMaskError> {
         Ok(match expr {
             GrammarExpr::Ref(name) => {
+                if !self.named_rule_exprs.contains_key(name) {
+                    return Err(GlrMaskError::GrammarParse(format!(
+                        "unknown rule referenced from nonterminal context: {name}"
+                    )));
+                }
                 if self.internal_terminal_names.contains(name) {
                     return Err(GlrMaskError::GrammarParse(format!(
                         "internal-only terminal {name} referenced from nonterminal context"
@@ -1991,7 +1996,13 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
         }
     }
 
-    let start = lowerer.nonterminal_id(&grammar.start);
+    let start = lowerer
+        .nonterminal_ids
+        .get(&grammar.start)
+        .copied()
+        .ok_or_else(|| {
+            GlrMaskError::GrammarParse(format!("undefined start rule: {}", grammar.start))
+        })?;
     let nonterminal_names = lowerer
         .nonterminal_ids
         .iter()
