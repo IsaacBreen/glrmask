@@ -7,11 +7,11 @@ use std::path::PathBuf;
 const DISPUTED_TOKEN_ID: u32 = 68439;
 const DISPUTED_TOKEN_BYTES: &[u8] = b"'];?>\"";
 const CONTROL_TOKEN_ID: u32 = 99925;
-const CONTROL_TOKEN_BYTES: &[u8] = b" Vimeo";
+const CONTROL_TOKEN_BYTES: &[u8] = b"a";
 const SPARSE_SCHEMA_GLRM: &str = r#"
 start start;
 
-internal t JSON_STRING_CHAR ::= "a" | " " | "V" | "i" | "m" | "e" | "o" | "'" | "]" | ";" | "?" | ">";
+internal t JSON_STRING_CHAR ::= "a" | "'" | "]" | ";" | "?" | ">";
 t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
 nt json_string ::= "\"" JSON_STRING_BODY;
 t JSON_INTEGER ::= /-?(0|[1-9][0-9]*)/;
@@ -685,6 +685,42 @@ fn scan_o82710_description_only_ascii_prefix_lengths() {
             content_len,
             content_len + token_content_len,
             (content_len + token_content_len) % 256,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+        );
+    }
+}
+
+#[ignore = "diagnostic for minimizing the control token in the current o82710 witness"]
+#[test]
+fn scan_o82710_control_token_variants() {
+    let variants: &[&[u8]] = &[
+        b" Vimeo",
+        b"a",
+        b" ",
+        b"aa",
+        b"aaaa",
+        b"x",
+        b"V",
+        b"a\"",
+    ];
+
+    for control_bytes in variants {
+        let vocab = Vocab::new(
+            vec![
+                (DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES.to_vec()),
+                (CONTROL_TOKEN_ID, control_bytes.to_vec()),
+            ],
+            None,
+        );
+        let constraint = Constraint::from_glrm_grammar(MINIMIZED_INLINE_GLRM_CANDIDATE, &vocab).unwrap();
+        let prefix = description_only_prefix();
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
+            classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES);
+        println!(
+            "control_variant={:?} mask={} commit_token={} commit_bytes={}",
+            control_bytes,
             mask_accepts,
             commit_token_accepts,
             commit_bytes_accepts,
