@@ -772,6 +772,29 @@ impl Tokenizer {
             }
         }
 
+        // When a partition does not contain a strong majority of terminals,
+        // skipping `relevant_bytes` pruning tends to produce a better quotient
+        // for the downstream L2P build: minimizing the active-only DFA keeps
+        // active-language distinctions while still collapsing dead inactive
+        // structure. When most terminals in the tokenizer are active, the
+        // relevant-bytes path remains worthwhile because the filtered DFA stays
+        // close to the original language and the pruned transition set buys a
+        // meaningful reduction.
+        let relevant_bytes = if std::env::var_os("GLRMASK_FORCE_RELEVANT_BYTES").is_some() {
+            relevant_bytes
+        } else if std::env::var_os("GLRMASK_NO_RELEVANT_BYTES").is_some() {
+            None
+        } else {
+            match relevant_bytes {
+                Some(rb) => {
+                    let num_active = active_terminals.iter().filter(|&&a| a).count();
+                    let num_total = active_terminals.len();
+                    if num_active * 3 <= num_total * 2 { None } else { Some(rb) }
+                }
+                None => None,
+            }
+        };
+
         let t_start = std::time::Instant::now();
         let t_clone = t_start.elapsed();
         let TerminalFilteredDfa {
