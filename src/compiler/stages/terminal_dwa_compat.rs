@@ -39,8 +39,16 @@ use super::id_map_and_terminal_dwa::classify::classify_vocab_char_type;
 
 fn partition_internal_vocab(
     entries: Vec<(u32, Vec<u8>)>,
-) -> [Vec<(usize, Vec<u8>)>; 4] {
-    let mut partitions: [Vec<(usize, Vec<u8>)>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+) -> [Vec<(usize, Vec<u8>)>; 7] {
+    let mut partitions: [Vec<(usize, Vec<u8>)>; 7] = [
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    ];
     for (token_id, bytes) in entries {
         let idx = classify_vocab_char_type(&bytes) as usize;
         partitions[idx].push((token_id as usize, bytes));

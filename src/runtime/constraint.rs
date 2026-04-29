@@ -51,14 +51,15 @@ pub(crate) fn bitmap_to_rangeset(words: &[u64]) -> RangeSetBlaze<u32> {
 /// The bitmap is NOT in original token space and is NOT in the raw parser-DWA
 /// vocab-compaction space. During compilation, raw possible_matches are computed
 /// in original token space, then remapped into a constraint vocab that refines
-/// the parser-DWA vocab by possible-match signature. Parser-DWA weights are
-/// remapped into this same token space.
+/// the parser-DWA vocab by possible-match signature and seed-state lexical-live
+/// signature. Parser-DWA weights are remapped into this same token space.
 pub(crate) type PossibleMatchesByState =
     BTreeMap<TokenizerStateID, BTreeMap<TerminalID, Box<[u64]>>>;
 type DenseWords = Box<[u64]>;
 type InternalTokenBufMasks = Vec<(u16, u32)>;
 type DenseWeightMaskCache = FxHashMap<usize, DenseWords>;
 type SeedTerminalDenseMasks = FxHashMap<(u32, TerminalID), DenseWords>;
+type SeedStateDenseMasks = Vec<DenseWords>;
 type FastDwaTransitions = Vec<FxHashMap<i32, (u32, Weight)>>;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -73,8 +74,8 @@ pub struct Constraint {
     ///
     /// Dense token bitmaps are in the final shared constraint-internal vocab
     /// space. That space is a refinement of the parser-DWA internal vocab by
-    /// possible-match signature. Parser-DWA weights have also been remapped into
-    /// this same token space.
+    /// possible-match signature and seed-state lexical-live signature. Parser-
+    /// DWA weights have also been remapped into this same token space.
     ///
     /// Do not remap the outer tokenizer-state key through state_to_internal_tsid.
     #[serde(with = "crate::runtime::serde::serde_btreemap_rangeset")]
@@ -122,6 +123,12 @@ pub struct Constraint {
     /// the dense bitmap of internal tokens that terminal covers in that state.
     #[serde(skip)]
     pub(crate) seed_terminal_dense: SeedTerminalDenseMasks,
+    /// Precomputed dense seed baseline for each ORIGINAL tokenizer state.
+    ///
+    /// seed_state_dense[s] is the dense bitmap of final shared internal token ids
+    /// whose original token bytes are lexically live from original tokenizer state s.
+    #[serde(skip)]
+    pub(crate) seed_state_dense: SeedStateDenseMasks,
     /// Dense bitmap of the full internal token universe.
     #[serde(skip)]
     pub(crate) seed_universe_dense: DenseWords,
@@ -430,6 +437,7 @@ impl Constraint {
         let dw = self.internal_token_dense_words;
         if dw == 0 {
             self.seed_terminal_dense.clear();
+            self.seed_state_dense.clear();
             self.seed_universe_dense = Box::new([]);
             return;
         }
@@ -438,6 +446,7 @@ impl Constraint {
         self.seed_universe_dense = self.dense_words_from_internal_set(&universe);
 
         self.seed_terminal_dense = self.build_seed_terminal_dense_masks();
+        self.seed_state_dense = self.build_seed_state_dense_masks();
     }
 
     fn collect_weight_dense_masks(
@@ -545,6 +554,22 @@ impl Constraint {
             .unwrap_or(token_id)
     }
 
+    fn final_internal_token_for_original(&self, token_id: u32) -> Option<u32> {
+        let internal = *self.original_token_to_internal.get(token_id as usize)?;
+
+        if internal == u32::MAX {
+            return None;
+        }
+
+        if !self.internal_token_to_tokens.is_empty()
+            && internal as usize >= self.internal_token_to_tokens.len()
+        {
+            return None;
+        }
+
+        Some(internal)
+    }
+
     pub(crate) fn internal_token_universe(&self) -> RangeSetBlaze<u32> {
         if self.internal_token_to_tokens.is_empty() {
             let Some(max_token_id) = self.max_original_token_id() else {
@@ -600,16 +625,79 @@ impl Constraint {
     }
 
     fn build_seed_terminal_dense_masks(&self) -> SeedTerminalDenseMasks {
+        let state_count = self.tokenizer.num_states();
+        let dense_words = self.internal_token_dense_words;
         let mut terminal_masks = SeedTerminalDenseMasks::default();
-        for (&tokenizer_state, terminals) in &self.possible_matches {
-            for (&terminal_id, bitmap) in terminals {
-                terminal_masks.insert(
-                    (tokenizer_state, terminal_id),
-                    bitmap.clone(),
-                );
+
+        for tokenizer_state in 0..state_count {
+            for (&original_token_id, token_bytes) in &self.token_bytes {
+                let Some(internal_token) = self.final_internal_token_for_original(original_token_id)
+                else {
+                    continue;
+                };
+
+                let exec = self.tokenizer.execute_from_state(token_bytes, tokenizer_state);
+                if exec.end_state.is_none() && exec.matches.is_empty() {
+                    continue;
+                }
+
+                let mut terminals: Vec<TerminalID> =
+                    exec.matches.iter().map(|matched| matched.id).collect();
+                if let Some(end_state) = exec.end_state {
+                    terminals.extend(
+                        self.tokenizer
+                            .possible_future_terminals_iter(end_state),
+                    );
+                }
+
+                terminals.sort_unstable();
+                terminals.dedup();
+
+                let word = internal_token as usize / 64;
+                let bit = internal_token as usize % 64;
+                for terminal_id in terminals {
+                    let dense = terminal_masks
+                        .entry((tokenizer_state, terminal_id))
+                        .or_insert_with(|| vec![0u64; dense_words].into_boxed_slice());
+                    dense[word] |= 1u64 << bit;
+                }
             }
         }
+
         terminal_masks
+    }
+
+    fn build_seed_state_dense_masks(&self) -> SeedStateDenseMasks {
+        let state_count = self.tokenizer.num_states() as usize;
+        let dense_words = self.internal_token_dense_words;
+        let mut masks = vec![vec![0u64; dense_words]; state_count];
+
+        for tokenizer_state in 0..state_count {
+            let tokenizer_state = tokenizer_state as u32;
+
+            for (&original_token_id, token_bytes) in &self.token_bytes {
+                let Some(internal_token) = self.final_internal_token_for_original(original_token_id)
+                else {
+                    continue;
+                };
+
+                let exec = self.tokenizer.execute_from_state(token_bytes, tokenizer_state);
+                if exec.end_state.is_none() && exec.matches.is_empty() {
+                    continue;
+                }
+
+                let word = internal_token as usize / 64;
+                let bit = internal_token as usize % 64;
+                if let Some(slot) = masks[tokenizer_state as usize].get_mut(word) {
+                    *slot |= 1u64 << bit;
+                }
+            }
+        }
+
+        masks
+            .into_iter()
+            .map(Vec::into_boxed_slice)
+            .collect()
     }
 
     fn or_internal_token_masks_to_buf(&self, internal_token: usize, buf: &mut [u32]) {

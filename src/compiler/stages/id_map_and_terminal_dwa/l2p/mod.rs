@@ -386,8 +386,11 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // transitions, reducing the state count for equivalence analysis and NWA
     // building.
     let simplify_started_at = Instant::now();
-    let (simplified_tok, orig_to_simplified) =
-        tokenizer.simplify_for_terminals(active_terminals, Some(&relevant_bytes));
+    let simplify_relevant_bytes = std::env::var("GLRMASK_ENABLE_L2P_RELEVANT_BYTES").map_or(false, |v| v == "1");
+    let (simplified_tok, orig_to_simplified) = tokenizer.simplify_for_terminals(
+        active_terminals,
+        simplify_relevant_bytes.then_some(&relevant_bytes),
+    );
     let simplify_ms = simplify_started_at.elapsed().as_secs_f64() * 1000.0;
 
     if debug_profile_enabled() {

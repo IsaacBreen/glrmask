@@ -237,6 +237,7 @@ fn terminal_expr(terminal: &Terminal) -> Expr {
 
 type DensePossibleMatchesByState = BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>;
 type PossibleMatchSignature = Vec<(u32, TerminalID)>;
+type SeedStateSignature = Vec<u32>;
 
 #[derive(Debug)]
 struct ConstraintVocabMap {
@@ -383,10 +384,44 @@ fn build_possible_match_signatures(
     signatures
 }
 
+fn build_seed_state_signatures(
+    tokenizer: &Tokenizer,
+    token_bytes: &BTreeMap<u32, Vec<u8>>,
+    tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
+) -> FxHashMap<u32, SeedStateSignature> {
+    let mut signatures = FxHashMap::default();
+
+    for (&token_id, bytes) in token_bytes {
+        let equivalent_tokens = tokens_with_same_bytes
+            .get(&token_id)
+            .cloned()
+            .unwrap_or_else(|| Arc::from([token_id]));
+
+        if equivalent_tokens.first().copied() != Some(token_id) {
+            continue;
+        }
+
+        let mut signature = Vec::new();
+        for tokenizer_state in 0..tokenizer.num_states() {
+            let exec = tokenizer.execute_from_state(bytes, tokenizer_state);
+            if exec.end_state.is_some() || !exec.matches.is_empty() {
+                signature.push(tokenizer_state);
+            }
+        }
+
+        for &equivalent_token_id in equivalent_tokens.iter() {
+            signatures.insert(equivalent_token_id, signature.clone());
+        }
+    }
+
+    signatures
+}
+
 fn build_constraint_vocab_map(
     parser_vocab: &ManyToOneIdMap,
     token_bytes: &BTreeMap<u32, Vec<u8>>,
     possible_match_signatures: &FxHashMap<u32, PossibleMatchSignature>,
+    seed_state_signatures: &FxHashMap<u32, SeedStateSignature>,
 ) -> ConstraintVocabMap {
     let max_original_slot = token_bytes
         .keys()
@@ -412,7 +447,8 @@ fn build_constraint_vocab_map(
     // unmapped tokens.
 
     for (old_internal_id, originals) in parser_vocab.internal_to_originals.iter().enumerate() {
-        let mut groups: BTreeMap<PossibleMatchSignature, Vec<u32>> = BTreeMap::new();
+        let mut groups: BTreeMap<(PossibleMatchSignature, SeedStateSignature), Vec<u32>> =
+            BTreeMap::new();
 
         for &original_token_id in originals {
             if !token_bytes.contains_key(&original_token_id) {
@@ -435,8 +471,15 @@ fn build_constraint_vocab_map(
                 .get(&original_token_id)
                 .cloned()
                 .unwrap_or_default();
+            let seed_signature = seed_state_signatures
+                .get(&original_token_id)
+                .cloned()
+                .unwrap_or_default();
 
-            groups.entry(signature).or_default().push(original_token_id);
+            groups
+                .entry((signature, seed_signature))
+                .or_default()
+                .push(original_token_id);
         }
 
         for (_, mut originals) in groups {
@@ -1212,10 +1255,16 @@ fn compile_prepared_with_profile(
             &token_bytes,
             &tokens_with_same_bytes,
         );
+        let seed_state_signatures = build_seed_state_signatures(
+            &tokenizer,
+            &token_bytes,
+            &tokens_with_same_bytes,
+        );
         let constraint_vocab = build_constraint_vocab_map(
             &internal_ids.vocab_tokens,
             &token_bytes,
             &possible_match_signatures,
+            &seed_state_signatures,
         );
         let constraint_token_count = constraint_vocab.internal_to_originals.len() as u32;
         let possible_matches = remap_possible_matches_to_constraint_vocab(
@@ -1286,6 +1335,7 @@ fn compile_prepared_with_profile(
             internal_token_dense_words: 0,
             weight_token_dense_masks: rustc_hash::FxHashMap::default(),
             seed_terminal_dense: rustc_hash::FxHashMap::default(),
+            seed_state_dense: Vec::new(),
             seed_universe_dense: Box::new([]),
             dwa_fast_transitions: Vec::new(),
             heavy_token_dense_masks: Vec::new(),
@@ -1398,10 +1448,15 @@ mod tests {
             &token_bytes,
             &tokens_with_same_bytes,
         );
+        let seed_state_signatures: FxHashMap<u32, SeedStateSignature> = token_bytes
+            .keys()
+            .map(|&token_id| (token_id, Vec::new()))
+            .collect();
         let constraint_vocab = build_constraint_vocab_map(
             &parser_vocab,
             &token_bytes,
             &signatures,
+            &seed_state_signatures,
         );
 
         let tok0 = constraint_vocab.original_to_internal[0];
@@ -1454,10 +1509,15 @@ mod tests {
             &token_bytes,
             &tokens_with_same_bytes,
         );
+        let seed_state_signatures: FxHashMap<u32, SeedStateSignature> = token_bytes
+            .keys()
+            .map(|&token_id| (token_id, Vec::new()))
+            .collect();
         let constraint_vocab = build_constraint_vocab_map(
             &parser_vocab,
             &token_bytes,
             &signatures,
+            &seed_state_signatures,
         );
 
         let tok0 = constraint_vocab.original_to_internal[0];

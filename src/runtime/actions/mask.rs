@@ -417,9 +417,13 @@ impl<'a> ConstraintState<'a> {
     fn terminals_disallowed_to_dense_acc(
         &self,
         terminals_disallowed: &TerminalsDisallowed,
+        original_tokenizer_state: u32,
         internal_tsid: u32,
     ) -> Option<DenseMaskAcc> {
-        let universe = &self.constraint.seed_universe_dense;
+        let base = self
+            .constraint
+            .seed_state_dense
+            .get(original_tokenizer_state as usize)?;
         let terminal_masks = &self.constraint.seed_terminal_dense;
 
         let no_disallowed_terminals = terminals_disallowed.is_empty()
@@ -428,10 +432,10 @@ impl<'a> ConstraintState<'a> {
                 .all(|disallowed| disallowed.is_empty());
 
         if no_disallowed_terminals {
-            return DenseMaskAcc::from_dense(internal_tsid, universe.to_vec());
+            return DenseMaskAcc::from_dense(internal_tsid, base.to_vec());
         }
 
-        let mut dense = vec![0u64; universe.len()];
+        let mut dense = vec![0u64; base.len()];
 
         // TerminalsDisallowed is keyed by ORIGINAL tokenizer state, because it
         // describes tokenizer futures accumulated by the GLR parser.
@@ -444,7 +448,11 @@ impl<'a> ConstraintState<'a> {
         // parser-DWA TSID compaction. These two TSID spaces intentionally remain
         // separate.
         for (&original_tokenizer_state, disallowed_in_state) in terminals_disallowed.iter() {
-            let mut allowed_for_state = universe.to_vec();
+            if disallowed_in_state.is_empty() {
+                continue;
+            }
+
+            let mut allowed_for_state = base.to_vec();
 
             for &terminal_id in disallowed_in_state {
                 if let Some(mask) = terminal_masks.get(&(original_tokenizer_state, terminal_id)) {
@@ -513,11 +521,16 @@ impl<'a> ConstraintState<'a> {
                 continue;
             }
 
-            let internal_tsid = self.constraint.internal_tsid_for_state(tokenizer_state);
+            let original_tokenizer_state = tokenizer_state;
+            let internal_tsid = self.constraint.internal_tsid_for_state(original_tokenizer_state);
 
             let (decomposed, root_accs) =
                 gss.apply_transform_and_decompose(|terminals_disallowed| {
-                    self.terminals_disallowed_to_dense_acc(terminals_disallowed, internal_tsid)
+                    self.terminals_disallowed_to_dense_acc(
+                        terminals_disallowed,
+                        original_tokenizer_state,
+                        internal_tsid,
+                    )
                 });
 
             if decomposed.is_empty() && root_accs.is_empty() {
@@ -602,6 +615,11 @@ impl<'a> ConstraintState<'a> {
 
         buf.fill(0);
         self.constraint.or_internal_dense_to_buf(&merged, buf, true);
+        // NOTE: NEVER EVER add any post-filter here that rechecks candidate
+        // mask tokens through commit semantics. If mask and commit disagree,
+        // the bug is in the seed/DWA mask construction logic itself and must
+        // be fixed there. Hiding the mismatch with a second-pass filter is not
+        // allowed. This note is intentional and must NEVER EVER be removed.
         update_eos_mask(buf, self.constraint.eos_token_id, self.is_complete());
 
         self.store_mask_cache(buf, &merged);
