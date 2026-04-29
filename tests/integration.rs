@@ -530,17 +530,16 @@ fn test_mre_o43234_closed_object_string_then_integer_rejects_trailing_comma_in_m
         r#"
 start start;
 
-internal t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]|\\["\\\/bfnrt]|\\u[0-9A-Fa-f]{4}/;
+internal t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]/;
 t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
-nt json_string ::= "\"" JSON_STRING_BODY;
 t JSON_INTEGER ::= /-?(0|[1-9][0-9]*)/;
-nt start ::= "{" ("\"" "a\"" ": " json_string) (", \"" "b\"" ": " JSON_INTEGER) "}";
+nt start ::= JSON_STRING_BODY JSON_INTEGER "}";
 "#,
         &vocab,
     )
     .unwrap();
     let comma_token_id = 11u32;
-    let prefix = b"{\"a\": \"x\", \"b\": 2";
+    let prefix = b"x\"2";
 
     let mut mask_state = constraint.start();
     mask_state.commit_bytes(prefix).unwrap();
