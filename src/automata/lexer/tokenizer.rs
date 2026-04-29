@@ -77,26 +77,6 @@ fn remap_masked_possible_futures(
     remapped
 }
 
-fn clear_future_tag_bits(dfa: &mut DFA, future_tag_base: usize) {
-    for state in 0..dfa.num_states() {
-        let mut finalizers = dfa.states()[state].finalizers.clone();
-        if finalizers.len() <= future_tag_base {
-            continue;
-        }
-        let tagged: Vec<usize> = finalizers
-            .iter_ones()
-            .filter(|&bit| bit >= future_tag_base)
-            .collect();
-        if tagged.is_empty() {
-            continue;
-        }
-        for bit in tagged {
-            finalizers.clear(bit);
-        }
-        dfa.states_mut()[state].finalizers = finalizers;
-    }
-}
-
 fn state_has_active_continuation(dfa: &DFA, state: usize, active_groups: &BitSet) -> bool {
     !dfa.states()[state].finalizers.is_disjoint(active_groups)
         || !dfa.possible_future_group_ids(state as u32).is_disjoint(active_groups)
@@ -809,7 +789,7 @@ impl Tokenizer {
                 Some(rb) => {
                     let num_active = active_terminals.iter().filter(|&&a| a).count();
                     let num_total = active_terminals.len();
-                    if num_active * 2 <= num_total { None } else { Some(rb) }
+                    if num_active * 3 <= num_total * 2 { None } else { Some(rb) }
                 }
                 None => None,
             }
@@ -900,25 +880,6 @@ impl Tokenizer {
         }
 
         let t_pre_min = std::time::Instant::now();
-        let future_tag_base = self.num_terminals as usize;
-        if transitions_pruned {
-            let num_groups = dfa.num_groups().max(future_tag_base + self.num_terminals as usize);
-            dfa.ensure_group_capacity(num_groups);
-            for state in 0..dfa.num_states() {
-                let mut finalizers = dfa.states()[state].finalizers.clone();
-                let masked_futures = self.dfa.possible_future_group_ids(state as u32);
-                let mut changed = false;
-                for terminal in masked_futures.iter_ones() {
-                    if active_bitset.contains(terminal) {
-                        finalizers.set(future_tag_base + terminal);
-                        changed = true;
-                    }
-                }
-                if changed {
-                    dfa.states_mut()[state].finalizers = finalizers;
-                }
-            }
-        }
         let (mut minimized, mut state_mapping) = match dfa.try_minimize_full_with_state_mapping() {
             Some(result) => result,
             None => {
@@ -932,10 +893,6 @@ impl Tokenizer {
                 dfa.minimize_with_state_mapping()
             }
         };
-
-        if transitions_pruned {
-            clear_future_tag_bits(&mut minimized, future_tag_base);
-        }
 
         if std::env::var_os("GLRMASK_DEBUG_SIMPLIFY_PHASES").is_some() {
             eprintln!(
