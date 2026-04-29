@@ -42,9 +42,12 @@ nt start ::= "{" obj_open_reqmask_0_nc_0 "}";
 const MINIMIZED_INLINE_GLRM_CANDIDATE: &str = r#"
 start start;
 
-t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= "a"{0,32} "\"";
-t JSON_STRING_CHAR_EXACT_256_3 ::= "a"{32};
-nt start ::= ("\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} "\""))+ "\"\"" ("\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} "\""))*;
+t q ::= "\"";
+t qq ::= q q;
+t u ::= "a"{0,32} q;
+t e ::= "a"{32};
+nt p ::= q (e{0,18} u | e{19} q);
+nt start ::= p+ qq p*;
 "#;
 
 fn token_allowed(mask: &[u32], id: usize) -> bool {
@@ -545,6 +548,15 @@ fn scaled_inlined_split_variant(chunk_size: usize) -> String {
     minimized_count_representation_variant(&a_close_rule, &a_exact_rule, "", &start_rule)
 }
 
+fn counted_inlined_split_variant(chunk_size: usize, first_arm_max_chunks: usize, second_arm_chunks: usize) -> String {
+    let a_close_rule = format!("t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= \"a\"{{0,{chunk_size}}} \"\\\"\";");
+    let a_exact_rule = format!("t JSON_STRING_CHAR_EXACT_256_3 ::= \"a\"{{{chunk_size}}};");
+    let start_rule = format!(
+        "(\"\\\"\" (JSON_STRING_CHAR_EXACT_256_3{{0,{first_arm_max_chunks}}} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{{{second_arm_chunks}}} \"\\\"\"))+ \"\\\"\\\"\" (\"\\\"\" (JSON_STRING_CHAR_EXACT_256_3{{0,{first_arm_max_chunks}}} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{{{second_arm_chunks}}} \"\\\"\"))*"
+    );
+    minimized_count_representation_variant(&a_close_rule, &a_exact_rule, "", &start_rule)
+}
+
 fn description_only_prefix_with_head(head: &[u8], content_len: usize) -> Vec<u8> {
     let mut prefix = Vec::from(head);
     prefix.extend(std::iter::repeat(b'a').take(content_len));
@@ -862,6 +874,10 @@ fn scan_o82710_all_ascii_prefix_lengths_up_to_current() {
 
     for content_len in 0usize..=2303 {
         let prefix = description_only_prefix_with_ascii_repeat(content_len);
+        let mut prefix_state = constraint.start();
+        if prefix_state.commit_bytes(&prefix).is_err() {
+            continue;
+        }
         let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
             classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES);
         if !mask_accepts && commit_token_accepts && commit_bytes_accepts {
@@ -1280,6 +1296,40 @@ fn scan_o82710_scaled_chunk_variants() {
             "scaled_chunk={} prefix_len={} mask={} commit_token={} commit_bytes={}",
             chunk_size,
             (9 * chunk_size) - 1,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+        );
+    }
+}
+
+#[ignore = "diagnostic for shrinking the split-count thresholds in the current witness"]
+#[test]
+fn scan_o82710_split_count_variants() {
+    let variants = [
+        ("18_19", 32usize, 18usize, 19usize, 287usize),
+        ("8_9", 32usize, 8usize, 9usize, 287usize),
+        ("4_5", 32usize, 4usize, 5usize, 159usize),
+        ("2_3", 32usize, 2usize, 3usize, 95usize),
+        ("1_2", 32usize, 1usize, 2usize, 63usize),
+    ];
+    let vocab = reduced_two_token_vocab();
+
+    for (label, chunk_size, first_arm_max_chunks, second_arm_chunks, prefix_len) in variants {
+        let grammar = counted_inlined_split_variant(chunk_size, first_arm_max_chunks, second_arm_chunks);
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+        let prefix = description_only_prefix_with_ascii_repeat(prefix_len);
+        let mut prefix_state = constraint.start();
+        if let Err(error) = prefix_state.commit_bytes(&prefix) {
+            println!("split_count_variant={} prefix_rejected={}", label, error);
+            continue;
+        }
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
+            classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES);
+        println!(
+            "split_count_variant={} prefix_len={} mask={} commit_token={} commit_bytes={}",
+            label,
+            prefix_len,
             mask_accepts,
             commit_token_accepts,
             commit_bytes_accepts,
