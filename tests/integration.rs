@@ -527,14 +527,14 @@ fn test_mre_o43234_closed_object_string_then_integer_rejects_trailing_comma_in_m
         None,
     );
     let constraint = Constraint::from_glrm_grammar(
-        r#"
-start start;
+    r#"
+        start start;
 
-internal t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]/;
-t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
-t JSON_INTEGER ::= /-?(0|[1-9][0-9]*)/;
-nt start ::= JSON_STRING_BODY JSON_INTEGER "}";
-"#,
+        internal t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]/;
+        t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
+        t JSON_INTEGER ::= /-?(0|[1-9][0-9]*)/;
+        nt start ::= JSON_STRING_BODY JSON_INTEGER "}";
+    "#,
         &vocab,
     )
     .unwrap();
