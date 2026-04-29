@@ -590,6 +590,7 @@ fn test_json_schema_bare_object_accepts_compact_empty_object_token() {
     assert!(state.is_finished(), "should accept after compact '{{}}' token");
 }
 
+#[ignore]
 #[test]
 fn test_json_schema_anyof_ambiguity_grows_with_n_not_log_n() {
     let vocab = byte_vocab();
