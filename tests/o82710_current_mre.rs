@@ -42,12 +42,9 @@ nt start ::= "{" obj_open_reqmask_0_nc_0 "}";
 const MINIMIZED_INLINE_GLRM_CANDIDATE: &str = r#"
 start start;
 
-internal t JSON_STRING_CHAR ::= "a";
-internal t JSON_STRING_CHAR_UPTO_256_1 ::= JSON_STRING_CHAR{0,256};
-t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= JSON_STRING_CHAR_UPTO_256_1 "\"";
-t JSON_STRING_CHAR_EXACT_256_3 ::= JSON_STRING_CHAR{256};
-nt json_string_bounded_split_6 ::= "\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} "\"");
-nt start ::= json_string_bounded_split_6+ "\"\"" json_string_bounded_split_6*;
+t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= "a"{0,256} "\"";
+t JSON_STRING_CHAR_EXACT_256_3 ::= "a"{256};
+nt start ::= ("\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} "\""))+ "\"\"" ("\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} "\""))*;
 "#;
 
 fn token_allowed(mask: &[u32], id: usize) -> bool {
@@ -521,6 +518,24 @@ nt start ::= {start_rule};
     )
 }
 
+fn minimized_count_representation_variant(
+    a_close_rule: &str,
+    a_exact_rule: &str,
+    split_rule: &str,
+    start_rule: &str,
+) -> String {
+    format!(
+        r#"
+start start;
+
+{a_close_rule}
+{a_exact_rule}
+{split_rule}
+nt start ::= {start_rule};
+"#,
+    )
+}
+
 fn description_only_prefix_with_head(head: &[u8], content_len: usize) -> Vec<u8> {
     let mut prefix = Vec::from(head);
     prefix.extend(std::iter::repeat(b'a').take(content_len));
@@ -744,7 +759,7 @@ fn scan_o82710_description_only_ascii_prefix_lengths() {
     let constraint = Constraint::from_glrm_grammar(MINIMIZED_INLINE_GLRM_CANDIDATE, &vocab).unwrap();
     let token_content_len = DISPUTED_TOKEN_BYTES.len() - 1;
 
-    for content_len in [252usize, 508, 764, 1020, 1276, 1532, 1788, 2044, 2300] {
+    for content_len in [252usize, 508, 764, 1020, 1276, 1532, 1788, 2044, 2300, 2301, 2302, 2303] {
         let prefix = description_only_prefix_with_ascii_repeat(content_len);
         let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
             classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES);
@@ -836,7 +851,7 @@ fn scan_o82710_all_ascii_prefix_lengths_up_to_current() {
     let constraint = Constraint::from_glrm_grammar(MINIMIZED_INLINE_GLRM_CANDIDATE, &vocab).unwrap();
     let mut smallest_repro = None;
 
-    for content_len in 0usize..=2300 {
+    for content_len in 0usize..=2303 {
         let prefix = description_only_prefix_with_ascii_repeat(content_len);
         let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
             classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES);
@@ -1168,6 +1183,71 @@ fn scan_o82710_flat_core_variants() {
             commit_bytes_accepts,
         );
     }
+}
+
+#[ignore = "diagnostic for minimizing bounded-split helper representation in the current o82710 witness"]
+#[test]
+fn scan_o82710_count_representation_variants() {
+    let variants = [
+        (
+            "current_helpers",
+            "internal t JSON_STRING_CHAR ::= \"a\";\ninternal t JSON_STRING_CHAR_UPTO_256_1 ::= JSON_STRING_CHAR{0,256};\nt JSON_STRING_CHAR_UPTO_CLOSE_2 ::= JSON_STRING_CHAR_UPTO_256_1 \"\\\"\";",
+            "t JSON_STRING_CHAR_EXACT_256_3 ::= JSON_STRING_CHAR{256};",
+            "nt json_string_bounded_split_6 ::= \"\\\"\" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} \"\\\"\");",
+            "json_string_bounded_split_6+ \"\\\"\\\"\" json_string_bounded_split_6*",
+        ),
+        (
+            "inline_char_alias_removed",
+            "t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= \"a\"{0,256} \"\\\"\";",
+            "t JSON_STRING_CHAR_EXACT_256_3 ::= \"a\"{256};",
+            "nt json_string_bounded_split_6 ::= \"\\\"\" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} \"\\\"\");",
+            "json_string_bounded_split_6+ \"\\\"\\\"\" json_string_bounded_split_6*",
+        ),
+        (
+            "inline_split_nonterminal_removed",
+            "t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= \"a\"{0,256} \"\\\"\";",
+            "t JSON_STRING_CHAR_EXACT_256_3 ::= \"a\"{256};",
+            "",
+            "(\"\\\"\" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} \"\\\"\"))+ \"\\\"\\\"\" (\"\\\"\" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} \"\\\"\"))*",
+        ),
+    ];
+
+    let vocab = reduced_two_token_vocab();
+    let prefix = description_only_prefix();
+    for (label, a_close_rule, a_exact_rule, split_rule, start_rule) in variants {
+        let grammar = minimized_count_representation_variant(a_close_rule, a_exact_rule, split_rule, start_rule);
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+        let mut prefix_state = constraint.start();
+        if let Err(error) = prefix_state.commit_bytes(&prefix) {
+            println!("count_repr_variant={} prefix_rejected={}", label, error);
+            continue;
+        }
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
+            classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES);
+        println!(
+            "count_repr_variant={} mask={} commit_token={} commit_bytes={}",
+            label,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+        );
+    }
+}
+
+#[ignore = "diagnostic for whether the current minimized witness still needs the control token"]
+#[test]
+fn scan_o82710_minimized_single_token_vocab() {
+    let vocab = single_token_vocab();
+    let constraint = Constraint::from_glrm_grammar(MINIMIZED_INLINE_GLRM_CANDIDATE, &vocab).unwrap();
+    let prefix = description_only_prefix();
+    let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
+        classify_constraint(&constraint, &prefix, 0, DISPUTED_TOKEN_BYTES);
+    println!(
+        "single_token_minimized mask={} commit_token={} commit_bytes={}",
+        mask_accepts,
+        commit_token_accepts,
+        commit_bytes_accepts,
+    );
 }
 
 #[ignore = "expensive full-vocab benchmark witness for the current false negative"]
