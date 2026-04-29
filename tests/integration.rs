@@ -5334,7 +5334,7 @@ fn test_o82710_minimized_inline_glrm_mask_allows_committable_token_16() {
         t a_exact_32 ::= "a"{32};
         t a_up_to_32 ::= "a"{0,32};
         nt p ::= (a_exact_32{0,16} a_up_to_32 | a_exact_32{17}) q;
-        nt start ::= p* q p*;
+        nt start ::= p? q p;
     "#;
     let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
 
@@ -5383,7 +5383,7 @@ fn test_o82710_minimized_inline_glrm_mask_allows_committable_token_17() {
         t a_exact_32 ::= "a"{32};
         t a_up_to_32 ::= "a"{0,32};
         nt p ::= (a_exact_32{0,17} a_up_to_32 | a_exact_32{18}) q;
-        nt start ::= p* q p*;
+        nt start ::= p? q p;
     "#;
     let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
 
@@ -5433,7 +5433,7 @@ fn test_o82710_minimized_inline_glrm_mask_allows_committable_token_17_var1() {
         t a_exact_32 ::= "a"{32};
         t a_up_to_32 ::= "a"{0,32};
         nt p ::= (a_exact_32{0,17} a_up_to_32 | a_exact_32{18}) q;
-        nt start ::= p? q p*;
+        nt start ::= q p;
     "#;
     let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
 
