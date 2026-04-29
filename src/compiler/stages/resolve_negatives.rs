@@ -690,13 +690,17 @@ fn has_non_default_transitions(state: &NWAState) -> bool {
         .any(|(label, targets)| *label != DEFAULT_LABEL && !targets.is_empty())
 }
 
-fn is_terminal_candidate(state: &NWAState) -> bool {
+fn is_terminal_shape_candidate(state: &NWAState) -> bool {
     !has_non_default_transitions(state)
         && state.epsilons.is_empty()
         && has_live_final_weight(state)
 }
 
-fn default_targets_are_terminal(state: &NWAState, terminal_states: &[bool]) -> bool {
+fn default_targets_are_terminal_and_redundant(state: &NWAState, terminal_states: &[bool]) -> bool {
+    let Some(final_weight) = state.final_weight.as_ref().filter(|weight| !weight.is_empty()) else {
+        return false;
+    };
+
     match state.transitions.get(&DEFAULT_LABEL) {
         None => true,
         Some(targets) => targets.iter().all(|(target, _)| {
@@ -704,7 +708,7 @@ fn default_targets_are_terminal(state: &NWAState, terminal_states: &[bool]) -> b
                 .get(*target as usize)
                 .copied()
                 .unwrap_or(false)
-        }),
+        }) && targets.iter().all(|(_, edge_weight)| edge_weight.is_subset(final_weight)),
     }
 }
 
@@ -712,11 +716,11 @@ fn grow_terminal_state_set(nwa: &NWA, terminal_states: &mut [bool]) {
     loop {
         let mut changed = false;
         for (state_id, state) in nwa.states().iter().enumerate() {
-            if terminal_states[state_id] || !is_terminal_candidate(state) {
+            if terminal_states[state_id] || !is_terminal_shape_candidate(state) {
                 continue;
             }
 
-            if default_targets_are_terminal(state, terminal_states) {
+            if default_targets_are_terminal_and_redundant(state, terminal_states) {
                 terminal_states[state_id] = true;
                 changed = true;
             }
@@ -730,15 +734,28 @@ fn grow_terminal_state_set(nwa: &NWA, terminal_states: &mut [bool]) {
 
 fn prune_terminal_default_targets(nwa: &mut NWA, terminal_states: &[bool]) {
     for state in  nwa.states_mut() {
+        let final_weight = state.final_weight.clone();
         if let Some(targets) = state.transitions.get_mut(&DEFAULT_LABEL) {
-            targets.retain(|(target, _)| !terminal_states[*target as usize]);
+            targets.retain(|(target, edge_weight)| {
+                if !terminal_states[*target as usize] {
+                    return true;
+                }
+                let Some(final_weight) = final_weight.as_ref() else {
+                    return true;
+                };
+                !edge_weight.is_subset(final_weight)
+            });
         }
         state.transitions.retain(|_, targets| !targets.is_empty());
     }
 }
 
 pub(crate) fn remove_redundant_default_transitions(nwa: &mut NWA) {
-    let mut terminal_states: Vec<bool> = nwa.states().iter().map(is_terminal_candidate).collect();
+    let mut terminal_states: Vec<bool> = nwa
+        .states()
+        .iter()
+        .map(|state| is_terminal_shape_candidate(state) && !state.transitions.contains_key(&DEFAULT_LABEL))
+        .collect();
 
     grow_terminal_state_set(nwa, &mut terminal_states);
     prune_terminal_default_targets(nwa, &terminal_states);
@@ -1522,5 +1539,32 @@ nt start ::= (A_EXACT{4} | A_EXACT{5}) A_UP_TO_32;
             normalized_nwa_signature(&expected),
             "resolved sparse o82710 parser NWA diverged from the reference negative-resolution pipeline"
         );
+    }
+
+    #[test]
+    fn test_remove_redundant_default_transitions_keeps_nonredundant_default_weight() {
+        let mut nwa = NWA::new(0, 0);
+        for _ in 0..3 {
+            nwa.add_state();
+        }
+
+        let token0 = Weight::from_token_set_for_tsid(0, RangeSetBlaze::from_iter([0u32..=0u32]));
+        let token1 = Weight::from_token_set_for_tsid(0, RangeSetBlaze::from_iter([1u32..=1u32]));
+        let token01 = token0.union(&token1);
+
+        nwa.set_final_weight(1, token0.clone());
+        nwa.set_final_weight(2, token1.clone());
+        nwa.add_transition(2, DEFAULT_LABEL, 1, token01.clone());
+
+        remove_redundant_default_transitions(&mut nwa);
+
+        let default_targets = nwa.states()[2]
+            .transitions
+            .get(&DEFAULT_LABEL)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(default_targets.len(), 1, "nonredundant DEFAULT edge should survive pruning");
+        assert_eq!(default_targets[0].0, 1);
+        assert_eq!(default_targets[0].1, token01);
     }
 }

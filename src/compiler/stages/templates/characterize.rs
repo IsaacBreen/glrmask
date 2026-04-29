@@ -99,6 +99,18 @@ fn record_initial_action(
     escapes: &mut BTreeSet<InitialEscape>,
     reduces: &mut BTreeSet<InitialReduce>,
 ) {
+    fn record_initial_stack_shift_effect(
+        state: u32,
+        pop: u32,
+        shifted_pushes: &[u32],
+        escapes: &mut BTreeSet<InitialEscape>,
+    ) {
+        let extra_pops = pop.saturating_sub(1) as usize;
+        let mut pushes = if pop == 0 { vec![state] } else { Vec::new() };
+        pushes.extend_from_slice(shifted_pushes);
+        escapes.insert((state, extra_pops, pushes));
+    }
+
     match action {
         Action::Shift(shift_state, replace) => {
             let effective_replace = *replace;
@@ -107,13 +119,14 @@ fn record_initial_action(
         }
         Action::StackShifts(shifts) => {
             for shift in shifts {
-                let extra_pops = shift.pop.saturating_sub(1) as usize;
-                let mut pushes = if shift.pop == 0 { vec![state] } else { Vec::new() };
-                pushes.extend_from_slice(&shift.pushes);
-                escapes.insert((state, extra_pops, pushes));
+                record_initial_stack_shift_effect(state, shift.pop, &shift.pushes, escapes);
             }
         }
-        Action::GuardedStackShifts(_) => {}
+        Action::GuardedStackShifts(shifts) => {
+            for shift in shifts {
+                record_initial_stack_shift_effect(state, shift.pop, &shift.pushes, escapes);
+            }
+        }
         Action::Reduce(lhs, len) => {
             let rule_len = if is_forwarded { (*len as usize) + 1 } else { *len as usize };
             reduces.insert((state, rule_len, *lhs));
@@ -150,6 +163,28 @@ fn record_goto_action(
     nt_rereduces: &mut BTreeSet<NtRereduce>,
     inheritances: &mut BTreeMap<u32, BTreeSet<u32>>,
 ) {
+    fn record_goto_stack_shift_effect(
+        stack_nt: NonterminalID,
+        revealed_state: u32,
+        goto_state: u32,
+        goto_replace: bool,
+        pop: u32,
+        shifted_pushes: &[u32],
+        nt_escapes: &mut BTreeSet<NtEscape>,
+    ) {
+        let mut pushes = Vec::new();
+        if !goto_replace {
+            pushes.push(revealed_state);
+        }
+        pushes.push(goto_state);
+        let base_pops = pushes.len();
+        let extra_pops = pop.saturating_sub(base_pops as u32) as usize;
+        let retained = base_pops.saturating_sub(pop as usize);
+        pushes.truncate(retained);
+        pushes.extend_from_slice(shifted_pushes);
+        nt_escapes.insert((stack_nt, revealed_state, extra_pops, pushes));
+    }
+
     match action {
         Action::Shift(shift_state, shift_replace) => {
             let mut pushes = Vec::new();
@@ -160,20 +195,30 @@ fn record_goto_action(
         }
         Action::StackShifts(shifts) => {
             for shift in shifts {
-                let mut pushes = Vec::new();
-                if !goto_replace {
-                    pushes.push(revealed_state);
-                }
-                pushes.push(goto_state);
-                let base_pops = pushes.len();
-                let extra_pops = shift.pop.saturating_sub(base_pops as u32) as usize;
-                let retained = base_pops.saturating_sub(shift.pop as usize);
-                pushes.truncate(retained);
-                pushes.extend_from_slice(&shift.pushes);
-                nt_escapes.insert((stack_nt, revealed_state, extra_pops, pushes));
+                record_goto_stack_shift_effect(
+                    stack_nt,
+                    revealed_state,
+                    goto_state,
+                    goto_replace,
+                    shift.pop,
+                    &shift.pushes,
+                    nt_escapes,
+                );
             }
         }
-        Action::GuardedStackShifts(_) => {}
+        Action::GuardedStackShifts(shifts) => {
+            for shift in shifts {
+                record_goto_stack_shift_effect(
+                    stack_nt,
+                    revealed_state,
+                    goto_state,
+                    goto_replace,
+                    shift.pop,
+                    &shift.pushes,
+                    nt_escapes,
+                );
+            }
+        }
         Action::Reduce(lhs, len) => {
             handle_reduce(
                 table,
@@ -389,6 +434,24 @@ fn expand_zero_pop_action(
     reduces: &mut BTreeSet<InitialReduce>,
     visited: &mut BTreeSet<(u32, NonterminalID)>,
 ) {
+    fn record_zero_pop_stack_shift_effect(
+        initial_state: u32,
+        push_stack: &[u32],
+        pop: u32,
+        shifted_pushes: &[u32],
+        escapes: &mut BTreeSet<InitialEscape>,
+    ) {
+        let mut pushes = Vec::new();
+        pushes.push(initial_state);
+        pushes.extend_from_slice(push_stack);
+        let base_pops = pushes.len();
+        let extra_pops = pop.saturating_sub(base_pops as u32) as usize;
+        let retained = base_pops.saturating_sub(pop as usize);
+        pushes.truncate(retained);
+        pushes.extend_from_slice(shifted_pushes);
+        escapes.insert((initial_state, extra_pops, pushes));
+    }
+
     match action {
         Action::Shift(shift_state, shift_replace) => {
             // Build the escape pushes from the accumulated push_stack.
@@ -409,18 +472,26 @@ fn expand_zero_pop_action(
         }
         Action::StackShifts(shifts) => {
             for shift in shifts {
-                let mut pushes = Vec::new();
-                pushes.push(initial_state);
-                pushes.extend_from_slice(push_stack);
-                let base_pops = pushes.len();
-                let extra_pops = shift.pop.saturating_sub(base_pops as u32) as usize;
-                let retained = base_pops.saturating_sub(shift.pop as usize);
-                pushes.truncate(retained);
-                pushes.extend_from_slice(&shift.pushes);
-                escapes.insert((initial_state, extra_pops, pushes));
+                record_zero_pop_stack_shift_effect(
+                    initial_state,
+                    push_stack,
+                    shift.pop,
+                    &shift.pushes,
+                    escapes,
+                );
             }
         }
-        Action::GuardedStackShifts(_) => {}
+        Action::GuardedStackShifts(shifts) => {
+            for shift in shifts {
+                record_zero_pop_stack_shift_effect(
+                    initial_state,
+                    push_stack,
+                    shift.pop,
+                    &shift.pushes,
+                    escapes,
+                );
+            }
+        }
         Action::Reduce(nt2, len2) => {
             handle_zero_pop_reduce(
                 table, terminal, initial_state, *nt2, *len2 as usize,
@@ -493,11 +564,6 @@ fn characterize_terminal_with_initial(
     mut escapes: BTreeSet<InitialEscape>,
     reduces: BTreeSet<InitialReduce>,
 ) -> TerminalCharacterization {
-    // Expand pop-0 initial reduces by following the goto chain.
-    // Pop-0 reduces become epsilon transitions in the template NFA, which
-    // bypass stack checks and make the mask too permissive. By inlining
-    // the goto chain, we convert them to equivalent escapes or higher-pop
-    // reduces that correctly gate on the parser state.
     let mut normal_reduces: BTreeSet<InitialReduce> = BTreeSet::new();
     for &(initial_state, pop_count, nonterminal) in &reduces {
         if pop_count == 0 {
@@ -673,20 +739,25 @@ fn handle_reduce(
     nt_rereduces: &mut BTreeSet<NtRereduce>,
     inheritances: &mut BTreeMap<u32, BTreeSet<u32>>,
 ) {
-    // If the goto was a replace, the goto state was never pushed, so the
-    // reduce effectively pops one fewer item from the perspective of the
-    // template NFA.  Equivalently, add 1 to len.
-    let effective_len = if goto_replace { len + 1 } else { len };
-    match effective_len {
-        0 => {
-            // Zero-length reduce at a non-replace goto target.
-            // The goto_state is still on the stack; follow the goto from it.
-            if let Some((next_goto_state, next_replace)) = table.goto_target(goto_state, reduce_nt) {
-                if visited.insert((next_goto_state, next_replace)) {
-                    worklist.push_back((next_goto_state, next_replace));
-                }
+    if len == 0 {
+        // A zero-pop reduce leaves the current goto target on top of the
+        // parser stack, even when the incoming goto was a replace. Continue
+        // from that current top state rather than revealing an older one.
+        if let Some((next_goto_state, next_replace)) = table.goto_target(goto_state, reduce_nt) {
+            if visited.insert((next_goto_state, next_replace)) {
+                worklist.push_back((next_goto_state, next_replace));
             }
         }
+        return;
+    }
+
+    // If the incoming goto was a replace, its target occupied the revealed
+    // slot instead of being pushed above it. Any positive-length reduce that
+    // pops through that target therefore reveals one additional older state
+    // from the template's perspective.
+    let effective_len = if goto_replace { len + 1 } else { len };
+    match effective_len {
+        0 => unreachable!("zero-pop reduces return early before effective_len matching"),
         1 => {
             if let Some((next_goto_state, next_replace)) = table.goto_target(revealed_state, reduce_nt) {
                 if next_replace {
