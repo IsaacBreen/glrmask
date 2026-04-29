@@ -1,6 +1,7 @@
 //! Integration tests: end-to-end from grammar → compile → mask → commit.
 
 use glrmask::{Constraint, ConstraintState, Vocab};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 /// Build a vocabulary from string entries.
 fn make_vocab(entries: &[&str]) -> Vocab {
@@ -512,6 +513,68 @@ fn test_json_schema_null() {
 fn test_json_schema_enum() {
     let constraint = json_schema_constraint(&["\"", "a", "b"], r#"{"enum": ["\"a\"", "\"b\""]}"#);
     assert_mask_allows(&constraint.start().mask(), &[0]);
+}
+
+#[ignore = "known o43234 GLRM trailing-comma mask false positive MRE"]
+#[test]
+fn test_mre_o43234_closed_object_string_then_integer_rejects_trailing_comma_in_mask() {
+    let vocab = Vocab::new(
+        vec![
+            (1, b"\"".to_vec()),
+            (11, b",".to_vec()),
+            (17, b"2".to_vec()),
+            (313, b"--".to_vec()),
+            (64, b"a".to_vec()),
+            (65, b"b".to_vec()),
+            (87, b"x".to_vec()),
+            (92, b"}".to_vec()),
+            (220, b" ".to_vec()),
+            (330, b" \"".to_vec()),
+            (498, b"\",".to_vec()),
+            (794, b"\":".to_vec()),
+            (5018, b"{\"".to_vec()),
+        ],
+        None,
+    );
+    let constraint = Constraint::from_glrm_grammar(
+        r#"
+start start;
+
+internal t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]|\\["\\\/bfnrt]|\\u[0-9A-Fa-f]{4}/;
+t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
+nt json_string ::= "\"" JSON_STRING_BODY;
+t JSON_INTEGER ::= /-?(0|[1-9][0-9]*)/;
+nt start ::= "{" ("\"" "a\"" ": " json_string) (", \"" "b\"" ": " JSON_INTEGER) "}";
+"#,
+        &vocab,
+    )
+    .unwrap();
+    let comma_token_id = 11u32;
+    let prefix = b"{\"a\": \"x\", \"b\": 2";
+
+    let mut mask_state = constraint.start();
+    mask_state.commit_bytes(prefix).unwrap();
+    let mask = mask_state.mask();
+    let mask_accepts = token_allowed(&mask, comma_token_id as usize);
+
+    let mut commit_token_state = constraint.start();
+    commit_token_state.commit_bytes(prefix).unwrap();
+    let commit_token_accepts = match catch_unwind(AssertUnwindSafe(|| {
+        commit_token_state.commit_token(comma_token_id)
+    })) {
+        Ok(result) => result.is_ok(),
+        Err(_) => false,
+    };
+
+    let mut commit_bytes_state = constraint.start();
+    commit_bytes_state.commit_bytes(prefix).unwrap();
+    let commit_bytes_accepts = commit_bytes_state.commit_bytes(b",").is_ok();
+
+    assert_eq!(
+        (mask_accepts, commit_token_accepts, commit_bytes_accepts),
+        (true, false, false),
+        "o43234 minimized GLRM MRE should preserve the current trailing-comma mask/commit mismatch; mask={mask_accepts} commit_token={commit_token_accepts} commit_bytes={commit_bytes_accepts}",
+    );
 }
 
 #[test]
@@ -4626,11 +4689,6 @@ fn test_grammar_cascading_ambiguity() {
 // ---------------------------------------------------------------------------
 // GLRM format tests
 // ---------------------------------------------------------------------------
-
-fn glrm_constraint(entries: &[&str], grammar: &str) -> Constraint {
-    let vocab = make_vocab(entries);
-    Constraint::from_glrm_grammar(grammar, &vocab).unwrap()
-}
 
 /// GLRM grammar for the schema:
 /// ```json
