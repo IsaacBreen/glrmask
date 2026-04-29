@@ -5301,3 +5301,46 @@ fn test_temp_name_glrm() {
     state.commit_token(0).unwrap();
 }
 
+#[test]
+fn test_o82710_minimized_inline_glrm_mask_allows_committable_token() {
+    let vocab = Vocab::new(
+        vec![
+            (0u32, b"aa\"".to_vec()),
+            (1u32, b"a".to_vec()),
+        ],
+        None,
+    );
+    let grammar = r#"
+        start start;
+
+        t q ::= "\"";
+        t e ::= "a"{32};
+        nt p ::= (e{0,18} "a"{0,32} | e{19}) q;
+        nt start ::= p* q p*;
+    "#;
+    let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+
+    let mut prefix = Vec::from(b"\"".as_slice());
+    prefix.extend(std::iter::repeat(b'a').take(287));
+
+    let mut bytes_state = constraint.start();
+    bytes_state.commit_bytes(&prefix).unwrap();
+    assert!(
+        bytes_state.commit_bytes(b"aa\"").is_ok(),
+        "the minimized witness should accept the disputed token bytes after the reproducing prefix"
+    );
+
+    let mut mask_state = constraint.start();
+    mask_state.commit_bytes(&prefix).unwrap();
+    let mask = mask_state.mask();
+    let token_in_mask = {
+        let word = 0usize / 32;
+        word < mask.len() && ((mask[word] >> (0usize % 32)) & 1) != 0
+    };
+
+    assert!(
+        token_in_mask,
+        "token 0 should be in the mask because its bytes are committable after the same prefix; mask={mask:?}"
+    );
+}
+
