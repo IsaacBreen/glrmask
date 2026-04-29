@@ -42,17 +42,15 @@ nt start ::= "{" obj_open_reqmask_0_nc_0 "}";
 const MINIMIZED_INLINE_GLRM_CANDIDATE: &str = r#"
 start start;
 
-internal t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]|\\["\\\/bfnrt]|\\u[0-9A-Fa-f]{4}/;
-t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
-nt json_string ::= "\"" JSON_STRING_BODY;
+internal t JSON_STRING_CHAR ::= "a" | " " | "V" | "i" | "m" | "e" | "o" | "'" | "]" | ";" | "?" | ">";
 internal t JSON_STRING_CHAR_UPTO_256_1 ::= JSON_STRING_CHAR{0,256};
 t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= JSON_STRING_CHAR_UPTO_256_1 "\"";
 t JSON_STRING_CHAR_EXACT_256_3 ::= JSON_STRING_CHAR{256};
 internal t JSON_STRING_CHAR_UPTO_136_4 ::= JSON_STRING_CHAR{0,136};
 t JSON_STRING_CHAR_UPTO_CLOSE_5 ::= JSON_STRING_CHAR_UPTO_136_4 "\"";
 nt json_string_bounded_split_6 ::= "\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} JSON_STRING_CHAR_UPTO_CLOSE_5);
-nt obj_open_reqmask_0_nc_0 ::= (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
-nt obj_open_reqmask_0_c_0 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | ", " (("\"" "id\"" ": ") json_string) obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_nc_0 ::= (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | (("\"" "id\"" ": ") "\"x\"") obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_0 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | ", " (("\"" "id\"" ": ") "\"x\"") obj_open_reqmask_0_c_1;
 nt obj_open_reqmask_0_c_1 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_1 | ;
 nt start ::= "{" obj_open_reqmask_0_nc_0 "}";
 "#;
