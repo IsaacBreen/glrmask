@@ -42,8 +42,8 @@ nt start ::= "{" obj_open_reqmask_0_nc_0 "}";
 const MINIMIZED_INLINE_GLRM_CANDIDATE: &str = r#"
 start start;
 
-t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= "a"{0,256} "\"";
-t JSON_STRING_CHAR_EXACT_256_3 ::= "a"{256};
+t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= "a"{0,32} "\"";
+t JSON_STRING_CHAR_EXACT_256_3 ::= "a"{32};
 nt start ::= ("\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} "\""))+ "\"\"" ("\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} "\""))*;
 "#;
 
@@ -251,7 +251,7 @@ fn benchmark_prefix_at_discrepancy() -> Vec<u8> {
 }
 
 fn description_only_prefix() -> Vec<u8> {
-    description_only_prefix_with_ascii_repeat(2303)
+    description_only_prefix_with_ascii_repeat(287)
 }
 
 fn description_only_prefix_with_ascii_repeat(content_len: usize) -> Vec<u8> {
@@ -534,6 +534,15 @@ start start;
 nt start ::= {start_rule};
 "#,
     )
+}
+
+fn scaled_inlined_split_variant(chunk_size: usize) -> String {
+    let a_close_rule = format!("t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= \"a\"{{0,{chunk_size}}} \"\\\"\";");
+    let a_exact_rule = format!("t JSON_STRING_CHAR_EXACT_256_3 ::= \"a\"{{{chunk_size}}};");
+    let start_rule = String::from(
+        r#"("\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} "\""))+ "\"\"" ("\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} "\""))*"#,
+    );
+    minimized_count_representation_variant(&a_close_rule, &a_exact_rule, "", &start_rule)
 }
 
 fn description_only_prefix_with_head(head: &[u8], content_len: usize) -> Vec<u8> {
@@ -1248,6 +1257,34 @@ fn scan_o82710_minimized_single_token_vocab() {
         commit_token_accepts,
         commit_bytes_accepts,
     );
+}
+
+#[ignore = "diagnostic for coherently shrinking the inlined split chunk size in the current witness"]
+#[test]
+fn scan_o82710_scaled_chunk_variants() {
+    let chunk_sizes = [256usize, 128, 64, 32];
+    let vocab = reduced_two_token_vocab();
+
+    for chunk_size in chunk_sizes {
+        let grammar = scaled_inlined_split_variant(chunk_size);
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+        let prefix = description_only_prefix_with_ascii_repeat((9 * chunk_size) - 1);
+        let mut prefix_state = constraint.start();
+        if let Err(error) = prefix_state.commit_bytes(&prefix) {
+            println!("scaled_chunk={} prefix_rejected={}", chunk_size, error);
+            continue;
+        }
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
+            classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES);
+        println!(
+            "scaled_chunk={} prefix_len={} mask={} commit_token={} commit_bytes={}",
+            chunk_size,
+            (9 * chunk_size) - 1,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+        );
+    }
 }
 
 #[ignore = "expensive full-vocab benchmark witness for the current false negative"]
