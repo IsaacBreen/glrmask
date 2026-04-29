@@ -238,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compile_duplicate_token_bytes_collapse_in_internal_possible_matches() {
+    fn test_compile_duplicate_token_bytes_are_represented_in_constraint_vocab_possible_matches() {
         let gdef = GrammarDef {
             rules: vec![Rule {
                 lhs: 0,
@@ -262,8 +262,10 @@ mod tests {
 
         let constraint = compile(&gdef, &vocab);
         let tokenizer_state = constraint.tokenizer.initial_state();
-        let internal_token = constraint.internal_token_for_original(10);
-        assert_eq!(internal_token, constraint.internal_token_for_original(20));
+        let internal_tokens: std::collections::BTreeSet<u32> = [10u32, 20u32]
+            .into_iter()
+            .map(|token_id| constraint.internal_token_for_original(token_id))
+            .collect();
 
         let internal_matches: std::collections::BTreeSet<u32> = constraint
             .possible_matches_for_state_internal(tokenizer_state)
@@ -271,7 +273,7 @@ mod tests {
             .flat_map(|m| m.into_values())
             .flat_map(|token_ids| token_ids.into_iter())
             .collect();
-        assert_eq!(internal_matches, std::collections::BTreeSet::from([internal_token]));
+        assert_eq!(internal_matches, internal_tokens);
 
         let original_matches: std::collections::BTreeSet<u32> = constraint
             .possible_matches_for_state(tokenizer_state)

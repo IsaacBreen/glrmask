@@ -1,9 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::Instant;
 
 use once_cell::sync::Lazy;
+use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
+use rustc_hash::FxHashMap;
 
 use crate::Vocab;
+use crate::automata::weighted::dwa::DWA;
 use crate::automata::lexer::compile::build_regex;
 use crate::automata::lexer::regex::parse_regex;
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -11,7 +15,7 @@ use crate::automata::regex::Expr;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{GLRTable, emit_glr_table_debug_dump};
 use crate::compiler::grammar::transforms::prepare_grammar_transforms_only;
-use crate::compiler::stages::equiv_types::InternalIdMap;
+use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
     SharedClassifyCache,
     classify_terminal_path_lengths,
@@ -30,8 +34,8 @@ use crate::compiler::stages::templates::characterize::characterize_terminals;
 use crate::compiler::stages::templates::compile_dfa::{emit_template_profile_summary, emit_templates_debug_dump};
 use crate::compiler::stages::terminal_dwa_compat::build_terminal_dwa_for_existing_id_map_with_possible_matches_and_coloring;
 use crate::ds::bitset::BitSet;
-use crate::ds::weight::{clear_weight_op_profile, emit_weight_op_profile_summary};
-use crate::grammar::flat::{GrammarDef, Terminal};
+use crate::ds::weight::{Weight, clear_weight_op_profile, emit_weight_op_profile_summary, finalize_weight_map, shared_rangeset};
+use crate::grammar::flat::{GrammarDef, Terminal, TerminalID};
 use crate::runtime::Constraint;
 
 fn env_flag_enabled(name: &str) -> bool {
@@ -231,17 +235,387 @@ fn terminal_expr(terminal: &Terminal) -> Expr {
     }
 }
 
-fn build_internal_token_bytes(vocab: &Vocab, internal_ids: &InternalIdMap) -> BTreeMap<u32, Vec<u8>> {
-    internal_ids
-        .vocab_tokens
-        .representative_original_ids
+type DensePossibleMatchesByState = BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>;
+type PossibleMatchSignature = Vec<(u32, TerminalID)>;
+
+#[derive(Debug)]
+struct ConstraintVocabMap {
+    original_to_internal: Vec<u32>,
+    internal_to_originals: Vec<Vec<u32>>,
+    old_internal_to_constraint: Vec<Vec<u32>>,
+}
+
+fn build_internal_token_bytes_from_groups(
+    vocab: &Vocab,
+    internal_to_originals: &[Vec<u32>],
+) -> BTreeMap<u32, Vec<u8>> {
+    internal_to_originals
         .iter()
         .enumerate()
-        .filter_map(|(internal_token_id, &representative)| {
-            let bytes = vocab.entries.get(&representative)?.clone();
+        .filter_map(|(internal_token_id, originals)| {
+            let bytes = originals
+                .iter()
+                .find_map(|original| vocab.entries.get(original))?
+                .clone();
+
             Some((internal_token_id as u32, bytes))
         })
         .collect()
+}
+
+fn dense_word_count(token_slots: u32) -> usize {
+    (token_slots as usize + 63) / 64
+}
+
+fn max_original_token_slot(token_bytes: &BTreeMap<u32, Vec<u8>>) -> u32 {
+    token_bytes
+        .keys()
+        .next_back()
+        .map(|token_id| token_id.saturating_add(1))
+        .unwrap_or(0)
+}
+
+fn set_dense_bit(words: &mut [u64], token_id: u32) {
+    let word = token_id as usize / 64;
+    let bit = token_id % 64;
+
+    if let Some(slot) = words.get_mut(word) {
+        *slot |= 1u64 << bit;
+    }
+}
+
+fn dense_bit_is_set(words: &[u64], token_id: u32) -> bool {
+    let word = token_id as usize / 64;
+    let bit = token_id % 64;
+
+    words
+        .get(word)
+        .map(|word| ((*word >> bit) & 1) != 0)
+        .unwrap_or(false)
+}
+
+fn for_each_dense_bit(words: &[u64], mut f: impl FnMut(u32)) {
+    for (word_idx, &word) in words.iter().enumerate() {
+        let mut bits = word;
+
+        while bits != 0 {
+            let bit = bits.trailing_zeros();
+            let token_id = word_idx as u32 * 64 + bit;
+            f(token_id);
+            bits &= bits - 1;
+        }
+    }
+}
+
+fn range_set_from_sorted_ids(ids: &[u32]) -> RangeSetBlaze<u32> {
+    let Some((&first, rest)) = ids.split_first() else {
+        return RangeSetBlaze::new();
+    };
+
+    let mut ranges = Vec::new();
+    let mut start = first;
+    let mut end = first;
+
+    for &id in rest {
+        if id == end + 1 {
+            end = id;
+        } else {
+            ranges.push(start..=end);
+            start = id;
+            end = id;
+        }
+    }
+
+    ranges.push(start..=end);
+    RangeSetBlaze::from_iter(ranges)
+}
+
+fn build_tokens_with_same_bytes(token_bytes: &BTreeMap<u32, Vec<u8>>) -> FxHashMap<u32, Arc<[u32]>> {
+    let mut by_bytes: BTreeMap<Vec<u8>, Vec<u32>> = BTreeMap::new();
+    for (&token_id, bytes) in token_bytes {
+        by_bytes.entry(bytes.clone()).or_default().push(token_id);
+    }
+
+    let mut tokens_with_same_bytes = FxHashMap::default();
+    for (_, mut token_ids) in by_bytes {
+        token_ids.sort_unstable();
+        token_ids.dedup();
+        let shared: Arc<[u32]> = Arc::from(token_ids.clone());
+        for &token_id in &token_ids {
+            tokens_with_same_bytes.insert(token_id, Arc::clone(&shared));
+        }
+    }
+
+    tokens_with_same_bytes
+}
+
+fn build_possible_match_signatures(
+    raw_possible_matches: &DensePossibleMatchesByState,
+    token_bytes: &BTreeMap<u32, Vec<u8>>,
+    tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
+) -> FxHashMap<u32, PossibleMatchSignature> {
+    let mut signatures: FxHashMap<u32, PossibleMatchSignature> = token_bytes
+        .keys()
+        .map(|&token_id| (token_id, Vec::new()))
+        .collect();
+
+    for (&original_tokenizer_state, terminals) in raw_possible_matches {
+        for (&terminal_id, bitmap) in terminals {
+            for_each_dense_bit(bitmap, |original_token_id| {
+                let Some(equivalent_tokens) = tokens_with_same_bytes.get(&original_token_id) else {
+                    return;
+                };
+
+                for &equivalent_token_id in equivalent_tokens.iter() {
+                    if let Some(signature) = signatures.get_mut(&equivalent_token_id) {
+                        signature.push((original_tokenizer_state, terminal_id));
+                    }
+                }
+            });
+        }
+    }
+
+    for signature in signatures.values_mut() {
+        signature.sort_unstable();
+        signature.dedup();
+    }
+
+    signatures
+}
+
+fn build_constraint_vocab_map(
+    parser_vocab: &ManyToOneIdMap,
+    token_bytes: &BTreeMap<u32, Vec<u8>>,
+    possible_match_signatures: &FxHashMap<u32, PossibleMatchSignature>,
+) -> ConstraintVocabMap {
+    for &token_id in token_bytes.keys() {
+        let mapped = parser_vocab
+            .original_to_internal
+            .get(token_id as usize)
+            .copied()
+            .unwrap_or(u32::MAX);
+
+        assert!(
+            mapped != u32::MAX,
+            "parser-DWA vocab map does not cover original token {token_id}"
+        );
+    }
+
+    let max_original_slot = token_bytes
+        .keys()
+        .next_back()
+        .map(|token_id| *token_id as usize + 1)
+        .unwrap_or(0);
+
+    let mut original_to_internal = vec![
+        u32::MAX;
+        parser_vocab
+            .original_to_internal
+            .len()
+            .max(max_original_slot)
+    ];
+
+    let mut internal_to_originals: Vec<Vec<u32>> = Vec::new();
+    let mut old_internal_to_constraint =
+        vec![Vec::<u32>::new(); parser_vocab.internal_to_originals.len()];
+
+    for (old_internal_id, originals) in parser_vocab.internal_to_originals.iter().enumerate() {
+        let mut groups: BTreeMap<PossibleMatchSignature, Vec<u32>> = BTreeMap::new();
+
+        for &original_token_id in originals {
+            if !token_bytes.contains_key(&original_token_id) {
+                continue;
+            }
+
+            let forward = parser_vocab
+                .original_to_internal
+                .get(original_token_id as usize)
+                .copied()
+                .unwrap_or(u32::MAX);
+
+            debug_assert_eq!(
+                forward,
+                old_internal_id as u32,
+                "inconsistent parser vocab map for original token {original_token_id}"
+            );
+
+            let signature = possible_match_signatures
+                .get(&original_token_id)
+                .cloned()
+                .unwrap_or_default();
+
+            groups.entry(signature).or_default().push(original_token_id);
+        }
+
+        for (_, mut originals) in groups {
+            originals.sort_unstable();
+            originals.dedup();
+
+            let new_internal_id = internal_to_originals.len() as u32;
+
+            for &original_token_id in &originals {
+                if original_token_id as usize >= original_to_internal.len() {
+                    original_to_internal.resize(original_token_id as usize + 1, u32::MAX);
+                }
+
+                original_to_internal[original_token_id as usize] = new_internal_id;
+            }
+
+            old_internal_to_constraint[old_internal_id].push(new_internal_id);
+            internal_to_originals.push(originals);
+        }
+    }
+
+    ConstraintVocabMap {
+        original_to_internal,
+        internal_to_originals,
+        old_internal_to_constraint,
+    }
+}
+
+fn remap_possible_matches_to_constraint_vocab(
+    raw_possible_matches: DensePossibleMatchesByState,
+    original_to_constraint_internal: &[u32],
+    constraint_token_count: u32,
+    tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
+) -> DensePossibleMatchesByState {
+    let num_words = dense_word_count(constraint_token_count);
+
+    raw_possible_matches
+        .into_iter()
+        .map(|(original_tokenizer_state, terminals)| {
+            let remapped_terminals = terminals
+                .into_iter()
+                .filter_map(|(terminal_id, original_bitmap)| {
+                    let mut remapped = vec![0u64; num_words];
+                    let mut any = false;
+
+                    for_each_dense_bit(&original_bitmap, |original_token_id| {
+                        let Some(equivalent_tokens) = tokens_with_same_bytes.get(&original_token_id) else {
+                            return;
+                        };
+
+                        for &equivalent_token_id in equivalent_tokens.iter() {
+                            let Some(&constraint_internal_id) =
+                                original_to_constraint_internal.get(equivalent_token_id as usize)
+                            else {
+                                continue;
+                            };
+
+                            if constraint_internal_id == u32::MAX {
+                                continue;
+                            }
+
+                            set_dense_bit(&mut remapped, constraint_internal_id);
+                            any = true;
+                        }
+                    });
+
+                    if any {
+                        Some((terminal_id, remapped.into_boxed_slice()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            (original_tokenizer_state, remapped_terminals)
+        })
+        .collect()
+}
+
+fn remap_token_set_to_constraint_vocab(
+    old_tokens: &RangeSetBlaze<u32>,
+    old_internal_to_constraint: &[Vec<u32>],
+) -> RangeSetBlaze<u32> {
+    let mut new_ids = Vec::new();
+
+    for old_internal_token in old_tokens.iter() {
+        debug_assert!(
+            (old_internal_token as usize) < old_internal_to_constraint.len(),
+            "parser-DWA weight references old internal token id {old_internal_token}, but old_internal_to_constraint has only {} entries",
+            old_internal_to_constraint.len()
+        );
+
+        if let Some(mapped_ids) = old_internal_to_constraint.get(old_internal_token as usize) {
+            new_ids.extend_from_slice(mapped_ids);
+        }
+    }
+
+    new_ids.sort_unstable();
+    new_ids.dedup();
+    range_set_from_sorted_ids(&new_ids)
+}
+
+fn remap_arc_token_set_to_constraint_vocab(
+    token_set: &Arc<RangeSetBlaze<u32>>,
+    old_internal_to_constraint: &[Vec<u32>],
+    token_set_cache: &mut FxHashMap<usize, Arc<RangeSetBlaze<u32>>>,
+) -> Arc<RangeSetBlaze<u32>> {
+    let cache_key = Arc::as_ptr(token_set) as usize;
+
+    if let Some(cached) = token_set_cache.get(&cache_key) {
+        return Arc::clone(cached);
+    }
+
+    let remapped = shared_rangeset(remap_token_set_to_constraint_vocab(
+        token_set,
+        old_internal_to_constraint,
+    ));
+
+    token_set_cache.insert(cache_key, Arc::clone(&remapped));
+    remapped
+}
+
+fn remap_weight_to_constraint_vocab(
+    weight: &Weight,
+    old_internal_to_constraint: &[Vec<u32>],
+    token_set_cache: &mut FxHashMap<usize, Arc<RangeSetBlaze<u32>>>,
+) -> Weight {
+    if weight.is_full() {
+        return Weight::all();
+    }
+
+    let mut remapped = RangeMapBlaze::new();
+
+    for (start, end, token_set) in weight.compact_entries().unwrap_or_default() {
+        let remapped_token_set = remap_arc_token_set_to_constraint_vocab(
+            &token_set,
+            old_internal_to_constraint,
+            token_set_cache,
+        );
+
+        if !remapped_token_set.is_empty() {
+            remapped.extend_simple(std::iter::once((start..=end, remapped_token_set)));
+        }
+    }
+
+    finalize_weight_map(remapped)
+}
+
+fn remap_parser_dwa_to_constraint_vocab(
+    parser_dwa: &mut DWA,
+    old_internal_to_constraint: &[Vec<u32>],
+) {
+    let mut token_set_cache: FxHashMap<usize, Arc<RangeSetBlaze<u32>>> = FxHashMap::default();
+
+    for state in parser_dwa.states_mut() {
+        if let Some(final_weight) = state.final_weight.as_mut() {
+            *final_weight = remap_weight_to_constraint_vocab(
+                final_weight,
+                old_internal_to_constraint,
+                &mut token_set_cache,
+            );
+        }
+
+        for (_, weight) in state.transitions.values_mut() {
+            *weight = remap_weight_to_constraint_vocab(
+                weight,
+                old_internal_to_constraint,
+                &mut token_set_cache,
+            );
+        }
+    }
 }
 
 fn finalize_constraint(mut constraint: Constraint) -> Constraint {
@@ -758,6 +1132,9 @@ fn compile_prepared_with_profile(
                 .iter()
                 .enumerate()
             {
+                if class == u32::MAX {
+                    continue;
+                }
                 let orig = orig as u32;
                 if orig < canonical_state_reps[class as usize] {
                     canonical_state_reps[class as usize] = orig;
@@ -765,6 +1142,9 @@ fn compile_prepared_with_profile(
             }
             let mut canonical_token_reps = vec![u32::MAX; internal_ids.num_internal_tokens() as usize];
             for (orig, &class) in internal_ids.vocab_tokens.original_to_internal.iter().enumerate() {
+                if class == u32::MAX {
+                    continue;
+                }
                 let orig = orig as u32;
                 if orig < canonical_token_reps[class as usize] {
                     canonical_token_reps[class as usize] = orig;
@@ -772,22 +1152,18 @@ fn compile_prepared_with_profile(
             }
             let oracle_data = serde_json::json!({
                 "state_map": internal_ids.tokenizer_states.original_to_internal,
-                "token_map": internal_ids.vocab_tokens.original_to_internal,
+                "parser_token_map": internal_ids.vocab_tokens.original_to_internal,
                 "num_state_classes": internal_ids.num_tsids(),
-                "num_token_classes": internal_ids.num_internal_tokens(),
+                "parser_num_token_classes": internal_ids.num_internal_tokens(),
                 "state_representatives": canonical_state_reps,
-                "token_representatives": canonical_token_reps,
+                "parser_token_representatives": canonical_token_reps,
             });
             std::fs::write(&dump_path, serde_json::to_string(&oracle_data).unwrap())
                 .expect("failed to write oracle dump");
             eprintln!("[glrmask/oracle] dumped post-compact mappings to {dump_path}");
         }
 
-        let internal_token_bytes_started_at = Instant::now();
-        let internal_token_bytes = build_internal_token_bytes(vocab, &internal_ids);
-        let internal_token_bytes_ms = elapsed_ms(internal_token_bytes_started_at);
-
-        let ((parser_dwa, parser_dwa_ms), (possible_matches, permute_possible_matches_ms)) =
+        let ((mut parser_dwa, parser_dwa_ms), (raw_possible_matches, possible_matches_collect_ms)) =
             rayon::join(
                 || {
                     let parser_dwa_started_at = Instant::now();
@@ -803,23 +1179,31 @@ fn compile_prepared_with_profile(
                 },
                 || {
                     let pm_started_at = Instant::now();
-                    let token_entries: Vec<(usize, Vec<u8>)> = internal_token_bytes
+                    // IMPORTANT: Constraint possible_matches must be computed from
+                    // ORIGINAL vocab token bytes. Do not use parser-DWA
+                    // internal_token_bytes here. The parser-DWA token equivalence
+                    // relation is not valid for possible_matches.
+                    let token_entries: Vec<(usize, Vec<u8>)> = token_bytes
                         .iter()
-                        .map(|(&id, bytes)| (id as usize, bytes.clone()))
+                        .map(|(&token_id, bytes)| (token_id as usize, bytes.clone()))
                         .collect();
                     let trie_build_started_at = Instant::now();
                     let trie = crate::ds::vocab_prefix_tree::VocabPrefixTree::build_owned(token_entries);
                     let trie_build_ms = elapsed_ms(trie_build_started_at);
                     let collect_started_at = Instant::now();
+                    // This is a dense original-token-id universe size, not a count
+                    // of parser-DWA internal tokens. Sparse original token ids require
+                    // max_original_token_id + 1 slots.
+                    let original_token_slots = max_original_token_slot(&token_bytes);
                     let (pm_by_tsid, dense_profile) = crate::compiler::possible_matches::collect_possible_matches_by_original_tsid_dense(
                         &tokenizer,
                         &trie.root,
-                        internal_ids.vocab_tokens.num_internal_ids(),
+                        original_token_slots,
                     );
                     let collect_ms = elapsed_ms(collect_started_at);
                     crate::compiler::possible_matches::emit_possible_matches_profile_summary(
-                        "original_tsid",
-                        internal_token_bytes.len(),
+                        "constraint_original_tokens",
+                        token_bytes.len(),
                         tokenizer.num_states(),
                         trie_build_ms,
                         collect_ms,
@@ -828,8 +1212,57 @@ fn compile_prepared_with_profile(
                     (pm_by_tsid, elapsed_ms(pm_started_at))
                 },
             );
+
+        let constraint_vocab_started_at = Instant::now();
+        let tokens_with_same_bytes = build_tokens_with_same_bytes(&token_bytes);
+        let possible_match_signatures = build_possible_match_signatures(
+            &raw_possible_matches,
+            &token_bytes,
+            &tokens_with_same_bytes,
+        );
+        let constraint_vocab = build_constraint_vocab_map(
+            &internal_ids.vocab_tokens,
+            &token_bytes,
+            &possible_match_signatures,
+        );
+        let constraint_token_count = constraint_vocab.internal_to_originals.len() as u32;
+        let possible_matches = remap_possible_matches_to_constraint_vocab(
+            raw_possible_matches,
+            &constraint_vocab.original_to_internal,
+            constraint_token_count,
+            &tokens_with_same_bytes,
+        );
+        remap_parser_dwa_to_constraint_vocab(
+            &mut parser_dwa,
+            &constraint_vocab.old_internal_to_constraint,
+        );
+        let constraint_vocab_ms = elapsed_ms(constraint_vocab_started_at);
+
+        if compile_profile_summary_enabled() {
+            let split_parser_tokens = constraint_vocab
+                .old_internal_to_constraint
+                .iter()
+                .filter(|mapped| mapped.len() > 1)
+                .count();
+
+            eprintln!(
+                "[glrmask/profile][constraint_vocab] parser_tokens={} constraint_tokens={} split_parser_tokens={} reconcile_ms={:.3}",
+                internal_ids.vocab_tokens.num_internal_ids(),
+                constraint_token_count,
+                split_parser_tokens,
+                constraint_vocab_ms,
+            );
+        }
+
+        let internal_token_bytes_started_at = Instant::now();
+        let internal_token_bytes = build_internal_token_bytes_from_groups(
+            vocab,
+            &constraint_vocab.internal_to_originals,
+        );
+        let internal_token_bytes_ms = elapsed_ms(internal_token_bytes_started_at);
+
         profile.parser_dwa_ms = parser_dwa_ms;
-        profile.permute_possible_matches_ms = permute_possible_matches_ms;
+        profile.permute_possible_matches_ms = possible_matches_collect_ms + constraint_vocab_ms;
         profile.internal_token_bytes_ms = internal_token_bytes_ms;
         if debug_compile_stages {
             eprintln!(
@@ -849,8 +1282,8 @@ fn compile_prepared_with_profile(
             possible_matches,
             state_to_internal_tsid: internal_ids.tokenizer_states.original_to_internal.clone(),
             internal_tsid_to_states: internal_ids.tokenizer_states.internal_to_originals_vecs(),
-            original_token_to_internal: internal_ids.vocab_tokens.original_to_internal.clone(),
-            internal_token_to_tokens: internal_ids.vocab_tokens.internal_to_originals_vecs(),
+            original_token_to_internal: constraint_vocab.original_to_internal,
+            internal_token_to_tokens: constraint_vocab.internal_to_originals,
             eos_token_id: vocab.eos_token_id,
             token_bytes,
             internal_token_bytes,
@@ -933,4 +1366,125 @@ pub(crate) fn compile_owned_profiled(
     profile.total_ms = elapsed_ms(total_started_at);
     emit_weight_op_profile_summary();
     (constraint, profile)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bitmap(tokens: &[u32], token_slots: u32) -> Box<[u64]> {
+        let mut words = vec![0u64; dense_word_count(token_slots)];
+        for &token in tokens {
+            set_dense_bit(&mut words, token);
+        }
+        words.into_boxed_slice()
+    }
+
+    #[test]
+    fn constraint_vocab_refines_parser_token_class_by_possible_matches() {
+        let parser_vocab = ManyToOneIdMap::from_original_to_internal_with_representatives(
+            vec![0, 0, 1],
+            2,
+            vec![0, 2],
+        );
+
+        let token_bytes = BTreeMap::from([
+            (0u32, b"a".to_vec()),
+            (1u32, b"b".to_vec()),
+            (2u32, b"c".to_vec()),
+        ]);
+
+        let mut terminals = BTreeMap::new();
+        terminals.insert(10u32, bitmap(&[0], 3));
+        terminals.insert(11u32, bitmap(&[1], 3));
+
+        let raw_possible_matches = BTreeMap::from([(5u32, terminals)]);
+
+        let tokens_with_same_bytes = build_tokens_with_same_bytes(&token_bytes);
+        let signatures = build_possible_match_signatures(
+            &raw_possible_matches,
+            &token_bytes,
+            &tokens_with_same_bytes,
+        );
+        let constraint_vocab = build_constraint_vocab_map(
+            &parser_vocab,
+            &token_bytes,
+            &signatures,
+        );
+
+        let tok0 = constraint_vocab.original_to_internal[0];
+        let tok1 = constraint_vocab.original_to_internal[1];
+        let tok2 = constraint_vocab.original_to_internal[2];
+
+        assert_ne!(tok0, tok1);
+        assert_eq!(constraint_vocab.old_internal_to_constraint[0].len(), 2);
+        assert_eq!(constraint_vocab.old_internal_to_constraint[1], vec![tok2]);
+
+        let remapped_pm = remap_possible_matches_to_constraint_vocab(
+            raw_possible_matches,
+            &constraint_vocab.original_to_internal,
+            constraint_vocab.internal_to_originals.len() as u32,
+            &tokens_with_same_bytes,
+        );
+
+        let terminal_10 = &remapped_pm[&5][&10];
+        let terminal_11 = &remapped_pm[&5][&11];
+
+        assert!(dense_bit_is_set(terminal_10, tok0));
+        assert!(!dense_bit_is_set(terminal_10, tok1));
+        assert!(!dense_bit_is_set(terminal_11, tok0));
+        assert!(dense_bit_is_set(terminal_11, tok1));
+    }
+
+    #[test]
+    fn parser_weight_remap_expands_old_parser_token_to_all_constraint_splits() {
+        let parser_vocab = ManyToOneIdMap::from_original_to_internal_with_representatives(
+            vec![0, 0, 1],
+            2,
+            vec![0, 2],
+        );
+
+        let token_bytes = BTreeMap::from([
+            (0u32, b"a".to_vec()),
+            (1u32, b"b".to_vec()),
+            (2u32, b"c".to_vec()),
+        ]);
+
+        let mut terminals = BTreeMap::new();
+        terminals.insert(10u32, bitmap(&[0], 3));
+        terminals.insert(11u32, bitmap(&[1], 3));
+
+        let raw_possible_matches = BTreeMap::from([(5u32, terminals)]);
+
+        let tokens_with_same_bytes = build_tokens_with_same_bytes(&token_bytes);
+        let signatures = build_possible_match_signatures(
+            &raw_possible_matches,
+            &token_bytes,
+            &tokens_with_same_bytes,
+        );
+        let constraint_vocab = build_constraint_vocab_map(
+            &parser_vocab,
+            &token_bytes,
+            &signatures,
+        );
+
+        let tok0 = constraint_vocab.original_to_internal[0];
+        let tok1 = constraint_vocab.original_to_internal[1];
+        let tok2 = constraint_vocab.original_to_internal[2];
+
+        let old_weight = Weight::from_uniform(123..=123, RangeSetBlaze::from_iter([0u32..=0u32]));
+
+        let mut cache = FxHashMap::default();
+        let new_weight = remap_weight_to_constraint_vocab(
+            &old_weight,
+            &constraint_vocab.old_internal_to_constraint,
+            &mut cache,
+        );
+
+        let new_set = new_weight.0.get(123).expect("tsid weight should remain");
+
+        assert!(new_set.contains(tok0));
+        assert!(new_set.contains(tok1));
+        assert!(!new_set.contains(tok2));
+    }
 }

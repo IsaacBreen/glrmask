@@ -46,8 +46,15 @@ pub struct FillMaskTimings {
 
 /// Dense bitmap accumulator used while walking the parser DWA.
 ///
-/// The key is an internal tokenizer-state id. The value is a dense bitmap of
-/// allowed internal tokens for that tokenizer state.
+/// Key:
+///   parser-DWA internal tokenizer-state id.
+///
+/// Value:
+///   dense bitmap of final shared constraint-internal token ids.
+///
+/// The token ids here must match parser-DWA Weight token ids. They also match
+/// Constraint.possible_matches bitmap token ids after compile-time vocab
+/// reconciliation.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct DenseMaskAcc(BTreeMap<u32, Arc<[u64]>>);
 
@@ -426,6 +433,16 @@ impl<'a> ConstraintState<'a> {
 
         let mut dense = vec![0u64; universe.len()];
 
+        // TerminalsDisallowed is keyed by ORIGINAL tokenizer state, because it
+        // describes tokenizer futures accumulated by the GLR parser.
+        //
+        // possible_matches is also keyed by ORIGINAL tokenizer state, so use
+        // original_tokenizer_state directly for lookup.
+        //
+        // The resulting DenseMaskAcc is keyed by `internal_tsid`, which comes
+        // from the Constraint state's current tokenizer state mapped through
+        // parser-DWA TSID compaction. These two TSID spaces intentionally remain
+        // separate.
         for (&original_tokenizer_state, disallowed_in_state) in terminals_disallowed.iter() {
             let mut allowed_for_state = universe.to_vec();
 

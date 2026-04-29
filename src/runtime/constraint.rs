@@ -37,6 +37,22 @@ pub(crate) fn bitmap_to_rangeset(words: &[u64]) -> RangeSetBlaze<u32> {
     }
     result
 }
+/// Runtime possible-matches table.
+///
+/// Outer key:
+///   original tokenizer state id.
+///
+/// Inner key:
+///   grammar terminal id.
+///
+/// Bitmap:
+///   final shared constraint-internal token ids.
+///
+/// The bitmap is NOT in original token space and is NOT in the raw parser-DWA
+/// vocab-compaction space. During compilation, raw possible_matches are computed
+/// in original token space, then remapped into a constraint vocab that refines
+/// the parser-DWA vocab by possible-match signature. Parser-DWA weights are
+/// remapped into this same token space.
 pub(crate) type PossibleMatchesByState =
     BTreeMap<TokenizerStateID, BTreeMap<TerminalID, Box<[u64]>>>;
 type DenseWords = Box<[u64]>;
@@ -53,12 +69,29 @@ pub struct Constraint {
     #[serde(default)]
     pub(crate) ignore_terminal: Option<TerminalID>,
 
+    /// possible_matches keyed by ORIGINAL tokenizer state.
+    ///
+    /// Dense token bitmaps are in the final shared constraint-internal vocab
+    /// space. That space is a refinement of the parser-DWA internal vocab by
+    /// possible-match signature. Parser-DWA weights have also been remapped into
+    /// this same token space.
+    ///
+    /// Do not remap the outer tokenizer-state key through state_to_internal_tsid.
     #[serde(with = "crate::runtime::serde::serde_btreemap_rangeset")]
     pub(crate) possible_matches: PossibleMatchesByState,
     pub(crate) state_to_internal_tsid: Vec<u32>,
     pub(crate) internal_tsid_to_states: Vec<Vec<u32>>,
+    /// Original token -> final shared constraint-internal token id.
+    ///
+    /// This is not necessarily equal to the parser-DWA compaction vocab map
+    /// produced before possible-match reconciliation. It may contain additional
+    /// splits required by possible_matches.
     #[serde(default)]
     pub(crate) original_token_to_internal: Vec<u32>,
+    /// Final shared constraint-internal token id -> original token ids.
+    ///
+    /// Parser-DWA weights and Constraint.possible_matches bitmaps both use these
+    /// final internal token ids.
     #[serde(default)]
     pub(crate) internal_token_to_tokens: Vec<Vec<u32>>,
     pub(crate) eos_token_id: Option<u32>,
@@ -474,10 +507,15 @@ impl Constraint {
         tokenizer_state: u32,
     ) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
         // STICKY NOTE: DO NOT REMOVE THIS COMMENT.
+        //
         // possible_matches is keyed by ORIGINAL tokenizer state on purpose.
         // Do not remap through internal_tsid_for_state() here. That merges
-        // distinct original-state futures and reintroduces the recurring bug
-        // documented next to collect_possible_matches_by_original_tsid_dense().
+        // distinct original-state futures.
+        //
+        // The bitmap values are in the shared constraint-internal VOCAB space,
+        // not original token space. Expanding to original tokens below is safe
+        // because the constraint vocab refines parser-DWA token classes by
+        // possible-match signature.
         self.possible_matches
             .get(&tokenizer_state)
             .map(|terminals| {
@@ -534,6 +572,11 @@ impl Constraint {
         &self,
         tokenizer_state: u32,
     ) -> Option<BTreeMap<TerminalID, RangeSetBlaze<u32>>> {
+        // Return possible_matches in the final shared constraint-internal vocab
+        // space. These ids match parser-DWA weight token ids after reconciliation.
+        //
+        // They are not guaranteed to equal the raw parser-DWA vocab ids produced
+        // before possible-match reconciliation.
         self.possible_matches.get(&tokenizer_state).map(|terminals| {
             terminals
                 .iter()
