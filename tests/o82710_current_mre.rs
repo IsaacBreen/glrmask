@@ -43,11 +43,9 @@ const MINIMIZED_INLINE_GLRM_CANDIDATE: &str = r#"
 start start;
 
 t q ::= "\"";
-t qq ::= q q;
-t u ::= "a"{0,32} q;
 t e ::= "a"{32};
-nt p ::= q (e{0,18} u | e{19} q);
-nt start ::= p+ qq p*;
+nt p ::= (e{0,18} "a"{0,32} | e{19}) q;
+nt start ::= p* q p*;
 "#;
 
 fn token_allowed(mask: &[u32], id: usize) -> bool {
@@ -543,7 +541,7 @@ fn scaled_inlined_split_variant(chunk_size: usize) -> String {
     let a_close_rule = format!("t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= \"a\"{{0,{chunk_size}}} \"\\\"\";");
     let a_exact_rule = format!("t JSON_STRING_CHAR_EXACT_256_3 ::= \"a\"{{{chunk_size}}};");
     let start_rule = String::from(
-        r#"("\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} "\""))+ "\"\"" ("\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} "\""))*"#,
+        r#"("\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} "\""))* "\"" ("\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} "\""))*"#,
     );
     minimized_count_representation_variant(&a_close_rule, &a_exact_rule, "", &start_rule)
 }
@@ -552,9 +550,52 @@ fn counted_inlined_split_variant(chunk_size: usize, first_arm_max_chunks: usize,
     let a_close_rule = format!("t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= \"a\"{{0,{chunk_size}}} \"\\\"\";");
     let a_exact_rule = format!("t JSON_STRING_CHAR_EXACT_256_3 ::= \"a\"{{{chunk_size}}};");
     let start_rule = format!(
-        "(\"\\\"\" (JSON_STRING_CHAR_EXACT_256_3{{0,{first_arm_max_chunks}}} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{{{second_arm_chunks}}} \"\\\"\"))+ \"\\\"\\\"\" (\"\\\"\" (JSON_STRING_CHAR_EXACT_256_3{{0,{first_arm_max_chunks}}} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{{{second_arm_chunks}}} \"\\\"\"))*"
+        "(\"\\\"\" (JSON_STRING_CHAR_EXACT_256_3{{0,{first_arm_max_chunks}}} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{{{second_arm_chunks}}} \"\\\"\"))* \"\\\"\" (\"\\\"\" (JSON_STRING_CHAR_EXACT_256_3{{0,{first_arm_max_chunks}}} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{{{second_arm_chunks}}} \"\\\"\"))*"
     );
     minimized_count_representation_variant(&a_close_rule, &a_exact_rule, "", &start_rule)
+}
+
+fn separator_variant(separator_expr: &str) -> String {
+    format!(
+        r#"
+start start;
+
+t q ::= "\"";
+t qq ::= q q;
+t u ::= "a"{{0,32}} q;
+t e ::= "a"{{32}};
+nt p ::= e{{0,18}} u | e{{19}} q;
+nt start ::= p* {separator_expr} p*;
+"#,
+    )
+}
+
+fn start_shape_variant(start_expr: &str) -> String {
+    format!(
+        r#"
+start start;
+
+t q ::= "\"";
+t u ::= "a"{{0,32}} q;
+t e ::= "a"{{32}};
+nt p ::= e{{0,18}} u | e{{19}} q;
+nt start ::= {start_expr};
+"#,
+    )
+}
+
+fn piece_variant(piece_expr: &str) -> String {
+    format!(
+        r#"
+start start;
+
+t q ::= "\"";
+t u ::= "a"{{0,32}} q;
+t e ::= "a"{{32}};
+nt p ::= {piece_expr};
+nt start ::= p* q p*;
+"#,
+    )
 }
 
 fn description_only_prefix_with_head(head: &[u8], content_len: usize) -> Vec<u8> {
@@ -1330,6 +1371,148 @@ fn scan_o82710_split_count_variants() {
             "split_count_variant={} prefix_len={} mask={} commit_token={} commit_bytes={}",
             label,
             prefix_len,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+        );
+    }
+}
+
+#[ignore = "diagnostic for minimizing the middle separator in the current witness"]
+#[test]
+fn scan_o82710_separator_variants() {
+    let variants = [
+        ("qq", "qq"),
+        ("q", "q"),
+        ("qqq", "q q q"),
+        ("empty", ""),
+    ];
+    let vocab = reduced_two_token_vocab();
+    let prefix = description_only_prefix();
+
+    for (label, separator_expr) in variants {
+        let grammar = separator_variant(separator_expr);
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+        let mut prefix_state = constraint.start();
+        if let Err(error) = prefix_state.commit_bytes(&prefix) {
+            println!("separator_variant={} prefix_rejected={}", label, error);
+            continue;
+        }
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
+            classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES);
+        println!(
+            "separator_variant={} mask={} commit_token={} commit_bytes={}",
+            label,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+        );
+    }
+}
+
+#[ignore = "diagnostic for shrinking disputed token bytes against the current 32-chunk witness"]
+#[test]
+fn scan_o82710_current_disputed_token_variants() {
+    let total_content_len = 289usize;
+    let variants: &[&[u8]] = &[
+        b"a\"",
+        b"aa\"",
+        b"aaa\"",
+        b"aaaa\"",
+        DISPUTED_TOKEN_BYTES,
+    ];
+    for disputed_bytes in variants {
+        let disputed_content_len = disputed_bytes.len() - 1;
+        let content_len = total_content_len - disputed_content_len;
+        let vocab = Vocab::new(
+            vec![
+                (DISPUTED_TOKEN_ID, disputed_bytes.to_vec()),
+                (CONTROL_TOKEN_ID, CONTROL_TOKEN_BYTES.to_vec()),
+            ],
+            None,
+        );
+        let constraint = Constraint::from_glrm_grammar(MINIMIZED_INLINE_GLRM_CANDIDATE, &vocab).unwrap();
+        let prefix = description_only_prefix_with_ascii_repeat(content_len);
+        let mut prefix_state = constraint.start();
+        if let Err(error) = prefix_state.commit_bytes(&prefix) {
+            println!("current_disputed_variant={:?} prefix_rejected={}", disputed_bytes, error);
+            continue;
+        }
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
+            classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, disputed_bytes);
+        println!(
+            "current_disputed_variant={:?} prefix_len={} mask={} commit_token={} commit_bytes={}",
+            disputed_bytes,
+            content_len,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+        );
+    }
+}
+
+#[ignore = "diagnostic for shrinking the repetition shape around the middle separator"]
+#[test]
+fn scan_o82710_start_shape_variants() {
+    let variants = [
+        ("current", "p+ q p*"),
+        ("left_one", "p q p*"),
+        ("right_one", "p+ q p"),
+        ("both_one", "p q p"),
+        ("left_optional", "p* q p+"),
+        ("both_optional", "p* q p*"),
+        ("left_only", "p* q"),
+        ("right_only", "q p*"),
+        ("just_q", "q"),
+    ];
+    let vocab = reduced_two_token_vocab();
+    let prefix = description_only_prefix();
+
+    for (label, start_expr) in variants {
+        let grammar = start_shape_variant(start_expr);
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+        let mut prefix_state = constraint.start();
+        if let Err(error) = prefix_state.commit_bytes(&prefix) {
+            println!("start_shape_variant={} prefix_rejected={}", label, error);
+            continue;
+        }
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
+            classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES);
+        println!(
+            "start_shape_variant={} mask={} commit_token={} commit_bytes={}",
+            label,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+        );
+    }
+}
+
+#[ignore = "diagnostic for simplifying the current p expression"]
+#[test]
+fn scan_o82710_piece_variants() {
+    let variants = [
+        ("current", r#"q (e{0,18} u | e{19} q)"#),
+        ("drop_outer_q", r#"e{0,18} u | e{19} q"#),
+        ("inline_u", r#"q (e{0,18} ("a"{0,32} q) | e{19} q)"#),
+        ("factored_q", r#"q (e{0,18} "a"{0,32} | e{19}) q"#),
+    ];
+    let vocab = reduced_two_token_vocab();
+    let prefix = description_only_prefix();
+
+    for (label, piece_expr) in variants {
+        let grammar = piece_variant(piece_expr);
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+        let mut prefix_state = constraint.start();
+        if let Err(error) = prefix_state.commit_bytes(&prefix) {
+            println!("piece_variant={} prefix_rejected={}", label, error);
+            continue;
+        }
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
+            classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES);
+        println!(
+            "piece_variant={} mask={} commit_token={} commit_bytes={}",
+            label,
             mask_accepts,
             commit_token_accepts,
             commit_bytes_accepts,
