@@ -1692,6 +1692,7 @@ mod tests {
     use crate::compiler::glr::analysis::AnalyzedGrammar;
     use crate::compiler::glr::labels::{DEFAULT_LABEL, encode_positive_label};
     use crate::compiler::glr::parser::stack_may_advance_on;
+    use crate::compiler::stages::resolve_negatives::resolve_negative_codes_in_nwa;
     use crate::grammar::flat::GrammarDef;
     use crate::grammar::flat::tests::*;
     use range_set_blaze::RangeSetBlaze;
@@ -1936,6 +1937,212 @@ nt start ::= (A_EXACT{4} | A_EXACT{5}) A_UP_TO_32;
         assert!(
             !template_accepts_candidate,
             "candidate terminal template unexpectedly accepts the live chain; candidate_terminals={candidate_terminals:?}"
+        );
+    }
+
+    #[ignore = "diagnostic for sparse o82710 reachability across resolved parser NWA and DWA stages"]
+    #[test]
+    fn diagnose_sparse_o82710_resolved_nwa_vs_dwas() {
+        let schema = r##"{
+            "type": "object",
+            "properties": {
+                "aside": { "type": "boolean" },
+                "autoplay": { "type": "boolean" },
+                "css_class": {
+                    "type": "string",
+                    "pattern": "^[\\w\\s-]+$"
+                },
+                "description": {
+                    "type": "string",
+                    "minLength": 0,
+                    "maxLength": 5000
+                }
+            },
+            "required": ["id"],
+            "additionalProperties": true
+        }"##;
+
+        fn dwa_reaches_token_along_chain(
+            dwa: &DWA,
+            chain_states: &[u32],
+            internal_tsid: u32,
+            internal_token: u32,
+        ) -> bool {
+            let mut wa_state = dwa.start_state();
+            for (index, parser_state) in chain_states.iter().copied().enumerate() {
+                if index == 0 && parser_state == 0 {
+                    continue;
+                }
+                let state = &dwa.states()[wa_state as usize];
+                let label = encode_positive_label(parser_state);
+                let Some((target, _weight)) = state.transitions.get(&label).or_else(|| state.transitions.get(&DEFAULT_LABEL)) else {
+                    return false;
+                };
+                wa_state = *target;
+                let final_tokens = dwa.states()[wa_state as usize]
+                    .final_weight
+                    .as_ref()
+                    .map(|weight| weight.tokens_for_tsid(internal_tsid))
+                    .unwrap_or_default();
+                if final_tokens.contains(internal_token) {
+                    return true;
+                }
+            }
+            false
+        }
+
+        fn nwa_reaches_token_along_chain(
+            nwa: &NWA,
+            chain_states: &[u32],
+            internal_tsid: u32,
+            internal_token: u32,
+        ) -> bool {
+            let mut current_subset = rustc_hash::FxHashMap::<u32, Weight>::default();
+            for &state_id in nwa.start_states() {
+                current_subset.insert(state_id, Weight::all());
+            }
+            local_epsilon_closure(
+                nwa,
+                &mut vec![None; nwa.states().len()],
+                &mut std::collections::VecDeque::new(),
+                &mut current_subset,
+            );
+
+            for (index, parser_state) in chain_states.iter().copied().enumerate() {
+                if index == 0 && parser_state == 0 {
+                    continue;
+                }
+
+                let label = encode_positive_label(parser_state);
+                let mut next_subset = rustc_hash::FxHashMap::<u32, Weight>::default();
+                for (&nwa_state_id, path_weight) in &current_subset {
+                    let state = &nwa.states()[nwa_state_id as usize];
+                    for candidate_label in [label, DEFAULT_LABEL] {
+                        let Some(targets) = state.transitions.get(&candidate_label) else {
+                            continue;
+                        };
+                        for (target, edge_weight) in targets {
+                            let contribution = path_weight.intersection(edge_weight);
+                            if contribution.is_empty() {
+                                continue;
+                            }
+                            let entry = next_subset.entry(*target).or_insert_with(Weight::empty);
+                            *entry = entry.union(&contribution);
+                        }
+                    }
+                }
+
+                local_epsilon_closure(
+                    nwa,
+                    &mut vec![None; nwa.states().len()],
+                    &mut std::collections::VecDeque::new(),
+                    &mut next_subset,
+                );
+                current_subset = next_subset;
+
+                for (&nwa_state_id, path_weight) in &current_subset {
+                    let Some(final_weight) = nwa.states()[nwa_state_id as usize].final_weight.as_ref() else {
+                        continue;
+                    };
+                    let contribution = path_weight.intersection(final_weight);
+                    if contribution.tokens_for_tsid(internal_tsid).contains(internal_token) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+
+        let grammar = crate::import::json_schema::json_schema_to_grammar(schema)
+            .expect("schema should lower to a grammar");
+        let (prepared, _prepared_tokenizer) =
+            crate::compiler::grammar::transforms::prepare_grammar_for_compile(&grammar);
+        let analyzed = AnalyzedGrammar::from_grammar_def(&prepared);
+        let table = GLRTable::build(&analyzed);
+        let tokenizer = crate::compiler::compile::build_tokenizer(&prepared);
+        let vocab = Vocab::new(
+            vec![(68439u32, b"'];?>\"".to_vec()), (99925u32, b" Vimeo".to_vec())],
+            None,
+        );
+        let id_map = crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::combined::analyze_equivalences(
+            &tokenizer,
+            &vocab,
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+        );
+        let terminal_dwa = build_terminal_dwa_for_existing_id_map(
+            &analyzed,
+            &tokenizer,
+            &vocab,
+            &id_map,
+            None,
+        );
+        let templates = Templates::from_characterizations(&characterize_terminals(&table, &analyzed));
+        let mut resolved_parser_nwa = debug_build_parser_nwa_from_terminal_dwa(&terminal_dwa, &analyzed, templates.clone())
+            .expect("parser NWA should build");
+        resolve_negative_codes_in_nwa(&mut resolved_parser_nwa);
+
+        let specialized_dwa = determinize_with_supports(&resolved_parser_nwa).dwa;
+        let generic_dwa = crate::automata::weighted_u32::determinize::determinize(&resolved_parser_nwa)
+            .expect("generic determinization should succeed");
+        let full_pipeline_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
+            &table,
+            &analyzed,
+            &terminal_dwa,
+            templates,
+            &vocab,
+            &id_map,
+        );
+
+        let constraint = Constraint::from_json_schema(schema, &vocab).unwrap();
+        let mut prefix = Vec::from(
+            b"{\"aside\": true, \"autoplay\": false, \"css_class\": \"vimeo-video-block\", \"description\": \"".as_slice(),
+        );
+        prefix.extend(std::iter::repeat(b"This is a Vimeo video block. ".as_slice()).take(79).flatten().copied());
+        prefix.extend_from_slice(b"This is a");
+
+        let mut state = constraint.start();
+        state.commit_bytes(&prefix).unwrap();
+        let (&tokenizer_state, gss) = state.state.iter().next().expect("live prefix tokenizer state");
+        let (chain_states, _acc, _tail) = gss.extract_chain_and_tail().expect("expected chain-shaped live GSS");
+        let internal_tsid = constraint.internal_tsid_for_state(tokenizer_state);
+        let internal_token = constraint.original_token_to_internal[68439usize];
+
+        let resolved_nwa_reachable = nwa_reaches_token_along_chain(
+            &resolved_parser_nwa,
+            &chain_states,
+            internal_tsid,
+            internal_token,
+        );
+        let specialized_reachable = dwa_reaches_token_along_chain(
+            &specialized_dwa,
+            &chain_states,
+            internal_tsid,
+            internal_token,
+        );
+        let generic_reachable = dwa_reaches_token_along_chain(
+            &generic_dwa,
+            &chain_states,
+            internal_tsid,
+            internal_token,
+        );
+        let full_pipeline_reachable = dwa_reaches_token_along_chain(
+            &full_pipeline_dwa,
+            &chain_states,
+            internal_tsid,
+            internal_token,
+        );
+
+        assert_eq!(
+            (
+                resolved_nwa_reachable,
+                specialized_reachable,
+                generic_reachable,
+                full_pipeline_reachable,
+            ),
+            (true, false, false, true),
+            "chain_states={chain_states:?} tokenizer_state={tokenizer_state} internal_tsid={internal_tsid} internal_token={internal_token}"
         );
     }
 }

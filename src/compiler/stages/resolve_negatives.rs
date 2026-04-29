@@ -876,6 +876,14 @@ fn apply_cancellations_parallel_fixpoint(nwa: &mut NWA) {
 mod tests {
     use super::*;
     use crate::compiler::glr::labels::{encode_negative_label, encode_positive_label};
+    use crate::compiler::glr::analysis::AnalyzedGrammar;
+    use crate::compiler::glr::table::GLRTable;
+    use crate::compiler::grammar::transforms::prepare_grammar_for_compile;
+    use crate::compiler::stages::parser_dwa::debug_build_parser_nwa_from_terminal_dwa;
+    use crate::compiler::stages::templates::{Templates, characterize::characterize_terminals};
+    use crate::compiler::stages::terminal_dwa_compat::build_terminal_dwa_for_existing_id_map;
+    use crate::import::json_schema::json_schema_to_grammar;
+    use crate::Vocab;
     use std::collections::{BTreeMap, HashMap, HashSet};
 
     fn compute_cancellations_reference(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
@@ -1163,6 +1171,32 @@ mod tests {
         Weight::from_compact_ranges([(1..=2, [1..=2])])
     }
 
+    fn normalized_nwa_signature(nwa: &NWA) -> Vec<(usize, Option<Weight>, Vec<(i32, u32, Weight)>, Vec<(u32, Weight)>)> {
+        let mut states = Vec::new();
+        for (state_id, state) in nwa.states().iter().enumerate() {
+            let mut transitions = Vec::new();
+            for (&label, targets) in &state.transitions {
+                for (target, weight) in targets {
+                    if !weight.is_empty() {
+                        transitions.push((label, *target, weight.clone()));
+                    }
+                }
+            }
+            transitions.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+            let mut epsilons: Vec<_> = state
+                .epsilons
+                .iter()
+                .filter(|(_, weight)| !weight.is_empty())
+                .map(|(target, weight)| (*target, weight.clone()))
+                .collect();
+            epsilons.sort_by(|a, b| a.0.cmp(&b.0));
+
+            states.push((state_id, state.final_weight.clone().filter(|w| !w.is_empty()), transitions, epsilons));
+        }
+        states
+    }
+
     #[test]
     fn test_compute_cancellations_widens_existing_eps_query() {
         let mut nwa = NWA::new(0, 0);
@@ -1379,5 +1413,114 @@ mod tests {
                 config
             );
         }
+    }
+
+    #[test]
+    fn test_resolve_negative_codes_matches_reference_on_minimized_split_boundary_parser_nwa() {
+        let grammar_str = r#"
+start start;
+t A_EXACT ::= "a"{32};
+t A_UP_TO_32 ::= "a"{1,2} "\"";
+nt start ::= (A_EXACT{4} | A_EXACT{5}) A_UP_TO_32;
+"#;
+        let named = crate::grammar::glrm::from_glrm(grammar_str).unwrap();
+        let factored = crate::grammar::factoring::factor_named_grammar(named);
+        let gdef = crate::grammar::ast::lower(&factored).unwrap();
+        let analyzed = AnalyzedGrammar::from_grammar_def(&gdef);
+        let table = GLRTable::build(&analyzed);
+        let tokenizer = crate::compiler::compile::build_tokenizer(&gdef);
+        let vocab = Vocab::new(vec![(0, b"aa\"".to_vec())], None);
+        let id_map = crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::combined::analyze_equivalences(
+            &tokenizer,
+            &vocab,
+            &BTreeMap::new(),
+            None,
+            None,
+        );
+        let terminal_dwa = build_terminal_dwa_for_existing_id_map(&analyzed, &tokenizer, &vocab, &id_map, None);
+        let templates = Templates::from_characterizations(&characterize_terminals(&table, &analyzed));
+        let parser_nwa = debug_build_parser_nwa_from_terminal_dwa(&terminal_dwa, &analyzed, templates)
+            .expect("parser NWA should build");
+
+        let mut actual = parser_nwa.clone();
+        let mut expected = parser_nwa.clone();
+        let expected_range = full_state_range(&expected);
+
+        resolve_negative_codes_in_nwa(&mut actual);
+        apply_cancellations_range(&mut expected, expected_range);
+        apply_finality_fixpoint_reference(&mut expected);
+        remove_negative_transitions(&mut expected);
+        remove_redundant_default_transitions(&mut expected);
+
+        assert_eq!(
+            normalized_nwa_signature(&actual),
+            normalized_nwa_signature(&expected),
+            "resolved minimized parser NWA diverged from the reference negative-resolution pipeline"
+        );
+    }
+
+    #[test]
+    fn test_resolve_negative_codes_matches_reference_on_sparse_o82710_parser_nwa() {
+        let schema = r##"{
+            "type": "object",
+            "properties": {
+                "aside": { "type": "boolean" },
+                "autoplay": { "type": "boolean" },
+                "css_class": {
+                    "type": "string",
+                    "pattern": "^[\\w\\s-]+$"
+                },
+                "description": {
+                    "type": "string",
+                    "minLength": 0,
+                    "maxLength": 5000
+                }
+            },
+            "required": ["id"],
+            "additionalProperties": true
+        }"##;
+
+        let grammar = json_schema_to_grammar(schema).expect("schema should lower to a grammar");
+        let (prepared, _prepared_tokenizer) = prepare_grammar_for_compile(&grammar);
+        let analyzed = AnalyzedGrammar::from_grammar_def(&prepared);
+        let table = GLRTable::build(&analyzed);
+        let tokenizer = crate::compiler::compile::build_tokenizer(&prepared);
+        let vocab = Vocab::new(
+            vec![(68439u32, b"'];?>\"".to_vec()), (99925u32, b" Vimeo".to_vec())],
+            None,
+        );
+        let id_map = crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::combined::analyze_equivalences(
+            &tokenizer,
+            &vocab,
+            &BTreeMap::new(),
+            None,
+            None,
+        );
+        let terminal_dwa = build_terminal_dwa_for_existing_id_map(
+            &analyzed,
+            &tokenizer,
+            &vocab,
+            &id_map,
+            None,
+        );
+        let templates = Templates::from_characterizations(&characterize_terminals(&table, &analyzed));
+        let parser_nwa = debug_build_parser_nwa_from_terminal_dwa(&terminal_dwa, &analyzed, templates)
+            .expect("parser NWA should build");
+
+        let mut actual = parser_nwa.clone();
+        let mut expected = parser_nwa.clone();
+        let expected_range = full_state_range(&expected);
+
+        resolve_negative_codes_in_nwa(&mut actual);
+        apply_cancellations_range(&mut expected, expected_range);
+        apply_finality_fixpoint_reference(&mut expected);
+        remove_negative_transitions(&mut expected);
+        remove_redundant_default_transitions(&mut expected);
+
+        assert_eq!(
+            normalized_nwa_signature(&actual),
+            normalized_nwa_signature(&expected),
+            "resolved sparse o82710 parser NWA diverged from the reference negative-resolution pipeline"
+        );
     }
 }
