@@ -5,7 +5,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 
 const DISPUTED_TOKEN_ID: u32 = 0;
-const DISPUTED_TOKEN_BYTES: &[u8] = b"'];?>\"";
+const DISPUTED_TOKEN_BYTES: &[u8] = b"aa\"";
 const CONTROL_TOKEN_ID: u32 = 1;
 const CONTROL_TOKEN_BYTES: &[u8] = b"a";
 const SPARSE_SCHEMA_GLRM: &str = r#"
@@ -42,13 +42,11 @@ nt start ::= "{" obj_open_reqmask_0_nc_0 "}";
 const MINIMIZED_INLINE_GLRM_CANDIDATE: &str = r#"
 start start;
 
-internal t JSON_STRING_CHAR ::= "a" | " " | "V" | "i" | "m" | "e" | "o" | "'" | "]" | ";" | "?" | ">";
+internal t JSON_STRING_CHAR ::= "a";
 internal t JSON_STRING_CHAR_UPTO_256_1 ::= JSON_STRING_CHAR{0,256};
 t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= JSON_STRING_CHAR_UPTO_256_1 "\"";
 t JSON_STRING_CHAR_EXACT_256_3 ::= JSON_STRING_CHAR{256};
-internal t JSON_STRING_CHAR_UPTO_136_4 ::= JSON_STRING_CHAR{0,136};
-t JSON_STRING_CHAR_UPTO_CLOSE_5 ::= JSON_STRING_CHAR_UPTO_136_4 "\"";
-nt json_string_bounded_split_6 ::= "\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} JSON_STRING_CHAR_UPTO_CLOSE_5);
+nt json_string_bounded_split_6 ::= "\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} "\"");
 nt obj_open_reqmask_0_nc_0 ::= (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | (("\"" "id\"" ": ") "\"x\"") obj_open_reqmask_0_c_1;
 nt obj_open_reqmask_0_c_0 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | ", " (("\"" "id\"" ": ") "\"x\"") obj_open_reqmask_0_c_1;
 nt obj_open_reqmask_0_c_1 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_1 | ;
@@ -259,7 +257,7 @@ fn benchmark_prefix_at_discrepancy() -> Vec<u8> {
 }
 
 fn description_only_prefix() -> Vec<u8> {
-    description_only_prefix_with_ascii_repeat(2300)
+    description_only_prefix_with_ascii_repeat(2303)
 }
 
 fn description_only_prefix_with_ascii_repeat(content_len: usize) -> Vec<u8> {
@@ -758,6 +756,138 @@ fn scan_o82710_token_id_variants() {
                 commit_bytes_accepts,
             );
         }
+    }
+}
+
+#[ignore = "diagnostic for minimizing the ASCII description prefix length in the current o82710 witness"]
+#[test]
+fn scan_o82710_all_ascii_prefix_lengths_up_to_current() {
+    let vocab = reduced_two_token_vocab();
+    let constraint = Constraint::from_glrm_grammar(MINIMIZED_INLINE_GLRM_CANDIDATE, &vocab).unwrap();
+    let mut smallest_repro = None;
+
+    for content_len in 0usize..=2300 {
+        let prefix = description_only_prefix_with_ascii_repeat(content_len);
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
+            classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES);
+        if !mask_accepts && commit_token_accepts && commit_bytes_accepts {
+            smallest_repro.get_or_insert(content_len);
+            println!("repro_ascii_len={content_len}");
+        }
+    }
+
+    println!("smallest_repro_ascii_len={:?}", smallest_repro);
+}
+
+#[ignore = "diagnostic for minimizing the disputed token bytes in the current o82710 witness"]
+#[test]
+fn scan_o82710_disputed_token_variants() {
+    let total_content_len = 2305usize;
+    let variants: &[&[u8]] = &[
+        b"a\"",
+        b"aa\"",
+        b"aaa\"",
+        b"aaaa\"",
+        b"aaaaa\"",
+        DISPUTED_TOKEN_BYTES,
+    ];
+
+    for disputed_bytes in variants {
+        let disputed_content_len = disputed_bytes.len() - 1;
+        let content_len = total_content_len - disputed_content_len;
+        let vocab = Vocab::new(
+            vec![
+                (DISPUTED_TOKEN_ID, disputed_bytes.to_vec()),
+                (CONTROL_TOKEN_ID, CONTROL_TOKEN_BYTES.to_vec()),
+            ],
+            None,
+        );
+        let constraint = Constraint::from_glrm_grammar(MINIMIZED_INLINE_GLRM_CANDIDATE, &vocab).unwrap();
+        let prefix = description_only_prefix_with_ascii_repeat(content_len);
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
+            classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, disputed_bytes);
+        println!(
+            "disputed_variant={:?} prefix_len={} mask={} commit_token={} commit_bytes={}",
+            disputed_bytes,
+            content_len,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+        );
+    }
+}
+
+#[ignore = "diagnostic for simplifying the unreachable second bounded-string arm"]
+#[test]
+fn scan_o82710_second_split_arm_variants() {
+    let variants = [
+        (
+            "original",
+            r#"
+start start;
+
+internal t JSON_STRING_CHAR ::= "a";
+internal t JSON_STRING_CHAR_UPTO_256_1 ::= JSON_STRING_CHAR{0,256};
+t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= JSON_STRING_CHAR_UPTO_256_1 "\"";
+t JSON_STRING_CHAR_EXACT_256_3 ::= JSON_STRING_CHAR{256};
+internal t JSON_STRING_CHAR_UPTO_136_4 ::= JSON_STRING_CHAR{0,136};
+t JSON_STRING_CHAR_UPTO_CLOSE_5 ::= JSON_STRING_CHAR_UPTO_136_4 "\"";
+nt json_string_bounded_split_6 ::= "\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} JSON_STRING_CHAR_UPTO_CLOSE_5);
+nt obj_open_reqmask_0_nc_0 ::= (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | (("\"" "id\"" ": ") "\"x\"") obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_0 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | ", " (("\"" "id\"" ": ") "\"x\"") obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_1 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_1 | ;
+nt start ::= "{" obj_open_reqmask_0_nc_0 "}";
+"#,
+        ),
+        (
+            "direct_quote",
+            r#"
+start start;
+
+internal t JSON_STRING_CHAR ::= "a";
+internal t JSON_STRING_CHAR_UPTO_256_1 ::= JSON_STRING_CHAR{0,256};
+t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= JSON_STRING_CHAR_UPTO_256_1 "\"";
+t JSON_STRING_CHAR_EXACT_256_3 ::= JSON_STRING_CHAR{256};
+nt json_string_bounded_split_6 ::= "\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} "\"");
+nt obj_open_reqmask_0_nc_0 ::= (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | (("\"" "id\"" ": ") "\"x\"") obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_0 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | ", " (("\"" "id\"" ": ") "\"x\"") obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_1 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_1 | ;
+nt start ::= "{" obj_open_reqmask_0_nc_0 "}";
+"#,
+        ),
+        (
+            "close_up_to_zero",
+            r#"
+start start;
+
+internal t JSON_STRING_CHAR ::= "a";
+internal t JSON_STRING_CHAR_UPTO_256_1 ::= JSON_STRING_CHAR{0,256};
+t JSON_STRING_CHAR_UPTO_CLOSE_2 ::= JSON_STRING_CHAR_UPTO_256_1 "\"";
+t JSON_STRING_CHAR_EXACT_256_3 ::= JSON_STRING_CHAR{256};
+internal t JSON_STRING_CHAR_UPTO_0_4 ::= JSON_STRING_CHAR{0,0};
+t JSON_STRING_CHAR_UPTO_CLOSE_5 ::= JSON_STRING_CHAR_UPTO_0_4 "\"";
+nt json_string_bounded_split_6 ::= "\"" (JSON_STRING_CHAR_EXACT_256_3{0,18} JSON_STRING_CHAR_UPTO_CLOSE_2 | JSON_STRING_CHAR_EXACT_256_3{19} JSON_STRING_CHAR_UPTO_CLOSE_5);
+nt obj_open_reqmask_0_nc_0 ::= (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | (("\"" "id\"" ": ") "\"x\"") obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_0 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_0 | ", " (("\"" "id\"" ": ") "\"x\"") obj_open_reqmask_0_c_1;
+nt obj_open_reqmask_0_c_1 ::= ", " (("\"" "description\"" ": ") json_string_bounded_split_6) obj_open_reqmask_0_c_1 | ;
+nt start ::= "{" obj_open_reqmask_0_nc_0 "}";
+"#,
+        ),
+    ];
+
+    let prefix = description_only_prefix();
+    let vocab = reduced_two_token_vocab();
+    for (label, grammar) in variants {
+        let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+        let (mask_accepts, commit_token_accepts, commit_bytes_accepts) =
+            classify_constraint(&constraint, &prefix, DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES);
+        println!(
+            "second_arm_variant={} mask={} commit_token={} commit_bytes={}",
+            label,
+            mask_accepts,
+            commit_token_accepts,
+            commit_bytes_accepts,
+        );
     }
 }
 
