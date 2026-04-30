@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use once_cell::sync::Lazy;
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::Vocab;
 use crate::automata::weighted::dwa::DWA;
@@ -237,6 +237,7 @@ fn terminal_expr(terminal: &Terminal) -> Expr {
 }
 
 type DensePossibleMatchesByState = BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>;
+type RawPossibleMatchesByState = BTreeMap<u32, Weight>;
 type RuntimePossibleMatchesByState = BTreeMap<u32, Weight>;
 type PossibleMatchSignature = Vec<(u32, TerminalID)>;
 type SeedStateSignature = Vec<u32>;
@@ -334,6 +335,30 @@ fn range_set_from_sorted_ids(ids: &[u32]) -> RangeSetBlaze<u32> {
     RangeSetBlaze::from_iter(ranges)
 }
 
+fn dense_bitmap_to_rangeset(words: &[u64]) -> RangeSetBlaze<u32> {
+    let mut ids = Vec::new();
+    for_each_dense_bit(words, |token_id| ids.push(token_id));
+    range_set_from_sorted_ids(&ids)
+}
+
+fn convert_dense_possible_matches_to_weight(
+    raw_possible_matches: DensePossibleMatchesByState,
+) -> RawPossibleMatchesByState {
+    raw_possible_matches
+        .into_iter()
+        .map(|(original_tokenizer_state, terminals)| {
+            let terminals = terminals
+                .into_iter()
+                .map(|(terminal_id, bitmap)| (terminal_id, dense_bitmap_to_rangeset(&bitmap)))
+                .collect::<Vec<_>>();
+            (
+                original_tokenizer_state,
+                Weight::from_per_tsid_token_sets(terminals),
+            )
+        })
+        .collect()
+}
+
 fn build_tokens_with_same_bytes(token_bytes: &BTreeMap<u32, Vec<u8>>) -> FxHashMap<u32, Arc<[u32]>> {
     let mut by_bytes: BTreeMap<Vec<u8>, Vec<u32>> = BTreeMap::new();
     for (&token_id, bytes) in token_bytes {
@@ -404,7 +429,7 @@ fn build_group_constraint_internal_ids(
 }
 
 fn build_possible_match_signatures(
-    raw_possible_matches: &DensePossibleMatchesByState,
+    raw_possible_matches: &RawPossibleMatchesByState,
     token_bytes: &BTreeMap<u32, Vec<u8>>,
     tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
 ) -> FxHashMap<u32, PossibleMatchSignature> {
@@ -416,19 +441,24 @@ fn build_possible_match_signatures(
         .collect();
 
     for (&original_tokenizer_state, terminals) in raw_possible_matches {
-        for (&terminal_id, bitmap) in terminals {
-            for_each_dense_bit(bitmap, |original_token_id| {
-                let Some(&leader) = group_leaders.get(original_token_id as usize) else {
-                    return;
-                };
-                if leader == u32::MAX {
-                    return;
-                }
+        let Some(entries) = terminals.compact_entries() else {
+            continue;
+        };
+        for (start_terminal_id, end_terminal_id, tokens) in entries {
+            for terminal_id in start_terminal_id..=end_terminal_id {
+                for original_token_id in tokens.iter() {
+                    let Some(&leader) = group_leaders.get(original_token_id as usize) else {
+                        continue;
+                    };
+                    if leader == u32::MAX {
+                        continue;
+                    }
 
-                if let Some(signature) = signatures_by_group.get_mut(&leader) {
-                    signature.push((original_tokenizer_state, terminal_id));
+                    if let Some(signature) = signatures_by_group.get_mut(&leader) {
+                        signature.push((original_tokenizer_state, terminal_id));
+                    }
                 }
-            });
+            }
         }
     }
 
@@ -449,7 +479,7 @@ fn build_possible_match_signatures(
 }
 
 fn build_seed_state_signatures_from_possible_matches(
-    raw_possible_matches: &DensePossibleMatchesByState,
+    raw_possible_matches: &RawPossibleMatchesByState,
     token_bytes: &BTreeMap<u32, Vec<u8>>,
     tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
 ) -> FxHashMap<u32, SeedStateSignature> {
@@ -461,19 +491,23 @@ fn build_seed_state_signatures_from_possible_matches(
         .collect();
 
     for (&original_tokenizer_state, terminals) in raw_possible_matches {
-        for bitmap in terminals.values() {
-            for_each_dense_bit(bitmap, |original_token_id| {
+        let Some(entries) = terminals.compact_entries() else {
+            continue;
+        };
+        let mut seen_leaders = FxHashSet::default();
+        for (_, _, tokens) in entries {
+            for original_token_id in tokens.iter() {
                 let Some(&leader) = group_leaders.get(original_token_id as usize) else {
-                    return;
+                    continue;
                 };
-                if leader == u32::MAX {
-                    return;
+                if leader == u32::MAX || !seen_leaders.insert(leader) {
+                    continue;
                 }
 
                 if let Some(signature) = signatures_by_group.get_mut(&leader) {
                     signature.push(original_tokenizer_state);
                 }
-            });
+            }
         }
     }
 
@@ -604,12 +638,11 @@ fn build_constraint_vocab_map(
 }
 
 fn remap_possible_matches_to_constraint_vocab(
-    raw_possible_matches: DensePossibleMatchesByState,
+    raw_possible_matches: RawPossibleMatchesByState,
     original_to_constraint_internal: &[u32],
-    constraint_token_count: u32,
+    _constraint_token_count: u32,
     tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
 ) -> RuntimePossibleMatchesByState {
-    let num_words = dense_word_count(constraint_token_count);
     let groups = unique_same_byte_groups(tokens_with_same_bytes);
     let max_token_slot = tokens_with_same_bytes
         .keys()
@@ -630,46 +663,47 @@ fn remap_possible_matches_to_constraint_vocab(
         .into_iter()
         .map(|(original_tokenizer_state, terminals)| {
             let remapped_terminals = terminals
+                .compact_entries()
+                .unwrap_or_default()
                 .into_iter()
-                .filter_map(|(terminal_id, original_bitmap)| {
-                    let mut remapped = vec![0u64; num_words];
-                    let mut any = false;
+                .flat_map(|(start_terminal_id, end_terminal_id, original_tokens)| {
+                    let mut remapped_ids = Vec::new();
 
-                    for_each_dense_bit(&original_bitmap, |original_token_id| {
+                    for original_token_id in original_tokens.iter() {
                         let Some(&leader) = group_leaders.get(original_token_id as usize) else {
-                            return;
+                            continue;
                         };
                         if leader == u32::MAX {
-                            return;
+                            continue;
                         }
 
                         let Some(constraint_internal_ids) =
                             group_constraint_internal_ids.get(&leader)
                         else {
-                            return;
+                            continue;
                         };
 
-                        for &constraint_internal_id in constraint_internal_ids.iter() {
-                            set_dense_bit(&mut remapped, constraint_internal_id);
-                            any = true;
-                        }
-                    });
-
-                    if any {
-                        Some((terminal_id, {
-                            let mut ids = Vec::new();
-                            for_each_dense_bit(&remapped, |token_id| ids.push(token_id));
-                            range_set_from_sorted_ids(&ids)
-                        }))
-                    } else {
-                        None
+                        remapped_ids.extend(constraint_internal_ids.iter().copied());
                     }
+
+                    remapped_ids.sort_unstable();
+                    remapped_ids.dedup();
+                    let remapped = shared_rangeset(range_set_from_sorted_ids(&remapped_ids));
+
+                    if remapped.is_empty() {
+                        return Vec::new().into_iter();
+                    }
+
+                    (start_terminal_id..=end_terminal_id)
+                        .map(move |terminal_id| (terminal_id, Arc::clone(&remapped)))
+                        .collect::<Vec<_>>()
+                        .into_iter()
                 })
                 .collect::<Vec<_>>();
 
             (
                 original_tokenizer_state,
-                Weight::from_per_tsid_token_sets(remapped_terminals),
+                Weight::from_per_tsid_shared(remapped_terminals),
             )
         })
         .collect()
@@ -1364,6 +1398,8 @@ fn compile_prepared_with_profile(
                 },
             );
 
+        let raw_possible_matches = convert_dense_possible_matches_to_weight(raw_possible_matches);
+
         let constraint_vocab_started_at = Instant::now();
         let tokens_with_same_bytes_started_at = Instant::now();
         let tokens_with_same_bytes = build_tokens_with_same_bytes(&token_bytes);
@@ -1644,7 +1680,7 @@ mod tests {
         terminals.insert(10u32, bitmap(&[0], 3));
         terminals.insert(11u32, bitmap(&[1], 3));
 
-        let raw_possible_matches = BTreeMap::from([(5u32, terminals)]);
+        let raw_possible_matches = convert_dense_possible_matches_to_weight(BTreeMap::from([(5u32, terminals)]));
 
         let tokens_with_same_bytes = build_tokens_with_same_bytes(&token_bytes);
         let signatures = build_possible_match_signatures(
@@ -1707,7 +1743,7 @@ mod tests {
         terminals.insert(10u32, bitmap(&[0], 3));
         terminals.insert(11u32, bitmap(&[1], 3));
 
-        let raw_possible_matches = BTreeMap::from([(5u32, terminals)]);
+        let raw_possible_matches = convert_dense_possible_matches_to_weight(BTreeMap::from([(5u32, terminals)]));
 
         let tokens_with_same_bytes = build_tokens_with_same_bytes(&token_bytes);
         let signatures = build_possible_match_signatures(
@@ -1781,6 +1817,7 @@ mod tests {
             &trie.root,
             max_original_token_slot(&token_bytes),
         );
+        let raw_possible_matches = convert_dense_possible_matches_to_weight(raw_possible_matches);
 
         let actual = build_seed_state_signatures_from_possible_matches(
             &raw_possible_matches,
@@ -1835,6 +1872,7 @@ mod tests {
             &trie.root,
             max_original_token_slot(&token_bytes),
         );
+        let raw_possible_matches = convert_dense_possible_matches_to_weight(raw_possible_matches);
 
         let actual = build_seed_state_signatures_from_possible_matches(
             &raw_possible_matches,
