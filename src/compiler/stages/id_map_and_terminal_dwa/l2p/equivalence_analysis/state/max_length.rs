@@ -29,18 +29,29 @@ fn mix_u64(mut x: u64) -> u64 {
 }
 
 #[inline(always)]
-fn hash_sorted_set(values: &[usize], tag: u64) -> u64 {
-    let mut hash = mix_u64((values.len() as u64) ^ tag);
+fn hash_filtered_sorted_set(values: &[usize], active_groups: Option<&[bool]>, tag: u64) -> u64 {
+    let active_len = values
+        .iter()
+        .filter(|&&value| active_groups.map_or(true, |groups| groups.get(value).copied().unwrap_or(false)))
+        .count();
+    let mut hash = mix_u64((active_len as u64) ^ tag);
     for &value in values {
+        if !active_groups.map_or(true, |groups| groups.get(value).copied().unwrap_or(false)) {
+            continue;
+        }
         hash = hash.wrapping_add(mix_u64((value as u64) ^ tag.rotate_left(17)));
     }
     hash
 }
 
 #[inline(always)]
-fn hash_state_label(state: &FlatDfaState) -> u64 {
-    let finalizers = hash_sorted_set(&state.finalizers, 0xF11A_F11A_F11A_F11A);
-    let futures = hash_sorted_set(&state.possible_future_group_ids, 0xF0C7_F0C7_F0C7_F0C7);
+fn hash_state_label(state: &FlatDfaState, active_groups: Option<&[bool]>) -> u64 {
+    let finalizers = hash_filtered_sorted_set(&state.finalizers, active_groups, 0xF11A_F11A_F11A_F11A);
+    let futures = hash_filtered_sorted_set(
+        &state.possible_future_group_ids,
+        active_groups,
+        0xF0C7_F0C7_F0C7_F0C7,
+    );
     mix_u64(finalizers.wrapping_add(futures))
 }
 
@@ -53,13 +64,17 @@ fn hash_transition_labels(label_hashes: &[u64]) -> u64 {
     hash
 }
 
-fn build_state_shape(dfa: &FlatDfa, state_idx: usize) -> (Vec<usize>, u64) {
+fn build_state_shape(
+    dfa: &FlatDfa,
+    state_idx: usize,
+    relevant_bytes: Option<&[bool; 256]>,
+) -> (Vec<usize>, u64) {
     let mut targets: Vec<usize> = Vec::new();
     let mut label_hashes: Vec<u64> = Vec::new();
     let trans = dfa.transitions_for(state_idx);
 
     for (byte, &target) in trans.iter().enumerate() {
-        if target == u32::MAX {
+        if target == u32::MAX || relevant_bytes.is_some_and(|bytes| !bytes[byte]) {
             continue;
         }
 
@@ -226,6 +241,8 @@ fn find_state_equivalence_classes_kstep(
     tokenizer: &TokenizerView,
     states: &[usize],
     k: usize,
+    active_groups: Option<&[bool]>,
+    relevant_bytes: Option<&[bool; 256]>,
 ) -> Vec<usize> {
     if states.is_empty() {
         return Vec::new();
@@ -235,8 +252,11 @@ fn find_state_equivalence_classes_kstep(
     let state_shapes: Vec<(Vec<usize>, u64)> = (0..dfa.states.len())
         .into_par_iter()
         .map(|s| {
-            let (targets, transition_label_hash) = build_state_shape(dfa, s);
-            (targets, mix_u64(hash_state_label(&dfa.states[s]) ^ transition_label_hash))
+            let (targets, transition_label_hash) = build_state_shape(dfa, s, relevant_bytes);
+            (
+                targets,
+                mix_u64(hash_state_label(&dfa.states[s], active_groups) ^ transition_label_hash),
+            )
         })
         .collect();
     let (outgoing_targets_vec, mut prev_hashes): (Vec<_>, Vec<_>) = state_shapes.into_iter().unzip();
@@ -251,12 +271,17 @@ fn find_state_equivalence_classes_kstep(
 /// This is used as a fast precheck: if all states have unique cheap hashes,
 /// the expensive `build_state_shape` + kstep iteration can be skipped entirely.
 #[inline]
-fn cheap_state_hash(dfa: &FlatDfa, state_idx: usize) -> u64 {
-    let label = hash_state_label(&dfa.states[state_idx]);
+fn cheap_state_hash(
+    dfa: &FlatDfa,
+    state_idx: usize,
+    active_groups: Option<&[bool]>,
+    relevant_bytes: Option<&[bool; 256]>,
+) -> u64 {
+    let label = hash_state_label(&dfa.states[state_idx], active_groups);
     let mut transition_hash: u64 = 0;
     let trans = dfa.transitions_for(state_idx);
     for (byte, &target) in trans.iter().enumerate() {
-        if target != u32::MAX {
+        if target != u32::MAX && relevant_bytes.is_none_or(|bytes| bytes[byte]) {
             transition_hash = transition_hash.wrapping_add(
                 mix_u64((byte as u64) ^ ((target as u64) << 16) ^ 0xD6E8_FD93_5E6C_A271),
             );
@@ -269,9 +294,17 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
     tokenizer: &TokenizerView,
     tokens: &[S],
     states: &[usize],
+    active_groups: Option<&[bool]>,
+    relevant_bytes: Option<&[bool; 256]>,
 ) -> Vec<usize> {
     let max_len = tokens.iter().map(|token| token.as_ref().len()).max().unwrap_or(0);
-    let mapping = find_state_equivalence_classes_kstep(tokenizer, states, max_len);
+    let mapping = find_state_equivalence_classes_kstep(
+        tokenizer,
+        states,
+        max_len,
+        active_groups,
+        relevant_bytes,
+    );
 
     if debug_max_length_enabled() {
         let mut representatives = mapping.clone();
@@ -388,6 +421,7 @@ fn find_state_equivalence_classes_kstep_restricted(
     k: usize,
     relevant_bytes: &[bool; 256],
     byte_to_class: Option<&[u8; 256]>,
+    active_groups: Option<&[bool]>,
 ) -> Vec<usize> {
     if states.is_empty() {
         return Vec::new();
@@ -409,7 +443,10 @@ fn find_state_equivalence_classes_kstep_restricted(
             } else {
                 build_state_shape_restricted(dfa, s, relevant_bytes)
             };
-            (targets, mix_u64(hash_state_label(&dfa.states[s]) ^ transition_label_hash))
+            (
+                targets,
+                mix_u64(hash_state_label(&dfa.states[s], active_groups) ^ transition_label_hash),
+            )
         })
         .collect();
     let (outgoing_targets_vec, mut prev_hashes): (Vec<_>, Vec<_>) = state_shapes.into_iter().unzip();
@@ -450,16 +487,33 @@ pub fn find_state_equivalence_classes_byte_restricted<S: AsRef<[u8]>>(
     tokens: &[S],
     states: &[usize],
     byte_to_class: Option<&[u8; 256]>,
+    active_groups: Option<&[bool]>,
+    relevant_bytes: Option<&[bool; 256]>,
 ) -> Vec<usize> {
     let max_len = tokens.iter().map(|token| token.as_ref().len()).max().unwrap_or(0);
     let k = max_len;
 
-    let mut relevant_bytes = [false; 256];
-    for token in tokens {
-        for &b in token.as_ref() {
-            relevant_bytes[b as usize] = true;
+    let derived_relevant_bytes;
+    let relevant_bytes = match relevant_bytes {
+        Some(bytes) => bytes,
+        None => {
+            let mut bytes = [false; 256];
+            for token in tokens {
+                for &b in token.as_ref() {
+                    bytes[b as usize] = true;
+                }
+            }
+            derived_relevant_bytes = bytes;
+            &derived_relevant_bytes
         }
-    }
+    };
 
-    find_state_equivalence_classes_kstep_restricted(tokenizer, states, k, &relevant_bytes, byte_to_class)
+    find_state_equivalence_classes_kstep_restricted(
+        tokenizer,
+        states,
+        k,
+        relevant_bytes,
+        byte_to_class,
+        active_groups,
+    )
 }

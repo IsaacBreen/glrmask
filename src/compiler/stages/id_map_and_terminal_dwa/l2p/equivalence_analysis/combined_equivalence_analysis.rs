@@ -417,6 +417,12 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
         .map(|base| base.byte_to_class())
         .unwrap_or_else(|| super::compat::compute_byte_classes(tokenizer.dfa()));
     let dedup = deduplicate_tokens_by_byte_class(tokens, &byte_to_class);
+    let mut relevant_bytes = [false; 256];
+    for token in &dedup.representative_token_bytes {
+        for &byte in *token {
+            relevant_bytes[byte as usize] = true;
+        }
+    }
     let dedup_ms = elapsed_ms(dedup_started_at);
 
     let max_length_started_at = std::time::Instant::now();
@@ -428,6 +434,8 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
             &dedup.representative_token_bytes,
             initial_states,
             Some(&byte_to_class),
+            active_groups,
+            Some(&relevant_bytes),
         )
     };
     let max_length_ms = elapsed_ms(max_length_started_at);

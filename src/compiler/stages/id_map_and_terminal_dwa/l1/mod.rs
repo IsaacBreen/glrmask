@@ -175,10 +175,18 @@ pub(crate) fn count_l1_equivalence_classes(
     let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
     let tokenizer_view = TokenizerView::new_filtered(tokenizer, active_terminals);
     let token_bytes: Vec<&[u8]> = vocab.entries.values().map(|b| b.as_slice()).collect();
+    let mut relevant_bytes = [false; 256];
+    for bytes in &token_bytes {
+        for &byte in *bytes {
+            relevant_bytes[byte as usize] = true;
+        }
+    }
     let equiv_mapping = max_length::find_state_equivalence_classes_byte_restricted(
         &tokenizer_view,
         &token_bytes,
         &states,
+        Some(active_terminals),
+        Some(&relevant_bytes),
     );
     let mut seen = rustc_hash::FxHashSet::default();
     for &rep in &equiv_mapping {
@@ -339,10 +347,18 @@ fn build_l1_id_map<'a>(tokenizer: &Tokenizer, vocab: &'a Vocab, active_terminals
         .values()
         .map(|b| b.as_slice())
         .collect();
+    let mut relevant_bytes = [false; 256];
+    for bytes in &token_bytes {
+        for &byte in *bytes {
+            relevant_bytes[byte as usize] = true;
+        }
+    }
     let equiv_mapping = max_length::find_state_equivalence_classes_byte_restricted(
         &tokenizer_view,
         &token_bytes,
         &states,
+        Some(active_terminals),
+        Some(&relevant_bytes),
     );
     let equiv_algo_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0 - view_ms;
     // Build representative → internal_id mapping
