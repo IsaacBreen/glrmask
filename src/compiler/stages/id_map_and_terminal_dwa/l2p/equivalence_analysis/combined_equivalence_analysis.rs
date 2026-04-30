@@ -51,7 +51,6 @@ const SKIP_TOKEN_STATE_EQUIV_ENV: &str = "GLRMASK_SKIP_TOKEN_STATE_EQUIV";
 const USE_SLOW_VOCAB_EQUIV_ENV: &str = "GLRMASK_USE_SLOW_VOCAB_EQUIV";
 const FORCE_PRE_VOCAB_STATE_REDUCTION_ENV: &str = "GLRMASK_FORCE_PRE_VOCAB_STATE_REDUCTION";
 const DISABLE_PRE_VOCAB_STATE_REDUCTION_ENV: &str = "GLRMASK_DISABLE_PRE_VOCAB_STATE_REDUCTION";
-const SKIP_MAX_LENGTH_SMALL_STATE_THRESHOLD: usize = 128;
 const PRE_VOCAB_STATE_REDUCTION_MIN_STATES: usize = 200;
 const PRE_VOCAB_STATE_REDUCTION_MAX_GROUPS: usize = 256;
 /// Only run pre-vocab state reduction when the deduped token count is high
@@ -385,8 +384,7 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
     active_groups: Option<&[bool]>,
     shared_vocab_dfa_cache: Option<&vocab_equivalence_analysis::SharedVocabDfaCache>,
 ) -> CombinedEquivalenceResult {
-    let skip_max_length = env_flag_enabled(SKIP_MAX_LENGTH_STATE_EQUIV_ENV)
-        || initial_states.len() <= SKIP_MAX_LENGTH_SMALL_STATE_THRESHOLD;
+    let skip_max_length = env_flag_enabled(SKIP_MAX_LENGTH_STATE_EQUIV_ENV);
     let skip_token_state = env_flag_enabled(SKIP_TOKEN_STATE_EQUIV_ENV);
     let profile_compile = compile_profile_enabled();
     let debug_profile = debug_profile_enabled();
