@@ -169,6 +169,7 @@ mod tests {
         fn compute_node_classes(
             node: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
             tokenizer: &crate::automata::lexer::tokenizer::Tokenizer,
+            active_states: &[u32],
             matched_terminals: &[Vec<u32>],
             node_terminal_ids: &[u32],
             empty_terminals_id: u32,
@@ -179,85 +180,93 @@ mod tests {
             segment_cache: &mut std::collections::HashMap<Vec<u8>, usize>,
             segment_outcome_tables: &mut Vec<Vec<SegmentWalkOutcome>>,
         ) -> Vec<u32> {
-            let child_data: Vec<(
-                usize,
-                crate::ds::u8set::U8Set,
-                Vec<u32>,
-            )> = node
-                .iter_children()
-                .map(|(segment, child)| {
-                    let segment_table_idx = if let Some(&table_idx) = segment_cache.get(segment) {
-                        table_idx
-                    } else {
-                        let mut outcomes = vec![
-                            SegmentWalkOutcome {
-                                terminals_id: empty_terminals_id,
-                                end_state: None,
-                            };
-                            tokenizer.num_states() as usize
-                        ];
+            let mut child_data = Vec::new();
+            for (segment, child) in node.iter_children() {
+                let segment_table_idx = if let Some(&table_idx) = segment_cache.get(segment) {
+                    table_idx
+                } else {
+                    let mut outcomes = vec![
+                        SegmentWalkOutcome {
+                            terminals_id: empty_terminals_id,
+                            end_state: None,
+                        };
+                        tokenizer.num_states() as usize
+                    ];
 
-                        for start_state in 0..tokenizer.num_states() {
-                            let mut current_state = start_state;
-                            let mut blocked = false;
-                            let mut encountered_terminals = Vec::new();
+                    for start_state in 0..tokenizer.num_states() {
+                        let mut current_state = start_state;
+                        let mut blocked = false;
+                        let mut encountered_terminals = Vec::new();
 
-                            for &byte in segment {
-                                let next_state = flat_transitions[current_state as usize][byte as usize];
-                                if next_state == u32::MAX {
-                                    blocked = true;
-                                    break;
-                                }
-                                current_state = next_state;
-                                encountered_terminals
-                                    .extend_from_slice(&matched_terminals[current_state as usize]);
+                        for &byte in segment {
+                            let next_state = flat_transitions[current_state as usize][byte as usize];
+                            if next_state == u32::MAX {
+                                blocked = true;
+                                break;
                             }
-
-                            if encountered_terminals.len() > 1 {
-                                encountered_terminals.sort_unstable();
-                                encountered_terminals.dedup();
-                            }
-
-                            let next_id = terminal_set_ids.len() as u32;
-                            let terminals_id = *terminal_set_ids
-                                .entry(encountered_terminals)
-                                .or_insert(next_id);
-                            outcomes[start_state as usize] = SegmentWalkOutcome {
-                                terminals_id,
-                                end_state: (!blocked).then_some(current_state),
-                            };
+                            current_state = next_state;
+                            encountered_terminals
+                                .extend_from_slice(&matched_terminals[current_state as usize]);
                         }
 
-                        let table_idx = segment_outcome_tables.len();
-                        segment_outcome_tables.push(outcomes);
-                        segment_cache.insert(segment.to_vec(), table_idx);
-                        table_idx
-                    };
+                        if encountered_terminals.len() > 1 {
+                            encountered_terminals.sort_unstable();
+                            encountered_terminals.dedup();
+                        }
 
-                    (
-                        segment_table_idx,
-                        crate::ds::u8set::U8Set::from_words(*child.subtree_bytes()),
-                        compute_node_classes(
-                            child,
-                            tokenizer,
-                            matched_terminals,
-                            node_terminal_ids,
-                            empty_terminals_id,
-                            is_end,
-                            flat_transitions,
-                            self_loop_bytes,
-                            terminal_set_ids,
-                            segment_cache,
-                            segment_outcome_tables,
-                        ),
-                    )
-                })
-                .collect();
+                        let next_id = terminal_set_ids.len() as u32;
+                        let terminals_id = *terminal_set_ids
+                            .entry(encountered_terminals)
+                            .or_insert(next_id);
+                        outcomes[start_state as usize] = SegmentWalkOutcome {
+                            terminals_id,
+                            end_state: (!blocked).then_some(current_state),
+                        };
+                    }
+
+                    let table_idx = segment_outcome_tables.len();
+                    segment_outcome_tables.push(outcomes);
+                    segment_cache.insert(segment.to_vec(), table_idx);
+                    table_idx
+                };
+
+                let child_subtree_bytes = crate::ds::u8set::U8Set::from_words(*child.subtree_bytes());
+                let mut child_active_states = Vec::new();
+                for &state in active_states {
+                    let segment_outcome = segment_outcome_tables[segment_table_idx][state as usize];
+                    if let Some(end_state) = segment_outcome.end_state {
+                        if !is_end[end_state as usize]
+                            && !child_subtree_bytes.is_subset(&self_loop_bytes[end_state as usize])
+                        {
+                            child_active_states.push(end_state);
+                        }
+                    }
+                }
+                child_active_states.sort_unstable();
+                child_active_states.dedup();
+
+                let child_classes = compute_node_classes(
+                    child,
+                    tokenizer,
+                    &child_active_states,
+                    matched_terminals,
+                    node_terminal_ids,
+                    empty_terminals_id,
+                    is_end,
+                    flat_transitions,
+                    self_loop_bytes,
+                    terminal_set_ids,
+                    segment_cache,
+                    segment_outcome_tables,
+                );
+
+                child_data.push((segment_table_idx, child_subtree_bytes, child_classes));
+            }
 
             let mut signature_ids = std::collections::HashMap::new();
-            let mut classes = vec![0u32; tokenizer.num_states() as usize];
+            let mut classes = vec![u32::MAX; tokenizer.num_states() as usize];
 
-            for state in 0..tokenizer.num_states() {
+            for &state in active_states {
                 let node_terminals_id = if node.has_token() {
                     node_terminal_ids[state as usize]
                 } else {
@@ -293,6 +302,7 @@ mod tests {
         compute_node_classes(
             root,
             tokenizer,
+            &(0..tokenizer.num_states()).collect::<Vec<_>>(),
             &matched_terminals,
             &node_terminal_ids,
             empty_terminals_id,
