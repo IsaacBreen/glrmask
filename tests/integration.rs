@@ -619,7 +619,7 @@ fn test_mre_o43234_closed_object_string_then_integer_rejects_trailing_comma_in_m
 }
 
 #[test]
-fn test_mre_o43234_native_two_field_string_then_integer_rejects_trailing_comma() {
+fn test_mre_o43234_glrm_two_field_string_then_integer_rejects_trailing_comma() {
     let vocab = Vocab::new(
         vec![
             (1, b"\"".to_vec()),
@@ -630,16 +630,15 @@ fn test_mre_o43234_native_two_field_string_then_integer_rejects_trailing_comma()
         ],
         None,
     );
-    let constraint = Constraint::from_json_schema(
-        r#"{
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "a": {"type": "string"},
-                "b": {"type": "integer"}
-            },
-            "required": ["a", "b"]
-        }"#,
+    let constraint = Constraint::from_glrm_grammar(
+        r#"
+            start start;
+            internal t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]/;
+            t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
+            nt json_string ::= "\"" JSON_STRING_BODY;
+            t JSON_INTEGER ::= /-?(0|[1-9][0-9]*)/;
+            nt start ::= "{" ("\"" "a\"" ": " json_string) (", \"" "b\"" ": " JSON_INTEGER) "}";
+        "#,
         &vocab,
     )
     .unwrap();
@@ -667,7 +666,7 @@ fn test_mre_o43234_native_two_field_string_then_integer_rejects_trailing_comma()
     assert_eq!(
         (mask_accepts, commit_token_accepts, commit_bytes_accepts),
         (false, false, false),
-        "o43234 native trailing comma should be rejected consistently by both mask and commit; mask={mask_accepts} commit_token={commit_token_accepts} commit_bytes={commit_bytes_accepts}",
+        "o43234 glrm trailing comma should be rejected consistently by both mask and commit; mask={mask_accepts} commit_token={commit_token_accepts} commit_bytes={commit_bytes_accepts}",
     );
 }
 
