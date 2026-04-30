@@ -54,27 +54,6 @@ impl ManyToOneIdMap {
         }
     }
 
-    pub fn compose(&self, next: &ManyToOneIdMap) -> Self {
-        let mut original_to_internal = vec![u32::MAX; self.original_to_internal.len()];
-
-        for (original, &mid) in self.original_to_internal.iter().enumerate() {
-            if mid == u32::MAX {
-                continue;
-            }
-            let mapped = next
-                .original_to_internal
-                .get(mid as usize)
-                .copied()
-                .unwrap_or(u32::MAX);
-            original_to_internal[original] = mapped;
-        }
-
-        ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
-            original_to_internal,
-            next.num_internal_ids(),
-        )
-    }
-
     pub fn num_internal_ids(&self) -> u32 {
         self.internal_to_originals.len() as u32
     }

@@ -222,38 +222,16 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let total_started_at = Instant::now();
     let num_original_states = tokenizer.num_states() as usize;
     let num_active_terminals = active_terminals.iter().filter(|&&active| active).count();
-    let mut relevant_bytes = [false; 256];
-    for bytes in vocab.entries.values() {
-        for &byte in bytes {
-            relevant_bytes[byte as usize] = true;
-        }
-    }
-
-    // ---- Step 0: Simplify tokenizer for active terminals ----
-    // Strip non-active terminal bits from finalizers, drop transitions on
-    // bytes absent from this partition's vocab, and minimize. This merges
-    // states that only differed by non-active terminal info or irrelevant-byte
-    // transitions, reducing the state count for equivalence analysis and NWA
-    // building.
-    let simplify_started_at = Instant::now();
-    let (simplified_tok, simplify_state_map) = tokenizer.simplify_for_terminals(
-        active_terminals,
-        Some(&relevant_bytes),
-    );
-    let simplify_ms = simplify_started_at.elapsed().as_secs_f64() * 1000.0;
+    let simplify_ms = 0.0;
+    let simplified_tok = tokenizer.clone();
 
     if debug_profile_enabled() {
-        let unmapped_original_states = simplify_state_map
-            .original_to_internal
-            .iter()
-            .filter(|&&state| state == u32::MAX)
-            .count();
         eprintln!(
             "[glrmask/debug][l2p_simplify] partition={} original_states={} simplified_states={} unmapped_original_states={}",
             partition_label,
             num_original_states,
             simplified_tok.num_states(),
-            unmapped_original_states,
+            0,
         );
     }
 
@@ -453,11 +431,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     if early_none {
         return None;
     }
-    let composed_tokenizer_states = simplify_state_map.compose(&simplified_id_map.tokenizer_states);
-    let composed_id_map = InternalIdMap {
-        tokenizer_states: composed_tokenizer_states,
-        vocab_tokens: simplified_id_map.vocab_tokens.clone(),
-    };
+    let composed_id_map = simplified_id_map.clone();
     let postprocess_ms = always_allowed_ms + collapse_ms + disallowed_ms + prune_ms + canonicalize_ms;
 
     if compile_profile_enabled() || debug_profile_enabled() {
