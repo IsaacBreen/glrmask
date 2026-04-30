@@ -386,103 +386,38 @@ fn build_possible_match_signatures(
     signatures
 }
 
-fn build_seed_state_signatures(
-    tokenizer: &Tokenizer,
+fn build_seed_state_signatures_from_possible_matches(
+    raw_possible_matches: &DensePossibleMatchesByState,
     token_bytes: &BTreeMap<u32, Vec<u8>>,
     tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
 ) -> FxHashMap<u32, SeedStateSignature> {
-    let max_token_slot = max_original_token_slot(token_bytes) as usize;
-    let mut signatures_by_token = vec![Vec::new(); max_token_slot];
-
-    let num_states = tokenizer.num_states() as usize;
-    let terminal_states: Vec<bool> = (0..tokenizer.num_states())
-        .map(|state| tokenizer.matched_terminals_iter(state).next().is_some())
+    let mut signatures: FxHashMap<u32, SeedStateSignature> = token_bytes
+        .keys()
+        .map(|&token_id| (token_id, Vec::new()))
         .collect();
-    let terminal_start_states: Vec<u32> = (0..tokenizer.num_states())
-        .filter(|&state| terminal_states[state as usize])
-        .collect();
-    let nonterminal_start_states: Vec<u32> = (0..tokenizer.num_states())
-        .filter(|&state| !terminal_states[state as usize])
-        .collect();
-    let flat_transitions: Vec<[u32; 256]> = (0..tokenizer.num_states())
-        .map(|state| {
-            let dfa_state = &tokenizer.dfa.states()[state as usize];
-            let mut flat = [u32::MAX; 256];
-            for (byte, &target) in dfa_state.transitions.iter() {
-                flat[byte as usize] = target;
-            }
-            flat
-        })
-        .collect();
-    let mut active_start_states = Vec::with_capacity(num_states);
-    let mut active_current_states = Vec::with_capacity(num_states);
-    let mut next_active_start_states = Vec::with_capacity(num_states);
-    let mut next_active_current_states = Vec::with_capacity(num_states);
-    let mut matched_states = Vec::with_capacity(num_states);
 
-    for (&token_id, bytes) in token_bytes {
-        let equivalent_tokens = tokens_with_same_bytes
-            .get(&token_id)
-            .cloned()
-            .unwrap_or_else(|| Arc::from([token_id]));
-        if equivalent_tokens.first().copied() != Some(token_id) {
-            continue;
-        }
+    for (&original_tokenizer_state, terminals) in raw_possible_matches {
+        for bitmap in terminals.values() {
+            for_each_dense_bit(bitmap, |original_token_id| {
+                let Some(equivalent_tokens) = tokens_with_same_bytes.get(&original_token_id) else {
+                    return;
+                };
 
-        active_start_states.clear();
-        active_start_states.extend_from_slice(&nonterminal_start_states);
-        active_current_states.clear();
-        active_current_states.extend_from_slice(&nonterminal_start_states);
-        matched_states.clear();
-        matched_states.extend_from_slice(&terminal_start_states);
-
-        for &byte in bytes {
-            next_active_start_states.clear();
-            next_active_current_states.clear();
-
-            for (&start_state, &current_state) in active_start_states
-                .iter()
-                .zip(active_current_states.iter())
-            {
-                let next_state = flat_transitions[current_state as usize][byte as usize];
-                if next_state == u32::MAX {
-                    continue;
+                for &equivalent_token_id in equivalent_tokens.iter() {
+                    if let Some(signature) = signatures.get_mut(&equivalent_token_id) {
+                        signature.push(original_tokenizer_state);
+                    }
                 }
-
-                if terminal_states[next_state as usize] {
-                    matched_states.push(start_state);
-                } else {
-                    next_active_start_states.push(start_state);
-                    next_active_current_states.push(next_state);
-                }
-            }
-
-            std::mem::swap(&mut active_start_states, &mut next_active_start_states);
-            std::mem::swap(&mut active_current_states, &mut next_active_current_states);
-
-            if active_start_states.is_empty() {
-                break;
-            }
-        }
-
-        matched_states.extend(active_start_states.iter().copied());
-
-        for &equivalent_token_id in equivalent_tokens.iter() {
-            if let Some(signature) = signatures_by_token.get_mut(equivalent_token_id as usize) {
-                signature.extend_from_slice(&matched_states);
-            }
+            });
         }
     }
 
-    token_bytes
-        .keys()
-        .filter_map(|&token_id| {
-            signatures_by_token
-                .get(token_id as usize)
-                .cloned()
-                .map(|signature| (token_id, signature))
-        })
-        .collect()
+    for signature in signatures.values_mut() {
+        signature.sort_unstable();
+        signature.dedup();
+    }
+
+    signatures
 }
 
 fn intern_signature_ids<T>(signatures: FxHashMap<u32, T>) -> FxHashMap<u32, SignatureClassId>
@@ -1362,8 +1297,8 @@ fn compile_prepared_with_profile(
         let possible_match_signature_ids = intern_signature_ids(possible_match_signatures);
 
         let seed_state_signatures_started_at = Instant::now();
-        let seed_state_signatures = build_seed_state_signatures(
-            &tokenizer,
+        let seed_state_signatures = build_seed_state_signatures_from_possible_matches(
+            &raw_possible_matches,
             &token_bytes,
             &tokens_with_same_bytes,
         );
@@ -1741,9 +1676,20 @@ mod tests {
             (1u32, b"ac".to_vec()),
         ]);
         let tokens_with_same_bytes = build_tokens_with_same_bytes(&token_bytes);
-
-        let actual = build_seed_state_signatures(
+        let trie = crate::ds::vocab_prefix_tree::VocabPrefixTree::build_owned(
+            token_bytes
+                .iter()
+                .map(|(&token_id, bytes)| (token_id as usize, bytes.clone()))
+                .collect(),
+        );
+        let (raw_possible_matches, _) = crate::compiler::possible_matches::collect_possible_matches_by_original_tsid_dense(
             &constraint.tokenizer,
+            &trie.root,
+            max_original_token_slot(&token_bytes),
+        );
+
+        let actual = build_seed_state_signatures_from_possible_matches(
+            &raw_possible_matches,
             &token_bytes,
             &tokens_with_same_bytes,
         );
@@ -1784,9 +1730,20 @@ mod tests {
             (313u32, b"--".to_vec()),
         ]);
         let tokens_with_same_bytes = build_tokens_with_same_bytes(&token_bytes);
-
-        let actual = build_seed_state_signatures(
+        let trie = crate::ds::vocab_prefix_tree::VocabPrefixTree::build_owned(
+            token_bytes
+                .iter()
+                .map(|(&token_id, bytes)| (token_id as usize, bytes.clone()))
+                .collect(),
+        );
+        let (raw_possible_matches, _) = crate::compiler::possible_matches::collect_possible_matches_by_original_tsid_dense(
             &constraint.tokenizer,
+            &trie.root,
+            max_original_token_slot(&token_bytes),
+        );
+
+        let actual = build_seed_state_signatures_from_possible_matches(
+            &raw_possible_matches,
             &token_bytes,
             &tokens_with_same_bytes,
         );
