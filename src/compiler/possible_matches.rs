@@ -338,6 +338,33 @@ fn reachable_bitmap(node: &VocabPrefixTreeNode, num_words: usize) -> Vec<u64> {
     words
 }
 
+fn reachable_sparse_bitmap(node: &VocabPrefixTreeNode) -> Box<[(u16, u64)]> {
+    let mut entries = Vec::new();
+
+    for range in node.reachable_token_ids().ranges() {
+        let mut token_id = *range.start() as u32;
+        let end = *range.end() as u32;
+
+        while token_id <= end {
+            let word = token_id / 64;
+            let word_end = ((word + 1) * 64 - 1).min(end);
+            let start_bit = token_id % 64;
+            let end_bit = word_end % 64;
+            let bit_count = end_bit - start_bit + 1;
+            let mask = if bit_count == 64 {
+                u64::MAX
+            } else {
+                ((1u64 << bit_count) - 1) << start_bit
+            };
+
+            entries.push((word as u16, mask));
+            token_id = word_end.saturating_add(1);
+        }
+    }
+
+    entries.into_boxed_slice()
+}
+
 #[inline]
 fn merge_bitmaps(into: &mut [u64], other: &[u64]) {
     for (a, b) in into.iter_mut().zip(other.iter()) {
@@ -651,8 +678,8 @@ fn collect_possible_matches_dense_batched(
         .collect();
 
     // Pre-compute reachable bitmaps for all trie nodes.
-    let mut reachable_bitmaps: FxHashMap<usize, Vec<u64>> = FxHashMap::default();
-    precompute_reachable_bitmaps(root, num_words, &mut reachable_bitmaps);
+    let mut reachable_bitmaps: FxHashMap<usize, Box<[(u16, u64)]>> = FxHashMap::default();
+    precompute_reachable_bitmaps(root, &mut reachable_bitmaps);
 
     let entries: Vec<u32> = (0..tokenizer.num_states()).collect();
 
@@ -702,16 +729,15 @@ fn collect_possible_matches_dense_batched(
 
 fn precompute_reachable_bitmaps(
     node: &VocabPrefixTreeNode,
-    num_words: usize,
-    cache: &mut FxHashMap<usize, Vec<u64>>,
+    cache: &mut FxHashMap<usize, Box<[(u16, u64)]>>,
 ) {
     let key = node as *const VocabPrefixTreeNode as usize;
     if cache.contains_key(&key) {
         return;
     }
-    cache.insert(key, reachable_bitmap(node, num_words));
+    cache.insert(key, reachable_sparse_bitmap(node));
     for (_, child) in node.iter_children() {
-        precompute_reachable_bitmaps(child, num_words, cache);
+        precompute_reachable_bitmaps(child, cache);
     }
 }
 
@@ -724,7 +750,7 @@ fn batched_walk_node(
     matched_terminals: &[Box<[TerminalID]>],
     is_end: &[bool],
     num_words: usize,
-    reachable_bitmaps: &FxHashMap<usize, Vec<u64>>,
+    reachable_bitmaps: &FxHashMap<usize, Box<[(u16, u64)]>>,
 ) {
     if live.is_empty() {
         return;
@@ -765,7 +791,9 @@ fn batched_walk_node(
                 for &terminal in matched_terminals[s as usize].iter() {
                     let entry = results[idx][terminal as usize]
                         .get_or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
-                    merge_bitmaps(entry, reachable);
+                    for &(word_idx, mask) in reachable.iter() {
+                        entry[word_idx as usize] |= mask;
+                    }
                 }
             }
 
