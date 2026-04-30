@@ -2383,6 +2383,76 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "o1051 diagnostic: compare trie-class collector against current collector"]
+    fn test_o1051_llama3_trie_class_dense_possible_matches_collector() {
+        let vocab = load_llama3_vocab();
+        let schema_path = o1051_schema_path();
+        let schema_json = fs::read_to_string(&schema_path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", schema_path.display()));
+        let schema_value: serde_json::Value = serde_json::from_str(&schema_json)
+            .expect("o1051 schema should parse as JSON");
+        let schema_payload = schema_value.get("schema").unwrap_or(&schema_value);
+        let grammar = json_schema_to_grammar(
+            &serde_json::to_string(schema_payload).expect("o1051 schema should serialize"),
+        )
+        .expect("o1051 schema should import to a grammar");
+        let (prepared_grammar, _nullable_terminals) = prepare_grammar_for_compile(&grammar);
+
+        let tokenizer_started_at = Instant::now();
+        let tokenizer = build_tokenizer(&prepared_grammar);
+        let tokenizer_ms = elapsed_ms(tokenizer_started_at);
+
+        let trie_started_at = Instant::now();
+        let trie = crate::ds::vocab_prefix_tree::VocabPrefixTree::build_owned(
+            vocab.entries
+                .iter()
+                .map(|(&token_id, bytes)| (token_id as usize, bytes.clone()))
+                .collect(),
+        );
+        let trie_ms = elapsed_ms(trie_started_at);
+
+        let sample_state_limit = std::env::var("GLRMASK_PM_DIAG_SAMPLE_STATES")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(8192)
+            .min(tokenizer.num_states());
+        let entries: Vec<u32> = (0..sample_state_limit).collect();
+
+        let baseline_started_at = Instant::now();
+        let (baseline_maps, baseline_profile) = crate::compiler::possible_matches::collect_possible_matches_by_selected_original_tsid_dense(
+            &tokenizer,
+            &trie.root,
+            vocab.entries.len() as u32,
+            &entries,
+        );
+        let baseline_ms = elapsed_ms(baseline_started_at);
+
+        let trie_class_started_at = Instant::now();
+        let (trie_class_maps, trie_class_profile) = crate::compiler::possible_matches::collect_possible_matches_dense_trie_class_build(
+            &tokenizer,
+            &trie.root,
+            vocab.entries.len() as u32,
+            &entries,
+        );
+        let trie_class_ms = elapsed_ms(trie_class_started_at);
+
+        assert_eq!(trie_class_maps, baseline_maps);
+
+        eprintln!(
+            "[o1051/trie_class_dense_possible_matches_collector] tokenizer_states={} sampled_states={} tokenizer_ms={:.3} trie_ms={:.3} baseline_ms={:.3} trie_class_ms={:.3} speedup={:.2}x baseline_root_compute_ms={:.3} trie_class_root_compute_ms={:.3}",
+            tokenizer.num_states(),
+            entries.len(),
+            tokenizer_ms,
+            trie_ms,
+            baseline_ms,
+            trie_class_ms,
+            baseline_ms / trie_class_ms.max(0.001),
+            baseline_profile.root_compute_ms,
+            trie_class_profile.root_compute_ms,
+        );
+    }
+
+    #[test]
     #[ignore = "o1051 diagnostic: exact PM-map interning classes"]
     fn test_o1051_llama3_trie_pm_exact_map_classes() {
         let vocab = load_llama3_vocab();
