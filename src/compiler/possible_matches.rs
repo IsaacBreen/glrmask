@@ -615,6 +615,7 @@ fn collect_possible_matches_dense_batched(
     num_internal_tokens: u32,
 ) -> (BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>, PossibleMatchesProfile) {
     let num_words = (num_internal_tokens as usize + 63) / 64;
+    let terminal_count = tokenizer.num_terminals as usize;
 
     // Pre-compute flat transitions for all DFA states.
     let flat_transitions: Vec<[u32; 256]> = (0..tokenizer.num_states() as usize)
@@ -656,9 +657,9 @@ fn collect_possible_matches_dense_batched(
     let entries: Vec<u32> = (0..tokenizer.num_states()).collect();
 
     let n = entries.len();
-    let mut results: Vec<DensePossibleMatchMap> = Vec::with_capacity(n);
+    let mut results: Vec<Vec<Option<Box<[u64]>>>> = Vec::with_capacity(n);
     for _ in 0..n {
-        results.push(DensePossibleMatchMap::default());
+        results.push(vec![None; terminal_count]);
     }
 
     // Build initial live set: (entry_index, dfa_state)
@@ -681,7 +682,20 @@ fn collect_possible_matches_dense_batched(
     );
 
     let possible_matches_by_state: BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>> =
-        results.into_iter().enumerate().map(|(i, map)| (entries[i], map)).collect();
+        results
+            .into_iter()
+            .enumerate()
+            .map(|(i, slots)| {
+                let map = slots
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(terminal_id, bitmap)| {
+                        bitmap.map(|bitmap| (terminal_id as TerminalID, bitmap))
+                    })
+                    .collect();
+                (entries[i], map)
+            })
+            .collect();
 
     (possible_matches_by_state, PossibleMatchesProfile::default())
 }
@@ -704,7 +718,7 @@ fn precompute_reachable_bitmaps(
 fn batched_walk_node(
     node: &VocabPrefixTreeNode,
     live: &[(usize, u32)],
-    results: &mut [DensePossibleMatchMap],
+    results: &mut [Vec<Option<Box<[u64]>>>],
     flat_trans: &[[u32; 256]],
     self_loop: &[U8Set],
     matched_terminals: &[Box<[TerminalID]>],
@@ -721,9 +735,8 @@ fn batched_walk_node(
         let token_id = node.token_id() as u32;
         for &(idx, state) in live {
             for &terminal in matched_terminals[state as usize].iter() {
-                let entry = results[idx]
-                    .entry(terminal)
-                    .or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
+                let entry = results[idx][terminal as usize]
+                    .get_or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
                 entry[token_id as usize / 64] |= 1u64 << (token_id % 64);
             }
         }
@@ -750,9 +763,8 @@ fn batched_walk_node(
                 }
                 s = next;
                 for &terminal in matched_terminals[s as usize].iter() {
-                    let entry = results[idx]
-                        .entry(terminal)
-                        .or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
+                    let entry = results[idx][terminal as usize]
+                        .get_or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
                     merge_bitmaps(entry, reachable);
                 }
             }

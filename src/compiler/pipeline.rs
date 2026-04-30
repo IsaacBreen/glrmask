@@ -404,10 +404,10 @@ fn build_seed_state_signatures(
     let nonterminal_start_states: Vec<u32> = (0..tokenizer.num_states())
         .filter(|&state| !terminal_states[state as usize])
         .collect();
-    let flat_transitions: Vec<Box<[u32; 256]>> = (0..tokenizer.num_states())
+    let flat_transitions: Vec<[u32; 256]> = (0..tokenizer.num_states())
         .map(|state| {
             let dfa_state = &tokenizer.dfa.states()[state as usize];
-            let mut flat = Box::new([u32::MAX; 256]);
+            let mut flat = [u32::MAX; 256];
             for (byte, &target) in dfa_state.transitions.iter() {
                 flat[byte as usize] = target;
             }

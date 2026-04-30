@@ -652,10 +652,10 @@ impl Constraint {
         let nonterminal_start_states: Vec<u32> = (0..self.tokenizer.num_states())
             .filter(|&state| !terminal_states[state as usize])
             .collect();
-        let flat_transitions: Vec<Box<[u32; 256]>> = (0..self.tokenizer.num_states())
+        let flat_transitions: Vec<[u32; 256]> = (0..self.tokenizer.num_states())
             .map(|state| {
                 let dfa_state = &self.tokenizer.dfa.states()[state as usize];
-                let mut flat = Box::new([u32::MAX; 256]);
+                let mut flat = [u32::MAX; 256];
                 for (byte, &target) in dfa_state.transitions.iter() {
                     flat[byte as usize] = target;
                 }
