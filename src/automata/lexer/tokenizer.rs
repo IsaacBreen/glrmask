@@ -858,6 +858,26 @@ impl Tokenizer {
             return (Tokenizer { dfa, num_terminals: self.num_terminals, exprs: self.exprs.clone() }, identity);
         }
 
+        if transitions_pruned {
+            // Pruning non-relevant bytes can make states look equivalent even
+            // when their original futures differ behind those pruned edges.
+            // Returning the filtered DFA directly avoids reintroducing a union
+            // of those incompatible futures during state remapping.
+            let n = dfa.num_states();
+            let identity: Vec<u32> = (0..n as u32).collect();
+            if compile_profile {
+                eprintln!(
+                    "[glrmask/profile][simplify_detail] states={} active={} clone_ms={:.1} clear_ms={:.1} skip_minimize(pruned_transitions) total_ms={:.1}",
+                    n,
+                    active_terminals.iter().filter(|&&b| b).count(),
+                    t_clone.as_secs_f64()*1000.0,
+                    (t_clear - t_clone).as_secs_f64()*1000.0,
+                    t_start.elapsed().as_secs_f64()*1000.0,
+                );
+            }
+            return (Tokenizer { dfa, num_terminals: self.num_terminals, exprs: self.exprs.clone() }, identity);
+        }
+
         let pre_minimize_states = dfa.num_states();
 
         let num_active = active_terminals.iter().filter(|&&b| b).count();

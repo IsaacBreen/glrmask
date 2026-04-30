@@ -447,13 +447,14 @@ fn push_seed_signature_for_subtree(
 fn collect_seed_state_signature_for_state(
     tokenizer: &Tokenizer,
     node: &VocabPrefixTreeNode,
+    signature_state: u32,
     tokenizer_state: u32,
     flat_transitions: &mut [Option<Box<[u32; 256]>>],
     signatures: &mut [Vec<u32>],
     tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
 ) {
     if tokenizer.matched_terminals_iter(tokenizer_state).next().is_some() {
-        push_seed_signature_for_subtree(node, tokenizer_state, signatures, tokens_with_same_bytes);
+        push_seed_signature_for_subtree(node, signature_state, signatures, tokens_with_same_bytes);
         return;
     }
 
@@ -476,7 +477,7 @@ fn collect_seed_state_signature_for_state(
         }
 
         if matched_prefix {
-            push_seed_signature_for_subtree(child, tokenizer_state, signatures, tokens_with_same_bytes);
+            push_seed_signature_for_subtree(child, signature_state, signatures, tokens_with_same_bytes);
             continue;
         }
 
@@ -487,7 +488,7 @@ fn collect_seed_state_signature_for_state(
         if child.has_token() {
             push_seed_signature_for_token(
                 child.token_id(),
-                tokenizer_state,
+                signature_state,
                 signatures,
                 tokens_with_same_bytes,
             );
@@ -496,6 +497,7 @@ fn collect_seed_state_signature_for_state(
         collect_seed_state_signature_for_state(
             tokenizer,
             child,
+            signature_state,
             current_state,
             flat_transitions,
             signatures,
@@ -530,6 +532,7 @@ fn build_seed_state_signatures(
         collect_seed_state_signature_for_state(
             tokenizer,
             &trie.root,
+            tokenizer_state,
             tokenizer_state,
             &mut flat_transitions,
             &mut signatures_by_token,
@@ -571,8 +574,8 @@ where
 fn build_constraint_vocab_map(
     parser_vocab: &ManyToOneIdMap,
     token_bytes: &BTreeMap<u32, Vec<u8>>,
-    possible_match_signature_ids: &FxHashMap<u32, SignatureClassId>,
-    seed_state_signature_ids: &FxHashMap<u32, SignatureClassId>,
+    possible_match_signatures: &FxHashMap<u32, PossibleMatchSignature>,
+    seed_state_signatures: &FxHashMap<u32, SeedStateSignature>,
 ) -> ConstraintVocabMap {
     let max_original_slot = token_bytes
         .keys()
@@ -598,8 +601,8 @@ fn build_constraint_vocab_map(
     // unmapped tokens.
 
     for (old_internal_id, originals) in parser_vocab.internal_to_originals.iter().enumerate() {
-        let mut groups: FxHashMap<(SignatureClassId, SignatureClassId), Vec<u32>> =
-            FxHashMap::default();
+        let mut groups: BTreeMap<(PossibleMatchSignature, SeedStateSignature), Vec<u32>> =
+            BTreeMap::new();
 
         for &original_token_id in originals {
             if !token_bytes.contains_key(&original_token_id) {
@@ -618,11 +621,11 @@ fn build_constraint_vocab_map(
                 "inconsistent parser vocab map for original token {original_token_id}"
             );
 
-            let signature = possible_match_signature_ids
+            let signature = possible_match_signatures
                 .get(&original_token_id)
                 .cloned()
                 .unwrap_or_default();
-            let seed_signature = seed_state_signature_ids
+            let seed_signature = seed_state_signatures
                 .get(&original_token_id)
                 .cloned()
                 .unwrap_or_default();
@@ -633,7 +636,7 @@ fn build_constraint_vocab_map(
                 .push(original_token_id);
         }
 
-        for mut originals in groups.into_values() {
+        for (_, mut originals) in groups {
             originals.sort_unstable();
             originals.dedup();
 
@@ -1401,21 +1404,21 @@ fn compile_prepared_with_profile(
 
         let constraint_vocab_started_at = Instant::now();
         let tokens_with_same_bytes = build_tokens_with_same_bytes(&token_bytes);
-        let possible_match_signature_ids = intern_signature_ids(build_possible_match_signatures(
+        let possible_match_signatures = build_possible_match_signatures(
             &raw_possible_matches,
             &token_bytes,
             &tokens_with_same_bytes,
-        ));
-        let seed_state_signature_ids = intern_signature_ids(build_seed_state_signatures(
+        );
+        let seed_state_signatures = build_seed_state_signatures(
             &tokenizer,
             &token_bytes,
             &tokens_with_same_bytes,
-        ));
+        );
         let constraint_vocab = build_constraint_vocab_map(
             &internal_ids.vocab_tokens,
             &token_bytes,
-            &possible_match_signature_ids,
-            &seed_state_signature_ids,
+            &possible_match_signatures,
+            &seed_state_signatures,
         );
         let constraint_token_count = constraint_vocab.internal_to_originals.len() as u32;
         let possible_matches = remap_possible_matches_to_constraint_vocab(
@@ -1564,6 +1567,7 @@ pub(crate) fn compile_owned_profiled(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::Constraint;
 
     fn bitmap(tokens: &[u32], token_slots: u32) -> Box<[u64]> {
         let mut words = vec![0u64; dense_word_count(token_slots)];
@@ -1571,6 +1575,32 @@ mod tests {
             set_dense_bit(&mut words, token);
         }
         words.into_boxed_slice()
+    }
+
+    fn brute_force_seed_state_signatures(
+        tokenizer: &Tokenizer,
+        token_bytes: &BTreeMap<u32, Vec<u8>>,
+    ) -> FxHashMap<u32, SeedStateSignature> {
+        let mut signatures: FxHashMap<u32, SeedStateSignature> = token_bytes
+            .keys()
+            .map(|&token_id| (token_id, Vec::new()))
+            .collect();
+
+        for tokenizer_state in 0..tokenizer.num_states() {
+            for (&token_id, bytes) in token_bytes {
+                let exec = tokenizer.execute_from_state(bytes, tokenizer_state);
+                if exec.end_state.is_none() && exec.matches.is_empty() {
+                    continue;
+                }
+
+                signatures
+                    .get_mut(&token_id)
+                    .expect("token should have a seed signature slot")
+                    .push(tokenizer_state);
+            }
+        }
+
+        signatures
     }
 
     #[test]
@@ -1599,16 +1629,15 @@ mod tests {
             &token_bytes,
             &tokens_with_same_bytes,
         );
-        let possible_match_signature_ids = intern_signature_ids(signatures);
-        let seed_state_signature_ids: FxHashMap<u32, SignatureClassId> = token_bytes
+        let seed_state_signatures: FxHashMap<u32, SeedStateSignature> = token_bytes
             .keys()
-            .map(|&token_id| (token_id, 0))
+            .map(|&token_id| (token_id, Vec::new()))
             .collect();
         let constraint_vocab = build_constraint_vocab_map(
             &parser_vocab,
             &token_bytes,
-            &possible_match_signature_ids,
-            &seed_state_signature_ids,
+            &signatures,
+            &seed_state_signatures,
         );
 
         let tok0 = constraint_vocab.original_to_internal[0];
@@ -1661,16 +1690,15 @@ mod tests {
             &token_bytes,
             &tokens_with_same_bytes,
         );
-        let possible_match_signature_ids = intern_signature_ids(signatures);
-        let seed_state_signature_ids: FxHashMap<u32, SignatureClassId> = token_bytes
+        let seed_state_signatures: FxHashMap<u32, SeedStateSignature> = token_bytes
             .keys()
-            .map(|&token_id| (token_id, 0))
+            .map(|&token_id| (token_id, Vec::new()))
             .collect();
         let constraint_vocab = build_constraint_vocab_map(
             &parser_vocab,
             &token_bytes,
-            &possible_match_signature_ids,
-            &seed_state_signature_ids,
+            &signatures,
+            &seed_state_signatures,
         );
 
         let tok0 = constraint_vocab.original_to_internal[0];
@@ -1691,5 +1719,81 @@ mod tests {
         assert!(new_set.contains(tok0));
         assert!(new_set.contains(tok1));
         assert!(!new_set.contains(tok2));
+    }
+
+    #[test]
+    fn seed_state_signatures_match_bruteforce_across_shared_prefixes() {
+        let vocab = Vocab::new(
+            vec![
+                (0, b"ab".to_vec()),
+                (1, b"ac".to_vec()),
+            ],
+            None,
+        );
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                nt start ::= "ab" | "ac";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let token_bytes = BTreeMap::from([
+            (0u32, b"ab".to_vec()),
+            (1u32, b"ac".to_vec()),
+        ]);
+        let tokens_with_same_bytes = build_tokens_with_same_bytes(&token_bytes);
+
+        let actual = build_seed_state_signatures(
+            &constraint.tokenizer,
+            &token_bytes,
+            &tokens_with_same_bytes,
+        );
+        let expected = brute_force_seed_state_signatures(&constraint.tokenizer, &token_bytes);
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn seed_state_signatures_match_bruteforce_on_o43234_glrm_mre() {
+        let vocab = Vocab::new(
+            vec![
+                (1, b"\"".to_vec()),
+                (11, b",".to_vec()),
+                (25, b":".to_vec()),
+                (220, b" ".to_vec()),
+                (313, b"--".to_vec()),
+            ],
+            None,
+        );
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                internal t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]/;
+                t JSON_STRING_BODY ::= JSON_STRING_CHAR* "\"";
+                nt json_string ::= "\"" JSON_STRING_BODY;
+                t JSON_INTEGER ::= /-?(0|[1-9][0-9]*)/;
+                nt start ::= "{" ("\"" "a\"" ": " json_string) (", \"" "b\"" ": " JSON_INTEGER) "}";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let token_bytes = BTreeMap::from([
+            (1u32, b"\"".to_vec()),
+            (11u32, b",".to_vec()),
+            (25u32, b":".to_vec()),
+            (220u32, b" ".to_vec()),
+            (313u32, b"--".to_vec()),
+        ]);
+        let tokens_with_same_bytes = build_tokens_with_same_bytes(&token_bytes);
+
+        let actual = build_seed_state_signatures(
+            &constraint.tokenizer,
+            &token_bytes,
+            &tokens_with_same_bytes,
+        );
+        let expected = brute_force_seed_state_signatures(&constraint.tokenizer, &token_bytes);
+
+        assert_eq!(actual, expected);
     }
 }
