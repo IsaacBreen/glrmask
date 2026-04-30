@@ -5,7 +5,6 @@
 //! equivalence classes.
 
 use rayon::prelude::*;
-use std::collections::VecDeque;
 
 use super::super::compat::{FlatDfa, TokenizerView};
 
@@ -57,6 +56,27 @@ fn build_filtered_finalizer_labels(
         .collect()
 }
 
+fn build_filtered_possible_future_labels(
+    dfa: &FlatDfa,
+    active_groups: Option<&[bool]>,
+) -> Vec<Vec<usize>> {
+    dfa.states
+        .par_iter()
+        .map(|state| filtered_group_ids(&state.possible_future_group_ids, active_groups))
+        .collect()
+}
+
+fn build_has_any_transition_labels(dfa: &FlatDfa) -> Vec<bool> {
+    (0..dfa.states.len())
+        .into_par_iter()
+        .map(|state| {
+            dfa.transitions_for(state)
+                .iter()
+                .any(|&target| target != u32::MAX)
+        })
+        .collect()
+}
+
 #[inline]
 fn byte_is_relevant(byte: usize, relevant_bytes: Option<&[bool; 256]>) -> bool {
     relevant_bytes.map_or(true, |bytes| bytes[byte])
@@ -93,243 +113,9 @@ fn active_byte_representatives(
     }
 }
 
-fn build_dedup_adjacency(dfa: &FlatDfa, active_bytes: &[u8]) -> Vec<Vec<usize>> {
-    let n = dfa.states.len();
-
-    (0..n)
-        .into_par_iter()
-        .map(|state| {
-            let mut targets = Vec::new();
-            for &byte in active_bytes {
-                let target = dfa.trans(state, byte as usize);
-                if target != u32::MAX {
-                    targets.push(target as usize);
-                }
-            }
-            targets.sort_unstable();
-            targets.dedup();
-            targets
-        })
-        .collect()
-}
-
-fn compute_scc_ids(adj: &[Vec<usize>]) -> (Vec<u32>, usize) {
-    let n = adj.len();
-    let mut reverse_adj: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for (source, targets) in adj.iter().enumerate() {
-        for &target in targets {
-            reverse_adj[target].push(source);
-        }
-    }
-
-    let mut visited = vec![false; n];
-    let mut finish_order = Vec::with_capacity(n);
-
-    for start in 0..n {
-        if visited[start] {
-            continue;
-        }
-        visited[start] = true;
-        let mut stack: Vec<(usize, usize)> = vec![(start, 0)];
-
-        while let Some((state, next_child)) = stack.pop() {
-            if next_child < adj[state].len() {
-                stack.push((state, next_child + 1));
-                let target = adj[state][next_child];
-                if !visited[target] {
-                    visited[target] = true;
-                    stack.push((target, 0));
-                }
-            } else {
-                finish_order.push(state);
-            }
-        }
-    }
-
-    let mut scc_id = vec![u32::MAX; n];
-    let mut scc_count = 0usize;
-
-    for &start in finish_order.iter().rev() {
-        if scc_id[start] != u32::MAX {
-            continue;
-        }
-
-        let current_scc = usize_to_u32(scc_count, "SCC id");
-        scc_count += 1;
-        scc_id[start] = current_scc;
-        let mut stack = vec![start];
-
-        while let Some(state) = stack.pop() {
-            for &pred in &reverse_adj[state] {
-                if scc_id[pred] == u32::MAX {
-                    scc_id[pred] = current_scc;
-                    stack.push(pred);
-                }
-            }
-        }
-    }
-
-    (scc_id, scc_count)
-}
-
-fn union_sorted_in_place(dst: &mut Vec<usize>, src: &[usize]) {
-    if src.is_empty() {
-        return;
-    }
-    if dst.is_empty() {
-        dst.extend_from_slice(src);
-        return;
-    }
-
-    let mut merged = Vec::with_capacity(dst.len() + src.len());
-    let mut i = 0usize;
-    let mut j = 0usize;
-
-    while i < dst.len() && j < src.len() {
-        match dst[i].cmp(&src[j]) {
-            std::cmp::Ordering::Less => {
-                merged.push(dst[i]);
-                i += 1;
-            }
-            std::cmp::Ordering::Greater => {
-                merged.push(src[j]);
-                j += 1;
-            }
-            std::cmp::Ordering::Equal => {
-                merged.push(dst[i]);
-                i += 1;
-                j += 1;
-            }
-        }
-    }
-
-    merged.extend_from_slice(&dst[i..]);
-    merged.extend_from_slice(&src[j..]);
-    *dst = merged;
-}
-
-fn compute_strict_future_label_ids(
-    dfa: &FlatDfa,
-    active_bytes: &[u8],
-    finalizer_labels: &[Vec<usize>],
-) -> Vec<u32> {
-    let n = dfa.states.len();
-    if n == 0 {
-        return Vec::new();
-    }
-    if active_bytes.is_empty() || finalizer_labels.iter().all(|label| label.is_empty()) {
-        return vec![0u32; n];
-    }
-
-    let adj = build_dedup_adjacency(dfa, active_bytes);
-    let (scc_id, scc_count) = compute_scc_ids(&adj);
-
-    let mut scc_finalizers: Vec<Vec<usize>> = vec![Vec::new(); scc_count];
-    let mut scc_sizes = vec![0usize; scc_count];
-    let mut scc_has_self_loop = vec![false; scc_count];
-
-    for state in 0..n {
-        let sid = scc_id[state] as usize;
-        scc_sizes[sid] += 1;
-        scc_finalizers[sid].extend_from_slice(&finalizer_labels[state]);
-        if adj[state].iter().any(|&target| target == state) {
-            scc_has_self_loop[sid] = true;
-        }
-    }
-
-    for finalizers in &mut scc_finalizers {
-        finalizers.sort_unstable();
-        finalizers.dedup();
-    }
-
-    let mut scc_successors: Vec<Vec<u32>> = vec![Vec::new(); scc_count];
-    for (source, targets) in adj.iter().enumerate() {
-        let source_scc = scc_id[source];
-        for &target in targets {
-            let target_scc = scc_id[target];
-            if source_scc != target_scc {
-                scc_successors[source_scc as usize].push(target_scc);
-            }
-        }
-    }
-    for successors in &mut scc_successors {
-        successors.sort_unstable();
-        successors.dedup();
-    }
-
-    let mut scc_predecessors: Vec<Vec<u32>> = vec![Vec::new(); scc_count];
-    let mut remaining_successors = vec![0usize; scc_count];
-    for (sid, successors) in scc_successors.iter().enumerate() {
-        remaining_successors[sid] = successors.len();
-        let sid_u32 = usize_to_u32(sid, "SCC id");
-        for &succ in successors {
-            scc_predecessors[succ as usize].push(sid_u32);
-        }
-    }
-
-    let mut scc_futures: Vec<Vec<usize>> = vec![Vec::new(); scc_count];
-    for sid in 0..scc_count {
-        let cyclic = scc_sizes[sid] > 1 || scc_has_self_loop[sid];
-        if cyclic {
-            scc_futures[sid] = scc_finalizers[sid].clone();
-        }
-    }
-
-    let mut queue: VecDeque<u32> = remaining_successors
-        .iter()
-        .enumerate()
-        .filter_map(|(sid, &count)| (count == 0).then(|| usize_to_u32(sid, "SCC id")))
-        .collect();
-
-    while let Some(sid_u32) = queue.pop_front() {
-        let sid = sid_u32 as usize;
-        let sid_finalizers = scc_finalizers[sid].clone();
-        let sid_futures = scc_futures[sid].clone();
-
-        for &pred_u32 in &scc_predecessors[sid] {
-            let pred = pred_u32 as usize;
-            union_sorted_in_place(&mut scc_futures[pred], &sid_finalizers);
-            union_sorted_in_place(&mut scc_futures[pred], &sid_futures);
-
-            remaining_successors[pred] -= 1;
-            if remaining_successors[pred] == 0 {
-                queue.push_back(pred_u32);
-            }
-        }
-    }
-
-    let mut scc_order: Vec<usize> = (0..scc_count).collect();
-    scc_order.sort_unstable_by(|&left, &right| {
-        scc_futures[left]
-            .cmp(&scc_futures[right])
-            .then_with(|| left.cmp(&right))
-    });
-
-    let mut scc_future_ids = vec![0u32; scc_count];
-    let mut future_label_count = 0usize;
-    let mut previous_scc: Option<usize> = None;
-
-    for sid in scc_order {
-        let starts_new_label = previous_scc.map_or(true, |prev| scc_futures[sid] != scc_futures[prev]);
-        if starts_new_label {
-            future_label_count += 1;
-        }
-        scc_future_ids[sid] = usize_to_u32(future_label_count - 1, "future-label id");
-        previous_scc = Some(sid);
-    }
-
-    let mut state_future_ids = vec![0u32; n];
-    for state in 0..n {
-        state_future_ids[state] = scc_future_ids[scc_id[state] as usize];
-    }
-
-    state_future_ids
-}
-
 fn build_initial_label_partition(
     dfa: &FlatDfa,
     active_groups: Option<&[bool]>,
-    active_bytes: &[u8],
 ) -> (Vec<u32>, usize) {
     let n = dfa.states.len();
     if n == 0 {
@@ -337,13 +123,15 @@ fn build_initial_label_partition(
     }
 
     let finalizer_labels = build_filtered_finalizer_labels(dfa, active_groups);
-    let future_label_ids = compute_strict_future_label_ids(dfa, active_bytes, &finalizer_labels);
+    let future_labels = build_filtered_possible_future_labels(dfa, active_groups);
+    let has_any_transition = build_has_any_transition_labels(dfa);
 
     let mut order: Vec<usize> = (0..n).collect();
     order.par_sort_unstable_by(|&left, &right| {
         finalizer_labels[left]
             .cmp(&finalizer_labels[right])
-            .then_with(|| future_label_ids[left].cmp(&future_label_ids[right]))
+            .then_with(|| future_labels[left].cmp(&future_labels[right]))
+            .then_with(|| has_any_transition[left].cmp(&has_any_transition[right]))
             .then_with(|| left.cmp(&right))
     });
 
@@ -354,7 +142,8 @@ fn build_initial_label_partition(
     for state in order {
         let starts_new_label = previous_state.map_or(true, |prev| {
             finalizer_labels[state] != finalizer_labels[prev]
-                || future_label_ids[state] != future_label_ids[prev]
+                || future_labels[state] != future_labels[prev]
+                || has_any_transition[state] != has_any_transition[prev]
         });
         if starts_new_label {
             label_count += 1;
@@ -464,22 +253,27 @@ fn compute_kbounded_partition(
     }
 
     let debug = debug_max_length_enabled();
-    let (label_ids, mut block_count) = build_initial_label_partition(dfa, active_groups, active_bytes);
+    let (label_ids, mut block_count) = build_initial_label_partition(dfa, active_groups);
     let mut blocks = label_ids.clone();
 
     if debug {
-        eprintln!("[glrmask/debug][max_length_partition] depth=0 blocks={}", block_count);
+        eprintln!(
+            "[glrmask/debug][max_length_partition] max_token_len={} iteration=0 blocks={}",
+            k,
+            block_count,
+        );
     }
 
-    if k == 0 || block_count == n {
+    if block_count == n || active_bytes.is_empty() {
         return (blocks, block_count, 0);
     }
 
     let width = 1 + active_bytes.len();
     let mut signatures = vec![0u32; n * width];
     let mut order: Vec<usize> = (0..n).collect();
+    let mut iteration = 0usize;
 
-    for step in 0..k {
+    loop {
         let (next_blocks, next_count) = refine_once(
             dfa,
             active_bytes,
@@ -489,14 +283,15 @@ fn compute_kbounded_partition(
             &mut order,
         );
 
-        let iteration = step + 1;
+        iteration += 1;
         let stable = same_partition(&blocks, block_count, &next_blocks, next_count);
         blocks = next_blocks;
         block_count = next_count;
 
         if debug {
             eprintln!(
-                "[glrmask/debug][max_length_partition] depth={} blocks={}",
+                "[glrmask/debug][max_length_partition] max_token_len={} iteration={} blocks={}",
+                k,
                 iteration,
                 block_count,
             );
@@ -506,8 +301,6 @@ fn compute_kbounded_partition(
             return (blocks, block_count, iteration);
         }
     }
-
-    (blocks, block_count, k)
 }
 
 fn build_subset_mapping(states: &[usize], blocks: &[u32]) -> Vec<usize> {
@@ -570,7 +363,7 @@ fn find_state_equivalence_classes_kbounded(
     if profile {
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
         eprintln!(
-            "[glrmask/profile][max_length_partition] mode={} dfa_states={} input_states={} k={} iterations_run={} relevant_bytes={} byte_representatives={} blocks={} analysis_ms={:.3}",
+            "[glrmask/profile][max_length_partition] mode={} dfa_states={} input_states={} max_token_len={} refinement_iterations={} relevant_bytes={} byte_representatives={} blocks={} analysis_ms={:.3}",
             mode,
             dfa.states.len(),
             states.len(),
