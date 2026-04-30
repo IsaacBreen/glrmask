@@ -836,10 +836,19 @@ fn compile_prepared_with_profile(
             eprintln!("[glrmask/oracle] dumped post-compact mappings to {dump_path}");
         }
 
-        let use_internal_tsid_representatives = std::env::var(
-            "GLRMASK_PM_USE_INTERNAL_TSID_REPS",
-        )
-        .map_or(false, |value| value == "1");
+        if strict_one_flag_enabled("GLRMASK_PM_USE_INTERNAL_TSID_REPS") {
+            panic!(
+                "GLRMASK_PM_USE_INTERNAL_TSID_REPS was an unsafe diagnostic shortcut. \
+Use GLRMASK_DIAG_PM_USE_INTERNAL_TSID_REPS_UNSAFE=1 only for diagnostics after \
+independently proving possible_matches equivalence for your workload."
+            );
+        }
+
+        // This is not production-valid by construction. The tokenizer-state
+        // internal ids come from the parser/compiler equivalence analysis,
+        // not a possible_matches-specific quotient.
+        let use_internal_tsid_representatives =
+            strict_one_flag_enabled("GLRMASK_DIAG_PM_USE_INTERNAL_TSID_REPS_UNSAFE");
 
         let ((mut parser_dwa, parser_dwa_ms), (raw_possible_matches, possible_matches_collect_ms)) =
             rayon::join(
@@ -874,6 +883,9 @@ fn compile_prepared_with_profile(
                     // max_original_token_id + 1 slots.
                     let original_token_slots = max_original_token_slot(&token_bytes);
                     let (pm_by_tsid, dense_profile, profile_label, profile_state_count) = if use_internal_tsid_representatives {
+                        eprintln!(
+                            "[glrmask/diag][pm_reps_unsafe] using internal-tsid representatives as a diagnostic shortcut; this is not production-valid by construction"
+                        );
                         let representative_states = &internal_ids.tokenizer_states.representative_original_ids;
                         if std::env::var("GLRMASK_DIAG_PM_ROOT_SIG").map_or(false, |v| v == "1") {
                             let root_signature_count = crate::compiler::possible_matches::count_root_child_internal_tsid_signatures(
