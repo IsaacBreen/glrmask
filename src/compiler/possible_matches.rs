@@ -106,6 +106,29 @@ pub(crate) fn emit_possible_matches_profile_summary(
     );
 }
 
+fn merge_possible_matches_profile(into: &mut PossibleMatchesProfile, other: PossibleMatchesProfile) {
+    into.cache_hits += other.cache_hits;
+    into.cache_misses += other.cache_misses;
+    into.reachable_cache_hits += other.reachable_cache_hits;
+    into.reachable_cache_misses += other.reachable_cache_misses;
+    into.child_segments_visited += other.child_segments_visited;
+    into.byte_steps += other.byte_steps;
+    into.blocked_segments += other.blocked_segments;
+    into.recursive_descents += other.recursive_descents;
+    into.self_loop_subtrees_skipped += other.self_loop_subtrees_skipped;
+    into.terminal_insertions += other.terminal_insertions;
+    into.cache_entries += other.cache_entries;
+    into.reachable_cache_entries += other.reachable_cache_entries;
+    into.cache_lookup_ms += other.cache_lookup_ms;
+    into.reachable_lookup_ms += other.reachable_lookup_ms;
+    into.node_terminal_insert_ms += other.node_terminal_insert_ms;
+    into.segment_walk_ms += other.segment_walk_ms;
+    into.self_loop_check_ms += other.self_loop_check_ms;
+    into.merge_child_matches_ms += other.merge_child_matches_ms;
+    into.root_compute_ms += other.root_compute_ms;
+    into.materialize_output_ms += other.materialize_output_ms;
+}
+
 fn owned_token_entries(token_bytes: &BTreeMap<u32, Vec<u8>>) -> Vec<(u32, Vec<u8>)> {
     token_bytes
         .iter()
@@ -624,6 +647,17 @@ pub(crate) fn collect_possible_matches_by_selected_original_tsid_dense(
     num_internal_tokens: u32,
     entries: &[u32],
 ) -> (BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>, PossibleMatchesProfile) {
+    let state_chunk_parallel = std::env::var("GLRMASK_PM_STATE_CHUNK_PARALLEL")
+        .map_or(false, |value| value == "1");
+    if state_chunk_parallel && entries.len() >= 2048 {
+        return collect_possible_matches_dense_chunk_parallel(
+            tokenizer,
+            root,
+            num_internal_tokens,
+            entries,
+        );
+    }
+
     let force_serial = std::env::var("GLRMASK_PM_FORCE_SERIAL")
         .map_or(false, |value| value == "1");
     // For small workloads, the serial path with FxHashMap cache is faster.
@@ -643,6 +677,41 @@ pub(crate) fn collect_possible_matches_by_selected_original_tsid_dense(
         num_internal_tokens,
         entries,
     )
+}
+
+fn collect_possible_matches_dense_chunk_parallel(
+    tokenizer: &Tokenizer,
+    root: &VocabPrefixTreeNode,
+    num_internal_tokens: u32,
+    entries: &[u32],
+) -> (BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>, PossibleMatchesProfile) {
+    use rayon::prelude::*;
+
+    let chunk_size = std::env::var("GLRMASK_PM_STATE_CHUNK_SIZE")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&size| size > 0)
+        .unwrap_or(2048);
+
+    let chunks: Vec<&[u32]> = entries.chunks(chunk_size).collect();
+    let partials: Vec<_> = chunks
+        .par_iter()
+        .map(|chunk| {
+            if chunk.len() < 2048 {
+                collect_possible_matches_dense_serial(tokenizer, root, num_internal_tokens, chunk)
+            } else {
+                collect_possible_matches_dense_batched(tokenizer, root, num_internal_tokens, chunk)
+            }
+        })
+        .collect();
+
+    let mut merged_maps = BTreeMap::new();
+    let mut merged_profile = PossibleMatchesProfile::default();
+    for (partial_maps, partial_profile) in partials {
+        merged_maps.extend(partial_maps);
+        merge_possible_matches_profile(&mut merged_profile, partial_profile);
+    }
+    (merged_maps, merged_profile)
 }
 
 pub(crate) fn count_root_child_internal_tsid_signatures(

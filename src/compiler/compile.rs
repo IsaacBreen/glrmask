@@ -2348,9 +2348,15 @@ mod tests {
         );
         let trie_ms = elapsed_ms(trie_started_at);
 
-        let entries: Vec<u32> = (0..tokenizer.num_states().min(8192)).collect();
-        let root_child_parallel = std::env::var("GLRMASK_PM_ROOT_CHILD_PARALLEL")
+        let sample_state_limit = std::env::var("GLRMASK_PM_DIAG_SAMPLE_STATES")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(8192)
+            .min(tokenizer.num_states());
+        let entries: Vec<u32> = (0..sample_state_limit).collect();
+        let state_chunk_parallel = std::env::var("GLRMASK_PM_STATE_CHUNK_PARALLEL")
             .map_or(false, |value| value == "1");
+        let chunk_size = std::env::var("GLRMASK_PM_STATE_CHUNK_SIZE").ok();
 
         let collector_started_at = Instant::now();
         let (raw_maps, profile) = crate::compiler::possible_matches::collect_possible_matches_by_selected_original_tsid_dense(
@@ -2362,8 +2368,9 @@ mod tests {
         let collector_ms = elapsed_ms(collector_started_at);
 
         eprintln!(
-            "[o1051/dense_possible_matches_collector] root_child_parallel={} tokenizer_states={} sampled_states={} states_collected={} tokenizer_ms={:.3} trie_ms={:.3} collector_ms={:.3} root_compute_ms={:.3} materialize_output_ms={:.3}",
-            root_child_parallel,
+            "[o1051/dense_possible_matches_collector] state_chunk_parallel={} chunk_size={:?} tokenizer_states={} sampled_states={} states_collected={} tokenizer_ms={:.3} trie_ms={:.3} collector_ms={:.3} root_compute_ms={:.3} materialize_output_ms={:.3}",
+            state_chunk_parallel,
+            chunk_size,
             tokenizer.num_states(),
             entries.len(),
             raw_maps.len(),
