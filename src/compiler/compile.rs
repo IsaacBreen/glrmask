@@ -54,6 +54,65 @@ mod tests {
         started_at.elapsed().as_secs_f64() * 1000.0
     }
 
+    #[derive(Debug, Clone, Eq, Hash, PartialEq)]
+    struct PmObservableOutputSignature {
+        matched_terminals: Vec<u32>,
+        is_end: bool,
+    }
+
+    #[derive(Debug, Clone, Eq, Hash, PartialEq)]
+    struct PmObservableStateSignature {
+        output: PmObservableOutputSignature,
+        transition_classes: Vec<u32>,
+    }
+
+    fn compute_pm_observable_tokenizer_classes(tokenizer: &crate::automata::lexer::tokenizer::Tokenizer) -> Vec<u32> {
+        let num_states = tokenizer.num_states() as usize;
+
+        let outputs: Vec<PmObservableOutputSignature> = (0..tokenizer.num_states())
+            .map(|state| PmObservableOutputSignature {
+                matched_terminals: tokenizer.matched_terminals_iter(state).collect(),
+                is_end: tokenizer.is_end(state),
+            })
+            .collect();
+
+        let mut output_classes = std::collections::HashMap::new();
+        let mut classes = vec![0u32; num_states];
+        for (state, output) in outputs.iter().enumerate() {
+            let next_id = output_classes.len() as u32;
+            let class_id = *output_classes.entry(output.clone()).or_insert(next_id);
+            classes[state] = class_id;
+        }
+
+        loop {
+            let mut signature_classes = std::collections::HashMap::new();
+            let mut next_classes = vec![0u32; num_states];
+
+            for state in 0..tokenizer.num_states() {
+                let mut transition_classes = vec![u32::MAX; 256];
+                let dfa_state = &tokenizer.dfa.states()[state as usize];
+                for (byte, &target) in dfa_state.transitions.iter() {
+                    transition_classes[byte as usize] = classes[target as usize];
+                }
+
+                let signature = PmObservableStateSignature {
+                    output: outputs[state as usize].clone(),
+                    transition_classes,
+                };
+
+                let next_id = signature_classes.len() as u32;
+                let class_id = *signature_classes.entry(signature).or_insert(next_id);
+                next_classes[state as usize] = class_id;
+            }
+
+            if next_classes == classes {
+                return classes;
+            }
+
+            classes = next_classes;
+        }
+    }
+
     fn mask_has_token(mask: &[u32], token: u32) -> bool {
         let word = token as usize / 32;
         let bit = token as usize % 32;
@@ -1305,6 +1364,40 @@ mod tests {
             merged_class_count,
             merged_state_count,
             max_class_size,
+        );
+    }
+
+    #[test]
+    #[ignore = "o1051 diagnostic: measure PM-valid tokenizer DFA quotient"]
+    fn test_o1051_llama3_pm_observable_tokenizer_classes() {
+        let schema_path = o1051_schema_path();
+        let schema_json = fs::read_to_string(&schema_path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", schema_path.display()));
+        let schema_value: serde_json::Value = serde_json::from_str(&schema_json)
+            .expect("o1051 schema should parse as JSON");
+        let schema_payload = schema_value.get("schema").unwrap_or(&schema_value);
+        let grammar = json_schema_to_grammar(
+            &serde_json::to_string(schema_payload).expect("o1051 schema should serialize"),
+        )
+            .expect("o1051 schema should import to a grammar");
+        let (prepared_grammar, _nullable_terminals) = prepare_grammar_for_compile(&grammar);
+
+        let tokenizer_started_at = Instant::now();
+        let tokenizer = build_tokenizer(&prepared_grammar);
+        let tokenizer_ms = elapsed_ms(tokenizer_started_at);
+
+        let classes_started_at = Instant::now();
+        let classes = compute_pm_observable_tokenizer_classes(&tokenizer);
+        let classes_ms = elapsed_ms(classes_started_at);
+        let num_classes = classes.iter().copied().max().map_or(0, |id| id + 1);
+
+        eprintln!(
+            "[o1051/pm_observable_classes] tokenizer_states={} pm_classes={} shrink={:.2}x tokenizer_ms={:.3} classes_ms={:.3}",
+            tokenizer.num_states(),
+            num_classes,
+            tokenizer.num_states() as f64 / num_classes.max(1) as f64,
+            tokenizer_ms,
+            classes_ms,
         );
     }
 
