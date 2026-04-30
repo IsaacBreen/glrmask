@@ -53,8 +53,7 @@ pub(crate) fn bitmap_to_rangeset(words: &[u64]) -> RangeSetBlaze<u32> {
 /// in original token space, then remapped into a constraint vocab that refines
 /// the parser-DWA vocab by possible-match signature and seed-state lexical-live
 /// signature. Parser-DWA weights are remapped into this same token space.
-pub(crate) type PossibleMatchesByState =
-    BTreeMap<TokenizerStateID, BTreeMap<TerminalID, Box<[u64]>>>;
+pub(crate) type PossibleMatchesByState = BTreeMap<TokenizerStateID, Weight>;
 type DenseWords = Box<[u64]>;
 type InternalTokenBufMasks = Vec<(u16, u32)>;
 type DenseWeightMaskCache = FxHashMap<usize, DenseWords>;
@@ -78,7 +77,6 @@ pub struct Constraint {
     /// DWA weights have also been remapped into this same token space.
     ///
     /// Do not remap the outer tokenizer-state key through state_to_internal_tsid.
-    #[serde(with = "crate::runtime::serde::serde_btreemap_rangeset")]
     pub(crate) possible_matches: PossibleMatchesByState,
     pub(crate) state_to_internal_tsid: Vec<u32>,
     pub(crate) internal_tsid_to_states: Vec<Vec<u32>>,
@@ -529,10 +527,12 @@ impl Constraint {
             .get(&tokenizer_state)
             .map(|terminals| {
                 terminals
-                    .iter()
-                    .map(|(&terminal, bitmap)| {
-                        let internal_tokens = bitmap_to_rangeset(bitmap);
-                        (terminal, self.expand_internal_token_set(&internal_tokens))
+                    .compact_entries()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .flat_map(|(start, end, token_set)| {
+                        let original_tokens = self.expand_internal_token_set(token_set.as_ref());
+                        (start..=end).map(move |terminal| (terminal, original_tokens.clone()))
                     })
                     .collect()
             })
@@ -604,8 +604,13 @@ impl Constraint {
         // before possible-match reconciliation.
         self.possible_matches.get(&tokenizer_state).map(|terminals| {
             terminals
-                .iter()
-                .map(|(&terminal, bitmap)| (terminal, bitmap_to_rangeset(bitmap)))
+                .compact_entries()
+                .unwrap_or_default()
+                .into_iter()
+                .flat_map(|(start, end, token_set)| {
+                    let internal_tokens = token_set.as_ref().clone();
+                    (start..=end).map(move |terminal| (terminal, internal_tokens.clone()))
+                })
                 .collect()
         })
     }
@@ -628,9 +633,16 @@ impl Constraint {
         self.possible_matches
             .iter()
             .flat_map(|(&tokenizer_state, terminals)| {
-                terminals.iter().map(move |(&terminal_id, bitmap)| {
-                    ((tokenizer_state, terminal_id), bitmap.clone())
-                })
+                terminals
+                    .compact_entries()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .flat_map(move |(start, end, token_set)| {
+                        let dense = self.dense_words_from_internal_set(token_set.as_ref());
+                        (start..=end).map(move |terminal_id| {
+                            ((tokenizer_state, terminal_id), dense.clone())
+                        })
+                    })
             })
             .collect()
     }

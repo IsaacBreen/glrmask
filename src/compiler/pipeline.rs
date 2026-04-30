@@ -237,6 +237,7 @@ fn terminal_expr(terminal: &Terminal) -> Expr {
 }
 
 type DensePossibleMatchesByState = BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>;
+type RuntimePossibleMatchesByState = BTreeMap<u32, Weight>;
 type PossibleMatchSignature = Vec<(u32, TerminalID)>;
 type SeedStateSignature = Vec<u32>;
 type SignatureClassId = u32;
@@ -352,35 +353,96 @@ fn build_tokens_with_same_bytes(token_bytes: &BTreeMap<u32, Vec<u8>>) -> FxHashM
     tokens_with_same_bytes
 }
 
+fn unique_same_byte_groups(tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>) -> Vec<Arc<[u32]>> {
+    let mut groups: Vec<_> = tokens_with_same_bytes
+        .iter()
+        .filter_map(|(&token_id, group)| {
+            (group.first().copied() == Some(token_id)).then(|| Arc::clone(group))
+        })
+        .collect();
+    groups.sort_unstable_by_key(|group| group[0]);
+    groups
+}
+
+fn build_same_byte_group_leaders(
+    token_bytes: &BTreeMap<u32, Vec<u8>>,
+    groups: &[Arc<[u32]>],
+) -> Vec<u32> {
+    let mut leaders = vec![u32::MAX; max_original_token_slot(token_bytes) as usize];
+    for group in groups {
+        let leader = group[0];
+        for &token_id in group.iter() {
+            leaders[token_id as usize] = leader;
+        }
+    }
+    leaders
+}
+
+fn build_group_constraint_internal_ids(
+    groups: &[Arc<[u32]>],
+    original_to_constraint_internal: &[u32],
+) -> FxHashMap<u32, Arc<[u32]>> {
+    let mut result = FxHashMap::default();
+
+    for group in groups {
+        let leader = group[0];
+        let mut ids = Vec::new();
+        for &token_id in group.iter() {
+            let Some(&constraint_internal_id) = original_to_constraint_internal.get(token_id as usize) else {
+                continue;
+            };
+            if constraint_internal_id != u32::MAX {
+                ids.push(constraint_internal_id);
+            }
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        result.insert(leader, Arc::from(ids));
+    }
+
+    result
+}
+
 fn build_possible_match_signatures(
     raw_possible_matches: &DensePossibleMatchesByState,
     token_bytes: &BTreeMap<u32, Vec<u8>>,
     tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
 ) -> FxHashMap<u32, PossibleMatchSignature> {
-    let mut signatures: FxHashMap<u32, PossibleMatchSignature> = token_bytes
-        .keys()
-        .map(|&token_id| (token_id, Vec::new()))
+    let groups = unique_same_byte_groups(tokens_with_same_bytes);
+    let group_leaders = build_same_byte_group_leaders(token_bytes, &groups);
+    let mut signatures_by_group: FxHashMap<u32, PossibleMatchSignature> = groups
+        .iter()
+        .map(|group| (group[0], Vec::new()))
         .collect();
 
     for (&original_tokenizer_state, terminals) in raw_possible_matches {
         for (&terminal_id, bitmap) in terminals {
             for_each_dense_bit(bitmap, |original_token_id| {
-                let Some(equivalent_tokens) = tokens_with_same_bytes.get(&original_token_id) else {
+                let Some(&leader) = group_leaders.get(original_token_id as usize) else {
                     return;
                 };
+                if leader == u32::MAX {
+                    return;
+                }
 
-                for &equivalent_token_id in equivalent_tokens.iter() {
-                    if let Some(signature) = signatures.get_mut(&equivalent_token_id) {
-                        signature.push((original_tokenizer_state, terminal_id));
-                    }
+                if let Some(signature) = signatures_by_group.get_mut(&leader) {
+                    signature.push((original_tokenizer_state, terminal_id));
                 }
             });
         }
     }
 
-    for signature in signatures.values_mut() {
+    for signature in signatures_by_group.values_mut() {
         signature.sort_unstable();
         signature.dedup();
+    }
+
+    let mut signatures = FxHashMap::default();
+    for group in groups {
+        let signature = signatures_by_group.remove(&group[0]).unwrap_or_default();
+        for &token_id in group.iter() {
+            signatures.insert(token_id, signature.clone());
+        }
     }
 
     signatures
@@ -391,30 +453,41 @@ fn build_seed_state_signatures_from_possible_matches(
     token_bytes: &BTreeMap<u32, Vec<u8>>,
     tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
 ) -> FxHashMap<u32, SeedStateSignature> {
-    let mut signatures: FxHashMap<u32, SeedStateSignature> = token_bytes
-        .keys()
-        .map(|&token_id| (token_id, Vec::new()))
+    let groups = unique_same_byte_groups(tokens_with_same_bytes);
+    let group_leaders = build_same_byte_group_leaders(token_bytes, &groups);
+    let mut signatures_by_group: FxHashMap<u32, SeedStateSignature> = groups
+        .iter()
+        .map(|group| (group[0], Vec::new()))
         .collect();
 
     for (&original_tokenizer_state, terminals) in raw_possible_matches {
         for bitmap in terminals.values() {
             for_each_dense_bit(bitmap, |original_token_id| {
-                let Some(equivalent_tokens) = tokens_with_same_bytes.get(&original_token_id) else {
+                let Some(&leader) = group_leaders.get(original_token_id as usize) else {
                     return;
                 };
+                if leader == u32::MAX {
+                    return;
+                }
 
-                for &equivalent_token_id in equivalent_tokens.iter() {
-                    if let Some(signature) = signatures.get_mut(&equivalent_token_id) {
-                        signature.push(original_tokenizer_state);
-                    }
+                if let Some(signature) = signatures_by_group.get_mut(&leader) {
+                    signature.push(original_tokenizer_state);
                 }
             });
         }
     }
 
-    for signature in signatures.values_mut() {
+    for signature in signatures_by_group.values_mut() {
         signature.sort_unstable();
         signature.dedup();
+    }
+
+    let mut signatures = FxHashMap::default();
+    for group in groups {
+        let signature = signatures_by_group.remove(&group[0]).unwrap_or_default();
+        for &token_id in group.iter() {
+            signatures.insert(token_id, signature.clone());
+        }
     }
 
     signatures
@@ -535,8 +608,23 @@ fn remap_possible_matches_to_constraint_vocab(
     original_to_constraint_internal: &[u32],
     constraint_token_count: u32,
     tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
-) -> DensePossibleMatchesByState {
+) -> RuntimePossibleMatchesByState {
     let num_words = dense_word_count(constraint_token_count);
+    let groups = unique_same_byte_groups(tokens_with_same_bytes);
+    let max_token_slot = tokens_with_same_bytes
+        .keys()
+        .max()
+        .map(|token_id| *token_id as usize + 1)
+        .unwrap_or(0);
+    let mut group_leaders = vec![u32::MAX; max_token_slot];
+    for group in &groups {
+        let leader = group[0];
+        for &token_id in group.iter() {
+            group_leaders[token_id as usize] = leader;
+        }
+    }
+    let group_constraint_internal_ids =
+        build_group_constraint_internal_ids(&groups, original_to_constraint_internal);
 
     raw_possible_matches
         .into_iter()
@@ -548,35 +636,41 @@ fn remap_possible_matches_to_constraint_vocab(
                     let mut any = false;
 
                     for_each_dense_bit(&original_bitmap, |original_token_id| {
-                        let Some(equivalent_tokens) = tokens_with_same_bytes.get(&original_token_id) else {
+                        let Some(&leader) = group_leaders.get(original_token_id as usize) else {
+                            return;
+                        };
+                        if leader == u32::MAX {
+                            return;
+                        }
+
+                        let Some(constraint_internal_ids) =
+                            group_constraint_internal_ids.get(&leader)
+                        else {
                             return;
                         };
 
-                        for &equivalent_token_id in equivalent_tokens.iter() {
-                            let Some(&constraint_internal_id) =
-                                original_to_constraint_internal.get(equivalent_token_id as usize)
-                            else {
-                                continue;
-                            };
-
-                            if constraint_internal_id == u32::MAX {
-                                continue;
-                            }
-
+                        for &constraint_internal_id in constraint_internal_ids.iter() {
                             set_dense_bit(&mut remapped, constraint_internal_id);
                             any = true;
                         }
                     });
 
                     if any {
-                        Some((terminal_id, remapped.into_boxed_slice()))
+                        Some((terminal_id, {
+                            let mut ids = Vec::new();
+                            for_each_dense_bit(&remapped, |token_id| ids.push(token_id));
+                            range_set_from_sorted_ids(&ids)
+                        }))
                     } else {
                         None
                     }
                 })
-                .collect();
+                .collect::<Vec<_>>();
 
-            (original_tokenizer_state, remapped_terminals)
+            (
+                original_tokenizer_state,
+                Weight::from_per_tsid_token_sets(remapped_terminals),
+            )
         })
         .collect()
 }
@@ -1586,13 +1680,13 @@ mod tests {
             &tokens_with_same_bytes,
         );
 
-        let terminal_10 = &remapped_pm[&5][&10];
-        let terminal_11 = &remapped_pm[&5][&11];
+        let terminal_10 = remapped_pm[&5].tokens_for_tsid(10);
+        let terminal_11 = remapped_pm[&5].tokens_for_tsid(11);
 
-        assert!(dense_bit_is_set(terminal_10, tok0));
-        assert!(!dense_bit_is_set(terminal_10, tok1));
-        assert!(!dense_bit_is_set(terminal_11, tok0));
-        assert!(dense_bit_is_set(terminal_11, tok1));
+        assert!(terminal_10.contains(tok0));
+        assert!(!terminal_10.contains(tok1));
+        assert!(!terminal_11.contains(tok0));
+        assert!(terminal_11.contains(tok1));
     }
 
     #[test]

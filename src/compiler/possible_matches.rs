@@ -379,6 +379,18 @@ fn merge_dense_maps(into: &mut DensePossibleMatchMap, other: &DensePossibleMatch
     }
 }
 
+fn merge_dense_map_into_slots(
+    slots: &mut [Option<Box<[u64]>>],
+    other: &DensePossibleMatchMap,
+    num_words: usize,
+) {
+    for (&terminal, bitmap) in other.iter() {
+        let existing = slots[terminal as usize]
+            .get_or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
+        merge_bitmaps(existing, bitmap);
+    }
+}
+
 fn bitmap_to_rangeset(words: &[u64]) -> RangeSetBlaze<u32> {
     let mut result = RangeSetBlaze::new();
     for (word_idx, &word) in words.iter().enumerate() {
@@ -682,6 +694,7 @@ fn collect_possible_matches_dense_batched(
     precompute_reachable_bitmaps(root, &mut reachable_bitmaps);
 
     let entries: Vec<u32> = (0..tokenizer.num_states()).collect();
+    let mut subtree_computer = DensePossibleMatchesComputer::new(tokenizer, num_internal_tokens);
 
     let n = entries.len();
     let mut results: Vec<Vec<Option<Box<[u64]>>>> = Vec::with_capacity(n);
@@ -700,6 +713,7 @@ fn collect_possible_matches_dense_batched(
         root,
         &live,
         &mut results,
+        &mut subtree_computer,
         &flat_transitions,
         &self_loop_bytes,
         &matched_terminals,
@@ -724,7 +738,7 @@ fn collect_possible_matches_dense_batched(
             })
             .collect();
 
-    (possible_matches_by_state, PossibleMatchesProfile::default())
+    (possible_matches_by_state, subtree_computer.profile())
 }
 
 fn precompute_reachable_bitmaps(
@@ -745,6 +759,7 @@ fn batched_walk_node(
     node: &VocabPrefixTreeNode,
     live: &[(usize, u32)],
     results: &mut [Vec<Option<Box<[u64]>>>],
+    subtree_computer: &mut DensePossibleMatchesComputer<'_>,
     flat_trans: &[[u32; 256]],
     self_loop: &[U8Set],
     matched_terminals: &[Box<[TerminalID]>],
@@ -775,7 +790,7 @@ fn batched_walk_node(
 
         let subtree_bytes = U8Set::from_words(*child.subtree_bytes());
 
-        let mut child_live: Vec<(usize, u32)> = Vec::new();
+        let mut child_live_by_state: FxHashMap<u32, Vec<usize>> = FxHashMap::default();
 
         for &(idx, state) in live {
             let mut s = state;
@@ -806,21 +821,14 @@ fn batched_walk_node(
             if subtree_bytes.is_subset(&self_loop[s as usize]) {
                 continue;
             }
-            child_live.push((idx, s));
+            child_live_by_state.entry(s).or_default().push(idx);
         }
 
-        if !child_live.is_empty() {
-            batched_walk_node(
-                child,
-                &child_live,
-                results,
-                flat_trans,
-                self_loop,
-                matched_terminals,
-                is_end,
-                num_words,
-                reachable_bitmaps,
-            );
+        for (state, indices) in child_live_by_state {
+            let child_matches = subtree_computer.possible_matches_for_node(child, state);
+            for idx in indices {
+                merge_dense_map_into_slots(&mut results[idx], child_matches.as_ref(), num_words);
+            }
         }
     }
 }
