@@ -72,6 +72,27 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../grammars2024/benchmarking/gpt2_vocab.json")
     }
 
+    fn llama3_vocab_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(".cache/vocab_cache/llama3_vocab.json")
+    }
+
+    fn o1051_schema_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../constraint-framework-analysis/data/sources/jsonschemabench/data/Github_hard/o1051.json",
+        )
+    }
+
+    fn decode_hex_bytes(hex: &str) -> Vec<u8> {
+        assert_eq!(hex.len() % 2, 0, "hex payload must have even length");
+        (0..hex.len())
+            .step_by(2)
+            .map(|offset| {
+                u8::from_str_radix(&hex[offset..offset + 2], 16)
+                    .unwrap_or_else(|err| panic!("invalid hex byte at offset {offset}: {err}"))
+            })
+            .collect()
+    }
+
     fn gpt2_token_str_to_bytes(token_str: &str) -> Vec<u8> {
         token_str.chars().map(unicode_char_to_byte).collect()
     }
@@ -130,6 +151,27 @@ mod tests {
             .map(|(token_str, token_id)| {
                 let token_id = token_id.as_u64().expect("token id must be integer") as u32;
                 (token_id, gpt2_token_str_to_bytes(&token_str))
+            })
+            .collect();
+        Vocab::new(entries, None)
+    }
+
+    fn load_llama3_vocab() -> Vocab {
+        let vocab_path = llama3_vocab_path();
+        let vocab_json = fs::read_to_string(&vocab_path)
+            .unwrap_or_else(|err| panic!("failed to read Llama 3 vocab at {}: {err}", vocab_path.display()));
+        let vocab_map: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&vocab_json).expect("parse Llama 3 vocab json");
+        let entries = vocab_map
+            .into_iter()
+            .map(|(token_id, token_hex)| {
+                let token_id = token_id
+                    .parse::<u32>()
+                    .unwrap_or_else(|err| panic!("invalid token id {token_id:?}: {err}"));
+                let token_hex = token_hex
+                    .as_str()
+                    .unwrap_or_else(|| panic!("token payload for {token_id} must be a hex string"));
+                (token_id, decode_hex_bytes(token_hex))
             })
             .collect();
         Vocab::new(entries, None)
@@ -1215,6 +1257,54 @@ mod tests {
             id_map.tokenizer_states.internal_to_originals.len(),
             id_map.vocab_tokens.internal_to_originals.len(),
             equivalence_ms,
+        );
+    }
+
+    #[test]
+    #[ignore = "o1051 diagnostic: verify tokenizer-state classes preserve possible_matches"]
+    fn test_o1051_llama3_tokenizer_classes_preserve_possible_matches() {
+        let vocab = load_llama3_vocab();
+        let schema_path = o1051_schema_path();
+        let schema_json = fs::read_to_string(&schema_path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", schema_path.display()));
+
+        let constraint = crate::Constraint::from_json_schema(&schema_json, &vocab)
+            .expect("o1051 should compile with the cached Llama 3 vocab");
+
+        let mut merged_class_count = 0usize;
+        let mut merged_state_count = 0usize;
+        let mut max_class_size = 0usize;
+
+        for states in &constraint.internal_tsid_to_states {
+            if states.len() <= 1 {
+                continue;
+            }
+
+            merged_class_count += 1;
+            merged_state_count += states.len();
+            max_class_size = max_class_size.max(states.len());
+
+            let representative = constraint.possible_matches_for_state(states[0]);
+            for &state in &states[1..] {
+                let actual = constraint.possible_matches_for_state(state);
+                assert_eq!(
+                    actual,
+                    representative,
+                    "possible_matches diverged inside tokenizer-state class {} between states {} and {}",
+                    constraint.internal_tsid_for_state(states[0]),
+                    states[0],
+                    state,
+                );
+            }
+        }
+
+        eprintln!(
+            "[o1051/possible_matches_equiv] tokenizer_states={} internal_tsids={} merged_classes={} merged_states={} max_class_size={}",
+            constraint.state_to_internal_tsid.len(),
+            constraint.internal_tsid_to_states.len(),
+            merged_class_count,
+            merged_state_count,
+            max_class_size,
         );
     }
 

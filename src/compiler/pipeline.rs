@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use once_cell::sync::Lazy;
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::Vocab;
 use crate::automata::weighted::dwa::DWA;
@@ -448,6 +448,56 @@ fn build_possible_match_signatures(
     signatures
 }
 
+fn build_possible_match_signatures_by_internal_tsid(
+    raw_possible_matches: &DensePossibleMatchesByState,
+    token_bytes: &BTreeMap<u32, Vec<u8>>,
+    tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
+    state_to_internal_tsid: &[u32],
+) -> FxHashMap<u32, PossibleMatchSignature> {
+    let groups = unique_same_byte_groups(tokens_with_same_bytes);
+    let group_leaders = build_same_byte_group_leaders(token_bytes, &groups);
+    let mut signatures_by_group: FxHashMap<u32, PossibleMatchSignature> = groups
+        .iter()
+        .map(|group| (group[0], Vec::new()))
+        .collect();
+
+    for (&original_tokenizer_state, terminals) in raw_possible_matches {
+        let internal_tsid = state_to_internal_tsid
+            .get(original_tokenizer_state as usize)
+            .copied()
+            .unwrap_or(original_tokenizer_state);
+        for (&terminal_id, bitmap) in terminals {
+            for_each_dense_bit(bitmap, |original_token_id| {
+                let Some(&leader) = group_leaders.get(original_token_id as usize) else {
+                    return;
+                };
+                if leader == u32::MAX {
+                    return;
+                }
+
+                if let Some(signature) = signatures_by_group.get_mut(&leader) {
+                    signature.push((internal_tsid, terminal_id));
+                }
+            });
+        }
+    }
+
+    for signature in signatures_by_group.values_mut() {
+        signature.sort_unstable();
+        signature.dedup();
+    }
+
+    let mut signatures = FxHashMap::default();
+    for group in groups {
+        let signature = signatures_by_group.remove(&group[0]).unwrap_or_default();
+        for &token_id in group.iter() {
+            signatures.insert(token_id, signature.clone());
+        }
+    }
+
+    signatures
+}
+
 fn build_seed_state_signatures_from_possible_matches(
     raw_possible_matches: &DensePossibleMatchesByState,
     token_bytes: &BTreeMap<u32, Vec<u8>>,
@@ -472,6 +522,56 @@ fn build_seed_state_signatures_from_possible_matches(
 
                 if let Some(signature) = signatures_by_group.get_mut(&leader) {
                     signature.push(original_tokenizer_state);
+                }
+            });
+        }
+    }
+
+    for signature in signatures_by_group.values_mut() {
+        signature.sort_unstable();
+        signature.dedup();
+    }
+
+    let mut signatures = FxHashMap::default();
+    for group in groups {
+        let signature = signatures_by_group.remove(&group[0]).unwrap_or_default();
+        for &token_id in group.iter() {
+            signatures.insert(token_id, signature.clone());
+        }
+    }
+
+    signatures
+}
+
+fn build_seed_state_signatures_from_possible_matches_by_internal_tsid(
+    raw_possible_matches: &DensePossibleMatchesByState,
+    token_bytes: &BTreeMap<u32, Vec<u8>>,
+    tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
+    state_to_internal_tsid: &[u32],
+) -> FxHashMap<u32, SeedStateSignature> {
+    let groups = unique_same_byte_groups(tokens_with_same_bytes);
+    let group_leaders = build_same_byte_group_leaders(token_bytes, &groups);
+    let mut signatures_by_group: FxHashMap<u32, SeedStateSignature> = groups
+        .iter()
+        .map(|group| (group[0], Vec::new()))
+        .collect();
+
+    for (&original_tokenizer_state, terminals) in raw_possible_matches {
+        let internal_tsid = state_to_internal_tsid
+            .get(original_tokenizer_state as usize)
+            .copied()
+            .unwrap_or(original_tokenizer_state);
+        for bitmap in terminals.values() {
+            for_each_dense_bit(bitmap, |original_token_id| {
+                let Some(&leader) = group_leaders.get(original_token_id as usize) else {
+                    return;
+                };
+                if leader == u32::MAX {
+                    return;
+                }
+
+                if let Some(signature) = signatures_by_group.get_mut(&leader) {
+                    signature.push(internal_tsid);
                 }
             });
         }
@@ -771,7 +871,93 @@ fn remap_parser_dwa_to_constraint_vocab(
 
 fn finalize_constraint(mut constraint: Constraint) -> Constraint {
     constraint.rebuild_runtime_caches();
+    if std::env::var("GLRMASK_ASSERT_PM_EQUIV_WITHIN_INTERNAL_TSID").map_or(false, |v| v == "1") {
+        assert_possible_matches_equivalent_within_internal_tsids(&constraint);
+    }
+    if std::env::var("GLRMASK_DIAG_PM_UNIQUE_COUNTS").map_or(false, |v| v == "1") {
+        emit_possible_matches_unique_counts(&constraint);
+    }
     constraint
+}
+
+fn assert_possible_matches_equivalent_within_internal_tsids(constraint: &Constraint) {
+    let mut merged_class_count = 0usize;
+    let mut merged_state_count = 0usize;
+    let mut max_class_size = 0usize;
+
+    for states in &constraint.internal_tsid_to_states {
+        if states.len() <= 1 {
+            continue;
+        }
+
+        merged_class_count += 1;
+        merged_state_count += states.len();
+        max_class_size = max_class_size.max(states.len());
+
+        let representative = constraint.possible_matches_for_state(states[0]);
+        for &state in &states[1..] {
+            let actual = constraint.possible_matches_for_state(state);
+            assert_eq!(
+                actual,
+                representative,
+                "possible_matches diverged inside tokenizer-state class {} between states {} and {}",
+                constraint.internal_tsid_for_state(states[0]),
+                states[0],
+                state,
+            );
+        }
+    }
+
+    eprintln!(
+        "[glrmask/diag][pm_equiv] tokenizer_states={} internal_tsids={} merged_classes={} merged_states={} max_class_size={}",
+        constraint.state_to_internal_tsid.len(),
+        constraint.internal_tsid_to_states.len(),
+        merged_class_count,
+        merged_state_count,
+        max_class_size,
+    );
+}
+
+fn emit_possible_matches_unique_counts(constraint: &Constraint) {
+    let unique_all: FxHashSet<_> = constraint.possible_matches.values().cloned().collect();
+    let unique_reps: FxHashSet<_> = constraint
+        .internal_tsid_to_states
+        .iter()
+        .filter_map(|states| states.first())
+        .filter_map(|state| constraint.possible_matches.get(state).cloned())
+        .collect();
+
+    eprintln!(
+        "[glrmask/diag][pm_unique] tokenizer_states={} internal_tsids={} unique_all_states={} unique_rep_states={}",
+        constraint.possible_matches.len(),
+        constraint.internal_tsid_to_states.len(),
+        unique_all.len(),
+        unique_reps.len(),
+    );
+}
+
+fn expand_possible_matches_to_original_states(
+    representative_matches: &BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>,
+    state_classes: &[Vec<u32>],
+    representative_states: &[u32],
+) -> BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>> {
+    let mut expanded = BTreeMap::new();
+
+    for (internal_tsid, states) in state_classes.iter().enumerate() {
+        let representative_state = representative_states
+            .get(internal_tsid)
+            .copied()
+            .unwrap_or(u32::MAX);
+        let matches = representative_matches
+            .get(&representative_state)
+            .cloned()
+            .unwrap_or_default();
+        for &state in states {
+            expanded.insert(state, matches.clone());
+        }
+    }
+
+    expanded
 }
 
 fn warn_problematic_byte_terminals(tokenizer: &Tokenizer, vocab: &Vocab) {
@@ -1167,6 +1353,16 @@ fn compile_prepared_with_profile(
                         &adjusted_disallowed_for_classification,
                         Some(&shared_classify_cache),
                     );
+                    if std::env::var("GLRMASK_DIAG_PM_VOCAB_EQUIV").map_or(false, |v| v == "1") {
+                        let pm_vocab_id_map = crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::combined::analyze_equivalences_l1_fast(&tokenizer, vocab);
+                        eprintln!(
+                            "[glrmask/diag][pm_vocab_equiv] tokenizer_states={} vocab_tokens={} pm_vocab_state_classes={} pm_vocab_token_classes={}",
+                            tokenizer.num_states(),
+                            vocab.len(),
+                            pm_vocab_id_map.tokenizer_states.num_internal_ids(),
+                            pm_vocab_id_map.vocab_tokens.num_internal_ids(),
+                        );
+                    }
                     IdMapBuildResult::SplitComplete {
                         global: id_map,
                         terminal_dwa: dwa,
@@ -1314,6 +1510,11 @@ fn compile_prepared_with_profile(
             eprintln!("[glrmask/oracle] dumped post-compact mappings to {dump_path}");
         }
 
+        let use_internal_tsid_representatives = std::env::var(
+            "GLRMASK_PM_USE_INTERNAL_TSID_REPS",
+        )
+        .map_or(false, |value| value == "1");
+
         let ((mut parser_dwa, parser_dwa_ms), (raw_possible_matches, possible_matches_collect_ms)) =
             rayon::join(
                 || {
@@ -1346,16 +1547,51 @@ fn compile_prepared_with_profile(
                     // of parser-DWA internal tokens. Sparse original token ids require
                     // max_original_token_id + 1 slots.
                     let original_token_slots = max_original_token_slot(&token_bytes);
-                    let (pm_by_tsid, dense_profile) = crate::compiler::possible_matches::collect_possible_matches_by_original_tsid_dense(
-                        &tokenizer,
-                        &trie.root,
-                        original_token_slots,
-                    );
+                    let (pm_by_tsid, dense_profile, profile_label, profile_state_count) = if use_internal_tsid_representatives {
+                        let representative_states = &internal_ids.tokenizer_states.representative_original_ids;
+                        if std::env::var("GLRMASK_DIAG_PM_ROOT_SIG").map_or(false, |v| v == "1") {
+                            let root_signature_count = crate::compiler::possible_matches::count_root_child_internal_tsid_signatures(
+                                &tokenizer,
+                                &trie.root,
+                                representative_states,
+                                &internal_ids.tokenizer_states.original_to_internal,
+                            );
+                            eprintln!(
+                                "[glrmask/diag][pm_root_sig] rep_states={} unique_root_signatures={}",
+                                representative_states.len(),
+                                root_signature_count,
+                            );
+                        }
+                        let (representative_matches, profile) = crate::compiler::possible_matches::collect_possible_matches_by_selected_original_tsid_dense(
+                            &tokenizer,
+                            &trie.root,
+                            original_token_slots,
+                            representative_states,
+                        );
+                        (
+                            representative_matches,
+                            profile,
+                            "constraint_original_tokens_internal_tsid_reps",
+                            representative_states.len() as u32,
+                        )
+                    } else {
+                        let (matches, profile) = crate::compiler::possible_matches::collect_possible_matches_by_original_tsid_dense(
+                            &tokenizer,
+                            &trie.root,
+                            original_token_slots,
+                        );
+                        (
+                            matches,
+                            profile,
+                            "constraint_original_tokens",
+                            tokenizer.num_states(),
+                        )
+                    };
                     let collect_ms = elapsed_ms(collect_started_at);
                     crate::compiler::possible_matches::emit_possible_matches_profile_summary(
-                        "constraint_original_tokens",
+                        profile_label,
                         token_bytes.len(),
-                        tokenizer.num_states(),
+                        profile_state_count,
                         trie_build_ms,
                         collect_ms,
                         &dense_profile,
@@ -1376,11 +1612,20 @@ fn compile_prepared_with_profile(
         }
 
         let possible_match_signatures_started_at = Instant::now();
-        let possible_match_signatures = build_possible_match_signatures(
-            &raw_possible_matches,
-            &token_bytes,
-            &tokens_with_same_bytes,
-        );
+        let possible_match_signatures = if use_internal_tsid_representatives {
+            build_possible_match_signatures_by_internal_tsid(
+                &raw_possible_matches,
+                &token_bytes,
+                &tokens_with_same_bytes,
+                &internal_ids.tokenizer_states.original_to_internal,
+            )
+        } else {
+            build_possible_match_signatures(
+                &raw_possible_matches,
+                &token_bytes,
+                &tokens_with_same_bytes,
+            )
+        };
         let possible_match_signatures_ms = elapsed_ms(possible_match_signatures_started_at);
         if compile_profile_summary_enabled() {
             eprintln!(
@@ -1391,11 +1636,20 @@ fn compile_prepared_with_profile(
         let possible_match_signature_ids = intern_signature_ids(possible_match_signatures);
 
         let seed_state_signatures_started_at = Instant::now();
-        let seed_state_signatures = build_seed_state_signatures_from_possible_matches(
-            &raw_possible_matches,
-            &token_bytes,
-            &tokens_with_same_bytes,
-        );
+        let seed_state_signatures = if use_internal_tsid_representatives {
+            build_seed_state_signatures_from_possible_matches_by_internal_tsid(
+                &raw_possible_matches,
+                &token_bytes,
+                &tokens_with_same_bytes,
+                &internal_ids.tokenizer_states.original_to_internal,
+            )
+        } else {
+            build_seed_state_signatures_from_possible_matches(
+                &raw_possible_matches,
+                &token_bytes,
+                &tokens_with_same_bytes,
+            )
+        };
         let seed_state_signatures_ms = elapsed_ms(seed_state_signatures_started_at);
         if compile_profile_summary_enabled() {
             eprintln!(
@@ -1422,6 +1676,15 @@ fn compile_prepared_with_profile(
         let constraint_token_count = constraint_vocab.internal_to_originals.len() as u32;
 
         let remap_possible_matches_started_at = Instant::now();
+        let raw_possible_matches = if use_internal_tsid_representatives {
+            expand_possible_matches_to_original_states(
+                &raw_possible_matches,
+                &internal_ids.tokenizer_states.internal_to_originals,
+                &internal_ids.tokenizer_states.representative_original_ids,
+            )
+        } else {
+            raw_possible_matches
+        };
         let possible_matches = remap_possible_matches_to_constraint_vocab(
             raw_possible_matches,
             &constraint_vocab.original_to_internal,

@@ -1,12 +1,13 @@
 //! Possible-match tables for tokenizer states and vocab-prefix subtrees.
 
 use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -608,30 +609,106 @@ pub(crate) fn collect_possible_matches_by_original_tsid_dense(
     root: &VocabPrefixTreeNode,
     num_internal_tokens: u32,
 ) -> (BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>, PossibleMatchesProfile) {
+    let entries: Vec<u32> = (0..tokenizer.num_states()).collect();
+    collect_possible_matches_by_selected_original_tsid_dense(
+        tokenizer,
+        root,
+        num_internal_tokens,
+        &entries,
+    )
+}
+
+pub(crate) fn collect_possible_matches_by_selected_original_tsid_dense(
+    tokenizer: &Tokenizer,
+    root: &VocabPrefixTreeNode,
+    num_internal_tokens: u32,
+    entries: &[u32],
+) -> (BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>, PossibleMatchesProfile) {
+    let force_serial = std::env::var("GLRMASK_PM_FORCE_SERIAL")
+        .map_or(false, |value| value == "1");
     // For small workloads, the serial path with FxHashMap cache is faster.
     // For medium-to-large workloads, the batched trie walk eliminates cache
     // overhead even before we reach the old 5k-state cutoff.
-    if tokenizer.num_states() < 2048 {
+    if force_serial || entries.len() < 2048 {
         return collect_possible_matches_dense_serial(
-            tokenizer, root, num_internal_tokens,
+            tokenizer,
+            root,
+            num_internal_tokens,
+            entries,
         );
     }
     collect_possible_matches_dense_batched(
-        tokenizer, root, num_internal_tokens,
+        tokenizer,
+        root,
+        num_internal_tokens,
+        entries,
     )
+}
+
+pub(crate) fn count_root_child_internal_tsid_signatures(
+    tokenizer: &Tokenizer,
+    root: &VocabPrefixTreeNode,
+    entries: &[u32],
+    state_to_internal_tsid: &[u32],
+) -> usize {
+    let mut unique = FxHashSet::default();
+
+    for &start_state in entries {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+
+        for (segment_bytes, _child) in root.iter_children() {
+            let mut current_state = start_state;
+            let mut segment_blocked = false;
+
+            segment_bytes.len().hash(&mut hasher);
+            for &byte in segment_bytes {
+                byte.hash(&mut hasher);
+                let Some(next_state) = tokenizer.step(current_state, byte) else {
+                    segment_blocked = true;
+                    break;
+                };
+                current_state = next_state;
+
+                for terminal in tokenizer.matched_terminals_iter(current_state) {
+                    terminal.hash(&mut hasher);
+                }
+                u32::MAX.hash(&mut hasher);
+            }
+
+            segment_blocked.hash(&mut hasher);
+            if !segment_blocked {
+                let is_end = tokenizer.is_end(current_state);
+                is_end.hash(&mut hasher);
+                if !is_end {
+                    state_to_internal_tsid
+                        .get(current_state as usize)
+                        .copied()
+                        .unwrap_or(current_state)
+                        .hash(&mut hasher);
+                }
+            }
+
+            0xFFFF_FFFEu32.hash(&mut hasher);
+        }
+
+        unique.insert(hasher.finish());
+    }
+
+    unique.len()
 }
 
 fn collect_possible_matches_dense_serial(
     tokenizer: &Tokenizer,
     root: &VocabPrefixTreeNode,
     num_internal_tokens: u32,
+    entries: &[u32],
 ) -> (BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>, PossibleMatchesProfile) {
     let mut computer = DensePossibleMatchesComputer::new(tokenizer, num_internal_tokens);
     let mut possible_matches_by_state: BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>> = BTreeMap::new();
     let root_key = root as *const VocabPrefixTreeNode as usize;
     let num_words = (num_internal_tokens as usize + 63) / 64;
 
-    for original_state in 0..tokenizer.num_states() {
+    for &original_state in entries {
         let _ = computer.possible_matches_for_node(root, original_state);
         let matches_for_state = computer
             .cache
@@ -653,6 +730,7 @@ fn collect_possible_matches_dense_batched(
     tokenizer: &Tokenizer,
     root: &VocabPrefixTreeNode,
     num_internal_tokens: u32,
+    entries: &[u32],
 ) -> (BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>, PossibleMatchesProfile) {
     let num_words = (num_internal_tokens as usize + 63) / 64;
     let terminal_count = tokenizer.num_terminals as usize;
@@ -694,7 +772,6 @@ fn collect_possible_matches_dense_batched(
     let mut reachable_bitmaps: FxHashMap<usize, Box<[(u16, u64)]>> = FxHashMap::default();
     precompute_reachable_bitmaps(root, &mut reachable_bitmaps);
 
-    let entries: Vec<u32> = (0..tokenizer.num_states()).collect();
     let mut subtree_computer = DensePossibleMatchesComputer::new(tokenizer, num_internal_tokens);
 
     let n = entries.len();
