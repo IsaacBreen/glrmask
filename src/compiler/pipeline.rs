@@ -870,6 +870,9 @@ independently proving possible_matches equivalence for your workload."
                     // ORIGINAL vocab token bytes. Do not use parser-DWA
                     // internal_token_bytes here. The parser-DWA token equivalence
                     // relation is not valid for possible_matches.
+                    if debug_compile_stages {
+                        eprintln!("[glrmask/debug][compile_stage] raw_possible_matches_begin");
+                    }
                     let token_entries: Vec<(usize, Vec<u8>)> = token_bytes
                         .iter()
                         .map(|(&token_id, bytes)| (token_id as usize, bytes.clone()))
@@ -934,14 +937,38 @@ independently proving possible_matches equivalence for your workload."
                         collect_ms,
                         &dense_profile,
                     );
+                    if debug_compile_stages {
+                        eprintln!(
+                            "[glrmask/debug][compile_stage] raw_possible_matches_done trie_build_ms={:.3} collect_ms={:.3} profile_label={} profile_states={}",
+                            trie_build_ms,
+                            collect_ms,
+                            profile_label,
+                            profile_state_count,
+                        );
+                    }
                     (pm_by_tsid, elapsed_ms(pm_started_at))
                 },
             );
 
         let constraint_vocab_started_at = Instant::now();
+        if debug_compile_stages {
+            eprintln!(
+                "[glrmask/debug][compile_stage] constraint_vocab_begin possible_matches_ms={:.3}",
+                possible_matches_collect_ms,
+            );
+        }
         let tokens_with_same_bytes_started_at = Instant::now();
+        if debug_compile_stages {
+            eprintln!("[glrmask/debug][compile_stage] constraint_vocab_same_bytes_begin");
+        }
         let tokens_with_same_bytes = cpm::build_tokens_with_same_bytes(&token_bytes);
         let tokens_with_same_bytes_ms = elapsed_ms(tokens_with_same_bytes_started_at);
+        if debug_compile_stages {
+            eprintln!(
+                "[glrmask/debug][compile_stage] constraint_vocab_same_bytes_done ms={:.3}",
+                tokens_with_same_bytes_ms,
+            );
+        }
         if compile_profile_summary_enabled() {
             eprintln!(
                 "[glrmask/profile][constraint_vocab_step] step=same_bytes ms={:.3}",
@@ -950,6 +977,11 @@ independently proving possible_matches equivalence for your workload."
         }
 
         let possible_match_signatures_started_at = Instant::now();
+        if debug_compile_stages {
+            eprintln!(
+                "[glrmask/debug][compile_stage] constraint_vocab_possible_match_signatures_begin"
+            );
+        }
         let possible_match_signatures = if use_internal_tsid_representatives {
             cpm::build_possible_match_signatures_by_internal_tsid(
                 &raw_possible_matches,
@@ -965,6 +997,12 @@ independently proving possible_matches equivalence for your workload."
             )
         };
         let possible_match_signatures_ms = elapsed_ms(possible_match_signatures_started_at);
+        if debug_compile_stages {
+            eprintln!(
+                "[glrmask/debug][compile_stage] constraint_vocab_possible_match_signatures_done ms={:.3}",
+                possible_match_signatures_ms,
+            );
+        }
         if compile_profile_summary_enabled() {
             eprintln!(
                 "[glrmask/profile][constraint_vocab_step] step=possible_match_signatures ms={:.3}",
@@ -974,6 +1012,11 @@ independently proving possible_matches equivalence for your workload."
         let possible_match_signature_ids = cpm::intern_signature_ids(possible_match_signatures);
 
         let seed_state_signatures_started_at = Instant::now();
+        if debug_compile_stages {
+            eprintln!(
+                "[glrmask/debug][compile_stage] constraint_vocab_seed_state_signatures_begin"
+            );
+        }
         let seed_state_signatures = if use_internal_tsid_representatives {
             cpm::build_seed_state_signatures_from_possible_matches_by_internal_tsid(
                 &raw_possible_matches,
@@ -989,6 +1032,12 @@ independently proving possible_matches equivalence for your workload."
             )
         };
         let seed_state_signatures_ms = elapsed_ms(seed_state_signatures_started_at);
+        if debug_compile_stages {
+            eprintln!(
+                "[glrmask/debug][compile_stage] constraint_vocab_seed_state_signatures_done ms={:.3}",
+                seed_state_signatures_ms,
+            );
+        }
         if compile_profile_summary_enabled() {
             eprintln!(
                 "[glrmask/profile][constraint_vocab_step] step=seed_state_signatures ms={:.3}",
@@ -998,6 +1047,9 @@ independently proving possible_matches equivalence for your workload."
         let seed_state_signature_ids = cpm::intern_signature_ids(seed_state_signatures);
 
         let constraint_vocab_map_started_at = Instant::now();
+        if debug_compile_stages {
+            eprintln!("[glrmask/debug][compile_stage] constraint_vocab_build_map_begin");
+        }
         let constraint_vocab = cpm::build_constraint_vocab_map(
             &internal_ids.vocab_tokens,
             &token_bytes,
@@ -1005,6 +1057,12 @@ independently proving possible_matches equivalence for your workload."
             &seed_state_signature_ids,
         );
         let constraint_vocab_map_ms = elapsed_ms(constraint_vocab_map_started_at);
+        if debug_compile_stages {
+            eprintln!(
+                "[glrmask/debug][compile_stage] constraint_vocab_build_map_done ms={:.3}",
+                constraint_vocab_map_ms,
+            );
+        }
         if compile_profile_summary_enabled() {
             eprintln!(
                 "[glrmask/profile][constraint_vocab_step] step=build_map ms={:.3}",
@@ -1014,6 +1072,12 @@ independently proving possible_matches equivalence for your workload."
         let constraint_token_count = constraint_vocab.internal_to_originals.len() as u32;
 
         let remap_possible_matches_started_at = Instant::now();
+        if debug_compile_stages {
+            eprintln!(
+                "[glrmask/debug][compile_stage] constraint_vocab_remap_possible_matches_begin constraint_token_count={}",
+                constraint_token_count,
+            );
+        }
         let raw_possible_matches = if use_internal_tsid_representatives {
             cpm::expand_possible_matches_to_original_states(
                 &raw_possible_matches,
@@ -1030,6 +1094,12 @@ independently proving possible_matches equivalence for your workload."
             &tokens_with_same_bytes,
         );
         let remap_possible_matches_ms = elapsed_ms(remap_possible_matches_started_at);
+        if debug_compile_stages {
+            eprintln!(
+                "[glrmask/debug][compile_stage] constraint_vocab_remap_possible_matches_done ms={:.3}",
+                remap_possible_matches_ms,
+            );
+        }
         if compile_profile_summary_enabled() {
             eprintln!(
                 "[glrmask/profile][constraint_vocab_step] step=remap_possible_matches ms={:.3}",
@@ -1050,6 +1120,12 @@ independently proving possible_matches equivalence for your workload."
             );
         }
         let constraint_vocab_ms = elapsed_ms(constraint_vocab_started_at);
+        if debug_compile_stages {
+            eprintln!(
+                "[glrmask/debug][compile_stage] constraint_vocab_done ms={:.3}",
+                constraint_vocab_ms,
+            );
+        }
 
         if compile_profile_summary_enabled() {
             let split_parser_tokens = constraint_vocab
