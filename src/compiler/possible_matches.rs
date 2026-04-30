@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::grammar::flat::TerminalID;
@@ -795,6 +796,7 @@ fn batched_walk_node(
         for &(idx, state) in live {
             let mut s = state;
             let mut dead = false;
+            let mut encountered_terminals = SmallVec::<[TerminalID; 8]>::new();
 
             for &byte in segment {
                 let next = flat_trans[s as usize][byte as usize];
@@ -804,11 +806,17 @@ fn batched_walk_node(
                 }
                 s = next;
                 for &terminal in matched_terminals[s as usize].iter() {
-                    let entry = results[idx][terminal as usize]
-                        .get_or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
-                    for &(word_idx, mask) in reachable.iter() {
-                        entry[word_idx as usize] |= mask;
+                    if !encountered_terminals.contains(&terminal) {
+                        encountered_terminals.push(terminal);
                     }
+                }
+            }
+
+            for terminal in encountered_terminals {
+                let entry = results[idx][terminal as usize]
+                    .get_or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
+                for &(word_idx, mask) in reachable.iter() {
+                    entry[word_idx as usize] |= mask;
                 }
             }
 
