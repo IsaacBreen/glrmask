@@ -66,6 +66,18 @@ mod tests {
         transition_classes: Vec<u32>,
     }
 
+    #[derive(Debug, Clone, Eq, Hash, PartialEq)]
+    struct TriePmChildSignature {
+        encountered_terminals: Vec<u32>,
+        child_class_id: Option<u32>,
+    }
+
+    #[derive(Debug, Clone, Eq, Hash, PartialEq)]
+    struct TriePmNodeSignature {
+        node_terminals: Vec<u32>,
+        child_signatures: Vec<TriePmChildSignature>,
+    }
+
     fn compute_pm_observable_tokenizer_classes(tokenizer: &crate::automata::lexer::tokenizer::Tokenizer) -> Vec<u32> {
         let num_states = tokenizer.num_states() as usize;
 
@@ -111,6 +123,140 @@ mod tests {
 
             classes = next_classes;
         }
+    }
+
+    fn compute_trie_pm_root_classes(
+        tokenizer: &crate::automata::lexer::tokenizer::Tokenizer,
+        root: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
+    ) -> Vec<u32> {
+        let matched_terminals: Vec<Vec<u32>> = (0..tokenizer.num_states())
+            .map(|state| tokenizer.matched_terminals_iter(state).collect())
+            .collect();
+        let is_end: Vec<bool> = (0..tokenizer.num_states())
+            .map(|state| tokenizer.is_end(state))
+            .collect();
+        let flat_transitions: Vec<[u32; 256]> = (0..tokenizer.num_states() as usize)
+            .map(|state_idx| {
+                let dfa_state = &tokenizer.dfa.states()[state_idx];
+                let mut flat = [u32::MAX; 256];
+                for (byte, &target) in dfa_state.transitions.iter() {
+                    flat[byte as usize] = target;
+                }
+                flat
+            })
+            .collect();
+        let self_loop_bytes: Vec<crate::ds::u8set::U8Set> = (0..tokenizer.num_states() as usize)
+            .map(|state_idx| {
+                let dfa_state = &tokenizer.dfa.states()[state_idx];
+                let mut bytes = crate::ds::u8set::U8Set::empty();
+                for (byte, &target) in dfa_state.transitions.iter() {
+                    if target == state_idx as u32 {
+                        bytes.insert(byte);
+                    }
+                }
+                bytes
+            })
+            .collect();
+
+        fn compute_node_classes(
+            node: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
+            tokenizer: &crate::automata::lexer::tokenizer::Tokenizer,
+            matched_terminals: &[Vec<u32>],
+            is_end: &[bool],
+            flat_transitions: &[[u32; 256]],
+            self_loop_bytes: &[crate::ds::u8set::U8Set],
+        ) -> Vec<u32> {
+            let child_data: Vec<(
+                &[u8],
+                crate::ds::u8set::U8Set,
+                Vec<u32>,
+            )> = node
+                .iter_children()
+                .map(|(segment, child)| {
+                    (
+                        segment,
+                        crate::ds::u8set::U8Set::from_words(*child.subtree_bytes()),
+                        compute_node_classes(
+                            child,
+                            tokenizer,
+                            matched_terminals,
+                            is_end,
+                            flat_transitions,
+                            self_loop_bytes,
+                        ),
+                    )
+                })
+                .collect();
+
+            let mut signature_ids = std::collections::HashMap::new();
+            let mut classes = vec![0u32; tokenizer.num_states() as usize];
+
+            for state in 0..tokenizer.num_states() {
+                let node_terminals = if node.has_token() {
+                    matched_terminals[state as usize].clone()
+                } else {
+                    Vec::new()
+                };
+
+                let mut child_signatures = Vec::with_capacity(child_data.len());
+                for (segment, child_subtree_bytes, child_class_ids) in child_data.iter() {
+                    let mut current_state = state;
+                    let mut blocked = false;
+                    let mut encountered_terminals = Vec::new();
+
+                    for &byte in *segment {
+                        let next_state = flat_transitions[current_state as usize][byte as usize];
+                        if next_state == u32::MAX {
+                            blocked = true;
+                            break;
+                        }
+                        current_state = next_state;
+                        encountered_terminals
+                            .extend_from_slice(&matched_terminals[current_state as usize]);
+                    }
+
+                    if encountered_terminals.len() > 1 {
+                        encountered_terminals.sort_unstable();
+                        encountered_terminals.dedup();
+                    }
+
+                    let child_class_id = if blocked || is_end[current_state as usize] {
+                        None
+                    } else {
+                        if child_subtree_bytes.is_subset(&self_loop_bytes[current_state as usize]) {
+                            None
+                        } else {
+                            Some(child_class_ids[current_state as usize])
+                        }
+                    };
+
+                    child_signatures.push(TriePmChildSignature {
+                        encountered_terminals,
+                        child_class_id,
+                    });
+                }
+
+                let signature = TriePmNodeSignature {
+                    node_terminals,
+                    child_signatures,
+                };
+
+                let next_id = signature_ids.len() as u32;
+                let class_id = *signature_ids.entry(signature).or_insert(next_id);
+                classes[state as usize] = class_id;
+            }
+
+            classes
+        }
+
+        compute_node_classes(
+            root,
+            tokenizer,
+            &matched_terminals,
+            &is_end,
+            &flat_transitions,
+            &self_loop_bytes,
+        )
     }
 
     fn mask_has_token(mask: &[u32], token: u32) -> bool {
@@ -1397,6 +1543,51 @@ mod tests {
             num_classes,
             tokenizer.num_states() as f64 / num_classes.max(1) as f64,
             tokenizer_ms,
+            classes_ms,
+        );
+    }
+
+    #[test]
+    #[ignore = "o1051 diagnostic: measure trie-specific PM root quotient"]
+    fn test_o1051_llama3_trie_specific_pm_root_classes() {
+        let vocab = load_llama3_vocab();
+        let schema_path = o1051_schema_path();
+        let schema_json = fs::read_to_string(&schema_path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", schema_path.display()));
+        let schema_value: serde_json::Value = serde_json::from_str(&schema_json)
+            .expect("o1051 schema should parse as JSON");
+        let schema_payload = schema_value.get("schema").unwrap_or(&schema_value);
+        let grammar = json_schema_to_grammar(
+            &serde_json::to_string(schema_payload).expect("o1051 schema should serialize"),
+        )
+        .expect("o1051 schema should import to a grammar");
+        let (prepared_grammar, _nullable_terminals) = prepare_grammar_for_compile(&grammar);
+
+        let tokenizer_started_at = Instant::now();
+        let tokenizer = build_tokenizer(&prepared_grammar);
+        let tokenizer_ms = elapsed_ms(tokenizer_started_at);
+
+        let trie_started_at = Instant::now();
+        let trie = crate::ds::vocab_prefix_tree::VocabPrefixTree::build_owned(
+            vocab.entries
+                .iter()
+                .map(|(&token_id, bytes)| (token_id as usize, bytes.clone()))
+                .collect(),
+        );
+        let trie_ms = elapsed_ms(trie_started_at);
+
+        let classes_started_at = Instant::now();
+        let root_classes = compute_trie_pm_root_classes(&tokenizer, &trie.root);
+        let classes_ms = elapsed_ms(classes_started_at);
+        let num_classes = root_classes.iter().copied().max().map_or(0, |id| id + 1);
+
+        eprintln!(
+            "[o1051/trie_pm_root_classes] tokenizer_states={} root_classes={} shrink={:.2}x tokenizer_ms={:.3} trie_ms={:.3} classes_ms={:.3}",
+            tokenizer.num_states(),
+            num_classes,
+            tokenizer.num_states() as f64 / num_classes.max(1) as f64,
+            tokenizer_ms,
+            trie_ms,
             classes_ms,
         );
     }
