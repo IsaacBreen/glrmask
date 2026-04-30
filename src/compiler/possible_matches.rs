@@ -349,7 +349,13 @@ impl<'a> PossibleMatchesComputer<'a> {
 // Dense bitmap variant of PossibleMatchesComputer
 // ---------------------------------------------------------------------------
 
-type DensePossibleMatchMap = BTreeMap<TerminalID, Box<[u64]>>;
+pub(crate) type DensePossibleMatchMap = BTreeMap<TerminalID, Box<[u64]>>;
+
+pub(crate) struct DenseTrieClassBuildResult {
+    pub(crate) possible_matches_by_state: BTreeMap<u32, DensePossibleMatchMap>,
+    pub(crate) state_classes: Vec<u32>,
+    pub(crate) class_maps: Vec<Arc<DensePossibleMatchMap>>,
+}
 
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
 struct TrieMapBuildSegmentOutcome {
@@ -754,6 +760,21 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build(
     num_internal_tokens: u32,
     entries: &[u32],
 ) -> (BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>, PossibleMatchesProfile) {
+    let (result, profile) = collect_possible_matches_dense_trie_class_build_with_classes(
+        tokenizer,
+        root,
+        num_internal_tokens,
+        entries,
+    );
+    (result.possible_matches_by_state, profile)
+}
+
+pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
+    tokenizer: &Tokenizer,
+    root: &VocabPrefixTreeNode,
+    num_internal_tokens: u32,
+    entries: &[u32],
+) -> (DenseTrieClassBuildResult, PossibleMatchesProfile) {
     let num_words = (num_internal_tokens as usize + 63) / 64;
     let matched_terminals: Vec<Box<[TerminalID]>> = (0..tokenizer.num_states())
         .map(|state| tokenizer.matched_terminals_iter(state).collect::<Vec<_>>().into_boxed_slice())
@@ -1020,7 +1041,18 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build(
         materialize_output_ms,
         ..Default::default()
     };
-    (possible_matches_by_state, profile)
+    (
+        DenseTrieClassBuildResult {
+            possible_matches_by_state,
+            state_classes: root_result.classes,
+            class_maps: root_result
+                .class_maps
+                .into_iter()
+                .map(|map| Arc::new(map.as_ref().clone()))
+                .collect(),
+        },
+        profile,
+    )
 }
 
 fn collect_possible_matches_dense_chunk_parallel(

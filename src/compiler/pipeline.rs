@@ -850,7 +850,10 @@ independently proving possible_matches equivalence for your workload."
         let use_internal_tsid_representatives =
             strict_one_flag_enabled("GLRMASK_DIAG_PM_USE_INTERNAL_TSID_REPS_UNSAFE");
 
-        let ((mut parser_dwa, parser_dwa_ms), (raw_possible_matches, possible_matches_collect_ms)) =
+        let trie_class_build_enabled = std::env::var("GLRMASK_PM_TRIE_CLASS_BUILD")
+            .map_or(false, |value| value == "1");
+
+        let ((mut parser_dwa, parser_dwa_ms), (raw_possible_matches, trie_class_result, possible_matches_collect_ms)) =
             rayon::join(
                 || {
                     let parser_dwa_started_at = Instant::now();
@@ -885,7 +888,7 @@ independently proving possible_matches equivalence for your workload."
                     // of parser-DWA internal tokens. Sparse original token ids require
                     // max_original_token_id + 1 slots.
                     let original_token_slots = max_original_token_slot(&token_bytes);
-                    let (pm_by_tsid, dense_profile, profile_label, profile_state_count) = if use_internal_tsid_representatives {
+                    let (pm_by_tsid, trie_class_result, dense_profile, profile_label, profile_state_count) = if use_internal_tsid_representatives {
                         eprintln!(
                             "[glrmask/diag][pm_reps_unsafe] using internal-tsid representatives as a diagnostic shortcut; this is not production-valid by construction"
                         );
@@ -911,9 +914,34 @@ independently proving possible_matches equivalence for your workload."
                         );
                         (
                             representative_matches,
+                            None,
                             profile,
                             "constraint_original_tokens_internal_tsid_reps",
                             representative_states.len() as u32,
+                        )
+                    } else if trie_class_build_enabled {
+                        let all_states: Vec<u32> = (0..tokenizer.num_states()).collect();
+                        let (trie_class_result, profile) = crate::compiler::possible_matches::collect_possible_matches_dense_trie_class_build_with_classes(
+                            &tokenizer,
+                            &trie.root,
+                            original_token_slots,
+                            &all_states,
+                        );
+                        let crate::compiler::possible_matches::DenseTrieClassBuildResult {
+                            possible_matches_by_state,
+                            state_classes,
+                            class_maps,
+                        } = trie_class_result;
+                        (
+                            possible_matches_by_state,
+                            Some(crate::compiler::possible_matches::DenseTrieClassBuildResult {
+                                possible_matches_by_state: BTreeMap::new(),
+                                state_classes,
+                                class_maps,
+                            }),
+                            profile,
+                            "constraint_original_tokens",
+                            tokenizer.num_states(),
                         )
                     } else {
                         let (matches, profile) = crate::compiler::possible_matches::collect_possible_matches_by_original_tsid_dense(
@@ -923,6 +951,7 @@ independently proving possible_matches equivalence for your workload."
                         );
                         (
                             matches,
+                            None,
                             profile,
                             "constraint_original_tokens",
                             tokenizer.num_states(),
@@ -946,7 +975,7 @@ independently proving possible_matches equivalence for your workload."
                             profile_state_count,
                         );
                     }
-                    (pm_by_tsid, elapsed_ms(pm_started_at))
+                    (pm_by_tsid, trie_class_result, elapsed_ms(pm_started_at))
                 },
             );
 
@@ -982,19 +1011,26 @@ independently proving possible_matches equivalence for your workload."
                 "[glrmask/debug][compile_stage] constraint_vocab_possible_match_signatures_begin"
             );
         }
-        let possible_match_signatures = if use_internal_tsid_representatives {
-            cpm::build_possible_match_signatures_by_internal_tsid(
+        let possible_match_signature_ids = if let Some(trie_class_result) = trie_class_result.as_ref() {
+            cpm::build_possible_match_signature_ids_from_trie_classes(
+                &trie_class_result.class_maps,
+                &trie_class_result.state_classes,
+                &token_bytes,
+                &tokens_with_same_bytes,
+            )
+        } else if use_internal_tsid_representatives {
+            cpm::intern_signature_ids(cpm::build_possible_match_signatures_by_internal_tsid(
                 &raw_possible_matches,
                 &token_bytes,
                 &tokens_with_same_bytes,
                 &internal_ids.tokenizer_states.original_to_internal,
-            )
+            ))
         } else {
-            cpm::build_possible_match_signatures(
+            cpm::intern_signature_ids(cpm::build_possible_match_signatures(
                 &raw_possible_matches,
                 &token_bytes,
                 &tokens_with_same_bytes,
-            )
+            ))
         };
         let possible_match_signatures_ms = elapsed_ms(possible_match_signatures_started_at);
         if debug_compile_stages {
@@ -1009,27 +1045,32 @@ independently proving possible_matches equivalence for your workload."
                 possible_match_signatures_ms,
             );
         }
-        let possible_match_signature_ids = cpm::intern_signature_ids(possible_match_signatures);
-
         let seed_state_signatures_started_at = Instant::now();
         if debug_compile_stages {
             eprintln!(
                 "[glrmask/debug][compile_stage] constraint_vocab_seed_state_signatures_begin"
             );
         }
-        let seed_state_signatures = if use_internal_tsid_representatives {
-            cpm::build_seed_state_signatures_from_possible_matches_by_internal_tsid(
+        let seed_state_signature_ids = if let Some(trie_class_result) = trie_class_result.as_ref() {
+            cpm::build_seed_state_signature_ids_from_trie_classes(
+                &trie_class_result.class_maps,
+                &trie_class_result.state_classes,
+                &token_bytes,
+                &tokens_with_same_bytes,
+            )
+        } else if use_internal_tsid_representatives {
+            cpm::intern_signature_ids(cpm::build_seed_state_signatures_from_possible_matches_by_internal_tsid(
                 &raw_possible_matches,
                 &token_bytes,
                 &tokens_with_same_bytes,
                 &internal_ids.tokenizer_states.original_to_internal,
-            )
+            ))
         } else {
-            cpm::build_seed_state_signatures_from_possible_matches(
+            cpm::intern_signature_ids(cpm::build_seed_state_signatures_from_possible_matches(
                 &raw_possible_matches,
                 &token_bytes,
                 &tokens_with_same_bytes,
-            )
+            ))
         };
         let seed_state_signatures_ms = elapsed_ms(seed_state_signatures_started_at);
         if debug_compile_stages {
@@ -1044,8 +1085,6 @@ independently proving possible_matches equivalence for your workload."
                 seed_state_signatures_ms,
             );
         }
-        let seed_state_signature_ids = cpm::intern_signature_ids(seed_state_signatures);
-
         let constraint_vocab_map_started_at = Instant::now();
         if debug_compile_stages {
             eprintln!("[glrmask/debug][compile_stage] constraint_vocab_build_map_begin");
