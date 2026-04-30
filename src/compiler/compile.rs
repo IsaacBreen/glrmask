@@ -72,6 +72,78 @@ mod tests {
         end_state: Option<u32>,
     }
 
+    type DensePossibleMatchMap = BTreeMap<u32, Box<[u64]>>;
+
+    #[derive(Default)]
+    struct TerminalSetInterner {
+        ids: std::collections::HashMap<Vec<u32>, u32>,
+        sets: Vec<Vec<u32>>,
+    }
+
+    impl TerminalSetInterner {
+        fn intern_slice(&mut self, terminals: &[u32]) -> u32 {
+            if let Some(&id) = self.ids.get(terminals) {
+                return id;
+            }
+
+            let id = self.sets.len() as u32;
+            let owned = terminals.to_vec();
+            self.ids.insert(owned.clone(), id);
+            self.sets.push(owned);
+            id
+        }
+
+        fn intern_vec(&mut self, terminals: Vec<u32>) -> u32 {
+            if let Some(&id) = self.ids.get(&terminals) {
+                return id;
+            }
+
+            let id = self.sets.len() as u32;
+            self.ids.insert(terminals.clone(), id);
+            self.sets.push(terminals);
+            id
+        }
+
+        fn get(&self, id: u32) -> &[u32] {
+            &self.sets[id as usize]
+        }
+    }
+
+    struct BuiltNodeClasses {
+        classes: Vec<u32>,
+        class_maps: Vec<std::rc::Rc<DensePossibleMatchMap>>,
+    }
+
+    fn merge_pm_bitmaps(into: &mut [u64], other: &[u64]) {
+        for (lhs, rhs) in into.iter_mut().zip(other.iter()) {
+            *lhs |= *rhs;
+        }
+    }
+
+    fn merge_pm_maps(into: &mut DensePossibleMatchMap, other: &DensePossibleMatchMap, num_words: usize) {
+        for (&terminal, bitmap) in other {
+            let entry = into
+                .entry(terminal)
+                .or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
+            merge_pm_bitmaps(entry, bitmap);
+        }
+    }
+
+    fn reachable_bitmap_for_test(
+        node: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
+        num_words: usize,
+    ) -> Box<[u64]> {
+        let mut words = vec![0u64; num_words];
+        for range in node.reachable_token_ids().ranges() {
+            let lo = *range.start() as u32;
+            let hi = *range.end() as u32;
+            for token_id in lo..=hi {
+                words[token_id as usize / 64] |= 1u64 << (token_id % 64);
+            }
+        }
+        words.into_boxed_slice()
+    }
+
     fn compute_pm_observable_tokenizer_classes(tokenizer: &crate::automata::lexer::tokenizer::Tokenizer) -> Vec<u32> {
         let num_states = tokenizer.num_states() as usize;
 
@@ -330,6 +402,260 @@ mod tests {
         root: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
     ) -> Vec<u32> {
         compute_trie_pm_root_classes_with_depth(tokenizer, root, None)
+    }
+
+    fn build_trie_pm_root_maps_by_class(
+        tokenizer: &crate::automata::lexer::tokenizer::Tokenizer,
+        root: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
+        num_internal_tokens: u32,
+    ) -> BuiltNodeClasses {
+        let num_words = (num_internal_tokens as usize + 63) / 64;
+        let matched_terminals: Vec<Vec<u32>> = (0..tokenizer.num_states())
+            .map(|state| tokenizer.matched_terminals_iter(state).collect())
+            .collect();
+        let is_end: Vec<bool> = (0..tokenizer.num_states())
+            .map(|state| tokenizer.is_end(state))
+            .collect();
+        let flat_transitions: Vec<[u32; 256]> = (0..tokenizer.num_states() as usize)
+            .map(|state_idx| {
+                let dfa_state = &tokenizer.dfa.states()[state_idx];
+                let mut flat = [u32::MAX; 256];
+                for (byte, &target) in dfa_state.transitions.iter() {
+                    flat[byte as usize] = target;
+                }
+                flat
+            })
+            .collect();
+        let self_loop_bytes: Vec<crate::ds::u8set::U8Set> = (0..tokenizer.num_states() as usize)
+            .map(|state_idx| {
+                let dfa_state = &tokenizer.dfa.states()[state_idx];
+                let mut bytes = crate::ds::u8set::U8Set::empty();
+                for (byte, &target) in dfa_state.transitions.iter() {
+                    if target == state_idx as u32 {
+                        bytes.insert(byte);
+                    }
+                }
+                bytes
+            })
+            .collect();
+        let mut terminal_sets = TerminalSetInterner::default();
+        let empty_terminals_id = terminal_sets.intern_slice(&[]);
+        let node_terminal_ids: Vec<u32> = matched_terminals
+            .iter()
+            .map(|terminals| terminal_sets.intern_slice(terminals))
+            .collect();
+        let mut segment_cache = std::collections::HashMap::<Vec<u8>, usize>::new();
+        let mut segment_outcome_tables = Vec::<Vec<SegmentWalkOutcome>>::new();
+
+        fn build_node(
+            node: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
+            tokenizer: &crate::automata::lexer::tokenizer::Tokenizer,
+            active_states: &[u32],
+            matched_terminals: &[Vec<u32>],
+            node_terminal_ids: &[u32],
+            empty_terminals_id: u32,
+            is_end: &[bool],
+            flat_transitions: &[[u32; 256]],
+            self_loop_bytes: &[crate::ds::u8set::U8Set],
+            terminal_sets: &mut TerminalSetInterner,
+            segment_cache: &mut std::collections::HashMap<Vec<u8>, usize>,
+            segment_outcome_tables: &mut Vec<Vec<SegmentWalkOutcome>>,
+            num_words: usize,
+        ) -> BuiltNodeClasses {
+            struct ChildBuildData {
+                segment_table_idx: usize,
+                subtree_bytes: crate::ds::u8set::U8Set,
+                reachable: Box<[u64]>,
+                result: BuiltNodeClasses,
+            }
+
+            let mut child_data = Vec::new();
+            for (segment, child) in node.iter_children() {
+                let segment_table_idx = if let Some(&table_idx) = segment_cache.get(segment) {
+                    table_idx
+                } else {
+                    let mut outcomes = vec![
+                        SegmentWalkOutcome {
+                            terminals_id: empty_terminals_id,
+                            end_state: None,
+                        };
+                        tokenizer.num_states() as usize
+                    ];
+
+                    for start_state in 0..tokenizer.num_states() {
+                        let mut current_state = start_state;
+                        let mut blocked = false;
+                        let mut encountered_terminals = Vec::new();
+
+                        for &byte in segment {
+                            let next_state = flat_transitions[current_state as usize][byte as usize];
+                            if next_state == u32::MAX {
+                                blocked = true;
+                                break;
+                            }
+                            current_state = next_state;
+                            encountered_terminals
+                                .extend_from_slice(&matched_terminals[current_state as usize]);
+                        }
+
+                        if encountered_terminals.len() > 1 {
+                            encountered_terminals.sort_unstable();
+                            encountered_terminals.dedup();
+                        }
+
+                        let terminals_id = terminal_sets.intern_vec(encountered_terminals);
+                        outcomes[start_state as usize] = SegmentWalkOutcome {
+                            terminals_id,
+                            end_state: (!blocked).then_some(current_state),
+                        };
+                    }
+
+                    let table_idx = segment_outcome_tables.len();
+                    segment_outcome_tables.push(outcomes);
+                    segment_cache.insert(segment.to_vec(), table_idx);
+                    table_idx
+                };
+
+                let subtree_bytes = crate::ds::u8set::U8Set::from_words(*child.subtree_bytes());
+                let mut child_active_states = Vec::new();
+                for &state in active_states {
+                    let segment_outcome = segment_outcome_tables[segment_table_idx][state as usize];
+                    if let Some(end_state) = segment_outcome.end_state {
+                        if !is_end[end_state as usize]
+                            && !subtree_bytes.is_subset(&self_loop_bytes[end_state as usize])
+                        {
+                            child_active_states.push(end_state);
+                        }
+                    }
+                }
+                child_active_states.sort_unstable();
+                child_active_states.dedup();
+
+                let result = build_node(
+                    child,
+                    tokenizer,
+                    &child_active_states,
+                    matched_terminals,
+                    node_terminal_ids,
+                    empty_terminals_id,
+                    is_end,
+                    flat_transitions,
+                    self_loop_bytes,
+                    terminal_sets,
+                    segment_cache,
+                    segment_outcome_tables,
+                    num_words,
+                );
+
+                child_data.push(ChildBuildData {
+                    segment_table_idx,
+                    subtree_bytes,
+                    reachable: reachable_bitmap_for_test(child, num_words),
+                    result,
+                });
+            }
+
+            let mut signature_ids = std::collections::HashMap::<Vec<u32>, u32>::new();
+            let mut representative_states = Vec::new();
+            let mut classes = vec![u32::MAX; tokenizer.num_states() as usize];
+
+            for &state in active_states {
+                let node_terminals_id = if node.has_token() {
+                    node_terminal_ids[state as usize]
+                } else {
+                    empty_terminals_id
+                };
+
+                let mut signature_words = Vec::with_capacity(child_data.len() * 2 + 1);
+                signature_words.push(node_terminals_id);
+                for child in child_data.iter() {
+                    let segment_outcome = segment_outcome_tables[child.segment_table_idx][state as usize];
+                    let child_class_id = if let Some(end_state) = segment_outcome.end_state {
+                        if is_end[end_state as usize]
+                            || child.subtree_bytes.is_subset(&self_loop_bytes[end_state as usize])
+                        {
+                            u32::MAX
+                        } else {
+                            child.result.classes[end_state as usize]
+                        }
+                    } else {
+                        u32::MAX
+                    };
+                    signature_words.push(segment_outcome.terminals_id);
+                    signature_words.push(child_class_id);
+                }
+
+                let next_id = signature_ids.len() as u32;
+                let class_id = *signature_ids.entry(signature_words).or_insert_with(|| {
+                    representative_states.push(state);
+                    next_id
+                });
+                classes[state as usize] = class_id;
+            }
+
+            let mut class_maps = Vec::with_capacity(representative_states.len());
+            for &state in representative_states.iter() {
+                let mut result = DensePossibleMatchMap::default();
+
+                if node.has_token() {
+                    let token_id = node.token_id() as u32;
+                    for &terminal in terminal_sets.get(node_terminal_ids[state as usize]) {
+                        let entry = result
+                            .entry(terminal)
+                            .or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
+                        entry[token_id as usize / 64] |= 1u64 << (token_id % 64);
+                    }
+                }
+
+                for child in child_data.iter() {
+                    let segment_outcome = segment_outcome_tables[child.segment_table_idx][state as usize];
+                    for &terminal in terminal_sets.get(segment_outcome.terminals_id) {
+                        let entry = result
+                            .entry(terminal)
+                            .or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
+                        merge_pm_bitmaps(entry, &child.reachable);
+                    }
+
+                    if let Some(end_state) = segment_outcome.end_state {
+                        if is_end[end_state as usize]
+                            || child.subtree_bytes.is_subset(&self_loop_bytes[end_state as usize])
+                        {
+                            continue;
+                        }
+
+                        let child_class_id = child.result.classes[end_state as usize];
+                        if child_class_id != u32::MAX {
+                            merge_pm_maps(
+                                &mut result,
+                                child.result.class_maps[child_class_id as usize].as_ref(),
+                                num_words,
+                            );
+                        }
+                    }
+                }
+
+                class_maps.push(std::rc::Rc::new(result));
+            }
+
+            BuiltNodeClasses { classes, class_maps }
+        }
+
+        let active_states = (0..tokenizer.num_states()).collect::<Vec<_>>();
+        build_node(
+            root,
+            tokenizer,
+            &active_states,
+            &matched_terminals,
+            &node_terminal_ids,
+            empty_terminals_id,
+            &is_end,
+            &flat_transitions,
+            &self_loop_bytes,
+            &mut terminal_sets,
+            &mut segment_cache,
+            &mut segment_outcome_tables,
+            num_words,
+        )
     }
 
     fn mask_has_token(mask: &[u32], token: u32) -> bool {
@@ -1680,6 +2006,83 @@ mod tests {
             tokenizer_ms,
             trie_ms,
             classes_ms,
+        );
+    }
+
+    #[test]
+    #[ignore = "o1051 diagnostic: compare bottom-up trie PM map build against collector"]
+    fn test_o1051_llama3_trie_pm_bottom_up_map_build() {
+        let vocab = load_llama3_vocab();
+        let schema_path = o1051_schema_path();
+        let schema_json = fs::read_to_string(&schema_path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", schema_path.display()));
+        let schema_value: serde_json::Value = serde_json::from_str(&schema_json)
+            .expect("o1051 schema should parse as JSON");
+        let schema_payload = schema_value.get("schema").unwrap_or(&schema_value);
+        let grammar = json_schema_to_grammar(
+            &serde_json::to_string(schema_payload).expect("o1051 schema should serialize"),
+        )
+        .expect("o1051 schema should import to a grammar");
+        let (prepared_grammar, _nullable_terminals) = prepare_grammar_for_compile(&grammar);
+
+        let tokenizer_started_at = Instant::now();
+        let tokenizer = build_tokenizer(&prepared_grammar);
+        let tokenizer_ms = elapsed_ms(tokenizer_started_at);
+
+        let trie_started_at = Instant::now();
+        let trie = crate::ds::vocab_prefix_tree::VocabPrefixTree::build_owned(
+            vocab.entries
+                .iter()
+                .map(|(&token_id, bytes)| (token_id as usize, bytes.clone()))
+                .collect(),
+        );
+        let trie_ms = elapsed_ms(trie_started_at);
+
+        let bottom_up_started_at = Instant::now();
+        let root_result = build_trie_pm_root_maps_by_class(
+            &tokenizer,
+            &trie.root,
+            vocab.entries.len() as u32,
+        );
+        let bottom_up_ms = elapsed_ms(bottom_up_started_at);
+        let root_class_count = root_result.class_maps.len();
+
+        let mut representative_states = vec![u32::MAX; root_class_count];
+        for state in 0..tokenizer.num_states() {
+            let class_id = root_result.classes[state as usize] as usize;
+            if representative_states[class_id] == u32::MAX {
+                representative_states[class_id] = state;
+            }
+        }
+
+        let baseline_started_at = Instant::now();
+        let (baseline_maps, _profile) = crate::compiler::possible_matches::collect_possible_matches_by_selected_original_tsid_dense(
+            &tokenizer,
+            &trie.root,
+            vocab.entries.len() as u32,
+            &representative_states,
+        );
+        let baseline_ms = elapsed_ms(baseline_started_at);
+
+        for &state in representative_states.iter() {
+            let class_id = root_result.classes[state as usize] as usize;
+            assert_eq!(
+                baseline_maps.get(&state).expect("collector should produce representative state map"),
+                root_result.class_maps[class_id].as_ref(),
+                "bottom-up class map diverged from collector for representative state {state}",
+            );
+        }
+
+        eprintln!(
+            "[o1051/trie_pm_bottom_up_maps] tokenizer_states={} root_classes={} reps={} tokenizer_ms={:.3} trie_ms={:.3} baseline_collector_ms={:.3} bottom_up_ms={:.3} speedup={:.2}x",
+            tokenizer.num_states(),
+            root_class_count,
+            representative_states.len(),
+            tokenizer_ms,
+            trie_ms,
+            baseline_ms,
+            bottom_up_ms,
+            baseline_ms / bottom_up_ms.max(0.001),
         );
     }
 
