@@ -2320,6 +2320,62 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "o1051 diagnostic: compare sampled dense possible-matches collector"]
+    fn test_o1051_llama3_dense_possible_matches_collector() {
+        let vocab = load_llama3_vocab();
+        let schema_path = o1051_schema_path();
+        let schema_json = fs::read_to_string(&schema_path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", schema_path.display()));
+        let schema_value: serde_json::Value = serde_json::from_str(&schema_json)
+            .expect("o1051 schema should parse as JSON");
+        let schema_payload = schema_value.get("schema").unwrap_or(&schema_value);
+        let grammar = json_schema_to_grammar(
+            &serde_json::to_string(schema_payload).expect("o1051 schema should serialize"),
+        )
+        .expect("o1051 schema should import to a grammar");
+        let (prepared_grammar, _nullable_terminals) = prepare_grammar_for_compile(&grammar);
+
+        let tokenizer_started_at = Instant::now();
+        let tokenizer = build_tokenizer(&prepared_grammar);
+        let tokenizer_ms = elapsed_ms(tokenizer_started_at);
+
+        let trie_started_at = Instant::now();
+        let trie = crate::ds::vocab_prefix_tree::VocabPrefixTree::build_owned(
+            vocab.entries
+                .iter()
+                .map(|(&token_id, bytes)| (token_id as usize, bytes.clone()))
+                .collect(),
+        );
+        let trie_ms = elapsed_ms(trie_started_at);
+
+        let entries: Vec<u32> = (0..tokenizer.num_states().min(8192)).collect();
+        let root_child_parallel = std::env::var("GLRMASK_PM_ROOT_CHILD_PARALLEL")
+            .map_or(false, |value| value == "1");
+
+        let collector_started_at = Instant::now();
+        let (raw_maps, profile) = crate::compiler::possible_matches::collect_possible_matches_by_selected_original_tsid_dense(
+            &tokenizer,
+            &trie.root,
+            vocab.entries.len() as u32,
+            &entries,
+        );
+        let collector_ms = elapsed_ms(collector_started_at);
+
+        eprintln!(
+            "[o1051/dense_possible_matches_collector] root_child_parallel={} tokenizer_states={} sampled_states={} states_collected={} tokenizer_ms={:.3} trie_ms={:.3} collector_ms={:.3} root_compute_ms={:.3} materialize_output_ms={:.3}",
+            root_child_parallel,
+            tokenizer.num_states(),
+            entries.len(),
+            raw_maps.len(),
+            tokenizer_ms,
+            trie_ms,
+            collector_ms,
+            profile.root_compute_ms,
+            profile.materialize_output_ms,
+        );
+    }
+
+    #[test]
     #[ignore = "o1051 diagnostic: exact PM-map interning classes"]
     fn test_o1051_llama3_trie_pm_exact_map_classes() {
         let vocab = load_llama3_vocab();

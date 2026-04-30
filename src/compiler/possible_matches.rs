@@ -849,71 +849,109 @@ fn batched_walk_node(
         return;
     }
 
-    // Handle token at this node
-    if node.has_token() {
-        let token_id = node.token_id() as u32;
-        for &(idx, state) in live {
-            for &terminal in matched_terminals[state as usize].iter() {
-                let entry = results[idx][terminal as usize]
-                    .get_or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
-                entry[token_id as usize / 64] |= 1u64 << (token_id % 64);
-            }
-        }
-    }
+    apply_batched_node_token_matches(node, live, results, matched_terminals, num_words);
 
     // Process each child edge
     for (segment, child) in node.iter_children() {
-        let child_key = child as *const VocabPrefixTreeNode as usize;
-        let reachable = &reachable_bitmaps[&child_key];
+        batched_process_child(
+            segment,
+            child,
+            live,
+            results,
+            subtree_computer,
+            flat_trans,
+            self_loop,
+            matched_terminals,
+            is_end,
+            num_words,
+            reachable_bitmaps,
+        );
+    }
+}
 
-        let subtree_bytes = U8Set::from_words(*child.subtree_bytes());
+fn apply_batched_node_token_matches(
+    node: &VocabPrefixTreeNode,
+    live: &[(usize, u32)],
+    results: &mut [Vec<Option<Box<[u64]>>>],
+    matched_terminals: &[Box<[TerminalID]>],
+    num_words: usize,
+) {
+    if !node.has_token() {
+        return;
+    }
 
-        let mut child_live_by_state: FxHashMap<u32, Vec<usize>> = FxHashMap::default();
+    let token_id = node.token_id() as u32;
+    for &(idx, state) in live {
+        for &terminal in matched_terminals[state as usize].iter() {
+            let entry = results[idx][terminal as usize]
+                .get_or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
+            entry[token_id as usize / 64] |= 1u64 << (token_id % 64);
+        }
+    }
+}
 
-        for &(idx, state) in live {
-            let mut s = state;
-            let mut dead = false;
-            let mut encountered_terminals = SmallVec::<[TerminalID; 8]>::new();
+fn batched_process_child(
+    segment: &[u8],
+    child: &VocabPrefixTreeNode,
+    live: &[(usize, u32)],
+    results: &mut [Vec<Option<Box<[u64]>>>],
+    subtree_computer: &mut DensePossibleMatchesComputer<'_>,
+    flat_trans: &[[u32; 256]],
+    self_loop: &[U8Set],
+    matched_terminals: &[Box<[TerminalID]>],
+    is_end: &[bool],
+    num_words: usize,
+    reachable_bitmaps: &FxHashMap<usize, Box<[(u16, u64)]>>,
+) {
+    let child_key = child as *const VocabPrefixTreeNode as usize;
+    let reachable = &reachable_bitmaps[&child_key];
+    let subtree_bytes = U8Set::from_words(*child.subtree_bytes());
 
-            for &byte in segment {
-                let next = flat_trans[s as usize][byte as usize];
-                if next == u32::MAX {
-                    dead = true;
-                    break;
+    let mut child_live_by_state: FxHashMap<u32, Vec<usize>> = FxHashMap::default();
+
+    for &(idx, state) in live {
+        let mut s = state;
+        let mut dead = false;
+        let mut encountered_terminals = SmallVec::<[TerminalID; 8]>::new();
+
+        for &byte in segment {
+            let next = flat_trans[s as usize][byte as usize];
+            if next == u32::MAX {
+                dead = true;
+                break;
+            }
+            s = next;
+            for &terminal in matched_terminals[s as usize].iter() {
+                if !encountered_terminals.contains(&terminal) {
+                    encountered_terminals.push(terminal);
                 }
-                s = next;
-                for &terminal in matched_terminals[s as usize].iter() {
-                    if !encountered_terminals.contains(&terminal) {
-                        encountered_terminals.push(terminal);
-                    }
-                }
             }
-
-            for terminal in encountered_terminals {
-                let entry = results[idx][terminal as usize]
-                    .get_or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
-                for &(word_idx, mask) in reachable.iter() {
-                    entry[word_idx as usize] |= mask;
-                }
-            }
-
-            if dead {
-                continue;
-            }
-            if is_end[s as usize] {
-                continue;
-            }
-            if subtree_bytes.is_subset(&self_loop[s as usize]) {
-                continue;
-            }
-            child_live_by_state.entry(s).or_default().push(idx);
         }
 
-        for (state, indices) in child_live_by_state {
-            let child_matches = subtree_computer.possible_matches_for_node(child, state);
-            for idx in indices {
-                merge_dense_map_into_slots(&mut results[idx], child_matches.as_ref(), num_words);
+        for terminal in encountered_terminals {
+            let entry = results[idx][terminal as usize]
+                .get_or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
+            for &(word_idx, mask) in reachable.iter() {
+                entry[word_idx as usize] |= mask;
             }
+        }
+
+        if dead {
+            continue;
+        }
+        if is_end[s as usize] {
+            continue;
+        }
+        if subtree_bytes.is_subset(&self_loop[s as usize]) {
+            continue;
+        }
+        child_live_by_state.entry(s).or_default().push(idx);
+    }
+
+    for (state, indices) in child_live_by_state {
+        let child_matches = subtree_computer.possible_matches_for_node(child, state);
+        for idx in indices {
+            merge_dense_map_into_slots(&mut results[idx], child_matches.as_ref(), num_words);
         }
     }
 }
