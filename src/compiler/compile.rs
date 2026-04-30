@@ -119,9 +119,10 @@ mod tests {
         }
     }
 
-    fn compute_trie_pm_root_classes(
+    fn compute_trie_pm_root_classes_with_depth(
         tokenizer: &crate::automata::lexer::tokenizer::Tokenizer,
         root: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
+        max_depth: Option<usize>,
     ) -> Vec<u32> {
         let matched_terminals: Vec<Vec<u32>> = (0..tokenizer.num_states())
             .map(|state| tokenizer.matched_terminals_iter(state).collect())
@@ -170,6 +171,7 @@ mod tests {
             node: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
             tokenizer: &crate::automata::lexer::tokenizer::Tokenizer,
             active_states: &[u32],
+            remaining_depth: Option<usize>,
             matched_terminals: &[Vec<u32>],
             node_terminal_ids: &[u32],
             empty_terminals_id: u32,
@@ -245,20 +247,25 @@ mod tests {
                 child_active_states.sort_unstable();
                 child_active_states.dedup();
 
-                let child_classes = compute_node_classes(
-                    child,
-                    tokenizer,
-                    &child_active_states,
-                    matched_terminals,
-                    node_terminal_ids,
-                    empty_terminals_id,
-                    is_end,
-                    flat_transitions,
-                    self_loop_bytes,
-                    terminal_set_ids,
-                    segment_cache,
-                    segment_outcome_tables,
-                );
+                let child_classes = if matches!(remaining_depth, Some(0)) {
+                    vec![u32::MAX; tokenizer.num_states() as usize]
+                } else {
+                    compute_node_classes(
+                        child,
+                        tokenizer,
+                        &child_active_states,
+                        remaining_depth.map(|depth| depth - 1),
+                        matched_terminals,
+                        node_terminal_ids,
+                        empty_terminals_id,
+                        is_end,
+                        flat_transitions,
+                        self_loop_bytes,
+                        terminal_set_ids,
+                        segment_cache,
+                        segment_outcome_tables,
+                    )
+                };
 
                 child_data.push((segment_table_idx, child_subtree_bytes, child_classes));
             }
@@ -280,6 +287,8 @@ mod tests {
                     let child_class_id = if let Some(end_state) = segment_outcome.end_state {
                         if is_end[end_state as usize] || child_subtree_bytes.is_subset(&self_loop_bytes[end_state as usize]) {
                             None
+                        } else if matches!(remaining_depth, Some(0)) {
+                            Some(0)
                         } else {
                             Some(child_class_ids[end_state as usize])
                         }
@@ -303,6 +312,7 @@ mod tests {
             root,
             tokenizer,
             &(0..tokenizer.num_states()).collect::<Vec<_>>(),
+            max_depth,
             &matched_terminals,
             &node_terminal_ids,
             empty_terminals_id,
@@ -313,6 +323,13 @@ mod tests {
             &mut segment_cache,
             &mut segment_outcome_tables,
         )
+    }
+
+    fn compute_trie_pm_root_classes(
+        tokenizer: &crate::automata::lexer::tokenizer::Tokenizer,
+        root: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
+    ) -> Vec<u32> {
+        compute_trie_pm_root_classes_with_depth(tokenizer, root, None)
     }
 
     fn mask_has_token(mask: &[u32], token: u32) -> bool {
@@ -1636,6 +1653,24 @@ mod tests {
         let root_classes = compute_trie_pm_root_classes(&tokenizer, &trie.root);
         let classes_ms = elapsed_ms(classes_started_at);
         let num_classes = root_classes.iter().copied().max().map_or(0, |id| id + 1);
+
+        for max_depth in [Some(0usize), Some(1), Some(2), Some(3)] {
+            let localized_started_at = Instant::now();
+            let localized_classes = compute_trie_pm_root_classes_with_depth(&tokenizer, &trie.root, max_depth);
+            let localized_ms = elapsed_ms(localized_started_at);
+            let localized_num_classes = localized_classes
+                .iter()
+                .copied()
+                .max()
+                .map_or(0, |id| id + 1);
+            eprintln!(
+                "[o1051/trie_pm_root_classes/localized] depth={} root_classes={} shrink={:.2}x classes_ms={:.3}",
+                max_depth.unwrap(),
+                localized_num_classes,
+                tokenizer.num_states() as f64 / localized_num_classes.max(1) as f64,
+                localized_ms,
+            );
+        }
 
         eprintln!(
             "[o1051/trie_pm_root_classes] tokenizer_states={} root_classes={} shrink={:.2}x tokenizer_ms={:.3} trie_ms={:.3} classes_ms={:.3}",
