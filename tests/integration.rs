@@ -619,6 +619,59 @@ fn test_mre_o43234_closed_object_string_then_integer_rejects_trailing_comma_in_m
 }
 
 #[test]
+fn test_mre_o43234_native_two_field_string_then_integer_rejects_trailing_comma() {
+    let vocab = Vocab::new(
+        vec![
+            (1, b"\"".to_vec()),
+            (11, b",".to_vec()),
+            (25, b":".to_vec()),
+            (220, b" ".to_vec()),
+            (313, b"--".to_vec()),
+        ],
+        None,
+    );
+    let constraint = Constraint::from_json_schema(
+        r#"{
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "integer"}
+            },
+            "required": ["a", "b"]
+        }"#,
+        &vocab,
+    )
+    .unwrap();
+    let comma_token_id = 11u32;
+    let prefix = b"{\"a\": \"--\", \"b\": 8";
+
+    let mut mask_state = constraint.start();
+    mask_state.commit_bytes(prefix).unwrap();
+    let mask = mask_state.mask();
+    let mask_accepts = token_allowed(&mask, comma_token_id as usize);
+
+    let mut commit_token_state = constraint.start();
+    commit_token_state.commit_bytes(prefix).unwrap();
+    let commit_token_accepts = match catch_unwind(AssertUnwindSafe(|| {
+        commit_token_state.commit_token(comma_token_id)
+    })) {
+        Ok(result) => result.is_ok(),
+        Err(_) => false,
+    };
+
+    let mut commit_bytes_state = constraint.start();
+    commit_bytes_state.commit_bytes(prefix).unwrap();
+    let commit_bytes_accepts = commit_bytes_state.commit_bytes(b",").is_ok();
+
+    assert_eq!(
+        (mask_accepts, commit_token_accepts, commit_bytes_accepts),
+        (false, false, false),
+        "o43234 native trailing comma should be rejected consistently by both mask and commit; mask={mask_accepts} commit_token={commit_token_accepts} commit_bytes={commit_bytes_accepts}",
+    );
+}
+
+#[test]
 fn test_json_schema_bare_object_accepts_compact_empty_object_token() {
     let constraint = json_schema_constraint(&["{}", "true"], r#"{"type": "object"}"#);
     let mut state = constraint.start();
