@@ -625,69 +625,90 @@ impl Constraint {
     }
 
     fn build_seed_terminal_dense_masks(&self) -> SeedTerminalDenseMasks {
-        let state_count = self.tokenizer.num_states();
-        let dense_words = self.internal_token_dense_words;
-        let mut terminal_masks = SeedTerminalDenseMasks::default();
-
-        for tokenizer_state in 0..state_count {
-            for (&original_token_id, token_bytes) in &self.token_bytes {
-                let Some(internal_token) = self.final_internal_token_for_original(original_token_id)
-                else {
-                    continue;
-                };
-
-                let exec = self.tokenizer.execute_from_state(token_bytes, tokenizer_state);
-                if exec.end_state.is_none() && exec.matches.is_empty() {
-                    continue;
-                }
-
-                let mut terminals: Vec<TerminalID> =
-                    exec.matches.iter().map(|matched| matched.id).collect();
-                if let Some(end_state) = exec.end_state {
-                    terminals.extend(
-                        self.tokenizer
-                            .possible_future_terminals_iter(end_state),
-                    );
-                }
-
-                terminals.sort_unstable();
-                terminals.dedup();
-
-                let word = internal_token as usize / 64;
-                let bit = internal_token as usize % 64;
-                for terminal_id in terminals {
-                    let dense = terminal_masks
-                        .entry((tokenizer_state, terminal_id))
-                        .or_insert_with(|| vec![0u64; dense_words].into_boxed_slice());
-                    dense[word] |= 1u64 << bit;
-                }
-            }
-        }
-
-        terminal_masks
+        self.possible_matches
+            .iter()
+            .flat_map(|(&tokenizer_state, terminals)| {
+                terminals.iter().map(move |(&terminal_id, bitmap)| {
+                    ((tokenizer_state, terminal_id), bitmap.clone())
+                })
+            })
+            .collect()
     }
 
     fn build_seed_state_dense_masks(&self) -> SeedStateDenseMasks {
         let state_count = self.tokenizer.num_states() as usize;
         let dense_words = self.internal_token_dense_words;
         let mut masks = vec![vec![0u64; dense_words]; state_count];
+        if state_count == 0 || dense_words == 0 {
+            return masks.into_iter().map(Vec::into_boxed_slice).collect();
+        }
 
-        for tokenizer_state in 0..state_count {
-            let tokenizer_state = tokenizer_state as u32;
+        let terminal_states: Vec<bool> = (0..self.tokenizer.num_states())
+            .map(|state| self.tokenizer.matched_terminals_iter(state).next().is_some())
+            .collect();
+        let terminal_start_states: Vec<u32> = (0..self.tokenizer.num_states())
+            .filter(|&state| terminal_states[state as usize])
+            .collect();
+        let nonterminal_start_states: Vec<u32> = (0..self.tokenizer.num_states())
+            .filter(|&state| !terminal_states[state as usize])
+            .collect();
+        let flat_transitions: Vec<Box<[u32; 256]>> = (0..self.tokenizer.num_states())
+            .map(|state| {
+                let dfa_state = &self.tokenizer.dfa.states()[state as usize];
+                let mut flat = Box::new([u32::MAX; 256]);
+                for (byte, &target) in dfa_state.transitions.iter() {
+                    flat[byte as usize] = target;
+                }
+                flat
+            })
+            .collect();
+        let mut active_start_states = Vec::with_capacity(state_count);
+        let mut active_current_states = Vec::with_capacity(state_count);
+        let mut next_active_start_states = Vec::with_capacity(state_count);
+        let mut next_active_current_states = Vec::with_capacity(state_count);
+        let mut matched_states = Vec::with_capacity(state_count);
 
-            for (&original_token_id, token_bytes) in &self.token_bytes {
-                let Some(internal_token) = self.final_internal_token_for_original(original_token_id)
-                else {
-                    continue;
-                };
+        for (&internal_token, token_bytes) in &self.internal_token_bytes {
+            active_start_states.clear();
+            active_start_states.extend_from_slice(&nonterminal_start_states);
+            active_current_states.clear();
+            active_current_states.extend_from_slice(&nonterminal_start_states);
+            matched_states.clear();
+            matched_states.extend_from_slice(&terminal_start_states);
 
-                let exec = self.tokenizer.execute_from_state(token_bytes, tokenizer_state);
-                if exec.end_state.is_none() && exec.matches.is_empty() {
-                    continue;
+            for &byte in token_bytes {
+                next_active_start_states.clear();
+                next_active_current_states.clear();
+
+                for (&start_state, &current_state) in active_start_states
+                    .iter()
+                    .zip(active_current_states.iter())
+                {
+                    let next_state = flat_transitions[current_state as usize][byte as usize];
+                    if next_state == u32::MAX {
+                        continue;
+                    }
+
+                    if terminal_states[next_state as usize] {
+                        matched_states.push(start_state);
+                    } else {
+                        next_active_start_states.push(start_state);
+                        next_active_current_states.push(next_state);
+                    }
                 }
 
-                let word = internal_token as usize / 64;
-                let bit = internal_token as usize % 64;
+                std::mem::swap(&mut active_start_states, &mut next_active_start_states);
+                std::mem::swap(&mut active_current_states, &mut next_active_current_states);
+                if active_start_states.is_empty() {
+                    break;
+                }
+            }
+
+            matched_states.extend(active_start_states.iter().copied());
+
+            let word = internal_token as usize / 64;
+            let bit = internal_token as usize % 64;
+            for &tokenizer_state in &matched_states {
                 if let Some(slot) = masks[tokenizer_state as usize].get_mut(word) {
                     *slot |= 1u64 << bit;
                 }

@@ -642,6 +642,13 @@ fn collect_possible_matches_dense_batched(
         })
         .collect();
 
+    let matched_terminals: Vec<Box<[TerminalID]>> = (0..tokenizer.num_states())
+        .map(|state| tokenizer.matched_terminals_iter(state).collect::<Vec<_>>().into_boxed_slice())
+        .collect();
+    let is_end: Vec<bool> = (0..tokenizer.num_states())
+        .map(|state| tokenizer.is_end(state))
+        .collect();
+
     // Pre-compute reachable bitmaps for all trie nodes.
     let mut reachable_bitmaps: FxHashMap<usize, Vec<u64>> = FxHashMap::default();
     precompute_reachable_bitmaps(root, num_words, &mut reachable_bitmaps);
@@ -667,7 +674,8 @@ fn collect_possible_matches_dense_batched(
         &mut results,
         &flat_transitions,
         &self_loop_bytes,
-        tokenizer,
+        &matched_terminals,
+        &is_end,
         num_words,
         &reachable_bitmaps,
     );
@@ -699,7 +707,8 @@ fn batched_walk_node(
     results: &mut [DensePossibleMatchMap],
     flat_trans: &[[u32; 256]],
     self_loop: &[U8Set],
-    tokenizer: &Tokenizer,
+    matched_terminals: &[Box<[TerminalID]>],
+    is_end: &[bool],
     num_words: usize,
     reachable_bitmaps: &FxHashMap<usize, Vec<u64>>,
 ) {
@@ -711,7 +720,7 @@ fn batched_walk_node(
     if node.has_token() {
         let token_id = node.token_id() as u32;
         for &(idx, state) in live {
-            for terminal in tokenizer.matched_terminals_iter(state) {
+            for &terminal in matched_terminals[state as usize].iter() {
                 let entry = results[idx]
                     .entry(terminal)
                     .or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
@@ -740,7 +749,7 @@ fn batched_walk_node(
                     break;
                 }
                 s = next;
-                for terminal in tokenizer.matched_terminals_iter(s) {
+                for &terminal in matched_terminals[s as usize].iter() {
                     let entry = results[idx]
                         .entry(terminal)
                         .or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
@@ -751,7 +760,7 @@ fn batched_walk_node(
             if dead {
                 continue;
             }
-            if tokenizer.is_end(s) {
+            if is_end[s as usize] {
                 continue;
             }
             if subtree_bytes.is_subset(&self_loop[s as usize]) {
@@ -767,7 +776,8 @@ fn batched_walk_node(
                 results,
                 flat_trans,
                 self_loop,
-                tokenizer,
+                matched_terminals,
+                is_end,
                 num_words,
                 reachable_bitmaps,
             );

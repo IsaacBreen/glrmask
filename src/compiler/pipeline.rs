@@ -36,7 +36,6 @@ use crate::compiler::stages::templates::compile_dfa::{emit_template_profile_summ
 use crate::compiler::stages::terminal_dwa_compat::build_terminal_dwa_for_existing_id_map_with_possible_matches_and_coloring;
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::{Weight, clear_weight_op_profile, emit_weight_op_profile_summary, finalize_weight_map, shared_rangeset};
-use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::grammar::flat::{GrammarDef, Terminal, TerminalID};
 use crate::runtime::Constraint;
 
@@ -387,125 +386,6 @@ fn build_possible_match_signatures(
     signatures
 }
 
-#[inline]
-fn tokenizer_fast_step(
-    tokenizer: &Tokenizer,
-    flat_transitions: &mut [Option<Box<[u32; 256]>>],
-    state: u32,
-    byte: u8,
-) -> Option<u32> {
-    let state_idx = state as usize;
-    if flat_transitions[state_idx].is_none() {
-        let dfa_state = &tokenizer.dfa.states()[state_idx];
-        let mut flat = Box::new([u32::MAX; 256]);
-        for (b, &target) in dfa_state.transitions.iter() {
-            flat[b as usize] = target;
-        }
-        flat_transitions[state_idx] = Some(flat);
-    }
-    let next = flat_transitions[state_idx].as_ref().unwrap()[byte as usize];
-    if next == u32::MAX { None } else { Some(next) }
-}
-
-#[inline]
-fn push_seed_signature_for_token(
-    token_id: usize,
-    tokenizer_state: u32,
-    signatures: &mut [Vec<u32>],
-    tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
-) {
-    let equivalent_tokens = tokens_with_same_bytes
-        .get(&(token_id as u32))
-        .cloned()
-        .unwrap_or_else(|| Arc::from([token_id as u32]));
-
-    for &equivalent_token_id in equivalent_tokens.iter() {
-        if let Some(signature) = signatures.get_mut(equivalent_token_id as usize) {
-            signature.push(tokenizer_state);
-        }
-    }
-}
-
-fn push_seed_signature_for_subtree(
-    node: &VocabPrefixTreeNode,
-    tokenizer_state: u32,
-    signatures: &mut [Vec<u32>],
-    tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
-) {
-    for range in node.reachable_token_ids().ranges() {
-        for token_id in *range.start()..=*range.end() {
-            push_seed_signature_for_token(
-                token_id,
-                tokenizer_state,
-                signatures,
-                tokens_with_same_bytes,
-            );
-        }
-    }
-}
-
-fn collect_seed_state_signature_for_state(
-    tokenizer: &Tokenizer,
-    node: &VocabPrefixTreeNode,
-    signature_state: u32,
-    tokenizer_state: u32,
-    flat_transitions: &mut [Option<Box<[u32; 256]>>],
-    signatures: &mut [Vec<u32>],
-    tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
-) {
-    if tokenizer.matched_terminals_iter(tokenizer_state).next().is_some() {
-        push_seed_signature_for_subtree(node, signature_state, signatures, tokens_with_same_bytes);
-        return;
-    }
-
-    for (segment_bytes, child) in node.iter_children() {
-        let mut current_state = tokenizer_state;
-        let mut matched_prefix = false;
-        let mut blocked = false;
-
-        for &byte in segment_bytes {
-            let Some(next_state) = tokenizer_fast_step(tokenizer, flat_transitions, current_state, byte) else {
-                blocked = true;
-                break;
-            };
-            current_state = next_state;
-
-            if tokenizer.matched_terminals_iter(current_state).next().is_some() {
-                matched_prefix = true;
-                break;
-            }
-        }
-
-        if matched_prefix {
-            push_seed_signature_for_subtree(child, signature_state, signatures, tokens_with_same_bytes);
-            continue;
-        }
-
-        if blocked {
-            continue;
-        }
-
-        if child.has_token() {
-            push_seed_signature_for_token(
-                child.token_id(),
-                signature_state,
-                signatures,
-                tokens_with_same_bytes,
-            );
-        }
-
-        collect_seed_state_signature_for_state(
-            tokenizer,
-            child,
-            signature_state,
-            current_state,
-            flat_transitions,
-            signatures,
-            tokens_with_same_bytes,
-        );
-    }
-}
-
 fn build_seed_state_signatures(
     tokenizer: &Tokenizer,
     token_bytes: &BTreeMap<u32, Vec<u8>>,
@@ -514,30 +394,84 @@ fn build_seed_state_signatures(
     let max_token_slot = max_original_token_slot(token_bytes) as usize;
     let mut signatures_by_token = vec![Vec::new(); max_token_slot];
 
-    let representative_entries: Vec<(usize, Vec<u8>)> = token_bytes
-        .iter()
-        .filter_map(|(&token_id, bytes)| {
-            let representative = tokens_with_same_bytes
-                .get(&token_id)
-                .and_then(|group| group.first().copied())
-                .unwrap_or(token_id);
-            (representative == token_id).then_some((token_id as usize, bytes.clone()))
+    let num_states = tokenizer.num_states() as usize;
+    let terminal_states: Vec<bool> = (0..tokenizer.num_states())
+        .map(|state| tokenizer.matched_terminals_iter(state).next().is_some())
+        .collect();
+    let terminal_start_states: Vec<u32> = (0..tokenizer.num_states())
+        .filter(|&state| terminal_states[state as usize])
+        .collect();
+    let nonterminal_start_states: Vec<u32> = (0..tokenizer.num_states())
+        .filter(|&state| !terminal_states[state as usize])
+        .collect();
+    let flat_transitions: Vec<Box<[u32; 256]>> = (0..tokenizer.num_states())
+        .map(|state| {
+            let dfa_state = &tokenizer.dfa.states()[state as usize];
+            let mut flat = Box::new([u32::MAX; 256]);
+            for (byte, &target) in dfa_state.transitions.iter() {
+                flat[byte as usize] = target;
+            }
+            flat
         })
         .collect();
+    let mut active_start_states = Vec::with_capacity(num_states);
+    let mut active_current_states = Vec::with_capacity(num_states);
+    let mut next_active_start_states = Vec::with_capacity(num_states);
+    let mut next_active_current_states = Vec::with_capacity(num_states);
+    let mut matched_states = Vec::with_capacity(num_states);
 
-    let trie = VocabPrefixTree::build_owned(representative_entries);
-    let mut flat_transitions = vec![None; tokenizer.num_states() as usize];
+    for (&token_id, bytes) in token_bytes {
+        let equivalent_tokens = tokens_with_same_bytes
+            .get(&token_id)
+            .cloned()
+            .unwrap_or_else(|| Arc::from([token_id]));
+        if equivalent_tokens.first().copied() != Some(token_id) {
+            continue;
+        }
 
-    for tokenizer_state in 0..tokenizer.num_states() {
-        collect_seed_state_signature_for_state(
-            tokenizer,
-            &trie.root,
-            tokenizer_state,
-            tokenizer_state,
-            &mut flat_transitions,
-            &mut signatures_by_token,
-            tokens_with_same_bytes,
-        );
+        active_start_states.clear();
+        active_start_states.extend_from_slice(&nonterminal_start_states);
+        active_current_states.clear();
+        active_current_states.extend_from_slice(&nonterminal_start_states);
+        matched_states.clear();
+        matched_states.extend_from_slice(&terminal_start_states);
+
+        for &byte in bytes {
+            next_active_start_states.clear();
+            next_active_current_states.clear();
+
+            for (&start_state, &current_state) in active_start_states
+                .iter()
+                .zip(active_current_states.iter())
+            {
+                let next_state = flat_transitions[current_state as usize][byte as usize];
+                if next_state == u32::MAX {
+                    continue;
+                }
+
+                if terminal_states[next_state as usize] {
+                    matched_states.push(start_state);
+                } else {
+                    next_active_start_states.push(start_state);
+                    next_active_current_states.push(next_state);
+                }
+            }
+
+            std::mem::swap(&mut active_start_states, &mut next_active_start_states);
+            std::mem::swap(&mut active_current_states, &mut next_active_current_states);
+
+            if active_start_states.is_empty() {
+                break;
+            }
+        }
+
+        matched_states.extend(active_start_states.iter().copied());
+
+        for &equivalent_token_id in equivalent_tokens.iter() {
+            if let Some(signature) = signatures_by_token.get_mut(equivalent_token_id as usize) {
+                signature.extend_from_slice(&matched_states);
+            }
+        }
     }
 
     token_bytes
@@ -574,8 +508,8 @@ where
 fn build_constraint_vocab_map(
     parser_vocab: &ManyToOneIdMap,
     token_bytes: &BTreeMap<u32, Vec<u8>>,
-    possible_match_signatures: &FxHashMap<u32, PossibleMatchSignature>,
-    seed_state_signatures: &FxHashMap<u32, SeedStateSignature>,
+    possible_match_signature_ids: &FxHashMap<u32, SignatureClassId>,
+    seed_state_signature_ids: &FxHashMap<u32, SignatureClassId>,
 ) -> ConstraintVocabMap {
     let max_original_slot = token_bytes
         .keys()
@@ -601,8 +535,7 @@ fn build_constraint_vocab_map(
     // unmapped tokens.
 
     for (old_internal_id, originals) in parser_vocab.internal_to_originals.iter().enumerate() {
-        let mut groups: BTreeMap<(PossibleMatchSignature, SeedStateSignature), Vec<u32>> =
-            BTreeMap::new();
+        let mut groups: BTreeMap<(SignatureClassId, SignatureClassId), Vec<u32>> = BTreeMap::new();
 
         for &original_token_id in originals {
             if !token_bytes.contains_key(&original_token_id) {
@@ -621,11 +554,11 @@ fn build_constraint_vocab_map(
                 "inconsistent parser vocab map for original token {original_token_id}"
             );
 
-            let signature = possible_match_signatures
+            let signature = possible_match_signature_ids
                 .get(&original_token_id)
                 .cloned()
                 .unwrap_or_default();
-            let seed_signature = seed_state_signatures
+            let seed_signature = seed_state_signature_ids
                 .get(&original_token_id)
                 .cloned()
                 .unwrap_or_default();
@@ -1403,34 +1336,89 @@ fn compile_prepared_with_profile(
             );
 
         let constraint_vocab_started_at = Instant::now();
+        let tokens_with_same_bytes_started_at = Instant::now();
         let tokens_with_same_bytes = build_tokens_with_same_bytes(&token_bytes);
+        let tokens_with_same_bytes_ms = elapsed_ms(tokens_with_same_bytes_started_at);
+        if compile_profile_summary_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_vocab_step] step=same_bytes ms={:.3}",
+                tokens_with_same_bytes_ms,
+            );
+        }
+
+        let possible_match_signatures_started_at = Instant::now();
         let possible_match_signatures = build_possible_match_signatures(
             &raw_possible_matches,
             &token_bytes,
             &tokens_with_same_bytes,
         );
+        let possible_match_signatures_ms = elapsed_ms(possible_match_signatures_started_at);
+        if compile_profile_summary_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_vocab_step] step=possible_match_signatures ms={:.3}",
+                possible_match_signatures_ms,
+            );
+        }
+        let possible_match_signature_ids = intern_signature_ids(possible_match_signatures);
+
+        let seed_state_signatures_started_at = Instant::now();
         let seed_state_signatures = build_seed_state_signatures(
             &tokenizer,
             &token_bytes,
             &tokens_with_same_bytes,
         );
+        let seed_state_signatures_ms = elapsed_ms(seed_state_signatures_started_at);
+        if compile_profile_summary_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_vocab_step] step=seed_state_signatures ms={:.3}",
+                seed_state_signatures_ms,
+            );
+        }
+        let seed_state_signature_ids = intern_signature_ids(seed_state_signatures);
+
+        let constraint_vocab_map_started_at = Instant::now();
         let constraint_vocab = build_constraint_vocab_map(
             &internal_ids.vocab_tokens,
             &token_bytes,
-            &possible_match_signatures,
-            &seed_state_signatures,
+            &possible_match_signature_ids,
+            &seed_state_signature_ids,
         );
+        let constraint_vocab_map_ms = elapsed_ms(constraint_vocab_map_started_at);
+        if compile_profile_summary_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_vocab_step] step=build_map ms={:.3}",
+                constraint_vocab_map_ms,
+            );
+        }
         let constraint_token_count = constraint_vocab.internal_to_originals.len() as u32;
+
+        let remap_possible_matches_started_at = Instant::now();
         let possible_matches = remap_possible_matches_to_constraint_vocab(
             raw_possible_matches,
             &constraint_vocab.original_to_internal,
             constraint_token_count,
             &tokens_with_same_bytes,
         );
+        let remap_possible_matches_ms = elapsed_ms(remap_possible_matches_started_at);
+        if compile_profile_summary_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_vocab_step] step=remap_possible_matches ms={:.3}",
+                remap_possible_matches_ms,
+            );
+        }
+
+        let remap_parser_dwa_started_at = Instant::now();
         remap_parser_dwa_to_constraint_vocab(
             &mut parser_dwa,
             &constraint_vocab.old_internal_to_constraint,
         );
+        let remap_parser_dwa_ms = elapsed_ms(remap_parser_dwa_started_at);
+        if compile_profile_summary_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_vocab_step] step=remap_parser_dwa ms={:.3}",
+                remap_parser_dwa_ms,
+            );
+        }
         let constraint_vocab_ms = elapsed_ms(constraint_vocab_started_at);
 
         if compile_profile_summary_enabled() {
@@ -1441,11 +1429,17 @@ fn compile_prepared_with_profile(
                 .count();
 
             eprintln!(
-                "[glrmask/profile][constraint_vocab] parser_tokens={} constraint_tokens={} split_parser_tokens={} reconcile_ms={:.3}",
+                "[glrmask/profile][constraint_vocab] parser_tokens={} constraint_tokens={} split_parser_tokens={} reconcile_ms={:.3} same_bytes_ms={:.3} possible_match_signatures_ms={:.3} seed_state_signatures_ms={:.3} build_map_ms={:.3} remap_possible_matches_ms={:.3} remap_parser_dwa_ms={:.3}",
                 internal_ids.vocab_tokens.num_internal_ids(),
                 constraint_token_count,
                 split_parser_tokens,
                 constraint_vocab_ms,
+                tokens_with_same_bytes_ms,
+                possible_match_signatures_ms,
+                seed_state_signatures_ms,
+                constraint_vocab_map_ms,
+                remap_possible_matches_ms,
+                remap_parser_dwa_ms,
             );
         }
 
@@ -1629,15 +1623,17 @@ mod tests {
             &token_bytes,
             &tokens_with_same_bytes,
         );
+        let signature_ids = intern_signature_ids(signatures);
         let seed_state_signatures: FxHashMap<u32, SeedStateSignature> = token_bytes
             .keys()
             .map(|&token_id| (token_id, Vec::new()))
             .collect();
+        let seed_state_signature_ids = intern_signature_ids(seed_state_signatures);
         let constraint_vocab = build_constraint_vocab_map(
             &parser_vocab,
             &token_bytes,
-            &signatures,
-            &seed_state_signatures,
+            &signature_ids,
+            &seed_state_signature_ids,
         );
 
         let tok0 = constraint_vocab.original_to_internal[0];
@@ -1690,15 +1686,17 @@ mod tests {
             &token_bytes,
             &tokens_with_same_bytes,
         );
+        let signature_ids = intern_signature_ids(signatures);
         let seed_state_signatures: FxHashMap<u32, SeedStateSignature> = token_bytes
             .keys()
             .map(|&token_id| (token_id, Vec::new()))
             .collect();
+        let seed_state_signature_ids = intern_signature_ids(seed_state_signatures);
         let constraint_vocab = build_constraint_vocab_map(
             &parser_vocab,
             &token_bytes,
-            &signatures,
-            &seed_state_signatures,
+            &signature_ids,
+            &seed_state_signature_ids,
         );
 
         let tok0 = constraint_vocab.original_to_internal[0];
