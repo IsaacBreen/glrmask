@@ -271,9 +271,8 @@ fn compute_kbounded_partition(
     let width = 1 + active_bytes.len();
     let mut signatures = vec![0u32; n * width];
     let mut order: Vec<usize> = (0..n).collect();
-    let mut iteration = 0usize;
 
-    loop {
+    for step in 0..k {
         let (next_blocks, next_count) = refine_once(
             dfa,
             active_bytes,
@@ -283,7 +282,7 @@ fn compute_kbounded_partition(
             &mut order,
         );
 
-        iteration += 1;
+        let iteration = step + 1;
         let stable = same_partition(&blocks, block_count, &next_blocks, next_count);
         blocks = next_blocks;
         block_count = next_count;
@@ -301,6 +300,8 @@ fn compute_kbounded_partition(
             return (blocks, block_count, iteration);
         }
     }
+
+    (blocks, block_count, k)
 }
 
 fn build_subset_mapping(states: &[usize], blocks: &[u32]) -> Vec<usize> {
