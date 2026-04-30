@@ -21,32 +21,10 @@ use crate::ds::weight::Weight;
 use super::types::{TerminalDwaPhaseProfile, compile_profile_enabled, debug_profile_enabled};
 
 #[derive(Debug, Clone)]
-pub(crate) struct DroppedOriginalStateTsidFallback {
-    original_to_local_tsid: Vec<u32>,
-}
-
-impl DroppedOriginalStateTsidFallback {
-    pub(crate) fn new(original_to_local_tsid: Vec<u32>) -> Self {
-        Self { original_to_local_tsid }
-    }
-
-    fn resolve(&self, original_state: usize) -> u32 {
-        self.original_to_local_tsid[original_state]
-    }
-}
-
-#[derive(Debug, Clone)]
 pub(crate) struct LocalIdMapTerminalDwa {
     pub(crate) id_map: InternalIdMap,
     pub(crate) dwa: DWA,
-    pub(crate) original_to_local_state: Vec<u32>,
-    // Temporary merge-side shim for original states dropped by tokenizer simplification.
-    pub(crate) dropped_original_state_tsid_fallback: Option<DroppedOriginalStateTsidFallback>,
     pub(crate) profile: TerminalDwaPhaseProfile,
-}
-
-pub(crate) fn identity_original_to_local_state(num_tokenizer_states: usize) -> Vec<u32> {
-    (0..num_tokenizer_states as u32).collect()
 }
 
 fn merge_phase_profile(
@@ -63,19 +41,6 @@ fn merge_phase_profile(
     }
 }
 
-fn local_tsid_for_original_state(local: &LocalIdMapTerminalDwa, original_state: usize) -> u32 {
-    if let Some(fallback) = &local.dropped_original_state_tsid_fallback {
-        return fallback.resolve(original_state);
-    }
-
-    let local_state = local.original_to_local_state[original_state];
-    if local_state == u32::MAX {
-        u32::MAX
-    } else {
-        local.id_map.tokenizer_states.original_to_internal[local_state as usize]
-    }
-}
-
 pub(crate) fn merge_local_id_maps_and_terminal_dwas(
     label: &str,
     inputs: Vec<LocalIdMapTerminalDwa>,
@@ -88,7 +53,6 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
 
     if inputs.len() == 1 {
         let mut input = inputs.into_iter().next().unwrap();
-        input.id_map = expand_local_id_map_to_original_space(&input, num_tokenizer_states);
         let compact_tsids_before = input.id_map.num_tsids();
         let compact_tokens_before = input.id_map.num_internal_tokens();
         let compact_started_at = Instant::now();
@@ -146,7 +110,7 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
 
     for local in &inputs {
         let mut nwa = local.dwa.to_nwa();
-        let tsid_map = build_local_to_global_tsid_map_from_local_input(local, &global_id_map);
+        let tsid_map = build_local_to_global_tsid_map(&local.id_map, &global_id_map);
         let token_map = build_local_to_global_token_map(&local.id_map, &global_id_map);
         remap_nwa_with_maps(
             &mut nwa,
@@ -217,8 +181,6 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
     LocalIdMapTerminalDwa {
         id_map: global,
         dwa,
-        original_to_local_state: identity_original_to_local_state(num_tokenizer_states),
-        dropped_original_state_tsid_fallback: None,
         profile,
     }
 }
@@ -380,8 +342,6 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     LocalIdMapTerminalDwa {
         id_map: global,
         dwa,
-        original_to_local_state: identity_original_to_local_state(num_tokenizer_states),
-        dropped_original_state_tsid_fallback: None,
         profile,
     }
 }
@@ -559,41 +519,6 @@ fn build_unified_global_id_map(
     }
 }
 
-pub(crate) fn expand_local_id_map_to_original_space(
-    input: &LocalIdMapTerminalDwa,
-    num_tokenizer_states: usize,
-) -> InternalIdMap {
-    let num_internal = input.id_map.num_tsids() as usize;
-    let mut state_o2i = vec![0u32; num_tokenizer_states];
-    let mut state_i2o = vec![Vec::new(); num_internal.max(1)];
-    let mut state_reps = vec![0u32; num_internal.max(1)];
-    let mut seen_rep = vec![false; num_internal.max(1)];
-
-    for original_state in 0..num_tokenizer_states {
-        let local_tsid = local_tsid_for_original_state(input, original_state);
-        let internal = if local_tsid == u32::MAX {
-            0
-        } else {
-            local_tsid
-        } as usize;
-        state_o2i[original_state] = internal as u32;
-        state_i2o[internal].push(original_state as u32);
-        if !seen_rep[internal] {
-            state_reps[internal] = original_state as u32;
-            seen_rep[internal] = true;
-        }
-    }
-
-    InternalIdMap {
-        tokenizer_states: ManyToOneIdMap {
-            original_to_internal: state_o2i,
-            internal_to_originals: state_i2o,
-            representative_original_ids: state_reps,
-        },
-        vocab_tokens: input.id_map.vocab_tokens.clone(),
-    }
-}
-
 fn build_unified_global_id_map_from_local_inputs(
     inputs: &[&LocalIdMapTerminalDwa],
     num_tokenizer_states: usize,
@@ -607,7 +532,7 @@ fn build_unified_global_id_map_from_local_inputs(
     for state in 0..num_tokenizer_states {
         let composite: Vec<u32> = inputs
             .iter()
-            .map(|input| local_tsid_for_original_state(input, state))
+            .map(|input| input.id_map.tokenizer_states.original_to_internal[state])
             .collect();
         let next_id = state_i2o.len() as u32;
         let class = *composite_to_class.entry(composite).or_insert_with(|| {
@@ -690,28 +615,6 @@ fn build_local_to_global_tsid_map(
         .iter()
         .enumerate()
     {
-        let global_tsid = global_id_map.tokenizer_states.original_to_internal[state];
-        local_to_global[local_tsid as usize].insert(global_tsid);
-    }
-
-    local_to_global
-        .into_iter()
-        .map(|s| s.into_iter().collect())
-        .collect()
-}
-
-fn build_local_to_global_tsid_map_from_local_input(
-    local: &LocalIdMapTerminalDwa,
-    global_id_map: &InternalIdMap,
-) -> Vec<Vec<u32>> {
-    let num_local = local.id_map.num_tsids() as usize;
-    let mut local_to_global = vec![BTreeSet::new(); num_local];
-
-    for state in 0..local.original_to_local_state.len() {
-        let local_tsid = local_tsid_for_original_state(local, state);
-        if local_tsid == u32::MAX {
-            continue;
-        }
         let global_tsid = global_id_map.tokenizer_states.original_to_internal[state];
         local_to_global[local_tsid as usize].insert(global_tsid);
     }

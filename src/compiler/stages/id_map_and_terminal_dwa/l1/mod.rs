@@ -147,7 +147,7 @@ use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::compact::{compact_from_env, CompactMode};
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::compiler::stages::id_map_and_terminal_dwa::merge::{
-    LocalIdMapTerminalDwa, identity_original_to_local_state,
+    LocalIdMapTerminalDwa,
 };
 use crate::ds::weight::{Weight, shared_rangeset};
 use crate::Vocab;
@@ -316,8 +316,6 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     Some(LocalIdMapTerminalDwa {
         id_map,
         dwa,
-        original_to_local_state: identity_original_to_local_state(tokenizer.num_states() as usize),
-        dropped_original_state_tsid_fallback: None,
         profile: TerminalDwaPhaseProfile {
             id_map_ms,
             terminal_dwa_ms: terminal_build_ms,

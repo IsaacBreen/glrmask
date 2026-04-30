@@ -15,8 +15,6 @@ pub(crate) mod postprocess;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use rustc_hash::FxHashMap;
-
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::determinize::determinize;
@@ -27,7 +25,8 @@ use crate::grammar::flat::TerminalID;
 use crate::compiler::possible_matches::{
     PossibleMatchesComputer,
 };
-use crate::compiler::stages::id_map_and_terminal_dwa::merge::{DroppedOriginalStateTsidFallback, LocalIdMapTerminalDwa};
+use crate::compiler::stages::equiv_types::InternalIdMap;
+use crate::compiler::stages::id_map_and_terminal_dwa::merge::LocalIdMapTerminalDwa;
 use crate::ds::bitset::BitSet;
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::ds::weight::Weight;
@@ -35,9 +34,6 @@ use crate::Vocab;
 
 use super::grammar_helpers::compute_always_allowed_follows;
 use super::types::{TerminalColoring, TerminalDwaPhaseProfile, compile_profile_enabled, debug_profile_enabled};
-use equivalence_analysis::compat::TokenizerView;
-use equivalence_analysis::disallowed_follows::normalize_disallowed_follows;
-use equivalence_analysis::state::fast as fast_state_equivalence;
 use nwa_builder::{build_nwa_via_trie_walk, internal_vocab_entries, seed_root_nodes};
 use postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
@@ -76,7 +72,7 @@ fn sampled_internal_tokens(weight: &Weight, max_samples: usize) -> Vec<u32> {
 fn validate_sampled_path_token_lengths(
     path: &[i32],
     accepted_weight: &Weight,
-    id_map: &crate::compiler::stages::equiv_types::InternalIdMap,
+    id_map: &InternalIdMap,
     vocab: &Vocab,
 ) {
     for internal_token_id in sampled_internal_tokens(accepted_weight, L2P_PATH_VALIDATION_TOKENS_PER_WEIGHT) {
@@ -110,7 +106,7 @@ fn validate_sampled_path_token_lengths(
 
 fn validate_sampled_terminal_dwa_paths(
     dwa: &DWA,
-    id_map: &crate::compiler::stages::equiv_types::InternalIdMap,
+    id_map: &InternalIdMap,
     vocab: &Vocab,
 ) {
     if dwa.states().is_empty() {
@@ -188,150 +184,6 @@ fn validate_sampled_terminal_dwa_paths(
     }
 }
 
-fn build_partition_pruned_tokenizer(
-    tokenizer: &Tokenizer,
-    active_terminals: &[bool],
-    relevant_bytes: &[bool; 256],
-) -> Tokenizer {
-    tokenizer.clone_filtered_for_terminals(active_terminals, relevant_bytes)
-}
-
-fn build_dropped_original_state_tsid_fallback(
-    original_tokenizer: &Tokenizer,
-    simplified_tokenizer: &Tokenizer,
-    simplified_id_map: &crate::compiler::stages::equiv_types::InternalIdMap,
-    original_to_local_state: &[u32],
-    vocab: &Vocab,
-    active_terminals: &[bool],
-    relevant_bytes: &[bool; 256],
-    disallowed_follows: &BTreeMap<u32, BitSet>,
-) -> DroppedOriginalStateTsidFallback {
-    let mut original_to_local_tsid = vec![u32::MAX; original_to_local_state.len()];
-    let mut simplified_state_to_original = vec![u32::MAX; simplified_tokenizer.num_states() as usize];
-
-    for (original_state, &local_state) in original_to_local_state.iter().enumerate() {
-        if local_state == u32::MAX {
-            continue;
-        }
-        original_to_local_tsid[original_state] =
-            simplified_id_map.tokenizer_states.original_to_internal[local_state as usize];
-        if simplified_state_to_original[local_state as usize] == u32::MAX {
-            simplified_state_to_original[local_state as usize] = original_state as u32;
-        }
-    }
-
-    let representative_local_tsids_and_states: Vec<(u32, usize)> = simplified_id_map
-        .tokenizer_states
-        .iter_representative_ids()
-        .enumerate()
-        .filter_map(|local_state| {
-            let (local_tsid, local_state) = local_state;
-            let original_state = simplified_state_to_original[local_state as usize];
-            (original_state != u32::MAX).then_some((local_tsid as u32, original_state as usize))
-        })
-        .collect();
-    if representative_local_tsids_and_states.is_empty() {
-        return DroppedOriginalStateTsidFallback::new(original_to_local_tsid);
-    }
-
-    // Fast path: missing states that can never produce an active terminal are
-    // equivalent to an already-mapped dead representative state.
-    let active_bitset = bitset_from_active_terminals(active_terminals, original_tokenizer.num_terminals as usize);
-    let mut dead_representative_tsid = None;
-    for &(local_tsid, original_state) in &representative_local_tsids_and_states {
-        let has_active_final = original_tokenizer
-            .matched_terminals_iter(original_state as u32)
-            .any(|tid| active_terminals.get(tid as usize).copied().unwrap_or(false));
-        let has_active_future = !original_tokenizer
-            .possible_future_terminals(original_state as u32)
-            .is_disjoint(&active_bitset);
-        if !has_active_final && !has_active_future {
-            dead_representative_tsid = Some(local_tsid);
-            break;
-        }
-    }
-
-    let mut unresolved_missing_states = Vec::new();
-    if let Some(dead_tsid) = dead_representative_tsid {
-        for (state, tsid) in original_to_local_tsid.iter_mut().enumerate() {
-            if *tsid != u32::MAX {
-                continue;
-            }
-            let has_active_final = original_tokenizer
-                .matched_terminals_iter(state as u32)
-                .any(|tid| active_terminals.get(tid as usize).copied().unwrap_or(false));
-            let has_active_future = !original_tokenizer
-                .possible_future_terminals(state as u32)
-                .is_disjoint(&active_bitset);
-            if !has_active_final && !has_active_future {
-                *tsid = dead_tsid;
-            } else {
-                unresolved_missing_states.push(state);
-            }
-        }
-    } else {
-        unresolved_missing_states = original_to_local_tsid
-            .iter()
-            .enumerate()
-            .filter_map(|(state, &tsid)| (tsid == u32::MAX).then_some(state))
-            .collect();
-    }
-
-    if unresolved_missing_states.is_empty() {
-        return DroppedOriginalStateTsidFallback::new(original_to_local_tsid);
-    }
-
-    let representative_tokens: Vec<&[u8]> = simplified_id_map
-        .vocab_tokens
-        .iter_representative_ids()
-        .filter_map(|token_id| vocab.entries.get(&token_id).map(|bytes| bytes.as_slice()))
-        .collect();
-    if representative_tokens.is_empty() {
-        return DroppedOriginalStateTsidFallback::new(original_to_local_tsid);
-    }
-
-    let mut states: Vec<usize> = representative_local_tsids_and_states
-        .iter()
-        .map(|(_, original_state)| *original_state)
-        .collect();
-    states.extend(unresolved_missing_states.iter().copied());
-
-    let pruned_tokenizer = build_partition_pruned_tokenizer(original_tokenizer, active_terminals, relevant_bytes);
-    let tokenizer_view = TokenizerView::new(&pruned_tokenizer);
-    let normalized_disallowed = normalize_disallowed_follows(pruned_tokenizer.num_terminals as usize, disallowed_follows);
-    let representative_mapping = fast_state_equivalence::find_state_equivalence_classes_with_disallowed(
-        &tokenizer_view,
-        &representative_tokens,
-        &states,
-        &normalized_disallowed,
-    );
-
-    let mut representative_state_to_tsid = FxHashMap::default();
-    for (idx, &(local_tsid, _)) in representative_local_tsids_and_states.iter().enumerate() {
-        let mapped_rep = representative_mapping[idx];
-        representative_state_to_tsid.entry(mapped_rep).or_insert(local_tsid);
-    }
-
-    for (idx, &original_state) in unresolved_missing_states.iter().enumerate() {
-        let rep = representative_mapping[representative_local_tsids_and_states.len() + idx];
-        if let Some(&tsid) = representative_state_to_tsid.get(&rep) {
-            original_to_local_tsid[original_state] = tsid;
-        }
-    }
-
-    DroppedOriginalStateTsidFallback::new(original_to_local_tsid)
-}
-
-fn bitset_from_active_terminals(active_terminals: &[bool], num_terminals: usize) -> BitSet {
-    let mut bits = BitSet::new(num_terminals);
-    for (terminal_id, &active) in active_terminals.iter().enumerate() {
-        if active {
-            bits.set(terminal_id);
-        }
-    }
-    bits
-}
-
 /// Build an L2+ id_map and terminal DWA for the given vocab and terminal set.
 ///
 /// Builds its own id_map via `InternalIdMap::build_with_group_filter` (full DFA-
@@ -367,8 +219,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         return None;
     }
 
-    let original_tokenizer = tokenizer;
-
     let total_started_at = Instant::now();
     let num_original_states = tokenizer.num_states() as usize;
     let num_active_terminals = active_terminals.iter().filter(|&&active| active).count();
@@ -386,16 +236,24 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // transitions, reducing the state count for equivalence analysis and NWA
     // building.
     let simplify_started_at = Instant::now();
-    let (simplified_tok, orig_to_simplified) = tokenizer.simplify_for_terminals(
+    let (simplified_tok, simplify_state_map) = tokenizer.simplify_for_terminals(
         active_terminals,
         Some(&relevant_bytes),
     );
     let simplify_ms = simplify_started_at.elapsed().as_secs_f64() * 1000.0;
 
     if debug_profile_enabled() {
+        let unmapped_original_states = simplify_state_map
+            .original_to_internal
+            .iter()
+            .filter(|&&state| state == u32::MAX)
+            .count();
         eprintln!(
-            "[glrmask/debug][l2p_simplify] partition={} original_states={} simplified_states={}",
-            partition_label, num_original_states, simplified_tok.num_states(),
+            "[glrmask/debug][l2p_simplify] partition={} original_states={} simplified_states={} unmapped_original_states={}",
+            partition_label,
+            num_original_states,
+            simplified_tok.num_states(),
+            unmapped_original_states,
         );
     }
 
@@ -442,8 +300,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // off the per-partition sequential critical path.
     let tokenizer = &simplified_tok;
     let (
-        (dropped_original_state_tsid_fallback, tsid_fallback_ms),
-        (
             dwa,
             vocab_tree_ms,
             possible_matches_ms,
@@ -464,157 +320,144 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             dwa_stats_before_compact,
             dwa_stats_after_compact,
             early_none,
-        ),
-    ) = rayon::join(
-        || {
-            let t0 = Instant::now();
-            let fb = build_dropped_original_state_tsid_fallback(
-                original_tokenizer,
-                &simplified_tok,
-                &simplified_id_map,
-                &orig_to_simplified,
-                vocab,
-                active_terminals,
-                &relevant_bytes,
-                disallowed_follows,
-            );
-            (fb, t0.elapsed().as_secs_f64() * 1000.0)
-        },
-        || {
+        ) = {
             // ---- Step 2-3: Internal vocab + prefix tree ----
             let vocab_tree_started_at = Instant::now();
             let internal_vocab = internal_vocab_entries(vocab, &simplified_id_map);
             if internal_vocab.is_empty() {
                 // Signal early-None via a sentinel. Build a dummy DWA;
                 // outer code will observe `early_none=true` and return.
-                return (
+                (
                     crate::automata::weighted_u32::dwa::DWA::new(0, 0),
                     0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
                     0usize, 0usize, 0usize, 0usize, 0usize,
                     crate::automata::weighted_u32::dwa::DWA::new(0, 0).stats(),
                     crate::automata::weighted_u32::dwa::DWA::new(0, 0).stats(),
                     true,
+                )
+            } else {
+                let full_tree = VocabPrefixTree::build_owned(
+                    internal_vocab
+                        .iter()
+                        .map(|(token_id, bytes)| (*token_id as usize, bytes.clone()))
+                        .collect(),
                 );
-            }
-            let full_tree = VocabPrefixTree::build_owned(
-                internal_vocab
-                    .iter()
-                    .map(|(token_id, bytes)| (*token_id as usize, bytes.clone()))
-                    .collect(),
-            );
-            let vocab_tree_ms = vocab_tree_started_at.elapsed().as_secs_f64() * 1000.0;
+                let vocab_tree_ms = vocab_tree_started_at.elapsed().as_secs_f64() * 1000.0;
 
-            // ---- Step 4: Possible matches (lazy via computer) ----
-            let mut pm_computer = PossibleMatchesComputer::new(tokenizer);
-            let possible_matches_ms = 0.0;
+                // ---- Step 4: Possible matches (lazy via computer) ----
+                let mut pm_computer = PossibleMatchesComputer::new(tokenizer);
+                let possible_matches_ms = 0.0;
 
-            // ---- Step 5: Create NWA and seed root nodes ----
-            let seed_started_at = Instant::now();
-            let mut nwa = NWA::new(simplified_id_map.num_tsids(), simplified_id_map.max_internal_token_id());
-            let leaf_state = nwa.add_state();
-            nwa.set_final_weight(leaf_state, Weight::all());
-            let start_state = nwa.add_state();
-            nwa.start_states_mut().push(start_state);
+                // ---- Step 5: Create NWA and seed root nodes ----
+                let seed_started_at = Instant::now();
+                let mut nwa = NWA::new(simplified_id_map.num_tsids(), simplified_id_map.max_internal_token_id());
+                let leaf_state = nwa.add_state();
+                nwa.set_final_weight(leaf_state, Weight::all());
+                let start_state = nwa.add_state();
+                nwa.start_states_mut().push(start_state);
 
-            let roots = seed_root_nodes(
-                &mut nwa,
-                start_state,
-                &simplified_id_map,
-            );
-            let seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
-
-            // ---- Step 6: Trie-walk NWA build ----
-            let trie_build_started_at = Instant::now();
-            let _build_profile = build_nwa_via_trie_walk(
-                tokenizer,
-                terminal_coloring,
-                use_terminal_coloring,
-                ignore_terminal,
-                &mut nwa,
-                leaf_state,
-                simplified_id_map.num_tsids(),
-                &full_tree.root,
-                &roots,
-                &mut pm_computer,
-                None,
-            );
-            let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
-
-            // ---- Step 7: Postprocess ----
-            let always_allowed_started_at = Instant::now();
-            let always_allowed = compute_always_allowed_follows(grammar);
-            let always_allowed_ms = always_allowed_started_at.elapsed().as_secs_f64() * 1000.0;
-            let nwa_states_after_build = nwa.states().len();
-
-            if debug_profile_enabled() {
-                let non_empty_count = always_allowed.iter().filter(|v| !v.is_empty()).count();
-                let total_entries: usize = always_allowed.iter().map(|v| v.len()).sum();
-                eprintln!(
-                    "[glrmask/debug][always_allowed] terminals_with_follows={}/{} total_entries={}",
-                    non_empty_count, always_allowed.len(), total_entries,
+                let roots = seed_root_nodes(
+                    &mut nwa,
+                    start_state,
+                    &simplified_id_map,
                 );
+                let seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
+
+                // ---- Step 6: Trie-walk NWA build ----
+                let trie_build_started_at = Instant::now();
+                let _build_profile = build_nwa_via_trie_walk(
+                    tokenizer,
+                    terminal_coloring,
+                    use_terminal_coloring,
+                    ignore_terminal,
+                    &mut nwa,
+                    leaf_state,
+                    simplified_id_map.num_tsids(),
+                    &full_tree.root,
+                    &roots,
+                    &mut pm_computer,
+                    None,
+                );
+                let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
+
+                let always_allowed_started_at = Instant::now();
+                let always_allowed = compute_always_allowed_follows(grammar);
+                let always_allowed_ms = always_allowed_started_at.elapsed().as_secs_f64() * 1000.0;
+                let nwa_states_after_build = nwa.states().len();
+
+                if debug_profile_enabled() {
+                    let non_empty_count = always_allowed.iter().filter(|v| !v.is_empty()).count();
+                    let total_entries: usize = always_allowed.iter().map(|v| v.len()).sum();
+                    eprintln!(
+                        "[glrmask/debug][always_allowed] terminals_with_follows={}/{} total_entries={}",
+                        non_empty_count, always_allowed.len(), total_entries,
+                    );
+                }
+
+                let collapse_started_at = Instant::now();
+                collapse_always_allowed(&mut nwa, &always_allowed, grammar.num_terminals as usize);
+                let collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
+                let nwa_states_after_collapse = nwa.states().len();
+
+                let disallowed_started_at = Instant::now();
+                apply_disallowed_follow_constraints(&mut nwa, disallowed_follows, grammar.num_terminals as usize);
+                let disallowed_ms = disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
+                let nwa_states_after_disallowed = nwa.states().len();
+
+                let prune_started_at = Instant::now();
+                prune_non_coreachable_states(&mut nwa);
+                let prune_ms = prune_started_at.elapsed().as_secs_f64() * 1000.0;
+                let nwa_states_after_prune = nwa.states().len();
+
+                let canonicalize_started_at = Instant::now();
+                canonicalize_acyclic_nwa(&mut nwa);
+                let canonicalize_ms = canonicalize_started_at.elapsed().as_secs_f64() * 1000.0;
+                let nwa_states_after_canonicalize = nwa.states().len();
+
+                let determinize_started_at = Instant::now();
+                let det = determinize(&nwa).expect("L2+ terminal NWA determinization failed");
+                let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
+
+                let minimize_started_at = Instant::now();
+                let dwa = minimize_from_env(&det, "GLRMASK_MINIMIZE_L2P", |dwa| {
+                    minimize_with_threshold(dwa, 50)
+                });
+                let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
+                let dwa_stats_before_compact = dwa.stats();
+                let dwa_stats_after_compact = dwa.stats();
+
+                (
+                    dwa,
+                    vocab_tree_ms,
+                    possible_matches_ms,
+                    seed_ms,
+                    trie_build_ms,
+                    always_allowed_ms,
+                    collapse_ms,
+                    disallowed_ms,
+                    prune_ms,
+                    canonicalize_ms,
+                    determinize_ms,
+                    minimize_ms,
+                    nwa_states_after_build,
+                    nwa_states_after_collapse,
+                    nwa_states_after_disallowed,
+                    nwa_states_after_prune,
+                    nwa_states_after_canonicalize,
+                    dwa_stats_before_compact,
+                    dwa_stats_after_compact,
+                    false,
+                )
             }
-
-            let collapse_started_at = Instant::now();
-            collapse_always_allowed(&mut nwa, &always_allowed, grammar.num_terminals as usize);
-            let collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
-            let nwa_states_after_collapse = nwa.states().len();
-
-            let disallowed_started_at = Instant::now();
-            apply_disallowed_follow_constraints(&mut nwa, disallowed_follows, grammar.num_terminals as usize);
-            let disallowed_ms = disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
-            let nwa_states_after_disallowed = nwa.states().len();
-
-            let prune_started_at = Instant::now();
-            prune_non_coreachable_states(&mut nwa);
-            let prune_ms = prune_started_at.elapsed().as_secs_f64() * 1000.0;
-            let nwa_states_after_prune = nwa.states().len();
-
-            let canonicalize_started_at = Instant::now();
-            canonicalize_acyclic_nwa(&mut nwa);
-            let canonicalize_ms = canonicalize_started_at.elapsed().as_secs_f64() * 1000.0;
-            let nwa_states_after_canonicalize = nwa.states().len();
-
-            // ---- Step 8: Determinize → minimize ----
-            let determinize_started_at = Instant::now();
-            let det = determinize(&nwa).expect("L2+ terminal NWA determinization failed");
-            let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
-
-            let minimize_started_at = Instant::now();
-            let dwa = minimize_from_env(&det, "GLRMASK_MINIMIZE_L2P", |dwa| {
-                minimize_with_threshold(dwa, 50)
-            });
-            let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
-            let dwa_stats_before_compact = dwa.stats();
-            let dwa_stats_after_compact = dwa.stats();
-
-            (
-                dwa,
-                vocab_tree_ms,
-                possible_matches_ms,
-                seed_ms,
-                trie_build_ms,
-                always_allowed_ms,
-                collapse_ms,
-                disallowed_ms,
-                prune_ms,
-                canonicalize_ms,
-                determinize_ms,
-                minimize_ms,
-                nwa_states_after_build,
-                nwa_states_after_collapse,
-                nwa_states_after_disallowed,
-                nwa_states_after_prune,
-                nwa_states_after_canonicalize,
-                dwa_stats_before_compact,
-                dwa_stats_after_compact,
-                false,
-            )
-        },
-    );
+        };
     if early_none {
         return None;
     }
+    let composed_tokenizer_states = simplify_state_map.compose(&simplified_id_map.tokenizer_states);
+    let composed_id_map = InternalIdMap {
+        tokenizer_states: composed_tokenizer_states,
+        vocab_tokens: simplified_id_map.vocab_tokens.clone(),
+    };
     let postprocess_ms = always_allowed_ms + collapse_ms + disallowed_ms + prune_ms + canonicalize_ms;
 
     if compile_profile_enabled() || debug_profile_enabled() {
@@ -628,7 +471,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             simplify_ms,
             simplified_tok.num_states(),
             id_map_ms,
-            tsid_fallback_ms,
+            0.0,
             vocab_tree_ms,
             possible_matches_ms,
             seed_ms,
@@ -657,16 +500,14 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     }
 
     if l2p_path_validation_enabled() {
-        validate_sampled_terminal_dwa_paths(&dwa, &simplified_id_map, vocab);
+        validate_sampled_terminal_dwa_paths(&dwa, &composed_id_map, vocab);
     }
 
     Some(LocalIdMapTerminalDwa {
-        id_map: simplified_id_map,
+        id_map: composed_id_map,
         dwa,
-        original_to_local_state: orig_to_simplified,
-        dropped_original_state_tsid_fallback: Some(dropped_original_state_tsid_fallback),
         profile: TerminalDwaPhaseProfile {
-            id_map_ms: simplify_ms + id_map_ms + tsid_fallback_ms,
+            id_map_ms: simplify_ms + id_map_ms,
             terminal_dwa_ms: vocab_tree_ms
                 + possible_matches_ms
                 + seed_ms

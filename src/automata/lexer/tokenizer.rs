@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::automata::dfa::DFA;
 use crate::automata::regex::Expr;
+use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::grammar::flat::TerminalID;
 use crate::ds::bitset::BitSet;
 
@@ -54,271 +55,6 @@ fn group_matches_by_width(matches: Vec<TokenizerMatch>) -> Vec<(usize, BTreeSet<
     grouped.into_iter().collect()
 }
 
-fn remap_masked_possible_futures(
-    tokenizer: &Tokenizer,
-    active_groups: &BitSet,
-    state_mapping: &[u32],
-    num_new_states: usize,
-) -> Vec<BitSet> {
-    let mut remapped = (0..num_new_states)
-        .map(|_| BitSet::new(active_groups.len()))
-        .collect::<Vec<_>>();
-
-    for (old_state, &new_state) in state_mapping.iter().enumerate() {
-        if new_state == u32::MAX {
-            continue;
-        }
-
-        let mut masked = tokenizer.dfa.possible_future_group_ids(old_state as u32).clone();
-        masked.intersect_with(active_groups);
-        remapped[new_state as usize].union_with(&masked);
-    }
-
-    remapped
-}
-
-fn state_has_active_continuation(dfa: &DFA, state: usize, active_groups: &BitSet) -> bool {
-    !dfa.states()[state].finalizers.is_disjoint(active_groups)
-        || !dfa.possible_future_group_ids(state as u32).is_disjoint(active_groups)
-}
-
-fn state_needs_preserved_root(dfa: &DFA, state: usize, active_groups: &BitSet) -> bool {
-    let dfa_state = &dfa.states()[state];
-    !dfa_state.finalizers.is_disjoint(active_groups)
-        || (!dfa_state.transitions.is_empty()
-            && !dfa.possible_future_group_ids(state as u32).is_disjoint(active_groups))
-}
-
-fn collect_pruned_continuation_roots(
-    dfa: &DFA,
-    pruned_targets: &[Vec<u32>],
-    active_groups: &BitSet,
-) -> Vec<u32> {
-    let num_states = dfa.num_states();
-    if num_states == 0 || pruned_targets.len() != num_states {
-        return Vec::new();
-    }
-
-    let mut reachable = vec![false; num_states];
-    let mut queue = vec![0usize];
-    reachable[0] = true;
-    while let Some(state) = queue.pop() {
-        for (_, &next) in dfa.states()[state].transitions.iter() {
-            let next = next as usize;
-            if !reachable[next] {
-                reachable[next] = true;
-                queue.push(next);
-            }
-        }
-    }
-
-    let mut visited = vec![false; num_states];
-    let mut preserved = vec![false; num_states];
-    let mut queue = Vec::new();
-    for targets in pruned_targets {
-        for &target in targets {
-            let target = target as usize;
-            if target < num_states && !reachable[target] && !visited[target] {
-                visited[target] = true;
-                queue.push(target);
-            }
-        }
-    }
-
-    while let Some(state) = queue.pop() {
-        if state_needs_preserved_root(dfa, state, active_groups) {
-            preserved[state] = true;
-        }
-        for &next in &pruned_targets[state] {
-            let next = next as usize;
-            if next < num_states
-                && !reachable[next]
-                && !visited[next]
-                && state_has_active_continuation(dfa, next, active_groups)
-            {
-                visited[next] = true;
-                queue.push(next);
-            }
-        }
-    }
-
-    preserved
-        .into_iter()
-        .enumerate()
-        .filter_map(|(state, keep)| keep.then_some(state as u32))
-        .collect()
-}
-
-fn append_continuation_alias_states(
-    minimized: &mut DFA,
-    pruned_dfa: &DFA,
-    continuation_roots: &[u32],
-    state_mapping: &mut Vec<u32>,
-) {
-    if continuation_roots.is_empty() {
-        return;
-    }
-
-    fn ensure_continuation_alias_state(
-        minimized: &mut DFA,
-        pruned_dfa: &DFA,
-        state_mapping: &mut Vec<u32>,
-        building: &mut [bool],
-        original_state: usize,
-    ) -> u32 {
-        if state_mapping[original_state] != u32::MAX {
-            return state_mapping[original_state];
-        }
-
-        if building[original_state] {
-            return state_mapping[original_state];
-        }
-
-        building[original_state] = true;
-        let alias_state = minimized.add_state();
-        state_mapping[original_state] = alias_state;
-
-        let original = &pruned_dfa.states()[original_state];
-        let mut transitions = Vec::with_capacity(original.transitions.len());
-        for (byte, &target) in original.transitions.iter() {
-            let mapped_target = ensure_continuation_alias_state(
-                minimized,
-                pruned_dfa,
-                state_mapping,
-                building,
-                target as usize,
-            );
-            transitions.push((byte, mapped_target));
-        }
-
-        let alias = &mut minimized.states_mut()[alias_state as usize];
-        alias.transitions = crate::ds::char_transitions::CharTransitions::from_sorted_entries(transitions);
-        alias.finalizers = original.finalizers.clone();
-        building[original_state] = false;
-        alias_state
-    }
-
-    let mut building = vec![false; pruned_dfa.num_states()];
-    for &root in continuation_roots {
-        let root = root as usize;
-        if root < pruned_dfa.num_states() {
-            ensure_continuation_alias_state(
-                minimized,
-                pruned_dfa,
-                state_mapping,
-                &mut building,
-                root,
-            );
-        }
-    }
-}
-
-/// Merge alias states that are byte-for-byte identical, never touching
-/// main-DFA states (indices `< main_state_count`). Uses a single pass over
-/// alias states with a hash signature; redirects redundant aliases to a
-/// canonical representative and compacts the DFA.
-///
-/// This is a cheap structural dedup — it does not collapse transitive
-/// equivalences that full Hopcroft minimization would find, but it catches
-/// the common case where `append_continuation_alias_states` clones the same
-/// original state multiple times via different paths.
-fn dedup_alias_states(
-    minimized: &mut DFA,
-    main_state_count: usize,
-    state_mapping: &mut [u32],
-) {
-    use crate::ds::char_transitions::CharTransitions;
-    use rustc_hash::FxHashMap;
-    use std::hash::{Hash, Hasher};
-
-    let n = minimized.num_states() as usize;
-    if n <= main_state_count {
-        return;
-    }
-
-    // Hash signature = FxHash of (finalizer bits + sorted transitions).
-    // On collision we verify equality.
-    let mut sig_hash: FxHashMap<u64, u32> = FxHashMap::default();
-    let mut redirect = vec![u32::MAX; n];
-    let mut any = false;
-
-    for s in main_state_count..n {
-        let st = &minimized.states()[s];
-        let mut hasher = rustc_hash::FxHasher::default();
-        for bit in st.finalizers.iter_ones() {
-            bit.hash(&mut hasher);
-        }
-        0xAAAA_u32.hash(&mut hasher);
-        for (b, &t) in st.transitions.iter() {
-            b.hash(&mut hasher);
-            t.hash(&mut hasher);
-        }
-        let key = hasher.finish();
-        match sig_hash.get(&key) {
-            Some(&canon) => {
-                // Verify equality to guard against hash collisions.
-                let c = &minimized.states()[canon as usize];
-                let s_state = &minimized.states()[s];
-                let fins_eq = c.finalizers == s_state.finalizers;
-                let trans_eq = c.transitions.iter().count() == s_state.transitions.iter().count()
-                    && c.transitions
-                        .iter()
-                        .zip(s_state.transitions.iter())
-                        .all(|((b1, &t1), (b2, &t2))| b1 == b2 && t1 == t2);
-                if fins_eq && trans_eq {
-                    redirect[s] = canon;
-                    any = true;
-                }
-            }
-            None => {
-                sig_hash.insert(key, s as u32);
-            }
-        }
-    }
-
-    if !any {
-        return;
-    }
-
-    // Compact: surviving states get new indices; redirected states inherit
-    // their canonical's new index.
-    let mut old_to_new = vec![u32::MAX; n];
-    let mut new_idx: u32 = 0;
-    for s in 0..n {
-        if redirect[s] == u32::MAX {
-            old_to_new[s] = new_idx;
-            new_idx += 1;
-        }
-    }
-    for s in 0..n {
-        if redirect[s] != u32::MAX {
-            old_to_new[s] = old_to_new[redirect[s] as usize];
-        }
-    }
-
-    let mut new_states = Vec::with_capacity(new_idx as usize);
-    let old_states = std::mem::take(minimized.states_mut());
-    for (old_idx, mut st) in old_states.into_iter().enumerate() {
-        if redirect[old_idx] != u32::MAX {
-            continue;
-        }
-        let entries: Vec<(u8, u32)> = st
-            .transitions
-            .iter()
-            .map(|(b, &t)| (b, old_to_new[t as usize]))
-            .collect();
-        st.transitions = CharTransitions::from_sorted_entries(entries);
-        new_states.push(st);
-    }
-    *minimized.states_mut() = new_states;
-
-    for slot in state_mapping.iter_mut() {
-        if *slot != u32::MAX {
-            *slot = old_to_new[*slot as usize];
-        }
-    }
-}
-
 struct TerminalFilteredDfa {
     dfa: DFA,
     active_bitset: BitSet,
@@ -332,12 +68,6 @@ impl Tokenizer {
         0
     }
 
-    /// Build a simplified tokenizer by rebuilding the DFA from scratch using
-    /// only the active terminal expressions. Finalizer and possible-future
-    /// bitsets in the returned tokenizer are in the ORIGINAL terminal-id
-    /// space (inactive bits always clear). Returns `None` if this tokenizer
-    /// has no cached `exprs` or the active set is empty.
-    ///
     /// The `orig_to_simplified` mapping is computed by a parallel BFS over
     /// (original_state, fresh_state) pairs starting at (0, 0), following
     /// bytes that exist in the fresh DFA. Original states unreachable via
@@ -345,7 +75,7 @@ impl Tokenizer {
     pub fn simplified_from_active_exprs(
         &self,
         active_terminals: &[bool],
-    ) -> Option<(Tokenizer, Vec<u32>)> {
+    ) -> Option<(Tokenizer, ManyToOneIdMap)> {
         use std::collections::VecDeque;
 
         let exprs = match self.exprs.as_ref() {
@@ -428,7 +158,14 @@ impl Tokenizer {
             num_terminals: self.num_terminals,
             exprs: self.exprs.clone(),
         };
-        Some((tok, mapping))
+        let num_states = tok.num_states();
+        Some((
+            tok,
+            ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+                mapping,
+                num_states,
+            ),
+        ))
     }
 
     /// Detect nullable terminals (those that match the empty string) by
@@ -742,7 +479,7 @@ impl Tokenizer {
         &self,
         active_terminals: &[bool],
         relevant_bytes: Option<&[bool; 256]>,
-    ) -> (Tokenizer, Vec<u32>) {
+    ) -> (Tokenizer, ManyToOneIdMap) {
         let compile_profile = std::env::var("GLRMASK_PROFILE_COMPILE")
             .map(|v| !v.is_empty() && v != "0")
             .unwrap_or(false);
@@ -802,7 +539,7 @@ impl Tokenizer {
             active_bitset,
             any_cleared,
             transitions_pruned,
-            pruned_targets,
+            pruned_targets: _,
         } = self.filter_dfa_for_terminals(active_terminals, relevant_bytes);
         let t_clear = t_start.elapsed();
 
@@ -836,43 +573,16 @@ impl Tokenizer {
             );
         }
 
-        let continuation_roots = if transitions_pruned {
-            collect_pruned_continuation_roots(
-                &dfa,
-                pruned_targets.as_deref().unwrap_or(&[]),
-                &active_bitset,
-            )
-        } else {
-            Vec::new()
-        };
-
         if !any_cleared && !transitions_pruned {
             let n = dfa.num_states();
-            let identity: Vec<u32> = (0..n as u32).collect();
+            let identity = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+                (0..n as u32).collect(),
+                n as u32,
+            );
             if compile_profile {
                 eprintln!(
                     "[glrmask/profile][simplify_detail] states={} no_change clone_ms={:.1} clear_ms={:.1}",
                     n, t_clone.as_secs_f64()*1000.0, (t_clear - t_clone).as_secs_f64()*1000.0,
-                );
-            }
-            return (Tokenizer { dfa, num_terminals: self.num_terminals, exprs: self.exprs.clone() }, identity);
-        }
-
-        if transitions_pruned {
-            // Pruning non-relevant bytes can make states look equivalent even
-            // when their original futures differ behind those pruned edges.
-            // Returning the filtered DFA directly avoids reintroducing a union
-            // of those incompatible futures during state remapping.
-            let n = dfa.num_states();
-            let identity: Vec<u32> = (0..n as u32).collect();
-            if compile_profile {
-                eprintln!(
-                    "[glrmask/profile][simplify_detail] states={} active={} clone_ms={:.1} clear_ms={:.1} skip_minimize(pruned_transitions) total_ms={:.1}",
-                    n,
-                    active_terminals.iter().filter(|&&b| b).count(),
-                    t_clone.as_secs_f64()*1000.0,
-                    (t_clear - t_clone).as_secs_f64()*1000.0,
-                    t_start.elapsed().as_secs_f64()*1000.0,
                 );
             }
             return (Tokenizer { dfa, num_terminals: self.num_terminals, exprs: self.exprs.clone() }, identity);
@@ -886,7 +596,10 @@ impl Tokenizer {
             let n = pre_minimize_states;
             if distinct > n * 9 / 10 {
                 dfa.mask_possible_futures(&active_bitset);
-                let identity: Vec<u32> = (0..n as u32).collect();
+                let identity = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+                    (0..n as u32).collect(),
+                    n as u32,
+                );
                 if compile_profile {
                     let total = t_start.elapsed();
                     eprintln!(
@@ -900,125 +613,25 @@ impl Tokenizer {
         }
 
         let t_pre_min = std::time::Instant::now();
-        let (mut minimized, mut state_mapping) = match dfa.try_minimize_full_with_state_mapping() {
-            Some(result) => result,
-            None => {
-                if compile_profile {
-                    eprintln!(
-                        "[glrmask/profile][simplify_detail] states={} active={} iterative_bail_ms={:.1} falling_through_to_hopcroft",
-                        pre_minimize_states, num_active,
-                        t_pre_min.elapsed().as_secs_f64()*1000.0,
-                    );
-                }
-                dfa.minimize_with_state_mapping()
-            }
+        // Irrelevant-byte pruning can disconnect states from DFA start even
+        // though later compile steps still resume from those original state
+        // ids. Preserve the full original state set before minimization so the
+        // quotient map remains valid for every resumable state.
+        let preserve_all_original_states = transitions_pruned;
+        let (minimized, state_mapping) = if preserve_all_original_states {
+            dfa.minimize_with_state_mapping_preserve_all_states()
+        } else {
+            dfa.minimize_with_state_mapping()
         };
 
         if std::env::var_os("GLRMASK_DEBUG_SIMPLIFY_PHASES").is_some() {
             eprintln!(
-                "[glrmask/debug][simplify_phase] active={} pre_min={} post_first_min={} roots={}",
+                "[glrmask/debug][simplify_phase] active={} pre_min={} post_first_min={} preserve_all_original_states={}",
                 num_active,
                 pre_minimize_states,
                 minimized.num_states(),
-                continuation_roots.len(),
+                preserve_all_original_states,
             );
-        }
-
-        if transitions_pruned && !continuation_roots.is_empty() {
-            let main_state_count = minimized.num_states() as usize;
-            append_continuation_alias_states(
-                &mut minimized,
-                &dfa,
-                &continuation_roots,
-                &mut state_mapping,
-            );
-            // Merge identical alias states (aliases with byte-for-byte equal
-            // transitions and finalizers). This is a conservative in-place
-            // dedup that never touches main DFA states, preserving the
-            // transition shape Hopcroft produced for the filtered DFA while
-            // collapsing the redundant alias clones that cloning introduces.
-            dedup_alias_states(
-                &mut minimized,
-                main_state_count,
-                &mut state_mapping,
-            );
-
-            if std::env::var_os("GLRMASK_DEBUG_SIMPLIFY_PHASES").is_some() {
-                eprintln!(
-                    "[glrmask/debug][simplify_phase] after_append_dedup states={} main_count={}",
-                    minimized.num_states(),
-                    main_state_count,
-                );
-            }
-
-            // Optional: full Hopcroft re-minimize after dedup. We prevent
-            // main-state/alias-state cross-merging by tagging every alias
-            // with a synthetic finalizer bit before the minimize call so
-            // Hopcroft's initial partition separates them. The bit is
-            // cleared on the resulting DFA before anyone observes it.
-            if std::env::var_os("GLRMASK_DEBUG_REMIN_FULL").is_some() {
-                let synthetic_bit = self.num_terminals as usize;
-                let num_groups = minimized.num_groups().max(synthetic_bit + 1);
-                minimized.ensure_group_capacity(num_groups);
-                for s in main_state_count..minimized.num_states() as usize {
-                    let mut fins = minimized.states()[s].finalizers.clone();
-                    if fins.len() <= synthetic_bit {
-                        let mut grown =
-                            crate::ds::bitset::BitSet::new(synthetic_bit + 1);
-                        for b in fins.iter_ones() {
-                            grown.set(b);
-                        }
-                        fins = grown;
-                    }
-                    fins.set(synthetic_bit);
-                    minimized.states_mut()[s].finalizers = fins;
-                }
-                let mut roots: Vec<u32> = state_mapping
-                    .iter()
-                    .copied()
-                    .filter(|&m| m != u32::MAX)
-                    .collect();
-                roots.sort_unstable();
-                roots.dedup();
-                let pre = minimized.num_states() as usize;
-                let (mut remin, remap) =
-                    minimized.minimize_with_state_mapping_and_roots(&roots);
-
-                for s in 0..remin.num_states() as usize {
-                    if remin.states()[s].finalizers.len() > synthetic_bit
-                        && remin.states()[s].finalizers.contains(synthetic_bit)
-                    {
-                        let mut fins = remin.states()[s].finalizers.clone();
-                        fins.clear(synthetic_bit);
-                        remin.states_mut()[s].finalizers = fins;
-                    }
-                }
-                eprintln!(
-                    "[glrmask/debug][remin_tagged] pre={} post={} main_count={}",
-                    pre,
-                    remin.num_states(),
-                    main_state_count,
-                );
-
-                for slot in state_mapping.iter_mut() {
-                    if *slot != u32::MAX {
-                        *slot = remap[*slot as usize];
-                    }
-                }
-                minimized = remin;
-            }
-        }
-
-        if transitions_pruned {
-            let remapped_futures = remap_masked_possible_futures(
-                self,
-                &active_bitset,
-                &state_mapping,
-                minimized.num_states() as usize,
-            );
-            for (state, futures) in remapped_futures.into_iter().enumerate() {
-                minimized.set_possible_future_group_ids(state as u32, futures);
-            }
         }
 
         let t_minimize = t_pre_min.elapsed();
@@ -1043,7 +656,13 @@ impl Tokenizer {
             exprs: self.exprs.clone(),
         };
 
-        (simplified, state_mapping)
+        (
+            simplified,
+            ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+                state_mapping,
+                post_minimize_states as u32,
+            ),
+        )
     }
 }
 
@@ -1131,7 +750,7 @@ mod tests {
         relevant_bytes[b'-' as usize] = true;
 
         let (simplified, mapping) = tokenizer.simplify_for_terminals(&[true], Some(&relevant_bytes));
-        let simplified_dash_state = mapping[dash_state as usize];
+        let simplified_dash_state = mapping.original_to_internal[dash_state as usize];
 
         assert_ne!(simplified_dash_state, u32::MAX);
         assert!(simplified.possible_future_terminals(simplified_dash_state).contains(0));
@@ -1148,7 +767,7 @@ mod tests {
         }
 
         let (simplified, mapping) = tokenizer.simplify_for_terminals(&[true, true], Some(&relevant_bytes));
-        let simplified_colon_state = mapping[colon_state as usize];
+        let simplified_colon_state = mapping.original_to_internal[colon_state as usize];
 
         assert_ne!(
             simplified_colon_state,
