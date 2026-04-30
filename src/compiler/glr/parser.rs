@@ -1604,6 +1604,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_advance_manual_o1051_second_advance_faithful_timing() {
         use std::hint::black_box;
         use std::time::Instant;

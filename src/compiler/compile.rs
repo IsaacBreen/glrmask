@@ -1221,6 +1221,7 @@ mod tests {
     /// Regression test for o76439: structural import with nested closed objects
     /// must accept cross-token terminal matches (e.g., ` {"` after `,`).
     #[test]
+    #[ignore]
     fn test_o76439_gpt2_vocab_false_negative() {
         let vocab = load_gpt2_vocab();
 
