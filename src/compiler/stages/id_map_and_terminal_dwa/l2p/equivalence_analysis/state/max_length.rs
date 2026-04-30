@@ -28,6 +28,25 @@ fn profile_compile_enabled() -> bool {
         .unwrap_or(false)
 }
 
+#[inline(always)]
+fn mix_u64(mut x: u64) -> u64 {
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xbf58476d1ce4e5b9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94d049bb133111eb);
+    x ^= x >> 31;
+    x
+}
+
+#[inline(always)]
+fn hash_signature_row(row: &[u32]) -> u64 {
+    let mut hash = mix_u64((row.len() as u64) ^ 0x9E37_79B9_7F4A_7C15);
+    for &cell in row {
+        hash = mix_u64(hash ^ (cell as u64).wrapping_add(0xA24B_AED4_963E_E407));
+    }
+    hash
+}
+
 #[inline]
 fn usize_to_u32(value: usize, what: &str) -> u32 {
     u32::try_from(value).unwrap_or_else(|_| panic!("{} exceeds u32::MAX", what))
@@ -192,16 +211,19 @@ fn refine_once(
     label_ids: &[u32],
     prev_blocks: &[u32],
     signatures: &mut [u32],
+    row_hashes: &mut [u64],
     order: &mut [usize],
 ) -> (Vec<u32>, usize) {
     let n = prev_blocks.len();
     let width = 1 + active_bytes.len();
     debug_assert_eq!(signatures.len(), n * width);
+    debug_assert_eq!(row_hashes.len(), n);
 
     signatures
         .par_chunks_mut(width)
+        .zip(row_hashes.par_iter_mut())
         .enumerate()
-        .for_each(|(state, row)| {
+        .for_each(|(state, (row, row_hash))| {
             row[0] = label_ids[state];
             for (i, &byte) in active_bytes.iter().enumerate() {
                 let target = dfa.trans(state, byte as usize);
@@ -211,9 +233,15 @@ fn refine_once(
                     prev_blocks[target as usize]
                 };
             }
+            *row_hash = hash_signature_row(row);
         });
 
     order.par_sort_unstable_by(|&left, &right| {
+        let hash_cmp = row_hashes[left].cmp(&row_hashes[right]);
+        if hash_cmp != std::cmp::Ordering::Equal {
+            return hash_cmp;
+        }
+
         let left_start = left * width;
         let right_start = right * width;
         signatures[left_start..left_start + width]
@@ -227,6 +255,10 @@ fn refine_once(
 
     for &state in order.iter() {
         let starts_new_block = previous_state.map_or(true, |prev| {
+            if row_hashes[state] != row_hashes[prev] {
+                return true;
+            }
+
             let state_start = state * width;
             let prev_start = prev * width;
             signatures[state_start..state_start + width] != signatures[prev_start..prev_start + width]
@@ -270,6 +302,7 @@ fn compute_kbounded_partition(
 
     let width = 1 + active_bytes.len();
     let mut signatures = vec![0u32; n * width];
+    let mut row_hashes = vec![0u64; n];
     let mut order: Vec<usize> = (0..n).collect();
 
     for step in 0..k {
@@ -279,6 +312,7 @@ fn compute_kbounded_partition(
             &label_ids,
             &blocks,
             &mut signatures,
+            &mut row_hashes,
             &mut order,
         );
 
