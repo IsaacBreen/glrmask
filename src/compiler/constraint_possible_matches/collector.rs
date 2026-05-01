@@ -15,24 +15,11 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
-use crate::compiler::possible_matches::{PossibleMatchesProfile, merge_possible_matches_profile};
-pub(crate) use crate::compiler::possible_matches::emit_possible_matches_profile_summary;
+use crate::compiler::pm_profile::{PossibleMatchesProfile, elapsed_ms, merge_possible_matches_profile, profile_summary_enabled};
+pub(crate) use crate::compiler::pm_profile::emit_possible_matches_profile_summary;
 use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
 use crate::grammar::flat::TerminalID;
-
-fn profile_summary_enabled() -> bool {
-    std::env::var("GLRMASK_PROFILE_COMPILE_SUMMARY")
-        .map(|value| {
-            let normalized = value.trim().to_ascii_lowercase();
-            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
-        })
-        .unwrap_or(false)
-}
-
-fn elapsed_ms(started_at: Instant) -> f64 {
-    started_at.elapsed().as_secs_f64() * 1000.0
-}
 
 // ===========================================================================
 
