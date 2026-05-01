@@ -512,9 +512,8 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
     }
 
     let mut segment_cache: FxHashMap<(u64, u8), usize> = FxHashMap::default();
-    let mut segment_outcome_tables = Vec::<Vec<TrieMapBuildSegmentOutcome>>::new();
+    let mut segment_outcome_tables = Vec::<FxHashMap<u32, TrieMapBuildSegmentOutcome>>::new();
 
-    // Reusable stamped terminal table to avoid per-state Vec allocation/sort.
     let num_terminals = tokenizer.num_terminals as usize;
     let mut stamp_gen: u32 = 0;
     let mut terminal_stamps: Vec<u32> = vec![0; num_terminals];
@@ -534,6 +533,81 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
         classes_built: 0,
     };
 
+    /// Fill missing segment-outcome entries for the given `needed_states`
+    /// into `table` by walking the DFA `segment` from each missing state.
+    /// Uses a stamp-based dedup array for O(1) terminal dedup.
+    fn ensure_segment_outcomes(
+        table: &mut FxHashMap<u32, TrieMapBuildSegmentOutcome>,
+        needed_states: &[u32],
+        segment: &[u8],
+        matched_terminals: &[Box<[TerminalID]>],
+        flat_transitions: &[[u32; 256]],
+        terminal_sets: &mut TrieMapBuildTerminalSetInterner,
+        empty_terminals_id: u32,
+        terminal_stamps: &mut [u32],
+        stamp_gen: &mut u32,
+        timings: &mut TrieBuildTimings,
+    ) {
+        // Collect missing states — avoid allocating if all present.
+        let mut missing = SmallVec::<[u32; 8]>::new();
+        for &state in needed_states {
+            if !table.contains_key(&state) {
+                missing.push(state);
+            }
+        }
+        if missing.is_empty() {
+            return;
+        }
+
+        let t_start = Instant::now();
+
+        for &start_state in &missing {
+            let mut current_state = start_state;
+            let mut blocked = false;
+            *stamp_gen = stamp_gen.wrapping_add(1);
+            let current_gen = *stamp_gen;
+            let mut term_count = 0usize;
+
+            for &byte in segment {
+                let next_state = flat_transitions[current_state as usize][byte as usize];
+                if next_state == u32::MAX {
+                    blocked = true;
+                    break;
+                }
+                current_state = next_state;
+                for &terminal in matched_terminals[current_state as usize].iter() {
+                    let t = terminal as usize;
+                    if terminal_stamps[t] != current_gen {
+                        terminal_stamps[t] = current_gen;
+                        term_count += 1;
+                    }
+                }
+            }
+
+            let terminals_id = if term_count == 0 {
+                empty_terminals_id
+            } else {
+                let mut list = Vec::with_capacity(term_count);
+                for (t_idx, &stamp) in terminal_stamps.iter().enumerate() {
+                    if stamp == current_gen {
+                        list.push(t_idx as TerminalID);
+                    }
+                }
+                terminal_sets.intern_vec(list)
+            };
+
+            table.insert(
+                start_state,
+                TrieMapBuildSegmentOutcome {
+                    terminals_id,
+                    end_state: (!blocked).then_some(current_state),
+                },
+            );
+        }
+
+        timings.segment_table_ms += elapsed_ms(t_start);
+    }
+
     fn build_node(
         node: &VocabPrefixTreeNode,
         tokenizer: &Tokenizer,
@@ -546,7 +620,7 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
         self_loop_bytes: &[U8Set],
         terminal_sets: &mut TrieMapBuildTerminalSetInterner,
         segment_cache: &mut FxHashMap<(u64, u8), usize>,
-        segment_outcome_tables: &mut Vec<Vec<TrieMapBuildSegmentOutcome>>,
+        segment_outcome_tables: &mut Vec<FxHashMap<u32, TrieMapBuildSegmentOutcome>>,
         num_words: usize,
         timings: &mut TrieBuildTimings,
         stamp_gen: &mut u32,
@@ -564,66 +638,31 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
             let segment_table_idx = if let Some(&table_idx) = segment_cache.get(&segment_key(segment)) {
                 table_idx
             } else {
-                let t_seg = Instant::now();
-                let mut outcomes = vec![
-                    TrieMapBuildSegmentOutcome {
-                        terminals_id: empty_terminals_id,
-                        end_state: None,
-                    };
-                    tokenizer.num_states() as usize
-                ];
-
-                for start_state in 0..tokenizer.num_states() {
-                    let mut current_state = start_state;
-                    let mut blocked = false;
-                    *stamp_gen = stamp_gen.wrapping_add(1);
-                    let current_gen = *stamp_gen;
-                    let mut term_count = 0usize;
-
-                    for &byte in segment {
-                        let next_state = flat_transitions[current_state as usize][byte as usize];
-                        if next_state == u32::MAX {
-                            blocked = true;
-                            break;
-                        }
-                        current_state = next_state;
-                        for &terminal in matched_terminals[current_state as usize].iter() {
-                            let t = terminal as usize;
-                            if terminal_stamps[t] != current_gen {
-                                terminal_stamps[t] = current_gen;
-                                term_count += 1;
-                            }
-                        }
-                    }
-
-                    let terminals_id = if term_count == 0 {
-                        empty_terminals_id
-                    } else {
-                        let mut list = Vec::with_capacity(term_count);
-                        for (t_idx, &stamp) in terminal_stamps.iter().enumerate() {
-                            if stamp == current_gen {
-                                list.push(t_idx as TerminalID);
-                            }
-                        }
-                        terminal_sets.intern_vec(list)
-                    };
-                    outcomes[start_state as usize] = TrieMapBuildSegmentOutcome {
-                        terminals_id,
-                        end_state: (!blocked).then_some(current_state),
-                    };
-                }
-
-                let table_idx = segment_outcome_tables.len();
-                segment_outcome_tables.push(outcomes);
-                segment_cache.insert(segment_key(segment), table_idx);
-                timings.segment_table_ms += elapsed_ms(t_seg);
-                table_idx
+                let idx = segment_outcome_tables.len();
+                segment_outcome_tables.push(FxHashMap::default());
+                segment_cache.insert(segment_key(segment), idx);
+                idx
             };
+
+            // Ensure outcomes for the current active_states exist
+            // (on-demand: only missing states are walked).
+            ensure_segment_outcomes(
+                &mut segment_outcome_tables[segment_table_idx],
+                active_states,
+                segment,
+                matched_terminals,
+                flat_transitions,
+                terminal_sets,
+                empty_terminals_id,
+                terminal_stamps,
+                stamp_gen,
+                timings,
+            );
 
             let subtree_bytes = U8Set::from_words(*child.subtree_bytes());
             let mut child_active_states = Vec::new();
             for &state in active_states {
-                let segment_outcome = segment_outcome_tables[segment_table_idx][state as usize];
+                let segment_outcome = &segment_outcome_tables[segment_table_idx][&state];
                 if let Some(end_state) = segment_outcome.end_state {
                     if !is_end[end_state as usize]
                         && !subtree_bytes.is_subset(&self_loop_bytes[end_state as usize])
@@ -677,7 +716,7 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
             let mut signature_words = Vec::with_capacity(child_data.len() * 2 + 1);
             signature_words.push(node_terminals_id);
             for child in child_data.iter() {
-                let segment_outcome = segment_outcome_tables[child.segment_table_idx][state as usize];
+                let segment_outcome = &segment_outcome_tables[child.segment_table_idx][&state];
                 let child_class_id = if let Some(end_state) = segment_outcome.end_state {
                     if is_end[end_state as usize]
                         || child.subtree_bytes.is_subset(&self_loop_bytes[end_state as usize])
@@ -719,7 +758,7 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
             }
 
             for child in child_data.iter() {
-                let segment_outcome = segment_outcome_tables[child.segment_table_idx][state as usize];
+                let segment_outcome = &segment_outcome_tables[child.segment_table_idx][&state];
                 for &terminal in terminal_sets.get(segment_outcome.terminals_id) {
                     let entry = result
                         .entry(terminal)
