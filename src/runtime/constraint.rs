@@ -647,6 +647,83 @@ impl Constraint {
             .collect()
     }
 
+    fn precompute_node_reachable_dense(
+        node: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
+        dense_words: usize,
+        cache: &mut FxHashMap<*const crate::ds::vocab_prefix_tree::VocabPrefixTreeNode, Vec<u64>>,
+    ) {
+        let ptr = node as *const _;
+        if cache.contains_key(&ptr) {
+            return;
+        }
+        let mut dense = vec![0u64; dense_words];
+        if node.has_token() {
+            let id = node.token_id();
+            let word = id / 64;
+            let bit = id % 64;
+            if word < dense_words {
+                dense[word] |= 1u64 << bit;
+            }
+        }
+        for (_, child) in node.iter_children() {
+            Self::precompute_node_reachable_dense(child, dense_words, cache);
+            let child_ptr = child as *const _;
+            let child_dense = cache.get(&child_ptr).unwrap();
+            for i in 0..dense_words {
+                dense[i] |= child_dense[i];
+            }
+        }
+        cache.insert(ptr, dense);
+    }
+
+    fn walk_seed_trie(
+        node: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
+        state: u32,
+        mask: &mut [u64],
+        flat_transitions: &[[u32; 256]],
+        terminal_states: &[bool],
+        node_reachable_dense: &FxHashMap<*const crate::ds::vocab_prefix_tree::VocabPrefixTreeNode, Vec<u64>>,
+    ) {
+        if node.has_token() {
+            let id = node.token_id();
+            let word = id / 64;
+            let bit = id % 64;
+            if word < mask.len() {
+                mask[word] |= 1u64 << bit;
+            }
+        }
+        for (segment, child) in node.iter_children() {
+            let mut current_state = state;
+            let mut terminal_hit = false;
+            let mut blocked = false;
+            for &byte in segment {
+                let next = flat_transitions[current_state as usize][byte as usize];
+                if next == u32::MAX {
+                    blocked = true;
+                    break;
+                }
+                if terminal_states[next as usize] {
+                    terminal_hit = true;
+                    break;
+                }
+                current_state = next;
+            }
+            if blocked {
+                continue;
+            }
+            if terminal_hit {
+                let child_ptr = child as *const _;
+                if let Some(child_dense) = node_reachable_dense.get(&child_ptr) {
+                    for i in 0..mask.len() {
+                        mask[i] |= child_dense[i];
+                    }
+                }
+            } else {
+                Self::walk_seed_trie(child, current_state, mask, flat_transitions, terminal_states, node_reachable_dense);
+            }
+        }
+    }
+
     fn build_seed_state_dense_masks(&self) -> SeedStateDenseMasks {
         let state_count = self.tokenizer.num_states() as usize;
         let dense_words = self.internal_token_dense_words;
@@ -658,12 +735,6 @@ impl Constraint {
         let terminal_states: Vec<bool> = (0..self.tokenizer.num_states())
             .map(|state| self.tokenizer.matched_terminals_iter(state).next().is_some())
             .collect();
-        let terminal_start_states: Vec<u32> = (0..self.tokenizer.num_states())
-            .filter(|&state| terminal_states[state as usize])
-            .collect();
-        let nonterminal_start_states: Vec<u32> = (0..self.tokenizer.num_states())
-            .filter(|&state| !terminal_states[state as usize])
-            .collect();
         let flat_transitions: Vec<[u32; 256]> = (0..self.tokenizer.num_states())
             .map(|state| {
                 let dfa_state = &self.tokenizer.dfa.states()[state as usize];
@@ -674,58 +745,120 @@ impl Constraint {
                 flat
             })
             .collect();
-        let mut active_start_states = Vec::with_capacity(state_count);
-        let mut active_current_states = Vec::with_capacity(state_count);
-        let mut next_active_start_states = Vec::with_capacity(state_count);
-        let mut next_active_current_states = Vec::with_capacity(state_count);
-        let mut matched_states = Vec::with_capacity(state_count);
 
-        for (&internal_token, token_bytes) in &self.internal_token_bytes {
-            active_start_states.clear();
-            active_start_states.extend_from_slice(&nonterminal_start_states);
-            active_current_states.clear();
-            active_current_states.extend_from_slice(&nonterminal_start_states);
-            matched_states.clear();
-            matched_states.extend_from_slice(&terminal_start_states);
+        // Build trie over internal token byte strings so common prefixes
+        // are shared instead of re-simulated for every token.
+        let trie = crate::ds::vocab_prefix_tree::VocabPrefixTree::build_owned(
+            self.internal_token_bytes
+                .iter()
+                .map(|(&token_id, bytes)| (token_id as usize, bytes.clone()))
+                .collect(),
+        );
 
-            for &byte in token_bytes {
-                next_active_start_states.clear();
-                next_active_current_states.clear();
+        // Precompute a dense reachable-token bitmap for every trie node.
+        let mut node_reachable_dense: FxHashMap<*const crate::ds::vocab_prefix_tree::VocabPrefixTreeNode, Vec<u64>> =
+            FxHashMap::default();
+        Self::precompute_node_reachable_dense(&trie.root, dense_words, &mut node_reachable_dense);
 
-                for (&start_state, &current_state) in active_start_states
-                    .iter()
-                    .zip(active_current_states.iter())
-                {
-                    let next_state = flat_transitions[current_state as usize][byte as usize];
-                    if next_state == u32::MAX {
-                        continue;
-                    }
+        let root_ptr = &trie.root as *const _;
+        let all_tokens_dense = node_reachable_dense
+            .get(&root_ptr)
+            .expect("root reachable-token bitmap must be precomputed")
+            .clone();
 
-                    if terminal_states[next_state as usize] {
-                        matched_states.push(start_state);
-                    } else {
-                        next_active_start_states.push(start_state);
-                        next_active_current_states.push(next_state);
-                    }
-                }
-
-                std::mem::swap(&mut active_start_states, &mut next_active_start_states);
-                std::mem::swap(&mut active_current_states, &mut next_active_current_states);
-                if active_start_states.is_empty() {
-                    break;
-                }
-            }
-
-            matched_states.extend(active_start_states.iter().copied());
-
-            let word = internal_token as usize / 64;
-            let bit = internal_token as usize % 64;
-            for &tokenizer_state in &matched_states {
-                if let Some(slot) = masks[tokenizer_state as usize].get_mut(word) {
-                    *slot |= 1u64 << bit;
-                }
+        for start_state in 0..state_count as u32 {
+            if terminal_states[start_state as usize] {
+                masks[start_state as usize].copy_from_slice(&all_tokens_dense);
+            } else {
+                Self::walk_seed_trie(
+                    &trie.root,
+                    start_state,
+                    &mut masks[start_state as usize],
+                    &flat_transitions,
+                    &terminal_states,
+                    &node_reachable_dense,
+                );
             }
         }
+
+        // --- Validation: compare against old DFA-simulation implementation ---
+        if std::env::var("GLRMASK_VALIDATE_SEED_STATE_DENSE").as_deref() == Ok("1") {
+            let mut old_masks = vec![vec![0u64; dense_words]; state_count];
+
+            let terminal_start_states: Vec<u32> = (0..self.tokenizer.num_states())
+                .filter(|&state| terminal_states[state as usize])
+                .collect();
+            let nonterminal_start_states: Vec<u32> = (0..self.tokenizer.num_states())
+                .filter(|&state| !terminal_states[state as usize])
+                .collect();
+            let mut active_start_states = Vec::with_capacity(state_count);
+            let mut active_current_states = Vec::with_capacity(state_count);
+            let mut next_active_start_states = Vec::with_capacity(state_count);
+            let mut next_active_current_states = Vec::with_capacity(state_count);
+            let mut matched_states = Vec::with_capacity(state_count);
+
+            for (&internal_token, token_bytes) in &self.internal_token_bytes {
+                active_start_states.clear();
+                active_start_states.extend_from_slice(&nonterminal_start_states);
+                active_current_states.clear();
+                active_current_states.extend_from_slice(&nonterminal_start_states);
+                matched_states.clear();
+                matched_states.extend_from_slice(&terminal_start_states);
+
+                for &byte in token_bytes {
+                    next_active_start_states.clear();
+                    next_active_current_states.clear();
+
+                    for (&start_state, &current_state) in active_start_states
+                        .iter()
+                        .zip(active_current_states.iter())
+                    {
+                        let next_state = flat_transitions[current_state as usize][byte as usize];
+                        if next_state == u32::MAX {
+                            continue;
+                        }
+
+                        if terminal_states[next_state as usize] {
+                            matched_states.push(start_state);
+                        } else {
+                            next_active_start_states.push(start_state);
+                            next_active_current_states.push(next_state);
+                        }
+                    }
+
+                    std::mem::swap(&mut active_start_states, &mut next_active_start_states);
+                    std::mem::swap(&mut active_current_states, &mut next_active_current_states);
+                    if active_start_states.is_empty() {
+                        break;
+                    }
+                }
+
+                matched_states.extend(active_start_states.iter().copied());
+
+                let word = internal_token as usize / 64;
+                let bit = internal_token as usize % 64;
+                for &tokenizer_state in &matched_states {
+                    if let Some(slot) = old_masks[tokenizer_state as usize].get_mut(word) {
+                        *slot |= 1u64 << bit;
+                    }
+                }
+            }
+
+            for (state_idx, (new, old)) in masks.iter().zip(old_masks.iter()).enumerate() {
+                if new != old {
+                    eprintln!(
+                        "[GLRMASK_VALIDATE_SEED_STATE_DENSE] MISMATCH state={} new={:016x?} old={:016x?}",
+                        state_idx, new, old
+                    );
+                    panic!(
+                        "build_seed_state_dense_masks validation failed for state {}: new mask != old mask",
+                        state_idx
+                    );
+                }
+            }
+            eprintln!("[GLRMASK_VALIDATE_SEED_STATE_DENSE] VALIDATION PASSED: {} states compared", masks.len());
+        }
+        // ------------------------------------------------------------------
 
         masks
             .into_iter()
