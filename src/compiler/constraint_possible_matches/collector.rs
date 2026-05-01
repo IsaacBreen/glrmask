@@ -488,8 +488,38 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
         .iter()
         .map(|terminals| terminal_sets.intern_slice(terminals))
         .collect();
-    let mut segment_cache: FxHashMap<Vec<u8>, usize> = FxHashMap::default();
+    // Segment cache keyed by (hash, length) to avoid cloning Vec<u8> on hit.
+    // Collisions almost impossible: we only insert once per unique segment.
+    fn segment_key(segment: &[u8]) -> (u64, u8) {
+        let mut h: u64 = 0;
+        for &b in segment {
+            h = h.wrapping_mul(0x517cc1b727220a95).wrapping_add(b as u64);
+        }
+        (h, segment.len() as u8)
+    }
+
+    let mut segment_cache: FxHashMap<(u64, u8), usize> = FxHashMap::default();
     let mut segment_outcome_tables = Vec::<Vec<TrieMapBuildSegmentOutcome>>::new();
+
+    // Reusable stamped terminal table to avoid per-state Vec allocation/sort.
+    let num_terminals = tokenizer.num_terminals as usize;
+    let mut stamp_gen: u32 = 0;
+    let mut terminal_stamps: Vec<u32> = vec![0; num_terminals];
+
+    let t_root_start = Instant::now();
+
+    struct TrieBuildTimings {
+        segment_table_ms: f64,
+        signature_hash_ms: f64,
+        map_materialize_ms: f64,
+        classes_built: usize,
+    }
+    let mut timings = TrieBuildTimings {
+        segment_table_ms: 0.0,
+        signature_hash_ms: 0.0,
+        map_materialize_ms: 0.0,
+        classes_built: 0,
+    };
 
     fn build_node(
         node: &VocabPrefixTreeNode,
@@ -502,9 +532,12 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
         flat_transitions: &[[u32; 256]],
         self_loop_bytes: &[U8Set],
         terminal_sets: &mut TrieMapBuildTerminalSetInterner,
-        segment_cache: &mut FxHashMap<Vec<u8>, usize>,
+        segment_cache: &mut FxHashMap<(u64, u8), usize>,
         segment_outcome_tables: &mut Vec<Vec<TrieMapBuildSegmentOutcome>>,
         num_words: usize,
+        timings: &mut TrieBuildTimings,
+        stamp_gen: &mut u32,
+        terminal_stamps: &mut [u32],
     ) -> TrieMapBuildNodeClasses {
         struct ChildBuildData {
             segment_table_idx: usize,
@@ -515,9 +548,10 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
 
         let mut child_data = Vec::new();
         for (segment, child) in node.iter_children() {
-            let segment_table_idx = if let Some(&table_idx) = segment_cache.get(segment) {
+            let segment_table_idx = if let Some(&table_idx) = segment_cache.get(&segment_key(segment)) {
                 table_idx
             } else {
+                let t_seg = Instant::now();
                 let mut outcomes = vec![
                     TrieMapBuildSegmentOutcome {
                         terminals_id: empty_terminals_id,
@@ -529,7 +563,9 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
                 for start_state in 0..tokenizer.num_states() {
                     let mut current_state = start_state;
                     let mut blocked = false;
-                    let mut encountered_terminals = Vec::new();
+                    *stamp_gen = stamp_gen.wrapping_add(1);
+                    let current_gen = *stamp_gen;
+                    let mut term_count = 0usize;
 
                     for &byte in segment {
                         let next_state = flat_transitions[current_state as usize][byte as usize];
@@ -538,15 +574,26 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
                             break;
                         }
                         current_state = next_state;
-                        encountered_terminals.extend_from_slice(&matched_terminals[current_state as usize]);
+                        for &terminal in matched_terminals[current_state as usize].iter() {
+                            let t = terminal as usize;
+                            if terminal_stamps[t] != current_gen {
+                                terminal_stamps[t] = current_gen;
+                                term_count += 1;
+                            }
+                        }
                     }
 
-                    if encountered_terminals.len() > 1 {
-                        encountered_terminals.sort_unstable();
-                        encountered_terminals.dedup();
-                    }
-
-                    let terminals_id = terminal_sets.intern_vec(encountered_terminals);
+                    let terminals_id = if term_count == 0 {
+                        empty_terminals_id
+                    } else {
+                        let mut list = Vec::with_capacity(term_count);
+                        for (t_idx, &stamp) in terminal_stamps.iter().enumerate() {
+                            if stamp == current_gen {
+                                list.push(t_idx as TerminalID);
+                            }
+                        }
+                        terminal_sets.intern_vec(list)
+                    };
                     outcomes[start_state as usize] = TrieMapBuildSegmentOutcome {
                         terminals_id,
                         end_state: (!blocked).then_some(current_state),
@@ -555,7 +602,8 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
 
                 let table_idx = segment_outcome_tables.len();
                 segment_outcome_tables.push(outcomes);
-                segment_cache.insert(segment.to_vec(), table_idx);
+                segment_cache.insert(segment_key(segment), table_idx);
+                timings.segment_table_ms += elapsed_ms(t_seg);
                 table_idx
             };
 
@@ -588,6 +636,9 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
                 segment_cache,
                 segment_outcome_tables,
                 num_words,
+                timings,
+                stamp_gen,
+                terminal_stamps,
             );
 
             child_data.push(ChildBuildData {
@@ -598,6 +649,7 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
             });
         }
 
+        let t_sig = Instant::now();
         let mut signature_ids: FxHashMap<Vec<u32>, u32> = FxHashMap::default();
         let mut representative_states = Vec::new();
         let mut classes = vec![u32::MAX; tokenizer.num_states() as usize];
@@ -635,7 +687,10 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
             });
             classes[state as usize] = class_id;
         }
+        timings.signature_hash_ms += elapsed_ms(t_sig);
+        timings.classes_built += representative_states.len();
 
+        let t_map = Instant::now();
         let mut class_maps = Vec::with_capacity(representative_states.len());
         for &state in representative_states.iter() {
             let mut result = DensePossibleMatchMap::default();
@@ -679,11 +734,11 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
 
             class_maps.push(Rc::new(result));
         }
+        timings.map_materialize_ms += elapsed_ms(t_map);
 
         TrieMapBuildNodeClasses { classes, class_maps }
     }
 
-    let root_started_at = Instant::now();
     let root_result = build_node(
         root,
         tokenizer,
@@ -698,8 +753,11 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
         &mut segment_cache,
         &mut segment_outcome_tables,
         num_words,
+        &mut timings,
+        &mut stamp_gen,
+        &mut terminal_stamps,
     );
-    let root_compute_ms = elapsed_ms(root_started_at);
+    let root_compute_ms = elapsed_ms(t_root_start);
 
     let materialize_started_at = Instant::now();
     let possible_matches_by_state = entries
@@ -712,6 +770,13 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
         })
         .collect();
     let materialize_output_ms = elapsed_ms(materialize_started_at);
+
+    if profile_summary_enabled() {
+        eprintln!(
+            "[glrmask/profile][trie_build_timings] segment_table_ms={:.3} signature_hash_ms={:.3} map_materialize_ms={:.3} classes_built={}",
+            timings.segment_table_ms, timings.signature_hash_ms, timings.map_materialize_ms, timings.classes_built,
+        );
+    }
 
     let profile = PossibleMatchesProfile {
         cache_entries: root_result.class_maps.len(),
