@@ -851,7 +851,10 @@ independently proving possible_matches equivalence for your workload."
             strict_one_flag_enabled("GLRMASK_DIAG_PM_USE_INTERNAL_TSID_REPS_UNSAFE");
 
         let trie_class_build_enabled = std::env::var("GLRMASK_PM_TRIE_CLASS_BUILD")
-            .map_or(false, |value| value == "1");
+            .map_or(true, |value| {
+                let v = value.trim().to_ascii_lowercase();
+                !matches!(v.as_str(), "0" | "false" | "no" | "off")
+            });
 
         let ((mut parser_dwa, parser_dwa_ms), (raw_possible_matches, trie_class_result, possible_matches_collect_ms)) =
             rayon::join(
