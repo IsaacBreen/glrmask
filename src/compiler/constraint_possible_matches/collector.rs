@@ -608,6 +608,18 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
         timings.segment_table_ms += elapsed_ms(t_start);
     }
 
+    #[inline]
+    fn mix_signature_word(hash: u64, word: u32) -> u64 {
+        hash
+            .wrapping_mul(0x517cc1b727220a95)
+            .wrapping_add((word as u64).wrapping_add(0x9e3779b97f4a7c15))
+    }
+
+    struct SignatureEntry {
+        words: Vec<u32>,
+        class_id: u32,
+    }
+
     fn build_node(
         node: &VocabPrefixTreeNode,
         tokenizer: &Tokenizer,
@@ -702,9 +714,10 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
         }
 
         let t_sig = Instant::now();
-        let mut signature_ids: FxHashMap<Vec<u32>, u32> = FxHashMap::default();
+        let mut signature_buckets: FxHashMap<u64, Vec<SignatureEntry>> = FxHashMap::default();
         let mut representative_states = Vec::new();
         let mut classes = vec![u32::MAX; tokenizer.num_states() as usize];
+        let mut next_class_id: u32 = 0;
 
         for &state in active_states {
             let node_terminals_id = if node.has_token() {
@@ -713,8 +726,9 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
                 empty_terminals_id
             };
 
-            let mut signature_words = Vec::with_capacity(child_data.len() * 2 + 1);
-            signature_words.push(node_terminals_id);
+            let mut hash: u64 = mix_signature_word(0, node_terminals_id);
+            let mut sig_small = SmallVec::<[u32; 16]>::with_capacity(child_data.len() * 2 + 1);
+            sig_small.push(node_terminals_id);
             for child in child_data.iter() {
                 let segment_outcome = &segment_outcome_tables[child.segment_table_idx][&state];
                 let child_class_id = if let Some(end_state) = segment_outcome.end_state {
@@ -728,16 +742,31 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
                 } else {
                     u32::MAX
                 };
-                signature_words.push(segment_outcome.terminals_id);
-                signature_words.push(child_class_id);
+                sig_small.push(segment_outcome.terminals_id);
+                sig_small.push(child_class_id);
+                hash = mix_signature_word(hash, segment_outcome.terminals_id);
+                hash = mix_signature_word(hash, child_class_id);
             }
 
-            let next_id = signature_ids.len() as u32;
-            let class_id = *signature_ids.entry(signature_words).or_insert_with(|| {
+            let bucket = signature_buckets.entry(hash).or_default();
+            let mut found = false;
+            for entry in bucket.iter() {
+                if entry.words == sig_small.as_slice() {
+                    classes[state as usize] = entry.class_id;
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                let class_id = next_class_id;
+                next_class_id += 1;
+                classes[state as usize] = class_id;
                 representative_states.push(state);
-                next_id
-            });
-            classes[state as usize] = class_id;
+                bucket.push(SignatureEntry {
+                    words: sig_small.into_vec(),
+                    class_id,
+                });
+            }
         }
         timings.signature_hash_ms += elapsed_ms(t_sig);
         timings.classes_built += representative_states.len();
