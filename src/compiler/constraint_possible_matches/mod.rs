@@ -564,6 +564,20 @@ pub(crate) fn remap_possible_matches_to_constraint_vocab(
     constraint_token_count: u32,
     tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
 ) -> RuntimePossibleMatchesByState {
+    remap_dense_maps_to_constraint_vocab(
+        raw_possible_matches.into_iter(),
+        original_to_constraint_internal,
+        constraint_token_count,
+        tokens_with_same_bytes,
+    )
+}
+
+fn remap_dense_maps_to_constraint_vocab(
+    maps: impl Iterator<Item = (u32, DensePossibleMatchMap)>,
+    original_to_constraint_internal: &[u32],
+    constraint_token_count: u32,
+    tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
+) -> RuntimePossibleMatchesByState {
     let num_words = dense_word_count(constraint_token_count);
     let mut remap_cache: FxHashMap<Vec<(TerminalID, Box<[u64]>)>, Weight> = FxHashMap::default();
     let groups = unique_same_byte_groups(tokens_with_same_bytes);
@@ -581,9 +595,8 @@ pub(crate) fn remap_possible_matches_to_constraint_vocab(
     }
     let group_constraint_internal_ids = build_group_constraint_internal_ids(&groups, original_to_constraint_internal);
 
-    raw_possible_matches
-        .into_iter()
-        .map(|(original_tokenizer_state, terminals)| {
+    maps
+        .map(|(state_id, terminals)| {
             let cache_key: Vec<(TerminalID, Box<[u64]>)> = terminals
                 .iter()
                 .map(|(&terminal_id, bitmap)| (terminal_id, bitmap.clone()))
@@ -627,9 +640,95 @@ pub(crate) fn remap_possible_matches_to_constraint_vocab(
                 })
                 .clone();
 
-            (original_tokenizer_state, weight)
+            (state_id, weight)
         })
         .collect()
+}
+
+pub(crate) fn remap_class_maps_to_constraint_vocab(
+    class_maps: &[Arc<DensePossibleMatchMap>],
+    state_classes: &[u32],
+    original_to_constraint_internal: &[u32],
+    constraint_token_count: u32,
+    tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
+) -> RuntimePossibleMatchesByState {
+    let num_words = dense_word_count(constraint_token_count);
+    let mut remap_cache: FxHashMap<Vec<(TerminalID, Box<[u64]>)>, Weight> = FxHashMap::default();
+    let groups = unique_same_byte_groups(tokens_with_same_bytes);
+    let max_token_slot = tokens_with_same_bytes
+        .keys()
+        .max()
+        .map(|token_id| *token_id as usize + 1)
+        .unwrap_or(0);
+    let mut group_leaders = vec![u32::MAX; max_token_slot];
+    for group in &groups {
+        let leader = group[0];
+        for &token_id in group.iter() {
+            group_leaders[token_id as usize] = leader;
+        }
+    }
+    let group_constraint_internal_ids = build_group_constraint_internal_ids(&groups, original_to_constraint_internal);
+
+    // Remap each unique class map once.
+    let mut class_weights = Vec::with_capacity(class_maps.len());
+    for class_map in class_maps {
+        let cache_key: Vec<(TerminalID, Box<[u64]>)> = class_map
+            .iter()
+            .map(|(&terminal_id, bitmap)| (terminal_id, bitmap.clone()))
+            .collect();
+
+        let weight = remap_cache
+            .entry(cache_key)
+            .or_insert_with(|| {
+                let remapped_terminals = class_map
+                    .iter()
+                    .filter_map(|(&terminal_id, original_bitmap)| {
+                        let mut remapped = vec![0u64; num_words];
+                        let mut any = false;
+                        for_each_dense_bit(original_bitmap, |original_token_id| {
+                            let Some(&leader) = group_leaders.get(original_token_id as usize) else {
+                                return;
+                            };
+                            if leader == u32::MAX {
+                                return;
+                            }
+                            let Some(constraint_internal_ids) = group_constraint_internal_ids.get(&leader) else {
+                                return;
+                            };
+                            for &constraint_internal_id in constraint_internal_ids.iter() {
+                                set_dense_bit(&mut remapped, constraint_internal_id);
+                                any = true;
+                            }
+                        });
+                        if any {
+                            Some((terminal_id, {
+                                let mut ids = Vec::new();
+                                for_each_dense_bit(&remapped, |token_id| ids.push(token_id));
+                                range_set_from_sorted_ids(&ids)
+                            }))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                Weight::from_per_tsid_token_sets(remapped_terminals)
+            })
+            .clone();
+
+        class_weights.push(weight);
+    }
+
+    // Expand to all original tokenizer states.
+    let mut result = BTreeMap::new();
+    for (state, &class_id) in state_classes.iter().enumerate() {
+        if class_id == u32::MAX {
+            continue;
+        }
+        if let Some(weight) = class_weights.get(class_id as usize) {
+            result.insert(state as u32, weight.clone());
+        }
+    }
+    result
 }
 
 fn remap_token_set_to_constraint_vocab(

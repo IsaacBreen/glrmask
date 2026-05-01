@@ -927,18 +927,9 @@ independently proving possible_matches equivalence for your workload."
                             original_token_slots,
                             &all_states,
                         );
-                        let cpm::collector::DenseTrieClassBuildResult {
-                            possible_matches_by_state,
-                            state_classes,
-                            class_maps,
-                        } = trie_class_result;
                         (
-                            possible_matches_by_state,
-                            Some(cpm::collector::DenseTrieClassBuildResult {
-                                possible_matches_by_state: BTreeMap::new(),
-                                state_classes,
-                                class_maps,
-                            }),
+                            BTreeMap::new(),
+                            Some(trie_class_result),
                             profile,
                             "constraint_original_tokens",
                             tokenizer.num_states(),
@@ -1117,21 +1108,31 @@ independently proving possible_matches equivalence for your workload."
                 constraint_token_count,
             );
         }
-        let raw_possible_matches = if use_internal_tsid_representatives {
-            cpm::expand_possible_matches_to_original_states(
-                &raw_possible_matches,
-                &internal_ids.tokenizer_states.internal_to_originals,
-                &internal_ids.tokenizer_states.representative_original_ids,
+        let possible_matches = if let Some(trie_class_result) = trie_class_result.as_ref() {
+            cpm::remap_class_maps_to_constraint_vocab(
+                &trie_class_result.class_maps,
+                &trie_class_result.state_classes,
+                &constraint_vocab.original_to_internal,
+                constraint_token_count,
+                &tokens_with_same_bytes,
             )
         } else {
-            raw_possible_matches
+            let raw_possible_matches = if use_internal_tsid_representatives {
+                cpm::expand_possible_matches_to_original_states(
+                    &raw_possible_matches,
+                    &internal_ids.tokenizer_states.internal_to_originals,
+                    &internal_ids.tokenizer_states.representative_original_ids,
+                )
+            } else {
+                raw_possible_matches
+            };
+            cpm::remap_possible_matches_to_constraint_vocab(
+                raw_possible_matches,
+                &constraint_vocab.original_to_internal,
+                constraint_token_count,
+                &tokens_with_same_bytes,
+            )
         };
-        let possible_matches = cpm::remap_possible_matches_to_constraint_vocab(
-            raw_possible_matches,
-            &constraint_vocab.original_to_internal,
-            constraint_token_count,
-            &tokens_with_same_bytes,
-        );
         let remap_possible_matches_ms = elapsed_ms(remap_possible_matches_started_at);
         if debug_compile_stages {
             eprintln!(
@@ -1512,7 +1513,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn seed_state_signatures_match_bruteforce_on_o43234_glrm_mre() {
         let vocab = Vocab::new(
             vec![

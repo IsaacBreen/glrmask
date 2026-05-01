@@ -30,9 +30,22 @@ use crate::grammar::flat::TerminalID;
 pub(crate) type DensePossibleMatchMap = BTreeMap<TerminalID, Box<[u64]>>;
 
 pub(crate) struct DenseTrieClassBuildResult {
-    pub(crate) possible_matches_by_state: BTreeMap<u32, DensePossibleMatchMap>,
     pub(crate) state_classes: Vec<u32>,
     pub(crate) class_maps: Vec<Arc<DensePossibleMatchMap>>,
+}
+
+impl DenseTrieClassBuildResult {
+    pub(crate) fn expand_to_states(&self, entries: &[u32]) -> BTreeMap<u32, DensePossibleMatchMap> {
+        entries
+            .iter()
+            .copied()
+            .map(|state| {
+                let class_id = self.state_classes[state as usize];
+                let map = self.class_maps[class_id as usize].as_ref().clone();
+                (state, map)
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
@@ -444,7 +457,7 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build(
         num_internal_tokens,
         entries,
     );
-    (result.possible_matches_by_state, profile)
+    (result.expand_to_states(entries), profile)
 }
 
 pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
@@ -759,18 +772,6 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
     );
     let root_compute_ms = elapsed_ms(t_root_start);
 
-    let materialize_started_at = Instant::now();
-    let possible_matches_by_state = entries
-        .iter()
-        .copied()
-        .map(|state| {
-            let class_id = root_result.classes[state as usize];
-            let map = root_result.class_maps[class_id as usize].as_ref().clone();
-            (state, map)
-        })
-        .collect();
-    let materialize_output_ms = elapsed_ms(materialize_started_at);
-
     if profile_summary_enabled() {
         eprintln!(
             "[glrmask/profile][trie_build_timings] segment_table_ms={:.3} signature_hash_ms={:.3} map_materialize_ms={:.3} classes_built={}",
@@ -781,12 +782,10 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
     let profile = PossibleMatchesProfile {
         cache_entries: root_result.class_maps.len(),
         root_compute_ms,
-        materialize_output_ms,
         ..Default::default()
     };
     (
         DenseTrieClassBuildResult {
-            possible_matches_by_state,
             state_classes: root_result.classes,
             class_maps: root_result
                 .class_maps
