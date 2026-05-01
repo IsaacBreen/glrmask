@@ -6,7 +6,7 @@ use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::Vocab;
-use crate::compiler::possible_matches::DensePossibleMatchMap;
+use crate::compiler::constraint_possible_matches::collector::DensePossibleMatchMap;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::ds::weight::{Weight, finalize_weight_map, shared_rangeset};
 use crate::grammar::flat::TerminalID;
