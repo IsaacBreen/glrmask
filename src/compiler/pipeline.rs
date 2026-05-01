@@ -894,7 +894,7 @@ independently proving possible_matches equivalence for your workload."
                         );
                         let representative_states = &internal_ids.tokenizer_states.representative_original_ids;
                         if std::env::var("GLRMASK_DIAG_PM_ROOT_SIG").map_or(false, |v| v == "1") {
-                            let root_signature_count = crate::compiler::possible_matches::count_root_child_internal_tsid_signatures(
+                            let root_signature_count = cpm::collector::count_root_child_internal_tsid_signatures(
                                 &tokenizer,
                                 &trie.root,
                                 representative_states,
@@ -906,7 +906,7 @@ independently proving possible_matches equivalence for your workload."
                                 root_signature_count,
                             );
                         }
-                        let (representative_matches, profile) = crate::compiler::possible_matches::collect_possible_matches_by_selected_original_tsid_dense(
+                        let (representative_matches, profile) = cpm::collector::collect_possible_matches_by_selected_original_tsid_dense(
                             &tokenizer,
                             &trie.root,
                             original_token_slots,
@@ -921,20 +921,20 @@ independently proving possible_matches equivalence for your workload."
                         )
                     } else if trie_class_build_enabled {
                         let all_states: Vec<u32> = (0..tokenizer.num_states()).collect();
-                        let (trie_class_result, profile) = crate::compiler::possible_matches::collect_possible_matches_dense_trie_class_build_with_classes(
+                        let (trie_class_result, profile) = cpm::collector::collect_possible_matches_dense_trie_class_build_with_classes(
                             &tokenizer,
                             &trie.root,
                             original_token_slots,
                             &all_states,
                         );
-                        let crate::compiler::possible_matches::DenseTrieClassBuildResult {
+                        let cpm::collector::DenseTrieClassBuildResult {
                             possible_matches_by_state,
                             state_classes,
                             class_maps,
                         } = trie_class_result;
                         (
                             possible_matches_by_state,
-                            Some(crate::compiler::possible_matches::DenseTrieClassBuildResult {
+                            Some(cpm::collector::DenseTrieClassBuildResult {
                                 possible_matches_by_state: BTreeMap::new(),
                                 state_classes,
                                 class_maps,
@@ -944,7 +944,7 @@ independently proving possible_matches equivalence for your workload."
                             tokenizer.num_states(),
                         )
                     } else {
-                        let (matches, profile) = crate::compiler::possible_matches::collect_possible_matches_by_original_tsid_dense(
+                        let (matches, profile) = cpm::collector::collect_possible_matches_by_original_tsid_dense(
                             &tokenizer,
                             &trie.root,
                             original_token_slots,
@@ -958,7 +958,7 @@ independently proving possible_matches equivalence for your workload."
                         )
                     };
                     let collect_ms = elapsed_ms(collect_started_at);
-                    crate::compiler::possible_matches::emit_possible_matches_profile_summary(
+                    cpm::collector::emit_possible_matches_profile_summary(
                         profile_label,
                         token_bytes.len(),
                         profile_state_count,
@@ -1495,7 +1495,7 @@ mod tests {
                 .map(|(&token_id, bytes)| (token_id as usize, bytes.clone()))
                 .collect(),
         );
-        let (raw_possible_matches, _) = crate::compiler::possible_matches::collect_possible_matches_by_original_tsid_dense(
+        let (raw_possible_matches, _) = cpm::collector::collect_possible_matches_by_original_tsid_dense(
             &constraint.tokenizer,
             &trie.root,
             max_original_token_slot(&token_bytes),
@@ -1549,7 +1549,7 @@ mod tests {
                 .map(|(&token_id, bytes)| (token_id as usize, bytes.clone()))
                 .collect(),
         );
-        let (raw_possible_matches, _) = crate::compiler::possible_matches::collect_possible_matches_by_original_tsid_dense(
+        let (raw_possible_matches, _) = cpm::collector::collect_possible_matches_by_original_tsid_dense(
             &constraint.tokenizer,
             &trie.root,
             max_original_token_slot(&token_bytes),

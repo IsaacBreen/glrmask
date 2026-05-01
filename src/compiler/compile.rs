@@ -2289,7 +2289,7 @@ mod tests {
         }
 
         let baseline_started_at = Instant::now();
-        let (baseline_maps, _profile) = crate::compiler::possible_matches::collect_possible_matches_by_selected_original_tsid_dense(
+        let (baseline_maps, _profile) = crate::compiler::constraint_possible_matches::collector::collect_possible_matches_by_selected_original_tsid_dense(
             &tokenizer,
             &trie.root,
             vocab.entries.len() as u32,
@@ -2359,7 +2359,7 @@ mod tests {
         let chunk_size = std::env::var("GLRMASK_PM_STATE_CHUNK_SIZE").ok();
 
         let collector_started_at = Instant::now();
-        let (raw_maps, profile) = crate::compiler::possible_matches::collect_possible_matches_by_selected_original_tsid_dense(
+        let (raw_maps, profile) = crate::compiler::constraint_possible_matches::collector::collect_possible_matches_by_selected_original_tsid_dense(
             &tokenizer,
             &trie.root,
             vocab.entries.len() as u32,
@@ -2419,7 +2419,7 @@ mod tests {
         let entries: Vec<u32> = (0..sample_state_limit).collect();
 
         let baseline_started_at = Instant::now();
-        let (baseline_maps, baseline_profile) = crate::compiler::possible_matches::collect_possible_matches_by_selected_original_tsid_dense(
+        let (baseline_maps, baseline_profile) = crate::compiler::constraint_possible_matches::collector::collect_possible_matches_by_selected_original_tsid_dense(
             &tokenizer,
             &trie.root,
             vocab.entries.len() as u32,
@@ -2428,7 +2428,7 @@ mod tests {
         let baseline_ms = elapsed_ms(baseline_started_at);
 
         let trie_class_started_at = Instant::now();
-        let (trie_class_maps, trie_class_profile) = crate::compiler::possible_matches::collect_possible_matches_dense_trie_class_build(
+        let (trie_class_maps, trie_class_profile) = crate::compiler::constraint_possible_matches::collector::collect_possible_matches_dense_trie_class_build(
             &tokenizer,
             &trie.root,
             vocab.entries.len() as u32,
@@ -2498,7 +2498,7 @@ mod tests {
         }
 
         let baseline_started_at = Instant::now();
-        let (baseline_maps, _profile) = crate::compiler::possible_matches::collect_possible_matches_by_selected_original_tsid_dense(
+        let (baseline_maps, _profile) = crate::compiler::constraint_possible_matches::collector::collect_possible_matches_by_selected_original_tsid_dense(
             &tokenizer,
             &trie.root,
             vocab.entries.len() as u32,
