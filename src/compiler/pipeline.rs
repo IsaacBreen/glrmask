@@ -1046,22 +1046,15 @@ independently proving possible_matches equivalence for your workload."
             );
         }
         let seed_state_signature_ids = if let Some(trie_class_result) = trie_class_result.as_ref() {
-            cpm::build_seed_state_signature_ids_from_trie_classes(
-                &trie_class_result.class_maps,
+            cpm::build_seed_state_signature_ids_from_trie_classes_exact(
+                &tokenizer,
+                &token_bytes,
+                &tokens_with_same_bytes,
                 &trie_class_result.state_classes,
-                &token_bytes,
-                &tokens_with_same_bytes,
             )
-        } else if use_internal_tsid_representatives {
-            cpm::intern_signature_ids(cpm::build_seed_state_signatures_from_possible_matches_by_internal_tsid(
-                &raw_possible_matches,
-                &token_bytes,
-                &tokens_with_same_bytes,
-                &internal_ids.tokenizer_states.original_to_internal,
-            ))
         } else {
-            cpm::intern_signature_ids(cpm::build_seed_state_signatures_from_possible_matches(
-                &raw_possible_matches,
+            cpm::intern_signature_ids(cpm::build_seed_state_signatures_trie(
+                &tokenizer,
                 &token_bytes,
                 &tokens_with_same_bytes,
             ))
@@ -1332,7 +1325,14 @@ mod tests {
             .map(|&token_id| (token_id, Vec::new()))
             .collect();
 
+        let terminal_states: Vec<bool> = (0..tokenizer.num_states())
+            .map(|state| tokenizer.matched_terminals_iter(state).next().is_some())
+            .collect();
+
         for tokenizer_state in 0..tokenizer.num_states() {
+            if terminal_states[tokenizer_state as usize] {
+                continue;
+            }
             for (&token_id, bytes) in token_bytes {
                 let exec = tokenizer.execute_from_state(bytes, tokenizer_state);
                 if exec.end_state.is_none() && exec.matches.is_empty() {
@@ -1493,20 +1493,8 @@ mod tests {
             (1u32, b"ac".to_vec()),
         ]);
         let tokens_with_same_bytes = cpm::build_tokens_with_same_bytes(&token_bytes);
-        let trie = crate::ds::vocab_prefix_tree::VocabPrefixTree::build_owned(
-            token_bytes
-                .iter()
-                .map(|(&token_id, bytes)| (token_id as usize, bytes.clone()))
-                .collect(),
-        );
-        let (raw_possible_matches, _) = cpm::collector::collect_possible_matches_by_original_tsid_dense(
+        let actual = cpm::build_seed_state_signatures_trie(
             &constraint.tokenizer,
-            &trie.root,
-            max_original_token_slot(&token_bytes),
-        );
-
-        let actual = cpm::build_seed_state_signatures_from_possible_matches(
-            &raw_possible_matches,
             &token_bytes,
             &tokens_with_same_bytes,
         );
@@ -1547,20 +1535,9 @@ mod tests {
             (313u32, b"--".to_vec()),
         ]);
         let tokens_with_same_bytes = cpm::build_tokens_with_same_bytes(&token_bytes);
-        let trie = crate::ds::vocab_prefix_tree::VocabPrefixTree::build_owned(
-            token_bytes
-                .iter()
-                .map(|(&token_id, bytes)| (token_id as usize, bytes.clone()))
-                .collect(),
-        );
-        let (raw_possible_matches, _) = cpm::collector::collect_possible_matches_by_original_tsid_dense(
-            &constraint.tokenizer,
-            &trie.root,
-            max_original_token_slot(&token_bytes),
-        );
 
-        let actual = cpm::build_seed_state_signatures_from_possible_matches(
-            &raw_possible_matches,
+        let actual = cpm::build_seed_state_signatures_trie(
+            &constraint.tokenizer,
             &token_bytes,
             &tokens_with_same_bytes,
         );

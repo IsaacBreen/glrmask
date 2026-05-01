@@ -363,6 +363,261 @@ pub(crate) fn build_possible_match_signatures_by_internal_tsid(
     signatures
 }
 
+/// Exact trie-based seed-state signature builder.
+///
+/// Walks the tokenizer DFA over a prefix trie of group-leader byte strings,
+/// recording which original tokenizer states can reach each leader.  The
+/// result is then expanded from leaders to every token in the same-byte
+/// group, sorted/deduplicated, and returned as a map from original token id
+/// to its seed-state signature.
+/// Brute-force exact seed-state signature builder.
+///
+/// For each group leader, simulates the tokenizer from every nonterminal
+/// state.  Terminal states are intentionally omitted: all tokens share the
+/// same terminal-state component, so it does not affect the constraint-vocab
+/// grouping.
+pub(crate) fn build_seed_state_signatures_trie(
+    tokenizer: &crate::automata::lexer::tokenizer::Tokenizer,
+    token_bytes: &BTreeMap<u32, Vec<u8>>,
+    tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
+) -> FxHashMap<u32, SeedStateSignature> {
+    let groups = unique_same_byte_groups(tokens_with_same_bytes);
+    let num_states = tokenizer.num_states() as usize;
+
+    let terminal_states: Vec<bool> = (0..num_states)
+        .map(|state| !tokenizer.dfa.finalizers(state as u32).is_zero())
+        .collect();
+
+    // Compute signatures per group leader in parallel.
+    let signatures_by_leader: Vec<(u32, SeedStateSignature)> = groups
+        .par_iter()
+        .map(|group| {
+            let leader = group[0];
+            let bytes = token_bytes.get(&leader).expect("leader must have bytes");
+            let mut signature: SeedStateSignature = Vec::new();
+
+            for state in 0..num_states as u32 {
+                if terminal_states[state as usize] {
+                    continue;
+                }
+                if can_scan_token(tokenizer, bytes, state) {
+                    signature.push(state);
+                }
+            }
+
+            signature.sort_unstable();
+            signature.dedup();
+            (leader, signature)
+        })
+        .collect();
+
+    let mut signatures_by_leader_map: FxHashMap<u32, SeedStateSignature> =
+        signatures_by_leader.into_iter().collect();
+
+    // Expand from leaders to all tokens in each same-byte group.
+    let mut signatures = FxHashMap::default();
+    for group in groups {
+        let signature = signatures_by_leader_map.remove(&group[0]).unwrap_or_default();
+        for &token_id in group.iter() {
+            signatures.insert(token_id, signature.clone());
+        }
+    }
+
+    signatures
+}
+
+/// Fast seed-state signature builder that reuses trie state classes.
+///
+/// `state_classes` comes from `collect_possible_matches_dense_trie_class_build_with_classes`.
+/// States in the same class are guaranteed to have identical token-matching
+/// behavior, so we only simulate one representative per class.
+pub(crate) fn build_seed_state_signature_ids_from_trie_classes_exact(
+    tokenizer: &crate::automata::lexer::tokenizer::Tokenizer,
+    token_bytes: &BTreeMap<u32, Vec<u8>>,
+    tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
+    state_classes: &[u32],
+) -> FxHashMap<u32, SignatureClassId> {
+    let t_start = std::time::Instant::now();
+
+    let t_groups = std::time::Instant::now();
+    let groups = unique_same_byte_groups(tokens_with_same_bytes);
+    let groups_ms = t_groups.elapsed().as_secs_f64() * 1000.0;
+
+    let t_map = std::time::Instant::now();
+    let mut class_to_rep: FxHashMap<u32, u32> = FxHashMap::default();
+    let mut class_members: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+    for (state, &class_id) in state_classes.iter().enumerate() {
+        if class_id == u32::MAX {
+            continue;
+        }
+        class_to_rep.entry(class_id).or_insert(state as u32);
+        class_members.entry(class_id).or_default().push(state as u32);
+    }
+    let rep_entries: Vec<(u32, u32)> = class_to_rep.into_iter().collect();
+    let map_ms = t_map.elapsed().as_secs_f64() * 1000.0;
+
+    let t_sim = std::time::Instant::now();
+    let matched_per_rep: Vec<Vec<u32>> = rep_entries
+        .par_iter()
+        .map(|(_class_id, rep_state)| {
+            let mut matched = Vec::new();
+            for group in &groups {
+                let leader = group[0];
+                let bytes = token_bytes.get(&leader).expect("leader must have bytes");
+                if can_scan_token(tokenizer, bytes, *rep_state) {
+                    matched.push(leader);
+                }
+            }
+            matched
+        })
+        .collect();
+    let sim_ms = t_sim.elapsed().as_secs_f64() * 1000.0;
+
+    let t_inv = std::time::Instant::now();
+    let mut leader_to_idx: FxHashMap<u32, usize> = FxHashMap::default();
+    let mut idx_to_leader: Vec<u32> = Vec::with_capacity(groups.len());
+    for (idx, group) in groups.iter().enumerate() {
+        leader_to_idx.insert(group[0], idx);
+        idx_to_leader.push(group[0]);
+    }
+
+    let mut leader_to_reps: Vec<Vec<u32>> = vec![Vec::new(); groups.len()];
+    for (rep_idx, matched_leaders) in matched_per_rep.iter().enumerate() {
+        for &leader in matched_leaders {
+            if let Some(&leader_idx) = leader_to_idx.get(&leader) {
+                leader_to_reps[leader_idx].push(rep_idx as u32);
+            }
+        }
+    }
+    let inv_ms = t_inv.elapsed().as_secs_f64() * 1000.0;
+
+    let num_states = tokenizer.num_states() as usize;
+    let state_words = (num_states + 63) / 64;
+    let num_leaders = groups.len();
+    let flat_len = num_leaders * state_words;
+
+    let t_flat = std::time::Instant::now();
+    let mut signatures_flat = vec![0u64; flat_len];
+
+    // Precompute (word, mask) for each member state to avoid division in the inner loop.
+    let member_word_mask: Vec<(usize, u64)> = (0..num_states)
+        .map(|member| (member / 64, 1u64 << (member % 64)))
+        .collect();
+
+    // Precompute members for each rep_idx to avoid HashMap lookups in the inner loop.
+    let rep_members: Vec<&[u32]> = (0..rep_entries.len())
+        .map(|rep_idx| {
+            let class_id = rep_entries[rep_idx].0;
+            class_members.get(&class_id).map(|v| v.as_slice()).unwrap_or(&[])
+        })
+        .collect();
+
+    // Iterate by leader for cache locality: stay at one base for all reps.
+    for (leader_idx, rep_indices) in leader_to_reps.iter().enumerate() {
+        let base = leader_idx * state_words;
+        for &rep_idx in rep_indices {
+            for &member in rep_members[rep_idx as usize] {
+                let (word, mask) = member_word_mask[member as usize];
+                if word < state_words {
+                    unsafe {
+                        *signatures_flat.get_unchecked_mut(base + word) |= mask;
+                    }
+                }
+            }
+        }
+    }
+    let flat_ms = t_flat.elapsed().as_secs_f64() * 1000.0;
+
+    let t_expand = std::time::Instant::now();
+    // Hash-sort-group dense signatures to avoid expensive Vec cloning and
+    // HashMap operations with 581-word keys.
+    use std::hash::Hasher;
+    use rustc_hash::FxHasher;
+
+    fn hash_slice(slice: &[u64]) -> u64 {
+        let mut hasher = FxHasher::default();
+        for &word in slice {
+            hasher.write_u64(word);
+        }
+        hasher.finish()
+    }
+
+    let mut leader_hashes: Vec<(u64, usize)> = Vec::with_capacity(num_leaders);
+    for leader_idx in 0..num_leaders {
+        let base = leader_idx * state_words;
+        let hash = hash_slice(&signatures_flat[base..base + state_words]);
+        leader_hashes.push((hash, leader_idx));
+    }
+    leader_hashes.sort_unstable_by_key(|(h, _)| *h);
+
+    let mut leader_to_interned: Vec<SignatureClassId> = vec![0; num_leaders];
+    let mut next_class: SignatureClassId = 0;
+    let mut i = 0;
+    while i < leader_hashes.len() {
+        let hash = leader_hashes[i].0;
+        // Find the end of this hash bucket.
+        let mut j = i + 1;
+        while j < leader_hashes.len() && leader_hashes[j].0 == hash {
+            j += 1;
+        }
+        // Within the bucket, intern unique slices using a small HashMap.
+        let mut slice_to_class: FxHashMap<&[u64], SignatureClassId> = FxHashMap::default();
+        for k in i..j {
+            let leader_idx = leader_hashes[k].1;
+            let base = leader_idx * state_words;
+            let slice = &signatures_flat[base..base + state_words];
+            let class_id = *slice_to_class.entry(slice).or_insert_with(|| {
+                let id = next_class;
+                next_class += 1;
+                id
+            });
+            leader_to_interned[leader_idx] = class_id;
+        }
+        i = j;
+    }
+    let num_classes = next_class as usize;
+
+    let mut token_to_id = FxHashMap::with_capacity_and_hasher(
+        tokens_with_same_bytes.len(),
+        Default::default(),
+    );
+    for (leader_idx, group) in groups.iter().enumerate() {
+        let interned_id = leader_to_interned[leader_idx];
+        for &token_id in group.iter() {
+            token_to_id.insert(token_id, interned_id);
+        }
+    }
+    let expand_ms = t_expand.elapsed().as_secs_f64() * 1000.0;
+
+    let total_ms = t_start.elapsed().as_secs_f64() * 1000.0;
+    eprintln!(
+        "[glrmask/profile][seed_sig_classes] groups={} classes={} reps={} words={} flat_len={} num_classes={} groups_ms={:.3} map_ms={:.3} sim_ms={:.3} inv_ms={:.3} flat_ms={:.3} expand_ms={:.3} total_ms={:.3}",
+        groups.len(), class_members.len(), rep_entries.len(), state_words, flat_len, num_classes,
+        groups_ms, map_ms, sim_ms, inv_ms, flat_ms, expand_ms, total_ms,
+    );
+
+    token_to_id
+}
+
+#[inline]
+fn can_scan_token(
+    tokenizer: &crate::automata::lexer::tokenizer::Tokenizer,
+    bytes: &[u8],
+    start_state: u32,
+) -> bool {
+    let mut state = start_state;
+    for &byte in bytes {
+        let Some(next) = tokenizer.step(state, byte) else {
+            return false;
+        };
+        state = next;
+        if !tokenizer.dfa.finalizers(state).is_zero() {
+            return true;
+        }
+    }
+    true
+}
+
 pub(crate) fn build_seed_state_signatures_from_possible_matches(
     raw_possible_matches: &DensePossibleMatchesByState,
     token_bytes: &BTreeMap<u32, Vec<u8>>,
