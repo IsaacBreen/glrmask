@@ -282,9 +282,7 @@ pub(crate) fn build_possible_match_signature_ids_from_trie_classes(
                     return;
                 }
                 if let Some(signature) = signatures_by_group.get_mut(&leader) {
-                    for &state in members {
-                        signature.push((state, terminal_id));
-                    }
+                    signature.push((class_id as u32, terminal_id));
                 }
             });
         }
@@ -420,7 +418,7 @@ pub(crate) fn build_seed_state_signature_ids_from_trie_classes(
 
         for leader in covered_leaders {
             if let Some(signature) = signatures_by_group.get_mut(&leader) {
-                signature.extend(members.iter().copied());
+                signature.push(class_id as u32);
             }
         }
     }
