@@ -590,11 +590,15 @@ pub(crate) fn build_seed_state_signature_ids_from_trie_classes_exact(
     let expand_ms = t_expand.elapsed().as_secs_f64() * 1000.0;
 
     let total_ms = t_start.elapsed().as_secs_f64() * 1000.0;
-    eprintln!(
-        "[glrmask/profile][seed_sig_classes] groups={} classes={} reps={} words={} flat_len={} num_classes={} groups_ms={:.3} map_ms={:.3} sim_ms={:.3} inv_ms={:.3} flat_ms={:.3} expand_ms={:.3} total_ms={:.3}",
-        groups.len(), class_members.len(), rep_entries.len(), state_words, flat_len, num_classes,
-        groups_ms, map_ms, sim_ms, inv_ms, flat_ms, expand_ms, total_ms,
-    );
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][seed_sig_classes] groups={} classes={} reps={} words={} flat_len={} num_classes={} groups_ms={:.3} map_ms={:.3} sim_ms={:.3} inv_ms={:.3} flat_ms={:.3} expand_ms={:.3} total_ms={:.3}",
+            groups.len(), class_members.len(), rep_entries.len(), state_words, flat_len, num_classes,
+            groups_ms, map_ms, sim_ms, inv_ms, flat_ms, expand_ms, total_ms,
+        );
+    }
 
     token_to_id
 }

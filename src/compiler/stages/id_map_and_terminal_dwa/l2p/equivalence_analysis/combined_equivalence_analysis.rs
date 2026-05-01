@@ -447,9 +447,13 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
     let pre_vocab_min_states = env_usize_override(PRE_VOCAB_MIN_STATES_ENV, PRE_VOCAB_STATE_REDUCTION_MIN_STATES);
     let pre_vocab_max_groups = env_usize_override(PRE_VOCAB_MAX_GROUPS_ENV, PRE_VOCAB_STATE_REDUCTION_MAX_GROUPS);
     let pre_vocab_min_tokens = env_usize_override(PRE_VOCAB_MIN_TOKENS_ENV, PRE_VOCAB_STATE_REDUCTION_MIN_TOKENS);
+    let large_dfa_threshold = env_usize_override(LARGE_DFA_THRESHOLD_ENV, PRE_VOCAB_STATE_REDUCTION_LARGE_DFA_THRESHOLD);
+    let large_dfa_batch_size = env_usize_override(LARGE_DFA_BATCH_SIZE_ENV, PRE_VOCAB_STATE_REDUCTION_LARGE_DFA_BATCH_SIZE);
+    let pre_vocab_max_full_tokens = env_usize_override(PRE_VOCAB_MAX_FULL_TOKENS_ENV, PRE_VOCAB_STATE_REDUCTION_MAX_FULL_TOKENS);
+    let large_dfa = num_dfa_states >= large_dfa_threshold;
     let use_pre_vocab_state_reduction = if force_pre_vocab_state_reduction {
         true
-    } else if disable_pre_vocab_state_reduction {
+    } else if disable_pre_vocab_state_reduction || large_dfa {
         false
     } else {
         !skip_token_state
@@ -457,13 +461,9 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
             && tokenizer_num_groups <= pre_vocab_max_groups
             && dedup.representative_token_bytes.len() >= pre_vocab_min_tokens
     };
-    // For large DFAs, use sample-based pre-vocab reduction: walk only a small
-    // batch of tokens through the states instead of all tokens. This avoids
-    // O(tokens × states) cost while still providing effective coarsening.
-    let large_dfa_threshold = env_usize_override(LARGE_DFA_THRESHOLD_ENV, PRE_VOCAB_STATE_REDUCTION_LARGE_DFA_THRESHOLD);
-    let large_dfa_batch_size = env_usize_override(LARGE_DFA_BATCH_SIZE_ENV, PRE_VOCAB_STATE_REDUCTION_LARGE_DFA_BATCH_SIZE);
-    let pre_vocab_max_full_tokens = env_usize_override(PRE_VOCAB_MAX_FULL_TOKENS_ENV, PRE_VOCAB_STATE_REDUCTION_MAX_FULL_TOKENS);
-    let large_dfa = num_dfa_states >= large_dfa_threshold;
+    // For large DFAs, sample-based pre-vocab reduction is only used when forced.
+    // The sample can miss continuation-future distinctions that are required for
+    // mask/commit equivalence.
     let pre_vocab_max_batches = if large_dfa { Some(1) } else { None };
     let pre_vocab_batch_size = if large_dfa {
         Some(large_dfa_batch_size)
