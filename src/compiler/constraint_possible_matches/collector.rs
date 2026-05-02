@@ -545,7 +545,7 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
     /// Fill missing segment-outcome entries for the given `needed_states`
     /// into `table` by walking the DFA `segment` from each missing state.
     /// Uses a stamp-based dedup array for O(1) terminal dedup.
-    fn ensure_segment_outcomes(
+    fn segment_outcomes_for_states(
         table: &mut FxHashMap<u32, TrieMapBuildSegmentOutcome>,
         needed_states: &[u32],
         segment: &[u8],
@@ -556,21 +556,16 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
         terminal_stamps: &mut [u32],
         stamp_gen: &mut u32,
         timings: &mut TrieBuildTimings,
-    ) {
-        // Collect missing states — avoid allocating if all present.
-        let mut missing = SmallVec::<[u32; 8]>::new();
-        for &state in needed_states {
-            if !table.contains_key(&state) {
-                missing.push(state);
-            }
-        }
-        if missing.is_empty() {
-            return;
-        }
-
+    ) -> Vec<TrieMapBuildSegmentOutcome> {
         let t_start = Instant::now();
+        let mut outcomes = Vec::with_capacity(needed_states.len());
 
-        for &start_state in &missing {
+        for &start_state in needed_states {
+            if let Some(&outcome) = table.get(&start_state) {
+                outcomes.push(outcome);
+                continue;
+            }
+
             let mut current_state = start_state;
             let mut blocked = false;
             *stamp_gen = stamp_gen.wrapping_add(1);
@@ -605,16 +600,16 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
                 terminal_sets.intern_vec(list)
             };
 
-            table.insert(
-                start_state,
-                TrieMapBuildSegmentOutcome {
-                    terminals_id,
-                    end_state: (!blocked).then_some(current_state),
-                },
-            );
+            let outcome = TrieMapBuildSegmentOutcome {
+                terminals_id,
+                end_state: (!blocked).then_some(current_state),
+            };
+            table.insert(start_state, outcome);
+            outcomes.push(outcome);
         }
 
         timings.segment_table_ms += elapsed_ms(t_start);
+        outcomes
     }
 
     #[inline]
@@ -665,9 +660,10 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
                 idx
             };
 
-            // Ensure outcomes for the current active_states exist
-            // (on-demand: only missing states are walked).
-            ensure_segment_outcomes(
+            // Compute segment outcomes for all active states with one
+            // hash lookup per state (cache hit returns immediately, miss
+            // walks the DFA and inserts both into the cache and the result).
+            let outcomes = segment_outcomes_for_states(
                 &mut segment_outcome_tables[segment_table_idx],
                 active_states,
                 segment,
@@ -682,12 +678,9 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
 
             let child_active_started_at = Instant::now();
             let subtree_bytes = U8Set::from_words(*child.subtree_bytes());
-            let table = &segment_outcome_tables[segment_table_idx];
-            let mut outcomes = Vec::with_capacity(active_states.len());
             let mut descend_end_states = Vec::with_capacity(active_states.len());
             let mut child_active_states = Vec::new();
-            for &state in active_states {
-                let segment_outcome = table[&state];
+            for segment_outcome in outcomes.iter() {
                 let descend_end_state = if let Some(end_state) = segment_outcome.end_state {
                     if !is_end[end_state as usize]
                         && !subtree_bytes.is_subset(&self_loop_bytes[end_state as usize])
@@ -700,7 +693,6 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
                 } else {
                     u32::MAX
                 };
-                outcomes.push(segment_outcome);
                 descend_end_states.push(descend_end_state);
             }
             child_active_states.sort_unstable();
