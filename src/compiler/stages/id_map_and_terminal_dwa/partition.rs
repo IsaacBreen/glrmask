@@ -144,7 +144,9 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                     &l2p_mask,
                     disallowed_follows,
                     _shared_vocab_dfa_cache,
-                    None, // Do not share flat_trans — it's from the original tokenizer and may be incompatible with simplified DFA
+                    // L2P currently uses the original tokenizer unchanged (`simplify_ms=0`), and
+                    // equivalence analysis verifies flat-table compatibility before using it.
+                    Some(flat_trans),
                     initial_state_map,
                 );
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
