@@ -91,7 +91,7 @@ impl TrieMapBuildTerminalSetInterner {
 
 struct TrieMapBuildNodeClasses {
     classes: Vec<u32>,
-    class_maps: Vec<Rc<DensePossibleMatchMap>>,
+    class_maps: Vec<Arc<DensePossibleMatchMap>>,
 }
 
 fn reachable_bitmap(node: &VocabPrefixTreeNode, num_words: usize) -> Vec<u64> {
@@ -938,7 +938,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_interned(
                 }
             }
 
-            class_maps.push(Rc::new(result));
+            class_maps.push(Arc::new(result));
         }
         timings.map_materialize_ms += elapsed_ms(t_map);
 
@@ -984,8 +984,8 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_interned(
             state_classes: root_result.classes,
             class_maps: root_result
                 .class_maps
-                .into_iter()
-                .map(|map| Arc::new(map.as_ref().clone()))
+                .iter()
+                .cloned()
                 .collect(),
         },
         profile,
@@ -1057,6 +1057,19 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
         reachable_bitmap_ms: 0.0,
         child_precompute_ms: 0.0,
     };
+
+    impl TrieBuildTimings {
+        fn add_assign(&mut self, other: Self) {
+            self.segment_table_ms += other.segment_table_ms;
+            self.signature_hash_ms += other.signature_hash_ms;
+            self.map_materialize_ms += other.map_materialize_ms;
+            self.classes_built += other.classes_built;
+            self.child_active_ms += other.child_active_ms;
+            self.recursive_ms += other.recursive_ms;
+            self.reachable_bitmap_ms += other.reachable_bitmap_ms;
+            self.child_precompute_ms += other.child_precompute_ms;
+        }
+    }
 
     #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
     struct TrieMapBuildSegmentOutcomeMask {
@@ -1154,6 +1167,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
         self_loop_bytes: &[U8Set],
         num_words: usize,
         timings: &mut TrieBuildTimings,
+        parallel_children: bool,
     ) -> TrieMapBuildNodeClasses {
         struct ChildBuildData {
             outcomes: Vec<TrieMapBuildSegmentOutcomeMask>,
@@ -1162,10 +1176,20 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
             result: TrieMapBuildNodeClasses,
         }
 
-        let mut child_data = Vec::new();
-        for (segment, child) in node.iter_children() {
-            // Compute segment outcomes using the mask fast path.
-            // No cache needed: OR-based accumulation is cheaper than a hash lookup.
+        /// Build ChildBuildData for a single child edge, accumulating into
+        /// a local timings struct (safe for parallel use).
+        fn build_child_data(
+            segment: &[u8],
+            child: &VocabPrefixTreeNode,
+            tokenizer: &Tokenizer,
+            active_states: &[u32],
+            state_terminal_masks: &[u64],
+            is_end: &[bool],
+            flat_transitions: &[[u32; 256]],
+            self_loop_bytes: &[U8Set],
+            num_words: usize,
+            timings: &mut TrieBuildTimings,
+        ) -> ChildBuildData {
             let outcomes = segment_outcomes_for_states(
                 active_states,
                 segment,
@@ -1207,6 +1231,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
                 )
             } else {
                 let recursive_started_at = Instant::now();
+                // Recursive calls always run serially.
                 let result = build_node(
                     child,
                     tokenizer,
@@ -1217,6 +1242,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
                     self_loop_bytes,
                     num_words,
                     timings,
+                    false,
                 );
                 timings.recursive_ms += elapsed_ms(recursive_started_at);
 
@@ -1240,12 +1266,79 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
             let reachable = reachable_dense_bitmap(child, num_words);
             timings.reachable_bitmap_ms += elapsed_ms(reachable_started_at);
 
-            child_data.push(ChildBuildData {
+            ChildBuildData {
                 outcomes,
                 child_class_ids,
                 reachable,
                 result,
-            });
+            }
+        }
+
+        let children: Vec<(&[u8], &VocabPrefixTreeNode)> = node.iter_children().collect();
+        let num_children = children.len();
+        let mut child_data = Vec::with_capacity(num_children);
+
+        if parallel_children && num_children >= 4 {
+            use rayon::prelude::*;
+            let built: Vec<(ChildBuildData, TrieBuildTimings)> = children
+                .par_iter()
+                .map(|(segment, child)| {
+                    let mut local_timings = TrieBuildTimings {
+                        segment_table_ms: 0.0,
+                        signature_hash_ms: 0.0,
+                        map_materialize_ms: 0.0,
+                        classes_built: 0,
+                        child_active_ms: 0.0,
+                        recursive_ms: 0.0,
+                        reachable_bitmap_ms: 0.0,
+                        child_precompute_ms: 0.0,
+                    };
+                    let data = build_child_data(
+                        segment,
+                        child,
+                        tokenizer,
+                        active_states,
+                        state_terminal_masks,
+                        is_end,
+                        flat_transitions,
+                        self_loop_bytes,
+                        num_words,
+                        &mut local_timings,
+                    );
+                    (data, local_timings)
+                })
+                .collect();
+            for (data, local_timings) in built {
+                timings.add_assign(local_timings);
+                child_data.push(data);
+            }
+        } else {
+            for (segment, child) in &children {
+                let mut local_timings = TrieBuildTimings {
+                    segment_table_ms: 0.0,
+                    signature_hash_ms: 0.0,
+                    map_materialize_ms: 0.0,
+                    classes_built: 0,
+                    child_active_ms: 0.0,
+                    recursive_ms: 0.0,
+                    reachable_bitmap_ms: 0.0,
+                    child_precompute_ms: 0.0,
+                };
+                let data = build_child_data(
+                    segment,
+                    child,
+                    tokenizer,
+                    active_states,
+                    state_terminal_masks,
+                    is_end,
+                    flat_transitions,
+                    self_loop_bytes,
+                    num_words,
+                    &mut local_timings,
+                );
+                timings.add_assign(local_timings);
+                child_data.push(data);
+            }
         }
 
         let t_sig = Instant::now();
@@ -1380,11 +1473,19 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
                 }
             }
 
-            class_maps.push(Rc::new(result));
+            class_maps.push(Arc::new(result));
         }
         timings.map_materialize_ms += elapsed_ms(t_map);
 
         TrieMapBuildNodeClasses { classes, class_maps }
+    }
+
+    if profile_summary_enabled() {
+        let num_root_children = root.children().len();
+        eprintln!(
+            "[glrmask/profile][trie_build_terminal_mask] root_parallel_children={}",
+            num_root_children,
+        );
     }
 
     let root_result = build_node(
@@ -1397,6 +1498,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
         &self_loop_bytes,
         num_words,
         &mut timings,
+        true,
     );
     let root_compute_ms = elapsed_ms(t_root_start);
 
@@ -1419,8 +1521,8 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
             state_classes: root_result.classes,
             class_maps: root_result
                 .class_maps
-                .into_iter()
-                .map(|map| Arc::new(map.as_ref().clone()))
+                .iter()
+                .cloned()
                 .collect(),
         },
         profile,
