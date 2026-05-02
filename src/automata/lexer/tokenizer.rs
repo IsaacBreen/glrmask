@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::automata::dfa::DFA;
 use crate::automata::regex::Expr;
-use crate::grammar::flat::TerminalID;
+use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::ds::bitset::BitSet;
+use crate::grammar::flat::TerminalID;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tokenizer {
@@ -54,9 +55,106 @@ fn group_matches_by_width(matches: Vec<TokenizerMatch>) -> Vec<(usize, BTreeSet<
     grouped.into_iter().collect()
 }
 
+struct TerminalFilteredDfa {
+    dfa: DFA,
+    active_bitset: BitSet,
+    any_cleared: bool,
+    transitions_pruned: bool,
+}
+
 impl Tokenizer {
     pub fn start_state(&self) -> u32 {
         0
+    }
+
+    /// Rebuild a tokenizer from the active terminal regexes and map original
+    /// states to rebuilt states by walking both DFAs in lockstep.
+    pub fn simplified_from_active_exprs(
+        &self,
+        active_terminals: &[bool],
+    ) -> Option<(Tokenizer, ManyToOneIdMap)> {
+        use std::collections::VecDeque;
+
+        let exprs = self.exprs.as_ref()?;
+        if exprs.len() != active_terminals.len() {
+            return None;
+        }
+
+        let local_to_orig: Vec<u32> = active_terminals
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &active)| active.then_some(i as u32))
+            .collect();
+        if local_to_orig.is_empty() {
+            return None;
+        }
+
+        let active_exprs: Vec<Expr> = local_to_orig
+            .iter()
+            .map(|&orig| exprs[orig as usize].clone())
+            .collect();
+        let regex = crate::automata::lexer::compile::build_regex(&active_exprs);
+        let mut fresh_dfa: DFA = regex.dfa;
+
+        let num_terminals = self.num_terminals as usize;
+        fresh_dfa.ensure_group_capacity(num_terminals);
+        let num_states = fresh_dfa.num_states();
+        for state_id in 0..num_states {
+            let old_finalizers = fresh_dfa.states()[state_id].finalizers.clone();
+            let mut new_finalizers = BitSet::new(num_terminals);
+            for local in old_finalizers.iter_ones() {
+                if let Some(&orig) = local_to_orig.get(local) {
+                    new_finalizers.set(orig as usize);
+                }
+            }
+
+            let old_futures = fresh_dfa
+                .possible_future_group_ids(state_id as u32)
+                .clone();
+            let mut new_futures = BitSet::new(num_terminals);
+            for local in old_futures.iter_ones() {
+                if let Some(&orig) = local_to_orig.get(local) {
+                    new_futures.set(orig as usize);
+                }
+            }
+            fresh_dfa.overwrite_state_metadata(state_id as u32, new_finalizers, new_futures);
+        }
+
+        let mut mapping = vec![u32::MAX; self.dfa.num_states()];
+        mapping[0] = 0;
+        let mut queue = VecDeque::from([0u32]);
+        while let Some(original) = queue.pop_front() {
+            let fresh = mapping[original as usize];
+            let original_state = &self.dfa.states()[original as usize];
+            for (byte, &original_next) in original_state.transitions.iter() {
+                if let Some(fresh_next) = fresh_dfa.step(fresh, byte) {
+                    let slot = &mut mapping[original_next as usize];
+                    if *slot == u32::MAX {
+                        *slot = fresh_next;
+                        queue.push_back(original_next);
+                    } else {
+                        debug_assert_eq!(
+                            *slot, fresh_next,
+                            "parallel BFS inconsistency: original state {} mapped to both {} and {}",
+                            original_next, *slot, fresh_next
+                        );
+                    }
+                }
+            }
+        }
+
+        let tok = Tokenizer {
+            dfa: fresh_dfa,
+            num_terminals: self.num_terminals,
+            exprs: self.exprs.clone(),
+        };
+        Some((
+            tok.clone(),
+            ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+                mapping,
+                tok.num_states(),
+            ),
+        ))
     }
 
     /// Detect nullable terminals (those that match the empty string) by
@@ -293,6 +391,258 @@ impl Tokenizer {
         }
         Some(state)
     }
+
+    fn filter_dfa_for_terminals(
+        &self,
+        active_terminals: &[bool],
+        relevant_bytes: Option<&[bool; 256]>,
+    ) -> TerminalFilteredDfa {
+        let mut dfa = self.dfa.clone();
+
+        let num_groups = self.num_terminals as usize;
+        let mut active_bitset = BitSet::new(num_groups);
+        for (tid, &active) in active_terminals.iter().enumerate() {
+            if active {
+                active_bitset.set(tid);
+            }
+        }
+
+        let mut any_cleared = false;
+        let mut transitions_pruned = false;
+        for state in dfa.states_mut().iter_mut() {
+            if let Some(relevant_bytes) = relevant_bytes {
+                let mut filtered_transitions = Vec::with_capacity(state.transitions.len());
+                for (byte, &target) in state.transitions.iter() {
+                    if relevant_bytes[byte as usize] {
+                        filtered_transitions.push((byte, target));
+                    }
+                }
+                if filtered_transitions.len() != state.transitions.len() {
+                    state.transitions =
+                        crate::ds::char_transitions::CharTransitions::from_sorted_entries(
+                            filtered_transitions,
+                        );
+                    transitions_pruned = true;
+                }
+            }
+
+            if state.finalizers.len() == active_bitset.len()
+                && !state.finalizers.is_subset(&active_bitset)
+            {
+                state.finalizers.intersect_with(&active_bitset);
+                any_cleared = true;
+            } else {
+                for (terminal_id, active) in active_terminals.iter().enumerate() {
+                    if !active
+                        && terminal_id < state.finalizers.len()
+                        && state.finalizers.contains(terminal_id)
+                    {
+                        state.finalizers.clear(terminal_id);
+                        any_cleared = true;
+                    }
+                }
+            }
+        }
+
+        let num_states_after_filter = dfa.num_states();
+        let mut is_dead = vec![false; num_states_after_filter];
+        for state_id in 0..num_states_after_filter {
+            let state = &dfa.states()[state_id];
+            let final_active = !state.finalizers.is_disjoint(&active_bitset);
+            let future_active = !self
+                .dfa
+                .possible_future_group_ids(state_id as u32)
+                .is_disjoint(&active_bitset);
+            if !final_active && !future_active {
+                is_dead[state_id] = true;
+            }
+        }
+        let mut coreach_pruned = false;
+        for state in dfa.states_mut().iter_mut() {
+            let original_len = state.transitions.len();
+            if original_len == 0 {
+                continue;
+            }
+            let mut filtered = Vec::with_capacity(original_len);
+            for (byte, &target) in state.transitions.iter() {
+                if !is_dead[target as usize] {
+                    filtered.push((byte, target));
+                }
+            }
+            if filtered.len() != original_len {
+                state.transitions =
+                    crate::ds::char_transitions::CharTransitions::from_sorted_entries(filtered);
+                coreach_pruned = true;
+            }
+        }
+        if coreach_pruned {
+            any_cleared = true;
+        }
+
+        TerminalFilteredDfa {
+            dfa,
+            active_bitset,
+            any_cleared,
+            transitions_pruned,
+        }
+    }
+
+    pub(crate) fn clone_filtered_for_terminals(
+        &self,
+        active_terminals: &[bool],
+        relevant_bytes: &[bool; 256],
+    ) -> Tokenizer {
+        let mut filtered = self.filter_dfa_for_terminals(active_terminals, Some(relevant_bytes));
+        filtered.dfa.recompute_possible_futures();
+        Tokenizer {
+            dfa: filtered.dfa,
+            num_terminals: self.num_terminals,
+            exprs: self.exprs.clone(),
+        }
+    }
+
+    /// Create a simplified tokenizer that only knows about `active_terminals`.
+    ///
+    /// Non-active terminal bits are cleared from finalizers and the DFA is
+    /// minimized. The `relevant_bytes` parameter is accepted for API
+    /// compatibility, but transition-byte pruning is only honored when the
+    /// `GLRMASK_FORCE_RELEVANT_BYTES` environment variable is set; by default
+    /// the method clears inactive terminal metadata and minimizes without byte
+    /// pruning, to preserve commit/mask equivalence.
+    pub fn simplify_for_terminals(
+        &self,
+        active_terminals: &[bool],
+        relevant_bytes: Option<&[bool; 256]>,
+    ) -> (Tokenizer, ManyToOneIdMap) {
+        let compile_profile = std::env::var("GLRMASK_PROFILE_COMPILE")
+            .map(|value| !value.is_empty() && value != "0")
+            .unwrap_or(false);
+
+        let use_from_scratch =
+            std::env::var_os("GLRMASK_SIMPLIFY_FROM_SCRATCH").is_some() && self.exprs.is_some() && {
+            let num_active = active_terminals.iter().filter(|&&active| active).count();
+            let total = active_terminals.len();
+            num_active * 2 <= total
+        };
+        if use_from_scratch {
+            if let Some(result) = self.simplified_from_active_exprs(active_terminals) {
+                if compile_profile {
+                    eprintln!(
+                        "[glrmask/profile][simplify_detail] from_scratch states={} active={}",
+                        result.0.num_states(),
+                        active_terminals.iter().filter(|&&active| active).count(),
+                    );
+                }
+                return result;
+            }
+        }
+
+        let relevant_bytes = if std::env::var_os("GLRMASK_FORCE_RELEVANT_BYTES").is_some() {
+            relevant_bytes
+        } else {
+            None
+        };
+
+        let started_at = std::time::Instant::now();
+        let TerminalFilteredDfa {
+            mut dfa,
+            active_bitset,
+            any_cleared,
+            transitions_pruned,
+        } = self.filter_dfa_for_terminals(active_terminals, relevant_bytes);
+        let clear_elapsed = started_at.elapsed();
+
+        if !any_cleared && !transitions_pruned {
+            let num_states = dfa.num_states();
+            let identity = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+                (0..num_states as u32).collect(),
+                num_states as u32,
+            );
+            if compile_profile {
+                eprintln!(
+                    "[glrmask/profile][simplify_detail] states={} no_change clear_ms={:.1}",
+                    num_states,
+                    clear_elapsed.as_secs_f64() * 1000.0,
+                );
+            }
+            return (
+                Tokenizer {
+                    dfa,
+                    num_terminals: self.num_terminals,
+                    exprs: self.exprs.clone(),
+                },
+                identity,
+            );
+        }
+
+        let pre_minimize_states = dfa.num_states();
+        let num_active = active_terminals.iter().filter(|&&active| active).count();
+        if pre_minimize_states > 1000 && num_active > 32 && !transitions_pruned {
+            let distinct = dfa.distinct_fingerprint_count();
+            if distinct > pre_minimize_states * 9 / 10 {
+                dfa.mask_possible_futures(&active_bitset);
+                let identity = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+                    (0..pre_minimize_states as u32).collect(),
+                    pre_minimize_states as u32,
+                );
+                if compile_profile {
+                    eprintln!(
+                        "[glrmask/profile][simplify_detail] states={} active={} clear_ms={:.1} skip_minimize(distinct={}/{}) total_ms={:.1}",
+                        pre_minimize_states,
+                        num_active,
+                        clear_elapsed.as_secs_f64() * 1000.0,
+                        distinct,
+                        pre_minimize_states,
+                        started_at.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+                return (
+                    Tokenizer {
+                        dfa,
+                        num_terminals: self.num_terminals,
+                        exprs: self.exprs.clone(),
+                    },
+                    identity,
+                );
+            }
+        }
+
+        let minimize_started_at = std::time::Instant::now();
+        let preserve_all_original_states = transitions_pruned;
+        let (minimized, state_mapping) = if preserve_all_original_states {
+            dfa.minimize_with_state_mapping_preserve_all_states()
+        } else {
+            dfa.minimize_with_state_mapping()
+        };
+        let minimize_elapsed = minimize_started_at.elapsed();
+        let post_minimize_states = minimized.num_states();
+
+        if compile_profile {
+            eprintln!(
+                "[glrmask/profile][simplify_detail] states={} active={} clear_ms={:.1} minimize_ms={:.1} total_ms={:.1} pre={} post={} reduction={}",
+                pre_minimize_states,
+                num_active,
+                clear_elapsed.as_secs_f64() * 1000.0,
+                minimize_elapsed.as_secs_f64() * 1000.0,
+                started_at.elapsed().as_secs_f64() * 1000.0,
+                pre_minimize_states,
+                post_minimize_states,
+                pre_minimize_states - post_minimize_states,
+            );
+        }
+
+        (
+            Tokenizer {
+                dfa: minimized,
+                num_terminals: self.num_terminals,
+                exprs: self.exprs.clone(),
+            },
+            ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+                state_mapping,
+                post_minimize_states as u32,
+            ),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -366,6 +716,35 @@ mod tests {
                 (1, BTreeSet::from([0, 1])),
                 (2, BTreeSet::from([1])),
             ]
+        );
+    }
+
+    #[test]
+    fn test_simplify_for_terminals_preserves_continuation_states_behind_pruned_bytes() {
+        let tokenizer = build_tokenizer_from_exprs(&[bytes(b": "), bytes(b"true")]);
+        let colon_state = tokenizer.step(tokenizer.start_state(), b':').unwrap();
+
+        let mut relevant_bytes = [false; 256];
+        for byte in [b' ', b't', b'r', b'u', b'e'] {
+            relevant_bytes[byte as usize] = true;
+        }
+
+        let (simplified, mapping) =
+            tokenizer.simplify_for_terminals(&[true, true], Some(&relevant_bytes));
+        let simplified_colon_state = mapping.original_to_internal[colon_state as usize];
+
+        assert_ne!(
+            simplified_colon_state,
+            u32::MAX,
+            "continuation states reached through pruned bytes must remain addressable"
+        );
+
+        let exec = simplified.execute_from_state_all_widths(b" true", simplified_colon_state);
+        assert!(
+            exec.matches
+                .iter()
+                .any(|matched| matched.id == 0 && matched.width == 1),
+            "the bridge terminal must still match from the preserved continuation state"
         );
     }
 
