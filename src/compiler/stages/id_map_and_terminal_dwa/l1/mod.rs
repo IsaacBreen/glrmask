@@ -214,6 +214,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     grammar: &AnalyzedGrammar,
     active_terminals: &[bool],
     flat_trans: &Arc<[u32]>,
+    initial_state_map: Option<&ManyToOneIdMap>,
 ) -> Option<LocalIdMapTerminalDwa> {
     if vocab.is_empty() {
         return None;
@@ -221,7 +222,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
 
     let total_started_at = Instant::now();
     let id_map_started_at = Instant::now();
-    let (mut id_map, sorted_entries, state_to_rep, id_map_profile) = build_l1_id_map(tokenizer, vocab, active_terminals, flat_trans);
+    let (mut id_map, sorted_entries, state_to_rep, id_map_profile) = build_l1_id_map(tokenizer, vocab, active_terminals, flat_trans, initial_state_map);
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let num_terminals = grammar.num_terminals as u32;
@@ -332,8 +333,18 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     })
 }
 
-fn build_l1_id_map<'a>(tokenizer: &Tokenizer, vocab: &'a Vocab, active_terminals: &[bool], flat_trans: &Arc<[u32]>) -> (InternalIdMap, Vec<(u32, &'a [u8])>, Vec<u32>, L1IdMapProfile) {
-    let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
+fn build_l1_id_map<'a>(
+    tokenizer: &Tokenizer,
+    vocab: &'a Vocab,
+    active_terminals: &[bool],
+    flat_trans: &Arc<[u32]>,
+    initial_state_map: Option<&ManyToOneIdMap>,
+) -> (InternalIdMap, Vec<(u32, &'a [u8])>, Vec<u32>, L1IdMapProfile) {
+    let num_dfa_states = tokenizer.num_states() as usize;
+    let states: Vec<usize> = match initial_state_map {
+        Some(map) => map.representative_original_ids.iter().map(|&s| s as usize).collect(),
+        None => (0..num_dfa_states).collect(),
+    };
 
     // Max-length bounded state equivalence: merge DFA states that behave
     // identically when only tokens up to the max vocab token length are
@@ -361,9 +372,9 @@ fn build_l1_id_map<'a>(tokenizer: &Tokenizer, vocab: &'a Vocab, active_terminals
         Some(&relevant_bytes),
     );
     let equiv_algo_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0 - view_ms;
-    // Build representative → internal_id mapping
+    // Build representative → internal_id mapping, composing through initial_state_map when present
     let mut rep_to_internal: FxHashMap<usize, u32> = FxHashMap::default();
-    let mut state_original_to_internal = vec![u32::MAX; states.len()];
+    let mut state_original_to_internal = vec![u32::MAX; num_dfa_states];
     let mut state_representatives = Vec::new();
     for (i, &rep) in equiv_mapping.iter().enumerate() {
         let state_id = states[i];
@@ -375,13 +386,27 @@ fn build_l1_id_map<'a>(tokenizer: &Tokenizer, vocab: &'a Vocab, active_terminals
         state_original_to_internal[state_id] = internal_id;
     }
 
+    // When initial_state_map is present, compose: all DFA states map through
+    // initial_state_map → max-length equivalence
+    if let Some(init_map) = initial_state_map {
+        for (orig_state, &init_internal) in init_map.original_to_internal.iter().enumerate() {
+            if init_internal == u32::MAX || (init_internal as usize) >= init_map.representative_original_ids.len() {
+                continue;
+            }
+            let init_rep = init_map.representative_original_ids[init_internal as usize] as usize;
+            let final_internal = state_original_to_internal[init_rep];
+            if final_internal != u32::MAX {
+                state_original_to_internal[orig_state] = final_internal;
+            }
+        }
+    }
+
     // Token-based pre-refinement for large DFAs: walk a small sample of tokens
     // through the kstep representatives to further reduce state count before
     // the expensive terminal DWA traversal.
     const L1_TOKEN_REFINE_MIN_REPS: usize = 200;
     const L1_TOKEN_REFINE_DFA_THRESHOLD: usize = 16_000;
     const L1_TOKEN_REFINE_BATCH_SIZE: usize = 200;
-    let num_dfa_states = tokenizer.num_states() as usize;
     if state_representatives.len() >= L1_TOKEN_REFINE_MIN_REPS
         && num_dfa_states >= L1_TOKEN_REFINE_DFA_THRESHOLD
     {
@@ -429,7 +454,7 @@ fn build_l1_id_map<'a>(tokenizer: &Tokenizer, vocab: &'a Vocab, active_terminals
     }
 
     // Build state_to_rep: original_state → representative_state (for trie traversal)
-    let mut state_to_rep = vec![0u32; states.len()];
+    let mut state_to_rep = vec![0u32; num_dfa_states];
     for (state_id, &internal) in state_original_to_internal.iter().enumerate() {
         if internal != u32::MAX {
             state_to_rep[state_id] = state_representatives[internal as usize];

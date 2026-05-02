@@ -67,6 +67,51 @@ fn build_state_map(
     }
 }
 
+fn build_state_map_composed(
+    state_classes: &BTreeSet<BTreeSet<usize>>,
+    num_dfa_states: usize,
+    initial_state_map: &ManyToOneIdMap,
+) -> ManyToOneIdMap {
+    // Build rep → new_internal from state_classes
+    let mut rep_to_new_internal = vec![u32::MAX; num_dfa_states];
+    let mut new_internal_to_originals: Vec<Vec<u32>> = Vec::new();
+    for class in state_classes {
+        let internal_id = new_internal_to_originals.len() as u32;
+        let originals: Vec<u32> = class.iter().map(|&state| state as u32).collect();
+        for &state in &originals {
+            rep_to_new_internal[state as usize] = internal_id;
+        }
+        new_internal_to_originals.push(originals);
+    }
+
+    // Compose: original state → initial_state_map → new_internal
+    let mut composed_original_to_internal = vec![u32::MAX; num_dfa_states];
+    let mut composed_internal_to_originals = vec![Vec::new(); new_internal_to_originals.len()];
+    let mut composed_reps = vec![u32::MAX; new_internal_to_originals.len()];
+
+    for (orig_state, &init_internal) in initial_state_map.original_to_internal.iter().enumerate() {
+        if init_internal == u32::MAX || (init_internal as usize) >= initial_state_map.representative_original_ids.len() {
+            continue;
+        }
+        let init_rep = initial_state_map.representative_original_ids[init_internal as usize] as usize;
+        let new_internal = rep_to_new_internal[init_rep];
+        if new_internal != u32::MAX {
+            composed_original_to_internal[orig_state] = new_internal;
+            let bucket = &mut composed_internal_to_originals[new_internal as usize];
+            if bucket.is_empty() {
+                composed_reps[new_internal as usize] = init_rep as u32;
+            }
+            bucket.push(orig_state as u32);
+        }
+    }
+
+    ManyToOneIdMap {
+        original_to_internal: composed_original_to_internal,
+        internal_to_originals: composed_internal_to_originals,
+        representative_original_ids: composed_reps,
+    }
+}
+
 fn build_vocab_map(
     vocab_classes: &BTreeSet<Vec<usize>>,
     token_ids: &[u32],
@@ -638,7 +683,7 @@ pub(crate) fn analyze_equivalences(
     ignore_terminal: Option<u32>,
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
 ) -> InternalIdMap {
-    analyze_equivalences_impl(tokenizer, vocab, disallowed_follows, ignore_terminal, None, shared_vocab_dfa_cache, None)
+    analyze_equivalences_impl(tokenizer, vocab, disallowed_follows, ignore_terminal, None, shared_vocab_dfa_cache, None, None)
 }
 
 pub(crate) fn analyze_equivalences_with_group_filter(
@@ -649,8 +694,9 @@ pub(crate) fn analyze_equivalences_with_group_filter(
     active_groups: Option<&[bool]>,
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
+    initial_state_map: Option<&ManyToOneIdMap>,
 ) -> InternalIdMap {
-    analyze_equivalences_impl(tokenizer, vocab, disallowed_follows, ignore_terminal, active_groups, shared_vocab_dfa_cache, flat_trans)
+    analyze_equivalences_impl(tokenizer, vocab, disallowed_follows, ignore_terminal, active_groups, shared_vocab_dfa_cache, flat_trans, initial_state_map)
 }
 
 /// Combined equivalence analysis over a flattened tokenizer DFA.
@@ -665,6 +711,7 @@ fn analyze_equivalences_impl(
     active_groups: Option<&[bool]>,
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
+    initial_state_map: Option<&ManyToOneIdMap>,
 ) -> InternalIdMap {
     let profile_compile = compile_profile_enabled();
     let total_started_at = std::time::Instant::now();
@@ -701,9 +748,12 @@ fn analyze_equivalences_impl(
     }
     let vocab_extract_ms = elapsed_ms(vocab_extract_started_at);
 
-    // All DFA states as initial states
+    // All DFA states as initial states (use initial_state_map representatives if available)
     let initial_states_started_at = std::time::Instant::now();
-    let initial_states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
+    let initial_states: Vec<usize> = match initial_state_map {
+        Some(map) => map.representative_original_ids.iter().map(|&s| s as usize).collect(),
+        None => (0..tokenizer.num_states() as usize).collect(),
+    };
     let initial_states_ms = elapsed_ms(initial_states_started_at);
 
     let combined_started_at = std::time::Instant::now();
@@ -720,7 +770,10 @@ fn analyze_equivalences_impl(
 
     let state_map_started_at = std::time::Instant::now();
     let num_dfa_states = tokenizer.num_states() as usize;
-    let state_map = build_state_map(&result.state_classes, num_dfa_states);
+    let state_map = match initial_state_map {
+        Some(init_map) => build_state_map_composed(&result.state_classes, num_dfa_states, init_map),
+        None => build_state_map(&result.state_classes, num_dfa_states),
+    };
     let state_map_ms = elapsed_ms(state_map_started_at);
 
     let vocab_map_started_at = std::time::Instant::now();

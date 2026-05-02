@@ -591,6 +591,7 @@ fn compile_prepared_with_profile(
                 global: InternalIdMap,
                 terminal_dwa: crate::automata::weighted::dwa::DWA,
                 phase_profile: crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalDwaPhaseProfile,
+                global_max_length_state_map: crate::compiler::stages::equiv_types::ManyToOneIdMap,
             },
         }
 
@@ -669,7 +670,7 @@ fn compile_prepared_with_profile(
                         },
                     }
                 } else {
-                    let (id_map, dwa, phase_profile) = crate::compiler::stages::id_map_and_terminal_dwa::build_id_map_and_terminal_dwa(
+                    let (id_map, dwa, phase_profile, global_max_length_state_map) = crate::compiler::stages::id_map_and_terminal_dwa::build_id_map_and_terminal_dwa(
                         &tokenizer,
                         vocab,
                         &terminal_coloring,
@@ -693,6 +694,7 @@ fn compile_prepared_with_profile(
                         global: id_map,
                         terminal_dwa: dwa,
                         phase_profile,
+                        global_max_length_state_map,
                     }
                 };
                 (result, elapsed_ms(id_map_started_at))
@@ -717,17 +719,19 @@ fn compile_prepared_with_profile(
         if strict_one_flag_enabled("GLRMASK_DEBUG_DUMP_TEMPLATES") {
             emit_templates_debug_dump(&templates);
         }
-        let (mut internal_ids, prebuilt_terminal_dwa, mut terminal_phase_profile) = match id_map_build_result {
+        let (mut internal_ids, prebuilt_terminal_dwa, mut terminal_phase_profile, global_max_length_state_map) = match id_map_build_result {
             IdMapBuildResult::Ready {
                 global,
                 phase_profile,
-            } => (global, None, phase_profile),
+            } => (global, None, phase_profile, None),
             IdMapBuildResult::SplitComplete {
                 global,
                 terminal_dwa,
                 phase_profile,
-            } => (global, Some(terminal_dwa), phase_profile),
+                global_max_length_state_map,
+            } => (global, Some(terminal_dwa), phase_profile, Some(global_max_length_state_map)),
         };
+        let global_max_length_state_map_ref = global_max_length_state_map.as_ref();
         profile.templates_ms = templates_ms;
         if debug_compile_stages {
             eprintln!(
@@ -889,6 +893,7 @@ independently proving possible_matches equivalence for your workload."
                     trie_class_build_enabled,
                     diag_root_signature: std::env::var("GLRMASK_DIAG_PM_ROOT_SIG")
                         .map_or(false, |v| v == "1"),
+                    initial_state_map: global_max_length_state_map_ref,
                 },
             )
         };

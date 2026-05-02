@@ -16,6 +16,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use rustc_hash::FxHashMap;
+
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
@@ -25,6 +27,8 @@ use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 
 use classify::classify_vocab_char_type;
+use l2p::equivalence_analysis::compat::{TokenizerView, compute_byte_classes};
+use l2p::equivalence_analysis::state::max_length::find_state_equivalence_classes_byte_restricted;
 use types::{
     compile_profile_enabled, debug_profile_enabled, debug_terminal_mapping_enabled, TerminalColoring,
     TerminalDwaPhaseProfile,
@@ -133,6 +137,63 @@ fn emit_terminal_dwa_symbol_counts(label: &str, dwa: &DWA, grammar: &AnalyzedGra
     );
 }
 
+pub(crate) fn build_global_max_length_state_map(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    flat_trans: &Arc<[u32]>,
+) -> ManyToOneIdMap {
+    let started_at = Instant::now();
+    let tokenizer_view = TokenizerView::new_from_flat_trans(
+        flat_trans,
+        tokenizer,
+    );
+    let token_bytes: Vec<&[u8]> = vocab.entries.values().map(|bytes| bytes.as_slice()).collect();
+    let mut relevant_bytes = [false; 256];
+    for bytes in &token_bytes {
+        for &byte in *bytes {
+            relevant_bytes[byte as usize] = true;
+        }
+    }
+    let byte_to_class = compute_byte_classes(tokenizer_view.dfa());
+    let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
+    let mapping = find_state_equivalence_classes_byte_restricted(
+        &tokenizer_view,
+        &token_bytes,
+        &states,
+        Some(&byte_to_class),
+        None,
+        Some(&relevant_bytes),
+    );
+
+    let mut rep_to_internal = FxHashMap::<usize, u32>::default();
+    let mut original_to_internal = vec![u32::MAX; states.len()];
+    let mut representative_original_ids = Vec::new();
+    for (state, &rep) in mapping.iter().enumerate() {
+        let internal = *rep_to_internal.entry(rep).or_insert_with(|| {
+            let id = representative_original_ids.len() as u32;
+            representative_original_ids.push(rep as u32);
+            id
+        });
+        original_to_internal[state] = internal;
+    }
+
+    if compile_profile_enabled() || debug_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][global_max_length] states={} reps={} tokens={} ms={:.3}",
+            states.len(),
+            representative_original_ids.len(),
+            token_bytes.len(),
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    ManyToOneIdMap::from_original_to_internal_with_representatives(
+        original_to_internal,
+        representative_original_ids.len() as u32,
+        representative_original_ids,
+    )
+}
+
 /// Build the global `(InternalIdMap, DWA)` for the full vocabulary.
 ///
 /// IMPORTANT: the JSON-schema importer must not feed this stage large numbers
@@ -174,7 +235,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     grammar: &AnalyzedGrammar,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     external_classify_cache: Option<&classify::SharedClassifyCache>,
-) -> (InternalIdMap, DWA, TerminalDwaPhaseProfile) {
+) -> (InternalIdMap, DWA, TerminalDwaPhaseProfile, ManyToOneIdMap) {
     let total_started_at = Instant::now();
     let force_all_l2p = std::env::var("GLRMASK_FORCE_ALL_L2P").map_or(false, |v| v == "1");
     let mut profile = TerminalDwaPhaseProfile::default();
@@ -418,6 +479,12 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     let flat_trans: Arc<[u32]> = Arc::from(l1::build_flat_transition_table(tokenizer));
     profile.terminal_dwa_ms += flat_trans_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    // Global max-length state equivalence map (used as initial state grouping
+    // for downstream partitioning and constraint-possible-matches).
+    let global_max_length_started_at = Instant::now();
+    let global_max_length_state_map = build_global_max_length_state_map(tokenizer, vocab, &flat_trans);
+    profile.id_map_ms += global_max_length_started_at.elapsed().as_secs_f64() * 1000.0;
+
     // Lazily-initialized shared compact transition table cache.
     // The first partition to reach vocab_build_dfa will build the cache from
     // its simplified tokenizer's FlatDfa (same transitions as original when
@@ -451,6 +518,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
                     grammar,
                     disallowed_follows,
                     &flat_trans,
+                    Some(&global_max_length_state_map),
                     Some(&shared_vocab_dfa_cache),
                     Some(&shared_classify_cache),
                 ).map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0));
@@ -473,6 +541,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
                 grammar,
                 disallowed_follows,
                 &flat_trans,
+                Some(&global_max_length_state_map),
                 Some(&shared_vocab_dfa_cache),
                 Some(&shared_classify_cache),
             ).map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0));
@@ -517,7 +586,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
                 representative_original_ids: Vec::new(),
             },
         };
-        return (empty_map, DWA::new(1, 0), profile);
+        return (empty_map, DWA::new(1, 0), profile, global_max_length_state_map);
     }
 
     let num_tokenizer_states = tokenizer.num_states() as usize;
@@ -568,7 +637,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
         emit_merged_dwa_dump(&merged.dwa);
     }
 
-    (merged.id_map, merged.dwa, profile)
+    (merged.id_map, merged.dwa, profile, global_max_length_state_map)
 }
 
 fn emit_merged_token_map(dwa: &DWA, vocab: &Vocab, id_map: &InternalIdMap) {

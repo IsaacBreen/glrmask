@@ -639,8 +639,8 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
         terminal_stamps: &mut [u32],
     ) -> TrieMapBuildNodeClasses {
         struct ChildBuildData {
-            segment_table_idx: usize,
-            subtree_bytes: U8Set,
+            outcomes: Vec<TrieMapBuildSegmentOutcome>,
+            child_class_ids: Vec<u32>,
             reachable: Box<[u64]>,
             result: TrieMapBuildNodeClasses,
         }
@@ -705,9 +705,30 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
                 terminal_stamps,
             );
 
+            // Precompute outcomes and child_class_ids aligned to parent's active_states.
+            let mut outcomes = Vec::with_capacity(active_states.len());
+            let mut child_class_ids = Vec::with_capacity(active_states.len());
+            let table = &segment_outcome_tables[segment_table_idx];
+            for &state in active_states {
+                let segment_outcome = table[&state];
+                let child_class_id = if let Some(end_state) = segment_outcome.end_state {
+                    if is_end[end_state as usize]
+                        || subtree_bytes.is_subset(&self_loop_bytes[end_state as usize])
+                    {
+                        u32::MAX
+                    } else {
+                        result.classes[end_state as usize]
+                    }
+                } else {
+                    u32::MAX
+                };
+                outcomes.push(segment_outcome);
+                child_class_ids.push(child_class_id);
+            }
+
             child_data.push(ChildBuildData {
-                segment_table_idx,
-                subtree_bytes,
+                outcomes,
+                child_class_ids,
                 reachable: reachable_dense_bitmap(child, num_words),
                 result,
             });
@@ -716,10 +737,11 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
         let t_sig = Instant::now();
         let mut signature_buckets: FxHashMap<u64, Vec<SignatureEntry>> = FxHashMap::default();
         let mut representative_states = Vec::new();
+        let mut representative_state_positions = Vec::new();
         let mut classes = vec![u32::MAX; tokenizer.num_states() as usize];
         let mut next_class_id: u32 = 0;
 
-        for &state in active_states {
+        for (state_pos, &state) in active_states.iter().enumerate() {
             let node_terminals_id = if node.has_token() {
                 node_terminal_ids[state as usize]
             } else {
@@ -730,18 +752,8 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
             let mut sig_small = SmallVec::<[u32; 16]>::with_capacity(child_data.len() * 2 + 1);
             sig_small.push(node_terminals_id);
             for child in child_data.iter() {
-                let segment_outcome = &segment_outcome_tables[child.segment_table_idx][&state];
-                let child_class_id = if let Some(end_state) = segment_outcome.end_state {
-                    if is_end[end_state as usize]
-                        || child.subtree_bytes.is_subset(&self_loop_bytes[end_state as usize])
-                    {
-                        u32::MAX
-                    } else {
-                        child.result.classes[end_state as usize]
-                    }
-                } else {
-                    u32::MAX
-                };
+                let segment_outcome = child.outcomes[state_pos];
+                let child_class_id = child.child_class_ids[state_pos];
                 sig_small.push(segment_outcome.terminals_id);
                 sig_small.push(child_class_id);
                 hash = mix_signature_word(hash, segment_outcome.terminals_id);
@@ -762,6 +774,7 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
                 next_class_id += 1;
                 classes[state as usize] = class_id;
                 representative_states.push(state);
+                representative_state_positions.push(state_pos);
                 bucket.push(SignatureEntry {
                     words: sig_small.into_vec(),
                     class_id,
@@ -773,7 +786,7 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
 
         let t_map = Instant::now();
         let mut class_maps = Vec::with_capacity(representative_states.len());
-        for &state in representative_states.iter() {
+        for (&state, &state_pos) in representative_states.iter().zip(representative_state_positions.iter()) {
             let mut result = DensePossibleMatchMap::default();
 
             if node.has_token() {
@@ -787,7 +800,7 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
             }
 
             for child in child_data.iter() {
-                let segment_outcome = &segment_outcome_tables[child.segment_table_idx][&state];
+                let segment_outcome = child.outcomes[state_pos];
                 for &terminal in terminal_sets.get(segment_outcome.terminals_id) {
                     let entry = result
                         .entry(terminal)
@@ -795,21 +808,13 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
                     merge_bitmaps(entry, &child.reachable);
                 }
 
-                if let Some(end_state) = segment_outcome.end_state {
-                    if is_end[end_state as usize]
-                        || child.subtree_bytes.is_subset(&self_loop_bytes[end_state as usize])
-                    {
-                        continue;
-                    }
-
-                    let child_class_id = child.result.classes[end_state as usize];
-                    if child_class_id != u32::MAX {
-                        merge_dense_maps(
-                            &mut result,
-                            child.result.class_maps[child_class_id as usize].as_ref(),
-                            num_words,
-                        );
-                    }
+                let child_class_id = child.child_class_ids[state_pos];
+                if child_class_id != u32::MAX {
+                    merge_dense_maps(
+                        &mut result,
+                        child.result.class_maps[child_class_id as usize].as_ref(),
+                        num_words,
+                    );
                 }
             }
 

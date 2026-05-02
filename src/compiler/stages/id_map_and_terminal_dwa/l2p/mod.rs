@@ -25,7 +25,7 @@ use crate::grammar::flat::TerminalID;
 use crate::compiler::possible_matches::{
     PossibleMatchesComputer,
 };
-use crate::compiler::stages::equiv_types::InternalIdMap;
+use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::compiler::stages::id_map_and_terminal_dwa::merge::LocalIdMapTerminalDwa;
 use crate::ds::bitset::BitSet;
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
@@ -214,6 +214,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     shared_vocab_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
+    initial_state_map: Option<&ManyToOneIdMap>,
 ) -> Option<LocalIdMapTerminalDwa> {
     if vocab.is_empty() {
         return None;
@@ -268,6 +269,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         None,
         shared_vocab_dfa_cache,
         flat_trans,
+        initial_state_map,
     );
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -541,6 +543,7 @@ mod tests {
             &analyzed,
             &active_terminals,
             &BTreeMap::new(),
+            None,
             None,
             None,
         )

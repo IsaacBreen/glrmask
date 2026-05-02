@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::hash::Hash;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
@@ -12,7 +13,7 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::constraint_possible_matches::collector::DensePossibleMatchMap;
 use crate::compiler::pm_profile::elapsed_ms;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
-use crate::ds::vocab_prefix_tree::VocabPrefixTree;
+use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::ds::weight::{Weight, finalize_weight_map, shared_rangeset};
 use crate::grammar::flat::TerminalID;
 use crate::runtime::Constraint;
@@ -33,13 +34,14 @@ pub(crate) struct ConstraintVocabMap {
     pub(crate) old_internal_to_constraint: Vec<Vec<u32>>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ConstraintPossibleMatchesConfig {
+#[derive(Debug, Clone)]
+pub(crate) struct ConstraintPossibleMatchesConfig<'a> {
     pub(crate) debug_compile_stages: bool,
     pub(crate) profile_summary_enabled: bool,
     pub(crate) use_internal_tsid_representatives: bool,
     pub(crate) trie_class_build_enabled: bool,
     pub(crate) diag_root_signature: bool,
+    pub(crate) initial_state_map: Option<&'a ManyToOneIdMap>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -222,6 +224,35 @@ fn build_state_class_members(state_classes: &[u32], num_classes: usize) -> Vec<V
         }
     }
     members
+}
+
+/// Compose a short `state_classes` (covering only representative states) back
+/// to the full DFA state space using `initial_state_map`.
+/// Compose dense root `state_classes` through `initial_state_map`.
+/// The collector returns classes indexed by original DFA state id for the
+/// states it was seeded with; each initial-map class inherits the class of its
+/// representative.
+fn compose_state_classes_with_initial_map(
+    state_classes: &[u32],
+    initial_state_map: &ManyToOneIdMap,
+) -> Vec<u32> {
+    let num_dfa_states = initial_state_map.original_to_internal.len();
+    let mut composed_state_classes = vec![u32::MAX; num_dfa_states];
+    for (initial_internal, originals) in initial_state_map.internal_to_originals.iter().enumerate() {
+        let Some(&initial_rep) = initial_state_map.representative_original_ids.get(initial_internal) else {
+            continue;
+        };
+        let Some(&class_id) = state_classes.get(initial_rep as usize) else {
+            continue;
+        };
+        if class_id == u32::MAX {
+            continue;
+        }
+        for &original in originals {
+            composed_state_classes[original as usize] = class_id;
+        }
+    }
+    composed_state_classes
 }
 
 fn used_state_class_ids(state_classes: &[u32]) -> Vec<u32> {
@@ -486,84 +517,72 @@ pub(crate) fn build_seed_state_signature_ids_from_trie_classes_exact(
         class_to_rep.entry(class_id).or_insert(state as u32);
         class_members.entry(class_id).or_default().push(state as u32);
     }
-    let rep_entries: Vec<(u32, u32)> = class_to_rep.into_iter().collect();
+    let mut rep_entries: Vec<(u32, u32)> = class_to_rep.into_iter().collect();
+    rep_entries.sort_unstable_by_key(|(class_id, _)| *class_id);
+    let state_class_count = rep_entries.len();
     let map_ms = t_map.elapsed().as_secs_f64() * 1000.0;
 
-    let t_sim = std::time::Instant::now();
-    let matched_per_rep: Vec<Vec<u32>> = rep_entries
-        .par_iter()
-        .map(|(_class_id, rep_state)| {
-            let mut matched = Vec::new();
-            for group in &groups {
-                let leader = group[0];
-                let bytes = token_bytes.get(&leader).expect("leader must have bytes");
-                if can_scan_token(tokenizer, bytes, *rep_state) {
-                    matched.push(leader);
-                }
-            }
-            matched
-        })
+    let num_leaders = groups.len();
+
+    // Build a vocabulary prefix trie over the leader tokens for seed-signature
+    // simulation. This replaces the per-group can_scan_token loop with a
+    // prefix-shared traversal that avoids re-scanning common prefixes for every
+    // representative state.
+    let mut leader_idx_by_token = vec![u32::MAX; max_original_token_slot(token_bytes) as usize];
+    let mut leader_entries = Vec::with_capacity(num_leaders);
+    for (leader_idx, group) in groups.iter().enumerate() {
+        let leader = group[0];
+        if let Some(slot) = leader_idx_by_token.get_mut(leader as usize) {
+            *slot = leader_idx as u32;
+        }
+        let bytes = token_bytes
+            .get(&leader)
+            .expect("leader must have bytes")
+            .clone();
+        leader_entries.push((leader as usize, bytes));
+    }
+    let leader_trie = VocabPrefixTree::build(&leader_entries);
+
+    let class_words = (state_class_count + 63) / 64;
+    let rep_word_mask: Vec<(usize, u64)> = (0..state_class_count)
+        .map(|rep_idx| (rep_idx / 64, 1u64 << (rep_idx % 64)))
         .collect();
+    let signatures_atomic: Vec<AtomicU64> = (0..num_leaders * class_words)
+        .map(|_| AtomicU64::new(0))
+        .collect();
+
+    let t_sim = std::time::Instant::now();
+    rep_entries
+        .par_iter()
+        .enumerate()
+        .for_each(|(rep_idx, (_class_id, rep_state))| {
+            let (word, mask) = rep_word_mask[rep_idx];
+            let mut on_match = |leader_idx: u32| {
+                let offset = leader_idx as usize * class_words + word;
+                signatures_atomic[offset].fetch_or(mask, Ordering::Relaxed);
+            };
+            collect_seed_signature_matches_from_trie(
+                tokenizer,
+                &leader_trie.root,
+                *rep_state,
+                &leader_idx_by_token,
+                &mut on_match,
+            );
+        });
     let sim_ms = t_sim.elapsed().as_secs_f64() * 1000.0;
 
-    let t_inv = std::time::Instant::now();
-    let mut leader_to_idx: FxHashMap<u32, usize> = FxHashMap::default();
-    let mut idx_to_leader: Vec<u32> = Vec::with_capacity(groups.len());
-    for (idx, group) in groups.iter().enumerate() {
-        leader_to_idx.insert(group[0], idx);
-        idx_to_leader.push(group[0]);
-    }
-
-    let mut leader_to_reps: Vec<Vec<u32>> = vec![Vec::new(); groups.len()];
-    for (rep_idx, matched_leaders) in matched_per_rep.iter().enumerate() {
-        for &leader in matched_leaders {
-            if let Some(&leader_idx) = leader_to_idx.get(&leader) {
-                leader_to_reps[leader_idx].push(rep_idx as u32);
-            }
-        }
-    }
-    let inv_ms = t_inv.elapsed().as_secs_f64() * 1000.0;
-
-    let num_states = tokenizer.num_states() as usize;
-    let state_words = (num_states + 63) / 64;
-    let num_leaders = groups.len();
-    let flat_len = num_leaders * state_words;
+    let inv_ms = 0.0;
 
     let t_flat = std::time::Instant::now();
-    let mut signatures_flat = vec![0u64; flat_len];
-
-    // Precompute (word, mask) for each member state to avoid division in the inner loop.
-    let member_word_mask: Vec<(usize, u64)> = (0..num_states)
-        .map(|member| (member / 64, 1u64 << (member % 64)))
+    let signatures_flat: Vec<u64> = signatures_atomic
+        .into_iter()
+        .map(AtomicU64::into_inner)
         .collect();
-
-    // Precompute members for each rep_idx to avoid HashMap lookups in the inner loop.
-    let rep_members: Vec<&[u32]> = (0..rep_entries.len())
-        .map(|rep_idx| {
-            let class_id = rep_entries[rep_idx].0;
-            class_members.get(&class_id).map(|v| v.as_slice()).unwrap_or(&[])
-        })
-        .collect();
-
-    // Iterate by leader for cache locality: stay at one base for all reps.
-    for (leader_idx, rep_indices) in leader_to_reps.iter().enumerate() {
-        let base = leader_idx * state_words;
-        for &rep_idx in rep_indices {
-            for &member in rep_members[rep_idx as usize] {
-                let (word, mask) = member_word_mask[member as usize];
-                if word < state_words {
-                    unsafe {
-                        *signatures_flat.get_unchecked_mut(base + word) |= mask;
-                    }
-                }
-            }
-        }
-    }
     let flat_ms = t_flat.elapsed().as_secs_f64() * 1000.0;
 
     let t_expand = std::time::Instant::now();
     // Hash-sort-group dense signatures to avoid expensive Vec cloning and
-    // HashMap operations with 581-word keys.
+    // HashMap operations with class_words-word keys.
     use std::hash::Hasher;
     use rustc_hash::FxHasher;
 
@@ -577,8 +596,8 @@ pub(crate) fn build_seed_state_signature_ids_from_trie_classes_exact(
 
     let mut leader_hashes: Vec<(u64, usize)> = Vec::with_capacity(num_leaders);
     for leader_idx in 0..num_leaders {
-        let base = leader_idx * state_words;
-        let hash = hash_slice(&signatures_flat[base..base + state_words]);
+        let base = leader_idx * class_words;
+        let hash = hash_slice(&signatures_flat[base..base + class_words]);
         leader_hashes.push((hash, leader_idx));
     }
     leader_hashes.sort_unstable_by_key(|(h, _)| *h);
@@ -597,8 +616,8 @@ pub(crate) fn build_seed_state_signature_ids_from_trie_classes_exact(
         let mut slice_to_class: FxHashMap<&[u64], SignatureClassId> = FxHashMap::default();
         for k in i..j {
             let leader_idx = leader_hashes[k].1;
-            let base = leader_idx * state_words;
-            let slice = &signatures_flat[base..base + state_words];
+            let base = leader_idx * class_words;
+            let slice = &signatures_flat[base..base + class_words];
             let class_id = *slice_to_class.entry(slice).or_insert_with(|| {
                 let id = next_class;
                 next_class += 1;
@@ -608,7 +627,8 @@ pub(crate) fn build_seed_state_signature_ids_from_trie_classes_exact(
         }
         i = j;
     }
-    let num_classes = next_class as usize;
+
+    let signature_class_count = next_class as usize;
 
     let mut token_to_id = FxHashMap::with_capacity_and_hasher(
         tokens_with_same_bytes.len(),
@@ -627,13 +647,101 @@ pub(crate) fn build_seed_state_signature_ids_from_trie_classes_exact(
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
     if profile_enabled {
         eprintln!(
-            "[glrmask/profile][seed_sig_classes] groups={} classes={} reps={} words={} flat_len={} num_classes={} groups_ms={:.3} map_ms={:.3} sim_ms={:.3} inv_ms={:.3} flat_ms={:.3} expand_ms={:.3} total_ms={:.3}",
-            groups.len(), class_members.len(), rep_entries.len(), state_words, flat_len, num_classes,
-            groups_ms, map_ms, sim_ms, inv_ms, flat_ms, expand_ms, total_ms,
+            "[glrmask/profile][seed_sig_classes] groups={} state_classes={} reps={} words={} flat_len={} signature_classes={} groups_ms={:.3} map_ms={:.3} sim_ms={:.3} inv_ms={:.3} flat_ms={:.3} expand_ms={:.3} total_ms={:.3}",
+            groups.len(),
+            class_members.len(),
+            rep_entries.len(),
+            class_words,
+            num_leaders * class_words,
+            signature_class_count,
+            groups_ms,
+            map_ms,
+            sim_ms,
+            inv_ms,
+            flat_ms,
+            expand_ms,
+            total_ms,
         );
     }
 
     token_to_id
+}
+
+#[inline]
+fn push_reachable_leader_indices<F>(
+    node: &VocabPrefixTreeNode,
+    leader_idx_by_token: &[u32],
+    on_match: &mut F,
+)
+where
+    F: FnMut(u32),
+{
+    for range in node.reachable_token_ids().ranges() {
+        for token_id in *range.start()..=*range.end() {
+            let idx = leader_idx_by_token
+                .get(token_id)
+                .copied()
+                .unwrap_or(u32::MAX);
+            if idx != u32::MAX {
+                on_match(idx);
+            }
+        }
+    }
+}
+
+#[inline]
+fn scan_seed_signature_edge(
+    tokenizer: &crate::automata::lexer::tokenizer::Tokenizer,
+    mut state: u32,
+    edge: &[u8],
+) -> Option<(u32, bool)> {
+    for &byte in edge {
+        state = tokenizer.step(state, byte)?;
+        if !tokenizer.dfa.finalizers(state).is_zero() {
+            return Some((state, true));
+        }
+    }
+    Some((state, false))
+}
+
+fn collect_seed_signature_matches_from_trie<F>(
+    tokenizer: &crate::automata::lexer::tokenizer::Tokenizer,
+    node: &VocabPrefixTreeNode,
+    state: u32,
+    leader_idx_by_token: &[u32],
+    on_match: &mut F,
+)
+where
+    F: FnMut(u32),
+{
+    if node.has_token() {
+        let token_id = node.token_id();
+        let idx = leader_idx_by_token
+            .get(token_id)
+            .copied()
+            .unwrap_or(u32::MAX);
+        if idx != u32::MAX {
+            on_match(idx);
+        }
+    }
+
+    for (edge, child) in node.iter_children() {
+        let Some((next_state, accepted)) = scan_seed_signature_edge(tokenizer, state, edge) else {
+            continue;
+        };
+
+        if accepted {
+            push_reachable_leader_indices(child, leader_idx_by_token, on_match);
+        } else {
+            collect_seed_signature_matches_from_trie(
+                tokenizer,
+                child,
+                next_state,
+                leader_idx_by_token,
+                on_match,
+            );
+        }
+    }
 }
 
 #[inline]
@@ -1202,19 +1310,32 @@ pub(crate) fn compute_constraint_possible_matches(
                 representative_states.len() as u32,
             )
         } else if config.trie_class_build_enabled {
-            let all_states: Vec<u32> = (0..tokenizer.num_states()).collect();
-            let (trie_class_result, profile) = collector::collect_possible_matches_dense_trie_class_build_with_classes(
+            let trie_build_states: Vec<u32> = match config.initial_state_map {
+                Some(init_map) => init_map.representative_original_ids.clone(),
+                None => (0..tokenizer.num_states()).collect(),
+            };
+            let (mut trie_class_result, profile) = collector::collect_possible_matches_dense_trie_class_build_with_classes(
                 tokenizer,
                 &trie.root,
                 original_token_slots,
-                &all_states,
+                &trie_build_states,
             );
+            // Compose dense root state_classes through initial_state_map.
+            // The collector returns classes indexed by original DFA state id
+            // for the states it was seeded with. Each initial-map class inherits
+            // the class of its representative.
+            if let Some(init_map) = config.initial_state_map {
+                trie_class_result.state_classes = compose_state_classes_with_initial_map(
+                    &trie_class_result.state_classes,
+                    init_map,
+                );
+            }
             (
                 BTreeMap::new(),
                 Some(trie_class_result),
                 profile,
                 "constraint_original_tokens",
-                tokenizer.num_states(),
+                trie_build_states.len() as u32,
             )
         } else {
             let (matches, profile) = collector::collect_possible_matches_by_original_tsid_dense(

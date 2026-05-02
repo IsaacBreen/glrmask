@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
-use crate::grammar::flat::TerminalID;
+use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::classify_terminal_path_lengths;
 use crate::compiler::stages::id_map_and_terminal_dwa::merge::{LocalIdMapTerminalDwa, merge_local_id_maps_and_terminal_dwas};
 use crate::compiler::stages::id_map_and_terminal_dwa::types::{
@@ -18,6 +18,7 @@ use crate::compiler::stages::id_map_and_terminal_dwa::types::{
     debug_terminal_mapping_enabled,
 };
 use crate::ds::bitset::BitSet;
+use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 
 /// Build an id_map and terminal DWA for a single vocab partition.
@@ -38,6 +39,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     grammar: &AnalyzedGrammar,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     flat_trans: &Arc<[u32]>,
+    initial_state_map: Option<&ManyToOneIdMap>,
     _shared_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
     shared_classify_cache: Option<&super::classify::SharedClassifyCache>,
 ) -> Option<LocalIdMapTerminalDwa> {
@@ -121,6 +123,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                     grammar,
                     &l1_mask,
                     flat_trans,
+                    initial_state_map,
                 );
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
             } else {
@@ -142,6 +145,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                     disallowed_follows,
                     _shared_vocab_dfa_cache,
                     None, // Do not share flat_trans — it's from the original tokenizer and may be incompatible with simplified DFA
+                    initial_state_map,
                 );
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
             } else {
