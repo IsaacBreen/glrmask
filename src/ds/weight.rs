@@ -2081,18 +2081,31 @@ impl Serialize for Weight {
     }
 }
 
+fn weight_from_serde_entries(entries: Vec<WeightSerdeEntry>) -> Weight {
+    let mut builder = CompactRangeBuilder::new();
+    for entry in entries {
+        let tokens = rangeset_from_ranges(
+            entry.tokens.into_iter().map(|token| token[0]..=token[1]),
+        );
+        if tokens.is_empty() {
+            continue;
+        }
+        builder.push(
+            entry.tsid[0],
+            entry.tsid[1],
+            shared_rangeset(tokens),
+        );
+    }
+    builder.finish()
+}
+
 impl<'de> Deserialize<'de> for Weight {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let serde_weight = WeightSerde::deserialize(deserializer)?;
         if serde_weight.all {
             return Ok(Self::all());
         }
-        Ok(Self::from_compact_ranges(serde_weight.entries.into_iter().map(|entry| {
-            (
-                entry.tsid[0]..=entry.tsid[1],
-                entry.tokens.into_iter().map(|token| token[0]..=token[1]),
-            )
-        })))
+        Ok(weight_from_serde_entries(serde_weight.entries))
     }
 }
 

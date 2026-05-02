@@ -109,7 +109,7 @@ pub struct Constraint {
     /// Precomputed bitmask fragments for each internal token.
     /// `internal_token_buf_masks[i]` contains (word_index, or_mask) pairs
     /// for all original tokens that map to internal token `i`.
-    #[serde(default)]
+    #[serde(skip)]
     pub(crate) internal_token_buf_masks: Vec<InternalTokenBufMasks>,
     /// Precomputed combined buf output for each group of 64 internal tokens.
     /// `word_group_buf_masks[w]` is the combined mask for internal tokens [w*64 .. (w+1)*64).
