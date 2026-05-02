@@ -1140,7 +1140,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
     }
 
     struct SignatureEntryMask {
-        words: Vec<u64>,
+        words: SmallVec<[u64; 16]>,
         class_id: u32,
     }
 
@@ -1322,7 +1322,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
                     let bucket = signature_buckets.entry(hash).or_default();
                     let mut found = false;
                     for entry in bucket.iter() {
-                        if entry.words == sig_small.as_slice() {
+                        if entry.words.as_slice() == sig_small.as_slice() {
                             classes[state as usize] = entry.class_id;
                             found = true;
                             break;
@@ -1335,7 +1335,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
                         representative_states.push(state);
                         representative_state_positions.push(state_pos);
                         bucket.push(SignatureEntryMask {
-                            words: sig_small.into_vec(),
+                            words: sig_small,
                             class_id,
                         });
                     }
