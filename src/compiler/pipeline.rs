@@ -915,13 +915,18 @@ independently proving possible_matches equivalence for your workload."
         );
         let parser_dwa_ms = elapsed_ms(parser_dwa_started_at);
 
-        // Remap parser DWA into the constraint-vocab token space.
+        // Remap parser DWA into the constraint-vocab token space (no-op when
+        // constraint-vocab matches the terminal-DWA vocab).
         let remap_parser_dwa_started_at = Instant::now();
-        remap_parser_dwa_to_constraint_vocab(
-            &mut parser_dwa,
-            &constraint_vocab.old_internal_to_constraint,
-        );
-        let remap_parser_dwa_ms = elapsed_ms(remap_parser_dwa_started_at);
+        let remap_parser_dwa_ms = if cpm::constraint_vocab_is_identity(&constraint_vocab) {
+            0.0
+        } else {
+            remap_parser_dwa_to_constraint_vocab(
+                &mut parser_dwa,
+                &constraint_vocab.old_internal_to_constraint,
+            );
+            elapsed_ms(remap_parser_dwa_started_at)
+        };
         if compile_profile_summary_enabled() {
             eprintln!(
                 "[glrmask/profile][constraint_vocab_step] step=remap_parser_dwa ms={:.3}",
