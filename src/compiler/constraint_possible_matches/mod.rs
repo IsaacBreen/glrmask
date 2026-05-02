@@ -16,7 +16,7 @@ use crate::runtime::Constraint;
 pub(crate) mod collector;
 
 pub(crate) type DensePossibleMatchesByState = BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>;
-pub(crate) type RuntimePossibleMatchesByState = BTreeMap<u32, Weight>;
+pub(crate) type RuntimePossibleMatchesByTerminal = BTreeMap<TerminalID, Weight>;
 pub(crate) type PossibleMatchSignature = Vec<(u32, TerminalID)>;
 pub(crate) type SeedStateSignature = Vec<u32>;
 pub(crate) type SignatureClassId = u32;
@@ -845,7 +845,7 @@ pub(crate) fn remap_possible_matches_to_constraint_vocab(
     original_to_constraint_internal: &[u32],
     constraint_token_count: u32,
     tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
-) -> RuntimePossibleMatchesByState {
+) -> RuntimePossibleMatchesByTerminal {
     remap_dense_maps_to_constraint_vocab(
         raw_possible_matches.into_iter(),
         original_to_constraint_internal,
@@ -859,9 +859,9 @@ fn remap_dense_maps_to_constraint_vocab(
     original_to_constraint_internal: &[u32],
     constraint_token_count: u32,
     tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
-) -> RuntimePossibleMatchesByState {
+) -> RuntimePossibleMatchesByTerminal {
     let num_words = dense_word_count(constraint_token_count);
-    let mut remap_cache: FxHashMap<Vec<(TerminalID, Box<[u64]>)>, Weight> = FxHashMap::default();
+    let mut remap_cache: FxHashMap<(TerminalID, Box<[u64]>), RangeSetBlaze<u32>> = FxHashMap::default();
     let groups = unique_same_byte_groups(tokens_with_same_bytes);
     let max_token_slot = tokens_with_same_bytes
         .keys()
@@ -877,52 +877,56 @@ fn remap_dense_maps_to_constraint_vocab(
     }
     let group_constraint_internal_ids = build_group_constraint_internal_ids(&groups, original_to_constraint_internal);
 
-    maps
-        .map(|(state_id, terminals)| {
-            let cache_key: Vec<(TerminalID, Box<[u64]>)> = terminals
-                .iter()
-                .map(|(&terminal_id, bitmap)| (terminal_id, bitmap.clone()))
-                .collect();
+    // Accumulate per-terminal (state_id, token_set) entries.
+    let mut terminal_entries: BTreeMap<TerminalID, Vec<(u32, RangeSetBlaze<u32>)>> = BTreeMap::new();
 
-            let weight = remap_cache
+    for (state_id, terminals) in maps {
+        for (&terminal_id, original_bitmap) in &terminals {
+            let cache_key = (terminal_id, original_bitmap.clone());
+            let token_set = remap_cache
                 .entry(cache_key)
                 .or_insert_with(|| {
-                    let remapped_terminals = terminals
-                        .iter()
-                        .filter_map(|(&terminal_id, original_bitmap)| {
-                            let mut remapped = vec![0u64; num_words];
-                            let mut any = false;
-                            for_each_dense_bit(original_bitmap, |original_token_id| {
-                                let Some(&leader) = group_leaders.get(original_token_id as usize) else {
-                                    return;
-                                };
-                                if leader == u32::MAX {
-                                    return;
-                                }
-                                let Some(constraint_internal_ids) = group_constraint_internal_ids.get(&leader) else {
-                                    return;
-                                };
-                                for &constraint_internal_id in constraint_internal_ids.iter() {
-                                    set_dense_bit(&mut remapped, constraint_internal_id);
-                                    any = true;
-                                }
-                            });
-                            if any {
-                                Some((terminal_id, {
-                                    let mut ids = Vec::new();
-                                    for_each_dense_bit(&remapped, |token_id| ids.push(token_id));
-                                    range_set_from_sorted_ids(&ids)
-                                }))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>();
-                    Weight::from_per_tsid_token_sets(remapped_terminals)
+                    let mut remapped = vec![0u64; num_words];
+                    let mut any = false;
+                    for_each_dense_bit(original_bitmap, |original_token_id| {
+                        let Some(&leader) = group_leaders.get(original_token_id as usize) else {
+                            return;
+                        };
+                        if leader == u32::MAX {
+                            return;
+                        }
+                        let Some(constraint_internal_ids) = group_constraint_internal_ids.get(&leader) else {
+                            return;
+                        };
+                        for &constraint_internal_id in constraint_internal_ids.iter() {
+                            set_dense_bit(&mut remapped, constraint_internal_id);
+                            any = true;
+                        }
+                    });
+                    if any {
+                        let mut ids = Vec::new();
+                        for_each_dense_bit(&remapped, |token_id| ids.push(token_id));
+                        range_set_from_sorted_ids(&ids)
+                    } else {
+                        RangeSetBlaze::new()
+                    }
                 })
                 .clone();
 
-            (state_id, weight)
+            if !token_set.is_empty() {
+                terminal_entries.entry(terminal_id).or_default().push((state_id, token_set));
+            }
+        }
+    }
+
+    terminal_entries
+        .into_iter()
+        .map(|(terminal_id, mut entries)| {
+            entries.sort_by_key(|(state, _)| *state);
+            let weight = Weight::from_per_tsid_token_sets(
+                entries.into_iter().map(|(state, tokens)| (state, tokens)),
+            );
+            (terminal_id, weight)
         })
         .collect()
 }
@@ -933,10 +937,10 @@ pub(crate) fn remap_class_maps_to_constraint_vocab(
     original_to_constraint_internal: &[u32],
     constraint_token_count: u32,
     tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
-) -> RuntimePossibleMatchesByState {
+) -> RuntimePossibleMatchesByTerminal {
     let num_words = dense_word_count(constraint_token_count);
-    let mut remap_cache: FxHashMap<Vec<(TerminalID, Box<[u64]>)>, Weight> = FxHashMap::default();
-    let mut class_weight_cache: FxHashMap<u32, Weight> = FxHashMap::default();
+    let mut remap_cache: FxHashMap<(TerminalID, Box<[u64]>), RangeSetBlaze<u32>> = FxHashMap::default();
+    let mut class_token_set_cache: FxHashMap<u32, BTreeMap<TerminalID, RangeSetBlaze<u32>>> = FxHashMap::default();
     let groups = unique_same_byte_groups(tokens_with_same_bytes);
     let max_token_slot = tokens_with_same_bytes
         .keys()
@@ -952,7 +956,8 @@ pub(crate) fn remap_class_maps_to_constraint_vocab(
     }
     let group_constraint_internal_ids = build_group_constraint_internal_ids(&groups, original_to_constraint_internal);
 
-    let mut result = BTreeMap::new();
+    // Accumulate per-terminal (state_id, token_set) entries.
+    let mut terminal_entries: BTreeMap<TerminalID, Vec<(u32, RangeSetBlaze<u32>)>> = BTreeMap::new();
 
     for (state, &class_id) in state_classes.iter().enumerate() {
         if class_id == u32::MAX {
@@ -961,58 +966,65 @@ pub(crate) fn remap_class_maps_to_constraint_vocab(
         let Some(class_map) = class_maps.get(class_id as usize) else {
             continue;
         };
-        let weight = if let Some(weight) = class_weight_cache.get(&class_id) {
-            weight.clone()
-        } else {
-            let cache_key: Vec<(TerminalID, Box<[u64]>)> = class_map
-                .iter()
-                .map(|(&terminal_id, bitmap)| (terminal_id, bitmap.clone()))
-                .collect();
 
-            let weight = remap_cache
-                .entry(cache_key)
-                .or_insert_with(|| {
-                    let remapped_terminals = class_map
-                        .iter()
-                        .filter_map(|(&terminal_id, original_bitmap)| {
-                            let mut remapped = vec![0u64; num_words];
-                            let mut any = false;
-                            for_each_dense_bit(original_bitmap, |original_token_id| {
-                                let Some(&leader) = group_leaders.get(original_token_id as usize) else {
-                                    return;
-                                };
-                                if leader == u32::MAX {
-                                    return;
-                                }
-                                let Some(constraint_internal_ids) = group_constraint_internal_ids.get(&leader) else {
-                                    return;
-                                };
-                                for &constraint_internal_id in constraint_internal_ids.iter() {
-                                    set_dense_bit(&mut remapped, constraint_internal_id);
-                                    any = true;
-                                }
-                            });
-                            if any {
-                                Some((terminal_id, {
-                                    let mut ids = Vec::new();
-                                    for_each_dense_bit(&remapped, |token_id| ids.push(token_id));
-                                    range_set_from_sorted_ids(&ids)
-                                }))
-                            } else {
-                                None
+        let remapped_terminals = if let Some(cached) = class_token_set_cache.get(&class_id) {
+            cached.clone()
+        } else {
+            let mut remapped = BTreeMap::new();
+            for (&terminal_id, original_bitmap) in class_map.iter() {
+                let cache_key = (terminal_id, original_bitmap.clone());
+                let token_set = remap_cache
+                    .entry(cache_key)
+                    .or_insert_with(|| {
+                        let mut remapped_bits = vec![0u64; num_words];
+                        let mut any = false;
+                        for_each_dense_bit(original_bitmap, |original_token_id| {
+                            let Some(&leader) = group_leaders.get(original_token_id as usize) else {
+                                return;
+                            };
+                            if leader == u32::MAX {
+                                return;
                             }
-                        })
-                        .collect::<Vec<_>>();
-                    Weight::from_per_tsid_token_sets(remapped_terminals)
-                })
-                .clone();
-            class_weight_cache.insert(class_id, weight.clone());
-            weight
+                            let Some(constraint_internal_ids) = group_constraint_internal_ids.get(&leader) else {
+                                return;
+                            };
+                            for &constraint_internal_id in constraint_internal_ids.iter() {
+                                set_dense_bit(&mut remapped_bits, constraint_internal_id);
+                                any = true;
+                            }
+                        });
+                        if any {
+                            let mut ids = Vec::new();
+                            for_each_dense_bit(&remapped_bits, |token_id| ids.push(token_id));
+                            range_set_from_sorted_ids(&ids)
+                        } else {
+                            RangeSetBlaze::new()
+                        }
+                    })
+                    .clone();
+                if !token_set.is_empty() {
+                    remapped.insert(terminal_id, token_set);
+                }
+            }
+            class_token_set_cache.insert(class_id, remapped.clone());
+            remapped
         };
-        result.insert(state as u32, weight);
+
+        for (terminal_id, token_set) in remapped_terminals {
+            terminal_entries.entry(terminal_id).or_default().push((state as u32, token_set));
+        }
     }
 
-    result
+    terminal_entries
+        .into_iter()
+        .map(|(terminal_id, mut entries)| {
+            entries.sort_by_key(|(state, _)| *state);
+            let weight = Weight::from_per_tsid_token_sets(
+                entries.into_iter().map(|(state, tokens)| (state, tokens)),
+            );
+            (terminal_id, weight)
+        })
+        .collect()
 }
 
 fn remap_token_set_to_constraint_vocab(
@@ -1092,18 +1104,11 @@ pub(crate) fn assert_possible_matches_equivalent_within_internal_tsids(constrain
 
 pub(crate) fn emit_possible_matches_unique_counts(constraint: &Constraint) {
     let unique_all: FxHashSet<_> = constraint.possible_matches.values().cloned().collect();
-    let unique_reps: FxHashSet<_> = constraint
-        .internal_tsid_to_states
-        .iter()
-        .filter_map(|states| states.first())
-        .filter_map(|state| constraint.possible_matches.get(state).cloned())
-        .collect();
     eprintln!(
-        "[glrmask/diag][pm_unique] tokenizer_states={} internal_tsids={} unique_all_states={} unique_rep_states={}",
+        "[glrmask/diag][pm_unique] terminals={} internal_tsids={} unique_terminal_weights={}",
         constraint.possible_matches.len(),
         constraint.internal_tsid_to_states.len(),
         unique_all.len(),
-        unique_reps.len(),
     );
 }
 

@@ -440,8 +440,8 @@ impl<'a> ConstraintState<'a> {
         // TerminalsDisallowed is keyed by ORIGINAL tokenizer state, because it
         // describes tokenizer futures accumulated by the GLR parser.
         //
-        // possible_matches is also keyed by ORIGINAL tokenizer state, so use
-        // original_tokenizer_state directly for lookup.
+        // possible_matches is keyed by TERMINAL; seed_terminal_dense (built from
+        // possible_matches) is keyed by (original_tokenizer_state, terminal_id).
         //
         // The resulting DenseMaskAcc is keyed by `internal_tsid`, which comes
         // from the Constraint state's current tokenizer state mapped through

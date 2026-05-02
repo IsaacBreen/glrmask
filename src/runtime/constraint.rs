@@ -40,20 +40,24 @@ pub(crate) fn bitmap_to_rangeset(words: &[u64]) -> RangeSetBlaze<u32> {
 /// Runtime possible-matches table.
 ///
 /// Outer key:
-///   original tokenizer state id.
-///
-/// Inner key:
 ///   grammar terminal id.
 ///
-/// Bitmap:
+/// Inner key (in each Weight):
+///   original tokenizer state id.
+///
+/// Value (in each Weight):
 ///   final shared constraint-internal token ids.
+///
+/// This is symmetric with terminal DWA weights: terminal DWA transitions carry
+/// a Weight over source states; possible_matches carries a Weight over source
+/// states for each terminal.
 ///
 /// The bitmap is NOT in original token space and is NOT in the raw parser-DWA
 /// vocab-compaction space. During compilation, raw possible_matches are computed
 /// in original token space, then remapped into a constraint vocab that refines
 /// the parser-DWA vocab by possible-match signature and seed-state lexical-live
 /// signature. Parser-DWA weights are remapped into this same token space.
-pub(crate) type PossibleMatchesByState = BTreeMap<TokenizerStateID, Weight>;
+pub(crate) type PossibleMatchesByTerminal = BTreeMap<TerminalID, Weight>;
 type DenseWords = Box<[u64]>;
 type InternalTokenBufMasks = Vec<(u16, u32)>;
 type DenseWeightMaskCache = FxHashMap<usize, DenseWords>;
@@ -69,15 +73,16 @@ pub struct Constraint {
     #[serde(default)]
     pub(crate) ignore_terminal: Option<TerminalID>,
 
-    /// possible_matches keyed by ORIGINAL tokenizer state.
+    /// possible_matches keyed by grammar terminal id.
     ///
-    /// Dense token bitmaps are in the final shared constraint-internal vocab
-    /// space. That space is a refinement of the parser-DWA internal vocab by
-    /// possible-match signature and seed-state lexical-live signature. Parser-
-    /// DWA weights have also been remapped into this same token space.
+    /// Each Weight maps original tokenizer state ids to token sets in the final
+    /// shared constraint-internal vocab space. That space is a refinement of the
+    /// parser-DWA internal vocab by possible-match signature and seed-state
+    /// lexical-live signature. Parser-DWA weights have also been remapped into
+    /// this same token space.
     ///
-    /// Do not remap the outer tokenizer-state key through state_to_internal_tsid.
-    pub(crate) possible_matches: PossibleMatchesByState,
+    /// Do not remap the inner tokenizer-state keys through state_to_internal_tsid.
+    pub(crate) possible_matches: PossibleMatchesByTerminal,
     pub(crate) state_to_internal_tsid: Vec<u32>,
     pub(crate) internal_tsid_to_states: Vec<Vec<u32>>,
     /// Original token -> final shared constraint-internal token id.
@@ -515,28 +520,26 @@ impl Constraint {
     ) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
         // STICKY NOTE: DO NOT REMOVE THIS COMMENT.
         //
-        // possible_matches is keyed by ORIGINAL tokenizer state on purpose.
-        // Do not remap through internal_tsid_for_state() here. That merges
-        // distinct original-state futures.
+        // possible_matches is keyed by TERMINAL on the outside; each Weight
+        // maps ORIGINAL tokenizer state to token set. Do not remap through
+        // internal_tsid_for_state() here. That merges distinct original-state
+        // futures.
         //
         // The bitmap values are in the shared constraint-internal VOCAB space,
         // not original token space. Expanding to original tokens below is safe
         // because the constraint vocab refines parser-DWA token classes by
         // possible-match signature.
         self.possible_matches
-            .get(&tokenizer_state)
-            .map(|terminals| {
-                terminals
-                    .compact_entries()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .flat_map(|(start, end, token_set)| {
-                        let original_tokens = self.expand_internal_token_set(token_set.as_ref());
-                        (start..=end).map(move |terminal| (terminal, original_tokens.clone()))
-                    })
-                    .collect()
+            .iter()
+            .filter_map(|(&terminal, weight)| {
+                let tokens = weight.tokens_for_tsid(tokenizer_state);
+                if tokens.is_empty() {
+                    None
+                } else {
+                    Some((terminal, self.expand_internal_token_set(&tokens)))
+                }
             })
-            .unwrap_or_default()
+            .collect()
     }
 
     pub(crate) fn internal_tsid_for_state(&self, tokenizer_state: u32) -> u32 {
@@ -602,17 +605,18 @@ impl Constraint {
         //
         // They are not guaranteed to equal the raw parser-DWA vocab ids produced
         // before possible-match reconciliation.
-        self.possible_matches.get(&tokenizer_state).map(|terminals| {
-            terminals
-                .compact_entries()
-                .unwrap_or_default()
-                .into_iter()
-                .flat_map(|(start, end, token_set)| {
-                    let internal_tokens = token_set.as_ref().clone();
-                    (start..=end).map(move |terminal| (terminal, internal_tokens.clone()))
-                })
-                .collect()
-        })
+        let mut result = BTreeMap::new();
+        for (&terminal, weight) in &self.possible_matches {
+            let tokens = weight.tokens_for_tsid(tokenizer_state);
+            if !tokens.is_empty() {
+                result.insert(terminal, tokens);
+            }
+        }
+        if result.is_empty() {
+            None
+        } else {
+            Some(result)
+        }
     }
 
     fn build_internal_token_buf_mask(originals: &[u32]) -> InternalTokenBufMasks {
@@ -632,14 +636,14 @@ impl Constraint {
     fn build_seed_terminal_dense_masks(&self) -> SeedTerminalDenseMasks {
         self.possible_matches
             .iter()
-            .flat_map(|(&tokenizer_state, terminals)| {
-                terminals
+            .flat_map(|(&terminal_id, weight)| {
+                weight
                     .compact_entries()
                     .unwrap_or_default()
                     .into_iter()
                     .flat_map(move |(start, end, token_set)| {
                         let dense = self.dense_words_from_internal_set(token_set.as_ref());
-                        (start..=end).map(move |terminal_id| {
+                        (start..=end).map(move |tokenizer_state| {
                             ((tokenizer_state, terminal_id), dense.clone())
                         })
                     })

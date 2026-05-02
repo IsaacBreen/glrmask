@@ -1403,8 +1403,8 @@ mod tests {
             &tokens_with_same_bytes,
         );
 
-        let terminal_10 = remapped_pm[&5].tokens_for_tsid(10);
-        let terminal_11 = remapped_pm[&5].tokens_for_tsid(11);
+        let terminal_10 = remapped_pm[&10].tokens_for_tsid(5);
+        let terminal_11 = remapped_pm[&11].tokens_for_tsid(5);
 
         assert!(terminal_10.contains(tok0));
         assert!(!terminal_10.contains(tok1));
