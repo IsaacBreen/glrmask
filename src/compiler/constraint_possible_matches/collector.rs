@@ -1167,7 +1167,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
         self_loop_bytes: &[U8Set],
         num_words: usize,
         timings: &mut TrieBuildTimings,
-        parallel_children: bool,
+        parallel_depth: u8,
     ) -> TrieMapBuildNodeClasses {
         struct ChildBuildData {
             outcomes: Vec<TrieMapBuildSegmentOutcomeMask>,
@@ -1189,6 +1189,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
             self_loop_bytes: &[U8Set],
             num_words: usize,
             timings: &mut TrieBuildTimings,
+            parallel_depth: u8,
         ) -> ChildBuildData {
             let outcomes = segment_outcomes_for_states(
                 active_states,
@@ -1231,7 +1232,6 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
                 )
             } else {
                 let recursive_started_at = Instant::now();
-                // Recursive calls always run serially.
                 let result = build_node(
                     child,
                     tokenizer,
@@ -1242,7 +1242,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
                     self_loop_bytes,
                     num_words,
                     timings,
-                    false,
+                    parallel_depth.saturating_sub(1),
                 );
                 timings.recursive_ms += elapsed_ms(recursive_started_at);
 
@@ -1278,7 +1278,11 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
         let num_children = children.len();
         let mut child_data = Vec::with_capacity(num_children);
 
-        if parallel_children && num_children >= 4 {
+        let should_parallelize = parallel_depth > 0
+            && num_children >= 4
+            && active_states.len() >= 4096;
+
+        if should_parallelize {
             use rayon::prelude::*;
             let built: Vec<(ChildBuildData, TrieBuildTimings)> = children
                 .par_iter()
@@ -1304,6 +1308,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
                         self_loop_bytes,
                         num_words,
                         &mut local_timings,
+                        parallel_depth,
                     );
                     (data, local_timings)
                 })
@@ -1335,6 +1340,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
                     self_loop_bytes,
                     num_words,
                     &mut local_timings,
+                    parallel_depth,
                 );
                 timings.add_assign(local_timings);
                 child_data.push(data);
@@ -1480,11 +1486,17 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
         TrieMapBuildNodeClasses { classes, class_maps }
     }
 
+    let parallel_depth = std::env::var("GLRMASK_PM_ROOT_PARALLEL_DEPTH")
+        .ok()
+        .and_then(|value| value.parse::<u8>().ok())
+        .unwrap_or(2);
+
     if profile_summary_enabled() {
         let num_root_children = root.children().len();
         eprintln!(
-            "[glrmask/profile][trie_build_terminal_mask] root_parallel_children={}",
+            "[glrmask/profile][trie_build_terminal_mask] root_parallel_children={} parallel_depth={}",
             num_root_children,
+            parallel_depth,
         );
     }
 
@@ -1498,7 +1510,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
         &self_loop_bytes,
         num_words,
         &mut timings,
-        true,
+        parallel_depth,
     );
     let root_compute_ms = elapsed_ms(t_root_start);
 
