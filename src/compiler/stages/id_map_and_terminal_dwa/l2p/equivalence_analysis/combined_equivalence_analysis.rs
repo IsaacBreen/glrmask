@@ -220,6 +220,73 @@ fn collect_representative_states(states: &[usize]) -> Vec<usize> {
     states.iter().copied().collect::<BTreeSet<_>>().into_iter().collect()
 }
 
+/// Exact full-token state-equivalence refinement of a sampled proposal.
+///
+/// The sampled pre-vocab pass may merge states that differ on tokens outside
+/// the sample.  This helper keeps all existing splits and only splits further:
+/// it collects every state that still shares a tentative class with at least
+/// one other state, runs a single full-token equivalence pass on that
+/// ambiguous subset, and maps every member back to its new representative.
+///
+/// States that are already singletons after sampling are skipped entirely.
+/// The result is always a refinement of true full-token equivalence, so it
+/// is sound (possibly too fine, but never too coarse).
+fn refine_state_mapping_with_full_tokens<S: AsRef<[u8]> + Sync>(
+    tokenizer: &TokenizerView,
+    tokens: &[S],
+    states: &[usize],
+    tentative_mapping: &[usize],
+    disallowed_follows: &[BitSet],
+) -> Vec<usize> {
+    debug_assert_eq!(states.len(), tentative_mapping.len());
+
+    // Count how many states map to each tentative representative.
+    let mut group_sizes: BTreeMap<usize, usize> = BTreeMap::new();
+    for &rep in tentative_mapping {
+        *group_sizes.entry(rep).or_insert(0) += 1;
+    }
+
+    // Collect indices of states that are in multi-state groups (ambiguous).
+    let mut ambiguous_indices: Vec<usize> = Vec::new();
+    let mut ambiguous_states: Vec<usize> = Vec::new();
+    for (idx, (&state, &rep)) in states.iter().zip(tentative_mapping.iter()).enumerate() {
+        if group_sizes.get(&rep).copied().unwrap_or(0) > 1 {
+            ambiguous_indices.push(idx);
+            ambiguous_states.push(state);
+        }
+    }
+
+    let mut refined = vec![0usize; states.len()];
+
+    // Singletons are already exact — copy them through.
+    for (idx, (&state, &rep)) in states.iter().zip(tentative_mapping.iter()).enumerate() {
+        if group_sizes.get(&rep).copied().unwrap_or(0) == 1 {
+            refined[idx] = state;
+        }
+    }
+
+    if ambiguous_states.len() <= 1 {
+        // Zero or one ambiguous state — nothing left to split.
+        return refined;
+    }
+
+    // Run ONE full-token equivalence pass on all ambiguous states together.
+    // States from different tentative groups are already known to differ on
+    // the sampled tokens, so they will never be merged by this full pass.
+    let full_mapping = state_equivalence_analysis::find_state_equivalence_classes_with_disallowed(
+        tokenizer,
+        tokens,
+        &ambiguous_states,
+        disallowed_follows,
+    );
+
+    for (local_idx, &state_idx) in ambiguous_indices.iter().enumerate() {
+        refined[state_idx] = full_mapping[local_idx];
+    }
+
+    refined
+}
+
 /// Compute which groups can be skipped in state equivalence hashing.
 ///
 /// A group is "universally disallowed" if it appears in the disallowed set
@@ -453,7 +520,7 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
     let large_dfa = num_dfa_states >= large_dfa_threshold;
     let use_pre_vocab_state_reduction = if force_pre_vocab_state_reduction {
         true
-    } else if disable_pre_vocab_state_reduction || large_dfa {
+    } else if disable_pre_vocab_state_reduction {
         false
     } else {
         !skip_token_state
@@ -461,9 +528,10 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
             && tokenizer_num_groups <= pre_vocab_max_groups
             && dedup.representative_token_bytes.len() >= pre_vocab_min_tokens
     };
-    // For large DFAs, sample-based pre-vocab reduction is only used when forced.
-    // The sample can miss continuation-future distinctions that are required for
-    // mask/commit equivalence.
+    // For large DFAs, use sample-based pre-vocab reduction as a fast proposal,
+    // but the returned partition will be exact-refined below before it is used
+    // for vocab equivalence.  This avoids the O(tokens × states) cost of the
+    // first pass while keeping the final result sound.
     let pre_vocab_max_batches = if large_dfa { Some(1) } else { None };
     let pre_vocab_batch_size = if large_dfa {
         Some(large_dfa_batch_size)
@@ -472,7 +540,9 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
     } else {
         None
     };
-    let vocab_states = if use_pre_vocab_state_reduction {
+    let pre_vocab_state_reduction_is_sampled = use_pre_vocab_state_reduction && pre_vocab_max_batches.is_some();
+
+    let (vocab_states, pre_vocab_reps_for_pre_reduced) = if use_pre_vocab_state_reduction {
         let pre_vocab_state_started_at = std::time::Instant::now();
 
         // Rep-only confirmation: after groups stabilize (first stable batch),
@@ -503,14 +573,14 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
                 elapsed_ms(pre_vocab_state_started_at),
             );
         }
-        vocab_states
+        (vocab_states, reduced_state_reps)
     } else {
-        pre_reduced_states.clone()
+        (pre_reduced_states.clone(), pre_reduced_states.clone())
     };
 
     let use_slow_vocab = env_flag_enabled(USE_SLOW_VOCAB_EQUIV_ENV);
     let vocab_started_at = std::time::Instant::now();
-    let dedup_vocab_classes = if use_slow_vocab {
+    let mut dedup_vocab_classes = if use_slow_vocab {
         super::vocab::slow::find_vocab_equivalence_classes_with_follow(
             tokenizer,
             &dedup.representative_token_bytes,
@@ -528,37 +598,96 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
             shared_vocab_dfa_cache,
         )
     };
-    let vocab_ms = elapsed_ms(vocab_started_at);
+    let mut vocab_ms = elapsed_ms(vocab_started_at);
 
     // Running vocab first shrinks the token set before token_state refinement.
     // Tokens in the same vocab class are behaviorally identical across the
     // surviving states, so one representative token per class is sufficient
     // for the state refinement pass.
     let token_state_started_at = std::time::Instant::now();
-    let representative_states = if skip_token_state {
-        pre_state_reps.clone()
+    let mut reduced_state_reps_for_pre_reduced = if skip_token_state {
+        pre_vocab_reps_for_pre_reduced.clone()
     } else {
         let vocab_representative_tokens = representative_tokens_for_vocab_classes(
             &dedup_vocab_classes,
             &dedup.representative_token_bytes,
         );
-        let reduced_state_reps = state_equivalence_analysis::find_state_equivalence_classes_with_disallowed(
+        state_equivalence_analysis::find_state_equivalence_classes_with_disallowed(
             tokenizer,
             &vocab_representative_tokens,
             &pre_reduced_states,
             &normalized_disallowed_follows,
-        );
+        )
+    };
+    let mut representative_states = {
         let rep_to_final: BTreeMap<usize, usize> = pre_reduced_states
             .iter()
             .copied()
-            .zip(reduced_state_reps)
+            .zip(reduced_state_reps_for_pre_reduced.iter().copied())
             .collect();
         pre_state_reps
             .iter()
             .map(|pre_rep| rep_to_final[pre_rep])
-            .collect()
+            .collect::<Vec<_>>()
     };
     let token_state_ms = elapsed_ms(token_state_started_at);
+
+    // If the pre-vocab pass was sampled, exact-refine every tentative class
+    // with the full token set.  This guarantees the returned partition is a
+    // refinement of true full-token state equivalence, which is required
+    // because vocab equivalence is computed only on the representative set.
+    if pre_vocab_state_reduction_is_sampled {
+        let exact_started_at = std::time::Instant::now();
+        reduced_state_reps_for_pre_reduced = refine_state_mapping_with_full_tokens(
+            tokenizer,
+            &dedup.representative_token_bytes,
+            &pre_reduced_states,
+            &reduced_state_reps_for_pre_reduced,
+            &normalized_disallowed_follows,
+        );
+
+        let exact_vocab_states = collect_representative_states(&reduced_state_reps_for_pre_reduced);
+        let exact_vocab_started_at = std::time::Instant::now();
+        dedup_vocab_classes = if use_slow_vocab {
+            super::vocab::slow::find_vocab_equivalence_classes_with_follow(
+                tokenizer,
+                &dedup.representative_token_bytes,
+                &exact_vocab_states,
+                disallowed_follows,
+            )
+        } else {
+            vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter(
+                tokenizer,
+                &dedup.representative_token_bytes,
+                &exact_vocab_states,
+                disallowed_follows,
+                Some(&byte_to_class),
+                active_groups,
+                shared_vocab_dfa_cache,
+            )
+        };
+        vocab_ms += elapsed_ms(exact_vocab_started_at);
+
+        let rep_to_final: BTreeMap<usize, usize> = pre_reduced_states
+            .iter()
+            .copied()
+            .zip(reduced_state_reps_for_pre_reduced.iter().copied())
+            .collect();
+        representative_states = pre_state_reps
+            .iter()
+            .map(|pre_rep| rep_to_final[pre_rep])
+            .collect();
+
+        if profile_compile {
+            eprintln!(
+                "[glrmask/profile][pre_vocab_state_exact_finalize] input_states={} refined_states={} tokens={} ms={:.3}",
+                pre_reduced_states.len(),
+                exact_vocab_states.len(),
+                dedup.representative_token_bytes.len(),
+                elapsed_ms(exact_started_at),
+            );
+        }
+    }
 
     // Expand dedup vocab classes back to original token indices.
     let vocab_classes = expand_vocab_classes(
@@ -634,7 +763,7 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
                 }
             }
         } else {
-            eprintln!("[verify_dedup] No dedup hash collisions found — bug is in vocab signature");
+            eprintln!("[verify_dedup] No dedup hash collisions found");
             
             // Diagnose: find two representative tokens that are in the same fast dedup class
             // but different reference classes
