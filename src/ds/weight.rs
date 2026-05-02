@@ -11,6 +11,81 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Instant;
 
+// STICKY NOTE: DO NOT REMOVE THIS COMMENT.
+//
+// This module uses RangeSetBlaze and RangeMapBlaze as its core data structures.
+// Performance characteristics are counterintuitive and differ from naive bitmaps
+// or hash maps. Read this note before writing hot-path code that creates,
+// mutates, or queries Weight objects.
+//
+// 1. RangeSetBlaze / RangeMapBlaze complexity
+//    Cost is proportional to the NUMBER OF RANGES, not the numeric span covered.
+//    A set covering 0..=1_000_000 as a single range is much cheaper than 1_000_001
+//    individual points stored as 1_000_001 singleton ranges.
+//    RangeMapBlaze merges adjacent keys only when the VALUES are also equal.
+//    A Weight with 10 key-ranges each mapping to a 3-range token set can be
+//    more expensive than a Weight with 50 key-ranges each mapping to a 1-range
+//    token set, depending on operation mix.
+//
+// 2. Why remapping / rearranging IDs matters
+//    If many Weights will be stored or queried together, arrange numeric IDs
+//    so that each Weight's inner sets/maps form FEWER TOTAL RANGES.
+//    The target is NOT "small max ID"; it is fewer ranges across the relevant
+//    weights. In DWA/id-map/possible-matches-style code this means:
+//    - Group IDs that co-occur in the same token sets into contiguous ranges.
+//    - Recompact parser-state and terminal IDs jointly with token vocab IDs
+//      when the weights are built together.
+//    - A renumbering that cuts total unique ranges by 2x often beats a
+//      renumbering that merely lowers the max ID.
+//
+// 3. Two-level interning
+//    Outer Weight maps (RangeMapBlaze<u32, SharedTokenSet>) are interned via
+//    GLOBAL_WEIGHTS. Inner RangeSetBlaze values are interned via
+//    GLOBAL_TOKEN_SETS. Both use Arc deduplication.
+//    When measuring static complexity of a collection of weights, count UNIQUE
+//    interned weights once, and count UNIQUE inner rangesets once, not once per
+//    key-range occurrence. Example: if the same weight appears 100 times in a
+//    collection of 101 weights, its static cost is roughly that weight plus the
+//    1 other unique weight, plus their shared inner rangesets. Do not multiply by 100.
+//
+//    Static complexity model for DWA / possible-matches recompaction:
+//    - For a unique Weight, count its unique outer key ranges, plus the ranges
+//      in each unique interned inner RangeSetBlaze (counted once per unique
+//      inner set, not once per reference).
+//    - For a collection of weights, count each unique interned Weight once and
+//      each unique inner set once.
+//    - This is the mental model behind minimizing
+//      total_outer_ranges + total_inner_ranges in DWA::stats()-style accounting.
+//
+// 4. Mutation pitfalls
+//    Small repeated mutations (insert one token, union one range) can be
+//    surprisingly expensive because each operation may trigger normalization
+//    and intern-table lookup. In hot paths, avoid building a Weight one item
+//    at a time. Prefer construction APIs that collect from sorted/ranged data
+//    (e.g. CompactRangeBuilder, from_per_tsid_shared, from_compact_ranges)
+//    so normalization and interning happen once at the end.
+//
+// 5. Lookup / iteration implications
+//    Lookups are O(log num_key_ranges). Iteration yields ranges, not individual
+//    points. Union / intersection iterate over both operands' ranges in lockstep.
+//    The cheap case is when both operands have very few ranges or are the same
+//    interned Arc (fast path: Arc::ptr_eq). The expensive case is many
+//    misaligned small ranges on both sides.
+//    Cloning is cheap because it is just an Arc clone of the interned map, but
+//    only until you mutate; then a fresh normalized map must be built.
+//
+// 6. Practical guidance
+//    - Prefer dense contiguous IDs for things that co-occur in the same sets.
+//    - Recompact / remap based on the WHOLE COLLECTION of weights that will be
+//      queried or stored together, not per-weight in isolation.
+//    - When designing optimizers, consider the interning boundary: reducing
+//      total unique interned weights and unique inner rangesets is often more
+//      valuable than shrinking any single weight's local range count.
+//    - If you must measure, measure total unique interned structures and total
+//      ranges across the representative workload, not max ID or per-weight size.
+//
+// DO NOT REMOVE THIS NOTE. Future maintainers will need it.
+
 #[derive(Debug, Clone)]
 pub struct Weight(pub Arc<WeightMap>);
 
