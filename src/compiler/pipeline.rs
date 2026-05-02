@@ -863,57 +863,63 @@ independently proving possible_matches equivalence for your workload."
         let use_bruteforce_possible_matches =
             strict_one_flag_enabled("GLRMASK_PM_BRUTE_FORCE");
 
-        // Compute constraint possible matches as its own stage, after all
-        // terminal-DWA partition/id-map work is complete.
-        let cpm_result = if use_bruteforce_possible_matches {
-            let started_at = Instant::now();
-            let brute = cpm::bruteforce::compute_constraint_possible_matches_bruteforce(
-                &tokenizer,
-                vocab,
-                &internal_ids.vocab_tokens,
-            );
-            cpm::ConstraintPossibleMatchesComputation {
-                possible_matches: brute.possible_matches,
-                constraint_vocab: brute.constraint_vocab,
-                profile: cpm::ConstraintPossibleMatchesProfile {
-                    possible_matches_collect_ms: elapsed_ms(started_at),
-                    total_ms: elapsed_ms(started_at),
-                    ..Default::default()
-                },
-            }
-        } else {
-            cpm::compute_constraint_possible_matches(
-                &tokenizer,
-                &token_bytes,
-                &internal_ids,
-                cpm::ConstraintPossibleMatchesConfig {
-                    debug_compile_stages,
-                    profile_summary_enabled: compile_profile_summary_enabled(),
-                    use_internal_tsid_representatives,
-                    trie_class_build_enabled,
-                    diag_root_signature: std::env::var("GLRMASK_DIAG_PM_ROOT_SIG")
-                        .map_or(false, |v| v == "1"),
-                    initial_state_map: global_max_length_state_map_ref,
-                },
-            )
-        };
+        // Compute constraint possible matches and build parser DWA
+        // concurrently.  Parser DWA does not depend on possible matches
+        // or constraint-vocab; only the later remap step does.
+        let (cpm_result, (mut parser_dwa, parser_dwa_ms)) = rayon::join(
+            || {
+                if use_bruteforce_possible_matches {
+                    let started_at = Instant::now();
+                    let brute =
+                        cpm::bruteforce::compute_constraint_possible_matches_bruteforce(
+                            &tokenizer,
+                            vocab,
+                            &internal_ids.vocab_tokens,
+                        );
+                    cpm::ConstraintPossibleMatchesComputation {
+                        possible_matches: brute.possible_matches,
+                        constraint_vocab: brute.constraint_vocab,
+                        profile: cpm::ConstraintPossibleMatchesProfile {
+                            possible_matches_collect_ms: elapsed_ms(started_at),
+                            total_ms: elapsed_ms(started_at),
+                            ..Default::default()
+                        },
+                    }
+                } else {
+                    cpm::compute_constraint_possible_matches(
+                        &tokenizer,
+                        &token_bytes,
+                        &internal_ids,
+                        cpm::ConstraintPossibleMatchesConfig {
+                            debug_compile_stages,
+                            profile_summary_enabled: compile_profile_summary_enabled(),
+                            use_internal_tsid_representatives,
+                            trie_class_build_enabled,
+                            diag_root_signature: std::env::var("GLRMASK_DIAG_PM_ROOT_SIG")
+                                .map_or(false, |v| v == "1"),
+                            initial_state_map: global_max_length_state_map_ref,
+                        },
+                    )
+                }
+            },
+            || {
+                let parser_dwa_started_at = Instant::now();
+                let parser_dwa =
+                    build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
+                        &table,
+                        &analyzed_grammar,
+                        &terminal_dwa,
+                        templates,
+                        vocab,
+                        &internal_ids,
+                    );
+                (parser_dwa, elapsed_ms(parser_dwa_started_at))
+            },
+        );
 
         let constraint_vocab = cpm_result.constraint_vocab;
         let possible_matches = cpm_result.possible_matches;
         let cpm_profile = cpm_result.profile;
-
-        // Build parser DWA now, after CPM is done. It no longer runs in
-        // parallel with possible matches; the old rayon::join is removed.
-        let parser_dwa_started_at = Instant::now();
-        let mut parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
-            &table,
-            &analyzed_grammar,
-            &terminal_dwa,
-            templates,
-            vocab,
-            &internal_ids,
-        );
-        let parser_dwa_ms = elapsed_ms(parser_dwa_started_at);
 
         // Remap parser DWA into the constraint-vocab token space (no-op when
         // constraint-vocab matches the terminal-DWA vocab).
