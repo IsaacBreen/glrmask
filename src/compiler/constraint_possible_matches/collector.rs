@@ -545,6 +545,10 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
     /// Fill missing segment-outcome entries for the given `needed_states`
     /// into `table` by walking the DFA `segment` from each missing state.
     /// Uses a stamp-based dedup array for O(1) terminal dedup.
+    ///
+    /// For single-byte segments, uses a fast path that directly looks up
+    /// `flat_transitions` and `node_terminal_ids` without touching the
+    /// hash-table segment cache or the stamp-based terminal collector.
     fn segment_outcomes_for_states(
         table: &mut FxHashMap<u32, TrieMapBuildSegmentOutcome>,
         needed_states: &[u32],
@@ -556,9 +560,30 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
         terminal_stamps: &mut [u32],
         stamp_gen: &mut u32,
         timings: &mut TrieBuildTimings,
+        node_terminal_ids: &[u32],
     ) -> Vec<TrieMapBuildSegmentOutcome> {
         let t_start = Instant::now();
         let mut outcomes = Vec::with_capacity(needed_states.len());
+
+        if segment.len() == 1 {
+            let byte = segment[0] as usize;
+            for &start_state in needed_states {
+                let next_state = flat_transitions[start_state as usize][byte];
+                if next_state == u32::MAX {
+                    outcomes.push(TrieMapBuildSegmentOutcome {
+                        terminals_id: empty_terminals_id,
+                        end_state: None,
+                    });
+                } else {
+                    outcomes.push(TrieMapBuildSegmentOutcome {
+                        terminals_id: node_terminal_ids[next_state as usize],
+                        end_state: Some(next_state),
+                    });
+                }
+            }
+            timings.segment_table_ms += elapsed_ms(t_start);
+            return outcomes;
+        }
 
         for &start_state in needed_states {
             if let Some(&outcome) = table.get(&start_state) {
@@ -674,6 +699,7 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
                 terminal_stamps,
                 stamp_gen,
                 timings,
+                node_terminal_ids,
             );
 
             let child_active_started_at = Instant::now();
