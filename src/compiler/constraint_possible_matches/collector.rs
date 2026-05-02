@@ -707,40 +707,52 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
             child_active_states.dedup();
             timings.child_active_ms += elapsed_ms(child_active_started_at);
 
-            let recursive_started_at = Instant::now();
-            let result = build_node(
-                child,
-                tokenizer,
-                &child_active_states,
-                matched_terminals,
-                node_terminal_ids,
-                empty_terminals_id,
-                is_end,
-                flat_transitions,
-                self_loop_bytes,
-                terminal_sets,
-                segment_cache,
-                segment_outcome_tables,
-                num_words,
-                timings,
-                stamp_gen,
-                terminal_stamps,
-            );
-            timings.recursive_ms += elapsed_ms(recursive_started_at);
+            let (result, child_class_ids) = if child_active_states.is_empty() {
+                (
+                    TrieMapBuildNodeClasses {
+                        classes: Vec::new(),
+                        class_maps: Vec::new(),
+                    },
+                    vec![u32::MAX; descend_end_states.len()],
+                )
+            } else {
+                let recursive_started_at = Instant::now();
+                let result = build_node(
+                    child,
+                    tokenizer,
+                    &child_active_states,
+                    matched_terminals,
+                    node_terminal_ids,
+                    empty_terminals_id,
+                    is_end,
+                    flat_transitions,
+                    self_loop_bytes,
+                    terminal_sets,
+                    segment_cache,
+                    segment_outcome_tables,
+                    num_words,
+                    timings,
+                    stamp_gen,
+                    terminal_stamps,
+                );
+                timings.recursive_ms += elapsed_ms(recursive_started_at);
 
-            // Build child_class_ids from the cached descend_end_states.
-            let child_precompute_started_at = Instant::now();
-            let child_class_ids: Vec<u32> = descend_end_states
-                .iter()
-                .map(|&end_state| {
-                    if end_state == u32::MAX {
-                        u32::MAX
-                    } else {
-                        result.classes[end_state as usize]
-                    }
-                })
-                .collect();
-            timings.child_precompute_ms += elapsed_ms(child_precompute_started_at);
+                // Build child_class_ids from the cached descend_end_states.
+                let child_precompute_started_at = Instant::now();
+                let child_class_ids: Vec<u32> = descend_end_states
+                    .iter()
+                    .map(|&end_state| {
+                        if end_state == u32::MAX {
+                            u32::MAX
+                        } else {
+                            result.classes[end_state as usize]
+                        }
+                    })
+                    .collect();
+                timings.child_precompute_ms += elapsed_ms(child_precompute_started_at);
+
+                (result, child_class_ids)
+            };
 
             let reachable_started_at = Instant::now();
             let reachable = reachable_dense_bitmap(child, num_words);
