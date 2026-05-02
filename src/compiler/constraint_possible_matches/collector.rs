@@ -525,12 +525,20 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
         signature_hash_ms: f64,
         map_materialize_ms: f64,
         classes_built: usize,
+        child_active_ms: f64,
+        recursive_ms: f64,
+        reachable_bitmap_ms: f64,
+        child_precompute_ms: f64,
     }
     let mut timings = TrieBuildTimings {
         segment_table_ms: 0.0,
         signature_hash_ms: 0.0,
         map_materialize_ms: 0.0,
         classes_built: 0,
+        child_active_ms: 0.0,
+        recursive_ms: 0.0,
+        reachable_bitmap_ms: 0.0,
+        child_precompute_ms: 0.0,
     };
 
     /// Fill missing segment-outcome entries for the given `needed_states`
@@ -671,21 +679,34 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
                 timings,
             );
 
+            let child_active_started_at = Instant::now();
             let subtree_bytes = U8Set::from_words(*child.subtree_bytes());
+            let table = &segment_outcome_tables[segment_table_idx];
+            let mut outcomes = Vec::with_capacity(active_states.len());
+            let mut descend_end_states = Vec::with_capacity(active_states.len());
             let mut child_active_states = Vec::new();
             for &state in active_states {
-                let segment_outcome = &segment_outcome_tables[segment_table_idx][&state];
-                if let Some(end_state) = segment_outcome.end_state {
+                let segment_outcome = table[&state];
+                let descend_end_state = if let Some(end_state) = segment_outcome.end_state {
                     if !is_end[end_state as usize]
                         && !subtree_bytes.is_subset(&self_loop_bytes[end_state as usize])
                     {
                         child_active_states.push(end_state);
+                        end_state
+                    } else {
+                        u32::MAX
                     }
-                }
+                } else {
+                    u32::MAX
+                };
+                outcomes.push(segment_outcome);
+                descend_end_states.push(descend_end_state);
             }
             child_active_states.sort_unstable();
             child_active_states.dedup();
+            timings.child_active_ms += elapsed_ms(child_active_started_at);
 
+            let recursive_started_at = Instant::now();
             let result = build_node(
                 child,
                 tokenizer,
@@ -704,32 +725,30 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
                 stamp_gen,
                 terminal_stamps,
             );
+            timings.recursive_ms += elapsed_ms(recursive_started_at);
 
-            // Precompute outcomes and child_class_ids aligned to parent's active_states.
-            let mut outcomes = Vec::with_capacity(active_states.len());
-            let mut child_class_ids = Vec::with_capacity(active_states.len());
-            let table = &segment_outcome_tables[segment_table_idx];
-            for &state in active_states {
-                let segment_outcome = table[&state];
-                let child_class_id = if let Some(end_state) = segment_outcome.end_state {
-                    if is_end[end_state as usize]
-                        || subtree_bytes.is_subset(&self_loop_bytes[end_state as usize])
-                    {
+            // Build child_class_ids from the cached descend_end_states.
+            let child_precompute_started_at = Instant::now();
+            let child_class_ids: Vec<u32> = descend_end_states
+                .iter()
+                .map(|&end_state| {
+                    if end_state == u32::MAX {
                         u32::MAX
                     } else {
                         result.classes[end_state as usize]
                     }
-                } else {
-                    u32::MAX
-                };
-                outcomes.push(segment_outcome);
-                child_class_ids.push(child_class_id);
-            }
+                })
+                .collect();
+            timings.child_precompute_ms += elapsed_ms(child_precompute_started_at);
+
+            let reachable_started_at = Instant::now();
+            let reachable = reachable_dense_bitmap(child, num_words);
+            timings.reachable_bitmap_ms += elapsed_ms(reachable_started_at);
 
             child_data.push(ChildBuildData {
                 outcomes,
                 child_class_ids,
-                reachable: reachable_dense_bitmap(child, num_words),
+                reachable,
                 result,
             });
         }
@@ -847,8 +866,10 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
 
     if profile_summary_enabled() {
         eprintln!(
-            "[glrmask/profile][trie_build_timings] segment_table_ms={:.3} signature_hash_ms={:.3} map_materialize_ms={:.3} classes_built={}",
-            timings.segment_table_ms, timings.signature_hash_ms, timings.map_materialize_ms, timings.classes_built,
+            "[glrmask/profile][trie_build_timings] segment_table_ms={:.3} signature_hash_ms={:.3} map_materialize_ms={:.3} child_active_ms={:.3} recursive_ms={:.3} reachable_bitmap_ms={:.3} child_precompute_ms={:.3} classes_built={}",
+            timings.segment_table_ms, timings.signature_hash_ms, timings.map_materialize_ms,
+            timings.child_active_ms, timings.recursive_ms, timings.reachable_bitmap_ms, timings.child_precompute_ms,
+            timings.classes_built,
         );
     }
 

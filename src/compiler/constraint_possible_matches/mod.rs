@@ -543,6 +543,24 @@ pub(crate) fn build_seed_state_signature_ids_from_trie_classes_exact(
     }
     let leader_trie = VocabPrefixTree::build(&leader_entries);
 
+    // Precompute flat DFA transitions and terminal-state booleans for the
+    // seed-signature trie walk, replacing hot tokenizer.step/finalizers calls
+    // with direct array lookups.
+    let num_states = tokenizer.num_states() as usize;
+    let flat_transitions: Vec<[u32; 256]> = (0..num_states)
+        .map(|state_idx| {
+            let dfa_state = &tokenizer.dfa.states()[state_idx];
+            let mut flat = [u32::MAX; 256];
+            for (byte, &target) in dfa_state.transitions.iter() {
+                flat[byte as usize] = target;
+            }
+            flat
+        })
+        .collect();
+    let terminal_states: Vec<bool> = (0..num_states)
+        .map(|state| !tokenizer.dfa.finalizers(state as u32).is_zero())
+        .collect();
+
     let class_words = (state_class_count + 63) / 64;
     let rep_word_mask: Vec<(usize, u64)> = (0..state_class_count)
         .map(|rep_idx| (rep_idx / 64, 1u64 << (rep_idx % 64)))
@@ -562,7 +580,8 @@ pub(crate) fn build_seed_state_signature_ids_from_trie_classes_exact(
                 signatures_atomic[offset].fetch_or(mask, Ordering::Relaxed);
             };
             collect_seed_signature_matches_from_trie(
-                tokenizer,
+                &flat_transitions,
+                &terminal_states,
                 &leader_trie.root,
                 *rep_state,
                 &leader_idx_by_token,
@@ -691,13 +710,18 @@ where
 
 #[inline]
 fn scan_seed_signature_edge(
-    tokenizer: &crate::automata::lexer::tokenizer::Tokenizer,
+    flat_transitions: &[[u32; 256]],
+    terminal_states: &[bool],
     mut state: u32,
     edge: &[u8],
 ) -> Option<(u32, bool)> {
     for &byte in edge {
-        state = tokenizer.step(state, byte)?;
-        if !tokenizer.dfa.finalizers(state).is_zero() {
+        let next = flat_transitions[state as usize][byte as usize];
+        if next == u32::MAX {
+            return None;
+        }
+        state = next;
+        if terminal_states[state as usize] {
             return Some((state, true));
         }
     }
@@ -705,7 +729,8 @@ fn scan_seed_signature_edge(
 }
 
 fn collect_seed_signature_matches_from_trie<F>(
-    tokenizer: &crate::automata::lexer::tokenizer::Tokenizer,
+    flat_transitions: &[[u32; 256]],
+    terminal_states: &[bool],
     node: &VocabPrefixTreeNode,
     state: u32,
     leader_idx_by_token: &[u32],
@@ -726,7 +751,7 @@ where
     }
 
     for (edge, child) in node.iter_children() {
-        let Some((next_state, accepted)) = scan_seed_signature_edge(tokenizer, state, edge) else {
+        let Some((next_state, accepted)) = scan_seed_signature_edge(flat_transitions, terminal_states, state, edge) else {
             continue;
         };
 
@@ -734,7 +759,8 @@ where
             push_reachable_leader_indices(child, leader_idx_by_token, on_match);
         } else {
             collect_seed_signature_matches_from_trie(
-                tokenizer,
+                flat_transitions,
+                terminal_states,
                 child,
                 next_state,
                 leader_idx_by_token,
