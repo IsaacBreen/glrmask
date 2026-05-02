@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
+use rayon::prelude::*;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
@@ -654,9 +655,9 @@ impl Constraint {
     fn precompute_node_reachable_dense(
         node: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
         dense_words: usize,
-        cache: &mut FxHashMap<*const crate::ds::vocab_prefix_tree::VocabPrefixTreeNode, Vec<u64>>,
+        cache: &mut FxHashMap<usize, Vec<u64>>,
     ) {
-        let ptr = node as *const _;
+        let ptr = node as *const _ as usize;
         if cache.contains_key(&ptr) {
             return;
         }
@@ -671,7 +672,7 @@ impl Constraint {
         }
         for (_, child) in node.iter_children() {
             Self::precompute_node_reachable_dense(child, dense_words, cache);
-            let child_ptr = child as *const _;
+            let child_ptr = child as *const _ as usize;
             let child_dense = cache.get(&child_ptr).unwrap();
             for i in 0..dense_words {
                 dense[i] |= child_dense[i];
@@ -686,7 +687,7 @@ impl Constraint {
         mask: &mut [u64],
         flat_transitions: &[[u32; 256]],
         terminal_states: &[bool],
-        node_reachable_dense: &FxHashMap<*const crate::ds::vocab_prefix_tree::VocabPrefixTreeNode, Vec<u64>>,
+        node_reachable_dense: &FxHashMap<usize, Vec<u64>>,
     ) {
         if node.has_token() {
             let id = node.token_id();
@@ -716,7 +717,7 @@ impl Constraint {
                 continue;
             }
             if terminal_hit {
-                let child_ptr = child as *const _;
+                let child_ptr = child as *const _ as usize;
                 if let Some(child_dense) = node_reachable_dense.get(&child_ptr) {
                     for i in 0..mask.len() {
                         mask[i] |= child_dense[i];
@@ -731,9 +732,10 @@ impl Constraint {
     fn build_seed_state_dense_masks(&self) -> SeedStateDenseMasks {
         let state_count = self.tokenizer.num_states() as usize;
         let dense_words = self.internal_token_dense_words;
-        let mut masks = vec![vec![0u64; dense_words]; state_count];
         if state_count == 0 || dense_words == 0 {
-            return masks.into_iter().map(Vec::into_boxed_slice).collect();
+            return (0..state_count)
+                .map(|_| vec![0u64; dense_words].into_boxed_slice())
+                .collect();
         }
 
         let terminal_states: Vec<bool> = (0..self.tokenizer.num_states())
@@ -760,30 +762,35 @@ impl Constraint {
         );
 
         // Precompute a dense reachable-token bitmap for every trie node.
-        let mut node_reachable_dense: FxHashMap<*const crate::ds::vocab_prefix_tree::VocabPrefixTreeNode, Vec<u64>> =
-            FxHashMap::default();
+        let mut node_reachable_dense: FxHashMap<usize, Vec<u64>> = FxHashMap::default();
         Self::precompute_node_reachable_dense(&trie.root, dense_words, &mut node_reachable_dense);
 
-        let root_ptr = &trie.root as *const _;
+        let root_ptr = &trie.root as *const _ as usize;
         let all_tokens_dense = node_reachable_dense
             .get(&root_ptr)
             .expect("root reachable-token bitmap must be precomputed")
             .clone();
 
-        for start_state in 0..state_count as u32 {
-            if terminal_states[start_state as usize] {
-                masks[start_state as usize].copy_from_slice(&all_tokens_dense);
-            } else {
-                Self::walk_seed_trie(
-                    &trie.root,
-                    start_state,
-                    &mut masks[start_state as usize],
-                    &flat_transitions,
-                    &terminal_states,
-                    &node_reachable_dense,
-                );
-            }
-        }
+        // Parallel fill: each start_state is independent.
+        let masks: Vec<Box<[u64]>> = (0..state_count as u32)
+            .into_par_iter()
+            .map(|start_state| {
+                let mut mask = vec![0u64; dense_words];
+                if terminal_states[start_state as usize] {
+                    mask.copy_from_slice(&all_tokens_dense);
+                } else {
+                    Self::walk_seed_trie(
+                        &trie.root,
+                        start_state,
+                        &mut mask,
+                        &flat_transitions,
+                        &terminal_states,
+                        &node_reachable_dense,
+                    );
+                }
+                mask.into_boxed_slice()
+            })
+            .collect();
 
         // --- Validation: compare against old DFA-simulation implementation ---
         if std::env::var("GLRMASK_VALIDATE_SEED_STATE_DENSE").as_deref() == Ok("1") {
@@ -849,7 +856,7 @@ impl Constraint {
             }
 
             for (state_idx, (new, old)) in masks.iter().zip(old_masks.iter()).enumerate() {
-                if new != old {
+                if new.as_ref() != old.as_slice() {
                     eprintln!(
                         "[GLRMASK_VALIDATE_SEED_STATE_DENSE] MISMATCH state={} new={:016x?} old={:016x?}",
                         state_idx, new, old
@@ -865,9 +872,6 @@ impl Constraint {
         // ------------------------------------------------------------------
 
         masks
-            .into_iter()
-            .map(Vec::into_boxed_slice)
-            .collect()
     }
 
     fn or_internal_token_masks_to_buf(&self, internal_token: usize, buf: &mut [u32]) {
