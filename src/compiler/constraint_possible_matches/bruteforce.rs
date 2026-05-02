@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use range_set_blaze::RangeSetBlaze;
+use rustc_hash::FxHashMap;
 
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -9,7 +10,14 @@ use crate::ds::bitset::BitSet;
 use crate::ds::weight::Weight;
 use crate::grammar::flat::TerminalID;
 
-use super::RuntimePossibleMatchesByTerminal;
+use super::{
+    ConstraintVocabMap,
+    PossibleMatchSignature,
+    RuntimePossibleMatchesByTerminal,
+    SeedStateSignature,
+    build_constraint_vocab_map,
+    intern_signature_ids,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct BruteForcePossibleMatches {
@@ -22,6 +30,16 @@ pub(crate) struct BruteForcePossibleMatches {
     /// pipeline stage must merge/refine this id map with the parser-DWA id map
     /// before possible_matches and parser-DWA weights can be used together.
     pub(crate) id_map: ManyToOneIdMap,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BruteForceConstraintPossibleMatches {
+    /// Possible matches keyed by terminal. Each Weight maps original tokenizer
+    /// start states to token sets in `constraint_vocab`'s token space.
+    pub(crate) possible_matches: RuntimePossibleMatchesByTerminal,
+    /// Shared constraint-vocab map that refines the parser-DWA vocab map by the
+    /// brute-force possible-match and seed-state signatures.
+    pub(crate) constraint_vocab: ConstraintVocabMap,
 }
 
 /// Compute possible matches by direct simulation.
@@ -86,6 +104,113 @@ pub(crate) fn compute_possible_matches_bruteforce(
     }
 }
 
+/// Compute possible matches and the shared constraint-vocab map by direct simulation.
+///
+/// This is the simple, correctness-first version of the CPM pipeline. It computes
+/// the mathematical `(terminal, start_state, token)` relation directly, computes
+/// the two token signatures currently used by constraint-vocab refinement, builds
+/// the `ConstraintVocabMap`, and returns possible_matches already remapped into
+/// that constraint-vocab token space.
+///
+/// It is intentionally not the default large-vocab implementation: the literal
+/// complexity is `num_tokens * num_tokenizer_states * scan(token_bytes)`.
+pub(crate) fn compute_constraint_possible_matches_bruteforce(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    parser_vocab: &ManyToOneIdMap,
+) -> BruteForceConstraintPossibleMatches {
+    let all_terminals = BitSet::all(tokenizer.num_terminals as usize);
+    let mut terminal_state_original_tokens: BTreeMap<TerminalID, BTreeMap<u32, Vec<u32>>> =
+        BTreeMap::new();
+    let mut possible_match_signatures: FxHashMap<u32, PossibleMatchSignature> = FxHashMap::default();
+    let mut seed_state_signatures: FxHashMap<u32, SeedStateSignature> = FxHashMap::default();
+
+    for (&original_token_id, bytes) in &vocab.entries {
+        let mut possible_signature = PossibleMatchSignature::new();
+        let mut seed_signature = SeedStateSignature::new();
+
+        for start_state in 0..tokenizer.num_states() {
+            let (matched_terminals, _end_state) =
+                tokenizer.scan_terminal_matches_from_state(bytes, start_state, &all_terminals);
+
+            for terminal in matched_terminals.iter() {
+                let terminal_id = terminal as TerminalID;
+                possible_signature.push((start_state, terminal_id));
+                terminal_state_original_tokens
+                    .entry(terminal_id)
+                    .or_default()
+                    .entry(start_state)
+                    .or_default()
+                    .push(original_token_id);
+            }
+
+            if can_scan_token_for_seed_signature(tokenizer, bytes, start_state) {
+                seed_signature.push(start_state);
+            }
+        }
+
+        possible_signature.sort_unstable();
+        possible_signature.dedup();
+        seed_signature.sort_unstable();
+        seed_signature.dedup();
+        possible_match_signatures.insert(original_token_id, possible_signature);
+        seed_state_signatures.insert(original_token_id, seed_signature);
+    }
+
+    let possible_match_signature_ids = intern_signature_ids(possible_match_signatures);
+    let seed_state_signature_ids = intern_signature_ids(seed_state_signatures);
+    let constraint_vocab = build_constraint_vocab_map(
+        parser_vocab,
+        &vocab.entries,
+        &possible_match_signature_ids,
+        &seed_state_signature_ids,
+    );
+
+    let possible_matches = terminal_state_original_tokens
+        .into_iter()
+        .map(|(terminal, state_tokens)| {
+            let weight_entries = state_tokens.into_iter().map(|(state, original_token_ids)| {
+                let mut constraint_token_ids = original_token_ids
+                    .into_iter()
+                    .filter_map(|original_token_id| {
+                        constraint_vocab
+                            .original_to_internal
+                            .get(original_token_id as usize)
+                            .copied()
+                            .filter(|&internal_id| internal_id != u32::MAX)
+                    })
+                    .collect::<Vec<_>>();
+                constraint_token_ids.sort_unstable();
+                constraint_token_ids.dedup();
+                let token_set = RangeSetBlaze::from_iter(
+                    constraint_token_ids.into_iter().map(|id| id..=id),
+                );
+                (state, token_set)
+            });
+            (terminal, Weight::from_per_tsid_token_sets(weight_entries))
+        })
+        .collect();
+
+    BruteForceConstraintPossibleMatches {
+        possible_matches,
+        constraint_vocab,
+    }
+}
+
+fn can_scan_token_for_seed_signature(tokenizer: &Tokenizer, bytes: &[u8], start_state: u32) -> bool {
+    let mut state = start_state;
+    for &byte in bytes {
+        let Some(next) = tokenizer.step(state, byte) else {
+            return false;
+        };
+        state = next;
+        if !tokenizer.dfa.finalizers(state).is_zero() {
+            return true;
+        }
+    }
+    true
+}
+
 fn build_vocab_token_id_map(vocab: &Vocab) -> ManyToOneIdMap {
     let max_original_token_id = vocab.entries.keys().next_back().copied().unwrap_or(0);
     let mut original_to_internal = vec![u32::MAX; max_original_token_id as usize + 1];
@@ -111,6 +236,7 @@ mod tests {
     use super::*;
     use crate::automata::lexer::ast::bytes;
     use crate::compiler::compile::build_tokenizer_from_exprs;
+    use crate::compiler::stages::equiv_types::InternalIdMap;
 
     fn internal_id(result: &BruteForcePossibleMatches, original_token_id: u32) -> u32 {
         result.id_map.original_to_internal[original_token_id as usize]
@@ -203,5 +329,85 @@ mod tests {
         assert!(result.possible_matches.is_empty());
         // The id_map still gives the token an internal id.
         assert_eq!(result.id_map.original_to_internal[0], 0);
+    }
+
+    #[test]
+    fn brute_force_constraint_possible_matches_returns_constraint_vocab_space() {
+        let tokenizer = build_tokenizer_from_exprs(&[bytes(b"a"), bytes(b"ab"), bytes(b"b")]);
+        let vocab = Vocab::new(
+            vec![
+                (10, b"a".to_vec()),
+                (20, b"ab".to_vec()),
+                (30, b"b".to_vec()),
+                (40, b"c".to_vec()),
+            ],
+            None,
+        );
+        let internal_ids = InternalIdMap::build_identity(&tokenizer, &vocab);
+
+        let result = compute_constraint_possible_matches_bruteforce(
+            &tokenizer,
+            &vocab,
+            &internal_ids.vocab_tokens,
+        );
+
+        assert_eq!(
+            result.constraint_vocab.internal_to_originals,
+            vec![vec![10], vec![20], vec![30], vec![40]]
+        );
+
+        let start = tokenizer.start_state();
+        let after_a = tokenizer.run(b"a");
+        let token_a = result.constraint_vocab.original_to_internal[10];
+        let token_ab = result.constraint_vocab.original_to_internal[20];
+        let token_b = result.constraint_vocab.original_to_internal[30];
+        let token_c = result.constraint_vocab.original_to_internal[40];
+
+        let terminal_a_from_start = result.possible_matches[&0].tokens_for_tsid(start);
+        assert!(terminal_a_from_start.contains(token_a));
+        assert!(terminal_a_from_start.contains(token_ab));
+        assert!(!terminal_a_from_start.contains(token_b));
+        assert!(!terminal_a_from_start.contains(token_c));
+
+        let terminal_ab_from_start = result.possible_matches[&1].tokens_for_tsid(start);
+        assert!(terminal_ab_from_start.contains(token_ab));
+        assert!(!terminal_ab_from_start.contains(token_a));
+
+        let terminal_ab_from_after_a = result.possible_matches[&1].tokens_for_tsid(after_a);
+        assert!(terminal_ab_from_after_a.contains(token_b));
+    }
+
+    #[test]
+    fn brute_force_constraint_vocab_splits_parser_token_class_by_possible_matches() {
+        let tokenizer = build_tokenizer_from_exprs(&[bytes(b"a"), bytes(b"b")]);
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
+        let parser_vocab = ManyToOneIdMap {
+            original_to_internal: vec![0, 0],
+            internal_to_originals: vec![vec![0, 1]],
+            representative_original_ids: vec![0],
+        };
+
+        let result = compute_constraint_possible_matches_bruteforce(
+            &tokenizer,
+            &vocab,
+            &parser_vocab,
+        );
+
+        assert_eq!(result.constraint_vocab.internal_to_originals.len(), 2);
+        assert_ne!(
+            result.constraint_vocab.original_to_internal[0],
+            result.constraint_vocab.original_to_internal[1]
+        );
+
+        let start = tokenizer.start_state();
+        let token_a = result.constraint_vocab.original_to_internal[0];
+        let token_b = result.constraint_vocab.original_to_internal[1];
+
+        let terminal_a_from_start = result.possible_matches[&0].tokens_for_tsid(start);
+        let terminal_b_from_start = result.possible_matches[&1].tokens_for_tsid(start);
+        assert!(terminal_a_from_start.contains(token_a));
+        assert!(!terminal_a_from_start.contains(token_b));
+        assert!(terminal_b_from_start.contains(token_b));
+        assert!(!terminal_b_from_start.contains(token_a));
     }
 }

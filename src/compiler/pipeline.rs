@@ -856,293 +856,61 @@ independently proving possible_matches equivalence for your workload."
                 !matches!(v.as_str(), "0" | "false" | "no" | "off")
             });
 
-        let ((mut parser_dwa, parser_dwa_ms), (raw_possible_matches, trie_class_result, possible_matches_collect_ms)) =
-            rayon::join(
-                || {
-                    let parser_dwa_started_at = Instant::now();
-                    let parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
-                        &table,
-                        &analyzed_grammar,
-                        &terminal_dwa,
-                        templates,
-                        vocab,
-                        &internal_ids,
-                    );
-                    (parser_dwa, elapsed_ms(parser_dwa_started_at))
-                },
-                || {
-                    let pm_started_at = Instant::now();
-                    // IMPORTANT: Constraint possible_matches must be computed from
-                    // ORIGINAL vocab token bytes. Do not use parser-DWA
-                    // internal_token_bytes here. The parser-DWA token equivalence
-                    // relation is not valid for possible_matches.
-                    if debug_compile_stages {
-                        eprintln!("[glrmask/debug][compile_stage] raw_possible_matches_begin");
-                    }
-                    let token_entries: Vec<(usize, Vec<u8>)> = token_bytes
-                        .iter()
-                        .map(|(&token_id, bytes)| (token_id as usize, bytes.clone()))
-                        .collect();
-                    let trie_build_started_at = Instant::now();
-                    let trie = crate::ds::vocab_prefix_tree::VocabPrefixTree::build_owned(token_entries);
-                    let trie_build_ms = elapsed_ms(trie_build_started_at);
-                    let collect_started_at = Instant::now();
-                    // This is a dense original-token-id universe size, not a count
-                    // of parser-DWA internal tokens. Sparse original token ids require
-                    // max_original_token_id + 1 slots.
-                    let original_token_slots = max_original_token_slot(&token_bytes);
-                    let (pm_by_tsid, trie_class_result, dense_profile, profile_label, profile_state_count) = if use_internal_tsid_representatives {
-                        eprintln!(
-                            "[glrmask/diag][pm_reps_unsafe] using internal-tsid representatives as a diagnostic shortcut; this is not production-valid by construction"
-                        );
-                        let representative_states = &internal_ids.tokenizer_states.representative_original_ids;
-                        if std::env::var("GLRMASK_DIAG_PM_ROOT_SIG").map_or(false, |v| v == "1") {
-                            let root_signature_count = cpm::collector::count_root_child_internal_tsid_signatures(
-                                &tokenizer,
-                                &trie.root,
-                                representative_states,
-                                &internal_ids.tokenizer_states.original_to_internal,
-                            );
-                            eprintln!(
-                                "[glrmask/diag][pm_root_sig] rep_states={} unique_root_signatures={}",
-                                representative_states.len(),
-                                root_signature_count,
-                            );
-                        }
-                        let (representative_matches, profile) = cpm::collector::collect_possible_matches_by_selected_original_tsid_dense(
-                            &tokenizer,
-                            &trie.root,
-                            original_token_slots,
-                            representative_states,
-                        );
-                        (
-                            representative_matches,
-                            None,
-                            profile,
-                            "constraint_original_tokens_internal_tsid_reps",
-                            representative_states.len() as u32,
-                        )
-                    } else if trie_class_build_enabled {
-                        let all_states: Vec<u32> = (0..tokenizer.num_states()).collect();
-                        let (trie_class_result, profile) = cpm::collector::collect_possible_matches_dense_trie_class_build_with_classes(
-                            &tokenizer,
-                            &trie.root,
-                            original_token_slots,
-                            &all_states,
-                        );
-                        (
-                            BTreeMap::new(),
-                            Some(trie_class_result),
-                            profile,
-                            "constraint_original_tokens",
-                            tokenizer.num_states(),
-                        )
-                    } else {
-                        let (matches, profile) = cpm::collector::collect_possible_matches_by_original_tsid_dense(
-                            &tokenizer,
-                            &trie.root,
-                            original_token_slots,
-                        );
-                        (
-                            matches,
-                            None,
-                            profile,
-                            "constraint_original_tokens",
-                            tokenizer.num_states(),
-                        )
-                    };
-                    let collect_ms = elapsed_ms(collect_started_at);
-                    cpm::collector::emit_possible_matches_profile_summary(
-                        profile_label,
-                        token_bytes.len(),
-                        profile_state_count,
-                        trie_build_ms,
-                        collect_ms,
-                        &dense_profile,
-                    );
-                    if debug_compile_stages {
-                        eprintln!(
-                            "[glrmask/debug][compile_stage] raw_possible_matches_done trie_build_ms={:.3} collect_ms={:.3} profile_label={} profile_states={}",
-                            trie_build_ms,
-                            collect_ms,
-                            profile_label,
-                            profile_state_count,
-                        );
-                    }
-                    (pm_by_tsid, trie_class_result, elapsed_ms(pm_started_at))
-                },
-            );
+        let use_bruteforce_possible_matches =
+            strict_one_flag_enabled("GLRMASK_PM_BRUTE_FORCE");
 
-        let constraint_vocab_started_at = Instant::now();
-        if debug_compile_stages {
-            eprintln!(
-                "[glrmask/debug][compile_stage] constraint_vocab_begin possible_matches_ms={:.3}",
-                possible_matches_collect_ms,
+        // Compute constraint possible matches as its own stage, after all
+        // terminal-DWA partition/id-map work is complete.
+        let cpm_result = if use_bruteforce_possible_matches {
+            let started_at = Instant::now();
+            let brute = cpm::bruteforce::compute_constraint_possible_matches_bruteforce(
+                &tokenizer,
+                vocab,
+                &internal_ids.vocab_tokens,
             );
-        }
-        let tokens_with_same_bytes_started_at = Instant::now();
-        if debug_compile_stages {
-            eprintln!("[glrmask/debug][compile_stage] constraint_vocab_same_bytes_begin");
-        }
-        let tokens_with_same_bytes = cpm::build_tokens_with_same_bytes(&token_bytes);
-        let tokens_with_same_bytes_ms = elapsed_ms(tokens_with_same_bytes_started_at);
-        if debug_compile_stages {
-            eprintln!(
-                "[glrmask/debug][compile_stage] constraint_vocab_same_bytes_done ms={:.3}",
-                tokens_with_same_bytes_ms,
-            );
-        }
-        if compile_profile_summary_enabled() {
-            eprintln!(
-                "[glrmask/profile][constraint_vocab_step] step=same_bytes ms={:.3}",
-                tokens_with_same_bytes_ms,
-            );
-        }
-
-        let possible_match_signatures_started_at = Instant::now();
-        if debug_compile_stages {
-            eprintln!(
-                "[glrmask/debug][compile_stage] constraint_vocab_possible_match_signatures_begin"
-            );
-        }
-        let possible_match_signature_ids = if let Some(trie_class_result) = trie_class_result.as_ref() {
-            cpm::build_possible_match_signature_ids_from_trie_classes(
-                &trie_class_result.class_maps,
-                &trie_class_result.state_classes,
-                &token_bytes,
-                &tokens_with_same_bytes,
-            )
-        } else if use_internal_tsid_representatives {
-            cpm::intern_signature_ids(cpm::build_possible_match_signatures_by_internal_tsid(
-                &raw_possible_matches,
-                &token_bytes,
-                &tokens_with_same_bytes,
-                &internal_ids.tokenizer_states.original_to_internal,
-            ))
+            cpm::ConstraintPossibleMatchesComputation {
+                possible_matches: brute.possible_matches,
+                constraint_vocab: brute.constraint_vocab,
+                profile: cpm::ConstraintPossibleMatchesProfile {
+                    possible_matches_collect_ms: elapsed_ms(started_at),
+                    total_ms: elapsed_ms(started_at),
+                    ..Default::default()
+                },
+            }
         } else {
-            cpm::intern_signature_ids(cpm::build_possible_match_signatures(
-                &raw_possible_matches,
-                &token_bytes,
-                &tokens_with_same_bytes,
-            ))
-        };
-        let possible_match_signatures_ms = elapsed_ms(possible_match_signatures_started_at);
-        if debug_compile_stages {
-            eprintln!(
-                "[glrmask/debug][compile_stage] constraint_vocab_possible_match_signatures_done ms={:.3}",
-                possible_match_signatures_ms,
-            );
-        }
-        if compile_profile_summary_enabled() {
-            eprintln!(
-                "[glrmask/profile][constraint_vocab_step] step=possible_match_signatures ms={:.3}",
-                possible_match_signatures_ms,
-            );
-        }
-        let seed_state_signatures_started_at = Instant::now();
-        if debug_compile_stages {
-            eprintln!(
-                "[glrmask/debug][compile_stage] constraint_vocab_seed_state_signatures_begin"
-            );
-        }
-        let seed_state_signature_ids = if let Some(trie_class_result) = trie_class_result.as_ref() {
-            cpm::build_seed_state_signature_ids_from_trie_classes_exact(
+            cpm::compute_constraint_possible_matches(
                 &tokenizer,
                 &token_bytes,
-                &tokens_with_same_bytes,
-                &trie_class_result.state_classes,
+                &internal_ids,
+                cpm::ConstraintPossibleMatchesConfig {
+                    debug_compile_stages,
+                    profile_summary_enabled: compile_profile_summary_enabled(),
+                    use_internal_tsid_representatives,
+                    trie_class_build_enabled,
+                    diag_root_signature: std::env::var("GLRMASK_DIAG_PM_ROOT_SIG")
+                        .map_or(false, |v| v == "1"),
+                },
             )
-        } else {
-            cpm::intern_signature_ids(cpm::build_seed_state_signatures_trie(
-                &tokenizer,
-                &token_bytes,
-                &tokens_with_same_bytes,
-            ))
         };
-        let seed_state_signatures_ms = elapsed_ms(seed_state_signatures_started_at);
-        if debug_compile_stages {
-            eprintln!(
-                "[glrmask/debug][compile_stage] constraint_vocab_seed_state_signatures_done ms={:.3}",
-                seed_state_signatures_ms,
-            );
-        }
-        if compile_profile_summary_enabled() {
-            eprintln!(
-                "[glrmask/profile][constraint_vocab_step] step=seed_state_signatures ms={:.3}",
-                seed_state_signatures_ms,
-            );
-        }
-        let constraint_vocab_map_started_at = Instant::now();
-        if debug_compile_stages {
-            eprintln!("[glrmask/debug][compile_stage] constraint_vocab_build_map_begin");
-        }
-        let constraint_vocab = cpm::build_constraint_vocab_map(
-            &internal_ids.vocab_tokens,
-            &token_bytes,
-            &possible_match_signature_ids,
-            &seed_state_signature_ids,
+
+        let constraint_vocab = cpm_result.constraint_vocab;
+        let possible_matches = cpm_result.possible_matches;
+        let cpm_profile = cpm_result.profile;
+
+        // Build parser DWA now, after CPM is done. It no longer runs in
+        // parallel with possible matches; the old rayon::join is removed.
+        let parser_dwa_started_at = Instant::now();
+        let mut parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
+            &table,
+            &analyzed_grammar,
+            &terminal_dwa,
+            templates,
+            vocab,
+            &internal_ids,
         );
-        let constraint_vocab_map_ms = elapsed_ms(constraint_vocab_map_started_at);
-        if debug_compile_stages {
-            eprintln!(
-                "[glrmask/debug][compile_stage] constraint_vocab_build_map_done ms={:.3}",
-                constraint_vocab_map_ms,
-            );
-        }
-        if compile_profile_summary_enabled() {
-            eprintln!(
-                "[glrmask/profile][constraint_vocab_step] step=build_map ms={:.3}",
-                constraint_vocab_map_ms,
-            );
-        }
-        let constraint_token_count = constraint_vocab.internal_to_originals.len() as u32;
+        let parser_dwa_ms = elapsed_ms(parser_dwa_started_at);
 
-        let remap_possible_matches_started_at = Instant::now();
-        if debug_compile_stages {
-            eprintln!(
-                "[glrmask/debug][compile_stage] constraint_vocab_remap_possible_matches_begin constraint_token_count={}",
-                constraint_token_count,
-            );
-        }
-        let possible_matches = if let Some(trie_class_result) = trie_class_result.as_ref() {
-            cpm::remap_class_maps_to_constraint_vocab(
-                &trie_class_result.class_maps,
-                &trie_class_result.state_classes,
-                &constraint_vocab.original_to_internal,
-                constraint_token_count,
-                &tokens_with_same_bytes,
-            )
-        } else {
-            let raw_possible_matches = if use_internal_tsid_representatives {
-                cpm::expand_possible_matches_to_original_states(
-                    &raw_possible_matches,
-                    &internal_ids.tokenizer_states.internal_to_originals,
-                    &internal_ids.tokenizer_states.representative_original_ids,
-                )
-            } else {
-                raw_possible_matches
-            };
-            cpm::remap_possible_matches_to_constraint_vocab(
-                raw_possible_matches,
-                &constraint_vocab.original_to_internal,
-                constraint_token_count,
-                &tokens_with_same_bytes,
-            )
-        };
-        let remap_possible_matches_ms = elapsed_ms(remap_possible_matches_started_at);
-        if debug_compile_stages {
-            eprintln!(
-                "[glrmask/debug][compile_stage] constraint_vocab_remap_possible_matches_done ms={:.3}",
-                remap_possible_matches_ms,
-            );
-        }
-        if compile_profile_summary_enabled() {
-            eprintln!(
-                "[glrmask/profile][constraint_vocab_step] step=remap_possible_matches ms={:.3}",
-                remap_possible_matches_ms,
-            );
-        }
-
+        // Remap parser DWA into the constraint-vocab token space.
         let remap_parser_dwa_started_at = Instant::now();
         remap_parser_dwa_to_constraint_vocab(
             &mut parser_dwa,
@@ -1155,13 +923,6 @@ independently proving possible_matches equivalence for your workload."
                 remap_parser_dwa_ms,
             );
         }
-        let constraint_vocab_ms = elapsed_ms(constraint_vocab_started_at);
-        if debug_compile_stages {
-            eprintln!(
-                "[glrmask/debug][compile_stage] constraint_vocab_done ms={:.3}",
-                constraint_vocab_ms,
-            );
-        }
 
         if compile_profile_summary_enabled() {
             let split_parser_tokens = constraint_vocab
@@ -1170,19 +931,30 @@ independently proving possible_matches equivalence for your workload."
                 .filter(|mapped| mapped.len() > 1)
                 .count();
 
-            eprintln!(
-                "[glrmask/profile][constraint_vocab] parser_tokens={} constraint_tokens={} split_parser_tokens={} reconcile_ms={:.3} same_bytes_ms={:.3} possible_match_signatures_ms={:.3} seed_state_signatures_ms={:.3} build_map_ms={:.3} remap_possible_matches_ms={:.3} remap_parser_dwa_ms={:.3}",
-                internal_ids.vocab_tokens.num_internal_ids(),
-                constraint_token_count,
-                split_parser_tokens,
-                constraint_vocab_ms,
-                tokens_with_same_bytes_ms,
-                possible_match_signatures_ms,
-                seed_state_signatures_ms,
-                constraint_vocab_map_ms,
-                remap_possible_matches_ms,
-                remap_parser_dwa_ms,
-            );
+            if use_bruteforce_possible_matches {
+                eprintln!(
+                    "[glrmask/profile][constraint_vocab] mode=bruteforce parser_tokens={} constraint_tokens={} split_parser_tokens={} possible_matches_ms={:.3} remap_parser_dwa_ms={:.3}",
+                    internal_ids.vocab_tokens.num_internal_ids(),
+                    constraint_vocab.internal_to_originals.len(),
+                    split_parser_tokens,
+                    cpm_profile.possible_matches_collect_ms,
+                    remap_parser_dwa_ms,
+                );
+            } else {
+                eprintln!(
+                    "[glrmask/profile][constraint_vocab] parser_tokens={} constraint_tokens={} split_parser_tokens={} reconcile_ms={:.3} same_bytes_ms={:.3} possible_match_signatures_ms={:.3} seed_state_signatures_ms={:.3} build_map_ms={:.3} remap_possible_matches_ms={:.3} remap_parser_dwa_ms={:.3}",
+                    internal_ids.vocab_tokens.num_internal_ids(),
+                    constraint_vocab.internal_to_originals.len(),
+                    split_parser_tokens,
+                    cpm_profile.constraint_vocab_ms + remap_parser_dwa_ms,
+                    cpm_profile.same_bytes_ms,
+                    cpm_profile.possible_match_signatures_ms,
+                    cpm_profile.seed_state_signatures_ms,
+                    cpm_profile.build_map_ms,
+                    cpm_profile.remap_possible_matches_ms,
+                    remap_parser_dwa_ms,
+                );
+            }
         }
 
         let internal_token_bytes_started_at = Instant::now();
@@ -1193,7 +965,8 @@ independently proving possible_matches equivalence for your workload."
         let internal_token_bytes_ms = elapsed_ms(internal_token_bytes_started_at);
 
         profile.parser_dwa_ms = parser_dwa_ms;
-        profile.permute_possible_matches_ms = possible_matches_collect_ms + constraint_vocab_ms;
+        profile.permute_possible_matches_ms =
+            cpm_profile.possible_matches_collect_ms + cpm_profile.constraint_vocab_ms + remap_parser_dwa_ms;
         profile.internal_token_bytes_ms = internal_token_bytes_ms;
         if debug_compile_stages {
             eprintln!(
@@ -1544,5 +1317,71 @@ mod tests {
         let expected = brute_force_seed_state_signatures(&constraint.tokenizer, &token_bytes);
 
         assert_eq!(actual, expected);
+    }
+
+    fn with_env_var<T>(name: &'static str, value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        use std::ffi::OsString;
+        use std::sync::OnceLock;
+
+        static ENV_LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+
+        struct EnvRestoreGuard {
+            name: &'static str,
+            old_value: Option<OsString>,
+        }
+
+        impl Drop for EnvRestoreGuard {
+            fn drop(&mut self) {
+                match self.old_value.take() {
+                    Some(old_value) => unsafe { std::env::set_var(self.name, old_value); },
+                    None => unsafe { std::env::remove_var(self.name); },
+                }
+            }
+        }
+
+        let lock = ENV_LOCK.get_or_init(|| std::sync::Mutex::new(()));
+        let _lock_guard = lock.lock().expect("env lock poisoned");
+        let _restore_guard = EnvRestoreGuard {
+            name,
+            old_value: std::env::var_os(name),
+        };
+
+        match value {
+            Some(value) => unsafe { std::env::set_var(name, value); },
+            None => unsafe { std::env::remove_var(name); },
+        }
+
+        f()
+    }
+
+    #[test]
+    fn brute_force_possible_matches_pipeline_smoke() {
+        with_env_var("GLRMASK_PM_BRUTE_FORCE", Some("1"), || {
+            let vocab = Vocab::new(
+                vec![
+                    (0, b"a".to_vec()),
+                    (1, b"b".to_vec()),
+                    (2, b"ab".to_vec()),
+                ],
+                None,
+            );
+            let constraint = Constraint::from_glrm_grammar(
+                r#"
+                    start start;
+                    nt start ::= "a" | "b" | "ab";
+                "#,
+                &vocab,
+            )
+            .unwrap();
+
+            let initial_state = constraint.tokenizer.initial_state();
+            let possible_matches = constraint.possible_matches_for_state(initial_state);
+            assert!(!possible_matches.is_empty());
+            assert!(
+                possible_matches.values().any(|tokens| !tokens.is_empty()),
+                "brute-force pipeline should produce non-empty possible matches"
+            );
+            assert_eq!(constraint.original_token_to_internal.len(), 3);
+        });
     }
 }
