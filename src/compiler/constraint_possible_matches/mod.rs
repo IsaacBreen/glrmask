@@ -1172,6 +1172,106 @@ fn remap_dense_maps_to_constraint_vocab(
         .collect()
 }
 
+fn build_terminal_vocab_token_entries(
+    token_bytes: &BTreeMap<u32, Vec<u8>>,
+    original_to_internal: &[u32],
+) -> Vec<(usize, Vec<u8>)> {
+    token_bytes
+        .iter()
+        .filter_map(|(&original_token_id, bytes)| {
+            let internal_id = original_to_internal
+                .get(original_token_id as usize)
+                .copied()
+                .unwrap_or(u32::MAX);
+            (internal_id != u32::MAX).then(|| (internal_id as usize, bytes.clone()))
+        })
+        .collect()
+}
+
+fn range_set_from_dense_words(words: &[u64]) -> RangeSetBlaze<u32> {
+    let mut ids = Vec::new();
+    for_each_dense_bit(words, |token_id| ids.push(token_id));
+    range_set_from_sorted_ids(&ids)
+}
+
+pub(crate) fn class_maps_to_runtime_possible_matches_shared(
+    class_maps: &[Arc<DensePossibleMatchMap>],
+    state_classes: &[u32],
+) -> RuntimePossibleMatchesByTerminal {
+    let mut bitmap_cache: FxHashMap<Box<[u64]>, Arc<RangeSetBlaze<u32>>> = FxHashMap::default();
+    let mut class_token_set_cache: FxHashMap<u32, BTreeMap<TerminalID, Arc<RangeSetBlaze<u32>>>> = FxHashMap::default();
+
+    for (class_id, class_map) in class_maps.iter().enumerate() {
+        let mut terminal_sets = BTreeMap::new();
+        for (&terminal_id, bitmap) in class_map.iter() {
+            let token_set = bitmap_cache
+                .entry(bitmap.clone())
+                .or_insert_with(|| shared_rangeset(range_set_from_dense_words(bitmap)))
+                .clone();
+            if !token_set.is_empty() {
+                terminal_sets.insert(terminal_id, token_set);
+            }
+        }
+        class_token_set_cache.insert(class_id as u32, terminal_sets);
+    }
+
+    let mut terminal_entries: BTreeMap<TerminalID, Vec<(u32, Arc<RangeSetBlaze<u32>>)>> = BTreeMap::new();
+    for (state_id, &class_id) in state_classes.iter().enumerate() {
+        if class_id == u32::MAX {
+            continue;
+        }
+        let Some(terminal_sets) = class_token_set_cache.get(&class_id) else {
+            continue;
+        };
+        for (&terminal_id, token_set) in terminal_sets {
+            terminal_entries
+                .entry(terminal_id)
+                .or_default()
+                .push((state_id as u32, Arc::clone(token_set)));
+        }
+    }
+
+    terminal_entries
+        .into_iter()
+        .map(|(terminal_id, mut entries)| {
+            entries.sort_by_key(|(state, _)| *state);
+            let weight = Weight::from_per_tsid_shared(entries.into_iter());
+            (terminal_id, weight)
+        })
+        .collect()
+}
+
+pub(crate) fn dense_maps_to_runtime_possible_matches_shared(
+    maps: DensePossibleMatchesByState,
+) -> RuntimePossibleMatchesByTerminal {
+    let mut bitmap_cache: FxHashMap<Box<[u64]>, Arc<RangeSetBlaze<u32>>> = FxHashMap::default();
+    let mut terminal_entries: BTreeMap<TerminalID, Vec<(u32, Arc<RangeSetBlaze<u32>>)>> = BTreeMap::new();
+
+    for (state_id, terminals) in maps {
+        for (&terminal_id, bitmap) in terminals.iter() {
+            let token_set = bitmap_cache
+                .entry(bitmap.clone())
+                .or_insert_with(|| shared_rangeset(range_set_from_dense_words(bitmap)))
+                .clone();
+            if !token_set.is_empty() {
+                terminal_entries
+                    .entry(terminal_id)
+                    .or_default()
+                    .push((state_id, token_set));
+            }
+        }
+    }
+
+    terminal_entries
+        .into_iter()
+        .map(|(terminal_id, mut entries)| {
+            entries.sort_by_key(|(state, _)| *state);
+            let weight = Weight::from_per_tsid_shared(entries.into_iter());
+            (terminal_id, weight)
+        })
+        .collect()
+}
+
 pub(crate) fn remap_class_maps_to_existing_vocab_fast(
     class_maps: &[Arc<DensePossibleMatchMap>],
     state_classes: &[u32],
@@ -1428,16 +1528,16 @@ pub(crate) fn compute_constraint_possible_matches(
         eprintln!("[glrmask/debug][compile_stage] raw_possible_matches_begin");
     }
 
-    let token_entries: Vec<(usize, Vec<u8>)> = token_bytes
-        .iter()
-        .map(|(&token_id, bytes)| (token_id as usize, bytes.clone()))
-        .collect();
+    let token_entries = build_terminal_vocab_token_entries(
+        token_bytes,
+        &internal_ids.vocab_tokens.original_to_internal,
+    );
     let trie_build_started_at = Instant::now();
     let trie = VocabPrefixTree::build_owned(token_entries);
     let trie_build_ms = elapsed_ms(trie_build_started_at);
 
     let collect_started_at = Instant::now();
-    let original_token_slots = max_original_token_slot(token_bytes);
+    let terminal_vocab_token_count = internal_ids.vocab_tokens.num_internal_ids();
 
     let (raw_possible_matches, trie_class_result, dense_profile, profile_label, profile_state_count) =
         if config.use_internal_tsid_representatives {
@@ -1461,14 +1561,14 @@ pub(crate) fn compute_constraint_possible_matches(
             let (representative_matches, profile) = collector::collect_possible_matches_by_selected_original_tsid_dense(
                 tokenizer,
                 &trie.root,
-                original_token_slots,
+                terminal_vocab_token_count,
                 representative_states,
             );
             (
                 representative_matches,
                 None,
                 profile,
-                "constraint_original_tokens_internal_tsid_reps",
+                "constraint_terminal_vocab_tokens",
                 representative_states.len() as u32,
             )
         } else if config.trie_class_build_enabled {
@@ -1479,7 +1579,7 @@ pub(crate) fn compute_constraint_possible_matches(
             let (mut trie_class_result, profile) = collector::collect_possible_matches_dense_trie_class_build_with_classes(
                 tokenizer,
                 &trie.root,
-                original_token_slots,
+                terminal_vocab_token_count,
                 &trie_build_states,
             );
             // Compose dense root state_classes through initial_state_map.
@@ -1496,20 +1596,20 @@ pub(crate) fn compute_constraint_possible_matches(
                 BTreeMap::new(),
                 Some(trie_class_result),
                 profile,
-                "constraint_original_tokens",
+                "constraint_terminal_vocab_tokens",
                 trie_build_states.len() as u32,
             )
         } else {
             let (matches, profile) = collector::collect_possible_matches_by_original_tsid_dense(
                 tokenizer,
                 &trie.root,
-                original_token_slots,
+                terminal_vocab_token_count,
             );
             (
                 matches,
                 None,
                 profile,
-                "constraint_original_tokens",
+                "constraint_terminal_vocab_tokens",
                 tokenizer.num_states(),
             )
         };
@@ -1541,23 +1641,9 @@ pub(crate) fn compute_constraint_possible_matches(
 
     let constraint_vocab_started_at = Instant::now();
 
-    let tokens_with_same_bytes_started_at = Instant::now();
+    let same_bytes_ms = 0.0;
     if config.debug_compile_stages {
-        eprintln!("[glrmask/debug][compile_stage] constraint_vocab_same_bytes_begin");
-    }
-    let tokens_with_same_bytes = build_tokens_with_same_bytes(token_bytes);
-    let same_bytes_ms = elapsed_ms(tokens_with_same_bytes_started_at);
-    if config.debug_compile_stages {
-        eprintln!(
-            "[glrmask/debug][compile_stage] constraint_vocab_same_bytes_done ms={:.3}",
-            same_bytes_ms,
-        );
-    }
-    if config.profile_summary_enabled {
-        eprintln!(
-            "[glrmask/profile][constraint_vocab_step] step=same_bytes ms={:.3}",
-            same_bytes_ms,
-        );
+        eprintln!("[glrmask/debug][compile_stage] constraint_vocab_same_bytes_done ms=0.0 (no same-bytes needed for terminal-vocab PM)");
     }
 
     // Fast path: possible-matches are produced in terminal-DWA vocab space,
@@ -1598,12 +1684,9 @@ pub(crate) fn compute_constraint_possible_matches(
         );
     }
     let possible_matches = if let Some(trie_class_result) = trie_class_result.as_ref() {
-        remap_class_maps_to_existing_vocab_fast(
+        class_maps_to_runtime_possible_matches_shared(
             &trie_class_result.class_maps,
             &trie_class_result.state_classes,
-            &constraint_vocab.original_to_internal,
-            constraint_token_count,
-            &tokens_with_same_bytes,
         )
     } else {
         let raw_possible_matches = if config.use_internal_tsid_representatives {
@@ -1615,12 +1698,7 @@ pub(crate) fn compute_constraint_possible_matches(
         } else {
             raw_possible_matches
         };
-        remap_possible_matches_to_constraint_vocab(
-            raw_possible_matches,
-            &constraint_vocab.original_to_internal,
-            constraint_token_count,
-            &tokens_with_same_bytes,
-        )
+        dense_maps_to_runtime_possible_matches_shared(raw_possible_matches)
     };
     let remap_possible_matches_ms = elapsed_ms(remap_possible_matches_started_at);
     if config.debug_compile_stages {

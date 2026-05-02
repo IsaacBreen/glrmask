@@ -518,6 +518,7 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
     let mut stamp_gen: u32 = 0;
     let mut terminal_stamps: Vec<u32> = vec![0; num_terminals];
 
+
     let t_root_start = Instant::now();
 
     struct TrieBuildTimings {
@@ -754,50 +755,97 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
         }
 
         let t_sig = Instant::now();
-        let mut signature_buckets: FxHashMap<u64, Vec<SignatureEntry>> = FxHashMap::default();
         let mut representative_states = Vec::new();
         let mut representative_state_positions = Vec::new();
         let mut classes = vec![u32::MAX; tokenizer.num_states() as usize];
-        let mut next_class_id: u32 = 0;
 
-        for (state_pos, &state) in active_states.iter().enumerate() {
-            let node_terminals_id = if node.has_token() {
-                node_terminal_ids[state as usize]
-            } else {
-                empty_terminals_id
-            };
-
-            let mut hash: u64 = mix_signature_word(0, node_terminals_id);
-            let mut sig_small = SmallVec::<[u32; 16]>::with_capacity(child_data.len() * 2 + 1);
-            sig_small.push(node_terminals_id);
-            for child in child_data.iter() {
-                let segment_outcome = child.outcomes[state_pos];
-                let child_class_id = child.child_class_ids[state_pos];
-                sig_small.push(segment_outcome.terminals_id);
-                sig_small.push(child_class_id);
-                hash = mix_signature_word(hash, segment_outcome.terminals_id);
-                hash = mix_signature_word(hash, child_class_id);
-            }
-
-            let bucket = signature_buckets.entry(hash).or_default();
-            let mut found = false;
-            for entry in bucket.iter() {
-                if entry.words == sig_small.as_slice() {
-                    classes[state as usize] = entry.class_id;
-                    found = true;
-                    break;
+        match child_data.len() {
+            0 => {
+                if node.has_token() {
+                    let mut class_by_terminal_id: FxHashMap<u32, u32> = FxHashMap::default();
+                    for (state_pos, &state) in active_states.iter().enumerate() {
+                        let node_terminals_id = node_terminal_ids[state as usize];
+                        let class_id = *class_by_terminal_id.entry(node_terminals_id).or_insert_with(|| {
+                            let class_id = representative_states.len() as u32;
+                            representative_states.push(state);
+                            representative_state_positions.push(state_pos);
+                            class_id
+                        });
+                        classes[state as usize] = class_id;
+                    }
+                } else if let Some(&state) = active_states.first() {
+                    representative_states.push(state);
+                    representative_state_positions.push(0);
+                    for &state in active_states {
+                        classes[state as usize] = 0;
+                    }
                 }
             }
-            if !found {
-                let class_id = next_class_id;
-                next_class_id += 1;
-                classes[state as usize] = class_id;
-                representative_states.push(state);
-                representative_state_positions.push(state_pos);
-                bucket.push(SignatureEntry {
-                    words: sig_small.into_vec(),
-                    class_id,
-                });
+            1 => {
+                let child = &child_data[0];
+                let mut class_by_signature: FxHashMap<(u32, u32, u32), u32> = FxHashMap::default();
+                for (state_pos, &state) in active_states.iter().enumerate() {
+                    let node_terminals_id = if node.has_token() {
+                        node_terminal_ids[state as usize]
+                    } else {
+                        empty_terminals_id
+                    };
+                    let segment_outcome = child.outcomes[state_pos];
+                    let child_class_id = child.child_class_ids[state_pos];
+                    let signature = (node_terminals_id, segment_outcome.terminals_id, child_class_id);
+                    let class_id = *class_by_signature.entry(signature).or_insert_with(|| {
+                        let class_id = representative_states.len() as u32;
+                        representative_states.push(state);
+                        representative_state_positions.push(state_pos);
+                        class_id
+                    });
+                    classes[state as usize] = class_id;
+                }
+            }
+            _ => {
+                let mut signature_buckets: FxHashMap<u64, Vec<SignatureEntry>> = FxHashMap::default();
+                let mut next_class_id: u32 = 0;
+
+                for (state_pos, &state) in active_states.iter().enumerate() {
+                    let node_terminals_id = if node.has_token() {
+                        node_terminal_ids[state as usize]
+                    } else {
+                        empty_terminals_id
+                    };
+
+                    let mut hash: u64 = mix_signature_word(0, node_terminals_id);
+                    let mut sig_small = SmallVec::<[u32; 16]>::with_capacity(child_data.len() * 2 + 1);
+                    sig_small.push(node_terminals_id);
+                    for child in child_data.iter() {
+                        let segment_outcome = child.outcomes[state_pos];
+                        let child_class_id = child.child_class_ids[state_pos];
+                        sig_small.push(segment_outcome.terminals_id);
+                        sig_small.push(child_class_id);
+                        hash = mix_signature_word(hash, segment_outcome.terminals_id);
+                        hash = mix_signature_word(hash, child_class_id);
+                    }
+
+                    let bucket = signature_buckets.entry(hash).or_default();
+                    let mut found = false;
+                    for entry in bucket.iter() {
+                        if entry.words == sig_small.as_slice() {
+                            classes[state as usize] = entry.class_id;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        let class_id = next_class_id;
+                        next_class_id += 1;
+                        classes[state as usize] = class_id;
+                        representative_states.push(state);
+                        representative_state_positions.push(state_pos);
+                        bucket.push(SignatureEntry {
+                            words: sig_small.into_vec(),
+                            class_id,
+                        });
+                    }
+                }
             }
         }
         timings.signature_hash_ms += elapsed_ms(t_sig);
