@@ -301,7 +301,6 @@ fn contains_literal_prefix(expr: &GrammarExpr, prefix: &[u8]) -> bool {
 }
 
 #[test]
-#[should_panic(expected = "byte should be allowed at index")]
 fn test_uri_reg_name_chunking_regression_repro_commit_rejects_on_valid_prefix() {
         // Minimal schema that exercises the same URI host/path boundary behavior
         // seen in o1051 profiling.
@@ -324,7 +323,7 @@ fn test_uri_reg_name_chunking_regression_repro_commit_rejects_on_valid_prefix() 
         let constraint = schema_constraint_direct_compile(schema, &vocab);
         let mut state = constraint.start();
 
-        let payload = br#"{"portrait":"https://www.example.com/h"}"#;
+        let payload = br#"{"portrait": "https://www.example.com/h"}"#;
         for (idx, &byte) in payload.iter().enumerate() {
                 let mask = state.mask();
                 assert_token_allowed(
@@ -2459,6 +2458,20 @@ fn test_o69752_max_stack_size2() {
 
     let max_paths = max_parser_paths_over_prefix(&constraint, prefix);
     assert_eq!(max_paths, 1, "max paths {} should be 1", max_paths);
+}
+
+#[test]
+fn test_uri_allows_fragment_after_authority_prefix() {
+    let constraint = schema_constraint(r#"{"type":"string","format":"uri"}"#);
+    let mut state = constraint.start();
+    advance_byte_prefix(&mut state, br#""https://www"#);
+    let mask = state.mask();
+    assert_token_allowed(
+        &mask,
+        b'#' as usize,
+        "URI fragment delimiter should be allowed after authority host",
+    );
+    state.commit_token(b'#' as u32).unwrap();
 }
 
 #[test]

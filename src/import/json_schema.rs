@@ -6490,12 +6490,20 @@ impl<'a> SchemaCtx<'a> {
                 ])))
             }
             "uri" if use_structured_uri() => {
-                Ok(self.build_structured_uri_expr())
+                Ok(self.build_fast_uri_expr())
             }
             _ => json_format_pattern(format_name)
                 .map(|pattern| self.build_json_wrapped_fullmatch_pattern(&pattern, "JSON_FORMAT_STRING"))
                 .ok_or_else(|| GlrMaskError::GrammarParse(format!("Unknown format: {format_name}"))),
         }
+    }
+
+    fn build_fast_uri_expr(&mut self) -> GrammarExpr {
+        const URI_CHAR: &str = r#"[a-zA-Z0-9\-._~!$&'()*+,;=:@/?\[\]%]"#;
+        let pattern = format!(
+            r#"[a-zA-Z][a-zA-Z0-9+\-.]*:{URI_CHAR}*(?:#{URI_CHAR}*)?"#
+        );
+        self.build_json_wrapped_fullmatch_pattern(&pattern, "JSON_FORMAT_URI")
     }
 
     fn build_structured_uri_expr(&mut self) -> GrammarExpr {
