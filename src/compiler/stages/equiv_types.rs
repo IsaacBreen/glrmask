@@ -103,6 +103,28 @@ impl ManyToOneIdMap {
             .map(|i| i as u32)
             .unwrap_or(0)
     }
+
+    /// Fill any unmapped original entries (`u32::MAX`) into a new
+    /// internal class.  This is safe when the simplified DFA dropped
+    /// states that had no active-terminal future: they get a class that
+    /// contributes no allowed tokens.
+    pub fn fill_unmapped_with_new_class(mut self) -> Self {
+        if !self.original_to_internal.iter().any(|&id| id == u32::MAX) {
+            return self;
+        }
+        let new_internal = self.internal_to_originals.len() as u32;
+        let mut originals = Vec::new();
+        for (original, internal) in self.original_to_internal.iter_mut().enumerate() {
+            if *internal == u32::MAX {
+                *internal = new_internal;
+                originals.push(original as u32);
+            }
+        }
+        let representative = originals.first().copied().unwrap_or(u32::MAX);
+        self.internal_to_originals.push(originals);
+        self.representative_original_ids.push(representative);
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
