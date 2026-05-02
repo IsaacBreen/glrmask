@@ -481,8 +481,33 @@ pub(crate) fn build_id_map_and_terminal_dwa(
 
     // Global max-length state equivalence map (used as initial state grouping
     // for downstream partitioning and constraint-possible-matches).
+    // Default is identity (skipped). Set GLRMASK_USE_GLOBAL_MAX_LENGTH_STATE_MAP=1
+    // to enable the full max-length prepass.
+    let use_global_max_length_state_map = std::env::var("GLRMASK_USE_GLOBAL_MAX_LENGTH_STATE_MAP")
+        .map_or(false, |value| value == "1");
     let global_max_length_started_at = Instant::now();
-    let global_max_length_state_map = build_global_max_length_state_map(tokenizer, vocab, &flat_trans);
+    let global_max_length_state_map = if use_global_max_length_state_map {
+        build_global_max_length_state_map(tokenizer, vocab, &flat_trans)
+    } else {
+        let num_states = tokenizer.num_states() as usize;
+        let original_to_internal: Vec<u32> = (0..num_states as u32).collect();
+        let internal_to_originals: Vec<Vec<u32>> = (0..num_states as u32).map(|state| vec![state]).collect();
+        let representative_original_ids: Vec<u32> = (0..num_states as u32).collect();
+        if compile_profile_enabled() || debug_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][global_max_length] states={} reps={} tokens={} ms={:.3} skipped=1",
+                num_states,
+                num_states,
+                vocab.entries.len(),
+                global_max_length_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        ManyToOneIdMap {
+            original_to_internal,
+            internal_to_originals,
+            representative_original_ids,
+        }
+    };
     profile.id_map_ms += global_max_length_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // Lazily-initialized shared compact transition table cache.
