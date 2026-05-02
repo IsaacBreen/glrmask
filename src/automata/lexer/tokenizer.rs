@@ -195,6 +195,63 @@ impl Tokenizer {
         self.possible_future_terminals(state)
     }
 
+    /// Scan input bytes and report which terminals of interest matched/finalized.
+    ///
+    /// Returns a bitset of matched terminals and an optional end state.
+    ///
+    /// Algorithm:
+    /// 1. `remaining = terminals_of_interest`.
+    /// 2. `matched = empty`.
+    /// 3. For each byte:
+    ///    - Check if current state's possible futures overlap `remaining`.
+    ///      If not, return `(matched, None)`.
+    ///    - Consume byte → next state.
+    ///    - If no transition, return `(matched, None)`.
+    ///    - Get finalizers at next state, intersect with `remaining`.
+    ///    - Add intersection to `matched`, remove from `remaining`.
+    /// 4. After all bytes, check futures at end state overlap `remaining`.
+    ///    If not, return `(matched, None)`. Otherwise `(matched, Some(end_state))`.
+    ///
+    /// Important: initial-state finalizers are intentionally ignored.
+    /// Only post-byte finalizers count.
+    ///
+    /// `terminals_of_interest` must have length equal to `self.num_terminals`.
+    pub fn scan_terminal_matches_from_state(
+        &self,
+        input: &[u8],
+        start: u32,
+        terminals_of_interest: &BitSet,
+    ) -> (BitSet, Option<u32>) {
+        debug_assert_eq!(terminals_of_interest.len(), self.num_terminals as usize);
+        let mut remaining = terminals_of_interest.clone();
+        let mut matched = BitSet::new(self.num_terminals as usize);
+        let mut state = start;
+
+        for &byte in input {
+            let futures = self.possible_future_terminals(state);
+            if futures.is_disjoint(&remaining) {
+                return (matched, None);
+            }
+
+            let next = match self.step(state, byte) {
+                Some(s) => s,
+                None => return (matched, None),
+            };
+
+            let finals = self.dfa.finalizers(next).intersection(&remaining);
+            matched.union_with(&finals);
+            remaining = remaining.difference(&finals);
+            state = next;
+        }
+
+        let futures = self.possible_future_terminals(state);
+        if futures.is_disjoint(&remaining) {
+            (matched, None)
+        } else {
+            (matched, Some(state))
+        }
+    }
+
     fn has_incoming_start_transitions(&self, start: u32) -> bool {
         self.dfa
             .states()
@@ -310,5 +367,106 @@ mod tests {
                 (2, BTreeSet::from([1])),
             ]
         );
+    }
+
+    #[test]
+    fn test_scan_terminal_matches_ignores_initial_state_finalizer() {
+        // Terminal 0 matches "" or "a"; terminal 1 matches "b".
+        let tokenizer = build_tokenizer_from_exprs(&[
+            parse_regex("a?", true),
+            bytes(b"b"),
+        ]);
+        let mut interest = BitSet::new(tokenizer.num_terminals as usize);
+        interest.set(0);
+        let (matched, end_state) =
+            tokenizer.scan_terminal_matches_from_state(b"", tokenizer.start_state(), &interest);
+        assert!(matched.is_empty(), "initial state finalizer should be ignored");
+        assert!(
+            end_state.is_some(),
+            "futures should still overlap since terminal 0 can match 'a'"
+        );
+    }
+
+    #[test]
+    fn test_scan_terminal_matches_returns_matched_terminals_after_bytes() {
+        // Terminal 0 = "a", terminal 1 = "aa".
+        // After consuming "a", terminal 0 matched and terminal 1 remains
+        // with a future (can continue with another "a").
+        let tokenizer = build_tokenizer_from_exprs(&[bytes(b"a"), bytes(b"aa")]);
+        let mut interest = BitSet::new(tokenizer.num_terminals as usize);
+        interest.set(0);
+        interest.set(1);
+        let (matched, end_state) =
+            tokenizer.scan_terminal_matches_from_state(b"a", tokenizer.start_state(), &interest);
+        assert!(matched.contains(0), "terminal 0 ('a') should match");
+        assert!(!matched.contains(1), "terminal 1 ('aa') should not match yet");
+        assert!(end_state.is_some(), "end state should exist because terminal 1 still has a future");
+    }
+
+    #[test]
+    fn test_scan_terminal_matches_returns_none_when_futures_diverge() {
+        // Terminal 0 = "a", terminal 1 = "b".
+        // After consuming "a", terminal 1 has no future from the end state.
+        let tokenizer = build_tokenizer_from_exprs(&[bytes(b"a"), bytes(b"b")]);
+        let mut interest = BitSet::new(tokenizer.num_terminals as usize);
+        interest.set(0);
+        interest.set(1);
+        let (matched, end_state) =
+            tokenizer.scan_terminal_matches_from_state(b"a", tokenizer.start_state(), &interest);
+        // Terminal 0 matched, terminal 1 remained in `remaining` but has no future.
+        assert!(matched.contains(0));
+        assert!(!matched.contains(1));
+        assert!(
+            end_state.is_none(),
+            "end state should be None because futures of end state do not overlap remaining"
+        );
+    }
+
+    #[test]
+    fn test_scan_terminal_matches_returns_some_when_end_state_still_has_future() {
+        // Terminal 0 = "a", terminal 1 = "ab".
+        // After consuming "a", terminal 0 matched. Terminal 1 remains and
+        // the end state still has a future for terminal 1 (can continue with 'b').
+        let tokenizer = build_tokenizer_from_exprs(&[bytes(b"a"), bytes(b"ab")]);
+        let mut interest = BitSet::new(tokenizer.num_terminals as usize);
+        interest.set(0);
+        interest.set(1);
+        let (matched, end_state) =
+            tokenizer.scan_terminal_matches_from_state(b"a", tokenizer.start_state(), &interest);
+        assert!(matched.contains(0), "terminal 0 should match");
+        assert!(!matched.contains(1), "terminal 1 should not have matched yet");
+        assert!(
+            end_state.is_some(),
+            "end state should be Some because terminal 1 still has a future"
+        );
+    }
+
+    #[test]
+    fn test_scan_terminal_matches_respects_terminals_of_interest_filter() {
+        // Terminal 0 = "a", terminal 1 = "b", terminal 2 = "c".
+        // We only care about terminal 1 ("b"). Input "a" does not match it,
+        // and from the state-after-a there is no future for "b".
+        let tokenizer = build_tokenizer_from_exprs(&[bytes(b"a"), bytes(b"b"), bytes(b"c")]);
+        let mut interest = BitSet::new(tokenizer.num_terminals as usize);
+        interest.set(1);
+        let (matched, end_state) =
+            tokenizer.scan_terminal_matches_from_state(b"a", tokenizer.start_state(), &interest);
+        assert!(matched.is_empty(), "no terminal of interest should have matched");
+        assert!(
+            end_state.is_none(),
+            "end state should be None because no future for terminal 1 after 'a'"
+        );
+    }
+
+    #[test]
+    fn test_scan_terminal_matches_early_stop_on_no_transition() {
+        let tokenizer = build_tokenizer_from_exprs(&[bytes(b"a")]);
+        let mut interest = BitSet::new(tokenizer.num_terminals as usize);
+        interest.set(0);
+        let (matched, end_state) =
+            tokenizer.scan_terminal_matches_from_state(b"ab", tokenizer.start_state(), &interest);
+        // After "a", terminal 0 matched. Then on "b" there is no transition.
+        assert!(matched.contains(0));
+        assert!(end_state.is_none());
     }
 }
