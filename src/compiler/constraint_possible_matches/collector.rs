@@ -466,6 +466,29 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
     num_internal_tokens: u32,
     entries: &[u32],
 ) -> (DenseTrieClassBuildResult, PossibleMatchesProfile) {
+    if tokenizer.num_terminals <= 64 {
+        if profile_summary_enabled() {
+            eprintln!(
+                "[glrmask/profile][trie_build_terminal_mask] mode=u64 terminals={}",
+                tokenizer.num_terminals,
+            );
+        }
+        collect_possible_matches_dense_trie_class_build_with_classes_u64(
+            tokenizer, root, num_internal_tokens, entries,
+        )
+    } else {
+        collect_possible_matches_dense_trie_class_build_with_classes_interned(
+            tokenizer, root, num_internal_tokens, entries,
+        )
+    }
+}
+
+fn collect_possible_matches_dense_trie_class_build_with_classes_interned(
+    tokenizer: &Tokenizer,
+    root: &VocabPrefixTreeNode,
+    num_internal_tokens: u32,
+    entries: &[u32],
+) -> (DenseTrieClassBuildResult, PossibleMatchesProfile) {
     let num_words = (num_internal_tokens as usize + 63) / 64;
     let matched_terminals: Vec<Box<[TerminalID]>> = (0..tokenizer.num_states())
         .map(|state| tokenizer.matched_terminals_iter(state).collect::<Vec<_>>().into_boxed_slice())
@@ -939,6 +962,441 @@ pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(
         &mut timings,
         &mut stamp_gen,
         &mut terminal_stamps,
+    );
+    let root_compute_ms = elapsed_ms(t_root_start);
+
+    if profile_summary_enabled() {
+        eprintln!(
+            "[glrmask/profile][trie_build_timings] segment_table_ms={:.3} signature_hash_ms={:.3} map_materialize_ms={:.3} child_active_ms={:.3} recursive_ms={:.3} reachable_bitmap_ms={:.3} child_precompute_ms={:.3} classes_built={}",
+            timings.segment_table_ms, timings.signature_hash_ms, timings.map_materialize_ms,
+            timings.child_active_ms, timings.recursive_ms, timings.reachable_bitmap_ms, timings.child_precompute_ms,
+            timings.classes_built,
+        );
+    }
+
+    let profile = PossibleMatchesProfile {
+        cache_entries: root_result.class_maps.len(),
+        root_compute_ms,
+        ..Default::default()
+    };
+    (
+        DenseTrieClassBuildResult {
+            state_classes: root_result.classes,
+            class_maps: root_result
+                .class_maps
+                .into_iter()
+                .map(|map| Arc::new(map.as_ref().clone()))
+                .collect(),
+        },
+        profile,
+    )
+}
+
+fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
+    tokenizer: &Tokenizer,
+    root: &VocabPrefixTreeNode,
+    num_internal_tokens: u32,
+    entries: &[u32],
+) -> (DenseTrieClassBuildResult, PossibleMatchesProfile) {
+    let num_words = (num_internal_tokens as usize + 63) / 64;
+    let state_terminal_masks: Vec<u64> = (0..tokenizer.num_states())
+        .map(|state| {
+            let mut mask = 0u64;
+            for terminal in tokenizer.matched_terminals_iter(state) {
+                debug_assert!((terminal as usize) < 64);
+                mask |= 1u64 << terminal;
+            }
+            mask
+        })
+        .collect();
+    let is_end: Vec<bool> = (0..tokenizer.num_states())
+        .map(|state| tokenizer.is_end(state))
+        .collect();
+    let flat_transitions: Vec<[u32; 256]> = (0..tokenizer.num_states() as usize)
+        .map(|state_idx| {
+            let dfa_state = &tokenizer.dfa.states()[state_idx];
+            let mut flat = [u32::MAX; 256];
+            for (byte, &target) in dfa_state.transitions.iter() {
+                flat[byte as usize] = target;
+            }
+            flat
+        })
+        .collect();
+    let self_loop_bytes: Vec<U8Set> = (0..tokenizer.num_states() as usize)
+        .map(|state_idx| {
+            let dfa_state = &tokenizer.dfa.states()[state_idx];
+            let mut bytes = U8Set::empty();
+            for (byte, &target) in dfa_state.transitions.iter() {
+                if target == state_idx as u32 {
+                    bytes.insert(byte);
+                }
+            }
+            bytes
+        })
+        .collect();
+
+    let t_root_start = Instant::now();
+
+    struct TrieBuildTimings {
+        segment_table_ms: f64,
+        signature_hash_ms: f64,
+        map_materialize_ms: f64,
+        classes_built: usize,
+        child_active_ms: f64,
+        recursive_ms: f64,
+        reachable_bitmap_ms: f64,
+        child_precompute_ms: f64,
+    }
+    let mut timings = TrieBuildTimings {
+        segment_table_ms: 0.0,
+        signature_hash_ms: 0.0,
+        map_materialize_ms: 0.0,
+        classes_built: 0,
+        child_active_ms: 0.0,
+        recursive_ms: 0.0,
+        reachable_bitmap_ms: 0.0,
+        child_precompute_ms: 0.0,
+    };
+
+    #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
+    struct TrieMapBuildSegmentOutcomeMask {
+        terminals_mask: u64,
+        end_state: Option<u32>,
+    }
+
+    /// Compute segment outcomes using direct u64 terminal masks.
+    /// Single-byte segments look up the precomputed mask directly.
+    /// Multi-byte segments OR masks from each intermediate state.
+    /// No hash-table cache is needed since OR is cheaper than a lookup.
+    fn segment_outcomes_for_states(
+        needed_states: &[u32],
+        segment: &[u8],
+        state_terminal_masks: &[u64],
+        flat_transitions: &[[u32; 256]],
+        timings: &mut TrieBuildTimings,
+    ) -> Vec<TrieMapBuildSegmentOutcomeMask> {
+        let t_start = Instant::now();
+        let mut outcomes = Vec::with_capacity(needed_states.len());
+
+        if segment.len() == 1 {
+            let byte = segment[0] as usize;
+            for &start_state in needed_states {
+                let next_state = flat_transitions[start_state as usize][byte];
+                if next_state == u32::MAX {
+                    outcomes.push(TrieMapBuildSegmentOutcomeMask {
+                        terminals_mask: 0,
+                        end_state: None,
+                    });
+                } else {
+                    outcomes.push(TrieMapBuildSegmentOutcomeMask {
+                        terminals_mask: state_terminal_masks[next_state as usize],
+                        end_state: Some(next_state),
+                    });
+                }
+            }
+            timings.segment_table_ms += elapsed_ms(t_start);
+            return outcomes;
+        }
+
+        for &start_state in needed_states {
+            let mut current_state = start_state;
+            let mut blocked = false;
+            let mut terminals_mask = 0u64;
+
+            for &byte in segment {
+                let next_state = flat_transitions[current_state as usize][byte as usize];
+                if next_state == u32::MAX {
+                    blocked = true;
+                    break;
+                }
+                current_state = next_state;
+                terminals_mask |= state_terminal_masks[current_state as usize];
+            }
+
+            outcomes.push(TrieMapBuildSegmentOutcomeMask {
+                terminals_mask,
+                end_state: (!blocked).then_some(current_state),
+            });
+        }
+
+        timings.segment_table_ms += elapsed_ms(t_start);
+        outcomes
+    }
+
+    #[inline]
+    fn for_each_terminal_mask_bit(mut mask: u64, mut f: impl FnMut(TerminalID)) {
+        while mask != 0 {
+            let bit = mask.trailing_zeros() as TerminalID;
+            f(bit);
+            mask &= mask - 1;
+        }
+    }
+
+    #[inline]
+    fn mix_signature_word(hash: u64, word: u64) -> u64 {
+        hash
+            .wrapping_mul(0x517cc1b727220a95)
+            .wrapping_add(word.wrapping_add(0x9e3779b97f4a7c15))
+    }
+
+    struct SignatureEntryMask {
+        words: Vec<u64>,
+        class_id: u32,
+    }
+
+    fn build_node(
+        node: &VocabPrefixTreeNode,
+        tokenizer: &Tokenizer,
+        active_states: &[u32],
+        state_terminal_masks: &[u64],
+        is_end: &[bool],
+        flat_transitions: &[[u32; 256]],
+        self_loop_bytes: &[U8Set],
+        num_words: usize,
+        timings: &mut TrieBuildTimings,
+    ) -> TrieMapBuildNodeClasses {
+        struct ChildBuildData {
+            outcomes: Vec<TrieMapBuildSegmentOutcomeMask>,
+            child_class_ids: Vec<u32>,
+            reachable: Box<[u64]>,
+            result: TrieMapBuildNodeClasses,
+        }
+
+        let mut child_data = Vec::new();
+        for (segment, child) in node.iter_children() {
+            // Compute segment outcomes using the mask fast path.
+            // No cache needed: OR-based accumulation is cheaper than a hash lookup.
+            let outcomes = segment_outcomes_for_states(
+                active_states,
+                segment,
+                state_terminal_masks,
+                flat_transitions,
+                timings,
+            );
+
+            let child_active_started_at = Instant::now();
+            let subtree_bytes = U8Set::from_words(*child.subtree_bytes());
+            let mut descend_end_states = Vec::with_capacity(active_states.len());
+            let mut child_active_states = Vec::new();
+            for segment_outcome in outcomes.iter() {
+                let descend_end_state = if let Some(end_state) = segment_outcome.end_state {
+                    if !is_end[end_state as usize]
+                        && !subtree_bytes.is_subset(&self_loop_bytes[end_state as usize])
+                    {
+                        child_active_states.push(end_state);
+                        end_state
+                    } else {
+                        u32::MAX
+                    }
+                } else {
+                    u32::MAX
+                };
+                descend_end_states.push(descend_end_state);
+            }
+            child_active_states.sort_unstable();
+            child_active_states.dedup();
+            timings.child_active_ms += elapsed_ms(child_active_started_at);
+
+            let (result, child_class_ids) = if child_active_states.is_empty() {
+                (
+                    TrieMapBuildNodeClasses {
+                        classes: Vec::new(),
+                        class_maps: Vec::new(),
+                    },
+                    vec![u32::MAX; descend_end_states.len()],
+                )
+            } else {
+                let recursive_started_at = Instant::now();
+                let result = build_node(
+                    child,
+                    tokenizer,
+                    &child_active_states,
+                    state_terminal_masks,
+                    is_end,
+                    flat_transitions,
+                    self_loop_bytes,
+                    num_words,
+                    timings,
+                );
+                timings.recursive_ms += elapsed_ms(recursive_started_at);
+
+                let child_precompute_started_at = Instant::now();
+                let child_class_ids: Vec<u32> = descend_end_states
+                    .iter()
+                    .map(|&end_state| {
+                        if end_state == u32::MAX {
+                            u32::MAX
+                        } else {
+                            result.classes[end_state as usize]
+                        }
+                    })
+                    .collect();
+                timings.child_precompute_ms += elapsed_ms(child_precompute_started_at);
+
+                (result, child_class_ids)
+            };
+
+            let reachable_started_at = Instant::now();
+            let reachable = reachable_dense_bitmap(child, num_words);
+            timings.reachable_bitmap_ms += elapsed_ms(reachable_started_at);
+
+            child_data.push(ChildBuildData {
+                outcomes,
+                child_class_ids,
+                reachable,
+                result,
+            });
+        }
+
+        let t_sig = Instant::now();
+        let mut representative_states = Vec::new();
+        let mut representative_state_positions = Vec::new();
+        let mut classes = vec![u32::MAX; tokenizer.num_states() as usize];
+
+        match child_data.len() {
+            0 => {
+                if node.has_token() {
+                    let mut class_by_terminal_mask: FxHashMap<u64, u32> = FxHashMap::default();
+                    for (state_pos, &state) in active_states.iter().enumerate() {
+                        let node_terminal_mask = state_terminal_masks[state as usize];
+                        let class_id = *class_by_terminal_mask.entry(node_terminal_mask).or_insert_with(|| {
+                            let class_id = representative_states.len() as u32;
+                            representative_states.push(state);
+                            representative_state_positions.push(state_pos);
+                            class_id
+                        });
+                        classes[state as usize] = class_id;
+                    }
+                } else if let Some(&state) = active_states.first() {
+                    representative_states.push(state);
+                    representative_state_positions.push(0);
+                    for &state in active_states {
+                        classes[state as usize] = 0;
+                    }
+                }
+            }
+            1 => {
+                let child = &child_data[0];
+                let mut class_by_signature: FxHashMap<(u64, u64, u32), u32> = FxHashMap::default();
+                for (state_pos, &state) in active_states.iter().enumerate() {
+                    let node_terminal_mask = if node.has_token() {
+                        state_terminal_masks[state as usize]
+                    } else {
+                        0u64
+                    };
+                    let segment_outcome = child.outcomes[state_pos];
+                    let child_class_id = child.child_class_ids[state_pos];
+                    let signature = (node_terminal_mask, segment_outcome.terminals_mask, child_class_id);
+                    let class_id = *class_by_signature.entry(signature).or_insert_with(|| {
+                        let class_id = representative_states.len() as u32;
+                        representative_states.push(state);
+                        representative_state_positions.push(state_pos);
+                        class_id
+                    });
+                    classes[state as usize] = class_id;
+                }
+            }
+            _ => {
+                let mut signature_buckets: FxHashMap<u64, Vec<SignatureEntryMask>> = FxHashMap::default();
+                let mut next_class_id: u32 = 0;
+
+                for (state_pos, &state) in active_states.iter().enumerate() {
+                    let node_terminal_mask = if node.has_token() {
+                        state_terminal_masks[state as usize]
+                    } else {
+                        0u64
+                    };
+
+                    let mut hash: u64 = mix_signature_word(0, node_terminal_mask);
+                    let mut sig_small = SmallVec::<[u64; 16]>::with_capacity(child_data.len() * 2 + 1);
+                    sig_small.push(node_terminal_mask);
+                    for child in child_data.iter() {
+                        let segment_outcome = child.outcomes[state_pos];
+                        let child_class_id = child.child_class_ids[state_pos];
+                        sig_small.push(segment_outcome.terminals_mask);
+                        sig_small.push(child_class_id as u64);
+                        hash = mix_signature_word(hash, segment_outcome.terminals_mask);
+                        hash = mix_signature_word(hash, child_class_id as u64);
+                    }
+
+                    let bucket = signature_buckets.entry(hash).or_default();
+                    let mut found = false;
+                    for entry in bucket.iter() {
+                        if entry.words == sig_small.as_slice() {
+                            classes[state as usize] = entry.class_id;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        let class_id = next_class_id;
+                        next_class_id += 1;
+                        classes[state as usize] = class_id;
+                        representative_states.push(state);
+                        representative_state_positions.push(state_pos);
+                        bucket.push(SignatureEntryMask {
+                            words: sig_small.into_vec(),
+                            class_id,
+                        });
+                    }
+                }
+            }
+        }
+        timings.signature_hash_ms += elapsed_ms(t_sig);
+        timings.classes_built += representative_states.len();
+
+        let t_map = Instant::now();
+        let mut class_maps = Vec::with_capacity(representative_states.len());
+        for (&state, &state_pos) in representative_states.iter().zip(representative_state_positions.iter()) {
+            let mut result = DensePossibleMatchMap::default();
+
+            if node.has_token() {
+                let token_id = node.token_id() as u32;
+                let node_mask = state_terminal_masks[state as usize];
+                for_each_terminal_mask_bit(node_mask, |terminal| {
+                    let entry = result
+                        .entry(terminal)
+                        .or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
+                    entry[token_id as usize / 64] |= 1u64 << (token_id % 64);
+                });
+            }
+
+            for child in child_data.iter() {
+                let segment_outcome = child.outcomes[state_pos];
+                for_each_terminal_mask_bit(segment_outcome.terminals_mask, |terminal| {
+                    let entry = result
+                        .entry(terminal)
+                        .or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
+                    merge_bitmaps(entry, &child.reachable);
+                });
+
+                let child_class_id = child.child_class_ids[state_pos];
+                if child_class_id != u32::MAX {
+                    merge_dense_maps(
+                        &mut result,
+                        child.result.class_maps[child_class_id as usize].as_ref(),
+                        num_words,
+                    );
+                }
+            }
+
+            class_maps.push(Rc::new(result));
+        }
+        timings.map_materialize_ms += elapsed_ms(t_map);
+
+        TrieMapBuildNodeClasses { classes, class_maps }
+    }
+
+    let root_result = build_node(
+        root,
+        tokenizer,
+        entries,
+        &state_terminal_masks,
+        &is_end,
+        &flat_transitions,
+        &self_loop_bytes,
+        num_words,
+        &mut timings,
     );
     let root_compute_ms = elapsed_ms(t_root_start);
 
