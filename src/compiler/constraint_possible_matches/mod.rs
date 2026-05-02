@@ -13,6 +13,7 @@ use crate::ds::weight::{Weight, finalize_weight_map, shared_rangeset};
 use crate::grammar::flat::TerminalID;
 use crate::runtime::Constraint;
 
+pub(crate) mod bruteforce;
 pub(crate) mod collector;
 
 pub(crate) type DensePossibleMatchesByState = BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>;
