@@ -223,48 +223,65 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let total_started_at = Instant::now();
     let num_original_states = tokenizer.num_states() as usize;
     let num_active_terminals = active_terminals.iter().filter(|&&active| active).count();
-    let mut relevant_bytes = [false; 256];
-    for bytes in vocab.entries.values() {
-        for &byte in bytes {
-            relevant_bytes[byte as usize] = true;
-        }
-    }
 
-    // Strip non-active terminal bits from DFA finalizers and minimize.
-    // Relevant-byte transition pruning is only applied when
-    // GLRMASK_FORCE_RELEVANT_BYTES is set, because the default must preserve
-    // commit/mask equivalence. This keeps L2P construction on the smaller
-    // DFA needed by this partition.
-    let simplify_started_at = Instant::now();
-    let (candidate_tok, candidate_state_map) = tokenizer.simplify_for_terminals(
-        active_terminals,
-        Some(&relevant_bytes),
-    );
-    let simplify_ms = simplify_started_at.elapsed().as_secs_f64() * 1000.0;
-    let candidate_unmapped_original_states = candidate_state_map
-        .original_to_internal
-        .iter()
-        .filter(|&&state| state == u32::MAX)
-        .count();
-    let use_simplified_tok = candidate_unmapped_original_states == 0;
-    let (simplified_tok, simplify_state_map) = if use_simplified_tok {
-        (candidate_tok, Some(candidate_state_map))
-    } else {
-        let identity = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
-            (0..num_original_states as u32).collect(),
-            num_original_states as u32,
-        );
-        (tokenizer.clone(), Some(identity))
-    };
+    // Cheap pre-check: if any original DFA state has zero active-terminal
+    // coverage, the simplified state map cannot be total and the result of
+    // simplify_for_terminals will be discarded, so skip it entirely.
+    let simplification_can_be_total =
+        tokenizer.active_terminal_filter_can_preserve_total_state_map(active_terminals);
+
+    let (simplified_tok, simplify_state_map, use_simplified_tok, simplify_ms, candidate_unmapped_original_states) =
+        if simplification_can_be_total {
+            let mut relevant_bytes = [false; 256];
+            for bytes in vocab.entries.values() {
+                for &byte in bytes {
+                    relevant_bytes[byte as usize] = true;
+                }
+            }
+
+            // Strip non-active terminal bits from DFA finalizers and minimize.
+            // Relevant-byte transition pruning is only applied when
+            // GLRMASK_FORCE_RELEVANT_BYTES is set, because the default must
+            // preserve commit/mask equivalence. This keeps L2P construction on
+            // the smaller DFA needed by this partition.
+            let simplify_started_at = Instant::now();
+            let (candidate_tok, candidate_state_map) = tokenizer.simplify_for_terminals(
+                active_terminals,
+                Some(&relevant_bytes),
+            );
+            let simplify_ms = simplify_started_at.elapsed().as_secs_f64() * 1000.0;
+            let candidate_unmapped_original_states = candidate_state_map
+                .original_to_internal
+                .iter()
+                .filter(|&&state| state == u32::MAX)
+                .count();
+            let use_simplified_tok = candidate_unmapped_original_states == 0;
+            if use_simplified_tok {
+                (candidate_tok, Some(candidate_state_map), true, simplify_ms, candidate_unmapped_original_states)
+            } else {
+                let identity = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+                    (0..num_original_states as u32).collect(),
+                    num_original_states as u32,
+                );
+                (tokenizer.clone(), Some(identity), false, simplify_ms, candidate_unmapped_original_states)
+            }
+        } else {
+            let identity = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+                (0..num_original_states as u32).collect(),
+                num_original_states as u32,
+            );
+            (tokenizer.clone(), Some(identity), false, 0.0, num_original_states)
+        };
 
     if debug_profile_enabled() {
         eprintln!(
-            "[glrmask/debug][l2p_simplify] partition={} original_states={} simplified_states={} unmapped_original_states={} used={}",
+            "[glrmask/debug][l2p_simplify] partition={} original_states={} simplified_states={} unmapped_original_states={} used={} total_candidate={}",
             partition_label,
             num_original_states,
             simplified_tok.num_states(),
             candidate_unmapped_original_states,
             use_simplified_tok,
+            simplification_can_be_total,
         );
     }
 

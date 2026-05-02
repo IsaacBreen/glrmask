@@ -501,6 +501,37 @@ impl Tokenizer {
         }
     }
 
+    /// Check whether filtering to `active_terminals` can produce a total
+    /// original-state map.  Returns `false` if any original DFA state has
+    /// neither an active finalizer nor an active future (i.e., the state
+    /// would be dead after filtering), which makes the simplified state map
+    /// non-total.
+    pub fn active_terminal_filter_can_preserve_total_state_map(
+        &self,
+        active_terminals: &[bool],
+    ) -> bool {
+        let num_groups = self.num_terminals as usize;
+        let mut active_bitset = BitSet::new(num_groups);
+        for (terminal_id, &active) in active_terminals.iter().enumerate() {
+            if active {
+                active_bitset.set(terminal_id);
+            }
+        }
+
+        for state_id in 0..self.dfa.num_states() {
+            let state = &self.dfa.states()[state_id];
+            let final_active = !state.finalizers.is_disjoint(&active_bitset);
+            let future_active = !self
+                .dfa
+                .possible_future_group_ids(state_id as u32)
+                .is_disjoint(&active_bitset);
+            if !final_active && !future_active {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Create a simplified tokenizer that only knows about `active_terminals`.
     ///
     /// Non-active terminal bits are cleared from finalizers and the DFA is
