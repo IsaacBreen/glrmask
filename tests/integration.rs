@@ -519,6 +519,10 @@ fn test_json_schema_enum() {
 #[ignore = "known o1052 mask/commit mismatch MRE: token b\"jand\" is committable but absent from mask"]
 fn test_json_schema_enum_jand_mask_false_negative() {
     let disputed_token = b"jand";
+    // Weird but load-bearing: these duplicate token bytes are distinct token ids.
+    // Deduplicating to unique strings, dropping the rare singleton strings, or
+    // reducing any duplicate count by one stops the mismatch. Grouping by token
+    // string preserves the mismatch, but lexicographic ordering does not.
     let vocab_entries = [
         ("jand", 1),
         (" a", 124),

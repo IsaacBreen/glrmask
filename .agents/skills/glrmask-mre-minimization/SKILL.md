@@ -28,6 +28,8 @@ Create minimal reproducible Rust tests in `tests/mre.rs`. Do not put MREs in `in
 
 Start with the exact schema, prefix, token, and vocab involved in the failure. Inline the schema or GLRM grammar in the test body. Do not hide the active artifact in helpers while minimizing.
 
+Document the weird load-bearing behavior directly in the MRE code. If a survivor looks obviously accidental, such as duplicate vocab bytes, order-dependent vocab grouping, nullable branches that consume nothing, strange regex bounds, or source-looking strings that could not be renamed, add a short comment beside that artifact explaining what simplifications were tried and failed.
+
 Use these commands when they help locate the source artifact:
 
 ```bash
