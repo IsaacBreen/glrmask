@@ -23,6 +23,12 @@ Find the first layer where semantics diverge. Do not add post-filters around `ma
 5. If `GLRMASK_NO_PARTITION=1` or `GLRMASK_FORCE_ALL_L2P=1` changes the oracle, inspect `src/compiler/stages/id_map_and_terminal_dwa/{partition,merge,l1,l2p}.rs`. Compare token/state maps and DWA weights before and after L1/L2P merge.
 6. Keep diagnostics temporary unless they are generally useful and gated by an env var. Remove one-off prints before committing the fix.
 
+## L1 Terminal DWA Pitfall
+
+L1 state equivalence can be valid for whole-token walks from a start state without being valid for arbitrary suffix walks after the first byte. If the L1 builder splits tokens into first byte plus suffix, it must not walk the suffix from a merged internal representative unless the equivalence relation is proven suffix-closed. A robust pattern is: use concrete DFA target states for suffix traversal, then map the final state back to the L1 representative/TSID space.
+
+This failure shape often looks bizarre in an MRE: duplicate vocab bytes, token ordering, and source-looking survivor strings may be load-bearing because they perturb internal token ids, state reps, and range-set profiles enough to expose a bad representative choice.
+
 ## Root-Cause Standard
 
 The final explanation should name:

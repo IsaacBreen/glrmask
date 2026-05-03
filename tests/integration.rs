@@ -516,7 +516,6 @@ fn test_json_schema_enum() {
 }
 
 #[test]
-#[ignore = "known o1052 mask/commit mismatch MRE: token b\"jand\" is committable but absent from mask"]
 fn test_json_schema_enum_jand_mask_false_negative() {
     let disputed_token = b"jand";
     // Weird but load-bearing: these duplicate token bytes are distinct token ids.

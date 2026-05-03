@@ -553,31 +553,7 @@ fn build_l1_terminal_dwa(
             .push(internal_tsid as u32);
     }
     let state_seed_ms = state_seed_started_at.elapsed().as_secs_f64() * 1000.0;
-    let representative_states = &id_map.tokenizer_states.representative_original_ids;
-    let state_original_to_internal = &id_map.tokenizer_states.original_to_internal;
     let dead = u32::MAX;
-    let dead_internal = u32::MAX;
-    // Extra sentinel row at the end: all entries map to dead_internal.
-    // This allows branchless dead-state lookups in the batched walk by
-    // substituting sentinel_internal for dead_internal before indexing.
-    let sentinel_internal = representative_states.len() as u32;
-    // Transposed layout: rep_flat_trans[byte * stride + state] instead of
-    // [state * 256 + byte]. When walking all targets for the same byte,
-    // accesses become sequential instead of stride-256, and each byte
-    // column (stride * 4 bytes) fits in L1 cache.
-    let stride = representative_states.len() + 1;
-    let mut rep_flat_trans = vec![dead_internal; stride * 256];
-    for (internal_state, &rep_state) in representative_states.iter().enumerate() {
-        let base = rep_state as usize * 256;
-        for byte in 0..256usize {
-            let next = flat_trans[base + byte];
-            rep_flat_trans[byte * stride + internal_state] = if next == dead {
-                dead_internal
-            } else {
-                state_original_to_internal[next as usize]
-            };
-        }
-    }
 
     // Batch simulation: for each unique start state, simulate all tokens through
     // the DFA and accumulate end_state_rep → (tsid → token_ids).
@@ -666,18 +642,19 @@ fn build_l1_terminal_dwa(
     // the raw merged ranges. Self-loop optimization: if the target state
     // has self-loops on all suffix bytes, all tokens end at the target
     // state and the walk can be skipped entirely.
-        // Phase 1: Identify unique (first_byte, target_rep) pairs.
-        // Equivalent post-byte target states produce identical suffix walks,
-        // so canonicalize on the representative to avoid duplicate work.
+        // Phase 1: Identify unique concrete (first_byte, target_state) pairs.
+        // State equivalence is valid for whole-token walks from a start state,
+        // but it is not necessarily closed over suffixes after the first byte.
+        // Walk token suffixes from the concrete post-first-byte DFA state and
+        // only map the final state back to a representative.
         let mut unique_targets: FxHashMap<(u8, u32), ()> = FxHashMap::default();
         for (&start_state, _) in &states_to_initial_tsids {
-            let start_internal = state_original_to_internal[start_state as usize];
             for (byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
                 if token_ids.is_empty() { continue; }
-                let target_internal = rep_flat_trans[byte * stride + start_internal as usize];
-                if target_internal != dead_internal {
+                let target_state = flat_trans[start_state as usize * 256 + byte];
+                if target_state != dead {
                     unique_targets
-                        .entry((byte as u8, target_internal))
+                        .entry((byte as u8, target_state))
                         .or_default();
                 }
             }
@@ -716,7 +693,7 @@ fn build_l1_terminal_dwa(
             self_loop_masks.entry(target).or_insert_with(|| {
                 let mut mask = [0u64; 4];
                 for byte in 0..=255u8 {
-                    if rep_flat_trans[byte as usize * stride + target as usize] == target {
+                    if flat_trans[target as usize * 256 + byte as usize] == target {
                         mask[byte as usize >> 6] |= 1u64 << (byte & 63);
                     }
                 }
@@ -771,7 +748,7 @@ fn build_l1_terminal_dwa(
                         let first = *token_ids.first().unwrap() as u32;
                         let last = *token_ids.last().unwrap() as u32;
                         for &target in &selfloop_targets {
-                            let end_rep = representative_states[target as usize];
+                            let end_rep = state_to_rep[target as usize];
                             results.push(((byte, target), vec![(end_rep, vec![(first, last)])]));
                         }
                     }
@@ -811,12 +788,12 @@ fn build_l1_terminal_dwa(
                             let mut fp_groups: FxHashMap<Vec<u32>, Vec<u32>> = FxHashMap::default();
                             for &target in &walk_targets {
                                 let fp: Vec<u32> = sfb_list.iter()
-                                    .map(|&b| rep_flat_trans[b as usize * stride + target as usize])
+                                    .map(|&b| flat_trans[target as usize * 256 + b as usize])
                                     .collect();
                                 fp_groups.entry(fp).or_default().push(target);
                             }
 
-                            // Separate dead groups (all entries are dead_internal)
+                            // Separate dead groups (all entries are dead)
                             // from live groups
                             let mut deduped_targets: Vec<u32> = Vec::new();
                             let mut others: Vec<Vec<u32>> = Vec::new();
@@ -824,7 +801,7 @@ fn build_l1_terminal_dwa(
                             let mut dup_eliminated = 0usize;
 
                             for (fp, group) in &fp_groups {
-                                let all_dead = fp.iter().all(|&s| s == dead_internal);
+                                let all_dead = fp.iter().all(|&s| s == dead);
                                 if all_dead {
                                     // All targets in this group produce empty walk results
                                     dead_eliminated += group.len();
@@ -877,15 +854,15 @@ fn build_l1_terminal_dwa(
                         for byte_pos in lcp_len..suffix_bytes.len() {
                             let b = suffix_bytes[byte_pos];
                             let base = byte_pos * num_walk;
-                            let col_base = b as usize * stride;
                             for t in 0..num_walk {
                                 let prev_state = suffix_states[base + t];
-                                // Sentinel substitution: dead_internal → sentinel row
-                                // (returns dead_internal), avoiding bounds issues.
-                                let safe = if prev_state == dead_internal { sentinel_internal } else { prev_state };
-                                let next_state = rep_flat_trans[col_base + safe as usize];
+                                let next_state = if prev_state == dead {
+                                    dead
+                                } else {
+                                    flat_trans[prev_state as usize * 256 + b as usize]
+                                };
                                 suffix_states.push(next_state);
-                                local_transition_steps += (prev_state != dead_internal) as u64;
+                                local_transition_steps += (prev_state != dead) as u64;
                             }
                         }
 
@@ -894,8 +871,8 @@ fn build_l1_terminal_dwa(
                         let token_id = internal_token_id as u32;
                         for t in 0..num_walk {
                             let final_state = suffix_states[end_base + t];
-                            if final_state != dead_internal {
-                                let end_rep = representative_states[final_state as usize];
+                            if final_state != dead {
+                                let end_rep = state_to_rep[final_state as usize];
                                 local_successful_tokens += 1;
                                 if run_end_reps[t] == end_rep
                                     && run_ends[t].wrapping_add(1) == token_id
@@ -1053,7 +1030,6 @@ fn build_l1_terminal_dwa(
             .par_iter()
             .map(|&(&start_state, ref initial_tsids)| {
                 let collect_start = Instant::now();
-                let start_internal = state_original_to_internal[start_state as usize];
 
                 // Track only touched end_reps for this start state instead of
                 // allocating n_end_reps buckets every time.
@@ -1080,9 +1056,9 @@ fn build_l1_terminal_dwa(
 
                 for (byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
                     if token_ids.is_empty() { continue; }
-                    let target_internal = rep_flat_trans[byte * stride + start_internal as usize];
-                    if target_internal == dead_internal { continue; }
-                    if let Some(results) = indexed_walk_cache.get(&(byte as u8, target_internal)) {
+                    let target_state = flat_trans[start_state as usize * 256 + byte];
+                    if target_state == dead { continue; }
+                    if let Some(results) = indexed_walk_cache.get(&(byte as u8, target_state)) {
                         for &(end_rep_idx, ranges, entry_hash, entry_mc) in results {
                             let position = if let Some(&position) = touched_positions.get(&end_rep_idx) {
                                 position
