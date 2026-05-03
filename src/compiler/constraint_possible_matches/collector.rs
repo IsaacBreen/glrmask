@@ -496,16 +496,12 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_interned(
     let is_end: Vec<bool> = (0..tokenizer.num_states())
         .map(|state| tokenizer.is_end(state))
         .collect();
-    let flat_transitions: Vec<[u32; 256]> = (0..tokenizer.num_states() as usize)
-        .map(|state_idx| {
-            let dfa_state = &tokenizer.dfa.states()[state_idx];
-            let mut flat = [u32::MAX; 256];
-            for (byte, &target) in dfa_state.transitions.iter() {
-                flat[byte as usize] = target;
-            }
-            flat
-        })
-        .collect();
+    let mut byte_transitions = vec![vec![u32::MAX; tokenizer.num_states() as usize]; 256];
+    for (state_idx, dfa_state) in tokenizer.dfa.states().iter().enumerate() {
+        for (byte, &target) in dfa_state.transitions.iter() {
+            byte_transitions[byte as usize][state_idx] = target;
+        }
+    }
     let self_loop_bytes: Vec<U8Set> = (0..tokenizer.num_states() as usize)
         .map(|state_idx| {
             let dfa_state = &tokenizer.dfa.states()[state_idx];
@@ -570,14 +566,14 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_interned(
     /// Uses a stamp-based dedup array for O(1) terminal dedup.
     ///
     /// For single-byte segments, uses a fast path that directly looks up
-    /// `flat_transitions` and `node_terminal_ids` without touching the
+    /// `byte_transitions` and `node_terminal_ids` without touching the
     /// hash-table segment cache or the stamp-based terminal collector.
     fn segment_outcomes_for_states(
         table: &mut FxHashMap<u32, TrieMapBuildSegmentOutcome>,
         needed_states: &[u32],
         segment: &[u8],
         matched_terminals: &[Box<[TerminalID]>],
-        flat_transitions: &[[u32; 256]],
+        byte_transitions: &[Vec<u32>],
         terminal_sets: &mut TrieMapBuildTerminalSetInterner,
         empty_terminals_id: u32,
         terminal_stamps: &mut [u32],
@@ -591,7 +587,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_interned(
         if segment.len() == 1 {
             let byte = segment[0] as usize;
             for &start_state in needed_states {
-                let next_state = flat_transitions[start_state as usize][byte];
+                let next_state = byte_transitions[byte][start_state as usize];
                 if next_state == u32::MAX {
                     outcomes.push(TrieMapBuildSegmentOutcome {
                         terminals_id: empty_terminals_id,
@@ -621,7 +617,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_interned(
             let mut term_count = 0usize;
 
             for &byte in segment {
-                let next_state = flat_transitions[current_state as usize][byte as usize];
+                let next_state = byte_transitions[byte as usize][current_state as usize];
                 if next_state == u32::MAX {
                     blocked = true;
                     break;
@@ -680,7 +676,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_interned(
         node_terminal_ids: &[u32],
         empty_terminals_id: u32,
         is_end: &[bool],
-        flat_transitions: &[[u32; 256]],
+        byte_transitions: &[Vec<u32>],
         self_loop_bytes: &[U8Set],
         terminal_sets: &mut TrieMapBuildTerminalSetInterner,
         segment_cache: &mut FxHashMap<(u64, u8), usize>,
@@ -716,7 +712,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_interned(
                 active_states,
                 segment,
                 matched_terminals,
-                flat_transitions,
+                byte_transitions,
                 terminal_sets,
                 empty_terminals_id,
                 terminal_stamps,
@@ -766,7 +762,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_interned(
                     node_terminal_ids,
                     empty_terminals_id,
                     is_end,
-                    flat_transitions,
+                    byte_transitions,
                     self_loop_bytes,
                     terminal_sets,
                     segment_cache,
@@ -963,7 +959,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_interned(
         &node_terminal_ids,
         empty_terminals_id,
         &is_end,
-        &flat_transitions,
+        &byte_transitions,
         &self_loop_bytes,
         &mut terminal_sets,
         &mut segment_cache,
@@ -1022,16 +1018,12 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
     let is_end: Vec<bool> = (0..tokenizer.num_states())
         .map(|state| tokenizer.is_end(state))
         .collect();
-    let flat_transitions: Vec<[u32; 256]> = (0..tokenizer.num_states() as usize)
-        .map(|state_idx| {
-            let dfa_state = &tokenizer.dfa.states()[state_idx];
-            let mut flat = [u32::MAX; 256];
-            for (byte, &target) in dfa_state.transitions.iter() {
-                flat[byte as usize] = target;
-            }
-            flat
-        })
-        .collect();
+    let mut byte_transitions = vec![vec![u32::MAX; tokenizer.num_states() as usize]; 256];
+    for (state_idx, dfa_state) in tokenizer.dfa.states().iter().enumerate() {
+        for (byte, &target) in dfa_state.transitions.iter() {
+            byte_transitions[byte as usize][state_idx] = target;
+        }
+    }
     let self_loop_bytes: Vec<U8Set> = (0..tokenizer.num_states() as usize)
         .map(|state_idx| {
             let dfa_state = &tokenizer.dfa.states()[state_idx];
@@ -1095,7 +1087,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
         needed_states: &[u32],
         segment: &[u8],
         state_terminal_masks: &[u64],
-        flat_transitions: &[[u32; 256]],
+        byte_transitions: &[Vec<u32>],
         timings: &mut TrieBuildTimings,
     ) -> Vec<TrieMapBuildSegmentOutcomeMask> {
         let t_start = Instant::now();
@@ -1104,7 +1096,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
         if segment.len() == 1 {
             let byte = segment[0] as usize;
             for &start_state in needed_states {
-                let next_state = flat_transitions[start_state as usize][byte];
+                let next_state = byte_transitions[byte][start_state as usize];
                 if next_state == u32::MAX {
                     outcomes.push(TrieMapBuildSegmentOutcomeMask {
                         terminals_mask: 0,
@@ -1127,7 +1119,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
             let mut terminals_mask = 0u64;
 
             for &byte in segment {
-                let next_state = flat_transitions[current_state as usize][byte as usize];
+                let next_state = byte_transitions[byte as usize][current_state as usize];
                 if next_state == u32::MAX {
                     blocked = true;
                     break;
@@ -1173,7 +1165,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
         active_states: &[u32],
         state_terminal_masks: &[u64],
         is_end: &[bool],
-        flat_transitions: &[[u32; 256]],
+        byte_transitions: &[Vec<u32>],
         self_loop_bytes: &[U8Set],
         num_words: usize,
         timings: &mut TrieBuildTimings,
@@ -1196,7 +1188,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
             active_states: &[u32],
             state_terminal_masks: &[u64],
             is_end: &[bool],
-            flat_transitions: &[[u32; 256]],
+            byte_transitions: &[Vec<u32>],
             self_loop_bytes: &[U8Set],
             num_words: usize,
             timings: &mut TrieBuildTimings,
@@ -1207,7 +1199,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
                 active_states,
                 segment,
                 state_terminal_masks,
-                flat_transitions,
+                byte_transitions,
                 timings,
             );
 
@@ -1250,7 +1242,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
                     &child_active_states,
                     state_terminal_masks,
                     is_end,
-                    flat_transitions,
+                    byte_transitions,
                     self_loop_bytes,
                     num_words,
                     timings,
@@ -1317,7 +1309,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
                         active_states,
                         state_terminal_masks,
                         is_end,
-                        flat_transitions,
+                        byte_transitions,
                         self_loop_bytes,
                         num_words,
                         &mut local_timings,
@@ -1350,7 +1342,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
                     active_states,
                     state_terminal_masks,
                     is_end,
-                    flat_transitions,
+                    byte_transitions,
                     self_loop_bytes,
                     num_words,
                     &mut local_timings,
@@ -1537,7 +1529,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
         entries,
         &state_terminal_masks,
         &is_end,
-        &flat_transitions,
+        &byte_transitions,
         &self_loop_bytes,
         num_words,
         &mut timings,
