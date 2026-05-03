@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 
 use crate::grammar::flat::{GrammarDef, NonterminalID, Rule, Symbol, TerminalID};
 
@@ -1079,28 +1080,72 @@ fn flatten_rhs_symbols(
 }
 
 /// Deduplicate rules, preserving order of first occurrence.
+enum RuleDedupKey<'a> {
+    Borrowed(NonterminalID, &'a [Symbol]),
+    Owned(NonterminalID, Vec<Symbol>),
+}
+
+impl RuleDedupKey<'_> {
+    fn lhs(&self) -> NonterminalID {
+        match self {
+            RuleDedupKey::Borrowed(lhs, _) | RuleDedupKey::Owned(lhs, _) => *lhs,
+        }
+    }
+
+    fn rhs(&self) -> &[Symbol] {
+        match self {
+            RuleDedupKey::Borrowed(_, rhs) => rhs,
+            RuleDedupKey::Owned(_, rhs) => rhs,
+        }
+    }
+}
+
+impl PartialEq for RuleDedupKey<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.lhs() == other.lhs() && self.rhs() == other.rhs()
+    }
+}
+
+impl Eq for RuleDedupKey<'_> {}
+
+impl Hash for RuleDedupKey<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.lhs().hash(state);
+        self.rhs().hash(state);
+    }
+}
+
 fn dedup_rules(rules: &mut Vec<Rule>) {
     let rhs_by_lhs = build_rhs_by_lhs(rules);
     let (unique_rhs_by_lhs, expandable_single_productions) =
         compute_expandable_single_productions(&rhs_by_lhs);
-    let mut seen = HashSet::with_capacity(rules.len());
-    let mut flatten_cache = HashMap::<NonterminalID, Option<Vec<Symbol>>>::new();
-    let mut deduped = Vec::with_capacity(rules.len());
-    for rule in rules.drain(..) {
-        let key = (
-            rule.lhs,
-            flatten_rhs_symbols(
-                &rule.rhs,
-                &unique_rhs_by_lhs,
-                &expandable_single_productions,
-                &mut flatten_cache,
-            ),
-        );
-        if seen.insert(key) {
-            deduped.push(rule);
+    let mut keep = Vec::with_capacity(rules.len());
+    {
+        let mut seen = HashSet::with_capacity(rules.len());
+        let mut flatten_cache = HashMap::<NonterminalID, Option<Vec<Symbol>>>::new();
+        for rule in rules.iter() {
+            let can_flatten = rule.rhs.iter().any(|symbol| {
+                matches!(symbol, Symbol::Nonterminal(nt) if expandable_single_productions.contains(nt))
+            });
+            let key = if can_flatten {
+                RuleDedupKey::Owned(
+                    rule.lhs,
+                    flatten_rhs_symbols(
+                        &rule.rhs,
+                        &unique_rhs_by_lhs,
+                        &expandable_single_productions,
+                        &mut flatten_cache,
+                    ),
+                )
+            } else {
+                RuleDedupKey::Borrowed(rule.lhs, &rule.rhs)
+            };
+            keep.push(seen.insert(key));
         }
     }
-    *rules = deduped;
+
+    let mut keep_iter = keep.into_iter();
+    rules.retain(|_| keep_iter.next().unwrap_or(false));
 }
 
 fn is_reflexive_unit_rule(rule: &Rule) -> bool {
