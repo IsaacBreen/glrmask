@@ -679,31 +679,28 @@ impl GLRTable {
             // same state, or are both absent).
             let nstates = self.num_states as usize;
             let mut all_nts: BTreeSet<NonterminalID> = BTreeSet::new();
-            for goto_row in &self.goto {
-                for &nt in goto_row.keys() {
+            let mut columns_by_nt: FxHashMap<NonterminalID, Vec<(u32, (u32, bool))>> =
+                FxHashMap::default();
+            for (state, goto_row) in self.goto.iter().enumerate() {
+                for (&nt, &target) in goto_row {
                     all_nts.insert(nt);
+                    columns_by_nt
+                        .entry(nt)
+                        .or_default()
+                        .push((state as u32, target));
                 }
             }
 
-            // Build goto column for each nonterminal.
-            let mut nt_to_column: FxHashMap<NonterminalID, Vec<Option<(u32, bool)>>> =
-                FxHashMap::default();
-            for &nt in &all_nts {
-                let col: Vec<Option<(u32, bool)>> = (0..nstates)
-                    .map(|s| self.goto[s].get(&nt).copied())
-                    .collect();
-                nt_to_column.insert(nt, col);
-            }
-
-            // Group NTs by column.
-            let mut column_to_canon: FxHashMap<Vec<Option<(u32, bool)>>, NonterminalID> =
+            // Build sparse goto signatures for each nonterminal and group by them.
+            let mut column_to_canon: FxHashMap<Vec<(u32, (u32, bool))>, NonterminalID> =
                 FxHashMap::default();
             let mut nt_remap: FxHashMap<NonterminalID, NonterminalID> = FxHashMap::default();
             for &nt in &all_nts {
-                let col = &nt_to_column[&nt];
-                let canon = *column_to_canon.entry(col.clone()).or_insert(nt);
-                if canon != nt {
+                let col = columns_by_nt.remove(&nt).unwrap_or_default();
+                if let Some(&canon) = column_to_canon.get(&col) {
                     nt_remap.insert(nt, canon);
+                } else {
+                    column_to_canon.insert(col, nt);
                 }
             }
 
@@ -959,6 +956,7 @@ impl GLRTable {
                         continue;
                     }
 
+
                     // 4b-ii: Deep chain following.
                     // For each alternative, simulate the reduce chain and track
                     // the total depth popped from the original split state S.
@@ -987,7 +985,6 @@ impl GLRTable {
                     // All alternatives converge if they reach the same
                     // (base_depth, final_lhs) and goto[preds^base_depth][lhs]
                     // agrees for all preds.
-
                     const MAX_CHAIN: usize = 32;
 
                     // Follow one alternative's chain.  Returns (base_depth, final_lhs)
