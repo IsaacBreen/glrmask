@@ -1,6 +1,7 @@
 //! Integration tests: end-to-end from grammar → compile → mask → commit.
 
 use glrmask::{Constraint, ConstraintState, Vocab};
+use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 /// Build a vocabulary from string entries.
@@ -518,16 +519,259 @@ fn test_json_schema_enum() {
 #[test]
 #[ignore = "known o1052 mask/commit mismatch MRE: token b\"mand\" is committable but absent from mask"]
 fn test_json_schema_enum_mand_mask_false_negative() {
-    let vocab = Vocab::new(vec![(0u32, b"mand".to_vec())], None);
-    let constraint =
-        Constraint::from_json_schema(r#"{"type":"string","enum":["mand","kvinde","ukendt"]}"#, &vocab)
-            .expect("minimal o1052 schema should compile");
+    let vocab_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(".cache/vocab_cache/llama3_vocab.json");
+    let vocab_json = fs::read_to_string(&vocab_path).expect("read cached Llama 3 vocab");
+    let vocab_map: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&vocab_json).expect("parse cached Llama 3 vocab json");
+    let vocab_entries = vocab_map
+        .into_iter()
+        .map(|(token_id, token_hex)| {
+            let token_id = token_id.parse::<u32>().expect("token id should parse");
+            let token_hex = token_hex.as_str().expect("token payload should be hex");
+            let bytes = (0..token_hex.len())
+                .step_by(2)
+                .map(|offset| {
+                    u8::from_str_radix(&token_hex[offset..offset + 2], 16)
+                        .expect("hex byte should parse")
+                })
+                .collect();
+            (token_id, bytes)
+        })
+        .collect();
+    let vocab = Vocab::new(vocab_entries, None);
+    let constraint = Constraint::from_json_schema(r#"{
+  "id": "https://almanak.github.io/schemas/people.aarhusteater.json",
+  "$schema": "http://json-schema.org/draft-04/schema#",
+  "title": "people.aarhusteater",
+  "description": "Schema for all personnel resources at Aarhus Teater.",
+  "type": "object",
+  "_meta": {
+    "indexProperties": [
+      "id",
+      "domain",
+      "schema",
+      "occupation",
+      "date_from",
+      "date_to"
+    ],
+    "systemProperties": [
+      "uuid",
+      "id",
+      "domain",
+      "schema",
+      "scheme",
+      "created",
+      "created_by",
+      "updated",
+      "updated_by",
+      "status"
+    ],
+    "fulltextProperties": [
+      "description"
+    ],
+    "autocompleteProperties": [
+      "display_label"
+    ]
+  },
+  "required": [
+    "lastnames",
+    "gender"
+  ],
+  "properties": {
+    "uuid": {
+      "type": "string",
+      "title": "Universal unique identifier",
+      "description": "UUID1. Assigned by system",
+      "pattern": "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    },
+    "id": {
+      "type": "string",
+      "title": "Resourcespecifik ID",
+      "description": "9-cifret l\u00f8benummer semi-specifik for resourcetypen. Assigned by system",
+      "maxLength": 9,
+      "pattern": "^[0-9]{9}$"
+    },
+    "domain": {
+      "type": "string",
+      "enum": [
+        "records",
+        "people",
+        "organisations",
+        "families",
+        "events",
+        "places",
+        "concepts",
+        "things"
+      ],
+      "title": "Resourcetype",
+      "description": "S\u00e6ttes kun n\u00e5r der v\u00e6lges skema til oprettelse. Ellers fastsat."
+    },
+    "schema": {
+      "type": "string",
+      "title": "Skema",
+      "description": "S\u00e6ttes kun n\u00e5r der v\u00e6lges skema til oprettelse. Ellers fastsat."
+    },
+    "created": {
+      "type": "string",
+      "format": "date-time",
+      "title": "Skabt",
+      "description": "Datetime for skabelse af metadata-ressourcen"
+    },
+    "created_by": {
+      "type": "string",
+      "maxLength": 255,
+      "title": "Skabt af",
+      "description": "Brugernavn/ID p\u00e5 skaber/oploader af metadata-ressourcen"
+    },
+    "updated": {
+      "type": "string",
+      "format": "date-time",
+      "title": "Senest opdateret",
+      "description": "Datetime for seneste opdatering af ressourcen"
+    },
+    "updated_by": {
+      "type": "string",
+      "maxLength": 255,
+      "title": "Senest opdateret af",
+      "description": "Brugernavn p\u00e5 seneste opdaterer af metadata-ressourcen"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "validated",
+        "machine-generated",
+        "user-generated"
+      ],
+      "title": "Status",
+      "default": "user-generated"
+    },
+    "display_label": {
+      "type": "string",
+      "maxLength": 255,
+      "title": "Displaynavn",
+      "description": "Den streng, som entiteten repr\u00e6senteres med"
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 5000,
+      "title": "Beskrivelse"
+    },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 255
+      },
+      "title": "Kilder",
+      "description": "URL-links eller enkeltlinje referencer"
+    },
+    "portrait": {
+      "type": "string",
+      "maxLength": 255,
+      "format": "uri",
+      "title": "Portr\u00e6t"
+    },
+    "firstnames": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 255
+      },
+      "description": "Alle fornavne i korrekt r\u00e6kkef\u00f8lge",
+      "title": "Fornavne"
+    },
+    "birthname": {
+      "type": "string",
+      "title": "Pigenavn (f\u00f8dt)",
+      "description": "Det eller de efternavne som vedkommende havde f\u00f8r giftem\u00e5l.",
+      "maxLength": 255
+    },
+    "lastnames": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 255
+      },
+      "title": "Mellem- og efternavne",
+      "description": "Alle nuv\u00e6rende mellem og efternavne i korrekt r\u00e6kkef\u00f8lge"
+    },
+    "gender": {
+      "type": "string",
+      "enum": [
+        "mand",
+        "kvinde",
+        "ukendt"
+      ],
+      "title": "K\u00f8n",
+      "description": "Selvforklarende"
+    },
+    "occupation": {
+      "type": "array",
+      "description": "B\u00f8r v\u00e6re en brance-betegnelse fra DB07",
+      "items": {
+        "type": "string",
+        "maxLength": 255
+      },
+      "_uniqueItems": true,
+      "title": "Erhverv"
+    },
+    "date_from": {
+      "type": "string",
+      "format": "date",
+      "maxLength": 255,
+      "title": "F\u00f8dselsdato (\u00e5\u00e5\u00e5\u00e5-mm-dd)",
+      "pattern": "^([0-9]{4})(-([0-9]{2}))?(-([0-9]{2}))?$"
+    },
+    "place_of_birth": {
+      "type": "string",
+      "maxLength": 255,
+      "title": "F\u00f8dselssted"
+    },
+    "date_to": {
+      "type": "string",
+      "format": "date",
+      "maxLength": 255,
+      "title": "D\u00f8dsdato (\u00e5\u00e5\u00e5\u00e5-mm-dd)",
+      "pattern": "^([0-9]{4})(-([0-9]{2}))?(-([0-9]{2}))?$"
+    },
+    "place_of_death": {
+      "type": "string",
+      "maxLength": 255,
+      "title": "D\u00f8dssted"
+    },
+    "ext_data": {
+      "type": "object",
+      "title": "Udvided metadata",
+      "properties": {
+        "original_id": {
+          "type": "string",
+          "maxLength": 255,
+          "title": "Originalt ID"
+        },
+        "place_of_education": {
+          "type": "string",
+          "maxLength": 255,
+          "title": "Uddannelsessted"
+        },
+        "year_of_graduation": {
+          "type": "string",
+          "pattern": "^[0-9]{4}$",
+          "title": "Uddannelses\u00e5r"
+        }
+      }
+    }
+  }
+}
+"#, &vocab)
+        .expect("minimal o1052 schema should compile");
 
-    let prefix = b"\"";
+    let prefix = b"{\"uuid\": \"12345678-1234-1234-1234-123456789012\", \"id\": \"123456789\", \"domain\": \"people\", \"schema\": \"https://almanak.github.io/schemas/people.aarhusteater.json\", \"created\": \"2022-01-01T12:00:00Z\", \"created_by\": \"John Doe\", \"updated\": \"2022-01-01T12:00:00Z\", \"updated_by\": \"John Doe\", \"status\": \"user-generated\", \"display_label\": \"John Smith\", \"description\": \"This is a description of John Smith.\", \"sources\": [\"https://example.com/source1\", \"https://example.com/source2\"], \"portrait\": \"https://example.com/portrait.jpg\", \"firstnames\": [\"John\"], \"lastnames\": [\"Smith\"], \"gender\": \"";
+    let disputed_token_id = 1969u32;
 
     let mut mask_state = constraint.start();
     mask_state.commit_bytes(prefix).unwrap();
-    let mask_accepts = token_allowed(&mask_state.mask(), 0);
+    let mask_accepts = token_allowed(&mask_state.mask(), disputed_token_id as usize);
 
     let mut commit_state = constraint.start();
     commit_state.commit_bytes(prefix).unwrap();
