@@ -3359,14 +3359,14 @@ mod tests {
         let vocab = Vocab::new(vec![(disputed_token_id, disputed_token.to_vec())], None);
         let constraint = Constraint::from_glrm_grammar(
             r#"
-start start;
+            start start;
 
-internal t CHAR ::= /[^\x00-\x1f\x7f"\\]|\\u[0-9A-Fa-f]{4}/;
-t NUM ::= /0*(\.00+|e0)/;
-t PAT ::= CHAR* [a]{36} CHAR* "\"";
-t BOUNDED ::= CHAR{0,254} "\"";
-nt start ::= PAT "d" (BOUNDED | NUM);
-"#,
+            internal t CHAR ::= /[^\x00-\x1f\x7f"\\]|\\u[0-9A-Fa-f]{4}/;
+            t NUM ::= /0*(\.00+|e0)/;
+            t PAT ::= CHAR* [a]{36} CHAR* "\"";
+            t BOUNDED ::= CHAR{0,254} "\"";
+            nt start ::= PAT "d" (BOUNDED | NUM);
+            "#,
             &vocab,
         )
         .expect("grammar should compile");
