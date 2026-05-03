@@ -3354,16 +3354,25 @@ mod tests {
     #[ignore = "diagnostic pattern/maxLength mask/commit mismatch"]
     #[test]
     fn diagnose_pattern_then_max_length_mask_commit_mismatch() {
-        let schema = r#"{"properties":{"u":{"pattern":"[a]{36}"},"d":{"maxLength":254}}}"#;
-
         let disputed_token_id = 0;
         let disputed_token = b"abcdefgh";
         let vocab = Vocab::new(vec![(disputed_token_id, disputed_token.to_vec())], None);
-        let constraint =
-            Constraint::from_json_schema(schema, &vocab).expect("o1052 schema should compile");
-        let mut prefix = br#"{"u": ""#.to_vec();
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+start start;
+
+internal t JSON_STRING_CHAR ::= /[^\x00-\x1f\x7f"\\]|\\["\\\/bfnrt]|\\u[0-9A-Fa-f]{4}/;
+t JSON_NUMBER ::= /-?(0|[1-9][0-9]*)(\.[0-9]+([eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+)/;
+t JSON_STRING_PATTERN_0 ::= ((([ !#-[\]-~] | [\xC2-\xDF] [\x80-\xBF] | [\xE0] [\xA0-\xBF] [\x80-\xBF] | [\xE1-\xEC] [\x80-\xBF] [\x80-\xBF] | [\xED] [\x80-\x9F] [\x80-\xBF] | [\xEE\xEF] [\x80-\xBF] [\x80-\xBF] | [\xF0] [\x90-\xBF] [\x80-\xBF] [\x80-\xBF] | [\xF1-\xF3] [\x80-\xBF] [\x80-\xBF] [\x80-\xBF] | [\xF4] [\x80-\x8F] [\x80-\xBF] [\x80-\xBF]) | "\\" ["/\\bfnrt] | "\\" "u" [0-9A-Fa-f]{4})* [a]{36} (([ !#-[\]-~] | [\xC2-\xDF] [\x80-\xBF] | [\xE0] [\xA0-\xBF] [\x80-\xBF] | [\xE1-\xEC] [\x80-\xBF] [\x80-\xBF] | [\xED] [\x80-\x9F] [\x80-\xBF] | [\xEE\xEF] [\x80-\xBF] [\x80-\xBF] | [\xF0] [\x90-\xBF] [\x80-\xBF] [\x80-\xBF] | [\xF1-\xF3] [\x80-\xBF] [\x80-\xBF] [\x80-\xBF] | [\xF4] [\x80-\x8F] [\x80-\xBF] [\x80-\xBF]) | "\\" ["/\\bfnrt] | "\\" "u" [0-9A-Fa-f]{4})*) "\"";
+t JSON_STRING_BOUNDED_1 ::= JSON_STRING_CHAR{0,254} "\"";
+nt start ::= JSON_STRING_PATTERN_0 "d" ("\"" JSON_STRING_BOUNDED_1 | JSON_NUMBER);
+"#,
+            &vocab,
+        )
+        .expect("grammar should compile");
+        let mut prefix = Vec::new();
         prefix.extend([b'a'; 36]);
-        prefix.extend(br#"", "d": ""#);
+        prefix.extend(br#""d""#);
         prefix.extend([b'a'; 254]);
 
         let mut mask_state = constraint.start();
