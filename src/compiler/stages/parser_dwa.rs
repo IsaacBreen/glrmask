@@ -722,8 +722,6 @@ fn determinize_with_supports(
     let mut touched_dense_labels: Vec<usize> = Vec::new();
     let mut dense_label_touched: Vec<bool> = vec![false; dense_label_limit];
     let mut default_touched = false;
-    // Reusable target subset map — cleared and reused each iteration.
-    let mut target_subset: FxHashMap<u32, Weight> = FxHashMap::default();
     // Memoize local epsilon-closure outputs keyed by pre-closure weighted subsets.
     let mut closure_cache: FxHashMap<Vec<(u32, usize)>, CachedClosure> = FxHashMap::default();
     let mut key_buf: Vec<(u32, usize)> = Vec::new();
@@ -860,15 +858,10 @@ fn determinize_with_supports(
                 return;
             }
 
-            let t_filter = std::time::Instant::now();
-            target_subset.clear();
-            for (dst, combined) in contribs {
-                if !combined.is_empty() {
-                    target_subset.insert(dst, combined);
-                }
-            }
+            let mut target_subset = contribs;
+            debug_assert!(target_subset.values().all(|weight| !weight.is_empty()));
             if profile_enabled {
-                prof_target_filter_ns += t_filter.elapsed().as_nanos() as u64;
+                prof_target_filter_ns += 0;
             }
             if target_subset.is_empty() {
                 return;
@@ -1157,7 +1150,6 @@ fn determinize_parser_dwa_with_fallbacks(
     let mut touched_dense_labels: Vec<usize> = Vec::new();
     let mut dense_label_touched: Vec<bool> = vec![false; dense_label_limit];
     let mut default_touched = false;
-    let mut target_subset: FxHashMap<u32, Weight> = FxHashMap::default();
     let mut key_buf: Vec<(u32, usize)> = Vec::new();
     let mut final_contributions: Vec<Weight> = Vec::new();
 
@@ -1297,12 +1289,8 @@ fn determinize_parser_dwa_with_fallbacks(
                 return;
             }
 
-            target_subset.clear();
-            for (dst, combined) in contribs {
-                if !combined.is_empty() {
-                    target_subset.insert(dst, combined);
-                }
-            }
+            let target_subset = contribs;
+            debug_assert!(target_subset.values().all(|weight| !weight.is_empty()));
             if target_subset.is_empty() {
                 return;
             }
