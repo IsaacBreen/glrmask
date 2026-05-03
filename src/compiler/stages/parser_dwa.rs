@@ -29,6 +29,19 @@ type TerminalBundle = BTreeMap<TerminalID, Weight>;
 type BundleSignature = Vec<(TerminalID, Weight)>;
 type ComposeMemo = Vec<Option<Option<NwaBody>>>;
 type ConcatMemo = FxHashMap<(usize, u32), Option<NwaBody>>;
+type TargetContribs = SmallVec<[(u32, Weight); 4]>;
+
+fn add_target_contribution(contribs: &mut TargetContribs, target: u32, add: Weight) {
+    if add.is_empty() {
+        return;
+    }
+
+    if let Some((_, existing)) = contribs.iter_mut().find(|(existing_target, _)| *existing_target == target) {
+        *existing = existing.union(&add);
+    } else {
+        contribs.push((target, add));
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 struct ParserDwaPhaseProfile {
@@ -715,10 +728,10 @@ fn determinize_with_supports(
     worklist.push_back(canon_buf.clone());
 
     let dense_label_limit = dense_positive_label_limit.map(|n| n as usize).unwrap_or(0);
-    let mut dense_raw_targets: Vec<FxHashMap<u32, Weight>> =
-        (0..dense_label_limit).map(|_| FxHashMap::default()).collect();
-    let mut default_raw_targets: FxHashMap<u32, Weight> = FxHashMap::default();
-    let mut sparse_raw_targets: FxHashMap<i32, FxHashMap<u32, Weight>> = FxHashMap::default();
+    let mut dense_raw_targets: Vec<TargetContribs> =
+        (0..dense_label_limit).map(|_| TargetContribs::new()).collect();
+    let mut default_raw_targets: TargetContribs = TargetContribs::new();
+    let mut sparse_raw_targets: FxHashMap<i32, TargetContribs> = FxHashMap::default();
     let mut touched_dense_labels: Vec<usize> = Vec::new();
     let mut dense_label_touched: Vec<bool> = vec![false; dense_label_limit];
     let mut default_touched = false;
@@ -827,12 +840,7 @@ fn determinize_with_supports(
                     } else {
                         sparse_raw_targets.entry(label).or_default()
                     };
-                    let entry = target_weights.entry(*target).or_insert_with(Weight::empty);
-                    *entry = if entry.is_empty() {
-                        next_weight
-                    } else {
-                        entry.union(&next_weight)
-                    };
+                    add_target_contribution(target_weights, *target, next_weight);
                 }
             }
         }
@@ -853,22 +861,20 @@ fn determinize_with_supports(
 
         let mut pre_closure_key: Vec<(u32, usize)> = Vec::new();
 
-        let mut process_label = |label: i32, contribs: FxHashMap<u32, Weight>| {
+        let mut process_label = |label: i32, mut contribs: TargetContribs| {
             if contribs.is_empty() {
                 return;
             }
 
-            let mut target_subset = contribs;
-            debug_assert!(target_subset.values().all(|weight| !weight.is_empty()));
+            debug_assert!(contribs.iter().all(|(_, weight)| !weight.is_empty()));
             if profile_enabled {
                 prof_target_filter_ns += 0;
             }
-            if target_subset.is_empty() {
-                return;
-            }
+
+            contribs.sort_unstable_by_key(|(state_id, _)| *state_id);
 
             if profile_enabled {
-                match target_subset.len() {
+                match contribs.len() {
                     1 => prof_target_subset_len_1 += 1,
                     2..=4 => prof_target_subset_len_2_4 += 1,
                     5..=16 => prof_target_subset_len_5_16 += 1,
@@ -876,12 +882,12 @@ fn determinize_with_supports(
                 }
             }
 
-            if target_subset.len() == 1 {
-                let (&only_state, only_weight) = target_subset.iter().next().unwrap();
-                if nwa.states()[only_state as usize].epsilons.is_empty() {
+            if contribs.len() == 1 {
+                let (only_state, only_weight) = &contribs[0];
+                if nwa.states()[*only_state as usize].epsilons.is_empty() {
                     let t_subset_lookup = std::time::Instant::now();
                     key_buf.clear();
-                    key_buf.push((only_state, only_weight.ptr_key()));
+                    key_buf.push((*only_state, only_weight.ptr_key()));
                     let to_state = if let Some(existing) = subset_map.get(&key_buf).copied() {
                         if profile_enabled {
                             prof_subset_map_hits += 1;
@@ -890,8 +896,8 @@ fn determinize_with_supports(
                     } else {
                         let new_state = dwa.add_state();
                         subset_map.insert(key_buf.clone(), new_state);
-                        worklist.push_back(vec![(only_state, only_weight.clone())]);
-                        supports.push(vec![only_state]);
+                        worklist.push_back(vec![(*only_state, only_weight.clone())]);
+                        supports.push(vec![*only_state]);
                         if profile_enabled {
                             prof_subset_map_inserts += 1;
                         }
@@ -920,8 +926,7 @@ fn determinize_with_supports(
 
             let t_pre_closure_key = std::time::Instant::now();
             pre_closure_key.clear();
-            pre_closure_key.extend(target_subset.iter().map(|(sid, w)| (*sid, w.ptr_key())));
-            pre_closure_key.sort_unstable_by_key(|(sid, _)| *sid);
+            pre_closure_key.extend(contribs.iter().map(|(sid, w)| (*sid, w.ptr_key())));
             if profile_enabled {
                 prof_target_pre_closure_key_ns += t_pre_closure_key.elapsed().as_nanos() as u64;
             }
@@ -937,13 +942,17 @@ fn determinize_with_supports(
                 }
                 Entry::Vacant(entry) => {
                     let t_edge_weight = std::time::Instant::now();
-                    let edge_weight = Weight::union_all(target_subset.values());
+                    let edge_weight = Weight::union_all(contribs.iter().map(|(_, weight)| weight));
                     if profile_enabled {
                         prof_target_edge_weight_ns += t_edge_weight.elapsed().as_nanos() as u64;
                     }
                     if edge_weight.is_empty() {
                         return;
                     }
+                    let mut target_subset: FxHashMap<u32, Weight> = contribs
+                        .iter()
+                        .map(|(state_id, weight)| (*state_id, weight.clone()))
+                        .collect();
                     local_epsilon_closure(
                         nwa,
                         &mut weight_by_state,
@@ -1143,10 +1152,10 @@ fn determinize_parser_dwa_with_fallbacks(
     subset_map.insert(subset_key(&canon_buf), result.start_state());
     worklist.push_back(canon_buf.clone());
 
-    let mut dense_raw_targets: Vec<FxHashMap<u32, Weight>> =
-        (0..dense_label_limit).map(|_| FxHashMap::default()).collect();
-    let mut default_raw_targets: FxHashMap<u32, Weight> = FxHashMap::default();
-    let mut sparse_raw_targets: FxHashMap<i32, FxHashMap<u32, Weight>> = FxHashMap::default();
+    let mut dense_raw_targets: Vec<TargetContribs> =
+        (0..dense_label_limit).map(|_| TargetContribs::new()).collect();
+    let mut default_raw_targets: TargetContribs = TargetContribs::new();
+    let mut sparse_raw_targets: FxHashMap<i32, TargetContribs> = FxHashMap::default();
     let mut touched_dense_labels: Vec<usize> = Vec::new();
     let mut dense_label_touched: Vec<bool> = vec![false; dense_label_limit];
     let mut default_touched = false;
@@ -1193,12 +1202,7 @@ fn determinize_parser_dwa_with_fallbacks(
                 } else {
                     sparse_raw_targets.entry(label).or_default()
                 };
-                let entry = target_weights.entry(*target).or_insert_with(Weight::empty);
-                *entry = if entry.is_empty() {
-                    next_weight
-                } else {
-                    entry.union(&next_weight)
-                };
+                add_target_contribution(target_weights, *target, next_weight);
             }
 
             let Some((default_target, default_weight)) = state.transitions.get(&DEFAULT_LABEL) else {
@@ -1210,14 +1214,7 @@ fn determinize_parser_dwa_with_fallbacks(
             }
 
             default_touched = true;
-            let entry = default_raw_targets
-                .entry(*default_target)
-                .or_insert_with(Weight::empty);
-            *entry = if entry.is_empty() {
-                fallback_weight.clone()
-            } else {
-                entry.union(&fallback_weight)
-            };
+            add_target_contribution(&mut default_raw_targets, *default_target, fallback_weight.clone());
 
             for &label in state.transitions.keys() {
                 if label == DEFAULT_LABEL {
@@ -1230,20 +1227,10 @@ fn determinize_parser_dwa_with_fallbacks(
                         touched_dense_labels.push(label_idx);
                     }
                     let target_weights = &mut dense_raw_targets[label_idx];
-                    let entry = target_weights.entry(*default_target).or_insert_with(Weight::empty);
-                    *entry = if entry.is_empty() {
-                        fallback_weight.clone()
-                    } else {
-                        entry.union(&fallback_weight)
-                    };
+                    add_target_contribution(target_weights, *default_target, fallback_weight.clone());
                 } else {
                     let target_weights = sparse_raw_targets.entry(label).or_default();
-                    let entry = target_weights.entry(*default_target).or_insert_with(Weight::empty);
-                    *entry = if entry.is_empty() {
-                        fallback_weight.clone()
-                    } else {
-                        entry.union(&fallback_weight)
-                    };
+                    add_target_contribution(target_weights, *default_target, fallback_weight.clone());
                 }
             }
 
@@ -1256,12 +1243,7 @@ fn determinize_parser_dwa_with_fallbacks(
                             touched_dense_labels.push(label_idx);
                         }
                         let target_weights = &mut dense_raw_targets[label_idx];
-                        let entry = target_weights.entry(*default_target).or_insert_with(Weight::empty);
-                        *entry = if entry.is_empty() {
-                            fallback_weight.clone()
-                        } else {
-                            entry.union(&fallback_weight)
-                        };
+                        add_target_contribution(target_weights, *default_target, fallback_weight.clone());
                     }
                 }
                 Some(PossibleOutgoingIds::Some(ids)) => {
@@ -1272,41 +1254,32 @@ fn determinize_parser_dwa_with_fallbacks(
                             touched_dense_labels.push(label_idx);
                         }
                         let target_weights = &mut dense_raw_targets[label_idx];
-                        let entry = target_weights.entry(*default_target).or_insert_with(Weight::empty);
-                        *entry = if entry.is_empty() {
-                            fallback_weight.clone()
-                        } else {
-                            entry.union(&fallback_weight)
-                        };
+                        add_target_contribution(target_weights, *default_target, fallback_weight.clone());
                     }
                 }
                 Some(PossibleOutgoingIds::Empty) | None => {}
             }
         }
 
-        let mut process_label = |label: i32, contribs: FxHashMap<u32, Weight>| {
+        let mut process_label = |label: i32, mut contribs: TargetContribs| {
             if contribs.is_empty() {
                 return;
             }
 
-            let target_subset = contribs;
-            debug_assert!(target_subset.values().all(|weight| !weight.is_empty()));
-            if target_subset.is_empty() {
-                return;
-            }
+            debug_assert!(contribs.iter().all(|(_, weight)| !weight.is_empty()));
+            contribs.sort_unstable_by_key(|(state_id, _)| *state_id);
 
-            let edge_weight = Weight::union_all(target_subset.values());
+            let edge_weight = Weight::union_all(contribs.iter().map(|(_, weight)| weight));
             if edge_weight.is_empty() {
                 return;
             }
 
             key_buf.clear();
-            if target_subset.len() == 1 {
-                let (&only_state, only_weight) = target_subset.iter().next().unwrap();
-                key_buf.push((only_state, only_weight.ptr_key()));
+            if contribs.len() == 1 {
+                let (only_state, only_weight) = &contribs[0];
+                key_buf.push((*only_state, only_weight.ptr_key()));
             } else {
-                key_buf.extend(target_subset.iter().map(|(sid, w)| (*sid, w.ptr_key())));
-                key_buf.sort_unstable_by_key(|(sid, _)| *sid);
+                key_buf.extend(contribs.iter().map(|(sid, w)| (*sid, w.ptr_key())));
             }
 
             let to_state = if let Some(existing) = subset_map.get(&key_buf).copied() {
@@ -1314,11 +1287,7 @@ fn determinize_parser_dwa_with_fallbacks(
             } else {
                 let new_state = result.add_state();
                 subset_map.insert(key_buf.clone(), new_state);
-                let mut next_entries: Vec<(u32, Weight)> = target_subset
-                    .iter()
-                    .map(|(state_id, weight)| (*state_id, weight.clone()))
-                    .collect();
-                next_entries.sort_unstable_by_key(|(state_id, _)| *state_id);
+                let next_entries: Vec<(u32, Weight)> = contribs.into_iter().collect();
                 worklist.push_back(next_entries);
                 new_state
             };
