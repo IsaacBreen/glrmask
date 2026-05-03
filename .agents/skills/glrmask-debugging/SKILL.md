@@ -1,6 +1,6 @@
 ---
 name: glrmask-debugging
-description: Debug glrmask2 runtime mask/commit-token behavior, schema-to-grammar bugs, GLRM grammar witnesses, and recursive minimization of schema/prefix/token/vocab repros. Use when GLRMASK_ASSERT_COMMIT_TOKEN_MASK_EQUIVALENCE fails, when a token is committable but absent from the mask or present in the mask but not committable, when glrmask accepts or rejects a token incorrectly, or when converting a JSON-schema repro into a minimal inline Rust test and then a minimal GLRM grammar.
+description: Debug glrmask2 runtime mask/commit-token behavior, schema-to-grammar bugs, GLRM grammar witnesses, and recursive minimization of schema/prefix/token/vocab repros. Use when GLRMASK_ASSERT_COMMIT_TOKEN_MASK_EQUIVALENCE fails, when a token is committable but absent from the mask or present in the mask but not committable, when glrmask accepts or rejects a token incorrectly, or when converting a JSON-schema repro into a minimal inline Rust test plus a duplicate GLRM-grammar test.
 ---
 
 # GLRMask Debugging
@@ -44,7 +44,7 @@ Minimize recursively:
 3. Minimize field names, object wrappers, pattern properties, bounds, branch counts, prefixes, token bytes, and vocabulary entries.
 4. Keep reducing until every remaining piece has survived an explicit attempt to delete it, inline it, weaken it, literalize it, or scale it down.
 
-After the schema-based repro is truly minimal, commit that checkpoint if useful. Then replace the schema with a direct GLRM grammar.
+After the schema-based repro is truly minimal, commit that checkpoint if useful. Then add a new duplicate test that uses the generated GLRM grammar directly instead of the schema. Keep the schema-based test; do not replace it.
 
 Use this environment variable to print the generated grammar when needed:
 
