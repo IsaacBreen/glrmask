@@ -2,7 +2,7 @@
 
 This note captures the useful mechanics from the `Github_hard---o1052` mask/commit MRE reduction.
 
-The key trick is to compile the Rust test once, but make the active artifacts come from stable `/tmp` files. The minimizer then overwrites those files and reruns the same release test binary. This avoids recompiling for every schema, prefix, grammar, or vocab candidate.
+The key trick is to compile the Rust test once, but make the active artifacts come from stable `/tmp` files. The minimizer then overwrites those files and reruns the same release test binary. This avoids recompiling for every schema, prefix, grammar, disputed-token, or vocab candidate.
 
 ## Rust Test Hook
 
@@ -33,6 +33,9 @@ let schema_json =
 
 let prefix = fs::read("/tmp/glrmask_o1052_prefix_candidate.bin")
     .unwrap_or_else(|_| b"{\"gender\": \"".to_vec());
+
+let disputed_token =
+    fs::read("/tmp/glrmask_o1052_token_candidate.bin").unwrap_or_else(|_| b"mand".to_vec());
 ```
 
 Then keep the oracle exact. For a mask false-negative:
@@ -160,7 +163,16 @@ while True:
         break
 ```
 
-For schemas, use the same skeleton over root keys, property keys, nested object keys, enum values, bounds, and prefix fields. After any accepted deletion, restart from the smaller artifact.
+For schemas and grammars, use the same skeleton over root keys, property keys, nested object keys, enum values, regex alternatives, repetition bounds, literal characters, token bytes, punctuation, and prefix fields. After any accepted deletion, restart from the smaller artifact.
+
+Do not stop at deleting whole fields. Also try:
+
+- replacing semantic names and values with one-letter names, then with repeated dummy bytes
+- deleting individual characters from field names, enum literals, and token bytes
+- replacing token bytes and the grammar literal together, not one at a time
+- removing JSON punctuation with synchronized prefix edits, including quotes, braces, colons, commas, and lookahead separators
+- changing bounds such as `{0,255}` to `{0,1}`, `{0,0}`, `*`, literals, and nearby bounds
+- factoring large generated regexes into named terminals for readability, then re-running deletion/weakening passes
 
 ## Recursive Loop
 
@@ -205,6 +217,17 @@ Use byte literals only if a survivor token is not valid UTF-8. Avoid keeping hex
 Keep a small log of accepted and rejected cuts. The point of recursive minimization is not just "smaller"; it is evidence that each remaining piece survived deletion, weakening, or literalization.
 
 When candidate runs become cheap enough, switch from coarse partition cuts to nested cuts immediately. When a large deletion unexpectedly fixes the bug, test single deletions and random or semantic buckets to distinguish one load-bearing token from aggregate vocab-shape effects.
+
+For the `o1052` GLRM witness, several zero-consumption-looking pieces were load-bearing:
+
+- `("x" JSON_NUMBER)*` remained necessary even when the reproducing prefix takes zero repetitions.
+- weakening `JSON_NUMBER` from `/[0-9eE+-]+/` to `"0"`, `/0+/`, or `/[0]+/` stopped the mismatch.
+- the `", " ~ (...)` separator/list form remained necessary; replacing it with direct concatenation stopped the mismatch.
+- the prefix-side `JSON_STRING_PATTERN_0` star remained necessary even though the prefix starts immediately with the UUID-shaped text.
+- the second string's bounded terminal shape remained necessary even when its value was minimized to the empty string.
+- factoring the generated string-pattern regex through a named `JSON_STRING_CHAR` terminal preserved the mismatch and made the witness more readable.
+- replacing `mand` with a synchronized same-length dummy token such as `jand` preserved the mismatch, but single-letter tokens did not.
+- replacing the remaining field names with single letters stopped the mismatch; record failed semantic replacements rather than assuming they are safe.
 
 If you interrupt a reducer, remember that the `/tmp` file may contain the last rejected candidate, not the last accepted candidate. Either write every accepted candidate to a checkpoint file immediately, or reconstruct/replay the accepted cuts before continuing. A simple pattern is:
 
