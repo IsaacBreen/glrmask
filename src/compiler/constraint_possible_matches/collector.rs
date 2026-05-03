@@ -1514,12 +1514,12 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
     let parallel_depth = std::env::var("GLRMASK_PM_ROOT_PARALLEL_DEPTH")
         .ok()
         .and_then(|value| value.parse::<u8>().ok())
-        .unwrap_or(2);
+        .unwrap_or(4);
 
     let parallel_min_active = std::env::var("GLRMASK_PM_PARALLEL_MIN_ACTIVE_STATES")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(4096);
+        .unwrap_or(1024);
 
     if profile_summary_enabled() {
         let num_root_children = root.children().len();
