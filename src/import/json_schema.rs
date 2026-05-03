@@ -6444,9 +6444,7 @@ impl<'a> SchemaCtx<'a> {
             }
         };
 
-        let (terminal_body, wrap) = wrap_string_value_expr_parts(bounded_body);
-        let body = self.extract_terminal_rule(terminal_body, "JSON_STRING_BOUNDED");
-        Ok(wrap(body))
+        Ok(quoted_expr(bounded_body))
     }
 
     fn build_bounded_string_from_unit_regex(
