@@ -282,7 +282,7 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     let det_states = det.states().len();
     let minimize_started_at = Instant::now();
     let mut dwa = if label == "global" {
-        minimize_from_env(&det, "GLRMASK_MINIMIZE_MERGE_GLOBAL", minimize)
+        minimize_from_env(&det, "GLRMASK_MINIMIZE_MERGE_GLOBAL", |dwa| dwa.clone())
     } else {
         minimize_from_env(&det, "GLRMASK_MINIMIZE_MERGE", minimize)
     };

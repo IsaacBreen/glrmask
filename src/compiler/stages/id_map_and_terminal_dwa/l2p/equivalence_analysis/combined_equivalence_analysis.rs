@@ -518,15 +518,14 @@ pub fn compute_combined_equivalence_with_group_filter<S: AsRef<[u8]> + Sync>(
     let large_dfa_batch_size = env_usize_override(LARGE_DFA_BATCH_SIZE_ENV, PRE_VOCAB_STATE_REDUCTION_LARGE_DFA_BATCH_SIZE);
     let pre_vocab_max_full_tokens = env_usize_override(PRE_VOCAB_MAX_FULL_TOKENS_ENV, PRE_VOCAB_STATE_REDUCTION_MAX_FULL_TOKENS);
     let large_dfa = num_dfa_states >= large_dfa_threshold;
+    // Keep the sampled pre-vocab pass available for experiments, but default it
+    // off because the proposal+exact-finalize path can be a net loss.
     let use_pre_vocab_state_reduction = if force_pre_vocab_state_reduction {
         true
     } else if disable_pre_vocab_state_reduction {
         false
     } else {
-        !skip_token_state
-            && pre_reduced_states.len() >= pre_vocab_min_states
-            && tokenizer_num_groups <= pre_vocab_max_groups
-            && dedup.representative_token_bytes.len() >= pre_vocab_min_tokens
+        false
     };
     // For large DFAs, use sample-based pre-vocab reduction as a fast proposal,
     // but the returned partition will be exact-refined below before it is used

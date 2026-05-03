@@ -20,7 +20,9 @@ use std::time::Instant;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::determinize::determinize;
-use crate::automata::weighted::minimize::{minimize_from_env, minimize_with_threshold};
+use crate::automata::weighted::minimize::{
+    minimize_fast, minimize_from_env, minimize_with_threshold,
+};
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::grammar::flat::TerminalID;
@@ -350,29 +352,38 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // `fill_unmapped_with_new_class` after composition, so we always
     // use the simplified tokenizer.
     let simplify_started_at = Instant::now();
-    let (simplified_tok, simplify_state_map, simplify_cache_hit) =
-        if let Some(cache) = shared_simplify_cache {
-            cache.simplify_for_terminals(tokenizer, active_terminals, &relevant_bytes)
+    let can_skip_simplify = num_active_terminals == active_terminals.len()
+        && std::env::var_os("GLRMASK_FORCE_RELEVANT_BYTES").is_none();
+    let (simplified_tok_storage, simplify_state_map, simplify_cache_hit) =
+        if can_skip_simplify {
+            (None, None, false)
+        } else if let Some(cache) = shared_simplify_cache {
+            let (tok, map, cache_hit) = cache.simplify_for_terminals(tokenizer, active_terminals, &relevant_bytes);
+            (Some(tok), Some(map), cache_hit)
         } else {
             let (tok, map) = tokenizer.simplify_for_terminals(active_terminals, Some(&relevant_bytes));
-            (tok, map, false)
+            (Some(tok), Some(map), false)
         };
     let simplify_ms = simplify_started_at.elapsed().as_secs_f64() * 1000.0;
-    let candidate_unmapped_original_states = simplify_state_map
-        .original_to_internal
-        .iter()
-        .filter(|&&state| state == u32::MAX)
-        .count();
-    let use_simplified_tok = true;
+    let use_simplified_tok = simplified_tok_storage.is_some();
+    let tokenizer_for_build = simplified_tok_storage.as_ref().unwrap_or(tokenizer);
+    let candidate_unmapped_original_states = simplify_state_map.as_ref().map_or(0, |state_map| {
+        state_map
+            .original_to_internal
+            .iter()
+            .filter(|&&state| state == u32::MAX)
+            .count()
+    });
 
     if debug_profile_enabled() {
         eprintln!(
-            "[glrmask/debug][l2p_simplify] partition={} original_states={} simplified_states={} unmapped_original_states={} cache_hit={} used=true",
+            "[glrmask/debug][l2p_simplify] partition={} original_states={} simplified_states={} unmapped_original_states={} cache_hit={} used={}",
             partition_label,
             num_original_states,
-            simplified_tok.num_states(),
+            tokenizer_for_build.num_states(),
             candidate_unmapped_original_states,
             simplify_cache_hit,
+            use_simplified_tok,
         );
     }
 
@@ -381,28 +392,27 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // (they describe the same language); any overshoot indicates a bug in
     // the simplify pipeline.
     if std::env::var_os("GLRMASK_DEBUG_SIMPLIFY_COMPARE_FROM_SCRATCH").is_some() {
-        // Re-minimize the simplified DFA. If state count drops, minimize is
-        // not reaching a fixed point in the pipeline.
-        let dfa_clone = simplified_tok.dfa.clone();
-        let t0 = Instant::now();
-        let (remin, _) = dfa_clone.minimize_with_state_mapping();
-        let remin_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        eprintln!(
-            "[glrmask/debug][l2p_remin] partition={} simplified_states={} remin_states={} remin_ms={:.1}",
-            partition_label,
-            simplified_tok.num_states(),
-            remin.num_states(),
-            remin_ms,
-        );
+        if let Some(simplified_tok) = simplified_tok_storage.as_ref() {
+            // Re-minimize the simplified DFA. If state count drops, minimize is
+            // not reaching a fixed point in the pipeline.
+            let dfa_clone = simplified_tok.dfa.clone();
+            let t0 = Instant::now();
+            let (remin, _) = dfa_clone.minimize_with_state_mapping();
+            let remin_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            eprintln!(
+                "[glrmask/debug][l2p_remin] partition={} simplified_states={} remin_states={} remin_ms={:.1}",
+                partition_label,
+                simplified_tok.num_states(),
+                remin.num_states(),
+                remin_ms,
+            );
+        }
     }
-
-    // From here on, use the simplified tokenizer for all operations.
-    let tokenizer = &simplified_tok;
 
     // ---- Step 1: Equivalence analysis (on simplified tokenizer) ----
     let id_map_started_at = Instant::now();
     let simplified_id_map = equivalence_analysis::combined::analyze_equivalences_with_group_filter(
-        tokenizer,
+        tokenizer_for_build,
         vocab,
         disallowed_follows,
         ignore_terminal,
@@ -418,7 +428,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // `LocalIdMapTerminalDwa` struct. Run it in parallel with steps 2-8
     // via rayon::join. On the critical partition this cuts ~150-200ms
     // off the per-partition sequential critical path.
-    let tokenizer = &simplified_tok;
     let (
             dwa,
             vocab_tree_ms,
@@ -486,7 +495,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 // ---- Step 6: Trie-walk NWA build ----
                 let trie_build_started_at = Instant::now();
                 let _build_profile = build_nwa_via_trie_walk(
-                    tokenizer,
+                    tokenizer_for_build,
                     terminal_coloring,
                     use_terminal_coloring,
                     ignore_terminal,
@@ -540,7 +549,11 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
                 let minimize_started_at = Instant::now();
                 let dwa = minimize_from_env(&det, "GLRMASK_MINIMIZE_L2P", |dwa| {
-                    minimize_with_threshold(dwa, 50)
+                    if std::env::var_os("GLRMASK_PARTITION_SERIAL").is_some() {
+                        minimize_fast(dwa)
+                    } else {
+                        minimize_with_threshold(dwa, 50)
+                    }
                 });
                 let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
                 let dwa_stats_before_compact = dwa.stats();
@@ -576,6 +589,8 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let composed_id_map = if use_simplified_tok {
         InternalIdMap {
             tokenizer_states: simplify_state_map
+                .as_ref()
+                .expect("simplify_state_map missing for simplified tokenizer")
                 .compose(&simplified_id_map.tokenizer_states)
                 .fill_unmapped_with_new_class(),
             vocab_tokens: simplified_id_map.vocab_tokens.clone(),
@@ -595,7 +610,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             simplified_id_map.num_tsids(),
             simplify_ms,
             simplify_cache_hit,
-            simplified_tok.num_states(),
+            tokenizer_for_build.num_states(),
             id_map_ms,
             0.0,
             vocab_tree_ms,
