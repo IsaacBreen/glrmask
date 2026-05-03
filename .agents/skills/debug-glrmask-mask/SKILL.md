@@ -37,6 +37,8 @@ If L1 needs post-max-length TSID coarsening, compare exact whole-vocab terminal-
 
 For performance work, do not assume a coarser proposal plus exact bucket refinement is faster. On o1052, a hash-based L1 proposal made exact refinement touch too many states, and L1-specific tokenizer simplification cost more than it saved. Use `/tmp` profile logs to compare wall time before keeping these changes. `GLRMASK_PARTITION_SERIAL=1` is diagnostic for Rayon contention, not automatically a better default.
 
+When caching shared work across parallel vocab partitions, cache the in-flight computation, not only the completed value. A mutex-protected map that unlocks before computing is safe but can let all matching partitions miss and duplicate the expensive work. Store a per-key result slot plus a condition variable so one owner computes while concurrent waiters block for the published result.
+
 When debugging L1, compare the concrete full-token end-state terminal signature with the signature used in the built transition weight. If they differ, suspect state-map coarsening or representative use before suspecting runtime mask filtering.
 
 ## Root-Cause Standard

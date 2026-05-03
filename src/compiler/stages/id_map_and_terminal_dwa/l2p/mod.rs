@@ -13,7 +13,8 @@ pub(crate) mod nwa_builder;
 pub(crate) mod postprocess;
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -54,7 +55,21 @@ struct SimplifyCacheKey {
 
 #[derive(Default)]
 pub(crate) struct SharedSimplifyCache {
-    entries: Mutex<FxHashMap<SimplifyCacheKey, Arc<(Tokenizer, ManyToOneIdMap)>>>,
+    entries: Mutex<FxHashMap<SimplifyCacheKey, Arc<SimplifyCacheEntry>>>,
+}
+
+struct SimplifyCacheEntry {
+    result: Mutex<Option<Result<Arc<(Tokenizer, ManyToOneIdMap)>, Arc<str>>>>,
+    ready: Condvar,
+}
+
+impl SimplifyCacheEntry {
+    fn new() -> Self {
+        Self {
+            result: Mutex::new(None),
+            ready: Condvar::new(),
+        }
+    }
 }
 
 impl SharedSimplifyCache {
@@ -86,21 +101,53 @@ impl SharedSimplifyCache {
         relevant_bytes: &[bool; 256],
     ) -> (Tokenizer, ManyToOneIdMap, bool) {
         let key = Self::key(active_terminals, relevant_bytes);
-        if let Some(cached) = self.entries.lock().unwrap().get(&key).cloned() {
-            return (cached.0.clone(), cached.1.clone(), true);
+        let (entry, owns_compute) = {
+            let mut entries = self.entries.lock().unwrap();
+            if let Some(entry) = entries.get(&key) {
+                (entry.clone(), false)
+            } else {
+                let entry = Arc::new(SimplifyCacheEntry::new());
+                entries.insert(key, entry.clone());
+                (entry, true)
+            }
+        };
+
+        if owns_compute {
+            match catch_unwind(AssertUnwindSafe(|| {
+                Arc::new(tokenizer.simplify_for_terminals(
+                    active_terminals,
+                    Some(relevant_bytes),
+                ))
+            })) {
+                Ok(computed) => {
+                    *entry.result.lock().unwrap() = Some(Ok(computed.clone()));
+                    entry.ready.notify_all();
+                    return (computed.0.clone(), computed.1.clone(), false);
+                }
+                Err(payload) => {
+                    *entry.result.lock().unwrap() = Some(Err(
+                        "tokenizer.simplify_for_terminals panicked".into(),
+                    ));
+                    entry.ready.notify_all();
+                    resume_unwind(payload);
+                }
+            }
         }
 
-        let computed = Arc::new(tokenizer.simplify_for_terminals(
-            active_terminals,
-            Some(relevant_bytes),
-        ));
-        let mut entries = self.entries.lock().unwrap();
-        let cached = entries.entry(key).or_insert_with(|| computed.clone()).clone();
-        (
-            cached.0.clone(),
-            cached.1.clone(),
-            !Arc::ptr_eq(&cached, &computed),
-        )
+        let mut result = entry.result.lock().unwrap();
+        loop {
+            match result.as_ref() {
+                Some(Ok(cached)) => {
+                    return (cached.0.clone(), cached.1.clone(), true);
+                }
+                Some(Err(message)) => {
+                    panic!("{message}");
+                }
+                None => {
+                    result = entry.ready.wait(result).unwrap();
+                }
+            }
+        }
     }
 }
 
