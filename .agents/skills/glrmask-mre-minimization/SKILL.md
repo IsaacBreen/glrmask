@@ -1,13 +1,13 @@
 ---
-name: glrmask-debugging
-description: Debug glrmask2 runtime mask/commit-token behavior, schema-to-grammar bugs, GLRM grammar witnesses, and recursive minimization of schema/prefix/token/vocab repros. Use when GLRMASK_ASSERT_COMMIT_TOKEN_MASK_EQUIVALENCE fails, when a token is committable but absent from the mask or present in the mask but not committable, when glrmask accepts or rejects a token incorrectly, or when converting a JSON-schema repro into a minimal inline Rust test plus a duplicate GLRM-grammar test.
+name: glrmask-mre-minimization
+description: Build and recursively minimize glrmask2 MREs for mask/commit-token mismatches, schema-to-grammar bugs, GLRM grammar witnesses, and schema/prefix/token/vocab repros. Use when GLRMASK_ASSERT_COMMIT_TOKEN_MASK_EQUIVALENCE fails, when a token is committable but absent from the mask or present in the mask but not committable, when glrmask accepts or rejects a token incorrectly, or when reducing a JSON-schema/GLRM repro to a minimal inline Rust test.
 ---
 
-# GLRMask Debugging
+# GLRMask MRE Minimization
 
 ## Scope
 
-Use this skill for `glrmask` bugs and repro minimization. For CFA sweep discrepancy triage and `llguidance_native` discrepancy handlers, use `$cfa-discrepancy-handling` first.
+Use this skill for `glrmask` bugs that need a minimal reproducible example, especially mask/commit mismatches. For CFA sweep discrepancy triage and `llguidance_native` discrepancy handlers, use `$cfa-discrepancy-handling` first.
 
 Treat the ground-truth checker as a signal, not gospel. Decide what is actually allowed by the JSON schema or GLRM grammar before choosing a fix.
 

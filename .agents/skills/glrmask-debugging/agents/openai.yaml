@@ -1,4 +1,0 @@
-interface:
-  display_name: "GLRMask Debugging"
-  short_description: "Debug glrmask2 masks and repros"
-  default_prompt: "Use $glrmask-debugging to debug this glrmask2 mask/commit bug or minimize its repro."
