@@ -229,6 +229,7 @@ For the `o1052` GLRM witness, several zero-consumption-looking pieces were load-
 - replacing `mand` with a synchronized same-length dummy token such as `jand` preserved the mismatch, but single-letter tokens did not.
 - replacing the remaining field names with single letters stopped the mismatch; record failed semantic replacements rather than assuming they are safe.
 - after grammar simplification, rerunning vocab deletion still found the `201`-token set deletion-minimal, but a monotonic content pass simplified most non-disputed entries to dummy tokens like `"a"`, `" a"`, `"b"`, `"x"`, and `"A"`. Minimize token contents as well as token count.
+- after vocab content simplification, rerunning grammar minimization removed the suffix-side `(JSON_STRING_CHAR*)` from the UUID pattern. The next vocab pass still found no coarse deletions and the seven remaining non-dummy token strings were individually load-bearing. Keep cycling until a full round produces no changes.
 
 If you interrupt a reducer, remember that the `/tmp` file may contain the last rejected candidate, not the last accepted candidate. Either write every accepted candidate to a checkpoint file immediately, or reconstruct/replay the accepted cuts before continuing. A simple pattern is:
 

@@ -735,7 +735,7 @@ fn test_json_schema_enum_jand_mask_false_negative() {
 
 t JSON_NUMBER ::= /[0-9eE+-]+/;
 t JSON_STRING_CHAR ::= ([ !#-[\]-~] | [\xC2-\xDF] [\x80-\xBF] | [\xE0] [\xA0-\xBF] [\x80-\xBF] | [\xE1-\xEC] [\x80-\xBF] [\x80-\xBF] | [\xED] [\x80-\x9F] [\x80-\xBF] | [\xEE\xEF] [\x80-\xBF] [\x80-\xBF] | [\xF0] [\x90-\xBF] [\x80-\xBF] [\x80-\xBF] | [\xF1-\xF3] [\x80-\xBF] [\x80-\xBF] [\x80-\xBF] | [\xF4] [\x80-\x8F] [\x80-\xBF] [\x80-\xBF]) | "\\" ["/\\bfnrt] | "\\" "u" [0-9A-Fa-f]{4};
-t JSON_STRING_PATTERN_0 ::= JSON_STRING_CHAR* ([0-9a-f]{8} "-" [0-9a-f]{4} "-" [0-9a-f]{4} "-" [0-9a-f]{4} "-" [0-9a-f]{12}) (JSON_STRING_CHAR*) "\"";
+t JSON_STRING_PATTERN_0 ::= JSON_STRING_CHAR* ([0-9a-f]{8} "-" [0-9a-f]{4} "-" [0-9a-f]{4} "-" [0-9a-f]{4} "-" [0-9a-f]{12}) "\"";
 t JSON_STRING_BOUNDED_1 ::= /[^"\\]/{0,255} "\"";
 nt obj_ord_0_np_0 ::= "a:" JSON_STRING_PATTERN_0;
 nt obj_ord_0_np_1 ::= "\"" "dispylabel\"" ": " "\"" JSON_STRING_BOUNDED_1;
