@@ -181,19 +181,24 @@ The important lesson is step 7. If a GLRM reduction removes terminals or alterna
 
 ## Inlining Vocab
 
-During reduction, hex JSON is convenient because it mirrors cached vocab files. Once the vocab is small enough to inline in Rust, prefer readable byte literals:
+During reduction, hex JSON is convenient because it mirrors cached vocab files. Once the vocab is small enough to inline in Rust, prefer readable token strings and assign compact IDs automatically:
 
 ```rust
 let vocab_entries = [
-    (1969u32, b"mand" as &[u8]),
-    (50247u32, b"owa\xC4\x87" as &[u8]),
-]
-.into_iter()
-.map(|(token_id, token_bytes)| (token_id, token_bytes.to_vec()))
-.collect();
+    "mand",
+    "owa\u{0107}",
+];
+let vocab = Vocab::new(
+    vocab_entries
+        .iter()
+        .enumerate()
+        .map(|(token_id, token)| (token_id as u32, token.as_bytes().to_vec()))
+        .collect(),
+    None,
+);
 ```
 
-Use byte literals rather than Rust `&str` if any survivor token is not plain ASCII. Avoid keeping hex decoding in the final MRE unless the bytes are genuinely unreadable or numerous.
+Use byte literals only if a survivor token is not valid UTF-8. Avoid keeping hex decoding or original LLM token IDs in the final MRE unless either is load-bearing.
 
 ## Practical Notes
 
