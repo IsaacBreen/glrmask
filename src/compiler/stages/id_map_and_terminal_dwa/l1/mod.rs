@@ -249,7 +249,8 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
 
     let total_started_at = Instant::now();
     let id_map_started_at = Instant::now();
-    let (mut id_map, sorted_entries, _state_to_rep, id_map_profile) = build_l1_id_map(tokenizer, vocab, active_terminals, flat_trans, initial_state_map);
+    let (mut id_map, sorted_entries, _state_to_rep, id_map_profile) =
+        build_l1_id_map(tokenizer, vocab, active_terminals, flat_trans, initial_state_map);
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let num_terminals = grammar.num_terminals as u32;

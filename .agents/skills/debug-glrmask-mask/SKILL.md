@@ -35,6 +35,8 @@ Do not coarsen L1 tokenizer states from a token sample. A sampled "confirmation"
 
 If L1 needs post-max-length TSID coarsening, compare exact whole-vocab terminal-signature profiles. The profile is the run-length-compressed sequence of terminal-signature IDs produced by walking every sorted vocab token from the candidate state, where signature 0 means dead/no active L1 terminal. Merge only profiles that compare exactly; hashes can be accelerators but not proofs. See `notes/2026-05-03-l1-sampled-equivalence-bug.md`.
 
+For performance work, do not assume a coarser proposal plus exact bucket refinement is faster. On o1052, a hash-based L1 proposal made exact refinement touch too many states, and L1-specific tokenizer simplification cost more than it saved. Use `/tmp` profile logs to compare wall time before keeping these changes. `GLRMASK_PARTITION_SERIAL=1` is diagnostic for Rayon contention, not automatically a better default.
+
 When debugging L1, compare the concrete full-token end-state terminal signature with the signature used in the built transition weight. If they differ, suspect state-map coarsening or representative use before suspecting runtime mask filtering.
 
 ## Root-Cause Standard

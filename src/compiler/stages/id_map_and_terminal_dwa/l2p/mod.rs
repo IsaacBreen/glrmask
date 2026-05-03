@@ -13,6 +13,7 @@ pub(crate) mod nwa_builder;
 pub(crate) mod postprocess;
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -31,6 +32,7 @@ use crate::ds::bitset::BitSet;
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::ds::weight::Weight;
 use crate::Vocab;
+use rustc_hash::FxHashMap;
 
 use super::grammar_helpers::compute_always_allowed_follows;
 use super::types::{TerminalColoring, TerminalDwaPhaseProfile, compile_profile_enabled, debug_profile_enabled};
@@ -43,6 +45,64 @@ use postprocess::{
 const L2P_PATH_VALIDATION_ENV: &str = "GLRMASK_VALIDATE_L2P_TERMINAL_DWA_PATH_LENGTHS";
 const L2P_PATH_VALIDATION_WALKS: u64 = 128;
 const L2P_PATH_VALIDATION_TOKENS_PER_WEIGHT: usize = 8;
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct SimplifyCacheKey {
+    active_words: Vec<u64>,
+    relevant_words: [u64; 4],
+}
+
+#[derive(Default)]
+pub(crate) struct SharedSimplifyCache {
+    entries: Mutex<FxHashMap<SimplifyCacheKey, Arc<(Tokenizer, ManyToOneIdMap)>>>,
+}
+
+impl SharedSimplifyCache {
+    fn key(active_terminals: &[bool], relevant_bytes: &[bool; 256]) -> SimplifyCacheKey {
+        let mut active_words = vec![0u64; active_terminals.len().div_ceil(64)];
+        for (idx, &active) in active_terminals.iter().enumerate() {
+            if active {
+                active_words[idx >> 6] |= 1u64 << (idx & 63);
+            }
+        }
+
+        let mut relevant_words = [0u64; 4];
+        for (idx, &relevant) in relevant_bytes.iter().enumerate() {
+            if relevant {
+                relevant_words[idx >> 6] |= 1u64 << (idx & 63);
+            }
+        }
+
+        SimplifyCacheKey {
+            active_words,
+            relevant_words,
+        }
+    }
+
+    fn simplify_for_terminals(
+        &self,
+        tokenizer: &Tokenizer,
+        active_terminals: &[bool],
+        relevant_bytes: &[bool; 256],
+    ) -> (Tokenizer, ManyToOneIdMap, bool) {
+        let key = Self::key(active_terminals, relevant_bytes);
+        if let Some(cached) = self.entries.lock().unwrap().get(&key).cloned() {
+            return (cached.0.clone(), cached.1.clone(), true);
+        }
+
+        let computed = Arc::new(tokenizer.simplify_for_terminals(
+            active_terminals,
+            Some(relevant_bytes),
+        ));
+        let mut entries = self.entries.lock().unwrap();
+        let cached = entries.entry(key).or_insert_with(|| computed.clone()).clone();
+        (
+            cached.0.clone(),
+            cached.1.clone(),
+            !Arc::ptr_eq(&cached, &computed),
+        )
+    }
+}
 
 fn l2p_path_validation_enabled() -> bool {
     std::env::var_os(L2P_PATH_VALIDATION_ENV).is_some()
@@ -213,6 +273,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     active_terminals: &[bool],
     disallowed_follows: &BTreeMap<u32, BitSet>,
     shared_vocab_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
+    shared_simplify_cache: Option<&SharedSimplifyCache>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
 ) -> Option<LocalIdMapTerminalDwa> {
@@ -242,17 +303,15 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // `fill_unmapped_with_new_class` after composition, so we always
     // use the simplified tokenizer.
     let simplify_started_at = Instant::now();
-    let (simplified_tok, simplify_state_map) = {
-        let (tok, map) = tokenizer.simplify_for_terminals(
-            active_terminals,
-            Some(&relevant_bytes),
-        );
-        (tok, Some(map))
-    };
+    let (simplified_tok, simplify_state_map, simplify_cache_hit) =
+        if let Some(cache) = shared_simplify_cache {
+            cache.simplify_for_terminals(tokenizer, active_terminals, &relevant_bytes)
+        } else {
+            let (tok, map) = tokenizer.simplify_for_terminals(active_terminals, Some(&relevant_bytes));
+            (tok, map, false)
+        };
     let simplify_ms = simplify_started_at.elapsed().as_secs_f64() * 1000.0;
     let candidate_unmapped_original_states = simplify_state_map
-        .as_ref()
-        .expect("simplify state map always present")
         .original_to_internal
         .iter()
         .filter(|&&state| state == u32::MAX)
@@ -261,11 +320,12 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
     if debug_profile_enabled() {
         eprintln!(
-            "[glrmask/debug][l2p_simplify] partition={} original_states={} simplified_states={} unmapped_original_states={} used=true",
+            "[glrmask/debug][l2p_simplify] partition={} original_states={} simplified_states={} unmapped_original_states={} cache_hit={} used=true",
             partition_label,
             num_original_states,
             simplified_tok.num_states(),
             candidate_unmapped_original_states,
+            simplify_cache_hit,
         );
     }
 
@@ -467,7 +527,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         return None;
     }
     let composed_id_map = if use_simplified_tok {
-        let simplify_state_map = simplify_state_map.expect("simplified path must have a state map");
         InternalIdMap {
             tokenizer_states: simplify_state_map
                 .compose(&simplified_id_map.tokenizer_states)
@@ -481,13 +540,14 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
     if compile_profile_enabled() || debug_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][l2p] partition={} vocab_tokens={} active_terminals={} original_states={} tsids={} simplify_ms={:.3} simplified_states={} id_map_ms={:.3} tsid_fallback_ms={:.3} vocab_tree_ms={:.3} possible_matches_ms={:.3} seed_ms={:.3} terminal_nwa_build_ms={:.3} nwa_states={}->{}->{}->{}->{} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} prune_ms={:.3} canonicalize_ms={:.3} postprocess_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} minimize_states={} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} total_ms={:.3}",
+            "[glrmask/profile][l2p] partition={} vocab_tokens={} active_terminals={} original_states={} tsids={} simplify_ms={:.3} simplify_cache_hit={} simplified_states={} id_map_ms={:.3} tsid_fallback_ms={:.3} vocab_tree_ms={:.3} possible_matches_ms={:.3} seed_ms={:.3} terminal_nwa_build_ms={:.3} nwa_states={}->{}->{}->{}->{} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} prune_ms={:.3} canonicalize_ms={:.3} postprocess_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} minimize_states={} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} total_ms={:.3}",
             partition_label,
             vocab.entries.len(),
             num_active_terminals,
             num_original_states,
             simplified_id_map.num_tsids(),
             simplify_ms,
+            simplify_cache_hit,
             simplified_tok.num_states(),
             id_map_ms,
             0.0,
@@ -586,6 +646,7 @@ mod tests {
             &analyzed,
             &active_terminals,
             &BTreeMap::new(),
+            None,
             None,
             None,
             None,

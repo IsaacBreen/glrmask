@@ -69,3 +69,25 @@ removed. A second exact post-max-length pass compares compressed whole-vocab
 terminal-signature profiles and only merges states whose profiles compare
 exactly. This is intended to recover useful L1 TSID coarsening without relying
 on sampling.
+
+## Performance Follow-Up
+
+Two tempting shortcuts were tested and rejected:
+
+- A cheap hash-based L1 max-length proposal, followed by exact refinement of
+  every non-singleton proposal bucket, was correct in shape but too coarse in
+  practice. It forced exact whole-vocab profiles for thousands of states and
+  made o1052 substantially slower.
+- Simplifying the tokenizer separately for L1 active terminals looked safe, but
+  it cost seconds and often reduced the DFA only modestly. On o1052 it made the
+  critical L1 partitions slower rather than faster.
+
+`GLRMASK_PARTITION_SERIAL=1` is useful diagnostically because it removes outer
+partition contention and shows how fast individual analyses can be when inner
+Rayon work has the machine to itself. It is not a compile-time fix by itself:
+the serial sum is still worse than parallel wall time for o1052.
+
+The remaining L1 bottleneck is the exact max-length prepass on large original
+DFAs, especially long-token partitions. A better fix needs either a faster exact
+bounded refinement or a vocab-trie/token-specific exact L1 equivalence analysis
+that does not fall back to sampled or hash-defined merging.

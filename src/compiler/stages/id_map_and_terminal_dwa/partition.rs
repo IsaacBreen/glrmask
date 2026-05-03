@@ -41,6 +41,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     flat_trans: &Arc<[u32]>,
     initial_state_map: Option<&ManyToOneIdMap>,
     _shared_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
+    shared_simplify_cache: Option<&super::l2p::SharedSimplifyCache>,
     shared_classify_cache: Option<&super::classify::SharedClassifyCache>,
 ) -> Option<LocalIdMapTerminalDwa> {
     if vocab.is_empty() {
@@ -144,6 +145,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                     &l2p_mask,
                     disallowed_follows,
                     _shared_vocab_dfa_cache,
+                    shared_simplify_cache,
                     // L2P currently uses the original tokenizer unchanged (`simplify_ms=0`), and
                     // equivalence analysis verifies flat-table compatibility before using it.
                     Some(flat_trans),

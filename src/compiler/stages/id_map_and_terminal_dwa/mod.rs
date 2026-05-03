@@ -518,6 +518,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     // The cache validates state counts, so it's safely ignored when simplify
     // changes the DFA (reducing state count via minimization).
     let shared_vocab_dfa_cache = l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
+    let shared_simplify_cache = l2p::SharedSimplifyCache::default();
 
     // Build each partition in parallel using rayon.
     // GLRMASK_PARTITION_SERIAL=1 runs partitions sequentially so inner rayon
@@ -545,6 +546,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
                     &flat_trans,
                     Some(&global_max_length_state_map),
                     Some(&shared_vocab_dfa_cache),
+                    Some(&shared_simplify_cache),
                     Some(&shared_classify_cache),
                 ).map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0));
                 (result, idx)
@@ -568,6 +570,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
                 &flat_trans,
                 Some(&global_max_length_state_map),
                 Some(&shared_vocab_dfa_cache),
+                Some(&shared_simplify_cache),
                 Some(&shared_classify_cache),
             ).map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0));
             (result, idx)
