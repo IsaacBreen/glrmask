@@ -1124,6 +1124,236 @@ fn determinize_with_supports(
     DeterminizedDwaWithSupports { dwa, supports }
 }
 
+fn determinize_parser_dwa_with_fallbacks(
+    dwa: &DWA,
+    possible_by_state: &[PossibleOutgoingIds],
+    num_parser_states: u32,
+) -> DWA {
+    fn subset_key(entries: &[(u32, Weight)]) -> Vec<(u32, usize)> {
+        entries.iter().map(|(sid, w)| (*sid, w.ptr_key())).collect()
+    }
+
+    let dense_label_limit = num_parser_states as usize;
+    let mut result = DWA::new(0, 0);
+
+    let mut start_subset = FxHashMap::default();
+    start_subset.insert(dwa.start_state(), Weight::all());
+
+    let mut canon_buf: Vec<(u32, Weight)> = start_subset
+        .iter()
+        .map(|(state_id, weight)| (*state_id, weight.clone()))
+        .collect();
+    canon_buf.sort_unstable_by_key(|(state_id, _)| *state_id);
+
+    let mut subset_map: FxHashMap<Vec<(u32, usize)>, u32> = FxHashMap::default();
+    let mut worklist: VecDeque<Vec<(u32, Weight)>> = VecDeque::new();
+    subset_map.insert(subset_key(&canon_buf), result.start_state());
+    worklist.push_back(canon_buf.clone());
+
+    let mut dense_raw_targets: Vec<FxHashMap<u32, Weight>> =
+        (0..dense_label_limit).map(|_| FxHashMap::default()).collect();
+    let mut default_raw_targets: FxHashMap<u32, Weight> = FxHashMap::default();
+    let mut sparse_raw_targets: FxHashMap<i32, FxHashMap<u32, Weight>> = FxHashMap::default();
+    let mut touched_dense_labels: Vec<usize> = Vec::new();
+    let mut dense_label_touched: Vec<bool> = vec![false; dense_label_limit];
+    let mut default_touched = false;
+    let mut target_subset: FxHashMap<u32, Weight> = FxHashMap::default();
+    let mut key_buf: Vec<(u32, usize)> = Vec::new();
+    let mut final_contributions: Vec<Weight> = Vec::new();
+
+    while let Some(subset_entries) = worklist.pop_front() {
+        let from_state = subset_map[&subset_key(&subset_entries)];
+
+        final_contributions.clear();
+        for (state_id, path_weight) in &subset_entries {
+            let Some(state_final) = dwa.states()[*state_id as usize].final_weight.as_ref() else {
+                continue;
+            };
+            let contribution = path_weight.intersection(state_final);
+            if !contribution.is_empty() {
+                final_contributions.push(contribution);
+            }
+        }
+        let final_weight = Weight::union_all(final_contributions.iter());
+        if !final_weight.is_empty() {
+            result.set_final_weight(from_state, final_weight);
+        }
+
+        for (dwa_state_id, path_weight) in &subset_entries {
+            let state = &dwa.states()[*dwa_state_id as usize];
+
+            for (&label, (target, transition_weight)) in &state.transitions {
+                if label == DEFAULT_LABEL {
+                    continue;
+                }
+                let next_weight = path_weight.intersection(transition_weight);
+                if next_weight.is_empty() {
+                    continue;
+                }
+
+                let target_weights = if label >= 0 && (label as usize) < dense_label_limit {
+                    let label_idx = label as usize;
+                    if !dense_label_touched[label_idx] {
+                        dense_label_touched[label_idx] = true;
+                        touched_dense_labels.push(label_idx);
+                    }
+                    &mut dense_raw_targets[label_idx]
+                } else {
+                    sparse_raw_targets.entry(label).or_default()
+                };
+                let entry = target_weights.entry(*target).or_insert_with(Weight::empty);
+                *entry = if entry.is_empty() {
+                    next_weight
+                } else {
+                    entry.union(&next_weight)
+                };
+            }
+
+            let Some((default_target, default_weight)) = state.transitions.get(&DEFAULT_LABEL) else {
+                continue;
+            };
+            let fallback_weight = path_weight.intersection(default_weight);
+            if fallback_weight.is_empty() {
+                continue;
+            }
+
+            default_touched = true;
+            let entry = default_raw_targets
+                .entry(*default_target)
+                .or_insert_with(Weight::empty);
+            *entry = if entry.is_empty() {
+                fallback_weight.clone()
+            } else {
+                entry.union(&fallback_weight)
+            };
+
+            for &label in state.transitions.keys() {
+                if label == DEFAULT_LABEL {
+                    continue;
+                }
+                if label >= 0 && (label as usize) < dense_label_limit {
+                    let label_idx = label as usize;
+                    if !dense_label_touched[label_idx] {
+                        dense_label_touched[label_idx] = true;
+                        touched_dense_labels.push(label_idx);
+                    }
+                    let target_weights = &mut dense_raw_targets[label_idx];
+                    let entry = target_weights.entry(*default_target).or_insert_with(Weight::empty);
+                    *entry = if entry.is_empty() {
+                        fallback_weight.clone()
+                    } else {
+                        entry.union(&fallback_weight)
+                    };
+                } else {
+                    let target_weights = sparse_raw_targets.entry(label).or_default();
+                    let entry = target_weights.entry(*default_target).or_insert_with(Weight::empty);
+                    *entry = if entry.is_empty() {
+                        fallback_weight.clone()
+                    } else {
+                        entry.union(&fallback_weight)
+                    };
+                }
+            }
+
+            match possible_by_state.get(*dwa_state_id as usize) {
+                Some(PossibleOutgoingIds::All) => {
+                    for parser_state_id in 0..num_parser_states {
+                        let label_idx = parser_state_id as usize;
+                        if !dense_label_touched[label_idx] {
+                            dense_label_touched[label_idx] = true;
+                            touched_dense_labels.push(label_idx);
+                        }
+                        let target_weights = &mut dense_raw_targets[label_idx];
+                        let entry = target_weights.entry(*default_target).or_insert_with(Weight::empty);
+                        *entry = if entry.is_empty() {
+                            fallback_weight.clone()
+                        } else {
+                            entry.union(&fallback_weight)
+                        };
+                    }
+                }
+                Some(PossibleOutgoingIds::Some(ids)) => {
+                    for parser_state_id in ids.iter_ones() {
+                        let label_idx = parser_state_id;
+                        if !dense_label_touched[label_idx] {
+                            dense_label_touched[label_idx] = true;
+                            touched_dense_labels.push(label_idx);
+                        }
+                        let target_weights = &mut dense_raw_targets[label_idx];
+                        let entry = target_weights.entry(*default_target).or_insert_with(Weight::empty);
+                        *entry = if entry.is_empty() {
+                            fallback_weight.clone()
+                        } else {
+                            entry.union(&fallback_weight)
+                        };
+                    }
+                }
+                Some(PossibleOutgoingIds::Empty) | None => {}
+            }
+        }
+
+        let mut process_label = |label: i32, contribs: FxHashMap<u32, Weight>| {
+            if contribs.is_empty() {
+                return;
+            }
+
+            target_subset.clear();
+            for (dst, combined) in contribs {
+                if !combined.is_empty() {
+                    target_subset.insert(dst, combined);
+                }
+            }
+            if target_subset.is_empty() {
+                return;
+            }
+
+            let edge_weight = Weight::union_all(target_subset.values());
+            if edge_weight.is_empty() {
+                return;
+            }
+
+            key_buf.clear();
+            if target_subset.len() == 1 {
+                let (&only_state, only_weight) = target_subset.iter().next().unwrap();
+                key_buf.push((only_state, only_weight.ptr_key()));
+            } else {
+                key_buf.extend(target_subset.iter().map(|(sid, w)| (*sid, w.ptr_key())));
+                key_buf.sort_unstable_by_key(|(sid, _)| *sid);
+            }
+
+            let to_state = if let Some(existing) = subset_map.get(&key_buf).copied() {
+                existing
+            } else {
+                let new_state = result.add_state();
+                subset_map.insert(key_buf.clone(), new_state);
+                let mut next_entries: Vec<(u32, Weight)> = target_subset
+                    .iter()
+                    .map(|(state_id, weight)| (*state_id, weight.clone()))
+                    .collect();
+                next_entries.sort_unstable_by_key(|(state_id, _)| *state_id);
+                worklist.push_back(next_entries);
+                new_state
+            };
+
+            result.add_transition(from_state, label, to_state, edge_weight);
+        };
+
+        for label_idx in touched_dense_labels.drain(..) {
+            dense_label_touched[label_idx] = false;
+            process_label(label_idx as i32, std::mem::take(&mut dense_raw_targets[label_idx]));
+        }
+        if default_touched {
+            default_touched = false;
+            process_label(DEFAULT_LABEL, std::mem::take(&mut default_raw_targets));
+        }
+        for (label, contribs) in sparse_raw_targets.drain() {
+            process_label(label, contribs);
+        }
+    }
+
+    result
+}
+
 fn optimize_parser_dwa_defaults(
     dwa: &mut DWA,
     possible_by_state: &[PossibleOutgoingIds],
@@ -1551,22 +1781,29 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     profile.subtract_final_ms = elapsed_ms(subtract_final_started_at);
 
     let ensure_fallback_started_at = Instant::now();
-    let mut nwa_for_fallback = parser_dwa_pre_minimize.to_nwa();
-    profile.fallback_to_nwa_ms = elapsed_ms(ensure_fallback_started_at);
+    if std::env::var_os("GLRMASK_USE_NWA_FALLBACK_DETERMINIZE").is_some() {
+        let mut nwa_for_fallback = parser_dwa_pre_minimize.to_nwa();
+        profile.fallback_to_nwa_ms = elapsed_ms(ensure_fallback_started_at);
 
-    let ensure_fallback_step_started_at = Instant::now();
-    ensure_default_transitions_are_fallbacks(&mut nwa_for_fallback, &possible_by_state, table.num_states);
-    profile.ensure_fallback_ms = elapsed_ms(ensure_fallback_step_started_at);
+        let ensure_fallback_step_started_at = Instant::now();
+        ensure_default_transitions_are_fallbacks(&mut nwa_for_fallback, &possible_by_state, table.num_states);
+        profile.ensure_fallback_ms = elapsed_ms(ensure_fallback_step_started_at);
 
-    // Determinize back to DWA to collapse the duplicated edges
-    let determinize_fallback_started_at = Instant::now();
-    parser_dwa_pre_minimize = if std::env::var_os("GLRMASK_USE_GENERIC_FALLBACK_DETERMINIZE").is_some() {
-        crate::automata::weighted_u32::determinize::determinize(&nwa_for_fallback)
-            .expect("NWA remains acyclic after fallback transformation")
+        let determinize_fallback_started_at = Instant::now();
+        parser_dwa_pre_minimize = determinize_with_supports(&nwa_for_fallback, Some(table.num_states)).dwa;
+        profile.determinize_fallback_ms = elapsed_ms(determinize_fallback_started_at);
     } else {
-        determinize_with_supports(&nwa_for_fallback, Some(table.num_states)).dwa
-    };
-    profile.determinize_fallback_ms = elapsed_ms(determinize_fallback_started_at);
+        profile.fallback_to_nwa_ms = 0.0;
+        profile.ensure_fallback_ms = 0.0;
+
+        let determinize_fallback_started_at = Instant::now();
+        parser_dwa_pre_minimize = determinize_parser_dwa_with_fallbacks(
+            &parser_dwa_pre_minimize,
+            &possible_by_state,
+            table.num_states,
+        );
+        profile.determinize_fallback_ms = elapsed_ms(determinize_fallback_started_at);
+    }
 
     profile.determinize_after_defaults_ms = elapsed_ms(ensure_fallback_started_at);
 
