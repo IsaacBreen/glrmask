@@ -6281,6 +6281,9 @@ impl<'a> SchemaCtx<'a> {
                 return Ok(self.extract_terminal_rule(never_expr(), "JSON_STRING_PATTERN_UNSAT"));
             };
             let pattern = simplify_known_json_schema_pattern(pattern);
+            if pattern == r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" {
+                return Ok(self.build_json_wrapped_contains_uuid_pattern());
+            }
             if min_len <= 1 {
                 if let Some(max_separators) = anchored_non_ws_word_count_pattern(&pattern) {
                     return Ok(self.build_json_wrapped_non_ws_word_count_pattern(max_separators));
@@ -7562,6 +7565,21 @@ impl<'a> SchemaCtx<'a> {
                 min: 0,
                 max: max_separators,
             },
+        ]))
+    }
+
+    fn build_json_wrapped_contains_uuid_pattern(&mut self) -> GrammarExpr {
+        let uuid = self.extract_terminal_rule(
+            parsed_regex_expr(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                true,
+            ),
+            "JSON_STRING_UUID_SUBSTRING",
+        );
+        quoted_expr(sequence_or_single(vec![
+            GrammarExpr::Repeat(Box::new(self.json_string_char_ref())),
+            uuid,
+            GrammarExpr::Repeat(Box::new(self.json_string_char_ref())),
         ]))
     }
 
