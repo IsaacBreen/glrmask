@@ -53,10 +53,6 @@ Do not add auxiliary documentation such as `README.md`, `INSTALLATION_GUIDE.md`,
 
 Inspect the existing skill before editing. Preserve useful trigger language in frontmatter, but make it specific enough that the skill triggers only in appropriate contexts.
 
-Update skills opportunistically when a lesson, workflow, command pattern, or domain rule is likely to save future agents real time or prevent repeat mistakes. Do not treat skill maintenance as routine housekeeping, and do not interrupt the main task just to polish skills.
-
-Prefer updating a skill over changing a coding tool's system prompt when the knowledge belongs to a reusable workflow or project practice. Do not modify prompts for other coding tools as a substitute for skill updates unless the user explicitly asks for that.
-
 When splitting a skill, keep each skill's frontmatter scoped to its own task and add a short pointer to the sibling skill where handoff is useful.
 
 When moving a skill, remove the old copy after confirming the new copy is in the requested location and has the expected files.
