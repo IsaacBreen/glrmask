@@ -39,7 +39,7 @@ Commit the prefix with `commit_bytes`. Then commit the token with `commit_token`
 
 Minimize recursively:
 
-1. Minimize the vocab first. A small vocab makes all subsequent constraint builds much faster. Try a vocab containing only the problematic token; that is often enough.
+1. Minimize the vocab first. A small vocab makes all subsequent constraint builds much faster. Try a vocab containing only the problematic token; if that does not reproduce, reduce by compiler vocab partition, token class, and ddmin deletion before spending time on schema or prefix cuts.
 2. Minimize the schema and prefix together. Removing schema branches often requires removing corresponding input bytes.
 3. Minimize field names, object wrappers, pattern properties, bounds, branch counts, prefixes, token bytes, and vocabulary entries.
 4. Keep reducing until every remaining piece has survived an explicit attempt to delete it, inline it, weaken it, literalize it, or scale it down.
@@ -58,4 +58,4 @@ GLRMASK_PRINT_GRAMMAR_GLRM=1
 
 Minimize the GLRM grammar again. Do not stop just because the grammar is smaller or cleaner; stop only when further deletion or weakening no longer preserves the failure.
 
-For detailed minimization standards and examples from prior `glrmask2` work, read `references/recursive-minimization.md`.
+For detailed minimization standards and examples from prior `glrmask2` work, read `references/recursive-minimization.md`. For the concrete `/tmp` candidate-file and ddmin reducer pattern, read `references/tmp-candidate-ddmin.md`.
