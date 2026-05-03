@@ -516,6 +516,31 @@ fn test_json_schema_enum() {
 }
 
 #[test]
+#[ignore = "known o1052 mask/commit mismatch MRE: token b\"mand\" is committable but absent from mask"]
+fn test_json_schema_enum_mand_mask_false_negative() {
+    let vocab = Vocab::new(vec![(0u32, b"mand".to_vec())], None);
+    let constraint =
+        Constraint::from_json_schema(r#"{"type":"string","enum":["mand","kvinde","ukendt"]}"#, &vocab)
+            .expect("minimal o1052 schema should compile");
+
+    let prefix = b"\"";
+
+    let mut mask_state = constraint.start();
+    mask_state.commit_bytes(prefix).unwrap();
+    let mask_accepts = token_allowed(&mask_state.mask(), 0);
+
+    let mut commit_state = constraint.start();
+    commit_state.commit_bytes(prefix).unwrap();
+    let commit_accepts = commit_state.commit_bytes(b"mand").is_ok();
+
+    assert_eq!(
+        (mask_accepts, commit_accepts),
+        (true, true),
+        "token b\"mand\" should be mask-visible because commit_bytes accepts it as a live prefix of the enum literal",
+    );
+}
+
+#[test]
 fn test_mre_o43234_closed_object_string_then_integer_rejects_trailing_comma_in_mask_simpler() {
     let vocab = Vocab::new(
         vec![
