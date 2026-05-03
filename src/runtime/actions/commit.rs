@@ -68,6 +68,16 @@ fn snapshot_mask_membership(state: &ConstraintState<'_>, token_id: u32) -> Optio
     Some(token_in_mask(&mask, token_id))
 }
 
+fn format_token_bytes(token_bytes: &[u8]) -> String {
+    let mut escaped = String::new();
+    for byte in token_bytes {
+        for ch in std::ascii::escape_default(*byte) {
+            escaped.push(ch as char);
+        }
+    }
+    format!("b\"{}\"", escaped)
+}
+
 fn assert_mask_commit_equivalence(
     token_id: u32,
     token_bytes: &[u8],
@@ -79,9 +89,9 @@ fn assert_mask_commit_equivalence(
     };
     assert!(
         commit_succeeded == was_in_mask,
-        "commit/mask mismatch for token_id {} bytes {:?}: token_in_mask={} commit_succeeded={}",
+        "commit/mask mismatch for token_id {} bytes {}: token_in_mask={} commit_succeeded={}",
         token_id,
-        token_bytes,
+        format_token_bytes(token_bytes),
         was_in_mask,
         commit_succeeded,
     );
