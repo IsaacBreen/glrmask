@@ -668,7 +668,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_interned(
     }
 
     struct SignatureEntry {
-        words: Vec<u32>,
+        state_pos: usize,
         class_id: u32,
     }
 
@@ -867,13 +867,9 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_interned(
                     };
 
                     let mut hash: u64 = mix_signature_word(0, node_terminals_id);
-                    let mut sig_small = SmallVec::<[u32; 16]>::with_capacity(child_data.len() * 2 + 1);
-                    sig_small.push(node_terminals_id);
                     for child in child_data.iter() {
                         let segment_outcome = child.outcomes[state_pos];
                         let child_class_id = child.child_class_ids[state_pos];
-                        sig_small.push(segment_outcome.terminals_id);
-                        sig_small.push(child_class_id);
                         hash = mix_signature_word(hash, segment_outcome.terminals_id);
                         hash = mix_signature_word(hash, child_class_id);
                     }
@@ -881,7 +877,21 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_interned(
                     let bucket = signature_buckets.entry(hash).or_default();
                     let mut found = false;
                     for entry in bucket.iter() {
-                        if entry.words == sig_small.as_slice() {
+                        let rep_pos = entry.state_pos;
+                        let rep_state = active_states[rep_pos];
+                        let rep_node_terminals_id = if node.has_token() {
+                            node_terminal_ids[rep_state as usize]
+                        } else {
+                            empty_terminals_id
+                        };
+                        if rep_node_terminals_id != node_terminals_id {
+                            continue;
+                        }
+                        let same_children = child_data.iter().all(|child| {
+                            child.outcomes[rep_pos].terminals_id == child.outcomes[state_pos].terminals_id
+                                && child.child_class_ids[rep_pos] == child.child_class_ids[state_pos]
+                        });
+                        if same_children {
                             classes[state as usize] = entry.class_id;
                             found = true;
                             break;
@@ -894,7 +904,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_interned(
                         representative_states.push(state);
                         representative_state_positions.push(state_pos);
                         bucket.push(SignatureEntry {
-                            words: sig_small.into_vec(),
+                            state_pos,
                             class_id,
                         });
                     }
@@ -1153,7 +1163,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
     }
 
     struct SignatureEntryMask {
-        words: SmallVec<[u64; 16]>,
+        state_pos: usize,
         class_id: u32,
     }
 
@@ -1412,13 +1422,9 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
                     };
 
                     let mut hash: u64 = mix_signature_word(0, node_terminal_mask);
-                    let mut sig_small = SmallVec::<[u64; 16]>::with_capacity(child_data.len() * 2 + 1);
-                    sig_small.push(node_terminal_mask);
                     for child in child_data.iter() {
                         let segment_outcome = child.outcomes[state_pos];
                         let child_class_id = child.child_class_ids[state_pos];
-                        sig_small.push(segment_outcome.terminals_mask);
-                        sig_small.push(child_class_id as u64);
                         hash = mix_signature_word(hash, segment_outcome.terminals_mask);
                         hash = mix_signature_word(hash, child_class_id as u64);
                     }
@@ -1426,7 +1432,21 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
                     let bucket = signature_buckets.entry(hash).or_default();
                     let mut found = false;
                     for entry in bucket.iter() {
-                        if entry.words.as_slice() == sig_small.as_slice() {
+                        let rep_pos = entry.state_pos;
+                        let rep_state = active_states[rep_pos];
+                        let rep_node_terminal_mask = if node.has_token() {
+                            state_terminal_masks[rep_state as usize]
+                        } else {
+                            0u64
+                        };
+                        if rep_node_terminal_mask != node_terminal_mask {
+                            continue;
+                        }
+                        let same_children = child_data.iter().all(|child| {
+                            child.outcomes[rep_pos].terminals_mask == child.outcomes[state_pos].terminals_mask
+                                && child.child_class_ids[rep_pos] == child.child_class_ids[state_pos]
+                        });
+                        if same_children {
                             classes[state as usize] = entry.class_id;
                             found = true;
                             break;
@@ -1439,7 +1459,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
                         representative_states.push(state);
                         representative_state_positions.push(state_pos);
                         bucket.push(SignatureEntryMask {
-                            words: sig_small,
+                            state_pos,
                             class_id,
                         });
                     }
