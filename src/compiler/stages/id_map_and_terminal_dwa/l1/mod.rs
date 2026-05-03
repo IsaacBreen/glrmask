@@ -223,7 +223,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
 
     let total_started_at = Instant::now();
     let id_map_started_at = Instant::now();
-    let (mut id_map, sorted_entries, state_to_rep, id_map_profile) = build_l1_id_map(tokenizer, vocab, active_terminals, flat_trans, initial_state_map);
+    let (mut id_map, sorted_entries, _state_to_rep, id_map_profile) = build_l1_id_map(tokenizer, vocab, active_terminals, flat_trans, initial_state_map);
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let num_terminals = grammar.num_terminals as u32;
@@ -232,7 +232,6 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
         tokenizer,
         sorted_entries,
         &mut id_map,
-        &state_to_rep,
         num_terminals,
         active_terminals,
         flat_trans.as_ref(),
@@ -403,57 +402,10 @@ fn build_l1_id_map<'a>(
         }
     }
 
-    // Token-based pre-refinement for large DFAs: walk a small sample of tokens
-    // through the kstep representatives to further reduce state count before
-    // the expensive terminal DWA traversal.
-    const L1_TOKEN_REFINE_MIN_REPS: usize = 200;
-    const L1_TOKEN_REFINE_DFA_THRESHOLD: usize = 16_000;
-    const L1_TOKEN_REFINE_BATCH_SIZE: usize = 200;
-    if state_representatives.len() >= L1_TOKEN_REFINE_MIN_REPS
-        && num_dfa_states >= L1_TOKEN_REFINE_DFA_THRESHOLD
-    {
-        let kstep_reps: Vec<usize> = state_representatives.iter().map(|&s| s as usize).collect();
-        let pre_refine_count = kstep_reps.len();
-        let token_refine_mapping = super::l2p::equivalence_analysis::state::fast
-            ::find_state_equivalence_classes_ex_with_rep_confirmation(
-                &tokenizer_view,
-                &token_bytes,
-                &kstep_reps,
-                &[], // skip_groups
-                Some(1), // max_batches: single sample batch
-                Some(L1_TOKEN_REFINE_BATCH_SIZE),
-                Some(true), // early_stop
-            );
-        // Compose kstep → token_refine mappings
-        let mut refined_rep_to_internal: FxHashMap<usize, u32> = FxHashMap::default();
-        let mut refined_representatives = Vec::new();
-        let mut kstep_internal_to_refined = vec![0u32; kstep_reps.len()];
-        for (kstep_idx, &refined_rep) in token_refine_mapping.iter().enumerate() {
-            let internal = *refined_rep_to_internal.entry(refined_rep).or_insert_with(|| {
-                let id = refined_representatives.len() as u32;
-                refined_representatives.push(refined_rep as u32);
-                id
-            });
-            kstep_internal_to_refined[kstep_idx] = internal;
-        }
-        // Update state_original_to_internal with refined mapping
-        for sto in state_original_to_internal.iter_mut() {
-            if *sto != u32::MAX {
-                *sto = kstep_internal_to_refined[*sto as usize];
-            }
-        }
-        if compile_profile_enabled() {
-            eprintln!(
-                "[glrmask/profile][l1_token_refine] dfa_states={} kstep_reps={} refined_reps={} sample_tokens={} batch_size={}",
-                num_dfa_states,
-                pre_refine_count,
-                refined_representatives.len(),
-                token_bytes.len(),
-                L1_TOKEN_REFINE_BATCH_SIZE,
-            );
-        }
-        state_representatives = refined_representatives;
-    }
+    // Keep this exact: the L1 terminal DWA indexes weights by TSID, so every
+    // original state in a TSID must have the same whole-token terminal
+    // signature for every token. Sampling tokens here is not a proof and has
+    // caused order-sensitive mask/commit mismatches.
 
     // Build state_to_rep: original_state → representative_state (for trie traversal)
     let mut state_to_rep = vec![0u32; num_dfa_states];
@@ -530,7 +482,6 @@ fn build_l1_terminal_dwa(
     tokenizer: &Tokenizer,
     sorted_entries: Vec<(u32, &[u8])>,
     id_map: &mut InternalIdMap,
-    state_to_rep: &[u32],
     num_terminals: u32,
     active_terminals: &[bool],
     flat_trans: &[u32],
@@ -554,16 +505,45 @@ fn build_l1_terminal_dwa(
     }
     let state_seed_ms = state_seed_started_at.elapsed().as_secs_f64() * 1000.0;
     let dead = u32::MAX;
+    let num_dfa_states = tokenizer.num_states() as usize;
+
+    let mut signature_to_id = FxHashMap::<Vec<u32>, u32>::default();
+    let mut terminal_signatures = Vec::<Vec<u32>>::new();
+    let mut state_to_terminal_signature = vec![u32::MAX; num_dfa_states];
+    for state in 0..num_dfa_states {
+        let state_u32 = state as u32;
+        let mut signature = Vec::<u32>::new();
+        for tid in tokenizer.dfa.finalizers(state_u32).iter() {
+            if active_terminals.get(tid).copied().unwrap_or(false) {
+                signature.push(tid as u32);
+            }
+        }
+        for tid in tokenizer.tokens_accessible_from_state(state_u32).iter() {
+            if active_terminals.get(tid).copied().unwrap_or(false) {
+                signature.push(tid as u32);
+            }
+        }
+        signature.sort_unstable();
+        signature.dedup();
+        if signature.is_empty() {
+            continue;
+        }
+        let next_id = signature_to_id.len() as u32;
+        let sig_id = *signature_to_id.entry(signature.clone()).or_insert_with(|| {
+            terminal_signatures.push(signature);
+            next_id
+        });
+        state_to_terminal_signature[state] = sig_id;
+    }
 
     // Batch simulation: for each unique start state, simulate all tokens through
-    // the DFA and accumulate end_state_rep → (tsid → token_ids).
+    // the DFA and accumulate terminal_signature(final concrete state) → (tsid → token_ids).
     // Parallelized across start states using rayon.
-    let num_dfa_states = tokenizer.num_states() as usize;
 
     let traversal_started_at = Instant::now();
 
     // Parallel traversal: each start_state processed independently.
-    // Each (end_rep, tsid) pair is unique across start groups since TSIDs
+    // Each (terminal_signature, tsid) pair is unique across start groups since TSIDs
     // partition deterministically into start groups. We exploit this by using
     // Arc from the start and skipping merging entirely.
     let start_states_list: Vec<(&u32, &Vec<u32>)> = states_to_initial_tsids.iter().collect();
@@ -748,8 +728,10 @@ fn build_l1_terminal_dwa(
                         let first = *token_ids.first().unwrap() as u32;
                         let last = *token_ids.last().unwrap() as u32;
                         for &target in &selfloop_targets {
-                            let end_rep = state_to_rep[target as usize];
-                            results.push(((byte, target), vec![(end_rep, vec![(first, last)])]));
+                            let sig_id = state_to_terminal_signature[target as usize];
+                            if sig_id != u32::MAX {
+                                results.push(((byte, target), vec![(sig_id, vec![(first, last)])]));
+                            }
                         }
                     }
 
@@ -837,10 +819,10 @@ fn build_l1_terminal_dwa(
                     let mut suffix_states: Vec<u32> = walk_targets.clone();
 
                     // Per-target run-flush state.
-                    let mut run_end_reps: Vec<u32> = vec![u32::MAX; num_walk];
+                    let mut run_signature_ids: Vec<u32> = vec![u32::MAX; num_walk];
                     let mut run_starts: Vec<u32> = vec![0; num_walk];
                     let mut run_ends: Vec<u32> = vec![0; num_walk];
-                    let mut end_rep_maps: Vec<FxHashMap<u32, Vec<(u32, u32)>>> =
+                    let mut signature_maps: Vec<FxHashMap<u32, Vec<(u32, u32)>>> =
                         (0..num_walk).map(|_| FxHashMap::default()).collect();
 
                     for (bucket_pos, &internal_token_id) in token_ids.iter().enumerate() {
@@ -872,32 +854,42 @@ fn build_l1_terminal_dwa(
                         for t in 0..num_walk {
                             let final_state = suffix_states[end_base + t];
                             if final_state != dead {
-                                let end_rep = state_to_rep[final_state as usize];
+                                let sig_id = state_to_terminal_signature[final_state as usize];
+                                if sig_id == u32::MAX {
+                                    if run_signature_ids[t] != u32::MAX {
+                                        signature_maps[t]
+                                            .entry(run_signature_ids[t])
+                                            .or_default()
+                                            .push((run_starts[t], run_ends[t]));
+                                        run_signature_ids[t] = u32::MAX;
+                                    }
+                                    continue;
+                                }
                                 local_successful_tokens += 1;
-                                if run_end_reps[t] == end_rep
+                                if run_signature_ids[t] == sig_id
                                     && run_ends[t].wrapping_add(1) == token_id
                                 {
                                     run_ends[t] = token_id;
                                 } else {
                                     // Flush previous run for this target.
-                                    if run_end_reps[t] != u32::MAX {
-                                        end_rep_maps[t]
-                                            .entry(run_end_reps[t])
+                                    if run_signature_ids[t] != u32::MAX {
+                                        signature_maps[t]
+                                            .entry(run_signature_ids[t])
                                             .or_default()
                                             .push((run_starts[t], run_ends[t]));
                                     }
-                                    run_end_reps[t] = end_rep;
+                                    run_signature_ids[t] = sig_id;
                                     run_starts[t] = token_id;
                                     run_ends[t] = token_id;
                                 }
                             } else {
                                 // Dead: flush current run for this target.
-                                if run_end_reps[t] != u32::MAX {
-                                    end_rep_maps[t]
-                                        .entry(run_end_reps[t])
+                                if run_signature_ids[t] != u32::MAX {
+                                    signature_maps[t]
+                                        .entry(run_signature_ids[t])
                                         .or_default()
                                         .push((run_starts[t], run_ends[t]));
-                                    run_end_reps[t] = u32::MAX;
+                                    run_signature_ids[t] = u32::MAX;
                                 }
                             }
                         }
@@ -905,9 +897,9 @@ fn build_l1_terminal_dwa(
 
                     // Flush remaining runs.
                     for t in 0..num_walk {
-                        if run_end_reps[t] != u32::MAX {
-                            end_rep_maps[t]
-                                .entry(run_end_reps[t])
+                        if run_signature_ids[t] != u32::MAX {
+                            signature_maps[t]
+                                .entry(run_signature_ids[t])
                                 .or_default()
                                 .push((run_starts[t], run_ends[t]));
                         }
@@ -917,16 +909,16 @@ fn build_l1_terminal_dwa(
                     phase1_successful_tokens.fetch_add(local_successful_tokens, std::sync::atomic::Ordering::Relaxed);
 
                     // Package per-target results.
-                    for (t, map) in end_rep_maps.into_iter().enumerate() {
+                    for (t, map) in signature_maps.into_iter().enumerate() {
                         let target = walk_targets[t];
                         let entries: Vec<(u32, Vec<(u32, u32)>)> = map
                             .into_iter()
-                            .map(|(end_rep, ranges)| {
+                            .map(|(sig_id, ranges)| {
                                 debug_assert!(
                                     ranges.windows(2).all(|w| w[0].1 < w[1].0),
                                     "Phase 1 ranges should be sorted and non-overlapping"
                                 );
-                                (end_rep, ranges)
+                                (sig_id, ranges)
                             })
                             .collect();
 
@@ -957,26 +949,9 @@ fn build_l1_terminal_dwa(
         let phase1_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0;
         let phase1_wall_ms = phase1_ms;
 
-        // Precompute unique end_reps and dense index for Phase 2.
-        // This allows replacing HashMap with a flat array.
-        let mut all_end_reps: Vec<u32> = walk_cache.values()
-            .flat_map(|results| results.iter().map(|(end_rep, _)| *end_rep))
-            .collect();
-        // Also include all state_to_rep values for states in start_states_list
-        // (needed for empty token handling).
-        for (&start_state, _) in &states_to_initial_tsids {
-            all_end_reps.push(state_to_rep[start_state as usize]);
-        }
-        all_end_reps.sort_unstable();
-        all_end_reps.dedup();
-        let n_end_reps = all_end_reps.len();
-        // Dense mapping: end_rep → index in [0..n_end_reps)
-        let mut end_rep_to_idx = vec![usize::MAX; num_dfa_states];
-        for (i, &rep) in all_end_reps.iter().enumerate() {
-            end_rep_to_idx[rep as usize] = i;
-        }
+        let n_signatures = terminal_signatures.len();
 
-        // Build indexed walk_cache: (byte, target) → Vec of (end_rep_idx, &ranges, entry_hash, entry_range_count).
+        // Build indexed walk_cache: (byte, target) → Vec of (signature_id, &ranges, entry_hash, entry_range_count).
         // entry_hash is precomputed from the ranges so Phase 2 can combine hashes
         // in O(entries) instead of O(ranges).
         let indexed_walk_cache: FxHashMap<(u8, u32), Vec<(usize, &[(u32, u32)], u64, usize)>> = walk_cache
@@ -984,13 +959,13 @@ fn build_l1_terminal_dwa(
             .map(|(&key, results)| {
                 let indexed: Vec<(usize, &[(u32, u32)], u64, usize)> = results
                     .iter()
-                    .map(|(end_rep, ranges)| {
+                    .map(|(sig_id, ranges)| {
                         let mut h: u64 = 0;
                         for &(s, e) in ranges.as_slice() {
                             h = h.wrapping_add(range_hash_val(s, e));
                         }
                         let entry_hash = (ranges.len() as u64).wrapping_add(h);
-                        (end_rep_to_idx[*end_rep as usize], ranges.as_slice(), entry_hash, ranges.len())
+                        (*sig_id as usize, ranges.as_slice(), entry_hash, ranges.len())
                     })
                     .collect();
                 (key, indexed)
@@ -999,13 +974,13 @@ fn build_l1_terminal_dwa(
 
         if debug_profile_enabled() {
             eprintln!(
-                "[glrmask/debug][l1_phase2_setup] unique_end_reps={} walk_cache_entries={}",
-                n_end_reps, walk_cache.len()
+                "[glrmask/debug][l1_phase2_setup] terminal_signatures={} walk_cache_entries={}",
+                n_signatures, walk_cache.len()
             );
         }
 
         // Phase 2: For each start_state, collect walk_cache references per
-        // end_rep and build LazyRanges. Instead of copying 25M+ ranges into
+        // terminal signature and build LazyRanges. Instead of copying 25M+ ranges into
         // per-start-state Vecs, store references to walk_cache range slices.
         // Materialization deferred to interning (only ~463 unique sets).
 
@@ -1031,27 +1006,29 @@ fn build_l1_terminal_dwa(
             .map(|&(&start_state, ref initial_tsids)| {
                 let collect_start = Instant::now();
 
-                // Track only touched end_reps for this start state instead of
-                // allocating n_end_reps buckets every time.
+                // Track only touched terminal signatures for this start state instead of
+                // allocating all signature buckets every time.
                 let mut touched_positions: FxHashMap<usize, usize> = FxHashMap::default();
-                let mut touched_end_reps: Vec<(usize, Vec<&[(u32, u32)]>, u64, usize)> = Vec::new();
+                let mut touched_signatures: Vec<(usize, Vec<&[(u32, u32)]>, u64, usize)> = Vec::new();
 
-                // Empty tokens: end_rep = start_rep
+                // Empty tokens: terminal signature at the start state.
                 if !empty_token_ranges.is_empty() {
-                    let start_rep = state_to_rep[start_state as usize];
-                    let start_rep_idx = end_rep_to_idx[start_rep as usize];
-                    let position = if let Some(&position) = touched_positions.get(&start_rep_idx) {
-                        position
-                    } else {
-                        let position = touched_end_reps.len();
-                        touched_positions.insert(start_rep_idx, position);
-                        touched_end_reps.push((start_rep_idx, Vec::new(), 0, 0));
-                        position
-                    };
-                    let (_, refs, hash_accum, len_accum) = &mut touched_end_reps[position];
-                    refs.push(empty_token_ranges.as_slice());
-                    *hash_accum = hash_accum.wrapping_add(empty_token_hash);
-                    *len_accum += empty_token_ranges.len();
+                    let sig_id = state_to_terminal_signature[start_state as usize];
+                    if sig_id != u32::MAX {
+                        let sig_idx = sig_id as usize;
+                        let position = if let Some(&position) = touched_positions.get(&sig_idx) {
+                            position
+                        } else {
+                            let position = touched_signatures.len();
+                            touched_positions.insert(sig_idx, position);
+                            touched_signatures.push((sig_idx, Vec::new(), 0, 0));
+                            position
+                        };
+                        let (_, refs, hash_accum, len_accum) = &mut touched_signatures[position];
+                        refs.push(empty_token_ranges.as_slice());
+                        *hash_accum = hash_accum.wrapping_add(empty_token_hash);
+                        *len_accum += empty_token_ranges.len();
+                    }
                 }
 
                 for (byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
@@ -1059,16 +1036,16 @@ fn build_l1_terminal_dwa(
                     let target_state = flat_trans[start_state as usize * 256 + byte];
                     if target_state == dead { continue; }
                     if let Some(results) = indexed_walk_cache.get(&(byte as u8, target_state)) {
-                        for &(end_rep_idx, ranges, entry_hash, entry_mc) in results {
-                            let position = if let Some(&position) = touched_positions.get(&end_rep_idx) {
+                        for &(sig_idx, ranges, entry_hash, entry_mc) in results {
+                            let position = if let Some(&position) = touched_positions.get(&sig_idx) {
                                 position
                             } else {
-                                let position = touched_end_reps.len();
-                                touched_positions.insert(end_rep_idx, position);
-                                touched_end_reps.push((end_rep_idx, Vec::new(), 0, 0));
+                                let position = touched_signatures.len();
+                                touched_positions.insert(sig_idx, position);
+                                touched_signatures.push((sig_idx, Vec::new(), 0, 0));
                                 position
                             };
-                            let (_, refs, hash_accum, len_accum) = &mut touched_end_reps[position];
+                            let (_, refs, hash_accum, len_accum) = &mut touched_signatures[position];
                             refs.push(ranges);
                             *hash_accum = hash_accum.wrapping_add(entry_hash);
                             *len_accum += entry_mc;
@@ -1080,16 +1057,15 @@ fn build_l1_terminal_dwa(
                 // Finalize hashes and build LazyRanges entries.
                 let build_start = Instant::now();
                 let mut result: Vec<(u32, u32, LazyRanges)> = Vec::new();
-                for (idx, refs, hash, total_len) in touched_end_reps.into_iter() {
+                for (sig_idx, refs, hash, total_len) in touched_signatures.into_iter() {
                     p2_total_ranges.fetch_add(total_len as u64, std::sync::atomic::Ordering::Relaxed);
-                    let end_rep = all_end_reps[idx];
                     let lazy = LazyRanges { refs, hash, total_len };
                     if initial_tsids.len() > 1 {
                         for &tsid in &initial_tsids[..initial_tsids.len() - 1] {
-                            result.push((end_rep, tsid, lazy.clone()));
+                            result.push((sig_idx as u32, tsid, lazy.clone()));
                         }
                     }
-                    result.push((end_rep, *initial_tsids.last().unwrap(), lazy));
+                    result.push((sig_idx as u32, *initial_tsids.last().unwrap(), lazy));
                 }
                 p2_build_ns.fetch_add(build_start.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
                 result
@@ -1187,7 +1163,7 @@ fn build_l1_terminal_dwa(
 
     // Merge parallel results into deferred_arced (sequential).
     let mut deferred_arced: Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>> =
-        vec![Vec::new(); num_dfa_states];
+        vec![Vec::new(); terminal_signatures.len()];
     // Count unique range sets: each distinct Arc pointer = one unique set.
     let unique_range_set_count;
     {
@@ -1200,8 +1176,8 @@ fn build_l1_terminal_dwa(
         unique_range_set_count = seen_arcs.len();
     }
     for result in group_results {
-        for (end_rep, tsid, arc) in result {
-            deferred_arced[end_rep].push((tsid, arc));
+        for (sig_id, tsid, arc) in result {
+            deferred_arced[sig_id as usize].push((tsid, arc));
         }
     }
 
@@ -1259,37 +1235,25 @@ fn build_l1_terminal_dwa(
     let distribute_started_at = Instant::now();
     let arc_wrap_ms = 0.0; // Arc wrapping is now done inside the traversal
 
-    // Build terminal → sorted deduped set of active DFA states (mapped to representatives)
+    // Build terminal -> terminal-signature ids. Each signature is the exact
+    // set of active terminals produced by the full-token end state.
     let inverse_started_at = Instant::now();
-    let mut terminal_to_active_states: Vec<Vec<u32>> = vec![Vec::new(); num_terminals as usize];
-    for state in 0..num_dfa_states {
-        let state_u32 = state as u32;
-        let rep = state_to_rep[state];
-        for tid in tokenizer.dfa.finalizers(state_u32).iter() {
-            if active_terminals.get(tid).copied().unwrap_or(false) {
-                terminal_to_active_states[tid].push(rep);
-            }
+    let mut terminal_to_signatures: Vec<Vec<u32>> = vec![Vec::new(); num_terminals as usize];
+    for (sig_id, terminals) in terminal_signatures.iter().enumerate() {
+        for &terminal in terminals {
+            terminal_to_signatures[terminal as usize].push(sig_id as u32);
         }
-        for tid in tokenizer.tokens_accessible_from_state(state_u32).iter() {
-            if active_terminals.get(tid).copied().unwrap_or(false) {
-                terminal_to_active_states[tid].push(rep);
-            }
-        }
-    }
-    for states in &mut terminal_to_active_states {
-        states.sort_unstable();
-        states.dedup();
     }
     let inverse_map_ms = inverse_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    // Pre-compute per-TSID full token set unions and contributing end_reps.
-    // For each terminal, TSIDs whose contributing end_reps are all active reuse
-    // the precomputed Arc; only TSIDs with some inactive end_reps are recomputed.
+    // Pre-compute per-TSID full token set unions and contributing signatures.
+    // For each terminal, TSIDs whose contributing signatures are all active reuse
+    // the precomputed Arc; only TSIDs with some inactive signatures are recomputed.
     let merge_started_at = Instant::now();
 
     let num_tsids = id_map.num_tsids() as usize;
 
-    // Build per-TSID: full ranges union + contributing end_rep count.
+    // Build per-TSID: full ranges union + contributing signature count.
     let mut tsid_full_ranges: Vec<Vec<(u32, u32)>> = (0..num_tsids).map(|_| Vec::new()).collect();
     let mut tsid_total_rep_counts = vec![0usize; num_tsids];
     for entries in &deferred_arced {
@@ -1304,15 +1268,15 @@ fn build_l1_terminal_dwa(
         (0..num_tsids).map(|_| std::sync::OnceLock::new()).collect();
 
     // Group terminals by active_states to deduplicate identical computation
-    let mut active_tids: Vec<usize> = (0..terminal_to_active_states.len())
-        .filter(|&i| !terminal_to_active_states[i].is_empty())
+    let mut active_tids: Vec<usize> = (0..terminal_to_signatures.len())
+        .filter(|&i| !terminal_to_signatures[i].is_empty())
         .collect();
     active_tids.sort_unstable_by(|&a, &b|
-        terminal_to_active_states[a].cmp(&terminal_to_active_states[b]));
+        terminal_to_signatures[a].cmp(&terminal_to_signatures[b]));
     let mut unique_groups: Vec<Vec<usize>> = Vec::new();
     for &tid in &active_tids {
         if let Some(last) = unique_groups.last_mut() {
-            if terminal_to_active_states[last[0]] == terminal_to_active_states[tid] {
+            if terminal_to_signatures[last[0]] == terminal_to_signatures[tid] {
                 last.push(tid); continue;
             }
         }
@@ -1320,21 +1284,21 @@ fn build_l1_terminal_dwa(
     }
 
     let num_groups = unique_groups.len();
-    let (end_rep_group_masks, words_per_mask) = build_end_rep_group_masks(
+    let (signature_group_masks, words_per_mask) = build_end_rep_group_masks(
         &unique_groups,
-        &terminal_to_active_states,
+        &terminal_to_signatures,
         deferred_arced.len(),
     );
     let mut tsid_group_contributions: Vec<Vec<(usize, Arc<RangeSetBlaze<u32>>)>> =
         (0..num_tsids).map(|_| Vec::new()).collect();
-    for (end_rep, entries) in deferred_arced.iter().enumerate() {
-        let mask_offset = end_rep * words_per_mask;
-        let mask_slice = &end_rep_group_masks[mask_offset..mask_offset + words_per_mask];
+    for (sig_id, entries) in deferred_arced.iter().enumerate() {
+        let mask_offset = sig_id * words_per_mask;
+        let mask_slice = &signature_group_masks[mask_offset..mask_offset + words_per_mask];
         if mask_slice.iter().all(|&w| w == 0) {
             continue;
         }
         for &(tsid, ref arc) in entries {
-            tsid_group_contributions[tsid as usize].push((end_rep, Arc::clone(arc)));
+            tsid_group_contributions[tsid as usize].push((sig_id, Arc::clone(arc)));
         }
     }
 
@@ -1352,9 +1316,9 @@ fn build_l1_terminal_dwa(
                     (0..num_groups).map(|_| Vec::new()).collect();
                 let mut touched_groups: Vec<usize> = Vec::new();
 
-                for &(end_rep, ref arc) in contributions {
-                    let mask_offset = end_rep * words_per_mask;
-                    let mask_slice = &end_rep_group_masks[mask_offset..mask_offset + words_per_mask];
+                for &(sig_id, ref arc) in contributions {
+                    let mask_offset = sig_id * words_per_mask;
+                    let mask_slice = &signature_group_masks[mask_offset..mask_offset + words_per_mask];
                     for (word_idx, &word) in mask_slice.iter().enumerate() {
                         let mut remaining = word;
                         while remaining != 0 {

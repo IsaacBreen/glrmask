@@ -1,5 +1,6 @@
 #![deny(warnings)]
 #![allow(dead_code)]
+#![allow(unused_variables)]
 
 pub(crate) mod automata;
 pub(crate) mod compiler;

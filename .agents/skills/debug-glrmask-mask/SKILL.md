@@ -29,6 +29,12 @@ L1 state equivalence can be valid for whole-token walks from a start state witho
 
 This failure shape often looks bizarre in an MRE: duplicate vocab bytes, token ordering, and source-looking survivor strings may be load-bearing because they perturb internal token ids, state reps, and range-set profiles enough to expose a bad representative choice.
 
+The L1 transition relation is a simple whole-token predicate: for each original tokenizer start state and LLM token, run the whole token bytes, keep terminals whose match width equals the token length, then add possible-future terminals from the token end state. Optimized L1 construction may compress IDs, but it must be equivalent to that predicate.
+
+Do not coarsen L1 tokenizer states from a token sample. A sampled "confirmation" can merge states that agree on the sample but differ on an unsampled token/terminal pair. This produces order-sensitive false negatives where `commit_token` succeeds through the concrete tokenizer state but the parser DWA weight was built from a representative whose end-state terminal signature is missing the needed terminal. Exact bounded state equivalence is acceptable; sampled post-coarsening is not.
+
+When debugging L1, compare the concrete full-token end-state terminal signature with the signature used in the built transition weight. If they differ, suspect state-map coarsening or representative use before suspecting runtime mask filtering.
+
 ## Root-Cause Standard
 
 The final explanation should name:
