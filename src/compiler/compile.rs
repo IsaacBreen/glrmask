@@ -3355,24 +3355,24 @@ mod tests {
     #[test]
     fn diagnose_pattern_then_max_length_mask_commit_mismatch() {
         let disputed_token_id = 0;
-        let disputed_token = b"abcdefgh";
+        let disputed_token = b"aaaaeaga";
         let vocab = Vocab::new(vec![(disputed_token_id, disputed_token.to_vec())], None);
         let constraint = Constraint::from_glrm_grammar(
             r#"
 start start;
 
-internal t CHAR ::= /[^\x00-\x1f\x7f"\\]|\\["\\\/bfnrt]|\\u[0-9A-Fa-f]{4}/;
-t NUM ::= /-?(0|[1-9][0-9]*)(\.[0-9]+([eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+)/;
+internal t CHAR ::= /[^\x00-\x1f\x7f"\\]|\\u[0-9A-Fa-f]{4}/;
+t NUM ::= /0*(\.00+|e0)/;
 t PAT ::= CHAR* [a]{36} CHAR* "\"";
 t BOUNDED ::= CHAR{0,254} "\"";
-nt start ::= PAT "d" ("\"" BOUNDED | NUM);
+nt start ::= PAT "d" (BOUNDED | NUM);
 "#,
             &vocab,
         )
         .expect("grammar should compile");
         let mut prefix = Vec::new();
         prefix.extend([b'a'; 36]);
-        prefix.extend(br#""d""#);
+        prefix.extend(br#""d"#);
         prefix.extend([b'a'; 254]);
 
         let mut mask_state = constraint.start();
