@@ -39,6 +39,9 @@ struct ParserDwaPhaseProfile {
     determinize_supports_ms: f64,
     optimize_defaults_ms: f64,
     subtract_final_ms: f64,
+    fallback_to_nwa_ms: f64,
+    ensure_fallback_ms: f64,
+    determinize_fallback_ms: f64,
     determinize_after_defaults_ms: f64,
     minimize_ms: f64,
     total_ms: f64,
@@ -800,6 +803,8 @@ fn determinize_with_supports(
         }
         if profile_enabled { prof_final_weight_ns += t_fw.elapsed().as_nanos() as u64; }
 
+        let labels_processed_before_iter = prof_labels_processed;
+
         let t_intersect = std::time::Instant::now();
         for (nwa_state_id, path_weight) in &subset_entries {
             let state = &nwa.states()[*nwa_state_id as usize];
@@ -849,7 +854,6 @@ fn determinize_with_supports(
         }
 
         let mut pre_closure_key: Vec<(u32, usize)> = Vec::new();
-        let labels_processed_before_iter = prof_labels_processed;
 
         let mut process_label = |label: i32, contribs: FxHashMap<u32, Weight>| {
             if contribs.is_empty() {
@@ -1548,11 +1552,21 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
 
     let ensure_fallback_started_at = Instant::now();
     let mut nwa_for_fallback = parser_dwa_pre_minimize.to_nwa();
+    profile.fallback_to_nwa_ms = elapsed_ms(ensure_fallback_started_at);
+
+    let ensure_fallback_step_started_at = Instant::now();
     ensure_default_transitions_are_fallbacks(&mut nwa_for_fallback, &possible_by_state, table.num_states);
+    profile.ensure_fallback_ms = elapsed_ms(ensure_fallback_step_started_at);
 
     // Determinize back to DWA to collapse the duplicated edges
-    parser_dwa_pre_minimize = crate::automata::weighted_u32::determinize::determinize(&nwa_for_fallback)
-        .expect("NWA remains acyclic after fallback transformation");
+    let determinize_fallback_started_at = Instant::now();
+    parser_dwa_pre_minimize = if std::env::var_os("GLRMASK_USE_GENERIC_FALLBACK_DETERMINIZE").is_some() {
+        crate::automata::weighted_u32::determinize::determinize(&nwa_for_fallback)
+            .expect("NWA remains acyclic after fallback transformation")
+    } else {
+        determinize_with_supports(&nwa_for_fallback, Some(table.num_states)).dwa
+    };
+    profile.determinize_fallback_ms = elapsed_ms(determinize_fallback_started_at);
 
     profile.determinize_after_defaults_ms = elapsed_ms(ensure_fallback_started_at);
 
@@ -1571,7 +1585,7 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
 
     if parser_dwa_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][parser_dwa] build_state_summaries_ms={:.3} compose_state_ms={:.3} resolve_negatives_ms={:.3} viable_suffix_ms={:.3} determinize_supports_ms={:.3} optimize_defaults_ms={:.3} subtract_final_ms={:.3} determinize_after_defaults_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][parser_dwa] build_state_summaries_ms={:.3} compose_state_ms={:.3} resolve_negatives_ms={:.3} viable_suffix_ms={:.3} determinize_supports_ms={:.3} optimize_defaults_ms={:.3} subtract_final_ms={:.3} fallback_to_nwa_ms={:.3} ensure_fallback_ms={:.3} determinize_fallback_ms={:.3} determinize_after_defaults_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
             profile.build_state_summaries_ms,
             profile.compose_state_ms,
             profile.resolve_negatives_ms,
@@ -1579,6 +1593,9 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
             profile.determinize_supports_ms,
             profile.optimize_defaults_ms,
             profile.subtract_final_ms,
+            profile.fallback_to_nwa_ms,
+            profile.ensure_fallback_ms,
+            profile.determinize_fallback_ms,
             profile.determinize_after_defaults_ms,
             profile.minimize_ms,
             profile.total_ms,
