@@ -44,6 +44,10 @@ Minimize recursively:
 3. Minimize field names, object wrappers, pattern properties, bounds, branch counts, prefixes, token bytes, and vocabulary entries.
 4. Keep reducing until every remaining piece has survived an explicit attempt to delete it, inline it, weaken it, literalize it, or scale it down.
 
+For slow Rust repros, avoid recompiling the test for every minimization attempt. Temporarily make the test read the active schema, grammar, prefix, or vocab candidate from stable files under `/tmp`, with the inline original as the fallback. Compile once in release mode, then have the reducer overwrite only the `/tmp` candidate files before rerunning the same already-built test command. After reduction, inline the minimized artifact back into the Rust test and remove the `/tmp` override.
+
+Use ddmin-style deletion passes instead of ad hoc editing when the artifact is large. Split properties, grammar alternatives, prefix fields, token entries, or JSON object keys into chunks; try deleting a chunk; keep the deletion only if the exact failing oracle still reproduces; then recurse from the smaller artifact. When chunk deletion stops working, reduce chunk size down to single elements, then repeat the whole process on nested survivors. Log both accepted and rejected cuts so the remaining pieces have evidence behind them.
+
 After the schema-based repro is truly minimal, commit that checkpoint if useful. Then add a new duplicate test that uses the generated GLRM grammar directly instead of the schema. Keep the schema-based test; do not replace it.
 
 Use this environment variable to print the generated grammar when needed:
