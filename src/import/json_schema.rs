@@ -2397,6 +2397,12 @@ fn simple_repeated_single_char_pattern(pattern: &str) -> Option<String> {
     Some(jsonify_regex_dot(repeated))
 }
 
+fn anchored_non_ws_word_count_pattern(pattern: &str) -> Option<usize> {
+    let rest = pattern.strip_prefix(r"^(?:\S+\s+){0,")?;
+    let max_words = rest.strip_suffix(r"}\S+$")?;
+    max_words.parse::<usize>().ok()
+}
+
 /// Returns `true` when every top-level branch of `pattern` starts with `^` and
 /// ends with `$` (after stripping a single outer group wrapper). For such
 /// patterns `json_wrapped_pattern` produces no `<string_tail>` padding, so the
@@ -6267,6 +6273,11 @@ impl<'a> SchemaCtx<'a> {
             let Some(pattern) = prune_pattern_branches_for_min_length(pattern, min_len) else {
                 return Ok(self.extract_terminal_rule(never_expr(), "JSON_STRING_PATTERN_UNSAT"));
             };
+            if min_len <= 1 {
+                if let Some(max_separators) = anchored_non_ws_word_count_pattern(&pattern) {
+                    return Ok(self.build_json_wrapped_non_ws_word_count_pattern(max_separators));
+                }
+            }
             if let Some(unit_pattern) = simple_repeated_single_char_pattern(&pattern) {
                 if min_len > 0 || max_len.is_some() {
                     return Ok(self.build_bounded_string_from_unit_regex(&unit_pattern, min_len, max_len));
@@ -7518,6 +7529,32 @@ impl<'a> SchemaCtx<'a> {
         let (terminal_body, wrap) = wrap_string_value_expr_parts(parsed_regex_expr(&inner, true));
         let term = self.extract_terminal_rule(terminal_body, prefix);
         wrap(term)
+    }
+
+    fn build_json_wrapped_non_ws_word_count_pattern(
+        &mut self,
+        max_separators: usize,
+    ) -> GrammarExpr {
+        let non_ws_fragment =
+            jsonify_shorthand_class(b'S').expect("\\S JSON shorthand must be supported");
+        let ws_fragment =
+            jsonify_shorthand_class(b's').expect("\\s JSON shorthand must be supported");
+        let non_ws_run = self.extract_terminal_rule(
+            parsed_regex_expr(&format!(r"(?:{})+", non_ws_fragment), true),
+            "JSON_STRING_NON_WS_RUN",
+        );
+        let ws_run = self.extract_terminal_rule(
+            parsed_regex_expr(&format!(r"(?:{})+", ws_fragment), true),
+            "JSON_STRING_WS_RUN",
+        );
+        quoted_expr(sequence_or_single(vec![
+            non_ws_run.clone(),
+            GrammarExpr::RepeatRange {
+                expr: Box::new(sequence_or_single(vec![ws_run, non_ws_run])),
+                min: 0,
+                max: max_separators,
+            },
+        ]))
     }
 
     fn build_state_machine_expr<State, IsAccepting, Transitions>(
