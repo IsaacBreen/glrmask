@@ -24,7 +24,7 @@ Debug straightforward breakages normally first, especially when recent local cha
 
 ## Repro Workflow
 
-Create a minimal reproducible Rust test, commonly in `integration.rs` or the relevant existing test module.
+Create minimal reproducible Rust tests in `tests/mre.rs`. Do not put MREs in `integration.rs` or another existing test module.
 
 Start with the exact schema, prefix, token, and vocab involved in the failure. Inline the schema or GLRM grammar in the test body. Do not hide the active artifact in helpers while minimizing.
 
