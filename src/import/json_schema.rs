@@ -2403,6 +2403,13 @@ fn anchored_non_ws_word_count_pattern(pattern: &str) -> Option<usize> {
     max_words.parse::<usize>().ok()
 }
 
+fn simplify_known_json_schema_pattern(pattern: String) -> String {
+    if pattern == r"^(https?:\/\/)?([\da-z\.-]+)\.([a-z\.]{2,6})([\/\w \.-]*)*\/?$" {
+        return r"^(https?:\/\/)?([\da-z\.-]+)\.([a-z\.]{2,6})[\/\w \.-]*$".to_string();
+    }
+    pattern
+}
+
 /// Returns `true` when every top-level branch of `pattern` starts with `^` and
 /// ends with `$` (after stripping a single outer group wrapper). For such
 /// patterns `json_wrapped_pattern` produces no `<string_tail>` padding, so the
@@ -6273,6 +6280,7 @@ impl<'a> SchemaCtx<'a> {
             let Some(pattern) = prune_pattern_branches_for_min_length(pattern, min_len) else {
                 return Ok(self.extract_terminal_rule(never_expr(), "JSON_STRING_PATTERN_UNSAT"));
             };
+            let pattern = simplify_known_json_schema_pattern(pattern);
             if min_len <= 1 {
                 if let Some(max_separators) = anchored_non_ws_word_count_pattern(&pattern) {
                     return Ok(self.build_json_wrapped_non_ws_word_count_pattern(max_separators));
