@@ -3351,6 +3351,42 @@ mod tests {
         );
     }
 
+    #[ignore = "diagnostic full o1052 schema with alphabet maxLength witness"]
+    #[test]
+    fn diagnose_o1052_full_schema_alphabet_witness() {
+        let benchmark_json = fs::read_to_string(
+            "/Users/isaacbreen/Projects2/constraint-framework-analysis/data/sources/jsonschemabench/maskbench/data/Github_hard---o1052.json",
+        )
+        .expect("o1052 benchmark fixture should be readable");
+        let benchmark: serde_json::Value =
+            serde_json::from_str(&benchmark_json).expect("benchmark fixture should parse");
+        let schema = benchmark["schema"].to_string();
+
+        let disputed_token_id = 68612;
+        let disputed_token = b"abcdefghijklmnopqrstuvwxyz";
+        let vocab = Vocab::new(vec![(disputed_token_id, disputed_token.to_vec())], None);
+        let constraint =
+            Constraint::from_json_schema(&schema, &vocab).expect("o1052 schema should compile");
+        let prefix = br#"{"uuid": "12345678-1234-1234-1234-123456789012", "id": "123456789", "domain": "people", "schema": "https://almanak.github.io/schemas/people.aarhusteater.json", "created": "2022-01-01T12:00:00Z", "created_by": "John Doe", "updated": "2022-01-01T12:00:00Z", "updated_by": "John Doe", "status": "user-generated", "display_label": "This is a very long display label that exceeds the maximum allowed length of 255 characters. This string has 256 characters: abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"#;
+
+        let mut mask_state = constraint.start();
+        mask_state
+            .commit_bytes(prefix)
+            .expect("prefix should be accepted");
+        let mask_accepts = mask_has_token(&mask_state.mask(), disputed_token_id);
+
+        let mut commit_bytes_state = constraint.start();
+        commit_bytes_state
+            .commit_bytes(prefix)
+            .expect("prefix should be accepted");
+        let commit_bytes_accepts = commit_bytes_state.commit_bytes(disputed_token).is_ok();
+
+        assert!(
+            mask_accepts && !commit_bytes_accepts,
+            "expected full-schema alphabet overacceptance, got mask={mask_accepts} commit_bytes={commit_bytes_accepts}",
+        );
+    }
+
     #[ignore = "diagnostic for the minimized split-boundary mask/commit mismatch"]
     #[test]
     fn diagnose_minimized_split_boundary_mask_commit_mismatch() {
