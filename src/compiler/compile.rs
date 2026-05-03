@@ -3351,39 +3351,6 @@ mod tests {
         );
     }
 
-    #[ignore = "diagnostic pattern/maxLength mask/commit mismatch"]
-    #[test]
-    fn diagnose_pattern_then_max_length_mask_commit_mismatch_schema() {
-        let schema = r#"{"properties":{"u":{"pattern":"[a]{36}"},"d":{"maxLength":254}}}"#;
-
-        let disputed_token_id = 0;
-        let disputed_token = b"abcdefgh";
-        let vocab = Vocab::new(vec![(disputed_token_id, disputed_token.to_vec())], None);
-        let constraint =
-            Constraint::from_json_schema(schema, &vocab).expect("o1052 schema should compile");
-        let mut prefix = br#"{"u": ""#.to_vec();
-        prefix.extend([b'a'; 36]);
-        prefix.extend(br#"", "d": ""#);
-        prefix.extend([b'a'; 254]);
-
-        let mut mask_state = constraint.start();
-        mask_state
-            .commit_bytes(&prefix)
-            .expect("prefix should be accepted");
-        let mask_accepts = mask_has_token(&mask_state.mask(), disputed_token_id);
-
-        let mut commit_bytes_state = constraint.start();
-        commit_bytes_state
-            .commit_bytes(&prefix)
-            .expect("prefix should be accepted");
-        let commit_bytes_accepts = commit_bytes_state.commit_bytes(disputed_token).is_ok();
-
-        assert!(
-            mask_accepts && !commit_bytes_accepts,
-            "expected mask/commit mismatch, got mask={mask_accepts} commit_bytes={commit_bytes_accepts}",
-        );
-    }
-
     #[test]
     fn diagnose_pattern_then_max_length_mask_commit_mismatch() {
         let disputed_token_id = 0;
