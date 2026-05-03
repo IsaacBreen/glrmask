@@ -197,12 +197,14 @@ During reduction, hex JSON is convenient because it mirrors cached vocab files. 
 
 ```rust
 let vocab_entries = [
-    "mand",
-    "owa\u{0107}",
+    ("mand", 1),
+    (" a", 3),
+    ("ować", 1),
 ];
 let vocab = Vocab::new(
     vocab_entries
-        .iter()
+        .into_iter()
+        .flat_map(|(token, count)| std::iter::repeat(token).take(count))
         .enumerate()
         .map(|(token_id, token)| (token_id as u32, token.as_bytes().to_vec()))
         .collect(),
@@ -211,6 +213,8 @@ let vocab = Vocab::new(
 ```
 
 Use byte literals only if a survivor token is not valid UTF-8. Avoid keeping hex decoding or original LLM token IDs in the final MRE unless either is load-bearing.
+
+Do not automatically deduplicate equal token bytes. `Vocab` entries still have distinct token ids, and repeated equal byte strings can change terminal DWA construction, partition shape, or mask bitsets. If many duplicates survive, test both "unique only" and grouped-by-token order. If grouped order preserves the oracle, inline the witness as `(token, count)` pairs so the load-bearing multiplicity is obvious without a giant repeated list.
 
 ## Practical Notes
 
@@ -230,6 +234,7 @@ For the `o1052` GLRM witness, several zero-consumption-looking pieces were load-
 - replacing the remaining field names with single letters stopped the mismatch; record failed semantic replacements rather than assuming they are safe.
 - after grammar simplification, rerunning vocab deletion still found the `201`-token set deletion-minimal, but a monotonic content pass simplified most non-disputed entries to dummy tokens like `"a"`, `" a"`, `"b"`, `"x"`, and `"A"`. Minimize token contents as well as token count.
 - after vocab content simplification, rerunning grammar minimization removed the suffix-side `(JSON_STRING_CHAR*)` from the UUID pattern. The next vocab pass still found no coarse deletions and the seven remaining non-dummy token strings were individually load-bearing. Keep cycling until a full round produces no changes.
+- the final vocab had many duplicate byte strings. Deduplicating to unique strings stopped the mismatch, dropping the rare singleton strings stopped it, and reducing any grouped duplicate count by even one stopped it. Grouping by token string preserved the mismatch while lexicographic order did not, so the inline test uses counted groups in the reproducing order.
 
 If you interrupt a reducer, remember that the `/tmp` file may contain the last rejected candidate, not the last accepted candidate. Either write every accepted candidate to a checkpoint file immediately, or reconstruct/replay the accepted cuts before continuing. A simple pattern is:
 
