@@ -152,7 +152,7 @@ use crate::compiler::stages::id_map_and_terminal_dwa::merge::{
 use crate::ds::weight::{Weight, shared_rangeset};
 use crate::Vocab;
 
-use super::l2p::equivalence_analysis::compat::TokenizerView;
+use super::l2p::equivalence_analysis::compat::{TokenizerView, compute_byte_classes};
 use super::types::{TerminalColoring, TerminalDwaPhaseProfile, compile_profile_enabled, debug_profile_enabled};
 
 /// Maximum L1 equivalence class count before falling back to L2+.
@@ -181,11 +181,12 @@ pub(crate) fn count_l1_equivalence_classes(
             relevant_bytes[byte as usize] = true;
         }
     }
+    let byte_to_class = compute_byte_classes(tokenizer_view.dfa());
     let equiv_mapping = super::l2p::equivalence_analysis::state::max_length::find_state_equivalence_classes_byte_restricted(
         &tokenizer_view,
         &token_bytes,
         &states,
-        None,
+        Some(&byte_to_class),
         Some(active_terminals),
         Some(&relevant_bytes),
     );
@@ -396,11 +397,12 @@ fn build_l1_id_map<'a>(
             relevant_bytes[byte as usize] = true;
         }
     }
+    let byte_to_class = compute_byte_classes(tokenizer_view.dfa());
     let equiv_mapping = super::l2p::equivalence_analysis::state::max_length::find_state_equivalence_classes_byte_restricted(
         &tokenizer_view,
         &token_bytes,
         &states,
-        None,
+        Some(&byte_to_class),
         Some(active_terminals),
         Some(&relevant_bytes),
     );
