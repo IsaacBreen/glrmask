@@ -33,6 +33,8 @@ The L1 transition relation is a simple whole-token predicate: for each original 
 
 Do not coarsen L1 tokenizer states from a token sample. A sampled "confirmation" can merge states that agree on the sample but differ on an unsampled token/terminal pair. This produces order-sensitive false negatives where `commit_token` succeeds through the concrete tokenizer state but the parser DWA weight was built from a representative whose end-state terminal signature is missing the needed terminal. Exact bounded state equivalence is acceptable; sampled post-coarsening is not.
 
+If L1 needs post-max-length TSID coarsening, compare exact whole-vocab terminal-signature profiles. The profile is the run-length-compressed sequence of terminal-signature IDs produced by walking every sorted vocab token from the candidate state, where signature 0 means dead/no active L1 terminal. Merge only profiles that compare exactly; hashes can be accelerators but not proofs. See `notes/2026-05-03-l1-sampled-equivalence-bug.md`.
+
 When debugging L1, compare the concrete full-token end-state terminal signature with the signature used in the built transition weight. If they differ, suspect state-map coarsening or representative use before suspecting runtime mask filtering.
 
 ## Root-Cause Standard

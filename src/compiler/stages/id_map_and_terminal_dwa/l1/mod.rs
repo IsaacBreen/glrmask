@@ -193,7 +193,33 @@ pub(crate) fn count_l1_equivalence_classes(
     for &rep in &equiv_mapping {
         seen.insert(rep);
     }
-    seen.len()
+    let mut max_length_representatives: Vec<usize> = seen.into_iter().collect();
+    max_length_representatives.sort_unstable();
+
+    let mut token_id_bytes: Vec<(u32, &[u8])> = vocab
+        .entries
+        .iter()
+        .map(|(&id, bytes)| (id, bytes.as_slice()))
+        .collect();
+    token_id_bytes.sort_unstable_by(|(_, left_bytes), (_, right_bytes)| {
+        left_bytes
+            .first()
+            .cmp(&right_bytes.first())
+            .then(left_bytes.len().cmp(&right_bytes.len()))
+            .then(left_bytes.cmp(right_bytes))
+    });
+    let flat_trans = build_flat_transition_table(tokenizer);
+    let exact_mapping = find_l1_exact_state_equivalence_by_token_signatures(
+        tokenizer,
+        &token_id_bytes,
+        &max_length_representatives,
+        active_terminals,
+        flat_trans.as_slice(),
+    );
+    exact_mapping
+        .into_iter()
+        .collect::<rustc_hash::FxHashSet<_>>()
+        .len()
 }
 
 /// Build an L1 id_map and terminal DWA for the given vocab and terminal set.
@@ -285,12 +311,16 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
             )
         };
         eprintln!(
-            "[glrmask/profile][l1] partition={} vocab_tokens={} tsids={} rep_states={} state_equiv_ms={:.3} token_identity_map_ms={:.3} id_map_ms={:.3} internal_vocab_ms={:.3} vocab_tree_build_ms={:.3} state_seed_ms={:.3} token_set_intern_ms={:.3} tsid_profile_merge_ms={:.3} tsid_profile_merge_before={} tsid_profile_merge_after={} vocab_tree_traversal_ms={:.3} direct_terminal_dwa_ms={:.3} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} terminal_build_ms={:.3} compact_ms={:.3} determinize=none minimize=none prune=none total_ms={:.3}{}",
+            "[glrmask/profile][l1] partition={} vocab_tokens={} tsids={} rep_states={} state_equiv_ms={:.3} max_length_state_equiv_ms={:.3} exact_state_equiv_ms={:.3} max_length_reps={} exact_reps={} token_identity_map_ms={:.3} id_map_ms={:.3} internal_vocab_ms={:.3} vocab_tree_build_ms={:.3} state_seed_ms={:.3} token_set_intern_ms={:.3} tsid_profile_merge_ms={:.3} tsid_profile_merge_before={} tsid_profile_merge_after={} vocab_tree_traversal_ms={:.3} direct_terminal_dwa_ms={:.3} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} terminal_build_ms={:.3} compact_ms={:.3} determinize=none minimize=none prune=none total_ms={:.3}{}",
             partition_label,
             vocab.entries.len(),
             id_map.num_tsids(),
             id_map.tokenizer_states.representative_original_ids.len(),
             id_map_profile.state_equiv_ms,
+            id_map_profile.max_length_state_equiv_ms,
+            id_map_profile.exact_state_equiv_ms,
+            id_map_profile.max_length_reps,
+            id_map_profile.exact_reps,
             id_map_profile.token_identity_map_ms,
             id_map_ms,
             terminal_profile.internal_vocab_ms,
@@ -353,11 +383,12 @@ fn build_l1_id_map<'a>(
     let state_equiv_started_at = Instant::now();
     let tokenizer_view = TokenizerView::new_filtered_from_flat_trans(flat_trans, tokenizer, active_terminals);
     let view_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
-    let token_bytes: Vec<&[u8]> = vocab
+    let mut token_id_bytes: Vec<(u32, &[u8])> = vocab
         .entries
-        .values()
-        .map(|b| b.as_slice())
+        .iter()
+        .map(|(&id, bytes)| (id, bytes.as_slice()))
         .collect();
+    let token_bytes: Vec<&[u8]> = token_id_bytes.iter().map(|(_, bytes)| *bytes).collect();
     let mut relevant_bytes = [false; 256];
     for bytes in &token_bytes {
         for &byte in *bytes {
@@ -372,16 +403,49 @@ fn build_l1_id_map<'a>(
         Some(active_terminals),
         Some(&relevant_bytes),
     );
-    let equiv_algo_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0 - view_ms;
+
+    // Sort token IDs first by first byte, then by length, then lexicographically.
+    // Keeping first-byte buckets contiguous preserves cheap whole-bucket unions,
+    // while length-major order can reduce fragmentation for length-sensitive
+    // token sets before the later compact pass.
+    let token_identity_started_at = Instant::now();
+    token_id_bytes.sort_unstable_by(|(_, left_bytes), (_, right_bytes)| {
+        left_bytes
+            .first()
+            .cmp(&right_bytes.first())
+            .then(left_bytes.len().cmp(&right_bytes.len()))
+            .then(left_bytes.cmp(right_bytes))
+    });
+    let token_sort_ms = token_identity_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let max_length_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0 - view_ms - token_sort_ms;
+    let exact_started_at = Instant::now();
+    let mut max_length_representatives = equiv_mapping.clone();
+    max_length_representatives.sort_unstable();
+    max_length_representatives.dedup();
+    let exact_mapping = find_l1_exact_state_equivalence_by_token_signatures(
+        tokenizer,
+        &token_id_bytes,
+        &max_length_representatives,
+        active_terminals,
+        flat_trans.as_ref(),
+    );
+    let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
+    let mut max_rep_to_exact_rep = FxHashMap::<usize, usize>::default();
+    for (&max_rep, &exact_rep) in max_length_representatives.iter().zip(exact_mapping.iter()) {
+        max_rep_to_exact_rep.insert(max_rep, exact_rep);
+    }
+
     // Build representative → internal_id mapping, composing through initial_state_map when present
     let mut rep_to_internal: FxHashMap<usize, u32> = FxHashMap::default();
     let mut state_original_to_internal = vec![u32::MAX; num_dfa_states];
     let mut state_representatives = Vec::new();
     for (i, &rep) in equiv_mapping.iter().enumerate() {
         let state_id = states[i];
-        let internal_id = *rep_to_internal.entry(rep).or_insert_with(|| {
+        let exact_rep = max_rep_to_exact_rep[&rep];
+        let internal_id = *rep_to_internal.entry(exact_rep).or_insert_with(|| {
             let id = state_representatives.len() as u32;
-            state_representatives.push(rep as u32);
+            state_representatives.push(exact_rep as u32);
             id
         });
         state_original_to_internal[state_id] = internal_id;
@@ -417,34 +481,20 @@ fn build_l1_id_map<'a>(
     let state_equiv_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
     if debug_profile_enabled() {
         eprintln!(
-            "[glrmask/debug][l1_id_map] state_equiv breakdown: view={:.1}ms equiv_algo={:.1}ms mapping={:.1}ms total={:.1}ms tokens={} dfa_states={} reps={}",
+            "[glrmask/debug][l1_id_map] state_equiv breakdown: view={:.1}ms max_length={:.1}ms exact_token_signature={:.1}ms mapping={:.1}ms total={:.1}ms tokens={} dfa_states={} max_length_reps={} exact_reps={}",
             view_ms,
-            equiv_algo_ms,
-            state_equiv_ms - view_ms - equiv_algo_ms,
+            max_length_ms,
+            exact_state_equiv_ms,
+            state_equiv_ms - view_ms - max_length_ms - exact_state_equiv_ms - token_sort_ms,
             state_equiv_ms,
             vocab.entries.len(),
             states.len(),
+            max_length_representatives.len(),
             state_representatives.len(),
         );
     }
 
-    // Sort token IDs first by first byte, then by length, then lexicographically.
-    // Keeping first-byte buckets contiguous preserves cheap whole-bucket unions,
-    // while length-major order can reduce fragmentation for length-sensitive
-    // token sets before the later compact pass.
-    let token_identity_started_at = Instant::now();
-    let mut token_id_bytes: Vec<(u32, &[u8])> = vocab
-        .entries
-        .iter()
-        .map(|(&id, bytes)| (id, bytes.as_slice()))
-        .collect();
-    token_id_bytes.sort_unstable_by(|(_, left_bytes), (_, right_bytes)| {
-        left_bytes
-            .first()
-            .cmp(&right_bytes.first())
-            .then(left_bytes.len().cmp(&right_bytes.len()))
-            .then(left_bytes.cmp(right_bytes))
-    });
+    let token_map_started_at = Instant::now();
     let mut token_original_to_internal = vec![u32::MAX; vocab.max_token_id() as usize + 1];
     let token_ids_sorted: Vec<u32> = token_id_bytes
         .iter()
@@ -454,13 +504,14 @@ fn build_l1_id_map<'a>(
             original_id
         })
         .collect();
-    let token_identity_map_ms = token_identity_started_at.elapsed().as_secs_f64() * 1000.0;
+    let token_identity_map_ms = token_sort_ms + token_map_started_at.elapsed().as_secs_f64() * 1000.0;
+    let exact_reps = state_representatives.len();
 
     (
         InternalIdMap {
             tokenizer_states: ManyToOneIdMap::from_original_to_internal_with_representatives(
                 state_original_to_internal,
-                state_representatives.len() as u32,
+                exact_reps as u32,
                 state_representatives,
             ),
             vocab_tokens: ManyToOneIdMap::from_original_to_internal_with_representatives(
@@ -473,9 +524,222 @@ fn build_l1_id_map<'a>(
         state_to_rep,
         L1IdMapProfile {
             state_equiv_ms,
+            max_length_state_equiv_ms: max_length_ms,
+            exact_state_equiv_ms,
+            max_length_reps: max_length_representatives.len(),
+            exact_reps,
             token_identity_map_ms,
         },
     )
+}
+
+fn find_l1_exact_state_equivalence_by_token_signatures(
+    tokenizer: &Tokenizer,
+    sorted_entries: &[(u32, &[u8])],
+    states: &[usize],
+    active_terminals: &[bool],
+    flat_trans: &[u32],
+) -> Vec<usize> {
+    if states.len() <= 1 {
+        return states.to_vec();
+    }
+
+    let state_to_terminal_signature =
+        build_l1_state_to_terminal_signature(tokenizer, active_terminals);
+    let token_buckets = build_l1_sorted_token_buckets(sorted_entries);
+
+    let profiles: Vec<Vec<(u32, u32, u32)>> = states
+        .par_iter()
+        .map(|&state| {
+            l1_token_signature_profile_for_state(
+                state as u32,
+                &token_buckets,
+                &state_to_terminal_signature,
+                flat_trans,
+            )
+        })
+        .collect();
+
+    let mut order: Vec<usize> = (0..states.len()).collect();
+    order.sort_unstable_by(|&left, &right| {
+        profiles[left]
+            .cmp(&profiles[right])
+            .then_with(|| states[left].cmp(&states[right]))
+    });
+
+    let mut mapping = vec![0usize; states.len()];
+    let mut current_rep = states[order[0]];
+    mapping[order[0]] = current_rep;
+    for pair in order.windows(2) {
+        let previous = pair[0];
+        let current = pair[1];
+        if profiles[current] != profiles[previous] {
+            current_rep = states[current];
+        }
+        mapping[current] = current_rep;
+    }
+
+    mapping
+}
+
+struct L1SortedTokenBuckets<'a> {
+    empty_token_indices: Vec<usize>,
+    token_indices_by_first_byte: Vec<Vec<usize>>,
+    suffixes_by_first_byte: Vec<Vec<&'a [u8]>>,
+    suffix_lcps_by_first_byte: Vec<Vec<usize>>,
+}
+
+fn build_l1_sorted_token_buckets<'a>(
+    sorted_entries: &[(u32, &'a [u8])],
+) -> L1SortedTokenBuckets<'a> {
+    let mut empty_token_indices = Vec::<usize>::new();
+    let mut token_indices_by_first_byte = vec![Vec::<usize>::new(); 256];
+    for (internal_token_id, &(_original_id, token_bytes)) in sorted_entries.iter().enumerate() {
+        if let Some(&first_byte) = token_bytes.first() {
+            token_indices_by_first_byte[first_byte as usize].push(internal_token_id);
+        } else {
+            empty_token_indices.push(internal_token_id);
+        }
+    }
+
+    let mut suffixes_by_first_byte = vec![Vec::<&[u8]>::new(); 256];
+    let mut suffix_lcps_by_first_byte = vec![Vec::<usize>::new(); 256];
+    for first_byte in 0..256 {
+        let token_ids = &token_indices_by_first_byte[first_byte];
+        if token_ids.is_empty() {
+            continue;
+        }
+
+        let suffixes = &mut suffixes_by_first_byte[first_byte];
+        let lcps = &mut suffix_lcps_by_first_byte[first_byte];
+        suffixes.reserve(token_ids.len());
+        lcps.reserve(token_ids.len());
+
+        let mut previous_suffix: &[u8] = &[];
+        for &internal_token_id in token_ids {
+            let suffix_bytes = &sorted_entries[internal_token_id].1[1..];
+            lcps.push(common_prefix_len(previous_suffix, suffix_bytes));
+            suffixes.push(suffix_bytes);
+            previous_suffix = suffix_bytes;
+        }
+    }
+
+    L1SortedTokenBuckets {
+        empty_token_indices,
+        token_indices_by_first_byte,
+        suffixes_by_first_byte,
+        suffix_lcps_by_first_byte,
+    }
+}
+
+fn build_l1_state_to_terminal_signature(
+    tokenizer: &Tokenizer,
+    active_terminals: &[bool],
+) -> Vec<u32> {
+    let mut signature_to_id = FxHashMap::<Vec<u32>, u32>::default();
+    signature_to_id.insert(Vec::new(), 0);
+    let mut next_signature_id = 1u32;
+    let mut state_to_terminal_signature = vec![0u32; tokenizer.num_states() as usize];
+
+    for state in 0..tokenizer.num_states() as usize {
+        let state_u32 = state as u32;
+        let mut signature = Vec::<u32>::new();
+        for tid in tokenizer.dfa.finalizers(state_u32).iter() {
+            if active_terminals.get(tid).copied().unwrap_or(false) {
+                signature.push(tid as u32);
+            }
+        }
+        for tid in tokenizer.tokens_accessible_from_state(state_u32).iter() {
+            if active_terminals.get(tid).copied().unwrap_or(false) {
+                signature.push(tid as u32);
+            }
+        }
+        signature.sort_unstable();
+        signature.dedup();
+        let sig_id = *signature_to_id.entry(signature).or_insert_with(|| {
+            let id = next_signature_id;
+            next_signature_id += 1;
+            id
+        });
+        state_to_terminal_signature[state] = sig_id;
+    }
+
+    state_to_terminal_signature
+}
+
+fn l1_token_signature_profile_for_state(
+    start_state: u32,
+    buckets: &L1SortedTokenBuckets<'_>,
+    state_to_terminal_signature: &[u32],
+    flat_trans: &[u32],
+) -> Vec<(u32, u32, u32)> {
+    let dead = u32::MAX;
+    let mut profile = Vec::<(u32, u32, u32)>::new();
+    let start_sig = state_to_terminal_signature[start_state as usize];
+    for &internal_token_id in &buckets.empty_token_indices {
+        append_l1_signature_profile_run(&mut profile, start_sig, internal_token_id as u32);
+    }
+
+    for (first_byte, token_ids) in buckets.token_indices_by_first_byte.iter().enumerate() {
+        if token_ids.is_empty() {
+            continue;
+        }
+
+        let first_target = flat_trans[start_state as usize * 256 + first_byte];
+        if first_target == dead {
+            for &internal_token_id in token_ids {
+                append_l1_signature_profile_run(&mut profile, 0, internal_token_id as u32);
+            }
+            continue;
+        }
+
+        let suffixes = &buckets.suffixes_by_first_byte[first_byte];
+        let suffix_lcps = &buckets.suffix_lcps_by_first_byte[first_byte];
+        let mut suffix_states = vec![first_target];
+        for (bucket_pos, &internal_token_id) in token_ids.iter().enumerate() {
+            let suffix_bytes = suffixes[bucket_pos];
+            let lcp_len = suffix_lcps[bucket_pos].min(suffix_states.len().saturating_sub(1));
+            suffix_states.truncate(lcp_len + 1);
+
+            let mut state = *suffix_states.last().unwrap_or(&first_target);
+            if state == dead {
+                suffix_states.resize(suffix_bytes.len() + 1, dead);
+            } else {
+                for &byte in &suffix_bytes[lcp_len..] {
+                    state = flat_trans[state as usize * 256 + byte as usize];
+                    suffix_states.push(state);
+                    if state == dead {
+                        suffix_states.resize(suffix_bytes.len() + 1, dead);
+                        break;
+                    }
+                }
+            }
+
+            let final_state = suffix_states[suffix_bytes.len()];
+            let sig_id = if final_state == dead {
+                0
+            } else {
+                state_to_terminal_signature[final_state as usize]
+            };
+            append_l1_signature_profile_run(&mut profile, sig_id, internal_token_id as u32);
+        }
+    }
+
+    profile
+}
+
+fn append_l1_signature_profile_run(
+    profile: &mut Vec<(u32, u32, u32)>,
+    sig_id: u32,
+    token_id: u32,
+) {
+    if let Some((last_sig, _start, end)) = profile.last_mut() {
+        if *last_sig == sig_id && end.wrapping_add(1) == token_id {
+            *end = token_id;
+            return;
+        }
+    }
+    profile.push((sig_id, token_id, token_id));
 }
 
 fn build_l1_terminal_dwa(
@@ -1762,6 +2026,10 @@ fn apply_tsid_perm_to_id_map(id_map: &mut ManyToOneIdMap, perm: &[u32], new_coun
 
 struct L1IdMapProfile {
     state_equiv_ms: f64,
+    max_length_state_equiv_ms: f64,
+    exact_state_equiv_ms: f64,
+    max_length_reps: usize,
+    exact_reps: usize,
     token_identity_map_ms: f64,
 }
 
