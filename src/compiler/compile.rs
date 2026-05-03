@@ -3365,14 +3365,14 @@ mod tests {
             t NUM ::= /0*(\.00+|e0)/;
             t PAT ::= CHAR* [a]{36} CHAR* "\"";
             t BOUNDED ::= CHAR{0,254} "\"";
-            nt start ::= PAT "d" (BOUNDED | NUM);
+            nt start ::= PAT (BOUNDED | NUM);
             "#,
             &vocab,
         )
         .expect("grammar should compile");
         let mut prefix = Vec::new();
         prefix.extend([b'a'; 36]);
-        prefix.extend(br#""d"#);
+        prefix.extend(br#"""#);
         prefix.extend([b'a'; 254]);
 
         let mut mask_state = constraint.start();
