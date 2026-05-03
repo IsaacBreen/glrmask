@@ -1,15 +1,15 @@
 ---
 name: manage-skills
-description: Create, update, split, move, validate, and git-commit Codex skills. Use when adding a new skill, editing an existing skill, converting notes or workflows into skills, improving skills after use, splitting one skill into multiple skills, moving skills between global and repo-local locations, or ensuring skill changes are validated and committed for self-improvement over time.
+description: Create, update, split, move, and git-commit Codex skills. Use when adding a new skill, editing an existing skill, converting notes or workflows into skills, improving skills after use, splitting one skill into multiple skills, moving skills between global and repo-local locations, or ensuring skill changes are committed for self-improvement over time.
 ---
 
 # Manage Skills
 
 ## Goal
 
-Maintain skills as durable agent knowledge. Keep them concise, triggerable, validated, and committed so future agents inherit improvements.
+Maintain skills as durable agent knowledge. Keep them concise, triggerable, and committed so future agents inherit improvements.
 
-Use the built-in `$skill-creator` guidance when available, especially for new skills, interface metadata, validation rules, and progressive disclosure structure.
+Use the built-in `$skill-creator` guidance when available, especially for new skills, interface metadata, and progressive disclosure structure.
 
 ## Location
 
@@ -55,21 +55,9 @@ Inspect the existing skill before editing. Preserve useful trigger language in f
 
 When splitting a skill, keep each skill's frontmatter scoped to its own task and add a short pointer to the sibling skill where handoff is useful.
 
-When moving a skill, remove the old copy after confirming the new copy validates.
+When moving a skill, remove the old copy after confirming the new copy is in the requested location and has the expected files.
 
 Keep `SKILL.md` lean. Move long examples, runbooks, schemas, policies, or copied notes into `references/` and mention when to read them.
-
-## Validation
-
-Validate every changed skill before committing:
-
-```bash
-python3 /path/to/skill-creator/scripts/quick_validate.py <path/to/skill-folder>
-```
-
-If the validator fails because the current environment lacks a dependency, rerun from another local environment where the validator works, or fix the dependency if appropriate. Do not ignore validation failures.
-
-For scripts added to a skill, run representative script tests before committing.
 
 ## Git Discipline
 
