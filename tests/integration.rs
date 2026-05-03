@@ -516,10 +516,11 @@ fn test_json_schema_enum() {
 }
 
 #[test]
-#[ignore = "known o1052 mask/commit mismatch MRE: token b\"mand\" is committable but absent from mask"]
-fn test_json_schema_enum_mand_mask_false_negative() {
+#[ignore = "known o1052 mask/commit mismatch MRE: token b\"jand\" is committable but absent from mask"]
+fn test_json_schema_enum_jand_mask_false_negative() {
+    let disputed_token = b"jand";
     let vocab_entries = [
-        "mand",
+        "jand",
         "OURCE",
         " wine",
         "John",
@@ -733,24 +734,20 @@ fn test_json_schema_enum_mand_mask_false_negative() {
         r#"start start;
 
 t JSON_NUMBER ::= /[0-9eE+-]+/;
-t JSON_STRING_PATTERN_0 ::= ((([ !#-[\]-~] | [\xC2-\xDF] [\x80-\xBF] | [\xE0] [\xA0-\xBF] [\x80-\xBF] | [\xE1-\xEC] [\x80-\xBF] [\x80-\xBF] | [\xED] [\x80-\x9F] [\x80-\xBF] | [\xEE\xEF] [\x80-\xBF] [\x80-\xBF] | [\xF0] [\x90-\xBF] [\x80-\xBF] [\x80-\xBF] | [\xF1-\xF3] [\x80-\xBF] [\x80-\xBF] [\x80-\xBF] | [\xF4] [\x80-\x8F] [\x80-\xBF] [\x80-\xBF]) | "\\" ["/\\bfnrt] | "\\" "u" [0-9A-Fa-f]{4})* ([0-9a-f]{8} "-" [0-9a-f]{4} "-" [0-9a-f]{4} "-" [0-9a-f]{4} "-" [0-9a-f]{12}) (([ !#-[\]-~] | [\xC2-\xDF] [\x80-\xBF] | [\xE0] [\xA0-\xBF] [\x80-\xBF] | [\xE1-\xEC] [\x80-\xBF] [\x80-\xBF] | [\xED] [\x80-\x9F] [\x80-\xBF] | [\xEE\xEF] [\x80-\xBF] [\x80-\xBF] | [\xF0] [\x90-\xBF] [\x80-\xBF] [\x80-\xBF] | [\xF1-\xF3] [\x80-\xBF] [\x80-\xBF] [\x80-\xBF] | [\xF4] [\x80-\x8F] [\x80-\xBF] [\x80-\xBF]) | "\\" ["/\\bfnrt] | "\\" "u" [0-9A-Fa-f]{4})*) "\"";
+t JSON_STRING_CHAR ::= ([ !#-[\]-~] | [\xC2-\xDF] [\x80-\xBF] | [\xE0] [\xA0-\xBF] [\x80-\xBF] | [\xE1-\xEC] [\x80-\xBF] [\x80-\xBF] | [\xED] [\x80-\x9F] [\x80-\xBF] | [\xEE\xEF] [\x80-\xBF] [\x80-\xBF] | [\xF0] [\x90-\xBF] [\x80-\xBF] [\x80-\xBF] | [\xF1-\xF3] [\x80-\xBF] [\x80-\xBF] [\x80-\xBF] | [\xF4] [\x80-\x8F] [\x80-\xBF] [\x80-\xBF]) | "\\" ["/\\bfnrt] | "\\" "u" [0-9A-Fa-f]{4};
+t JSON_STRING_PATTERN_0 ::= JSON_STRING_CHAR* ([0-9a-f]{8} "-" [0-9a-f]{4} "-" [0-9a-f]{4} "-" [0-9a-f]{4} "-" [0-9a-f]{12}) (JSON_STRING_CHAR*) "\"";
 t JSON_STRING_BOUNDED_1 ::= /[^"\\]/{0,255} "\"";
-t AP_SHARED_KEY ::= "x\"";
-nt obj_ord_0_ap_kv ::= ("\"" AP_SHARED_KEY ": ") JSON_NUMBER;
-nt obj_ord_0_ap_list ::= obj_ord_0_ap_kv*;
-nt obj_ord_0_np_0 ::= "\"" "u\"" ": " "\"" JSON_STRING_PATTERN_0;
-nt obj_ord_0_np_1 ::= "\"" "display_label\"" ": " "\"" JSON_STRING_BOUNDED_1;
-nt obj_ord_0_np_2 ::= "\"" "gender\"" ": " "\"" "mand\"";
+nt obj_ord_0_np_0 ::= "a:" JSON_STRING_PATTERN_0;
+nt obj_ord_0_np_1 ::= "\"" "dispylabel\"" ": " "\"" JSON_STRING_BOUNDED_1;
+nt obj_ord_0_np_2 ::= "\"" "gender\"" ": " "\"" "jand\"";
 nt obj_ord_0_np_list ::= ", " ~ ( obj_ord_0_np_0 obj_ord_0_np_1 obj_ord_0_np_2 );
-nt obj_ord_0_body ::= ", " ~ ( obj_ord_0_np_list obj_ord_0_ap_list );
-nt obj_ord_0_obj ::= "{" obj_ord_0_body "}";
-nt start ::= obj_ord_0_obj;
+nt start ::= obj_ord_0_np_list ("x" JSON_NUMBER)*;
 "#,
         &vocab,
     )
     .expect("minimal o1052 grammar should compile");
 
-    let prefix = b"{\"u\": \"12345678-1234-1234-1234-123456789012\", \"display_label\": \"John Smith\", \"gender\": \"";
+    let prefix = b"a:00000000-0000-0000-0000-000000000000\", \"dispylabel\": \"\", \"gender\": \"";
     let disputed_token_id = 0u32;
 
     let mut mask_state = constraint.start();
@@ -759,12 +756,12 @@ nt start ::= obj_ord_0_obj;
 
     let mut commit_state = constraint.start();
     commit_state.commit_bytes(prefix).unwrap();
-    let commit_accepts = commit_state.commit_bytes(b"mand").is_ok();
+    let commit_accepts = commit_state.commit_bytes(disputed_token).is_ok();
 
     assert_eq!(
         (mask_accepts, commit_accepts),
         (true, true),
-        "token b\"mand\" should be mask-visible because commit_bytes accepts it as a live prefix of the enum literal",
+        "token b\"jand\" should be mask-visible because commit_bytes accepts it as a live prefix of the enum literal",
     );
 }
 #[test]
