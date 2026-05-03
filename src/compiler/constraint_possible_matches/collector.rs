@@ -725,12 +725,18 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_interned(
             let subtree_bytes = U8Set::from_words(*child.subtree_bytes());
             let mut descend_end_states = Vec::with_capacity(active_states.len());
             let mut child_active_states = Vec::new();
+            let mut child_active_seen = vec![0u64; (tokenizer.num_states() as usize + 63) / 64];
             for segment_outcome in outcomes.iter() {
                 let descend_end_state = if let Some(end_state) = segment_outcome.end_state {
                     if !is_end[end_state as usize]
                         && !subtree_bytes.is_subset(&self_loop_bytes[end_state as usize])
                     {
-                        child_active_states.push(end_state);
+                        let word = end_state as usize / 64;
+                        let bit = 1u64 << (end_state % 64);
+                        if child_active_seen[word] & bit == 0 {
+                            child_active_seen[word] |= bit;
+                            child_active_states.push(end_state);
+                        }
                         end_state
                     } else {
                         u32::MAX
@@ -740,8 +746,6 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_interned(
                 };
                 descend_end_states.push(descend_end_state);
             }
-            child_active_states.sort_unstable();
-            child_active_states.dedup();
             timings.child_active_ms += elapsed_ms(child_active_started_at);
 
             let (result, child_class_ids) = if child_active_states.is_empty() {
@@ -1207,12 +1211,18 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
             let subtree_bytes = U8Set::from_words(*child.subtree_bytes());
             let mut descend_end_states = Vec::with_capacity(active_states.len());
             let mut child_active_states = Vec::new();
+            let mut child_active_seen = vec![0u64; (tokenizer.num_states() as usize + 63) / 64];
             for segment_outcome in outcomes.iter() {
                 let descend_end_state = if let Some(end_state) = segment_outcome.end_state {
                     if !is_end[end_state as usize]
                         && !subtree_bytes.is_subset(&self_loop_bytes[end_state as usize])
                     {
-                        child_active_states.push(end_state);
+                        let word = end_state as usize / 64;
+                        let bit = 1u64 << (end_state % 64);
+                        if child_active_seen[word] & bit == 0 {
+                            child_active_seen[word] |= bit;
+                            child_active_states.push(end_state);
+                        }
                         end_state
                     } else {
                         u32::MAX
@@ -1222,8 +1232,6 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
                 };
                 descend_end_states.push(descend_end_state);
             }
-            child_active_states.sort_unstable();
-            child_active_states.dedup();
             timings.child_active_ms += elapsed_ms(child_active_started_at);
 
             let (result, child_class_ids) = if child_active_states.is_empty() {
