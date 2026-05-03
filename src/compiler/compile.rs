@@ -3351,7 +3351,6 @@ mod tests {
         );
     }
 
-    #[ignore = "diagnostic pattern/maxLength mask/commit mismatch"]
     #[test]
     fn diagnose_pattern_then_max_length_mask_commit_mismatch() {
         let disputed_token_id = 0;
@@ -3387,9 +3386,10 @@ mod tests {
             .expect("prefix should be accepted");
         let commit_bytes_accepts = commit_bytes_state.commit_bytes(disputed_token).is_ok();
 
-        assert!(
-            mask_accepts && !commit_bytes_accepts,
-            "expected mask/commit mismatch, got mask={mask_accepts} commit_bytes={commit_bytes_accepts}",
+        assert_eq!(
+            (mask_accepts, commit_bytes_accepts),
+            (false, false),
+            "the token would leave the bounded string in a tokenizer state whose future terminal cannot advance the parser stack",
         );
     }
 

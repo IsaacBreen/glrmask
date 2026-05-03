@@ -181,10 +181,11 @@ pub(crate) fn count_l1_equivalence_classes(
             relevant_bytes[byte as usize] = true;
         }
     }
-    let equiv_mapping = max_length::find_state_equivalence_classes_byte_restricted(
+    let equiv_mapping = super::l2p::equivalence_analysis::state::max_length::find_state_equivalence_classes_byte_restricted(
         &tokenizer_view,
         &token_bytes,
         &states,
+        None,
         Some(active_terminals),
         Some(&relevant_bytes),
     );
@@ -364,10 +365,11 @@ fn build_l1_id_map<'a>(
             relevant_bytes[byte as usize] = true;
         }
     }
-    let equiv_mapping = max_length::find_state_equivalence_classes_byte_restricted(
+    let equiv_mapping = super::l2p::equivalence_analysis::state::max_length::find_state_equivalence_classes_byte_restricted(
         &tokenizer_view,
         &token_bytes,
         &states,
+        None,
         Some(active_terminals),
         Some(&relevant_bytes),
     );
@@ -1446,12 +1448,21 @@ fn build_l1_terminal_dwa(
 
     // Sequential DWA construction from grouped results
     let mut dwa = DWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
-    let end_state = dwa.add_state();
-    dwa.set_final_weight(end_state, Weight::all());
+    let mut final_states: Vec<(Weight, u32)> = Vec::new();
     let mut num_transitions = 0usize;
 
     for result in group_results.into_iter().flatten() {
         let (tids, weight) = result;
+        let end_state = if let Some((_, state)) =
+            final_states.iter().find(|(existing, _)| *existing == weight)
+        {
+            *state
+        } else {
+            let state = dwa.add_state();
+            dwa.set_final_weight(state, weight.clone());
+            final_states.push((weight.clone(), state));
+            state
+        };
         for &tid in &tids {
             dwa.add_transition(dwa.start_state(), tid as i32, end_state, weight.clone());
             num_transitions += 1;
