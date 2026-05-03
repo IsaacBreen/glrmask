@@ -11,6 +11,8 @@ Maintain skills as durable agent knowledge. Keep them concise, triggerable, and 
 
 Use the built-in `$skill-creator` guidance when available, especially for new skills, interface metadata, and progressive disclosure structure.
 
+Skills should be high-density operational memory, not daily notes. Add or keep material only when it changes future agent behavior on recurring tasks: commands, invariants, sharp pitfalls, reusable workflows, or deterministic scripts.
+
 ## Location
 
 Put skills where the user asks.
@@ -52,6 +54,8 @@ Do not add auxiliary documentation such as `README.md`, `INSTALLATION_GUIDE.md`,
 ## Updating Skills
 
 Inspect the existing skill before editing. Preserve useful trigger language in frontmatter, but make it specific enough that the skill triggers only in appropriate contexts.
+
+Before adding a lesson, ask whether it belongs in the skill, a dated note, or nowhere. Obvious engineering hygiene and one-off session facts usually do not belong in skills.
 
 When splitting a skill, keep each skill's frontmatter scoped to its own task and add a short pointer to the sibling skill where handoff is useful.
 

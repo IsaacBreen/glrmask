@@ -7,47 +7,39 @@ description: Trace glrmask2 mask/commit mismatches and false positive or false n
 
 ## Goal
 
-Find the first layer where semantics diverge. Do not add post-filters around `mask()` or relax assertions to hide a mismatch.
+Find the first layer where `mask()`, `commit_token`, and `commit_bytes` diverge. Do not add post-filters or relax assertions to hide a mismatch.
 
 ## Workflow
 
-1. Establish the oracle: compare `mask()`, `commit_token`, and `commit_bytes` on the same prefix and token. Treat `commit_bytes` as the byte-level parser oracle until proven otherwise.
-2. Run the focused release test and capture output to `/tmp/*.log`; release mode matters for timing and FFI-adjacent work.
-3. Toggle diagnostic build paths to localize the layer:
+1. Establish the oracle on the same prefix/token. Treat `commit_bytes` as the byte-level parser oracle until proven otherwise.
+2. Reproduce in release mode and tee long output to `/tmp/*.log`.
+3. Localize with one toggle at a time:
    - `GLRMASK_NO_PARTITION=1`: bypass split L1/L2P terminal-DWA construction.
    - `GLRMASK_FORCE_ALL_L2P=1`: keep partitioning but route all terminals through L2P.
    - `GLRMASK_PM_BRUTE_FORCE=1`: replace optimized constraint possible-matches.
    - `GLRMASK_PM_TRIE_CLASS_BUILD=0`: bypass trie-class possible-match grouping.
    - `GLRMASK_DEBUG_PROFILE=1 GLRMASK_DEBUG_TERMINAL_MAPPINGS=1`: print terminal ids, L1/L2P classification, partition sizes, and DWA profiles.
-4. If possible-matches toggles do not affect the oracle, debug parser-DWA weights and terminal-DWA/id-map remapping before runtime mask expansion.
-5. If `GLRMASK_NO_PARTITION=1` or `GLRMASK_FORCE_ALL_L2P=1` changes the oracle, inspect `src/compiler/stages/id_map_and_terminal_dwa/{partition,merge,l1,l2p}.rs`. Compare token/state maps and DWA weights before and after L1/L2P merge.
-6. Keep diagnostics temporary unless they are generally useful and gated by an env var. Remove one-off prints before committing the fix.
+4. If possible-matches toggles do not affect the oracle, inspect parser-DWA weights, terminal-DWA weights, id-map remapping, and runtime mask expansion in that order.
+5. If partition toggles change the oracle, inspect `src/compiler/stages/id_map_and_terminal_dwa/{partition,merge,l1,l2p}.rs` and compare original ids, internal ids, tokenizer-state ids, and DWA weights before/after merge.
 
-## L1 Terminal DWA Pitfall
+## High-Value Pitfalls
 
-L1 state equivalence can be valid for whole-token walks from a start state without being valid for arbitrary suffix walks after the first byte. If the L1 builder splits tokens into first byte plus suffix, it must not walk the suffix from a merged internal representative unless the equivalence relation is proven suffix-closed. A robust pattern is: use concrete DFA target states for suffix traversal, then map the final state back to the L1 representative/TSID space.
+### L1 Whole-Token Semantics
 
-This failure shape often looks bizarre in an MRE: duplicate vocab bytes, token ordering, and source-looking survivor strings may be load-bearing because they perturb internal token ids, state reps, and range-set profiles enough to expose a bad representative choice.
+For each original tokenizer start state and LLM token, L1 must run the whole token bytes, keep only terminal matches whose width equals the token length, then add possible-future terminals from the concrete token end state. Optimized construction may compress ids, but the transition weight must be equivalent to this predicate.
 
-The L1 transition relation is a simple whole-token predicate: for each original tokenizer start state and LLM token, run the whole token bytes, keep terminals whose match width equals the token length, then add possible-future terminals from the token end state. Optimized L1 construction may compress IDs, but it must be equivalent to that predicate.
+### L1 State Equivalence
 
-Do not coarsen L1 tokenizer states from a token sample. A sampled "confirmation" can merge states that agree on the sample but differ on an unsampled token/terminal pair. This produces order-sensitive false negatives where `commit_token` succeeds through the concrete tokenizer state but the parser DWA weight was built from a representative whose end-state terminal signature is missing the needed terminal. Exact bounded state equivalence is acceptable; sampled post-coarsening is not.
+Do not coarsen L1 tokenizer states from samples. Merge states only when their exact whole-vocab terminal-signature profiles are equal. Hashes can bucket candidates, but exact equality must prove every final merge. See `notes/2026-05-03-l1-sampled-equivalence-bug.md` for the o1052 failure history.
 
-If L1 needs post-max-length TSID coarsening, compare exact whole-vocab terminal-signature profiles. The profile is the run-length-compressed sequence of terminal-signature IDs produced by walking every sorted vocab token from the candidate state, where signature 0 means dead/no active L1 terminal. Merge only profiles that compare exactly; hashes can be accelerators but not proofs. See `notes/2026-05-03-l1-sampled-equivalence-bug.md`.
+### Representative Suffix Walks
 
-For performance work, do not assume a coarser proposal plus exact bucket refinement is faster. On o1052, a hash-based L1 proposal made exact refinement touch too many states, and L1-specific tokenizer simplification cost more than it saved. Use `/tmp` profile logs to compare wall time before keeping these changes. `GLRMASK_PARTITION_SERIAL=1` is diagnostic for Rayon contention, not automatically a better default.
+Whole-token equivalence from a start state is not necessarily suffix-closed. If L1 splits a token into first byte plus suffix, walk suffix bytes from the concrete DFA target state, then map only the final result back into compressed TSID/id spaces.
 
-When caching shared work across parallel vocab partitions, cache the in-flight computation, not only the completed value. A mutex-protected map that unlocks before computing is safe but can let all matching partitions miss and duplicate the expensive work. Store a per-key result slot plus a condition variable so one owner computes while concurrent waiters block for the published result.
+### Weird MRE Sensitivity
 
-When debugging L1, compare the concrete full-token end-state terminal signature with the signature used in the built transition weight. If they differ, suspect state-map coarsening or representative use before suspecting runtime mask filtering.
+If duplicate vocab bytes, token ordering, or irrelevant-looking string edits are load-bearing, suspect representative choice, id maps, range-set profiles, or cross-partition remapping before suspecting the literal token text.
 
 ## Root-Cause Standard
 
-The final explanation should name:
-
-- the exact layer that first drops or admits the token;
-- the invariant violated, in terms of original ids vs internal ids, tokenizer-state ids, possible-match token space, or DWA weight semantics;
-- why the weird MRE details are load-bearing;
-- why the fix restores the invariant without masking the symptom.
-
-Update this skill as new reusable diagnostics or invariants are discovered.
+Name the exact layer that first drops or admits the token, the invariant violated, why odd MRE details are load-bearing if relevant, and why the fix restores the invariant rather than masking the symptom.
