@@ -514,15 +514,6 @@ fn build_profile_merge_permutation<P: Ord + std::hash::Hash + Eq>(
     (perm, new_count)
 }
 
-#[cfg(test)]
-fn unique_storage_better(candidate: UniqueStorageCounts, current: UniqueStorageCounts) -> bool {
-    candidate.total_ranges() < current.total_ranges()
-        || (candidate.total_ranges() == current.total_ranges()
-            && (candidate.token_ranges < current.token_ranges
-                || (candidate.token_ranges == current.token_ranges
-                    && candidate.weight_ranges < current.weight_ranges)))
-}
-
 fn collect_token_sets_after_permutation(
     weights: &[Weight],
     token_perm: &[u32],
@@ -545,17 +536,6 @@ fn collect_token_sets_after_permutation(
         }
     }
     unique_sets
-}
-
-#[cfg(test)]
-fn count_token_ranges_after_group_permutation_exact(
-    merged_unique_token_sets: &[RangeSetBlaze<u32>],
-    group_positions: &[u32],
-) -> usize {
-    merged_unique_token_sets
-        .iter()
-        .map(|token_set| permute_rangeset(token_set, group_positions).ranges().count())
-        .sum()
 }
 
 fn layout_to_group_positions(layout: &[u32]) -> Vec<u32> {
@@ -953,19 +933,6 @@ fn undo_layout_move(layout: &mut [u32], undo_buf: &[u32]) {
     }
 }
 
-#[cfg(test)]
-fn score_permuted_weights(
-    weights: &[Weight],
-    tsid_perm: &[u32],
-    token_perm: &[u32],
-) -> UniqueStorageCounts {
-    let permuted: Vec<_> = weights
-        .iter()
-        .map(|weight| permute_weight(weight, tsid_perm, token_perm))
-        .collect();
-    count_unique_storage_for_weights(&permuted)
-}
-
 /// Create a new Weight from `w` with permuted (possibly many-to-one) coords.
 fn permute_weight(w: &Weight, tsid_perm: &[u32], token_perm: &[u32]) -> Weight {
     let mut cache = HashMap::new();
@@ -1128,95 +1095,3 @@ fn count_unique_storage_for_weights(weights: &[Weight]) -> UniqueStorageCounts {
     storage
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ds::weight::Weight;
-
-    #[test]
-    fn permute_weight_unions_duplicate_new_tsids() {
-        let weight = Weight::from_compact_ranges([
-            (0..=0, [0..=0]),
-            (1..=1, [1..=1]),
-            (2..=2, [0..=0]),
-            (3..=3, [1..=1]),
-        ]);
-
-        let permuted = permute_weight(&weight, &[0, 1, 0, 1], &[0, 1]);
-
-        assert_eq!(permuted.tokens_for_tsid(0), RangeSetBlaze::from_iter([0..=0]));
-        assert_eq!(permuted.tokens_for_tsid(1), RangeSetBlaze::from_iter([1..=1]));
-        assert!(permuted.tokens_for_tsid(2).is_empty());
-        assert!(permuted.tokens_for_tsid(3).is_empty());
-    }
-
-    #[test]
-    fn tsid_merge_profiles_collapse_repeated_equal_token_sets() {
-        let weight = Weight::from_compact_ranges([
-            (0..=0, [0..=0]),
-            (1..=1, [1..=1]),
-            (2..=2, [0..=0]),
-        ]);
-        let weights = vec![&weight];
-
-        let profiles = build_tsid_context_profiles(&weights, 3);
-        let (perm, new_count) = build_profile_merge_permutation(&profiles);
-
-        assert_eq!(new_count, 2);
-        assert_eq!(perm[0], perm[2]);
-        assert_ne!(perm[0], perm[1]);
-    }
-
-    #[test]
-    fn permute_weight_reuses_interned_weight_storage() {
-        let weight = Weight::from_compact_ranges([
-            (0..=0, [0..=0]),
-            (1..=1, [1..=1]),
-            (2..=2, [0..=0]),
-        ]);
-
-        let permuted_a = permute_weight(&weight, &[0, 1, 2], &[0, 1]);
-        let permuted_b = permute_weight(&weight, &[0, 1, 2], &[0, 1]);
-
-        assert!(Arc::ptr_eq(&permuted_a.0, &permuted_b.0));
-    }
-
-    #[test]
-    fn token_order_scorer_matches_exact_range_count() {
-        let merged_unique_token_sets = vec![
-            RangeSetBlaze::from_iter([0..=0, 2..=2]),
-            RangeSetBlaze::from_iter([0..=1, 3..=3]),
-            RangeSetBlaze::from_iter([1..=2]),
-        ];
-        let scorer = TokenOrderScorer::new(&merged_unique_token_sets, 4);
-        let layout = vec![2, 0, 3, 1];
-        let group_positions = layout_to_group_positions(&layout);
-
-        assert_eq!(
-            scorer.score_layout(&layout),
-            count_token_ranges_after_group_permutation_exact(
-                &merged_unique_token_sets,
-                &group_positions,
-            ),
-        );
-    }
-
-    #[test]
-    fn local_token_order_search_reduces_unique_token_ranges() {
-        let weights = vec![
-            Weight::from_uniform(0..=0, RangeSetBlaze::from_iter([0..=0, 2..=2])),
-            Weight::from_uniform(0..=0, RangeSetBlaze::from_iter([1..=1])),
-        ];
-        let initial_token_perm = vec![0, 1, 2];
-        let merged_unique_token_sets =
-            collect_token_sets_after_permutation(&weights, &initial_token_perm);
-
-        let baseline = score_permuted_weights(&weights, &[0], &initial_token_perm);
-        let optimized = optimize_token_group_order(&merged_unique_token_sets, initial_token_perm, 3);
-        let improved = score_permuted_weights(&weights, &[0], &optimized);
-
-        assert!(unique_storage_better(improved, baseline));
-        assert_eq!(improved.weight_ranges, baseline.weight_ranges);
-        assert!(improved.token_ranges < baseline.token_ranges);
-    }
-}

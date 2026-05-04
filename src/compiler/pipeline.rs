@@ -212,6 +212,7 @@ fn set_dense_bit(words: &mut [u64], token_id: u32) {
         *slot |= 1u64 << bit;
     }
 }
+
 fn remap_parser_dwa_to_constraint_vocab(
     parser_dwa: &mut DWA,
     old_internal_to_constraint: &[Vec<u32>],
@@ -303,7 +304,6 @@ fn compile_prepared_with_profile(
                 )
             },
         );
-
         profile.tokenizer_build_ms = tokenizer_build_ms;
         profile.analyze_grammar_ms = analyze_grammar_ms;
         profile.glr_table_ms = glr_table_ms;
@@ -311,19 +311,7 @@ fn compile_prepared_with_profile(
         profile.disallowed_follows_ms = disallowed_follows_ms;
         profile.analysis_wall_ms = elapsed_ms(analysis_started_at);
 
-        let adjusted_disallowed_for_classification = if let Some(ign) = prepared_grammar.ignore_terminal {
-            let mut adj = disallowed_follows.clone();
-            adj.remove(&ign);
-            for bits in adj.values_mut() {
-                if (ign as usize) < bits.len() {
-                    bits.clear(ign as usize);
-                }
-            }
-            adj.retain(|_, bits| !bits.is_zero());
-            adj
-        } else {
-            disallowed_follows.clone()
-        };
+        let adjusted_disallowed_for_classification = disallowed_follows.clone();
         let shared_classify_cache = SharedClassifyCache::new();
         let classify_started_at = Instant::now();
         let _terminal_path_lengths = classify_terminal_path_lengths(

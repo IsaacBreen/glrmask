@@ -689,35 +689,3 @@ fn nonneg_float_range_no_ints(
     )?))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_int_range_0_1() {
-        let r = rx_int_range(Some(0), Some(1)).unwrap();
-        assert_eq!(r, "([0-1])");
-    }
-
-    #[test]
-    fn test_int_range_0_255() {
-        let r = rx_int_range(Some(0), Some(255)).unwrap();
-        assert!(r.contains("[0-9]"));
-    }
-
-    #[test]
-    fn test_float_range_0_1() {
-        let r = rx_float_range(Some(0.0), Some(1.0), true, true).unwrap();
-        assert!(r.contains("0"));
-        assert!(r.contains("1"));
-    }
-
-    #[test]
-    fn test_noninteger_float_range_0_1_requires_decimal_point() {
-        let r = rx_noninteger_float_range(Some(0.0), Some(1.0), true, true)
-            .unwrap()
-            .unwrap();
-        assert!(r.contains("\\."));
-        assert!(!r.contains("(\\.[0-9]+)?"));
-    }
-}

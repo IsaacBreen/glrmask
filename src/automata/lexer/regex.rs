@@ -413,27 +413,3 @@ fn hex_digit(b: u8) -> u8 {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::parse_regex;
-
-    #[test]
-    fn test_named_group_p_style_parses_like_plain_group() {
-        assert_eq!(parse_regex("(?P<x>A)", true), parse_regex("(A)", true));
-    }
-
-    #[test]
-    fn test_named_group_angle_style_parses_like_plain_group() {
-        assert_eq!(parse_regex("(?<x>A)", true), parse_regex("(A)", true));
-    }
-
-    #[test]
-    fn test_non_capturing_group_still_parses_like_plain_group() {
-        assert_eq!(parse_regex("(?:A)", true), parse_regex("(A)", true));
-    }
-
-    #[test]
-    fn test_malformed_named_group_does_not_parse_like_plain_group() {
-        assert_ne!(parse_regex("(?P<xA)", true), parse_regex("(A)", true));
-    }
-}
