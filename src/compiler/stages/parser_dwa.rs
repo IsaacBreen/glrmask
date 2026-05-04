@@ -1430,44 +1430,6 @@ fn build_parser_nwa_from_terminal_dwa(
     Some(arena)
 }
 
-#[cfg(test)]
-pub(crate) fn debug_build_parser_nwa_from_terminal_dwa(
-    terminal_dwa: &DWA,
-    grammar: &AnalyzedGrammar,
-    templates: Templates,
-) -> Option<NWA> {
-    build_parser_nwa_from_terminal_dwa(terminal_dwa, grammar, templates)
-}
-
-#[cfg(test)]
-pub(crate) fn build_parser_dwa(
-    table: &GLRTable,
-    grammar: &AnalyzedGrammar,
-    tokenizer: &Tokenizer,
-    vocab: &Vocab,
-    id_map: &InternalIdMap,
-    ignore_terminal: Option<TerminalID>,
-) -> DWA {
-    let (terminal_dwa, templates) = rayon::join(
-        || build_terminal_dwa_for_existing_id_map(grammar, tokenizer, vocab, id_map, ignore_terminal),
-        || {
-            let characterizations = characterize_terminals(table, grammar);
-            Templates::from_characterizations(&characterizations)
-        },
-    );
-
-    let mut parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
-        table,
-        grammar,
-        &terminal_dwa,
-        templates,
-        vocab,
-        id_map,
-    );
-    parser_dwa.clip_weights(id_map.max_internal_token_id());
-    parser_dwa
-}
-
 pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,

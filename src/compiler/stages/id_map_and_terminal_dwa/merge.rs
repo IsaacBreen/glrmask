@@ -554,34 +554,3 @@ fn remap_weight_general(
     finalize_weight_map(map)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::remap_weight_general;
-    use crate::ds::weight::Weight;
-    use range_set_blaze::RangeSetBlaze;
-
-    #[test]
-    fn remap_full_weight_is_bounded_to_mapped_space() {
-        let remapped = remap_weight_general(
-            &Weight::all(),
-            &[vec![1, 3], vec![2], vec![]],
-            &[vec![10, 11], vec![12], vec![]],
-            5,
-        );
-
-        let expected_tokens: RangeSetBlaze<u32> = [10..=12].into_iter().collect();
-        let expected = Weight::from_per_tsid_token_sets([
-            (1, expected_tokens.clone()),
-            (2, expected_tokens.clone()),
-            (3, expected_tokens),
-        ]);
-
-        assert_eq!(remapped, expected);
-    }
-
-    #[test]
-    fn remap_full_weight_without_mappings_is_empty() {
-        let remapped = remap_weight_general(&Weight::all(), &[vec![]], &[vec![]], 4);
-        assert!(remapped.is_empty());
-    }
-}

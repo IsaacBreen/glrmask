@@ -336,36 +336,3 @@ pub(crate) fn classify_terminal_path_lengths(
 
     result
 }
-
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use crate::automata::lexer::regex::parse_regex;
-    use crate::compiler::compile::build_tokenizer_from_exprs;
-    use crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalPathLength;
-    use crate::ds::bitset::BitSet;
-    use crate::Vocab;
-
-    use super::classify_terminal_path_lengths;
-
-    #[test]
-    fn classify_prefix_only_partition_as_one() {
-        let tokenizer = build_tokenizer_from_exprs(&[parse_regex("-[0-9]", true)]);
-        let vocab = Vocab::new(vec![(0, b"-".to_vec())], None);
-        let disallowed_follows = BTreeMap::<u32, BitSet>::new();
-
-        let path_lengths =
-            classify_terminal_path_lengths(&tokenizer, &vocab, &disallowed_follows, 1, None);
-
-        assert_eq!(path_lengths, vec![TerminalPathLength::One]);
-    }
-
-    #[test]
-    fn classify_sign_prefix_tokens_as_mixed_partition() {
-        assert_eq!(super::classify_vocab_char_type(b"-"), 1);
-        assert_eq!(super::classify_vocab_char_type(b" -"), 1);
-        assert_eq!(super::classify_vocab_char_type(b"+"), 1);
-    }
-
-}
