@@ -1,13 +1,7 @@
-#[cfg(test)]
-use std::cell::Cell;
-#[cfg(test)]
-use std::collections::BTreeMap;
 #[cfg(any(test, debug_assertions))]
 use std::collections::BTreeSet;
 #[cfg(any(test, debug_assertions))]
 use std::collections::VecDeque;
-#[cfg(test)]
-use std::sync::Arc;
 
 use super::accumulator::TerminalsDisallowed;
 use super::analysis::EOF;
@@ -346,15 +340,6 @@ fn advance_reduce_branch(
     }
 }
 
-/// Advance an ambiguous frontier.
-///
-/// `closure` accumulates unshifted branches that still need GLR reduce-closure
-/// processing. `shifted` accumulates branches that have already advanced past
-/// the current token and therefore belong in the returned next frontier.
-///
-/// Each wave starts with a fresh `next` frontier. Shiftable isolated branches
-/// are moved directly into `shifted`; newly reduced branches are merged into
-/// `next` and become the closure for the next wave.
 fn advance_nondeterministically(
     table: &GLRTable,
     mut closure: ParserGSS,
@@ -377,8 +362,7 @@ fn advance_nondeterministically(
             }
 
             if let Some(target) = action.shift_target() {
-                let is_replace = action.shift_is_replace()
-                    && !table.forwarded_shifts.contains(&(state, token));
+                let is_replace = action.shift_is_replace() && !table.forwarded_shifts.contains(&(state, token));
                 if is_replace {
                     shifted = shifted.absorb_push_same_acc(target, &isolated.popn(1));
                 } else {
@@ -396,17 +380,11 @@ fn advance_nondeterministically(
                         continue;
                     };
 
-                    let (branch, det_ok) = advance_reduce_branch(
-                        table,
-                        base,
-                        target,
-                        is_replace,
-                        token,
-                    );
+                    let (branch, det_ok) = advance_reduce_branch(table, base, target, is_replace, token);
                     if det_ok {
                         match branch.into_virtual_stack() {
                             Ok(stack) => {
-                            let current = std::mem::replace(&mut shifted, ParserGSS::empty());
+                                let current = std::mem::replace(&mut shifted, ParserGSS::empty());
                                 shifted = current.absorb_vstack_same_acc_owned(stack);
                             }
                             Err(branch) => {

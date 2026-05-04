@@ -16,7 +16,7 @@ pub struct AnalyzedGrammar {
     pub nullable: BTreeSet<NonterminalID>,
     pub first: Vec<BTreeSet<TerminalID>>,
     pub follow: Vec<BTreeSet<TerminalID>>,
-    /// Index: nonterminal → list of rule indices with that nonterminal as LHS.
+    /// Index: nonterminal -> list of rule indices with that nonterminal as LHS.
     pub rules_by_lhs: Vec<Vec<u32>>,
 }
 
@@ -66,9 +66,6 @@ impl AnalyzedGrammar {
 
     /// Debug check: asserts the grammar has no right recursion, no indirect left
     /// recursion, and no nullable nonterminals.
-    ///
-    /// Calls [`check_no_nullable_nonterminals`] and
-    /// [`check_recursion_boundedness`] and merges their results.
     pub fn debug_check_grammar_preconditions(&self) -> Result<(), String> {
         let mut violations: Vec<String> = Vec::new();
         if let Err(msg) = self.check_no_nullable_nonterminals() {
@@ -80,29 +77,22 @@ impl AnalyzedGrammar {
         if violations.is_empty() {
             Ok(())
         } else {
-            Err(format!(
-                "grammar precondition violations ({} found):\n{}",
-                violations.len(),
-                violations.iter()
-                    .enumerate()
-                    .map(|(i, v)| format!("  {}. {}", i + 1, v))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ))
+            Err(violations.join("\n"))
         }
     }
 
-    /// Check that no nonterminal is nullable (derives ε).
     pub fn check_no_nullable_nonterminals(&self) -> Result<(), String> {
         if !self.nullable.is_empty() {
-            let ids: Vec<u32> = self.nullable.iter()
-                .filter(|&&nt| nt < self.num_nonterminals - 1) // skip augmented start
+            let ids: Vec<u32> = self
+                .nullable
+                .iter()
+                .filter(|&&nt| nt < self.num_nonterminals - 1)
                 .copied()
                 .collect();
             if !ids.is_empty() {
                 return Err(format!(
                     "nullable nonterminals detected: {:?}. \
-                     Rules with ε-productions or all-nullable RHS create \
+                     Rules with epsilon-productions or all-nullable RHS create \
                      reduce chains that the characterisation stage cannot \
                      handle when combined with recursion.",
                     ids,
@@ -112,8 +102,6 @@ impl AnalyzedGrammar {
         Ok(())
     }
 
-    /// Check that the grammar has no right-recursive or indirect
-    /// left-recursive cycles.
     pub fn check_recursion_boundedness(&self) -> Result<(), String> {
         let mut violations: Vec<String> = Vec::new();
 
@@ -122,7 +110,7 @@ impl AnalyzedGrammar {
             violations.push(format!(
                 "right-recursive cycle detected: {:?}. \
                  Right recursion causes unbounded reduce chains in \
-                 terminal characterisation.  Convert to left recursion \
+                 terminal characterisation. Convert to left recursion \
                  or inline the cycle.",
                 cycle,
             ));
@@ -134,7 +122,7 @@ impl AnalyzedGrammar {
                 violations.push(format!(
                     "indirect left-recursive cycle detected: {:?}. \
                      Indirect left recursion may create unbounded GSS \
-                     growth.  Inline or rewrite the cycle.",
+                     growth. Inline or rewrite the cycle.",
                     cycle,
                 ));
             }

@@ -1,8 +1,5 @@
 //! Flattened tokenizer-DFA views for the equivalence-analysis passes.
 
-#[cfg(test)]
-use std::collections::BTreeMap;
-
 use std::sync::Arc;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -239,10 +236,6 @@ impl FlatDfa {
         FlatDfa { states, start_state, transitions: Arc::clone(flat_trans) }
     }
 
-    #[cfg(test)]
-    pub fn num_states(&self) -> usize {
-        self.states.len()
-    }
 }
 
 /// A thin wrapper around glrmask's `Tokenizer` that exposes the flattened DFA.
@@ -252,17 +245,6 @@ impl FlatDfa {
 /// This wrapper pre-extracts all data into `FlatDfa` on construction.
 pub struct TokenizerView {
     pub flat_dfa: FlatDfa,
-}
-
-#[cfg(test)]
-fn execution_result(
-    match_positions: &BTreeMap<usize, usize>,
-    end_state: Option<usize>,
-) -> ExecuteResult {
-    ExecuteResult {
-        matches: collect_matches(match_positions),
-        end_state,
-    }
 }
 
 impl TokenizerView {
@@ -310,102 +292,4 @@ impl TokenizerView {
         self.flat_dfa.start_state
     }
 
-    #[cfg(test)]
-    pub fn execute_from_state_nonzero(&self, input: &[u8], start_state: usize) -> ExecuteResult {
-        let dfa = &self.flat_dfa;
-        if start_state >= dfa.states.len() {
-            return ExecuteResult {
-                matches: Vec::new(),
-                end_state: None,
-            };
-        }
-
-        let mut current = start_state;
-        let mut match_positions: BTreeMap<usize, usize> = dfa.states[current]
-            .finalizers
-            .iter()
-            .copied()
-            .map(|group_id| (group_id, 0usize))
-            .collect();
-
-        for (pos, &byte) in input.iter().enumerate() {
-            let next = dfa.trans(current, byte as usize);
-            if next == u32::MAX {
-                return execution_result(&match_positions, None);
-            }
-
-            current = next as usize;
-            let position = pos + 1;
-            for &gid in &dfa.states[current].finalizers {
-                match_positions.insert(gid, position);
-            }
-
-            if dfa.states[current].possible_future_group_ids.is_empty() {
-                return execution_result(&match_positions, None);
-            }
-        }
-
-        execution_result(
-            &match_positions,
-            (!state_is_done(dfa, current)).then_some(current),
-        )
-    }
-}
-
-#[cfg(test)]
-fn state_is_done(dfa: &FlatDfa, state: usize) -> bool {
-    dfa.transitions_for(state).iter().all(|&target| target == u32::MAX)
-}
-
-#[cfg(test)]
-fn collect_matches(match_positions: &BTreeMap<usize, usize>) -> Vec<ExecuteMatch> {
-    match_positions
-        .iter()
-        .filter_map(|(&group_id, &position)| {
-            (position != 0).then_some(ExecuteMatch { group_id, position })
-        })
-        .collect()
-}
-
-/// Result of executing the DFA on input bytes.
-#[cfg(test)]
-pub struct ExecuteResult {
-    pub matches: Vec<ExecuteMatch>,
-    pub end_state: Option<usize>,
-}
-
-/// A single match: group ID and byte position.
-#[cfg(test)]
-pub struct ExecuteMatch {
-    pub group_id: usize,
-    pub position: usize,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::automata::lexer::ast::{bytes, plus};
-    use crate::compiler::compile::build_tokenizer_from_exprs;
-
-    #[test]
-    fn test_execute_from_state_nonzero_deduplicates_group_matches() {
-        let tokenizer = build_tokenizer_from_exprs(&[plus(bytes(b"1"))]);
-        let tokenizer_view = TokenizerView::new(&tokenizer);
-
-        let result = tokenizer_view.execute_from_state_nonzero(b"11", tokenizer_view.initial_state_id());
-
-        assert_eq!(result.matches.len(), 1);
-        assert_eq!(result.matches[0].group_id, 0);
-        assert_eq!(result.matches[0].position, 2);
-    }
-
-    #[test]
-    fn test_execute_from_state_nonzero_returns_none_for_sink_end_state() {
-        let tokenizer = build_tokenizer_from_exprs(&[bytes(b"a")]);
-        let tokenizer_view = TokenizerView::new(&tokenizer);
-
-        let result = tokenizer_view.execute_from_state_nonzero(b"a", tokenizer_view.initial_state_id());
-
-        assert_eq!(result.end_state, None);
-    }
 }

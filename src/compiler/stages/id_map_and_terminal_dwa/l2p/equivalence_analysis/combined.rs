@@ -68,17 +68,22 @@ fn expand_vocab_classes(
     let mut original_classes: Vec<Vec<usize>> = Vec::with_capacity(dedup_classes.len());
 
     for (class_idx, dedup_class) in dedup_classes.iter().enumerate() {
-        for &dedup_idx in dedup_class {
-            repr_to_class[dedup_idx] = class_idx;
+        for &repr_idx in dedup_class {
+            repr_to_class[repr_idx] = class_idx;
         }
         original_classes.push(Vec::new());
     }
 
     for (original_idx, &repr_idx) in original_to_repr.iter().enumerate() {
-        original_classes[repr_to_class[repr_idx]].push(original_idx);
+        let class_idx = repr_to_class[repr_idx];
+        debug_assert!(class_idx != usize::MAX);
+        original_classes[class_idx].push(original_idx);
     }
 
-    original_classes.into_iter().collect()
+    original_classes
+        .into_iter()
+        .filter(|class| !class.is_empty())
+        .collect()
 }
 
 fn representative_tokens_for_vocab_classes<'a>(
