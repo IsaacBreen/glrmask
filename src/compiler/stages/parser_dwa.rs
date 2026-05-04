@@ -1,4 +1,4 @@
-use std::collections::{hash_map::Entry, BTreeMap, BTreeSet, VecDeque};
+use std::collections::{hash_map::Entry, BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -9,10 +9,10 @@ use crate::Vocab;
 #[cfg(test)]
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
-use crate::automata::weighted::minimize::{minimize_fast, minimize_from_env};
+use crate::automata::weighted::minimize::minimize_fast;
 use crate::automata::weighted::nwa::{NWA, NwaBody};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
-use crate::compiler::glr::labels::{DEFAULT_LABEL, encode_positive_label};
+use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::compiler::glr::table::GLRTable;
 use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::equiv_types::InternalIdMap;
@@ -41,35 +41,6 @@ fn add_target_contribution(contribs: &mut TargetContribs, target: u32, add: Weig
     } else {
         contribs.push((target, add));
     }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct ParserDwaPhaseProfile {
-    build_state_summaries_ms: f64,
-    compose_state_ms: f64,
-    resolve_negatives_ms: f64,
-    viable_suffix_ms: f64,
-    determinize_supports_ms: f64,
-    optimize_defaults_ms: f64,
-    subtract_final_ms: f64,
-    fallback_to_nwa_ms: f64,
-    ensure_fallback_ms: f64,
-    determinize_fallback_ms: f64,
-    determinize_after_defaults_ms: f64,
-    minimize_ms: f64,
-    total_ms: f64,
-}
-
-fn parser_dwa_profile_enabled() -> bool {
-    std::env::var_os("GLRMASK_PROFILE_PARSER_DWA").is_some()
-}
-
-fn parser_dwa_bundle_determinize_profile_enabled() -> bool {
-    std::env::var_os("GLRMASK_PROFILE_PARSER_DWA_BUNDLE_DETERMINIZE").is_some()
-}
-
-fn elapsed_ms(started_at: Instant) -> f64 {
-    started_at.elapsed().as_secs_f64() * 1000.0
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -101,6 +72,10 @@ struct DeterminizedDwaWithSupports {
 struct CachedClosure {
     canon: Vec<(u32, Weight)>,
     edge_weight: Weight,
+}
+
+fn elapsed_ms(started_at: Instant) -> f64 {
+    started_at.elapsed().as_secs_f64() * 1000.0
 }
 
 fn accepting_nwa(final_weight: &Weight) -> Option<NWA> {
@@ -176,119 +151,11 @@ fn build_state_summaries(
         pending_branches_by_state.push(pending_branches);
     }
 
-    if parser_dwa_profile_enabled() {
-        eprintln!(
-            "[glrmask/profile][parser_dwa_bundles] terminal_dwa_states={} unique_bundles={} total_branches={}",
-            terminal_dwa.states().len(),
-            unique_bundles.len(),
-            pending_branches_by_state.iter().map(|b| b.len()).sum::<usize>(),
-        );
-    }
-
     let built_bundles: Vec<Arc<NWA>> = {
         use rayon::prelude::*;
-        let profile_enabled = parser_dwa_profile_enabled();
-        let det_profile_enabled = parser_dwa_bundle_determinize_profile_enabled();
         unique_bundles
             .par_iter()
-            .enumerate()
-            .map(|(bundle_id, bundle)| {
-                if !profile_enabled {
-                    return Arc::new(templates.build_bundle(bundle));
-                }
-
-                let build_started_at = Instant::now();
-                let (built_nwa, bundle_profile) = templates.build_bundle_profiled(bundle);
-                let nwa = Arc::new(built_nwa);
-                {
-                    let build_ms = build_started_at.elapsed().as_secs_f64() * 1000.0;
-                    let nwa_transitions: usize = nwa
-                        .states()
-                        .iter()
-                        .map(|s| {
-                            s.transitions.values().map(|v| v.len()).sum::<usize>()
-                                + s.epsilons.len()
-                        })
-                        .sum();
-                    eprintln!(
-                        "[glrmask/profile][parser_dwa_bundle] bundle={:>4} terminals={:>4} nwa_states={:>5} nwa_trans={:>6} build_ms={:>7.1}",
-                        bundle_id,
-                        bundle.len(),
-                        nwa.states().len(),
-                        nwa_transitions,
-                        build_ms,
-                    );
-                    eprintln!(
-                        concat!(
-                            "[glrmask/profile][parser_dwa_bundle_detail] ",
-                            "bundle={:>4} input_terminals={:>4} nonempty_terminals={:>4} ",
-                            "weight_groups={:>4} singleton_groups={:>4} multi_groups={:>4} largest_group={:>4} ",
-                            "group_dfas_ms={:>7.1} union_groups_ms={:>7.1} ",
-                            "slowest_group_terminals={:>4} slowest_group_dfa_states={:>5} slowest_group_dfa_trans={:>6} slowest_group_ms={:>7.1} ",
-                            "determinize_bundle_ms={:>7.1} minimize_ms={:>7.1} dwa_to_nwa_ms={:>7.1} ",
-                            "result_dwa_states={:>5} result_dwa_trans={:>6} result_nwa_states={:>5} result_nwa_trans={:>6} ",
-                            "fast_path={} total_ms={:>7.1}"
-                        ),
-                        bundle_id,
-                        bundle_profile.input_terminals,
-                        bundle_profile.nonempty_terminals,
-                        bundle_profile.weight_groups,
-                        bundle_profile.singleton_groups,
-                        bundle_profile.multi_terminal_groups,
-                        bundle_profile.largest_weight_group,
-                        bundle_profile.build_group_dfas_ms,
-                        bundle_profile.union_groups_ms,
-                        bundle_profile.slowest_group_terminals,
-                        bundle_profile.slowest_group_dfa_states,
-                        bundle_profile.slowest_group_dfa_transitions,
-                        bundle_profile.slowest_group_ms,
-                        bundle_profile.determinize_bundle_ms,
-                        bundle_profile.minimize_ms,
-                        bundle_profile.dwa_to_nwa_ms,
-                        bundle_profile.result_dwa_states,
-                        bundle_profile.result_dwa_transitions,
-                        bundle_profile.result_nwa_states,
-                        bundle_profile.result_nwa_transitions,
-                        bundle_profile.used_single_terminal_fast_path,
-                        bundle_profile.total_ms,
-                    );
-
-                    if det_profile_enabled {
-                        eprintln!(
-                            concat!(
-                                "[glrmask/profile][parser_dwa_bundle_determinize] ",
-                                "bundle={:>4} det_pop_state_ms={:>7.1} det_alive_ms={:>7.1} det_effective_ms={:>7.1} ",
-                                "det_final_ms={:>7.1} det_labels_ms={:>7.1} det_next_ms={:>7.1} det_edge_weight_ms={:>7.1} det_lookup_ms={:>7.1} det_add_transition_ms={:>7.1} ",
-                                "det_states={:>5} det_labels={:>6} det_transitions={:>6} det_worklist_peak={:>5} det_cache_entries={:>5} ",
-                                "edge_subset_total={:>6} edge_subset_max={:>4} edge_cache_hits={:>5} edge_cache_hit_subset_total={:>6} ",
-                                "edge_cache_misses={:>5} edge_cache_miss_subset_total={:>6}"
-                            ),
-                            bundle_id,
-                            bundle_profile.determinize_pop_state_ms,
-                            bundle_profile.determinize_alive_groups_ms,
-                            bundle_profile.determinize_effective_weights_ms,
-                            bundle_profile.determinize_final_weight_ms,
-                            bundle_profile.determinize_collect_labels_ms,
-                            bundle_profile.determinize_next_state_ms,
-                            bundle_profile.determinize_edge_weight_ms,
-                            bundle_profile.determinize_state_lookup_ms,
-                            bundle_profile.determinize_add_transition_ms,
-                            bundle_profile.determinize_states_visited,
-                            bundle_profile.determinize_labels_processed,
-                            bundle_profile.determinize_transitions_added,
-                            bundle_profile.determinize_worklist_peak,
-                            bundle_profile.determinize_cache_entries,
-                            bundle_profile.determinize_edge_subset_total,
-                            bundle_profile.determinize_edge_subset_max,
-                            bundle_profile.determinize_edge_cache_hits,
-                            bundle_profile.determinize_edge_cache_hit_subset_total,
-                            bundle_profile.determinize_edge_cache_misses,
-                            bundle_profile.determinize_edge_cache_miss_subset_total,
-                        );
-                    }
-                }
-                nwa
-            })
+            .map(|bundle| Arc::new(templates.build_bundle(bundle)))
             .collect()
     };
 
@@ -589,7 +456,7 @@ fn determinize_with_supports(
         entries.iter().map(|(sid, w)| (*sid, w.ptr_key())).collect()
     }
 
-    let profile_enabled = parser_dwa_profile_enabled();
+    let profile_enabled = false;
     let mut prof_iterations: u64 = 0;
     let mut prof_total_subset_entries: u64 = 0;
     let mut prof_max_subset_size: usize = 0;
@@ -1546,67 +1413,16 @@ fn dwa_to_nwa(dwa: &DWA) -> NWA {
     nwa
 }
 
-fn ensure_default_transitions_are_fallbacks(
-    nwa: &mut NWA,
-    possible_by_state: &[PossibleOutgoingIds],
-    num_parser_states: u32,
-) {
-    for state_id in 0..nwa.states().len() {
-        let state = &nwa.states()[state_id];
-
-        let Some(default_targets) = state.transitions.get(&DEFAULT_LABEL).cloned() else {
-            continue;
-        };
-
-        if default_targets.is_empty() {
-            continue;
-        }
-
-        let mut fallback_labels = BTreeSet::new();
-        for &label in state.transitions.keys() {
-            if label != DEFAULT_LABEL {
-                fallback_labels.insert(label);
-            }
-        }
-
-        match possible_by_state.get(state_id) {
-            Some(PossibleOutgoingIds::Empty) | None => {}
-            Some(PossibleOutgoingIds::All) => {
-                for parser_state_id in 0..num_parser_states {
-                    fallback_labels.insert(encode_positive_label(parser_state_id));
-                }
-            }
-            Some(PossibleOutgoingIds::Some(ids)) => {
-                for parser_state_id in ids.iter_ones() {
-                    fallback_labels.insert(encode_positive_label(parser_state_id as u32));
-                }
-            }
-        }
-
-        for label in fallback_labels {
-            let state_mut = &mut nwa.states_mut()[state_id];
-            for (dst, weight) in &default_targets {
-                add_or_union_transition(state_mut, label, *dst, weight.clone());
-            }
-        }
-    }
-}
-
 fn build_parser_nwa_from_terminal_dwa(
     terminal_dwa: &DWA,
     grammar: &AnalyzedGrammar,
     templates: Templates,
-) -> Option<(NWA, ParserDwaPhaseProfile)> {
-    let mut profile = ParserDwaPhaseProfile::default();
-
-    let build_state_summaries_started_at = Instant::now();
+) -> Option<NWA> {
     let states = build_state_summaries(terminal_dwa, grammar, &templates);
-    profile.build_state_summaries_ms = elapsed_ms(build_state_summaries_started_at);
 
     let mut arena = NWA::new(0, 0);
     let mut body_memo = vec![None; states.len()];
     let mut concatenated_branches: ConcatMemo = FxHashMap::default();
-    let compose_started_at = Instant::now();
     let parser_body = compose_state(
         terminal_dwa.start_state(),
         &states,
@@ -1614,11 +1430,10 @@ fn build_parser_nwa_from_terminal_dwa(
         &mut body_memo,
         &mut concatenated_branches,
     )?;
-    profile.compose_state_ms = elapsed_ms(compose_started_at);
 
     arena.set_start_states(parser_body.start_states.clone());
 
-    Some((arena, profile))
+    Some(arena)
 }
 
 #[cfg(test)]
@@ -1627,7 +1442,7 @@ pub(crate) fn debug_build_parser_nwa_from_terminal_dwa(
     grammar: &AnalyzedGrammar,
     templates: Templates,
 ) -> Option<NWA> {
-    build_parser_nwa_from_terminal_dwa(terminal_dwa, grammar, templates).map(|(nwa, _)| nwa)
+    build_parser_nwa_from_terminal_dwa(terminal_dwa, grammar, templates)
 }
 
 #[cfg(test)]
@@ -1664,255 +1479,36 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     grammar: &AnalyzedGrammar,
     terminal_dwa: &DWA,
     templates: Templates,
-    vocab: &Vocab,
-    id_map: &InternalIdMap,
+    _vocab: &Vocab,
+    _id_map: &InternalIdMap,
 ) -> DWA {
-    let total_started_at = Instant::now();
-    let Some((mut parser_nwa, mut profile)) =
-        build_parser_nwa_from_terminal_dwa(terminal_dwa, grammar, templates)
-    else {
+    let Some(mut parser_nwa) = build_parser_nwa_from_terminal_dwa(terminal_dwa, grammar, templates) else {
         return DWA::new(0, 0);
     };
 
-    if parser_dwa_profile_enabled() {
-        let nwa_transitions: usize = parser_nwa.states().iter()
-            .map(|s| s.transitions.values().map(|v| v.len()).sum::<usize>() + s.epsilons.len())
-            .sum();
-        eprintln!(
-            "[glrmask/profile][parser_dwa_scale] phase=pre_resolve_negatives nwa_states={} nwa_transitions={} terminal_dwa_states={}",
-            parser_nwa.states().len(), nwa_transitions, terminal_dwa.states().len(),
-        );
-    }
-
-    let resolve_negatives_started_at = Instant::now();
     resolve_negative_codes_in_nwa(&mut parser_nwa);
-    profile.resolve_negatives_ms = elapsed_ms(resolve_negatives_started_at);
 
-    if parser_dwa_profile_enabled() {
-        let nwa_transitions: usize = parser_nwa.states().iter()
-            .map(|s| s.transitions.values().map(|v| v.len()).sum::<usize>() + s.epsilons.len())
-            .sum();
-        eprintln!(
-            "[glrmask/profile][parser_dwa_scale] phase=post_resolve_negatives nwa_states={} nwa_transitions={} terminal_dwa_states={}",
-            parser_nwa.states().len(), nwa_transitions, terminal_dwa.states().len(),
-        );
-    }
-
-    let determinize_supports_started_at = Instant::now();
     let determinized = determinize_with_supports(&parser_nwa, Some(table.num_states));
-    profile.determinize_supports_ms = elapsed_ms(determinize_supports_started_at);
     let mut parser_dwa_pre_minimize = determinized.dwa;
 
-    if parser_dwa_profile_enabled() {
-        let dwa_transitions: usize = parser_dwa_pre_minimize.states().iter()
-            .map(|s| s.transitions.len())
-            .sum();
-        eprintln!(
-            "[glrmask/profile][parser_dwa_scale] dwa_states={} dwa_transitions={} minimized_later",
-            parser_dwa_pre_minimize.states().len(), dwa_transitions,
-        );
-    }
-
-    let viable_suffix_started_at = Instant::now();
     let possible_by_state = build_possible_outgoing_ids_by_state(
         &parser_nwa,
         &determinized.supports,
         table.num_states,
     );
-    profile.viable_suffix_ms = elapsed_ms(viable_suffix_started_at);
-
-    let optimize_defaults_started_at = Instant::now();
-    if std::env::var_os("GLRMASK_DISABLE_PARSER_DWA_DEFAULTS_OPT").is_none() {
-        optimize_parser_dwa_defaults(
-            &mut parser_dwa_pre_minimize,
-            &possible_by_state,
-            table.num_states,
-        );
-    }
-    profile.optimize_defaults_ms = elapsed_ms(optimize_defaults_started_at);
-
-    let subtract_final_started_at = Instant::now();
-    if std::env::var_os("GLRMASK_DISABLE_PARSER_DWA_SUBTRACT_FINAL").is_none() {
-        subtract_final_weights_from_outgoing_dwa(&mut parser_dwa_pre_minimize);
-    }
-    profile.subtract_final_ms = elapsed_ms(subtract_final_started_at);
-
-    let ensure_fallback_started_at = Instant::now();
-    if std::env::var_os("GLRMASK_USE_NWA_FALLBACK_DETERMINIZE").is_some() {
-        let mut nwa_for_fallback = parser_dwa_pre_minimize.to_nwa();
-        profile.fallback_to_nwa_ms = elapsed_ms(ensure_fallback_started_at);
-
-        let ensure_fallback_step_started_at = Instant::now();
-        ensure_default_transitions_are_fallbacks(&mut nwa_for_fallback, &possible_by_state, table.num_states);
-        profile.ensure_fallback_ms = elapsed_ms(ensure_fallback_step_started_at);
-
-        let determinize_fallback_started_at = Instant::now();
-        parser_dwa_pre_minimize = determinize_with_supports(&nwa_for_fallback, Some(table.num_states)).dwa;
-        profile.determinize_fallback_ms = elapsed_ms(determinize_fallback_started_at);
-    } else {
-        profile.fallback_to_nwa_ms = 0.0;
-        profile.ensure_fallback_ms = 0.0;
-
-        let determinize_fallback_started_at = Instant::now();
-        parser_dwa_pre_minimize = determinize_parser_dwa_with_fallbacks(
-            &parser_dwa_pre_minimize,
-            &possible_by_state,
-            table.num_states,
-        );
-        profile.determinize_fallback_ms = elapsed_ms(determinize_fallback_started_at);
-    }
-
-    profile.determinize_after_defaults_ms = elapsed_ms(ensure_fallback_started_at);
-
-    let minimize_started_at = Instant::now();
-    let minimized = if std::env::var_os("GLRMASK_DISABLE_PARSER_DWA_MINIMIZE").is_some() {
-        parser_dwa_pre_minimize.clone()
-    } else {
-        minimize_from_env(
-            &parser_dwa_pre_minimize,
-            "GLRMASK_MINIMIZE_PARSER_DWA",
-            minimize_fast,
-        )
-    };
-    profile.minimize_ms = elapsed_ms(minimize_started_at);
-    profile.total_ms = elapsed_ms(total_started_at);
-
-    if parser_dwa_profile_enabled() {
-        eprintln!(
-            "[glrmask/profile][parser_dwa] build_state_summaries_ms={:.3} compose_state_ms={:.3} resolve_negatives_ms={:.3} viable_suffix_ms={:.3} determinize_supports_ms={:.3} optimize_defaults_ms={:.3} subtract_final_ms={:.3} fallback_to_nwa_ms={:.3} ensure_fallback_ms={:.3} determinize_fallback_ms={:.3} determinize_after_defaults_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
-            profile.build_state_summaries_ms,
-            profile.compose_state_ms,
-            profile.resolve_negatives_ms,
-            profile.viable_suffix_ms,
-            profile.determinize_supports_ms,
-            profile.optimize_defaults_ms,
-            profile.subtract_final_ms,
-            profile.fallback_to_nwa_ms,
-            profile.ensure_fallback_ms,
-            profile.determinize_fallback_ms,
-            profile.determinize_after_defaults_ms,
-            profile.minimize_ms,
-            profile.total_ms,
-        );
-    }
-
-    if std::env::var("GLRMASK_DEBUG_PARSER_DWA_DUMP").map_or(false, |v| v == "1") {
-        emit_parser_dwa_token_map(&minimized, vocab, id_map);
-        emit_parser_dwa_debug_dump(&minimized);
-    }
-
-    minimized
-}
-
-fn emit_parser_dwa_token_map(dwa: &DWA, vocab: &Vocab, id_map: &InternalIdMap) {
-    use super::id_map_and_terminal_dwa::l2p::nwa_builder::internal_vocab_entries;
-    let internal_vocab = internal_vocab_entries(vocab, id_map);
-    let internal_bytes: std::collections::BTreeMap<u32, &[u8]> =
-        internal_vocab.iter().map(|(id, bytes)| (*id, bytes.as_slice())).collect();
-    let mut referenced_tokens = std::collections::BTreeSet::new();
-    for state in dwa.states() {
-        for (_, (_, weight)) in &state.transitions {
-            for tid in weight.token_union().iter() {
-                referenced_tokens.insert(tid);
-            }
-        }
-        if let Some(fw) = &state.final_weight {
-            for tid in fw.token_union().iter() {
-                referenced_tokens.insert(tid);
-            }
-        }
-    }
-    for tid in &referenced_tokens {
-        if let Some(bytes) = internal_bytes.get(tid) {
-            let originals = id_map.vocab_tokens.internal_to_originals.get(*tid as usize)
-                .map(|v| v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","))
-                .unwrap_or_else(|| "?".into());
-            eprintln!(
-                "[glrmask/debug][parser_dwa][token_map] internal={} originals=[{}] bytes={:?}",
-                tid, originals, String::from_utf8_lossy(bytes)
-            );
-        }
-    }
-}
-
-fn emit_parser_dwa_debug_dump(dwa: &DWA) {
-    let num_states = dwa.num_states() as usize;
-    let start_state = dwa.start_state() as usize;
-    let mut incoming_counts = vec![0usize; num_states];
-    let mut outgoing_counts = vec![0usize; num_states];
-    let mut final_states = 0usize;
-    let mut self_loops = 0usize;
-    let mut transitions_to_start = 0usize;
-    let mut transitions_from_start = 0usize;
-    let mut transitions_from_start_to_start = 0usize;
-
-    for (state_id, state) in dwa.states().iter().enumerate() {
-        outgoing_counts[state_id] = state.transitions.len();
-        for (_, (target, _)) in &state.transitions {
-            incoming_counts[*target as usize] += 1;
-            if *target as usize == start_state {
-                transitions_to_start += 1;
-            }
-            if state_id == start_state {
-                transitions_from_start += 1;
-            }
-            if state_id == start_state && *target as usize == start_state {
-                transitions_from_start_to_start += 1;
-            }
-            if *target as usize == state_id {
-                self_loops += 1;
-            }
-        }
-        if state.final_weight.is_some() {
-            final_states += 1;
-        }
-    }
-
-    eprintln!(
-        "[glrmask/debug][parser_dwa][dump] states={} final_states={} self_loops={} to_start={} from_start={} from_start_to_start={}",
-        num_states, final_states, self_loops, transitions_to_start, transitions_from_start, transitions_from_start_to_start,
+    optimize_parser_dwa_defaults(
+        &mut parser_dwa_pre_minimize,
+        &possible_by_state,
+        table.num_states,
+    );
+    subtract_final_weights_from_outgoing_dwa(&mut parser_dwa_pre_minimize);
+    parser_dwa_pre_minimize = determinize_parser_dwa_with_fallbacks(
+        &parser_dwa_pre_minimize,
+        &possible_by_state,
+        table.num_states,
     );
 
-    for (state_id, state) in dwa.states().iter().enumerate() {
-        let incoming = incoming_counts[state_id];
-        let outgoing = outgoing_counts[state_id];
-        let to_start = state
-            .transitions
-            .values()
-            .filter(|(to, _)| *to as usize == start_state)
-            .count();
-        let self_loop_count = state
-            .transitions
-            .values()
-            .filter(|(to, _)| *to as usize == state_id)
-            .count();
-        let final_weight = state
-            .final_weight
-            .as_ref()
-            .map(|weight| format!("{weight}"))
-            .unwrap_or_else(|| "none".to_string());
-        let start_mark = if state_id == start_state {
-            " [START]"
-        } else {
-            ""
-        };
-
-        eprintln!(
-            "[glrmask/debug][parser_dwa][state] id={}{} incoming={} outgoing={} to_start={} self_loops={} final={}",
-            state_id,
-            start_mark,
-            incoming,
-            outgoing,
-            to_start,
-            self_loop_count,
-            final_weight,
-        );
-
-        for (label, (target, weight)) in &state.transitions {
-            eprintln!("    {label} -> State {target}");
-            eprintln!("      weight: {weight}");
-        }
-    }
+    minimize_fast(&parser_dwa_pre_minimize)
 }
 
 #[cfg(test)]
