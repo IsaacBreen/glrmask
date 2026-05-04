@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::compiler::glr::analysis::AnalyzedGrammar;
-use crate::compiler::glr::table::{Action, GLRTable, GuardedStackShift, StackShiftGuard};
+use crate::compiler::glr::table::{Action, GLRTable};
 use crate::grammar::flat::{NonterminalID, TerminalID};
 
 type NtAdjacency = BTreeMap<NonterminalID, BTreeSet<NonterminalID>>;
@@ -224,56 +224,6 @@ fn intersect_sorted(a: &[u32], b: &[u32]) -> Vec<u32> {
     out
 }
 
-fn constrain_matcher(matcher: &mut StackMatcher, allowed: &[u32]) -> bool {
-    let allowed = sorted_dedup(allowed.to_vec());
-
-    let next = match matcher {
-        StackMatcher::Any => states_matcher(allowed),
-        StackMatcher::State(state) => {
-            if allowed.binary_search(state).is_ok() {
-                Some(StackMatcher::State(*state))
-            } else {
-                None
-            }
-        }
-        StackMatcher::States(states) => states_matcher(intersect_sorted(states, &allowed)),
-    };
-
-    if let Some(next) = next {
-        *matcher = next;
-        true
-    } else {
-        false
-    }
-}
-
-fn finite_states(matcher: &StackMatcher) -> Option<Vec<u32>> {
-    match matcher {
-        StackMatcher::Any => None,
-        StackMatcher::State(state) => Some(vec![*state]),
-        StackMatcher::States(states) => Some(states.clone()),
-    }
-}
-
-fn assert_well_formed_guarded_shift(shift: &GuardedStackShift) {
-    debug_assert!(
-        shift.guards.windows(2).all(|w| w[0].pop <= w[1].pop),
-        "GuardedStackShift guards must be sorted by pop"
-    );
-    debug_assert!(
-        shift.guards.iter().all(|guard| guard.pop <= shift.pop),
-        "GuardedStackShift guard.pop must be <= shift.pop"
-    );
-    debug_assert!(
-        shift.guards.iter().all(|guard| !guard.states.is_empty()),
-        "GuardedStackShift guards must have nonempty state sets"
-    );
-    debug_assert!(
-        shift.guards.iter().all(|guard| guard.states.windows(2).all(|w| w[0] < w[1])),
-        "GuardedStackShift guard.states must be sorted and deduplicated"
-    );
-}
-
 fn identity_config(top_state: u32) -> RelationConfig {
     RelationConfig {
         input: vec![StackMatcher::State(top_state)],
@@ -325,113 +275,6 @@ fn reduce_crossing_pattern(config: &RelationConfig, reduce_len: usize) -> Vec<St
 fn ensure_input_len(input: &mut Vec<StackMatcher>, len: usize) {
     while input.len() < len {
         input.push(StackMatcher::Any);
-    }
-}
-
-fn guard_constraints(
-    shift_pop: usize,
-    guards: &[StackShiftGuard],
-) -> Option<BTreeMap<usize, Vec<u32>>> {
-    let mut out: BTreeMap<usize, Vec<u32>> = BTreeMap::new();
-    let mut previous_pop = None;
-
-    for guard in guards {
-        let depth = guard.pop as usize;
-
-        if let Some(previous) = previous_pop {
-            if depth < previous {
-                return None;
-            }
-        }
-        previous_pop = Some(depth);
-
-        if depth > shift_pop {
-            return None;
-        }
-
-        let states = sorted_dedup(guard.states.clone());
-        if states.is_empty() {
-            return None;
-        }
-
-        out.entry(depth)
-            .and_modify(|existing| {
-                *existing = intersect_sorted(existing, &states);
-            })
-            .or_insert(states);
-
-        if out.get(&depth).is_some_and(|states| states.is_empty()) {
-            return None;
-        }
-    }
-
-    Some(out)
-}
-
-fn stack_effect_edits(
-    config: &RelationConfig,
-    shift_pop: usize,
-    shifted_pushes: &[u32],
-    guards: &[StackShiftGuard],
-) -> Vec<StackEdit> {
-    let Some(guards) = guard_constraints(shift_pop, guards) else {
-        return Vec::new();
-    };
-
-    let segment_len = config.segment.len();
-    let base_input_len = config.input.len();
-    let mut input = config.input.clone();
-
-    for (&depth, allowed) in &guards {
-        if depth < segment_len {
-            let state = config.segment[segment_len - 1 - depth];
-            if allowed.binary_search(&state).is_err() {
-                return Vec::new();
-            }
-        } else {
-            let below_segment_index = depth - segment_len;
-            let input_index = base_input_len + below_segment_index;
-            ensure_input_len(&mut input, input_index + 1);
-            if !constrain_matcher(&mut input[input_index], allowed) {
-                return Vec::new();
-            }
-        }
-    }
-
-    let unknown_popped = shift_pop.saturating_sub(segment_len);
-    ensure_input_len(&mut input, base_input_len + unknown_popped);
-
-    if shift_pop < segment_len {
-        let mut pushes = config.segment[..segment_len - shift_pop].to_vec();
-        pushes.extend_from_slice(shifted_pushes);
-        return vec![StackEdit { pop: input, pushes }];
-    }
-
-    if guards.contains_key(&shift_pop) {
-        let revealed_input_index = base_input_len + unknown_popped;
-        ensure_input_len(&mut input, revealed_input_index + 1);
-        let Some(revealed_states) = finite_states(&input[revealed_input_index]) else {
-            unreachable!("revealed guard should have constrained matcher to a finite state set");
-        };
-
-        let mut edits = Vec::new();
-        for revealed_state in revealed_states {
-            let mut branch_input = input.clone();
-            branch_input[revealed_input_index] = StackMatcher::State(revealed_state);
-            let mut pushes = Vec::with_capacity(1 + shifted_pushes.len());
-            pushes.push(revealed_state);
-            pushes.extend_from_slice(shifted_pushes);
-            edits.push(StackEdit {
-                pop: branch_input,
-                pushes,
-            });
-        }
-        edits
-    } else {
-        vec![StackEdit {
-            pop: input,
-            pushes: shifted_pushes.to_vec(),
-        }]
     }
 }
 
@@ -488,12 +331,23 @@ fn emit_stack_effect_from_config(
     config: &RelationConfig,
     shift_pop: usize,
     shifted_pushes: &[u32],
-    guards: &[StackShiftGuard],
     output: &mut CharacterizationOutput,
 ) {
-    for edit in stack_effect_edits(config, shift_pop, shifted_pushes, guards) {
-        output.emit_escape(source, edit.pop, edit.pushes);
-    }
+    let segment_len = config.segment.len();
+    let base_input_len = config.input.len();
+    let mut input = config.input.clone();
+    let unknown_popped = shift_pop.saturating_sub(segment_len);
+    ensure_input_len(&mut input, base_input_len + unknown_popped);
+
+    let pushes = if shift_pop < segment_len {
+        let mut pushes = config.segment[..segment_len - shift_pop].to_vec();
+        pushes.extend_from_slice(shifted_pushes);
+        pushes
+    } else {
+        shifted_pushes.to_vec()
+    };
+
+    output.emit_escape(source, input, pushes);
 }
 
 fn process_action_from_config(
@@ -509,34 +363,9 @@ fn process_action_from_config(
     match action {
         Action::Shift(shift_state, replace) => {
             if *replace {
-                emit_stack_effect_from_config(source, config, 1, &[*shift_state], &[], output);
+                emit_stack_effect_from_config(source, config, 1, &[*shift_state], output);
             } else {
-                emit_stack_effect_from_config(source, config, 0, &[*shift_state], &[], output);
-            }
-        }
-        Action::StackShifts(shifts) => {
-            for shift in shifts {
-                emit_stack_effect_from_config(
-                    source,
-                    config,
-                    shift.pop as usize,
-                    &shift.pushes,
-                    &[],
-                    output,
-                );
-            }
-        }
-        Action::GuardedStackShifts(shifts) => {
-            for shift in shifts {
-                assert_well_formed_guarded_shift(shift);
-                emit_stack_effect_from_config(
-                    source,
-                    config,
-                    shift.pop as usize,
-                    &shift.pushes,
-                    &shift.guards,
-                    output,
-                );
+                emit_stack_effect_from_config(source, config, 0, &[*shift_state], output);
             }
         }
         Action::Reduce(lhs, len) => {
@@ -558,9 +387,9 @@ fn process_action_from_config(
         } => {
             if let Some((shift_state, replace)) = shift {
                 if *replace {
-                    emit_stack_effect_from_config(source, config, 1, &[*shift_state], &[], output);
+                    emit_stack_effect_from_config(source, config, 1, &[*shift_state], output);
                 } else {
-                    emit_stack_effect_from_config(source, config, 0, &[*shift_state], &[], output);
+                    emit_stack_effect_from_config(source, config, 0, &[*shift_state], output);
                 }
             }
 

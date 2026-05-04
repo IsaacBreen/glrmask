@@ -406,19 +406,6 @@ fn commit_bytes_fast_path(
                 state.insert(constraint.tokenizer.initial_state(), shifted);
                 return Some(Ok(()));
             }
-            if let Some(Action::StackShifts(shifts)) = constraint.table.action(top_state, terminal) {
-                let mut shifted = ParserGSS::empty();
-                for shift in shifts {
-                    let mut branch = gss.popn(shift.pop as isize);
-                    for &target in &shift.pushes {
-                        branch = branch.push(target);
-                    }
-                    shifted = if shifted.is_empty() { branch } else { shifted.merge(&branch) };
-                }
-                state.clear();
-                state.insert(constraint.tokenizer.initial_state(), shifted);
-                return Some(Ok(()));
-            }
         }
     }
 
