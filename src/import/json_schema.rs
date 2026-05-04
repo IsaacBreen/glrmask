@@ -6490,12 +6490,56 @@ impl<'a> SchemaCtx<'a> {
                 ])))
             }
             "uri" if use_structured_uri() => {
-                Ok(self.build_structured_uri_expr())
+                Ok(self.build_llguidance_uri_expr())
             }
             _ => json_format_pattern(format_name)
                 .map(|pattern| self.build_json_wrapped_fullmatch_pattern(&pattern, "JSON_FORMAT_STRING"))
                 .ok_or_else(|| GlrMaskError::GrammarParse(format!("Unknown format: {format_name}"))),
         }
+    }
+
+    fn build_llguidance_uri_expr(&mut self) -> GrammarExpr {
+        let pattern = concat!(
+            r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+\-.]*)",
+            r":",
+            r"(?:",
+            r"//",
+            r"(?:",
+            r"(?P<userinfo>(?:[a-zA-Z0-9\-._~!$&'()*+,;=:]|%[0-9a-fA-F]{2})*)",
+            r"@",
+            r")?",
+            r"(?P<host>",
+            r"\[",
+            r"(?:",
+            r"(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|",
+            r"(?:[0-9a-fA-F]{1,4}:){1,7}:|",
+            r"(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|",
+            r"(?:[0-9a-fA-F]{1,4}:){1,5}(?::[0-9a-fA-F]{1,4}){1,2}|",
+            r"(?:[0-9a-fA-F]{1,4}:){1,4}(?::[0-9a-fA-F]{1,4}){1,3}|",
+            r"(?:[0-9a-fA-F]{1,4}:){1,3}(?::[0-9a-fA-F]{1,4}){1,4}|",
+            r"(?:[0-9a-fA-F]{1,4}:){1,2}(?::[0-9a-fA-F]{1,4}){1,5}|",
+            r"[0-9a-fA-F]{1,4}:(?::[0-9a-fA-F]{1,4}){1,6}|",
+            r":(?::[0-9a-fA-F]{1,4}){1,7}|",
+            r"::|",
+            r"v[0-9a-fA-F]+\.[a-zA-Z0-9\-._~!$&'()*+,;=:]+",
+            r")",
+            r"\]|",
+            r"(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])|",
+            r"(?:[a-zA-Z0-9\-._~!$&'()*+,;=]|%[0-9a-fA-F]{2})*",
+            r")",
+            r"(?::(?P<port>[0-9]*))?",
+            r"(?P<path_abempty>(?:/(?:[a-zA-Z0-9\-._~!$&'()*+,;=:@]|%[0-9a-fA-F]{2})*)*)",
+            r"|",
+            r"(?P<path_absolute>/(?:(?:[a-zA-Z0-9\-._~!$&'()*+,;=:@]|%[0-9a-fA-F]{2})+(?:/(?:[a-zA-Z0-9\-._~!$&'()*+,;=:@]|%[0-9a-fA-F]{2})*)*)?)",
+            r"|",
+            r"(?P<path_rootless>(?:[a-zA-Z0-9\-._~!$&'()*+,;=:@]|%[0-9a-fA-F]{2})+(?:/(?:[a-zA-Z0-9\-._~!$&'()*+,;=:@]|%[0-9a-fA-F]{2})*)*)",
+            r"|",
+            r"(?P<path_empty>)",
+            r")",
+            r"(?:\?(?P<query>(?:[a-zA-Z0-9\-._~!$&'()*+,;=:@/?]|%[0-9a-fA-F]{2})*))?",
+            r"(?:\#(?P<fragment>(?:[a-zA-Z0-9\-._~!$&'()*+,;=:@/?]|%[0-9a-fA-F]{2})*))?"
+        );
+        self.build_json_wrapped_fullmatch_pattern(pattern, "JSON_FORMAT_URI")
     }
 
     fn build_structured_uri_expr(&mut self) -> GrammarExpr {

@@ -193,7 +193,7 @@ fn parse_atom(input: &[u8], pos: usize, utf8: bool) -> (Expr, usize) {
 }
 
 fn parse_group(input: &[u8], pos: usize, utf8: bool) -> (Expr, usize) {
-    let inner_pos = consume_non_capturing_group_prefix(input, pos + 1);
+    let inner_pos = consume_group_prefix(input, pos + 1);
     let (expr, mut pos) = parse_alternation(input, inner_pos, utf8);
     if pos < input.len() && input[pos] == b')' {
         pos += 1;
@@ -201,12 +201,36 @@ fn parse_group(input: &[u8], pos: usize, utf8: bool) -> (Expr, usize) {
     (expr, pos)
 }
 
-fn consume_non_capturing_group_prefix(input: &[u8], pos: usize) -> usize {
-    if pos + 1 < input.len() && input[pos] == b'?' && input[pos + 1] == b':' {
-        pos + 2
-    } else {
-        pos
+fn consume_group_prefix(input: &[u8], pos: usize) -> usize {
+    if pos >= input.len() || input[pos] != b'?' {
+        return pos;
     }
+
+    if pos + 1 < input.len() && input[pos + 1] == b':' {
+        return pos + 2;
+    }
+
+    if pos + 2 < input.len() && input[pos + 1] == b'P' && input[pos + 2] == b'<' {
+        return consume_named_group_name(input, pos + 3).unwrap_or(pos);
+    }
+
+    if pos + 1 < input.len() && input[pos + 1] == b'<' {
+        return consume_named_group_name(input, pos + 2).unwrap_or(pos);
+    }
+
+    pos
+}
+
+fn consume_named_group_name(input: &[u8], mut pos: usize) -> Option<usize> {
+    while pos < input.len() {
+        match input[pos] {
+            b'>' => return Some(pos + 1),
+            b')' => return None,
+            _ => pos += 1,
+        }
+    }
+
+    None
 }
 
 fn parse_char_class_byte(input: &[u8], pos: usize) -> Option<(u8, usize)> {
@@ -386,5 +410,30 @@ fn hex_digit(b: u8) -> u8 {
         b'a'..=b'f' => 10 + (b - b'a'),
         b'A'..=b'F' => 10 + (b - b'A'),
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_regex;
+
+    #[test]
+    fn test_named_group_p_style_parses_like_plain_group() {
+        assert_eq!(parse_regex("(?P<x>A)", true), parse_regex("(A)", true));
+    }
+
+    #[test]
+    fn test_named_group_angle_style_parses_like_plain_group() {
+        assert_eq!(parse_regex("(?<x>A)", true), parse_regex("(A)", true));
+    }
+
+    #[test]
+    fn test_non_capturing_group_still_parses_like_plain_group() {
+        assert_eq!(parse_regex("(?:A)", true), parse_regex("(A)", true));
+    }
+
+    #[test]
+    fn test_malformed_named_group_does_not_parse_like_plain_group() {
+        assert_ne!(parse_regex("(?P<xA)", true), parse_regex("(A)", true));
     }
 }

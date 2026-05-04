@@ -446,12 +446,28 @@ impl Tokenizer {
             }
         }
 
-        let preserve_all_original_states = transitions_pruned;
-        let (minimized, state_mapping) = if preserve_all_original_states {
-            dfa.minimize_with_state_mapping_preserve_all_states()
-        } else {
-            dfa.minimize_with_state_mapping()
-        };
+        if transitions_pruned {
+            // Downstream L1/L2P composition treats the returned map as an
+            // original-state map. Minimizing a byte-pruned DFA can merge
+            // continuation states that must stay distinct for whole-token
+            // signatures, so keep the filtered DFA and an identity map.
+            dfa.mask_possible_futures(&active_bitset);
+            let num_states = dfa.num_states();
+            let identity = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+                (0..num_states as u32).collect(),
+                num_states as u32,
+            );
+            return (
+                Tokenizer {
+                    dfa,
+                    num_terminals: self.num_terminals,
+                    exprs: self.exprs.clone(),
+                },
+                identity,
+            );
+        }
+
+        let (minimized, state_mapping) = dfa.minimize_with_state_mapping();
         let post_minimize_states = minimized.num_states();
 
         (

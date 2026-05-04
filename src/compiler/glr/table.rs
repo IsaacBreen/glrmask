@@ -1907,7 +1907,11 @@ fn stack_shift_action(shifts: Vec<StackShift>) -> Option<Action> {
     if shifts.len() == 1 {
         let shift = &shifts[0];
         if shift.pushes.len() == 1 {
-            return Some(Action::Shift(shift.pushes[0], shift.pop == 1));
+            match shift.pop {
+                0 => return Some(Action::Shift(shift.pushes[0], false)),
+                1 => return Some(Action::Shift(shift.pushes[0], true)),
+                _ => {}
+            }
         }
     }
     Some(Action::StackShifts(shifts))
