@@ -1,6 +1,5 @@
 //! Possible-match tables for tokenizer states and vocab-prefix subtrees.
 
-use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use range_set_blaze::RangeSetBlaze;
@@ -11,18 +10,7 @@ use crate::grammar::flat::TerminalID;
 use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
 
-pub(crate) type PossibleMatchesByState = BTreeMap<u32, BTreeMap<TerminalID, RangeSetBlaze<u32>>>;
 type PossibleMatchMap = FxHashMap<TerminalID, RangeSetBlaze<u32>>;
-
-fn ordered_possible_matches(matches_for_state: Rc<PossibleMatchMap>) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
-    match Rc::try_unwrap(matches_for_state) {
-        Ok(map) => map.into_iter().collect(),
-        Err(shared) => shared
-            .iter()
-            .map(|(&terminal, token_ids)| (terminal, token_ids.clone()))
-            .collect(),
-    }
-}
 
 fn reachable_u32(node: &VocabPrefixTreeNode) -> RangeSetBlaze<u32> {
     let mut out = RangeSetBlaze::new();
@@ -158,40 +146,4 @@ impl<'a> PossibleMatchesComputer<'a> {
         self.cache.insert(cache_key, Rc::clone(&result));
         result
     }
-}
-
-pub(crate) fn collect_possible_matches_by_state(
-    tokenizer: &Tokenizer,
-    root: &VocabPrefixTreeNode,
-    computer: &mut PossibleMatchesComputer<'_>,
-) -> PossibleMatchesByState {
-    collect_possible_matches_by_keys(
-        tokenizer,
-        root,
-        computer,
-        (0..tokenizer.num_states()).map(|state| (state, state)),
-        tokenizer.num_states(),
-    )
-}
-
-fn collect_possible_matches_by_keys(
-    _tokenizer: &Tokenizer,
-    root: &VocabPrefixTreeNode,
-    computer: &mut PossibleMatchesComputer<'_>,
-    keyed_states: impl Iterator<Item = (u32, u32)>,
-    total_keys: u32,
-) -> PossibleMatchesByState {
-    let mut possible_matches_by_state = BTreeMap::new();
-    let root_key = root as *const VocabPrefixTreeNode as usize;
-    for (index, (result_state_id, representative_state)) in keyed_states.enumerate() {
-        let cache_key = (root_key, representative_state);
-        let _ = computer.possible_matches_for_node(root, representative_state);
-        let matches_for_state = computer
-            .cache
-            .remove(&cache_key)
-            .expect("root possible-match map should be cached");
-        possible_matches_by_state.insert(result_state_id, ordered_possible_matches(matches_for_state));
-    }
-
-    possible_matches_by_state
 }
