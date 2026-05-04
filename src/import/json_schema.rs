@@ -1571,16 +1571,12 @@ fn jsonify_regex_dot(pattern: &str) -> String {
 }
 
 fn env_flag(name: &str) -> bool {
-    std::env::var(name)
-        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off"))
-        .unwrap_or(false)
+    env_flag_default(name, false)
 }
 
 fn split_open_quote() -> bool {
     // Default to true: opening quote is split unless explicitly disabled
-    std::env::var("GLRMASK_SPLIT_OPEN_QUOTE")
-        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off"))
-        .unwrap_or(true)
+    env_flag_default("GLRMASK_SPLIT_OPEN_QUOTE", true)
 }
 
 fn split_close_quote() -> bool {
@@ -1589,9 +1585,7 @@ fn split_close_quote() -> bool {
 
 fn split_colon_space() -> bool {
     // Default to true: colon-space is split unless explicitly disabled
-    std::env::var("GLRMASK_SPLIT_COLON_SPACE")
-        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off"))
-        .unwrap_or(true)
+    env_flag_default("GLRMASK_SPLIT_COLON_SPACE", true)
 }
 
 fn split_colon_from_space() -> bool {
