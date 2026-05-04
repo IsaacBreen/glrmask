@@ -595,13 +595,6 @@ pub(crate) fn prepare_grammar_for_compile(grammar: &GrammarDef) -> (GrammarDef, 
     prepare_owned_grammar_for_compile_impl(&mut normalized, &nullable_terminals)
 }
 
-pub(crate) fn prepare_owned_grammar_for_compile(grammar: GrammarDef) -> (GrammarDef, Tokenizer) {
-    let nullable_terminals = nullable_terminals_for_grammar(&grammar);
-    let mut normalized = grammar;
-
-    prepare_owned_grammar_for_compile_impl(&mut normalized, &nullable_terminals)
-}
-
 /// Run only the grammar transforms without building the tokenizer.
 /// The caller is responsible for calling `build_tokenizer` on the result.
 pub(crate) fn prepare_grammar_transforms_only(grammar: GrammarDef) -> GrammarDef {
@@ -616,35 +609,13 @@ fn prepare_grammar_transforms_impl(
     normalized: &mut GrammarDef,
     nullable_terminals: &BTreeSet<TerminalID>,
 ) {
-    let debug_profile = std::env::var("GLRMASK_DEBUG_PROFILE")
-        .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
-        .unwrap_or(false);
-    let debug_stage_trace = std::env::var("GLRMASK_DEBUG_PREPARE_STAGES")
-        .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
-        .unwrap_or(false);
-    let t0 = std::time::Instant::now();
     expand_nullable_terminals(&mut normalized.rules, nullable_terminals);
-    let expand_ms = t0.elapsed().as_secs_f64() * 1000.0;
-    if debug_stage_trace {
-        eprintln!("[glrmask/debug][prepare_stage] expand_done rules={} ms={:.3}", normalized.rules.len(), expand_ms);
-    }
 
-    let t1 = std::time::Instant::now();
     normalize_grammar(&mut normalized.rules, normalized.start);
-    let normalize_ms = t1.elapsed().as_secs_f64() * 1000.0;
-    if debug_stage_trace {
-        eprintln!("[glrmask/debug][prepare_stage] normalize_done rules={} ms={:.3}", normalized.rules.len(), normalize_ms);
-    }
 
-    let t2 = std::time::Instant::now();
     let protected_nonterminals = collect_protected_nonterminals(normalized);
     inline_single_use_nonterminals(&mut normalized.rules, &protected_nonterminals);
-    let inline_ms = t2.elapsed().as_secs_f64() * 1000.0;
-    if debug_stage_trace {
-        eprintln!("[glrmask/debug][prepare_stage] inline1_done rules={} ms={:.3}", normalized.rules.len(), inline_ms);
-    }
 
-    let t3 = std::time::Instant::now();
     loop {
         let prev_len = normalized.rules.len();
         normalized.rules = merge_identical_nonterminals(&normalized.rules, normalized.start);
@@ -652,34 +623,19 @@ fn prepare_grammar_transforms_impl(
             break;
         }
     }
-    let merge1_ms = t3.elapsed().as_secs_f64() * 1000.0;
-    if debug_stage_trace {
-        eprintln!("[glrmask/debug][prepare_stage] merge1_done rules={} ms={:.3}", normalized.rules.len(), merge1_ms);
-    }
 
-    let t4 = std::time::Instant::now();
     let max_reduction_len = std::env::var("GLRMASK_MAX_RUNTIME_REDUCTION_LEN")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(MAX_RUNTIME_REDUCTION_LEN);
     bound_runtime_reduction_length(normalized, max_reduction_len);
-    let bound_ms = t4.elapsed().as_secs_f64() * 1000.0;
-    if debug_stage_trace {
-        eprintln!("[glrmask/debug][prepare_stage] bound_done rules={} ms={:.3}", normalized.rules.len(), bound_ms);
-    }
 
-    let t5 = std::time::Instant::now();
     inline_post_bound_single_use_nonterminals(
         &mut normalized.rules,
         &protected_nonterminals,
         max_reduction_len,
     );
-    let inline2_ms = t5.elapsed().as_secs_f64() * 1000.0;
-    if debug_stage_trace {
-        eprintln!("[glrmask/debug][prepare_stage] inline2_done rules={} ms={:.3}", normalized.rules.len(), inline2_ms);
-    }
 
-    let t6 = std::time::Instant::now();
     loop {
         let prev_len = normalized.rules.len();
         normalized.rules = merge_identical_nonterminals(&normalized.rules, normalized.start);
@@ -687,24 +643,8 @@ fn prepare_grammar_transforms_impl(
             break;
         }
     }
-    let merge2_ms = t6.elapsed().as_secs_f64() * 1000.0;
-    if debug_stage_trace {
-        eprintln!("[glrmask/debug][prepare_stage] merge2_done rules={} ms={:.3}", normalized.rules.len(), merge2_ms);
-    }
 
-    let t7 = std::time::Instant::now();
     compact_unused_terminals(normalized);
-    let compact_ms = t7.elapsed().as_secs_f64() * 1000.0;
-    if debug_stage_trace {
-        eprintln!("[glrmask/debug][prepare_stage] compact_done rules={} terminals={} ms={:.3}", normalized.rules.len(), normalized.terminals.len(), compact_ms);
-    }
-
-    if debug_profile {
-        eprintln!(
-            "[glrmask/debug][prepare_transforms] expand_ms={:.3} normalize_ms={:.3} inline_ms={:.3} merge1_ms={:.3} bound_ms={:.3} inline2_ms={:.3} merge2_ms={:.3} compact_ms={:.3}",
-            expand_ms, normalize_ms, inline_ms, merge1_ms, bound_ms, inline2_ms, merge2_ms, compact_ms,
-        );
-    }
 }
 
 fn prepare_owned_grammar_for_compile_impl(
@@ -713,26 +653,10 @@ fn prepare_owned_grammar_for_compile_impl(
 ) -> (GrammarDef, Tokenizer) {
     prepare_grammar_transforms_impl(normalized, nullable_terminals);
 
-    let debug_profile = std::env::var("GLRMASK_DEBUG_PROFILE")
-        .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
-        .unwrap_or(false);
-
     // Build the real tokenizer only from the compacted live terminal set so
     // dead terminals never make it into downstream lexer/parser stages.
-    let t7 = std::time::Instant::now();
     let mut tokenizer = build_tokenizer(normalized);
-    let tokenizer_ms = t7.elapsed().as_secs_f64() * 1000.0;
-
-    let t8 = std::time::Instant::now();
     let _ = tokenizer.isolate_start_state_and_drain_nullable_terminals();
-    let isolate_ms = t8.elapsed().as_secs_f64() * 1000.0;
-
-    if debug_profile {
-        eprintln!(
-            "[glrmask/debug][prepare_tokenizer] tokenizer_ms={:.3} isolate_ms={:.3}",
-            tokenizer_ms, isolate_ms,
-        );
-    }
 
     (std::mem::take(normalized), tokenizer)
 }
