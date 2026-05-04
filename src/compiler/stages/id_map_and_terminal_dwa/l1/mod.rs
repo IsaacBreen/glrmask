@@ -144,7 +144,7 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::grammar::flat::TerminalID;
-use crate::compiler::stages::compact::{compact_from_env, CompactMode};
+use crate::compiler::stages::compact::compact_dwa_dimensions_fast_with_stats;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::compiler::stages::id_map_and_terminal_dwa::merge::{
     LocalIdMapTerminalDwa,
@@ -272,13 +272,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     let tokens_before_compact = id_map.num_internal_tokens();
 
     let compact_started_at = Instant::now();
-    let compact_report = compact_from_env(
-        &mut dwa,
-        &mut id_map,
-        "GLRMASK_COMPACT_L1",
-        CompactMode::Fast,
-        profiling,
-    );
+    let compact_report = compact_dwa_dimensions_fast_with_stats(&mut dwa, &mut id_map);
     let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
     let dwa_stats_after_compact = dwa.stats();
     let tsids_after_compact = id_map.num_tsids();
@@ -344,14 +338,6 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
             total_started_at.elapsed().as_secs_f64() * 1000.0,
             stats_str,
         );
-    }
-
-    // Fast iteration: exit after L1 for a specific partition
-    if let Ok(exit_label) = std::env::var("GLRMASK_EXIT_AFTER_L1") {
-        if exit_label == partition_label {
-            eprintln!("[glrmask/debug] EXIT_AFTER_L1={} triggered.", partition_label);
-            std::process::exit(0);
-        }
     }
 
     Some(LocalIdMapTerminalDwa {

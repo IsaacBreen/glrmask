@@ -8,15 +8,6 @@ use rayon::prelude::*;
 
 use super::super::l2p::equivalence_analysis::compat::{FlatDfa, FlatDfaState, TokenizerView};
 
-fn debug_max_length_enabled() -> bool {
-    std::env::var("GLRMASK_DEBUG_MAX_LENGTH")
-        .map(|value| {
-            let normalized = value.trim().to_ascii_lowercase();
-            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
-        })
-        .unwrap_or(false)
-}
-
 #[inline(always)]
 fn mix_u64(mut x: u64) -> u64 {
     x ^= x >> 30;
@@ -221,19 +212,6 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
         relevant_bytes,
     );
 
-    if debug_max_length_enabled() {
-        let mut representatives = mapping.clone();
-        representatives.sort_unstable();
-        representatives.dedup();
-        eprintln!(
-            "[glrmask/debug][max_length] max_token_len={} input_states={} tokenizer_dfa_states={} representative_states={}",
-            max_len,
-            states.len(),
-            tokenizer.dfa().states.len(),
-            representatives.len(),
-        );
-    }
-
     mapping
 }
 
@@ -377,7 +355,6 @@ fn find_state_equivalence_classes_kstep_restricted(
 
     let check_interval = 16.min(k);
     let mut prev_distinct = 0usize;
-    let mut actual_steps = 0usize;
     for step in 0..k {
         // Single-threaded iteration is faster for typical reachable set sizes
         // (avoids rayon scheduling overhead across 128 iterations).
@@ -393,7 +370,6 @@ fn find_state_equivalence_classes_kstep_restricted(
         }
         next_dense_hashes[n_reachable] = sentinel_hash; // sentinel unchanged
         std::mem::swap(&mut prev_dense_hashes, &mut next_dense_hashes);
-        actual_steps = step + 1;
         if (step + 1) % check_interval == 0 {
             let distinct = count_distinct_hashes(&prev_dense_hashes[..n_reachable]);
             if distinct == prev_distinct {
@@ -412,23 +388,6 @@ fn find_state_equivalence_classes_kstep_restricted(
     }
 
     let result = build_subset_mapping(states, &full_hashes);
-    let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
-    if debug_max_length_enabled() {
-        let relevant_count = relevant_bytes.iter().filter(|&&b| b).count();
-        eprintln!(
-            "[glrmask/debug][kstep_restricted] reachability={:.1}ms shape={:.1}ms iter={:.1}ms mapping={:.1}ms total={:.1}ms k={} actual_steps={} dfa_states={} reachable={} relevant_bytes={}",
-            reachability_ms,
-            shape_ms,
-            iter_ms,
-            total_ms - reachability_ms - shape_ms - iter_ms,
-            total_ms,
-            k,
-            actual_steps,
-            num_states,
-            n_reachable,
-            relevant_count,
-        );
-    }
     result
 }
 

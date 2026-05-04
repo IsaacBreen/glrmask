@@ -18,11 +18,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
-use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::determinize::determinize;
-use crate::automata::weighted::minimize::{
-    minimize_fast, minimize_from_env, minimize_with_threshold,
-};
+use crate::automata::weighted::minimize::minimize_with_threshold;
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::grammar::flat::TerminalID;
@@ -38,16 +35,12 @@ use crate::Vocab;
 use rustc_hash::FxHashMap;
 
 use super::grammar_helpers::compute_always_allowed_follows;
-use super::types::{TerminalColoring, TerminalDwaPhaseProfile, compile_profile_enabled, debug_profile_enabled};
+use super::types::{TerminalColoring, TerminalDwaPhaseProfile, compile_profile_enabled};
 use nwa_builder::{build_nwa_via_trie_walk, internal_vocab_entries, seed_root_nodes};
 use postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
     prune_non_coreachable_states,
 };
-
-const L2P_PATH_VALIDATION_ENV: &str = "GLRMASK_VALIDATE_L2P_TERMINAL_DWA_PATH_LENGTHS";
-const L2P_PATH_VALIDATION_WALKS: u64 = 128;
-const L2P_PATH_VALIDATION_TOKENS_PER_WEIGHT: usize = 8;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct SimplifyCacheKey {
@@ -153,146 +146,6 @@ impl SharedSimplifyCache {
     }
 }
 
-fn l2p_path_validation_enabled() -> bool {
-    std::env::var_os(L2P_PATH_VALIDATION_ENV).is_some()
-}
-
-fn mixed_walk_index(seed: u64, step: usize, state: u32, options: usize) -> usize {
-    debug_assert!(options > 0);
-    let mut value = seed
-        ^ ((step as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
-        ^ ((state as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F));
-    value ^= value >> 33;
-    value = value.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
-    value ^= value >> 33;
-    value = value.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
-    value ^= value >> 33;
-    (value as usize) % options
-}
-
-fn sampled_internal_tokens(weight: &Weight, max_samples: usize) -> Vec<u32> {
-    assert!(
-        !weight.is_full(),
-        "L2P terminal DWA validation expected concrete internal-token weights, got Weight::all()"
-    );
-    weight.token_union().iter().take(max_samples).collect()
-}
-
-fn validate_sampled_path_token_lengths(
-    path: &[i32],
-    accepted_weight: &Weight,
-    id_map: &InternalIdMap,
-    vocab: &Vocab,
-) {
-    for internal_token_id in sampled_internal_tokens(accepted_weight, L2P_PATH_VALIDATION_TOKENS_PER_WEIGHT) {
-        let representative = id_map
-            .vocab_tokens
-            .representative_original_id_for_internal(internal_token_id)
-            .unwrap_or_else(|| {
-                panic!(
-                    "L2P terminal DWA validation could not map internal token {} to a representative original token",
-                    internal_token_id,
-                )
-            });
-        let representative_bytes = vocab.entries.get(&representative).unwrap_or_else(|| {
-            panic!(
-                "L2P terminal DWA validation could not find bytes for representative original token {} (internal token {})",
-                representative,
-                internal_token_id,
-            )
-        });
-        assert!(
-            path.len() <= representative_bytes.len(),
-            "L2P terminal DWA validation failed: sampled accepting path {:?} has {} terminals, but representative token {} (internal {}) has only {} bytes",
-            path,
-            path.len(),
-            representative,
-            internal_token_id,
-            representative_bytes.len(),
-        );
-    }
-}
-
-fn validate_sampled_terminal_dwa_paths(
-    dwa: &DWA,
-    id_map: &InternalIdMap,
-    vocab: &Vocab,
-) {
-    if dwa.states().is_empty() {
-        return;
-    }
-
-    let max_rep_bytes = id_map
-        .vocab_tokens
-        .iter_representative_ids()
-        .filter_map(|token_id| vocab.entries.get(&token_id).map(Vec::len))
-        .max()
-        .unwrap_or(0);
-    if max_rep_bytes == 0 {
-        return;
-    }
-
-    let max_path_len = max_rep_bytes.saturating_add(1);
-    let mut sampled_paths = 0usize;
-    let mut sampled_tokens = 0usize;
-
-    for seed in 0..L2P_PATH_VALIDATION_WALKS {
-        let mut state = dwa.start_state();
-        let mut path: Vec<i32> = Vec::new();
-        let mut prefix_weight = Weight::all();
-
-        for step in 0..max_path_len {
-            if !path.is_empty() {
-                if let Some(final_weight) = dwa.states()[state as usize].final_weight.as_ref() {
-                    let accepted_weight = prefix_weight.intersection(final_weight);
-                    if !accepted_weight.is_empty() {
-                        sampled_paths += 1;
-                        let sampled = sampled_internal_tokens(
-                            &accepted_weight,
-                            L2P_PATH_VALIDATION_TOKENS_PER_WEIGHT,
-                        );
-                        sampled_tokens += sampled.len();
-                        validate_sampled_path_token_lengths(&path, &accepted_weight, id_map, vocab);
-                    }
-                }
-            }
-
-            let transitions = &dwa.states()[state as usize].transitions;
-            if transitions.is_empty() {
-                break;
-            }
-
-            let index = mixed_walk_index(seed, step, state, transitions.len());
-            let (&label, (next_state, edge_weight)) = transitions.iter().nth(index).unwrap();
-            assert!(
-                label >= 0,
-                "L2P terminal DWA validation expected terminal labels, got negative label {} on path {:?}",
-                label,
-                path,
-            );
-
-            let next_weight = prefix_weight.intersection(edge_weight);
-            if next_weight.is_empty() {
-                break;
-            }
-
-            path.push(label);
-            prefix_weight = next_weight;
-            state = *next_state;
-        }
-    }
-
-    if debug_profile_enabled() {
-        eprintln!(
-            "[glrmask/debug][l2p_path_validation] sampled_paths={} sampled_tokens={} max_path_len={} walks={}",
-            sampled_paths,
-            sampled_tokens,
-            max_path_len,
-            L2P_PATH_VALIDATION_WALKS,
-        );
-    }
-}
-
 /// Build an L2+ id_map and terminal DWA for the given vocab and terminal set.
 ///
 /// Builds its own id_map via `InternalIdMap::build_with_group_filter` (full DFA-
@@ -342,18 +195,15 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     }
 
     // Strip non-active terminal bits from DFA finalizers and minimize.
-    // Relevant-byte transition pruning is only applied when
-    // GLRMASK_FORCE_RELEVANT_BYTES is set, because the default must
-    // preserve commit/mask equivalence. This keeps L2P construction on
-    // the smaller DFA needed by this partition.
+    // When every terminal remains active, reuse the original tokenizer.
+    // Otherwise simplify to the smaller partition-local DFA.
     //
     // Unmapped original states (states with no active-terminal future
     // under this partition) are filled into a dead class via
     // `fill_unmapped_with_new_class` after composition, so we always
     // use the simplified tokenizer.
     let simplify_started_at = Instant::now();
-    let can_skip_simplify = num_active_terminals == active_terminals.len()
-        && std::env::var_os("GLRMASK_FORCE_RELEVANT_BYTES").is_none();
+    let can_skip_simplify = num_active_terminals == active_terminals.len();
     let (simplified_tok_storage, simplify_state_map, simplify_cache_hit) =
         if can_skip_simplify {
             (None, None, false)
@@ -374,40 +224,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             .filter(|&&state| state == u32::MAX)
             .count()
     });
-
-    if debug_profile_enabled() {
-        eprintln!(
-            "[glrmask/debug][l2p_simplify] partition={} original_states={} simplified_states={} unmapped_original_states={} cache_hit={} used={}",
-            partition_label,
-            num_original_states,
-            tokenizer_for_build.num_states(),
-            candidate_unmapped_original_states,
-            simplify_cache_hit,
-            use_simplified_tok,
-        );
-    }
-
-    // DIAGNOSTIC: compare simplified state count against a tokenizer built
-    // from scratch using only the active terminals. These should match
-    // (they describe the same language); any overshoot indicates a bug in
-    // the simplify pipeline.
-    if std::env::var_os("GLRMASK_DEBUG_SIMPLIFY_COMPARE_FROM_SCRATCH").is_some() {
-        if let Some(simplified_tok) = simplified_tok_storage.as_ref() {
-            // Re-minimize the simplified DFA. If state count drops, minimize is
-            // not reaching a fixed point in the pipeline.
-            let dfa_clone = simplified_tok.dfa.clone();
-            let t0 = Instant::now();
-            let (remin, _) = dfa_clone.minimize_with_state_mapping();
-            let remin_ms = t0.elapsed().as_secs_f64() * 1000.0;
-            eprintln!(
-                "[glrmask/debug][l2p_remin] partition={} simplified_states={} remin_states={} remin_ms={:.1}",
-                partition_label,
-                simplified_tok.num_states(),
-                remin.num_states(),
-                remin_ms,
-            );
-        }
-    }
 
     // ---- Step 1: Equivalence analysis (on simplified tokenizer) ----
     let id_map_started_at = Instant::now();
@@ -514,15 +330,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 let always_allowed_ms = always_allowed_started_at.elapsed().as_secs_f64() * 1000.0;
                 let nwa_states_after_build = nwa.states().len();
 
-                if debug_profile_enabled() {
-                    let non_empty_count = always_allowed.iter().filter(|v| !v.is_empty()).count();
-                    let total_entries: usize = always_allowed.iter().map(|v| v.len()).sum();
-                    eprintln!(
-                        "[glrmask/debug][always_allowed] terminals_with_follows={}/{} total_entries={}",
-                        non_empty_count, always_allowed.len(), total_entries,
-                    );
-                }
-
                 let collapse_started_at = Instant::now();
                 collapse_always_allowed(&mut nwa, &always_allowed, grammar.num_terminals as usize);
                 let collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -548,13 +355,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
 
                 let minimize_started_at = Instant::now();
-                let dwa = minimize_from_env(&det, "GLRMASK_MINIMIZE_L2P", |dwa| {
-                    if std::env::var_os("GLRMASK_PARTITION_SERIAL").is_some() {
-                        minimize_fast(dwa)
-                    } else {
-                        minimize_with_threshold(dwa, 50)
-                    }
-                });
+                let dwa = minimize_with_threshold(&det, 50);
                 let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
                 let dwa_stats_before_compact = dwa.stats();
                 let dwa_stats_after_compact = dwa.stats();
@@ -600,7 +401,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     };
     let postprocess_ms = always_allowed_ms + collapse_ms + disallowed_ms + prune_ms + canonicalize_ms;
 
-    if compile_profile_enabled() || debug_profile_enabled() {
+    if compile_profile_enabled() {
         eprintln!(
             "[glrmask/profile][l2p] partition={} vocab_tokens={} active_terminals={} original_states={} tsids={} simplify_ms={:.3} simplify_cache_hit={} simplified_states={} id_map_ms={:.3} tsid_fallback_ms={:.3} vocab_tree_ms={:.3} possible_matches_ms={:.3} seed_ms={:.3} terminal_nwa_build_ms={:.3} nwa_states={}->{}->{}->{}->{} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} prune_ms={:.3} canonicalize_ms={:.3} postprocess_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} minimize_states={} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} total_ms={:.3}",
             partition_label,
@@ -638,10 +439,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             dwa_stats_after_compact.interned_ranges,
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
-    }
-
-    if l2p_path_validation_enabled() {
-        validate_sampled_terminal_dwa_paths(&dwa, &composed_id_map, vocab);
     }
 
     Some(LocalIdMapTerminalDwa {

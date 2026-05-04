@@ -21,7 +21,6 @@ use crate::ds::weight::Weight;
 
 use crate::compiler::stages::id_map_and_terminal_dwa::types::{
     ColorId, TerminalColoring, TerminalDwaBuildProfile, TerminalPathLength,
-    compile_profile_enabled, debug_profile_enabled,
 };
 
 /// NWA state identifier (index into `NWA.states`).
@@ -643,12 +642,6 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         }
         let flush_weight_ms = flush_weight_start.elapsed().as_secs_f64() * 1000.0;
 
-        if debug_profile_enabled() || compile_profile_enabled() {
-            eprintln!(
-                "[glrmask/profile][flush] leaf_buf={} future_buf={} flush_leaf_ms={:.1} flush_future_ms={:.1} flush_weight_ms={:.1}",
-                leaf_buf_count, future_buf_count, flush_leaf_ms, flush_future_ms, flush_weight_ms,
-            );
-        }
     }
 
     /// Fast NWA construction for L1-only grammars (all terminals have path
@@ -773,12 +766,6 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         }
         let phase2_ms = phase2_start.elapsed().as_secs_f64() * 1000.0;
 
-        if debug_profile_enabled() {
-            eprintln!(
-                "[glrmask/debug][build_l1_fast] phase1_ms={:.1} phase2_ms={:.1} total_pairs={} alive={} groups={}",
-                phase1_ms, phase2_ms, total_pairs, total_alive, num_groups,
-            );
-        }
     }
 
     pub(crate) fn build_from_trie(
@@ -1037,14 +1024,6 @@ pub(crate) fn build_nwa_via_trie_walk<'a>(
     let profile = builder.profile;
     // Drop builder to release the mutable borrow on nwa before reading nwa.states.
     drop(builder);
-
-    if compile_profile_enabled() || debug_profile_enabled() {
-        eprintln!(
-            "[glrmask/profile][nwa_build] trie_walk_ms={:.3} flush_ms={:.3} total_ms={:.3} nwa_states={} future_additions={} match_additions={}",
-            trie_ms, flush_ms, trie_ms + flush_ms, nwa.states().len(),
-            profile.future_terminal_additions, profile.match_transition_additions,
-        );
-    }
 
     profile
 }
