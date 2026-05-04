@@ -2204,15 +2204,8 @@ fn wrap_key_colon_expr_parts(body: GrammarExpr) -> (GrammarExpr, Box<dyn FnOnce(
 /// Equivalent to composing `wrap_string_value_expr_parts` but for cases
 /// where the body does not need to be named as a separate terminal rule.
 fn quoted_expr(inner: GrammarExpr) -> GrammarExpr {
-    let open = split_open_quote();
-    let close = split_close_quote();
-    // Fuse non-split quotes into body, then wrap with split quotes
-    let mut body_parts = Vec::new();
-    if !open { body_parts.push(literal_expr(b"\"")); }
-    body_parts.push(inner);
-    if !close { body_parts.push(literal_expr(b"\"")); }
-    let body = sequence_or_single(body_parts);
-    wrap_string_value_terminal(body)
+    let (body, wrap) = wrap_string_value_expr_parts(inner);
+    wrap(body)
 }
 
 fn json_date_body_expr() -> GrammarExpr {
