@@ -42,29 +42,3 @@ pub(crate) struct PossibleMatchesProfile {
     pub(crate) root_compute_ms: f64,
     pub(crate) materialize_output_ms: f64,
 }
-
-pub(crate) fn merge_possible_matches_profile(
-    into: &mut PossibleMatchesProfile,
-    other: PossibleMatchesProfile,
-) {
-    into.cache_hits += other.cache_hits;
-    into.cache_misses += other.cache_misses;
-    into.reachable_cache_hits += other.reachable_cache_hits;
-    into.reachable_cache_misses += other.reachable_cache_misses;
-    into.child_segments_visited += other.child_segments_visited;
-    into.byte_steps += other.byte_steps;
-    into.blocked_segments += other.blocked_segments;
-    into.recursive_descents += other.recursive_descents;
-    into.self_loop_subtrees_skipped += other.self_loop_subtrees_skipped;
-    into.terminal_insertions += other.terminal_insertions;
-    into.cache_entries += other.cache_entries;
-    into.reachable_cache_entries += other.reachable_cache_entries;
-    into.cache_lookup_ms += other.cache_lookup_ms;
-    into.reachable_lookup_ms += other.reachable_lookup_ms;
-    into.node_terminal_insert_ms += other.node_terminal_insert_ms;
-    into.segment_walk_ms += other.segment_walk_ms;
-    into.self_loop_check_ms += other.self_loop_check_ms;
-    into.merge_child_matches_ms += other.merge_child_matches_ms;
-    into.root_compute_ms += other.root_compute_ms;
-    into.materialize_output_ms += other.materialize_output_ms;
-}

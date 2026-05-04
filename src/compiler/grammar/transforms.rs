@@ -584,17 +584,6 @@ fn collect_protected_nonterminals(grammar: &GrammarDef) -> BTreeSet<NonterminalI
         .collect()
 }
 
-pub(crate) fn prepare_grammar_for_compile(grammar: &GrammarDef) -> (GrammarDef, Tokenizer) {
-    // Probe nullability against the original terminal set first; nullable
-    // terminals are expanded into optional grammar structure before we compact
-    // away any terminals that normalization proves unreachable.
-    let nullable_terminals = nullable_terminals_for_grammar(grammar);
-
-    let mut normalized = grammar.clone();
-
-    prepare_owned_grammar_for_compile_impl(&mut normalized, &nullable_terminals)
-}
-
 /// Run only the grammar transforms without building the tokenizer.
 /// The caller is responsible for calling `build_tokenizer` on the result.
 pub(crate) fn prepare_grammar_transforms_only(grammar: GrammarDef) -> GrammarDef {

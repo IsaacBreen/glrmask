@@ -148,26 +148,6 @@ fn merge_partition_nwas(
     merged
 }
 
-pub(crate) fn build_terminal_dwa_for_existing_id_map(
-    grammar: &AnalyzedGrammar,
-    tokenizer: &Tokenizer,
-    vocab: &Vocab,
-    id_map: &InternalIdMap,
-    ignore_terminal: Option<TerminalID>,
-) -> DWA {
-    let terminal_coloring = TerminalColoring::identity(grammar.num_terminals as usize);
-    build_terminal_dwa_for_existing_id_map_inner(
-        grammar,
-        tokenizer,
-        vocab,
-        id_map,
-        &terminal_coloring,
-        false,
-        ignore_terminal,
-        None,
-    )
-}
-
 fn build_terminal_dwa_for_existing_id_map_inner(
     grammar: &AnalyzedGrammar,
     tokenizer: &Tokenizer,

@@ -936,17 +936,6 @@ fn commit_bytes_impl(
     Ok(())
 }
 
-pub(crate) fn token_bytes_may_commit_from_state_map(
-    constraint: &Constraint,
-    state: &BTreeMap<u32, ParserGSS>,
-    bytes: &[u8],
-    bufs: &mut CommitBuffers,
-) -> bool {
-    let mut probe_state = state.clone();
-    bufs.clear_all();
-    commit_bytes_impl(constraint, &mut probe_state, bytes, bufs).is_ok()
-}
-
 impl<'a> ConstraintState<'a> {
     /// Commit a sampled token, advancing the constraint state.
     ///

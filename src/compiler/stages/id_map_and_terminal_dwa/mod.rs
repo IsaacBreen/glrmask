@@ -34,16 +34,6 @@ use types::{
     TerminalDwaPhaseProfile,
 };
 
-pub(crate) fn maybe_print_terminal_mappings(grammar: &AnalyzedGrammar) {
-    for terminal_id in 0..grammar.num_terminals {
-        eprintln!(
-            "[glrmask/debug][terminal_mapping] id=   T{} name={}",
-            terminal_id,
-            grammar.terminal_display_name(terminal_id),
-        );
-    }
-}
-
 fn format_terminal_edge_symbol_counts(num_terminals: usize, dwa: &DWA) -> Vec<String> {
     let mut counts = vec![0usize; num_terminals];
     for state in dwa.states() {
