@@ -9,9 +9,8 @@ use hashbrown::HashMap;
 use once_cell::sync::Lazy;
 use rayon::prelude::*;
 use smallvec::SmallVec;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{BuildHasher, Hasher};
-use std::time::Instant;
 
 use super::super::disallowed_follows::normalize_disallowed_follows;
 use crate::ds::bitset::BitSet;
@@ -371,14 +370,6 @@ fn env_flag_enabled(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn compile_profile_enabled() -> bool {
-    env_flag_enabled("GLRMASK_PROFILE_COMPILE") || env_flag_enabled("GLRMASK_PROFILE_COMPILE_SUMMARY")
-}
-
-fn vocab_reachability_profile_enabled() -> bool {
-    env_flag_enabled("GLRMASK_PROFILE_VOCAB_REACHABILITY")
-}
-
 fn vocab_batch_size_override() -> Option<usize> {
     std::env::var("GLRMASK_VOCAB_EQUIV_BATCH_SIZE")
         .ok()
@@ -398,44 +389,6 @@ fn vocab_state_group_size(num_states: usize, num_groups: usize) -> usize {
 
 fn diversity_state_order_enabled() -> bool {
     !env_flag_enabled("GLRMASK_DISABLE_DIVERSITY_STATE_ORDER")
-}
-
-fn elapsed_ms(started_at: Instant) -> f64 {
-    started_at.elapsed().as_secs_f64() * 1000.0
-}
-
-fn reachable_state_count(tokenizer: &TokenizerView, initial_states: &[usize]) -> usize {
-    let dfa = tokenizer.dfa();
-    if initial_states.is_empty() {
-        return 0;
-    }
-
-    let mut seen = vec![false; dfa.states.len()];
-    let mut queue = VecDeque::new();
-
-    for &state in initial_states {
-        if state < seen.len() && !seen[state] {
-            seen[state] = true;
-            queue.push_back(state);
-        }
-    }
-
-    let mut count = 0usize;
-    while let Some(state) = queue.pop_front() {
-        count += 1;
-        for &target in dfa.transitions_for(state) {
-            if target == NONE {
-                continue;
-            }
-            let target = target as usize;
-            if !seen[target] {
-                seen[target] = true;
-                queue.push_back(target);
-            }
-        }
-    }
-
-    count
 }
 
 fn states_by_transition_diversity(dfa: &Dfa, states: &[usize]) -> Vec<usize> {
@@ -521,8 +474,6 @@ fn build_dfa_with_group_filter(
     active_groups: Option<&[bool]>,
     shared_cache: Option<&SharedVocabDfaCache>,
 ) -> Dfa {
-    let profile_compile = compile_profile_enabled();
-    let build_started_at = Instant::now();
     let dfa = tokenizer.dfa();
     assert!(dfa.states.len() <= u32::MAX as usize, "DFA too large");
 
@@ -543,7 +494,6 @@ fn build_dfa_with_group_filter(
         .max()
         .map_or(0, |m| m + 1);
 
-    let state_scan_started_at = Instant::now();
     let mut finalizers = Vec::with_capacity(dfa.states.len());
     let mut is_dead_end = Vec::with_capacity(dfa.states.len());
     let mut possible_future_groups = Vec::with_capacity(dfa.states.len());
@@ -566,7 +516,6 @@ fn build_dfa_with_group_filter(
         completion_hash.push(hash_group_list(future_groups.iter().copied()));
         possible_future_groups.push(future_groups);
     }
-    let state_scan_ms = elapsed_ms(state_scan_started_at);
 
     let num_dfa_states = dfa.states.len();
 
@@ -576,12 +525,11 @@ fn build_dfa_with_group_filter(
     let compatible_shared_base = shared_base.filter(|base| {
         base.is_compatible_with_dfa(dfa)
     });
-    let (byte_to_class, trans_by_class, self_loop_bytes, none_completion_hash, byte_classes_ms, transpose_ms) =
+    let (byte_to_class, trans_by_class, self_loop_bytes, none_completion_hash) =
         if let Some(base) = compatible_shared_base {
             let btc = byte_to_class_override.copied().unwrap_or(base.byte_to_class);
-            (btc, base.trans_by_class.clone(), base.self_loop_bytes.clone(), base.none_completion_hash, 0.0, 0.0)
+            (btc, base.trans_by_class.clone(), base.self_loop_bytes.clone(), base.none_completion_hash)
         } else {
-            let byte_classes_started_at = Instant::now();
             let btc = byte_to_class_override.copied().unwrap_or_else(|| compute_byte_classes(dfa));
             let num_classes = btc
                 .iter()
@@ -597,9 +545,7 @@ fn build_dfa_with_group_filter(
                     class_repr[class] = b;
                 }
             }
-            let byte_classes_ms = elapsed_ms(byte_classes_started_at);
 
-            let transpose_started_at = Instant::now();
             let mut tbc = vec![NONE; num_classes * num_dfa_states];
             for c in 0..num_classes {
                 let repr = class_repr[c] as usize;
@@ -608,7 +554,6 @@ fn build_dfa_with_group_filter(
                     tbc[bbase + s] = dfa.trans(s, repr);
                 }
             }
-            let transpose_ms = elapsed_ms(transpose_started_at);
 
             let mut slb = Vec::with_capacity(num_dfa_states);
             for s in 0..dfa.states.len() {
@@ -627,28 +572,8 @@ fn build_dfa_with_group_filter(
                 h.finish()
             };
 
-            (btc, tbc, slb, nch, byte_classes_ms, transpose_ms)
+            (btc, tbc, slb, nch)
         };
-
-    let num_classes = byte_to_class
-        .iter()
-        .copied()
-        .max()
-        .map_or(0usize, |max_class| max_class as usize + 1);
-
-    if profile_compile {
-        eprintln!(
-            "[glrmask/profile][vocab_build_dfa] dfa_states={} num_groups={} byte_classes={} state_scan_ms={:.3} byte_classes_ms={:.3} transpose_ms={:.3} shared_base={} total_ms={:.3}",
-            num_dfa_states,
-            num_groups,
-            num_classes,
-            state_scan_ms,
-            byte_classes_ms,
-            transpose_ms,
-            shared_base.is_some(),
-            elapsed_ms(build_started_at),
-        );
-    }
 
     Dfa {
         start_state: dfa.start_state,
@@ -1759,7 +1684,6 @@ fn compact_dfa_for_tokens<S: AsRef<[u8]>>(
     dfa: &Dfa,
     initial_states: &[usize],
     strings: &[S],
-    profile: bool,
 ) -> Option<(Dfa, Vec<usize>)> {
     if initial_states.len() < COMPACT_DFA_MIN_STATES
         || strings.is_empty()
@@ -1813,12 +1737,6 @@ fn compact_dfa_for_tokens<S: AsRef<[u8]>>(
     let restricted_reachable = visited.iter().filter(|&&v| v).count();
     let ratio = restricted_reachable as f64 / dfa.num_states as f64;
     if ratio > COMPACT_DFA_MAX_RATIO {
-        if profile {
-            eprintln!(
-                "[glrmask/profile][vocab_compact] skipped: reachable={} full={} ratio={:.3}",
-                restricted_reachable, dfa.num_states, ratio,
-            );
-        }
         return None;
     }
 
@@ -1869,13 +1787,6 @@ fn compact_dfa_for_tokens<S: AsRef<[u8]>>(
         .map(|&s| original_to_compact[s] as usize)
         .collect();
 
-    if profile {
-        eprintln!(
-            "[glrmask/profile][vocab_compact] compacted: reachable={} full={} ratio={:.3} relevant_classes={} initial_states={}",
-            compact_num, dfa.num_states, ratio, relevant_classes.len(), initial_states.len(),
-        );
-    }
-
     let compact_dfa = Dfa {
         start_state: if dfa.start_state < original_to_compact.len() && original_to_compact[dfa.start_state] != u32::MAX {
             original_to_compact[dfa.start_state] as usize
@@ -1909,32 +1820,23 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
     active_groups: Option<&[bool]>,
     shared_cache: Option<&SharedVocabDfaCache>,
 ) -> VocabEquivalenceResult {
-    let profile_compile = compile_profile_enabled();
-    let reachable_states = vocab_reachability_profile_enabled()
-        .then(|| reachable_state_count(tokenizer, initial_states));
-    let build_dfa_started_at = Instant::now();
     let dfa = build_dfa_with_group_filter(tokenizer, disallowed_follows, byte_to_class, active_groups, shared_cache);
-    let build_dfa_ms = elapsed_ms(build_dfa_started_at);
 
     // Compact DFA: restrict to states reachable from initial_states via the
     // partition's token bytes.  This can dramatically shrink the transition
     // table (e.g. 77260 → 36598 for p0 of o62058) improving cache locality.
-    let compact_started_at = Instant::now();
-    let compacted = compact_dfa_for_tokens(&dfa, initial_states, strings, profile_compile);
-    let compact_ms = elapsed_ms(compact_started_at);
+    let compacted = compact_dfa_for_tokens(&dfa, initial_states, strings);
     let (dfa_ref, initial_states_ref): (&Dfa, &[usize]) = if let Some((ref cdfa, ref cstates)) = compacted {
         (cdfa, cstates)
     } else {
         (&dfa, initial_states)
     };
 
-    let order_states_started_at = Instant::now();
     let ordered_states = if diversity_state_order_enabled() {
         states_by_transition_diversity(dfa_ref, initial_states_ref)
     } else {
         initial_states_ref.to_vec()
     };
-    let order_states_ms = elapsed_ms(order_states_started_at);
     let num_tokens = strings.len();
     let num_initial_states = ordered_states.len();
 
@@ -1959,21 +1861,15 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
     let mut active_indices: Vec<usize> = (0..num_tokens).collect();
     let mut partition = vec![0usize; num_tokens];
     let mut next_class_id = 1usize;
-    let mut batch_total_ms = 0.0;
-    let mut signature_total_ms = 0.0;
-    let mut refine_total_ms = 0.0;
 
-    for (batch_index, batch_start) in (0..num_initial_states).step_by(batch_size).enumerate() {
+    for (_batch_index, batch_start) in (0..num_initial_states).step_by(batch_size).enumerate() {
         if active_indices.is_empty() {
             break;
         }
 
-        let batch_started_at = Instant::now();
-        let active_before = active_indices.len();
         let batch_end = (batch_start + batch_size).min(num_initial_states);
         let batch = &ordered_states[batch_start..batch_end];
         let state_group_size = vocab_state_group_size(batch.len(), num_groups);
-        let signature_started_at = Instant::now();
         let use_trie_walk = active_indices.len() >= TRIE_WALK_MIN_TOKENS
             && !*TRIE_WALK_DISABLED;
         let active_sigs: Vec<(usize, u64)> = if use_trie_walk {
@@ -1999,7 +1895,7 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
                             state_group_size,
                             scratch,
                             trie_state,
-                            profile_compile,
+                            false,
                         )
                     },
                 )
@@ -2020,16 +1916,14 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
                                 batch,
                                 state_group_size,
                                 scratch,
-                                profile_compile,
+                                false,
                             ),
                         )
                     },
                 )
                 .collect()
         };
-        let signature_ms = elapsed_ms(signature_started_at);
 
-        let refine_started_at = Instant::now();
         let mut refinement: HashMap<(usize, u64), Vec<usize>> =
             HashMap::with_capacity(active_sigs.len() / 2);
         for (ti, sig) in active_sigs {
@@ -2058,58 +1952,13 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
             }
         }
         active_indices = new_active;
-        let refine_ms = elapsed_ms(refine_started_at);
-        let batch_ms = elapsed_ms(batch_started_at);
-        batch_total_ms += batch_ms;
-        signature_total_ms += signature_ms;
-        refine_total_ms += refine_ms;
-
-        if profile_compile {
-            let state_group_count = batch.len().div_ceil(state_group_size.max(1));
-            eprintln!(
-                "[glrmask/profile][vocab] batch={} states={} state_group_size={} state_groups={} active_before={} active_after={} classes={} signature_ms={:.3} refine_ms={:.3} ms={:.3}",
-                batch_index,
-                batch.len(),
-                state_group_size,
-                state_group_count,
-                active_before,
-                active_indices.len(),
-                next_class_id,
-                signature_ms,
-                refine_ms,
-                batch_ms,
-            );
-        }
     }
 
-    let materialize_started_at = Instant::now();
     let mut groups = vec![Vec::new(); next_class_id.max(1)];
     for (token_idx, &class_id) in partition.iter().enumerate() {
         groups[class_id].push(token_idx);
     }
-    let result: VocabEquivalenceResult = groups.into_iter().filter(|group| !group.is_empty()).collect();
-    let materialize_ms = elapsed_ms(materialize_started_at);
-
-    if profile_compile {
-        eprintln!(
-            "[glrmask/profile][vocab_summary] dfa_states={} compact_states={} reachable_states={} relevant_states={} tokens={} build_dfa_ms={:.3} compact_ms={:.3} order_states_ms={:.3} batch_ms={:.3} signature_ms={:.3} refine_ms={:.3} materialize_ms={:.3} classes={}",
-            dfa.num_states,
-            dfa_ref.num_states,
-            reachable_states.unwrap_or(0),
-            num_initial_states,
-            num_tokens,
-            build_dfa_ms,
-            compact_ms,
-            order_states_ms,
-            batch_total_ms,
-            signature_total_ms,
-            refine_total_ms,
-            materialize_ms,
-            result.len(),
-        );
-    }
-
-    result
+    groups.into_iter().filter(|group| !group.is_empty()).collect()
 }
 
 #[cfg(test)]
