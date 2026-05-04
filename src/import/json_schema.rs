@@ -188,10 +188,6 @@ fn factored_open_object_max_keys() -> usize {
     })
 }
 
-fn factored_ordered_object_enabled() -> bool {
-    env_flag("GLRMASK_ENABLE_FACTORED_ORDERED_OBJECT")
-}
-
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 enum JsonSchemaDraft {
     Draft4,
@@ -731,48 +727,6 @@ fn split_top_level_regex_branches(pattern: &str) -> Vec<&str> {
     }
     branches.push(&pattern[start..]);
     branches
-}
-
-fn strip_single_outer_group(branch: &str) -> Option<&str> {
-    let bytes = branch.as_bytes();
-    let inner_start = match bytes.get(1).copied() {
-        Some(b'?') => {
-            if bytes.get(2).copied() == Some(b':') {
-                3
-            } else {
-                return None;
-            }
-        }
-        _ => 1,
-    };
-
-    let mut paren_depth = 0usize;
-    let mut in_class = false;
-    let mut escaped = false;
-    for (idx, byte) in bytes.iter().copied().enumerate() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match byte {
-            b'\\' => escaped = true,
-            b'[' if !in_class => in_class = true,
-            b']' if in_class => in_class = false,
-            b'(' if !in_class => paren_depth += 1,
-            b')' if !in_class && paren_depth > 0 => {
-                paren_depth -= 1;
-                if paren_depth == 0 && idx != bytes.len() - 1 {
-                    return None;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if paren_depth != 0 || inner_start >= branch.len().saturating_sub(1) {
-        return None;
-    }
-    Some(&branch[inner_start..branch.len() - 1])
 }
 
 fn strip_branch_outer_anchors(branch: &str) -> (bool, bool, &str) {
@@ -1727,21 +1681,6 @@ fn key_colon_body_regex(inner: &str) -> String {
         (true, false, true)   => format!(r#"(?:{})""#, inner),
         (true, true, _)       => format!(r#"(?:{})"#, inner),
     }
-}
-
-/// Build literal bytes for the body terminal of a JSON string **value**.
-///
-/// Fuses non-split quotes into the byte sequence.
-fn string_value_literal_body_bytes(text: &str) -> Vec<u8> {
-    let full = json_string_literal_bytes(text); // b'"text"'
-    let body_only = &full[1..full.len() - 1];
-    let open = split_open_quote();
-    let close = split_close_quote();
-    let mut bytes = Vec::new();
-    if !open { bytes.push(b'"'); }
-    bytes.extend_from_slice(body_only);
-    if !close { bytes.push(b'"'); }
-    bytes
 }
 
 /// Build literal bytes for the body terminal of a JSON object **key-colon**.

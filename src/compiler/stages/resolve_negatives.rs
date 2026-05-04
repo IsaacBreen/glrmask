@@ -471,32 +471,6 @@ fn is_live_finality_edge(target_state: u32, weight: &Weight, state_count: usize)
     (target_state as usize) < state_count && !weight.is_empty()
 }
 
-fn for_each_live_finality_edge(
-    state: &NWAState,
-    state_count: usize,
-    mut visit: impl FnMut(usize, &Weight),
-) {
-    for (target_state, weight) in &state.epsilons {
-        if !is_live_finality_edge(*target_state, weight, state_count) {
-            continue;
-        }
-        visit(*target_state as usize, weight);
-    }
-
-    for (&label, targets) in &state.transitions {
-        if label != DEFAULT_LABEL && !is_negative_label(label) {
-            continue;
-        }
-
-        for (target_state, weight) in targets {
-            if !is_live_finality_edge(*target_state, weight, state_count) {
-                continue;
-            }
-            visit(*target_state as usize, weight);
-        }
-    }
-}
-
 fn build_finality_preds_and_outdegree<'a>(nwa: &'a NWA) -> (Vec<Vec<PredEdge<'a>>>, Vec<usize>) {
     let state_count = nwa.states().len();
     let mut preds = vec![Vec::<PredEdge<'a>>::new(); state_count];

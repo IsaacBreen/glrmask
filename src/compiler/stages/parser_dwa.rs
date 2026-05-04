@@ -256,32 +256,6 @@ fn union_final_weight(slot: &mut Option<Weight>, add: Weight) -> bool {
     }
 }
 
-fn add_or_union_transition(
-    state: &mut crate::automata::weighted::nwa::NWAState,
-    label: i32,
-    target: u32,
-    add: Weight,
-) -> bool {
-    if add.is_empty() {
-        return false;
-    }
-
-    let targets = state.transitions.entry(label).or_default();
-    for (existing_target, existing_weight) in targets.iter_mut() {
-        if *existing_target == target {
-            let updated = existing_weight.union(&add);
-            if updated != *existing_weight {
-                *existing_weight = updated;
-                return true;
-            }
-            return false;
-        }
-    }
-
-    targets.push((target, add));
-    true
-}
-
 fn parser_state_label(label: i32, num_parser_states: u32) -> Option<u32> {
     if label >= 0 && (label as u32) < num_parser_states {
         Some(label as u32)
