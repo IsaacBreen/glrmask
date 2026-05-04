@@ -2397,19 +2397,6 @@ fn simple_repeated_single_char_pattern(pattern: &str) -> Option<String> {
     Some(jsonify_regex_dot(repeated))
 }
 
-fn anchored_non_ws_word_count_pattern(pattern: &str) -> Option<usize> {
-    let rest = pattern.strip_prefix(r"^(?:\S+\s+){0,")?;
-    let max_words = rest.strip_suffix(r"}\S+$")?;
-    max_words.parse::<usize>().ok()
-}
-
-fn simplify_known_json_schema_pattern(pattern: String) -> String {
-    if pattern == r"^(https?:\/\/)?([\da-z\.-]+)\.([a-z\.]{2,6})([\/\w \.-]*)*\/?$" {
-        return r"^(https?:\/\/)?([\da-z\.-]+)\.([a-z\.]{2,6})[\/\w \.-]*$".to_string();
-    }
-    pattern
-}
-
 /// Returns `true` when every top-level branch of `pattern` starts with `^` and
 /// ends with `$` (after stripping a single outer group wrapper). For such
 /// patterns `json_wrapped_pattern` produces no `<string_tail>` padding, so the
@@ -6280,20 +6267,6 @@ impl<'a> SchemaCtx<'a> {
             let Some(pattern) = prune_pattern_branches_for_min_length(pattern, min_len) else {
                 return Ok(self.extract_terminal_rule(never_expr(), "JSON_STRING_PATTERN_UNSAT"));
             };
-            let pattern = simplify_known_json_schema_pattern(pattern);
-            if pattern
-                == r"^pbj:([a-z0-9-]+):([a-z0-9\.-]+):([a-z0-9-]+)?:([a-z0-9-]+):([0-9]+-[0-9]+-[0-9]+)$"
-            {
-                return Ok(self.build_json_wrapped_pbj_pattern());
-            }
-            if pattern == r"^([a-z0-9-]+):([a-z0-9\.-]+):([a-z0-9-]+)?:([a-z0-9-]+)$" {
-                return Ok(self.build_json_wrapped_curie_pattern());
-            }
-            if min_len <= 1 {
-                if let Some(max_separators) = anchored_non_ws_word_count_pattern(&pattern) {
-                    return Ok(self.build_json_wrapped_non_ws_word_count_pattern(max_separators));
-                }
-            }
             if let Some(unit_pattern) = simple_repeated_single_char_pattern(&pattern) {
                 if min_len > 0 || max_len.is_some() {
                     return Ok(self.build_bounded_string_from_unit_regex(&unit_pattern, min_len, max_len));
@@ -7545,75 +7518,6 @@ impl<'a> SchemaCtx<'a> {
         let (terminal_body, wrap) = wrap_string_value_expr_parts(parsed_regex_expr(&inner, true));
         let term = self.extract_terminal_rule(terminal_body, prefix);
         wrap(term)
-    }
-
-    fn build_json_wrapped_non_ws_word_count_pattern(
-        &mut self,
-        max_separators: usize,
-    ) -> GrammarExpr {
-        let non_ws_fragment =
-            jsonify_shorthand_class(b'S').expect("\\S JSON shorthand must be supported");
-        let ws_fragment =
-            jsonify_shorthand_class(b's').expect("\\s JSON shorthand must be supported");
-        let non_ws_run = self.extract_terminal_rule(
-            parsed_regex_expr(&format!(r"(?:{})+", non_ws_fragment), true),
-            "JSON_STRING_NON_WS_RUN",
-        );
-        let ws_run = self.extract_terminal_rule(
-            parsed_regex_expr(&format!(r"(?:{})+", ws_fragment), true),
-            "JSON_STRING_WS_RUN",
-        );
-        quoted_expr(sequence_or_single(vec![
-            non_ws_run.clone(),
-            GrammarExpr::RepeatRange {
-                expr: Box::new(sequence_or_single(vec![ws_run, non_ws_run])),
-                min: 0,
-                max: max_separators,
-            },
-        ]))
-    }
-
-    fn json_pattern_terminal(&mut self, fragment: &str, name: &str) -> GrammarExpr {
-        self.extract_terminal_rule(parsed_regex_expr(&jsonify_regex_dot(fragment), true), name)
-    }
-
-    fn build_json_wrapped_pbj_pattern(&mut self) -> GrammarExpr {
-        let lower_dash = self.json_pattern_terminal(r"[a-z0-9-]+", "JSON_STRING_PBJ_SEGMENT");
-        let lower_dot_dash =
-            self.json_pattern_terminal(r"[a-z0-9\.-]+", "JSON_STRING_PBJ_DOT_SEGMENT");
-        let digits = self.json_pattern_terminal(r"[0-9]+", "JSON_STRING_PBJ_DIGITS");
-        quoted_expr(sequence_or_single(vec![
-            literal_expr(b"pbj:"),
-            lower_dash.clone(),
-            literal_expr(b":"),
-            lower_dot_dash,
-            literal_expr(b":"),
-            GrammarExpr::Optional(Box::new(lower_dash.clone())),
-            literal_expr(b":"),
-            lower_dash,
-            literal_expr(b":"),
-            digits.clone(),
-            literal_expr(b"-"),
-            digits.clone(),
-            literal_expr(b"-"),
-            digits,
-        ]))
-    }
-
-    fn build_json_wrapped_curie_pattern(&mut self) -> GrammarExpr {
-        let lower_dash =
-            self.json_pattern_terminal(r"[a-z0-9-]+", "JSON_STRING_CURIE_SEGMENT");
-        let lower_dot_dash =
-            self.json_pattern_terminal(r"[a-z0-9\.-]+", "JSON_STRING_CURIE_DOT_SEGMENT");
-        quoted_expr(sequence_or_single(vec![
-            lower_dash.clone(),
-            literal_expr(b":"),
-            lower_dot_dash,
-            literal_expr(b":"),
-            GrammarExpr::Optional(Box::new(lower_dash.clone())),
-            literal_expr(b":"),
-            lower_dash,
-        ]))
     }
 
     fn build_state_machine_expr<State, IsAccepting, Transitions>(
