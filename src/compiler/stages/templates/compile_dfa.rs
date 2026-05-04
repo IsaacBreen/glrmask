@@ -299,39 +299,6 @@ fn build_nonterminal_nodes(
     nonterminal_nodes
 }
 
-fn append_default_pop_chain(nfa: &mut NFA, mut from: u32, pop_count: usize, target: u32) {
-    for pop_index in 0..pop_count {
-        let to = if pop_index == pop_count - 1 {
-            target
-        } else {
-            nfa.add_state()
-        };
-        nfa.add_transition(from, DEFAULT_LABEL, to);
-        from = to;
-    }
-}
-
-fn add_positive_transition_chain(
-    nfa: &mut NFA,
-    from: u32,
-    revealed_state: u32,
-    pop_count: usize,
-    target: u32,
-) {
-    if pop_count == 0 {
-        // Zero-length reduce: no stack pop — epsilon to the nonterminal node.
-        nfa.add_epsilon(from, target);
-        return;
-    }
-    if pop_count == 1 {
-        nfa.add_transition(from, encode_positive_label(revealed_state), target);
-        return;
-    }
-    let first_target = nfa.add_state();
-    nfa.add_transition(from, encode_positive_label(revealed_state), first_target);
-    append_default_pop_chain(nfa, first_target, pop_count - 1, target);
-}
-
 /// A shared DEFAULT-labeled pop chain ending at `target`.
 ///
 /// `chain[i]` is an NFA state such that there is a sequence of `i+1`
@@ -479,6 +446,49 @@ fn add_reduce_pattern_path(
     }
 }
 
+fn resolve_pos_target(
+    nfa: &mut NFA,
+    pos_target_cache: &mut BTreeMap<Vec<u32>, u32>,
+    suffix_trie: &mut BTreeMap<(u32, u32), u32>,
+    accept_root: u32,
+    pushes: &[u32],
+) -> u32 {
+    if let Some(&cached) = pos_target_cache.get(pushes) {
+        return cached;
+    }
+    let mut cur = accept_root;
+    for &push_state in pushes.iter().rev() {
+        let key = (cur, push_state);
+        cur = if let Some(&existing) = suffix_trie.get(&key) {
+            existing
+        } else {
+            let state = nfa.add_state();
+            nfa.add_transition(state, encode_negative_label(push_state), cur);
+            suffix_trie.insert(key, state);
+            state
+        };
+    }
+    pos_target_cache.insert(pushes.to_vec(), cur);
+    cur
+}
+
+fn add_escape_pattern_path(
+    nfa: &mut NFA,
+    pos_target_cache: &mut BTreeMap<Vec<u32>, u32>,
+    suffix_trie: &mut BTreeMap<(u32, u32), u32>,
+    emitted_escapes: &mut BTreeSet<(u32, Vec<StackMatcher>, Vec<u32>)>,
+    accept_root: u32,
+    from: u32,
+    pop: &[StackMatcher],
+    pushes: &[u32],
+) {
+    if !emitted_escapes.insert((from, pop.to_vec(), pushes.to_vec())) {
+        return;
+    }
+    let pos_target = resolve_pos_target(nfa, pos_target_cache, suffix_trie, accept_root, pushes);
+    add_pop_pattern_path(nfa, from, pop, pos_target);
+}
+
 /// Build an unweighted NFA from a terminal characterization.
 ///
 /// Each shift/reduce/escape/re-reduce path gets its own fresh intermediate
@@ -531,45 +541,18 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
     // characterization contains exact duplicates.
     let mut emitted_escapes: BTreeSet<(u32, Vec<StackMatcher>, Vec<u32>)> = BTreeSet::new();
 
-    // Resolve (or build) the pos-target for a `pushes` suffix by walking
-    // it in reverse through the suffix trie rooted at `accept_root`.
-    let resolve_pos_target =
-        |nfa: &mut NFA,
-         pos_target_cache: &mut BTreeMap<Vec<u32>, u32>,
-         suffix_trie: &mut BTreeMap<(u32, u32), u32>,
-         pushes: &[u32]|
-         -> u32 {
-            if let Some(&cached) = pos_target_cache.get(pushes) {
-                return cached;
-            }
-            let mut cur = accept_root;
-            for &push_state in pushes.iter().rev() {
-                let key = (cur, push_state);
-                cur = if let Some(&existing) = suffix_trie.get(&key) {
-                    existing
-                } else {
-                    let s = nfa.add_state();
-                    nfa.add_transition(s, encode_negative_label(push_state), cur);
-                    suffix_trie.insert(key, s);
-                    s
-                };
-            }
-            pos_target_cache.insert(pushes.to_vec(), cur);
-            cur
-        };
-
     // Initial escapes: start → positive(initial_state) → [extra DEFAULT pops] → [shared suffix tail] → accept_root
     for escape in &characterization.escapes {
-        if !emitted_escapes.insert((start, escape.pop.clone(), escape.pushes.clone())) {
-            continue;
-        }
-        let pos_target = resolve_pos_target(
+        add_escape_pattern_path(
             &mut nfa,
             &mut pos_target_cache,
             &mut suffix_trie,
+            &mut emitted_escapes,
+            accept_root,
+            start,
+            &escape.pop,
             &escape.pushes,
         );
-        add_pop_pattern_path(&mut nfa, start, &escape.pop, pos_target);
     }
 
     for reduce in &characterization.reduces {
@@ -596,16 +579,16 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
         let Some(&source_state) = nonterminal_nodes.get(&nt_escape.source_nonterminal) else {
             continue;
         };
-        if !emitted_escapes.insert((source_state, nt_escape.pop.clone(), nt_escape.pushes.clone())) {
-            continue;
-        }
-        let pos_target = resolve_pos_target(
+        add_escape_pattern_path(
             &mut nfa,
             &mut pos_target_cache,
             &mut suffix_trie,
+            &mut emitted_escapes,
+            accept_root,
+            source_state,
+            &nt_escape.pop,
             &nt_escape.pushes,
         );
-        add_pop_pattern_path(&mut nfa, source_state, &nt_escape.pop, pos_target);
     }
 
     for nt_rereduce in &characterization.nt_rereduces {
