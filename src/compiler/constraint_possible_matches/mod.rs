@@ -69,14 +69,6 @@ pub(crate) fn dense_word_count(token_slots: u32) -> usize {
     (token_slots as usize + 63) / 64
 }
 
-pub(crate) fn max_original_token_slot(token_bytes: &BTreeMap<u32, Vec<u8>>) -> u32 {
-    token_bytes
-        .keys()
-        .next_back()
-        .map(|token_id| token_id.saturating_add(1))
-        .unwrap_or(0)
-}
-
 fn set_dense_bit(words: &mut [u64], token_id: u32) {
     let word = token_id as usize / 64;
     let bit = token_id % 64;
@@ -129,26 +121,6 @@ fn range_set_from_sorted_ids(ids: &[u32]) -> RangeSetBlaze<u32> {
     RangeSetBlaze::from_iter(ranges)
 }
 
-pub(crate) fn build_tokens_with_same_bytes(
-    token_bytes: &BTreeMap<u32, Vec<u8>>,
-) -> FxHashMap<u32, Arc<[u32]>> {
-    let mut by_bytes: BTreeMap<Vec<u8>, Vec<u32>> = BTreeMap::new();
-    for (&token_id, bytes) in token_bytes {
-        by_bytes.entry(bytes.clone()).or_default().push(token_id);
-    }
-
-    let mut tokens_with_same_bytes = FxHashMap::default();
-    for (_, mut token_ids) in by_bytes {
-        token_ids.sort_unstable();
-        token_ids.dedup();
-        let shared: Arc<[u32]> = Arc::from(token_ids.clone());
-        for &token_id in &token_ids {
-            tokens_with_same_bytes.insert(token_id, Arc::clone(&shared));
-        }
-    }
-
-    tokens_with_same_bytes
-}
 
 fn unique_same_byte_groups(tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>) -> Vec<Arc<[u32]>> {
     let mut groups: Vec<_> = tokens_with_same_bytes
@@ -159,20 +131,6 @@ fn unique_same_byte_groups(tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>) 
         .collect();
     groups.sort_unstable_by_key(|group| group[0]);
     groups
-}
-
-fn build_same_byte_group_leaders(
-    token_bytes: &BTreeMap<u32, Vec<u8>>,
-    groups: &[Arc<[u32]>],
-) -> Vec<u32> {
-    let mut leaders = vec![u32::MAX; max_original_token_slot(token_bytes) as usize];
-    for group in groups {
-        let leader = group[0];
-        for &token_id in group.iter() {
-            leaders[token_id as usize] = leader;
-        }
-    }
-    leaders
 }
 
 fn build_group_constraint_internal_ids(
@@ -274,116 +232,6 @@ where
     token_to_id
 }
 
-fn normalize_signature_groups<Item>(signatures_by_group: &mut FxHashMap<u32, Vec<Item>>)
-where
-    Item: Ord,
-{
-    for signature in signatures_by_group.values_mut() {
-        signature.sort_unstable();
-        signature.dedup();
-    }
-}
-
-fn same_byte_group_leader(group_leaders: &[u32], original_token_id: u32) -> Option<u32> {
-    let leader = *group_leaders.get(original_token_id as usize)?;
-    (leader != u32::MAX).then_some(leader)
-}
-
-fn expand_signatures_by_group<Item>(
-    groups: Vec<Arc<[u32]>>,
-    mut signatures_by_group: FxHashMap<u32, Vec<Item>>,
-) -> FxHashMap<u32, Vec<Item>>
-where
-    Item: Ord + Clone,
-{
-    normalize_signature_groups(&mut signatures_by_group);
-
-    let mut signatures = FxHashMap::default();
-    for group in groups {
-        let signature = signatures_by_group.remove(&group[0]).unwrap_or_default();
-        for &token_id in group.iter() {
-            signatures.insert(token_id, signature.clone());
-        }
-    }
-    signatures
-}
-
-fn build_signatures_from_possible_matches<Item, F>(
-    raw_possible_matches: &DensePossibleMatchesByState,
-    token_bytes: &BTreeMap<u32, Vec<u8>>,
-    tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
-    mut item_for_match: F,
-) -> FxHashMap<u32, Vec<Item>>
-where
-    Item: Ord + Clone,
-    F: FnMut(u32, TerminalID) -> Item,
-{
-    let groups = unique_same_byte_groups(tokens_with_same_bytes);
-    let group_leaders = build_same_byte_group_leaders(token_bytes, &groups);
-    let mut signatures_by_group: FxHashMap<u32, Vec<Item>> =
-        groups.iter().map(|group| (group[0], Vec::new())).collect();
-
-    for (&original_tokenizer_state, terminals) in raw_possible_matches {
-        for (&terminal_id, bitmap) in terminals {
-            let item = item_for_match(original_tokenizer_state, terminal_id);
-            for_each_dense_bit(bitmap, |original_token_id| {
-                let Some(leader) = same_byte_group_leader(&group_leaders, original_token_id) else {
-                    return;
-                };
-                if let Some(signature) = signatures_by_group.get_mut(&leader) {
-                    signature.push(item.clone());
-                }
-            });
-        }
-    }
-
-    expand_signatures_by_group(groups, signatures_by_group)
-}
-
-pub(crate) fn build_possible_match_signatures(
-    raw_possible_matches: &DensePossibleMatchesByState,
-    token_bytes: &BTreeMap<u32, Vec<u8>>,
-    tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
-) -> FxHashMap<u32, PossibleMatchSignature> {
-    build_signatures_from_possible_matches(
-        raw_possible_matches,
-        token_bytes,
-        tokens_with_same_bytes,
-        |state, terminal_id| (state, terminal_id),
-    )
-}
-pub(crate) fn build_seed_state_signatures_from_possible_matches(
-    raw_possible_matches: &DensePossibleMatchesByState,
-    token_bytes: &BTreeMap<u32, Vec<u8>>,
-    tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
-) -> FxHashMap<u32, SeedStateSignature> {
-    build_signatures_from_possible_matches(
-        raw_possible_matches,
-        token_bytes,
-        tokens_with_same_bytes,
-        |state, _terminal_id| state,
-    )
-}
-
-pub(crate) fn build_seed_state_signatures_from_possible_matches_by_internal_tsid(
-    raw_possible_matches: &DensePossibleMatchesByState,
-    token_bytes: &BTreeMap<u32, Vec<u8>>,
-    tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
-    state_to_internal_tsid: &[u32],
-) -> FxHashMap<u32, SeedStateSignature> {
-    build_signatures_from_possible_matches(
-        raw_possible_matches,
-        token_bytes,
-        tokens_with_same_bytes,
-        |state, _terminal_id| {
-            state_to_internal_tsid
-                .get(state as usize)
-                .copied()
-                .unwrap_or(state)
-        },
-    )
-}
-
 pub(crate) fn intern_signature_ids<T>(
     signatures: FxHashMap<u32, T>,
 ) -> FxHashMap<u32, SignatureClassId>
@@ -423,20 +271,6 @@ pub(crate) fn constraint_vocab_is_identity(constraint_vocab: &ConstraintVocabMap
         .iter()
         .enumerate()
         .all(|(internal_id, mapped)| mapped.len() == 1 && mapped[0] == internal_id as u32)
-}
-
-pub(crate) fn remap_possible_matches_to_constraint_vocab(
-    raw_possible_matches: DensePossibleMatchesByState,
-    original_to_constraint_internal: &[u32],
-    constraint_token_count: u32,
-    tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
-) -> RuntimePossibleMatchesByTerminal {
-    remap_dense_maps_to_constraint_vocab(
-        raw_possible_matches.into_iter(),
-        original_to_constraint_internal,
-        constraint_token_count,
-        tokens_with_same_bytes,
-    )
 }
 
 fn remap_dense_maps_to_constraint_vocab(
