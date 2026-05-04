@@ -334,6 +334,21 @@ where
     token_to_id
 }
 
+fn normalize_signature_groups<Item>(signatures_by_group: &mut FxHashMap<u32, Vec<Item>>)
+where
+    Item: Ord,
+{
+    for signature in signatures_by_group.values_mut() {
+        signature.sort_unstable();
+        signature.dedup();
+    }
+}
+
+fn same_byte_group_leader(group_leaders: &[u32], original_token_id: u32) -> Option<u32> {
+    let leader = *group_leaders.get(original_token_id as usize)?;
+    (leader != u32::MAX).then_some(leader)
+}
+
 fn expand_signatures_by_group<Item>(
     groups: Vec<Arc<[u32]>>,
     mut signatures_by_group: FxHashMap<u32, Vec<Item>>,
@@ -341,10 +356,7 @@ fn expand_signatures_by_group<Item>(
 where
     Item: Ord + Clone,
 {
-    for signature in signatures_by_group.values_mut() {
-        signature.sort_unstable();
-        signature.dedup();
-    }
+    normalize_signature_groups(&mut signatures_by_group);
 
     let mut signatures = FxHashMap::default();
     for group in groups {
@@ -375,12 +387,9 @@ where
         for (&terminal_id, bitmap) in terminals {
             let item = item_for_match(original_tokenizer_state, terminal_id);
             for_each_dense_bit(bitmap, |original_token_id| {
-                let Some(&leader) = group_leaders.get(original_token_id as usize) else {
+                let Some(leader) = same_byte_group_leader(&group_leaders, original_token_id) else {
                     return;
                 };
-                if leader == u32::MAX {
-                    return;
-                }
                 if let Some(signature) = signatures_by_group.get_mut(&leader) {
                     signature.push(item.clone());
                 }
@@ -389,6 +398,43 @@ where
     }
 
     expand_signatures_by_group(groups, signatures_by_group)
+}
+
+fn build_signature_ids_from_trie_classes<Item, F>(
+    class_maps: &[Arc<DensePossibleMatchMap>],
+    state_classes: &[u32],
+    token_bytes: &BTreeMap<u32, Vec<u8>>,
+    tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
+    collect_entries: F,
+) -> FxHashMap<u32, SignatureClassId>
+where
+    Item: Ord + Eq + Hash + Default + Send,
+    F: Fn(u32, &DensePossibleMatchMap, &[u32]) -> Vec<(u32, Item)> + Sync,
+{
+    let groups = unique_same_byte_groups(tokens_with_same_bytes);
+    let group_leaders = build_same_byte_group_leaders(token_bytes, &groups);
+    let used_class_ids = used_state_class_ids(state_classes);
+    let mut signatures_by_group: FxHashMap<u32, Vec<Item>> =
+        groups.iter().map(|group| (group[0], Vec::new())).collect();
+
+    let signature_entries: Vec<(u32, Item)> = used_class_ids
+        .par_iter()
+        .flat_map_iter(|&class_id| {
+            let Some(terminals) = class_maps.get(class_id as usize) else {
+                return Vec::new();
+            };
+            collect_entries(class_id, terminals, &group_leaders)
+        })
+        .collect();
+
+    for (leader, item) in signature_entries {
+        if let Some(signature) = signatures_by_group.get_mut(&leader) {
+            signature.push(item);
+        }
+    }
+
+    normalize_signature_groups(&mut signatures_by_group);
+    intern_signatures_by_group(groups, signatures_by_group)
 }
 
 pub(crate) fn build_possible_match_signatures(
@@ -410,45 +456,23 @@ pub(crate) fn build_possible_match_signature_ids_from_trie_classes(
     token_bytes: &BTreeMap<u32, Vec<u8>>,
     tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
 ) -> FxHashMap<u32, SignatureClassId> {
-    let groups = unique_same_byte_groups(tokens_with_same_bytes);
-    let group_leaders = build_same_byte_group_leaders(token_bytes, &groups);
-    let used_class_ids = used_state_class_ids(state_classes);
-    let mut signatures_by_group: FxHashMap<u32, PossibleMatchSignature> =
-        groups.iter().map(|group| (group[0], Vec::new())).collect();
-
-    let signature_entries: Vec<(u32, (u32, TerminalID))> = used_class_ids
-        .par_iter()
-        .flat_map_iter(|&class_id| {
+    build_signature_ids_from_trie_classes(
+        class_maps,
+        state_classes,
+        token_bytes,
+        tokens_with_same_bytes,
+        |class_id, terminals, group_leaders| {
             let mut entries = Vec::new();
-            let Some(terminals) = class_maps.get(class_id as usize) else {
-                return entries;
-            };
             for (&terminal_id, bitmap) in terminals.iter() {
                 for_each_dense_bit(bitmap, |original_token_id| {
-                    let Some(&leader) = group_leaders.get(original_token_id as usize) else {
-                        return;
-                    };
-                    if leader != u32::MAX {
+                    if let Some(leader) = same_byte_group_leader(group_leaders, original_token_id) {
                         entries.push((leader, (class_id, terminal_id)));
                     }
                 });
             }
             entries
-        })
-        .collect();
-
-    for (leader, item) in signature_entries {
-        if let Some(signature) = signatures_by_group.get_mut(&leader) {
-            signature.push(item);
-        }
-    }
-
-    for signature in signatures_by_group.values_mut() {
-        signature.sort_unstable();
-        signature.dedup();
-    }
-
-    intern_signatures_by_group(groups, signatures_by_group)
+        },
+    )
 }
 
 pub(crate) fn build_possible_match_signatures_by_internal_tsid(
@@ -852,25 +876,16 @@ pub(crate) fn build_seed_state_signature_ids_from_trie_classes(
     token_bytes: &BTreeMap<u32, Vec<u8>>,
     tokens_with_same_bytes: &FxHashMap<u32, Arc<[u32]>>,
 ) -> FxHashMap<u32, SignatureClassId> {
-    let groups = unique_same_byte_groups(tokens_with_same_bytes);
-    let group_leaders = build_same_byte_group_leaders(token_bytes, &groups);
-    let used_class_ids = used_state_class_ids(state_classes);
-    let mut signatures_by_group: FxHashMap<u32, SeedStateSignature> =
-        groups.iter().map(|group| (group[0], Vec::new())).collect();
-
-    let signature_entries: Vec<(u32, u32)> = used_class_ids
-        .par_iter()
-        .flat_map_iter(|&class_id| {
+    build_signature_ids_from_trie_classes(
+        class_maps,
+        state_classes,
+        token_bytes,
+        tokens_with_same_bytes,
+        |class_id, terminals, group_leaders| {
             let mut covered_leaders = Vec::new();
-            let Some(terminals) = class_maps.get(class_id as usize) else {
-                return Vec::new();
-            };
             for bitmap in terminals.values() {
                 for_each_dense_bit(bitmap, |original_token_id| {
-                    let Some(&leader) = group_leaders.get(original_token_id as usize) else {
-                        return;
-                    };
-                    if leader != u32::MAX {
+                    if let Some(leader) = same_byte_group_leader(group_leaders, original_token_id) {
                         covered_leaders.push(leader);
                     }
                 });
@@ -880,22 +895,9 @@ pub(crate) fn build_seed_state_signature_ids_from_trie_classes(
             covered_leaders
                 .into_iter()
                 .map(|leader| (leader, class_id))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-
-    for (leader, class_id) in signature_entries {
-        if let Some(signature) = signatures_by_group.get_mut(&leader) {
-            signature.push(class_id);
-        }
-    }
-
-    for signature in signatures_by_group.values_mut() {
-        signature.sort_unstable();
-        signature.dedup();
-    }
-
-    intern_signatures_by_group(groups, signatures_by_group)
+                .collect()
+        },
+    )
 }
 
 pub(crate) fn build_seed_state_signatures_from_possible_matches_by_internal_tsid(
