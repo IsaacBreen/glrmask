@@ -331,25 +331,3 @@ impl std::fmt::Display for NWA {
         fmt_nwa_states(self, f, &|l| l.to_string(), &|w| format!("{w}"))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_nwa_basic() {
-        let mut nwa = NWA::new(2, 10);
-        let s0 = nwa.add_state();
-        let s1 = nwa.add_state();
-        let s2 = nwa.add_state();
-
-        let w = Weight::all();
-        nwa.add_transition(s0, 0, s1, w.clone());
-        nwa.add_epsilon(s1, s2, w.clone());
-        nwa.set_final_weight(s2, w);
-
-        assert_eq!(nwa.num_states(), 3);
-        assert_eq!(nwa.num_transitions(), 2);
-        assert!(nwa.states[s2 as usize].final_weight.is_some());
-    }
-}

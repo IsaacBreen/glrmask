@@ -279,9 +279,3 @@ impl From<&str> for Expr {
         Expr::U8Seq(s.as_bytes().to_vec())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    // NOTE: the old AST tests are intentionally omitted until the legacy
-    // lexer rewrite lands.
-}

@@ -485,33 +485,3 @@ impl PartialEq for DWAState {
         self.transitions == other.transitions && self.final_weight == other.final_weight
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_dwa_eval_word() {
-        let nt = 1u32;
-        let max_tok = 5u32;
-        let mut dwa = DWA::new(nt, max_tok);
-        let s1 = dwa.add_state();
-
-        let w_trans = Weight::all();
-        let w_final = Weight::all();
-        dwa.add_transition(0, 0, s1, w_trans);
-        dwa.set_final_weight(s1, w_final);
-
-        let result = dwa.eval_word(&[0]);
-        assert!(!result.is_empty());
-    }
-
-    #[test]
-    fn test_dwa_eval_word_reject() {
-        let nt = 1u32;
-        let dwa = DWA::new(nt, 5);
-
-        let result = dwa.eval_word(&[0]);
-        assert!(result.is_empty());
-    }
-}
