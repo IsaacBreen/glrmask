@@ -86,12 +86,6 @@ fn compile_from_source(
     Ok(compile_owned(grammar, vocab))
 }
 
-fn glrm_to_grammar_def(source: &str) -> crate::Result<GrammarDef> {
-    let named = crate::grammar::glrm::from_glrm(source)?;
-    let factored = factor_named_grammar(named);
-    ast::lower(&factored)
-}
-
 fn parse_json_schema_to_named(schema_json: &str) -> crate::Result<ast::NamedGrammar> {
     let schema: serde_json::Value = serde_json::from_str(schema_json)
         .map_err(|e| crate::GlrMaskError::GrammarParse(format!("invalid JSON: {e}")))?;

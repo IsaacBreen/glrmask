@@ -2187,25 +2187,6 @@ impl Item {
     }
 }
 
-fn lr0_closure(items: &BTreeSet<Item>, rules: &[Rule]) -> BTreeSet<Item> {
-    let mut result = items.clone();
-    let mut queue: VecDeque<Item> = items.iter().copied().collect();
-
-    while let Some(item) = queue.pop_front() {
-        if let Some(Symbol::Nonterminal(nt)) = item.next_symbol(rules) {
-            for (i, r) in rules.iter().enumerate() {
-                if r.lhs == *nt {
-                    let new_item = Item::new(i as u32, 0, r.rhs.len() as u32);
-                    if result.insert(new_item) {
-                        queue.push_back(new_item);
-                    }
-                }
-            }
-        }
-    }
-    result
-}
-
 #[derive(Debug, Default, Clone)]
 struct PendingAction {
     shift: Option<(u32, bool)>,

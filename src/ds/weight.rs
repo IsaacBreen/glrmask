@@ -572,27 +572,6 @@ fn with_memoized_weight_op(
     result
 }
 
-enum NextMeaningfulWeight<'a> {
-    End,
-    Full,
-    Weight(&'a Weight),
-}
-
-fn next_meaningful_weight<'a, I>(iter: &mut I) -> NextMeaningfulWeight<'a>
-where
-    I: Iterator<Item = &'a Weight>,
-{
-    for weight in iter {
-        if weight.is_full() {
-            return NextMeaningfulWeight::Full;
-        }
-        if !weight.is_empty() {
-            return NextMeaningfulWeight::Weight(weight);
-        }
-    }
-    NextMeaningfulWeight::End
-}
-
 pub(crate) fn finalize_weight_map(map: WeightMap) -> Weight {
     if map.ranges().next().is_none() {
         EMPTY_WEIGHT.clone()

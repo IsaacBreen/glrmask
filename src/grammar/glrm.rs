@@ -44,7 +44,6 @@
 //! | `sep ~ ( i1? i2 i3? )`           | SeparatedSequence                    |
 
 use crate::GlrMaskError;
-use crate::ds::u8set::U8Set;
 use crate::grammar::ast::{GrammarExpr, NamedGrammar, NamedRule};
 
 // ============================================================
@@ -892,76 +891,6 @@ impl GlrmParser {
 }
 
 // ---- Parse a byte character class string ----------------------------------
-
-/// Parse a raw char-class definition string (as it appears between `[` and `]`
-/// in the GLRM format, with `^` prefix for negation already stripped) into a
-/// [`U8Set`].
-fn parse_byte_class(def: &str) -> Result<U8Set, GlrMaskError> {
-    let bytes = def.as_bytes();
-    let mut i = 0;
-    let negate = !def.is_empty() && bytes[0] == b'^';
-    if negate { i += 1; }
-
-    let mut set = U8Set::empty();
-
-    while i < bytes.len() {
-        let start_byte = read_class_byte(bytes, &mut i)?;
-        if i + 1 < bytes.len() && bytes[i] == b'-' && (i + 1) < bytes.len() {
-            i += 1; // consume `-`
-            let end_byte = read_class_byte(bytes, &mut i)?;
-            for b in start_byte..=end_byte {
-                set.insert(b);
-            }
-        } else {
-            set.insert(start_byte);
-        }
-    }
-
-    if negate {
-        let mut full = U8Set::all();
-        for b in 0u8..=255 {
-            if set.contains(b) { full.remove(b); }
-        }
-        Ok(full)
-    } else {
-        Ok(set)
-    }
-}
-
-fn read_class_byte(bytes: &[u8], i: &mut usize) -> Result<u8, GlrMaskError> {
-    if *i >= bytes.len() {
-        return Err(err("unexpected end of char class"));
-    }
-    let b = bytes[*i];
-    *i += 1;
-    if b == b'\\' {
-        if *i >= bytes.len() {
-            return Err(err("unexpected end of char class escape"));
-        }
-        let c = bytes[*i];
-        *i += 1;
-        match c {
-            b'n' => Ok(b'\n'),
-            b't' => Ok(b'\t'),
-            b'r' => Ok(b'\r'),
-            b'\\' => Ok(b'\\'),
-            b']' => Ok(b']'),
-            b'-' => Ok(b'-'),
-            b'^' => Ok(b'^'),
-            b'x' => {
-                if *i + 1 >= bytes.len() {
-                    return Err(err("incomplete hex escape in char class"));
-                }
-                let hi = bytes[*i]; *i += 1;
-                let lo = bytes[*i]; *i += 1;
-                Ok((hex_digit(hi)? << 4) | hex_digit(lo)?)
-            }
-            _ => Ok(c),
-        }
-    } else {
-        Ok(b)
-    }
-}
 
 // ---- Small helpers ---------------------------------------------------------
 
