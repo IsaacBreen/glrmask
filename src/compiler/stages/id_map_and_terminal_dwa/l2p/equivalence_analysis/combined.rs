@@ -1,11 +1,12 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use super::compat::TokenizerView;
-use super::combined_equivalence_analysis;
-use super::combined_equivalence_analysis::hash_byte_class_seq;
+use super::disallowed_follows::normalize_disallowed_follows;
+use super::state::fast as state_equivalence_analysis;
+use super::vocab::fast as vocab_equivalence_analysis;
 use crate::ds::bitset::BitSet;
 
 fn env_flag_enabled(name: &str) -> bool {
@@ -23,6 +24,100 @@ fn compile_profile_enabled() -> bool {
 
 fn elapsed_ms(started_at: std::time::Instant) -> f64 {
     started_at.elapsed().as_secs_f64() * 1000.0
+}
+
+struct TokenDedup<'a> {
+    representative_token_bytes: Vec<&'a [u8]>,
+    original_to_repr: Vec<usize>,
+}
+
+#[inline]
+pub(crate) fn hash_byte_class_seq(bytes: &[u8], byte_to_class: &[u8; 256]) -> u128 {
+    let mut hash: u128 = 0xFF51_AFD7_ED55_8CCD;
+    hash = hash.wrapping_mul(0xC4CE_B9FE_1A85_EC53).wrapping_add(bytes.len() as u128);
+    for &byte in bytes {
+        hash = hash
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .wrapping_add(byte_to_class[byte as usize] as u128);
+    }
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
+    hash ^= hash >> 29;
+    hash
+}
+
+fn deduplicate_tokens_by_byte_class<'a, S: AsRef<[u8]>>(
+    tokens: &'a [S],
+    byte_to_class: &[u8; 256],
+) -> TokenDedup<'a> {
+    let mut hash_to_repr = HashMap::with_capacity(tokens.len() / 2);
+    let mut representative_token_bytes = Vec::new();
+    let mut original_to_repr = Vec::with_capacity(tokens.len());
+
+    for token in tokens {
+        let bytes = token.as_ref();
+        let repr_idx = *hash_to_repr
+            .entry(hash_byte_class_seq(bytes, byte_to_class))
+            .or_insert_with(|| {
+                let idx = representative_token_bytes.len();
+                representative_token_bytes.push(bytes);
+                idx
+            });
+        original_to_repr.push(repr_idx);
+    }
+
+    TokenDedup {
+        representative_token_bytes,
+        original_to_repr,
+    }
+}
+
+fn expand_vocab_classes(
+    dedup_classes: vocab_equivalence_analysis::VocabEquivalenceResult,
+    original_to_repr: &[usize],
+    num_representatives: usize,
+) -> vocab_equivalence_analysis::VocabEquivalenceResult {
+    let mut repr_to_class = vec![usize::MAX; num_representatives];
+    let mut original_classes: Vec<Vec<usize>> = Vec::with_capacity(dedup_classes.len());
+
+    for (class_idx, dedup_class) in dedup_classes.iter().enumerate() {
+        for &dedup_idx in dedup_class {
+            repr_to_class[dedup_idx] = class_idx;
+        }
+        original_classes.push(Vec::new());
+    }
+
+    for (original_idx, &repr_idx) in original_to_repr.iter().enumerate() {
+        original_classes[repr_to_class[repr_idx]].push(original_idx);
+    }
+
+    original_classes.into_iter().collect()
+}
+
+fn representative_tokens_for_vocab_classes<'a>(
+    dedup_vocab_classes: &vocab_equivalence_analysis::VocabEquivalenceResult,
+    representative_token_bytes: &'a [&'a [u8]],
+) -> Vec<&'a [u8]> {
+    dedup_vocab_classes
+        .iter()
+        .map(|dedup_class| representative_token_bytes[dedup_class[0]])
+        .collect()
+}
+
+fn tokenizer_group_count(tokenizer: &TokenizerView) -> usize {
+    tokenizer
+        .dfa()
+        .states
+        .iter()
+        .flat_map(|state| {
+            state
+                .finalizers
+                .iter()
+                .copied()
+                .chain(state.possible_future_group_ids.iter().copied())
+        })
+        .max()
+        .map_or(0, |max_group| max_group + 1)
 }
 
 fn adjust_disallowed_follows(
@@ -737,6 +832,17 @@ fn analyze_equivalences_impl(
     };
     let tokenizer_view_ms = elapsed_ms(tokenizer_view_started_at);
 
+    if let Some(cache) = shared_vocab_dfa_cache {
+        cache.get_or_init(|| vocab_equivalence_analysis::SharedVocabDfaBase::build_from_dfa(tokenizer_view.dfa()));
+    }
+
+    let compatible_cache = shared_vocab_dfa_cache
+        .and_then(|cache| cache.get())
+        .filter(|base| base.is_compatible_with_dfa(tokenizer_view.dfa()));
+    let byte_to_class = compatible_cache
+        .map(|base| base.byte_to_class())
+        .unwrap_or_else(|| super::compat::compute_byte_classes(tokenizer_view.dfa()));
+
     // Extract vocab tokens as byte slices, ordered by token ID.
     let vocab_extract_started_at = std::time::Instant::now();
     let max_token_id = vocab.max_token_id();
@@ -757,40 +863,103 @@ fn analyze_equivalences_impl(
     let initial_states_ms = elapsed_ms(initial_states_started_at);
 
     let combined_started_at = std::time::Instant::now();
-    let result = combined_equivalence_analysis::compute_combined_equivalence_with_group_filter(
+    let dedup_started_at = std::time::Instant::now();
+    let dedup = deduplicate_tokens_by_byte_class(&token_bytes, &byte_to_class);
+    let mut relevant_bytes = [false; 256];
+    for token in &dedup.representative_token_bytes {
+        for &byte in *token {
+            relevant_bytes[byte as usize] = true;
+        }
+    }
+    let dedup_ms = elapsed_ms(dedup_started_at);
+
+    let max_length_started_at = std::time::Instant::now();
+    let pre_state_reps = super::state::max_length::find_state_equivalence_classes_byte_restricted(
         &tokenizer_view,
-        &token_bytes,
+        &dedup.representative_token_bytes,
         &initial_states,
+        Some(&byte_to_class),
+        active_groups,
+        Some(&relevant_bytes),
+    );
+    let max_length_ms = elapsed_ms(max_length_started_at);
+
+    let pre_reduced_states: Vec<usize> = pre_state_reps
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let normalized_disallowed_follows =
+        normalize_disallowed_follows(tokenizer_group_count(&tokenizer_view), effective_disallowed);
+
+    let vocab_started_at = std::time::Instant::now();
+    let dedup_vocab_classes = vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter(
+        &tokenizer_view,
+        &dedup.representative_token_bytes,
+        &pre_reduced_states,
         effective_disallowed,
-        ignore_terminal,
+        Some(&byte_to_class),
         active_groups,
         shared_vocab_dfa_cache,
     );
+    let vocab_ms = elapsed_ms(vocab_started_at);
+
+    let token_state_started_at = std::time::Instant::now();
+    let vocab_representative_tokens = representative_tokens_for_vocab_classes(
+        &dedup_vocab_classes,
+        &dedup.representative_token_bytes,
+    );
+    let reduced_state_reps_for_pre_reduced =
+        state_equivalence_analysis::find_state_equivalence_classes_with_disallowed(
+            &tokenizer_view,
+            &vocab_representative_tokens,
+            &pre_reduced_states,
+            &normalized_disallowed_follows,
+        );
+    let rep_to_final: BTreeMap<usize, usize> = pre_reduced_states
+        .iter()
+        .copied()
+        .zip(reduced_state_reps_for_pre_reduced.iter().copied())
+        .collect();
+    let representative_states = pre_state_reps
+        .iter()
+        .map(|pre_rep| rep_to_final[pre_rep])
+        .collect::<Vec<_>>();
+    let token_state_ms = elapsed_ms(token_state_started_at);
+
+    let vocab_classes = expand_vocab_classes(
+        dedup_vocab_classes,
+        &dedup.original_to_repr,
+        dedup.representative_token_bytes.len(),
+    );
+    let state_classes =
+        state_equivalence_analysis::mapping_to_equivalence_classes(&initial_states, &representative_states);
     let combined_ms = elapsed_ms(combined_started_at);
 
     let state_map_started_at = std::time::Instant::now();
     let num_dfa_states = tokenizer.num_states() as usize;
     let state_map = match initial_state_map {
-        Some(init_map) => build_state_map_composed(&result.state_classes, num_dfa_states, init_map),
-        None => build_state_map(&result.state_classes, num_dfa_states),
+        Some(init_map) => build_state_map_composed(&state_classes, num_dfa_states, init_map),
+        None => build_state_map(&state_classes, num_dfa_states),
     };
     let state_map_ms = elapsed_ms(state_map_started_at);
 
     let vocab_map_started_at = std::time::Instant::now();
-    let vocab_map = build_vocab_map(
-        &result.vocab_classes,
-        &token_ids,
-        max_token_id,
-    );
+    let vocab_map = build_vocab_map(&vocab_classes, &token_ids, max_token_id);
     let vocab_map_ms = elapsed_ms(vocab_map_started_at);
 
     if profile_compile {
         eprintln!(
-            "[glrmask/profile][id_map] adjust_disallowed_ms={:.3} tokenizer_view_ms={:.3} vocab_extract_ms={:.3} initial_states_ms={:.3} combined_equiv_ms={:.3} build_state_map_ms={:.3} build_vocab_map_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][id_map] adjust_disallowed_ms={:.3} tokenizer_view_ms={:.3} vocab_extract_ms={:.3} initial_states_ms={:.3} dedup_ms={:.3} max_length_ms={:.3} token_state_ms={:.3} vocab_ms={:.3} combined_equiv_ms={:.3} build_state_map_ms={:.3} build_vocab_map_ms={:.3} total_ms={:.3}",
             adjust_ms,
             tokenizer_view_ms,
             vocab_extract_ms,
             initial_states_ms,
+            dedup_ms,
+            max_length_ms,
+            token_state_ms,
+            vocab_ms,
             combined_ms,
             state_map_ms,
             vocab_map_ms,
