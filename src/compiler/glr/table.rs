@@ -1098,28 +1098,6 @@ enum CellUpdate {
     Remove,
 }
 
-fn build_state_predecessors(
-    table: &GLRTable,
-    original_num_states: u32,
-    constituent_sets: &[BTreeSet<u32>],
-) -> Vec<BTreeSet<u32>> {
-    let nstates = table.num_states as usize;
-    let mut predecessors: Vec<BTreeSet<u32>> = vec![BTreeSet::new(); nstates];
-
-    for src in 0..original_num_states as usize {
-        for action in table.action[src].values() {
-            if let Some(dst) = action.shift_target() {
-                predecessors[dst as usize].extend(constituent_sets[src].iter().copied());
-            }
-        }
-        for &(dst, _) in table.goto[src].values() {
-            predecessors[dst as usize].extend(constituent_sets[src].iter().copied());
-        }
-    }
-
-    predecessors
-}
-
 fn build_runtime_state_predecessors(
     table: &GLRTable,
     original_num_states: u32,
@@ -2285,23 +2263,6 @@ where
     (item_sets, transitions)
 }
 
-#[allow(dead_code)]
-fn build_lr0_item_sets(grammar: &AnalyzedGrammar) -> (Vec<BTreeSet<Item>>, Vec<BTreeMap<Symbol, u32>>) {
-    let rules = &grammar.rules;
-
-    let initial = {
-        let mut s = BTreeSet::new();
-        s.insert(Item::new(0, 0, rules[0].rhs.len() as u32)); 
-        lr0_closure(&s, rules)
-    };
-
-    build_item_sets(
-        initial,
-        |item| item.next_symbol(rules).cloned(),
-        |items, sym| lr0_goto_set(items, sym, rules),
-    )
-}
-
 #[derive(Debug, Default, Clone)]
 struct PendingAction {
     shift: Option<(u32, bool)>,
@@ -2409,44 +2370,6 @@ fn finish_table(
         rules: grammar.rules.clone(),
         forwarded_shifts,
     }
-}
-
-#[allow(dead_code)]
-fn build_slr1_table(
-    grammar: &AnalyzedGrammar,
-    item_sets: &[BTreeSet<Item>],
-    transitions: &[BTreeMap<Symbol, u32>],
-) -> GLRTable {
-    // Convert old-style transitions to new format with replace=false, forwarded=false
-    let transitions_with_replace: Vec<BTreeMap<Symbol, (u32, bool, bool)>> = transitions
-        .iter()
-        .map(|m| m.iter().map(|(s, &t)| (s.clone(), (t, false, false))).collect())
-        .collect();
-    let (mut pending, goto, forwarded_shifts) = initialize_pending_and_goto(&transitions_with_replace);
-
-    for (state_id, items) in item_sets.iter().enumerate() {
-
-        for item in items {
-            let rule = &grammar.rules[item.rule as usize];
-            if item.dot as usize != rule.rhs.len() {
-                continue;
-            }
-
-            if item.rule == 0 {
-                pending[state_id].entry(EOF).or_default().push_accept();
-                continue;
-            }
-
-            for &lookahead in &grammar.follow[rule.lhs as usize] {
-                pending[state_id]
-                    .entry(lookahead)
-                    .or_default()
-                    .push_reduce(rule.lhs, item.stack_depth);
-            }
-        }
-    }
-
-    finish_table(grammar, pending, goto, forwarded_shifts)
 }
 
 // LR(1) item set construction.

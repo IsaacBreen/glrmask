@@ -9,7 +9,6 @@ use smallvec::SmallVec;
 pub type ParserGSS = LeveledGSS<u32, TerminalsDisallowed>;
 
 type ReduceSources = SmallVec<[(u32, ParserGSS); 4]>;
-type GotoBatch = SmallVec<[(u32, ParserGSS); 8]>;
 
 pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> ParserGSS {
     advance_stacks_core(table, stack.clone(), token)
@@ -157,21 +156,6 @@ fn virtual_stack_may_apply_guarded_shift(
 
     let mut cursor = stack.clone();
     cursor.pop(shift.pop as usize) == 0
-}
-
-fn apply_gotos(mut gss: ParserGSS, gotos: GotoBatch) -> ParserGSS {
-    for (target, base) in gotos {
-        gss = gss.absorb_push_same_acc(target, &base);
-    }
-    gss
-}
-
-fn add_goto(gotos: &mut GotoBatch, target: u32, base: ParserGSS) {
-    if let Some((_, existing)) = gotos.iter_mut().find(|(t, _)| *t == target) {
-        *existing = existing.merge(&base);
-    } else {
-        gotos.push((target, base));
-    }
 }
 
 fn reduce_sources_from_isolated(gss: &ParserGSS, rhs_len: usize) -> ReduceSources {
