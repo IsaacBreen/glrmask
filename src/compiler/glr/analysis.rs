@@ -186,29 +186,35 @@ fn max_nt_id(rules: &[Rule]) -> u32 {
         .unwrap_or(0)
 }
 
+fn add_boundary_nonterminals<'a>(
+    symbols: impl Iterator<Item = &'a Symbol>,
+    nullable: &BTreeSet<NonterminalID>,
+    targets: &mut BTreeSet<NonterminalID>,
+) {
+    for symbol in symbols {
+        match symbol {
+            Symbol::Nonterminal(nonterminal) => {
+                targets.insert(*nonterminal);
+                if !nullable.contains(nonterminal) {
+                    break;
+                }
+            }
+            Symbol::Terminal(_) => break,
+        }
+    }
+}
+
 fn build_right_reachability_graph(
     rules: &[Rule],
     nullable: &BTreeSet<NonterminalID>,
 ) -> BTreeMap<NonterminalID, BTreeSet<NonterminalID>> {
     let mut graph = BTreeMap::<NonterminalID, BTreeSet<NonterminalID>>::new();
     for rule in rules {
-        let suffix = rule
-            .rhs
-            .iter()
-            .rev()
-            .take_while(|symbol| match symbol {
-                Symbol::Nonterminal(nonterminal) => nullable.contains(nonterminal),
-                Symbol::Terminal(_) => false,
-            })
-            .collect::<Vec<_>>();
-        for symbol in suffix.into_iter().rev() {
-            if let Symbol::Nonterminal(nonterminal) = symbol {
-                graph.entry(rule.lhs).or_default().insert(*nonterminal);
-            }
-        }
-        if let Some(Symbol::Nonterminal(nonterminal)) = rule.rhs.last() {
-            graph.entry(rule.lhs).or_default().insert(*nonterminal);
-        }
+        add_boundary_nonterminals(
+            rule.rhs.iter().rev(),
+            nullable,
+            graph.entry(rule.lhs).or_default(),
+        );
     }
     graph
 }
@@ -295,17 +301,7 @@ fn build_left_reachability_graph(
 ) -> BTreeMap<NonterminalID, BTreeSet<NonterminalID>> {
     let mut graph = BTreeMap::<NonterminalID, BTreeSet<NonterminalID>>::new();
     for rule in rules {
-        for symbol in &rule.rhs {
-            match symbol {
-                Symbol::Nonterminal(nonterminal) => {
-                    graph.entry(rule.lhs).or_default().insert(*nonterminal);
-                    if !nullable.contains(nonterminal) {
-                        break;
-                    }
-                }
-                Symbol::Terminal(_) => break,
-            }
-        }
+        add_boundary_nonterminals(rule.rhs.iter(), nullable, graph.entry(rule.lhs).or_default());
     }
     graph
 }
