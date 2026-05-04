@@ -621,6 +621,27 @@ fn build_l1_sorted_token_buckets<'a>(
     }
 }
 
+fn collect_active_terminal_signature(
+    tokenizer: &Tokenizer,
+    state: u32,
+    active_terminals: &[bool],
+) -> Vec<u32> {
+    let mut signature = Vec::<u32>::new();
+    for tid in tokenizer.dfa.finalizers(state).iter() {
+        if active_terminals.get(tid).copied().unwrap_or(false) {
+            signature.push(tid as u32);
+        }
+    }
+    for tid in tokenizer.tokens_accessible_from_state(state).iter() {
+        if active_terminals.get(tid).copied().unwrap_or(false) {
+            signature.push(tid as u32);
+        }
+    }
+    signature.sort_unstable();
+    signature.dedup();
+    signature
+}
+
 fn build_l1_state_to_terminal_signature(
     tokenizer: &Tokenizer,
     active_terminals: &[bool],
@@ -631,20 +652,7 @@ fn build_l1_state_to_terminal_signature(
     let mut state_to_terminal_signature = vec![0u32; tokenizer.num_states() as usize];
 
     for state in 0..tokenizer.num_states() as usize {
-        let state_u32 = state as u32;
-        let mut signature = Vec::<u32>::new();
-        for tid in tokenizer.dfa.finalizers(state_u32).iter() {
-            if active_terminals.get(tid).copied().unwrap_or(false) {
-                signature.push(tid as u32);
-            }
-        }
-        for tid in tokenizer.tokens_accessible_from_state(state_u32).iter() {
-            if active_terminals.get(tid).copied().unwrap_or(false) {
-                signature.push(tid as u32);
-            }
-        }
-        signature.sort_unstable();
-        signature.dedup();
+        let signature = collect_active_terminal_signature(tokenizer, state as u32, active_terminals);
         let sig_id = *signature_to_id.entry(signature).or_insert_with(|| {
             let id = next_signature_id;
             next_signature_id += 1;
@@ -764,20 +772,7 @@ fn build_l1_terminal_dwa(
     let mut terminal_signatures = Vec::<Vec<u32>>::new();
     let mut state_to_terminal_signature = vec![u32::MAX; num_dfa_states];
     for state in 0..num_dfa_states {
-        let state_u32 = state as u32;
-        let mut signature = Vec::<u32>::new();
-        for tid in tokenizer.dfa.finalizers(state_u32).iter() {
-            if active_terminals.get(tid).copied().unwrap_or(false) {
-                signature.push(tid as u32);
-            }
-        }
-        for tid in tokenizer.tokens_accessible_from_state(state_u32).iter() {
-            if active_terminals.get(tid).copied().unwrap_or(false) {
-                signature.push(tid as u32);
-            }
-        }
-        signature.sort_unstable();
-        signature.dedup();
+        let signature = collect_active_terminal_signature(tokenizer, state as u32, active_terminals);
         if signature.is_empty() {
             continue;
         }
