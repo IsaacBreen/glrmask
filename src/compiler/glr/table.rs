@@ -2206,63 +2206,6 @@ fn lr0_closure(items: &BTreeSet<Item>, rules: &[Rule]) -> BTreeSet<Item> {
     result
 }
 
-fn lr0_goto_set(items: &BTreeSet<Item>, sym: &Symbol, rules: &[Rule]) -> BTreeSet<Item> {
-    let mut kernel = BTreeSet::new();
-    for item in items {
-        if item.next_symbol(rules) == Some(sym) {
-            kernel.insert(Item::new(item.rule, item.dot + 1, item.stack_depth));
-        }
-    }
-    lr0_closure(&kernel, rules)
-}
-
-fn build_item_sets<ItemT, NextSymbol, GotoSet>(
-    initial: BTreeSet<ItemT>,
-    next_symbol: NextSymbol,
-    goto_set: GotoSet,
-) -> (Vec<BTreeSet<ItemT>>, Vec<BTreeMap<Symbol, u32>>)
-where
-    ItemT: Copy + Ord + std::hash::Hash,
-    NextSymbol: Fn(&ItemT) -> Option<Symbol>,
-    GotoSet: Fn(&BTreeSet<ItemT>, &Symbol) -> BTreeSet<ItemT>,
-{
-    let mut item_sets = vec![initial.clone()];
-    let mut transitions = vec![BTreeMap::new()];
-    let mut set_to_id: FxHashMap<Vec<ItemT>, u32> = FxHashMap::default();
-    set_to_id.insert(initial.iter().copied().collect(), 0);
-
-    let mut queue = VecDeque::from([0u32]);
-    while let Some(state_id) = queue.pop_front() {
-        let symbols: BTreeSet<Symbol> = item_sets[state_id as usize]
-            .iter()
-            .filter_map(&next_symbol)
-            .collect();
-
-        for symbol in &symbols {
-            let target_items = goto_set(&item_sets[state_id as usize], symbol);
-            if target_items.is_empty() {
-                continue;
-            }
-
-            let key: Vec<ItemT> = target_items.iter().copied().collect();
-            let target_id = if let Some(&existing_id) = set_to_id.get(&key) {
-                existing_id
-            } else {
-                let new_id = item_sets.len() as u32;
-                set_to_id.insert(key, new_id);
-                item_sets.push(target_items);
-                transitions.push(BTreeMap::new());
-                queue.push_back(new_id);
-                new_id
-            };
-
-            transitions[state_id as usize].insert(symbol.clone(), target_id);
-        }
-    }
-
-    (item_sets, transitions)
-}
-
 #[derive(Debug, Default, Clone)]
 struct PendingAction {
     shift: Option<(u32, bool)>,

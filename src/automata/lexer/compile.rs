@@ -273,30 +273,6 @@ fn append_dfa_expr(dfa: &DFA, nfa: &mut NFA, start: u32, end: u32) {
     }
 }
 
-fn append_group_dfa_expr(dfa: &DFA, nfa: &mut NFA, start: u32, group_id: u32) {
-    let mut state_map = Vec::with_capacity(dfa.num_states());
-    state_map.push(start);
-    for _ in 1..dfa.num_states() {
-        state_map.push(nfa.add_state());
-    }
-
-    for (state_id, state) in dfa.states().iter().enumerate() {
-        let mapped_state = state_map[state_id];
-        for (byte, &target) in state.transitions.iter() {
-            nfa.add_transition(mapped_state, byte, state_map[target as usize]);
-        }
-        if !state.finalizers.is_empty() {
-            nfa.add_finalizer(mapped_state, group_id);
-        }
-    }
-}
-
-fn dfa_start_is_entry_only(dfa: &DFA) -> bool {
-    dfa.states()
-        .iter()
-        .all(|state| state.transitions.iter().all(|(_, &target)| target != 0))
-}
-
 fn append_sequence_expr(parts: &[Expr], nfa: &mut NFA, start: u32, end: u32) {
     let mut state = start;
     for (index, part) in parts.iter().enumerate() {
