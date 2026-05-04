@@ -80,7 +80,6 @@ impl<K: Clone + Eq + Hash, V: Clone> CompactMap<K, V> {
                     sv.push((key, value));
                     None
                 } else {
-                    // Promote to Large
                     let mut m = IHashMap::new();
                     for (k, v) in sv.drain(..) {
                         m.insert(k, v);
@@ -151,12 +150,14 @@ enum CompactMapKeys<'a, K, V> {
 
 impl<'a, K: Clone, V> Iterator for CompactMapKeys<'a, K, V> {
     type Item = &'a K;
+
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             CompactMapKeys::Inline(it) => it.next().map(|(k, _)| k),
             CompactMapKeys::Large(it) => it.next(),
         }
     }
+
     fn size_hint(&self) -> (usize, Option<usize>) {
         match self {
             CompactMapKeys::Inline(it) => it.size_hint(),
@@ -172,12 +173,14 @@ enum CompactMapValues<'a, K, V> {
 
 impl<'a, K, V> Iterator for CompactMapValues<'a, K, V> {
     type Item = &'a V;
+
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             CompactMapValues::Inline(it) => it.next().map(|(_, v)| v),
             CompactMapValues::Large(it) => it.next(),
         }
     }
+
     fn size_hint(&self) -> (usize, Option<usize>) {
         match self {
             CompactMapValues::Inline(it) => it.size_hint(),
@@ -191,14 +194,16 @@ enum CompactMapIter<'a, K, V> {
     Large(im::hashmap::Iter<'a, K, V>),
 }
 
-impl<'a, K: Clone, V: Clone> Iterator for CompactMapIter<'a, K, V> {
+impl<'a, K, V> Iterator for CompactMapIter<'a, K, V> {
     type Item = (&'a K, &'a V);
+
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             CompactMapIter::Inline(it) => it.next().map(|(k, v)| (k, v)),
             CompactMapIter::Large(it) => it.next(),
         }
     }
+
     fn size_hint(&self) -> (usize, Option<usize>) {
         match self {
             CompactMapIter::Inline(it) => it.size_hint(),
@@ -207,17 +212,50 @@ impl<'a, K: Clone, V: Clone> Iterator for CompactMapIter<'a, K, V> {
     }
 }
 
+impl<K: Clone + Eq + Hash, V: Clone> IntoIterator for CompactMap<K, V> {
+    type Item = (K, V);
+    type IntoIter = CompactMapIntoIter<K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            CompactMap::Inline(sv) => CompactMapIntoIter::Inline(sv.into_iter()),
+            CompactMap::Large(m) => CompactMapIntoIter::Large(m.into_iter()),
+        }
+    }
+}
+
+enum CompactMapIntoIter<K: Clone + Eq + Hash, V: Clone> {
+    Inline(smallvec::IntoIter<[(K, V); 4]>),
+    Large(im::hashmap::ConsumingIter<(K, V)>),
+}
+
+impl<K: Clone + Eq + Hash, V: Clone> Iterator for CompactMapIntoIter<K, V> {
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            CompactMapIntoIter::Inline(it) => it.next(),
+            CompactMapIntoIter::Large(it) => it.next(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            CompactMapIntoIter::Inline(it) => it.size_hint(),
+            CompactMapIntoIter::Large(it) => it.size_hint(),
+        }
+    }
+}
+
 impl<'a, K: Clone + Eq + Hash, V: Clone> IntoIterator for &'a CompactMap<K, V> {
     type Item = (&'a K, &'a V);
     type IntoIter = CompactMapIter<'a, K, V>;
+
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
 }
 
-/// A map optimized for small sizes (≤2 entries) keyed by u32 (depth).
-/// Replaces `OrdMap<u32, Arc<N>>` in the GSS children maps.
-/// Typical GSS paths have 1 entry; this avoids B-tree overhead.
 #[derive(Clone, PartialEq, Eq)]
 enum CompactOrdMap<V: Clone> {
     Inline(SmallVec<[(u32, V); 2]>),
@@ -274,7 +312,6 @@ impl<V: Clone> CompactOrdMap<V> {
                     sv.push((key, value));
                     None
                 } else {
-                    // Promote to Large
                     let mut m = OrdMap::new();
                     for (k, v) in sv.drain(..) {
                         m.insert(k, v);
@@ -297,9 +334,7 @@ impl<V: Clone> CompactOrdMap<V> {
 
     fn get_max(&self) -> Option<(&u32, &V)> {
         match self {
-            CompactOrdMap::Inline(sv) => {
-                sv.iter().max_by_key(|(k, _)| *k).map(|(k, v)| (k, v))
-            }
+            CompactOrdMap::Inline(sv) => sv.iter().max_by_key(|(k, _)| *k).map(|(k, v)| (k, v)),
             CompactOrdMap::Large(m) => m.get_max().map(|(k, v)| (k, v)),
         }
     }
@@ -326,12 +361,14 @@ enum CompactOrdMapIter<'a, V> {
 
 impl<'a, V: Clone> Iterator for CompactOrdMapIter<'a, V> {
     type Item = (&'a u32, &'a V);
+
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             CompactOrdMapIter::Inline(it) => it.next().map(|(k, v)| (k, v)),
             CompactOrdMapIter::Large(it) => it.next(),
         }
     }
+
     fn size_hint(&self) -> (usize, Option<usize>) {
         match self {
             CompactOrdMapIter::Inline(it) => it.size_hint(),
@@ -347,12 +384,14 @@ enum CompactOrdMapValues<'a, V> {
 
 impl<'a, V: Clone> Iterator for CompactOrdMapValues<'a, V> {
     type Item = &'a V;
+
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             CompactOrdMapValues::Inline(it) => it.next().map(|(_, v)| v),
             CompactOrdMapValues::Large(it) => it.next(),
         }
     }
+
     fn size_hint(&self) -> (usize, Option<usize>) {
         match self {
             CompactOrdMapValues::Inline(it) => it.size_hint(),
@@ -378,12 +417,14 @@ enum CompactOrdMapKeys<'a, V> {
 
 impl<'a, V> Iterator for CompactOrdMapKeys<'a, V> {
     type Item = &'a u32;
+
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             CompactOrdMapKeys::Inline(it) => it.next().map(|(k, _)| k),
             CompactOrdMapKeys::Large(it) => it.next(),
         }
     }
+
     fn size_hint(&self) -> (usize, Option<usize>) {
         match self {
             CompactOrdMapKeys::Inline(it) => it.size_hint(),
@@ -395,6 +436,7 @@ impl<'a, V> Iterator for CompactOrdMapKeys<'a, V> {
 impl<'a, V: Clone> IntoIterator for &'a CompactOrdMap<V> {
     type Item = (&'a u32, &'a V);
     type IntoIter = CompactOrdMapIter<'a, V>;
+
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
@@ -402,12 +444,6 @@ impl<'a, V: Clone> IntoIterator for &'a CompactOrdMap<V> {
 
 type Children<T, N> = CompactMap<T, CompactOrdMap<Arc<N>>>;
 
-/// Linear segment of the stack: multiple values packed into one node.
-/// `values[0]` is the deepest value (closest to `next`),
-/// `values[last]` is the shallowest (top of stack).
-/// Intermediate levels (all except the top) are guaranteed to have empty=false.
-/// Values are stored in SV<T> (type-aliased segment vector).
-/// Segments are always non-accepting (empty is implicitly false).
 struct Segment<T: Clone + Eq + Hash> {
     values: SV<T>,
     next: Arc<Lower<T>>,
@@ -449,10 +485,6 @@ enum Lower<T: Clone + Eq + Hash> {
     Segment(Arc<Segment<T>>),
 }
 
-/// Get a stable identity for a Lower node wrapped in Arc.
-/// For Segment nodes, uses the inner Arc<Segment> pointer (since the outer Arc<Lower>
-/// may be ephemeral when constructed from segment_rest_arc or children()).
-/// For General nodes, uses the outer Arc<Lower> pointer directly.
 #[inline]
 fn lower_node_id<T: Clone + Eq + Hash>(node: &Arc<Lower<T>>) -> usize {
     match &**node {
@@ -486,9 +518,6 @@ impl<T: Clone + Eq + Hash> Lower<T> {
         }
     }
 
-    /// If this node is a deterministic chain link (Segment or single-child
-    /// General with one edge), return the next node below it plus the number
-    /// of stack values represented at this node.
     #[inline]
     fn chain_step(&self) -> Option<(&Arc<Lower<T>>, usize)> {
         match self {
@@ -505,8 +534,6 @@ impl<T: Clone + Eq + Hash> Lower<T> {
         }
     }
 
-    /// Append the values represented by this deterministic chain node,
-    /// top-first, into `out`.
     #[inline]
     fn append_chain_values_top_first(&self, out: &mut SmallVec<[T; 16]>) {
         match self {
@@ -521,8 +548,6 @@ impl<T: Clone + Eq + Hash> Lower<T> {
         }
     }
 
-    /// Get children as a general Children map.
-    /// For Segment, constructs a map with the top value → rest-of-segment.
     fn children(&self) -> Children<T, Lower<T>> {
         match self {
             Lower::General { children, .. } => children.clone(),
@@ -534,7 +559,6 @@ impl<T: Clone + Eq + Hash> Lower<T> {
         }
     }
 
-    /// Consume self and return (children, empty, max_depth).
     fn into_parts(self) -> (Children<T, Lower<T>>, bool, u32) {
         match self {
             Lower::General { children, empty, max_depth } => (children, empty, max_depth),
@@ -545,8 +569,6 @@ impl<T: Clone + Eq + Hash> Lower<T> {
                 let child = if seg.values.len() == 1 {
                     seg.next
                 } else {
-                    // Pop the top value by taking all-but-last. O(1) for view-based types.
-                    // Don't call new_segment() — no need to merge, just shrink the segment.
                     let rest_values = seg.values.take(seg.values.len() - 1);
                     let child_max_depth = seg.max_depth - 1;
                     let segments_len = seg.segments_len - 1;
@@ -564,7 +586,6 @@ impl<T: Clone + Eq + Hash> Lower<T> {
         }
     }
 
-    /// Number of distinct child keys (at the top level).
     #[inline(always)]
     fn children_len(&self) -> usize {
         match self {
@@ -573,7 +594,6 @@ impl<T: Clone + Eq + Hash> Lower<T> {
         }
     }
 
-    /// Whether there are no children.
     #[inline(always)]
     fn children_is_empty(&self) -> bool {
         match self {
@@ -582,7 +602,6 @@ impl<T: Clone + Eq + Hash> Lower<T> {
         }
     }
 
-    /// Check if the top-level children contains a key.
     fn children_contains_key(&self, key: &T) -> bool {
         match self {
             Lower::General { children, .. } => children.contains_key(key),
@@ -590,7 +609,6 @@ impl<T: Clone + Eq + Hash> Lower<T> {
         }
     }
 
-    /// Ensure this Lower is in General form, converting from Segment if necessary.
     fn ensure_general(&mut self) {
         if let Lower::Segment(_) = self {
             let old = std::mem::replace(self, Lower::General {
@@ -603,14 +621,11 @@ impl<T: Clone + Eq + Hash> Lower<T> {
         }
     }
 
-    /// Returns true if this is a Segment variant.
     #[inline(always)]
     fn is_segment(&self) -> bool {
         matches!(self, Lower::Segment(_))
     }
 
-    /// For Segment variant, get the shallowest (top) value by reference.
-    /// Panics if called on General.
     #[inline(always)]
     fn segment_top_value(&self) -> &T {
         match self {
@@ -619,8 +634,6 @@ impl<T: Clone + Eq + Hash> Lower<T> {
         }
     }
 
-    /// For Segment variant, get the deep-end next pointer.
-    /// Panics if called on General.
     #[inline(always)]
     fn segment_next(&self) -> &Arc<Lower<T>> {
         match self {
@@ -629,8 +642,6 @@ impl<T: Clone + Eq + Hash> Lower<T> {
         }
     }
 
-    /// For Segment variant, get the values vector.
-    /// Panics if called on General.
     #[inline(always)]
     fn segment_values(&self) -> &SV<T> {
         match self {
@@ -639,14 +650,11 @@ impl<T: Clone + Eq + Hash> Lower<T> {
         }
     }
 
-    /// For Segment variant, return an Arc to the "rest" (everything below the top value).
-    /// If len==1, wraps next in Arc. Otherwise creates a new shorter Segment.
     fn segment_rest_arc(&self) -> Arc<Lower<T>> {
         match self {
             Lower::Segment(seg) if seg.values.len() == 1 => seg.next.clone(),
             Lower::Segment(seg) => seg.rest.get_or_init(|| {
                 let rest_values = seg.values.take(seg.values.len() - 1);
-                // Don't merge with child; just create a shorter segment.
                 let max_depth = seg.max_depth - 1;
                 let segments_len = seg.segments_len - 1;
                 Arc::new(Lower::Segment(Arc::new(Segment {
@@ -742,20 +750,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Upper<T, A> {
             }
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct LeveledGSSSummary {
-    pub top_values_count: usize,
-    pub upperbranch_nodes: usize,
-    pub interface_nodes: usize,
-    pub lower_nodes: usize,
-    pub lower_general_nodes: usize,
-    pub lower_segment_nodes: usize,
-    pub total_unique_nodes: usize,
-    pub total_edges: usize,
-    pub accumulator_instances: usize,
-    pub max_depth: u32,
 }
 
 fn merge_optional_acc<A: Merge + Clone>(a: &Option<A>, b: &Option<A>) -> Option<A> {
@@ -1254,452 +1248,6 @@ where
     }
 }
 
-#[cfg(test)]
-#[derive(Clone, PartialEq)]
-pub struct LeveledGSSStats<T: Clone + Eq + Hash, A: Clone + Eq + Hash> {
-    pub top_values: HashSet<T>,
-    pub num_upperbranch_nodes: usize,
-    pub num_interface_nodes: usize,
-    pub num_lower_nodes: usize,
-    pub total_unique_nodes: usize,
-    pub num_structurally_unique_nodes: usize,
-    pub upper_edges: usize,
-    pub interface_to_lower_edges: usize,
-    pub lower_edges: usize,
-    pub total_edges: usize,
-    pub max_upper_depth: u32,
-    pub max_lower_depth: u32,
-    pub distinct_values_count: usize,
-    pub distinct_values: HashSet<T>,
-    pub unique_accumulators_count: usize,
-    pub unique_accumulators: HashSet<A>,
-    pub total_accumulator_instances: usize,
-    pub num_upper_with_empty: usize,
-    pub num_interfaces_with_empty: usize,
-    pub num_lower_terminal_nodes: usize,
-    pub num_interface_implicit_terminals: usize,
-    pub num_multi_depth_slots_upper: usize,
-    pub num_multi_depth_slots_lower: usize,
-    pub max_multiplicity_per_value_upper: usize,
-    pub max_multiplicity_per_value_lower: usize,
-    pub average_in_degree: f64,
-    pub max_in_degree: usize,
-    pub structural_sharing_factor: f64,
-    pub promotable_upper_nodes: usize,
-}
-
-#[cfg(test)]
-impl<T: Clone + Eq + Hash + std::fmt::Debug, A: Clone + Eq + Hash + std::fmt::Debug> std::fmt::Debug
-    for LeveledGSSStats<T, A>
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LeveledGSSStats")
-            
-            .field("num_upperbranch_nodes", &self.num_upperbranch_nodes)
-            .field("num_interface_nodes", &self.num_interface_nodes)
-            .field("num_lower_nodes", &self.num_lower_nodes)
-            .field("total_unique_nodes", &self.total_unique_nodes)
-            .field("num_structurally_unique_nodes", &self.num_structurally_unique_nodes)
-            .field("upper_edges", &self.upper_edges)
-            .field("interface_to_lower_edges", &self.interface_to_lower_edges)
-            .field("lower_edges", &self.lower_edges)
-            .field("total_edges", &self.total_edges)
-            .field("max_upper_depth", &self.max_upper_depth)
-            .field("max_lower_depth", &self.max_lower_depth)
-            .field("distinct_values_count", &self.distinct_values_count)
-            
-            .field("unique_accumulators_count", &self.unique_accumulators_count)
-            
-            .field("total_accumulator_instances", &self.total_accumulator_instances)
-            .field("num_upper_with_empty", &self.num_upper_with_empty)
-            .field("num_interfaces_with_empty", &self.num_interfaces_with_empty)
-            .field("num_lower_terminal_nodes", &self.num_lower_terminal_nodes)
-            .field("num_interface_implicit_terminals", &self.num_interface_implicit_terminals)
-            .field("num_multi_depth_slots_upper", &self.num_multi_depth_slots_upper)
-            .field("num_multi_depth_slots_lower", &self.num_multi_depth_slots_lower)
-            .field("max_multiplicity_per_value_upper", &self.max_multiplicity_per_value_upper)
-            .field("max_multiplicity_per_value_lower", &self.max_multiplicity_per_value_lower)
-            .field("average_in_degree", &self.average_in_degree)
-            .field("max_in_degree", &self.max_in_degree)
-            .field("structural_sharing_factor", &self.structural_sharing_factor)
-            .field("promotable_upper_nodes", &self.promotable_upper_nodes)
-            .finish()
-    }
-}
-
-#[cfg(test)]
-fn is_promotable<T, A>(node: &Arc<UpperBranch<T, A>>) -> bool
-where
-    T: Clone + Eq + Hash,
-    A: Merge + Clone + Eq + Hash,
-{
-    let all_children: Vec<_> = node
-        .children
-        .values()
-        .flat_map(|kids| kids.values())
-        .collect();
-    if all_children.is_empty() {
-        
-        return node.empty.is_some();
-    }
-    if !all_children
-        .iter()
-        .all(|c| matches!(&***c, Upper::Interface(_)))
-    {
-        return false;
-    }
-    let mut accs: HashSet<A> = HashSet::new();
-    if let Some(empty) = &node.empty {
-        accs.insert(empty.clone());
-    }
-    for c in all_children {
-        if let Upper::Interface(ic) = &**c {
-            accs.insert(ic.acc.clone());
-        }
-    }
-    accs.len() <= 1
-}
-
-#[cfg(test)]
-#[derive(Clone, PartialEq, Eq)]
-struct LowerSig<T: Clone + Eq + Hash> {
-    empty: bool,
-    edges: StdHashMap<T, Vec<usize>>,
-}
-
-#[cfg(test)]
-#[derive(Clone, PartialEq, Eq)]
-enum UpperSig<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
-    Branch {
-        empty: Option<A>,
-        edges: StdHashMap<T, Vec<usize>>,
-    },
-    Interface {
-        acc: A,
-        inner_id: usize,
-    },
-}
-
-#[cfg(test)]
-struct NormalizationLowerInterner<T: Clone + Eq + Hash> {
-    map: StdHashMap<u64, Vec<(LowerSig<T>, usize, Arc<Lower<T>>)>>,
-    next_id: usize,
-}
-
-#[cfg(test)]
-impl<T: Clone + Eq + Hash> Default for NormalizationLowerInterner<T> {
-    fn default() -> Self {
-        Self {
-            map: StdHashMap::new(),
-            next_id: 0,
-        }
-    }
-}
-
-#[cfg(test)]
-struct NormalizationUpperInterner<
-    T: Clone + Eq + Hash,
-    A: Merge + Clone + Eq + Hash,
-> {
-    map: StdHashMap<u64, Vec<(UpperSig<T, A>, usize, Arc<Upper<T, A>>)>>,
-    next_id: usize,
-}
-
-#[cfg(test)]
-impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Default
-    for NormalizationUpperInterner<T, A>
-{
-    fn default() -> Self {
-        Self {
-            map: StdHashMap::new(),
-            next_id: 0,
-        }
-    }
-}
-
-#[cfg(test)]
-fn lower_sig_hash<T: Clone + Eq + Hash>(sig: &LowerSig<T>) -> u64 {
-    use std::hash::{Hash as _, Hasher};
-    let mut seed: u64 = if sig.empty {
-        0x9e37_79b9_7f4a_7c15
-    } else {
-        0x243f_6a88_85a3_08d3
-    };
-    seed ^= (sig.edges.len() as u64).wrapping_mul(0x94d0_49bb_1331_11eb);
-    let mut xor_acc: u64 = 0;
-    let mut sum_acc: u64 = 0;
-    let mut prod_acc: u64 = 0x517c_c1b7_2722_0a95 ^ (sig.edges.len() as u64);
-    for (k, ids) in &sig.edges {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        k.hash(&mut h);
-        ids.hash(&mut h); 
-        let e = h.finish();
-        xor_acc ^= e;
-        sum_acc = sum_acc.wrapping_add(e);
-        prod_acc = prod_acc.wrapping_mul(e.wrapping_add(0x9e37_79b9_7f4a_7c15));
-    }
-    seed ^ xor_acc ^ sum_acc ^ prod_acc
-}
-
-#[cfg(test)]
-fn upper_sig_hash<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
-    sig: &UpperSig<T, A>,
-) -> u64 {
-    use std::hash::{Hash as _, Hasher};
-    match sig {
-        UpperSig::Branch { empty, edges } => {
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            if let Some(e) = empty {
-                e.hash(&mut h);
-            }
-            let seed = 0x6a09_e667_f3bc_c908u64 ^ h.finish() ^ (edges.len() as u64);
-
-            let mut xor_acc: u64 = 0;
-            let mut sum_acc: u64 = 0;
-            let mut prod_acc: u64 = 0x3c6e_f372_fe94_f82b ^ (edges.len() as u64);
-            for (k, ids) in edges {
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                k.hash(&mut h);
-                ids.hash(&mut h); 
-                let e = h.finish();
-                xor_acc ^= e;
-                sum_acc = sum_acc.wrapping_add(e);
-                prod_acc = prod_acc.wrapping_mul(e.wrapping_add(0xa54f_f53a_5f1d_36f1));
-            }
-            seed ^ xor_acc ^ sum_acc ^ prod_acc
-        }
-        UpperSig::Interface { acc, inner_id } => {
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            acc.hash(&mut h);
-            inner_id.hash(&mut h);
-            0xbb67_ae85_84ca_a73bu64 ^ h.finish()
-        }
-    }
-}
-
-#[cfg(test)]
-fn normalize_canonicalize_lower<T>(
-    node: &Arc<Lower<T>>,
-    memo_lower: &mut StdHashMap<usize, (usize, Arc<Lower<T>>)>,
-    interner_lower: &mut NormalizationLowerInterner<T>,
-) -> (usize, Arc<Lower<T>>)
-where
-    T: Clone + Eq + Hash,
-{
-    let ptr = lower_node_id(node);
-    if let Some((id, arc)) = memo_lower.get(&ptr) {
-        return (*id, arc.clone());
-    }
-
-    let mut edges_raw: StdHashMap<T, Vec<(usize, Arc<Lower<T>>)>> = StdHashMap::new();
-    let node_children = node.children();
-    for (v, kids) in node_children.iter() {
-        let entry = edges_raw.entry(v.clone()).or_default();
-        for child in kids.values() {
-            let (cid, carc) = normalize_canonicalize_lower(child, memo_lower, interner_lower);
-            entry.push((cid, carc));
-        }
-    }
-
-    let mut sig_edges: StdHashMap<T, Vec<usize>> = StdHashMap::new();
-    for (v, items) in &edges_raw {
-        let mut ids: Vec<usize> = items.iter().map(|(cid, _)| *cid).collect();
-        ids.sort_unstable();
-        sig_edges.insert(v.clone(), ids);
-    }
-    let sig = LowerSig {
-        empty: node.empty(),
-        edges: sig_edges,
-    };
-    let h = lower_sig_hash(&sig);
-
-    if let Some(bucket) = interner_lower.map.get_mut(&h) {
-        for (existing_sig, id, arc) in bucket.iter() {
-            if existing_sig == &sig {
-                memo_lower.insert(ptr, (*id, arc.clone()));
-                return (*id, arc.clone());
-            }
-        }
-    }
-
-    let mut new_children: Children<T, Lower<T>> = CompactMap::new();
-    for (v, items) in edges_raw {
-        let mut ord: CompactOrdMap<Arc<Lower<T>>> = CompactOrdMap::new();
-        for (_, carc) in items {
-            let d = carc.max_depth();
-            if let Some(prev) = ord.get(&d) {
-                let merged = merge_lower(prev, &carc);
-                ord.insert(d, merged);
-            } else {
-                ord.insert(d, carc);
-            }
-        }
-        if !ord.is_empty() {
-            new_children.insert(v, ord);
-        }
-    }
-    let new_node = new_lower(new_children, node.empty());
-
-    let id = interner_lower.next_id;
-    interner_lower.next_id += 1;
-    interner_lower
-        .map
-        .entry(h)
-        .or_default()
-        .push((sig, id, new_node.clone()));
-    memo_lower.insert(ptr, (id, new_node.clone()));
-    (id, new_node)
-}
-
-#[cfg(test)]
-fn normalize_canonicalize_upper<T, A>(
-    node: &Arc<Upper<T, A>>,
-    memo_upper: &mut StdHashMap<usize, (usize, Arc<Upper<T, A>>)>,
-    memo_lower: &mut StdHashMap<usize, (usize, Arc<Lower<T>>)>,
-    interner_upper: &mut NormalizationUpperInterner<T, A>,
-    interner_lower: &mut NormalizationLowerInterner<T>,
-) -> (usize, Arc<Upper<T, A>>)
-where
-    T: Clone + Eq + Hash,
-    A: Merge + Clone + Eq + Hash,
-{
-    let ptr = Arc::as_ptr(node) as usize;
-    if let Some((id, arc)) = memo_upper.get(&ptr) {
-        return (*id, arc.clone());
-    }
-
-    match &**node {
-        Upper::Branch(b) => {
-            let mut edges_raw: StdHashMap<T, Vec<(usize, Arc<Upper<T, A>>)>> = StdHashMap::new();
-            for (v, kids) in b.children.iter() {
-                let entry = edges_raw.entry(v.clone()).or_default();
-                for child in kids.values() {
-                    let (cid, carc) = normalize_canonicalize_upper(
-                        child,
-                        memo_upper,
-                        memo_lower,
-                        interner_upper,
-                        interner_lower,
-                    );
-                    entry.push((cid, carc));
-                }
-            }
-
-            let mut sig_edges: StdHashMap<T, Vec<usize>> = StdHashMap::new();
-            for (v, items) in &edges_raw {
-                let mut ids: Vec<usize> = items.iter().map(|(cid, _)| *cid).collect();
-                ids.sort_unstable();
-                sig_edges.insert(v.clone(), ids);
-            }
-            let mut sig = UpperSig::Branch {
-                empty: b.empty.clone(),
-                edges: sig_edges,
-            };
-            let mut h = upper_sig_hash(&sig);
-
-            if let Some(bucket) = interner_upper.map.get_mut(&h) {
-                for (existing_sig, id, arc) in bucket.iter() {
-                    if existing_sig == &sig {
-                        memo_upper.insert(ptr, (*id, arc.clone()));
-                        return (*id, arc.clone());
-                    }
-                }
-            }
-
-            let mut new_children: Children<T, Upper<T, A>> = CompactMap::new();
-            for (v, items) in &edges_raw {
-                let mut ord: CompactOrdMap<Arc<Upper<T, A>>> = CompactOrdMap::new();
-                for (_, carc) in items {
-                    let d = carc.max_depth();
-                    if let Some(prev) = ord.get(&d) {
-                        let merged = merge_upper(prev, carc);
-                        ord.insert(d, merged);
-                    } else {
-                        ord.insert(d, carc.clone());
-                    }
-                }
-                if !ord.is_empty() {
-                    new_children.insert(v.clone(), ord);
-                }
-            }
-            let new_b = new_branch(new_children, b.empty.clone());
-            let mut new_node = try_promote(&new_b); 
-
-            match &*new_node {
-                Upper::Interface(i2) => {
-                    let i2_owned = i2.clone(); 
-                    
-                    let (inner_id, canonical_inner) = normalize_canonicalize_lower(
-                        &i2_owned.inner,
-                        memo_lower,
-                        interner_lower,
-                    );
-                    
-                    new_node = new_interface(canonical_inner, i2_owned.acc.clone());
-
-                    sig = UpperSig::Interface {
-                        acc: i2_owned.acc.clone(),
-                        inner_id,
-                    };
-                    h = upper_sig_hash(&sig);
-                }
-                Upper::Branch(_) => {
-                }
-            }
-
-            if let Some(bucket) = interner_upper.map.get_mut(&h) {
-                for (existing_sig, id, arc) in bucket.iter() {
-                    if existing_sig == &sig {
-                        memo_upper.insert(ptr, (*id, arc.clone()));
-                        return (*id, arc.clone());
-                    }
-                }
-            }
-
-            let id = interner_upper.next_id;
-            interner_upper.next_id += 1;
-            interner_upper
-                .map
-                .entry(h)
-                .or_default()
-                .push((sig, id, new_node.clone()));
-            memo_upper.insert(ptr, (id, new_node.clone()));
-            (id, new_node)
-        }
-        Upper::Interface(i) => {
-            let (inner_id, canonical_inner) =
-                normalize_canonicalize_lower(&i.inner, memo_lower, interner_lower);
-
-            let sig = UpperSig::Interface {
-                acc: i.acc.clone(),
-                inner_id,
-            };
-            let h = upper_sig_hash(&sig);
-
-            if let Some(bucket) = interner_upper.map.get_mut(&h) {
-                for (existing_sig, id, arc) in bucket.iter() {
-                    if existing_sig == &sig {
-                        memo_upper.insert(ptr, (*id, arc.clone()));
-                        return (*id, arc.clone());
-                    }
-                }
-            }
-
-            let new_node = new_interface(canonical_inner, i.acc.clone());
-
-            let id = interner_upper.next_id;
-            interner_upper.next_id += 1;
-            interner_upper
-                .map
-                .entry(h)
-                .or_default()
-                .push((sig, id, new_node.clone()));
-            memo_upper.insert(ptr, (id, new_node.clone()));
-            (id, new_node)
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
     inner: Arc<Upper<T, A>>,
@@ -1922,88 +1470,12 @@ impl<T: Clone + Eq + Hash + std::fmt::Debug, A: Merge + Clone + Eq + Hash + std:
 }
 
 impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
-    pub fn ptr_eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.inner, &other.inner)
-    }
-
     pub fn ptr_key(&self) -> usize {
         Arc::as_ptr(&self.inner) as usize
     }
 
-    #[cfg(test)]
-    fn lower_ptrs_eq(a: &Arc<Lower<T>>, b: &Arc<Lower<T>>) -> bool {
-        if a.empty() != b.empty() || a.children_len() != b.children_len() || a.max_depth() != b.max_depth() {
-            return false;
-        }
-
-        let c1 = a.children();
-        let c2 = b.children();
-        let keys1: HashSet<_> = c1.keys().collect();
-        let keys2: HashSet<_> = c2.keys().collect();
-        if keys1 != keys2 {
-            return false;
-        }
-        for (v, kids1) in c1.iter() {
-            let kids2 = c2.get(v).unwrap();
-            if kids1.len() != kids2.len() || !kids1.keys().eq(kids2.keys()) {
-                return false;
-            }
-            for (d, c1) in kids1.iter() {
-                let c2 = kids2.get(d).unwrap();
-                if !Arc::ptr_eq(c1, c2) {
-                    return false;
-                }
-            }
-        }
-        true
-    }
-
-    #[cfg(test)]
-    pub fn inner_ptrs_eq(&self, other: &Self) -> bool {
-        match (&*self.inner, &*other.inner) {
-            (Upper::Branch(b1), Upper::Branch(b2)) => {
-                if b1.empty != b2.empty || b1.children.len() != b2.children.len() || b1.max_depth != b2.max_depth {
-                    return false;
-                }
-                let keys1: HashSet<_> = b1.children.keys().collect();
-                let keys2: HashSet<_> = b2.children.keys().collect();
-                if keys1 != keys2 {
-                    return false;
-                }
-                for (v, kids1) in b1.children.iter() {
-                    let kids2 = b2.children.get(v).unwrap();
-                    if kids1.len() != kids2.len() || !kids1.keys().eq(kids2.keys()) {
-                        return false;
-                    }
-                    for (d, c1) in kids1.iter() {
-                        let c2 = kids2.get(d).unwrap();
-                        if !Arc::ptr_eq(c1, c2) {
-                            return false;
-                        }
-                    }
-                }
-                true
-            }
-            (Upper::Interface(i1), Upper::Interface(i2)) => {
-                if i1.acc != i2.acc {
-                    return false;
-                }
-                Self::lower_ptrs_eq(&i1.inner, &i2.inner)
-            }
-            _ => false,
-        }
-    }
-
     pub fn empty() -> Self {
         empty_upper()
-    }
-
-    /// Create a GSS from a tail Lower node and an accumulator.
-    /// Used by the chain optimization to reconstruct the GSS at the bottom of a chain.
-    pub fn from_chain_tail_and_acc(tail: ChainTail<T>, acc: A) -> Self {
-        LeveledGSS {
-            inner: new_interface(tail.inner, acc),
-        }
     }
 
     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
@@ -2444,28 +1916,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
-    /// Equivalent to `self.merge(&base.push(value))` but avoids intermediate
-    /// allocations by directly inserting into self's structure via Arc::make_mut.
-    /// Falls back to the standard path for non-Interface cases.
-    pub fn absorb_push(self, value: T, base: &Self) -> Self {
-        if base.is_empty() {
-            return self;
-        }
-        if self.is_empty() {
-            return base.push(value);
-        }
-        // Fast path: both are Interface with equal acc
-        if let (Upper::Interface(base_iface), Upper::Interface(self_iface)) =
-            (&*base.inner, &*self.inner)
-        {
-            if self_iface.acc == base_iface.acc {
-                return self.absorb_push_interface_inplace(value, base_iface);
-            }
-        }
-        // Fallback
-        self.merge(&base.push(value))
-    }
-
     /// Like `absorb_push` but assumes the caller has already verified that
     /// both `self` and `base` are Interface variants with identical `acc`
     /// values. This avoids an expensive O(n) annotation equality check.
@@ -2870,216 +2320,8 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
-    #[cfg(test)]
-    pub fn popn_with_underflow(&self, n: isize) -> (Self, StdHashMap<usize, A>) {
-        if n <= 0 {
-            return (self.clone(), StdHashMap::new());
-        }
-        if self.is_empty() {
-            return (self.clone(), StdHashMap::new());
-        }
-
-        let mut underflows: StdHashMap<usize, A> = StdHashMap::new();
-
-        fn merge_underflow<A: Merge + Clone>(map: &mut StdHashMap<usize, A>, shortfall: usize, acc: A) {
-            map.entry(shortfall)
-                .and_modify(|existing| *existing = existing.merge(&acc))
-                .or_insert(acc);
-        }
-
-        fn popn_lower_uf<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
-            node: &Arc<Lower<T>>,
-            k: isize,
-            underflows: &mut StdHashMap<usize, A>,
-            acc: &A,
-            memo_lower: &mut StdHashMap<(usize, isize), Arc<Lower<T>>>,
-        ) -> Arc<Lower<T>> {
-            if k == 0 {
-                return node.clone();
-            }
-            let node_id = match &**node {
-                Lower::Segment(seg) => Arc::as_ptr(seg) as usize,
-                _ => Arc::as_ptr(node) as usize,
-            };
-            let key = (node_id, k);
-            if let Some(cached) = memo_lower.get(&key) {
-                return cached.clone();
-            }
-
-            // Segment fast path: walk through the segment values directly
-            let res = if let Lower::Segment(seg) = &**node {
-                let seg_len = seg.values.len() as isize;
-                if k >= seg_len {
-                    // Pop past entire segment
-                    let next_arc = seg.next.clone();
-                    popn_lower_uf::<T, A>(&next_arc, k - seg_len, underflows, acc, memo_lower)
-                } else {
-                    // Pop within segment: create shorter segment with remaining values
-                    let keep = (seg_len - k) as usize;
-                    let new_values = seg.values.take(keep);
-                    new_segment(new_values, seg.next.clone())
-                }
-            } else {
-                let all_children: Vec<_> = node
-                    .children()
-                    .values()
-                    .flat_map(|kids| kids.values())
-                    .cloned()
-                    .collect();
-
-                if all_children.is_empty() {
-                    new_lower(CompactMap::new(), false)
-                } else {
-                    let popped_children: Vec<_> = all_children
-                        .into_iter()
-                        .map(|child| popn_lower_uf::<T, A>(&child, k - 1, underflows, acc, memo_lower))
-                        .collect();
-
-                    let mut it = popped_children.into_iter();
-                    let first = it.next().unwrap();
-                    it.fold(first, |acc, next| merge_lower(&acc, &next))
-                }
-            };
-
-            if node.empty() && k >= 1 {
-                
-                merge_underflow(underflows, k as usize, acc.clone());
-            }
-
-            memo_lower.insert(key, res.clone());
-            res
-        }
-
-        fn popn_upper_uf<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
-            node: &Arc<Upper<T, A>>,
-            k: isize,
-            underflows: &mut StdHashMap<usize, A>,
-            memo_upper: &mut StdHashMap<(usize, isize), Arc<Upper<T, A>>>,
-            memo_lower: &mut StdHashMap<(usize, isize), Arc<Lower<T>>>,
-        ) -> Arc<Upper<T, A>> {
-            if k == 0 {
-                return node.clone();
-            }
-            let key = (Arc::as_ptr(node) as usize, k);
-            if let Some(cached) = memo_upper.get(&key) {
-                return cached.clone();
-            }
-
-            let res = match &**node {
-                Upper::Branch(b) => {
-                    let mut popped = Vec::new();
-                    for kids in b.children.values() {
-                        for child in kids.values() {
-                            popped.push(popn_upper_uf(child, k - 1, underflows, memo_upper, memo_lower));
-                        }
-                    }
-
-                    if let Some(acc) = &b.empty {
-                        
-                        merge_underflow(underflows, k as usize, acc.clone());
-                    }
-
-                    if popped.is_empty() {
-                        empty_upper_inner()
-                    } else {
-                        let mut it = popped.into_iter();
-                        let first = it.next().unwrap();
-                        let merged = it.fold(first, |acc, next| merge_upper(&acc, &next));
-                        try_promote(&merged)
-                    }
-                }
-                Upper::Interface(i) => {
-                    let popped_lower = popn_lower_uf::<T, A>(&i.inner, k, underflows, &i.acc, memo_lower);
-                    if popped_lower.children_is_empty() && !popped_lower.empty() {
-                        empty_upper_inner()
-                    } else {
-                        new_interface(popped_lower, i.acc.clone())
-                    }
-                }
-            };
-
-            memo_upper.insert(key, res.clone());
-            res
-        }
-
-        let mut memo_upper: StdHashMap<(usize, isize), Arc<Upper<T, A>>> = StdHashMap::new();
-        let mut memo_lower: StdHashMap<(usize, isize), Arc<Lower<T>>> = StdHashMap::new();
-        let new_inner = popn_upper_uf::<T, A>(&self.inner, n, &mut underflows, &mut memo_upper, &mut memo_lower);
-        (LeveledGSS { inner: new_inner }, underflows)
-    }
-
     pub fn pop(&self) -> Self {
         self.popn(1)
-    }
-
-    /// Decompose the top level and pop one level in a single pass.
-    /// Returns `(value, popped_gss)` for each top-level child value.
-    /// Equivalent to calling `self.isolate(Some(v)).pop()` for each v in `peek_values()`,
-    /// but avoids repeated HashMap lookups.
-    pub fn decompose_and_pop(&self) -> Vec<(T, Self)> {
-        match &*self.inner {
-            Upper::Branch(b) => {
-                let mut result = Vec::with_capacity(b.children.len());
-                for (val, kids) in b.children.iter() {
-                    // Fast path: single child needs no merge.
-                    let m = if kids.len() == 1 {
-                        kids.values().next().unwrap().clone()
-                    } else {
-                        let mut it = kids.values();
-                        let mut acc = it.next().unwrap().clone();
-                        for child in it {
-                            acc = merge_upper(&acc, child);
-                        }
-                        acc
-                    };
-                    // Skip try_promote if already Interface (try_promote is a no-op for Interface).
-                    let inner = if matches!(&*m, Upper::Interface(_)) {
-                        m
-                    } else {
-                        try_promote(&m)
-                    };
-                    let is_empty = matches!(&*inner,
-                        Upper::Branch(b) if b.children.is_empty() && b.empty.is_none());
-                    if !is_empty {
-                        result.push((val.clone(), LeveledGSS { inner }));
-                    }
-                }
-                result
-            }
-            Upper::Interface(i) => {
-                // Segment fast path: single child, no iteration needed
-                if i.inner.is_segment() {
-                    let val = i.inner.segment_top_value().clone();
-                    let lower = i.inner.segment_rest_arc();
-                    if !lower.children_is_empty() || lower.empty() {
-                        let upper = new_interface(lower, i.acc.clone());
-                        return vec![(val, LeveledGSS { inner: upper })];
-                    }
-                    return vec![];
-                }
-                let mut result = Vec::with_capacity(i.inner.children_len());
-                if let Lower::General { children, .. } = &*i.inner {
-                    for (val, kids) in children.iter() {
-                        // Fast path: single child needs no merge.
-                        let lower = if kids.len() == 1 {
-                            kids.values().next().unwrap().clone()
-                        } else {
-                            let mut it = kids.values();
-                            let mut acc = it.next().unwrap().clone();
-                            for child in it {
-                                acc = merge_lower(&acc, child);
-                            }
-                            acc
-                        };
-                        if !lower.children_is_empty() || lower.empty() {
-                            let upper = new_interface(lower, i.acc.clone());
-                            result.push((val.clone(), LeveledGSS { inner: upper }));
-                        }
-                    }
-                }
-                result
-            }
-        }
     }
 
     /// Like `decompose_and_pop` but invokes a callback for each (value, popped_gss) pair
@@ -3230,118 +2472,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
     pub fn max_depth(&self) -> u32 {
         self.inner.max_depth()
-    }
-
-    pub fn summary(&self) -> LeveledGSSSummary {
-        let mut visited_upperbranch: HashSet<usize> = HashSet::new();
-        let mut visited_interface: HashSet<usize> = HashSet::new();
-        let mut visited_lower: HashSet<usize> = HashSet::new();
-
-        let mut upperbranch_nodes = 0usize;
-        let mut interface_nodes = 0usize;
-        let mut lower_nodes = 0usize;
-        let mut lower_general_nodes = 0usize;
-        let mut lower_segment_nodes = 0usize;
-        let mut total_edges = 0usize;
-        let mut accumulator_instances = 0usize;
-
-        let mut upper_queue: VecDeque<Arc<Upper<T, A>>> = VecDeque::new();
-        upper_queue.push_back(self.inner.clone());
-        let mut lower_queue: VecDeque<Arc<Lower<T>>> = VecDeque::new();
-
-        while let Some(node) = upper_queue.pop_front() {
-            match &*node {
-                Upper::Branch(branch) => {
-                    let node_id = Arc::as_ptr(branch) as usize;
-                    if !visited_upperbranch.insert(node_id) {
-                        continue;
-                    }
-                    upperbranch_nodes += 1;
-                    if branch.empty.is_some() {
-                        accumulator_instances += 1;
-                    }
-                    for children in branch.children.values() {
-                        total_edges += children.len();
-                        for child in children.values() {
-                            upper_queue.push_back(child.clone());
-                        }
-                    }
-                }
-                Upper::Interface(interface) => {
-                    let node_id = Arc::as_ptr(interface) as usize;
-                    if !visited_interface.insert(node_id) {
-                        continue;
-                    }
-                    interface_nodes += 1;
-                    accumulator_instances += 1;
-                    total_edges += 1;
-                    lower_queue.push_back(interface.inner.clone());
-                }
-            }
-        }
-
-        while let Some(node) = lower_queue.pop_front() {
-            let node_id = lower_node_id(&node);
-            if !visited_lower.insert(node_id) {
-                continue;
-            }
-            lower_nodes += 1;
-            match &*node {
-                Lower::Segment(_) => lower_segment_nodes += 1,
-                Lower::General { .. } => lower_general_nodes += 1,
-            }
-            // Walk through this node and any owned segment chain below it.
-            let mut current: &Lower<T> = &*node;
-            loop {
-                match current {
-                    Lower::Segment(seg) => {
-                        total_edges += 1; // One edge from this Segment to its next
-                        match &*seg.next {
-                            Lower::Segment(inner_seg) => {
-                                let inner_id = Arc::as_ptr(inner_seg) as usize;
-                                if !visited_lower.insert(inner_id) { break; }
-                                lower_nodes += 1;
-                                lower_segment_nodes += 1;
-                                current = &*seg.next;
-                            }
-                            Lower::General { children, .. } => {
-                                lower_nodes += 1;
-                                lower_general_nodes += 1;
-                                for kids in children.values() {
-                                    total_edges += kids.len();
-                                    for child in kids.values() {
-                                        lower_queue.push_back(child.clone());
-                                    }
-                                }
-                                break;
-                            }
-                        }
-                    }
-                    Lower::General { children, .. } => {
-                        for kids in children.values() {
-                            total_edges += kids.len();
-                            for child in kids.values() {
-                                lower_queue.push_back(child.clone());
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-
-        LeveledGSSSummary {
-            top_values_count: self.inner.children_keys().len(),
-            upperbranch_nodes,
-            interface_nodes,
-            lower_nodes,
-            lower_general_nodes,
-            lower_segment_nodes,
-            total_unique_nodes: upperbranch_nodes + interface_nodes + lower_nodes,
-            total_edges,
-            accumulator_instances,
-            max_depth: self.max_depth(),
-        }
     }
 
     pub fn isolate(&self, value: Option<T>) -> Self {
@@ -3495,93 +2625,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         LeveledGSS {
             inner: transform::<T, A, B, F>(&self.inner, &mut acc_memo, &mut func),
         }
-    }
-
-    pub fn apply_and_prune<B, M>(&self, mut mutator: M) -> LeveledGSS<T, B>
-    where
-        B: Merge + Clone + Eq + Hash,
-        M: FnMut(&A) -> Option<B>,
-    {
-        // Fast path: single Interface at root — no memo or tree traversal needed.
-        if let Upper::Interface(i) = &*self.inner {
-            return match mutator(&i.acc) {
-                Some(new_acc) => LeveledGSS { inner: new_interface(i.inner.clone(), new_acc) },
-                None => LeveledGSS::empty(),
-            };
-        }
-
-        // Use a flat Vec for memo instead of HashMap — avoids hashing cost
-        // for the typical case of 2-4 unique accumulators.
-        let mut acc_memo: Vec<(A, Option<B>)> = Vec::with_capacity(4);
-
-        fn mutate_acc<A, B, M>(
-            a: &A,
-            memo: &mut Vec<(A, Option<B>)>,
-            m: &mut M,
-        ) -> Option<B>
-        where
-            A: Clone + Eq,
-            B: Clone,
-            M: FnMut(&A) -> Option<B>,
-        {
-            for (k, v) in memo.iter() {
-                if k == a {
-                    return v.clone();
-                }
-            }
-            let r = m(a);
-            memo.push((a.clone(), r.clone()));
-            r
-        }
-
-        fn transform<T, A, B, M>(
-            node: &Arc<Upper<T, A>>,
-            memo: &mut Vec<(A, Option<B>)>,
-            m: &mut M,
-        ) -> Option<Arc<Upper<T, B>>>
-        where
-            T: Clone + Eq + Hash,
-            A: Merge + Clone + Eq + Hash,
-            B: Merge + Clone + Eq + Hash,
-            M: FnMut(&A) -> Option<B>,
-        {
-            match &**node {
-                Upper::Interface(i) => {
-                    let new_acc_opt = mutate_acc(&i.acc, memo, m);
-                    if let Some(new_acc) = new_acc_opt {
-                        let new_i = new_interface(i.inner.clone(), new_acc);
-                        Some(try_promote(&new_i))
-                    } else {
-                        None
-                    }
-                }
-                Upper::Branch(b) => {
-                    let new_empty_opt = b.empty.as_ref().and_then(|e| mutate_acc(e, memo, m));
-                    let mut new_children: Children<T, Upper<T, B>> = CompactMap::new();
-                    for (v, kids) in b.children.iter() {
-                        let mut new_kids: CompactOrdMap<Arc<Upper<T, B>>> = CompactOrdMap::new();
-                        for child in kids.values() {
-                            if let Some(nc) = transform::<T, A, B, M>(child, memo, m) {
-                                new_kids.insert(nc.max_depth(), nc);
-                            }
-                        }
-                        if !new_kids.is_empty() {
-                            new_children.insert(v.clone(), new_kids);
-                        }
-                    }
-
-                    if new_children.is_empty() && new_empty_opt.is_none() {
-                        None
-                    } else {
-                        let new_b = new_branch(new_children, new_empty_opt);
-                        Some(try_promote(&new_b))
-                    }
-                }
-            }
-        }
-
-        let res_inner_opt = transform::<T, A, B, M>(&self.inner, &mut acc_memo, &mut mutator);
-        res_inner_opt.map_or_else(LeveledGSS::<T, B>::empty, |inner| LeveledGSS::<T, B> { inner })
     }
 
     /// Like a cross-type no-promote transform followed by decompose_and_pop, but avoids
@@ -4065,26 +3108,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         self.inner.children_keys()
     }
 
-    /// Iterate over top values without allocating a Vec. 
-    /// Calls `f` for each top-level value in the GSS.
-    pub fn for_each_top_value<F: FnMut(T)>(&self, mut f: F) {
-        match &*self.inner {
-            Upper::Branch(branch) => {
-                for k in branch.children.keys() {
-                    f(k.clone());
-                }
-            }
-            Upper::Interface(interface) => match &*interface.inner {
-                Lower::Segment(seg) => f(seg.values.last().unwrap().clone()),
-                Lower::General { children, .. } => {
-                    for k in children.keys() {
-                        f(k.clone());
-                    }
-                }
-            },
-        }
-    }
-
     pub fn single_top_value(&self) -> Option<T> {
         self.inner.single_child_key()
     }
@@ -4208,10 +3231,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         let mut memo_upper = StdHashMap::new();
         let mut memo_lower = StdHashMap::new();
         count_upper(&self.inner, limit, &mut memo_upper, &mut memo_lower)
-    }
-
-    pub fn is_single_path(&self) -> bool {
-        self.path_count_at_most(2) <= 1
     }
 
     pub fn reduce_acc(&self) -> Option<A> {
