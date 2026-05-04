@@ -375,8 +375,6 @@ fn compile_prepared_with_profile(
                     &token_bytes,
                     &internal_ids,
                     cpm::ConstraintPossibleMatchesConfig {
-                        debug_compile_stages: false,
-                        profile_summary_enabled: compile_profile_summary_enabled(),
                         initial_state_map: global_max_length_state_map_ref,
                     },
                 )

@@ -5,16 +5,13 @@
 //! Future constraint-specific optimizations belong here.
 
 use std::collections::BTreeMap;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::pm_profile::{PossibleMatchesProfile, elapsed_ms, profile_summary_enabled};
-pub(crate) use crate::compiler::pm_profile::emit_possible_matches_profile_summary;
 use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
 use crate::grammar::flat::TerminalID;
@@ -92,45 +89,6 @@ struct TrieMapBuildNodeClasses {
     class_maps: Vec<Arc<DensePossibleMatchMap>>,
 }
 
-fn reachable_bitmap(node: &VocabPrefixTreeNode, num_words: usize) -> Vec<u64> {
-    let mut words = vec![0u64; num_words];
-    for range in node.reachable_token_ids().ranges() {
-        let lo = *range.start() as u32;
-        let hi = *range.end() as u32;
-        for id in lo..=hi {
-            words[id as usize / 64] |= 1u64 << (id % 64);
-        }
-    }
-    words
-}
-
-fn reachable_sparse_bitmap(node: &VocabPrefixTreeNode) -> Box<[(u16, u64)]> {
-    let mut entries = Vec::new();
-
-    for range in node.reachable_token_ids().ranges() {
-        let mut token_id = *range.start() as u32;
-        let end = *range.end() as u32;
-
-        while token_id <= end {
-            let word = token_id / 64;
-            let word_end = ((word + 1) * 64 - 1).min(end);
-            let start_bit = token_id % 64;
-            let end_bit = word_end % 64;
-            let bit_count = end_bit - start_bit + 1;
-            let mask = if bit_count == 64 {
-                u64::MAX
-            } else {
-                ((1u64 << bit_count) - 1) << start_bit
-            };
-
-            entries.push((word as u16, mask));
-            token_id = word_end.saturating_add(1);
-        }
-    }
-
-    entries.into_boxed_slice()
-}
-
 #[inline]
 fn merge_bitmaps(into: &mut [u64], other: &[u64]) {
     for (a, b) in into.iter_mut().zip(other.iter()) {
@@ -145,18 +103,6 @@ fn merge_dense_maps(into: &mut DensePossibleMatchMap, other: &DensePossibleMatch
     }
 }
 
-fn merge_dense_map_into_slots(
-    slots: &mut [Option<Box<[u64]>>],
-    other: &DensePossibleMatchMap,
-    num_words: usize,
-) {
-    for (&terminal, bitmap) in other.iter() {
-        let existing = slots[terminal as usize]
-            .get_or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
-        merge_bitmaps(existing, bitmap);
-    }
-}
-
 fn reachable_dense_bitmap(node: &VocabPrefixTreeNode, num_words: usize) -> Box<[u64]> {
     let mut words = vec![0u64; num_words];
     for range in node.reachable_token_ids().ranges() {
@@ -167,260 +113,6 @@ fn reachable_dense_bitmap(node: &VocabPrefixTreeNode, num_words: usize) -> Box<[
         }
     }
     words.into_boxed_slice()
-}
-
-fn bitmap_to_rangeset(words: &[u64]) -> RangeSetBlaze<u32> {
-    let mut result = RangeSetBlaze::new();
-    for (word_idx, &word) in words.iter().enumerate() {
-        if word == 0 { continue; }
-        let base = (word_idx as u32) * 64;
-        let mut w = word;
-        let mut pos = 0u32;
-        while w != 0 {
-            let zeros = w.trailing_zeros();
-            pos += zeros;
-            w >>= zeros;
-            let ones = if w == u64::MAX { 64 - pos % 64 } else { (!w).trailing_zeros() };
-            let run_start = base + pos;
-            let run_end = base + pos + ones - 1;
-            pos += ones;
-            if ones < 64 { w >>= ones; } else { w = 0; }
-            result.ranges_insert(run_start..=run_end);
-        }
-    }
-    result
-}
-
-pub(crate) struct DensePossibleMatchesComputer<'a> {
-    tokenizer: &'a Tokenizer,
-    num_words: usize,
-    cache: FxHashMap<(usize, u32), Rc<DensePossibleMatchMap>>,
-    reachable_cache: FxHashMap<usize, Rc<Vec<u64>>>,
-    self_loop_bytes: FxHashMap<u32, U8Set>,
-    flat_transitions: Vec<Option<Box<[u32; 256]>>>,
-    summary_profile_enabled: bool,
-    profile: PossibleMatchesProfile,
-}
-
-impl<'a> DensePossibleMatchesComputer<'a> {
-    pub(crate) fn new(tokenizer: &'a Tokenizer, num_internal_tokens: u32) -> Self {
-        let num_words = (num_internal_tokens as usize + 63) / 64;
-        Self {
-            tokenizer,
-            num_words,
-            cache: FxHashMap::default(),
-            reachable_cache: FxHashMap::default(),
-            self_loop_bytes: FxHashMap::default(),
-            flat_transitions: vec![None; tokenizer.num_states() as usize],
-            summary_profile_enabled: profile_summary_enabled(),
-            profile: PossibleMatchesProfile::default(),
-        }
-    }
-
-    pub(crate) fn profile(&self) -> PossibleMatchesProfile {
-        PossibleMatchesProfile {
-            cache_entries: self.cache.len(),
-            reachable_cache_entries: self.reachable_cache.len(),
-            ..self.profile
-        }
-    }
-
-    #[inline]
-    fn fast_step(&mut self, state: u32, byte: u8) -> Option<u32> {
-        let state_idx = state as usize;
-        if self.flat_transitions[state_idx].is_none() {
-            let dfa_state = &self.tokenizer.dfa.states()[state_idx];
-            let mut flat = Box::new([u32::MAX; 256]);
-            for (b, &target) in dfa_state.transitions.iter() {
-                flat[b as usize] = target;
-            }
-            self.flat_transitions[state_idx] = Some(flat);
-        }
-        let next = self.flat_transitions[state_idx].as_ref().unwrap()[byte as usize];
-        if next == u32::MAX { None } else { Some(next) }
-    }
-
-    fn reachable_for_node(&mut self, node: &VocabPrefixTreeNode) -> Rc<Vec<u64>> {
-        let started_at = self.summary_profile_enabled.then(Instant::now);
-        let cache_key = node as *const VocabPrefixTreeNode as usize;
-        let reachable = if let Some(cached) = self.reachable_cache.get(&cache_key) {
-            self.profile.reachable_cache_hits += 1;
-            Rc::clone(cached)
-        } else {
-            self.profile.reachable_cache_misses += 1;
-            let reachable = Rc::new(reachable_bitmap(node, self.num_words));
-            self.reachable_cache.insert(cache_key, Rc::clone(&reachable));
-            reachable
-        };
-        if let Some(started_at) = started_at {
-            self.profile.reachable_lookup_ms += elapsed_ms(started_at);
-        }
-        reachable
-    }
-
-    fn can_skip_self_loop_subtree(
-        &mut self,
-        node: &VocabPrefixTreeNode,
-        tokenizer_state: u32,
-    ) -> bool {
-        let self_loop_bytes = self.self_loop_bytes.entry(tokenizer_state).or_insert_with(|| {
-            let state = &self.tokenizer.dfa.states()[tokenizer_state as usize];
-            let mut bytes = U8Set::empty();
-            for (byte, &target) in state.transitions.iter() {
-                if target == tokenizer_state {
-                    bytes.insert(byte);
-                }
-            }
-            bytes
-        });
-        U8Set::from_words(*node.subtree_bytes()).is_subset(self_loop_bytes)
-    }
-
-    pub(crate) fn possible_matches_for_node(
-        &mut self,
-        node: &VocabPrefixTreeNode,
-        tokenizer_state: u32,
-    ) -> Rc<DensePossibleMatchMap> {
-        let cache_lookup_started_at = self.summary_profile_enabled.then(Instant::now);
-        let cache_key = (node as *const VocabPrefixTreeNode as usize, tokenizer_state);
-        if let Some(cached) = self.cache.get(&cache_key) {
-            self.profile.cache_hits += 1;
-            if let Some(started_at) = cache_lookup_started_at {
-                self.profile.cache_lookup_ms += elapsed_ms(started_at);
-            }
-            return Rc::clone(cached);
-        }
-        self.profile.cache_misses += 1;
-        if let Some(started_at) = cache_lookup_started_at {
-            self.profile.cache_lookup_ms += elapsed_ms(started_at);
-        }
-
-        let num_words = self.num_words;
-        let mut result = DensePossibleMatchMap::default();
-
-        if node.has_token() {
-            let insert_started_at = self.summary_profile_enabled.then(Instant::now);
-            let token_id = node.token_id() as u32;
-            for terminal in self.tokenizer.matched_terminals_iter(tokenizer_state) {
-                let entry = result.entry(terminal).or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
-                entry[token_id as usize / 64] |= 1u64 << (token_id % 64);
-                self.profile.terminal_insertions += 1;
-            }
-            if let Some(started_at) = insert_started_at {
-                self.profile.node_terminal_insert_ms += elapsed_ms(started_at);
-            }
-        }
-
-        for (segment_bytes, child) in node.iter_children() {
-            self.profile.child_segments_visited += 1;
-            let mut current_state = tokenizer_state;
-            let mut segment_blocked = false;
-            let reachable = self.reachable_for_node(child);
-
-            let segment_walk_started_at = self.summary_profile_enabled.then(Instant::now);
-            for &byte in segment_bytes {
-                self.profile.byte_steps += 1;
-                let Some(next_state) = self.fast_step(current_state, byte) else {
-                    segment_blocked = true;
-                    break;
-                };
-                current_state = next_state;
-                for terminal in self.tokenizer.matched_terminals_iter(current_state) {
-                    let existing = result.entry(terminal).or_insert_with(|| vec![0u64; num_words].into_boxed_slice());
-                    merge_bitmaps(existing, reachable.as_ref());
-                    self.profile.terminal_insertions += 1;
-                }
-            }
-            if let Some(started_at) = segment_walk_started_at {
-                self.profile.segment_walk_ms += elapsed_ms(started_at);
-            }
-
-            if segment_blocked {
-                self.profile.blocked_segments += 1;
-            }
-            if !segment_blocked && !self.tokenizer.is_end(current_state) {
-                let self_loop_check_started_at = self.summary_profile_enabled.then(Instant::now);
-                if self.can_skip_self_loop_subtree(child, current_state) {
-                    if let Some(started_at) = self_loop_check_started_at {
-                        self.profile.self_loop_check_ms += elapsed_ms(started_at);
-                    }
-                    self.profile.self_loop_subtrees_skipped += 1;
-                    continue;
-                }
-                if let Some(started_at) = self_loop_check_started_at {
-                    self.profile.self_loop_check_ms += elapsed_ms(started_at);
-                }
-                self.profile.recursive_descents += 1;
-                let child_matches = self.possible_matches_for_node(child, current_state);
-                let merge_started_at = self.summary_profile_enabled.then(Instant::now);
-                merge_dense_maps(&mut result, child_matches.as_ref(), num_words);
-                if let Some(started_at) = merge_started_at {
-                    self.profile.merge_child_matches_ms += elapsed_ms(started_at);
-                }
-            }
-        }
-
-        let result = Rc::new(result);
-        self.cache.insert(cache_key, Rc::clone(&result));
-        result
-    }
-}
-
-/// STICKY NOTE: DO NOT REMOVE THIS COMMENT.
-/// possible_matches MUST be computed for each ORIGINAL tokenizer state.
-/// Do NOT collapse this to an internal TSID, representative state, or
-/// tokenizer-state equivalence class, even if that looks like an easy
-/// optimization. This exact mistake has recurred and it silently changes
-/// semantics by merging distinct tokenizer futures.
-///
-/// If someone believes per-class possible_matches is safe, they must first
-/// prove semantic equivalence for all original states in the class and add
-/// regression coverage for divergent-state counterexamples before touching
-/// this again. Until then: keep this per-original-state and keep this note.
-///
-/// Collect possible_matches using dense bitmap computation internally,
-/// returning dense bitmaps directly (no RangeSetBlaze conversion).
-pub(crate) fn collect_possible_matches_by_original_tsid_dense(
-    tokenizer: &Tokenizer,
-    root: &VocabPrefixTreeNode,
-    num_internal_tokens: u32,
-) -> (BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>, PossibleMatchesProfile) {
-    let entries: Vec<u32> = (0..tokenizer.num_states()).collect();
-    collect_possible_matches_by_selected_original_tsid_dense(
-        tokenizer,
-        root,
-        num_internal_tokens,
-        &entries,
-    )
-}
-
-pub(crate) fn collect_possible_matches_by_selected_original_tsid_dense(
-    tokenizer: &Tokenizer,
-    root: &VocabPrefixTreeNode,
-    num_internal_tokens: u32,
-    entries: &[u32],
-) -> (BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>, PossibleMatchesProfile) {
-    collect_possible_matches_dense_trie_class_build(
-        tokenizer,
-        root,
-        num_internal_tokens,
-        entries,
-    )
-}
-
-pub(crate) fn collect_possible_matches_dense_trie_class_build(
-    tokenizer: &Tokenizer,
-    root: &VocabPrefixTreeNode,
-    num_internal_tokens: u32,
-    entries: &[u32],
-) -> (BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>, PossibleMatchesProfile) {
-    let (result, profile) = collect_possible_matches_dense_trie_class_build_with_classes(
-        tokenizer,
-        root,
-        num_internal_tokens,
-        entries,
-    );
-    (result.expand_to_states(entries), profile)
 }
 
 pub(crate) fn collect_possible_matches_dense_trie_class_build_with_classes(

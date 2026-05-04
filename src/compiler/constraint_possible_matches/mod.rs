@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 use rayon::prelude::*;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -16,7 +16,6 @@ use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::ds::weight::{Weight, finalize_weight_map, shared_rangeset};
 use crate::grammar::flat::TerminalID;
-use crate::runtime::Constraint;
 
 pub(crate) mod collector;
 
@@ -35,8 +34,6 @@ pub(crate) struct ConstraintVocabMap {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ConstraintPossibleMatchesConfig<'a> {
-    pub(crate) debug_compile_stages: bool,
-    pub(crate) profile_summary_enabled: bool,
     pub(crate) initial_state_map: Option<&'a ManyToOneIdMap>,
 }
 
@@ -44,12 +41,6 @@ pub(crate) struct ConstraintPossibleMatchesConfig<'a> {
 pub(crate) struct ConstraintPossibleMatchesProfile {
     pub(crate) possible_matches_collect_ms: f64,
     pub(crate) constraint_vocab_ms: f64,
-    pub(crate) same_bytes_ms: f64,
-    pub(crate) possible_match_signatures_ms: f64,
-    pub(crate) seed_state_signatures_ms: f64,
-    pub(crate) build_map_ms: f64,
-    pub(crate) remap_possible_matches_ms: f64,
-    pub(crate) total_ms: f64,
 }
 
 #[derive(Debug)]
@@ -1474,72 +1465,27 @@ pub(crate) fn remap_weight_to_constraint_vocab(
     finalize_weight_map(remapped)
 }
 
-pub(crate) fn assert_possible_matches_equivalent_within_internal_tsids(constraint: &Constraint) {
-    let mut merged_class_count = 0usize;
-    let mut merged_state_count = 0usize;
-    let mut max_class_size = 0usize;
-    for states in &constraint.internal_tsid_to_states {
-        if states.len() <= 1 {
-            continue;
-        }
-        merged_class_count += 1;
-        merged_state_count += states.len();
-        max_class_size = max_class_size.max(states.len());
-        let representative = constraint.possible_matches_for_state(states[0]);
-        for &state in &states[1..] {
-            let actual = constraint.possible_matches_for_state(state);
-            assert_eq!(actual, representative);
-        }
-    }
-    eprintln!(
-        "[glrmask/diag][pm_equiv] tokenizer_states={} internal_tsids={} merged_classes={} merged_states={} max_class_size={}",
-        constraint.state_to_internal_tsid.len(),
-        constraint.internal_tsid_to_states.len(),
-        merged_class_count,
-        merged_state_count,
-        max_class_size,
-    );
-}
-
-pub(crate) fn emit_possible_matches_unique_counts(constraint: &Constraint) {
-    let unique_all: FxHashSet<_> = constraint.possible_matches.values().cloned().collect();
-    eprintln!(
-        "[glrmask/diag][pm_unique] terminals={} internal_tsids={} unique_terminal_weights={}",
-        constraint.possible_matches.len(),
-        constraint.internal_tsid_to_states.len(),
-        unique_all.len(),
-    );
-}
-
 pub(crate) fn compute_constraint_possible_matches(
     tokenizer: &Tokenizer,
     token_bytes: &BTreeMap<u32, Vec<u8>>,
     internal_ids: &InternalIdMap,
     config: ConstraintPossibleMatchesConfig,
 ) -> ConstraintPossibleMatchesComputation {
-    let total_started_at = Instant::now();
-
     let pm_started_at = Instant::now();
-    if config.debug_compile_stages {
-        eprintln!("[glrmask/debug][compile_stage] raw_possible_matches_begin");
-    }
 
     let token_entries = build_terminal_vocab_token_entries(
         token_bytes,
         &internal_ids.vocab_tokens.original_to_internal,
     );
-    let trie_build_started_at = Instant::now();
     let trie = VocabPrefixTree::build_owned(token_entries);
-    let trie_build_ms = elapsed_ms(trie_build_started_at);
 
-    let collect_started_at = Instant::now();
     let terminal_vocab_token_count = internal_ids.vocab_tokens.num_internal_ids();
 
     let trie_build_states: Vec<u32> = match config.initial_state_map {
         Some(init_map) => init_map.representative_original_ids.clone(),
         None => (0..tokenizer.num_states()).collect(),
     };
-    let (mut trie_class_result, dense_profile) = collector::collect_possible_matches_dense_trie_class_build_with_classes(
+    let (mut trie_class_result, _) = collector::collect_possible_matches_dense_trie_class_build_with_classes(
         tokenizer,
         &trie.root,
         terminal_vocab_token_count,
@@ -1551,103 +1497,22 @@ pub(crate) fn compute_constraint_possible_matches(
             init_map,
         );
     }
-    let profile_label = "constraint_terminal_vocab_tokens";
-    let profile_state_count = trie_build_states.len() as u32;
-
-    let collect_ms = elapsed_ms(collect_started_at);
-    collector::emit_possible_matches_profile_summary(
-        profile_label,
-        token_bytes.len(),
-        profile_state_count,
-        trie_build_ms,
-        collect_ms,
-        &dense_profile,
-    );
-
     let possible_matches_collect_ms = elapsed_ms(pm_started_at);
-    if config.debug_compile_stages {
-        eprintln!(
-            "[glrmask/debug][compile_stage] raw_possible_matches_done trie_build_ms={:.3} collect_ms={:.3} profile_label={} profile_states={}",
-            trie_build_ms,
-            collect_ms,
-            profile_label,
-            profile_state_count,
-        );
-        eprintln!(
-            "[glrmask/debug][compile_stage] constraint_vocab_begin possible_matches_ms={:.3}",
-            possible_matches_collect_ms,
-        );
-    }
 
     let constraint_vocab_started_at = Instant::now();
-
-    let same_bytes_ms = 0.0;
-    if config.debug_compile_stages {
-        eprintln!("[glrmask/debug][compile_stage] constraint_vocab_same_bytes_done ms=0.0 (no same-bytes needed for terminal-vocab PM)");
-    }
 
     // Fast path: possible-matches are produced in terminal-DWA vocab space,
     // so there is no need to split vocab tokens by possible-match or seed-state
     // signatures. Use an identity constraint-vocab that preserves the existing
     // terminal-DWA token groupings.
-    let possible_match_signatures_ms = 0.0;
-    let seed_state_signatures_ms = 0.0;
-    let build_map_ms = 0.0;
     let constraint_vocab = constraint_vocab_from_terminal_dwa_vocab(&internal_ids.vocab_tokens);
-    if config.debug_compile_stages {
-        eprintln!(
-            "[glrmask/debug][compile_stage] constraint_vocab_identity vocab_tokens={}",
-            constraint_vocab.internal_to_originals.len(),
-        );
-    }
-    if config.profile_summary_enabled {
-        eprintln!(
-            "[glrmask/profile][constraint_vocab_step] step=possible_match_signatures ms={:.3}",
-            possible_match_signatures_ms,
-        );
-        eprintln!(
-            "[glrmask/profile][constraint_vocab_step] step=seed_state_signatures ms={:.3}",
-            seed_state_signatures_ms,
-        );
-        eprintln!(
-            "[glrmask/profile][constraint_vocab_step] step=build_map ms={:.3}",
-            build_map_ms,
-        );
-    }
 
-    let constraint_token_count = constraint_vocab.internal_to_originals.len() as u32;
-    let remap_possible_matches_started_at = Instant::now();
-    if config.debug_compile_stages {
-        eprintln!(
-            "[glrmask/debug][compile_stage] constraint_vocab_remap_possible_matches_begin constraint_token_count={}",
-            constraint_token_count,
-        );
-    }
     let possible_matches = class_maps_to_runtime_possible_matches_shared(
         &trie_class_result.class_maps,
         &trie_class_result.state_classes,
     );
-    let remap_possible_matches_ms = elapsed_ms(remap_possible_matches_started_at);
-    if config.debug_compile_stages {
-        eprintln!(
-            "[glrmask/debug][compile_stage] constraint_vocab_remap_possible_matches_done ms={:.3}",
-            remap_possible_matches_ms,
-        );
-    }
-    if config.profile_summary_enabled {
-        eprintln!(
-            "[glrmask/profile][constraint_vocab_step] step=remap_possible_matches ms={:.3}",
-            remap_possible_matches_ms,
-        );
-    }
 
     let constraint_vocab_ms = elapsed_ms(constraint_vocab_started_at);
-    if config.debug_compile_stages {
-        eprintln!(
-            "[glrmask/debug][compile_stage] constraint_vocab_done ms={:.3}",
-            constraint_vocab_ms,
-        );
-    }
 
     ConstraintPossibleMatchesComputation {
         possible_matches,
@@ -1655,12 +1520,6 @@ pub(crate) fn compute_constraint_possible_matches(
         profile: ConstraintPossibleMatchesProfile {
             possible_matches_collect_ms,
             constraint_vocab_ms,
-            same_bytes_ms,
-            possible_match_signatures_ms,
-            seed_state_signatures_ms,
-            build_map_ms,
-            remap_possible_matches_ms,
-            total_ms: elapsed_ms(total_started_at),
         },
     }
 }
