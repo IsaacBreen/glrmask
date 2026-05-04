@@ -4,7 +4,6 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use range_set_blaze::RangeSetBlaze;
-use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::automata::weighted::nwa::{NWA, NWAState};
@@ -762,131 +761,18 @@ pub(crate) fn remove_redundant_default_transitions(nwa: &mut NWA) {
 }
 
 pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
-    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_RESOLVE_NEGATIVES").is_some();
-    let disable_redundant_default_pruning =
-        std::env::var_os("GLRMASK_DISABLE_REDUNDANT_DEFAULT_PRUNING").is_some();
-
-    let cancellations_started_at = std::time::Instant::now();
     apply_cancellations_parallel_fixpoint(nwa);
-    let cancellations_ms = cancellations_started_at.elapsed().as_secs_f64() * 1000.0;
-
-    let finality_started_at = std::time::Instant::now();
     apply_finality_fixpoint(nwa);
-    let finality_ms = finality_started_at.elapsed().as_secs_f64() * 1000.0;
-
-    let remove_negative_started_at = std::time::Instant::now();
     remove_negative_transitions(nwa);
-    let remove_negative_ms = remove_negative_started_at.elapsed().as_secs_f64() * 1000.0;
-
-    let remove_default_started_at = std::time::Instant::now();
-    if !disable_redundant_default_pruning {
-        remove_redundant_default_transitions(nwa);
-    }
-    let remove_default_ms = remove_default_started_at.elapsed().as_secs_f64() * 1000.0;
-
-    if profile_enabled {
-        eprintln!(
-            "[glrmask/profile][resolve_negatives] cancellations_ms={:.3} finality_ms={:.3} remove_negative_ms={:.3} remove_default_ms={:.3} total_ms={:.3}",
-            cancellations_ms,
-            finality_ms,
-            remove_negative_ms,
-            remove_default_ms,
-            cancellations_ms + finality_ms + remove_negative_ms + remove_default_ms,
-        );
-    }
+    remove_redundant_default_transitions(nwa);
 }
 
 fn apply_cancellations_parallel_fixpoint(nwa: &mut NWA) {
-    let state_count = nwa.states().len();
-    if state_count == 0 {
+    if nwa.states().is_empty() {
         return;
     }
 
-    let num_threads = rayon::current_num_threads().max(1);
-    // The round-based parallel fixpoint adds enough chunking and merge overhead
-    // that the plain sequential worklist wins on the o1051 parser-NWA build.
-    // Keep the older parallel path available behind an explicit opt-in for
-    // experimentation, but default to the cheaper serial path.
-    let force_parallel = std::env::var("GLRMASK_RESOLVE_PARALLEL").is_ok();
-    if !force_parallel || state_count < 512 || num_threads < 2 {
-        let range = full_state_range(nwa);
-        apply_cancellations_range(nwa, range);
-        return;
-    }
-
-    // Chunk source states across threads (~4 chunks per thread for load-balancing).
-    let target_chunks = (num_threads * 4).max(1);
-    let chunk_size = (state_count.div_ceil(target_chunks)).max(64);
-    let chunks: Vec<std::ops::Range<u32>> = (0..state_count)
-        .step_by(chunk_size)
-        .map(|start| (start as u32)..((start + chunk_size).min(state_count) as u32))
-        .collect();
-
-    // Global snapshot of derived epsilons, indexed by source state. Grows monotonically.
-    let mut global_derived: DerivedEpsilons = vec![None; state_count];
-
-    let profile_enabled = std::env::var("GLRMASK_PROFILE_RESOLVE_ROUNDS").is_ok();
-    let max_rounds = 16; // safety bound; typical convergence is 2-4 rounds.
-    let mut rounds_run: usize = 0;
-    for round in 0..max_rounds {
-        let round_started_at = std::time::Instant::now();
-        // In parallel: each chunk runs a full cancellation fixpoint against the current
-        // global snapshot. Chunks only write derived epsilons for sources in their range,
-        // so the result slices are disjoint.
-        let results: Vec<Vec<(u32, u32, Weight)>> = chunks
-            .par_iter()
-            .cloned()
-            .map(|range| compute_cancellations_range_inner(nwa, range, Some(&global_derived)))
-            .collect();
-        let compute_ms = round_started_at.elapsed().as_secs_f64() * 1000.0;
-
-        let merge_started_at = std::time::Instant::now();
-        let mut changed = false;
-        let mut total_deltas = 0usize;
-        for batch in &results {
-            total_deltas += batch.len();
-        }
-        for batch in results {
-            for (from, to, weight) in batch {
-                let slot = global_derived[from as usize].get_or_insert_with(FxHashMap::default);
-                let entry = slot.entry(to).or_insert_with(Weight::empty);
-                if merge_weight(entry, weight) {
-                    changed = true;
-                }
-            }
-        }
-        let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
-        rounds_run += 1;
-
-        if profile_enabled {
-            eprintln!(
-                "[glrmask/profile][resolve_rounds] round={} compute_ms={:.1} merge_ms={:.1} total_deltas={} changed={}",
-                round, compute_ms, merge_ms, total_deltas, changed,
-            );
-        }
-        if !changed {
-            break;
-        }
-    }
-
-    if profile_enabled {
-        eprintln!(
-            "[glrmask/profile][resolve_rounds] total_rounds={} chunks={} state_count={}",
-            rounds_run,
-            chunks.len(),
-            state_count,
-        );
-    }
-
-    // Apply all derived epsilons to the NWA.
-    for (from, targets) in global_derived.into_iter().enumerate() {
-        let Some(targets) = targets else { continue };
-        for (to, weight) in targets {
-            if !weight.is_empty() {
-                nwa.add_epsilon(from as u32, to, weight);
-            }
-        }
-    }
+    apply_cancellations_range(nwa, full_state_range(nwa));
 }
 
 #[cfg(test)]

@@ -43,31 +43,15 @@ pub enum CompactMode {
     Full,
 }
 
-impl CompactMode {
-    /// Parse from an env var value. Unrecognized values fall back to `default`.
-    fn from_env_str(s: &str, default: CompactMode) -> CompactMode {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "none" | "0" | "off" | "skip" => CompactMode::None,
-            "fast" => CompactMode::Fast,
-            "full" | "1" | "on" => CompactMode::Full,
-            _ => default,
-        }
-    }
-}
-
-/// Run compaction according to the env var `env_var`, falling back to `default`.
+/// Run compaction according to the selected default mode.
 pub fn compact_from_env(
     dwa: &mut DWA,
     id_map: &mut InternalIdMap,
-    env_var: &str,
+    _env_var: &str,
     default: CompactMode,
     collect_profile_stats: bool,
 ) -> CompactReport {
-    let mode = std::env::var(env_var)
-        .ok()
-        .map(|v| CompactMode::from_env_str(&v, default))
-        .unwrap_or(default);
-    match mode {
+    match default {
         CompactMode::None => {
             let n_tsids = id_map.num_tsids() as usize;
             let n_tokens = id_map.num_internal_tokens() as usize;
@@ -232,17 +216,6 @@ fn compact_dwa_dimensions_inner(
         &compaction.token_perm,
         compaction.ordered_num_tokens,
     );
-    let t4 = std::time::Instant::now();
-    if std::env::var("GLRMASK_PROFILE_COMPACT").is_ok() {
-        eprintln!(
-            "[glrmask/profile][compact_breakdown] unique_weights={} collect_ms={:.3} build_dim_ms={:.3} apply_perm_ms={:.3} id_map_ms={:.3}",
-            unique_weights.len(),
-            (t1 - t0).as_secs_f64() * 1000.0,
-            (t2 - t1).as_secs_f64() * 1000.0,
-            (t3 - t2).as_secs_f64() * 1000.0,
-            (t4 - t3).as_secs_f64() * 1000.0,
-        );
-    }
     let profile_stats = storage_before.map(|storage_before| {
         let storage_after = count_unique_storage(dwa);
         CompactProfileStats {
@@ -272,27 +245,14 @@ fn build_dimension_compaction(
     num_tokens: u32,
     skip_token_ordering: bool,
 ) -> DimensionCompaction {
-    let profile_compact = std::env::var("GLRMASK_PROFILE_COMPACT").is_ok();
     let ((tsid_perm, ordered_num_tsids), (token_perm, ordered_num_tokens)) = rayon::join(
         || {
-            let t0 = std::time::Instant::now();
             let original_weight_refs = weight_refs(unique_weights);
             let tsid_merge_profiles = build_tsid_context_profiles(&original_weight_refs, num_tsids);
             let (tsid_merge_perm, merged_num_tsids) =
                 build_profile_merge_permutation(&tsid_merge_profiles);
-            let t1 = std::time::Instant::now();
 
             if skip_token_ordering {
-                // Skip tsid ordering — just use the merge permutation
-                if profile_compact {
-                    eprintln!(
-                        "[glrmask/profile][compact_tsid] merge_profile_ms={:.3} apply_perm_ms={:.3} order_profile_ms={:.3} merged_tsids={}",
-                        (t1 - t0).as_secs_f64() * 1000.0,
-                        0.0,
-                        0.0,
-                        merged_num_tsids,
-                    );
-                }
                 (tsid_merge_perm, merged_num_tsids)
             } else {
                 let merged_tsid_weights = apply_permutations_to_weight_set(
@@ -300,78 +260,41 @@ fn build_dimension_compaction(
                     &tsid_merge_perm,
                     &identity_perm(num_tokens as usize),
                 );
-                let t2 = std::time::Instant::now();
 
                 let merged_tsid_refs = weight_refs(&merged_tsid_weights);
                 let tsid_order_profiles =
                     build_tsid_context_profiles(&merged_tsid_refs, merged_num_tsids);
                 let (tsid_order_perm, ordered_num_tsids) =
                     build_profile_merge_permutation(&tsid_order_profiles);
-                let t3 = std::time::Instant::now();
-                if profile_compact {
-                    eprintln!(
-                        "[glrmask/profile][compact_tsid] merge_profile_ms={:.3} apply_perm_ms={:.3} order_profile_ms={:.3} merged_tsids={}",
-                        (t1 - t0).as_secs_f64() * 1000.0,
-                        (t2 - t1).as_secs_f64() * 1000.0,
-                        (t3 - t2).as_secs_f64() * 1000.0,
-                        merged_num_tsids,
-                    );
-                }
 
                 (compose_perm(&tsid_merge_perm, &tsid_order_perm), ordered_num_tsids)
             }
         },
         || {
-            let t0 = std::time::Instant::now();
             let original_weight_refs = weight_refs(unique_weights);
 
             let (token_perm, ordered_num_tokens) = if skip_token_ordering {
-                // Range-aware sweep: avoids expanding ranges element-by-element
                 let result = build_token_merge_permutation_ranged(&original_weight_refs, num_tokens);
-                let t1 = std::time::Instant::now();
-                let (token_perm, collect_sets_ms, optimize_order_ms) =
+                let (token_perm, _, _) =
                     maybe_optimize_fast_token_group_order(
                         unique_weights,
                         num_tsids,
                         result.0,
                         result.1,
-                        profile_compact,
+                        false,
                     );
-                let t2 = std::time::Instant::now();
-                if profile_compact {
-                    eprintln!(
-                        "[glrmask/profile][compact_token] merge_profile_ms={:.3} collect_sets_ms={:.3} optimize_order_ms={:.3} merged_tokens={}",
-                        (t1 - t0).as_secs_f64() * 1000.0,
-                        collect_sets_ms,
-                        optimize_order_ms,
-                        result.1,
-                    );
-                }
-                debug_assert!((t2 - t1).as_secs_f64() * 1000.0 + 1e-6 >= collect_sets_ms + optimize_order_ms);
                 (token_perm, result.1)
             } else {
                 let token_profiles = build_token_profiles(&original_weight_refs, num_tokens);
                 let (token_group_perm, ordered_num_tokens) =
                     build_profile_merge_permutation(&token_profiles);
-                let t1 = std::time::Instant::now();
                 let merged_token_sets =
                     collect_token_sets_after_permutation(unique_weights, &token_group_perm);
-                let t2 = std::time::Instant::now();
                 let token_perm = optimize_token_group_order(
                     &merged_token_sets,
                     token_group_perm,
                     ordered_num_tokens,
                 );
-                let t3 = std::time::Instant::now();
-                if profile_compact {
-                    eprintln!(
-                        "[glrmask/profile][compact_token] merge_profile_ms={:.3} collect_sets_ms={:.3} optimize_order_ms={:.3} merged_tokens={}",
-                        (t1 - t0).as_secs_f64() * 1000.0,
-                        (t2 - t1).as_secs_f64() * 1000.0,
-                        (t3 - t2).as_secs_f64() * 1000.0,
-                        ordered_num_tokens,
-                    );
-                }
                 (token_perm, ordered_num_tokens)
             };
 

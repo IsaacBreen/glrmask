@@ -708,40 +708,9 @@ pub(crate) fn characterize_terminals(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
 ) -> BTreeMap<TerminalID, TerminalCharacterization> {
-    let debug = std::env::var("GLRMASK_DEBUG_PROFILE").is_ok();
-
-    if debug {
-        let total_gotos: usize = table.goto.iter().map(|g| g.len()).sum();
-        eprintln!(
-            "[glrmask/debug][characterize] glr_states={} total_gotos={} num_terminals={}",
-            table.num_states, total_gotos, grammar.num_terminals
-        );
-    }
-
     (0..grammar.num_terminals)
         .map(|terminal| {
-            let t0 = std::time::Instant::now();
             let characterization = characterize_terminal(table, terminal);
-            if debug {
-                let ms = t0.elapsed().as_secs_f64() * 1000.0;
-                let total_entries = characterization.escapes.len()
-                    + characterization.reduces.len()
-                    + characterization.nt_escapes.len()
-                    + characterization.nt_rereduces.len();
-                if ms > 1.0 || total_entries > 500 {
-                    eprintln!(
-                        "[glrmask/debug][characterize_terminal] terminal={} escapes={} reduces={} nt_escapes={} rereduces={} nts={} total={} ms={:.1}",
-                        terminal,
-                        characterization.escapes.len(),
-                        characterization.reduces.len(),
-                        characterization.nt_escapes.len(),
-                        characterization.nt_rereduces.len(),
-                        characterization.all_nts.len(),
-                        total_entries,
-                        ms,
-                    );
-                }
-            }
             (terminal, characterization)
         })
         .collect()

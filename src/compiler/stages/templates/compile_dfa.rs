@@ -294,13 +294,6 @@ impl Templates {
         let mut by_terminal = BTreeMap::new();
         let mut by_terminal_nwa = BTreeMap::new();
         for (terminal, dfa, skeleton, sample) in compiled {
-            if std::env::var("GLRMASK_DEBUG_PROFILE").is_ok() && sample.nfa_states > 1000 {
-                eprintln!(
-                    "[glrmask/debug][template_large] terminal={} nfa_states={} nfa_transitions={} dfa_states={} dfa_transitions={} build_nfa_ms={:.1} det_ms={:.1} min_ms={:.1}",
-                    terminal, sample.nfa_states, sample.nfa_transitions, sample.dfa_states, sample.dfa_transitions,
-                    sample.build_nfa_ms, sample.determinize_ms, sample.minimize_ms
-                );
-            }
             profile.observe_compilation(&sample);
             by_terminal.insert(terminal, dfa);
             by_terminal_nwa.insert(terminal, skeleton);

@@ -30,7 +30,6 @@ use crate::compiler::stages::id_map_and_terminal_dwa::types::{
 use crate::compiler::stages::parser_dwa::build_parser_dwa_from_terminal_dwa_with_precomputed_templates;
 use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::characterize_terminals;
-use crate::compiler::stages::templates::compile_dfa::{emit_template_profile_summary, emit_templates_debug_dump};
 use crate::compiler::stages::terminal_dwa_compat::build_terminal_dwa_for_existing_id_map_with_possible_matches_and_coloring;
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::{GrammarDef, Terminal};
@@ -700,12 +699,9 @@ fn compile_prepared_with_profile(
             || {
                 let templates_started_at = Instant::now();
                 if compile_profile_enabled() {
-                    let characterize_started_at = Instant::now();
                     let characterizations = characterize_terminals(&table, &analyzed_grammar);
-                    let characterize_ms = elapsed_ms(characterize_started_at);
-                    let (templates, template_profile) =
+                    let (templates, _template_profile) =
                         Templates::from_characterizations_profiled(&characterizations);
-                    emit_template_profile_summary(characterize_ms, &template_profile);
                     (templates, elapsed_ms(templates_started_at))
                 } else {
                     let characterizations = characterize_terminals(&table, &analyzed_grammar);
@@ -714,9 +710,6 @@ fn compile_prepared_with_profile(
                 }
             },
         );
-        if strict_one_flag_enabled("GLRMASK_DEBUG_DUMP_TEMPLATES") {
-            emit_templates_debug_dump(&templates);
-        }
         let (mut internal_ids, prebuilt_terminal_dwa, mut terminal_phase_profile, global_max_length_state_map) = match id_map_build_result {
             IdMapBuildResult::Ready {
                 global,

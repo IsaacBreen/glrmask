@@ -10,7 +10,7 @@ use crate::automata::unweighted_u32::nfa::NFA as UnweightedNfa;
 use crate::automata::unweighted_u32::determinize::determinize as unweighted_determinize;
 use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic as unweighted_minimize;
 use crate::automata::weighted::dwa::DWA;
-use crate::automata::weighted::minimize::{minimize_fast, minimize_from_env};
+use crate::automata::weighted::minimize::minimize_fast;
 use crate::automata::weighted::nwa::{NWA, NWAState};
 use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::templates::compile_dfa::Templates;
@@ -18,10 +18,6 @@ use crate::ds::weight::Weight;
 
 type SubsetKey = SmallVec<[u64; 4]>;
 const SUBSET_BLOCK_BITS: usize = 8;
-
-fn parser_dwa_bundle_determinize_profile_enabled() -> bool {
-    std::env::var_os("GLRMASK_PROFILE_PARSER_DWA_BUNDLE_DETERMINIZE").is_some()
-}
 
 fn empty_bundle_nwa() -> NWA {
     let mut nwa = NWA::new(0, 0);
@@ -302,11 +298,7 @@ impl Templates {
         let group_dfas = self.build_group_dfas_profiled(&weight_groups, &mut profile);
 
         let determinize_started_at = Instant::now();
-        let (bundle_dwa, determinize_profile) = if parser_dwa_bundle_determinize_profile_enabled() {
-            determinize_bundle_groups_profiled(&group_dfas)
-        } else {
-            (determinize_bundle_groups(&group_dfas), DeterminizeBundleProfile::default())
-        };
+        let (bundle_dwa, determinize_profile) = determinize_bundle_groups_profiled(&group_dfas);
         profile.determinize_bundle_ms = elapsed_ms(determinize_started_at);
         profile.determinize_pop_state_ms = determinize_profile.pop_state_ms;
         profile.determinize_alive_groups_ms = determinize_profile.alive_groups_ms;
@@ -333,7 +325,7 @@ impl Templates {
 
         let minimize_started_at = Instant::now();
         let minimized = if profile.weight_groups > 1 {
-            minimize_from_env(&bundle_dwa, "GLRMASK_MINIMIZE_BUNDLE", minimize_fast)
+            minimize_fast(&bundle_dwa)
         } else {
             bundle_dwa
         };
@@ -369,7 +361,7 @@ impl Templates {
         let bundle_dwa = determinize_bundle_groups(&group_dfas);
 
         let minimized = if num_groups > 1 {
-            minimize_from_env(&bundle_dwa, "GLRMASK_MINIMIZE_BUNDLE", minimize_fast)
+            minimize_fast(&bundle_dwa)
         } else {
             bundle_dwa
         };
