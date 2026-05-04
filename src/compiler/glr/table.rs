@@ -2538,22 +2538,6 @@ fn lr1_closure(
     result
 }
 
-#[allow(dead_code)]
-fn lr1_goto_set(
-    items: &BTreeSet<LR1Item>,
-    sym: &Symbol,
-    grammar: &AnalyzedGrammar,
-) -> BTreeSet<LR1Item> {
-    let rules = &grammar.rules;
-    let mut kernel = BTreeSet::new();
-    for item in items {
-        if item.next_symbol(rules) == Some(sym) {
-            kernel.insert(LR1Item::new(item.rule, item.dot + 1, item.lookahead, item.stack_depth));
-        }
-    }
-    lr1_closure(&kernel, grammar)
-}
-
 /// Compute transferred items for the local-forward replace optimisation.
 ///
 /// For each dot-1 item `[A → X . rest, la]` in `kernel`, find "foo items" in

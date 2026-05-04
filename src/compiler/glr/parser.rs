@@ -159,16 +159,6 @@ fn virtual_stack_may_apply_guarded_shift(
     cursor.pop(shift.pop as usize) == 0
 }
 
-fn shift_frontier(table: &GLRTable, gss: ParserGSS, token: TerminalID) -> ParserGSS {
-    let mut shift_pairs = SmallVec::<[(u32, u32); 8]>::new();
-    for state in gss.peek_values() {
-        if let Some(target) = table.action(state, token).and_then(Action::shift_target) {
-            shift_pairs.push((state, target));
-        }
-    }
-    gss.remap_top_values_owned(shift_pairs)
-}
-
 fn apply_gotos(mut gss: ParserGSS, gotos: GotoBatch) -> ParserGSS {
     for (target, base) in gotos {
         gss = gss.absorb_push_same_acc(target, &base);
@@ -182,10 +172,6 @@ fn add_goto(gotos: &mut GotoBatch, target: u32, base: ParserGSS) {
     } else {
         gotos.push((target, base));
     }
-}
-
-fn reduce_sources(gss: &ParserGSS, state: u32, rhs_len: usize) -> ReduceSources {
-    gss.isolate_pop_bases(state, rhs_len as isize)
 }
 
 fn reduce_sources_from_isolated(gss: &ParserGSS, rhs_len: usize) -> ReduceSources {

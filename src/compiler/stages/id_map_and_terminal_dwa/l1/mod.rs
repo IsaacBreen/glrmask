@@ -1825,24 +1825,6 @@ fn merge_ranges_in_place(ranges: &mut Vec<(u32, u32)>) {
     ranges.truncate(write_index + 1);
 }
 
-/// Like merge_ranges_in_place but assumes the input is already sorted.
-/// Used in Phase 2 assembly where byte-order iteration guarantees sorted IDs.
-fn merge_sorted_ranges_in_place(ranges: &mut Vec<(u32, u32)>) {
-    if ranges.len() <= 1 {
-        return;
-    }
-    let mut write_index = 0usize;
-    for read_index in 1..ranges.len() {
-        if ranges[read_index].0 <= ranges[write_index].1.saturating_add(1) {
-            ranges[write_index].1 = ranges[write_index].1.max(ranges[read_index].1);
-        } else {
-            write_index += 1;
-            ranges[write_index] = ranges[read_index];
-        }
-    }
-    ranges.truncate(write_index + 1);
-}
-
 fn shared_rangeset_from_unsorted_pairs(
     ranges: &[(u32, u32)],
 ) -> Option<Arc<RangeSetBlaze<u32>>> {
