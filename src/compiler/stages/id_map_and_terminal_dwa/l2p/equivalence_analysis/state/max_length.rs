@@ -10,24 +10,6 @@ use super::super::compat::{FlatDfa, TokenizerView};
 
 const MISSING_BLOCK: u32 = u32::MAX;
 
-fn debug_max_length_enabled() -> bool {
-    std::env::var("GLRMASK_DEBUG_MAX_LENGTH")
-        .map(|value| {
-            let normalized = value.trim().to_ascii_lowercase();
-            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
-        })
-        .unwrap_or(false)
-}
-
-fn profile_compile_enabled() -> bool {
-    std::env::var("GLRMASK_PROFILE_COMPILE")
-        .map(|value| {
-            let normalized = value.trim().to_ascii_lowercase();
-            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
-        })
-        .unwrap_or(false)
-}
-
 #[inline(always)]
 fn mix_u64(mut x: u64) -> u64 {
     x ^= x >> 30;
@@ -99,10 +81,6 @@ fn build_has_any_transition_labels(dfa: &FlatDfa) -> Vec<bool> {
 #[inline]
 fn byte_is_relevant(byte: usize, relevant_bytes: Option<&[bool; 256]>) -> bool {
     relevant_bytes.map_or(true, |bytes| bytes[byte])
-}
-
-fn count_relevant_bytes(relevant_bytes: Option<&[bool; 256]>) -> usize {
-    relevant_bytes.map_or(256, |bytes| bytes.iter().filter(|&&b| b).count())
 }
 
 fn active_byte_representatives(
@@ -284,17 +262,8 @@ fn compute_kbounded_partition(
         return (Vec::new(), 0, 0);
     }
 
-    let debug = debug_max_length_enabled();
     let (label_ids, mut block_count) = build_initial_label_partition(dfa, active_groups);
     let mut blocks = label_ids.clone();
-
-    if debug {
-        eprintln!(
-            "[glrmask/debug][max_length_partition] max_token_len={} iteration=0 blocks={}",
-            k,
-            block_count,
-        );
-    }
 
     if block_count == n || active_bytes.is_empty() {
         return (blocks, block_count, 0);
@@ -320,15 +289,6 @@ fn compute_kbounded_partition(
         let stable = same_partition(&blocks, block_count, &next_blocks, next_count);
         blocks = next_blocks;
         block_count = next_count;
-
-        if debug {
-            eprintln!(
-                "[glrmask/debug][max_length_partition] max_token_len={} iteration={} blocks={}",
-                k,
-                iteration,
-                block_count,
-            );
-        }
 
         if stable || block_count == n {
             return (blocks, block_count, iteration);
@@ -367,13 +327,6 @@ fn build_subset_mapping(states: &[usize], blocks: &[u32]) -> Vec<usize> {
     mapping
 }
 
-fn count_mapping_representatives(mapping: &[usize]) -> usize {
-    let mut representatives = mapping.to_vec();
-    representatives.sort_unstable();
-    representatives.dedup();
-    representatives.len()
-}
-
 fn find_state_equivalence_classes_kbounded(
     tokenizer: &TokenizerView,
     states: &[usize],
@@ -389,27 +342,9 @@ fn find_state_equivalence_classes_kbounded(
 
     let dfa = tokenizer.dfa();
     let active_bytes = active_byte_representatives(relevant_bytes, byte_to_class);
-
-    let profile = profile_compile_enabled();
-    let start = std::time::Instant::now();
     let (blocks, block_count, iterations_run) =
         compute_kbounded_partition(dfa, k, active_groups, &active_bytes);
-
-    if profile {
-        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-        eprintln!(
-            "[glrmask/profile][max_length_partition] mode={} dfa_states={} input_states={} max_token_len={} refinement_iterations={} relevant_bytes={} byte_representatives={} blocks={} analysis_ms={:.3}",
-            mode,
-            dfa.states.len(),
-            states.len(),
-            k,
-            iterations_run,
-            count_relevant_bytes(relevant_bytes),
-            active_bytes.len(),
-            block_count,
-            elapsed_ms,
-        );
-    }
+    let _ = (block_count, iterations_run, mode);
 
     build_subset_mapping(states, &blocks)
 }
@@ -431,16 +366,6 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
         None,
         "default",
     );
-
-    if debug_max_length_enabled() {
-        eprintln!(
-            "[glrmask/debug][max_length] max_token_len={} input_states={} tokenizer_dfa_states={} representative_states={}",
-            max_len,
-            states.len(),
-            tokenizer.dfa().states.len(),
-            count_mapping_representatives(&mapping),
-        );
-    }
 
     mapping
 }
@@ -479,17 +404,6 @@ pub fn find_state_equivalence_classes_byte_restricted<S: AsRef<[u8]>>(
         byte_to_class,
         "byte_restricted",
     );
-
-    if debug_max_length_enabled() {
-        eprintln!(
-            "[glrmask/debug][max_length_byte_restricted] max_token_len={} input_states={} tokenizer_dfa_states={} relevant_bytes={} representative_states={}",
-            max_len,
-            states.len(),
-            tokenizer.dfa().states.len(),
-            relevant_bytes.iter().filter(|&&b| b).count(),
-            count_mapping_representatives(&mapping),
-        );
-    }
 
     mapping
 }

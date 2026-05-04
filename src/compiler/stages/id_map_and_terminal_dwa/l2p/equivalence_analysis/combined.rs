@@ -9,19 +9,6 @@ use super::state::fast as state_equivalence_analysis;
 use super::vocab::fast as vocab_equivalence_analysis;
 use crate::ds::bitset::BitSet;
 
-fn env_flag_enabled(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| {
-            let trimmed = value.trim();
-            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
-        })
-        .unwrap_or(false)
-}
-
-fn compile_profile_enabled() -> bool {
-    env_flag_enabled("GLRMASK_PROFILE_COMPILE") || env_flag_enabled("GLRMASK_PROFILE_COMPILE_SUMMARY")
-}
-
 fn elapsed_ms(started_at: std::time::Instant) -> f64 {
     started_at.elapsed().as_secs_f64() * 1000.0
 }
@@ -268,9 +255,6 @@ pub(crate) fn analyze_equivalences_l1_fast(
     use std::collections::HashMap;
     use std::hash::{Hash, Hasher};
 
-    let profile_compile = compile_profile_enabled();
-    let total_started_at = std::time::Instant::now();
-
     let num_states = tokenizer.num_states() as usize;
     let max_token_id = vocab.max_token_id();
 
@@ -284,7 +268,6 @@ pub(crate) fn analyze_equivalences_l1_fast(
     let num_tokens = token_ids.len();
 
     // Byte-class token deduplication.
-    let dedup_started_at = std::time::Instant::now();
     let tokenizer_view = TokenizerView::new(tokenizer);
     let byte_to_class = super::compat::compute_byte_classes(tokenizer_view.dfa());
     let mut bc_hash_to_repr: HashMap<u128, usize> = HashMap::with_capacity(num_tokens / 2);
@@ -300,10 +283,7 @@ pub(crate) fn analyze_equivalences_l1_fast(
         original_to_repr.push(repr);
     }
     let num_repr = repr_indices.len();
-    let dedup_ms = elapsed_ms(dedup_started_at);
-
     // Build transposed transition table for cache-optimal batched access.
-    let build_dfa_started_at = std::time::Instant::now();
     let dfa = tokenizer_view.dfa();
     let num_byte_classes = byte_to_class.iter().copied().max().map_or(0usize, |m| m as usize + 1);
     let mut class_repr_byte = vec![0u8; num_byte_classes];
@@ -323,13 +303,9 @@ pub(crate) fn analyze_equivalences_l1_fast(
             trans_by_class[c * num_states + s] = dfa.trans(s, class_repr_byte[c] as usize);
         }
     }
-    let build_dfa_ms = elapsed_ms(build_dfa_started_at);
-
     // Compute fingerprints: for each repr token, hash the ending state from
     // state group representatives only. States with identical transition rows
     // produce identical token walks, so grouping them first avoids redundant work.
-    let fp_started_at = std::time::Instant::now();
-
     // Initial state grouping by transition row: states with identical
     // 1-byte transitions for all byte classes are provably equivalent
     // for all tokens (since the DFA is deterministic).
@@ -349,8 +325,6 @@ pub(crate) fn analyze_equivalences_l1_fast(
         });
         initial_state_group.push(group);
     }
-    let num_initial_reps = initial_state_reps.len();
-
     // Each repr token gets a fingerprint: hash of ending state from
     // initial state group representatives only.
     let repr_fps: Vec<u64> = repr_indices
@@ -381,10 +355,7 @@ pub(crate) fn analyze_equivalences_l1_fast(
             sig
         })
         .collect();
-    let fp_ms = elapsed_ms(fp_started_at);
-
     // Group representative tokens by fingerprint → token classes.
-    let token_group_started_at = std::time::Instant::now();
     let mut repr_sig_to_class: HashMap<u64, u32> = HashMap::new();
     let mut repr_class: Vec<u32> = Vec::with_capacity(num_repr);
     let mut repr_class_reps: Vec<usize> = Vec::new();
@@ -411,11 +382,7 @@ pub(crate) fn analyze_equivalences_l1_fast(
             token_representative_ids[class as usize] = tid;
         }
     }
-    let token_group_ms = elapsed_ms(token_group_started_at);
-
     // State equivalence: group states by behavior across token class representatives.
-    let state_group_started_at = std::time::Instant::now();
-
     // For state grouping, we need per-state per-token-class fingerprints.
     // Compute ending state for each (state, repr_token_class_representative).
     let class_repr_tokens: Vec<&[u8]> = repr_class_reps
@@ -466,11 +433,8 @@ pub(crate) fn analyze_equivalences_l1_fast(
         state_internal_to_originals[class as usize].push(state as u32);
     }
     let num_state_classes = state_internal_to_originals.len();
-    let state_group_ms = elapsed_ms(state_group_started_at);
-
     // Re-group tokens using only state class representative fingerprints.
     // Skip if no state reduction occurred (same fingerprints guaranteed).
-    let refine_started_at = std::time::Instant::now();
     let (refined_num_token_classes, refined_token_original_to_internal, refined_token_internal_to_originals, refined_token_representative_ids) = if num_state_classes == num_states {
         // No state reduction: raw token classes are already optimal.
         (num_repr_classes, token_original_to_internal.clone(), token_internal_to_originals.clone(), token_representative_ids.clone())
@@ -536,20 +500,6 @@ pub(crate) fn analyze_equivalences_l1_fast(
     }
     (refined_num_tc, ref_token_o2i, ref_token_i2o, ref_token_reps)
     }; // end of if/else for refinement
-    let refine_ms = elapsed_ms(refine_started_at);
-
-    if profile_compile {
-        eprintln!(
-            "[glrmask/profile][id_map_l1_fast] dedup_ms={:.3} tokens={}->{} build_dfa_ms={:.3} fp_ms={:.3} initial_state_reps={} token_group_ms={:.3} state_group_ms={:.3} refine_ms={:.3} states={} state_classes={} token_classes_raw={} token_classes_refined={} total_ms={:.3}",
-            dedup_ms, num_tokens, num_repr,
-            build_dfa_ms,
-            fp_ms, num_initial_reps, token_group_ms, state_group_ms, refine_ms,
-            num_states, num_state_classes,
-            num_repr_classes, refined_num_token_classes,
-            elapsed_ms(total_started_at),
-        );
-    }
-
     InternalIdMap {
         tokenizer_states: ManyToOneIdMap {
             original_to_internal: state_original_to_internal,
@@ -579,9 +529,6 @@ pub(crate) fn analyze_equivalences_l1(
     use std::collections::HashMap;
     use std::hash::{Hash, Hasher};
 
-    let profile_compile = compile_profile_enabled();
-    let total_started_at = std::time::Instant::now();
-
     let num_states = tokenizer.num_states() as usize;
     let max_token_id = vocab.max_token_id();
 
@@ -596,7 +543,6 @@ pub(crate) fn analyze_equivalences_l1(
 
     // Byte-class token deduplication: tokens with the same byte-class sequence
     // produce identical DFA behavior from every state.
-    let dedup_started_at = std::time::Instant::now();
     let tokenizer_view = TokenizerView::new(tokenizer);
     let byte_to_class = super::compat::compute_byte_classes(tokenizer_view.dfa());
     let mut bc_hash_to_repr: HashMap<u128, usize> = HashMap::with_capacity(num_tokens / 2);
@@ -612,10 +558,7 @@ pub(crate) fn analyze_equivalences_l1(
         original_to_repr.push(repr);
     }
     let num_repr = repr_indices.len();
-    let dedup_ms = elapsed_ms(dedup_started_at);
-
     // Fingerprint per representative token: one u64 per state.
-    let fp_started_at = std::time::Instant::now();
     let mut repr_fps: Vec<Vec<u64>> = Vec::with_capacity(num_repr);
     for &idx in &repr_indices {
         let bytes = token_bytes_list[idx];
@@ -644,10 +587,7 @@ pub(crate) fn analyze_equivalences_l1(
         }
         repr_fps.push(fps);
     }
-    let fp_ms = elapsed_ms(fp_started_at);
-
     // Group representative tokens by fingerprint vector → token dedup classes.
-    let token_group_started_at = std::time::Instant::now();
     let mut repr_sig_to_class: HashMap<u64, u32> = HashMap::new();
     let mut repr_class: Vec<u32> = Vec::with_capacity(num_repr);
     let mut repr_class_reps: Vec<usize> = Vec::new(); // repr index for each class
@@ -678,10 +618,7 @@ pub(crate) fn analyze_equivalences_l1(
             token_representative_ids[class as usize] = tid;
         }
     }
-    let token_group_ms = elapsed_ms(token_group_started_at);
-
     // Group states by behavior across token class representative fingerprints.
-    let state_group_started_at = std::time::Instant::now();
     let mut state_sig_to_class: HashMap<u64, u32> = HashMap::new();
     let mut state_original_to_internal = vec![0u32; num_states];
     let mut state_internal_to_originals: Vec<Vec<u32>> = Vec::new();
@@ -703,10 +640,7 @@ pub(crate) fn analyze_equivalences_l1(
         state_internal_to_originals[class as usize].push(state as u32);
     }
     let num_state_classes = state_internal_to_originals.len();
-    let state_group_ms = elapsed_ms(state_group_started_at);
-
     // Re-group tokens using only state class representative fingerprints.
-    let refine_started_at = std::time::Instant::now();
     let state_class_reps: Vec<usize> = state_representative_ids
         .iter()
         .map(|&sid| sid as usize)
@@ -744,19 +678,6 @@ pub(crate) fn analyze_equivalences_l1(
             refined_token_representative_ids[class as usize] = tid;
         }
     }
-    let refine_ms = elapsed_ms(refine_started_at);
-
-    if profile_compile {
-        eprintln!(
-            "[glrmask/profile][id_map_l1] dedup_ms={:.3} tokens={}->{} fp_ms={:.3} token_group_ms={:.3} state_group_ms={:.3} refine_ms={:.3} states={} state_classes={} token_classes_raw={} token_classes_refined={} total_ms={:.3}",
-            dedup_ms, num_tokens, num_repr,
-            fp_ms, token_group_ms, state_group_ms, refine_ms,
-            num_states, num_state_classes,
-            num_repr_classes, refined_num_token_classes,
-            elapsed_ms(total_started_at),
-        );
-    }
-
     InternalIdMap {
         tokenizer_states: ManyToOneIdMap {
             original_to_internal: state_original_to_internal,
@@ -808,15 +729,8 @@ fn analyze_equivalences_impl(
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
 ) -> InternalIdMap {
-    let profile_compile = compile_profile_enabled();
-    let total_started_at = std::time::Instant::now();
-
-    let adjust_started_at = std::time::Instant::now();
     let adjusted_disallowed = adjust_disallowed_follows(disallowed_follows, ignore_terminal);
     let effective_disallowed = adjusted_disallowed.as_ref().unwrap_or(disallowed_follows);
-    let adjust_ms = elapsed_ms(adjust_started_at);
-
-    let tokenizer_view_started_at = std::time::Instant::now();
     // Only use shared flat_trans when state count matches the (possibly
     // simplified) tokenizer. If simplify_for_terminals minimized the DFA,
     // the original flat_trans has different state numbering and must be
@@ -830,8 +744,6 @@ fn analyze_equivalences_impl(
         (None, Some(ft)) => TokenizerView::new_from_flat_trans(ft, tokenizer),
         _ => TokenizerView::new(tokenizer),
     };
-    let tokenizer_view_ms = elapsed_ms(tokenizer_view_started_at);
-
     if let Some(cache) = shared_vocab_dfa_cache {
         cache.get_or_init(|| vocab_equivalence_analysis::SharedVocabDfaBase::build_from_dfa(tokenizer_view.dfa()));
     }
@@ -844,7 +756,6 @@ fn analyze_equivalences_impl(
         .unwrap_or_else(|| super::compat::compute_byte_classes(tokenizer_view.dfa()));
 
     // Extract vocab tokens as byte slices, ordered by token ID.
-    let vocab_extract_started_at = std::time::Instant::now();
     let max_token_id = vocab.max_token_id();
     let mut token_bytes: Vec<&[u8]> = Vec::with_capacity(vocab.len());
     let mut token_ids: Vec<u32> = Vec::with_capacity(vocab.len());
@@ -852,18 +763,11 @@ fn analyze_equivalences_impl(
         token_ids.push(tid);
         token_bytes.push(bytes.as_slice());
     }
-    let vocab_extract_ms = elapsed_ms(vocab_extract_started_at);
-
     // All DFA states as initial states (use initial_state_map representatives if available)
-    let initial_states_started_at = std::time::Instant::now();
     let initial_states: Vec<usize> = match initial_state_map {
         Some(map) => map.representative_original_ids.iter().map(|&s| s as usize).collect(),
         None => (0..tokenizer.num_states() as usize).collect(),
     };
-    let initial_states_ms = elapsed_ms(initial_states_started_at);
-
-    let combined_started_at = std::time::Instant::now();
-    let dedup_started_at = std::time::Instant::now();
     let dedup = deduplicate_tokens_by_byte_class(&token_bytes, &byte_to_class);
     let mut relevant_bytes = [false; 256];
     for token in &dedup.representative_token_bytes {
@@ -871,9 +775,6 @@ fn analyze_equivalences_impl(
             relevant_bytes[byte as usize] = true;
         }
     }
-    let dedup_ms = elapsed_ms(dedup_started_at);
-
-    let max_length_started_at = std::time::Instant::now();
     let pre_state_reps = super::state::max_length::find_state_equivalence_classes_byte_restricted(
         &tokenizer_view,
         &dedup.representative_token_bytes,
@@ -882,8 +783,6 @@ fn analyze_equivalences_impl(
         active_groups,
         Some(&relevant_bytes),
     );
-    let max_length_ms = elapsed_ms(max_length_started_at);
-
     let pre_reduced_states: Vec<usize> = pre_state_reps
         .iter()
         .copied()
@@ -893,7 +792,6 @@ fn analyze_equivalences_impl(
     let normalized_disallowed_follows =
         normalize_disallowed_follows(tokenizer_group_count(&tokenizer_view), effective_disallowed);
 
-    let vocab_started_at = std::time::Instant::now();
     let dedup_vocab_classes = vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter(
         &tokenizer_view,
         &dedup.representative_token_bytes,
@@ -903,9 +801,6 @@ fn analyze_equivalences_impl(
         active_groups,
         shared_vocab_dfa_cache,
     );
-    let vocab_ms = elapsed_ms(vocab_started_at);
-
-    let token_state_started_at = std::time::Instant::now();
     let vocab_representative_tokens = representative_tokens_for_vocab_classes(
         &dedup_vocab_classes,
         &dedup.representative_token_bytes,
@@ -926,8 +821,6 @@ fn analyze_equivalences_impl(
         .iter()
         .map(|pre_rep| rep_to_final[pre_rep])
         .collect::<Vec<_>>();
-    let token_state_ms = elapsed_ms(token_state_started_at);
-
     let vocab_classes = expand_vocab_classes(
         dedup_vocab_classes,
         &dedup.original_to_repr,
@@ -935,37 +828,12 @@ fn analyze_equivalences_impl(
     );
     let state_classes =
         state_equivalence_analysis::mapping_to_equivalence_classes(&initial_states, &representative_states);
-    let combined_ms = elapsed_ms(combined_started_at);
-
-    let state_map_started_at = std::time::Instant::now();
     let num_dfa_states = tokenizer.num_states() as usize;
     let state_map = match initial_state_map {
         Some(init_map) => build_state_map_composed(&state_classes, num_dfa_states, init_map),
         None => build_state_map(&state_classes, num_dfa_states),
     };
-    let state_map_ms = elapsed_ms(state_map_started_at);
-
-    let vocab_map_started_at = std::time::Instant::now();
     let vocab_map = build_vocab_map(&vocab_classes, &token_ids, max_token_id);
-    let vocab_map_ms = elapsed_ms(vocab_map_started_at);
-
-    if profile_compile {
-        eprintln!(
-            "[glrmask/profile][id_map] adjust_disallowed_ms={:.3} tokenizer_view_ms={:.3} vocab_extract_ms={:.3} initial_states_ms={:.3} dedup_ms={:.3} max_length_ms={:.3} token_state_ms={:.3} vocab_ms={:.3} combined_equiv_ms={:.3} build_state_map_ms={:.3} build_vocab_map_ms={:.3} total_ms={:.3}",
-            adjust_ms,
-            tokenizer_view_ms,
-            vocab_extract_ms,
-            initial_states_ms,
-            dedup_ms,
-            max_length_ms,
-            token_state_ms,
-            vocab_ms,
-            combined_ms,
-            state_map_ms,
-            vocab_map_ms,
-            elapsed_ms(total_started_at),
-        );
-    }
 
     InternalIdMap {
         tokenizer_states: state_map,
