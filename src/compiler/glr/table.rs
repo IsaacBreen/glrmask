@@ -266,26 +266,12 @@ impl<'a, K: Copy + Eq + Hash, V: Clone> Iterator for SparseRowValues<'a, K, V> {
 pub(crate) type ActionRow = SparseRow<TerminalID, Action>;
 pub(crate) type GotoRow = SparseRow<NonterminalID, (u32, bool)>;
 
-fn env_flag_enabled(key: &str) -> bool {
-    std::env::var(key).map_or(false, |v| v == "1")
-}
-
-/// Check once whether replace shifts are enabled via env vars.
 fn replace_shifts_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !env_flag_enabled("GLRMASK_DISABLE_REPLACE")
-            && !env_flag_enabled("GLRMASK_DISABLE_REPLACE_SHIFT")
-    })
+    true
 }
 
-/// Check once whether replace gotos are enabled via env vars.
 fn replace_gotos_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !env_flag_enabled("GLRMASK_DISABLE_REPLACE")
-            && !env_flag_enabled("GLRMASK_DISABLE_REPLACE_GOTO")
-    })
+    true
 }
 
 std::thread_local! {
@@ -297,7 +283,7 @@ fn local_forward_replace_enabled() -> bool {
         if let Some(v) = c.get() {
             return v;
         }
-        env_flag_enabled("GLRMASK_ENABLE_LOCAL_FORWARD_REPLACE")
+        false
     })
 }
 
@@ -472,37 +458,10 @@ impl GLRTable {
         table.merge_identical_rows();
         let merge_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
-        let pre_recog_states = table.num_states;
-        let pre_recog_splits = {
-            let debug_profile = std::env::var("GLRMASK_DEBUG_PROFILE")
-                .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
-                .unwrap_or(false);
-            if debug_profile {
-                table.action.iter().filter(|row| {
-                    row.values().any(|a| matches!(a, Action::Split { .. }))
-                }).count()
-            } else { 0 }
-        };
         let t3 = std::time::Instant::now();
         table.merge_recognizer_equivalent();
         let recog_ms = t3.elapsed().as_secs_f64() * 1000.0;
-
-        let debug_profile = std::env::var("GLRMASK_DEBUG_PROFILE")
-            .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
-            .unwrap_or(false);
-        if debug_profile {
-            let max_items = item_sets.iter().map(|s| s.len()).max().unwrap_or(0);
-            let total_items: usize = item_sets.iter().map(|s| s.len()).sum();
-            let count_splits = |t: &GLRTable| -> usize {
-                t.action.iter().filter(|row| {
-                    row.values().any(|a| matches!(a, Action::Split { .. }))
-                }).count()
-            };
-            eprintln!(
-                "[glrmask/debug][glr_table] lr1_states={} lr1_ms={:.3} ielr_ms={:.3} pre_merge_states={} merge_ms={:.3} pre_recog_states={} pre_recog_splits={} recog_ms={:.3} final_states={} splits={} max_items_per_state={} total_items={}",
-                item_sets.len(), lr1_ms, ielr_ms, pre_merge_states, merge_ms, pre_recog_states, pre_recog_splits, recog_ms, table.num_states, count_splits(&table), max_items, total_items,
-            );
-        }
+        let _ = (lr1_ms, ielr_ms, pre_merge_states, merge_ms, recog_ms, item_sets);
 
         table
     }
@@ -1118,34 +1077,7 @@ impl GLRTable {
 }
 
 pub(crate) fn emit_glr_table_debug_dump(table: &GLRTable) {
-    eprintln!("=== GLR Table ===");
-    eprintln!(
-        "num_states={} num_terminals={} num_rules={} start_state=0",
-        table.num_states, table.num_terminals, table.num_rules
-    );
-    for (index, rule) in table.rules.iter().enumerate() {
-        let rhs_str = rule
-            .rhs
-            .iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>()
-            .join(" ");
-        eprintln!("({}) N{} -> {}", index, rule.lhs, rhs_str);
-    }
-    for state in 0..table.num_states as usize {
-        let start_mark = if state == 0 { " [START]" } else { "" };
-        eprintln!("state {}{}", state, start_mark);
-        let mut actions = table.action[state].iter().collect::<Vec<_>>();
-        actions.sort_by_key(|(terminal, _)| **terminal);
-        for (terminal, action) in actions {
-            eprintln!("  action T{} -> {:?}", terminal, action);
-        }
-        let mut gotos = table.goto[state].iter().collect::<Vec<_>>();
-        gotos.sort_by_key(|(nonterminal, _)| **nonterminal);
-        for (nonterminal, (target, replace)) in gotos {
-            eprintln!("  goto N{} -> state {} replace={}", nonterminal, target, replace);
-        }
-    }
+    let _ = table;
 }
 
 fn row_key(
@@ -1696,19 +1628,7 @@ fn apply_reduce_to_frame(
         match target {
             None => target = Some(next_target),
             Some(existing) if existing == next_target => {}
-            Some(existing) => {
-                if env_flag_enabled("GLRMASK_DEBUG_STACK_SHIFT_LOWER") {
-                    eprintln!(
-                        "[stack-shift-lower] context-dependent goto target origin_state={} nt={} len={} existing_target={} next_target={}",
-                        origin_state,
-                        nt,
-                        len,
-                        existing,
-                        next_target
-                    );
-                }
-                return None;
-            }
+            Some(_) => return None,
         }
         by_replace.entry(replace).or_default().insert(goto_from);
     }
@@ -1719,30 +1639,6 @@ fn apply_reduce_to_frame(
 
     let target = target?;
     let needs_guard = missing > 0 || by_replace.len() > 1;
-    if missing > 0 && env_flag_enabled("GLRMASK_DEBUG_STACK_SHIFT_LOWER") {
-        eprintln!(
-            "[stack-shift-lower] guarded mixed missing/present goto origin_state={} nt={} len={} target={} guard_pop={} groups={:?} missing={}",
-            origin_state,
-            nt,
-            len,
-            target,
-            guard_pop,
-            by_replace,
-            missing
-        );
-    }
-    if by_replace.len() > 1 && env_flag_enabled("GLRMASK_DEBUG_STACK_SHIFT_LOWER") {
-        eprintln!(
-            "[stack-shift-lower] guarded same-target goto origin_state={} nt={} len={} target={} guard_pop={} groups={:?}",
-            origin_state,
-            nt,
-            len,
-            target,
-            guard_pop,
-            by_replace
-        );
-    }
-
     let mut frames = Vec::new();
     for (replace, froms) in by_replace {
         let mut next_frame = frame.clone();
@@ -1973,15 +1869,6 @@ fn try_inline_action_to_stack_shifts(
         return None;
     }
 
-    if env_flag_enabled("GLRMASK_DEBUG_STACK_SHIFT_LOWER") {
-        eprintln!(
-            "[stack-shift-lower] candidate state={} terminal={} action={:?}",
-            state,
-            tid,
-            action
-        );
-    }
-
     let effects = stack_effects_for_action(
         table,
         predecessors,
@@ -1997,26 +1884,10 @@ fn try_inline_action_to_stack_shifts(
         &mut BTreeSet::new(),
     )?;
     if effects.is_empty() {
-        if env_flag_enabled("GLRMASK_DEBUG_STACK_SHIFT_LOWER") {
-            eprintln!(
-                "[stack-shift-lower] dead candidate state={} terminal={} action={:?}",
-                state,
-                tid,
-                action
-            );
-        }
         return None;
     }
     if effects_can_be_delayed(&effects) {
         if effects.iter().any(|effect| effect.pop == 0) {
-            if env_flag_enabled("GLRMASK_DEBUG_STACK_SHIFT_LOWER") {
-                eprintln!(
-                    "[stack-shift-lower] pop0-delayed-block state={} terminal={} effects={:?}",
-                    state,
-                    tid,
-                    effects
-                );
-            }
             return None;
         }
         if let Some(delay_state) = try_create_delayed_stack_shift_state(
@@ -2027,25 +1898,8 @@ fn try_inline_action_to_stack_shifts(
             constituent_sets,
             0,
         ) {
-            if env_flag_enabled("GLRMASK_DEBUG_STACK_SHIFT_LOWER") {
-                eprintln!(
-                    "[stack-shift-lower] lowered-to-delayed state={} terminal={} effects={:?} delay_state={}",
-                    state,
-                    tid,
-                    effects,
-                    delay_state
-                );
-            }
             return Some(Action::Shift(delay_state, true));
         }
-    }
-    if env_flag_enabled("GLRMASK_DEBUG_STACK_SHIFT_LOWER") {
-        eprintln!(
-            "[stack-shift-lower] lowered state={} terminal={} effects={:?}",
-            state,
-            tid,
-            effects
-        );
     }
     stack_effect_action(effects)
 }
@@ -2057,11 +1911,7 @@ fn stack_shift_action(shifts: Vec<StackShift>) -> Option<Action> {
     if shifts.len() == 1 {
         let shift = &shifts[0];
         if shift.pushes.len() == 1 {
-            match shift.pop {
-                0 => return Some(Action::Shift(shift.pushes[0], false)),
-                1 => return Some(Action::Shift(shift.pushes[0], true)),
-                _ => {}
-            }
+            return Some(Action::Shift(shift.pushes[0], shift.pop == 1));
         }
     }
     Some(Action::StackShifts(shifts))

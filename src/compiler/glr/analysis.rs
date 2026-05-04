@@ -1318,7 +1318,7 @@ pub(crate) fn merge_identical_nonterminals(
         let init = vec![GENERIC_NT; nts.len()];
         (0..nts.len()).map(|i| hash_nt(i, &init)).collect()
     };
-    let (mut class_of, mut n_classes) = normalise_counted(&initial_classes);
+    let (mut class_of, n_classes) = normalise_counted(&initial_classes);
 
     // If every NT is already in its own class, no merges are possible.
     if n_classes == nts.len() {
@@ -1438,7 +1438,6 @@ pub(crate) fn merge_identical_nonterminals(
     };
 
     // Refine until stable, using depth-ordered in-place (Gauss-Seidel) updates.
-    let debug = std::env::var("GLRMASK_DEBUG_PROFILE").map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") }).unwrap_or(false);
     let mut iters = 0u32;
     loop {
         iters += 1;
@@ -1458,15 +1457,8 @@ pub(crate) fn merge_identical_nonterminals(
         }
         // Early termination: every NT is in its own class → no merges.
         if nc == nts.len() {
-            if debug {
-                eprintln!("[glrmask/debug][merge_nt] nts={} rules={} iters={} classes={} (early-exit)", nts.len(), rules.len(), iters, nc);
-            }
             return rules.to_vec();
         }
-        n_classes = nc;
-    }
-    if debug {
-        eprintln!("[glrmask/debug][merge_nt] nts={} rules={} iters={} classes={}", nts.len(), rules.len(), iters, n_classes);
     }
 
     // ── Build merge map from final partition ─────────────────────────────
@@ -1550,13 +1542,6 @@ pub(crate) fn merge_identical_nonterminals(
 pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
     use std::cell::Cell;
 
-    let debug_profile = std::env::var("GLRMASK_DEBUG_PROFILE")
-        .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
-        .unwrap_or(false);
-    let debug_stage_trace = std::env::var("GLRMASK_DEBUG_NORMALIZE_STAGES")
-        .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
-        .unwrap_or(false);
-
     let next_nt = Cell::new(max_nt_id(rules) + 1);
     let mut fresh_nt = || {
         let id = next_nt.get();
@@ -1566,54 +1551,17 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
 
     let mut iteration = 0;
     loop {
-        let iter_start = std::time::Instant::now();
         let snap = rules.clone();
-        let clone_ms = iter_start.elapsed().as_secs_f64() * 1000.0;
-
-        let t0 = std::time::Instant::now();
         replace_rules_with_resync(rules, &next_nt, inline_null_productions);
-        let inline_null_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        if debug_stage_trace {
-            eprintln!("[glrmask/debug][normalize_stage] iter={} inline_null_done rules={} ms={:.3}", iteration, rules.len(), inline_null_ms);
-        }
-
-        let t1 = std::time::Instant::now();
         with_resynced_next_nonterminal(rules, &next_nt, |rules| {
             eliminate_right_recursion(rules, &mut fresh_nt);
         });
-        let elim_right_ms = t1.elapsed().as_secs_f64() * 1000.0;
-        if debug_stage_trace {
-            eprintln!("[glrmask/debug][normalize_stage] iter={} elim_right_done rules={} ms={:.3}", iteration, rules.len(), elim_right_ms);
-        }
-
-        let t2 = std::time::Instant::now();
         with_resynced_next_nonterminal(rules, &next_nt, |rules| {
             let nullable = compute_nullable(rules, max_nt_id(rules) + 1);
             eliminate_hidden_left_recursion(rules, &nullable);
         });
-        let elim_hidden_ms = t2.elapsed().as_secs_f64() * 1000.0;
-        if debug_stage_trace {
-            eprintln!("[glrmask/debug][normalize_stage] iter={} elim_hidden_done rules={} ms={:.3}", iteration, rules.len(), elim_hidden_ms);
-        }
-
-        let t3 = std::time::Instant::now();
         dedup_rules(rules);
-        let dedup_ms = t3.elapsed().as_secs_f64() * 1000.0;
-        if debug_stage_trace {
-            eprintln!("[glrmask/debug][normalize_stage] iter={} dedup_done rules={} ms={:.3}", iteration, rules.len(), dedup_ms);
-        }
-
-        let t4 = std::time::Instant::now();
         let converged = *rules == snap;
-        let compare_ms = t4.elapsed().as_secs_f64() * 1000.0;
-
-        if debug_profile {
-            eprintln!(
-                "[glrmask/debug][normalize] iter={} rules={} clone_ms={:.3} inline_null_ms={:.3} elim_right_ms={:.3} elim_hidden_ms={:.3} dedup_ms={:.3} compare_ms={:.3} total_ms={:.3}",
-                iteration, rules.len(), clone_ms, inline_null_ms, elim_right_ms, elim_hidden_ms, dedup_ms, compare_ms,
-                iter_start.elapsed().as_secs_f64() * 1000.0,
-            );
-        }
         iteration += 1;
 
         if converged {
@@ -1621,33 +1569,9 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
         }
     }
 
-    let post_t0 = std::time::Instant::now();
     replace_rules_with_resync(rules, &next_nt, inline_null_productions);
-    let post_inline_null_ms = post_t0.elapsed().as_secs_f64() * 1000.0;
-    if debug_stage_trace {
-        eprintln!("[glrmask/debug][normalize_stage] post inline_null_done rules={} ms={:.3}", rules.len(), post_inline_null_ms);
-    }
-
-    let post_t1 = std::time::Instant::now();
     *rules = remove_unreachable_rules(rules, start);
-    let post_remove_ms = post_t1.elapsed().as_secs_f64() * 1000.0;
-    if debug_stage_trace {
-        eprintln!("[glrmask/debug][normalize_stage] post remove_unreachable_done rules={} ms={:.3}", rules.len(), post_remove_ms);
-    }
-
-    let post_t2 = std::time::Instant::now();
     dedup_rules(rules);
-    let post_dedup_ms = post_t2.elapsed().as_secs_f64() * 1000.0;
-    if debug_stage_trace {
-        eprintln!("[glrmask/debug][normalize_stage] post dedup_done rules={} ms={:.3}", rules.len(), post_dedup_ms);
-    }
-
-    if debug_profile {
-        eprintln!(
-            "[glrmask/debug][normalize] post_loop rules={} inline_null_ms={:.3} remove_unreachable_ms={:.3} dedup_ms={:.3}",
-            rules.len(), post_inline_null_ms, post_remove_ms, post_dedup_ms,
-        );
-    }
 }
 
 fn replace_rules_with_resync(
