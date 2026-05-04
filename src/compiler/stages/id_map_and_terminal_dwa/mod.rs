@@ -481,13 +481,10 @@ pub(crate) fn build_id_map_and_terminal_dwa(
 
     // Global max-length state equivalence map (used as initial state grouping
     // for downstream partitioning and constraint-possible-matches).
-    // Enabled by default; set GLRMASK_USE_GLOBAL_MAX_LENGTH_STATE_MAP=0
-    // to use the identity map.
+    // Default is identity (skipped). Set GLRMASK_USE_GLOBAL_MAX_LENGTH_STATE_MAP=1
+    // to enable the full max-length prepass.
     let use_global_max_length_state_map = std::env::var("GLRMASK_USE_GLOBAL_MAX_LENGTH_STATE_MAP")
-        .map_or(true, |value| {
-            let value = value.trim().to_ascii_lowercase();
-            !matches!(value.as_str(), "" | "0" | "false" | "no" | "off")
-        });
+        .map_or(false, |value| value == "1");
     let global_max_length_started_at = Instant::now();
     let global_max_length_state_map = if use_global_max_length_state_map {
         build_global_max_length_state_map(tokenizer, vocab, &flat_trans)
