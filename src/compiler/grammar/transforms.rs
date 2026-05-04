@@ -2,11 +2,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::automata::regex::Expr;
 use crate::automata::lexer::regex::parse_regex;
-use crate::compiler::compile::build_tokenizer;
 use crate::compiler::glr::analysis::{merge_identical_nonterminals, normalize_grammar};
 use crate::grammar::flat::{GrammarDef, NonterminalID, Terminal};
 use crate::grammar::flat::{Rule, Symbol, TerminalID};
-use crate::automata::lexer::tokenizer::Tokenizer;
 
 const MAX_RUNTIME_REDUCTION_LEN: usize = 5;
 const INLINE_PROTECTED_NONTERMINALS_ENV: &str = "GLRMASK_INLINE_PROTECTED_NONTERMINALS";
@@ -634,19 +632,5 @@ fn prepare_grammar_transforms_impl(
     }
 
     compact_unused_terminals(normalized);
-}
-
-fn prepare_owned_grammar_for_compile_impl(
-    normalized: &mut GrammarDef,
-    nullable_terminals: &BTreeSet<TerminalID>,
-) -> (GrammarDef, Tokenizer) {
-    prepare_grammar_transforms_impl(normalized, nullable_terminals);
-
-    // Build the real tokenizer only from the compacted live terminal set so
-    // dead terminals never make it into downstream lexer/parser stages.
-    let mut tokenizer = build_tokenizer(normalized);
-    let _ = tokenizer.isolate_start_state_and_drain_nullable_terminals();
-
-    (std::mem::take(normalized), tokenizer)
 }
 

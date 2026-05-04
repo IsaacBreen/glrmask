@@ -9,17 +9,10 @@ use rustc_hash::FxHashMap;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::grammar::flat::TerminalID;
 use crate::ds::u8set::U8Set;
-use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
+use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
 
 pub(crate) type PossibleMatchesByState = BTreeMap<u32, BTreeMap<TerminalID, RangeSetBlaze<u32>>>;
 type PossibleMatchMap = FxHashMap<TerminalID, RangeSetBlaze<u32>>;
-
-fn clone_token_entries(token_entries: &[(u32, Vec<u8>)]) -> Vec<(u32, Vec<u8>)> {
-    token_entries
-        .iter()
-        .map(|(token_id, bytes)| (*token_id, bytes.clone()))
-        .collect()
-}
 
 fn ordered_possible_matches(matches_for_state: Rc<PossibleMatchMap>) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
     match Rc::try_unwrap(matches_for_state) {
@@ -165,21 +158,6 @@ impl<'a> PossibleMatchesComputer<'a> {
         self.cache.insert(cache_key, Rc::clone(&result));
         result
     }
-}
-
-pub(crate) fn build_possible_matches_from_owned_token_entries(
-    tokenizer: &Tokenizer,
-    token_entries: Vec<(u32, Vec<u8>)>,
-) -> PossibleMatchesByState {
-    let trie = VocabPrefixTree::build_owned(
-        token_entries
-            .into_iter()
-            .map(|(token_id, bytes)| (token_id as usize, bytes))
-            .collect(),
-    );
-
-    let mut computer = PossibleMatchesComputer::new(tokenizer);
-    collect_possible_matches_by_state(tokenizer, &trie.root, &mut computer)
 }
 
 pub(crate) fn collect_possible_matches_by_state(

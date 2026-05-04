@@ -68,10 +68,6 @@ pub(crate) enum TerminalPathLength {
     TwoPlus,
 }
 
-pub(crate) fn terminal_dwa_profile_enabled() -> bool {
-    std::env::var_os("GLRMASK_PROFILE_TERMINAL_DWA").is_some()
-}
-
 pub(crate) fn compile_profile_enabled() -> bool {
     std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
