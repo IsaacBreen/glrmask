@@ -12,7 +12,7 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::regex::Expr;
 use crate::compiler::constraint_possible_matches as cpm;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
-use crate::compiler::glr::table::{GLRTable, emit_glr_table_debug_dump};
+use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar::transforms::prepare_grammar_transforms_only;
 use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
@@ -476,10 +476,6 @@ fn compile_prepared_with_profile(
 
         if debug_terminal_mapping_enabled() {
             maybe_print_terminal_mappings(&analyzed_grammar);
-        }
-
-        if strict_one_flag_enabled("GLRMASK_DEBUG_DUMP_GLR_TABLE") {
-            emit_glr_table_debug_dump(&table);
         }
 
         if env_flag_enabled("GLRMASK_WARN_PROBLEMATIC_BYTE_TERMINALS") {

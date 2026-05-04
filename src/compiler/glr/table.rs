@@ -1076,10 +1076,6 @@ impl GLRTable {
     }
 }
 
-pub(crate) fn emit_glr_table_debug_dump(table: &GLRTable) {
-    let _ = table;
-}
-
 fn row_key(
     action_row: &ActionRow,
     goto_row: &GotoRow,

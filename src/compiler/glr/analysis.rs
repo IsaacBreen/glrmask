@@ -616,9 +616,6 @@ fn compress_nullable_runs_with_optional_tree(rules: &[Rule], num_nt: u32) -> Vec
         return rules.to_vec();
     }
 
-    let debug_stage_trace = std::env::var("GLRMASK_DEBUG_INLINE_NULL_STAGES")
-        .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
-        .unwrap_or(false);
     let mut run_count = 0usize;
     let mut max_run_len = 0usize;
     for rule in rules {
@@ -626,15 +623,6 @@ fn compress_nullable_runs_with_optional_tree(rules: &[Rule], num_nt: u32) -> Vec
             run_count += 1;
             max_run_len = max_run_len.max(end - start + 1);
         }
-    }
-    if debug_stage_trace {
-        eprintln!(
-            "[glrmask/debug][inline_null] compress_start rules={} nullable_nts={} nullable_runs={} max_run_len={}",
-            rules.len(),
-            nullable.len(),
-            run_count,
-            max_run_len,
-        );
     }
     if run_count == 0 {
         return rules.to_vec();
@@ -810,30 +798,8 @@ fn get_or_create_non_nullable_nt(
 /// existing exhaustive elimination, to avoid the raw power-set blowups that
 /// occur when many nullable nonterminals appear consecutively.
 pub(crate) fn inline_null_productions(rules: &[Rule], num_nt: u32) -> Vec<Rule> {
-    let debug_stage_trace = std::env::var("GLRMASK_DEBUG_INLINE_NULL_STAGES")
-        .map(|v| { let n = v.trim().to_ascii_lowercase(); !matches!(n.as_str(), "" | "0" | "false" | "no" | "off") })
-        .unwrap_or(false);
-    let preprocess_started_at = std::time::Instant::now();
     let preprocessed = compress_nullable_runs_with_optional_tree(rules, num_nt);
-    if debug_stage_trace {
-        eprintln!(
-            "[glrmask/debug][inline_null] preprocess_done in_rules={} out_rules={} ms={:.3}",
-            rules.len(),
-            preprocessed.len(),
-            preprocess_started_at.elapsed().as_secs_f64() * 1000.0,
-        );
-    }
-
-    let exhaustive_started_at = std::time::Instant::now();
     let result = inline_null_productions_exhaustive(&preprocessed, max_nt_id(&preprocessed) + 1);
-    if debug_stage_trace {
-        eprintln!(
-            "[glrmask/debug][inline_null] exhaustive_done in_rules={} out_rules={} ms={:.3}",
-            preprocessed.len(),
-            result.len(),
-            exhaustive_started_at.elapsed().as_secs_f64() * 1000.0,
-        );
-    }
     result
 }
 
