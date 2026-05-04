@@ -4,7 +4,7 @@
 //! states by topological height, colors each height bucket subject to
 //! compatibility constraints, and reconstructs the minimized automaton from the
 //! merged buckets.
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use range_set_blaze::RangeSetBlaze;
 use rayon::prelude::*;
@@ -13,14 +13,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::dwa::{DWA, DWAState};
 use crate::ds::weight::Weight;
 
-fn debug_profile_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("GLRMASK_DEBUG_PROFILE")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-    })
-}
+fn debug_profile_enabled() -> bool { false }
 
 type Label = i32;
 
@@ -1676,14 +1669,9 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, _partition_refine_threshold: u
         return dwa.clone();
     }
 
-    let debug = debug_profile_enabled();
-    let t_start = std::time::Instant::now();
-
     // Clone and push weights
     let mut pushed = dwa.clone();
     let (_, topo_from_push, reachable_from_push) = push_weights(&mut pushed);
-
-    let push_ms = if debug { t_start.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
 
     // Reuse topo order from push_weights (graph structure unchanged by push).
     let topo = match topo_from_push {
@@ -1701,9 +1689,7 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, _partition_refine_threshold: u
     if needed[start_state].is_empty() {
         return canonical_dead_dwa();
     }
-    let t1 = if debug { std::time::Instant::now() } else { t_start };
     let productive_transitions = compute_productive_transitions(&pushed, &needed);
-    let prod_ms = if debug { t1.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
     let heights = compute_heights(&pushed, &topo);
     let max_height = heights.iter().max().copied().unwrap_or(0);
 
@@ -1797,16 +1783,7 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, _partition_refine_threshold: u
         }
     }
 
-    let t_recon = if debug { std::time::Instant::now() } else { t_start };
-    let minimized = reconstruct_dwa(start_state, &old_to_new, new_states);
-    if debug {
-        let recon_ms = t_recon.elapsed().as_secs_f64() * 1000.0;
-        let total_ms = t_start.elapsed().as_secs_f64() * 1000.0;
-        let coloring_ms = total_ms - push_ms - prod_ms - recon_ms;
-        eprintln!("[glrmask/debug][minimize_acyclic] states={} push_ms={:.1} prod_ms={:.1} coloring_ms={:.1} recon_ms={:.1} total_ms={:.1} minimized_states={}",
-            dwa.states().len(), push_ms, prod_ms, coloring_ms, recon_ms, total_ms, minimized.states().len());
-    }
-    minimized
+    reconstruct_dwa(start_state, &old_to_new, new_states)
 }
 
 /// Fast minimize using signature-based partition refinement.
@@ -1814,113 +1791,7 @@ pub fn minimize_acyclic_with_threshold(dwa: &DWA, _partition_refine_threshold: u
 /// for signatures and weight merging. Much faster but may produce slightly
 /// larger output than the full graph-coloring approach.
 pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
-    if dwa.states().is_empty() {
-        return dwa.clone();
-    }
-
-    let Some(topo) = compute_topo_order(dwa) else {
-        return dwa.clone(); // cyclic
-    };
-    let heights = compute_heights(dwa, &topo);
-    let max_height = heights.iter().max().copied().unwrap_or(0);
-
-    let n = dwa.states().len();
-    let start_state = dwa.start_state() as usize;
-    let needed = compute_needed_sets(dwa, &topo);
-    if needed[start_state].is_empty() {
-        return canonical_dead_dwa();
-    }
-
-    let reachable_from_start = compute_reachable_from_start(dwa, start_state);
-
-    let mut states_by_height: Vec<Vec<usize>> = vec![vec![]; max_height + 1];
-    for (id, &h) in heights.iter().enumerate() {
-        if !reachable_from_start[id] { continue; }
-        if needed[id].is_empty() { continue; }
-        states_by_height[h].push(id);
-    }
-
-    let mut old_to_new = vec![UNMAPPED; n];
-    let mut next_new_id: u32 = 0;
-    let mut any_merging = false;
-
-    // Assign new IDs via partition refinement.
-    for h in 0..=max_height {
-        let candidates = &states_by_height[h];
-        if candidates.is_empty() { continue; }
-
-        let coloring = partition_refine_coloring_raw(
-            candidates,
-            dwa,
-            &old_to_new,
-        );
-
-        let base_new_id = next_new_id;
-        let num_colors = coloring.iter().max().map(|&c| c + 1).unwrap_or(0);
-
-        if num_colors < candidates.len() {
-            any_merging = true;
-        }
-
-        for (idx, &color) in coloring.iter().enumerate() {
-            old_to_new[candidates[idx]] = base_new_id + color as u32;
-        }
-        next_new_id = base_new_id + num_colors as u32;
-    }
-
-    // Build the output DWA.
-    let minimized = if !any_merging {
-        // Fast path: no merging happened — just remap state IDs without cloning weights.
-        let total_new = next_new_id as usize;
-        let mut new_states: Vec<DWAState> = (0..total_new).map(|_| DWAState::default()).collect();
-        for (old_id, &new_id) in old_to_new.iter().enumerate() {
-            if new_id == UNMAPPED { continue; }
-            let old_state = &dwa.states()[old_id];
-            let ns = &mut new_states[new_id as usize];
-            ns.final_weight = old_state.final_weight.clone();
-            for (&label, (target_raw, w)) in &old_state.transitions {
-                let t = *target_raw as usize;
-                if t >= n { continue; }
-                let target_new = old_to_new[t];
-                if target_new == UNMAPPED { continue; }
-                ns.transitions.insert(label, (target_new, w.clone()));
-            }
-        }
-        let start_new = old_to_new[start_state];
-        DWA::from_parts(
-            new_states,
-            if start_new == UNMAPPED { 0 } else { start_new },
-        )
-    } else {
-        // Slow path: states were merged — use MergedStateBuilder.
-        let mut new_states: Vec<MergedStateBuilder> = (0..next_new_id as usize)
-            .map(|_| MergedStateBuilder::default())
-            .collect();
-        for (old_id, &new_id) in old_to_new.iter().enumerate() {
-            if new_id == UNMAPPED { continue; }
-            let builder = &mut new_states[new_id as usize];
-            let old_state = &dwa.states()[old_id];
-
-            if let Some(fw) = &old_state.final_weight {
-                builder.add_final_weight(fw);
-            }
-
-            for (&label, (target_raw, w_orig)) in &old_state.transitions {
-                let t = *target_raw as usize;
-                if t >= n { continue; }
-                let target_new = old_to_new[t];
-                if target_new == UNMAPPED { continue; }
-                if !w_orig.is_empty() {
-                    builder.add_transition(label, target_new, w_orig.clone());
-                }
-            }
-        }
-        for builder in new_states.iter_mut() {
-            builder.finalize_for_reuse();
-        }
-        reconstruct_dwa(start_state, &old_to_new, new_states)
-    };
-    minimized
+    minimize_acyclic(dwa)
 }
 
 /// Minimize using partition refinement: exact-signature grouping + disjoint-domain merging.
@@ -1938,79 +1809,7 @@ pub fn minimize_acyclic_fast(dwa: &DWA) -> DWA {
 /// When some mergeable state pairs have *overlapping* needed sets (a strictly harder case),
 /// this function may produce a slightly larger DWA than full minimize. It is always correct.
 pub fn minimize_acyclic_partition_refine(dwa: &DWA) -> DWA {
-    if dwa.states().is_empty() {
-        return dwa.clone();
-    }
-
-    let Some(topo) = compute_topo_order(dwa) else {
-        return dwa.clone(); // cyclic — caller handles
-    };
-
-    let heights = compute_heights(dwa, &topo);
-    let max_height = heights.iter().max().copied().unwrap_or(0);
-    let n = dwa.states().len();
-    let start_state = dwa.start_state() as usize;
-
-    // Compute needed sets on the original DWA (no push_weights clone/modification).
-    let needed = compute_needed_sets(dwa, &topo);
-    if needed[start_state].is_empty() {
-        return canonical_dead_dwa();
-    }
-    let productive_transitions = compute_productive_transitions(dwa, &needed);
-
-    let reachable_from_start = compute_reachable_from_start(dwa, start_state);
-
-    let mut states_by_height: Vec<Vec<usize>> = vec![vec![]; max_height + 1];
-    for (id, &h) in heights.iter().enumerate() {
-        if !reachable_from_start[id] { continue; }
-        if needed[id].is_empty() { continue; }
-        states_by_height[h].push(id);
-    }
-
-    let mut old_to_new = vec![UNMAPPED; n];
-    let mut new_states: Vec<MergedStateBuilder> = Vec::new();
-
-    for h in 0..=max_height {
-        let candidates = &states_by_height[h];
-        if candidates.is_empty() { continue; }
-
-        // Use partition_refine_coloring: exact signature match + disjoint-domain merge.
-        // This is cheaper than build_and_color_hybrid (no overlap analysis needed).
-        let coloring = partition_refine_coloring(
-            candidates,
-            dwa,
-            &needed,
-            &old_to_new,
-            &productive_transitions,
-        );
-
-        let base_new_id = new_states.len() as u32;
-        let num_colors = coloring.iter().max().map(|&c| c + 1).unwrap_or(0);
-
-        for (idx, &color) in coloring.iter().enumerate() {
-            old_to_new[candidates[idx]] = base_new_id + color as u32;
-        }
-
-        new_states.extend((0..num_colors).map(|_| MergedStateBuilder::default()));
-
-        let builders = &mut new_states[base_new_id as usize..];
-        for (idx, &color) in coloring.iter().enumerate() {
-            // Restrict transition weights by needed[target] for correctness without push_weights.
-            merge_state_with_needed_restriction(
-                candidates[idx],
-                color,
-                dwa,
-                &needed,
-                &old_to_new,
-                builders,
-            );
-        }
-        for builder in builders.iter_mut() {
-            builder.finalize_for_reuse();
-        }
-    }
-
-    reconstruct_dwa(start_state, &old_to_new, new_states)
+    minimize_acyclic(dwa)
 }
 
 /// Like `merge_state_into_builder` but restricts each transition weight to `needed[target]`.

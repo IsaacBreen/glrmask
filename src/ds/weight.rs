@@ -9,7 +9,6 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::Instant;
 
 // STICKY NOTE: DO NOT REMOVE THIS COMMENT.
 //
@@ -115,65 +114,6 @@ static ALL_WEIGHT: Lazy<Weight> = Lazy::new(|| {
     )));
     finalize_weight_map(map)
 });
-
-static WEIGHT_OP_PROFILE_ENABLED: Lazy<bool> = Lazy::new(|| {
-    std::env::var_os("GLRMASK_PROFILE_WEIGHT_OPS").is_some()
-});
-
-#[derive(Debug, Default)]
-struct WeightOpProfile {
-    union_calls: AtomicU64,
-    union_time_us: AtomicU64,
-    union_fast_full: AtomicU64,
-    union_fast_empty_left: AtomicU64,
-    union_fast_empty_right: AtomicU64,
-    union_fast_same_arc: AtomicU64,
-    union_fast_disjoint_tsid: AtomicU64,
-    union_memo_hits: AtomicU64,
-    union_computed: AtomicU64,
-    union_computed_single_single: AtomicU64,
-    union_computed_single_multi: AtomicU64,
-    union_computed_multi_single: AtomicU64,
-    union_computed_multi_multi: AtomicU64,
-    union_computed_single_single_time_us: AtomicU64,
-    union_computed_single_multi_time_us: AtomicU64,
-    union_computed_multi_single_time_us: AtomicU64,
-    union_computed_multi_multi_time_us: AtomicU64,
-    union_all_calls: AtomicU64,
-    union_all_time_us: AtomicU64,
-    union_all_inputs: AtomicU64,
-    complement_calls: AtomicU64,
-    complement_time_us: AtomicU64,
-}
-
-static WEIGHT_OP_PROFILE: Lazy<WeightOpProfile> = Lazy::new(WeightOpProfile::default);
-
-#[derive(Clone, Copy, Debug)]
-enum WeightUnionPath {
-    Full,
-    EmptyLeft,
-    EmptyRight,
-    SameArc,
-    DisjointTsid,
-    MemoHit,
-    Computed,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum WeightUnionComputedShape {
-    SingleSingle,
-    SingleMulti,
-    MultiSingle,
-    MultiMulti,
-}
-
-fn weight_op_profile_enabled() -> bool {
-    *WEIGHT_OP_PROFILE_ENABLED
-}
-
-fn micros_to_ms(micros: u64) -> f64 {
-    micros as f64 / 1000.0
-}
 
 fn prune_dead_token_sets() {
     GLOBAL_TOKEN_SETS.retain(|_, weak| weak.strong_count() > 0);
@@ -605,186 +545,6 @@ pub fn clear_weight_op_caches() {
 pub fn clear_weight_caches() {
     clear_weight_op_caches();
     clear_all_weights();
-}
-
-fn record_union_profile(path: WeightUnionPath, micros: u64) {
-    if !weight_op_profile_enabled() {
-        return;
-    }
-    WEIGHT_OP_PROFILE.union_calls.fetch_add(1, Ordering::Relaxed);
-    WEIGHT_OP_PROFILE
-        .union_time_us
-        .fetch_add(micros, Ordering::Relaxed);
-    match path {
-        WeightUnionPath::Full => {
-            WEIGHT_OP_PROFILE.union_fast_full.fetch_add(1, Ordering::Relaxed);
-        }
-        WeightUnionPath::EmptyLeft => {
-            WEIGHT_OP_PROFILE
-                .union_fast_empty_left
-                .fetch_add(1, Ordering::Relaxed);
-        }
-        WeightUnionPath::EmptyRight => {
-            WEIGHT_OP_PROFILE
-                .union_fast_empty_right
-                .fetch_add(1, Ordering::Relaxed);
-        }
-        WeightUnionPath::SameArc => {
-            WEIGHT_OP_PROFILE
-                .union_fast_same_arc
-                .fetch_add(1, Ordering::Relaxed);
-        }
-        WeightUnionPath::DisjointTsid => {
-            WEIGHT_OP_PROFILE
-                .union_fast_disjoint_tsid
-                .fetch_add(1, Ordering::Relaxed);
-        }
-        WeightUnionPath::MemoHit => {
-            WEIGHT_OP_PROFILE.union_memo_hits.fetch_add(1, Ordering::Relaxed);
-        }
-        WeightUnionPath::Computed => {
-            WEIGHT_OP_PROFILE.union_computed.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-}
-
-fn record_union_computed_shape(shape: WeightUnionComputedShape, micros: u64) {
-    if !weight_op_profile_enabled() {
-        return;
-    }
-    match shape {
-        WeightUnionComputedShape::SingleSingle => {
-            WEIGHT_OP_PROFILE
-                .union_computed_single_single
-                .fetch_add(1, Ordering::Relaxed);
-            WEIGHT_OP_PROFILE
-                .union_computed_single_single_time_us
-                .fetch_add(micros, Ordering::Relaxed);
-        }
-        WeightUnionComputedShape::SingleMulti => {
-            WEIGHT_OP_PROFILE
-                .union_computed_single_multi
-                .fetch_add(1, Ordering::Relaxed);
-            WEIGHT_OP_PROFILE
-                .union_computed_single_multi_time_us
-                .fetch_add(micros, Ordering::Relaxed);
-        }
-        WeightUnionComputedShape::MultiSingle => {
-            WEIGHT_OP_PROFILE
-                .union_computed_multi_single
-                .fetch_add(1, Ordering::Relaxed);
-            WEIGHT_OP_PROFILE
-                .union_computed_multi_single_time_us
-                .fetch_add(micros, Ordering::Relaxed);
-        }
-        WeightUnionComputedShape::MultiMulti => {
-            WEIGHT_OP_PROFILE
-                .union_computed_multi_multi
-                .fetch_add(1, Ordering::Relaxed);
-            WEIGHT_OP_PROFILE
-                .union_computed_multi_multi_time_us
-                .fetch_add(micros, Ordering::Relaxed);
-        }
-    }
-}
-
-fn record_union_all_profile(micros: u64, inputs: u64) {
-    if !weight_op_profile_enabled() {
-        return;
-    }
-    WEIGHT_OP_PROFILE.union_all_calls.fetch_add(1, Ordering::Relaxed);
-    WEIGHT_OP_PROFILE
-        .union_all_time_us
-        .fetch_add(micros, Ordering::Relaxed);
-    WEIGHT_OP_PROFILE
-        .union_all_inputs
-        .fetch_add(inputs, Ordering::Relaxed);
-}
-
-fn record_complement_profile(micros: u64) {
-    if !weight_op_profile_enabled() {
-        return;
-    }
-    WEIGHT_OP_PROFILE.complement_calls.fetch_add(1, Ordering::Relaxed);
-    WEIGHT_OP_PROFILE
-        .complement_time_us
-        .fetch_add(micros, Ordering::Relaxed);
-}
-
-pub(crate) fn clear_weight_op_profile() {
-    if !weight_op_profile_enabled() {
-        return;
-    }
-    WEIGHT_OP_PROFILE.union_calls.store(0, Ordering::Relaxed);
-    WEIGHT_OP_PROFILE.union_time_us.store(0, Ordering::Relaxed);
-    WEIGHT_OP_PROFILE.union_fast_full.store(0, Ordering::Relaxed);
-    WEIGHT_OP_PROFILE.union_fast_empty_left.store(0, Ordering::Relaxed);
-    WEIGHT_OP_PROFILE.union_fast_empty_right.store(0, Ordering::Relaxed);
-    WEIGHT_OP_PROFILE.union_fast_same_arc.store(0, Ordering::Relaxed);
-    WEIGHT_OP_PROFILE.union_fast_disjoint_tsid.store(0, Ordering::Relaxed);
-    WEIGHT_OP_PROFILE.union_memo_hits.store(0, Ordering::Relaxed);
-    WEIGHT_OP_PROFILE.union_computed.store(0, Ordering::Relaxed);
-    WEIGHT_OP_PROFILE
-        .union_computed_single_single
-        .store(0, Ordering::Relaxed);
-    WEIGHT_OP_PROFILE
-        .union_computed_single_multi
-        .store(0, Ordering::Relaxed);
-    WEIGHT_OP_PROFILE
-        .union_computed_multi_single
-        .store(0, Ordering::Relaxed);
-    WEIGHT_OP_PROFILE
-        .union_computed_multi_multi
-        .store(0, Ordering::Relaxed);
-    WEIGHT_OP_PROFILE
-        .union_computed_single_single_time_us
-        .store(0, Ordering::Relaxed);
-    WEIGHT_OP_PROFILE
-        .union_computed_single_multi_time_us
-        .store(0, Ordering::Relaxed);
-    WEIGHT_OP_PROFILE
-        .union_computed_multi_single_time_us
-        .store(0, Ordering::Relaxed);
-    WEIGHT_OP_PROFILE
-        .union_computed_multi_multi_time_us
-        .store(0, Ordering::Relaxed);
-    WEIGHT_OP_PROFILE.union_all_calls.store(0, Ordering::Relaxed);
-    WEIGHT_OP_PROFILE.union_all_time_us.store(0, Ordering::Relaxed);
-    WEIGHT_OP_PROFILE.union_all_inputs.store(0, Ordering::Relaxed);
-    WEIGHT_OP_PROFILE.complement_calls.store(0, Ordering::Relaxed);
-    WEIGHT_OP_PROFILE.complement_time_us.store(0, Ordering::Relaxed);
-}
-
-pub(crate) fn emit_weight_op_profile_summary() {
-    if !weight_op_profile_enabled() {
-        return;
-    }
-
-    eprintln!(
-        "[glrmask/profile][weight_ops] union_calls={} union_ms={:.3} union_fast_full={} union_fast_empty_left={} union_fast_empty_right={} union_fast_same_arc={} union_fast_disjoint_tsid={} union_memo_hits={} union_computed={} union_computed_single_single={} union_computed_single_single_ms={:.3} union_computed_single_multi={} union_computed_single_multi_ms={:.3} union_computed_multi_single={} union_computed_multi_single_ms={:.3} union_computed_multi_multi={} union_computed_multi_multi_ms={:.3} union_all_calls={} union_all_ms={:.3} union_all_inputs={} complement_calls={} complement_ms={:.3}",
-        WEIGHT_OP_PROFILE.union_calls.load(Ordering::Relaxed),
-        micros_to_ms(WEIGHT_OP_PROFILE.union_time_us.load(Ordering::Relaxed)),
-        WEIGHT_OP_PROFILE.union_fast_full.load(Ordering::Relaxed),
-        WEIGHT_OP_PROFILE.union_fast_empty_left.load(Ordering::Relaxed),
-        WEIGHT_OP_PROFILE.union_fast_empty_right.load(Ordering::Relaxed),
-        WEIGHT_OP_PROFILE.union_fast_same_arc.load(Ordering::Relaxed),
-        WEIGHT_OP_PROFILE.union_fast_disjoint_tsid.load(Ordering::Relaxed),
-        WEIGHT_OP_PROFILE.union_memo_hits.load(Ordering::Relaxed),
-        WEIGHT_OP_PROFILE.union_computed.load(Ordering::Relaxed),
-        WEIGHT_OP_PROFILE.union_computed_single_single.load(Ordering::Relaxed),
-        micros_to_ms(WEIGHT_OP_PROFILE.union_computed_single_single_time_us.load(Ordering::Relaxed)),
-        WEIGHT_OP_PROFILE.union_computed_single_multi.load(Ordering::Relaxed),
-        micros_to_ms(WEIGHT_OP_PROFILE.union_computed_single_multi_time_us.load(Ordering::Relaxed)),
-        WEIGHT_OP_PROFILE.union_computed_multi_single.load(Ordering::Relaxed),
-        micros_to_ms(WEIGHT_OP_PROFILE.union_computed_multi_single_time_us.load(Ordering::Relaxed)),
-        WEIGHT_OP_PROFILE.union_computed_multi_multi.load(Ordering::Relaxed),
-        micros_to_ms(WEIGHT_OP_PROFILE.union_computed_multi_multi_time_us.load(Ordering::Relaxed)),
-        WEIGHT_OP_PROFILE.union_all_calls.load(Ordering::Relaxed),
-        micros_to_ms(WEIGHT_OP_PROFILE.union_all_time_us.load(Ordering::Relaxed)),
-        WEIGHT_OP_PROFILE.union_all_inputs.load(Ordering::Relaxed),
-        WEIGHT_OP_PROFILE.complement_calls.load(Ordering::Relaxed),
-        micros_to_ms(WEIGHT_OP_PROFILE.complement_time_us.load(Ordering::Relaxed)),
-    );
 }
 
 fn lookup_memoized_weight_op(kind: WeightOpKind, left: &Weight, right: &Weight) -> Option<Weight> {
@@ -1562,57 +1322,28 @@ impl Weight {
     }
 
     pub fn union(&self, other: &Self) -> Self {
-        let profile_started_at = weight_op_profile_enabled().then(Instant::now);
         if self.is_full() || other.is_full() {
-            let result = Self::all();
-            if let Some(started_at) = profile_started_at {
-                record_union_profile(WeightUnionPath::Full, started_at.elapsed().as_micros() as u64);
-            }
-            return result;
+            return Self::all();
         }
         if self.is_empty() {
-            let result = other.clone();
-            if let Some(started_at) = profile_started_at {
-                record_union_profile(WeightUnionPath::EmptyLeft, started_at.elapsed().as_micros() as u64);
-            }
-            return result;
+            return other.clone();
         }
         if other.is_empty() {
-            let result = self.clone();
-            if let Some(started_at) = profile_started_at {
-                record_union_profile(WeightUnionPath::EmptyRight, started_at.elapsed().as_micros() as u64);
-            }
-            return result;
+            return self.clone();
         }
         if Arc::ptr_eq(&self.0, &other.0) {
-            let result = self.clone();
-            if let Some(started_at) = profile_started_at {
-                record_union_profile(WeightUnionPath::SameArc, started_at.elapsed().as_micros() as u64);
-            }
-            return result;
+            return self.clone();
         }
         if let Some(existing) = lookup_memoized_weight_op(WeightOpKind::Union, self, other) {
-            if let Some(started_at) = profile_started_at {
-                record_union_profile(WeightUnionPath::MemoHit, started_at.elapsed().as_micros() as u64);
-            }
             return existing;
         }
         if let Some(result) = union_disjoint_tsid_ranges(self, other) {
             store_memoized_weight_op(WeightOpKind::Union, self, other, &result);
-            if let Some(started_at) = profile_started_at {
-                record_union_profile(WeightUnionPath::DisjointTsid, started_at.elapsed().as_micros() as u64);
-            }
             return result;
         }
 
         let left_single = single_compact_entry(self);
         let right_single = single_compact_entry(other);
-        let computed_shape = match (&left_single, &right_single) {
-            (Some(_), Some(_)) => WeightUnionComputedShape::SingleSingle,
-            (Some(_), None) => WeightUnionComputedShape::SingleMulti,
-            (None, Some(_)) => WeightUnionComputedShape::MultiSingle,
-            (None, None) => WeightUnionComputedShape::MultiMulti,
-        };
 
         let result = if let (Some(left), Some(right)) = (&left_single, &right_single) {
             combine_single_entries(&left, &right, union_token_sets)
@@ -1620,32 +1351,20 @@ impl Weight {
             union_compact_entries(self, other)
         };
         store_memoized_weight_op(WeightOpKind::Union, self, other, &result);
-        if let Some(started_at) = profile_started_at {
-            let elapsed = started_at.elapsed().as_micros() as u64;
-            record_union_profile(WeightUnionPath::Computed, elapsed);
-            record_union_computed_shape(computed_shape, elapsed);
-        }
         result
     }
 
     pub fn union_all<'a>(weights: impl IntoIterator<Item = &'a Self>) -> Self {
-        let profile_started_at = weight_op_profile_enabled().then(Instant::now);
         let mut meaningful = SmallVec::<[&Weight; 8]>::new();
         for weight in weights {
             if weight.is_full() {
-                let result = Self::all();
-                if let Some(started_at) = profile_started_at {
-                    record_union_all_profile(started_at.elapsed().as_micros() as u64, meaningful.len() as u64);
-                }
-                return result;
+                return Self::all();
             }
             if weight.is_empty() {
                 continue;
             }
             meaningful.push(weight);
         }
-
-        let input_count = meaningful.len() as u64;
 
         let result = match meaningful.len() {
             0 => Self::empty(),
@@ -1681,10 +1400,6 @@ impl Weight {
                 }
             }
         };
-
-        if let Some(started_at) = profile_started_at {
-            record_union_all_profile(started_at.elapsed().as_micros() as u64, input_count);
-        }
         result
     }
 
@@ -1737,19 +1452,10 @@ impl Weight {
     }
 
     pub fn complement(&self) -> Self {
-        let profile_started_at = weight_op_profile_enabled().then(Instant::now);
         if self.is_full() {
-            let result = Self::empty();
-            if let Some(started_at) = profile_started_at {
-                record_complement_profile(started_at.elapsed().as_micros() as u64);
-            }
-            result
+            Self::empty()
         } else if self.is_empty() {
-            let result = Self::all();
-            if let Some(started_at) = profile_started_at {
-                record_complement_profile(started_at.elapsed().as_micros() as u64);
-            }
-            result
+            Self::all()
         } else {
             // Cannot compute a proper per-TSID complement without an explicit
             // token/TSID universe.  Returning empty() makes the determinization
@@ -1759,11 +1465,7 @@ impl Weight {
             // was `all().difference(self)` which always returned `all()` due to
             // the sentinel representation, causing target subsets to collapse
             // into `Weight::all()` and producing false positives.
-            let result = Self::empty();
-            if let Some(started_at) = profile_started_at {
-                record_complement_profile(started_at.elapsed().as_micros() as u64);
-            }
-            result
+            Self::empty()
         }
     }
 

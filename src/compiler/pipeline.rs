@@ -33,7 +33,6 @@ use crate::compiler::stages::templates::characterize::characterize_terminals;
 use crate::compiler::stages::templates::compile_dfa::{emit_template_profile_summary, emit_templates_debug_dump};
 use crate::compiler::stages::terminal_dwa_compat::build_terminal_dwa_for_existing_id_map_with_possible_matches_and_coloring;
 use crate::ds::bitset::BitSet;
-use crate::ds::weight::{clear_weight_op_profile, emit_weight_op_profile_summary};
 use crate::grammar::flat::{GrammarDef, Terminal};
 use crate::runtime::Constraint;
 
@@ -378,7 +377,6 @@ fn compile_prepared_with_profile(
     vocab: &Vocab,
 ) -> (Constraint, CompilePhaseProfile) {
     run_with_compile_thread_pool(|| {
-        clear_weight_op_profile();
         let compile_started_at = Instant::now();
         let mut profile = CompilePhaseProfile::default();
         let debug_compile_stages = debug_compile_stages_enabled();
@@ -1028,7 +1026,6 @@ pub(crate) fn compile_owned_profiled(
     let (constraint, mut profile) = compile_prepared_with_profile(prepared_grammar, vocab);
     profile.prepare_ms = prepare_ms;
     profile.total_ms = elapsed_ms(total_started_at);
-    emit_weight_op_profile_summary();
     (constraint, profile)
 }
 

@@ -7,7 +7,6 @@ use super::dwa::DWA;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MinimizeStrategy {
     Full,
-    Fast,
     Threshold(usize),
 }
 
@@ -31,27 +30,18 @@ pub fn minimize(dwa: &DWA) -> DWA {
 /// partition-refinement coloring when any height bucket exceeds
 /// `partition_refine_threshold` candidates. Produces a slightly larger DWA
 /// for those buckets but avoids the quadratic cost.
-pub fn minimize_with_threshold(dwa: &DWA, partition_refine_threshold: usize) -> DWA {
-    minimize_if_acyclic(dwa, |dwa| {
-        super::minimize_acyclic::minimize_acyclic_with_threshold(dwa, partition_refine_threshold)
-    })
+pub fn minimize_with_threshold(dwa: &DWA, _partition_refine_threshold: usize) -> DWA {
+    minimize(dwa)
 }
 
-/// Minimize using partition refinement + disjoint-domain merging, without push_weights.
-/// Much faster than `minimize` for DWAs where all mergeable state pairs have disjoint
-/// token domains (e.g. the global merge DWA built from partitioned vocabularies).
-/// Falls back to the caller's DWA unchanged if the input is cyclic.
+/// Compatibility wrapper for the single production minimization path.
 pub fn minimize_partition_refine(dwa: &DWA) -> DWA {
-    minimize_if_acyclic(dwa, super::minimize_acyclic::minimize_acyclic_partition_refine)
+    minimize(dwa)
 }
 
-
-/// O(n²) pairwise graph coloring. Produces a valid (correct) DWA that may
-/// be slightly larger than the graph-coloring result (doesn't merge states
-/// with overlapping needed sets). Suitable for bundle minimization where
-/// the extra few states are acceptable.
+/// Compatibility wrapper for the single production minimization path.
 pub fn minimize_fast(dwa: &DWA) -> DWA {
-    minimize_if_acyclic(dwa, super::minimize_acyclic::minimize_acyclic_fast)
+    minimize(dwa)
 }
 
 fn parse_minimize_strategy(env_var_name: &str) -> Option<MinimizeStrategy> {
@@ -68,7 +58,7 @@ fn parse_minimize_strategy(env_var_name: &str) -> Option<MinimizeStrategy> {
         return Some(MinimizeStrategy::Full);
     }
     if value.eq_ignore_ascii_case("fast") {
-        return Some(MinimizeStrategy::Fast);
+        return Some(MinimizeStrategy::Full);
     }
     if let Some(rest) = value.strip_prefix("threshold:") {
         let threshold = rest.parse::<usize>().unwrap_or_else(|_| {
@@ -91,7 +81,6 @@ pub fn minimize_from_env(
 ) -> DWA {
     match parse_minimize_strategy(env_var_name) {
         Some(MinimizeStrategy::Full) => minimize(dwa),
-        Some(MinimizeStrategy::Fast) => minimize_fast(dwa),
         Some(MinimizeStrategy::Threshold(threshold)) => minimize_with_threshold(dwa, threshold),
         None => default_behavior(dwa),
     }
