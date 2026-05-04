@@ -6449,7 +6449,9 @@ impl<'a> SchemaCtx<'a> {
             }
         };
 
-        Ok(quoted_expr(bounded_body))
+        let (terminal_body, wrap) = wrap_string_value_expr_parts(bounded_body);
+        let body = self.extract_terminal_rule(terminal_body, "JSON_STRING_BOUNDED");
+        Ok(wrap(body))
     }
 
     fn build_bounded_string_from_unit_regex(
@@ -6484,7 +6486,9 @@ impl<'a> SchemaCtx<'a> {
             }
         };
 
-        quoted_expr(bounded_body)
+        let (terminal_body, wrap) = wrap_string_value_expr_parts(bounded_body);
+        let body = self.extract_terminal_rule(terminal_body, "JSON_STRING_BOUNDED_PATTERN");
+        wrap(body)
     }
 
     fn build_format_string_expr(&mut self, format_name: &str) -> Result<GrammarExpr, GlrMaskError> {
