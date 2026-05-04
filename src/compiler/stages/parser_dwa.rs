@@ -450,40 +450,6 @@ fn determinize_with_supports(
         entries.iter().map(|(sid, w)| (*sid, w.ptr_key())).collect()
     }
 
-    let profile_enabled = false;
-    let mut prof_iterations: u64 = 0;
-    let mut prof_total_subset_entries: u64 = 0;
-    let mut prof_max_subset_size: usize = 0;
-    let mut prof_intersection_calls: u64 = 0;
-    let mut prof_eps_closure_calls: u64 = 0;
-    let mut prof_labels_processed: u64 = 0;
-    let mut prof_eps_closure_ns: u64 = 0;
-    let mut prof_intersection_ns: u64 = 0;
-    let mut prof_target_build_ns: u64 = 0;
-    let mut prof_target_drain_ns: u64 = 0;
-    let mut prof_target_filter_ns: u64 = 0;
-    let mut prof_target_edge_weight_ns: u64 = 0;
-    let mut prof_target_pre_closure_key_ns: u64 = 0;
-    let mut prof_target_closure_lookup_insert_ns: u64 = 0;
-    let mut prof_target_subset_lookup_ns: u64 = 0;
-    let mut prof_target_add_transition_ns: u64 = 0;
-    let mut prof_max_raw_target_entries_per_iter: u64 = 0;
-    let mut prof_max_labels_per_iter: u64 = 0;
-    let mut prof_single_target_no_epsilon_fast_path: u64 = 0;
-    let mut prof_target_subset_len_1: u64 = 0;
-    let mut prof_target_subset_len_2_4: u64 = 0;
-    let mut prof_target_subset_len_5_16: u64 = 0;
-    let mut prof_target_subset_len_gt_16: u64 = 0;
-    let mut prof_subset_map_hits: u64 = 0;
-    let mut prof_subset_map_inserts: u64 = 0;
-    let mut prof_dense_labels_processed: u64 = 0;
-    let mut prof_default_labels_processed: u64 = 0;
-    let mut prof_sparse_labels_processed: u64 = 0;
-    let mut prof_edge_weight_cache_hits: u64 = 0;
-    let mut prof_edge_weight_cache_misses: u64 = 0;
-    let determinize_started_at = Instant::now();
-    let mut last_progress_log_at = determinize_started_at;
-
     let num_nwa_states = nwa.states().len();
 
     // Use flat arrays for epsilon closure when NWA is small enough.
@@ -599,73 +565,16 @@ fn determinize_with_supports(
     // Memoize local epsilon-closure outputs keyed by pre-closure weighted subsets.
     let mut closure_cache: FxHashMap<Vec<(u32, usize)>, CachedClosure> = FxHashMap::default();
     let mut key_buf: Vec<(u32, usize)> = Vec::new();
-    let mut prof_final_weight_ns: u64 = 0;
-    let mut prof_subset_key_ns: u64 = 0;
-    let mut prof_total_raw_target_entries: u64 = 0;
 
     // Deferred final weight computation: store subset entries for each DWA state
     // and compute final weights in parallel after the main loop.
     let mut deferred_final_entries: Vec<(u32, Vec<(u32, Weight)>)> = Vec::new();
 
     while let Some(subset_entries) = worklist.pop_front() {
-        let t_sk = std::time::Instant::now();
         let from_state = subset_map[&subset_key(&subset_entries)];
-        if profile_enabled { prof_subset_key_ns += t_sk.elapsed().as_nanos() as u64; }
-
-        if profile_enabled {
-            prof_iterations += 1;
-            prof_total_subset_entries += subset_entries.len() as u64;
-            if subset_entries.len() > prof_max_subset_size {
-                prof_max_subset_size = subset_entries.len();
-            }
-            if last_progress_log_at.elapsed().as_secs_f64() >= 5.0 {
-                eprintln!(
-                    "[glrmask/profile][determinize_supports_progress] elapsed_ms={:.1} iterations={} dwa_states={} pending_worklist={} subset_cache={} closure_cache={} max_subset_size={} labels_processed={} raw_target_entries={} avg_labels_per_iter={:.1} avg_raw_targets_per_iter={:.1} max_labels_per_iter={} max_raw_target_entries_per_iter={} single_target_no_epsilon_fast_path={} subset_len_1={} subset_len_2_4={} subset_len_5_16={} subset_len_gt_16={} subset_map_hits={} subset_map_inserts={} dense_labels={} default_labels={} sparse_labels={} edge_weight_cache_hits={} edge_weight_cache_misses={} subset_key_ms={:.1} collect_finals_ms={:.1} intersection_ms={:.1} eps_closure_ms={:.1} target_build_ms={:.1} target_drain_ms={:.1} target_filter_ms={:.1} target_edge_weight_ms={:.1} target_pre_closure_key_ms={:.1} target_closure_lookup_insert_ms={:.1} target_subset_lookup_ms={:.1} target_add_transition_ms={:.1}",
-                    elapsed_ms(determinize_started_at),
-                    prof_iterations,
-                    dwa.states().len(),
-                    worklist.len(),
-                    subset_map.len(),
-                    closure_cache.len(),
-                    prof_max_subset_size,
-                    prof_labels_processed,
-                    prof_total_raw_target_entries,
-                    if prof_iterations > 0 { prof_labels_processed as f64 / prof_iterations as f64 } else { 0.0 },
-                    if prof_iterations > 0 { prof_total_raw_target_entries as f64 / prof_iterations as f64 } else { 0.0 },
-                    prof_max_labels_per_iter,
-                    prof_max_raw_target_entries_per_iter,
-                    prof_single_target_no_epsilon_fast_path,
-                    prof_target_subset_len_1,
-                    prof_target_subset_len_2_4,
-                    prof_target_subset_len_5_16,
-                    prof_target_subset_len_gt_16,
-                    prof_subset_map_hits,
-                    prof_subset_map_inserts,
-                    prof_dense_labels_processed,
-                    prof_default_labels_processed,
-                    prof_sparse_labels_processed,
-                    prof_edge_weight_cache_hits,
-                    prof_edge_weight_cache_misses,
-                    prof_subset_key_ns as f64 / 1_000_000.0,
-                    prof_final_weight_ns as f64 / 1_000_000.0,
-                    prof_intersection_ns as f64 / 1_000_000.0,
-                    prof_eps_closure_ns as f64 / 1_000_000.0,
-                    prof_target_build_ns as f64 / 1_000_000.0,
-                    prof_target_drain_ns as f64 / 1_000_000.0,
-                    prof_target_filter_ns as f64 / 1_000_000.0,
-                    prof_target_edge_weight_ns as f64 / 1_000_000.0,
-                    prof_target_pre_closure_key_ns as f64 / 1_000_000.0,
-                    prof_target_closure_lookup_insert_ns as f64 / 1_000_000.0,
-                    prof_target_subset_lookup_ns as f64 / 1_000_000.0,
-                    prof_target_add_transition_ns as f64 / 1_000_000.0,
-                );
-                last_progress_log_at = Instant::now();
-            }
-        }
 
         // Save subset entries for deferred parallel final weight computation.
         // Only save entries whose NWA states have final weights.
-        let t_fw = std::time::Instant::now();
         let has_finals: Vec<(u32, Weight)> = subset_entries.iter()
             .filter(|(nwa_state_id, _)| nwa.states()[*nwa_state_id as usize].final_weight.is_some())
             .map(|(id, w)| (*id, w.clone()))
@@ -673,16 +582,10 @@ fn determinize_with_supports(
         if !has_finals.is_empty() {
             deferred_final_entries.push((from_state, has_finals));
         }
-        if profile_enabled { prof_final_weight_ns += t_fw.elapsed().as_nanos() as u64; }
-
-        let labels_processed_before_iter = prof_labels_processed;
-
-        let t_intersect = std::time::Instant::now();
         for (nwa_state_id, path_weight) in &subset_entries {
             let state = &nwa.states()[*nwa_state_id as usize];
             for (&label, targets) in &state.transitions {
                 for (target, transition_weight) in targets {
-                    if profile_enabled { prof_intersection_calls += 1; }
                     let next_weight = path_weight.intersection(transition_weight);
                     if next_weight.is_empty() {
                         continue;
@@ -705,20 +608,6 @@ fn determinize_with_supports(
                 }
             }
         }
-        if profile_enabled { prof_intersection_ns += t_intersect.elapsed().as_nanos() as u64; }
-
-        let t_target = std::time::Instant::now();
-        if profile_enabled {
-            let raw_target_entries_this_iter = touched_dense_labels.iter()
-                .map(|&label_idx| dense_raw_targets[label_idx].len() as u64)
-                .sum::<u64>()
-                + if default_touched { default_raw_targets.len() as u64 } else { 0 }
-                + sparse_raw_targets.values().map(|contribs| contribs.len() as u64).sum::<u64>();
-            prof_total_raw_target_entries += raw_target_entries_this_iter;
-            if raw_target_entries_this_iter > prof_max_raw_target_entries_per_iter {
-                prof_max_raw_target_entries_per_iter = raw_target_entries_this_iter;
-            }
-        }
 
         let mut pre_closure_key: Vec<(u32, usize)> = Vec::new();
 
@@ -728,85 +617,35 @@ fn determinize_with_supports(
             }
 
             debug_assert!(contribs.iter().all(|(_, weight)| !weight.is_empty()));
-            if profile_enabled {
-                prof_target_filter_ns += 0;
-            }
 
             contribs.sort_unstable_by_key(|(state_id, _)| *state_id);
-
-            if profile_enabled {
-                match contribs.len() {
-                    1 => prof_target_subset_len_1 += 1,
-                    2..=4 => prof_target_subset_len_2_4 += 1,
-                    5..=16 => prof_target_subset_len_5_16 += 1,
-                    _ => prof_target_subset_len_gt_16 += 1,
-                }
-            }
 
             if contribs.len() == 1 {
                 let (only_state, only_weight) = &contribs[0];
                 if nwa.states()[*only_state as usize].epsilons.is_empty() {
-                    let t_subset_lookup = std::time::Instant::now();
                     key_buf.clear();
                     key_buf.push((*only_state, only_weight.ptr_key()));
                     let to_state = if let Some(existing) = subset_map.get(&key_buf).copied() {
-                        if profile_enabled {
-                            prof_subset_map_hits += 1;
-                        }
                         existing
                     } else {
                         let new_state = dwa.add_state();
                         subset_map.insert(key_buf.clone(), new_state);
                         worklist.push_back(vec![(*only_state, only_weight.clone())]);
                         supports.push(vec![*only_state]);
-                        if profile_enabled {
-                            prof_subset_map_inserts += 1;
-                        }
                         new_state
                     };
-                    if profile_enabled {
-                        prof_target_subset_lookup_ns += t_subset_lookup.elapsed().as_nanos() as u64;
-                    }
-                    let t_add_transition = std::time::Instant::now();
                     dwa.add_transition(from_state, label, to_state, only_weight.clone());
-                    if profile_enabled {
-                        prof_target_add_transition_ns += t_add_transition.elapsed().as_nanos() as u64;
-                        prof_labels_processed += 1;
-                        prof_single_target_no_epsilon_fast_path += 1;
-                        if label >= 0 && (label as usize) < dense_label_limit {
-                            prof_dense_labels_processed += 1;
-                        } else if label == DEFAULT_LABEL {
-                            prof_default_labels_processed += 1;
-                        } else {
-                            prof_sparse_labels_processed += 1;
-                        }
-                    }
                     return;
                 }
             }
 
-            let t_pre_closure_key = std::time::Instant::now();
             pre_closure_key.clear();
             pre_closure_key.extend(contribs.iter().map(|(sid, w)| (*sid, w.ptr_key())));
-            if profile_enabled {
-                prof_target_pre_closure_key_ns += t_pre_closure_key.elapsed().as_nanos() as u64;
-            }
 
-            let t_eps = std::time::Instant::now();
-            let t_closure_lookup_insert = std::time::Instant::now();
             let cached = match closure_cache.entry(pre_closure_key.clone()) {
-                Entry::Occupied(entry) => {
-                    if profile_enabled {
-                        prof_edge_weight_cache_hits += 1;
-                    }
-                    entry.into_mut()
-                }
+                Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
-                    let t_edge_weight = std::time::Instant::now();
                     let edge_weight = Weight::union_all(contribs.iter().map(|(_, weight)| weight));
-                    if profile_enabled {
-                        prof_target_edge_weight_ns += t_edge_weight.elapsed().as_nanos() as u64;
-                    }
                     if edge_weight.is_empty() {
                         return;
                     }
@@ -832,55 +671,24 @@ fn determinize_with_supports(
                     if canon.is_empty() {
                         return;
                     }
-                    if profile_enabled {
-                        prof_edge_weight_cache_misses += 1;
-                    }
                     entry.insert(CachedClosure { canon, edge_weight })
                 }
             };
-            if profile_enabled {
-                prof_target_closure_lookup_insert_ns += t_closure_lookup_insert.elapsed().as_nanos() as u64;
-                prof_labels_processed += 1;
-                prof_eps_closure_calls += 1;
-                prof_eps_closure_ns += t_eps.elapsed().as_nanos() as u64;
-                if label >= 0 && (label as usize) < dense_label_limit {
-                    prof_dense_labels_processed += 1;
-                } else if label == DEFAULT_LABEL {
-                    prof_default_labels_processed += 1;
-                } else {
-                    prof_sparse_labels_processed += 1;
-                }
-            }
 
-            let t_subset_lookup = std::time::Instant::now();
             key_buf.clear();
             key_buf.extend(cached.canon.iter().map(|(sid, w)| (*sid, w.ptr_key())));
             let to_state = if let Some(existing) = subset_map.get(&key_buf).copied() {
-                if profile_enabled {
-                    prof_subset_map_hits += 1;
-                }
                 existing
             } else {
                 let new_state = dwa.add_state();
                 subset_map.insert(key_buf.clone(), new_state);
                 worklist.push_back(cached.canon.clone());
                 supports.push(cached.canon.iter().map(|(sid, _)| *sid).collect());
-                if profile_enabled {
-                    prof_subset_map_inserts += 1;
-                }
                 new_state
             };
-            if profile_enabled {
-                prof_target_subset_lookup_ns += t_subset_lookup.elapsed().as_nanos() as u64;
-            }
-            let t_add_transition = std::time::Instant::now();
             dwa.add_transition(from_state, label, to_state, cached.edge_weight.clone());
-            if profile_enabled {
-                prof_target_add_transition_ns += t_add_transition.elapsed().as_nanos() as u64;
-            }
         };
 
-        let t_drain = std::time::Instant::now();
         for label_idx in touched_dense_labels.drain(..) {
             dense_label_touched[label_idx] = false;
             process_label(label_idx as i32, std::mem::take(&mut dense_raw_targets[label_idx]));
@@ -894,20 +702,9 @@ fn determinize_with_supports(
         for (label, contribs) in sparse_raw_targets.drain() {
             process_label(label, contribs);
         }
-        if profile_enabled {
-            prof_target_drain_ns += t_drain.elapsed().as_nanos() as u64;
-        }
-        if profile_enabled {
-            let labels_processed_this_iter = prof_labels_processed - labels_processed_before_iter;
-            if labels_processed_this_iter > prof_max_labels_per_iter {
-                prof_max_labels_per_iter = labels_processed_this_iter;
-            }
-        }
-        if profile_enabled { prof_target_build_ns += t_target.elapsed().as_nanos() as u64; }
     }
 
     // Compute final weights in parallel using rayon.
-    let t_parallel_fw = std::time::Instant::now();
     {
         use rayon::prelude::*;
         let final_weights: Vec<(u32, Weight)> = deferred_final_entries
@@ -941,47 +738,6 @@ fn determinize_with_supports(
         for (state_id, weight) in final_weights {
             dwa.set_final_weight(state_id, weight);
         }
-    }
-    let parallel_fw_ms = t_parallel_fw.elapsed().as_millis();
-
-    if profile_enabled {
-        let avg_subset = if prof_iterations > 0 { prof_total_subset_entries as f64 / prof_iterations as f64 } else { 0.0 };
-        let avg_labels = if prof_iterations > 0 { prof_labels_processed as f64 / prof_iterations as f64 } else { 0.0 };
-        let avg_raw_targets = if prof_iterations > 0 { prof_total_raw_target_entries as f64 / prof_iterations as f64 } else { 0.0 };
-        eprintln!(
-            "[glrmask/profile][determinize_supports] iterations={} total_subset_entries={} avg_subset_size={:.1} max_subset_size={} intersection_calls={} eps_closure_calls={} labels_processed={} avg_labels_per_iter={:.1} max_labels_per_iter={} raw_target_entries={} avg_raw_targets_per_iter={:.1} max_raw_target_entries_per_iter={} single_target_no_epsilon_fast_path={} subset_len_1={} subset_len_2_4={} subset_len_5_16={} subset_len_gt_16={} subset_map_hits={} subset_map_inserts={} dense_labels={} default_labels={} sparse_labels={} edge_weight_cache_hits={} edge_weight_cache_misses={} deferred_finals={} parallel_final_weight_ms={} subset_key_ms={:.1} collect_finals_ms={:.1} intersection_ms={:.1} eps_closure_ms={:.1} target_build_ms={:.1} target_drain_ms={:.1} target_filter_ms={:.1} target_edge_weight_ms={:.1} target_pre_closure_key_ms={:.1} target_closure_lookup_insert_ms={:.1} target_subset_lookup_ms={:.1} target_add_transition_ms={:.1}",
-            prof_iterations, prof_total_subset_entries, avg_subset, prof_max_subset_size,
-            prof_intersection_calls, prof_eps_closure_calls, prof_labels_processed,
-            avg_labels, prof_max_labels_per_iter,
-            prof_total_raw_target_entries,
-            avg_raw_targets, prof_max_raw_target_entries_per_iter,
-            prof_single_target_no_epsilon_fast_path,
-            prof_target_subset_len_1,
-            prof_target_subset_len_2_4,
-            prof_target_subset_len_5_16,
-            prof_target_subset_len_gt_16,
-            prof_subset_map_hits,
-            prof_subset_map_inserts,
-            prof_dense_labels_processed,
-            prof_default_labels_processed,
-            prof_sparse_labels_processed,
-            prof_edge_weight_cache_hits,
-            prof_edge_weight_cache_misses,
-            deferred_final_entries.len(),
-            parallel_fw_ms,
-            prof_subset_key_ns as f64 / 1_000_000.0,
-            prof_final_weight_ns as f64 / 1_000_000.0,
-            prof_intersection_ns as f64 / 1_000_000.0,
-            prof_eps_closure_ns as f64 / 1_000_000.0,
-            prof_target_build_ns as f64 / 1_000_000.0,
-            prof_target_drain_ns as f64 / 1_000_000.0,
-            prof_target_filter_ns as f64 / 1_000_000.0,
-            prof_target_edge_weight_ns as f64 / 1_000_000.0,
-            prof_target_pre_closure_key_ns as f64 / 1_000_000.0,
-            prof_target_closure_lookup_insert_ns as f64 / 1_000_000.0,
-            prof_target_subset_lookup_ns as f64 / 1_000_000.0,
-            prof_target_add_transition_ns as f64 / 1_000_000.0,
-        );
     }
 
     DeterminizedDwaWithSupports { dwa, supports }
