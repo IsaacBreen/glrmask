@@ -840,67 +840,21 @@ fn compile_prepared_with_profile(
             eprintln!("[glrmask/oracle] dumped post-compact mappings to {dump_path}");
         }
 
-        if strict_one_flag_enabled("GLRMASK_PM_USE_INTERNAL_TSID_REPS") {
-            panic!(
-                "GLRMASK_PM_USE_INTERNAL_TSID_REPS was an unsafe diagnostic shortcut. \
-Use GLRMASK_DIAG_PM_USE_INTERNAL_TSID_REPS_UNSAFE=1 only for diagnostics after \
-independently proving possible_matches equivalence for your workload."
-            );
-        }
-
-        // This is not production-valid by construction. The tokenizer-state
-        // internal ids come from the parser/compiler equivalence analysis,
-        // not a possible_matches-specific quotient.
-        let use_internal_tsid_representatives =
-            strict_one_flag_enabled("GLRMASK_DIAG_PM_USE_INTERNAL_TSID_REPS_UNSAFE");
-
-        let trie_class_build_enabled = std::env::var("GLRMASK_PM_TRIE_CLASS_BUILD")
-            .map_or(true, |value| {
-                let v = value.trim().to_ascii_lowercase();
-                !matches!(v.as_str(), "0" | "false" | "no" | "off")
-            });
-
-        let use_bruteforce_possible_matches =
-            strict_one_flag_enabled("GLRMASK_PM_BRUTE_FORCE");
-
         // Compute constraint possible matches and build parser DWA
         // concurrently.  Parser DWA does not depend on possible matches
         // or constraint-vocab; only the later remap step does.
         let (cpm_result, (mut parser_dwa, parser_dwa_ms)) = rayon::join(
             || {
-                if use_bruteforce_possible_matches {
-                    let started_at = Instant::now();
-                    let brute =
-                        cpm::bruteforce::compute_constraint_possible_matches_bruteforce(
-                            &tokenizer,
-                            vocab,
-                            &internal_ids.vocab_tokens,
-                        );
-                    cpm::ConstraintPossibleMatchesComputation {
-                        possible_matches: brute.possible_matches,
-                        constraint_vocab: brute.constraint_vocab,
-                        profile: cpm::ConstraintPossibleMatchesProfile {
-                            possible_matches_collect_ms: elapsed_ms(started_at),
-                            total_ms: elapsed_ms(started_at),
-                            ..Default::default()
-                        },
-                    }
-                } else {
-                    cpm::compute_constraint_possible_matches(
-                        &tokenizer,
-                        &token_bytes,
-                        &internal_ids,
-                        cpm::ConstraintPossibleMatchesConfig {
-                            debug_compile_stages,
-                            profile_summary_enabled: compile_profile_summary_enabled(),
-                            use_internal_tsid_representatives,
-                            trie_class_build_enabled,
-                            diag_root_signature: std::env::var("GLRMASK_DIAG_PM_ROOT_SIG")
-                                .map_or(false, |v| v == "1"),
-                            initial_state_map: global_max_length_state_map_ref,
-                        },
-                    )
-                }
+                cpm::compute_constraint_possible_matches(
+                    &tokenizer,
+                    &token_bytes,
+                    &internal_ids,
+                    cpm::ConstraintPossibleMatchesConfig {
+                        debug_compile_stages,
+                        profile_summary_enabled: compile_profile_summary_enabled(),
+                        initial_state_map: global_max_length_state_map_ref,
+                    },
+                )
             },
             || {
                 let parser_dwa_started_at = Instant::now();
@@ -947,30 +901,19 @@ independently proving possible_matches equivalence for your workload."
                 .filter(|mapped| mapped.len() > 1)
                 .count();
 
-            if use_bruteforce_possible_matches {
-                eprintln!(
-                    "[glrmask/profile][constraint_vocab] mode=bruteforce parser_tokens={} constraint_tokens={} split_parser_tokens={} possible_matches_ms={:.3} remap_parser_dwa_ms={:.3}",
-                    internal_ids.vocab_tokens.num_internal_ids(),
-                    constraint_vocab.internal_to_originals.len(),
-                    split_parser_tokens,
-                    cpm_profile.possible_matches_collect_ms,
-                    remap_parser_dwa_ms,
-                );
-            } else {
-                eprintln!(
-                    "[glrmask/profile][constraint_vocab] parser_tokens={} constraint_tokens={} split_parser_tokens={} reconcile_ms={:.3} same_bytes_ms={:.3} possible_match_signatures_ms={:.3} seed_state_signatures_ms={:.3} build_map_ms={:.3} remap_possible_matches_ms={:.3} remap_parser_dwa_ms={:.3}",
-                    internal_ids.vocab_tokens.num_internal_ids(),
-                    constraint_vocab.internal_to_originals.len(),
-                    split_parser_tokens,
-                    cpm_profile.constraint_vocab_ms + remap_parser_dwa_ms,
-                    cpm_profile.same_bytes_ms,
-                    cpm_profile.possible_match_signatures_ms,
-                    cpm_profile.seed_state_signatures_ms,
-                    cpm_profile.build_map_ms,
-                    cpm_profile.remap_possible_matches_ms,
-                    remap_parser_dwa_ms,
-                );
-            }
+            eprintln!(
+                "[glrmask/profile][constraint_vocab] parser_tokens={} constraint_tokens={} split_parser_tokens={} reconcile_ms={:.3} same_bytes_ms={:.3} possible_match_signatures_ms={:.3} seed_state_signatures_ms={:.3} build_map_ms={:.3} remap_possible_matches_ms={:.3} remap_parser_dwa_ms={:.3}",
+                internal_ids.vocab_tokens.num_internal_ids(),
+                constraint_vocab.internal_to_originals.len(),
+                split_parser_tokens,
+                cpm_profile.constraint_vocab_ms + remap_parser_dwa_ms,
+                cpm_profile.same_bytes_ms,
+                cpm_profile.possible_match_signatures_ms,
+                cpm_profile.seed_state_signatures_ms,
+                cpm_profile.build_map_ms,
+                cpm_profile.remap_possible_matches_ms,
+                remap_parser_dwa_ms,
+            );
         }
 
         let internal_token_bytes_started_at = Instant::now();

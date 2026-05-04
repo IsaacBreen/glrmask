@@ -18,7 +18,6 @@ use crate::ds::weight::{Weight, finalize_weight_map, shared_rangeset};
 use crate::grammar::flat::TerminalID;
 use crate::runtime::Constraint;
 
-pub(crate) mod bruteforce;
 pub(crate) mod collector;
 
 pub(crate) type DensePossibleMatchesByState = BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>;
@@ -38,9 +37,6 @@ pub(crate) struct ConstraintVocabMap {
 pub(crate) struct ConstraintPossibleMatchesConfig<'a> {
     pub(crate) debug_compile_stages: bool,
     pub(crate) profile_summary_enabled: bool,
-    pub(crate) use_internal_tsid_representatives: bool,
-    pub(crate) trie_class_build_enabled: bool,
-    pub(crate) diag_root_signature: bool,
     pub(crate) initial_state_map: Option<&'a ManyToOneIdMap>,
 }
 
@@ -1539,80 +1535,24 @@ pub(crate) fn compute_constraint_possible_matches(
     let collect_started_at = Instant::now();
     let terminal_vocab_token_count = internal_ids.vocab_tokens.num_internal_ids();
 
-    let (raw_possible_matches, trie_class_result, dense_profile, profile_label, profile_state_count) =
-        if config.use_internal_tsid_representatives {
-            eprintln!(
-                "[glrmask/diag][pm_reps_unsafe] using internal-tsid representatives as a diagnostic shortcut; this is not production-valid by construction"
-            );
-            let representative_states = &internal_ids.tokenizer_states.representative_original_ids;
-            if config.diag_root_signature {
-                let root_signature_count = collector::count_root_child_internal_tsid_signatures(
-                    tokenizer,
-                    &trie.root,
-                    representative_states,
-                    &internal_ids.tokenizer_states.original_to_internal,
-                );
-                eprintln!(
-                    "[glrmask/diag][pm_root_sig] rep_states={} unique_root_signatures={}",
-                    representative_states.len(),
-                    root_signature_count,
-                );
-            }
-            let (representative_matches, profile) = collector::collect_possible_matches_by_selected_original_tsid_dense(
-                tokenizer,
-                &trie.root,
-                terminal_vocab_token_count,
-                representative_states,
-            );
-            (
-                representative_matches,
-                None,
-                profile,
-                "constraint_terminal_vocab_tokens",
-                representative_states.len() as u32,
-            )
-        } else if config.trie_class_build_enabled {
-            let trie_build_states: Vec<u32> = match config.initial_state_map {
-                Some(init_map) => init_map.representative_original_ids.clone(),
-                None => (0..tokenizer.num_states()).collect(),
-            };
-            let (mut trie_class_result, profile) = collector::collect_possible_matches_dense_trie_class_build_with_classes(
-                tokenizer,
-                &trie.root,
-                terminal_vocab_token_count,
-                &trie_build_states,
-            );
-            // Compose dense root state_classes through initial_state_map.
-            // The collector returns classes indexed by original DFA state id
-            // for the states it was seeded with. Each initial-map class inherits
-            // the class of its representative.
-            if let Some(init_map) = config.initial_state_map {
-                trie_class_result.state_classes = compose_state_classes_with_initial_map(
-                    &trie_class_result.state_classes,
-                    init_map,
-                );
-            }
-            (
-                BTreeMap::new(),
-                Some(trie_class_result),
-                profile,
-                "constraint_terminal_vocab_tokens",
-                trie_build_states.len() as u32,
-            )
-        } else {
-            let (matches, profile) = collector::collect_possible_matches_by_original_tsid_dense(
-                tokenizer,
-                &trie.root,
-                terminal_vocab_token_count,
-            );
-            (
-                matches,
-                None,
-                profile,
-                "constraint_terminal_vocab_tokens",
-                tokenizer.num_states(),
-            )
-        };
+    let trie_build_states: Vec<u32> = match config.initial_state_map {
+        Some(init_map) => init_map.representative_original_ids.clone(),
+        None => (0..tokenizer.num_states()).collect(),
+    };
+    let (mut trie_class_result, dense_profile) = collector::collect_possible_matches_dense_trie_class_build_with_classes(
+        tokenizer,
+        &trie.root,
+        terminal_vocab_token_count,
+        &trie_build_states,
+    );
+    if let Some(init_map) = config.initial_state_map {
+        trie_class_result.state_classes = compose_state_classes_with_initial_map(
+            &trie_class_result.state_classes,
+            init_map,
+        );
+    }
+    let profile_label = "constraint_terminal_vocab_tokens";
+    let profile_state_count = trie_build_states.len() as u32;
 
     let collect_ms = elapsed_ms(collect_started_at);
     collector::emit_possible_matches_profile_summary(
@@ -1683,23 +1623,10 @@ pub(crate) fn compute_constraint_possible_matches(
             constraint_token_count,
         );
     }
-    let possible_matches = if let Some(trie_class_result) = trie_class_result.as_ref() {
-        class_maps_to_runtime_possible_matches_shared(
-            &trie_class_result.class_maps,
-            &trie_class_result.state_classes,
-        )
-    } else {
-        let raw_possible_matches = if config.use_internal_tsid_representatives {
-            expand_possible_matches_to_original_states(
-                &raw_possible_matches,
-                &internal_ids.tokenizer_states.internal_to_originals,
-                &internal_ids.tokenizer_states.representative_original_ids,
-            )
-        } else {
-            raw_possible_matches
-        };
-        dense_maps_to_runtime_possible_matches_shared(raw_possible_matches)
-    };
+    let possible_matches = class_maps_to_runtime_possible_matches_shared(
+        &trie_class_result.class_maps,
+        &trie_class_result.state_classes,
+    );
     let remap_possible_matches_ms = elapsed_ms(remap_possible_matches_started_at);
     if config.debug_compile_stages {
         eprintln!(
@@ -1736,20 +1663,4 @@ pub(crate) fn compute_constraint_possible_matches(
             total_ms: elapsed_ms(total_started_at),
         },
     }
-}
-
-pub(crate) fn expand_possible_matches_to_original_states(
-    representative_matches: &BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>>,
-    state_classes: &[Vec<u32>],
-    representative_states: &[u32],
-) -> BTreeMap<u32, BTreeMap<TerminalID, Box<[u64]>>> {
-    let mut expanded = BTreeMap::new();
-    for (internal_tsid, states) in state_classes.iter().enumerate() {
-        let representative_state = representative_states.get(internal_tsid).copied().unwrap_or(u32::MAX);
-        let matches = representative_matches.get(&representative_state).cloned().unwrap_or_default();
-        for &state in states {
-            expanded.insert(state, matches.clone());
-        }
-    }
-    expanded
 }
