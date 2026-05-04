@@ -1972,11 +1972,6 @@ fn uri_charclass_run_regex(def: &str, max_run: usize) -> String {
     format!(r#"(?:[{def}]{{1,{max_run}}})"#)
 }
 
-fn json_wrapped_pattern_bounded(pattern: &str, max_tail: usize) -> GrammarExpr {
-    let inner = json_search_pattern_bounded(pattern, max_tail);
-    wrap_string_value_regex(&inner)
-}
-
 fn json_wrapped_string_length_regex(min_len: usize, max_len: usize) -> String {
     let inner = if min_len == max_len {
         format!(r#"(?:{}){{{}}}"# , JSON_STRING_CHAR_PATTERN, min_len)
