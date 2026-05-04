@@ -121,14 +121,6 @@ struct PredEdge<'a> {
     weight: &'a Weight,
 }
 
-pub(crate) fn compute_cancellations(nwa: &NWA) -> Vec<(u32, u32, Weight)> {
-    compute_cancellations_range(nwa, full_state_range(nwa))
-}
-
-fn full_state_range(nwa: &NWA) -> std::ops::Range<u32> {
-    0..nwa.states().len() as u32
-}
-
 fn enqueue_cancellation_task(
     worklist: &mut VecDeque<CancellationTask>,
     queued: &mut QueuedQueries,
@@ -761,18 +753,12 @@ pub(crate) fn remove_redundant_default_transitions(nwa: &mut NWA) {
 }
 
 pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
-    apply_cancellations_parallel_fixpoint(nwa);
+    if !nwa.states().is_empty() {
+        apply_cancellations_range(nwa, 0..nwa.states().len() as u32);
+    }
     apply_finality_fixpoint(nwa);
     remove_negative_transitions(nwa);
     remove_redundant_default_transitions(nwa);
-}
-
-fn apply_cancellations_parallel_fixpoint(nwa: &mut NWA) {
-    if nwa.states().is_empty() {
-        return;
-    }
-
-    apply_cancellations_range(nwa, full_state_range(nwa));
 }
 
 #[cfg(test)]
@@ -1117,7 +1103,7 @@ mod tests {
         nwa.add_transition(2, pos1, 1, weight_12());
         nwa.add_epsilon(2, 0, weight_12());
 
-        let cancellations = compute_cancellations(&nwa);
+        let cancellations = compute_cancellations_range(&nwa, 0..nwa.states().len() as u32);
 
         assert!(
             cancellations
@@ -1148,7 +1134,7 @@ mod tests {
         nwa.add_transition(3, neg1, 0, weight_1());
         nwa.add_transition(2, pos1, 1, weight_12());
 
-        let cancellations = compute_cancellations(&nwa);
+        let cancellations = compute_cancellations_range(&nwa, 0..nwa.states().len() as u32);
 
         assert!(
             cancellations
@@ -1190,7 +1176,10 @@ mod tests {
             add_weighted_epsilon(&mut nwa, 2, 0, next_kind());
             add_weighted_transition(&mut nwa, 3, neg1, 0, next_kind());
 
-            let actual = normalize_cancellations(compute_cancellations(&nwa));
+            let actual = normalize_cancellations(compute_cancellations_range(
+                &nwa,
+                0..nwa.states().len() as u32,
+            ));
             let expected = normalize_cancellations(compute_cancellations_reference(&nwa));
 
             assert_eq!(
@@ -1347,7 +1336,7 @@ nt start ::= (A_EXACT{4} | A_EXACT{5}) A_UP_TO_32;
 
         let mut actual = parser_nwa.clone();
         let mut expected = parser_nwa.clone();
-        let expected_range = full_state_range(&expected);
+        let expected_range = 0..expected.states().len() as u32;
 
         resolve_negative_codes_in_nwa(&mut actual);
         apply_cancellations_range(&mut expected, expected_range);
@@ -1412,7 +1401,7 @@ nt start ::= (A_EXACT{4} | A_EXACT{5}) A_UP_TO_32;
 
         let mut actual = parser_nwa.clone();
         let mut expected = parser_nwa.clone();
-        let expected_range = full_state_range(&expected);
+        let expected_range = 0..expected.states().len() as u32;
 
         resolve_negative_codes_in_nwa(&mut actual);
         apply_cancellations_range(&mut expected, expected_range);
