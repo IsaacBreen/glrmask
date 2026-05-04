@@ -14,7 +14,6 @@ use crate::compiler::constraint_possible_matches as cpm;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar::transforms::prepare_grammar_transforms_only;
-use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
     SharedClassifyCache,
     classify_terminal_path_lengths,
@@ -23,14 +22,9 @@ use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::{
     compute_ever_allowed_follows,
     compute_terminal_coloring,
 };
-use crate::compiler::stages::id_map_and_terminal_dwa::maybe_print_terminal_mappings;
-use crate::compiler::stages::id_map_and_terminal_dwa::types::{
-    debug_terminal_mapping_enabled, TerminalColoring,
-};
 use crate::compiler::stages::parser_dwa::build_parser_dwa_from_terminal_dwa_with_precomputed_templates;
 use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::characterize_terminals;
-use crate::compiler::stages::terminal_dwa_compat::build_terminal_dwa_for_existing_id_map_with_possible_matches_and_coloring;
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::{GrammarDef, Terminal};
 use crate::runtime::Constraint;
@@ -49,19 +43,7 @@ pub(crate) fn compile_profile_summary_enabled() -> bool {
 }
 
 pub(crate) fn compile_profile_enabled() -> bool {
-    env_flag_enabled("GLRMASK_PROFILE_COMPILE") || compile_profile_summary_enabled()
-}
-
-fn debug_verbose_enabled() -> bool {
-    env_flag_enabled("GLRMASK_DEBUG_VERBOSE")
-}
-
-fn debug_compile_stages_enabled() -> bool {
-    env_flag_enabled("GLRMASK_DEBUG_COMPILE_STAGES")
-}
-
-fn strict_one_flag_enabled(name: &str) -> bool {
-    std::env::var(name).map_or(false, |value| value == "1")
+    compile_profile_summary_enabled()
 }
 
 fn elapsed_ms(started_at: Instant) -> f64 {
@@ -200,16 +182,6 @@ pub(crate) fn compute_disallowed_follows(grammar: &AnalyzedGrammar) -> BTreeMap<
 }
 
 pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
-    if debug_verbose_enabled() {
-        for (index, _) in grammar.terminals.iter().enumerate() {
-            eprintln!(
-                "[glrmask/debug][tokenizer_terminal] expr={} name={}",
-                index,
-                grammar.terminal_display_name(index as u32),
-            );
-        }
-    }
-
     let exprs: Vec<Expr> = grammar.terminals.iter().map(terminal_expr).collect();
     build_tokenizer_from_exprs(&exprs)
 }
@@ -230,14 +202,6 @@ fn terminal_expr(terminal: &Terminal) -> Expr {
         Terminal::Pattern { pattern, utf8, .. } => parse_regex(pattern, *utf8),
         Terminal::Expr { expr, .. } => expr.clone(),
     }
-}
-
-fn max_original_token_slot(token_bytes: &BTreeMap<u32, Vec<u8>>) -> u32 {
-    token_bytes
-        .keys()
-        .next_back()
-        .map(|token_id| token_id.saturating_add(1))
-        .unwrap_or(0)
 }
 
 fn set_dense_bit(words: &mut [u64], token_id: u32) {
@@ -275,100 +239,7 @@ fn remap_parser_dwa_to_constraint_vocab(
 
 fn finalize_constraint(mut constraint: Constraint) -> Constraint {
     constraint.rebuild_runtime_caches();
-    if std::env::var("GLRMASK_ASSERT_PM_EQUIV_WITHIN_INTERNAL_TSID").map_or(false, |v| v == "1") {
-        cpm::assert_possible_matches_equivalent_within_internal_tsids(&constraint);
-    }
-    if std::env::var("GLRMASK_DIAG_PM_UNIQUE_COUNTS").map_or(false, |v| v == "1") {
-        cpm::emit_possible_matches_unique_counts(&constraint);
-    }
     constraint
-}
-
-fn warn_problematic_byte_terminals(tokenizer: &Tokenizer, vocab: &Vocab) {
-    const SCORE_THRESHOLD: u64 = 100_000;
-
-    let start = tokenizer.start_state();
-    let mut problematic = [false; 256];
-    let mut any_problematic = false;
-    for b in 0u16..=255 {
-        if let Some(next_state) = tokenizer.step(start, b as u8) {
-            if !tokenizer.matched_terminals(next_state).is_empty()
-                && tokenizer.step(next_state, b as u8).is_none()
-            {
-                problematic[b as usize] = true;
-                any_problematic = true;
-            }
-        }
-    }
-    if !any_problematic {
-        return;
-    }
-
-    let mut byte_count = [0u64; 256];
-    for bytes in vocab.entries.values() {
-        for &b in bytes.iter() {
-            byte_count[b as usize] += 1;
-        }
-    }
-
-    let score: u64 = (0..256)
-        .filter(|&b| problematic[b])
-        .map(|b| byte_count[b])
-        .sum();
-    if score < SCORE_THRESHOLD {
-        return;
-    }
-
-    let problematic_bytes: Vec<u8> = (0..=255u8).filter(|&b| problematic[b as usize]).collect();
-    let display = format_byte_ranges(&problematic_bytes);
-    eprintln!(
-        "[glrmask/warn] grammar has length-1 terminal matches on high-frequency bytes \
-         (score={score}, threshold={SCORE_THRESHOLD}): {display}"
-    );
-}
-
-fn format_byte_ranges(bytes: &[u8]) -> String {
-    if bytes.is_empty() {
-        return String::new();
-    }
-    fn is_rangeable(b: u8) -> bool {
-        b.is_ascii_alphanumeric()
-    }
-    fn display_byte(b: u8) -> String {
-        if b.is_ascii_graphic() || b == b' ' {
-            format!("{}", b as char)
-        } else {
-            format!("0x{b:02x}")
-        }
-    }
-
-    let mut parts: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        let start = bytes[i];
-        if is_rangeable(start) {
-            let mut end = start;
-            while i + 1 < bytes.len()
-                && bytes[i + 1] == end + 1
-                && is_rangeable(bytes[i + 1])
-            {
-                i += 1;
-                end = bytes[i];
-            }
-            if end > start + 1 {
-                parts.push(format!("{}-{}", display_byte(start), display_byte(end)));
-            } else if end == start + 1 {
-                parts.push(display_byte(start));
-                parts.push(display_byte(end));
-            } else {
-                parts.push(display_byte(start));
-            }
-        } else {
-            parts.push(display_byte(start));
-        }
-        i += 1;
-    }
-    parts.join(", ")
 }
 
 fn compile_prepared_with_profile(
@@ -378,7 +249,6 @@ fn compile_prepared_with_profile(
     run_with_compile_thread_pool(|| {
         let compile_started_at = Instant::now();
         let mut profile = CompilePhaseProfile::default();
-        let debug_compile_stages = debug_compile_stages_enabled();
 
         let analysis_started_at = Instant::now();
         let (
@@ -389,7 +259,6 @@ fn compile_prepared_with_profile(
                 table,
                 glr_table_ms,
                 terminal_coloring,
-                terminal_coloring_enabled,
                 terminal_coloring_ms,
                 disallowed_follows,
                 disallowed_follows_ms,
@@ -415,12 +284,7 @@ fn compile_prepared_with_profile(
                 let glr_table_ms = elapsed_ms(table_started_at);
 
                 let terminal_coloring_started_at = Instant::now();
-                let terminal_coloring_enabled = !env_flag_enabled("GLRMASK_DISABLE_TERMINAL_COLORING");
-                let terminal_coloring = if terminal_coloring_enabled {
-                    compute_terminal_coloring(&table)
-                } else {
-                    TerminalColoring::identity(table.num_terminals as usize)
-                };
+                let terminal_coloring = compute_terminal_coloring(&table);
                 let terminal_coloring_ms = elapsed_ms(terminal_coloring_started_at);
 
                 let disallowed_follows_started_at = Instant::now();
@@ -433,7 +297,6 @@ fn compile_prepared_with_profile(
                     table,
                     glr_table_ms,
                     terminal_coloring,
-                    terminal_coloring_enabled,
                     terminal_coloring_ms,
                     disallowed_follows,
                     disallowed_follows_ms,
@@ -447,74 +310,6 @@ fn compile_prepared_with_profile(
         profile.terminal_coloring_ms = terminal_coloring_ms;
         profile.disallowed_follows_ms = disallowed_follows_ms;
         profile.analysis_wall_ms = elapsed_ms(analysis_started_at);
-        if debug_compile_stages {
-            eprintln!(
-                "[glrmask/debug][compile_stage] analysis_done wall_ms={:.3} analyze_ms={:.3} glr_ms={:.3} coloring_ms={:.3} disallowed_ms={:.3}",
-                profile.analysis_wall_ms,
-                analyze_grammar_ms,
-                glr_table_ms,
-                terminal_coloring_ms,
-                disallowed_follows_ms,
-            );
-        }
-
-        let debug_profile = std::env::var("GLRMASK_DEBUG_PROFILE")
-            .map(|v| {
-                let n = v.trim().to_ascii_lowercase();
-                !matches!(n.as_str(), "" | "0" | "false" | "no" | "off")
-            })
-            .unwrap_or(false);
-        if debug_profile {
-            eprintln!(
-                "[glrmask/debug][analysis_overlap] wall_ms={:.3} analyze_ms={:.3} glr_ms={:.3} disallowed_ms={:.3}",
-                elapsed_ms(analysis_started_at),
-                analyze_grammar_ms,
-                glr_table_ms,
-                disallowed_follows_ms,
-            );
-        }
-
-        if debug_terminal_mapping_enabled() {
-            maybe_print_terminal_mappings(&analyzed_grammar);
-        }
-
-        if env_flag_enabled("GLRMASK_WARN_PROBLEMATIC_BYTE_TERMINALS") {
-            let warn_started_at = Instant::now();
-            warn_problematic_byte_terminals(&tokenizer, vocab);
-            if debug_profile {
-                eprintln!(
-                    "[glrmask/debug][warn_byte_terminals] ms={:.3}",
-                    elapsed_ms(warn_started_at),
-                );
-            }
-        }
-
-        if compile_profile_enabled() {
-            let num_groups = analyzed_grammar.num_terminals as usize;
-            let mut universally_disallowed = 0usize;
-            for gid in 0..num_groups {
-                let is_disallowed_by_all = (0..num_groups).all(|other| {
-                    disallowed_follows
-                        .get(&(other as u32))
-                        .is_some_and(|bs| bs.contains(gid))
-                });
-                if is_disallowed_by_all {
-                    universally_disallowed += 1;
-                }
-            }
-            let total_disallowed: usize = disallowed_follows.values().map(|bs| bs.count_ones()).sum();
-            let total_possible = num_groups * num_groups;
-            let groups_with_disallowed = disallowed_follows.len();
-            eprintln!(
-                "[glrmask/profile][disallowed_follows] num_groups={} groups_with_disallowed={} total_disallowed_pairs={}/{} ({:.1}%) universally_disallowed_groups={}",
-                num_groups,
-                groups_with_disallowed,
-                total_disallowed,
-                total_possible,
-                total_disallowed as f64 / total_possible as f64 * 100.0,
-                universally_disallowed,
-            );
-        }
 
         let adjusted_disallowed_for_classification = if let Some(ign) = prepared_grammar.ignore_terminal {
             let mut adj = disallowed_follows.clone();
@@ -531,7 +326,7 @@ fn compile_prepared_with_profile(
         };
         let shared_classify_cache = SharedClassifyCache::new();
         let classify_started_at = Instant::now();
-        let terminal_path_lengths = classify_terminal_path_lengths(
+        let _terminal_path_lengths = classify_terminal_path_lengths(
             &tokenizer,
             vocab,
             &adjusted_disallowed_for_classification,
@@ -539,296 +334,39 @@ fn compile_prepared_with_profile(
             Some(&shared_classify_cache),
         );
         profile.classify_ms = elapsed_ms(classify_started_at);
-        if debug_compile_stages {
-            eprintln!(
-                "[glrmask/debug][compile_stage] classify_done ms={:.3}",
-                profile.classify_ms,
-            );
-        }
-        if compile_profile_enabled() {
-            use crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalPathLength;
-            let n0 = terminal_path_lengths
-                .iter()
-                .filter(|l| **l == TerminalPathLength::Zero)
-                .count();
-            let n1 = terminal_path_lengths
-                .iter()
-                .filter(|l| **l == TerminalPathLength::One)
-                .count();
-            let n2 = terminal_path_lengths
-                .iter()
-                .filter(|l| **l == TerminalPathLength::TwoPlus)
-                .count();
-            eprintln!(
-                "[glrmask/profile][terminal_path_lengths] total={} length0={} length1={} length2plus={}",
-                terminal_path_lengths.len(),
-                n0,
-                n1,
-                n2,
-            );
-        }
 
-        let all_l1 = {
-            use crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalPathLength;
-            terminal_path_lengths
-                .iter()
-                .all(|l| matches!(l, TerminalPathLength::Zero | TerminalPathLength::One))
-        };
-
-        enum IdMapBuildResult {
-            Ready {
-                global: InternalIdMap,
-                phase_profile: crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalDwaPhaseProfile,
-            },
-            SplitComplete {
-                global: InternalIdMap,
-                terminal_dwa: crate::automata::weighted::dwa::DWA,
-                phase_profile: crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalDwaPhaseProfile,
-                global_max_length_state_map: crate::compiler::stages::equiv_types::ManyToOneIdMap,
-            },
-        }
-
-        let ((id_map_build_result, _id_map_wall_ms), (templates, templates_ms)) = rayon::join(
+        let (((internal_ids, terminal_dwa, terminal_phase_profile, global_max_length_state_map), _id_map_wall_ms), (templates, templates_ms)) = rayon::join(
             || {
                 let id_map_started_at = Instant::now();
-                let result = if let Ok(load_path) = std::env::var("GLRMASK_ORACLE_LOAD") {
-                    let data: serde_json::Value = serde_json::from_str(
-                        &std::fs::read_to_string(&load_path).expect("failed to read oracle file"),
-                    )
-                    .expect("failed to parse oracle JSON");
-                    let state_map: Vec<u32> = data["state_map"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|v| v.as_u64().unwrap() as u32)
-                        .collect();
-                    let token_map: Vec<u32> = data["token_map"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|v| v.as_u64().unwrap() as u32)
-                        .collect();
-                    let num_state_classes = data["num_state_classes"].as_u64().unwrap() as u32;
-                    let num_token_classes = data["num_token_classes"].as_u64().unwrap() as u32;
-                    let state_reps: Vec<u32> = data["state_representatives"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|v| v.as_u64().unwrap() as u32)
-                        .collect();
-                    let token_reps: Vec<u32> = data["token_representatives"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|v| v.as_u64().unwrap() as u32)
-                        .collect();
-                    eprintln!(
-                        "[glrmask/oracle] loaded from {load_path}: {num_state_classes} state classes, {num_token_classes} token classes"
-                    );
-                    IdMapBuildResult::Ready {
-                        global: InternalIdMap {
-                            tokenizer_states: crate::compiler::stages::equiv_types::ManyToOneIdMap::from_original_to_internal_with_representatives(
-                                state_map,
-                                num_state_classes,
-                                state_reps,
-                            ),
-                            vocab_tokens: crate::compiler::stages::equiv_types::ManyToOneIdMap::from_original_to_internal_with_representatives(
-                                token_map,
-                                num_token_classes,
-                                token_reps,
-                            ),
-                        },
-                        phase_profile: crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalDwaPhaseProfile {
-                            id_map_ms: elapsed_ms(id_map_started_at),
-                            terminal_dwa_ms: 0.0,
-                            compact_ms: 0.0,
-                        },
-                    }
-                } else if all_l1 && std::env::var("GLRMASK_L1_IDMAP").map_or(false, |v| v == "1") {
-                    IdMapBuildResult::Ready {
-                        global: crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::combined::analyze_equivalences_l1_fast(&tokenizer, vocab),
-                        phase_profile: crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalDwaPhaseProfile {
-                            id_map_ms: elapsed_ms(id_map_started_at),
-                            terminal_dwa_ms: 0.0,
-                            compact_ms: 0.0,
-                        },
-                    }
-                } else if std::env::var("GLRMASK_NO_PARTITION").map_or(false, |v| v == "1") {
-                    IdMapBuildResult::Ready {
-                        global: crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::combined::analyze_equivalences(&tokenizer, vocab, &disallowed_follows, prepared_grammar.ignore_terminal, None),
-                        phase_profile: crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalDwaPhaseProfile {
-                            id_map_ms: elapsed_ms(id_map_started_at),
-                            terminal_dwa_ms: 0.0,
-                            compact_ms: 0.0,
-                        },
-                    }
-                } else {
-                    let (id_map, dwa, phase_profile, global_max_length_state_map) = crate::compiler::stages::id_map_and_terminal_dwa::build_id_map_and_terminal_dwa(
-                        &tokenizer,
-                        vocab,
-                        &terminal_coloring,
-                        terminal_coloring_enabled,
-                        prepared_grammar.ignore_terminal,
-                        &analyzed_grammar,
-                        &adjusted_disallowed_for_classification,
-                        Some(&shared_classify_cache),
-                    );
-                    if std::env::var("GLRMASK_DIAG_PM_VOCAB_EQUIV").map_or(false, |v| v == "1") {
-                        let pm_vocab_id_map = crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::combined::analyze_equivalences_l1_fast(&tokenizer, vocab);
-                        eprintln!(
-                            "[glrmask/diag][pm_vocab_equiv] tokenizer_states={} vocab_tokens={} pm_vocab_state_classes={} pm_vocab_token_classes={}",
-                            tokenizer.num_states(),
-                            vocab.len(),
-                            pm_vocab_id_map.tokenizer_states.num_internal_ids(),
-                            pm_vocab_id_map.vocab_tokens.num_internal_ids(),
-                        );
-                    }
-                    IdMapBuildResult::SplitComplete {
-                        global: id_map,
-                        terminal_dwa: dwa,
-                        phase_profile,
-                        global_max_length_state_map,
-                    }
-                };
+                let result = crate::compiler::stages::id_map_and_terminal_dwa::build_id_map_and_terminal_dwa(
+                    &tokenizer,
+                    vocab,
+                    &terminal_coloring,
+                    true,
+                    prepared_grammar.ignore_terminal,
+                    &analyzed_grammar,
+                    &adjusted_disallowed_for_classification,
+                    Some(&shared_classify_cache),
+                );
                 (result, elapsed_ms(id_map_started_at))
             },
             || {
                 let templates_started_at = Instant::now();
-                if compile_profile_enabled() {
-                    let characterizations = characterize_terminals(&table, &analyzed_grammar);
-                    let (templates, _template_profile) =
-                        Templates::from_characterizations_profiled(&characterizations);
-                    (templates, elapsed_ms(templates_started_at))
-                } else {
-                    let characterizations = characterize_terminals(&table, &analyzed_grammar);
-                    let templates = Templates::from_characterizations(&characterizations);
-                    (templates, elapsed_ms(templates_started_at))
-                }
+                let characterizations = characterize_terminals(&table, &analyzed_grammar);
+                let templates = Templates::from_characterizations(&characterizations);
+                (templates, elapsed_ms(templates_started_at))
             },
         );
-        let (mut internal_ids, prebuilt_terminal_dwa, mut terminal_phase_profile, global_max_length_state_map) = match id_map_build_result {
-            IdMapBuildResult::Ready {
-                global,
-                phase_profile,
-            } => (global, None, phase_profile, None),
-            IdMapBuildResult::SplitComplete {
-                global,
-                terminal_dwa,
-                phase_profile,
-                global_max_length_state_map,
-            } => (global, Some(terminal_dwa), phase_profile, Some(global_max_length_state_map)),
-        };
-        let global_max_length_state_map_ref = global_max_length_state_map.as_ref();
+        let global_max_length_state_map_ref = Some(&global_max_length_state_map);
         profile.templates_ms = templates_ms;
-        if debug_compile_stages {
-            eprintln!(
-                "[glrmask/debug][compile_stage] id_map_templates_done id_map_ms={:.3} terminal_dwa_ms={:.3} compact_ms={:.3} templates_ms={:.3}",
-                terminal_phase_profile.id_map_ms,
-                terminal_phase_profile.terminal_dwa_ms,
-                terminal_phase_profile.compact_ms,
-                profile.templates_ms,
-            );
-        }
-        let token_bytes = vocab.entries.clone();
-
-        let (mut terminal_dwa, already_compacted) = if let Some(dwa) = prebuilt_terminal_dwa {
-            (dwa, true)
-        } else {
-            let terminal_dwa_started_at = Instant::now();
-            let (dwa, _pm) = build_terminal_dwa_for_existing_id_map_with_possible_matches_and_coloring(
-                &analyzed_grammar,
-                &tokenizer,
-                vocab,
-                &internal_ids,
-                &terminal_coloring,
-                terminal_coloring_enabled,
-                prepared_grammar.ignore_terminal,
-                Some(&adjusted_disallowed_for_classification),
-            );
-            terminal_phase_profile.terminal_dwa_ms += elapsed_ms(terminal_dwa_started_at);
-            (dwa, false)
-        };
-
-        if !already_compacted {
-            let compact_started_at = Instant::now();
-            let compact_report = crate::compiler::stages::compact::compact_from_env(
-                &mut terminal_dwa,
-                &mut internal_ids,
-                "GLRMASK_COMPACT_FINAL",
-                crate::compiler::stages::compact::CompactMode::Full,
-                compile_profile_summary_enabled(),
-            );
-            let compact_ms = elapsed_ms(compact_started_at);
-            if let Some(stats) = compact_report.profile_stats {
-                eprintln!(
-                    "[glrmask/profile][compact] tsids={}=>{} tokens={}=>{} weight_ranges={}=>{} token_ranges={}=>{} total_ranges={}=>{}",
-                    stats.tsids_before,
-                    stats.tsids_after,
-                    stats.tokens_before,
-                    stats.tokens_after,
-                    stats.weight_ranges_before,
-                    stats.weight_ranges_after,
-                    stats.token_ranges_before,
-                    stats.token_ranges_after,
-                    stats.total_ranges_before(),
-                    stats.total_ranges_after(),
-                );
-            }
-            terminal_phase_profile.compact_ms += compact_ms;
-        }
         profile.id_map_ms = terminal_phase_profile.id_map_ms;
         profile.terminal_dwa_ms = terminal_phase_profile.terminal_dwa_ms;
         profile.compact_ms = terminal_phase_profile.compact_ms;
-        if debug_compile_stages {
-            eprintln!(
-                "[glrmask/debug][compile_stage] terminal_dwa_done id_map_ms={:.3} terminal_dwa_ms={:.3} compact_ms={:.3}",
-                profile.id_map_ms,
-                profile.terminal_dwa_ms,
-                profile.compact_ms,
-            );
-        }
 
-        if let Ok(dump_path) = std::env::var("GLRMASK_ORACLE_DUMP") {
-            let mut canonical_state_reps = vec![u32::MAX; internal_ids.num_tsids() as usize];
-            for (orig, &class) in internal_ids
-                .tokenizer_states
-                .original_to_internal
-                .iter()
-                .enumerate()
-            {
-                if class == u32::MAX {
-                    continue;
-                }
-                let orig = orig as u32;
-                if orig < canonical_state_reps[class as usize] {
-                    canonical_state_reps[class as usize] = orig;
-                }
-            }
-            let mut canonical_token_reps = vec![u32::MAX; internal_ids.num_internal_tokens() as usize];
-            for (orig, &class) in internal_ids.vocab_tokens.original_to_internal.iter().enumerate() {
-                if class == u32::MAX {
-                    continue;
-                }
-                let orig = orig as u32;
-                if orig < canonical_token_reps[class as usize] {
-                    canonical_token_reps[class as usize] = orig;
-                }
-            }
-            let oracle_data = serde_json::json!({
-                "state_map": internal_ids.tokenizer_states.original_to_internal,
-                "parser_token_map": internal_ids.vocab_tokens.original_to_internal,
-                "num_state_classes": internal_ids.num_tsids(),
-                "parser_num_token_classes": internal_ids.num_internal_tokens(),
-                "state_representatives": canonical_state_reps,
-                "parser_token_representatives": canonical_token_reps,
-            });
-            std::fs::write(&dump_path, serde_json::to_string(&oracle_data).unwrap())
-                .expect("failed to write oracle dump");
-            eprintln!("[glrmask/oracle] dumped post-compact mappings to {dump_path}");
-        }
+        let token_bytes = vocab.entries.clone();
 
         // Compute constraint possible matches and build parser DWA
-        // concurrently.  Parser DWA does not depend on possible matches
+        // concurrently. Parser DWA does not depend on possible matches
         // or constraint-vocab; only the later remap step does.
         let (cpm_result, (mut parser_dwa, parser_dwa_ms)) = rayon::join(
             || {
@@ -837,7 +375,7 @@ fn compile_prepared_with_profile(
                     &token_bytes,
                     &internal_ids,
                     cpm::ConstraintPossibleMatchesConfig {
-                        debug_compile_stages,
+                        debug_compile_stages: false,
                         profile_summary_enabled: compile_profile_summary_enabled(),
                         initial_state_map: global_max_length_state_map_ref,
                     },
@@ -862,8 +400,6 @@ fn compile_prepared_with_profile(
         let possible_matches = cpm_result.possible_matches;
         let cpm_profile = cpm_result.profile;
 
-        // Remap parser DWA into the constraint-vocab token space (no-op when
-        // constraint-vocab matches the terminal-DWA vocab).
         let remap_parser_dwa_started_at = Instant::now();
         let remap_parser_dwa_ms = if cpm::constraint_vocab_is_identity(&constraint_vocab) {
             0.0
@@ -874,34 +410,6 @@ fn compile_prepared_with_profile(
             );
             elapsed_ms(remap_parser_dwa_started_at)
         };
-        if compile_profile_summary_enabled() {
-            eprintln!(
-                "[glrmask/profile][constraint_vocab_step] step=remap_parser_dwa ms={:.3}",
-                remap_parser_dwa_ms,
-            );
-        }
-
-        if compile_profile_summary_enabled() {
-            let split_parser_tokens = constraint_vocab
-                .old_internal_to_constraint
-                .iter()
-                .filter(|mapped| mapped.len() > 1)
-                .count();
-
-            eprintln!(
-                "[glrmask/profile][constraint_vocab] parser_tokens={} constraint_tokens={} split_parser_tokens={} reconcile_ms={:.3} same_bytes_ms={:.3} possible_match_signatures_ms={:.3} seed_state_signatures_ms={:.3} build_map_ms={:.3} remap_possible_matches_ms={:.3} remap_parser_dwa_ms={:.3}",
-                internal_ids.vocab_tokens.num_internal_ids(),
-                constraint_vocab.internal_to_originals.len(),
-                split_parser_tokens,
-                cpm_profile.constraint_vocab_ms + remap_parser_dwa_ms,
-                cpm_profile.same_bytes_ms,
-                cpm_profile.possible_match_signatures_ms,
-                cpm_profile.seed_state_signatures_ms,
-                cpm_profile.build_map_ms,
-                cpm_profile.remap_possible_matches_ms,
-                remap_parser_dwa_ms,
-            );
-        }
 
         let internal_token_bytes_started_at = Instant::now();
         let internal_token_bytes = cpm::build_internal_token_bytes_from_groups(
@@ -914,14 +422,6 @@ fn compile_prepared_with_profile(
         profile.permute_possible_matches_ms =
             cpm_profile.possible_matches_collect_ms + cpm_profile.constraint_vocab_ms + remap_parser_dwa_ms;
         profile.internal_token_bytes_ms = internal_token_bytes_ms;
-        if debug_compile_stages {
-            eprintln!(
-                "[glrmask/debug][compile_stage] parser_possible_matches_done parser_dwa_ms={:.3} possible_matches_ms={:.3} internal_token_bytes_ms={:.3}",
-                profile.parser_dwa_ms,
-                profile.permute_possible_matches_ms,
-                profile.internal_token_bytes_ms,
-            );
-        }
 
         let finalize_started_at = Instant::now();
         let constraint = finalize_constraint(Constraint {
@@ -957,13 +457,6 @@ fn compile_prepared_with_profile(
         });
         profile.finalize_ms = elapsed_ms(finalize_started_at);
         profile.compile_ms = elapsed_ms(compile_started_at);
-        if debug_compile_stages {
-            eprintln!(
-                "[glrmask/debug][compile_stage] finalize_done finalize_ms={:.3} compile_ms={:.3}",
-                profile.finalize_ms,
-                profile.compile_ms,
-            );
-        }
 
         (constraint, profile)
     })
@@ -974,28 +467,9 @@ pub(crate) fn compile_prepared(prepared_grammar: GrammarDef, vocab: &Vocab) -> C
 }
 
 pub(crate) fn compile_owned(grammar: GrammarDef, vocab: &Vocab) -> Constraint {
-    if compile_profile_enabled() || env_flag_enabled("GLRMASK_PROFILE_PHASES") {
+    if compile_profile_summary_enabled() {
         let (constraint, profile) = compile_owned_profiled(grammar, vocab);
-        if compile_profile_summary_enabled() {
-            emit_compile_profile_summary(None, None, &profile);
-        } else {
-            eprintln!(
-                "[glrmask/profile][phases] prepare={:.1} analysis_wall={:.1} classify={:.1} id_map={:.1} terminal_dwa={:.1} templates={:.1} compact={:.1} possible_matches={:.1} internal_token_bytes={:.1} parser_dwa={:.1} finalize={:.1} compile={:.1} total={:.1}",
-                profile.prepare_ms,
-                profile.analysis_wall_ms,
-                profile.classify_ms,
-                profile.id_map_ms,
-                profile.terminal_dwa_ms,
-                profile.templates_ms,
-                profile.compact_ms,
-                profile.permute_possible_matches_ms,
-                profile.internal_token_bytes_ms,
-                profile.parser_dwa_ms,
-                profile.finalize_ms,
-                profile.compile_ms,
-                profile.total_ms,
-            );
-        }
+        emit_compile_profile_summary(None, None, &profile);
         return constraint;
     }
 
