@@ -67,96 +67,6 @@ impl Tokenizer {
         0
     }
 
-    /// Rebuild a tokenizer from the active terminal regexes and map original
-    /// states to rebuilt states by walking both DFAs in lockstep.
-    pub fn simplified_from_active_exprs(
-        &self,
-        active_terminals: &[bool],
-    ) -> Option<(Tokenizer, ManyToOneIdMap)> {
-        use std::collections::VecDeque;
-
-        let exprs = self.exprs.as_ref()?;
-        if exprs.len() != active_terminals.len() {
-            return None;
-        }
-
-        let local_to_orig: Vec<u32> = active_terminals
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &active)| active.then_some(i as u32))
-            .collect();
-        if local_to_orig.is_empty() {
-            return None;
-        }
-
-        let active_exprs: Vec<Expr> = local_to_orig
-            .iter()
-            .map(|&orig| exprs[orig as usize].clone())
-            .collect();
-        let regex = crate::automata::lexer::compile::build_regex(&active_exprs);
-        let mut fresh_dfa: DFA = regex.dfa;
-
-        let num_terminals = self.num_terminals as usize;
-        fresh_dfa.ensure_group_capacity(num_terminals);
-        let num_states = fresh_dfa.num_states();
-        for state_id in 0..num_states {
-            let old_finalizers = fresh_dfa.states()[state_id].finalizers.clone();
-            let mut new_finalizers = BitSet::new(num_terminals);
-            for local in old_finalizers.iter_ones() {
-                if let Some(&orig) = local_to_orig.get(local) {
-                    new_finalizers.set(orig as usize);
-                }
-            }
-
-            let old_futures = fresh_dfa
-                .possible_future_group_ids(state_id as u32)
-                .clone();
-            let mut new_futures = BitSet::new(num_terminals);
-            for local in old_futures.iter_ones() {
-                if let Some(&orig) = local_to_orig.get(local) {
-                    new_futures.set(orig as usize);
-                }
-            }
-            fresh_dfa.overwrite_state_metadata(state_id as u32, new_finalizers, new_futures);
-        }
-
-        let mut mapping = vec![u32::MAX; self.dfa.num_states()];
-        mapping[0] = 0;
-        let mut queue = VecDeque::from([0u32]);
-        while let Some(original) = queue.pop_front() {
-            let fresh = mapping[original as usize];
-            let original_state = &self.dfa.states()[original as usize];
-            for (byte, &original_next) in original_state.transitions.iter() {
-                if let Some(fresh_next) = fresh_dfa.step(fresh, byte) {
-                    let slot = &mut mapping[original_next as usize];
-                    if *slot == u32::MAX {
-                        *slot = fresh_next;
-                        queue.push_back(original_next);
-                    } else {
-                        debug_assert_eq!(
-                            *slot, fresh_next,
-                            "parallel BFS inconsistency: original state {} mapped to both {} and {}",
-                            original_next, *slot, fresh_next
-                        );
-                    }
-                }
-            }
-        }
-
-        let tok = Tokenizer {
-            dfa: fresh_dfa,
-            num_terminals: self.num_terminals,
-            exprs: self.exprs.clone(),
-        };
-        Some((
-            tok.clone(),
-            ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
-                mapping,
-                tok.num_states(),
-            ),
-        ))
-    }
-
     /// Detect nullable terminals (those that match the empty string) by
     /// inspecting start-state finalizers, remove them from the DFA, and return
     /// the set.  After this call the tokenizer no longer reports those
@@ -222,10 +132,6 @@ impl Tokenizer {
             .possible_future_group_ids(state)
             .iter()
             .map(|terminal| terminal as TerminalID)
-    }
-
-    pub fn all_matched_terminals(&self, state: u32) -> BTreeSet<TerminalID> {
-        self.matched_terminals(state)
     }
 
     pub fn possible_future_terminals(&self, state: u32) -> &BitSet {
@@ -487,101 +393,21 @@ impl Tokenizer {
         }
     }
 
-    pub(crate) fn clone_filtered_for_terminals(
-        &self,
-        active_terminals: &[bool],
-        relevant_bytes: &[bool; 256],
-    ) -> Tokenizer {
-        let mut filtered = self.filter_dfa_for_terminals(active_terminals, Some(relevant_bytes));
-        filtered.dfa.recompute_possible_futures();
-        Tokenizer {
-            dfa: filtered.dfa,
-            num_terminals: self.num_terminals,
-            exprs: self.exprs.clone(),
-        }
-    }
-
-    /// Check whether filtering to `active_terminals` can produce a total
-    /// original-state map.  Returns `false` if any original DFA state has
-    /// neither an active finalizer nor an active future (i.e., the state
-    /// would be dead after filtering), which makes the simplified state map
-    /// non-total.
-    pub fn active_terminal_filter_can_preserve_total_state_map(
-        &self,
-        active_terminals: &[bool],
-    ) -> bool {
-        let num_groups = self.num_terminals as usize;
-        let mut active_bitset = BitSet::new(num_groups);
-        for (terminal_id, &active) in active_terminals.iter().enumerate() {
-            if active {
-                active_bitset.set(terminal_id);
-            }
-        }
-
-        for state_id in 0..self.dfa.num_states() {
-            let state = &self.dfa.states()[state_id];
-            let final_active = !state.finalizers.is_disjoint(&active_bitset);
-            let future_active = !self
-                .dfa
-                .possible_future_group_ids(state_id as u32)
-                .is_disjoint(&active_bitset);
-            if !final_active && !future_active {
-                return false;
-            }
-        }
-        true
-    }
-
     /// Create a simplified tokenizer that only knows about `active_terminals`.
     ///
-    /// Non-active terminal bits are cleared from finalizers and the DFA is
-    /// minimized. The `relevant_bytes` parameter is accepted for API
-    /// compatibility, but transition-byte pruning is only honored when the
-    /// `GLRMASK_FORCE_RELEVANT_BYTES` environment variable is set; by default
-    /// the method clears inactive terminal metadata and minimizes without byte
-    /// pruning, to preserve commit/mask equivalence.
+    /// Non-active terminal bits are cleared from finalizers and the filtered
+    /// DFA is then minimized when that preserves the required mapping shape.
     pub fn simplify_for_terminals(
         &self,
         active_terminals: &[bool],
         relevant_bytes: Option<&[bool; 256]>,
     ) -> (Tokenizer, ManyToOneIdMap) {
-        let compile_profile = std::env::var("GLRMASK_PROFILE_COMPILE")
-            .map(|value| !value.is_empty() && value != "0")
-            .unwrap_or(false);
-
-        let use_from_scratch =
-            std::env::var_os("GLRMASK_SIMPLIFY_FROM_SCRATCH").is_some() && self.exprs.is_some() && {
-            let num_active = active_terminals.iter().filter(|&&active| active).count();
-            let total = active_terminals.len();
-            num_active * 2 <= total
-        };
-        if use_from_scratch {
-            if let Some(result) = self.simplified_from_active_exprs(active_terminals) {
-                if compile_profile {
-                    eprintln!(
-                        "[glrmask/profile][simplify_detail] from_scratch states={} active={}",
-                        result.0.num_states(),
-                        active_terminals.iter().filter(|&&active| active).count(),
-                    );
-                }
-                return result;
-            }
-        }
-
-        let relevant_bytes = if std::env::var_os("GLRMASK_FORCE_RELEVANT_BYTES").is_some() {
-            relevant_bytes
-        } else {
-            None
-        };
-
-        let started_at = std::time::Instant::now();
         let TerminalFilteredDfa {
             mut dfa,
             active_bitset,
             any_cleared,
             transitions_pruned,
         } = self.filter_dfa_for_terminals(active_terminals, relevant_bytes);
-        let clear_elapsed = started_at.elapsed();
 
         if !any_cleared && !transitions_pruned {
             let num_states = dfa.num_states();
@@ -589,13 +415,6 @@ impl Tokenizer {
                 (0..num_states as u32).collect(),
                 num_states as u32,
             );
-            if compile_profile {
-                eprintln!(
-                    "[glrmask/profile][simplify_detail] states={} no_change clear_ms={:.1}",
-                    num_states,
-                    clear_elapsed.as_secs_f64() * 1000.0,
-                );
-            }
             return (
                 Tokenizer {
                     dfa,
@@ -616,17 +435,6 @@ impl Tokenizer {
                     (0..pre_minimize_states as u32).collect(),
                     pre_minimize_states as u32,
                 );
-                if compile_profile {
-                    eprintln!(
-                        "[glrmask/profile][simplify_detail] states={} active={} clear_ms={:.1} skip_minimize(distinct={}/{}) total_ms={:.1}",
-                        pre_minimize_states,
-                        num_active,
-                        clear_elapsed.as_secs_f64() * 1000.0,
-                        distinct,
-                        pre_minimize_states,
-                        started_at.elapsed().as_secs_f64() * 1000.0,
-                    );
-                }
                 return (
                     Tokenizer {
                         dfa,
@@ -638,29 +446,13 @@ impl Tokenizer {
             }
         }
 
-        let minimize_started_at = std::time::Instant::now();
         let preserve_all_original_states = transitions_pruned;
         let (minimized, state_mapping) = if preserve_all_original_states {
             dfa.minimize_with_state_mapping_preserve_all_states()
         } else {
             dfa.minimize_with_state_mapping()
         };
-        let minimize_elapsed = minimize_started_at.elapsed();
         let post_minimize_states = minimized.num_states();
-
-        if compile_profile {
-            eprintln!(
-                "[glrmask/profile][simplify_detail] states={} active={} clear_ms={:.1} minimize_ms={:.1} total_ms={:.1} pre={} post={} reduction={}",
-                pre_minimize_states,
-                num_active,
-                clear_elapsed.as_secs_f64() * 1000.0,
-                minimize_elapsed.as_secs_f64() * 1000.0,
-                started_at.elapsed().as_secs_f64() * 1000.0,
-                pre_minimize_states,
-                post_minimize_states,
-                pre_minimize_states - post_minimize_states,
-            );
-        }
 
         (
             Tokenizer {

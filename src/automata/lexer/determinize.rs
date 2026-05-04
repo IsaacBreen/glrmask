@@ -1,7 +1,6 @@
 //! Lexer NFA -> DFA determinization for glrmask's byte-oriented DFA types.
 
 use std::collections::VecDeque;
-use std::time::Instant;
 
 use rustc_hash::FxHashMap;
 
@@ -13,28 +12,6 @@ use super::dfa::DFA;
 use super::nfa::{CompactNFA, NFA};
 
 const EPSILON_CLOSURE_PRECOMPUTE_THRESHOLD: u32 = 1;
-
-fn debug_profile_enabled() -> bool {
-    std::env::var("GLRMASK_DEBUG_PROFILE")
-        .map(|value| {
-            let normalized = value.trim().to_ascii_lowercase();
-            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
-        })
-        .unwrap_or(false)
-}
-
-fn debug_verbose_enabled() -> bool {
-    std::env::var("GLRMASK_DEBUG_VERBOSE")
-        .map(|value| {
-            let normalized = value.trim().to_ascii_lowercase();
-            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
-        })
-        .unwrap_or(false)
-}
-
-fn elapsed_ms(started_at: Instant) -> f64 {
-    started_at.elapsed().as_secs_f64() * 1000.0
-}
 
 fn sparse_to_sorted_vec(set: &SparseStateSet) -> Vec<u32> {
     let mut states = Vec::new();
@@ -533,8 +510,6 @@ fn expand_transition_closure(
 
 impl NFA {
     pub fn to_dfa(&self) -> DFA {
-        let debug_verbose = debug_verbose_enabled();
-        let total_started_at = Instant::now();
         let group_count = self
             .states
             .iter()
@@ -543,43 +518,19 @@ impl NFA {
             .map(|group| *group as usize + 1)
             .unwrap_or(0);
 
-        let reachable_started_at = Instant::now();
         let reachable_groups = compute_reachable_groups(self, group_count);
-        let reachable_ms = elapsed_ms(reachable_started_at);
-
-        let epsilon_edges: usize = self
-            .states
-            .iter()
-            .map(|state| state.epsilon_transitions.len())
-            .sum();
         let deterministic_no_epsilon = is_epsilon_free_deterministic(self);
 
         if deterministic_no_epsilon {
-            let fast_started_at = Instant::now();
-            let dfa = determinize_epsilon_free_deterministic(self, group_count, &reachable_groups);
-            if debug_verbose {
-                eprintln!(
-                    "[glrmask/debug][determinize] states={} epsilon_edges={} fast_path=epsilon_free_deterministic reachable_ms={:.3} fast_ms={:.3} total_ms={:.3} dfa_states={}",
-                    self.states.len(),
-                    epsilon_edges,
-                    reachable_ms,
-                    elapsed_ms(fast_started_at),
-                    elapsed_ms(total_started_at),
-                    dfa.num_states(),
-                );
-            }
-            return dfa;
+            return determinize_epsilon_free_deterministic(self, group_count, &reachable_groups);
         }
 
         let mut dfa = DFA::new(1);
         dfa.ensure_group_capacity(group_count);
 
-        let classes_started_at = Instant::now();
         let (class_map, num_classes, class_members) = self.compute_equivalence_classes();
         let remapped_transitions = build_remapped_transitions(self, &class_map);
-        let classes_ms = elapsed_ms(classes_started_at);
 
-        let epsilon_setup_started_at = Instant::now();
         let compact_nfa = self.build_compact_nfa();
         let num_nfa_states = self.states.len();
         let mut epsilon_stack = Vec::with_capacity(num_nfa_states);
@@ -594,7 +545,6 @@ impl NFA {
             self.start_state as usize,
             &out_degree,
         );
-        let epsilon_setup_ms = elapsed_ms(epsilon_setup_started_at);
 
         let start_key = CompressedStateSet::from_sparse(&start_closure);
         let (start_finalizers, start_future) =
@@ -614,21 +564,8 @@ impl NFA {
         let mut seen_class = vec![false; num_classes];
         let mut closure_set = SparseStateSet::new(num_nfa_states);
         let mut scratch_closure = CompressedStateSet::new();
-        let subset_started_at = Instant::now();
-        let mut processed_subsets = 0u64;
-        let mut processed_targets = 0u64;
-        let mut singleton_targets = 0u64;
-        let mut total_subset_words = 0u64;
-        let mut total_target_words = 0u64;
-        let mut max_subset_words = 0usize;
-        let mut max_target_words = 0usize;
 
         while let Some((current_dfa_state, current_set)) = worklist.pop() {
-            processed_subsets += 1;
-            let subset_words = current_set.words.len();
-            total_subset_words += subset_words as u64;
-            max_subset_words = max_subset_words.max(subset_words);
-
             collect_transition_targets(
                 &current_set,
                 &remapped_transitions,
@@ -639,7 +576,6 @@ impl NFA {
 
             let mut dfa_transitions_vec = Vec::with_capacity(used_classes.len() * 2);
             for &class_id in &used_classes {
-                processed_targets += 1;
                 let target_set = &transition_targets[class_id];
 
                 if let Some(state) = fast_singleton_without_epsilon(
@@ -647,7 +583,6 @@ impl NFA {
                     &out_degree,
                     &high_degree_closures,
                 ) {
-                    singleton_targets += 1;
                     scratch_closure.words.clear();
                     let word_idx = (state >> 6) as u32;
                     let mask = 1u64 << (state & 0x3f);
@@ -665,10 +600,6 @@ impl NFA {
                     );
                     CompressedStateSet::reuse_from_sparse(&closure_set, &mut scratch_closure);
                 }
-
-                let target_words = scratch_closure.words.len();
-                total_target_words += target_words as u64;
-                max_target_words = max_target_words.max(target_words);
 
                 let next_dfa_state = if let Some(&existing) = subset_map.get(&scratch_closure) {
                     existing
@@ -698,37 +629,6 @@ impl NFA {
                 transition_targets[idx].clear();
             }
             used_classes.clear();
-        }
-
-        if debug_verbose {
-            let avg_subset_words = if processed_subsets == 0 {
-                0.0
-            } else {
-                total_subset_words as f64 / processed_subsets as f64
-            };
-            let avg_target_words = if processed_targets == 0 {
-                0.0
-            } else {
-                total_target_words as f64 / processed_targets as f64
-            };
-            eprintln!(
-                "[glrmask/debug][determinize] states={} epsilon_edges={} fast_path=generic reachable_ms={:.3} classes_ms={:.3} epsilon_setup_ms={:.3} subset_ms={:.3} total_ms={:.3} dfa_states={} processed_subsets={} processed_targets={} singleton_targets={} avg_subset_words={:.2} max_subset_words={} avg_target_words={:.2} max_target_words={}",
-                self.states.len(),
-                epsilon_edges,
-                reachable_ms,
-                classes_ms,
-                epsilon_setup_ms,
-                elapsed_ms(subset_started_at),
-                elapsed_ms(total_started_at),
-                dfa.num_states(),
-                processed_subsets,
-                processed_targets,
-                singleton_targets,
-                avg_subset_words,
-                max_subset_words,
-                avg_target_words,
-                max_target_words,
-            );
         }
 
         dfa

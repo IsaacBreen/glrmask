@@ -328,7 +328,7 @@ fn append_choice_expr(options: &[Expr], nfa: &mut NFA, start: u32, end: u32) {
 const DIRECT_BOUNDED_REPEAT_THRESHOLD: usize = 32;
 
 fn compile_expr_to_dfa(expr: &Expr) -> DFA {
-    let mut nfa = build_regex_nfa_impl(std::slice::from_ref(expr), false);
+    let mut nfa = build_regex_nfa_impl(std::slice::from_ref(expr));
     nfa.condense_epsilon_sccs();
     nfa.to_dfa().minimize()
 }
@@ -860,7 +860,43 @@ impl Expr {
 ///
 /// Each expression's index becomes its group ID in the resulting DFA.
 pub fn build_regex(exprs: &[Expr]) -> Regex {
-    build_regex_with_profile_label(exprs, "default")
+    let plan = build_exclusion_compile_plan(exprs);
+    let group_sets: Vec<U8Set> = plan
+        .compiled_exprs
+        .iter()
+        .map(|expr| expr_u8set(expr))
+        .collect();
+    let used_product_dfa = plan.compiled_exprs.len() > 1;
+
+    let mut dfa = if used_product_dfa {
+        build_product_dfa(&plan.compiled_exprs)
+    } else {
+        let mut nfa = build_regex_nfa(&plan.compiled_exprs);
+        nfa.condense_epsilon_sccs();
+        nfa.to_dfa()
+    };
+
+    dfa.ensure_group_capacity(group_sets.len());
+    for (group_id, set) in group_sets.into_iter().enumerate() {
+        dfa.set_group_u8set(group_id as u32, set);
+    }
+
+    if !plan.exclusions.is_empty() {
+        dfa.apply_group_exclusions(&plan.exclusions);
+    }
+    if !plan.intersections.is_empty() {
+        dfa.apply_group_intersections(&plan.intersections);
+    }
+
+    let dfa = if plan.visible_groups < plan.compiled_exprs.len() {
+        dfa.project_groups(plan.visible_groups)
+    } else {
+        dfa
+    };
+
+    let dfa = if used_product_dfa { dfa } else { dfa.minimize() };
+
+    Regex { dfa }
 }
 
 fn product_state_metadata(
@@ -897,57 +933,6 @@ fn product_state_metadata(
     }
 
     (finalizers, future)
-}
-
-fn product_dfa_locality_metrics(dfa: &DFA) -> (f64, f64, f64) {
-    let mut total_transition_distance = 0u64;
-    let mut total_transition_count = 0u64;
-    let mut total_modal_distance = 0u64;
-    let mut modal_state_count = 0u64;
-    let mut adjacent_modal_count = 0u64;
-
-    for (state_id, state) in dfa.states().iter().enumerate() {
-        let mut target_counts = FxHashMap::<u32, usize>::default();
-        for (_, &target) in state.transitions.iter() {
-            total_transition_distance += state_id.abs_diff(target as usize) as u64;
-            total_transition_count += 1;
-            *target_counts.entry(target).or_insert(0) += 1;
-        }
-
-        if let Some((&modal_target, _)) = target_counts
-            .iter()
-            .max_by(|left, right| left.1.cmp(right.1).then_with(|| left.0.cmp(right.0)))
-        {
-            let modal_distance = state_id.abs_diff(modal_target as usize) as u64;
-            total_modal_distance += modal_distance;
-            modal_state_count += 1;
-            if modal_distance <= 1 {
-                adjacent_modal_count += 1;
-            }
-        }
-    }
-
-    let avg_transition_distance = if total_transition_count == 0 {
-        0.0
-    } else {
-        total_transition_distance as f64 / total_transition_count as f64
-    };
-    let avg_modal_distance = if modal_state_count == 0 {
-        0.0
-    } else {
-        total_modal_distance as f64 / modal_state_count as f64
-    };
-    let adjacent_modal_ratio = if modal_state_count == 0 {
-        0.0
-    } else {
-        adjacent_modal_count as f64 / modal_state_count as f64
-    };
-
-    (
-        avg_transition_distance,
-        avg_modal_distance,
-        adjacent_modal_ratio,
-    )
 }
 
 fn explicit_dead_sink_state(dfa: &DFA) -> Option<u32> {
@@ -988,7 +973,7 @@ fn compile_product_component_dfa_direct(expr: &Expr) -> Option<(DFA, bool)> {
     }
 }
 
-fn compile_product_component_dfa(expr: &Expr, profile_label: &str) -> DFA {
+fn compile_product_component_dfa(expr: &Expr) -> DFA {
     if let Some((mut dfa, needs_future_recompute)) = compile_product_component_dfa_direct(expr) {
         dfa.ensure_group_capacity(1);
         dfa.set_group_u8set(0, expr_u8set(expr));
@@ -998,7 +983,7 @@ fn compile_product_component_dfa(expr: &Expr, profile_label: &str) -> DFA {
         return dfa;
     }
 
-    build_regex_with_profile_label(std::slice::from_ref(expr), profile_label).dfa
+    build_regex(std::slice::from_ref(expr)).dfa
 }
 
 enum ProductComponent {
@@ -1016,15 +1001,6 @@ enum ProductComponentClassTransitions {
 }
 
 impl ProductComponent {
-    fn debug_state_count(&self) -> usize {
-        match self {
-            ProductComponent::Materialized(dfa) => dfa.num_states(),
-            ProductComponent::VirtualBoundedRepeat { base_dfa, max, .. } => {
-                base_dfa.num_states() * (*max as usize + 1)
-            }
-        }
-    }
-
     fn partition_dfa(&self) -> &DFA {
         match self {
             ProductComponent::Materialized(dfa) => dfa,
@@ -1040,12 +1016,9 @@ impl ProductComponent {
     }
 }
 
-fn compile_product_component(
-    expr: &Expr,
-    profile_label: &str,
-) -> ProductComponent {
+fn compile_product_component(expr: &Expr) -> ProductComponent {
     match expr {
-        Expr::Shared(inner) => compile_product_component(inner, profile_label),
+        Expr::Shared(inner) => compile_product_component(inner),
         Expr::Repeat {
             expr,
             min,
@@ -1059,60 +1032,25 @@ fn compile_product_component(
                 };
             }
 
-            ProductComponent::Materialized(compile_product_component_dfa(expr, profile_label))
+            ProductComponent::Materialized(compile_product_component_dfa(expr))
         }
-        _ => ProductComponent::Materialized(compile_product_component_dfa(expr, profile_label)),
+        _ => ProductComponent::Materialized(compile_product_component_dfa(expr)),
     }
 }
 
-fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -> DFA {
-    let debug_verbose = debug_verbose_enabled();
-    let product_total_started_at = std::time::Instant::now();
-    let parallel_results: Vec<(usize, ProductComponent, usize, f64)> = exprs
+fn build_product_dfa(exprs: &[Expr]) -> DFA {
+    let components: Vec<ProductComponent> = exprs
         .par_iter()
-        .enumerate()
-        .map(|(group_id, expr)| {
-            let group_started_at = std::time::Instant::now();
-            let component = compile_product_component(expr, profile_label);
-            let group_ms = group_started_at.elapsed().as_secs_f64() * 1000.0;
-            let state_count = component.debug_state_count();
-            (group_id, component, state_count, group_ms)
-        })
+        .map(compile_product_component)
         .collect();
-    let mut component_build_stats = Vec::<(usize, usize, f64)>::with_capacity(exprs.len());
-    let mut components = Vec::with_capacity(exprs.len());
-    for (group_id, component, state_count, group_ms) in parallel_results {
-        if debug_verbose {
-            eprintln!(
-                "[glrmask/debug][product] group={} dfa_states={} compile_ms={:.3}",
-                group_id,
-                state_count,
-                group_ms,
-            );
-        }
-        component_build_stats.push((group_id, state_count, group_ms));
-        components.push(component);
-    }
-    let component_compile_ms: f64 = component_build_stats.iter().map(|(_, _, ms)| *ms).sum();
     let num_groups = components.len();
     let component_dead_states: Vec<Option<u32>> = components
         .iter()
         .map(ProductComponent::dead_state)
         .collect();
-    let class_partition_started_at = std::time::Instant::now();
     let (class_map, class_members) = compute_product_equivalence_classes(&components);
     let num_classes = class_members.len();
-    let class_partition_ms = class_partition_started_at.elapsed().as_secs_f64() * 1000.0;
-    let class_transition_started_at = std::time::Instant::now();
     let component_class_transitions = build_product_class_transitions(&components, &class_map);
-    let class_transition_ms = class_transition_started_at.elapsed().as_secs_f64() * 1000.0;
-
-    if debug_profile {
-        eprintln!(
-            "[glrmask/debug][product] alphabet_classes={}",
-            num_classes,
-        );
-    }
     let mut dfa = DFA::new(1);
     dfa.ensure_group_capacity(num_groups);
 
@@ -1133,32 +1071,12 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
         .collect();
     let mut class_active = vec![false; num_classes];
     let mut used_classes = Vec::<usize>::new();
-    let mut live_state_counts = if debug_profile { vec![0u64; num_groups] } else { Vec::new() };
-    let mut processed_product_states = 0u64;
-    let mut total_live_groups = 0u64;
-    let mut max_live_groups = 0usize;
-    let mut transition_scatter_ns = 0u128;
-    let mut state_lookup_ns = 0u128;
-    let mut state_insert_ns = 0u128;
-    let mut metadata_ns = 0u128;
-    let mut transition_expand_ns = 0u128;
-    let mut transition_assign_ns = 0u128;
-    let mut state_add_ns = 0u128;
-    let mut worklist_push_ns = 0u128;
-    let mut bucket_take_ns = 0u128;
     state_map.insert(start_tuple.clone(), 0);
     worklist.push_back((0, start_tuple));
 
-    let product_walk_started_at = std::time::Instant::now();
     while let Some((current_state, state_tuple)) = worklist.pop_front() {
-        processed_product_states += 1;
-        let transition_scatter_started_at = if debug_profile { std::time::Instant::now() } else { product_walk_started_at };
-        let live_groups = state_tuple.len();
         for &(group_id, component_state) in &state_tuple {
             let group_index = group_id as usize;
-            if debug_profile {
-                live_state_counts[group_index] += 1;
-            }
 
             match (&components[group_index], &component_class_transitions[group_index]) {
                 (
@@ -1214,56 +1132,22 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
                 _ => unreachable!("component and class-transition kinds must match"),
             }
         }
-        if debug_profile {
-            transition_scatter_ns += transition_scatter_started_at.elapsed().as_nanos();
-        }
-        total_live_groups += live_groups as u64;
-        max_live_groups = max_live_groups.max(live_groups);
 
         let mut class_transitions = Vec::with_capacity(used_classes.len());
         for &class_index in &used_classes {
-            if debug_profile {
-                let bucket_take_started_at = std::time::Instant::now();
-                let next_tuple = &class_buffers[class_index];
-                bucket_take_ns += bucket_take_started_at.elapsed().as_nanos();
-                let lookup_started_at = std::time::Instant::now();
-                let existing = state_map.get(next_tuple).copied();
-                state_lookup_ns += lookup_started_at.elapsed().as_nanos();
-                let next_state = if let Some(existing) = existing {
-                    existing
-                } else {
-                    let state_add_started_at = std::time::Instant::now();
-                    let new_state = dfa.add_state();
-                    state_add_ns += state_add_started_at.elapsed().as_nanos();
-                    let metadata_started_at = std::time::Instant::now();
-                    let (finalizers, future) = product_state_metadata(&components, next_tuple);
-                    metadata_ns += metadata_started_at.elapsed().as_nanos();
-                    dfa.overwrite_state_metadata(new_state, finalizers, future);
-                    let insert_started_at = std::time::Instant::now();
-                    state_map.insert(next_tuple.clone(), new_state);
-                    state_insert_ns += insert_started_at.elapsed().as_nanos();
-                    pending_class_transitions.push(Vec::new());
-                    let worklist_push_started_at = std::time::Instant::now();
-                    worklist.push_back((new_state, next_tuple.clone()));
-                    worklist_push_ns += worklist_push_started_at.elapsed().as_nanos();
-                    new_state
-                };
-                class_transitions.push((class_index as u8, next_state));
+            let next_tuple = &class_buffers[class_index];
+            let next_state = if let Some(&existing) = state_map.get(next_tuple) {
+                existing
             } else {
-                let next_tuple = &class_buffers[class_index];
-                let next_state = if let Some(&existing) = state_map.get(next_tuple) {
-                    existing
-                } else {
-                    let new_state = dfa.add_state();
-                    let (finalizers, future) = product_state_metadata(&components, next_tuple);
-                    dfa.overwrite_state_metadata(new_state, finalizers, future);
-                    state_map.insert(next_tuple.clone(), new_state);
-                    pending_class_transitions.push(Vec::new());
-                    worklist.push_back((new_state, next_tuple.clone()));
-                    new_state
-                };
-                class_transitions.push((class_index as u8, next_state));
-            }
+                let new_state = dfa.add_state();
+                let (finalizers, future) = product_state_metadata(&components, next_tuple);
+                dfa.overwrite_state_metadata(new_state, finalizers, future);
+                state_map.insert(next_tuple.clone(), new_state);
+                pending_class_transitions.push(Vec::new());
+                worklist.push_back((new_state, next_tuple.clone()));
+                new_state
+            };
+            class_transitions.push((class_index as u8, next_state));
             class_buffers[class_index].clear();
             class_active[class_index] = false;
         }
@@ -1271,7 +1155,6 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
         pending_class_transitions[current_state as usize] = class_transitions;
     }
 
-    let transition_expand_started_at = if debug_profile { std::time::Instant::now() } else { product_walk_started_at };
     let expanded_transitions: Vec<crate::ds::char_transitions::CharTransitions<u32>> = pending_class_transitions
         .into_par_iter()
         .map(|class_transitions| {
@@ -1291,98 +1174,9 @@ fn build_product_dfa(exprs: &[Expr], profile_label: &str, debug_profile: bool) -
             crate::ds::char_transitions::CharTransitions::from_sorted_entries(transitions)
         })
         .collect();
-    if debug_profile {
-        transition_expand_ns += transition_expand_started_at.elapsed().as_nanos();
-    }
 
-    let transition_assign_started_at = if debug_profile { std::time::Instant::now() } else { product_walk_started_at };
     for (state, transitions) in dfa.states_mut().iter_mut().zip(expanded_transitions) {
         state.transitions = transitions;
-    }
-    if debug_profile {
-        transition_assign_ns += transition_assign_started_at.elapsed().as_nanos();
-    }
-
-    if debug_profile {
-        let avg_live_groups = if processed_product_states == 0 {
-            0.0
-        } else {
-            total_live_groups as f64 / processed_product_states as f64
-        };
-        let product_walk_ms = product_walk_started_at.elapsed().as_secs_f64() * 1000.0;
-        let mut top_groups = component_build_stats.clone();
-        top_groups.sort_unstable_by(|left, right| right.2.partial_cmp(&left.2).unwrap_or(std::cmp::Ordering::Equal));
-        eprintln!(
-            "[glrmask/debug][product] reachable_states={} avg_live_groups={:.2} max_live_groups={}",
-            processed_product_states,
-            avg_live_groups,
-            max_live_groups,
-        );
-        eprintln!(
-            "[glrmask/debug][product] component_compile_ms={:.3} class_partition_ms={:.3} class_transition_ms={:.3} product_walk_ms={:.3} total_ms={:.3}",
-            component_compile_ms,
-            class_partition_ms,
-            class_transition_ms,
-            product_walk_ms,
-            product_total_started_at.elapsed().as_secs_f64() * 1000.0,
-        );
-        if debug_verbose {
-            for (group_id, state_count, compile_ms) in top_groups.into_iter().take(5) {
-                eprintln!(
-                    "[glrmask/debug][product] slow_group group={} dfa_states={} compile_ms={:.3}",
-                    group_id,
-                    state_count,
-                    compile_ms,
-                );
-            }
-        }
-        eprintln!(
-            "[glrmask/debug][product] walk_breakdown transition_scatter_ms={:.3} state_lookup_ms={:.3} state_insert_ms={:.3} metadata_ms={:.3} transition_expand_ms={:.3} transition_assign_ms={:.3} state_add_ms={:.3} worklist_push_ms={:.3} bucket_take_ms={:.3}",
-            transition_scatter_ns as f64 / 1_000_000.0,
-            state_lookup_ns as f64 / 1_000_000.0,
-            state_insert_ns as f64 / 1_000_000.0,
-            metadata_ns as f64 / 1_000_000.0,
-            transition_expand_ns as f64 / 1_000_000.0,
-            transition_assign_ns as f64 / 1_000_000.0,
-            state_add_ns as f64 / 1_000_000.0,
-            worklist_push_ns as f64 / 1_000_000.0,
-            bucket_take_ns as f64 / 1_000_000.0,
-        );
-        let total_transitions: usize = dfa.states().iter().map(|state| state.transitions.len()).sum();
-        eprintln!(
-            "[glrmask/debug][product] transition_count={}",
-            total_transitions,
-        );
-        let (avg_transition_distance, avg_modal_distance, adjacent_modal_ratio) =
-            product_dfa_locality_metrics(&dfa);
-        eprintln!(
-            "[glrmask/debug][product] locality avg_transition_target_distance={:.2} avg_modal_target_distance={:.2} adjacent_modal_ratio={:.4}",
-            avg_transition_distance,
-            avg_modal_distance,
-            adjacent_modal_ratio,
-        );
-        let mut top_alive_groups: Vec<(usize, u64)> = live_state_counts
-            .iter()
-            .copied()
-            .enumerate()
-            .filter(|(_, alive_states)| *alive_states > 0)
-            .collect();
-        top_alive_groups.sort_unstable_by(|left, right| right.1.cmp(&left.1));
-        if debug_verbose {
-            for (group_id, alive_states) in top_alive_groups.into_iter().take(5) {
-                let alive_ratio = if processed_product_states == 0 {
-                    0.0
-                } else {
-                    alive_states as f64 / processed_product_states as f64
-                };
-                eprintln!(
-                    "[glrmask/debug][product] top_alive_group group={} alive_states={} alive_ratio={:.4}",
-                    group_id,
-                    alive_states,
-                    alive_ratio,
-                );
-            }
-        }
     }
 
     dfa
@@ -1476,169 +1270,15 @@ fn refine_u8_partitions(partitions: Vec<U8Set>, split: U8Set) -> Vec<U8Set> {
     next_partitions
 }
 
-pub fn build_regex_with_profile_label(exprs: &[Expr], _profile_label: &str) -> Regex {
-    let debug_profile = debug_profile_enabled();
-    let debug_verbose = debug_verbose_enabled();
-    let total_started_at = std::time::Instant::now();
-    let plan = build_exclusion_compile_plan(exprs);
-    let group_sets: Vec<U8Set> = plan
-        .compiled_exprs
-        .iter()
-        .map(|expr| expr_u8set(expr))
-        .collect();
-    let used_product_dfa = plan.compiled_exprs.len() > 1;
-    let determinize_started_at = std::time::Instant::now();
-
-    let (mut dfa, build_nfa_ms, nfa_states_after_build, condense_ms, nfa_states_after_condense) =
-        if used_product_dfa {
-            (build_product_dfa(&plan.compiled_exprs, _profile_label, debug_profile), 0.0, 0, 0.0, 0)
-        } else {
-            let build_nfa_started_at = std::time::Instant::now();
-            let mut nfa = build_regex_nfa(&plan.compiled_exprs);
-            let build_nfa_ms = build_nfa_started_at.elapsed().as_secs_f64() * 1000.0;
-            let nfa_states_after_build = nfa.states.len();
-            if debug_verbose {
-                eprintln!(
-                    "[glrmask/debug][prepare_regex] label={} stage=build_nfa num_exprs={} ms={:.3} nfa_states={}",
-                    _profile_label,
-                    plan.compiled_exprs.len(),
-                    build_nfa_ms,
-                    nfa_states_after_build,
-                );
-            }
-
-            let condense_started_at = std::time::Instant::now();
-            nfa.condense_epsilon_sccs();
-            let condense_ms = condense_started_at.elapsed().as_secs_f64() * 1000.0;
-            let nfa_states_after_condense = nfa.states.len();
-            if debug_verbose {
-                eprintln!(
-                    "[glrmask/debug][prepare_regex] label={} stage=condense num_exprs={} ms={:.3} nfa_states={}",
-                    _profile_label,
-                    plan.compiled_exprs.len(),
-                    condense_ms,
-                    nfa_states_after_condense,
-                );
-            }
-
-            (nfa.to_dfa(), build_nfa_ms, nfa_states_after_build, condense_ms, nfa_states_after_condense)
-        };
-
-    let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
-    let dfa_states_after_determinize = dfa.num_states();
-    if debug_verbose {
-        eprintln!(
-            "[glrmask/debug][prepare_regex] label={} stage=determinize num_exprs={} ms={:.3} dfa_states={}",
-            _profile_label,
-            plan.compiled_exprs.len(),
-            determinize_ms,
-            dfa_states_after_determinize,
-        );
-    }
-
-    dfa.ensure_group_capacity(group_sets.len());
-    for (group_id, set) in group_sets.into_iter().enumerate() {
-        dfa.set_group_u8set(group_id as u32, set);
-    }
-
-    if !plan.exclusions.is_empty() {
-        dfa.apply_group_exclusions(&plan.exclusions);
-    }
-    if !plan.intersections.is_empty() {
-        dfa.apply_group_intersections(&plan.intersections);
-    }
-
-    let dfa = if plan.visible_groups < plan.compiled_exprs.len() {
-        dfa.project_groups(plan.visible_groups)
-    } else {
-        dfa
-    };
-
-    let minimize_started_at = std::time::Instant::now();
-    let skip_minimize_for_product = used_product_dfa;
-    let dfa = if skip_minimize_for_product {
-        // A product of independently minimized component DFAs is already
-        // minimal: any difference in a component state yields a distinguishing
-        // suffix in that component, which also distinguishes the full product
-        // tuple.  Exclusion application only clears finalizer bits and does
-        // not create new state equivalences in practice (the component
-        // structure keeps states distinguishable).
-        dfa
-    } else {
-        dfa.minimize()
-    };
-    let minimize_ms = if skip_minimize_for_product {
-        0.0
-    } else {
-        minimize_started_at.elapsed().as_secs_f64() * 1000.0
-    };
-    if debug_verbose {
-        eprintln!(
-            "[glrmask/debug][prepare_regex] label={} stage=minimize num_exprs={} ms={:.3} dfa_states={}",
-            _profile_label,
-            plan.compiled_exprs.len(),
-            minimize_ms,
-            dfa.num_states(),
-        );
-    }
-
-    if debug_verbose {
-        eprintln!(
-            "[glrmask/debug][prepare_regex] label={} build_nfa_ms={:.3} nfa_states_build={} condense_ms={:.3} nfa_states_condensed={} determinize_ms={:.3} dfa_states_determinized={} minimize_ms={:.3} dfa_states_minimized={} total_ms={:.3}",
-            _profile_label,
-            build_nfa_ms,
-            nfa_states_after_build,
-            condense_ms,
-            nfa_states_after_condense,
-            determinize_ms,
-            dfa_states_after_determinize,
-            minimize_ms,
-            dfa.num_states(),
-            total_started_at.elapsed().as_secs_f64() * 1000.0,
-        );
-    }
-
-    Regex { dfa }
-}
-
-fn debug_profile_enabled() -> bool {
-    std::env::var("GLRMASK_DEBUG_PROFILE")
-        .map(|value| {
-            let normalized = value.trim().to_ascii_lowercase();
-            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
-        })
-        .unwrap_or(false)
-}
-
-fn debug_verbose_enabled() -> bool {
-    std::env::var("GLRMASK_DEBUG_VERBOSE")
-        .map(|value| {
-            let normalized = value.trim().to_ascii_lowercase();
-            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
-        })
-        .unwrap_or(false)
-}
-
 /// Compile multiple expressions into a single NFA (without determinization).
 ///
 /// Each expression's index becomes its group ID.
 pub fn build_regex_nfa(exprs: &[Expr]) -> NFA {
-    build_regex_nfa_impl(exprs, true)
+    build_regex_nfa_impl(exprs)
 }
 
-fn build_regex_nfa_impl(exprs: &[Expr], probe_single_exprs: bool) -> NFA {
+fn build_regex_nfa_impl(exprs: &[Expr]) -> NFA {
     let optimized_exprs: Vec<Expr> = exprs.iter().cloned().map(Expr::optimize).collect();
-
-    if probe_single_exprs && debug_verbose_enabled() {
-        for (index, expr) in optimized_exprs.iter().enumerate() {
-            let single_nfa = build_regex_nfa_impl(std::slice::from_ref(expr), false);
-            eprintln!(
-                "[glrmask/debug][regex_nfa] expr={} nfa_states={}",
-                index,
-                single_nfa.states.len(),
-            );
-        }
-    }
 
     let mut nfa = NFA::new(1);
 

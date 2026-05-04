@@ -176,10 +176,6 @@ fn iterative_signature_refine(dfa: &DFA, initial_blocks: Vec<Vec<u32>>, max_iter
 
     loop {
         if iterations >= max_iterations {
-            // Did not converge — caller should fall back
-            if std::env::var("GLRMASK_PROFILE_COMPILE").map(|v| !v.is_empty() && v != "0").unwrap_or(false) {
-                eprintln!("[glrmask/debug][iterative_refine] states={} iterations={} blocks={} NOT_CONVERGED", n, iterations, num_blocks);
-            }
             return None;
         }
 
@@ -208,10 +204,6 @@ fn iterative_signature_refine(dfa: &DFA, initial_blocks: Vec<Vec<u32>>, max_iter
         }
 
         if next_label == num_blocks {
-            // Converged — no new splits
-            if std::env::var("GLRMASK_PROFILE_COMPILE").map(|v| !v.is_empty() && v != "0").unwrap_or(false) {
-                eprintln!("[glrmask/debug][iterative_refine] states={} iterations={} final_blocks={}", n, iterations, num_blocks);
-            }
             break;
         }
         num_blocks = next_label;
@@ -484,20 +476,6 @@ fn compute_tarjan_scc_ids(adj: &[Vec<usize>]) -> (Vec<u32>, u32) {
 }
 
 impl DFA {
-    /// Quick check: are all states unique by (transitions, finalizers)?
-    ///
-    /// If every state has a unique fingerprint, DFA minimization cannot merge
-    /// any states and can be skipped entirely. This runs in O(n) time with
-    /// hashing, much cheaper than the full minimize pipeline.
-    ///
-    /// Note: this ignores `possible_future_group_ids` because minimization
-    /// partitions by finalizers, not futures. Futures are recomputed after
-    /// minimization anyway.
-    pub(crate) fn quick_all_states_unique(&self) -> bool {
-        let n = self.states().len();
-        self.distinct_fingerprint_count() == n
-    }
-
     /// Count distinct (transitions, finalizers) fingerprints via FxHasher.
     /// This is a LOWER bound on the number of truly distinct states (hash
     /// collisions can only reduce the count). Useful for predicting whether
@@ -529,14 +507,14 @@ impl DFA {
     /// Minimize this DFA using Hopcroft's algorithm.
     /// Returns a new, minimized DFA.  State 0 remains the start state.
     pub fn minimize(&self) -> DFA {
-        self.minimize_impl(false, true).0
+        self.minimize_impl(true).0
     }
 
     /// Minimize this DFA and return the mapping from original states to
     /// minimized states.  `mapping[old_state] = new_state`.
     /// Unreachable original states map to `u32::MAX`.
     pub fn minimize_with_state_mapping(&self) -> (DFA, Vec<u32>) {
-        self.minimize_impl(false, true)
+        self.minimize_impl(true)
     }
 
     /// Minimize this DFA and return the mapping from original states to
@@ -546,16 +524,10 @@ impl DFA {
     /// that are only reachable after resuming from inside a partially matched
     /// terminal.
     pub fn minimize_with_state_mapping_preserve_all_states(&self) -> (DFA, Vec<u32>) {
-        self.minimize_impl(false, false)
+        self.minimize_impl(false)
     }
 
-    /// Minimize this DFA while preserving states reachable from state 0 or any
-    /// of the provided extra roots.
-    pub fn minimize_with_state_mapping_and_roots(&self, extra_roots: &[u32]) -> (DFA, Vec<u32>) {
-        self.minimize_impl_with_roots(false, extra_roots)
-    }
-
-    fn minimize_impl(&self, force_hopcroft: bool, drop_unreachable: bool) -> (DFA, Vec<u32>) {
+    fn minimize_impl(&self, drop_unreachable: bool) -> (DFA, Vec<u32>) {
         let orig_n = self.states().len();
         if orig_n == 0 {
             return (self.clone(), Vec::new());
@@ -580,12 +552,9 @@ impl DFA {
 
         match topology_prerefine_partition(&working, &partition) {
             TopologyPrerefine::AlreadyMinimal(blocks) => {
-                if !force_hopcroft {
-                    let (result, block_map) = working.rebuild_from_blocks_with_mapping(blocks);
-                    let composed = compose_mappings(&old_to_working, &block_map);
-                    return (result, composed);
-                }
-                minimality_check_blocks = blocks;
+                let (result, block_map) = working.rebuild_from_blocks_with_mapping(blocks);
+                let composed = compose_mappings(&old_to_working, &block_map);
+                return (result, composed);
             }
             TopologyPrerefine::Refined { blocks: refined_blocks, .. } => {
                 // Previously bailed out when refined_blocks.len() > n*9/10,
@@ -611,60 +580,6 @@ impl DFA {
         let (result, block_map) = working.rebuild_from_blocks_with_mapping(blocks);
         let composed = compose_mappings(&old_to_working, &block_map);
         (result, composed)
-    }
-
-    fn minimize_impl_with_roots(&self, force_hopcroft: bool, extra_roots: &[u32]) -> (DFA, Vec<u32>) {
-        let orig_n = self.states().len();
-        if orig_n == 0 {
-            return (self.clone(), Vec::new());
-        }
-
-        let mut working = self.clone();
-        let old_to_working = working.remove_unreachable_states_with_roots_with_mapping(extra_roots);
-        clear_possible_futures_for_minimization(&mut working);
-        let n = working.states().len();
-
-        if n <= 1 {
-            working.recompute_possible_futures();
-            return (working, old_to_working);
-        }
-
-        let (partition, blocks) = partition_by_finalizers(&working);
-        let mut minimality_check_blocks = blocks.clone();
-
-        match topology_prerefine_partition(&working, &partition) {
-            TopologyPrerefine::AlreadyMinimal(blocks) => {
-                if !force_hopcroft {
-                    let (result, block_map) = working.rebuild_from_blocks_with_mapping(blocks);
-                    let composed = compose_mappings(&old_to_working, &block_map);
-                    return (result, composed);
-                }
-                minimality_check_blocks = blocks;
-            }
-            TopologyPrerefine::Refined { blocks: refined_blocks, .. } => {
-                // See minimize_impl: topology prerefine is unsound as a
-                // minimality predictor; always fall through to Hopcroft.
-                minimality_check_blocks = refined_blocks;
-            }
-            TopologyPrerefine::Skip => {}
-        }
-
-        if minimality_check_blocks.iter().all(|block| block.len() <= 1) {
-            let (result, block_map) = working.rebuild_from_blocks_with_mapping(minimality_check_blocks);
-            let composed = compose_mappings(&old_to_working, &block_map);
-            return (result, composed);
-        }
-
-        let blocks = hopcroft_refine_partition(&working, partition, blocks);
-
-        let (result, block_map) = working.rebuild_from_blocks_with_mapping(blocks);
-        let composed = compose_mappings(&old_to_working, &block_map);
-        (result, composed)
-    }
-
-    /// Remove states not reachable from state 0.
-    fn remove_unreachable_states(&mut self) {
-        self.remove_unreachable_states_with_mapping();
     }
 
     /// Remove unreachable states, returning old→new mapping.
