@@ -201,36 +201,6 @@ fn compile_template_with_profile(
     )
 }
 
-pub(crate) fn emit_template_profile_summary(
-    characterize_ms: f64,
-    profile: &TemplateCompileProfile,
-) {
-    eprintln!(
-        "[glrmask/profile][templates] characterize_ms={:.3} compile_ms={:.3} build_nfa_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} num_terminals={} unique_characterizations={} max_characterization_multiplicity={} avg_nfa_states={:.1} max_nfa_states={} avg_nfa_transitions={:.1} max_nfa_transitions={} avg_premin_dfa_states={:.1} max_premin_dfa_states={} avg_premin_dfa_transitions={:.1} max_premin_dfa_transitions={} avg_dfa_states={:.1} max_dfa_states={} avg_dfa_transitions={:.1} max_dfa_transitions={} total_ms={:.3}",
-        characterize_ms,
-        profile.total_ms,
-        profile.build_nfa_ms,
-        profile.determinize_ms,
-        profile.minimize_ms,
-        profile.num_terminals,
-        profile.unique_characterizations,
-        profile.max_characterization_multiplicity,
-        profile.avg_nfa_states(),
-        profile.max_nfa_states,
-        profile.avg_nfa_transitions(),
-        profile.max_nfa_transitions,
-        profile.avg_premin_dfa_states(),
-        profile.max_premin_dfa_states,
-        profile.avg_premin_dfa_transitions(),
-        profile.max_premin_dfa_transitions,
-        profile.avg_dfa_states(),
-        profile.max_dfa_states,
-        profile.avg_dfa_transitions(),
-        profile.max_dfa_transitions,
-        characterize_ms + profile.total_ms,
-    );
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct Templates {
     pub by_terminal: BTreeMap<TerminalID, UnweightedDfa>,

@@ -254,19 +254,6 @@ fn remap_dense_bitmap_with_original_to_internal_ids(
     range_set_from_sorted_ids(&ids)
 }
 
-fn build_state_class_members(state_classes: &[u32], num_classes: usize) -> Vec<Vec<u32>> {
-    let mut members = vec![Vec::new(); num_classes];
-    for (state, &class_id) in state_classes.iter().enumerate() {
-        if class_id == u32::MAX {
-            continue;
-        }
-        if let Some(class_members) = members.get_mut(class_id as usize) {
-            class_members.push(state as u32);
-        }
-    }
-    members
-}
-
 /// Compose a short `state_classes` (covering only representative states) back
 /// to the full DFA state space using `initial_state_map`.
 /// Compose dense root `state_classes` through `initial_state_map`.

@@ -9,10 +9,6 @@ use super::disallowed_follows::normalize_disallowed_follows;
 use super::state::fast as state_equivalence_analysis;
 use super::vocab::fast as vocab_equivalence_analysis;
 
-fn elapsed_ms(started_at: std::time::Instant) -> f64 {
-    started_at.elapsed().as_secs_f64() * 1000.0
-}
-
 struct TokenDedup<'a> {
     representative_token_bytes: Vec<&'a [u8]>,
     original_to_repr: Vec<usize>,
