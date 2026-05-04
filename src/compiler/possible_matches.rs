@@ -21,13 +21,6 @@ fn clone_token_entries(token_entries: &[(u32, Vec<u8>)]) -> Vec<(u32, Vec<u8>)> 
         .collect()
 }
 
-fn owned_token_entries(token_bytes: &BTreeMap<u32, Vec<u8>>) -> Vec<(u32, Vec<u8>)> {
-    token_bytes
-        .iter()
-        .map(|(token_id, bytes)| (*token_id, bytes.clone()))
-        .collect()
-}
-
 fn ordered_possible_matches(matches_for_state: Rc<PossibleMatchMap>) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
     match Rc::try_unwrap(matches_for_state) {
         Ok(map) => map.into_iter().collect(),
@@ -174,22 +167,6 @@ impl<'a> PossibleMatchesComputer<'a> {
     }
 }
 
-pub(crate) fn build_possible_matches_by_state(
-    tokenizer: &Tokenizer,
-    token_bytes: &BTreeMap<u32, Vec<u8>>,
-) -> PossibleMatchesByState {
-    let token_entries = owned_token_entries(token_bytes);
-    build_possible_matches_from_token_entries(tokenizer, &token_entries)
-}
-
-pub(crate) fn build_possible_matches_from_token_bytes(
-    tokenizer: &Tokenizer,
-    token_bytes: &BTreeMap<u32, Vec<u8>>,
-) -> PossibleMatchesByState {
-    let token_entries = owned_token_entries(token_bytes);
-    build_possible_matches_from_token_entries(tokenizer, &token_entries)
-}
-
 pub(crate) fn build_possible_matches_from_token_entries(
     tokenizer: &Tokenizer,
     token_entries: &[(u32, Vec<u8>)],
@@ -226,27 +203,6 @@ pub(crate) fn collect_possible_matches_by_state(
     )
 }
 
-pub(crate) fn collect_possible_matches_by_original_tsid(
-    tokenizer: &Tokenizer,
-    root: &VocabPrefixTreeNode,
-    computer: &mut PossibleMatchesComputer<'_>,
-) -> PossibleMatchesByState {
-    let mut possible_matches_by_state = BTreeMap::new();
-    let root_key = root as *const VocabPrefixTreeNode as usize;
-
-    for tokenizer_state in 0..tokenizer.num_states() {
-        let cache_key = (root_key, tokenizer_state);
-        let _ = computer.possible_matches_for_node(root, tokenizer_state);
-        let matches_for_state = computer
-            .cache
-            .remove(&cache_key)
-            .expect("root possible-match map should be cached");
-        possible_matches_by_state.insert(tokenizer_state, ordered_possible_matches(matches_for_state));
-    }
-
-    possible_matches_by_state
-}
-
 fn collect_possible_matches_by_keys(
     _tokenizer: &Tokenizer,
     root: &VocabPrefixTreeNode,
@@ -267,45 +223,5 @@ fn collect_possible_matches_by_keys(
     }
 
     possible_matches_by_state
-}
-
-pub(crate) fn permute_possible_matches_in_place(
-    possible_matches_by_state: &mut PossibleMatchesByState,
-    token_perm: &[u32],
-) {
-    for matches_by_terminal in possible_matches_by_state.values_mut() {
-        for token_ids in matches_by_terminal.values_mut() {
-            let mut mapped: Vec<u32> = token_ids
-                .iter()
-                .filter_map(|token_id| token_perm.get(token_id as usize).copied())
-                .collect();
-            mapped.sort_unstable();
-            mapped.dedup();
-            *token_ids = RangeSetBlaze::from_iter(mapped.into_iter().map(|token_id| token_id..=token_id));
-        }
-    }
-}
-
-pub(crate) fn permute_possible_match_state_ids_in_place(
-    possible_matches_by_state: &mut PossibleMatchesByState,
-    state_perm: &[u32],
-) {
-    let mut remapped = BTreeMap::new();
-
-    for (&state_id, matches_by_terminal) in possible_matches_by_state.iter() {
-        let Some(&new_state_id) = state_perm.get(state_id as usize) else {
-            continue;
-        };
-
-        let target = remapped
-            .entry(new_state_id)
-            .or_insert_with(BTreeMap::<TerminalID, RangeSetBlaze<u32>>::new);
-        for (&terminal_id, token_ids) in matches_by_terminal {
-            let existing = target.entry(terminal_id).or_default();
-            *existing |= token_ids;
-        }
-    }
-
-    *possible_matches_by_state = remapped;
 }
 
