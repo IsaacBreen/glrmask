@@ -803,10 +803,6 @@ fn json_search_pattern(pattern: &str) -> String {
     json_search_pattern_impl(pattern, None)
 }
 
-fn json_search_pattern_bounded(pattern: &str, max_tail: usize) -> String {
-    json_search_pattern_impl(pattern, Some(max_tail))
-}
-
 fn json_search_pattern_impl(pattern: &str, max_tail: Option<usize>) -> String {
     let branches = split_top_level_regex_branches(pattern);
     let map_fn = |b| match max_tail {
@@ -1751,12 +1747,6 @@ fn wrap_key_colon_terminal(body: GrammarExpr) -> GrammarExpr {
 // ---------------------------------------------------------------------------
 // Convenience combinators
 // ---------------------------------------------------------------------------
-
-/// Wrap a body regex as a JSON string value expression.
-/// Shorthand for `wrap_string_value_terminal(regex_expr(string_value_body_regex(inner)))`.
-fn wrap_string_value_regex(inner_regex: &str) -> GrammarExpr {
-    wrap_string_value_terminal(regex_expr(string_value_body_regex(inner_regex)))
-}
 
 /// Wrap a body regex as a JSON key-colon expression.
 /// Shorthand for `wrap_key_colon_terminal(regex_expr(key_colon_body_regex(inner)))`.
