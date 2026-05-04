@@ -4,12 +4,6 @@ pub mod json_schema;
 pub mod lark;
 pub mod numeric_range;
 
-#[cfg(test)]
-mod test_grammar_import;
-
-#[cfg(test)]
-mod test_json_schema;
-
 use crate::compiler::compile::{compile_owned_profiled, compile_profile_enabled, emit_compile_profile_summary};
 use crate::compiler::compile_owned;
 use crate::grammar::flat::GrammarDef;
