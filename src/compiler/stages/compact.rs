@@ -32,44 +32,6 @@ pub struct CompactReport {
     pub profile_stats: Option<CompactProfileStats>,
 }
 
-/// Controls DWA dimension compaction behavior.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CompactMode {
-    /// Skip compaction entirely.
-    None,
-    /// Merge equivalent IDs but skip token reordering.
-    Fast,
-    /// Full compaction with token reordering.
-    Full,
-}
-
-/// Run compaction according to the selected default mode.
-pub fn compact_from_env(
-    dwa: &mut DWA,
-    id_map: &mut InternalIdMap,
-    _env_var: &str,
-    default: CompactMode,
-    collect_profile_stats: bool,
-) -> CompactReport {
-    match default {
-        CompactMode::None => {
-            let n_tsids = id_map.num_tsids() as usize;
-            let n_tokens = id_map.num_internal_tokens() as usize;
-            CompactReport {
-                tsid_perm: (0..n_tsids as u32).collect(),
-                token_perm: (0..n_tokens as u32).collect(),
-                profile_stats: None,
-            }
-        }
-        CompactMode::Fast => {
-            compact_dwa_dimensions_inner(dwa, id_map, collect_profile_stats, true)
-        }
-        CompactMode::Full => {
-            compact_dwa_dimensions_inner(dwa, id_map, collect_profile_stats, false)
-        }
-    }
-}
-
 struct DimensionCompaction {
     tsid_perm: Vec<u32>,
     ordered_num_tsids: usize,
@@ -102,13 +64,6 @@ pub struct CompactProfileStats {
 }
 
 impl CompactProfileStats {
-    pub fn total_ranges_before(self) -> usize {
-        self.weight_ranges_before + self.token_ranges_before
-    }
-
-    pub fn total_ranges_after(self) -> usize {
-        self.weight_ranges_after + self.token_ranges_after
-    }
 }
 
 struct TokenOrderScorer {
@@ -157,23 +112,6 @@ impl TokenOrderScorer {
             .sum();
         self.total_token_memberships.saturating_sub(adjacency_bonus)
     }
-}
-
-/// Merge equivalent IDs and reorder both dimensions of every weight in `dwa`,
-/// updating `id_map` to match.
-pub fn compact_dwa_dimensions(
-    dwa: &mut DWA,
-    id_map: &mut InternalIdMap,
-    collect_profile_stats: bool,
-) -> CompactReport {
-    compact_dwa_dimensions_inner(dwa, id_map, collect_profile_stats, false)
-}
-
-pub fn compact_dwa_dimensions_fast(
-    dwa: &mut DWA,
-    id_map: &mut InternalIdMap,
-) -> CompactReport {
-    compact_dwa_dimensions_inner(dwa, id_map, false, true)
 }
 
 pub fn compact_dwa_dimensions_fast_with_stats(
