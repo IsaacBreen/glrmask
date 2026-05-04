@@ -5,6 +5,3 @@ pub mod leveled_gss;
 pub mod vocab_prefix_tree;
 pub mod weight;
 pub mod u8set;
-
-// StackVec trait and implementations
-pub mod stack_vecs;
