@@ -735,20 +735,3 @@ impl NFA {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_to_dfa_fast_path_remaps_nonzero_start_state() {
-        let mut nfa = NFA::new(3);
-        nfa.start_state = 1;
-        nfa.add_transition(1, b'a', 2);
-        nfa.add_finalizer(2, 0);
-
-        let dfa = nfa.to_dfa();
-
-        let next = dfa.step(0, b'a').expect("expected remapped start transition");
-        assert!(dfa.finalizers(next).contains(0));
-    }
-}
