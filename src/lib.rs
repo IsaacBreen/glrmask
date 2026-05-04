@@ -22,7 +22,6 @@ pub use runtime::{
     Constraint,
     ConstraintState,
     FillMaskTimings,
-    PerAdvanceEntry,
 };
 pub use vocab::Vocab;
 
