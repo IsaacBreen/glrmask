@@ -1,6 +1,6 @@
 use super::accumulator::TerminalsDisallowed;
 use super::analysis::EOF;
-use super::table::{Action, GLRTable};
+use super::table::{Action, GLRTable, GuardedStackShift, StackShiftGuard};
 use crate::ds::bitset::BitSet;
 use crate::ds::leveled_gss::{LeveledGSS, VirtualStack};
 use crate::grammar::flat::TerminalID;
@@ -38,6 +38,12 @@ fn advance_stacks_core(table: &GLRTable, mut gss: ParserGSS, token: TerminalID) 
                 gss.push(*target)
             };
         }
+        if let Some(Action::StackShifts(shifts)) = table.action(state, token) {
+            return apply_stack_shifts(gss, shifts);
+        }
+        if let Some(Action::GuardedStackShifts(shifts)) = table.action(state, token) {
+            return apply_guarded_stack_shifts(gss, shifts);
+        }
     }
 
     if advance_deterministically(table, &mut gss, token) {
@@ -45,6 +51,112 @@ fn advance_stacks_core(table: &GLRTable, mut gss: ParserGSS, token: TerminalID) 
     }
 
     advance_nondeterministically(table, gss, token)
+}
+
+fn apply_stack_shifts(gss: ParserGSS, shifts: &[super::table::StackShift]) -> ParserGSS {
+    let mut out = ParserGSS::empty();
+    for shift in shifts {
+        let mut branch = gss.popn(shift.pop as isize);
+        for &state in &shift.pushes {
+            branch = branch.push(state);
+        }
+        merge_into(&mut out, branch);
+    }
+    out
+}
+
+fn apply_guarded_stack_shifts(gss: ParserGSS, shifts: &[GuardedStackShift]) -> ParserGSS {
+    let mut out = ParserGSS::empty();
+
+    for shift in shifts {
+        debug_assert!(shift.guards.windows(2).all(|w| w[0].pop <= w[1].pop));
+        debug_assert!(shift.guards.iter().all(|guard| guard.pop <= shift.pop));
+
+        let mut base = gss.clone();
+        let mut depth = 0u32;
+        let mut dead = false;
+
+        for guard in &shift.guards {
+            if guard.pop < depth {
+                dead = true;
+                break;
+            }
+
+            base = base.popn((guard.pop - depth) as isize);
+            if base.is_empty() {
+                dead = true;
+                break;
+            }
+
+            let mut filtered = ParserGSS::empty();
+            for &state in &guard.states {
+                merge_into(&mut filtered, base.isolate(Some(state)));
+            }
+
+            base = filtered;
+            if base.is_empty() {
+                dead = true;
+                break;
+            }
+
+            depth = guard.pop;
+        }
+
+        if dead || shift.pop < depth {
+            continue;
+        }
+
+        let mut branch = base.popn((shift.pop - depth) as isize);
+        for &state in &shift.pushes {
+            branch = branch.push(state);
+        }
+        merge_into(&mut out, branch);
+    }
+
+    out
+}
+
+#[inline]
+fn virtual_stack_satisfies_guards(
+    stack: &VirtualStack<u32, TerminalsDisallowed>,
+    guards: &[StackShiftGuard],
+) -> bool {
+    let mut cursor = stack.clone();
+    let mut depth = 0u32;
+
+    for guard in guards {
+        if guard.pop < depth {
+            return false;
+        }
+
+        if cursor.pop((guard.pop - depth) as usize) != 0 {
+            return false;
+        }
+
+        let Some(&state) = cursor.top() else {
+            return false;
+        };
+        if guard.states.binary_search(&state).is_err() {
+            return false;
+        }
+
+        depth = guard.pop;
+    }
+
+    true
+}
+
+#[inline]
+fn virtual_stack_may_apply_guarded_shift(
+    stack: &VirtualStack<u32, TerminalsDisallowed>,
+    shift: &GuardedStackShift,
+) -> bool {
+    if !virtual_stack_satisfies_guards(stack, &shift.guards) {
+        return false;
+    }
+
+    let mut cursor = stack.clone();
+    cursor.pop(shift.pop as usize) == 0
 }
 
 fn shift_frontier(table: &GLRTable, gss: ParserGSS, token: TerminalID) -> ParserGSS {
@@ -184,6 +296,12 @@ fn advance_deterministically_from_vstack(
                 }
                 return (stack.into_gss(), true);
             }
+            Some(Action::StackShifts(shifts)) => {
+                return (apply_stack_shifts(stack.into_gss(), shifts), true);
+            }
+            Some(Action::GuardedStackShifts(shifts)) => {
+                return (apply_guarded_stack_shifts(stack.into_gss(), shifts), true);
+            }
             Some(Action::Split { .. }) | Some(Action::Accept) | None => break,
         }
     }
@@ -244,6 +362,10 @@ fn advance_nondeterministically(
                 } else {
                     shifted = shifted.absorb_push_same_acc(target, &isolated);
                 }
+            }
+
+            if let Action::StackShifts(shifts) = action {
+                merge_into(&mut shifted, apply_stack_shifts(isolated.clone(), shifts));
             }
 
             action.for_each_reduce(|nt, len| {
@@ -377,6 +499,14 @@ fn advance_deterministically(
                 }
                 return true;
             }
+            Some(Action::StackShifts(shifts)) => {
+                *gss = apply_stack_shifts(stack.into_gss(), shifts);
+                return true;
+            }
+            Some(Action::GuardedStackShifts(shifts)) => {
+                *gss = apply_guarded_stack_shifts(stack.into_gss(), shifts);
+                return true;
+            }
             Some(Action::Split { .. }) => break,
             Some(Action::Accept) => break,
             None => break,
@@ -388,7 +518,26 @@ fn advance_deterministically(
 }
 
 pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
-    stack.peek_values().into_iter().any(|state| table.action(state, token).is_some())
+    let virtual_stack = stack.try_virtual_stack();
+    stack.peek_values().into_iter().any(|state| {
+        let Some(action) = table.action(state, token) else {
+            return false;
+        };
+        match action {
+            Action::GuardedStackShifts(shifts) => virtual_stack
+                .as_ref()
+                .is_some_and(|vstack| {
+                    shifts
+                        .iter()
+                        .any(|shift| virtual_stack_may_apply_guarded_shift(vstack, shift))
+                })
+                || {
+                    let isolated = stack.isolate(Some(state));
+                    !apply_guarded_stack_shifts(isolated, shifts).is_empty()
+                },
+            _ => true,
+        }
+    })
 }
 
 pub(crate) fn stack_may_advance_on_any(
@@ -396,14 +545,27 @@ pub(crate) fn stack_may_advance_on_any(
     stack: &ParserGSS,
     terminals: &BitSet,
 ) -> bool {
+    let virtual_stack = stack.try_virtual_stack();
     stack.peek_values().into_iter().any(|state| {
         table.action.get(state as usize).is_some_and(|actions| {
             actions.iter().any(|(&terminal, action)| {
                 if !terminals.contains(terminal as usize) {
                     return false;
                 }
-                let _ = action;
-                true
+                match action {
+                    Action::GuardedStackShifts(shifts) => virtual_stack
+                        .as_ref()
+                        .is_some_and(|vstack| {
+                            shifts
+                                .iter()
+                                .any(|shift| virtual_stack_may_apply_guarded_shift(vstack, shift))
+                        })
+                        || {
+                            let isolated = stack.isolate(Some(state));
+                            !apply_guarded_stack_shifts(isolated, shifts).is_empty()
+                        },
+                    _ => true,
+                }
             })
         })
     })
