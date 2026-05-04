@@ -78,16 +78,6 @@ fn set_dense_bit(words: &mut [u64], token_id: u32) {
     }
 }
 
-pub(crate) fn dense_bit_is_set(words: &[u64], token_id: u32) -> bool {
-    let word = token_id as usize / 64;
-    let bit = token_id % 64;
-
-    words
-        .get(word)
-        .map(|word| ((*word >> bit) & 1) != 0)
-        .unwrap_or(false)
-}
-
 fn for_each_dense_bit(words: &[u64], mut f: impl FnMut(u32)) {
     for (word_idx, &word) in words.iter().enumerate() {
         let mut bits = word;

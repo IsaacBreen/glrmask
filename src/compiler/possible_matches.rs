@@ -167,13 +167,6 @@ impl<'a> PossibleMatchesComputer<'a> {
     }
 }
 
-pub(crate) fn build_possible_matches_from_token_entries(
-    tokenizer: &Tokenizer,
-    token_entries: &[(u32, Vec<u8>)],
-) -> PossibleMatchesByState {
-    build_possible_matches_from_owned_token_entries(tokenizer, clone_token_entries(token_entries))
-}
-
 pub(crate) fn build_possible_matches_from_owned_token_entries(
     tokenizer: &Tokenizer,
     token_entries: Vec<(u32, Vec<u8>)>,
@@ -224,4 +217,3 @@ fn collect_possible_matches_by_keys(
 
     possible_matches_by_state
 }
-

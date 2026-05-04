@@ -17,24 +17,6 @@ fn decode_ranges(ranges: EncodedRanges) -> RangeSetBlaze<u32> {
         .collect()
 }
 
-fn encode_terminal_ranges(
-    terminal_map: &std::collections::BTreeMap<u32, RangeSetBlaze<u32>>,
-) -> std::collections::BTreeMap<u32, EncodedRanges> {
-    terminal_map
-        .iter()
-        .map(|(&terminal, token_set)| (terminal, encode_ranges(token_set)))
-        .collect()
-}
-
-fn decode_terminal_ranges(
-    terminal_map: std::collections::BTreeMap<u32, EncodedRanges>,
-) -> std::collections::BTreeMap<u32, RangeSetBlaze<u32>> {
-    terminal_map
-        .into_iter()
-        .map(|(terminal, ranges)| (terminal, decode_ranges(ranges)))
-        .collect()
-}
-
 pub(in crate::runtime) mod serde_btreemap_rangeset {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::collections::BTreeMap;

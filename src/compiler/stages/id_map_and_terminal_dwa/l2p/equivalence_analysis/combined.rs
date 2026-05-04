@@ -236,16 +236,6 @@ fn build_vocab_map(
     }
 }
 
-pub(crate) fn analyze_equivalences(
-    tokenizer: &Tokenizer,
-    vocab: &Vocab,
-    disallowed_follows: &BTreeMap<u32, BitSet>,
-    ignore_terminal: Option<u32>,
-    shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
-) -> InternalIdMap {
-    analyze_equivalences_impl(tokenizer, vocab, disallowed_follows, ignore_terminal, None, shared_vocab_dfa_cache, None, None)
-}
-
 pub(crate) fn analyze_equivalences_with_group_filter(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -384,4 +374,3 @@ fn analyze_equivalences_impl(
         vocab_tokens: vocab_map,
     }
 }
-
