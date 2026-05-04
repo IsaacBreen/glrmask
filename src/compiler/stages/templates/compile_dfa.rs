@@ -12,7 +12,7 @@ use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::unweighted_u32::determinize::determinize;
 use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic as minimize_dfa;
 use crate::automata::unweighted_u32::nfa::NFA;
-use crate::compiler::glr::labels::{DEFAULT_LABEL, encode_negative_label, encode_positive_label, is_negative_label, negative_to_positive_label};
+use crate::compiler::glr::labels::{DEFAULT_LABEL, encode_negative_label, encode_positive_label};
 use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::templates::characterize::{StackMatcher, TerminalCharacterization};
 use crate::ds::weight::Weight;
@@ -284,53 +284,6 @@ impl Templates {
             },
             profile,
         )
-    }
-}
-
-fn describe_debug_label(label: i32) -> String {
-    if label == DEFAULT_LABEL {
-        "DEFAULT".to_string()
-    } else if is_negative_label(label) {
-        format!("push({})", negative_to_positive_label(label))
-    } else {
-        format!("pop({})", label)
-    }
-}
-
-fn emit_unweighted_dfa_debug_dump(label: &str, dfa: &UnweightedDfa) {
-    eprintln!("{} start_state={}", label, dfa.start_state);
-    for (state_id, state) in dfa.states.iter().enumerate() {
-        eprintln!("  state {} accepting={}", state_id, state.is_accepting);
-        let mut transitions = state.transitions.iter().collect::<Vec<_>>();
-        transitions.sort_by_key(|(edge_label, _)| **edge_label);
-        for (edge_label, target) in transitions {
-            eprintln!("    {} -> {}", describe_debug_label(*edge_label), target);
-        }
-    }
-}
-
-fn emit_weighted_nwa_debug_dump(label: &str, nwa: &NWA) {
-    eprintln!("{} start_states={:?}", label, nwa.start_states());
-    for (state_id, state) in nwa.states().iter().enumerate() {
-        eprintln!(
-            "  state {} final_weight={:?} epsilons={:?}",
-            state_id, state.final_weight, state.epsilons
-        );
-        let mut transitions = state.transitions.iter().collect::<Vec<_>>();
-        transitions.sort_by_key(|(edge_label, _)| **edge_label);
-        for (edge_label, targets) in transitions {
-            eprintln!("    {} -> {:?}", describe_debug_label(*edge_label), targets);
-        }
-    }
-}
-
-pub(crate) fn emit_templates_debug_dump(templates: &Templates) {
-    eprintln!("=== Template DFAs / Skeleton NWAs ===");
-    for (terminal, dfa) in &templates.by_terminal {
-        emit_unweighted_dfa_debug_dump(&format!("terminal {} template_dfa", terminal), dfa);
-    }
-    for (terminal, nwa) in &templates.by_terminal_nwa {
-        emit_weighted_nwa_debug_dump(&format!("terminal {} template_nwa_skeleton", terminal), nwa);
     }
 }
 
