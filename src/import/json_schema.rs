@@ -118,74 +118,71 @@ fn env_usize_with_default(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn cached_env_usize(slot: &'static OnceLock<usize>, name: &'static str, default: usize) -> usize {
+    *slot.get_or_init(|| env_usize_with_default(name, default))
+}
+
 fn closed_required_object_fused_literal_max_alts() -> usize {
     static VALUE: OnceLock<usize> = OnceLock::new();
-    *VALUE.get_or_init(|| {
-        env_usize_with_default(
-            "GLRMASK_CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_ALTS",
-            CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_ALTS,
-        )
-    })
+    cached_env_usize(
+        &VALUE,
+        "GLRMASK_CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_ALTS",
+        CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_ALTS,
+    )
 }
 
 fn closed_required_object_fused_literal_max_total_bytes() -> usize {
     static VALUE: OnceLock<usize> = OnceLock::new();
-    *VALUE.get_or_init(|| {
-        env_usize_with_default(
-            "GLRMASK_CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_TOTAL_BYTES",
-            CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_TOTAL_BYTES,
-        )
-    })
+    cached_env_usize(
+        &VALUE,
+        "GLRMASK_CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_TOTAL_BYTES",
+        CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_TOTAL_BYTES,
+    )
 }
 
 fn exact_closed_object_union_max_variants() -> usize {
     static VALUE: OnceLock<usize> = OnceLock::new();
-    *VALUE.get_or_init(|| {
-        env_usize_with_default(
-            "GLRMASK_EXACT_CLOSED_OBJECT_UNION_MAX_VARIANTS",
-            EXACT_CLOSED_OBJECT_UNION_MAX_VARIANTS,
-        )
-    })
+    cached_env_usize(
+        &VALUE,
+        "GLRMASK_EXACT_CLOSED_OBJECT_UNION_MAX_VARIANTS",
+        EXACT_CLOSED_OBJECT_UNION_MAX_VARIANTS,
+    )
 }
 
 fn exact_closed_object_union_max_keys() -> usize {
     static VALUE: OnceLock<usize> = OnceLock::new();
-    *VALUE.get_or_init(|| {
-        env_usize_with_default(
-            "GLRMASK_EXACT_CLOSED_OBJECT_UNION_MAX_KEYS",
-            EXACT_CLOSED_OBJECT_UNION_MAX_KEYS,
-        )
-    })
+    cached_env_usize(
+        &VALUE,
+        "GLRMASK_EXACT_CLOSED_OBJECT_UNION_MAX_KEYS",
+        EXACT_CLOSED_OBJECT_UNION_MAX_KEYS,
+    )
 }
 
 fn exact_closed_object_single_max_keys() -> usize {
     static VALUE: OnceLock<usize> = OnceLock::new();
-    *VALUE.get_or_init(|| {
-        env_usize_with_default(
-            "GLRMASK_EXACT_CLOSED_OBJECT_SINGLE_MAX_KEYS",
-            EXACT_CLOSED_OBJECT_SINGLE_MAX_KEYS,
-        )
-    })
+    cached_env_usize(
+        &VALUE,
+        "GLRMASK_EXACT_CLOSED_OBJECT_SINGLE_MAX_KEYS",
+        EXACT_CLOSED_OBJECT_SINGLE_MAX_KEYS,
+    )
 }
 
 fn exact_closed_object_union_max_states() -> usize {
     static VALUE: OnceLock<usize> = OnceLock::new();
-    *VALUE.get_or_init(|| {
-        env_usize_with_default(
-            "GLRMASK_EXACT_CLOSED_OBJECT_UNION_MAX_STATES",
-            EXACT_CLOSED_OBJECT_UNION_MAX_STATES,
-        )
-    })
+    cached_env_usize(
+        &VALUE,
+        "GLRMASK_EXACT_CLOSED_OBJECT_UNION_MAX_STATES",
+        EXACT_CLOSED_OBJECT_UNION_MAX_STATES,
+    )
 }
 
 fn factored_open_object_max_keys() -> usize {
     static VALUE: OnceLock<usize> = OnceLock::new();
-    *VALUE.get_or_init(|| {
-        env_usize_with_default(
-            "GLRMASK_FACTORED_OPEN_OBJECT_MAX_KEYS",
-            FACTORED_OPEN_OBJECT_MAX_KEYS,
-        )
-    })
+    cached_env_usize(
+        &VALUE,
+        "GLRMASK_FACTORED_OPEN_OBJECT_MAX_KEYS",
+        FACTORED_OPEN_OBJECT_MAX_KEYS,
+    )
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
