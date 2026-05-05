@@ -4,7 +4,6 @@ use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::bitset::BitSet;
-use super::combined_equivalence_analysis;
 use super::compat::TokenizerView;
 use super::disallowed_follows::normalize_disallowed_follows;
 use super::shared::{
@@ -204,11 +203,17 @@ fn prepare_equivalence_inputs<'a>(
     }
 }
 
+
+struct CombinedEquivalenceResult {
+    vocab_classes: BTreeSet<Vec<usize>>,
+    state_classes: BTreeSet<BTreeSet<usize>>,
+}
+
 fn build_internal_id_map_from_combined_result(
     tokenizer: &Tokenizer,
     initial_state_map: Option<&ManyToOneIdMap>,
     prepared: &PreparedEquivalenceInputs<'_>,
-    result: &combined_equivalence_analysis::CombinedEquivalenceResult,
+    result: &CombinedEquivalenceResult,
 ) -> InternalIdMap {
     let num_dfa_states = tokenizer.num_states() as usize;
     let state_map = match initial_state_map {
@@ -339,7 +344,7 @@ fn analyze_equivalences_impl(
     );
     let state_classes =
         state_equivalence_analysis::mapping_to_equivalence_classes(&prepared.initial_states, &representative_states);
-    let result = combined_equivalence_analysis::CombinedEquivalenceResult {
+    let result = CombinedEquivalenceResult {
         vocab_classes,
         state_classes,
     };
