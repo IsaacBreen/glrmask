@@ -5,5 +5,6 @@ pub mod combined;
 pub mod combined_equivalence_analysis;
 pub mod compat;
 pub mod reference;
+pub(crate) mod shared;
 pub mod state;
 pub mod vocab;

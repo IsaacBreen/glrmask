@@ -7,28 +7,15 @@ use crate::ds::bitset::BitSet;
 use super::combined_equivalence_analysis;
 use super::compat::TokenizerView;
 use super::disallowed_follows::normalize_disallowed_follows;
+use super::shared::{
+    TokenDedup,
+    expand_vocab_classes,
+    hash_byte_class_seq,
+    representative_tokens_for_vocab_classes,
+    tokenizer_group_count,
+};
 use super::state::fast as state_equivalence_analysis;
 use super::vocab::fast as vocab_equivalence_analysis;
-
-struct TokenDedup<'a> {
-    representative_token_bytes: Vec<&'a [u8]>,
-    original_to_repr: Vec<usize>,
-}
-
-#[inline]
-pub(crate) fn hash_byte_class_seq(bytes: &[u8], byte_to_class: &[u8; 256]) -> u128 {
-    let mut hash: u128 = 0xFF51_AFD7_ED55_8CCD;
-    hash = hash.wrapping_mul(0xC4CE_B9FE_1A85_EC53).wrapping_add(bytes.len() as u128);
-    for &byte in bytes {
-        hash = hash
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            .wrapping_add(byte_to_class[byte as usize] as u128);
-    }
-    hash ^= hash >> 33;
-    hash = hash.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
-    hash ^= hash >> 29;
-    hash
-}
 
 fn deduplicate_tokens_by_byte_class<'a, S: AsRef<[u8]>>(
     tokens: &'a [S],
@@ -54,59 +41,6 @@ fn deduplicate_tokens_by_byte_class<'a, S: AsRef<[u8]>>(
         representative_token_bytes,
         original_to_repr,
     }
-}
-
-fn expand_vocab_classes(
-    dedup_classes: vocab_equivalence_analysis::VocabEquivalenceResult,
-    original_to_repr: &[usize],
-    num_representatives: usize,
-) -> vocab_equivalence_analysis::VocabEquivalenceResult {
-    let mut repr_to_class = vec![usize::MAX; num_representatives];
-    let mut original_classes: Vec<Vec<usize>> = Vec::with_capacity(dedup_classes.len());
-
-    for (class_idx, dedup_class) in dedup_classes.iter().enumerate() {
-        for &repr_idx in dedup_class {
-            repr_to_class[repr_idx] = class_idx;
-        }
-        original_classes.push(Vec::new());
-    }
-
-    for (original_idx, &repr_idx) in original_to_repr.iter().enumerate() {
-        let class_idx = repr_to_class[repr_idx];
-        debug_assert!(class_idx != usize::MAX);
-        original_classes[class_idx].push(original_idx);
-    }
-
-    original_classes
-        .into_iter()
-        .filter(|class| !class.is_empty())
-        .collect()
-}
-
-fn representative_tokens_for_vocab_classes<'a>(
-    dedup_vocab_classes: &vocab_equivalence_analysis::VocabEquivalenceResult,
-    representative_token_bytes: &'a [&'a [u8]],
-) -> Vec<&'a [u8]> {
-    dedup_vocab_classes
-        .iter()
-        .map(|dedup_class| representative_token_bytes[dedup_class[0]])
-        .collect()
-}
-
-fn tokenizer_group_count(tokenizer: &TokenizerView) -> usize {
-    tokenizer
-        .dfa()
-        .states
-        .iter()
-        .flat_map(|state| {
-            state
-                .finalizers
-                .iter()
-                .copied()
-                .chain(state.possible_future_group_ids.iter().copied())
-        })
-        .max()
-        .map_or(0, |max_group| max_group + 1)
 }
 
 fn adjust_disallowed_follows(
@@ -237,6 +171,58 @@ fn build_vocab_map(
     }
 }
 
+struct PreparedEquivalenceInputs<'a> {
+    max_token_id: u32,
+    token_ids: Vec<u32>,
+    token_bytes: Vec<&'a [u8]>,
+    initial_states: Vec<usize>,
+}
+
+fn prepare_equivalence_inputs<'a>(
+    tokenizer: &Tokenizer,
+    vocab: &'a Vocab,
+    initial_state_map: Option<&ManyToOneIdMap>,
+) -> PreparedEquivalenceInputs<'a> {
+    let max_token_id = vocab.max_token_id();
+    let mut token_bytes: Vec<&[u8]> = Vec::with_capacity(vocab.len());
+    let mut token_ids: Vec<u32> = Vec::with_capacity(vocab.len());
+    for (&tid, bytes) in &vocab.entries {
+        token_ids.push(tid);
+        token_bytes.push(bytes.as_slice());
+    }
+
+    let initial_states = match initial_state_map {
+        Some(map) => map.representative_original_ids.iter().map(|&s| s as usize).collect(),
+        None => (0..tokenizer.num_states() as usize).collect(),
+    };
+
+    PreparedEquivalenceInputs {
+        max_token_id,
+        token_ids,
+        token_bytes,
+        initial_states,
+    }
+}
+
+fn build_internal_id_map_from_combined_result(
+    tokenizer: &Tokenizer,
+    initial_state_map: Option<&ManyToOneIdMap>,
+    prepared: &PreparedEquivalenceInputs<'_>,
+    result: &combined_equivalence_analysis::CombinedEquivalenceResult,
+) -> InternalIdMap {
+    let num_dfa_states = tokenizer.num_states() as usize;
+    let state_map = match initial_state_map {
+        Some(init_map) => build_state_map_composed(&result.state_classes, num_dfa_states, init_map),
+        None => build_state_map(&result.state_classes, num_dfa_states),
+    };
+    let vocab_map = build_vocab_map(&result.vocab_classes, &prepared.token_ids, prepared.max_token_id);
+
+    InternalIdMap {
+        tokenizer_states: state_map,
+        vocab_tokens: vocab_map,
+    }
+}
+
 pub(crate) fn analyze_equivalences_with_group_filter(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -280,39 +266,18 @@ fn analyze_equivalences_impl(
         _ => TokenizerView::new(tokenizer),
     };
 
-    let max_token_id = vocab.max_token_id();
-    let mut token_bytes: Vec<&[u8]> = Vec::with_capacity(vocab.len());
-    let mut token_ids: Vec<u32> = Vec::with_capacity(vocab.len());
-    for (&tid, bytes) in &vocab.entries {
-        token_ids.push(tid);
-        token_bytes.push(bytes.as_slice());
-    }
-
-    let initial_states: Vec<usize> = match initial_state_map {
-        Some(map) => map.representative_original_ids.iter().map(|&s| s as usize).collect(),
-        None => (0..tokenizer.num_states() as usize).collect(),
-    };
+    let prepared = prepare_equivalence_inputs(tokenizer, vocab, initial_state_map);
 
     if let Some(result) = combined_equivalence_analysis::compute_reference_validation_if_enabled(
             &tokenizer_view,
-            &token_bytes,
-            &initial_states,
+            &prepared.token_bytes,
+            &prepared.initial_states,
             effective_disallowed,
             ignore_terminal,
             active_groups,
             shared_vocab_dfa_cache,
         ) {
-        let num_dfa_states = tokenizer.num_states() as usize;
-        let state_map = match initial_state_map {
-            Some(init_map) => build_state_map_composed(&result.state_classes, num_dfa_states, init_map),
-            None => build_state_map(&result.state_classes, num_dfa_states),
-        };
-        let vocab_map = build_vocab_map(&result.vocab_classes, &token_ids, max_token_id);
-
-        return InternalIdMap {
-            tokenizer_states: state_map,
-            vocab_tokens: vocab_map,
-        };
+        return build_internal_id_map_from_combined_result(tokenizer, initial_state_map, &prepared, &result);
     }
 
     if let Some(cache) = shared_vocab_dfa_cache {
@@ -326,7 +291,7 @@ fn analyze_equivalences_impl(
         .map(|base| base.byte_to_class())
         .unwrap_or_else(|| super::compat::compute_byte_classes(tokenizer_view.dfa()));
 
-    let dedup = deduplicate_tokens_by_byte_class(&token_bytes, &byte_to_class);
+    let dedup = deduplicate_tokens_by_byte_class(&prepared.token_bytes, &byte_to_class);
     let mut relevant_bytes = [false; 256];
     for token in &dedup.representative_token_bytes {
         for &byte in *token {
@@ -336,7 +301,7 @@ fn analyze_equivalences_impl(
     let pre_state_reps = super::state::max_length::find_state_equivalence_classes_byte_restricted(
         &tokenizer_view,
         &dedup.representative_token_bytes,
-        &initial_states,
+        &prepared.initial_states,
         Some(&byte_to_class),
         active_groups,
         Some(&relevant_bytes),
@@ -385,16 +350,11 @@ fn analyze_equivalences_impl(
         dedup.representative_token_bytes.len(),
     );
     let state_classes =
-        state_equivalence_analysis::mapping_to_equivalence_classes(&initial_states, &representative_states);
-    let num_dfa_states = tokenizer.num_states() as usize;
-    let state_map = match initial_state_map {
-        Some(init_map) => build_state_map_composed(&state_classes, num_dfa_states, init_map),
-        None => build_state_map(&state_classes, num_dfa_states),
+        state_equivalence_analysis::mapping_to_equivalence_classes(&prepared.initial_states, &representative_states);
+    let result = combined_equivalence_analysis::CombinedEquivalenceResult {
+        vocab_classes,
+        state_classes,
     };
-    let vocab_map = build_vocab_map(&vocab_classes, &token_ids, max_token_id);
 
-    InternalIdMap {
-        tokenizer_states: state_map,
-        vocab_tokens: vocab_map,
-    }
+    build_internal_id_map_from_combined_result(tokenizer, initial_state_map, &prepared, &result)
 }

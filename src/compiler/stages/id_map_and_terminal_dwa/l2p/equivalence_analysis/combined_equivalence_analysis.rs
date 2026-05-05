@@ -9,6 +9,13 @@ use hashbrown::HashMap;
 
 use super::compat::TokenizerView;
 use super::disallowed_follows::normalize_disallowed_follows;
+use super::shared::{
+    TokenDedup,
+    expand_vocab_classes,
+    hash_byte_class_seq,
+    representative_tokens_for_vocab_classes,
+    tokenizer_group_count,
+};
 use crate::ds::bitset::BitSet;
 
 use super::state::fast::{self as state_equivalence_analysis, StateEquivalenceResult};
@@ -350,52 +357,6 @@ fn compute_skip_groups(num_groups: usize, disallowed_follows: &BTreeMap<u32, Bit
     skip
 }
 
-fn tokenizer_group_count(tokenizer: &TokenizerView) -> usize {
-    tokenizer
-        .dfa()
-        .states
-        .iter()
-        .flat_map(|state| {
-            state
-                .finalizers
-                .iter()
-                .copied()
-                .chain(state.possible_future_group_ids.iter().copied())
-        })
-        .max()
-        .map_or(0, |max_group| max_group + 1)
-}
-
-/// Compute byte equivalence classes from the tokenizer DFA.
-///
-/// Bytes with identical transitions across all DFA states are merged into
-/// the same class. This is used to deduplicate tokens before equivalence
-/// analysis: tokens whose byte-class sequences are identical will always
-/// produce the same DFA behavior from any starting state.
-/// Token deduplication result.
-struct TokenDedup<'a> {
-    /// Byte slices for representative tokens (references into the original array).
-    representative_token_bytes: Vec<&'a [u8]>,
-    /// For each original token index, the index of its representative.
-    original_to_repr: Vec<usize>,
-}
-
-/// Hash a token's byte-class sequence into a u128 for dedup.
-/// Collision probability is ~n²/2^128 ≈ 0 for any practical n.
-#[inline]
-pub(crate) fn hash_byte_class_seq(bytes: &[u8], byte_to_class: &[u8; 256]) -> u128 {
-    // Length-prefixed hash with a good mixing function.
-    let mut h: u128 = 0xFF51_AFD7_ED55_8CCD;
-    h = h.wrapping_mul(0xC4CE_B9FE_1A85_EC53).wrapping_add(bytes.len() as u128);
-    for &b in bytes {
-        h = h.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(byte_to_class[b as usize] as u128);
-    }
-    h ^= h >> 33;
-    h = h.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
-    h ^= h >> 29;
-    h
-}
-
 /// Deduplicate tokens by their byte-class sequence.
 ///
 /// Tokens whose bytes map to the same sequence of byte classes under the
@@ -426,41 +387,6 @@ fn deduplicate_tokens_by_byte_class<'a, S: AsRef<[u8]>>(
         original_to_repr,
     }
 }
-
-/// Expand vocab equivalence classes from representative indices back to
-/// original token indices.
-fn expand_vocab_classes(
-    dedup_classes: VocabEquivalenceResult,
-    original_to_repr: &[usize],
-    num_representatives: usize,
-) -> VocabEquivalenceResult {
-    let mut repr_to_class = vec![usize::MAX; num_representatives];
-    let mut original_classes: Vec<Vec<usize>> = Vec::with_capacity(dedup_classes.len());
-
-    for (class_idx, dedup_class) in dedup_classes.iter().enumerate() {
-        for &dedup_idx in dedup_class {
-            repr_to_class[dedup_idx] = class_idx;
-        }
-        original_classes.push(Vec::new());
-    }
-
-    for (original_idx, &repr_idx) in original_to_repr.iter().enumerate() {
-        original_classes[repr_to_class[repr_idx]].push(original_idx);
-    }
-
-    original_classes.into_iter().collect()
-}
-
-fn representative_tokens_for_vocab_classes<'a>(
-    dedup_vocab_classes: &VocabEquivalenceResult,
-    representative_token_bytes: &'a [&'a [u8]],
-) -> Vec<&'a [u8]> {
-    dedup_vocab_classes
-        .iter()
-        .map(|dedup_class| representative_token_bytes[dedup_class[0]])
-        .collect()
-}
-
 /// Compute combined state and vocab equivalence analysis.
 ///
 /// This function:
