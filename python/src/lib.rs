@@ -79,6 +79,38 @@ fn constraint_result<T>(result: glrmask::Result<T>) -> PyResult<T> {
     result.map_err(|e| PyValueError::new_err(format!("{e}")))
 }
 
+fn set_gss_summary_fields(
+    dict: &Bound<'_, PyDict>,
+    prefix: &str,
+    path_count: usize,
+    summary: &glrmask::GssProfileSummary,
+) -> PyResult<()> {
+    dict.set_item(format!("{prefix}_path_count"), path_count)?;
+    dict.set_item(format!("{prefix}_top_values_count"), summary.top_values_count)?;
+    dict.set_item(format!("{prefix}_upper_branch_nodes"), summary.upperbranch_nodes)?;
+    dict.set_item(format!("{prefix}_upper_interface_nodes"), summary.interface_nodes)?;
+    dict.set_item(format!("{prefix}_lower_nodes"), summary.lower_nodes)?;
+    dict.set_item(
+        format!("{prefix}_lower_general_nodes"),
+        summary.lower_general_nodes,
+    )?;
+    dict.set_item(
+        format!("{prefix}_lower_segment_nodes"),
+        summary.lower_segment_nodes,
+    )?;
+    dict.set_item(
+        format!("{prefix}_total_unique_nodes"),
+        summary.total_unique_nodes,
+    )?;
+    dict.set_item(format!("{prefix}_total_edges"), summary.total_edges)?;
+    dict.set_item(
+        format!("{prefix}_accumulator_instances"),
+        summary.accumulator_instances,
+    )?;
+    dict.set_item(format!("{prefix}_max_depth"), summary.max_depth)?;
+    Ok(())
+}
+
 fn string_result<T>(result: Result<T, String>) -> PyResult<T> {
     result.map_err(PyValueError::new_err)
 }
@@ -429,30 +461,8 @@ impl PyConstraintState {
             d.set_item("tokenizer_state", entry.tokenizer_state)?;
             d.set_item("gss_stacks_before", entry.gss_stacks_before)?;
             d.set_item("gss_stacks_after", entry.gss_stacks_after)?;
-
-            d.set_item("gss_before_path_count", gss_stacks_before_len)?;
-            d.set_item("gss_before_top_values_count", entry.gss_summary_before.top_values_count)?;
-            d.set_item("gss_before_upper_branch_nodes", entry.gss_summary_before.upperbranch_nodes)?;
-            d.set_item("gss_before_upper_interface_nodes", entry.gss_summary_before.interface_nodes)?;
-            d.set_item("gss_before_lower_nodes", entry.gss_summary_before.lower_nodes)?;
-            d.set_item("gss_before_lower_general_nodes", entry.gss_summary_before.lower_general_nodes)?;
-            d.set_item("gss_before_lower_segment_nodes", entry.gss_summary_before.lower_segment_nodes)?;
-            d.set_item("gss_before_total_unique_nodes", entry.gss_summary_before.total_unique_nodes)?;
-            d.set_item("gss_before_total_edges", entry.gss_summary_before.total_edges)?;
-            d.set_item("gss_before_accumulator_instances", entry.gss_summary_before.accumulator_instances)?;
-            d.set_item("gss_before_max_depth", entry.gss_summary_before.max_depth)?;
-
-            d.set_item("gss_path_count", gss_stacks_after_len)?;
-            d.set_item("gss_top_values_count", entry.gss_summary_after.top_values_count)?;
-            d.set_item("gss_upper_branch_nodes", entry.gss_summary_after.upperbranch_nodes)?;
-            d.set_item("gss_upper_interface_nodes", entry.gss_summary_after.interface_nodes)?;
-            d.set_item("gss_lower_nodes", entry.gss_summary_after.lower_nodes)?;
-            d.set_item("gss_lower_general_nodes", entry.gss_summary_after.lower_general_nodes)?;
-            d.set_item("gss_lower_segment_nodes", entry.gss_summary_after.lower_segment_nodes)?;
-            d.set_item("gss_total_unique_nodes", entry.gss_summary_after.total_unique_nodes)?;
-            d.set_item("gss_total_edges", entry.gss_summary_after.total_edges)?;
-            d.set_item("gss_accumulator_instances", entry.gss_summary_after.accumulator_instances)?;
-            d.set_item("gss_max_depth", entry.gss_summary_after.max_depth)?;
+            set_gss_summary_fields(&d, "gss_before", gss_stacks_before_len, &entry.gss_summary_before)?;
+            set_gss_summary_fields(&d, "gss", gss_stacks_after_len, &entry.gss_summary_after)?;
             d.set_item("match_start", entry.match_start)?;
             d.set_item("match_end", entry.match_end)?;
             d.set_item("token_bound", entry.token_bound)?;
