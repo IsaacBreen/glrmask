@@ -431,10 +431,16 @@ impl PyConstraintState {
             d.set_item("gss_before_path_count", entry.gss_summary_before.path_count)?;
             d.set_item("gss_before_total_edges", entry.gss_summary_before.total_edges)?;
             d.set_item("gss_before_max_depth", entry.gss_summary_before.max_depth)?;
+            if let Some(segment_count) = entry.gss_summary_before.segment_count {
+                d.set_item("gss_before_segment_count", segment_count)?;
+            }
 
             d.set_item("gss_path_count", entry.gss_summary_after.path_count)?;
             d.set_item("gss_total_edges", entry.gss_summary_after.total_edges)?;
             d.set_item("gss_max_depth", entry.gss_summary_after.max_depth)?;
+            if let Some(segment_count) = entry.gss_summary_after.segment_count {
+                d.set_item("gss_segment_count", segment_count)?;
+            }
             d.set_item("match_start", entry.match_start)?;
             d.set_item("match_end", entry.match_end)?;
             d.set_item("token_bound", entry.token_bound)?;

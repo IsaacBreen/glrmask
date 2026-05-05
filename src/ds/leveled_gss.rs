@@ -39,6 +39,14 @@ pub struct VirtualStack<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
     acc: A,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct LeveledGssSummary {
+    pub path_count: usize,
+    pub total_edges: usize,
+    pub max_depth: u32,
+    pub segment_count: Option<usize>,
+}
+
 impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
     pub fn top(&self) -> Option<&T> {
         self.values.last()
@@ -190,6 +198,21 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             .map(|(stack, _)| stack.len() as u32)
             .max()
             .unwrap_or(0)
+    }
+
+    pub fn flattened_summary(&self) -> LeveledGssSummary {
+        LeveledGssSummary {
+            path_count: self.stacks.len(),
+            total_edges: self
+                .stacks
+                .iter()
+                .map(|(stack, _)| stack.len().saturating_sub(1))
+                .sum(),
+            max_depth: self.max_depth(),
+            // The current LeveledGSS representation stores flat stacks of `T`
+            // values and does not retain segment-node structure.
+            segment_count: None,
+        }
     }
 
     pub fn isolate(&self, value: Option<T>) -> Self {

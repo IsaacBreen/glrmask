@@ -13,18 +13,14 @@ use crate::compiler::glr::parser::{
     stack_may_advance_on_any,
 };
 use crate::compiler::glr::table::Action;
+use crate::ds::leveled_gss::LeveledGssSummary;
 use crate::runtime::constraint::Constraint;
 use crate::runtime::state::{ConstraintState, CommitBuffers};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 type ParserStatesByTokenizer = FxHashMap<u32, ParserGSS>;
 
-#[derive(Clone, Debug, Default)]
-pub struct GssProfileSummary {
-    pub path_count: usize,
-    pub total_edges: usize,
-    pub max_depth: u32,
-}
+pub type GssProfileSummary = LeveledGssSummary;
 
 #[derive(Clone, Debug, Default)]
 pub struct CommitProfile {
@@ -109,19 +105,6 @@ struct InitialCommitScan {
 
 fn parser_stacks_only(gss: &ParserGSS) -> Vec<Vec<u32>> {
     gss.to_stacks().into_iter().map(|(stack, _)| stack).collect()
-}
-
-fn summarize_gss(gss: &ParserGSS) -> GssProfileSummary {
-    let stacks = gss.to_stacks();
-    let total_edges = stacks
-        .iter()
-        .map(|(stack, _)| stack.len().saturating_sub(1))
-        .sum::<usize>();
-    GssProfileSummary {
-        path_count: stacks.len(),
-        total_edges,
-        max_depth: gss.max_depth(),
-    }
 }
 
 fn apply_advance_profile(commit_profile: &mut CommitProfile, profile: &AdvanceProfile) {
@@ -622,8 +605,8 @@ fn record_per_advance_entry(
         tokenizer_state,
         gss_stacks_before: parser_stacks_only(before_gss),
         gss_stacks_after: parser_stacks_only(after_gss),
-        gss_summary_before: summarize_gss(before_gss),
-        gss_summary_after: summarize_gss(after_gss),
+        gss_summary_before: before_gss.flattened_summary(),
+        gss_summary_after: after_gss.flattened_summary(),
         match_start,
         match_end,
         token_bound,
