@@ -10,7 +10,7 @@ use crate::automata::unweighted_u32::nfa::NFA as UnweightedNfa;
 use crate::automata::unweighted_u32::determinize::determinize as unweighted_determinize;
 use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic as unweighted_minimize;
 use crate::automata::weighted::dwa::DWA;
-use crate::automata::weighted::minimize::minimize_fast;
+use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::{NWA, NWAState};
 use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::templates::compile_dfa::Templates;
@@ -304,7 +304,7 @@ impl Templates {
 
         let minimize_started_at = Instant::now();
         let minimized = if profile.weight_groups > 1 {
-            minimize_fast(&bundle_dwa)
+            minimize(&bundle_dwa)
         } else {
             bundle_dwa
         };

@@ -7,7 +7,7 @@ use smallvec::SmallVec;
 
 use crate::Vocab;
 use crate::automata::weighted::dwa::DWA;
-use crate::automata::weighted::minimize::minimize_fast;
+use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::{NWA, NwaBody};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::labels::DEFAULT_LABEL;
@@ -1194,6 +1194,6 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
         table.num_states,
     );
 
-    minimize_fast(&parser_dwa_pre_minimize)
+    minimize(&parser_dwa_pre_minimize)
 }
 
