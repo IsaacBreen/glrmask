@@ -268,18 +268,6 @@ fn analyze_equivalences_impl(
 
     let prepared = prepare_equivalence_inputs(tokenizer, vocab, initial_state_map);
 
-    if let Some(result) = combined_equivalence_analysis::compute_reference_validation_if_enabled(
-            &tokenizer_view,
-            &prepared.token_bytes,
-            &prepared.initial_states,
-            effective_disallowed,
-            ignore_terminal,
-            active_groups,
-            shared_vocab_dfa_cache,
-        ) {
-        return build_internal_id_map_from_combined_result(tokenizer, initial_state_map, &prepared, &result);
-    }
-
     if let Some(cache) = shared_vocab_dfa_cache {
         cache.get_or_init(|| vocab_equivalence_analysis::SharedVocabDfaBase::build_from_dfa(tokenizer_view.dfa()));
     }
