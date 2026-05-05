@@ -423,24 +423,36 @@ impl PyConstraintState {
         let advance_list = pyo3::types::PyList::empty(py);
         for entry in advances {
             let d = pyo3::types::PyDict::new(py);
+            let gss_stacks_before_len = entry.gss_stacks_before.len();
+            let gss_stacks_after_len = entry.gss_stacks_after.len();
             d.set_item("terminal_id", entry.terminal_id)?;
             d.set_item("tokenizer_state", entry.tokenizer_state)?;
             d.set_item("gss_stacks_before", entry.gss_stacks_before)?;
             d.set_item("gss_stacks_after", entry.gss_stacks_after)?;
 
-            d.set_item("gss_before_path_count", entry.gss_summary_before.path_count)?;
+            d.set_item("gss_before_path_count", gss_stacks_before_len)?;
+            d.set_item("gss_before_top_values_count", entry.gss_summary_before.top_values_count)?;
+            d.set_item("gss_before_upper_branch_nodes", entry.gss_summary_before.upperbranch_nodes)?;
+            d.set_item("gss_before_upper_interface_nodes", entry.gss_summary_before.interface_nodes)?;
+            d.set_item("gss_before_lower_nodes", entry.gss_summary_before.lower_nodes)?;
+            d.set_item("gss_before_lower_general_nodes", entry.gss_summary_before.lower_general_nodes)?;
+            d.set_item("gss_before_lower_segment_nodes", entry.gss_summary_before.lower_segment_nodes)?;
+            d.set_item("gss_before_total_unique_nodes", entry.gss_summary_before.total_unique_nodes)?;
             d.set_item("gss_before_total_edges", entry.gss_summary_before.total_edges)?;
+            d.set_item("gss_before_accumulator_instances", entry.gss_summary_before.accumulator_instances)?;
             d.set_item("gss_before_max_depth", entry.gss_summary_before.max_depth)?;
-            if let Some(segment_count) = entry.gss_summary_before.segment_count {
-                d.set_item("gss_before_segment_count", segment_count)?;
-            }
 
-            d.set_item("gss_path_count", entry.gss_summary_after.path_count)?;
+            d.set_item("gss_path_count", gss_stacks_after_len)?;
+            d.set_item("gss_top_values_count", entry.gss_summary_after.top_values_count)?;
+            d.set_item("gss_upper_branch_nodes", entry.gss_summary_after.upperbranch_nodes)?;
+            d.set_item("gss_upper_interface_nodes", entry.gss_summary_after.interface_nodes)?;
+            d.set_item("gss_lower_nodes", entry.gss_summary_after.lower_nodes)?;
+            d.set_item("gss_lower_general_nodes", entry.gss_summary_after.lower_general_nodes)?;
+            d.set_item("gss_lower_segment_nodes", entry.gss_summary_after.lower_segment_nodes)?;
+            d.set_item("gss_total_unique_nodes", entry.gss_summary_after.total_unique_nodes)?;
             d.set_item("gss_total_edges", entry.gss_summary_after.total_edges)?;
+            d.set_item("gss_accumulator_instances", entry.gss_summary_after.accumulator_instances)?;
             d.set_item("gss_max_depth", entry.gss_summary_after.max_depth)?;
-            if let Some(segment_count) = entry.gss_summary_after.segment_count {
-                d.set_item("gss_segment_count", segment_count)?;
-            }
             d.set_item("match_start", entry.match_start)?;
             d.set_item("match_end", entry.match_end)?;
             d.set_item("token_bound", entry.token_bound)?;

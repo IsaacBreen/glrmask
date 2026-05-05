@@ -13,14 +13,14 @@ use crate::compiler::glr::parser::{
     stack_may_advance_on_any,
 };
 use crate::compiler::glr::table::Action;
-use crate::ds::leveled_gss::LeveledGssSummary;
+use crate::ds::leveled_gss::LeveledGSSSummary;
 use crate::runtime::constraint::Constraint;
 use crate::runtime::state::{ConstraintState, CommitBuffers};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 type ParserStatesByTokenizer = FxHashMap<u32, ParserGSS>;
 
-pub type GssProfileSummary = LeveledGssSummary;
+pub type GssProfileSummary = LeveledGSSSummary;
 
 #[derive(Clone, Debug, Default)]
 pub struct CommitProfile {
@@ -605,8 +605,8 @@ fn record_per_advance_entry(
         tokenizer_state,
         gss_stacks_before: parser_stacks_only(before_gss),
         gss_stacks_after: parser_stacks_only(after_gss),
-        gss_summary_before: before_gss.flattened_summary(),
-        gss_summary_after: after_gss.flattened_summary(),
+        gss_summary_before: before_gss.summary(),
+        gss_summary_after: after_gss.summary(),
         match_start,
         match_end,
         token_bound,

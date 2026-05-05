@@ -549,12 +549,13 @@ fn advance_nondeterministically_profiled(
         profile.n_nondet_waves += 1;
         let mut next = ParserGSS::empty();
 
-        for (state, mut isolated) in closure.grouped_by_top() {
+        for state in closure.peek_values() {
             profile.n_nondet_branches += 1;
             let Some(action) = table.action(state, token) else {
                 continue;
             };
             profile.n_nondet_isolates += 1;
+            let mut isolated = closure.isolate(Some(state));
             let reduce_base = isolated.clone();
             let det_start = Instant::now();
             if advance_deterministically(table, &mut isolated, token) {
@@ -623,10 +624,11 @@ fn advance_nondeterministically(
     loop {
         let mut next = ParserGSS::empty();
 
-        for (state, mut isolated) in closure.grouped_by_top() {
+        for state in closure.peek_values() {
             let Some(action) = table.action(state, token) else {
                 continue;
             };
+            let mut isolated = closure.isolate(Some(state));
             let reduce_base = isolated.clone();
             if advance_deterministically(table, &mut isolated, token) {
                 merge_into(&mut shifted, isolated);
