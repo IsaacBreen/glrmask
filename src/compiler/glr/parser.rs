@@ -9,6 +9,21 @@ use smallvec::SmallVec;
 pub type ParserGSS = LeveledGSS<u32, TerminalsDisallowed>;
 
 type ReduceSources = SmallVec<[(u32, ParserGSS); 4]>;
+type ReduceBranches = SmallVec<[(ParserGSS, u32, bool); 4]>;
+
+enum AdvancedBranch {
+    Stack(VirtualStack<u32, TerminalsDisallowed>),
+    Gss(ParserGSS),
+}
+
+impl AdvancedBranch {
+    fn into_gss(self) -> ParserGSS {
+        match self {
+            AdvancedBranch::Stack(stack) => stack.into_gss(),
+            AdvancedBranch::Gss(gss) => gss,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct AdvanceProfile {
@@ -210,6 +225,47 @@ fn apply_guarded_stack_shifts(gss: ParserGSS, shifts: &[GuardedStackShift]) -> P
     out
 }
 
+fn apply_guarded_stack_shifts_to_vstack(
+    stack: &VirtualStack<u32, TerminalsDisallowed>,
+    shifts: &[GuardedStackShift],
+) -> ParserGSS {
+    let mut out = ParserGSS::empty();
+
+    for shift in shifts {
+        debug_assert!(shift.guards.windows(2).all(|w| w[0].pop <= w[1].pop));
+        debug_assert!(shift.guards.iter().all(|guard| guard.pop <= shift.pop));
+
+        let mut dead = false;
+
+        for guard in &shift.guards {
+            let Some(&state) = stack.top_after_popping(guard.pop as usize) else {
+                dead = true;
+                break;
+            };
+            if guard.states.binary_search(&state).is_err() {
+                dead = true;
+                break;
+            }
+        }
+
+        if dead || (shift.pop > 0 && stack.top_after_popping(shift.pop as usize - 1).is_none()) {
+            continue;
+        }
+
+        let mut branch = stack.clone();
+        if branch.pop(shift.pop as usize) != 0 {
+            continue;
+        }
+
+        for &state in &shift.pushes {
+            branch.push(state);
+        }
+        merge_into(&mut out, branch.into_gss());
+    }
+
+    out
+}
+
 #[inline]
 fn virtual_stack_satisfies_guards(
     stack: &VirtualStack<u32, TerminalsDisallowed>,
@@ -271,6 +327,33 @@ fn reduce_sources_from_isolated(gss: &ParserGSS, rhs_len: usize) -> ReduceSource
     result
 }
 
+fn reduce_branches_from_isolated(
+    table: &GLRTable,
+    gss: &ParserGSS,
+    nt: u32,
+    rhs_len: usize,
+) -> ReduceBranches {
+    if let Some(mut stack) = gss.try_virtual_stack() {
+        if stack.pop(rhs_len) == 0 {
+            if let Some(&goto_from) = stack.top() {
+                if let Some((target, is_replace)) = table.goto_target(goto_from, nt) {
+                    let mut branches = SmallVec::new();
+                    branches.push((stack.into_gss(), target, is_replace));
+                    return branches;
+                }
+            }
+        }
+    }
+
+    let mut branches = SmallVec::new();
+    for (goto_from, base) in reduce_sources_from_isolated(gss, rhs_len) {
+        if let Some((target, is_replace)) = table.goto_target(goto_from, nt) {
+            branches.push((base, target, is_replace));
+        }
+    }
+    branches
+}
+
 fn merge_into(dst: &mut ParserGSS, branch: ParserGSS) {
     if branch.is_empty() {
         return;
@@ -282,11 +365,11 @@ fn merge_into(dst: &mut ParserGSS, branch: ParserGSS) {
     }
 }
 
-fn advance_deterministically_from_vstack(
+fn advance_deterministically_from_vstack_raw(
     table: &GLRTable,
     mut stack: VirtualStack<u32, TerminalsDisallowed>,
     token: TerminalID,
-) -> (ParserGSS, bool) {
+) -> (AdvancedBranch, bool) {
     loop {
         let Some(&state) = stack.top() else {
             break;
@@ -306,7 +389,7 @@ fn advance_deterministically_from_vstack(
                                     continue;
                                 }
                                 Some(_) | None => {
-                                    return (ParserGSS::empty(), false);
+                                    return (AdvancedBranch::Gss(ParserGSS::empty()), false);
                                 }
                             }
                         }
@@ -320,12 +403,11 @@ fn advance_deterministically_from_vstack(
                             stack.replace_top(target);
                         }
                         None => {
-                            return (ParserGSS::empty(), false);
+                              return (AdvancedBranch::Gss(ParserGSS::empty()), false);
                         }
                     }
                 } else {
-                    let current = stack.into_gss();
-                    let popped = current.popn(rhs_len as isize);
+                    let popped = stack.into_gss_after_popping(rhs_len);
                     let mut normal_shifts = SmallVec::<[(u32, u32); 8]>::new();
                     let mut replace_gotos = SmallVec::<[(u32, u32); 4]>::new();
                     for goto_from in popped.peek_values() {
@@ -347,9 +429,9 @@ fn advance_deterministically_from_vstack(
                         }
                         r
                     };
-                    let Some(next_stack) = rebuilt.try_virtual_stack() else {
-                        return (rebuilt, false);
-                    };
+                      let Some(next_stack) = rebuilt.try_virtual_stack() else {
+                          return (AdvancedBranch::Gss(rebuilt), false);
+                      };
                     stack = next_stack;
                 }
             }
@@ -359,19 +441,28 @@ fn advance_deterministically_from_vstack(
                 } else {
                     stack.push(*target);
                 }
-                return (stack.into_gss(), true);
+                return (AdvancedBranch::Stack(stack), true);
             }
             Some(Action::StackShifts(shifts)) => {
-                return (apply_stack_shifts(stack.into_gss(), shifts), true);
+                return (AdvancedBranch::Gss(apply_stack_shifts(stack.into_gss(), shifts)), true);
             }
             Some(Action::GuardedStackShifts(shifts)) => {
-                return (apply_guarded_stack_shifts(stack.into_gss(), shifts), true);
+                return (AdvancedBranch::Gss(apply_guarded_stack_shifts_to_vstack(&stack, shifts)), true);
             }
             Some(Action::Split { .. }) | Some(Action::Accept) | None => break,
         }
     }
 
-    (stack.into_gss(), false)
+    (AdvancedBranch::Stack(stack), false)
+}
+
+fn advance_deterministically_from_vstack(
+    table: &GLRTable,
+    stack: VirtualStack<u32, TerminalsDisallowed>,
+    token: TerminalID,
+) -> (ParserGSS, bool) {
+    let (advanced, ok) = advance_deterministically_from_vstack_raw(table, stack, token);
+    (advanced.into_gss(), ok)
 }
 
 fn advance_reduce_branch(
@@ -380,14 +471,14 @@ fn advance_reduce_branch(
     target: u32,
     is_replace: bool,
     token: TerminalID,
-) -> (ParserGSS, bool) {
+) -> (AdvancedBranch, bool) {
     if let Some(mut stack) = base.try_virtual_stack() {
         if is_replace {
             stack.replace_top(target);
         } else {
             stack.push(target);
         }
-        advance_deterministically_from_vstack(table, stack, token)
+        advance_deterministically_from_vstack_raw(table, stack, token)
     } else {
         let mut branch = if is_replace {
             base.popn(1).push(target)
@@ -395,7 +486,7 @@ fn advance_reduce_branch(
             base.push(target)
         };
         let det_ok = advance_deterministically(table, &mut branch, token);
-        (branch, det_ok)
+        (AdvancedBranch::Gss(branch), det_ok)
     }
 }
 
@@ -461,8 +552,7 @@ fn advance_deterministically_profiled(
                 } else {
                     profile.n_floor_crossings += 1;
                     profile.n_det_popn_ops += 1;
-                    let current = stack.into_gss();
-                    let popped = current.popn(rhs_len as isize);
+                    let popped = stack.into_gss_after_popping(rhs_len);
                     let mut normal_shifts = SmallVec::<[(u32, u32); 8]>::new();
                     let mut replace_gotos = SmallVec::<[(u32, u32); 4]>::new();
                     for goto_from in popped.peek_values() {
@@ -509,7 +599,7 @@ fn advance_deterministically_profiled(
                 return true;
             }
             Some(Action::GuardedStackShifts(shifts)) => {
-                *gss = apply_guarded_stack_shifts(stack.into_gss(), shifts);
+                *gss = apply_guarded_stack_shifts_to_vstack(&stack, shifts);
                 profile.det_exit_reason = 1;
                 return true;
             }
@@ -544,7 +634,6 @@ fn advance_nondeterministically_profiled(
     use std::time::Instant;
 
     let mut shifted = ParserGSS::empty();
-
     loop {
         profile.n_nondet_waves += 1;
         let mut next = ParserGSS::empty();
@@ -555,16 +644,46 @@ fn advance_nondeterministically_profiled(
                 continue;
             };
             profile.n_nondet_isolates += 1;
+            let pure_reduce = matches!(action, Action::Reduce(..));
             let mut isolated = closure.isolate(Some(state));
-            let reduce_base = isolated.clone();
-            let det_start = Instant::now();
-            if advance_deterministically(table, &mut isolated, token) {
-                profile.nondet_det_ns += det_start.elapsed().as_nanos() as u64;
-                profile.n_nondet_merges += 1;
-                merge_into(&mut shifted, isolated);
-                continue;
+            match action {
+                Action::Shift(target, is_replace) => {
+                    profile.n_nondet_merges += 1;
+                    if *is_replace {
+                        shifted = shifted.absorb_push_same_acc(*target, &isolated.popn(1));
+                    } else {
+                        shifted = shifted.absorb_push_same_acc(*target, &isolated);
+                    }
+                    continue;
+                }
+                Action::StackShifts(shifts) => {
+                    profile.n_nondet_merges += 1;
+                    merge_into(&mut shifted, apply_stack_shifts(isolated, shifts));
+                    continue;
+                }
+                Action::GuardedStackShifts(shifts) => {
+                    profile.n_nondet_merges += 1;
+                    let branch = if let Some(stack) = isolated.try_virtual_stack() {
+                        apply_guarded_stack_shifts_to_vstack(&stack, shifts)
+                    } else {
+                        apply_guarded_stack_shifts(isolated, shifts)
+                    };
+                    merge_into(&mut shifted, branch);
+                    continue;
+                }
+                _ => {}
             }
-            profile.nondet_det_ns += det_start.elapsed().as_nanos() as u64;
+            let reduce_base = if pure_reduce { None } else { Some(isolated.clone()) };
+            if !pure_reduce {
+                let det_start = Instant::now();
+                if advance_deterministically(table, &mut isolated, token) {
+                    profile.nondet_det_ns += det_start.elapsed().as_nanos() as u64;
+                    profile.n_nondet_merges += 1;
+                    merge_into(&mut shifted, isolated);
+                    continue;
+                }
+                profile.nondet_det_ns += det_start.elapsed().as_nanos() as u64;
+            }
 
             if let Some(target) = action.shift_target() {
                 let is_replace = action.shift_is_replace() && !table.forwarded_shifts.contains(&(state, token));
@@ -582,26 +701,26 @@ fn advance_nondeterministically_profiled(
             }
 
             action.for_each_reduce(|nt, len| {
-                for (goto_from, base) in reduce_sources_from_isolated(&reduce_base, len as usize) {
+                let reduce_base = reduce_base.as_ref().unwrap_or(&isolated);
+                for (base, target, is_replace) in
+                    reduce_branches_from_isolated(table, reduce_base, nt, len as usize)
+                {
                     profile.n_nondet_reduce_ops += 1;
-                    let Some((target, is_replace)) = table.goto_target(goto_from, nt) else {
-                        continue;
-                    };
                     let (branch, det_ok) = advance_reduce_branch(table, base, target, is_replace, token);
                     if det_ok {
                         profile.n_nondet_merges += 1;
-                        match branch.into_virtual_stack() {
-                            Ok(stack) => {
+                        match branch {
+                            AdvancedBranch::Stack(stack) => {
                                 let current = std::mem::replace(&mut shifted, ParserGSS::empty());
                                 shifted = current.absorb_vstack_same_acc_owned(stack);
                             }
-                            Err(branch) => {
+                            AdvancedBranch::Gss(branch) => {
                                 merge_into(&mut shifted, branch);
                             }
                         }
                     } else {
                         profile.n_nondet_merges += 1;
-                        merge_into(&mut next, branch);
+                        merge_into(&mut next, branch.into_gss());
                     }
                 }
             });
@@ -628,9 +747,34 @@ fn advance_nondeterministically(
             let Some(action) = table.action(state, token) else {
                 continue;
             };
+            let pure_reduce = matches!(action, Action::Reduce(..));
             let mut isolated = closure.isolate(Some(state));
-            let reduce_base = isolated.clone();
-            if advance_deterministically(table, &mut isolated, token) {
+            match action {
+                Action::Shift(target, is_replace) => {
+                    if *is_replace {
+                        shifted = shifted.absorb_push_same_acc(*target, &isolated.popn(1));
+                    } else {
+                        shifted = shifted.absorb_push_same_acc(*target, &isolated);
+                    }
+                    continue;
+                }
+                Action::StackShifts(shifts) => {
+                    merge_into(&mut shifted, apply_stack_shifts(isolated, shifts));
+                    continue;
+                }
+                Action::GuardedStackShifts(shifts) => {
+                    let branch = if let Some(stack) = isolated.try_virtual_stack() {
+                        apply_guarded_stack_shifts_to_vstack(&stack, shifts)
+                    } else {
+                        apply_guarded_stack_shifts(isolated, shifts)
+                    };
+                    merge_into(&mut shifted, branch);
+                    continue;
+                }
+                _ => {}
+            }
+            let reduce_base = if pure_reduce { None } else { Some(isolated.clone()) };
+            if !pure_reduce && advance_deterministically(table, &mut isolated, token) {
                 merge_into(&mut shifted, isolated);
                 continue;
             }
@@ -649,24 +793,23 @@ fn advance_nondeterministically(
             }
 
             action.for_each_reduce(|nt, len| {
-                for (goto_from, base) in reduce_sources_from_isolated(&reduce_base, len as usize) {
-                    let Some((target, is_replace)) = table.goto_target(goto_from, nt) else {
-                        continue;
-                    };
-
+                let reduce_base = reduce_base.as_ref().unwrap_or(&isolated);
+                for (base, target, is_replace) in
+                    reduce_branches_from_isolated(table, reduce_base, nt, len as usize)
+                {
                     let (branch, det_ok) = advance_reduce_branch(table, base, target, is_replace, token);
                     if det_ok {
-                        match branch.into_virtual_stack() {
-                            Ok(stack) => {
+                        match branch {
+                            AdvancedBranch::Stack(stack) => {
                                 let current = std::mem::replace(&mut shifted, ParserGSS::empty());
                                 shifted = current.absorb_vstack_same_acc_owned(stack);
                             }
-                            Err(branch) => {
+                            AdvancedBranch::Gss(branch) => {
                                 merge_into(&mut shifted, branch);
                             }
                         }
                     } else {
-                        merge_into(&mut next, branch);
+                        merge_into(&mut next, branch.into_gss());
                     }
                 }
             });
@@ -739,8 +882,7 @@ fn advance_deterministically(
                         }
                     }
                 } else {
-                    let current = stack.into_gss();
-                    let popped = current.popn(rhs_len as isize);
+                    let popped = stack.into_gss_after_popping(rhs_len);
                     let mut normal_shifts = SmallVec::<[(u32, u32); 8]>::new();
                     let mut replace_gotos = SmallVec::<[(u32, u32); 4]>::new();
                     for goto_from in popped.peek_values() {
@@ -784,7 +926,7 @@ fn advance_deterministically(
                 return true;
             }
             Some(Action::GuardedStackShifts(shifts)) => {
-                *gss = apply_guarded_stack_shifts(stack.into_gss(), shifts);
+                *gss = apply_guarded_stack_shifts_to_vstack(&stack, shifts);
                 return true;
             }
             Some(Action::Split { .. }) => break,

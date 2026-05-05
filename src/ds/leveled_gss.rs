@@ -2089,6 +2089,35 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
         self.pending_top.as_ref().or_else(|| self.values.last())
     }
 
+    /// Return the top value that would be visible after popping `remaining`
+    /// values, without mutating or cloning the virtual stack.
+    #[inline]
+    pub fn top_after_popping(&self, mut remaining: usize) -> Option<&T> {
+        if let Some(top) = self.pending_top.as_ref() {
+            if remaining == 0 {
+                return Some(top);
+            }
+            remaining -= 1;
+        }
+
+        let mut values = &self.values;
+        let mut next = &self.next;
+        loop {
+            let len = values.len();
+            if remaining < len {
+                return values.iter().rev().nth(remaining);
+            }
+            remaining -= len;
+            match &**next {
+                Lower::Segment(seg) => {
+                    values = &seg.values;
+                    next = &seg.next;
+                }
+                _ => return None,
+            }
+        }
+    }
+
     /// Flush pending_top into the backing values.
     #[inline]
     fn flush_pending(&mut self) {
@@ -2165,31 +2194,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
     /// Return the value immediately below the current top, if any.
     #[inline]
     pub fn parent_of_top(&self) -> Option<T> {
-        if self.pending_top.is_some() {
-            if let Some(parent) = self.values.last() {
-                return Some(parent.clone());
-            }
-            if let Lower::Segment(seg) = &*self.next {
-                return seg.values.last().cloned();
-            }
-        } else {
-            let len = self.values.len();
-            if len >= 2 {
-                return self.values.take(len - 1).last().cloned();
-            }
-            if len == 1 {
-                if let Lower::Segment(seg) = &*self.next {
-                    return seg.values.last().cloned();
-                }
-            }
-        }
-
-        let mut parent = self.clone();
-        if parent.pop(1) == 0 {
-            parent.top().cloned()
-        } else {
-            None
-        }
+        self.top_after_popping(1).cloned()
     }
 
     /// Replace the current top-of-stack value in place.
@@ -2222,11 +2227,26 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
     /// Materialize the virtual stack back into a GSS.
     pub fn into_gss(mut self) -> LeveledGSS<T, A> {
         self.flush_pending();
+        if self.values.is_empty() {
+            return LeveledGSS {
+                inner: new_interface(self.next, self.acc),
+            };
+        }
         LeveledGSS {
             inner: new_interface(new_segment(self.values, self.next), self.acc),
         }
     }
 
+    pub fn into_gss_after_popping(mut self, n: usize) -> LeveledGSS<T, A> {
+        self.flush_pending();
+        let remaining = self.pop(n);
+        let gss = self.into_gss();
+        if remaining == 0 {
+            gss
+        } else {
+            gss.popn(remaining as isize)
+        }
+    }
 }
 
 impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> PartialEq for LeveledGSS<T, A> {
