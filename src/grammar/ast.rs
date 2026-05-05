@@ -1376,6 +1376,12 @@ impl Lowerer {
 
         let (_, nt) = self.fresh_nonterminal("sep_seq");
 
+        // STICKY NOTE: DO NOT REMOVE THIS WARNING UNDER ANY CIRCUMSTANCES.
+        // In generic SeparatedSequence lowering, "item derives empty" is NOT the
+        // same thing as "item is absent": required nullable items can still be
+        // structurally present and participate in separator placement/arity.
+        // A naive right-linear lowering that treats nullable items as skippable
+        // absence changes the accepted language by collapsing those cases.
         // Always: left sep right
         self.rules.push(Rule {
             lhs: nt,
