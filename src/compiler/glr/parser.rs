@@ -25,7 +25,6 @@ pub struct AdvanceProfile {
     pub gss_depth: u32,
     pub total_ns: u64,
     pub clone_ns: u64,
-    pub summary_ns: u64,
     pub fast_path_ns: u64,
     pub det_ns: u64,
     pub nondet_ns: u64,
@@ -550,13 +549,12 @@ fn advance_nondeterministically_profiled(
         profile.n_nondet_waves += 1;
         let mut next = ParserGSS::empty();
 
-        for state in closure.peek_values() {
+        for (state, mut isolated) in closure.grouped_by_top() {
             profile.n_nondet_branches += 1;
             let Some(action) = table.action(state, token) else {
                 continue;
             };
             profile.n_nondet_isolates += 1;
-            let mut isolated = closure.isolate(Some(state));
             let reduce_base = isolated.clone();
             let det_start = Instant::now();
             if advance_deterministically(table, &mut isolated, token) {
@@ -625,11 +623,10 @@ fn advance_nondeterministically(
     loop {
         let mut next = ParserGSS::empty();
 
-        for state in closure.peek_values() {
+        for (state, mut isolated) in closure.grouped_by_top() {
             let Some(action) = table.action(state, token) else {
                 continue;
             };
-            let mut isolated = closure.isolate(Some(state));
             let reduce_base = isolated.clone();
             if advance_deterministically(table, &mut isolated, token) {
                 merge_into(&mut shifted, isolated);

@@ -21,11 +21,7 @@ type ParserStatesByTokenizer = FxHashMap<u32, ParserGSS>;
 
 #[derive(Clone, Debug, Default)]
 pub struct GssProfileSummary {
-    pub upperbranch_nodes: usize,
-    pub interface_nodes: usize,
-    pub lower_nodes: usize,
-    pub lower_general_nodes: usize,
-    pub lower_segment_nodes: usize,
+    pub path_count: usize,
     pub total_edges: usize,
     pub max_depth: u32,
 }
@@ -52,7 +48,6 @@ pub struct CommitProfile {
     pub adv_n_nondet_waves: u64,
     pub adv_n_nondet_branches: u64,
     pub adv_clone_ns: u64,
-    pub adv_summary_ns: u64,
     pub adv_fast_path_ns: u64,
     pub adv_det_ns: u64,
     pub adv_nondet_ns: u64,
@@ -118,17 +113,14 @@ fn parser_stacks_only(gss: &ParserGSS) -> Vec<Vec<u32>> {
 
 fn summarize_gss(gss: &ParserGSS) -> GssProfileSummary {
     let stacks = gss.to_stacks();
-    let lower_nodes = stacks.iter().map(|(stack, _)| stack.len()).sum::<usize>();
     let total_edges = stacks
         .iter()
         .map(|(stack, _)| stack.len().saturating_sub(1))
         .sum::<usize>();
     GssProfileSummary {
-        lower_nodes,
-        lower_general_nodes: lower_nodes,
+        path_count: stacks.len(),
         total_edges,
         max_depth: gss.max_depth(),
-        ..GssProfileSummary::default()
     }
 }
 
@@ -138,7 +130,6 @@ fn apply_advance_profile(commit_profile: &mut CommitProfile, profile: &AdvancePr
     commit_profile.adv_n_nondet_waves += profile.n_nondet_waves as u64;
     commit_profile.adv_n_nondet_branches += profile.n_nondet_branches as u64;
     commit_profile.adv_clone_ns += profile.clone_ns;
-    commit_profile.adv_summary_ns += profile.summary_ns;
     commit_profile.adv_fast_path_ns += profile.fast_path_ns;
     commit_profile.adv_det_ns += profile.det_ns;
     commit_profile.adv_nondet_ns += profile.nondet_ns;

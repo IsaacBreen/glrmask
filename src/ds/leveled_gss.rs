@@ -239,6 +239,34 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             .collect()
     }
 
+    pub fn grouped_by_top(&self) -> SmallVec<[(T, Self); 4]> {
+        if self.is_empty() {
+            return SmallVec::new();
+        }
+        if let Some(single) = self.single_top_value() {
+            let mut result = SmallVec::new();
+            result.push((single, self.clone()));
+            return result;
+        }
+
+        let mut groups: SmallVec<[(T, Vec<(Vec<T>, A)>); 4]> = SmallVec::new();
+        for (stack, acc) in self.stacks.iter() {
+            let Some(top) = stack.last().cloned() else {
+                continue;
+            };
+            if let Some((_, grouped)) = groups.iter_mut().find(|(existing, _)| *existing == top) {
+                grouped.push((stack.clone(), acc.clone()));
+            } else {
+                groups.push((top, vec![(stack.clone(), acc.clone())]));
+            }
+        }
+
+        groups
+            .into_iter()
+            .map(|(top, stacks)| (top, Self::from_stacks(&stacks)))
+            .collect()
+    }
+
     pub fn remap_top_values<I>(&self, shifts: I) -> Self
     where
         I: IntoIterator<Item = (T, T)>,

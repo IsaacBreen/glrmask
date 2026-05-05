@@ -362,7 +362,6 @@ impl PyConstraintState {
         dict.set_item("adv_n_nondet_waves", profile.adv_n_nondet_waves)?;
         dict.set_item("adv_n_nondet_branches", profile.adv_n_nondet_branches)?;
         dict.set_item("adv_clone_ns", profile.adv_clone_ns)?;
-        dict.set_item("adv_summary_ns", profile.adv_summary_ns)?;
         dict.set_item("adv_fast_path_ns", profile.adv_fast_path_ns)?;
         dict.set_item("adv_det_ns", profile.adv_det_ns)?;
         dict.set_item("adv_nondet_ns", profile.adv_nondet_ns)?;
@@ -429,20 +428,11 @@ impl PyConstraintState {
             d.set_item("gss_stacks_before", entry.gss_stacks_before)?;
             d.set_item("gss_stacks_after", entry.gss_stacks_after)?;
 
-            d.set_item("gss_before_upperbranch_nodes", entry.gss_summary_before.upperbranch_nodes)?;
-            d.set_item("gss_before_interface_nodes", entry.gss_summary_before.interface_nodes)?;
-            d.set_item("gss_before_lower_nodes", entry.gss_summary_before.lower_nodes)?;
-            d.set_item("gss_before_lower_general_nodes", entry.gss_summary_before.lower_general_nodes)?;
-            d.set_item("gss_before_lower_segment_nodes", entry.gss_summary_before.lower_segment_nodes)?;
+            d.set_item("gss_before_path_count", entry.gss_summary_before.path_count)?;
             d.set_item("gss_before_total_edges", entry.gss_summary_before.total_edges)?;
             d.set_item("gss_before_max_depth", entry.gss_summary_before.max_depth)?;
 
-            // Backward-compatible key names now intentionally refer to AFTER state.
-            d.set_item("gss_upperbranch_nodes", entry.gss_summary_after.upperbranch_nodes)?;
-            d.set_item("gss_interface_nodes", entry.gss_summary_after.interface_nodes)?;
-            d.set_item("gss_lower_nodes", entry.gss_summary_after.lower_nodes)?;
-            d.set_item("gss_lower_general_nodes", entry.gss_summary_after.lower_general_nodes)?;
-            d.set_item("gss_lower_segment_nodes", entry.gss_summary_after.lower_segment_nodes)?;
+            d.set_item("gss_path_count", entry.gss_summary_after.path_count)?;
             d.set_item("gss_total_edges", entry.gss_summary_after.total_edges)?;
             d.set_item("gss_max_depth", entry.gss_summary_after.max_depth)?;
             d.set_item("match_start", entry.match_start)?;
@@ -465,7 +455,6 @@ impl PyConstraintState {
             d.set_item("gss_depth", p.gss_depth)?;
             d.set_item("total_ns", p.total_ns)?;
             d.set_item("clone_ns", p.clone_ns)?;
-            d.set_item("summary_ns", p.summary_ns)?;
             d.set_item("fast_path_ns", p.fast_path_ns)?;
             d.set_item("det_ns", p.det_ns)?;
             d.set_item("nondet_ns", p.nondet_ns)?;
@@ -503,7 +492,6 @@ impl PyConstraintState {
         commit_dict.set_item("adv_n_nondet_waves", commit_profile.adv_n_nondet_waves)?;
         commit_dict.set_item("adv_n_nondet_branches", commit_profile.adv_n_nondet_branches)?;
         commit_dict.set_item("adv_clone_ns", commit_profile.adv_clone_ns)?;
-        commit_dict.set_item("adv_summary_ns", commit_profile.adv_summary_ns)?;
         commit_dict.set_item("adv_fast_path_ns", commit_profile.adv_fast_path_ns)?;
         commit_dict.set_item("adv_det_ns", commit_profile.adv_det_ns)?;
         commit_dict.set_item("adv_nondet_ns", commit_profile.adv_nondet_ns)?;
