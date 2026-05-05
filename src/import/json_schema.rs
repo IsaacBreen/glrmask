@@ -1639,14 +1639,7 @@ fn split_item_separator() -> bool {
 /// The caller wraps the result with `regex_expr()` and passes it to
 /// `wrap_string_value_terminal()`.
 fn string_value_body_regex(inner: &str) -> String {
-    let open = split_open_quote();
-    let close = split_close_quote();
-    match (open, close) {
-        (false, false) => format!(r#""(?:{})""#, inner),
-        (false, true)  => format!(r#""(?:{})"#, inner),
-        (true, false)  => format!(r#"(?:{})""#, inner),
-        (true, true)   => format!(r#"(?:{})"#, inner),
-    }
+    quoted_body_regex(inner, false)
 }
 
 /// Build the regex pattern for the body terminal of a JSON object **key-colon**
@@ -1657,17 +1650,23 @@ fn string_value_body_regex(inner: &str) -> String {
 ///  - `split_close=false` → pattern includes close `"`
 ///  - `split_colon=false` → pattern includes `": "`
 fn key_colon_body_regex(inner: &str) -> String {
-    let open = split_open_quote();
+    quoted_body_regex(inner, true)
+}
+
+fn quoted_body_regex(inner: &str, include_colon_space: bool) -> String {
     let close = split_close_quote();
-    let colon = split_colon_space();
-    match (open, close, colon) {
-        (false, false, false) => format!(r#""(?:{})": "#, inner),
-        (false, false, true)  => format!(r#""(?:{})""#, inner),
-        (false, true, _)      => format!(r#""(?:{})"#, inner),
-        (true, false, false)  => format!(r#"(?:{})": "#, inner),
-        (true, false, true)   => format!(r#"(?:{})""#, inner),
-        (true, true, _)       => format!(r#"(?:{})"#, inner),
+    let mut prefix = String::new();
+    if !split_open_quote() {
+        prefix.push('"');
     }
+    let mut suffix = String::new();
+    if !close {
+        suffix.push('"');
+        if include_colon_space && !split_colon_space() {
+            suffix.push_str(": ");
+        }
+    }
+    format!("{prefix}(?:{inner}){suffix}")
 }
 
 /// Build literal bytes for the body terminal of a JSON object **key-colon**.

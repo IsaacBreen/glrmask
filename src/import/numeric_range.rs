@@ -14,11 +14,7 @@ fn mk_or(parts: Vec<String>) -> String {
 }
 
 fn mk_or_opt(parts: Vec<String>) -> Option<String> {
-    if parts.is_empty() {
-        None
-    } else {
-        Some(mk_or(parts))
-    }
+    (!parts.is_empty()).then(|| mk_or(parts))
 }
 
 fn push_optional_part(parts: &mut Vec<String>, part: Option<String>) {
