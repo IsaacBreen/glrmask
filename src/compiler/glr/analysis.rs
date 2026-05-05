@@ -8,8 +8,6 @@ pub const EOF: TerminalID = u32::MAX;
 #[derive(Debug, Clone)]
 pub struct AnalyzedGrammar {
     pub rules: Vec<Rule>,
-    #[allow(dead_code)]
-    pub start: NonterminalID,
     pub num_terminals: u32,
     pub terminal_display_names: Vec<String>,
     pub num_nonterminals: u32,
@@ -44,7 +42,6 @@ impl AnalyzedGrammar {
 
         Self {
             rules,
-            start: augmented_start,
             num_terminals: g.num_terminals(),
             terminal_display_names: (0..g.num_terminals())
                 .map(|terminal| g.terminal_display_name(terminal))
