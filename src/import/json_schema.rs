@@ -108,7 +108,7 @@ const UNSAT_SCHEMA_ERROR: &str = "__unsat_schema__";
 const EXACT_CLOSED_OBJECT_UNION_MAX_VARIANTS: usize = 8;
 const EXACT_CLOSED_OBJECT_UNION_MAX_KEYS: usize = 16;
 const EXACT_CLOSED_OBJECT_SINGLE_MAX_KEYS: usize = 16;
-const EXACT_CLOSED_OBJECT_UNION_MAX_STATES: usize = 128;
+const EXACT_CLOSED_OBJECT_UNION_MAX_STATES: usize = 512;
 const FACTORED_OPEN_OBJECT_MAX_KEYS: usize = 200;
 
 fn env_usize_with_default(name: &str, default: usize) -> usize {
@@ -5389,6 +5389,13 @@ impl<'a> SchemaCtx<'a> {
         }
 
         if keyword == "anyOf" {
+            if let Some(expr) = self.try_build_exact_closed_object_union(
+                schema,
+                options,
+                StructuralBranchMode::AnyOf,
+            )? {
+                return Ok(Some(expr));
+            }
             if let Some(expr) = self.try_reduce_anyof_closed_objects(schema, options)? {
                 return Ok(Some(expr));
             }
