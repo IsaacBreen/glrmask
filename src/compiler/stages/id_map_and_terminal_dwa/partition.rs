@@ -182,7 +182,6 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     let max_token_id = vocab.max_token_id();
     let merge_started_at = Instant::now();
     let mut merged = merge_local_id_maps_and_terminal_dwas(
-        &format!("partition:{partition_label}"),
         pairs,
         num_tokenizer_states,
         max_token_id,

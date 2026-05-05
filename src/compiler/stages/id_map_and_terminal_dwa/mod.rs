@@ -282,7 +282,6 @@ pub(crate) fn build_id_map_and_terminal_dwa(
         (pairs.into_iter().next().unwrap(), TerminalDwaPhaseProfile::default())
     } else {
         let merged = merge::merge_id_maps_and_terminal_dwas(
-            "global",
             pairs,
             num_tokenizer_states,
             max_token_id,

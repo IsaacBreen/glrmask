@@ -25,8 +25,8 @@ pub(crate) struct LocalIdMapTerminalDwa {
     pub(crate) profile: TerminalDwaPhaseProfile,
 }
 
+/// Merge local branch outputs for a single partition into one compacted DWA.
 pub(crate) fn merge_local_id_maps_and_terminal_dwas(
-    _label: &str,
     inputs: Vec<LocalIdMapTerminalDwa>,
     num_tokenizer_states: usize,
     max_token_id: u32,
@@ -40,11 +40,8 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
     }
 
     let input_refs: Vec<&LocalIdMapTerminalDwa> = inputs.iter().collect();
-    let global_id_map = build_unified_global_id_map_from_local_inputs(
-        &input_refs,
-        num_tokenizer_states,
-        max_token_id,
-    );
+    let id_map_refs: Vec<&InternalIdMap> = input_refs.iter().map(|input| &input.id_map).collect();
+    let global_id_map = build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
 
     let mut global_nwa = NWA::new(
         global_id_map.num_tsids(),
@@ -77,8 +74,11 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
     }
 }
 
+/// Merge already-compacted partition outputs into a single determinized global DWA.
+///
+/// Partition-local merges have already paid the minimize cost, so the global
+/// merge keeps behavior unchanged by stopping after determinization.
 pub(crate) fn merge_id_maps_and_terminal_dwas(
-    _label: &str,
     inputs: Vec<LocalIdMapTerminalDwa>,
     num_tokenizer_states: usize,
     max_token_id: u32,
@@ -204,15 +204,6 @@ fn build_unified_global_id_map(
             representative_original_ids: token_reps,
         },
     }
-}
-
-fn build_unified_global_id_map_from_local_inputs(
-    inputs: &[&LocalIdMapTerminalDwa],
-    num_tokenizer_states: usize,
-    max_token_id: u32,
-) -> InternalIdMap {
-    let id_map_refs: Vec<&InternalIdMap> = inputs.iter().map(|input| &input.id_map).collect();
-    build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id)
 }
 
 fn reorder_classes(
