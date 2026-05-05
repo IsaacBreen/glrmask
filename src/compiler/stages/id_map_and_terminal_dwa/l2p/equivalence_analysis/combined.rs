@@ -4,6 +4,7 @@ use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::bitset::BitSet;
+use super::combined_equivalence_analysis;
 use super::compat::TokenizerView;
 use super::disallowed_follows::normalize_disallowed_follows;
 use super::state::fast as state_equivalence_analysis;
@@ -12,6 +13,28 @@ use super::vocab::fast as vocab_equivalence_analysis;
 struct TokenDedup<'a> {
     representative_token_bytes: Vec<&'a [u8]>,
     original_to_repr: Vec<usize>,
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let trimmed = value.trim();
+            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+}
+
+fn use_reference_validation_path() -> bool {
+    [
+        "REFERENCE_EQUIV_VERIFICATION",
+        "GLRMASK_USE_REFERENCE_EQUIV",
+        "GLRMASK_SKIP_MAX_LENGTH_STATE_EQUIV",
+        "GLRMASK_SKIP_TOKEN_STATE_EQUIV",
+        "GLRMASK_FORCE_PRE_VOCAB_STATE_REDUCTION",
+        "GLRMASK_DISABLE_PRE_VOCAB_STATE_REDUCTION",
+    ]
+    .into_iter()
+    .any(env_flag_enabled)
 }
 
 #[inline]
@@ -278,6 +301,43 @@ fn analyze_equivalences_impl(
         (None, Some(ft)) => TokenizerView::new_from_flat_trans(ft, tokenizer),
         _ => TokenizerView::new(tokenizer),
     };
+
+    let max_token_id = vocab.max_token_id();
+    let mut token_bytes: Vec<&[u8]> = Vec::with_capacity(vocab.len());
+    let mut token_ids: Vec<u32> = Vec::with_capacity(vocab.len());
+    for (&tid, bytes) in &vocab.entries {
+        token_ids.push(tid);
+        token_bytes.push(bytes.as_slice());
+    }
+
+    let initial_states: Vec<usize> = match initial_state_map {
+        Some(map) => map.representative_original_ids.iter().map(|&s| s as usize).collect(),
+        None => (0..tokenizer.num_states() as usize).collect(),
+    };
+
+    if use_reference_validation_path() {
+        let result = combined_equivalence_analysis::compute_combined_equivalence_with_group_filter(
+            &tokenizer_view,
+            &token_bytes,
+            &initial_states,
+            effective_disallowed,
+            ignore_terminal,
+            active_groups,
+            shared_vocab_dfa_cache,
+        );
+        let num_dfa_states = tokenizer.num_states() as usize;
+        let state_map = match initial_state_map {
+            Some(init_map) => build_state_map_composed(&result.state_classes, num_dfa_states, init_map),
+            None => build_state_map(&result.state_classes, num_dfa_states),
+        };
+        let vocab_map = build_vocab_map(&result.vocab_classes, &token_ids, max_token_id);
+
+        return InternalIdMap {
+            tokenizer_states: state_map,
+            vocab_tokens: vocab_map,
+        };
+    }
+
     if let Some(cache) = shared_vocab_dfa_cache {
         cache.get_or_init(|| vocab_equivalence_analysis::SharedVocabDfaBase::build_from_dfa(tokenizer_view.dfa()));
     }
@@ -289,19 +349,6 @@ fn analyze_equivalences_impl(
         .map(|base| base.byte_to_class())
         .unwrap_or_else(|| super::compat::compute_byte_classes(tokenizer_view.dfa()));
 
-    // Extract vocab tokens as byte slices, ordered by token ID.
-    let max_token_id = vocab.max_token_id();
-    let mut token_bytes: Vec<&[u8]> = Vec::with_capacity(vocab.len());
-    let mut token_ids: Vec<u32> = Vec::with_capacity(vocab.len());
-    for (&tid, bytes) in &vocab.entries {
-        token_ids.push(tid);
-        token_bytes.push(bytes.as_slice());
-    }
-    // All DFA states as initial states (use initial_state_map representatives if available)
-    let initial_states: Vec<usize> = match initial_state_map {
-        Some(map) => map.representative_original_ids.iter().map(|&s| s as usize).collect(),
-        None => (0..tokenizer.num_states() as usize).collect(),
-    };
     let dedup = deduplicate_tokens_by_byte_class(&token_bytes, &byte_to_class);
     let mut relevant_bytes = [false; 256];
     for token in &dedup.representative_token_bytes {

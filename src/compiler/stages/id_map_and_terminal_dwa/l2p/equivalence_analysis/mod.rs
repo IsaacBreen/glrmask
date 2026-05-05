@@ -2,6 +2,8 @@
 
 pub(crate) mod disallowed_follows;
 pub mod combined;
+pub mod combined_equivalence_analysis;
 pub mod compat;
+pub mod reference;
 pub mod state;
 pub mod vocab;
