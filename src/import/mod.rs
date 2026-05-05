@@ -13,6 +13,22 @@ use crate::runtime::Constraint;
 type GrammarParser = fn(&str) -> crate::Result<GrammarDef>;
 type NamedGrammarParser = fn(&str) -> crate::Result<ast::NamedGrammar>;
 
+pub(crate) fn choice_or_single(mut options: Vec<ast::GrammarExpr>) -> ast::GrammarExpr {
+    if options.len() == 1 {
+        options.pop().unwrap()
+    } else {
+        ast::GrammarExpr::Choice(options)
+    }
+}
+
+pub(crate) fn sequence_or_single(mut items: Vec<ast::GrammarExpr>) -> ast::GrammarExpr {
+    match items.len() {
+        0 => ast::GrammarExpr::Sequence(Vec::new()),
+        1 => items.pop().unwrap(),
+        _ => ast::GrammarExpr::Sequence(items),
+    }
+}
+
 fn env_var_is_truthy(name: &str) -> bool {
     std::env::var(name)
         .map(|value| {

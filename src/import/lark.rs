@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use super::{choice_or_single, sequence_or_single};
 use crate::GlrMaskError;
 use crate::grammar::flat::GrammarDef;
 use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, lower};
@@ -293,22 +294,6 @@ fn bounded_repeat_expr(atom: GrammarExpr, min: usize, max: Option<usize>) -> Gra
         expr: Box::new(atom),
         min,
         max,
-    }
-}
-
-fn choice_or_single(mut options: Vec<GrammarExpr>) -> GrammarExpr {
-    if options.len() == 1 {
-        options.pop().unwrap()
-    } else {
-        GrammarExpr::Choice(options)
-    }
-}
-
-fn sequence_or_single(mut parts: Vec<GrammarExpr>) -> GrammarExpr {
-    match parts.len() {
-        0 => GrammarExpr::Sequence(Vec::new()),
-        1 => parts.pop().unwrap(),
-        _ => GrammarExpr::Sequence(parts),
     }
 }
 

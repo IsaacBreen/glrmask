@@ -1,3 +1,4 @@
+use super::{choice_or_single, sequence_or_single};
 use crate::GlrMaskError;
 use crate::grammar::flat::GrammarDef;
 use crate::grammar::factoring::factor_named_grammar;
@@ -218,22 +219,6 @@ fn is_ebnf_ident_start(byte: u8) -> bool {
 
 fn is_ebnf_ident_continue(byte: u8) -> bool {
     (byte as char).is_ascii_alphanumeric() || byte == b'_'
-}
-
-fn choice_or_single(mut options: Vec<GrammarExpr>) -> GrammarExpr {
-    if options.len() == 1 {
-        options.pop().unwrap()
-    } else {
-        GrammarExpr::Choice(options)
-    }
-}
-
-fn sequence_or_single(mut items: Vec<GrammarExpr>) -> GrammarExpr {
-    match items.len() {
-        0 => GrammarExpr::Sequence(Vec::new()),
-        1 => items.pop().unwrap(),
-        _ => GrammarExpr::Sequence(items),
-    }
 }
 
 fn apply_postfix_operator(atom: GrammarExpr, token: Option<&Token>) -> GrammarExpr {
