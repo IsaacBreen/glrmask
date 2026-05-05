@@ -15,28 +15,6 @@ struct TokenDedup<'a> {
     original_to_repr: Vec<usize>,
 }
 
-fn env_flag_enabled(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| {
-            let trimmed = value.trim();
-            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
-        })
-        .unwrap_or(false)
-}
-
-fn use_reference_validation_path() -> bool {
-    [
-        "REFERENCE_EQUIV_VERIFICATION",
-        "GLRMASK_USE_REFERENCE_EQUIV",
-        "GLRMASK_SKIP_MAX_LENGTH_STATE_EQUIV",
-        "GLRMASK_SKIP_TOKEN_STATE_EQUIV",
-        "GLRMASK_FORCE_PRE_VOCAB_STATE_REDUCTION",
-        "GLRMASK_DISABLE_PRE_VOCAB_STATE_REDUCTION",
-    ]
-    .into_iter()
-    .any(env_flag_enabled)
-}
-
 #[inline]
 pub(crate) fn hash_byte_class_seq(bytes: &[u8], byte_to_class: &[u8; 256]) -> u128 {
     let mut hash: u128 = 0xFF51_AFD7_ED55_8CCD;
@@ -315,8 +293,7 @@ fn analyze_equivalences_impl(
         None => (0..tokenizer.num_states() as usize).collect(),
     };
 
-    if use_reference_validation_path() {
-        let result = combined_equivalence_analysis::compute_combined_equivalence_with_group_filter(
+    if let Some(result) = combined_equivalence_analysis::compute_reference_validation_if_enabled(
             &tokenizer_view,
             &token_bytes,
             &initial_states,
@@ -324,7 +301,7 @@ fn analyze_equivalences_impl(
             ignore_terminal,
             active_groups,
             shared_vocab_dfa_cache,
-        );
+        ) {
         let num_dfa_states = tokenizer.num_states() as usize;
         let state_map = match initial_state_map {
             Some(init_map) => build_state_map_composed(&result.state_classes, num_dfa_states, init_map),

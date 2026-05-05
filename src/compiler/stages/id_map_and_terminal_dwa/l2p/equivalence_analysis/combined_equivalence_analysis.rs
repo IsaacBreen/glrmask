@@ -109,6 +109,43 @@ fn debug_profile_enabled() -> bool {
     env_flag_enabled("GLRMASK_DEBUG_PROFILE")
 }
 
+pub(crate) fn reference_validation_enabled_from_env() -> bool {
+    [
+        REFERENCE_EQUIV_VERIFICATION_ENV,
+        USE_REFERENCE_EQUIV_ENV,
+        SKIP_MAX_LENGTH_STATE_EQUIV_ENV,
+        SKIP_TOKEN_STATE_EQUIV_ENV,
+        FORCE_PRE_VOCAB_STATE_REDUCTION_ENV,
+        DISABLE_PRE_VOCAB_STATE_REDUCTION_ENV,
+    ]
+    .into_iter()
+    .any(env_flag_enabled)
+}
+
+pub(crate) fn compute_reference_validation_if_enabled<S: AsRef<[u8]> + Sync>(
+    tokenizer: &TokenizerView,
+    tokens: &[S],
+    initial_states: &[usize],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    ignore_terminal: Option<u32>,
+    active_groups: Option<&[bool]>,
+    shared_vocab_dfa_cache: Option<&vocab_equivalence_analysis::SharedVocabDfaCache>,
+) -> Option<CombinedEquivalenceResult> {
+    if !reference_validation_enabled_from_env() {
+        return None;
+    }
+
+    Some(compute_combined_equivalence_with_group_filter(
+        tokenizer,
+        tokens,
+        initial_states,
+        disallowed_follows,
+        ignore_terminal,
+        active_groups,
+        shared_vocab_dfa_cache,
+    ))
+}
+
 fn elapsed_ms(started_at: std::time::Instant) -> f64 {
     started_at.elapsed().as_secs_f64() * 1000.0
 }
