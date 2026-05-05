@@ -62,7 +62,7 @@ fn selected_variant() -> Variant {
         match std::env::var("STACKVEC").as_deref() {
             Ok("arc") | Ok("arc_array") => Variant::ArcArray,
             Ok("vec") => Variant::Vec,
-            _ => Variant::ArcArray, // default
+            _ => Variant::Vec, // default
         }
     })
 }
@@ -89,7 +89,7 @@ fn selected_variant() -> Variant {
             Ok("small32") => Variant::Small32,
             Ok("small64") | Ok("small") => Variant::Small64,
             Ok("small128") => Variant::Small128,
-            _ => Variant::ArcArray, // default
+            _ => Variant::Vec, // default
         }
     })
 }

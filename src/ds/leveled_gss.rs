@@ -8,7 +8,7 @@ use std::hash::Hash;
 use std::sync::{Arc, OnceLock};
 
 /// Type alias for segment values. Set `STACKVEC` before process startup:
-///   normal builds: `arc` (default), `vec`
+///   normal builds: `vec` (default), `arc`
 ///   with `stackvec-experiments`: `array*`, `im`, `rpds`, `seg`, `small*`
 type SV<T> = DynStackVec<T>;
 
