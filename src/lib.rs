@@ -19,9 +19,12 @@ pub use ds::weight::{
 };
 pub use error::{Error, GlrMaskError, Result};
 pub use runtime::{
+    CommitProfile,
     Constraint,
     ConstraintState,
     FillMaskTimings,
+    GssProfileSummary,
+    PerAdvanceEntry,
 };
 pub use vocab::Vocab;
 

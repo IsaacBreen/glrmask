@@ -10,6 +10,36 @@ pub type ParserGSS = LeveledGSS<u32, TerminalsDisallowed>;
 
 type ReduceSources = SmallVec<[(u32, ParserGSS); 4]>;
 
+#[derive(Clone, Debug, Default)]
+pub struct AdvanceProfile {
+    pub pure_shift: bool,
+    pub deterministic_entered: bool,
+    pub deterministic_finished: bool,
+    pub nondeterministic_entered: bool,
+    pub vstack_len: u32,
+    pub n_reduces_above_floor: u32,
+    pub n_floor_crossings: u32,
+    pub n_nondet_waves: u32,
+    pub n_nondet_branches: u32,
+    pub top_states: u32,
+    pub gss_depth: u32,
+    pub total_ns: u64,
+    pub clone_ns: u64,
+    pub summary_ns: u64,
+    pub fast_path_ns: u64,
+    pub det_ns: u64,
+    pub nondet_ns: u64,
+    pub nondet_det_ns: u64,
+    pub det_exit_reason: u32,
+    pub det_exit_state: u32,
+    pub n_det_action_lookups: u32,
+    pub n_det_goto_lookups: u32,
+    pub n_det_popn_ops: u32,
+    pub n_nondet_reduce_ops: u32,
+    pub n_nondet_merges: u32,
+    pub n_nondet_isolates: u32,
+}
+
 pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> ParserGSS {
     advance_stacks_core(table, stack.clone(), token)
 }
@@ -18,6 +48,72 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
 /// unnecessary Arc clone when the caller doesn't need the original.
 pub(crate) fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> ParserGSS {
     advance_stacks_core(table, stack, token)
+}
+
+pub(crate) fn advance_stacks_profiled(
+    table: &GLRTable,
+    stack: &ParserGSS,
+    token: TerminalID,
+) -> (ParserGSS, AdvanceProfile) {
+    use std::time::Instant;
+
+    let total_start = Instant::now();
+    let clone_start = Instant::now();
+    let mut gss = stack.clone();
+    let mut profile = AdvanceProfile {
+        clone_ns: clone_start.elapsed().as_nanos() as u64,
+        top_states: stack.peek_values().len() as u32,
+        gss_depth: stack.max_depth(),
+        vstack_len: stack.try_virtual_stack().map_or(0, |vstack| vstack.len() as u32),
+        ..AdvanceProfile::default()
+    };
+
+    let fast_path_start = Instant::now();
+    if let Some(state) = gss.single_exclusive_top_value() {
+        match table.action(state, token) {
+            Some(Action::Shift(target, is_replace)) => {
+                profile.pure_shift = true;
+                profile.fast_path_ns = fast_path_start.elapsed().as_nanos() as u64;
+                profile.total_ns = total_start.elapsed().as_nanos() as u64;
+                return (
+                    if *is_replace {
+                        gss.popn(1).push(*target)
+                    } else {
+                        gss.push(*target)
+                    },
+                    profile,
+                );
+            }
+            Some(Action::StackShifts(shifts)) => {
+                profile.fast_path_ns = fast_path_start.elapsed().as_nanos() as u64;
+                profile.total_ns = total_start.elapsed().as_nanos() as u64;
+                return (apply_stack_shifts(gss, shifts), profile);
+            }
+            Some(Action::GuardedStackShifts(shifts)) => {
+                profile.fast_path_ns = fast_path_start.elapsed().as_nanos() as u64;
+                profile.total_ns = total_start.elapsed().as_nanos() as u64;
+                return (apply_guarded_stack_shifts(gss, shifts), profile);
+            }
+            _ => {}
+        }
+    }
+    profile.fast_path_ns = fast_path_start.elapsed().as_nanos() as u64;
+
+    let det_start = Instant::now();
+    let det_ok = advance_deterministically_profiled(table, &mut gss, token, &mut profile);
+    profile.det_ns = det_start.elapsed().as_nanos() as u64;
+    if det_ok {
+        profile.deterministic_finished = true;
+        profile.total_ns = total_start.elapsed().as_nanos() as u64;
+        return (gss, profile);
+    }
+
+    let nondet_start = Instant::now();
+    profile.nondeterministic_entered = true;
+    let gss = advance_nondeterministically_profiled(table, gss, token, &mut profile);
+    profile.nondet_ns = nondet_start.elapsed().as_nanos() as u64;
+    profile.total_ns = total_start.elapsed().as_nanos() as u64;
+    (gss, profile)
 }
 
 /// Advance the GSS by one token.
@@ -301,6 +397,221 @@ fn advance_reduce_branch(
         };
         let det_ok = advance_deterministically(table, &mut branch, token);
         (branch, det_ok)
+    }
+}
+
+fn advance_deterministically_profiled(
+    table: &GLRTable,
+    gss: &mut ParserGSS,
+    token: TerminalID,
+    profile: &mut AdvanceProfile,
+) -> bool {
+    let Some(mut stack) = gss.try_virtual_stack() else {
+        profile.det_exit_reason = 6;
+        return false;
+    };
+
+    profile.deterministic_entered = true;
+    profile.vstack_len = stack.len() as u32;
+
+    loop {
+        let Some(&state) = stack.top() else {
+            profile.det_exit_reason = 5;
+            break;
+        };
+
+        profile.n_det_action_lookups += 1;
+        match table.action(state, token) {
+            Some(Action::Reduce(nt, len)) => {
+                let rhs_len = *len as usize;
+                if rhs_len < stack.len() {
+                    profile.n_reduces_above_floor += 1;
+                    if rhs_len == 1 {
+                        if let Some(goto_from) = stack.parent_of_top() {
+                            profile.n_det_goto_lookups += 1;
+                            match table.goto_target(goto_from, *nt) {
+                                Some((target, false)) if stack.replace_top(target) => continue,
+                                Some((target, true)) => {
+                                    stack.pop(2);
+                                    stack.push(target);
+                                    continue;
+                                }
+                                Some(_) | None => {
+                                    *gss = ParserGSS::empty();
+                                    profile.det_exit_reason = 4;
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+
+                    stack.pop(rhs_len);
+                    let goto_from = *stack.top().unwrap();
+                    profile.n_det_goto_lookups += 1;
+                    match table.goto_target(goto_from, *nt) {
+                        Some((target, false)) => stack.push(target),
+                        Some((target, true)) => {
+                            stack.replace_top(target);
+                        }
+                        None => {
+                            *gss = ParserGSS::empty();
+                            profile.det_exit_reason = 4;
+                            return false;
+                        }
+                    }
+                } else {
+                    profile.n_floor_crossings += 1;
+                    profile.n_det_popn_ops += 1;
+                    let current = stack.into_gss();
+                    let popped = current.popn(rhs_len as isize);
+                    let mut normal_shifts = SmallVec::<[(u32, u32); 8]>::new();
+                    let mut replace_gotos = SmallVec::<[(u32, u32); 4]>::new();
+                    for goto_from in popped.peek_values() {
+                        profile.n_det_goto_lookups += 1;
+                        if let Some((target, is_replace)) = table.goto_target(goto_from, *nt) {
+                            if is_replace {
+                                replace_gotos.push((goto_from, target));
+                            } else {
+                                normal_shifts.push((goto_from, target));
+                            }
+                        }
+                    }
+                    let rebuilt = if replace_gotos.is_empty() {
+                        popped.remap_top_values_owned(normal_shifts)
+                    } else {
+                        let mut rebuilt = popped.remap_top_values(normal_shifts);
+                        for (goto_from, target) in replace_gotos {
+                            let base = popped.isolate(Some(goto_from));
+                            rebuilt = rebuilt.merge(&base.popn(1).push(target));
+                        }
+                        rebuilt
+                    };
+                    let Some(next_stack) = rebuilt.try_virtual_stack() else {
+                        *gss = rebuilt;
+                        profile.det_exit_reason = 7;
+                        return false;
+                    };
+                    stack = next_stack;
+                }
+            }
+            Some(Action::Shift(target, is_replace)) => {
+                if *is_replace {
+                    stack.replace_top(*target);
+                } else {
+                    stack.push(*target);
+                }
+                *gss = stack.into_gss();
+                profile.det_exit_reason = 1;
+                return true;
+            }
+            Some(Action::StackShifts(shifts)) => {
+                *gss = apply_stack_shifts(stack.into_gss(), shifts);
+                profile.det_exit_reason = 1;
+                return true;
+            }
+            Some(Action::GuardedStackShifts(shifts)) => {
+                *gss = apply_guarded_stack_shifts(stack.into_gss(), shifts);
+                profile.det_exit_reason = 1;
+                return true;
+            }
+            Some(Action::Split { .. }) => {
+                profile.det_exit_reason = 2;
+                profile.det_exit_state = state;
+                break;
+            }
+            Some(Action::Accept) => {
+                profile.det_exit_reason = 3;
+                profile.det_exit_state = state;
+                break;
+            }
+            None => {
+                profile.det_exit_reason = 4;
+                profile.det_exit_state = state;
+                break;
+            }
+        }
+    }
+
+    *gss = stack.into_gss();
+    false
+}
+
+fn advance_nondeterministically_profiled(
+    table: &GLRTable,
+    mut closure: ParserGSS,
+    token: TerminalID,
+    profile: &mut AdvanceProfile,
+) -> ParserGSS {
+    use std::time::Instant;
+
+    let mut shifted = ParserGSS::empty();
+
+    loop {
+        profile.n_nondet_waves += 1;
+        let mut next = ParserGSS::empty();
+
+        for state in closure.peek_values() {
+            profile.n_nondet_branches += 1;
+            let Some(action) = table.action(state, token) else {
+                continue;
+            };
+            profile.n_nondet_isolates += 1;
+            let mut isolated = closure.isolate(Some(state));
+            let reduce_base = isolated.clone();
+            let det_start = Instant::now();
+            if advance_deterministically(table, &mut isolated, token) {
+                profile.nondet_det_ns += det_start.elapsed().as_nanos() as u64;
+                profile.n_nondet_merges += 1;
+                merge_into(&mut shifted, isolated);
+                continue;
+            }
+            profile.nondet_det_ns += det_start.elapsed().as_nanos() as u64;
+
+            if let Some(target) = action.shift_target() {
+                let is_replace = action.shift_is_replace() && !table.forwarded_shifts.contains(&(state, token));
+                profile.n_nondet_merges += 1;
+                if is_replace {
+                    shifted = shifted.absorb_push_same_acc(target, &isolated.popn(1));
+                } else {
+                    shifted = shifted.absorb_push_same_acc(target, &isolated);
+                }
+            }
+
+            if let Action::StackShifts(shifts) = action {
+                profile.n_nondet_merges += 1;
+                merge_into(&mut shifted, apply_stack_shifts(isolated.clone(), shifts));
+            }
+
+            action.for_each_reduce(|nt, len| {
+                for (goto_from, base) in reduce_sources_from_isolated(&reduce_base, len as usize) {
+                    profile.n_nondet_reduce_ops += 1;
+                    let Some((target, is_replace)) = table.goto_target(goto_from, nt) else {
+                        continue;
+                    };
+                    let (branch, det_ok) = advance_reduce_branch(table, base, target, is_replace, token);
+                    if det_ok {
+                        profile.n_nondet_merges += 1;
+                        match branch.into_virtual_stack() {
+                            Ok(stack) => {
+                                let current = std::mem::replace(&mut shifted, ParserGSS::empty());
+                                shifted = current.absorb_vstack_same_acc_owned(stack);
+                            }
+                            Err(branch) => {
+                                merge_into(&mut shifted, branch);
+                            }
+                        }
+                    } else {
+                        profile.n_nondet_merges += 1;
+                        merge_into(&mut next, branch);
+                    }
+                }
+            });
+        }
+
+        if next.is_empty() {
+            return shifted;
+        }
+        closure = next;
     }
 }
 

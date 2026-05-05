@@ -16,6 +16,7 @@
 //! NumPy `i32` to `u32` bitmask view cast used by `fill_mask`.
 
 use numpy::{PyArray1, PyReadwriteArray1};
+use pyo3::exceptions::PyNotImplementedError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
@@ -184,38 +185,40 @@ impl PyConstraint {
     }
 
     /// Temporary diagnostic: return the original→internal token mapping as a list.
-    fn _debug_token_map(&self) -> Vec<u32> {
-        self.inner.debug_original_token_to_internal()
+    fn _debug_token_map(&self) -> PyResult<Vec<u32>> {
+        Err(PyNotImplementedError::new_err("_debug_token_map is not available in this build"))
     }
 
     /// Temporary diagnostic: return internal→originals mapping.
-    fn _debug_internal_to_tokens(&self) -> Vec<Vec<u32>> {
-        self.inner.debug_internal_token_to_tokens()
+    fn _debug_internal_to_tokens(&self) -> PyResult<Vec<Vec<u32>>> {
+        Err(PyNotImplementedError::new_err("_debug_internal_to_tokens is not available in this build"))
     }
 
     /// Walk bytes through DFA from every state. Returns list of (final_state, finalizers, futures).
-    fn _debug_walk_dfa(&self, token_bytes: Vec<u8>) -> Vec<(u32, Vec<u32>, Vec<u32>)> {
-        self.inner.debug_walk_dfa(&token_bytes)
+    fn _debug_walk_dfa(&self, token_bytes: Vec<u8>) -> PyResult<Vec<(u32, Vec<u32>, Vec<u32>)>> {
+        let _ = token_bytes;
+        Err(PyNotImplementedError::new_err("_debug_walk_dfa is not available in this build"))
     }
 
     /// Return action table entries for a given parser state.
     /// Returns list of (terminal_id, action_str) pairs.
-    fn _debug_actions_for_state(&self, state: u32) -> Vec<(u32, String)> {
-        self.inner.debug_actions_for_state(state)
+    fn _debug_actions_for_state(&self, state: u32) -> PyResult<Vec<(u32, String)>> {
+        let _ = state;
+        Err(PyNotImplementedError::new_err("_debug_actions_for_state is not available in this build"))
     }
 
     /// Return rule info: list of (lhs_nonterminal, rhs_length, rhs_symbols_debug).
-    fn _debug_rules(&self) -> Vec<(u32, usize, String)> {
-        self.inner.debug_rules()
+    fn _debug_rules(&self) -> PyResult<Vec<(u32, usize, String)>> {
+        Err(PyNotImplementedError::new_err("_debug_rules is not available in this build"))
     }
 
     /// Return terminal names/mapping for the GLR table.
-    fn _debug_num_terminals(&self) -> u32 {
-        self.inner.debug_num_terminals()
+    fn _debug_num_terminals(&self) -> PyResult<u32> {
+        Err(PyNotImplementedError::new_err("_debug_num_terminals is not available in this build"))
     }
 
-    fn _debug_num_states(&self) -> u32 {
-        self.inner.debug_num_states()
+    fn _debug_num_states(&self) -> PyResult<u32> {
+        Err(PyNotImplementedError::new_err("_debug_num_states is not available in this build"))
     }
 }
 
@@ -335,61 +338,62 @@ impl PyConstraintState {
 
     /// Like commit_token but returns profiling stats as a dict.
     fn commit_token_profiled<'py>(&mut self, py: Python<'py>, token_id: u32) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-           let (total_ns, scan_ns, prune_ns, queue_ns, fuse_ns, exec_ns, advance_ns, advance_may_check_ns, advance_core_ns, advance_future_disallow_ns, actionable_ns, may_advance_ns, n_tokenizer_states, n_queue_entries, n_advances,
-               adv_n_reduces_above_floor, adv_n_floor_crossings, adv_n_nondet_waves, adv_n_nondet_branches, adv_clone_ns, adv_fast_path_ns, adv_det_ns, adv_nondet_ns, adv_vstack_len, adv_gss_depth,
-               adv_det_exit_reason, adv_det_exit_state, adv_summary_ns,
-               adv_n_det_action_lookups, adv_n_det_goto_lookups, adv_n_det_popn_ops,
-             adv_det_action_lookup_ns, adv_det_goto_lookup_ns, adv_det_pop_ns, adv_det_push_ns, adv_det_floor_cross_ns,
-             adv_det_floor_sources_ns, adv_det_floor_rebuild_ns, adv_det_floor_try_vstack_ns,
-               adv_n_nondet_reduce_ops, adv_n_nondet_merges, adv_n_nondet_isolates,
-               adv_nondet_det_ns) =
-            self.inner.with_dependent_mut(|_owner, state| {
-                state.commit_token_profiled(token_id).map_err(|e| PyValueError::new_err(e))
-            })?;
+        let profile = self.inner.with_dependent_mut(|_owner, state| {
+            state.commit_token_profiled(token_id).map_err(|e| PyValueError::new_err(e))
+        })?;
         let dict = pyo3::types::PyDict::new(py);
-        dict.set_item("total_ns", total_ns)?;
-        dict.set_item("scan_ns", scan_ns)?;
-        dict.set_item("prune_ns", prune_ns)?;
-        dict.set_item("queue_ns", queue_ns)?;
-        dict.set_item("fuse_ns", fuse_ns)?;
-        dict.set_item("exec_ns", exec_ns)?;
-        dict.set_item("advance_ns", advance_ns)?;
-        dict.set_item("advance_may_check_ns", advance_may_check_ns)?;
-        dict.set_item("advance_core_ns", advance_core_ns)?;
-        dict.set_item("advance_future_disallow_ns", advance_future_disallow_ns)?;
-        dict.set_item("actionable_ns", actionable_ns)?;
-        dict.set_item("may_advance_ns", may_advance_ns)?;
-        dict.set_item("n_tokenizer_states", n_tokenizer_states)?;
-        dict.set_item("n_queue_entries", n_queue_entries)?;
-        dict.set_item("n_advances", n_advances)?;
-        dict.set_item("adv_n_reduces_above_floor", adv_n_reduces_above_floor)?;
-        dict.set_item("adv_n_floor_crossings", adv_n_floor_crossings)?;
-        dict.set_item("adv_n_nondet_waves", adv_n_nondet_waves)?;
-        dict.set_item("adv_n_nondet_branches", adv_n_nondet_branches)?;
-        dict.set_item("adv_clone_ns", adv_clone_ns)?;
-        dict.set_item("adv_summary_ns", adv_summary_ns)?;
-        dict.set_item("adv_fast_path_ns", adv_fast_path_ns)?;
-        dict.set_item("adv_det_ns", adv_det_ns)?;
-        dict.set_item("adv_nondet_ns", adv_nondet_ns)?;
-        dict.set_item("adv_vstack_len", adv_vstack_len)?;
-        dict.set_item("adv_gss_depth", adv_gss_depth)?;
-        dict.set_item("adv_det_exit_reason", adv_det_exit_reason)?;
-        dict.set_item("adv_det_exit_state", adv_det_exit_state)?;
-        dict.set_item("adv_n_det_action_lookups", adv_n_det_action_lookups)?;
-        dict.set_item("adv_n_det_goto_lookups", adv_n_det_goto_lookups)?;
-        dict.set_item("adv_n_det_popn_ops", adv_n_det_popn_ops)?;
-        dict.set_item("adv_det_action_lookup_ns", adv_det_action_lookup_ns)?;
-        dict.set_item("adv_det_goto_lookup_ns", adv_det_goto_lookup_ns)?;
-        dict.set_item("adv_det_pop_ns", adv_det_pop_ns)?;
-        dict.set_item("adv_det_push_ns", adv_det_push_ns)?;
-        dict.set_item("adv_det_floor_cross_ns", adv_det_floor_cross_ns)?;
-        dict.set_item("adv_det_floor_sources_ns", adv_det_floor_sources_ns)?;
-        dict.set_item("adv_det_floor_rebuild_ns", adv_det_floor_rebuild_ns)?;
-        dict.set_item("adv_det_floor_try_vstack_ns", adv_det_floor_try_vstack_ns)?;
-        dict.set_item("adv_n_nondet_reduce_ops", adv_n_nondet_reduce_ops)?;
-        dict.set_item("adv_n_nondet_merges", adv_n_nondet_merges)?;
-        dict.set_item("adv_n_nondet_isolates", adv_n_nondet_isolates)?;
-        dict.set_item("adv_nondet_det_ns", adv_nondet_det_ns)?;
+        dict.set_item("total_ns", profile.total_ns)?;
+        dict.set_item("scan_ns", profile.scan_ns)?;
+        dict.set_item("prune_ns", profile.prune_ns)?;
+        dict.set_item("queue_ns", profile.queue_ns)?;
+        dict.set_item("fuse_ns", profile.fuse_ns)?;
+        dict.set_item("exec_ns", profile.exec_ns)?;
+        dict.set_item("advance_ns", profile.advance_ns)?;
+        dict.set_item("advance_may_check_ns", profile.advance_may_check_ns)?;
+        dict.set_item("advance_core_ns", profile.advance_core_ns)?;
+        dict.set_item("advance_future_disallow_ns", profile.advance_future_disallow_ns)?;
+        dict.set_item("actionable_ns", profile.actionable_ns)?;
+        dict.set_item("may_advance_ns", profile.may_advance_ns)?;
+        dict.set_item("n_tokenizer_states", profile.n_tokenizer_states)?;
+        dict.set_item("n_queue_entries", profile.n_queue_entries)?;
+        dict.set_item("n_advances", profile.n_advances)?;
+        dict.set_item("adv_n_reduces_above_floor", profile.adv_n_reduces_above_floor)?;
+        dict.set_item("adv_n_floor_crossings", profile.adv_n_floor_crossings)?;
+        dict.set_item("adv_n_nondet_waves", profile.adv_n_nondet_waves)?;
+        dict.set_item("adv_n_nondet_branches", profile.adv_n_nondet_branches)?;
+        dict.set_item("adv_clone_ns", profile.adv_clone_ns)?;
+        dict.set_item("adv_summary_ns", profile.adv_summary_ns)?;
+        dict.set_item("adv_fast_path_ns", profile.adv_fast_path_ns)?;
+        dict.set_item("adv_det_ns", profile.adv_det_ns)?;
+        dict.set_item("adv_nondet_ns", profile.adv_nondet_ns)?;
+        dict.set_item("adv_vstack_len", profile.adv_vstack_len)?;
+        dict.set_item("adv_gss_depth", profile.adv_gss_depth)?;
+        dict.set_item("adv_det_exit_reason", profile.adv_det_exit_reason)?;
+        dict.set_item("adv_det_exit_state", profile.adv_det_exit_state)?;
+        dict.set_item("adv_n_det_action_lookups", profile.adv_n_det_action_lookups)?;
+        dict.set_item("adv_n_det_goto_lookups", profile.adv_n_det_goto_lookups)?;
+        dict.set_item("adv_n_det_popn_ops", profile.adv_n_det_popn_ops)?;
+        dict.set_item("adv_n_nondet_reduce_ops", profile.adv_n_nondet_reduce_ops)?;
+        dict.set_item("adv_n_nondet_merges", profile.adv_n_nondet_merges)?;
+        dict.set_item("adv_n_nondet_isolates", profile.adv_n_nondet_isolates)?;
+        dict.set_item("adv_nondet_det_ns", profile.adv_nondet_det_ns)?;
+        dict.set_item("fast_path_total_ns", profile.fast_path_total_ns)?;
+        dict.set_item("fast_path_tokenizer_exec_ns", profile.fast_path_tokenizer_exec_ns)?;
+        dict.set_item("fast_path_match_scan_ns", profile.fast_path_match_scan_ns)?;
+        dict.set_item("fast_path_end_state_check_ns", profile.fast_path_end_state_check_ns)?;
+        dict.set_item("fast_path_prune_ns", profile.fast_path_prune_ns)?;
+        dict.set_item("fast_path_advance_ns", profile.fast_path_advance_ns)?;
+        dict.set_item("fast_path_future_disallow_ns", profile.fast_path_future_disallow_ns)?;
+        dict.set_item("fast_path_fuse_ns", profile.fast_path_fuse_ns)?;
+        dict.set_item("fast_path_state_update_ns", profile.fast_path_state_update_ns)?;
+        dict.set_item("linear_fast_path_total_ns", profile.linear_fast_path_total_ns)?;
+        dict.set_item("linear_fast_path_exec_ns", profile.linear_fast_path_exec_ns)?;
+        dict.set_item("linear_fast_path_match_scan_ns", profile.linear_fast_path_match_scan_ns)?;
+        dict.set_item("linear_fast_path_end_state_check_ns", profile.linear_fast_path_end_state_check_ns)?;
+        dict.set_item("linear_fast_path_advance_ns", profile.linear_fast_path_advance_ns)?;
+        dict.set_item("linear_fast_path_future_disallow_ns", profile.linear_fast_path_future_disallow_ns)?;
+        dict.set_item("linear_fast_path_fuse_ns", profile.linear_fast_path_fuse_ns)?;
+        dict.set_item("linear_fast_path_steps", profile.linear_fast_path_steps)?;
         Ok(dict)
     }
 
@@ -410,7 +414,7 @@ impl PyConstraintState {
 
     /// Per-advance profiling: returns a list of per-advance entries and final GSS stacks.
     fn commit_token_per_advance<'py>(&mut self, py: Python<'py>, token_id: u32) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-        let (advances, final_stacks) = self.inner.with_dependent_mut(|_owner, state| {
+        let (advances, final_stacks, commit_profile) = self.inner.with_dependent_mut(|_owner, state| {
             state.commit_token_per_advance(token_id).map_err(|e| PyValueError::new_err(e))
         })?;
 
@@ -425,22 +429,22 @@ impl PyConstraintState {
             d.set_item("gss_stacks_before", entry.gss_stacks_before)?;
             d.set_item("gss_stacks_after", entry.gss_stacks_after)?;
 
-            d.set_item("gss_before_upperbranch_nodes", entry.gss_summary_upperbranch_before)?;
-            d.set_item("gss_before_interface_nodes", entry.gss_summary_interface_before)?;
-            d.set_item("gss_before_lower_nodes", entry.gss_summary_lower_before)?;
-            d.set_item("gss_before_lower_general_nodes", entry.gss_summary_lower_general_before)?;
-            d.set_item("gss_before_lower_segment_nodes", entry.gss_summary_lower_segment_before)?;
-            d.set_item("gss_before_total_edges", entry.gss_summary_edges_before)?;
-            d.set_item("gss_before_max_depth", entry.gss_summary_depth_before)?;
+            d.set_item("gss_before_upperbranch_nodes", entry.gss_summary_before.upperbranch_nodes)?;
+            d.set_item("gss_before_interface_nodes", entry.gss_summary_before.interface_nodes)?;
+            d.set_item("gss_before_lower_nodes", entry.gss_summary_before.lower_nodes)?;
+            d.set_item("gss_before_lower_general_nodes", entry.gss_summary_before.lower_general_nodes)?;
+            d.set_item("gss_before_lower_segment_nodes", entry.gss_summary_before.lower_segment_nodes)?;
+            d.set_item("gss_before_total_edges", entry.gss_summary_before.total_edges)?;
+            d.set_item("gss_before_max_depth", entry.gss_summary_before.max_depth)?;
 
             // Backward-compatible key names now intentionally refer to AFTER state.
-            d.set_item("gss_upperbranch_nodes", entry.gss_summary_upperbranch_after)?;
-            d.set_item("gss_interface_nodes", entry.gss_summary_interface_after)?;
-            d.set_item("gss_lower_nodes", entry.gss_summary_lower_after)?;
-            d.set_item("gss_lower_general_nodes", entry.gss_summary_lower_general_after)?;
-            d.set_item("gss_lower_segment_nodes", entry.gss_summary_lower_segment_after)?;
-            d.set_item("gss_total_edges", entry.gss_summary_edges_after)?;
-            d.set_item("gss_max_depth", entry.gss_summary_depth_after)?;
+            d.set_item("gss_upperbranch_nodes", entry.gss_summary_after.upperbranch_nodes)?;
+            d.set_item("gss_interface_nodes", entry.gss_summary_after.interface_nodes)?;
+            d.set_item("gss_lower_nodes", entry.gss_summary_after.lower_nodes)?;
+            d.set_item("gss_lower_general_nodes", entry.gss_summary_after.lower_general_nodes)?;
+            d.set_item("gss_lower_segment_nodes", entry.gss_summary_after.lower_segment_nodes)?;
+            d.set_item("gss_total_edges", entry.gss_summary_after.total_edges)?;
+            d.set_item("gss_max_depth", entry.gss_summary_after.max_depth)?;
             d.set_item("match_start", entry.match_start)?;
             d.set_item("match_end", entry.match_end)?;
             d.set_item("token_bound", entry.token_bound)?;
@@ -466,31 +470,11 @@ impl PyConstraintState {
             d.set_item("det_ns", p.det_ns)?;
             d.set_item("nondet_ns", p.nondet_ns)?;
             d.set_item("nondet_det_ns", p.nondet_det_ns)?;
-            d.set_item("nondet_det_action_lookup_ns", p.nondet_det_action_lookup_ns)?;
-            d.set_item("nondet_det_goto_lookup_ns", p.nondet_det_goto_lookup_ns)?;
-            d.set_item("nondet_det_pop_ns", p.nondet_det_pop_ns)?;
-            d.set_item("nondet_det_push_ns", p.nondet_det_push_ns)?;
-            d.set_item("nondet_det_floor_cross_ns", p.nondet_det_floor_cross_ns)?;
-            d.set_item("nondet_det_floor_sources_ns", p.nondet_det_floor_sources_ns)?;
-            d.set_item("nondet_det_floor_rebuild_ns", p.nondet_det_floor_rebuild_ns)?;
-            d.set_item("nondet_det_floor_try_vstack_ns", p.nondet_det_floor_try_vstack_ns)?;
-            d.set_item("nondet_isolate_ns", p.nondet_isolate_ns)?;
-            d.set_item("nondet_merge_ns", p.nondet_merge_ns)?;
-            d.set_item("nondet_reduce_sources_ns", p.nondet_reduce_sources_ns)?;
-            d.set_item("nondet_push_ns", p.nondet_push_ns)?;
             d.set_item("det_exit_reason", p.det_exit_reason)?;
             d.set_item("det_exit_state", p.det_exit_state)?;
             d.set_item("n_det_action_lookups", p.n_det_action_lookups)?;
             d.set_item("n_det_goto_lookups", p.n_det_goto_lookups)?;
             d.set_item("n_det_popn_ops", p.n_det_popn_ops)?;
-            d.set_item("det_action_lookup_ns", p.det_action_lookup_ns)?;
-            d.set_item("det_goto_lookup_ns", p.det_goto_lookup_ns)?;
-            d.set_item("det_pop_ns", p.det_pop_ns)?;
-            d.set_item("det_push_ns", p.det_push_ns)?;
-            d.set_item("det_floor_cross_ns", p.det_floor_cross_ns)?;
-            d.set_item("det_floor_sources_ns", p.det_floor_sources_ns)?;
-            d.set_item("det_floor_rebuild_ns", p.det_floor_rebuild_ns)?;
-            d.set_item("det_floor_try_vstack_ns", p.det_floor_try_vstack_ns)?;
             d.set_item("n_nondet_reduce_ops", p.n_nondet_reduce_ops)?;
             d.set_item("n_nondet_merges", p.n_nondet_merges)?;
             d.set_item("n_nondet_isolates", p.n_nondet_isolates)?;
@@ -498,6 +482,60 @@ impl PyConstraintState {
         }
         result.set_item("advances", advance_list)?;
         result.set_item("final_stacks", final_stacks)?;
+        let commit_dict = pyo3::types::PyDict::new(py);
+        commit_dict.set_item("total_ns", commit_profile.total_ns)?;
+        commit_dict.set_item("scan_ns", commit_profile.scan_ns)?;
+        commit_dict.set_item("prune_ns", commit_profile.prune_ns)?;
+        commit_dict.set_item("queue_ns", commit_profile.queue_ns)?;
+        commit_dict.set_item("fuse_ns", commit_profile.fuse_ns)?;
+        commit_dict.set_item("exec_ns", commit_profile.exec_ns)?;
+        commit_dict.set_item("advance_ns", commit_profile.advance_ns)?;
+        commit_dict.set_item("advance_may_check_ns", commit_profile.advance_may_check_ns)?;
+        commit_dict.set_item("advance_core_ns", commit_profile.advance_core_ns)?;
+        commit_dict.set_item("advance_future_disallow_ns", commit_profile.advance_future_disallow_ns)?;
+        commit_dict.set_item("actionable_ns", commit_profile.actionable_ns)?;
+        commit_dict.set_item("may_advance_ns", commit_profile.may_advance_ns)?;
+        commit_dict.set_item("n_tokenizer_states", commit_profile.n_tokenizer_states)?;
+        commit_dict.set_item("n_queue_entries", commit_profile.n_queue_entries)?;
+        commit_dict.set_item("n_advances", commit_profile.n_advances)?;
+        commit_dict.set_item("adv_n_reduces_above_floor", commit_profile.adv_n_reduces_above_floor)?;
+        commit_dict.set_item("adv_n_floor_crossings", commit_profile.adv_n_floor_crossings)?;
+        commit_dict.set_item("adv_n_nondet_waves", commit_profile.adv_n_nondet_waves)?;
+        commit_dict.set_item("adv_n_nondet_branches", commit_profile.adv_n_nondet_branches)?;
+        commit_dict.set_item("adv_clone_ns", commit_profile.adv_clone_ns)?;
+        commit_dict.set_item("adv_summary_ns", commit_profile.adv_summary_ns)?;
+        commit_dict.set_item("adv_fast_path_ns", commit_profile.adv_fast_path_ns)?;
+        commit_dict.set_item("adv_det_ns", commit_profile.adv_det_ns)?;
+        commit_dict.set_item("adv_nondet_ns", commit_profile.adv_nondet_ns)?;
+        commit_dict.set_item("adv_vstack_len", commit_profile.adv_vstack_len)?;
+        commit_dict.set_item("adv_gss_depth", commit_profile.adv_gss_depth)?;
+        commit_dict.set_item("adv_det_exit_reason", commit_profile.adv_det_exit_reason)?;
+        commit_dict.set_item("adv_det_exit_state", commit_profile.adv_det_exit_state)?;
+        commit_dict.set_item("adv_n_det_action_lookups", commit_profile.adv_n_det_action_lookups)?;
+        commit_dict.set_item("adv_n_det_goto_lookups", commit_profile.adv_n_det_goto_lookups)?;
+        commit_dict.set_item("adv_n_det_popn_ops", commit_profile.adv_n_det_popn_ops)?;
+        commit_dict.set_item("adv_n_nondet_reduce_ops", commit_profile.adv_n_nondet_reduce_ops)?;
+        commit_dict.set_item("adv_n_nondet_merges", commit_profile.adv_n_nondet_merges)?;
+        commit_dict.set_item("adv_n_nondet_isolates", commit_profile.adv_n_nondet_isolates)?;
+        commit_dict.set_item("adv_nondet_det_ns", commit_profile.adv_nondet_det_ns)?;
+        commit_dict.set_item("fast_path_total_ns", commit_profile.fast_path_total_ns)?;
+        commit_dict.set_item("fast_path_tokenizer_exec_ns", commit_profile.fast_path_tokenizer_exec_ns)?;
+        commit_dict.set_item("fast_path_match_scan_ns", commit_profile.fast_path_match_scan_ns)?;
+        commit_dict.set_item("fast_path_end_state_check_ns", commit_profile.fast_path_end_state_check_ns)?;
+        commit_dict.set_item("fast_path_prune_ns", commit_profile.fast_path_prune_ns)?;
+        commit_dict.set_item("fast_path_advance_ns", commit_profile.fast_path_advance_ns)?;
+        commit_dict.set_item("fast_path_future_disallow_ns", commit_profile.fast_path_future_disallow_ns)?;
+        commit_dict.set_item("fast_path_fuse_ns", commit_profile.fast_path_fuse_ns)?;
+        commit_dict.set_item("fast_path_state_update_ns", commit_profile.fast_path_state_update_ns)?;
+        commit_dict.set_item("linear_fast_path_total_ns", commit_profile.linear_fast_path_total_ns)?;
+        commit_dict.set_item("linear_fast_path_exec_ns", commit_profile.linear_fast_path_exec_ns)?;
+        commit_dict.set_item("linear_fast_path_match_scan_ns", commit_profile.linear_fast_path_match_scan_ns)?;
+        commit_dict.set_item("linear_fast_path_end_state_check_ns", commit_profile.linear_fast_path_end_state_check_ns)?;
+        commit_dict.set_item("linear_fast_path_advance_ns", commit_profile.linear_fast_path_advance_ns)?;
+        commit_dict.set_item("linear_fast_path_future_disallow_ns", commit_profile.linear_fast_path_future_disallow_ns)?;
+        commit_dict.set_item("linear_fast_path_fuse_ns", commit_profile.linear_fast_path_fuse_ns)?;
+        commit_dict.set_item("linear_fast_path_steps", commit_profile.linear_fast_path_steps)?;
+        result.set_item("commit_profile", commit_dict)?;
 
         Ok(result)
     }

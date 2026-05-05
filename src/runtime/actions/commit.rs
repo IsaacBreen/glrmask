@@ -6,7 +6,9 @@ use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{
     ParserGSS,
     advance_stacks,
+    advance_stacks_profiled,
     advance_stacks_owned,
+    AdvanceProfile,
     stack_may_advance_on,
     stack_may_advance_on_any,
 };
@@ -17,6 +19,88 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 type ParserStatesByTokenizer = FxHashMap<u32, ParserGSS>;
 
+#[derive(Clone, Debug, Default)]
+pub struct GssProfileSummary {
+    pub upperbranch_nodes: usize,
+    pub interface_nodes: usize,
+    pub lower_nodes: usize,
+    pub lower_general_nodes: usize,
+    pub lower_segment_nodes: usize,
+    pub total_edges: usize,
+    pub max_depth: u32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CommitProfile {
+    pub total_ns: u64,
+    pub scan_ns: u64,
+    pub prune_ns: u64,
+    pub queue_ns: u64,
+    pub fuse_ns: u64,
+    pub exec_ns: u64,
+    pub advance_ns: u64,
+    pub advance_may_check_ns: u64,
+    pub advance_core_ns: u64,
+    pub advance_future_disallow_ns: u64,
+    pub actionable_ns: u64,
+    pub may_advance_ns: u64,
+    pub n_tokenizer_states: u64,
+    pub n_queue_entries: u64,
+    pub n_advances: u64,
+    pub adv_n_reduces_above_floor: u64,
+    pub adv_n_floor_crossings: u64,
+    pub adv_n_nondet_waves: u64,
+    pub adv_n_nondet_branches: u64,
+    pub adv_clone_ns: u64,
+    pub adv_summary_ns: u64,
+    pub adv_fast_path_ns: u64,
+    pub adv_det_ns: u64,
+    pub adv_nondet_ns: u64,
+    pub adv_vstack_len: u64,
+    pub adv_gss_depth: u64,
+    pub adv_det_exit_reason: u64,
+    pub adv_det_exit_state: u64,
+    pub adv_n_det_action_lookups: u64,
+    pub adv_n_det_goto_lookups: u64,
+    pub adv_n_det_popn_ops: u64,
+    pub adv_n_nondet_reduce_ops: u64,
+    pub adv_n_nondet_merges: u64,
+    pub adv_n_nondet_isolates: u64,
+    pub adv_nondet_det_ns: u64,
+    pub fast_path_total_ns: u64,
+    pub fast_path_tokenizer_exec_ns: u64,
+    pub fast_path_match_scan_ns: u64,
+    pub fast_path_end_state_check_ns: u64,
+    pub fast_path_prune_ns: u64,
+    pub fast_path_advance_ns: u64,
+    pub fast_path_future_disallow_ns: u64,
+    pub fast_path_fuse_ns: u64,
+    pub fast_path_state_update_ns: u64,
+    pub linear_fast_path_total_ns: u64,
+    pub linear_fast_path_exec_ns: u64,
+    pub linear_fast_path_match_scan_ns: u64,
+    pub linear_fast_path_end_state_check_ns: u64,
+    pub linear_fast_path_advance_ns: u64,
+    pub linear_fast_path_future_disallow_ns: u64,
+    pub linear_fast_path_fuse_ns: u64,
+    pub linear_fast_path_steps: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct PerAdvanceEntry {
+    pub terminal_id: u32,
+    pub tokenizer_state: u32,
+    pub gss_stacks_before: Vec<Vec<u32>>,
+    pub gss_stacks_after: Vec<Vec<u32>>,
+    pub gss_summary_before: GssProfileSummary,
+    pub gss_summary_after: GssProfileSummary,
+    pub match_start: usize,
+    pub match_end: usize,
+    pub token_bound: usize,
+    pub match_bytes: Vec<u8>,
+    pub profile: AdvanceProfile,
+}
+
 /// Cache for `advance_stacks` results, keyed by (GSS pointer, terminal).
 /// Stores the key GSS alongside the result to keep its Arc alive and prevent
 /// address reuse (ABA problem) within a single `commit_bytes_impl` call.
@@ -26,6 +110,49 @@ struct InitialCommitScan {
     exec_results: FxHashMap<u32, TokenizerExecResult>,
     remapped_tokenizer_states: FxHashMap<u32, u32>,
     accepted_terminals: FxHashMap<u32, FxHashSet<u32>>,
+}
+
+fn parser_stacks_only(gss: &ParserGSS) -> Vec<Vec<u32>> {
+    gss.to_stacks().into_iter().map(|(stack, _)| stack).collect()
+}
+
+fn summarize_gss(gss: &ParserGSS) -> GssProfileSummary {
+    let stacks = gss.to_stacks();
+    let lower_nodes = stacks.iter().map(|(stack, _)| stack.len()).sum::<usize>();
+    let total_edges = stacks
+        .iter()
+        .map(|(stack, _)| stack.len().saturating_sub(1))
+        .sum::<usize>();
+    GssProfileSummary {
+        lower_nodes,
+        lower_general_nodes: lower_nodes,
+        total_edges,
+        max_depth: gss.max_depth(),
+        ..GssProfileSummary::default()
+    }
+}
+
+fn apply_advance_profile(commit_profile: &mut CommitProfile, profile: &AdvanceProfile) {
+    commit_profile.adv_n_reduces_above_floor += profile.n_reduces_above_floor as u64;
+    commit_profile.adv_n_floor_crossings += profile.n_floor_crossings as u64;
+    commit_profile.adv_n_nondet_waves += profile.n_nondet_waves as u64;
+    commit_profile.adv_n_nondet_branches += profile.n_nondet_branches as u64;
+    commit_profile.adv_clone_ns += profile.clone_ns;
+    commit_profile.adv_summary_ns += profile.summary_ns;
+    commit_profile.adv_fast_path_ns += profile.fast_path_ns;
+    commit_profile.adv_det_ns += profile.det_ns;
+    commit_profile.adv_nondet_ns += profile.nondet_ns;
+    commit_profile.adv_vstack_len = profile.vstack_len as u64;
+    commit_profile.adv_gss_depth = profile.gss_depth as u64;
+    commit_profile.adv_det_exit_reason = profile.det_exit_reason as u64;
+    commit_profile.adv_det_exit_state = profile.det_exit_state as u64;
+    commit_profile.adv_n_det_action_lookups += profile.n_det_action_lookups as u64;
+    commit_profile.adv_n_det_goto_lookups += profile.n_det_goto_lookups as u64;
+    commit_profile.adv_n_det_popn_ops += profile.n_det_popn_ops as u64;
+    commit_profile.adv_n_nondet_reduce_ops += profile.n_nondet_reduce_ops as u64;
+    commit_profile.adv_n_nondet_merges += profile.n_nondet_merges as u64;
+    commit_profile.adv_n_nondet_isolates += profile.n_nondet_isolates as u64;
+    commit_profile.adv_nondet_det_ns += profile.nondet_det_ns;
 }
 
 fn token_bytes_for_id(constraint: &Constraint, token_id: u32) -> Option<&[u8]> {
@@ -485,6 +612,457 @@ enum LinearFastPathResult {
     Complete(Result<ParserGSS, String>),
     Continue { gss: ParserGSS, offset: usize },
     Restart,
+}
+
+fn record_per_advance_entry(
+    advances: &mut Vec<PerAdvanceEntry>,
+    tokenizer_state: u32,
+    terminal_id: u32,
+    before_gss: &ParserGSS,
+    after_gss: &ParserGSS,
+    match_start: usize,
+    match_end: usize,
+    token_bound: usize,
+    match_bytes: &[u8],
+    profile: AdvanceProfile,
+) {
+    advances.push(PerAdvanceEntry {
+        terminal_id,
+        tokenizer_state,
+        gss_stacks_before: parser_stacks_only(before_gss),
+        gss_stacks_after: parser_stacks_only(after_gss),
+        gss_summary_before: summarize_gss(before_gss),
+        gss_summary_after: summarize_gss(after_gss),
+        match_start,
+        match_end,
+        token_bound,
+        match_bytes: match_bytes.to_vec(),
+        profile,
+    });
+}
+
+fn commit_bytes_fast_path_profiled(
+    constraint: &Constraint,
+    state: &mut BTreeMap<u32, ParserGSS>,
+    bytes: &[u8],
+    tokenizer_state: u32,
+    exec_result: &TokenizerExecResult,
+    advances: Option<&mut Vec<PerAdvanceEntry>>,
+    profile: &mut CommitProfile,
+) -> Option<Result<(), String>> {
+    use std::time::Instant;
+
+    let total_start = Instant::now();
+    let gss = state.values().next().unwrap();
+    let ignore_terminal = constraint.ignore_terminal;
+
+    let scan_start = Instant::now();
+    let mut sole_terminal: Option<u32> = None;
+    for matched in &exec_result.matches {
+        if matched.width != bytes.len() {
+            return None;
+        }
+        if is_ignored_terminal(ignore_terminal, matched.id) {
+            return None;
+        }
+        if !stack_may_advance_on(&constraint.table, gss, matched.id) {
+            continue;
+        }
+        if sole_terminal.is_some() {
+            return None;
+        }
+        sole_terminal = Some(matched.id);
+    }
+    profile.fast_path_match_scan_ns = scan_start.elapsed().as_nanos() as u64;
+    let terminal = sole_terminal?;
+
+    let end_state_check_start = Instant::now();
+    if let Some(end_state) = exec_result.end_state {
+        if end_state_may_advance(constraint, gss, end_state) {
+            return None;
+        }
+    }
+    profile.fast_path_end_state_check_ns = end_state_check_start.elapsed().as_nanos() as u64;
+
+    let no_end_state = exec_result.end_state.is_none();
+    let all_accs_empty = no_end_state
+        && gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty());
+
+    if all_accs_empty {
+        if let Some(top_state) = gss.single_exclusive_top_value() {
+            if let Some(Action::Shift(target, is_replace)) = constraint.table.action(top_state, terminal) {
+                let advance_start = Instant::now();
+                let shifted = if *is_replace {
+                    gss.popn(1).push(*target)
+                } else {
+                    gss.push(*target)
+                };
+                profile.fast_path_advance_ns = advance_start.elapsed().as_nanos() as u64;
+                profile.advance_core_ns = profile.fast_path_advance_ns;
+                profile.advance_ns = profile.fast_path_advance_ns;
+                profile.n_advances = 1;
+
+                if let Some(advances) = advances {
+                    record_per_advance_entry(
+                        advances,
+                        tokenizer_state,
+                        terminal,
+                        gss,
+                        &shifted,
+                        0,
+                        bytes.len(),
+                        bytes.len(),
+                        bytes,
+                        AdvanceProfile {
+                            pure_shift: true,
+                            fast_path_ns: profile.fast_path_advance_ns,
+                            total_ns: profile.fast_path_advance_ns,
+                            top_states: gss.peek_values().len() as u32,
+                            gss_depth: gss.max_depth(),
+                            vstack_len: gss.try_virtual_stack().map_or(0, |vstack| vstack.len() as u32),
+                            ..AdvanceProfile::default()
+                        },
+                    );
+                }
+
+                let update_start = Instant::now();
+                state.clear();
+                state.insert(constraint.tokenizer.initial_state(), shifted);
+                profile.fast_path_state_update_ns = update_start.elapsed().as_nanos() as u64;
+                profile.fast_path_total_ns = total_start.elapsed().as_nanos() as u64;
+                profile.total_ns = profile.fast_path_total_ns;
+                profile.fast_path_tokenizer_exec_ns = profile.exec_ns;
+                return Some(Ok(()));
+            }
+            if let Some(Action::StackShifts(shifts)) = constraint.table.action(top_state, terminal) {
+                let advance_start = Instant::now();
+                let (shifted, advance_profile) = advance_stacks_profiled(&constraint.table, gss, terminal);
+                profile.fast_path_advance_ns = advance_start.elapsed().as_nanos() as u64;
+                profile.advance_core_ns = profile.fast_path_advance_ns;
+                profile.advance_ns = profile.fast_path_advance_ns;
+                profile.n_advances = 1;
+                apply_advance_profile(profile, &advance_profile);
+                if let Some(advances) = advances {
+                    record_per_advance_entry(
+                        advances,
+                        tokenizer_state,
+                        terminal,
+                        gss,
+                        &shifted,
+                        0,
+                        bytes.len(),
+                        bytes.len(),
+                        bytes,
+                        advance_profile,
+                    );
+                }
+
+                let update_start = Instant::now();
+                state.clear();
+                state.insert(constraint.tokenizer.initial_state(), shifted);
+                profile.fast_path_state_update_ns = update_start.elapsed().as_nanos() as u64;
+                profile.fast_path_total_ns = total_start.elapsed().as_nanos() as u64;
+                profile.total_ns = profile.fast_path_total_ns;
+                profile.fast_path_tokenizer_exec_ns = profile.exec_ns;
+                return Some(Ok(()));
+            }
+        }
+    }
+
+    let (_, gss_owned) = state.pop_first().unwrap();
+
+    let prune_start = Instant::now();
+    let pruned_gss = if all_accs_empty {
+        gss_owned
+    } else {
+        let pruned = gss_owned.apply_and_prune_no_promote(|td: &TerminalsDisallowed| {
+            if td.is_empty() {
+                return Some(TerminalsDisallowed::new());
+            }
+            if let Some(disallowed) = td.get(&tokenizer_state) {
+                if disallowed.contains(&terminal) {
+                    return None;
+                }
+            }
+            let mut remapped = BTreeMap::new();
+            if let Some(end_state) = exec_result.end_state {
+                if let Some(d) = td.get(&tokenizer_state) {
+                    remapped
+                        .entry(end_state)
+                        .or_insert_with(BTreeSet::new)
+                        .extend(d.iter().copied());
+                }
+            }
+            Some(TerminalsDisallowed(std::sync::Arc::new(remapped)))
+        });
+
+        if pruned.is_empty() {
+            return Some(Err("commit rejected: no valid parser states remain".to_string()));
+        }
+        pruned
+    };
+    profile.fast_path_prune_ns = prune_start.elapsed().as_nanos() as u64;
+    profile.prune_ns = profile.fast_path_prune_ns;
+
+    let advance_start = Instant::now();
+    let advanced = advance_stacks_owned(&constraint.table, pruned_gss.clone(), terminal);
+    profile.fast_path_advance_ns = advance_start.elapsed().as_nanos() as u64;
+    profile.advance_core_ns = profile.fast_path_advance_ns;
+    if advanced.is_empty() {
+        return Some(Err("commit rejected: no valid parser states remain".to_string()));
+    }
+
+    let future_start = Instant::now();
+    let advanced = apply_future_terminal_disallow(constraint, exec_result, terminal, advanced);
+    profile.fast_path_future_disallow_ns = future_start.elapsed().as_nanos() as u64;
+    profile.advance_future_disallow_ns = profile.fast_path_future_disallow_ns;
+    profile.advance_ns = profile.fast_path_advance_ns + profile.fast_path_future_disallow_ns;
+    profile.n_advances = 1;
+    if advanced.is_empty() {
+        return Some(Err("commit rejected: no valid parser states remain".to_string()));
+    }
+
+    if let Some(advances) = advances {
+        let (after_for_entry, advance_profile) = advance_stacks_profiled(&constraint.table, &pruned_gss, terminal);
+        record_per_advance_entry(
+            advances,
+            tokenizer_state,
+            terminal,
+            &pruned_gss,
+            &after_for_entry,
+            0,
+            bytes.len(),
+            bytes.len(),
+            bytes,
+            advance_profile.clone(),
+        );
+        apply_advance_profile(profile, &advance_profile);
+    }
+
+    let fuse_start = Instant::now();
+    let fused = advanced.fuse(Some(1));
+    profile.fast_path_fuse_ns = fuse_start.elapsed().as_nanos() as u64;
+    profile.fuse_ns = profile.fast_path_fuse_ns;
+
+    if fused.is_empty() {
+        return Some(Err("commit rejected: no valid parser states remain".to_string()));
+    }
+
+    let update_start = Instant::now();
+    state.insert(constraint.tokenizer.initial_state(), fused);
+    profile.fast_path_state_update_ns = update_start.elapsed().as_nanos() as u64;
+    profile.fast_path_total_ns = total_start.elapsed().as_nanos() as u64;
+    profile.total_ns = profile.fast_path_total_ns;
+    profile.fast_path_tokenizer_exec_ns = profile.exec_ns;
+    Some(Ok(()))
+}
+
+fn commit_bytes_impl_profiled(
+    constraint: &Constraint,
+    state: &mut BTreeMap<u32, ParserGSS>,
+    bytes: &[u8],
+    bufs: &mut CommitBuffers,
+    mut advances: Option<&mut Vec<PerAdvanceEntry>>,
+) -> Result<CommitProfile, String> {
+    use std::time::Instant;
+
+    let total_start = Instant::now();
+    let mut profile = CommitProfile {
+        n_tokenizer_states: state.len() as u64,
+        ..CommitProfile::default()
+    };
+
+    if bytes.is_empty() {
+        profile.total_ns = total_start.elapsed().as_nanos() as u64;
+        return Ok(profile);
+    }
+
+    let ignore_terminal = constraint.ignore_terminal;
+
+    if state.len() == 1 {
+        let (&tokenizer_state, _) = state.iter().next().unwrap();
+        let exec_start = Instant::now();
+        let exec_result = constraint.tokenizer.execute_from_state(bytes, tokenizer_state);
+        profile.exec_ns = exec_start.elapsed().as_nanos() as u64;
+        profile.fast_path_tokenizer_exec_ns = profile.exec_ns;
+
+        if let Some(result) = commit_bytes_fast_path_profiled(
+            constraint,
+            state,
+            bytes,
+            tokenizer_state,
+            &exec_result,
+            advances.as_deref_mut(),
+            &mut profile,
+        ) {
+            let result = result.map(|()| profile);
+            return result;
+        }
+    }
+
+    let scan_start = Instant::now();
+    let mut initial_scan = InitialCommitScan::collect(constraint, state, bytes);
+    profile.scan_ns = scan_start.elapsed().as_nanos() as u64;
+
+    let prune_start = Instant::now();
+    prune_initial_states(
+        state,
+        &initial_scan.accepted_terminals,
+        &initial_scan.remapped_tokenizer_states,
+    );
+    state.retain(|_, parser_state| !parser_state.is_empty());
+    profile.prune_ns = prune_start.elapsed().as_nanos() as u64;
+
+    let queue_start = Instant::now();
+    let mut pending_state = ParserStatesByTokenizer::default();
+    let mut processing_queue: Vec<ParserStatesByTokenizer> =
+        (0..=bytes.len()).map(|_| ParserStatesByTokenizer::default()).collect();
+    processing_queue[0] = std::mem::take(state).into_iter().collect();
+
+    let mut offset = 0usize;
+    while offset < processing_queue.len() {
+        if processing_queue[offset].is_empty() {
+            offset += 1;
+            continue;
+        }
+
+        let states_to_process = std::mem::take(&mut processing_queue[offset]);
+        for (tokenizer_state, gss_at_offset) in states_to_process {
+            profile.n_queue_entries += 1;
+
+            let actionable_start = Instant::now();
+            let actionable_terminals = ActionableTerminals::from_gss(constraint, &gss_at_offset);
+            profile.actionable_ns += actionable_start.elapsed().as_nanos() as u64;
+
+            let exec_start = Instant::now();
+            let exec_result = if offset == 0 {
+                initial_scan.take_exec_result(tokenizer_state).unwrap_or_else(|| {
+                    constraint.tokenizer.execute_from_state(&bytes[offset..], tokenizer_state)
+                })
+            } else {
+                constraint.tokenizer.execute_from_state(&bytes[offset..], tokenizer_state)
+            };
+            profile.exec_ns += exec_start.elapsed().as_nanos() as u64;
+
+            let mut seen_matches = FxHashSet::default();
+
+            for matched in &exec_result.matches {
+                let new_offset = offset + matched.width;
+                let ignored = is_ignored_terminal(ignore_terminal, matched.id);
+
+                if !ignored
+                    && !is_actionable_terminal(actionable_terminals.as_ref(), constraint, matched.id)
+                {
+                    continue;
+                }
+                if !seen_matches.insert((matched.width, matched.id)) {
+                    continue;
+                }
+
+                if ignored {
+                    queue_parser_state(
+                        &mut processing_queue,
+                        &mut pending_state,
+                        new_offset,
+                        bytes.len(),
+                        constraint.tokenizer.initial_state(),
+                        gss_at_offset.clone(),
+                    );
+                    continue;
+                }
+
+                let may_start = Instant::now();
+                let may_advance = stack_may_advance_on(&constraint.table, &gss_at_offset, matched.id);
+                profile.advance_may_check_ns += may_start.elapsed().as_nanos() as u64;
+                if !may_advance {
+                    continue;
+                }
+
+                let advance_core_start = Instant::now();
+                let (advanced_before_disallow, advance_profile) =
+                    advance_stacks_profiled(&constraint.table, &gss_at_offset, matched.id);
+                profile.advance_core_ns += advance_core_start.elapsed().as_nanos() as u64;
+                apply_advance_profile(&mut profile, &advance_profile);
+
+                if let Some(advances) = advances.as_deref_mut() {
+                    record_per_advance_entry(
+                        advances,
+                        tokenizer_state,
+                        matched.id,
+                        &gss_at_offset,
+                        &advanced_before_disallow,
+                        offset,
+                        new_offset,
+                        bytes.len(),
+                        &bytes[offset..new_offset],
+                        advance_profile.clone(),
+                    );
+                }
+
+                let future_start = Instant::now();
+                let advanced = apply_future_terminal_disallow(
+                    constraint,
+                    &exec_result,
+                    matched.id,
+                    advanced_before_disallow,
+                );
+                profile.advance_future_disallow_ns += future_start.elapsed().as_nanos() as u64;
+                profile.advance_ns += advance_profile.total_ns;
+                profile.n_advances += 1;
+
+                if advanced.is_empty() {
+                    continue;
+                }
+
+                queue_parser_state(
+                    &mut processing_queue,
+                    &mut pending_state,
+                    new_offset,
+                    bytes.len(),
+                    constraint.tokenizer.initial_state(),
+                    advanced,
+                );
+            }
+
+            if let Some(end_state) = exec_result.end_state {
+                let may_start = Instant::now();
+                let may_advance = end_state_may_advance(constraint, &gss_at_offset, end_state);
+                profile.may_advance_ns += may_start.elapsed().as_nanos() as u64;
+                if !may_advance {
+                    continue;
+                }
+
+                queue_parser_state(
+                    &mut processing_queue,
+                    &mut pending_state,
+                    bytes.len(),
+                    bytes.len(),
+                    end_state,
+                    gss_at_offset,
+                );
+            }
+        }
+        offset += 1;
+    }
+    profile.queue_ns = queue_start.elapsed().as_nanos() as u64;
+
+    let fuse_start = Instant::now();
+    let new_state = finalize_pending_state(std::mem::take(&mut pending_state));
+    profile.fuse_ns = fuse_start.elapsed().as_nanos() as u64;
+
+    *state = new_state;
+    if state.is_empty() {
+        return Err("commit rejected: no valid parser states remain".to_string());
+    }
+
+    profile.total_ns = total_start.elapsed().as_nanos() as u64;
+    Ok(profile)
+}
+
+fn final_stacks(state: &BTreeMap<u32, ParserGSS>) -> Vec<(u32, Vec<Vec<u32>>)> {
+    state.iter().map(|(&tokenizer_state, gss)| {
+        (tokenizer_state, parser_stacks_only(gss))
+    }).collect()
 }
 
 fn commit_bytes_linear_fast_path(
@@ -958,6 +1536,60 @@ impl<'a> ConstraintState<'a> {
             })?;
         let was_in_mask = snapshot_mask_membership(self, token_id);
         let result = commit_bytes_impl(constraint, &mut self.state, bytes, &mut self.buffers);
+        self.generation += 1;
+        assert_mask_commit_equivalence(token_id, bytes, was_in_mask, result.is_ok());
+        result
+    }
+
+    pub fn commit_token_timed_ns(&mut self, token_id: u32) -> Result<u64, String> {
+        use std::time::Instant;
+
+        let constraint = self.constraint;
+        let bytes = token_bytes_for_id(constraint, token_id)
+            .ok_or_else(|| format!("commit_token: token_id {token_id} not in vocabulary"))?;
+        let was_in_mask = snapshot_mask_membership(self, token_id);
+        let start = Instant::now();
+        let result = commit_bytes_impl(constraint, &mut self.state, bytes, &mut self.buffers);
+        let total_ns = start.elapsed().as_nanos() as u64;
+        self.generation += 1;
+        assert_mask_commit_equivalence(token_id, bytes, was_in_mask, result.is_ok());
+        result.map(|()| total_ns)
+    }
+
+    pub fn commit_token_profiled(&mut self, token_id: u32) -> Result<CommitProfile, String> {
+        let constraint = self.constraint;
+        let bytes = token_bytes_for_id(constraint, token_id)
+            .ok_or_else(|| format!("commit_token: token_id {token_id} not in vocabulary"))?;
+        let was_in_mask = snapshot_mask_membership(self, token_id);
+        let result = commit_bytes_impl_profiled(
+            constraint,
+            &mut self.state,
+            bytes,
+            &mut self.buffers,
+            None,
+        );
+        self.generation += 1;
+        assert_mask_commit_equivalence(token_id, bytes, was_in_mask, result.is_ok());
+        result
+    }
+
+    pub fn commit_token_per_advance(
+        &mut self,
+        token_id: u32,
+    ) -> Result<(Vec<PerAdvanceEntry>, Vec<(u32, Vec<Vec<u32>>)>, CommitProfile), String> {
+        let constraint = self.constraint;
+        let bytes = token_bytes_for_id(constraint, token_id)
+            .ok_or_else(|| format!("commit_token: token_id {token_id} not in vocabulary"))?;
+        let was_in_mask = snapshot_mask_membership(self, token_id);
+        let mut advances = Vec::new();
+        let result = commit_bytes_impl_profiled(
+            constraint,
+            &mut self.state,
+            bytes,
+            &mut self.buffers,
+            Some(&mut advances),
+        )
+        .map(|profile| (advances, final_stacks(&self.state), profile));
         self.generation += 1;
         assert_mask_commit_equivalence(token_id, bytes, was_in_mask, result.is_ok());
         result
