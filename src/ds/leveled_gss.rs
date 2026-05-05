@@ -7,8 +7,9 @@ use std::collections::BTreeMap;
 use std::hash::Hash;
 use std::sync::{Arc, OnceLock};
 
-/// Type alias for segment values. Set `STACKVEC` env var to switch at runtime:
-///   arc (default), array64, array128, im, seg, vec, small64, small128
+/// Type alias for segment values. Set `STACKVEC` before process startup:
+///   normal builds: `arc` (default), `vec`
+///   with `stackvec-experiments`: `array*`, `im`, `rpds`, `seg`, `small*`
 type SV<T> = DynStackVec<T>;
 
 pub trait Merge: Clone {
