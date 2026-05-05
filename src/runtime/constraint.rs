@@ -15,29 +15,6 @@ use crate::ds::weight::Weight;
 
 use super::state::ConstraintState;
 
-pub(crate) type TokenizerStateID = u32;
-
-pub(crate) fn bitmap_to_rangeset(words: &[u64]) -> RangeSetBlaze<u32> {
-    let mut result = RangeSetBlaze::new();
-    for (word_idx, &word) in words.iter().enumerate() {
-        if word == 0 { continue; }
-        let base = (word_idx as u32) * 64;
-        let mut w = word;
-        let mut pos = 0u32;
-        while w != 0 {
-            let zeros = w.trailing_zeros();
-            pos += zeros;
-            w >>= zeros;
-            let ones = if w == u64::MAX { 64 - pos % 64 } else { (!w).trailing_zeros() };
-            let run_start = base + pos;
-            let run_end = base + pos + ones - 1;
-            pos += ones;
-            if ones < 64 { w >>= ones; } else { w = 0; }
-            result.ranges_insert(run_start..=run_end);
-        }
-    }
-    result
-}
 /// Runtime possible-matches table.
 ///
 /// Outer key:
