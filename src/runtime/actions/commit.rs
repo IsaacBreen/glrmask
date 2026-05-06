@@ -660,7 +660,11 @@ fn choose_direct_linear_step(
     let mut actionable_terminals: Option<ActionableTerminals> = None;
 
     for (index, &byte) in bytes.iter().enumerate() {
-        let Some(next_state) = constraint.tokenizer.step(tokenizer_state, byte) else {
+        let next_state = constraint
+            .tokenizer_fast_transitions
+            .get(tokenizer_state as usize)
+            .map_or(u32::MAX, |transitions| transitions[byte as usize]);
+        if next_state == u32::MAX {
             consumed_all = false;
             break;
         };

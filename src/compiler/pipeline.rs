@@ -433,6 +433,7 @@ fn compile_prepared_with_profile(
             seed_state_dense: Vec::new(),
             seed_universe_dense: Box::new([]),
             dwa_fast_transitions: Vec::new(),
+            tokenizer_fast_transitions: Vec::new(),
             heavy_token_dense_masks: Vec::new(),
             heavy_token_indices: Vec::new(),
             internal_token_buf_flat: Box::new([]),
@@ -477,4 +478,3 @@ pub(crate) fn compile_owned_profiled(
     profile.total_ms = elapsed_ms(total_started_at);
     (constraint, profile)
 }
-

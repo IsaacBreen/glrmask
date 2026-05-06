@@ -42,6 +42,7 @@ type DenseWeightMaskCache = FxHashMap<usize, DenseWords>;
 type SeedTerminalDenseMasks = FxHashMap<(u32, TerminalID), DenseWords>;
 type SeedStateDenseMasks = Vec<DenseWords>;
 type FastDwaTransitions = Vec<FxHashMap<i32, (u32, Weight)>>;
+type FastTokenizerTransitions = Vec<Box<[u32; 256]>>;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Constraint {
@@ -117,6 +118,9 @@ pub struct Constraint {
     /// Built from parser_dwa.states at load/build time.
     #[serde(skip)]
     pub(crate) dwa_fast_transitions: FastDwaTransitions,
+    /// Dense tokenizer transition lookup for commit-time byte scans.
+    #[serde(skip)]
+    pub(crate) tokenizer_fast_transitions: FastTokenizerTransitions,
     /// Dense buf masks for "heavy" internal tokens (those with many buf entries).
     /// Indexed by internal token ID; None for light tokens.
     #[serde(skip)]
@@ -233,7 +237,21 @@ impl Constraint {
         self.internal_token_dense_words = dense_mask_words;
         self.weight_token_dense_masks = dense_masks;
         self.dwa_fast_transitions = fast_transitions;
+        self.tokenizer_fast_transitions = self.compute_tokenizer_fast_transitions();
         self.build_seed_dense_masks();
+    }
+
+    fn compute_tokenizer_fast_transitions(&self) -> FastTokenizerTransitions {
+        (0..self.tokenizer.num_states())
+            .map(|state| {
+                let dfa_state = &self.tokenizer.dfa.states()[state as usize];
+                let mut flat = Box::new([u32::MAX; 256]);
+                for (byte, &target) in dfa_state.transitions.iter() {
+                    flat[byte as usize] = target;
+                }
+                flat
+            })
+            .collect()
     }
 
     fn compute_buf_masks(&self) -> Vec<InternalTokenBufMasks> {
