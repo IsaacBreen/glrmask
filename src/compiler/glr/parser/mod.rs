@@ -1,6 +1,6 @@
 use super::accumulator::TerminalsDisallowed;
 use super::analysis::EOF;
-use super::table::{Action, GLRTable, GuardedStackShift, StackShiftGuard};
+use super::table::{Action, GLRTable, GuardedStackShift, StackShift, StackShiftGuard};
 use crate::ds::bitset::BitSet;
 use crate::ds::leveled_gss::{LeveledGSS, VirtualStack};
 use crate::grammar::flat::TerminalID;
@@ -143,14 +143,72 @@ fn advance_stacks_core(table: &GLRTable, mut gss: ParserGSS, token: TerminalID) 
     advance_nondeterministically(table, gss, token)
 }
 
-fn apply_stack_shifts(gss: ParserGSS, shifts: &[super::table::StackShift]) -> ParserGSS {
-    let mut out = ParserGSS::empty();
-    for shift in shifts {
-        let mut branch = gss.popn(shift.pop as isize);
-        for &state in &shift.pushes {
-            branch = branch.push(state);
+fn push_states(mut gss: ParserGSS, states: &[u32]) -> ParserGSS {
+    for &state in states {
+        gss = gss.push(state);
+    }
+    gss
+}
+
+fn common_stack_shift_suffix_len(pushes: &[&[u32]]) -> usize {
+    let Some(first) = pushes.first() else {
+        return 0;
+    };
+    let mut suffix_len = 0;
+    'suffix: while suffix_len < first.len() {
+        let state = first[first.len() - 1 - suffix_len];
+        for pushes in &pushes[1..] {
+            if suffix_len >= pushes.len() || pushes[pushes.len() - 1 - suffix_len] != state {
+                break 'suffix;
+            }
         }
-        merge_into(&mut out, branch);
+        suffix_len += 1;
+    }
+    suffix_len
+}
+
+fn apply_push_sequences(base: ParserGSS, pushes: &[&[u32]]) -> ParserGSS {
+    match pushes {
+        [] => ParserGSS::empty(),
+        [pushes] => push_states(base, pushes),
+        _ => {
+            let common_suffix_len = common_stack_shift_suffix_len(pushes);
+            if common_suffix_len > 0 {
+                let mut prefixes = ParserGSS::empty();
+                for pushes in pushes {
+                    let prefix_len = pushes.len() - common_suffix_len;
+                    merge_into(&mut prefixes, push_states(base.clone(), &pushes[..prefix_len]));
+                }
+                let suffix = &pushes[0][pushes[0].len() - common_suffix_len..];
+                push_states(prefixes, suffix)
+            } else {
+                let mut out = ParserGSS::empty();
+                for pushes in pushes {
+                    merge_into(&mut out, push_states(base.clone(), pushes));
+                }
+                out
+            }
+        }
+    }
+}
+
+fn apply_stack_shifts(gss: ParserGSS, shifts: &[StackShift]) -> ParserGSS {
+    let mut out = ParserGSS::empty();
+    let mut groups: SmallVec<[(u32, SmallVec<[&[u32]; 4]>); 4]> = SmallVec::new();
+
+    for shift in shifts {
+        if let Some((_, group_pushes)) = groups.iter_mut().find(|(pop, _)| *pop == shift.pop) {
+            group_pushes.push(shift.pushes.as_slice());
+        } else {
+            let mut group_pushes = SmallVec::new();
+            group_pushes.push(shift.pushes.as_slice());
+            groups.push((shift.pop, group_pushes));
+        }
+    }
+
+    for (pop, pushes) in groups {
+        let base = gss.popn(pop as isize);
+        merge_into(&mut out, apply_push_sequences(base, &pushes));
     }
     out
 }
@@ -196,10 +254,7 @@ fn apply_guarded_stack_shifts(gss: ParserGSS, shifts: &[GuardedStackShift]) -> P
             continue;
         }
 
-        let mut branch = base.popn((shift.pop - depth) as isize);
-        for &state in &shift.pushes {
-            branch = branch.push(state);
-        }
+        let branch = push_states(base.popn((shift.pop - depth) as isize), &shift.pushes);
         merge_into(&mut out, branch);
     }
 
