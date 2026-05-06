@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::sync::OnceLock;
 
 use crate::automata::lexer::ast::Expr as LexerExpr;
 use crate::automata::lexer::compile::build_regex;
@@ -109,80 +108,6 @@ const EXACT_CLOSED_OBJECT_UNION_MAX_KEYS: usize = 16;
 const EXACT_CLOSED_OBJECT_SINGLE_MAX_KEYS: usize = 16;
 const EXACT_CLOSED_OBJECT_UNION_MAX_STATES: usize = 128;
 const FACTORED_OPEN_OBJECT_MAX_KEYS: usize = 200;
-
-fn env_usize_with_default(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(default)
-}
-
-fn cached_env_usize(slot: &'static OnceLock<usize>, name: &'static str, default: usize) -> usize {
-    *slot.get_or_init(|| env_usize_with_default(name, default))
-}
-
-fn closed_required_object_fused_literal_max_alts() -> usize {
-    static VALUE: OnceLock<usize> = OnceLock::new();
-    cached_env_usize(
-        &VALUE,
-        "GLRMASK_CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_ALTS",
-        CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_ALTS,
-    )
-}
-
-fn closed_required_object_fused_literal_max_total_bytes() -> usize {
-    static VALUE: OnceLock<usize> = OnceLock::new();
-    cached_env_usize(
-        &VALUE,
-        "GLRMASK_CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_TOTAL_BYTES",
-        CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_TOTAL_BYTES,
-    )
-}
-
-fn exact_closed_object_union_max_variants() -> usize {
-    static VALUE: OnceLock<usize> = OnceLock::new();
-    cached_env_usize(
-        &VALUE,
-        "GLRMASK_EXACT_CLOSED_OBJECT_UNION_MAX_VARIANTS",
-        EXACT_CLOSED_OBJECT_UNION_MAX_VARIANTS,
-    )
-}
-
-fn exact_closed_object_union_max_keys() -> usize {
-    static VALUE: OnceLock<usize> = OnceLock::new();
-    cached_env_usize(
-        &VALUE,
-        "GLRMASK_EXACT_CLOSED_OBJECT_UNION_MAX_KEYS",
-        EXACT_CLOSED_OBJECT_UNION_MAX_KEYS,
-    )
-}
-
-fn exact_closed_object_single_max_keys() -> usize {
-    static VALUE: OnceLock<usize> = OnceLock::new();
-    cached_env_usize(
-        &VALUE,
-        "GLRMASK_EXACT_CLOSED_OBJECT_SINGLE_MAX_KEYS",
-        EXACT_CLOSED_OBJECT_SINGLE_MAX_KEYS,
-    )
-}
-
-fn exact_closed_object_union_max_states() -> usize {
-    static VALUE: OnceLock<usize> = OnceLock::new();
-    cached_env_usize(
-        &VALUE,
-        "GLRMASK_EXACT_CLOSED_OBJECT_UNION_MAX_STATES",
-        EXACT_CLOSED_OBJECT_UNION_MAX_STATES,
-    )
-}
-
-fn factored_open_object_max_keys() -> usize {
-    static VALUE: OnceLock<usize> = OnceLock::new();
-    cached_env_usize(
-        &VALUE,
-        "GLRMASK_FACTORED_OPEN_OBJECT_MAX_KEYS",
-        FACTORED_OPEN_OBJECT_MAX_KEYS,
-    )
-}
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 enum JsonSchemaDraft {
@@ -541,7 +466,7 @@ fn finite_literal_alternatives(
     };
 
     let total_bytes = alts.iter().map(Vec::len).sum::<usize>();
-    if alts.len() > max_alts || total_bytes > closed_required_object_fused_literal_max_total_bytes() {
+    if alts.len() > max_alts || total_bytes > CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_TOTAL_BYTES {
         return None;
     }
 
@@ -549,7 +474,7 @@ fn finite_literal_alternatives(
 }
 
 fn maybe_fuse_finite_literal_expr(expr: GrammarExpr, context: &str) -> GrammarExpr {
-    let Some(alts) = finite_literal_alternatives(&expr, closed_required_object_fused_literal_max_alts()) else {
+    let Some(alts) = finite_literal_alternatives(&expr, CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_ALTS) else {
         return expr;
     };
     if alts.len() < 2 {
@@ -1561,29 +1486,6 @@ fn env_flag(name: &str) -> bool {
     env_flag_default(name, false)
 }
 
-fn split_open_quote() -> bool {
-    // Default to true: opening quote is split unless explicitly disabled
-    env_flag_default("GLRMASK_SPLIT_OPEN_QUOTE", true)
-}
-
-fn split_close_quote() -> bool {
-    env_flag("GLRMASK_SPLIT_CLOSE_QUOTE")
-}
-
-fn split_colon_space() -> bool {
-    // Default to true: colon-space is split unless explicitly disabled
-    env_flag_default("GLRMASK_SPLIT_COLON_SPACE", true)
-}
-
-fn split_colon_from_space() -> bool {
-    env_flag("GLRMASK_SPLIT_COLON_FROM_SPACE")
-}
-
-fn split_item_separator() -> bool {
-    // Default to fused JSON_ITEM_SEPARATOR literal unless explicitly enabled.
-    env_flag("GLRMASK_SPLIT_ITEM_SEPARATOR")
-}
-
 // ---------------------------------------------------------------------------
 // Hierarchical string / key-colon construction
 // ---------------------------------------------------------------------------
@@ -1640,20 +1542,8 @@ fn key_colon_body_regex(inner: &str) -> String {
     quoted_body_regex(inner, true)
 }
 
-fn quoted_body_regex(inner: &str, include_colon_space: bool) -> String {
-    let close = split_close_quote();
-    let mut prefix = String::new();
-    if !split_open_quote() {
-        prefix.push('"');
-    }
-    let mut suffix = String::new();
-    if !close {
-        suffix.push('"');
-        if include_colon_space && !split_colon_space() {
-            suffix.push_str(": ");
-        }
-    }
-    format!("{prefix}(?:{inner}){suffix}")
+fn quoted_body_regex(inner: &str, _include_colon_space: bool) -> String {
+    format!("(?:{inner})\"")
 }
 
 /// Build literal bytes for the body terminal of a JSON object **key-colon**.
@@ -1662,27 +1552,14 @@ fn quoted_body_regex(inner: &str, include_colon_space: bool) -> String {
 fn key_colon_literal_body_bytes(text: &str) -> Vec<u8> {
     let full = json_string_literal_bytes(text); // b'"text"'
     let body_only = &full[1..full.len() - 1];
-    let open = split_open_quote();
-    let close = split_close_quote();
-    let colon = split_colon_space();
-    let mut bytes = Vec::new();
-    if !open { bytes.push(b'"'); }
-    bytes.extend_from_slice(body_only);
-    match (close, colon) {
-        (false, false) => bytes.extend_from_slice(b"\": "),
-        (false, true)  => bytes.push(b'"'),
-        (true, _)      => {} // close quote and colon handled by wrapper
-    }
+    let mut bytes = body_only.to_vec();
+    bytes.push(b'"');
     bytes
 }
 
 /// Build the colon-space suffix expression for keys.
 fn key_colon_suffix_expr() -> GrammarExpr {
-    if split_colon_from_space() {
-        sequence_or_single(vec![literal_expr(b":"), literal_expr(b" ")])
-    } else {
-        literal_expr(b": ")
-    }
+    literal_expr(b": ")
 }
 
 /// Wrap a body terminal expression as a JSON string **value**.
@@ -1690,13 +1567,7 @@ fn key_colon_suffix_expr() -> GrammarExpr {
 /// Adds split-off quote literals around the body terminal.
 /// The body terminal must already include fused (non-split) quotes.
 fn wrap_string_value_terminal(body: GrammarExpr) -> GrammarExpr {
-    let open = split_open_quote();
-    let close = split_close_quote();
-    let mut parts = Vec::new();
-    if open { parts.push(literal_expr(b"\"")); }
-    parts.push(body);
-    if close { parts.push(literal_expr(b"\"")); }
-    sequence_or_single(parts)
+    sequence_or_single(vec![literal_expr(b"\""), body])
 }
 
 /// Wrap a body terminal expression as a JSON object **key-colon**.
@@ -1704,21 +1575,7 @@ fn wrap_string_value_terminal(body: GrammarExpr) -> GrammarExpr {
 /// Adds split-off quote literals and colon-space around the body terminal.
 /// The body terminal must already include fused (non-split) quotes and colon.
 fn wrap_key_colon_terminal(body: GrammarExpr) -> GrammarExpr {
-    let open = split_open_quote();
-    let close = split_close_quote();
-    let colon = split_colon_space();
-    let mut parts = Vec::new();
-    if open { parts.push(literal_expr(b"\"")); }
-    parts.push(body);
-    if close && colon {
-        parts.push(literal_expr(b"\""));
-        parts.push(key_colon_suffix_expr());
-    } else if close {
-        parts.push(literal_expr(b"\": "));
-    } else if colon {
-        parts.push(key_colon_suffix_expr());
-    }
-    sequence_or_single(parts)
+    sequence_or_single(vec![literal_expr(b"\""), body, key_colon_suffix_expr()])
 }
 
 // ---------------------------------------------------------------------------
@@ -1735,25 +1592,8 @@ fn parsed_regex_expr(pattern: &str, utf8: bool) -> GrammarExpr {
     expr_to_grammar_expr(&parse_regex(pattern, utf8))
 }
 
-fn no_additional_properties() -> bool {
-    env_flag("GLRMASK_NO_ADDITIONAL_PROPERTIES")
-}
-
-fn additional_properties_default_false() -> bool {
-    env_flag("GLRMASK_AP_DEFAULT_FALSE")
-}
-
 fn ap_key_any_string() -> bool {
     env_flag("GLRMASK_AP_KEY_ANY_STRING") || env_flag("GLRMASK_ADDPROP_NO_EXCLUSIONS")
-}
-
-fn shared_ap_key_exclusions_enabled() -> bool {
-    std::env::var("GLRMASK_AP_SHARED_EXCLUSIONS")
-        .map(|v| {
-            let n = v.trim().to_ascii_lowercase();
-            !matches!(n.as_str(), "" | "0" | "false" | "no" | "off")
-        })
-        .unwrap_or(true)
 }
 
 fn decode_local_ref_token(token: &str) -> String {
@@ -1881,12 +1721,6 @@ fn collect_shared_ap_literal_keys(root: &Value) -> BTreeSet<String> {
 }
 
 const SHARED_AP_MAX_ALLOW_BACK_KEYS: usize = 32;
-
-fn max_string_length_cap() -> Option<usize> {
-    std::env::var("GLRMASK_MAX_STRING_LENGTH_CAP")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-}
 
 fn use_structured_uri() -> bool {
     env_flag_default("GLRMASK_STRUCT_URI_FORMAT", true)
@@ -2146,16 +1980,7 @@ fn compile_regex_union_expr(regexes: &[String]) -> LexerExpr {
 /// `wrap_string_value_terminal` for cases where the body is an
 /// expression tree rather than a regex string.
 fn wrap_string_value_expr_parts(body: GrammarExpr) -> (GrammarExpr, Box<dyn FnOnce(GrammarExpr) -> GrammarExpr>) {
-    let open = split_open_quote();
-    let close = split_close_quote();
-    // Fuse non-split quotes into the body terminal
-    let terminal_body = {
-        let mut inner_parts = Vec::new();
-        if !open { inner_parts.push(literal_expr(b"\"")); }
-        inner_parts.push(body);
-        if !close { inner_parts.push(literal_expr(b"\"")); }
-        sequence_or_single(inner_parts)
-    };
+    let terminal_body = sequence_or_single(vec![body, literal_expr(b"\"")]);
     // Wrap the terminal ref with split-off quotes
     let wrap = move |term: GrammarExpr| -> GrammarExpr {
         wrap_string_value_terminal(term)
@@ -2164,23 +1989,7 @@ fn wrap_string_value_expr_parts(body: GrammarExpr) -> (GrammarExpr, Box<dyn FnOn
 }
 
 fn wrap_key_colon_expr_parts(body: GrammarExpr) -> (GrammarExpr, Box<dyn FnOnce(GrammarExpr) -> GrammarExpr>) {
-    let open = split_open_quote();
-    let close = split_close_quote();
-    let colon = split_colon_space();
-    let terminal_body = {
-        let mut inner_parts = Vec::new();
-        if !open {
-            inner_parts.push(literal_expr(b"\""));
-        }
-        inner_parts.push(body);
-        if !close {
-            inner_parts.push(literal_expr(b"\""));
-        }
-        if !colon {
-            inner_parts.push(key_colon_suffix_expr());
-        }
-        sequence_or_single(inner_parts)
-    };
+    let terminal_body = sequence_or_single(vec![body, literal_expr(b"\"")]);
     let wrap = move |term: GrammarExpr| -> GrammarExpr { wrap_key_colon_terminal(term) };
     (terminal_body, Box::new(wrap))
 }
@@ -2360,13 +2169,11 @@ fn json_value_literal_expr(value: &Value) -> GrammarExpr {
         let body_end = if has_close { bytes.len() - 1 } else { bytes.len() };
         let body_only = &bytes[1..body_end];
 
-        // Build body with fused non-split quotes
-        let open = split_open_quote();
-        let close = split_close_quote();
         let mut body_bytes = Vec::new();
-        if !open { body_bytes.push(b'"'); }
         body_bytes.extend_from_slice(body_only);
-        if !close && has_close { body_bytes.push(b'"'); }
+        if has_close {
+            body_bytes.push(b'"');
+        }
         let body = literal_expr(&body_bytes);
 
         // Wrap with split-off quotes
@@ -4233,22 +4040,6 @@ impl<'a> SchemaCtx<'a> {
             .collect()
     }
 
-    fn exact_closed_object_disabled() -> bool {
-        std::env::var("GLRMASK_DISABLE_EXACT_CLOSED_OBJECT_UNION")
-            .map(|v| {
-                let n = v.trim().to_ascii_lowercase();
-                !matches!(n.as_str(), "" | "0" | "false" | "no" | "off")
-            })
-            .unwrap_or(false)
-    }
-
-    /// Returns true when the separator-merged left-recursive grammar for
-    /// closed objects with optional keys is enabled.  Off by default; opt-in
-    /// via `GLRMASK_ENABLE_FACTORED_CLOSED_OBJECT=1`.
-    fn factored_closed_object_enabled() -> bool {
-        env_flag("GLRMASK_ENABLE_FACTORED_CLOSED_OBJECT")
-    }
-
     fn collect_ordered_closed_object_schema_variant(
         &mut self,
         variant: &Map<String, Value>,
@@ -4370,7 +4161,7 @@ impl<'a> SchemaCtx<'a> {
         variants: Vec<OrderedClosedObjectVariant>,
         mode: StructuralBranchMode,
     ) -> Result<Option<GrammarExpr>, GlrMaskError> {
-        if variants.is_empty() || variants.len() > exact_closed_object_union_max_variants() {
+        if variants.is_empty() || variants.len() > EXACT_CLOSED_OBJECT_UNION_MAX_VARIANTS {
             return Ok(None);
         }
         let key_count = variants
@@ -4378,7 +4169,7 @@ impl<'a> SchemaCtx<'a> {
             .flat_map(|variant| variant.items.iter().map(|item| item.key.as_str()))
             .collect::<BTreeSet<_>>()
             .len();
-        if key_count > exact_closed_object_union_max_keys() {
+        if key_count > EXACT_CLOSED_OBJECT_UNION_MAX_KEYS {
             return Ok(None);
         }
 
@@ -4436,7 +4227,7 @@ impl<'a> SchemaCtx<'a> {
                         idx
                     } else {
                         let idx = states.len();
-                        if idx >= exact_closed_object_union_max_states() {
+                        if idx >= EXACT_CLOSED_OBJECT_UNION_MAX_STATES {
                             return Ok(None);
                         }
                         states.push(next_state.clone());
@@ -4540,7 +4331,7 @@ impl<'a> SchemaCtx<'a> {
         &mut self,
         ordered: &[(String, GrammarExpr, bool)],
     ) -> Result<Option<GrammarExpr>, GlrMaskError> {
-        if ordered.is_empty() || ordered.len() > exact_closed_object_single_max_keys() {
+        if ordered.is_empty() || ordered.len() > EXACT_CLOSED_OBJECT_SINGLE_MAX_KEYS {
             return Ok(None);
         }
 
@@ -4615,7 +4406,7 @@ impl<'a> SchemaCtx<'a> {
         additional_pair_exprs: &[GrammarExpr],
         additional_c: &str,
     ) -> Result<Option<GrammarExpr>, GlrMaskError> {
-        if ordered.is_empty() || ordered.len() > factored_open_object_max_keys() {
+        if ordered.is_empty() || ordered.len() > FACTORED_OPEN_OBJECT_MAX_KEYS {
             return Ok(None);
         }
 
@@ -4775,7 +4566,7 @@ impl<'a> SchemaCtx<'a> {
         options: &[Value],
         mode: StructuralBranchMode,
     ) -> Result<Option<GrammarExpr>, GlrMaskError> {
-        if options.len() < 2 || options.len() > exact_closed_object_union_max_variants() {
+        if options.len() < 2 || options.len() > EXACT_CLOSED_OBJECT_UNION_MAX_VARIANTS {
             return Ok(None);
         }
 
@@ -6071,7 +5862,7 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn build_string_expr(&mut self, schema: &Map<String, Value>) -> Result<GrammarExpr, GlrMaskError> {
-        let cap = max_string_length_cap();
+        let cap = None;
         let min_len = {
             let raw = schema
                 .get("minLength")
@@ -6209,14 +6000,12 @@ impl<'a> SchemaCtx<'a> {
         }
 
         if self.should_split_bounded_string(min_len, max_len) {
-            let open = split_open_quote();
-            let close = split_close_quote();
             // When min_len > 0 the exact-part terminal must start with the
             // opening quote so the tokenizer DFA cannot conflate it with
             // JSON_STRING_BODY (which also follows a standalone '"' terminal).
-            let actually_split_open = open && min_len == 0;
+            let actually_split_open = min_len == 0;
             let prefix = if actually_split_open { None } else { Some(literal_expr(b"\"")) };
-            let suffix = if close { None } else { Some(literal_expr(b"\"")) };
+            let suffix = Some(literal_expr(b"\""));
             let body = self.build_split_json_string_body_wrapped(min_len, max_len, prefix, suffix);
 
             let mut result_parts = Vec::new();
@@ -6224,9 +6013,6 @@ impl<'a> SchemaCtx<'a> {
                 result_parts.push(literal_expr(b"\""));
             }
             result_parts.push(body);
-            if close {
-                result_parts.push(literal_expr(b"\""));
-            }
 
             return Ok(self.extract_rule(
                 sequence_or_single(result_parts),
@@ -7052,33 +6838,19 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn json_item_separator_expr(&self) -> GrammarExpr {
-        if split_item_separator() {
-            sequence_or_single(vec![literal_expr(b","), literal_expr(b" ")])
-        } else {
-            // Default: keep as a single fused literal token.
-            literal_expr(JSON_ITEM_SEPARATOR)
-        }
+        // Default: keep as a single fused literal token.
+        literal_expr(JSON_ITEM_SEPARATOR)
     }
 
     fn normalized_additional_properties_schema(
         &mut self,
         additional_properties: Option<&Value>,
     ) -> Option<Value> {
-        if no_additional_properties() {
-            return None;
-        }
-
         let schema = match additional_properties {
             Some(Value::Bool(false)) => None,
             Some(Value::Object(map)) => Some(Value::Object(map.clone())),
-            // Absent or `true`: use default based on env var
-            _ => {
-                if additional_properties.is_none() && additional_properties_default_false() {
-                    None
-                } else {
-                    Some(serde_json::json!({}))
-                }
-            }
+            // Absent or `true`: preserve the JSON Schema default additionalProperties `{}`.
+            _ => Some(serde_json::json!({})),
         };
 
         if schema
@@ -7724,7 +7496,7 @@ impl<'a> SchemaCtx<'a> {
         &self,
         excluded_literal_keys: &BTreeSet<String>,
     ) -> bool {
-        if !shared_ap_key_exclusions_enabled() || ap_key_any_string() {
+        if ap_key_any_string() {
             return false;
         }
 
