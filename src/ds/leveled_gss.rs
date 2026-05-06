@@ -1296,12 +1296,6 @@ pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
     inner: Arc<Upper<T, A>>,
 }
 
-/// Opaque handle to the tail of a chain in the GSS.
-/// Used by the chain optimization to reconstruct the GSS after walking a chain.
-pub struct ChainTail<T: Clone + Eq + Hash> {
-    inner: Arc<Lower<T>>,
-}
-
 /// A mutable view of the top portion of a GSS as a flat stack of values.
 /// Works when the top of the GSS is a deterministic chain (single-child Segments
 /// and single-child Generals).
@@ -1546,14 +1540,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
     pub fn empty() -> Self {
         empty_upper()
-    }
-
-    /// Create a GSS from a tail Lower node and an accumulator.
-    /// Used by the chain optimization to reconstruct the GSS at the bottom of a chain.
-    pub fn from_chain_tail_and_acc(tail: ChainTail<T>, acc: A) -> Self {
-        LeveledGSS {
-            inner: new_interface(tail.inner, acc),
-        }
     }
 
     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
@@ -1994,28 +1980,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
-    /// Equivalent to `self.merge(&base.push(value))` but avoids intermediate
-    /// allocations by directly inserting into self's structure via Arc::make_mut.
-    /// Falls back to the standard path for non-Interface cases.
-    pub fn absorb_push(self, value: T, base: &Self) -> Self {
-        if base.is_empty() {
-            return self;
-        }
-        if self.is_empty() {
-            return base.push(value);
-        }
-        // Fast path: both are Interface with equal acc
-        if let (Upper::Interface(base_iface), Upper::Interface(self_iface)) =
-            (&*base.inner, &*self.inner)
-        {
-            if self_iface.acc == base_iface.acc {
-                return self.absorb_push_interface_inplace(value, base_iface);
-            }
-        }
-        // Fallback
-        self.merge(&base.push(value))
-    }
-
     /// Like `absorb_push` but assumes the caller has already verified that
     /// both `self` and `base` are Interface variants with identical `acc`
     /// values. This avoids an expensive O(n) annotation equality check.
@@ -2193,28 +2157,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             return Self::empty();
         }
         self.isolate(Some(value)).popn(n)
-    }
-
-    /// Combined isolate_popn + enumerate top values and their isolated bases.
-    /// Returns (top_value, base_GSS) pairs where base_GSS = popped.isolate(Some(top_value)).
-    /// This avoids creating the intermediate "popped" GSS for the common case.
-    pub fn isolate_pop_bases(&self, value: T, n: isize) -> SmallVec<[(T, Self); 4]> {
-        let popped = self.isolate_popn(value, n);
-        if popped.is_empty() {
-            return SmallVec::new();
-        }
-        if let Some(v) = popped.single_top_value() {
-            let mut result = SmallVec::new();
-            result.push((v, popped));
-            return result;
-        }
-        let top_vals = popped.peek_values();
-        let mut result = SmallVec::new();
-        for v in top_vals {
-            let base = popped.isolate(Some(v.clone()));
-            result.push((v, base));
-        }
-        result
     }
 
     pub fn popn(&self, n: isize) -> Self {
@@ -2425,76 +2367,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         self.popn(1)
     }
 
-    /// Decompose the top level and pop one level in a single pass.
-    /// Returns `(value, popped_gss)` for each top-level child value.
-    /// Equivalent to calling `self.isolate(Some(v)).pop()` for each v in `peek_values()`,
-    /// but avoids repeated HashMap lookups.
-    pub fn decompose_and_pop(&self) -> Vec<(T, Self)> {
-        match &*self.inner {
-            Upper::Branch(b) => {
-                let mut result = Vec::with_capacity(b.children.len());
-                for (val, kids) in b.children.iter() {
-                    // Fast path: single child needs no merge.
-                    let m = if kids.len() == 1 {
-                        kids.values().next().unwrap().clone()
-                    } else {
-                        let mut it = kids.values();
-                        let mut acc = it.next().unwrap().clone();
-                        for child in it {
-                            acc = merge_upper(&acc, child);
-                        }
-                        acc
-                    };
-                    // Skip try_promote if already Interface (try_promote is a no-op for Interface).
-                    let inner = if matches!(&*m, Upper::Interface(_)) {
-                        m
-                    } else {
-                        try_promote(&m)
-                    };
-                    let is_empty = matches!(&*inner,
-                        Upper::Branch(b) if b.children.is_empty() && b.empty.is_none());
-                    if !is_empty {
-                        result.push((val.clone(), LeveledGSS { inner }));
-                    }
-                }
-                result
-            }
-            Upper::Interface(i) => {
-                // Segment fast path: single child, no iteration needed
-                if i.inner.is_segment() {
-                    let val = i.inner.segment_top_value().clone();
-                    let lower = i.inner.segment_rest_arc();
-                    if !lower.children_is_empty() || lower.empty() {
-                        let upper = new_interface(lower, i.acc.clone());
-                        return vec![(val, LeveledGSS { inner: upper })];
-                    }
-                    return vec![];
-                }
-                let mut result = Vec::with_capacity(i.inner.children_len());
-                if let Lower::General { children, .. } = &*i.inner {
-                    for (val, kids) in children.iter() {
-                        // Fast path: single child needs no merge.
-                        let lower = if kids.len() == 1 {
-                            kids.values().next().unwrap().clone()
-                        } else {
-                            let mut it = kids.values();
-                            let mut acc = it.next().unwrap().clone();
-                            for child in it {
-                                acc = merge_lower(&acc, child);
-                            }
-                            acc
-                        };
-                        if !lower.children_is_empty() || lower.empty() {
-                            let upper = new_interface(lower, i.acc.clone());
-                            result.push((val.clone(), LeveledGSS { inner: upper }));
-                        }
-                    }
-                }
-                result
-            }
-        }
-    }
-
     /// Like `decompose_and_pop` but invokes a callback for each (value, popped_gss) pair
     /// instead of allocating a Vec. Avoids heap allocation for the common single-element case.
     pub fn for_each_decomposed(&self, mut f: impl FnMut(T, Self)) {
@@ -2555,36 +2427,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
-    /// Extract the top chain of states plus the accumulator and tail.
-    ///
-    /// Returns `(chain_states_top_first, acc, tail_lower)` where:
-    /// - `chain_states_top_first`: parser states from the top of the chain downward
-    /// - `acc`: reference to the accumulator at the Interface
-    /// - `tail_lower`: the Lower node at the bottom of the chain
-    ///
-    /// Returns `None` if the GSS is not an Interface or has no chain.
-    /// The chain must have at least 2 states for this to be worthwhile.
-    pub fn extract_chain_and_tail(&self) -> Option<(SmallVec<[T; 16]>, &A, ChainTail<T>)> {
-        let interface = match &*self.inner {
-            Upper::Interface(iface) => iface,
-            _ => return None,
-        };
-
-        let mut states = SmallVec::<[T; 16]>::new();
-        let mut current: &Lower<T> = &*interface.inner;
-
-        while let Some((next, _)) = current.chain_step() {
-            current.append_chain_values_top_first(&mut states);
-            current = next;
-        }
-
-        if states.len() < 2 {
-            return None;
-        }
-
-        Some((states, &interface.acc, ChainTail { inner: Arc::new(current.clone()) }))
-    }
-
     /// Try to view the top of this GSS as a flat virtual stack.
     /// Succeeds when the GSS is an Interface whose top is a chain of Segment nodes.
     /// The chain is extracted until a non-Segment node is hit — that node becomes
@@ -2601,37 +2443,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             _ => return None,
         };
         Some(VirtualStack { values, next, acc: interface.acc.clone(), pending_top: None })
-    }
-
-    pub fn into_virtual_stack(self) -> Result<VirtualStack<T, A>, Self> {
-        match Arc::try_unwrap(self.inner) {
-            Ok(Upper::Interface(iface_arc)) => match Arc::try_unwrap(iface_arc) {
-                Ok(Interface { inner, acc }) => match Arc::try_unwrap(inner) {
-                    Ok(Lower::Segment(seg)) => {
-                        let seg = Arc::try_unwrap(seg).unwrap_or_else(|arc| (*arc).clone());
-                        Ok(VirtualStack {
-                        values: seg.values,
-                        next: seg.next,
-                        acc,
-                        pending_top: None,
-                    })
-                    }
-                    Ok(lower) => Err(LeveledGSS {
-                        inner: new_interface(Arc::new(lower), acc),
-                    }),
-                    Err(inner) => Err(LeveledGSS {
-                        inner: new_interface(inner, acc),
-                    }),
-                },
-                Err(iface_arc) => Err(LeveledGSS {
-                    inner: Arc::new(Upper::Interface(iface_arc)),
-                }),
-            },
-            Ok(upper) => Err(LeveledGSS {
-                inner: Arc::new(upper),
-            }),
-            Err(inner) => Err(LeveledGSS { inner }),
-        }
     }
 
     pub fn is_empty(&self) -> bool {
