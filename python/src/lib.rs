@@ -523,6 +523,7 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(clear_stale_weights, m)?)?;
     m.add_function(wrap_pyfunction!(clear_weight_op_caches, m)?)?;
     m.add_function(wrap_pyfunction!(compile_grammar_def_json, m)?)?;
+    m.add_function(wrap_pyfunction!(dump_json_schema_grammar_glrm, m)?)?;
     Ok(())
 }
 
@@ -545,4 +546,10 @@ fn compile_grammar_def_json(grammar_def_json: &str, vocab: &PyVocab) -> PyResult
         inner: std::sync::Arc::new(constraint),
         max_token,
     })
+}
+
+#[pyfunction]
+fn dump_json_schema_grammar_glrm(schema_json: &str) -> PyResult<String> {
+    glrmask::dump_json_schema_grammar_glrm(schema_json)
+        .map_err(|e| PyValueError::new_err(format!("{e}")))
 }
