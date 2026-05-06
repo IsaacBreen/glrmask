@@ -245,3 +245,44 @@ fn direct_glrm_ordered_suffix_model_has_stack_ambiguity() {
     let (max_paths, max_stacks) = max_paths_and_stacks(&constraint, "a,b,c,d,e,f,g,h");
     assert_eq!((max_paths, max_stacks), (3, 3));
 }
+
+#[test]
+fn direct_glrm_optional_suffix_has_two_continuation_stacks() {
+    let grammar = r#"
+        start start;
+        nt f0 ::= "a";
+        nt f1 ::= "b";
+        nt f2 ::= "c";
+        nt f3 ::= "d";
+        nt f4 ::= "e";
+        nt f5 ::= "f";
+        nt f6 ::= "g";
+        nt f7 ::= "h";
+        nt v0 ::= f0 "," f1 ("," f2)? "," f3 "," f4 "," f5 "," f6 ("," f7)?;
+        nt v1 ::= f0 "," f1 ("," f2)? "," f3 "," f4 "," f5 ("," f6)? "," f7;
+        nt start ::= v0 | v1;
+    "#;
+    let constraint = Constraint::from_glrm_grammar(grammar, &bytes_vocab()).unwrap();
+
+    let mut state = constraint.start();
+    for &byte in b"a,b,c,d,e,f,g,h" {
+        state.commit_bytes(&[byte]).unwrap();
+    }
+    let stacks = state.debug_parser_stacks();
+    let path_count = state.parser_path_count(10);
+
+    assert_eq!(path_count, 2, "{stacks:?}");
+    assert_eq!(stacks.len(), 1, "{stacks:?}");
+    assert_eq!(stack_count(&state), 2, "{stacks:?}");
+
+    // Same surface input, one tokenizer state, two parser continuations:
+    // a deeper stack for `..., g, h?` and a shorter stack for `..., g?, h`.
+    let stack_lengths = stacks
+        .iter()
+        .flat_map(|(_, stacks)| stacks.iter().map(|(stack, _)| stack.len()))
+        .collect::<Vec<_>>();
+    assert_eq!(stack_lengths.len(), 2, "{stacks:?}");
+    assert_eq!(stack_lengths, vec![4, 2], "{stacks:?}");
+
+    assert!(state.is_finished());
+}
