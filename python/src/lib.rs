@@ -16,7 +16,6 @@
 //! NumPy `i32` to `u32` bitmask view cast used by `fill_mask`.
 
 use numpy::{PyArray1, PyReadwriteArray1};
-use pyo3::exceptions::PyNotImplementedError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
@@ -214,43 +213,6 @@ impl PyConstraint {
     /// Return the number of GLR parser states.
     fn num_parser_states(&self) -> u32 {
         self.inner.num_parser_states()
-    }
-
-    /// Temporary diagnostic: return the original→internal token mapping as a list.
-    fn _debug_token_map(&self) -> PyResult<Vec<u32>> {
-        Err(PyNotImplementedError::new_err("_debug_token_map is not available in this build"))
-    }
-
-    /// Temporary diagnostic: return internal→originals mapping.
-    fn _debug_internal_to_tokens(&self) -> PyResult<Vec<Vec<u32>>> {
-        Err(PyNotImplementedError::new_err("_debug_internal_to_tokens is not available in this build"))
-    }
-
-    /// Walk bytes through DFA from every state. Returns list of (final_state, finalizers, futures).
-    fn _debug_walk_dfa(&self, token_bytes: Vec<u8>) -> PyResult<Vec<(u32, Vec<u32>, Vec<u32>)>> {
-        let _ = token_bytes;
-        Err(PyNotImplementedError::new_err("_debug_walk_dfa is not available in this build"))
-    }
-
-    /// Return action table entries for a given parser state.
-    /// Returns list of (terminal_id, action_str) pairs.
-    fn _debug_actions_for_state(&self, state: u32) -> PyResult<Vec<(u32, String)>> {
-        let _ = state;
-        Err(PyNotImplementedError::new_err("_debug_actions_for_state is not available in this build"))
-    }
-
-    /// Return rule info: list of (lhs_nonterminal, rhs_length, rhs_symbols_debug).
-    fn _debug_rules(&self) -> PyResult<Vec<(u32, usize, String)>> {
-        Err(PyNotImplementedError::new_err("_debug_rules is not available in this build"))
-    }
-
-    /// Return terminal names/mapping for the GLR table.
-    fn _debug_num_terminals(&self) -> PyResult<u32> {
-        Err(PyNotImplementedError::new_err("_debug_num_terminals is not available in this build"))
-    }
-
-    fn _debug_num_states(&self) -> PyResult<u32> {
-        Err(PyNotImplementedError::new_err("_debug_num_states is not available in this build"))
     }
 }
 
