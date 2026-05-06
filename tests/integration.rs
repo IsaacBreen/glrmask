@@ -249,7 +249,1078 @@ fn direct_glrm_ordered_suffix_model_has_stack_ambiguity() {
 
 #[test]
 fn json_schema_kubernetes_container_ports_prefix_has_schema_shaped_two_stack_split() {
-    const K8S_ORDERED_PORTS_SCHEMA_FRAGMENT: &str = r####"{"type":"object","properties":{"spec":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_apps_v1_StatefulSetSpec","description":"Spec defines the desired identities of pods in this set."}},"definitions":{"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_apps_v1_StatefulSetSpec":{"description":"A StatefulSetSpec is the specification of a StatefulSet.","properties":{"podManagementPolicy":{"description":"podManagementPolicy controls how pods are created during initial scale up, when replacing pods on nodes, or when scaling down. The default policy is `OrderedReady`, where pods are created in increasing order (pod-0, then pod-1, etc) and the controller will wait until each pod is ready before continuing. When scaling down, the pods are removed in the opposite order. The alternative policy is `Parallel` which will create pods in parallel to match the desired scale without waiting, and on scale down will delete all pods at once.","type":"string"},"replicas":{"_format":"int32","description":"replicas is the desired number of replicas of the given Template. These are replicas in the sense that they are instantiations of the same Template, but individual replicas also have a consistent identity. If unspecified, defaults to 1.","type":"integer"},"revisionHistoryLimit":{"_format":"int32","description":"revisionHistoryLimit is the maximum number of revisions that will be maintained in the StatefulSet's revision history. The revision history consists of all revisions not represented by a currently applied StatefulSetSpec version. The default value is 10.","type":"integer"},"selector":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_LabelSelector","description":"selector is a label query over pods that should match the replica count. It must match the pod template's labels. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#label-selectors"},"serviceName":{"description":"serviceName is the name of the service that governs this StatefulSet. This service must exist before the StatefulSet, and is responsible for the network identity of the set. Pods get DNS/hostnames that follow the pattern: pod-specific-string.serviceName.default.svc.cluster.local where \"pod-specific-string\" is managed by the StatefulSet controller.","type":"string"},"template":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodTemplateSpec","description":"template is the object that describes the pod that will be created if insufficient replicas are detected. Each pod stamped out by the StatefulSet will fulfill this Template, but have a unique identity from the rest of the StatefulSet."}},"required":["selector","template","serviceName"],"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Affinity":{"description":"Affinity is a group of affinity scheduling rules.","properties":{"nodeAffinity":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_NodeAffinity","description":"Describes node affinity scheduling rules for the pod."},"podAffinity":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodAffinity","description":"Describes pod affinity scheduling rules (e.g. co-locate this pod in the same node, zone, etc. as some other pod(s))."},"podAntiAffinity":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodAntiAffinity","description":"Describes pod anti-affinity scheduling rules (e.g. avoid putting this pod in the same node, zone, etc. as some other pod(s))."}},"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Capabilities":{"description":"Adds and removes POSIX capabilities from running containers.","properties":{"add":{"description":"Added capabilities","items":{"type":"string"},"type":"array"},"drop":{"description":"Removed capabilities","items":{"type":"string"},"type":"array"}},"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ConfigMapEnvSource":{"description":"ConfigMapEnvSource selects a ConfigMap to populate the environment variables with.\n\nThe contents of the target ConfigMap's Data field will represent the key-value pairs as environment variables.","properties":{"name":{"description":"Name of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names","type":"string"},"optional":{"description":"Specify whether the ConfigMap must be defined","type":"boolean"}},"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ConfigMapKeySelector":{"description":"Selects a key from a ConfigMap.","properties":{"key":{"description":"The key to select.","type":"string"},"name":{"description":"Name of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names","type":"string"},"optional":{"description":"Specify whether the ConfigMap or its key must be defined","type":"boolean"}},"required":["key"],"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Container":{"description":"A single application container that you want to run within a pod.","properties":{"args":{"description":"Arguments to the entrypoint. The docker image's CMD is used if this is not provided. Variable references $(VAR_NAME) are expanded using the container's environment. If a variable cannot be resolved, the reference in the input string will be unchanged. The $(VAR_NAME) syntax can be escaped with a double $$, ie: $$(VAR_NAME). Escaped references will never be expanded, regardless of whether the variable exists or not. Cannot be updated. More info: https://kubernetes.io/docs/tasks/inject-data-application/define-command-argument-container/#running-a-command-in-a-shell","items":{"type":"string"},"type":"array"},"command":{"description":"Entrypoint array. Not executed within a shell. The docker image's ENTRYPOINT is used if this is not provided. Variable references $(VAR_NAME) are expanded using the container's environment. If a variable cannot be resolved, the reference in the input string will be unchanged. The $(VAR_NAME) syntax can be escaped with a double $$, ie: $$(VAR_NAME). Escaped references will never be expanded, regardless of whether the variable exists or not. Cannot be updated. More info: https://kubernetes.io/docs/tasks/inject-data-application/define-command-argument-container/#running-a-command-in-a-shell","items":{"type":"string"},"type":"array"},"env":{"description":"List of environment variables to set in the container. Cannot be updated.","items":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_EnvVar"},"type":"array","x-kubernetes-patch-merge-key":"name","x-kubernetes-patch-strategy":"merge"},"envFrom":{"description":"List of sources to populate environment variables in the container. The keys defined within a source must be a C_IDENTIFIER. All invalid keys will be reported as an event when the container is starting. When a key exists in multiple sources, the value associated with the last source will take precedence. Values defined by an Env with a duplicate key will take precedence. Cannot be updated.","items":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_EnvFromSource"},"type":"array"},"image":{"description":"Docker image name. More info: https://kubernetes.io/docs/concepts/containers/images This field is optional to allow higher level config management to default or override container images in workload controllers like Deployments and StatefulSets.","type":"string"},"imagePullPolicy":{"description":"Image pull policy. One of Always, Never, IfNotPresent. Defaults to Always if :latest tag is specified, or IfNotPresent otherwise. Cannot be updated. More info: https://kubernetes.io/docs/concepts/containers/images#updating-images","type":"string"},"lifecycle":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Lifecycle","description":"Actions that the management system should take in response to container lifecycle events. Cannot be updated."},"livenessProbe":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Probe","description":"Periodic probe of container liveness. Container will be restarted if the probe fails. Cannot be updated. More info: https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle#container-probes"},"name":{"description":"Name of the container specified as a DNS_LABEL. Each container in a pod must have a unique name (DNS_LABEL). Cannot be updated.","type":"string"},"ports":{"description":"List of ports to expose from the container. Exposing a port here gives the system additional information about the network connections a container uses, but is primarily informational. Not specifying a port here DOES NOT prevent that port from being exposed. Any port which is listening on the default \"0.0.0.0\" address inside a container will be accessible from the network. Cannot be updated.","items":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ContainerPort"},"type":"array","x-kubernetes-list-map-keys":["containerPort","protocol"],"x-kubernetes-list-type":"map","x-kubernetes-patch-merge-key":"containerPort","x-kubernetes-patch-strategy":"merge"},"readinessProbe":{},"resources":{},"securityContext":{},"startupProbe":{},"stdin":{},"stdinOnce":{},"terminationMessagePath":{},"terminationMessagePolicy":{},"tty":{},"volumeDevices":{},"volumeMounts":{},"workingDir":{}},"required":["name"],"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ContainerPort":{"description":"ContainerPort represents a network port in a single container.","properties":{"containerPort":{"_format":"int32","description":"Number of port to expose on the pod's IP address. This must be a valid port number, 0 < x < 65536.","type":"integer"},"hostIP":{"description":"What host IP to bind the external port to.","type":"string"},"hostPort":{"_format":"int32","description":"Number of port to expose on the host. If specified, this must be a valid port number, 0 < x < 65536. If HostNetwork is specified, this must match ContainerPort. Most containers do not need this.","type":"integer"},"name":{"description":"If specified, this must be an IANA_SVC_NAME and unique within the pod. Each named port in a pod must have a unique name. Name for the port that can be referred to by services.","type":"string"},"protocol":{"description":"Protocol for port. Must be UDP, TCP, or SCTP. Defaults to \"TCP\".","type":"string"}},"required":["containerPort"],"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_EnvFromSource":{"description":"EnvFromSource represents the source of a set of ConfigMaps","properties":{"configMapRef":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ConfigMapEnvSource","description":"The ConfigMap to select from"},"prefix":{"description":"An optional identifier to prepend to each key in the ConfigMap. Must be a C_IDENTIFIER.","type":"string"},"secretRef":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_SecretEnvSource","description":"The Secret to select from"}},"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_EnvVar":{"description":"EnvVar represents an environment variable present in a Container.","properties":{"name":{"description":"Name of the environment variable. Must be a C_IDENTIFIER.","type":"string"},"value":{"description":"Variable references $(VAR_NAME) are expanded using the previous defined environment variables in the container and any service environment variables. If a variable cannot be resolved, the reference in the input string will be unchanged. The $(VAR_NAME) syntax can be escaped with a double $$, ie: $$(VAR_NAME). Escaped references will never be expanded, regardless of whether the variable exists or not. Defaults to \"\".","type":"string"},"valueFrom":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_EnvVarSource","description":"Source for the environment variable's value. Cannot be used if value is not empty."}},"required":["name"],"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_EnvVarSource":{"description":"EnvVarSource represents a source for the value of an EnvVar.","properties":{"configMapKeyRef":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ConfigMapKeySelector","description":"Selects a key of a ConfigMap."},"fieldRef":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ObjectFieldSelector","description":"Selects a field of the pod: supports metadata.name, metadata.namespace, metadata.labels, metadata.annotations, spec.nodeName, spec.serviceAccountName, status.hostIP, status.podIP, status.podIPs."},"resourceFieldRef":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ResourceFieldSelector","description":"Selects a resource of the container: only resources limits and requests (limits.cpu, limits.memory, limits.ephemeral-storage, requests.cpu, requests.memory and requests.ephemeral-storage) are currently supported."},"secretKeyRef":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_SecretKeySelector","description":"Selects a key of a secret in the pod's namespace"}},"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_EphemeralContainer":{"description":"An EphemeralContainer is a container that may be added temporarily to an existing pod for user-initiated activities such as debugging. Ephemeral containers have no resource or scheduling guarantees, and they will not be restarted when they exit or when a pod is removed or restarted. If an ephemeral container causes a pod to exceed its resource allocation, the pod may be evicted. Ephemeral containers may not be added by directly updating the pod spec. They must be added via the pod's ephemeralcontainers subresource, and they will appear in the pod spec once added. This is an alpha feature enabled by the EphemeralContainers feature flag.","properties":{"args":{"description":"Arguments to the entrypoint. The docker image's CMD is used if this is not provided. Variable references $(VAR_NAME) are expanded using the container's environment. If a variable cannot be resolved, the reference in the input string will be unchanged. The $(VAR_NAME) syntax can be escaped with a double $$, ie: $$(VAR_NAME). Escaped references will never be expanded, regardless of whether the variable exists or not. Cannot be updated. More info: https://kubernetes.io/docs/tasks/inject-data-application/define-command-argument-container/#running-a-command-in-a-shell","items":{"type":"string"},"type":"array"},"command":{"description":"Entrypoint array. Not executed within a shell. The docker image's ENTRYPOINT is used if this is not provided. Variable references $(VAR_NAME) are expanded using the container's environment. If a variable cannot be resolved, the reference in the input string will be unchanged. The $(VAR_NAME) syntax can be escaped with a double $$, ie: $$(VAR_NAME). Escaped references will never be expanded, regardless of whether the variable exists or not. Cannot be updated. More info: https://kubernetes.io/docs/tasks/inject-data-application/define-command-argument-container/#running-a-command-in-a-shell","items":{"type":"string"},"type":"array"},"env":{"description":"List of environment variables to set in the container. Cannot be updated.","items":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_EnvVar"},"type":"array","x-kubernetes-patch-merge-key":"name","x-kubernetes-patch-strategy":"merge"},"envFrom":{"description":"List of sources to populate environment variables in the container. The keys defined within a source must be a C_IDENTIFIER. All invalid keys will be reported as an event when the container is starting. When a key exists in multiple sources, the value associated with the last source will take precedence. Values defined by an Env with a duplicate key will take precedence. Cannot be updated.","items":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_EnvFromSource"},"type":"array"},"image":{"description":"Docker image name. More info: https://kubernetes.io/docs/concepts/containers/images","type":"string"},"imagePullPolicy":{"description":"Image pull policy. One of Always, Never, IfNotPresent. Defaults to Always if :latest tag is specified, or IfNotPresent otherwise. Cannot be updated. More info: https://kubernetes.io/docs/concepts/containers/images#updating-images","type":"string"},"lifecycle":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Lifecycle","description":"Lifecycle is not allowed for ephemeral containers."},"livenessProbe":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Probe","description":"Probes are not allowed for ephemeral containers."},"name":{"description":"Name of the ephemeral container specified as a DNS_LABEL. This name must be unique among all containers, init containers and ephemeral containers.","type":"string"},"ports":{"description":"Ports are not allowed for ephemeral containers.","items":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ContainerPort"},"type":"array"},"readinessProbe":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Probe","description":"Probes are not allowed for ephemeral containers."},"resources":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ResourceRequirements","description":"Resources are not allowed for ephemeral containers. Ephemeral containers use spare resources already allocated to the pod."},"securityContext":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_SecurityContext","description":"SecurityContext is not allowed for ephemeral containers."},"startupProbe":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Probe","description":"Probes are not allowed for ephemeral containers."},"stdin":{"description":"Whether this container should allocate a buffer for stdin in the container runtime. If this is not set, reads from stdin in the container will always result in EOF. Default is false.","type":"boolean"},"stdinOnce":{"description":"Whether the container runtime should close the stdin channel after it has been opened by a single attach. When stdin is true the stdin stream will remain open across multiple attach sessions. If stdinOnce is set to true, stdin is opened on container start, is empty until the first client attaches to stdin, and then remains open and accepts data until the client disconnects, at which time stdin is closed and remains closed until the container is restarted. If this flag is false, a container processes that reads from stdin will never receive an EOF. Default is false","type":"boolean"},"targetContainerName":{"description":"If set, the name of the container from PodSpec that this ephemeral container targets. The ephemeral container will be run in the namespaces (IPC, PID, etc) of this container. If not set then the ephemeral container is run in whatever namespaces are shared for the pod. Note that the container runtime must support this feature.","type":"string"},"terminationMessagePath":{"description":"Optional: Path at which the file to which the container's termination message will be written is mounted into the container's filesystem. Message written is intended to be brief final status, such as an assertion failure message. Will be truncated by the node if greater than 4096 bytes. The total message length across all containers will be limited to 12kb. Defaults to /dev/termination-log. Cannot be updated.","type":"string"},"terminationMessagePolicy":{"description":"Indicate how the termination message should be populated. File will use the contents of terminationMessagePath to populate the container status message on both success and failure. FallbackToLogsOnError will use the last chunk of container log output if the termination message file is empty and the container exited with an error. The log output is limited to 2048 bytes or 80 lines, whichever is smaller. Defaults to File. Cannot be updated.","type":"string"},"tty":{"description":"Whether this container should allocate a TTY for itself, also requires 'stdin' to be true. Default is false.","type":"boolean"},"volumeDevices":{"description":"volumeDevices is the list of block devices to be used by the container.","items":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_VolumeDevice"},"type":"array","x-kubernetes-patch-merge-key":"devicePath","x-kubernetes-patch-strategy":"merge"},"volumeMounts":{"description":"Pod volumes to mount into the container's filesystem. Cannot be updated.","items":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_VolumeMount"},"type":"array","x-kubernetes-patch-merge-key":"mountPath","x-kubernetes-patch-strategy":"merge"},"workingDir":{"description":"Container's working directory. If not specified, the container runtime's default will be used, which might be configured in the container image. Cannot be updated.","type":"string"}},"required":["name"],"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ExecAction":{"description":"ExecAction describes a \"run in container\" action.","properties":{"command":{"description":"Command is the command line to execute inside the container, the working directory for the command  is root ('/') in the container's filesystem. The command is simply exec'd, it is not run inside a shell, so traditional shell instructions ('|', etc) won't work. To use a shell, you need to explicitly call out to that shell. Exit status of 0 is treated as live/healthy and non-zero is unhealthy.","items":{"type":"string"},"type":"array"}},"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_HTTPGetAction":{"description":"HTTPGetAction describes an action based on HTTP Get requests.","properties":{"host":{"description":"Host name to connect to, defaults to the pod IP. You probably want to set \"Host\" in httpHeaders instead.","type":"string"},"httpHeaders":{"description":"Custom headers to set in the request. HTTP allows repeated headers.","items":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_HTTPHeader"},"type":"array"},"path":{"description":"Path to access on the HTTP server.","type":"string"},"port":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_util_intstr_IntOrString","description":"Name or number of the port to access on the container. Number must be in the range 1 to 65535. Name must be an IANA_SVC_NAME."},"scheme":{"description":"Scheme to use for connecting to the host. Defaults to HTTP.","type":"string"}},"required":["port"],"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_HTTPHeader":{"description":"HTTPHeader describes a custom header to be used in HTTP probes","properties":{"name":{"description":"The header field name","type":"string"},"value":{"description":"The header field value","type":"string"}},"required":["name","value"],"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Handler":{"description":"Handler defines a specific action that should be taken","properties":{"exec":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ExecAction","description":"One and only one of the following should be specified. Exec specifies the action to take."},"httpGet":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_HTTPGetAction","description":"HTTPGet specifies the http request to perform."},"tcpSocket":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_TCPSocketAction","description":"TCPSocket specifies an action involving a TCP port. TCP hooks not yet supported"}},"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Lifecycle":{"description":"Lifecycle describes actions that the management system should take in response to container lifecycle events. For the PostStart and PreStop lifecycle handlers, management of the container blocks until the action is complete, unless the container process fails, in which case the handler is aborted.","properties":{"postStart":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Handler","description":"PostStart is called immediately after a container is created. If the handler fails, the container is terminated and restarted according to its restart policy. Other management of the container blocks until the hook completes. More info: https://kubernetes.io/docs/concepts/containers/container-lifecycle-hooks/#container-hooks"},"preStop":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Handler","description":"PreStop is called immediately before a container is terminated due to an API request or management event such as liveness/startup probe failure, preemption, resource contention, etc. The handler is not called if the container crashes or exits. The reason for termination is passed to the handler. The Pod's termination grace period countdown begins before the PreStop hooked is executed. Regardless of the outcome of the handler, the container will eventually terminate within the Pod's termination grace period. Other management of the container blocks until the hook completes or until the termination grace period is reached. More info: https://kubernetes.io/docs/concepts/containers/container-lifecycle-hooks/#container-hooks"}},"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_NodeAffinity":{"description":"Node affinity is a group of node affinity scheduling rules.","properties":{"preferredDuringSchedulingIgnoredDuringExecution":{"description":"The scheduler will prefer to schedule pods to nodes that satisfy the affinity expressions specified by this field, but it may choose a node that violates one or more of the expressions. The node that is most preferred is the one with the greatest sum of weights, i.e. for each node that meets all of the scheduling requirements (resource request, requiredDuringScheduling affinity expressions, etc.), compute a sum by iterating through the elements of this field and adding \"weight\" to the sum if the node matches the corresponding matchExpressions; the node(s) with the highest sum are the most preferred.","items":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PreferredSchedulingTerm"},"type":"array"},"requiredDuringSchedulingIgnoredDuringExecution":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_NodeSelector","description":"If the affinity requirements specified by this field are not met at scheduling time, the pod will not be scheduled onto the node. If the affinity requirements specified by this field cease to be met at some point during pod execution (e.g. due to an update), the system may or may not try to eventually evict the pod from its node."}},"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_NodeSelector":{"description":"A node selector represents the union of the results of one or more label queries over a set of nodes; that is, it represents the OR of the selectors represented by the node selector terms.","properties":{"nodeSelectorTerms":{"description":"Required. A list of node selector terms. The terms are ORed.","items":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_NodeSelectorTerm"},"type":"array"}},"required":["nodeSelectorTerms"],"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_NodeSelectorRequirement":{"description":"A node selector requirement is a selector that contains values, a key, and an operator that relates the key and values.","properties":{"key":{"description":"The label key that the selector applies to.","type":"string"},"operator":{"description":"Represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists, DoesNotExist. Gt, and Lt.","type":"string"},"values":{"description":"An array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. If the operator is Gt or Lt, the values array must have a single element, which will be interpreted as an integer. This array is replaced during a strategic merge patch.","items":{"type":"string"},"type":"array"}},"required":["key","operator"],"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_NodeSelectorTerm":{"description":"A null or empty node selector term matches no objects. The requirements of them are ANDed. The TopologySelectorTerm type implements a subset of the NodeSelectorTerm.","properties":{"matchExpressions":{"description":"A list of node selector requirements by node's labels.","items":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_NodeSelectorRequirement"},"type":"array"},"matchFields":{"description":"A list of node selector requirements by node's fields.","items":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_NodeSelectorRequirement"},"type":"array"}},"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ObjectFieldSelector":{"description":"ObjectFieldSelector selects an APIVersioned field of an object.","properties":{"apiVersion":{"description":"Version of the schema the FieldPath is written in terms of, defaults to \"v1\".","type":"string"},"fieldPath":{"description":"Path of the field to select in the specified API version.","type":"string"}},"required":["fieldPath"],"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodAffinity":{"description":"Pod affinity is a group of inter pod affinity scheduling rules.","properties":{"preferredDuringSchedulingIgnoredDuringExecution":{"description":"The scheduler will prefer to schedule pods to nodes that satisfy the affinity expressions specified by this field, but it may choose a node that violates one or more of the expressions. The node that is most preferred is the one with the greatest sum of weights, i.e. for each node that meets all of the scheduling requirements (resource request, requiredDuringScheduling affinity expressions, etc.), compute a sum by iterating through the elements of this field and adding \"weight\" to the sum if the node has pods which matches the corresponding podAffinityTerm; the node(s) with the highest sum are the most preferred.","items":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_WeightedPodAffinityTerm"},"type":"array"},"requiredDuringSchedulingIgnoredDuringExecution":{"description":"If the affinity requirements specified by this field are not met at scheduling time, the pod will not be scheduled onto the node. If the affinity requirements specified by this field cease to be met at some point during pod execution (e.g. due to a pod label update), the system may or may not try to eventually evict the pod from its node. When there are multiple elements, the lists of nodes corresponding to each podAffinityTerm are intersected, i.e. all terms must be satisfied.","items":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodAffinityTerm"},"type":"array"}},"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodAffinityTerm":{"description":"Defines a set of pods (namely those matching the labelSelector relative to the given namespace(s)) that this pod should be co-located (affinity) or not co-located (anti-affinity) with, where co-located is defined as running on a node whose value of the label with key <topologyKey> matches that of any node on which a pod of the set of pods is running","properties":{"labelSelector":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_LabelSelector","description":"A label query over a set of resources, in this case pods."},"namespaces":{"description":"namespaces specifies which namespaces the labelSelector applies to (matches against); null or empty list means \"this pod's namespace\"","items":{"type":"string"},"type":"array"},"topologyKey":{"description":"This pod should be co-located (affinity) or not co-located (anti-affinity) with the pods matching the labelSelector in the specified namespaces, where co-located is defined as running on a node whose value of the label with key topologyKey matches that of any node on which any of the selected pods is running. Empty topologyKey is not allowed.","type":"string"}},"required":["topologyKey"],"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodAntiAffinity":{"description":"Pod anti affinity is a group of inter pod anti affinity scheduling rules.","properties":{"preferredDuringSchedulingIgnoredDuringExecution":{"description":"The scheduler will prefer to schedule pods to nodes that satisfy the anti-affinity expressions specified by this field, but it may choose a node that violates one or more of the expressions. The node that is most preferred is the one with the greatest sum of weights, i.e. for each node that meets all of the scheduling requirements (resource request, requiredDuringScheduling anti-affinity expressions, etc.), compute a sum by iterating through the elements of this field and adding \"weight\" to the sum if the node has pods which matches the corresponding podAffinityTerm; the node(s) with the highest sum are the most preferred.","items":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_WeightedPodAffinityTerm"},"type":"array"},"requiredDuringSchedulingIgnoredDuringExecution":{"description":"If the anti-affinity requirements specified by this field are not met at scheduling time, the pod will not be scheduled onto the node. If the anti-affinity requirements specified by this field cease to be met at some point during pod execution (e.g. due to a pod label update), the system may or may not try to eventually evict the pod from its node. When there are multiple elements, the lists of nodes corresponding to each podAffinityTerm are intersected, i.e. all terms must be satisfied.","items":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodAffinityTerm"},"type":"array"}},"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodDNSConfig":{"description":"PodDNSConfig defines the DNS parameters of a pod in addition to those generated from DNSPolicy.","properties":{"nameservers":{"description":"A list of DNS name server IP addresses. This will be appended to the base nameservers generated from DNSPolicy. Duplicated nameservers will be removed.","items":{"type":"string"},"type":"array"},"options":{"description":"A list of DNS resolver options. This will be merged with the base options generated from DNSPolicy. Duplicated entries will be removed. Resolution options given in Options will override those that appear in the base DNSPolicy.","items":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodDNSConfigOption"},"type":"array"},"searches":{"description":"A list of DNS search domains for host-name lookup. This will be appended to the base search paths generated from DNSPolicy. Duplicated search paths will be removed.","items":{"type":"string"},"type":"array"}},"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodDNSConfigOption":{"description":"PodDNSConfigOption defines DNS resolver options of a pod.","properties":{"name":{"description":"Required.","type":"string"},"value":{"type":"string"}},"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodSpec":{"description":"PodSpec is a description of a pod.","properties":{"activeDeadlineSeconds":{"_format":"int64","description":"Optional duration in seconds the pod may be active on the node relative to StartTime before the system will actively try to mark it failed and kill associated containers. Value must be a positive integer.","type":"integer"},"affinity":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Affinity","description":"If specified, the pod's scheduling constraints"},"automountServiceAccountToken":{"description":"AutomountServiceAccountToken indicates whether a service account token should be automatically mounted.","type":"boolean"},"containers":{"description":"List of containers belonging to the pod. Containers cannot currently be added or removed. There must be at least one container in a Pod. Cannot be updated.","items":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Container"},"type":"array","x-kubernetes-patch-merge-key":"name","x-kubernetes-patch-strategy":"merge"},"dnsConfig":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodDNSConfig","description":"Specifies the DNS parameters of a pod. Parameters specified here will be merged to the generated DNS configuration based on DNSPolicy."},"dnsPolicy":{"description":"Set DNS policy for the pod. Defaults to \"ClusterFirst\". Valid values are 'ClusterFirstWithHostNet', 'ClusterFirst', 'Default' or 'None'. DNS parameters given in DNSConfig will be merged with the policy selected with DNSPolicy. To have DNS options set along with hostNetwork, you have to specify DNS policy explicitly to 'ClusterFirstWithHostNet'.","type":"string"},"enableServiceLinks":{"description":"EnableServiceLinks indicates whether information about services should be injected into pod's environment variables, matching the syntax of Docker links. Optional: Defaults to true.","type":"boolean"},"ephemeralContainers":{"description":"List of ephemeral containers run in this pod. Ephemeral containers may be run in an existing pod to perform user-initiated actions such as debugging. This list cannot be specified when creating a pod, and it cannot be modified by updating the pod spec. In order to add an ephemeral container to an existing pod, use the pod's ephemeralcontainers subresource. This field is alpha-level and is only honored by servers that enable the EphemeralContainers feature.","items":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_EphemeralContainer"},"type":"array","x-kubernetes-patch-merge-key":"name","x-kubernetes-patch-strategy":"merge"}},"required":["containers"],"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodTemplateSpec":{"description":"PodTemplateSpec describes the data a pod should have when created from a template","properties":{"metadata":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_ObjectMeta","description":"Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata"},"spec":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodSpec","description":"Specification of the desired behavior of the pod. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status"}},"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PreferredSchedulingTerm":{"description":"An empty preferred scheduling term matches all objects with implicit weight 0 (i.e. it's a no-op). A null preferred scheduling term matches no objects (i.e. is also a no-op).","properties":{"preference":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_NodeSelectorTerm","description":"A node selector term, associated with the corresponding weight."},"weight":{"_format":"int32","description":"Weight associated with matching the corresponding nodeSelectorTerm, in the range 1-100.","type":"integer"}},"required":["weight","preference"],"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Probe":{"description":"Probe describes a health check to be performed against a container to determine whether it is alive or ready to receive traffic.","properties":{"exec":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ExecAction","description":"One and only one of the following should be specified. Exec specifies the action to take."},"failureThreshold":{"_format":"int32","description":"Minimum consecutive failures for the probe to be considered failed after having succeeded. Defaults to 3. Minimum value is 1.","type":"integer"},"httpGet":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_HTTPGetAction","description":"HTTPGet specifies the http request to perform."},"initialDelaySeconds":{"_format":"int32","description":"Number of seconds after the container has started before liveness probes are initiated. More info: https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle#container-probes","type":"integer"},"periodSeconds":{"_format":"int32","description":"How often (in seconds) to perform the probe. Default to 10 seconds. Minimum value is 1.","type":"integer"},"successThreshold":{"_format":"int32","description":"Minimum consecutive successes for the probe to be considered successful after having failed. Defaults to 1. Must be 1 for liveness and startup. Minimum value is 1.","type":"integer"},"tcpSocket":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_TCPSocketAction","description":"TCPSocket specifies an action involving a TCP port. TCP hooks not yet supported"},"timeoutSeconds":{"_format":"int32","description":"Number of seconds after which the probe times out. Defaults to 1 second. Minimum value is 1. More info: https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle#container-probes","type":"integer"}},"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ResourceFieldSelector":{"description":"ResourceFieldSelector represents container resources (cpu, memory) and their output format","properties":{"containerName":{"description":"Container name: required for volumes, optional for env vars","type":"string"},"divisor":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_api_resource_Quantity","description":"Specifies the output format of the exposed resources, defaults to \"1\""},"resource":{"description":"Required: resource to select","type":"string"}},"required":["resource"],"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ResourceRequirements":{"description":"ResourceRequirements describes the compute resource requirements.","properties":{"limits":{"additionalProperties":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_api_resource_Quantity"},"description":"Limits describes the maximum amount of compute resources allowed. More info: https://kubernetes.io/docs/concepts/configuration/manage-compute-resources-container/","type":"object"},"requests":{"additionalProperties":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_api_resource_Quantity"},"description":"Requests describes the minimum amount of compute resources required. If Requests is omitted for a container, it defaults to Limits if that is explicitly specified, otherwise to an implementation-defined value. More info: https://kubernetes.io/docs/concepts/configuration/manage-compute-resources-container/","type":"object"}},"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_SELinuxOptions":{"description":"SELinuxOptions are the labels to be applied to the container","properties":{"level":{"description":"Level is SELinux level label that applies to the container.","type":"string"},"role":{"description":"Role is a SELinux role label that applies to the container.","type":"string"},"type":{"description":"Type is a SELinux type label that applies to the container.","type":"string"},"user":{"description":"User is a SELinux user label that applies to the container.","type":"string"}},"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_SecretEnvSource":{"description":"SecretEnvSource selects a Secret to populate the environment variables with.\n\nThe contents of the target Secret's Data field will represent the key-value pairs as environment variables.","properties":{"name":{"description":"Name of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names","type":"string"},"optional":{"description":"Specify whether the Secret must be defined","type":"boolean"}},"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_SecretKeySelector":{"description":"SecretKeySelector selects a key of a Secret.","properties":{"key":{"description":"The key of the secret to select from.  Must be a valid secret key.","type":"string"},"name":{"description":"Name of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names","type":"string"},"optional":{"description":"Specify whether the Secret or its key must be defined","type":"boolean"}},"required":["key"],"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_SecurityContext":{"description":"SecurityContext holds security configuration that will be applied to a container. Some fields are present in both SecurityContext and PodSecurityContext.  When both are set, the values in SecurityContext take precedence.","properties":{"allowPrivilegeEscalation":{"description":"AllowPrivilegeEscalation controls whether a process can gain more privileges than its parent process. This bool directly controls if the no_new_privs flag will be set on the container process. AllowPrivilegeEscalation is true always when the container is: 1) run as Privileged 2) has CAP_SYS_ADMIN","type":"boolean"},"capabilities":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Capabilities","description":"The capabilities to add/drop when running containers. Defaults to the default set of capabilities granted by the container runtime."},"privileged":{"description":"Run container in privileged mode. Processes in privileged containers are essentially equivalent to root on the host. Defaults to false.","type":"boolean"},"procMount":{"description":"procMount denotes the type of proc mount to use for the containers. The default is DefaultProcMount which uses the container runtime defaults for readonly paths and masked paths. This requires the ProcMountType feature flag to be enabled.","type":"string"},"readOnlyRootFilesystem":{"description":"Whether this container has a read-only root filesystem. Default is false.","type":"boolean"},"runAsGroup":{"_format":"int64","description":"The GID to run the entrypoint of the container process. Uses runtime default if unset. May also be set in PodSecurityContext.  If set in both SecurityContext and PodSecurityContext, the value specified in SecurityContext takes precedence.","type":"integer"},"runAsNonRoot":{"description":"Indicates that the container must run as a non-root user. If true, the Kubelet will validate the image at runtime to ensure that it does not run as UID 0 (root) and fail to start the container if it does. If unset or false, no such validation will be performed. May also be set in PodSecurityContext.  If set in both SecurityContext and PodSecurityContext, the value specified in SecurityContext takes precedence.","type":"boolean"},"runAsUser":{"_format":"int64","description":"The UID to run the entrypoint of the container process. Defaults to user specified in image metadata if unspecified. May also be set in PodSecurityContext.  If set in both SecurityContext and PodSecurityContext, the value specified in SecurityContext takes precedence.","type":"integer"},"seLinuxOptions":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_SELinuxOptions","description":"The SELinux context to be applied to the container. If unspecified, the container runtime will allocate a random SELinux context for each container.  May also be set in PodSecurityContext.  If set in both SecurityContext and PodSecurityContext, the value specified in SecurityContext takes precedence."},"windowsOptions":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_WindowsSecurityContextOptions","description":"The Windows specific settings applied to all containers. If unspecified, the options from the PodSecurityContext will be used. If set in both SecurityContext and PodSecurityContext, the value specified in SecurityContext takes precedence."}},"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_TCPSocketAction":{"description":"TCPSocketAction describes an action based on opening a socket","properties":{"host":{"description":"Optional: Host name to connect to, defaults to the pod IP.","type":"string"},"port":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_util_intstr_IntOrString","description":"Number or name of the port to access on the container. Number must be in the range 1 to 65535. Name must be an IANA_SVC_NAME."}},"required":["port"],"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_VolumeDevice":{"description":"volumeDevice describes a mapping of a raw block device within a container.","properties":{"devicePath":{"description":"devicePath is the path inside of the container that the device will be mapped to.","type":"string"},"name":{"description":"name must match the name of a persistentVolumeClaim in the pod","type":"string"}},"required":["name","devicePath"],"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_VolumeMount":{"description":"VolumeMount describes a mounting of a Volume within a container.","properties":{"mountPath":{"description":"Path within the container at which the volume should be mounted.  Must not contain ':'.","type":"string"},"mountPropagation":{"description":"mountPropagation determines how mounts are propagated from the host to container and the other way around. When not set, MountPropagationNone is used. This field is beta in 1.10.","type":"string"},"name":{"description":"This must match the Name of a Volume.","type":"string"},"readOnly":{"description":"Mounted read-only if true, read-write otherwise (false or unspecified). Defaults to false.","type":"boolean"},"subPath":{"description":"Path within the volume from which the container's volume should be mounted. Defaults to \"\" (volume's root).","type":"string"},"subPathExpr":{"description":"Expanded path within the volume from which the container's volume should be mounted. Behaves similarly to SubPath but environment variable references $(VAR_NAME) are expanded using the container's environment. Defaults to \"\" (volume's root). SubPathExpr and SubPath are mutually exclusive.","type":"string"}},"required":["name","mountPath"],"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_WeightedPodAffinityTerm":{"description":"The weights of all of the matched WeightedPodAffinityTerm fields are added per-node to find the most preferred node(s)","properties":{"podAffinityTerm":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodAffinityTerm","description":"Required. A pod affinity term, associated with the corresponding weight."},"weight":{"_format":"int32","description":"weight associated with matching the corresponding podAffinityTerm, in the range 1-100.","type":"integer"}},"required":["weight","podAffinityTerm"],"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_WindowsSecurityContextOptions":{"description":"WindowsSecurityContextOptions contain Windows-specific options and credentials.","properties":{"gmsaCredentialSpec":{"description":"GMSACredentialSpec is where the GMSA admission webhook (https://github.com/kubernetes-sigs/windows-gmsa) inlines the contents of the GMSA credential spec named by the GMSACredentialSpecName field.","type":"string"},"gmsaCredentialSpecName":{"description":"GMSACredentialSpecName is the name of the GMSA credential spec to use.","type":"string"},"runAsUserName":{"description":"The UserName in Windows to run the entrypoint of the container process. Defaults to the user specified in image metadata if unspecified. May also be set in PodSecurityContext. If set in both SecurityContext and PodSecurityContext, the value specified in SecurityContext takes precedence.","type":"string"}},"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_api_resource_Quantity":{"oneOf":[{"type":"string"},{"type":"number"}]},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_FieldsV1":{"description":"FieldsV1 stores a set of fields in a data structure like a Trie, in JSON format.\n\nEach key is either a '.' representing the field itself, and will always map to an empty set, or a string representing a sub-field or item. The string will follow one of these four formats: 'f:<name>', where <name> is the name of a field in a struct, or key in a map 'v:<value>', where <value> is the exact json formatted value of a list item 'i:<index>', where <index> is position of a item in a list 'k:<keys>', where <keys> is a map of  a list item's key fields to their unique values If a key maps to an empty Fields value, the field that key represents is part of the set.\n\nThe exact format is defined in sigs.k8s.io/structured-merge-diff","type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_LabelSelector":{"description":"A label selector is a label query over a set of resources. The result of matchLabels and matchExpressions are ANDed. An empty label selector matches all objects. A null label selector matches no objects.","properties":{"matchExpressions":{"description":"matchExpressions is a list of label selector requirements. The requirements are ANDed.","items":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_LabelSelectorRequirement"},"type":"array"},"matchLabels":{"additionalProperties":{"type":"string"},"description":"matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is \"key\", the operator is \"In\", and the values array contains only \"value\". The requirements are ANDed.","type":"object"}},"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_LabelSelectorRequirement":{"description":"A label selector requirement is a selector that contains values, a key, and an operator that relates the key and values.","properties":{"key":{"description":"key is the label key that the selector applies to.","type":"string","x-kubernetes-patch-merge-key":"key","x-kubernetes-patch-strategy":"merge"},"operator":{"description":"operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist.","type":"string"},"values":{"description":"values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch.","items":{"type":"string"},"type":"array"}},"required":["key","operator"],"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_ManagedFieldsEntry":{"description":"ManagedFieldsEntry is a workflow-id, a FieldSet and the group version of the resource that the fieldset applies to.","properties":{"apiVersion":{"description":"APIVersion defines the version of this resource that this field set applies to. The format is \"group/version\" just like the top-level APIVersion field. It is necessary to track the version of a field set because it cannot be automatically converted.","type":"string"},"fieldsType":{"description":"FieldsType is the discriminator for the different fields format and version. There is currently only one possible value: \"FieldsV1\"","type":"string"},"fieldsV1":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_FieldsV1","description":"FieldsV1 holds the first JSON version format as described in the \"FieldsV1\" type."},"manager":{"description":"Manager is an identifier of the workflow managing these fields.","type":"string"},"operation":{"description":"Operation is the type of operation which lead to this ManagedFieldsEntry being created. The only valid values for this field are 'Apply' and 'Update'.","type":"string"},"time":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_Time","description":"Time is timestamp of when these fields were set. It should always be empty if Operation is 'Apply'"}},"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_ObjectMeta":{"description":"ObjectMeta is metadata that all persisted resources must have, which includes all objects users must create.","properties":{"annotations":{"additionalProperties":{"type":"string"},"description":"Annotations is an unstructured key value map stored with a resource that may be set by external tools to store and retrieve arbitrary metadata. They are not queryable and should be preserved when modifying objects. More info: http://kubernetes.io/docs/user-guide/annotations","type":"object"},"clusterName":{"description":"The name of the cluster which the object belongs to. This is used to distinguish resources with same name and namespace in different clusters. This field is not set anywhere right now and apiserver is going to ignore it if set in create or update request.","type":"string"},"creationTimestamp":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_Time","description":"CreationTimestamp is a timestamp representing the server time when this object was created. It is not guaranteed to be set in happens-before order across separate operations. Clients may not set this value. It is represented in RFC3339 form and is in UTC.\n\nPopulated by the system. Read-only. Null for lists. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata"},"deletionGracePeriodSeconds":{"_format":"int64","description":"Number of seconds allowed for this object to gracefully terminate before it will be removed from the system. Only set when deletionTimestamp is also set. May only be shortened. Read-only.","type":"integer"},"deletionTimestamp":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_Time","description":"DeletionTimestamp is RFC 3339 date and time at which this resource will be deleted. This field is set by the server when a graceful deletion is requested by the user, and is not directly settable by a client. The resource is expected to be deleted (no longer visible from resource lists, and not reachable by name) after the time in this field, once the finalizers list is empty. As long as the finalizers list contains items, deletion is blocked. Once the deletionTimestamp is set, this value may not be unset or be set further into the future, although it may be shortened or the resource may be deleted prior to this time. For example, a user may request that a pod is deleted in 30 seconds. The Kubelet will react by sending a graceful termination signal to the containers in the pod. After that 30 seconds, the Kubelet will send a hard termination signal (SIGKILL) to the container and after cleanup, remove the pod from the API. In the presence of network partitions, this object may still exist after this timestamp, until an administrator or automated process can determine the resource is fully terminated. If not set, graceful deletion of the object has not been requested.\n\nPopulated by the system when a graceful deletion is requested. Read-only. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata"},"finalizers":{"description":"Must be empty before the object is deleted from the registry. Each entry is an identifier for the responsible component that will remove the entry from the list. If the deletionTimestamp of the object is non-nil, entries in this list can only be removed. Finalizers may be processed and removed in any order.  Order is NOT enforced because it introduces significant risk of stuck finalizers. finalizers is a shared field, any actor with permission can reorder it. If the finalizer list is processed in order, then this can lead to a situation in which the component responsible for the first finalizer in the list is waiting for a signal (field value, external system, or other) produced by a component responsible for a finalizer later in the list, resulting in a deadlock. Without enforced ordering finalizers are free to order amongst themselves and are not vulnerable to ordering changes in the list.","items":{"type":"string"},"type":"array","x-kubernetes-patch-strategy":"merge"},"generateName":{"description":"GenerateName is an optional prefix, used by the server, to generate a unique name ONLY IF the Name field has not been provided. If this field is used, the name returned to the client will be different than the name passed. This value will also be combined with a unique suffix. The provided value has the same validation rules as the Name field, and may be truncated by the length of the suffix required to make the value unique on the server.\n\nIf this field is specified and the generated name exists, the server will NOT return a 409 - instead, it will either return 201 Created or 500 with Reason ServerTimeout indicating a unique name could not be found in the time allotted, and the client should retry (optionally after the time indicated in the Retry-After header).\n\nApplied only if Name is not specified. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#idempotency","type":"string"},"generation":{"_format":"int64","description":"A sequence number representing a specific generation of the desired state. Populated by the system. Read-only.","type":"integer"},"labels":{"additionalProperties":{"type":"string"},"description":"Map of string keys and values that can be used to organize and categorize (scope and select) objects. May match selectors of replication controllers and services. More info: http://kubernetes.io/docs/user-guide/labels","type":"object"},"managedFields":{"description":"ManagedFields maps workflow-id and version to the set of fields that are managed by that workflow. This is mostly for internal housekeeping, and users typically shouldn't need to set or understand this field. A workflow can be the user's name, a controller's name, or the name of a specific apply path like \"ci-cd\". The set of fields is always in the version that the workflow used when modifying the object.","items":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_ManagedFieldsEntry"},"type":"array"},"name":{"description":"Name must be unique within a namespace. Is required when creating resources, although some resources may allow a client to request the generation of an appropriate name automatically. Name is primarily intended for creation idempotence and configuration definition. Cannot be updated. More info: http://kubernetes.io/docs/user-guide/identifiers#names","type":"string"},"namespace":{"description":"Namespace defines the space within each name must be unique. An empty namespace is equivalent to the \"default\" namespace, but \"default\" is the canonical representation. Not all objects are required to be scoped to a namespace - the value of this field for those objects will be empty.\n\nMust be a DNS_LABEL. Cannot be updated. More info: http://kubernetes.io/docs/user-guide/namespaces","type":"string"},"ownerReferences":{"description":"List of objects depended by this object. If ALL objects in the list have been deleted, this object will be garbage collected. If this object is managed by a controller, then an entry in this list will point to this controller, with the controller field set to true. There cannot be more than one managing controller.","items":{"$ref":"#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_OwnerReference"},"type":"array","x-kubernetes-patch-merge-key":"uid","x-kubernetes-patch-strategy":"merge"},"resourceVersion":{"description":"An opaque value that represents the internal version of this object that can be used by clients to determine when objects have changed. May be used for optimistic concurrency, change detection, and the watch operation on a resource or set of resources. Clients must treat these values as opaque and passed unmodified back to the server. They may only be valid for a particular resource or set of resources.\n\nPopulated by the system. Read-only. Value must be treated as opaque by clients and . More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#concurrency-control-and-consistency","type":"string"},"selfLink":{"description":"SelfLink is a URL representing this object. Populated by the system. Read-only.\n\nDEPRECATED Kubernetes will stop propagating this field in 1.20 release and the field is planned to be removed in 1.21 release.","type":"string"},"uid":{"description":"UID is the unique in time and space value for this object. It is typically generated by the server on successful creation of a resource and is not allowed to change on PUT operations.\n\nPopulated by the system. Read-only. More info: http://kubernetes.io/docs/user-guide/identifiers#uids","type":"string"}},"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_OwnerReference":{"description":"OwnerReference contains enough information to let you identify an owning object. An owning object must be in the same namespace as the dependent, or be cluster-scoped, so there is no namespace field.","properties":{"apiVersion":{"description":"API version of the referent.","type":"string"},"blockOwnerDeletion":{"description":"If true, AND if the owner has the \"foregroundDeletion\" finalizer, then the owner cannot be deleted from the key-value store until this reference is removed. Defaults to false. To set this field, a user needs \"delete\" permission of the owner, otherwise 422 (Unprocessable Entity) will be returned.","type":"boolean"},"controller":{"description":"If true, this reference points to the managing controller.","type":"boolean"},"kind":{"description":"Kind of the referent. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds","type":"string"},"name":{"description":"Name of the referent. More info: http://kubernetes.io/docs/user-guide/identifiers#names","type":"string"},"uid":{"description":"UID of the referent. More info: http://kubernetes.io/docs/user-guide/identifiers#uids","type":"string"}},"required":["apiVersion","kind","name","uid"],"type":"object"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_Time":{"_format":"date-time","description":"Time is a wrapper around time.Time which supports correct marshaling to YAML and JSON.  Wrappers are provided for many of the factory methods that the time package offers.","type":"string"},"https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_util_intstr_IntOrString":{"oneOf":[{"type":"string"},{"type":"integer"}]}}}"####;
+    const K8S_ORDERED_PORTS_SCHEMA_FRAGMENT: &str = r####"
+    {
+      "type": "object",
+      "properties": {
+        "spec": {
+          "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_apps_v1_StatefulSetSpec",
+          "description": "Spec defines the desired identities of pods in this set."
+        }
+      },
+      "definitions": {
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_apps_v1_StatefulSetSpec": {
+          "description": "A StatefulSetSpec is the specification of a StatefulSet.", "properties": {
+            "podManagementPolicy": {
+              "description": "podManagementPolicy controls how pods are created during initial scale up, when replacing pods on nodes, or when scaling down. The default policy is `OrderedReady`, where pods are created in increasing order (pod-0, then pod-1, etc) and the controller will wait until each pod is ready before continuing. When scaling down, the pods are removed in the opposite order. The alternative policy is `Parallel` which will create pods in parallel to match the desired scale without waiting, and on scale down will delete all pods at once.",
+              "type": "string"
+            },
+            "replicas": {
+              "_format": "int32",
+              "description": "replicas is the desired number of replicas of the given Template. These are replicas in the sense that they are instantiations of the same Template, but individual replicas also have a consistent identity. If unspecified, defaults to 1.",
+              "type": "integer"
+            },
+            "revisionHistoryLimit": {
+              "_format": "int32",
+              "description": "revisionHistoryLimit is the maximum number of revisions that will be maintained in the StatefulSet's revision history. The revision history consists of all revisions not represented by a currently applied StatefulSetSpec version. The default value is 10.",
+              "type": "integer"
+            },
+            "selector": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_LabelSelector",
+              "description": "selector is a label query over pods that should match the replica count. It must match the pod template's labels. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#label-selectors"
+            },
+            "serviceName": {
+              "description": "serviceName is the name of the service that governs this StatefulSet. This service must exist before the StatefulSet, and is responsible for the network identity of the set. Pods get DNS/hostnames that follow the pattern: pod-specific-string.serviceName.default.svc.cluster.local where \"pod-specific-string\" is managed by the StatefulSet controller.",
+              "type": "string"
+            },
+            "template": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodTemplateSpec",
+              "description": "template is the object that describes the pod that will be created if insufficient replicas are detected. Each pod stamped out by the StatefulSet will fulfill this Template, but have a unique identity from the rest of the StatefulSet."
+            }
+          }, "required": ["selector", "template", "serviceName"], "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Affinity": {
+          "description": "Affinity is a group of affinity scheduling rules.",
+          "properties": {
+            "nodeAffinity": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_NodeAffinity",
+              "description": "Describes node affinity scheduling rules for the pod."
+            },
+            "podAffinity": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodAffinity",
+              "description": "Describes pod affinity scheduling rules (e.g. co-locate this pod in the same node, zone, etc. as some other pod(s))."
+            },
+            "podAntiAffinity": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodAntiAffinity",
+              "description": "Describes pod anti-affinity scheduling rules (e.g. avoid putting this pod in the same node, zone, etc. as some other pod(s))."
+            }
+          },
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Capabilities": {
+          "description": "Adds and removes POSIX capabilities from running containers.",
+          "properties": {
+            "add": {"description": "Added capabilities", "items": {"type": "string"}, "type": "array"},
+            "drop": {"description": "Removed capabilities", "items": {"type": "string"}, "type": "array"}
+          },
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ConfigMapEnvSource": {
+          "description": "ConfigMapEnvSource selects a ConfigMap to populate the environment variables with.\n\nThe contents of the target ConfigMap's Data field will represent the key-value pairs as environment variables.",
+          "properties": {
+            "name": {
+              "description": "Name of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names",
+              "type": "string"
+            },
+            "optional": {"description": "Specify whether the ConfigMap must be defined", "type": "boolean"}
+          },
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ConfigMapKeySelector": {
+          "description": "Selects a key from a ConfigMap.",
+          "properties": {
+            "key": {"description": "The key to select.", "type": "string"},
+            "name": {
+              "description": "Name of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names",
+              "type": "string"
+            },
+            "optional": {"description": "Specify whether the ConfigMap or its key must be defined", "type": "boolean"}
+          },
+          "required": ["key"],
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Container": {
+          "description": "A single application container that you want to run within a pod.", "properties": {
+            "args": {
+              "description": "Arguments to the entrypoint. The docker image's CMD is used if this is not provided. Variable references $(VAR_NAME) are expanded using the container's environment. If a variable cannot be resolved, the reference in the input string will be unchanged. The $(VAR_NAME) syntax can be escaped with a double $$, ie: $$(VAR_NAME). Escaped references will never be expanded, regardless of whether the variable exists or not. Cannot be updated. More info: https://kubernetes.io/docs/tasks/inject-data-application/define-command-argument-container/#running-a-command-in-a-shell",
+              "items": {"type": "string"},
+              "type": "array"
+            },
+            "command": {
+              "description": "Entrypoint array. Not executed within a shell. The docker image's ENTRYPOINT is used if this is not provided. Variable references $(VAR_NAME) are expanded using the container's environment. If a variable cannot be resolved, the reference in the input string will be unchanged. The $(VAR_NAME) syntax can be escaped with a double $$, ie: $$(VAR_NAME). Escaped references will never be expanded, regardless of whether the variable exists or not. Cannot be updated. More info: https://kubernetes.io/docs/tasks/inject-data-application/define-command-argument-container/#running-a-command-in-a-shell",
+              "items": {"type": "string"},
+              "type": "array"
+            },
+            "env": {
+              "description": "List of environment variables to set in the container. Cannot be updated.",
+              "items": {"$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_EnvVar"},
+              "type": "array",
+              "x-kubernetes-patch-merge-key": "name",
+              "x-kubernetes-patch-strategy": "merge"
+            },
+            "envFrom": {
+              "description": "List of sources to populate environment variables in the container. The keys defined within a source must be a C_IDENTIFIER. All invalid keys will be reported as an event when the container is starting. When a key exists in multiple sources, the value associated with the last source will take precedence. Values defined by an Env with a duplicate key will take precedence. Cannot be updated.",
+              "items": {"$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_EnvFromSource"},
+              "type": "array"
+            },
+            "image": {
+              "description": "Docker image name. More info: https://kubernetes.io/docs/concepts/containers/images This field is optional to allow higher level config management to default or override container images in workload controllers like Deployments and StatefulSets.",
+              "type": "string"
+            },
+            "imagePullPolicy": {
+              "description": "Image pull policy. One of Always, Never, IfNotPresent. Defaults to Always if :latest tag is specified, or IfNotPresent otherwise. Cannot be updated. More info: https://kubernetes.io/docs/concepts/containers/images#updating-images",
+              "type": "string"
+            },
+            "lifecycle": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Lifecycle",
+              "description": "Actions that the management system should take in response to container lifecycle events. Cannot be updated."
+            },
+            "livenessProbe": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Probe",
+              "description": "Periodic probe of container liveness. Container will be restarted if the probe fails. Cannot be updated. More info: https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle#container-probes"
+            },
+            "name": {
+              "description": "Name of the container specified as a DNS_LABEL. Each container in a pod must have a unique name (DNS_LABEL). Cannot be updated.",
+              "type": "string"
+            },
+            "ports": {
+              "description": "List of ports to expose from the container. Exposing a port here gives the system additional information about the network connections a container uses, but is primarily informational. Not specifying a port here DOES NOT prevent that port from being exposed. Any port which is listening on the default \"0.0.0.0\" address inside a container will be accessible from the network. Cannot be updated.",
+              "items": {"$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ContainerPort"},
+              "type": "array",
+              "x-kubernetes-list-map-keys": ["containerPort", "protocol"],
+              "x-kubernetes-list-type": "map",
+              "x-kubernetes-patch-merge-key": "containerPort",
+              "x-kubernetes-patch-strategy": "merge"
+            },
+            "readinessProbe": {},
+            "resources": {},
+            "securityContext": {},
+            "startupProbe": {},
+            "stdin": {},
+            "stdinOnce": {},
+            "terminationMessagePath": {},
+            "terminationMessagePolicy": {},
+            "tty": {},
+            "volumeDevices": {},
+            "volumeMounts": {},
+            "workingDir": {}
+          }, "required": ["name"], "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ContainerPort": {
+          "description": "ContainerPort represents a network port in a single container.",
+          "properties": {
+            "containerPort": {
+              "_format": "int32",
+              "description": "Number of port to expose on the pod's IP address. This must be a valid port number, 0 < x < 65536.",
+              "type": "integer"
+            },
+            "hostIP": {"description": "What host IP to bind the external port to.", "type": "string"},
+            "hostPort": {
+              "_format": "int32",
+              "description": "Number of port to expose on the host. If specified, this must be a valid port number, 0 < x < 65536. If HostNetwork is specified, this must match ContainerPort. Most containers do not need this.",
+              "type": "integer"
+            },
+            "name": {
+              "description": "If specified, this must be an IANA_SVC_NAME and unique within the pod. Each named port in a pod must have a unique name. Name for the port that can be referred to by services.",
+              "type": "string"
+            },
+            "protocol": {"description": "Protocol for port. Must be UDP, TCP, or SCTP. Defaults to \"TCP\".", "type": "string"}
+          },
+          "required": ["containerPort"],
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_EnvFromSource": {
+          "description": "EnvFromSource represents the source of a set of ConfigMaps",
+          "properties": {
+            "configMapRef": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ConfigMapEnvSource",
+              "description": "The ConfigMap to select from"
+            },
+            "prefix": {
+              "description": "An optional identifier to prepend to each key in the ConfigMap. Must be a C_IDENTIFIER.",
+              "type": "string"
+            },
+            "secretRef": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_SecretEnvSource",
+              "description": "The Secret to select from"
+            }
+          },
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_EnvVar": {
+          "description": "EnvVar represents an environment variable present in a Container.",
+          "properties": {
+            "name": {"description": "Name of the environment variable. Must be a C_IDENTIFIER.", "type": "string"},
+            "value": {
+              "description": "Variable references $(VAR_NAME) are expanded using the previous defined environment variables in the container and any service environment variables. If a variable cannot be resolved, the reference in the input string will be unchanged. The $(VAR_NAME) syntax can be escaped with a double $$, ie: $$(VAR_NAME). Escaped references will never be expanded, regardless of whether the variable exists or not. Defaults to \"\".",
+              "type": "string"
+            },
+            "valueFrom": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_EnvVarSource",
+              "description": "Source for the environment variable's value. Cannot be used if value is not empty."
+            }
+          },
+          "required": ["name"],
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_EnvVarSource": {
+          "description": "EnvVarSource represents a source for the value of an EnvVar.", "properties": {
+            "configMapKeyRef": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ConfigMapKeySelector",
+              "description": "Selects a key of a ConfigMap."
+            },
+            "fieldRef": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ObjectFieldSelector",
+              "description": "Selects a field of the pod: supports metadata.name, metadata.namespace, metadata.labels, metadata.annotations, spec.nodeName, spec.serviceAccountName, status.hostIP, status.podIP, status.podIPs."
+            },
+            "resourceFieldRef": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ResourceFieldSelector",
+              "description": "Selects a resource of the container: only resources limits and requests (limits.cpu, limits.memory, limits.ephemeral-storage, requests.cpu, requests.memory and requests.ephemeral-storage) are currently supported."
+            },
+            "secretKeyRef": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_SecretKeySelector",
+              "description": "Selects a key of a secret in the pod's namespace"
+            }
+          }, "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_EphemeralContainer": {
+          "description": "An EphemeralContainer is a container that may be added temporarily to an existing pod for user-initiated activities such as debugging. Ephemeral containers have no resource or scheduling guarantees, and they will not be restarted when they exit or when a pod is removed or restarted. If an ephemeral container causes a pod to exceed its resource allocation, the pod may be evicted. Ephemeral containers may not be added by directly updating the pod spec. They must be added via the pod's ephemeralcontainers subresource, and they will appear in the pod spec once added. This is an alpha feature enabled by the EphemeralContainers feature flag.",
+          "properties": {
+            "args": {
+              "description": "Arguments to the entrypoint. The docker image's CMD is used if this is not provided. Variable references $(VAR_NAME) are expanded using the container's environment. If a variable cannot be resolved, the reference in the input string will be unchanged. The $(VAR_NAME) syntax can be escaped with a double $$, ie: $$(VAR_NAME). Escaped references will never be expanded, regardless of whether the variable exists or not. Cannot be updated. More info: https://kubernetes.io/docs/tasks/inject-data-application/define-command-argument-container/#running-a-command-in-a-shell",
+              "items": {"type": "string"},
+              "type": "array"
+            },
+            "command": {
+              "description": "Entrypoint array. Not executed within a shell. The docker image's ENTRYPOINT is used if this is not provided. Variable references $(VAR_NAME) are expanded using the container's environment. If a variable cannot be resolved, the reference in the input string will be unchanged. The $(VAR_NAME) syntax can be escaped with a double $$, ie: $$(VAR_NAME). Escaped references will never be expanded, regardless of whether the variable exists or not. Cannot be updated. More info: https://kubernetes.io/docs/tasks/inject-data-application/define-command-argument-container/#running-a-command-in-a-shell",
+              "items": {"type": "string"},
+              "type": "array"
+            },
+            "env": {
+              "description": "List of environment variables to set in the container. Cannot be updated.",
+              "items": {"$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_EnvVar"},
+              "type": "array",
+              "x-kubernetes-patch-merge-key": "name",
+              "x-kubernetes-patch-strategy": "merge"
+            },
+            "envFrom": {
+              "description": "List of sources to populate environment variables in the container. The keys defined within a source must be a C_IDENTIFIER. All invalid keys will be reported as an event when the container is starting. When a key exists in multiple sources, the value associated with the last source will take precedence. Values defined by an Env with a duplicate key will take precedence. Cannot be updated.",
+              "items": {"$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_EnvFromSource"},
+              "type": "array"
+            },
+            "image": {"description": "Docker image name. More info: https://kubernetes.io/docs/concepts/containers/images", "type": "string"},
+            "imagePullPolicy": {
+              "description": "Image pull policy. One of Always, Never, IfNotPresent. Defaults to Always if :latest tag is specified, or IfNotPresent otherwise. Cannot be updated. More info: https://kubernetes.io/docs/concepts/containers/images#updating-images",
+              "type": "string"
+            },
+            "lifecycle": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Lifecycle",
+              "description": "Lifecycle is not allowed for ephemeral containers."
+            },
+            "livenessProbe": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Probe",
+              "description": "Probes are not allowed for ephemeral containers."
+            },
+            "name": {
+              "description": "Name of the ephemeral container specified as a DNS_LABEL. This name must be unique among all containers, init containers and ephemeral containers.",
+              "type": "string"
+            },
+            "ports": {
+              "description": "Ports are not allowed for ephemeral containers.",
+              "items": {"$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ContainerPort"},
+              "type": "array"
+            },
+            "readinessProbe": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Probe",
+              "description": "Probes are not allowed for ephemeral containers."
+            },
+            "resources": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ResourceRequirements",
+              "description": "Resources are not allowed for ephemeral containers. Ephemeral containers use spare resources already allocated to the pod."
+            },
+            "securityContext": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_SecurityContext",
+              "description": "SecurityContext is not allowed for ephemeral containers."
+            },
+            "startupProbe": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Probe",
+              "description": "Probes are not allowed for ephemeral containers."
+            },
+            "stdin": {
+              "description": "Whether this container should allocate a buffer for stdin in the container runtime. If this is not set, reads from stdin in the container will always result in EOF. Default is false.",
+              "type": "boolean"
+            },
+            "stdinOnce": {
+              "description": "Whether the container runtime should close the stdin channel after it has been opened by a single attach. When stdin is true the stdin stream will remain open across multiple attach sessions. If stdinOnce is set to true, stdin is opened on container start, is empty until the first client attaches to stdin, and then remains open and accepts data until the client disconnects, at which time stdin is closed and remains closed until the container is restarted. If this flag is false, a container processes that reads from stdin will never receive an EOF. Default is false",
+              "type": "boolean"
+            },
+            "targetContainerName": {
+              "description": "If set, the name of the container from PodSpec that this ephemeral container targets. The ephemeral container will be run in the namespaces (IPC, PID, etc) of this container. If not set then the ephemeral container is run in whatever namespaces are shared for the pod. Note that the container runtime must support this feature.",
+              "type": "string"
+            },
+            "terminationMessagePath": {
+              "description": "Optional: Path at which the file to which the container's termination message will be written is mounted into the container's filesystem. Message written is intended to be brief final status, such as an assertion failure message. Will be truncated by the node if greater than 4096 bytes. The total message length across all containers will be limited to 12kb. Defaults to /dev/termination-log. Cannot be updated.",
+              "type": "string"
+            },
+            "terminationMessagePolicy": {
+              "description": "Indicate how the termination message should be populated. File will use the contents of terminationMessagePath to populate the container status message on both success and failure. FallbackToLogsOnError will use the last chunk of container log output if the termination message file is empty and the container exited with an error. The log output is limited to 2048 bytes or 80 lines, whichever is smaller. Defaults to File. Cannot be updated.",
+              "type": "string"
+            },
+            "tty": {
+              "description": "Whether this container should allocate a TTY for itself, also requires 'stdin' to be true. Default is false.",
+              "type": "boolean"
+            },
+            "volumeDevices": {
+              "description": "volumeDevices is the list of block devices to be used by the container.",
+              "items": {"$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_VolumeDevice"},
+              "type": "array",
+              "x-kubernetes-patch-merge-key": "devicePath",
+              "x-kubernetes-patch-strategy": "merge"
+            },
+            "volumeMounts": {
+              "description": "Pod volumes to mount into the container's filesystem. Cannot be updated.",
+              "items": {"$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_VolumeMount"},
+              "type": "array",
+              "x-kubernetes-patch-merge-key": "mountPath",
+              "x-kubernetes-patch-strategy": "merge"
+            },
+            "workingDir": {
+              "description": "Container's working directory. If not specified, the container runtime's default will be used, which might be configured in the container image. Cannot be updated.",
+              "type": "string"
+            }
+          },
+          "required": ["name"],
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ExecAction": {
+          "description": "ExecAction describes a \"run in container\" action.",
+          "properties": {
+            "command": {
+              "description": "Command is the command line to execute inside the container, the working directory for the command  is root ('/') in the container's filesystem. The command is simply exec'd, it is not run inside a shell, so traditional shell instructions ('|', etc) won't work. To use a shell, you need to explicitly call out to that shell. Exit status of 0 is treated as live/healthy and non-zero is unhealthy.",
+              "items": {"type": "string"},
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_HTTPGetAction": {
+          "description": "HTTPGetAction describes an action based on HTTP Get requests.",
+          "properties": {
+            "host": {
+              "description": "Host name to connect to, defaults to the pod IP. You probably want to set \"Host\" in httpHeaders instead.",
+              "type": "string"
+            },
+            "httpHeaders": {
+              "description": "Custom headers to set in the request. HTTP allows repeated headers.",
+              "items": {"$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_HTTPHeader"},
+              "type": "array"
+            },
+            "path": {"description": "Path to access on the HTTP server.", "type": "string"},
+            "port": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_util_intstr_IntOrString",
+              "description": "Name or number of the port to access on the container. Number must be in the range 1 to 65535. Name must be an IANA_SVC_NAME."
+            },
+            "scheme": {"description": "Scheme to use for connecting to the host. Defaults to HTTP.", "type": "string"}
+          },
+          "required": ["port"],
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_HTTPHeader": {
+          "description": "HTTPHeader describes a custom header to be used in HTTP probes",
+          "properties": {
+            "name": {"description": "The header field name", "type": "string"},
+            "value": {"description": "The header field value", "type": "string"}
+          },
+          "required": ["name", "value"],
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Handler": {
+          "description": "Handler defines a specific action that should be taken",
+          "properties": {
+            "exec": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ExecAction",
+              "description": "One and only one of the following should be specified. Exec specifies the action to take."
+            },
+            "httpGet": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_HTTPGetAction",
+              "description": "HTTPGet specifies the http request to perform."
+            },
+            "tcpSocket": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_TCPSocketAction",
+              "description": "TCPSocket specifies an action involving a TCP port. TCP hooks not yet supported"
+            }
+          },
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Lifecycle": {
+          "description": "Lifecycle describes actions that the management system should take in response to container lifecycle events. For the PostStart and PreStop lifecycle handlers, management of the container blocks until the action is complete, unless the container process fails, in which case the handler is aborted.",
+          "properties": {
+            "postStart": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Handler",
+              "description": "PostStart is called immediately after a container is created. If the handler fails, the container is terminated and restarted according to its restart policy. Other management of the container blocks until the hook completes. More info: https://kubernetes.io/docs/concepts/containers/container-lifecycle-hooks/#container-hooks"
+            },
+            "preStop": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Handler",
+              "description": "PreStop is called immediately before a container is terminated due to an API request or management event such as liveness/startup probe failure, preemption, resource contention, etc. The handler is not called if the container crashes or exits. The reason for termination is passed to the handler. The Pod's termination grace period countdown begins before the PreStop hooked is executed. Regardless of the outcome of the handler, the container will eventually terminate within the Pod's termination grace period. Other management of the container blocks until the hook completes or until the termination grace period is reached. More info: https://kubernetes.io/docs/concepts/containers/container-lifecycle-hooks/#container-hooks"
+            }
+          },
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_NodeAffinity": {
+          "description": "Node affinity is a group of node affinity scheduling rules.", "properties": {
+            "preferredDuringSchedulingIgnoredDuringExecution": {
+              "description": "The scheduler will prefer to schedule pods to nodes that satisfy the affinity expressions specified by this field, but it may choose a node that violates one or more of the expressions. The node that is most preferred is the one with the greatest sum of weights, i.e. for each node that meets all of the scheduling requirements (resource request, requiredDuringScheduling affinity expressions, etc.), compute a sum by iterating through the elements of this field and adding \"weight\" to the sum if the node matches the corresponding matchExpressions; the node(s) with the highest sum are the most preferred.",
+              "items": {
+                "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PreferredSchedulingTerm"
+              },
+              "type": "array"
+            },
+            "requiredDuringSchedulingIgnoredDuringExecution": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_NodeSelector",
+              "description": "If the affinity requirements specified by this field are not met at scheduling time, the pod will not be scheduled onto the node. If the affinity requirements specified by this field cease to be met at some point during pod execution (e.g. due to an update), the system may or may not try to eventually evict the pod from its node."
+            }
+          }, "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_NodeSelector": {
+          "description": "A node selector represents the union of the results of one or more label queries over a set of nodes; that is, it represents the OR of the selectors represented by the node selector terms.",
+          "properties": {
+            "nodeSelectorTerms": {
+              "description": "Required. A list of node selector terms. The terms are ORed.",
+              "items": {"$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_NodeSelectorTerm"},
+              "type": "array"
+            }
+          },
+          "required": ["nodeSelectorTerms"],
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_NodeSelectorRequirement": {
+          "description": "A node selector requirement is a selector that contains values, a key, and an operator that relates the key and values.",
+          "properties": {
+            "key": {"description": "The label key that the selector applies to.", "type": "string"},
+            "operator": {
+              "description": "Represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists, DoesNotExist. Gt, and Lt.",
+              "type": "string"
+            },
+            "values": {
+              "description": "An array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. If the operator is Gt or Lt, the values array must have a single element, which will be interpreted as an integer. This array is replaced during a strategic merge patch.",
+              "items": {"type": "string"},
+              "type": "array"
+            }
+          },
+          "required": ["key", "operator"],
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_NodeSelectorTerm": {
+          "description": "A null or empty node selector term matches no objects. The requirements of them are ANDed. The TopologySelectorTerm type implements a subset of the NodeSelectorTerm.",
+          "properties": {
+            "matchExpressions": {
+              "description": "A list of node selector requirements by node's labels.",
+              "items": {
+                "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_NodeSelectorRequirement"
+              },
+              "type": "array"
+            },
+            "matchFields": {
+              "description": "A list of node selector requirements by node's fields.",
+              "items": {
+                "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_NodeSelectorRequirement"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ObjectFieldSelector": {
+          "description": "ObjectFieldSelector selects an APIVersioned field of an object.",
+          "properties": {
+            "apiVersion": {"description": "Version of the schema the FieldPath is written in terms of, defaults to \"v1\".", "type": "string"},
+            "fieldPath": {"description": "Path of the field to select in the specified API version.", "type": "string"}
+          },
+          "required": ["fieldPath"],
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodAffinity": {
+          "description": "Pod affinity is a group of inter pod affinity scheduling rules.", "properties": {
+            "preferredDuringSchedulingIgnoredDuringExecution": {
+              "description": "The scheduler will prefer to schedule pods to nodes that satisfy the affinity expressions specified by this field, but it may choose a node that violates one or more of the expressions. The node that is most preferred is the one with the greatest sum of weights, i.e. for each node that meets all of the scheduling requirements (resource request, requiredDuringScheduling affinity expressions, etc.), compute a sum by iterating through the elements of this field and adding \"weight\" to the sum if the node has pods which matches the corresponding podAffinityTerm; the node(s) with the highest sum are the most preferred.",
+              "items": {
+                "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_WeightedPodAffinityTerm"
+              },
+              "type": "array"
+            },
+            "requiredDuringSchedulingIgnoredDuringExecution": {
+              "description": "If the affinity requirements specified by this field are not met at scheduling time, the pod will not be scheduled onto the node. If the affinity requirements specified by this field cease to be met at some point during pod execution (e.g. due to a pod label update), the system may or may not try to eventually evict the pod from its node. When there are multiple elements, the lists of nodes corresponding to each podAffinityTerm are intersected, i.e. all terms must be satisfied.",
+              "items": {"$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodAffinityTerm"},
+              "type": "array"
+            }
+          }, "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodAffinityTerm": {
+          "description": "Defines a set of pods (namely those matching the labelSelector relative to the given namespace(s)) that this pod should be co-located (affinity) or not co-located (anti-affinity) with, where co-located is defined as running on a node whose value of the label with key <topologyKey> matches that of any node on which a pod of the set of pods is running",
+          "properties": {
+            "labelSelector": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_LabelSelector",
+              "description": "A label query over a set of resources, in this case pods."
+            },
+            "namespaces": {
+              "description": "namespaces specifies which namespaces the labelSelector applies to (matches against); null or empty list means \"this pod's namespace\"",
+              "items": {"type": "string"},
+              "type": "array"
+            },
+            "topologyKey": {
+              "description": "This pod should be co-located (affinity) or not co-located (anti-affinity) with the pods matching the labelSelector in the specified namespaces, where co-located is defined as running on a node whose value of the label with key topologyKey matches that of any node on which any of the selected pods is running. Empty topologyKey is not allowed.",
+              "type": "string"
+            }
+          },
+          "required": ["topologyKey"],
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodAntiAffinity": {
+          "description": "Pod anti affinity is a group of inter pod anti affinity scheduling rules.", "properties": {
+            "preferredDuringSchedulingIgnoredDuringExecution": {
+              "description": "The scheduler will prefer to schedule pods to nodes that satisfy the anti-affinity expressions specified by this field, but it may choose a node that violates one or more of the expressions. The node that is most preferred is the one with the greatest sum of weights, i.e. for each node that meets all of the scheduling requirements (resource request, requiredDuringScheduling anti-affinity expressions, etc.), compute a sum by iterating through the elements of this field and adding \"weight\" to the sum if the node has pods which matches the corresponding podAffinityTerm; the node(s) with the highest sum are the most preferred.",
+              "items": {
+                "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_WeightedPodAffinityTerm"
+              },
+              "type": "array"
+            },
+            "requiredDuringSchedulingIgnoredDuringExecution": {
+              "description": "If the anti-affinity requirements specified by this field are not met at scheduling time, the pod will not be scheduled onto the node. If the anti-affinity requirements specified by this field cease to be met at some point during pod execution (e.g. due to a pod label update), the system may or may not try to eventually evict the pod from its node. When there are multiple elements, the lists of nodes corresponding to each podAffinityTerm are intersected, i.e. all terms must be satisfied.",
+              "items": {"$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodAffinityTerm"},
+              "type": "array"
+            }
+          }, "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodDNSConfig": {
+          "description": "PodDNSConfig defines the DNS parameters of a pod in addition to those generated from DNSPolicy.",
+          "properties": {
+            "nameservers": {
+              "description": "A list of DNS name server IP addresses. This will be appended to the base nameservers generated from DNSPolicy. Duplicated nameservers will be removed.",
+              "items": {"type": "string"},
+              "type": "array"
+            },
+            "options": {
+              "description": "A list of DNS resolver options. This will be merged with the base options generated from DNSPolicy. Duplicated entries will be removed. Resolution options given in Options will override those that appear in the base DNSPolicy.",
+              "items": {"$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodDNSConfigOption"},
+              "type": "array"
+            },
+            "searches": {
+              "description": "A list of DNS search domains for host-name lookup. This will be appended to the base search paths generated from DNSPolicy. Duplicated search paths will be removed.",
+              "items": {"type": "string"},
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodDNSConfigOption": {
+          "description": "PodDNSConfigOption defines DNS resolver options of a pod.",
+          "properties": {"name": {"description": "Required.", "type": "string"}, "value": {"type": "string"}},
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodSpec": {
+          "description": "PodSpec is a description of a pod.", "properties": {
+            "activeDeadlineSeconds": {
+              "_format": "int64",
+              "description": "Optional duration in seconds the pod may be active on the node relative to StartTime before the system will actively try to mark it failed and kill associated containers. Value must be a positive integer.",
+              "type": "integer"
+            },
+            "affinity": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Affinity",
+              "description": "If specified, the pod's scheduling constraints"
+            },
+            "automountServiceAccountToken": {
+              "description": "AutomountServiceAccountToken indicates whether a service account token should be automatically mounted.",
+              "type": "boolean"
+            },
+            "containers": {
+              "description": "List of containers belonging to the pod. Containers cannot currently be added or removed. There must be at least one container in a Pod. Cannot be updated.",
+              "items": {"$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Container"},
+              "type": "array",
+              "x-kubernetes-patch-merge-key": "name",
+              "x-kubernetes-patch-strategy": "merge"
+            },
+            "dnsConfig": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodDNSConfig",
+              "description": "Specifies the DNS parameters of a pod. Parameters specified here will be merged to the generated DNS configuration based on DNSPolicy."
+            },
+            "dnsPolicy": {
+              "description": "Set DNS policy for the pod. Defaults to \"ClusterFirst\". Valid values are 'ClusterFirstWithHostNet', 'ClusterFirst', 'Default' or 'None'. DNS parameters given in DNSConfig will be merged with the policy selected with DNSPolicy. To have DNS options set along with hostNetwork, you have to specify DNS policy explicitly to 'ClusterFirstWithHostNet'.",
+              "type": "string"
+            },
+            "enableServiceLinks": {
+              "description": "EnableServiceLinks indicates whether information about services should be injected into pod's environment variables, matching the syntax of Docker links. Optional: Defaults to true.",
+              "type": "boolean"
+            },
+            "ephemeralContainers": {
+              "description": "List of ephemeral containers run in this pod. Ephemeral containers may be run in an existing pod to perform user-initiated actions such as debugging. This list cannot be specified when creating a pod, and it cannot be modified by updating the pod spec. In order to add an ephemeral container to an existing pod, use the pod's ephemeralcontainers subresource. This field is alpha-level and is only honored by servers that enable the EphemeralContainers feature.",
+              "items": {"$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_EphemeralContainer"},
+              "type": "array",
+              "x-kubernetes-patch-merge-key": "name",
+              "x-kubernetes-patch-strategy": "merge"
+            }
+          }, "required": ["containers"], "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodTemplateSpec": {
+          "description": "PodTemplateSpec describes the data a pod should have when created from a template",
+          "properties": {
+            "metadata": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_ObjectMeta",
+              "description": "Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata"
+            },
+            "spec": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodSpec",
+              "description": "Specification of the desired behavior of the pod. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status"
+            }
+          },
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PreferredSchedulingTerm": {
+          "description": "An empty preferred scheduling term matches all objects with implicit weight 0 (i.e. it's a no-op). A null preferred scheduling term matches no objects (i.e. is also a no-op).",
+          "properties": {
+            "preference": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_NodeSelectorTerm",
+              "description": "A node selector term, associated with the corresponding weight."
+            },
+            "weight": {
+              "_format": "int32",
+              "description": "Weight associated with matching the corresponding nodeSelectorTerm, in the range 1-100.",
+              "type": "integer"
+            }
+          },
+          "required": ["weight", "preference"],
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Probe": {
+          "description": "Probe describes a health check to be performed against a container to determine whether it is alive or ready to receive traffic.",
+          "properties": {
+            "exec": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ExecAction",
+              "description": "One and only one of the following should be specified. Exec specifies the action to take."
+            },
+            "failureThreshold": {
+              "_format": "int32",
+              "description": "Minimum consecutive failures for the probe to be considered failed after having succeeded. Defaults to 3. Minimum value is 1.",
+              "type": "integer"
+            },
+            "httpGet": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_HTTPGetAction",
+              "description": "HTTPGet specifies the http request to perform."
+            },
+            "initialDelaySeconds": {
+              "_format": "int32",
+              "description": "Number of seconds after the container has started before liveness probes are initiated. More info: https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle#container-probes",
+              "type": "integer"
+            },
+            "periodSeconds": {
+              "_format": "int32",
+              "description": "How often (in seconds) to perform the probe. Default to 10 seconds. Minimum value is 1.",
+              "type": "integer"
+            },
+            "successThreshold": {
+              "_format": "int32",
+              "description": "Minimum consecutive successes for the probe to be considered successful after having failed. Defaults to 1. Must be 1 for liveness and startup. Minimum value is 1.",
+              "type": "integer"
+            },
+            "tcpSocket": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_TCPSocketAction",
+              "description": "TCPSocket specifies an action involving a TCP port. TCP hooks not yet supported"
+            },
+            "timeoutSeconds": {
+              "_format": "int32",
+              "description": "Number of seconds after which the probe times out. Defaults to 1 second. Minimum value is 1. More info: https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle#container-probes",
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ResourceFieldSelector": {
+          "description": "ResourceFieldSelector represents container resources (cpu, memory) and their output format",
+          "properties": {
+            "containerName": {"description": "Container name: required for volumes, optional for env vars", "type": "string"},
+            "divisor": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_api_resource_Quantity",
+              "description": "Specifies the output format of the exposed resources, defaults to \"1\""
+            },
+            "resource": {"description": "Required: resource to select", "type": "string"}
+          },
+          "required": ["resource"],
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_ResourceRequirements": {
+          "description": "ResourceRequirements describes the compute resource requirements.",
+          "properties": {
+            "limits": {
+              "additionalProperties": {
+                "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_api_resource_Quantity"
+              },
+              "description": "Limits describes the maximum amount of compute resources allowed. More info: https://kubernetes.io/docs/concepts/configuration/manage-compute-resources-container/",
+              "type": "object"
+            },
+            "requests": {
+              "additionalProperties": {
+                "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_api_resource_Quantity"
+              },
+              "description": "Requests describes the minimum amount of compute resources required. If Requests is omitted for a container, it defaults to Limits if that is explicitly specified, otherwise to an implementation-defined value. More info: https://kubernetes.io/docs/concepts/configuration/manage-compute-resources-container/",
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_SELinuxOptions": {
+          "description": "SELinuxOptions are the labels to be applied to the container",
+          "properties": {
+            "level": {"description": "Level is SELinux level label that applies to the container.", "type": "string"},
+            "role": {"description": "Role is a SELinux role label that applies to the container.", "type": "string"},
+            "type": {"description": "Type is a SELinux type label that applies to the container.", "type": "string"},
+            "user": {"description": "User is a SELinux user label that applies to the container.", "type": "string"}
+          },
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_SecretEnvSource": {
+          "description": "SecretEnvSource selects a Secret to populate the environment variables with.\n\nThe contents of the target Secret's Data field will represent the key-value pairs as environment variables.",
+          "properties": {
+            "name": {
+              "description": "Name of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names",
+              "type": "string"
+            },
+            "optional": {"description": "Specify whether the Secret must be defined", "type": "boolean"}
+          },
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_SecretKeySelector": {
+          "description": "SecretKeySelector selects a key of a Secret.",
+          "properties": {
+            "key": {"description": "The key of the secret to select from.  Must be a valid secret key.", "type": "string"},
+            "name": {
+              "description": "Name of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names",
+              "type": "string"
+            },
+            "optional": {"description": "Specify whether the Secret or its key must be defined", "type": "boolean"}
+          },
+          "required": ["key"],
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_SecurityContext": {
+          "description": "SecurityContext holds security configuration that will be applied to a container. Some fields are present in both SecurityContext and PodSecurityContext.  When both are set, the values in SecurityContext take precedence.",
+          "properties": {
+            "allowPrivilegeEscalation": {
+              "description": "AllowPrivilegeEscalation controls whether a process can gain more privileges than its parent process. This bool directly controls if the no_new_privs flag will be set on the container process. AllowPrivilegeEscalation is true always when the container is: 1) run as Privileged 2) has CAP_SYS_ADMIN",
+              "type": "boolean"
+            },
+            "capabilities": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_Capabilities",
+              "description": "The capabilities to add/drop when running containers. Defaults to the default set of capabilities granted by the container runtime."
+            },
+            "privileged": {
+              "description": "Run container in privileged mode. Processes in privileged containers are essentially equivalent to root on the host. Defaults to false.",
+              "type": "boolean"
+            },
+            "procMount": {
+              "description": "procMount denotes the type of proc mount to use for the containers. The default is DefaultProcMount which uses the container runtime defaults for readonly paths and masked paths. This requires the ProcMountType feature flag to be enabled.",
+              "type": "string"
+            },
+            "readOnlyRootFilesystem": {
+              "description": "Whether this container has a read-only root filesystem. Default is false.",
+              "type": "boolean"
+            },
+            "runAsGroup": {
+              "_format": "int64",
+              "description": "The GID to run the entrypoint of the container process. Uses runtime default if unset. May also be set in PodSecurityContext.  If set in both SecurityContext and PodSecurityContext, the value specified in SecurityContext takes precedence.",
+              "type": "integer"
+            },
+            "runAsNonRoot": {
+              "description": "Indicates that the container must run as a non-root user. If true, the Kubelet will validate the image at runtime to ensure that it does not run as UID 0 (root) and fail to start the container if it does. If unset or false, no such validation will be performed. May also be set in PodSecurityContext.  If set in both SecurityContext and PodSecurityContext, the value specified in SecurityContext takes precedence.",
+              "type": "boolean"
+            },
+            "runAsUser": {
+              "_format": "int64",
+              "description": "The UID to run the entrypoint of the container process. Defaults to user specified in image metadata if unspecified. May also be set in PodSecurityContext.  If set in both SecurityContext and PodSecurityContext, the value specified in SecurityContext takes precedence.",
+              "type": "integer"
+            },
+            "seLinuxOptions": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_SELinuxOptions",
+              "description": "The SELinux context to be applied to the container. If unspecified, the container runtime will allocate a random SELinux context for each container.  May also be set in PodSecurityContext.  If set in both SecurityContext and PodSecurityContext, the value specified in SecurityContext takes precedence."
+            },
+            "windowsOptions": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_WindowsSecurityContextOptions",
+              "description": "The Windows specific settings applied to all containers. If unspecified, the options from the PodSecurityContext will be used. If set in both SecurityContext and PodSecurityContext, the value specified in SecurityContext takes precedence."
+            }
+          },
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_TCPSocketAction": {
+          "description": "TCPSocketAction describes an action based on opening a socket",
+          "properties": {
+            "host": {"description": "Optional: Host name to connect to, defaults to the pod IP.", "type": "string"},
+            "port": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_util_intstr_IntOrString",
+              "description": "Number or name of the port to access on the container. Number must be in the range 1 to 65535. Name must be an IANA_SVC_NAME."
+            }
+          },
+          "required": ["port"],
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_VolumeDevice": {
+          "description": "volumeDevice describes a mapping of a raw block device within a container.",
+          "properties": {
+            "devicePath": {
+              "description": "devicePath is the path inside of the container that the device will be mapped to.",
+              "type": "string"
+            },
+            "name": {"description": "name must match the name of a persistentVolumeClaim in the pod", "type": "string"}
+          },
+          "required": ["name", "devicePath"],
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_VolumeMount": {
+          "description": "VolumeMount describes a mounting of a Volume within a container.", "properties": {
+            "mountPath": {
+              "description": "Path within the container at which the volume should be mounted.  Must not contain ':'.",
+              "type": "string"
+            },
+            "mountPropagation": {
+              "description": "mountPropagation determines how mounts are propagated from the host to container and the other way around. When not set, MountPropagationNone is used. This field is beta in 1.10.",
+              "type": "string"
+            },
+            "name": {"description": "This must match the Name of a Volume.", "type": "string"},
+            "readOnly": {
+              "description": "Mounted read-only if true, read-write otherwise (false or unspecified). Defaults to false.",
+              "type": "boolean"
+            },
+            "subPath": {
+              "description": "Path within the volume from which the container's volume should be mounted. Defaults to \"\" (volume's root).",
+              "type": "string"
+            },
+            "subPathExpr": {
+              "description": "Expanded path within the volume from which the container's volume should be mounted. Behaves similarly to SubPath but environment variable references $(VAR_NAME) are expanded using the container's environment. Defaults to \"\" (volume's root). SubPathExpr and SubPath are mutually exclusive.",
+              "type": "string"
+            }
+          }, "required": ["name", "mountPath"], "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_WeightedPodAffinityTerm": {
+          "description": "The weights of all of the matched WeightedPodAffinityTerm fields are added per-node to find the most preferred node(s)",
+          "properties": {
+            "podAffinityTerm": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_PodAffinityTerm",
+              "description": "Required. A pod affinity term, associated with the corresponding weight."
+            },
+            "weight": {
+              "_format": "int32",
+              "description": "weight associated with matching the corresponding podAffinityTerm, in the range 1-100.",
+              "type": "integer"
+            }
+          },
+          "required": ["weight", "podAffinityTerm"],
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_api_core_v1_WindowsSecurityContextOptions": {
+          "description": "WindowsSecurityContextOptions contain Windows-specific options and credentials.",
+          "properties": {
+            "gmsaCredentialSpec": {
+              "description": "GMSACredentialSpec is where the GMSA admission webhook (https://github.com/kubernetes-sigs/windows-gmsa) inlines the contents of the GMSA credential spec named by the GMSACredentialSpecName field.",
+              "type": "string"
+            },
+            "gmsaCredentialSpecName": {
+              "description": "GMSACredentialSpecName is the name of the GMSA credential spec to use.",
+              "type": "string"
+            },
+            "runAsUserName": {
+              "description": "The UserName in Windows to run the entrypoint of the container process. Defaults to the user specified in image metadata if unspecified. May also be set in PodSecurityContext. If set in both SecurityContext and PodSecurityContext, the value specified in SecurityContext takes precedence.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_api_resource_Quantity": {
+          "oneOf": [{"type": "string"}, {"type": "number"}]
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_FieldsV1": {
+          "description": "FieldsV1 stores a set of fields in a data structure like a Trie, in JSON format.\n\nEach key is either a '.' representing the field itself, and will always map to an empty set, or a string representing a sub-field or item. The string will follow one of these four formats: 'f:<name>', where <name> is the name of a field in a struct, or key in a map 'v:<value>', where <value> is the exact json formatted value of a list item 'i:<index>', where <index> is position of a item in a list 'k:<keys>', where <keys> is a map of  a list item's key fields to their unique values If a key maps to an empty Fields value, the field that key represents is part of the set.\n\nThe exact format is defined in sigs.k8s.io/structured-merge-diff",
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_LabelSelector": {
+          "description": "A label selector is a label query over a set of resources. The result of matchLabels and matchExpressions are ANDed. An empty label selector matches all objects. A null label selector matches no objects.",
+          "properties": {
+            "matchExpressions": {
+              "description": "matchExpressions is a list of label selector requirements. The requirements are ANDed.",
+              "items": {
+                "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_LabelSelectorRequirement"
+              },
+              "type": "array"
+            },
+            "matchLabels": {
+              "additionalProperties": {"type": "string"},
+              "description": "matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is \"key\", the operator is \"In\", and the values array contains only \"value\". The requirements are ANDed.",
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_LabelSelectorRequirement": {
+          "description": "A label selector requirement is a selector that contains values, a key, and an operator that relates the key and values.",
+          "properties": {
+            "key": {
+              "description": "key is the label key that the selector applies to.",
+              "type": "string",
+              "x-kubernetes-patch-merge-key": "key",
+              "x-kubernetes-patch-strategy": "merge"
+            },
+            "operator": {
+              "description": "operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist.",
+              "type": "string"
+            },
+            "values": {
+              "description": "values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch.",
+              "items": {"type": "string"},
+              "type": "array"
+            }
+          },
+          "required": ["key", "operator"],
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_ManagedFieldsEntry": {
+          "description": "ManagedFieldsEntry is a workflow-id, a FieldSet and the group version of the resource that the fieldset applies to.",
+          "properties": {
+            "apiVersion": {
+              "description": "APIVersion defines the version of this resource that this field set applies to. The format is \"group/version\" just like the top-level APIVersion field. It is necessary to track the version of a field set because it cannot be automatically converted.",
+              "type": "string"
+            },
+            "fieldsType": {
+              "description": "FieldsType is the discriminator for the different fields format and version. There is currently only one possible value: \"FieldsV1\"",
+              "type": "string"
+            },
+            "fieldsV1": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_FieldsV1",
+              "description": "FieldsV1 holds the first JSON version format as described in the \"FieldsV1\" type."
+            },
+            "manager": {"description": "Manager is an identifier of the workflow managing these fields.", "type": "string"},
+            "operation": {
+              "description": "Operation is the type of operation which lead to this ManagedFieldsEntry being created. The only valid values for this field are 'Apply' and 'Update'.",
+              "type": "string"
+            },
+            "time": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_Time",
+              "description": "Time is timestamp of when these fields were set. It should always be empty if Operation is 'Apply'"
+            }
+          },
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_ObjectMeta": {
+          "description": "ObjectMeta is metadata that all persisted resources must have, which includes all objects users must create.",
+          "properties": {
+            "annotations": {
+              "additionalProperties": {"type": "string"},
+              "description": "Annotations is an unstructured key value map stored with a resource that may be set by external tools to store and retrieve arbitrary metadata. They are not queryable and should be preserved when modifying objects. More info: http://kubernetes.io/docs/user-guide/annotations",
+              "type": "object"
+            },
+            "clusterName": {
+              "description": "The name of the cluster which the object belongs to. This is used to distinguish resources with same name and namespace in different clusters. This field is not set anywhere right now and apiserver is going to ignore it if set in create or update request.",
+              "type": "string"
+            },
+            "creationTimestamp": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_Time",
+              "description": "CreationTimestamp is a timestamp representing the server time when this object was created. It is not guaranteed to be set in happens-before order across separate operations. Clients may not set this value. It is represented in RFC3339 form and is in UTC.\n\nPopulated by the system. Read-only. Null for lists. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata"
+            },
+            "deletionGracePeriodSeconds": {
+              "_format": "int64",
+              "description": "Number of seconds allowed for this object to gracefully terminate before it will be removed from the system. Only set when deletionTimestamp is also set. May only be shortened. Read-only.",
+              "type": "integer"
+            },
+            "deletionTimestamp": {
+              "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_Time",
+              "description": "DeletionTimestamp is RFC 3339 date and time at which this resource will be deleted. This field is set by the server when a graceful deletion is requested by the user, and is not directly settable by a client. The resource is expected to be deleted (no longer visible from resource lists, and not reachable by name) after the time in this field, once the finalizers list is empty. As long as the finalizers list contains items, deletion is blocked. Once the deletionTimestamp is set, this value may not be unset or be set further into the future, although it may be shortened or the resource may be deleted prior to this time. For example, a user may request that a pod is deleted in 30 seconds. The Kubelet will react by sending a graceful termination signal to the containers in the pod. After that 30 seconds, the Kubelet will send a hard termination signal (SIGKILL) to the container and after cleanup, remove the pod from the API. In the presence of network partitions, this object may still exist after this timestamp, until an administrator or automated process can determine the resource is fully terminated. If not set, graceful deletion of the object has not been requested.\n\nPopulated by the system when a graceful deletion is requested. Read-only. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata"
+            },
+            "finalizers": {
+              "description": "Must be empty before the object is deleted from the registry. Each entry is an identifier for the responsible component that will remove the entry from the list. If the deletionTimestamp of the object is non-nil, entries in this list can only be removed. Finalizers may be processed and removed in any order.  Order is NOT enforced because it introduces significant risk of stuck finalizers. finalizers is a shared field, any actor with permission can reorder it. If the finalizer list is processed in order, then this can lead to a situation in which the component responsible for the first finalizer in the list is waiting for a signal (field value, external system, or other) produced by a component responsible for a finalizer later in the list, resulting in a deadlock. Without enforced ordering finalizers are free to order amongst themselves and are not vulnerable to ordering changes in the list.",
+              "items": {"type": "string"},
+              "type": "array",
+              "x-kubernetes-patch-strategy": "merge"
+            },
+            "generateName": {
+              "description": "GenerateName is an optional prefix, used by the server, to generate a unique name ONLY IF the Name field has not been provided. If this field is used, the name returned to the client will be different than the name passed. This value will also be combined with a unique suffix. The provided value has the same validation rules as the Name field, and may be truncated by the length of the suffix required to make the value unique on the server.\n\nIf this field is specified and the generated name exists, the server will NOT return a 409 - instead, it will either return 201 Created or 500 with Reason ServerTimeout indicating a unique name could not be found in the time allotted, and the client should retry (optionally after the time indicated in the Retry-After header).\n\nApplied only if Name is not specified. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#idempotency",
+              "type": "string"
+            },
+            "generation": {
+              "_format": "int64",
+              "description": "A sequence number representing a specific generation of the desired state. Populated by the system. Read-only.",
+              "type": "integer"
+            },
+            "labels": {
+              "additionalProperties": {"type": "string"},
+              "description": "Map of string keys and values that can be used to organize and categorize (scope and select) objects. May match selectors of replication controllers and services. More info: http://kubernetes.io/docs/user-guide/labels",
+              "type": "object"
+            },
+            "managedFields": {
+              "description": "ManagedFields maps workflow-id and version to the set of fields that are managed by that workflow. This is mostly for internal housekeeping, and users typically shouldn't need to set or understand this field. A workflow can be the user's name, a controller's name, or the name of a specific apply path like \"ci-cd\". The set of fields is always in the version that the workflow used when modifying the object.",
+              "items": {
+                "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_ManagedFieldsEntry"
+              },
+              "type": "array"
+            },
+            "name": {
+              "description": "Name must be unique within a namespace. Is required when creating resources, although some resources may allow a client to request the generation of an appropriate name automatically. Name is primarily intended for creation idempotence and configuration definition. Cannot be updated. More info: http://kubernetes.io/docs/user-guide/identifiers#names",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace defines the space within each name must be unique. An empty namespace is equivalent to the \"default\" namespace, but \"default\" is the canonical representation. Not all objects are required to be scoped to a namespace - the value of this field for those objects will be empty.\n\nMust be a DNS_LABEL. Cannot be updated. More info: http://kubernetes.io/docs/user-guide/namespaces",
+              "type": "string"
+            },
+            "ownerReferences": {
+              "description": "List of objects depended by this object. If ALL objects in the list have been deleted, this object will be garbage collected. If this object is managed by a controller, then an entry in this list will point to this controller, with the controller field set to true. There cannot be more than one managing controller.",
+              "items": {
+                "$ref": "#/definitions/https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_OwnerReference"
+              },
+              "type": "array",
+              "x-kubernetes-patch-merge-key": "uid",
+              "x-kubernetes-patch-strategy": "merge"
+            },
+            "resourceVersion": {
+              "description": "An opaque value that represents the internal version of this object that can be used by clients to determine when objects have changed. May be used for optimistic concurrency, change detection, and the watch operation on a resource or set of resources. Clients must treat these values as opaque and passed unmodified back to the server. They may only be valid for a particular resource or set of resources.\n\nPopulated by the system. Read-only. Value must be treated as opaque by clients and . More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#concurrency-control-and-consistency",
+              "type": "string"
+            },
+            "selfLink": {
+              "description": "SelfLink is a URL representing this object. Populated by the system. Read-only.\n\nDEPRECATED Kubernetes will stop propagating this field in 1.20 release and the field is planned to be removed in 1.21 release.",
+              "type": "string"
+            },
+            "uid": {
+              "description": "UID is the unique in time and space value for this object. It is typically generated by the server on successful creation of a resource and is not allowed to change on PUT operations.\n\nPopulated by the system. Read-only. More info: http://kubernetes.io/docs/user-guide/identifiers#uids",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_OwnerReference": {
+          "description": "OwnerReference contains enough information to let you identify an owning object. An owning object must be in the same namespace as the dependent, or be cluster-scoped, so there is no namespace field.",
+          "properties": {
+            "apiVersion": {"description": "API version of the referent.", "type": "string"},
+            "blockOwnerDeletion": {
+              "description": "If true, AND if the owner has the \"foregroundDeletion\" finalizer, then the owner cannot be deleted from the key-value store until this reference is removed. Defaults to false. To set this field, a user needs \"delete\" permission of the owner, otherwise 422 (Unprocessable Entity) will be returned.",
+              "type": "boolean"
+            },
+            "controller": {"description": "If true, this reference points to the managing controller.", "type": "boolean"},
+            "kind": {
+              "description": "Kind of the referent. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+              "type": "string"
+            },
+            "name": {
+              "description": "Name of the referent. More info: http://kubernetes.io/docs/user-guide/identifiers#names",
+              "type": "string"
+            },
+            "uid": {"description": "UID of the referent. More info: http://kubernetes.io/docs/user-guide/identifiers#uids", "type": "string"}
+          },
+          "required": ["apiVersion", "kind", "name", "uid"],
+          "type": "object"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_apis_meta_v1_Time": {
+          "_format": "date-time",
+          "description": "Time is a wrapper around time.Time which supports correct marshaling to YAML and JSON.  Wrappers are provided for many of the factory methods that the time package offers.",
+          "type": "string"
+        },
+        "https:__kubernetesjsonschema_dev_master__defs_json_defs_io_k8s_apimachinery_pkg_util_intstr_IntOrString": {
+          "oneOf": [{"type": "string"}, {"type": "integer"}]
+        }
+      }
+    }"####;
     const K8S_ORDERED_PORTS_PREFIX: &[u8] = br####"{"spec": {"podManagementPolicy": "OrderedReady", "replicas": 3, "revisionHistoryLimit": 10, "selector": {"matchLabels": {"app": "example-statefulset"}}, "serviceName": "example-statefulset", "template": {"metadata": {"labels": {"app": "example-statefulset"}}, "spec": {"containers": [{"image": "nginx:latest", "name": "example-container", "ports"####;
 
     let constraint = Constraint::from_json_schema(K8S_ORDERED_PORTS_SCHEMA_FRAGMENT, &bytes_vocab()).unwrap();
