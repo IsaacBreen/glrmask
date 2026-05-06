@@ -7,6 +7,25 @@ struct TableRowKey {
 }
 
 impl GLRTable {
+    pub(super) fn canonicalize_stack_shift_predecessors(&mut self) {
+        for state in 0..self.num_states as usize {
+            let terminals: Vec<TerminalID> = self.action[state].keys().copied().collect();
+            for terminal in terminals {
+                let Some(Action::StackShifts(shifts)) = self.action[state].get(&terminal).cloned() else {
+                    continue;
+                };
+
+                let mut shifts = shifts;
+                canonicalize_stack_shift_predecessors_by_goto_superset(self, &mut shifts);
+                let Some(action) = stack_shift_action(shifts) else {
+                    self.action[state].remove(&terminal);
+                    continue;
+                };
+                self.action[state].insert(terminal, action);
+            }
+        }
+    }
+
     /// Merge states with identical (action, goto) rows.
     /// Iterates until no more merges are possible, since remapping targets
     /// can reveal new equivalences.
@@ -1326,19 +1345,20 @@ fn normalize_guarded_effects(effects: &mut Vec<GuardedStackShift>) {
     effects.dedup();
 }
 
-fn stack_effect_action(mut effects: Vec<GuardedStackShift>) -> Option<Action> {
+fn stack_effect_action(table: &GLRTable, mut effects: Vec<GuardedStackShift>) -> Option<Action> {
     normalize_guarded_effects(&mut effects);
     if effects.is_empty() {
         return None;
     }
     if effects.iter().all(|effect| effect.guards.is_empty()) {
-        let shifts = effects
+        let mut shifts: Vec<_> = effects
             .into_iter()
             .map(|effect| StackShift {
                 pop: effect.pop,
                 pushes: effect.pushes,
             })
             .collect();
+        canonicalize_stack_shift_predecessors_by_goto_superset(table, &mut shifts);
         return stack_shift_action(shifts);
     }
     Some(Action::GuardedStackShifts(effects))
@@ -1402,12 +1422,55 @@ fn try_inline_action_to_stack_shifts(
             return Some(Action::Shift(delay_state, true));
         }
     }
-    stack_effect_action(effects)
+    stack_effect_action(table, effects)
 }
 
 fn normalize_stack_shifts(shifts: &mut Vec<StackShift>) {
     shifts.sort_by(|a, b| a.pop.cmp(&b.pop).then_with(|| a.pushes.cmp(&b.pushes)));
     shifts.dedup();
+}
+
+fn canonicalize_stack_shift_predecessors_by_goto_superset(table: &GLRTable, shifts: &mut [StackShift]) {
+    for idx in 0..shifts.len() {
+        if shifts[idx].pushes.len() < 2 {
+            continue;
+        }
+
+        for rep_idx in 0..idx {
+            if shifts[idx].pop != shifts[rep_idx].pop
+                || shifts[idx].pushes.len() != shifts[rep_idx].pushes.len()
+                || shifts[idx].pushes[1..] != shifts[rep_idx].pushes[1..]
+            {
+                continue;
+            }
+
+            // The predecessor is buried below an identical pushed suffix. Once
+            // buried, it can only be observed by a later reduction querying its
+            // goto row, so prefer a predecessor whose goto row is a compatible
+            // superset and let the otherwise identical stack paths merge.
+            let pred = shifts[idx].pushes[0];
+            let rep = shifts[rep_idx].pushes[0];
+            if goto_row_is_target_compatible_subset(table, pred, rep) {
+                shifts[idx].pushes[0] = rep;
+                break;
+            }
+            if goto_row_is_target_compatible_subset(table, rep, pred) {
+                shifts[rep_idx].pushes[0] = pred;
+                break;
+            }
+        }
+    }
+}
+
+fn goto_row_is_target_compatible_subset(table: &GLRTable, subset: u32, superset: u32) -> bool {
+    let subset_row = &table.goto[subset as usize];
+    let superset_row = &table.goto[superset as usize];
+    !subset_row.is_empty()
+        && subset_row.iter().all(|(&nt, &target)| {
+            superset_row
+                .get(&nt)
+                .is_some_and(|&superset_target| superset_target == target)
+        })
 }
 
 fn stack_shift_action(mut shifts: Vec<StackShift>) -> Option<Action> {
@@ -1483,10 +1546,10 @@ fn try_create_delayed_stack_shift_state(
             ) {
                 Action::Shift(next_state, true)
             } else {
-                stack_effect_action(composed)?
+                stack_effect_action(table, composed)?
             }
         } else {
-            stack_effect_action(composed)?
+            stack_effect_action(table, composed)?
         };
         row.insert(terminal, action);
     }

@@ -18,6 +18,7 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
 
     let t3 = std::time::Instant::now();
     table.merge_recognizer_equivalent();
+    table.canonicalize_stack_shift_predecessors();
     let recog_ms = t3.elapsed().as_secs_f64() * 1000.0;
     let _ = (lr1_ms, ielr_ms, pre_merge_states, merge_ms, recog_ms, item_sets);
 
@@ -921,4 +922,3 @@ fn build_ielr_table(
     let core_keys = item_sets.iter().map(lr1_core_key).collect::<Vec<_>>();
     merge_same_core_lr1_states(canonical, &core_keys)
 }
-
