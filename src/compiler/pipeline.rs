@@ -276,7 +276,7 @@ fn compile_prepared_with_profile(
                 let analyzed_grammar = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
                 let analyze_grammar_ms = elapsed_ms(analyze_grammar_started_at);
 
-                if let Err(message) = analyzed_grammar.debug_check_grammar_preconditions() {
+                if let Err(message) = analyzed_grammar.check_table_build_normal_form() {
                     panic!("[glrmask] grammar precondition violations:\n{}", message);
                 }
 

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 
 use crate::grammar::flat::{GrammarDef, NonterminalID, Rule, Symbol, TerminalID};
@@ -61,11 +61,14 @@ impl AnalyzedGrammar {
             .unwrap_or("<unknown-terminal>")
     }
 
-    /// Debug check: asserts the grammar has no right recursion, no indirect left
-    /// recursion, and no nullable nonterminals.
-    pub fn debug_check_grammar_preconditions(&self) -> Result<(), String> {
+    /// Assert the pre-table-build grammar is in the normal form required by
+    /// GLR table construction and downstream characterization.
+    pub fn check_table_build_normal_form(&self) -> Result<(), String> {
         let mut violations: Vec<String> = Vec::new();
         if let Err(msg) = self.check_no_nullable_nonterminals() {
+            violations.push(msg);
+        }
+        if let Err(msg) = self.check_no_reachable_zero_length_productions() {
             violations.push(msg);
         }
         if let Err(msg) = self.check_recursion_boundedness() {
@@ -78,17 +81,23 @@ impl AnalyzedGrammar {
         }
     }
 
+    pub fn debug_check_grammar_preconditions(&self) -> Result<(), String> {
+        self.check_table_build_normal_form()
+    }
+
     pub fn check_no_nullable_nonterminals(&self) -> Result<(), String> {
+        let reachable = self.reachable_nonterminals();
+        let synthetic_start = self.num_nonterminals.saturating_sub(1);
         if !self.nullable.is_empty() {
             let ids: Vec<u32> = self
                 .nullable
                 .iter()
-                .filter(|&&nt| nt < self.num_nonterminals - 1)
+                .filter(|&&nt| nt != synthetic_start && reachable.contains(&nt))
                 .copied()
                 .collect();
             if !ids.is_empty() {
                 return Err(format!(
-                    "nullable nonterminals detected: {:?}. \
+                    "nullable nonterminals reachable at the table-build boundary: {:?}. \
                      Rules with epsilon-productions or all-nullable RHS create \
                      reduce chains that the characterisation stage cannot \
                      handle when combined with recursion.",
@@ -99,10 +108,34 @@ impl AnalyzedGrammar {
         Ok(())
     }
 
+    pub fn check_no_reachable_zero_length_productions(&self) -> Result<(), String> {
+        let reachable = self.reachable_nonterminals();
+        let zero_len_rules: Vec<String> = self
+            .rules
+            .iter()
+            .enumerate()
+            .filter(|(_, rule)| reachable.contains(&rule.lhs) && rule.rhs.is_empty())
+            .map(|(index, rule)| format!("rule#{index}: lhs=N{}", rule.lhs))
+            .collect();
+
+        if zero_len_rules.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "zero-length productions reachable at the table-build boundary: {}",
+                zero_len_rules.join(", ")
+            ))
+        }
+    }
+
     pub fn check_recursion_boundedness(&self) -> Result<(), String> {
         let mut violations: Vec<String> = Vec::new();
+        let reachable = self.reachable_nonterminals();
 
-        let rr_graph = build_right_reachability_graph(&self.rules, &self.nullable);
+        let rr_graph = filter_graph_to_reachable(
+            build_right_reachability_graph(&self.rules, &self.nullable),
+            &reachable,
+        );
         if let Some(cycle) = find_indirect_rr_cycle(&rr_graph) {
             violations.push(format!(
                 "right-recursive cycle detected: {:?}. \
@@ -113,7 +146,10 @@ impl AnalyzedGrammar {
             ));
         }
 
-        let lr_graph = build_left_reachability_graph(&self.rules, &self.nullable);
+        let lr_graph = filter_graph_to_reachable(
+            build_left_reachability_graph(&self.rules, &self.nullable),
+            &reachable,
+        );
         if let Some(cycle) = find_indirect_lr_cycle(&lr_graph) {
             if cycle.len() >= 2 {
                 violations.push(format!(
@@ -130,6 +166,28 @@ impl AnalyzedGrammar {
         } else {
             Err(violations.join("\n"))
         }
+    }
+
+    fn reachable_nonterminals(&self) -> BTreeSet<NonterminalID> {
+        let synthetic_start = self.num_nonterminals.saturating_sub(1);
+        let mut reachable = BTreeSet::from([synthetic_start]);
+        let mut queue = VecDeque::from([synthetic_start]);
+
+        while let Some(nonterminal) = queue.pop_front() {
+            for &rule_index in self.rules_by_lhs.get(nonterminal as usize).into_iter().flatten() {
+                let rule = &self.rules[rule_index as usize];
+                for next_nonterminal in rule.rhs.iter().filter_map(|symbol| match symbol {
+                    Symbol::Nonterminal(nonterminal) => Some(*nonterminal),
+                    Symbol::Terminal(_) => None,
+                }) {
+                    if reachable.insert(next_nonterminal) {
+                        queue.push_back(next_nonterminal);
+                    }
+                }
+            }
+        }
+
+        reachable
     }
 }
 
@@ -1652,5 +1710,108 @@ fn compute_follow(
     }
 
     follow
+}
+
+fn filter_graph_to_reachable(
+    graph: BTreeMap<NonterminalID, BTreeSet<NonterminalID>>,
+    reachable: &BTreeSet<NonterminalID>,
+) -> BTreeMap<NonterminalID, BTreeSet<NonterminalID>> {
+    graph
+        .into_iter()
+        .filter(|(nonterminal, _)| reachable.contains(nonterminal))
+        .map(|(nonterminal, edges)| {
+            (
+                nonterminal,
+                edges
+                    .into_iter()
+                    .filter(|edge| reachable.contains(edge))
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grammar::flat::{GrammarDef, Terminal};
+
+    fn analyzed_grammar(rules: Vec<Rule>, start: NonterminalID) -> AnalyzedGrammar {
+        AnalyzedGrammar::from_grammar_def(&GrammarDef {
+            rules,
+            start,
+            terminals: vec![Terminal::Literal {
+                id: 0,
+                bytes: b"a".to_vec(),
+            }],
+            ..GrammarDef::default()
+        })
+    }
+
+    #[test]
+    fn table_build_normal_form_rejects_nullable_zero_length_rules() {
+        let grammar = analyzed_grammar(vec![Rule { lhs: 0, rhs: Vec::new() }], 0);
+
+        let error = grammar.check_table_build_normal_form().unwrap_err();
+        assert!(error.contains("nullable nonterminals reachable"));
+        assert!(error.contains("zero-length productions reachable"));
+    }
+
+    #[test]
+    fn table_build_normal_form_rejects_direct_right_recursion() {
+        let grammar = analyzed_grammar(
+            vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(0), Symbol::Nonterminal(0)],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
+            ],
+            0,
+        );
+
+        let error = grammar.check_table_build_normal_form().unwrap_err();
+        assert!(error.contains("right-recursive cycle detected"));
+    }
+
+    #[test]
+    fn table_build_normal_form_rejects_indirect_left_recursion() {
+        let grammar = analyzed_grammar(
+            vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(0)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Nonterminal(0), Symbol::Terminal(0)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
+            ],
+            0,
+        );
+
+        let error = grammar.check_table_build_normal_form().unwrap_err();
+        assert!(error.contains("indirect left-recursive cycle detected"));
+    }
+
+    #[test]
+    fn table_build_normal_form_accepts_simple_nonnullable_grammar() {
+        let grammar = analyzed_grammar(
+            vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            0,
+        );
+
+        assert!(grammar.check_table_build_normal_form().is_ok());
+    }
 }
 
