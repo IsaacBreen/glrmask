@@ -258,11 +258,11 @@ fn json_schema_kubernetes_container_ports_prefix_has_schema_shaped_two_stack_spl
     const K8S_ORDERED_PORTS_SCHEMA_FRAGMENT: &str = r####"
     {
       "properties": {
-        "": {"items": {"properties": {"": {"type": "string"}, "l": {"type": "string"}, "g": {}}}},
-        "d": {"items": {"properties": {"": {"type": "string"}, "l": {"type": "string"}}}}
+        "a": {"items": {"properties": {"x": {"type": "string"}, "y": {"type": "string"}, "z": {}}}},
+        "b": {"items": {"properties": {"x": {"type": "string"}, "y": {"type": "string"}}}}
       }
     }"####;
-    const K8S_ORDERED_PORTS_PREFIX: &[u8] = br####"{"": [{"": "", "g"####;
+    const K8S_ORDERED_PORTS_PREFIX: &[u8] = br####"{"a": [{"x": "", "z"####;
 
     let constraint = Constraint::from_json_schema(K8S_ORDERED_PORTS_SCHEMA_FRAGMENT, &bytes_vocab()).unwrap();
     let mut state = constraint.start();
