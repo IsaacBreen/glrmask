@@ -146,19 +146,14 @@ impl SharedVocabDfaBase {
         self.byte_to_class
     }
 
-    /// Check if this cache was built from a DFA with the given state count
-    /// and identical transitions (verified via transition hash).
-    pub fn is_compatible_with_state_count(&self, num_dfa_states: usize) -> bool {
-        self.trans_by_class.len() == self.num_classes * num_dfa_states
-            && self.self_loop_bytes.len() == num_dfa_states
-    }
-
     /// Check full compatibility: state count AND transition hash must match.
     /// Two DFAs with the same state count but different transitions (e.g. from
     /// different simplify_for_terminals outcomes) must not share the cache.
     pub fn is_compatible_with_dfa(&self, dfa: &super::super::compat::FlatDfa) -> bool {
         let num_dfa_states = dfa.states.len();
-        if !self.is_compatible_with_state_count(num_dfa_states) {
+        if self.trans_by_class.len() != self.num_classes * num_dfa_states
+            || self.self_loop_bytes.len() != num_dfa_states
+        {
             return false;
         }
         let mut h = new_hasher();

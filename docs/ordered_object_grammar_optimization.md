@@ -255,7 +255,6 @@ of the tokenizer dispatch (2 tokenizer states → split commit).
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `GLRMASK_ENABLE_FACTORED_ORDERED_OBJECT=1` | off | Enable factored ordered-object grammar |
 | `GLRMASK_ORDERED_OBJECT_SHAPE` | balanced | Shape for fallback tree (right/balanced/left/left-balanced) |
 
 ---

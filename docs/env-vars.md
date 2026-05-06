@@ -10,15 +10,6 @@ This document lists all `GLRMASK_*` environment variables used in this crate, gr
 - **Compact mode**: `none|0|off|skip`, `fast`, `full|1|on`.
 - **Minimize strategy**: `full`, `fast`, or `threshold:<n>`.
 
-## GLR Parser / Table
-
-| Variable | Valid values | Default |
-|---|---|---|
-| `GLRMASK_DISABLE_REPLACE` | strict `1` bool | off |
-| `GLRMASK_DISABLE_REPLACE_SHIFT` | strict `1` bool | off |
-| `GLRMASK_DISABLE_REPLACE_GOTO` | strict `1` bool | off |
-| `GLRMASK_ENABLE_LOCAL_FORWARD_REPLACE` | strict `1` bool | off |
-
 ## Compiler Pipeline
 
 | Variable | Valid values | Default |
@@ -27,45 +18,17 @@ This document lists all `GLRMASK_*` environment variables used in this crate, gr
 | `GLRMASK_PROFILE_COMPILE` | truthy bool | off |
 | `GLRMASK_PROFILE_COMPILE_SUMMARY` | truthy bool | off |
 | `GLRMASK_DISABLE_TERMINAL_COLORING` | truthy bool | off |
-| `GLRMASK_L1_IDMAP` | strict `1` bool | off |
-| `GLRMASK_NO_PARTITION` | strict `1` bool | off |
-| `GLRMASK_COMPACT_FINAL` | compact mode | `full` |
-
-## Oracle / File Inputs
-
-| Variable | Valid values | Default |
-|---|---|---|
-| `GLRMASK_ORACLE_LOAD` | filesystem path (read JSON) | unused |
-| `GLRMASK_ORACLE_DUMP` | filesystem path (write JSON) | no dump |
-| `GLRMASK_PARTITION_FILE` | filesystem path (partition JSON) | auto partitioning |
-| `GLRMASK_EXIT_AFTER_L1` | partition label string | no early exit |
 
 ## Terminal DWA / ID Map (L1/L2P/Merge)
 
 | Variable | Valid values | Default |
 |---|---|---|
 | `GLRMASK_FORCE_ALL_L2P` | strict `1` bool | off |
-| `GLRMASK_DEBUG_DWA_DUMP` | strict `1` bool | off |
-| `GLRMASK_DEBUG_PARSER_DWA_DUMP` | strict `1` bool | off |
-| `GLRMASK_PROFILE_TERMINAL_DWA` | presence toggle | off |
-| `GLRMASK_PROFILE_PARSER_DWA` | presence toggle | off |
-| `GLRMASK_PROFILE_PARSER_DWA_BUNDLE_DETERMINIZE` | presence toggle | off |
-| `GLRMASK_PROFILE_WEIGHT_OPS` | presence toggle | off |
 | `GLRMASK_PROFILE_DETERMINIZE` | strict `1` bool | off |
-| `GLRMASK_PROFILE_COMPACT` | presence toggle | off |
-| `GLRMASK_DEBUG_CHARACTERIZE` | presence toggle | off |
-| `GLRMASK_DEBUG_MAX_LENGTH` | truthy bool | off |
 | `GLRMASK_DISABLE_DIVERSITY_STATE_ORDER` | truthy bool | off |
 | `GLRMASK_DISABLE_TRIE_WALK` | truthy bool | off |
 | `GLRMASK_VOCAB_UNGROUPED_BATCH` | truthy bool | off |
 | `GLRMASK_VOCAB_EQUIV_BATCH_SIZE` | positive integer (`usize > 0`) | auto |
-| `GLRMASK_SKIP_MAX_LENGTH_STATE_EQUIV` | truthy bool | off |
-| `GLRMASK_SKIP_TOKEN_STATE_EQUIV` | truthy bool | off |
-| `GLRMASK_USE_REFERENCE_EQUIV` | truthy bool | off |
-| `GLRMASK_USE_SLOW_VOCAB_EQUIV` | truthy bool | off |
-| `GLRMASK_FORCE_PRE_VOCAB_STATE_REDUCTION` | truthy bool | off |
-| `GLRMASK_DISABLE_PRE_VOCAB_STATE_REDUCTION` | truthy bool | off |
-| `GLRMASK_PROFILE_VOCAB_REACHABILITY` | truthy bool | off |
 
 ### Minimize strategy vars
 
@@ -101,15 +64,8 @@ This document lists all `GLRMASK_*` environment variables used in this crate, gr
 | `GLRMASK_REPEAT_TREE_SHAPE` | `left`, `balanced`, `leftbalanced`, `left_balanced` (other set value falls to right) | `leftbalanced` when unset |
 | `GLRMASK_MAX_RUNTIME_REDUCTION_LEN` | positive integer (`usize > 0`) | `5` |
 
-## Runtime
-
-| Variable | Valid values | Default |
-|---|---|---|
-
 ## Notes
 
-- `GLRMASK_PROFILE_PARSER_DWA` includes per-bundle parser-DWA summary lines; `GLRMASK_PROFILE_PARSER_DWA_BUNDLE_DETERMINIZE` adds low-level determinizer substep breakdowns for those bundles.
-- `GLRMASK_PROFILE_WEIGHT_OPS` adds a summary of `Weight::union`, `Weight::union_all`, and `Weight::complement` activity for the compile.
 - For minimize strategy vars, invalid set values panic with a validation error.
 - For compact mode vars, unknown set values silently fall back to the per-callsite default.
 - `GLRMASK_AP_KEY_ANY_STRING` is effectively enabled if either itself or `GLRMASK_ADDPROP_NO_EXCLUSIONS` is enabled.

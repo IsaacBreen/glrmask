@@ -7,7 +7,6 @@ schema_name = sys.argv[1] if len(sys.argv) > 1 else "Github_medium---o82370"
 
 os.environ["GLRMASK_PROFILE_COMPILE"] = "1"
 os.environ["GLRMASK_PROFILE_COMPILE_SUMMARY"] = "1"
-os.environ["GLRMASK_PROFILE_PARSER_DWA"] = "1"
 os.environ["RAYON_NUM_THREADS"] = "1"
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))

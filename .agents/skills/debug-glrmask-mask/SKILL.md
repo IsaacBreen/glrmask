@@ -14,11 +14,9 @@ Find the first layer where `mask()`, `commit_token`, and `commit_bytes` diverge.
 1. Establish the oracle on the same prefix/token. Treat `commit_bytes` as the byte-level parser oracle until proven otherwise.
 2. Reproduce in release mode and tee long output to `/tmp/*.log`.
 3. Localize with one toggle at a time:
-   - `GLRMASK_NO_PARTITION=1`: bypass split L1/L2P terminal-DWA construction.
    - `GLRMASK_FORCE_ALL_L2P=1`: keep partitioning but route all terminals through L2P.
    - `GLRMASK_PM_BRUTE_FORCE=1`: replace optimized constraint possible-matches.
    - `GLRMASK_PM_TRIE_CLASS_BUILD=0`: bypass trie-class possible-match grouping.
-   - `GLRMASK_DEBUG_PROFILE=1 GLRMASK_DEBUG_TERMINAL_MAPPINGS=1`: print terminal ids, L1/L2P classification, partition sizes, and DWA profiles.
 4. If possible-matches toggles do not affect the oracle, inspect parser-DWA weights, terminal-DWA weights, id-map remapping, and runtime mask expansion in that order.
 5. If partition toggles change the oracle, inspect `src/compiler/stages/id_map_and_terminal_dwa/{partition,merge,l1,l2p}.rs` and compare original ids, internal ids, tokenizer-state ids, and DWA weights before/after merge.
 
