@@ -15,7 +15,7 @@ use crate::compiler::glr::parser::{
 use crate::compiler::glr::table::Action;
 use crate::ds::leveled_gss::LeveledGSSSummary;
 use crate::runtime::constraint::Constraint;
-use crate::runtime::state::{ConstraintState, CommitBuffers};
+use crate::runtime::state::{CommitBuffers, ConstraintState};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
@@ -449,6 +449,19 @@ fn apply_single_top_action_fast(gss: &ParserGSS, action: &Action) -> Option<Pars
         }
         Action::StackShifts(shifts) => {
             let stack = gss.try_virtual_stack()?;
+            if let Some(first) = shifts.first() {
+                if !first.pushes.is_empty()
+                    && shifts
+                        .iter()
+                        .all(|shift| shift.pop == first.pop && !shift.pushes.is_empty())
+                {
+                    return stack.into_gss_after_popping_and_pushing_branches(
+                        first.pop as usize,
+                        shifts.iter().map(|shift| shift.pushes.as_slice()),
+                    );
+                }
+            }
+
             let mut shifted = ParserGSS::empty();
             for shift in shifts {
                 let mut branch = stack.clone();
@@ -640,11 +653,11 @@ fn choose_direct_linear_step(
     bytes: &[u8],
     start_state: u32,
 ) -> Option<DirectLinearStep> {
-    let actionable_terminals = ActionableTerminals::from_gss(constraint, gss);
     let ignore_terminal = constraint.ignore_terminal;
     let mut tokenizer_state = start_state;
     let mut chosen: Option<(usize, u32, bool)> = None;
     let mut consumed_all = true;
+    let mut actionable_terminals: Option<ActionableTerminals> = None;
 
     for (index, &byte) in bytes.iter().enumerate() {
         let Some(next_state) = constraint.tokenizer.step(tokenizer_state, byte) else {
@@ -657,10 +670,13 @@ fn choose_direct_linear_step(
 
         for terminal in constraint.tokenizer.matched_terminals_iter(tokenizer_state) {
             let ignored = is_ignored_terminal(ignore_terminal, terminal);
-            if !ignored
-                && !is_actionable_terminal(actionable_terminals.as_ref(), constraint, terminal)
-            {
-                continue;
+            if !ignored {
+                if actionable_terminals.is_none() {
+                    actionable_terminals = ActionableTerminals::from_gss(constraint, gss);
+                }
+                if !is_actionable_terminal(actionable_terminals.as_ref(), constraint, terminal) {
+                    continue;
+                }
             }
 
             let candidate = (width, terminal, ignored);

@@ -1508,6 +1508,57 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
             gss.popn(remaining as isize)
         }
     }
+
+    pub fn into_gss_after_popping_and_pushing_branches<'a, I>(
+        mut self,
+        n: usize,
+        pushes: I,
+    ) -> Option<LeveledGSS<T, A>>
+    where
+        I: IntoIterator<Item = &'a [T]>,
+        T: 'a,
+    {
+        self.flush_pending();
+        if self.pop(n) != 0 {
+            return None;
+        }
+
+        let base = if self.values.is_empty() {
+            self.next
+        } else {
+            new_segment(self.values, self.next)
+        };
+
+        let mut children: Children<T, Lower<T>> = CompactMap::new();
+        for pushes in pushes {
+            let (top, prefix) = pushes.split_last()?;
+            let mut child = base.clone();
+            for value in prefix {
+                child = new_segment(SV::unit(value.clone()), child);
+            }
+
+            let depth = child.max_depth();
+            if let Some(existing) = children.get_mut(top) {
+                if let Some(existing_child) = existing.get(&depth).cloned() {
+                    existing.insert(depth, merge_lower(&existing_child, &child));
+                } else {
+                    existing.insert(depth, child);
+                }
+            } else {
+                children.insert(top.clone(), CompactOrdMap::unit(depth, child));
+            }
+        }
+
+        if children.is_empty() {
+            return Some(LeveledGSS {
+                inner: new_interface(base, self.acc),
+            });
+        }
+
+        Some(LeveledGSS {
+            inner: new_interface(new_lower(children, false), self.acc),
+        })
+    }
 }
 
 impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> PartialEq for LeveledGSS<T, A> {
@@ -1977,6 +2028,101 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         let shifted_root = new_lower(shifted_children, false);
         LeveledGSS {
             inner: new_interface(shifted_root, acc),
+        }
+    }
+
+    /// Apply pure top-frontier shifts in one pass. Each tuple is
+    /// `(current_top, target_top, replace_top)`.
+    pub fn apply_top_pure_shifts<I>(&self, shifts: I) -> Self
+    where
+        I: IntoIterator<Item = (T, T, bool)>,
+    {
+        let shifts: SmallVec<[(T, T, bool); 8]> = shifts.into_iter().collect();
+        if shifts.is_empty() {
+            return Self::empty();
+        }
+
+        fn insert_lower_child<T: Clone + Eq + Hash>(
+            children: &mut Children<T, Lower<T>>,
+            key: T,
+            depth: u32,
+            child: Arc<Lower<T>>,
+        ) {
+            if let Some(ord_map) = children.get_mut(&key) {
+                if let Some(existing) = ord_map.get(&depth).cloned() {
+                    ord_map.insert(depth, merge_lower(&existing, &child));
+                } else {
+                    ord_map.insert(depth, child);
+                }
+            } else {
+                children.insert(key, CompactOrdMap::unit(depth, child));
+            }
+        }
+
+        match &*self.inner {
+            Upper::Interface(i) => {
+                let inner_children;
+                let seg_entry: Option<(&T, CompactOrdMap<Arc<Lower<T>>>)>;
+                match &*i.inner {
+                    Lower::Segment(seg) => {
+                        let top_val = seg.values.last().unwrap();
+                        let rest = i.inner.segment_rest_arc();
+                        inner_children = None;
+                        seg_entry = Some((top_val, CompactOrdMap::unit(rest.max_depth(), rest)));
+                    }
+                    Lower::General { children, .. } => {
+                        inner_children = Some(children);
+                        seg_entry = None;
+                    }
+                }
+
+                let mut shifted_children: Children<T, Lower<T>> = CompactMap::new();
+                for (from, to, replace_top) in shifts {
+                    let kids_opt = if let Some((seg_top, ref seg_kids)) = seg_entry {
+                        if *seg_top == from { Some(seg_kids) } else { None }
+                    } else {
+                        inner_children.unwrap().get(&from)
+                    };
+                    let Some(kids) = kids_opt else {
+                        continue;
+                    };
+
+                    if replace_top {
+                        for (depth, child) in kids.iter() {
+                            insert_lower_child(&mut shifted_children, to.clone(), *depth, child.clone());
+                        }
+                    } else {
+                        let mut pushed_children: Children<T, Lower<T>> = CompactMap::new();
+                        pushed_children.insert(from, kids.clone());
+                        let pushed_child = new_lower(pushed_children, false);
+                        insert_lower_child(
+                            &mut shifted_children,
+                            to,
+                            pushed_child.max_depth(),
+                            pushed_child,
+                        );
+                    }
+                }
+
+                if shifted_children.is_empty() {
+                    return Self::empty();
+                }
+                let shifted_root = new_lower(shifted_children, false);
+                LeveledGSS {
+                    inner: new_interface(shifted_root, i.acc.clone()),
+                }
+            }
+            Upper::Branch(_) => {
+                let shifted = shifts.into_iter().map(|(from, to, replace_top)| {
+                    let base = self.isolate(Some(from));
+                    if replace_top {
+                        base.popn(1).push(to)
+                    } else {
+                        base.push(to)
+                    }
+                });
+                Self::merge_many(shifted)
+            }
         }
     }
 
