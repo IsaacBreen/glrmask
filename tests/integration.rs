@@ -168,6 +168,14 @@ fn json_schema_rejects_invalid_utf8_in_string() {
 }
 
 #[test]
+fn json_schema_uri_format_accepts_basic_uri() {
+    let constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
+    let mut state = constraint.start();
+    state.commit_bytes(br#""https://example.com""#).unwrap();
+    assert!(state.is_finished());
+}
+
+#[test]
 fn commit_bytes_and_commit_tokens_agree() {
     let constraint = ebnf(&["a", "b", "ab"], r#"start ::= "a" "b" | "ab""#);
 
