@@ -5,90 +5,20 @@ use super::arc_array_vec::ArcArrayVec;
 use super::stack_vec::StackVec;
 use super::vec_stack_vec::VecStackVec;
 
-#[cfg(feature = "stackvec-experiments")]
-use super::array_stack_vec::{
-    ArrayStackVec4, ArrayStackVec8, ArrayStackVec16, ArrayStackVec32,
-    ArrayStackVec64, ArrayStackVec128, ArrayStackVec256,
-};
-#[cfg(feature = "stackvec-experiments")]
-use super::im_stack_vec::ImStackVec;
-#[cfg(feature = "stackvec-experiments")]
-use super::rpds_stack_vec::RpdsStackVec;
-#[cfg(feature = "stackvec-experiments")]
-use super::seg_vec::SegVec;
-#[cfg(feature = "stackvec-experiments")]
-use super::small_stack_vec::{
-    SmallStackVec4, SmallStackVec8, SmallStackVec16, SmallStackVec32,
-    SmallStackVec64, SmallStackVec128,
-};
-
 /// Which StackVec variant to use, selected once at startup via `STACKVEC` env var.
-#[cfg(not(feature = "stackvec-experiments"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Variant {
     ArcArray,
     Vec,
-}
-
-/// Which StackVec variant to use, selected once at startup via `STACKVEC` env var.
-#[cfg(feature = "stackvec-experiments")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Variant {
-    ArcArray,
-    Vec,
-    Array4,
-    Array8,
-    Array16,
-    Array32,
-    Array64,
-    Array128,
-    Array256,
-    Im,
-    Rpds,
-    Seg,
-    Small4,
-    Small8,
-    Small16,
-    Small32,
-    Small64,
-    Small128,
 }
 
 static VARIANT: OnceLock<Variant> = OnceLock::new();
 
-#[cfg(not(feature = "stackvec-experiments"))]
 fn selected_variant() -> Variant {
     *VARIANT.get_or_init(|| {
         match std::env::var("STACKVEC").as_deref() {
             Ok("arc") | Ok("arc_array") => Variant::ArcArray,
             Ok("vec") => Variant::Vec,
-            _ => Variant::Vec, // default
-        }
-    })
-}
-
-#[cfg(feature = "stackvec-experiments")]
-fn selected_variant() -> Variant {
-    *VARIANT.get_or_init(|| {
-        match std::env::var("STACKVEC").as_deref() {
-            Ok("arc") | Ok("arc_array") => Variant::ArcArray,
-            Ok("vec") => Variant::Vec,
-            Ok("array4") => Variant::Array4,
-            Ok("array8") => Variant::Array8,
-            Ok("array16") => Variant::Array16,
-            Ok("array32") => Variant::Array32,
-            Ok("array64") => Variant::Array64,
-            Ok("array128") | Ok("array") => Variant::Array128,
-            Ok("array256") => Variant::Array256,
-            Ok("im") | Ok("im_vector") => Variant::Im,
-            Ok("rpds") | Ok("rpds_stack") => Variant::Rpds,
-            Ok("seg") | Ok("seg_vec") => Variant::Seg,
-            Ok("small4") => Variant::Small4,
-            Ok("small8") => Variant::Small8,
-            Ok("small16") => Variant::Small16,
-            Ok("small32") => Variant::Small32,
-            Ok("small64") | Ok("small") => Variant::Small64,
-            Ok("small128") => Variant::Small128,
             _ => Variant::Vec, // default
         }
     })
@@ -229,41 +159,14 @@ macro_rules! define_dyn_stack_vec {
     (@iter vec_refs $v:ident) => { DynIter::VecRefs($v.iter()) };
 }
 
-#[cfg(not(feature = "stackvec-experiments"))]
 define_dyn_stack_vec! {
     ArcArray(ArcArrayVec<T>)        => slice,
     Vec(VecStackVec<T>)             => slice,
-}
-
-#[cfg(feature = "stackvec-experiments")]
-define_dyn_stack_vec! {
-    ArcArray(ArcArrayVec<T>)        => slice,
-    Vec(VecStackVec<T>)             => slice,
-    Array4(ArrayStackVec4<T>)       => slice,
-    Array8(ArrayStackVec8<T>)       => slice,
-    Array16(ArrayStackVec16<T>)     => slice,
-    Array32(ArrayStackVec32<T>)     => slice,
-    Array64(ArrayStackVec64<T>)     => slice,
-    Array128(ArrayStackVec128<T>)   => slice,
-    Array256(ArrayStackVec256<T>)   => slice,
-    Im(ImStackVec<T>)               => im,
-    Rpds(RpdsStackVec<T>)           => vec_refs,
-    Seg(SegVec<T>)                  => slice,
-    Small4(SmallStackVec4<T>)       => slice,
-    Small8(SmallStackVec8<T>)       => slice,
-    Small16(SmallStackVec16<T>)     => slice,
-    Small32(SmallStackVec32<T>)     => slice,
-    Small64(SmallStackVec64<T>)     => slice,
-    Small128(SmallStackVec128<T>)   => slice,
 }
 
 /// Iterator enum for DynStackVec. Supports DoubleEndedIterator.
 pub enum DynIter<'a, T> {
     Slice(std::slice::Iter<'a, T>),
-    #[cfg(feature = "stackvec-experiments")]
-    Im(im::vector::Iter<'a, T>),
-    #[cfg(feature = "stackvec-experiments")]
-    VecRefs(std::vec::IntoIter<&'a T>),
 }
 
 impl<'a, T: Clone> Iterator for DynIter<'a, T> {
@@ -272,20 +175,12 @@ impl<'a, T: Clone> Iterator for DynIter<'a, T> {
     fn next(&mut self) -> Option<&'a T> {
         match self {
             Self::Slice(it) => it.next(),
-            #[cfg(feature = "stackvec-experiments")]
-            Self::Im(it) => it.next(),
-            #[cfg(feature = "stackvec-experiments")]
-            Self::VecRefs(it) => it.next(),
         }
     }
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         match self {
             Self::Slice(it) => it.size_hint(),
-            #[cfg(feature = "stackvec-experiments")]
-            Self::Im(it) => it.size_hint(),
-            #[cfg(feature = "stackvec-experiments")]
-            Self::VecRefs(it) => it.size_hint(),
         }
     }
 }
@@ -295,10 +190,6 @@ impl<'a, T: Clone> DoubleEndedIterator for DynIter<'a, T> {
     fn next_back(&mut self) -> Option<&'a T> {
         match self {
             Self::Slice(it) => it.next_back(),
-            #[cfg(feature = "stackvec-experiments")]
-            Self::Im(it) => it.next_back(),
-            #[cfg(feature = "stackvec-experiments")]
-            Self::VecRefs(it) => it.next_back(),
         }
     }
 }

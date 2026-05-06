@@ -3,13 +3,8 @@ use std::hash::Hash;
 /// Common interface for stack-like vectors used in GSS segments.
 ///
 /// Implementations provide different trade-offs:
-/// - `ArrayStackVec`: Fixed-capacity inline array. O(n) clone, O(1) access.
-/// - `ImStackVec`: im::Vector tree. O(1) clone, O(log n) access.
-/// - `SegVec`: Arc<[T]> view. O(1) clone, O(1) access, O(n) push.
 /// - `ArcArrayVec`: Arc<Vec<T>> with window. O(1) clone, O(1) access, COW push.
 /// - `VecStackVec`: Plain Vec. O(n) clone, O(1) access.
-/// - `SmallStackVec`: SmallVec inline/heap hybrid. O(n) clone, O(1) access.
-/// - `RpdsStackVec`: rpds::Stack persistent list. O(1) clone/push, O(n) access.
 pub trait StackVec<T>: Clone + PartialEq + Eq + Hash + Default
 where
     T: Clone + Eq + Hash,
