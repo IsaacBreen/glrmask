@@ -27,7 +27,7 @@ use crate::compiler::possible_matches::{
     PossibleMatchesComputer,
 };
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
-use crate::compiler::stages::id_map_and_terminal_dwa::merge::LocalIdMapTerminalDwa;
+use crate::compiler::stages::id_map_and_terminal_dwa::types::LocalIdMapTerminalDwa;
 use crate::ds::bitset::BitSet;
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::ds::weight::Weight;

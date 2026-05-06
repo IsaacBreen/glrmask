@@ -30,7 +30,7 @@ use classify::classify_vocab_char_type;
 use l2p::equivalence_analysis::compat::{TokenizerView, compute_byte_classes};
 use l2p::equivalence_analysis::state::max_length::find_state_equivalence_classes_byte_restricted;
 use types::{
-    compile_profile_enabled, TerminalColoring,
+    compile_profile_enabled, LocalIdMapTerminalDwa, TerminalColoring,
     TerminalDwaPhaseProfile,
 };
 
@@ -176,7 +176,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     let shared_simplify_cache = l2p::SharedSimplifyCache::default();
 
     use rayon::prelude::*;
-    let partition_results: Vec<(Option<(merge::LocalIdMapTerminalDwa, f64)>, usize)> = sub_vocabs
+    let partition_results: Vec<(Option<(LocalIdMapTerminalDwa, f64)>, usize)> = sub_vocabs
         .par_iter()
         .enumerate()
         .map(|(idx, sub_vocab)| {
@@ -216,7 +216,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
         .unwrap_or_default();
 
     // Collect non-None results.
-    let mut pairs: Vec<merge::LocalIdMapTerminalDwa> = Vec::new();
+    let mut pairs: Vec<LocalIdMapTerminalDwa> = Vec::new();
     for (result, _idx) in partition_results {
         if let Some((pair, _)) = result {
             pairs.push(pair);

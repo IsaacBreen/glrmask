@@ -12,10 +12,10 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::classify_terminal_path_lengths;
-use crate::compiler::stages::id_map_and_terminal_dwa::merge::{LocalIdMapTerminalDwa, merge_local_id_maps_and_terminal_dwas};
 use crate::compiler::stages::id_map_and_terminal_dwa::types::{
-    TerminalColoring, TerminalPathLength, compile_profile_enabled,
+    LocalIdMapTerminalDwa, TerminalColoring, TerminalPathLength, compile_profile_enabled,
 };
+use crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_local_id_maps_and_terminal_dwas;
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::TerminalID;
 use crate::Vocab;

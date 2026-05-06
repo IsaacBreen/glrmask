@@ -10,20 +10,12 @@ use std::sync::Arc;
 use range_set_blaze::RangeSetBlaze;
 
 use crate::automata::weighted::determinize::determinize;
-use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::weight::Weight;
 
-use super::types::TerminalDwaPhaseProfile;
-
-#[derive(Debug, Clone)]
-pub(crate) struct LocalIdMapTerminalDwa {
-    pub(crate) id_map: InternalIdMap,
-    pub(crate) dwa: DWA,
-    pub(crate) profile: TerminalDwaPhaseProfile,
-}
+use super::types::{LocalIdMapTerminalDwa, TerminalDwaPhaseProfile};
 
 /// Merge local branch outputs for a single partition into one compacted DWA.
 pub(crate) fn merge_local_id_maps_and_terminal_dwas(

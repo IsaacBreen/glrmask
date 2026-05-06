@@ -1,5 +1,7 @@
 //! Shared types used across the terminal DWA build pipeline.
 
+use crate::automata::weighted::dwa::DWA;
+use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::grammar::flat::TerminalID;
 
 /// Color identifier (index into graph-coloring partition).
@@ -43,6 +45,13 @@ pub(crate) struct TerminalDwaPhaseProfile {
     pub(crate) id_map_ms: f64,
     pub(crate) terminal_dwa_ms: f64,
     pub(crate) compact_ms: f64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LocalIdMapTerminalDwa {
+    pub(crate) id_map: InternalIdMap,
+    pub(crate) dwa: DWA,
+    pub(crate) profile: TerminalDwaPhaseProfile,
 }
 
 impl TerminalDwaPhaseProfile {

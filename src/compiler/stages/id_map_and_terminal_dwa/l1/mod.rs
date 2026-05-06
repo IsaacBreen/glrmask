@@ -146,9 +146,7 @@ use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::compact::compact_dwa_dimensions_fast_with_stats;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
-use crate::compiler::stages::id_map_and_terminal_dwa::merge::{
-    LocalIdMapTerminalDwa,
-};
+use crate::compiler::stages::id_map_and_terminal_dwa::types::LocalIdMapTerminalDwa;
 use crate::ds::weight::{Weight, shared_rangeset};
 use crate::Vocab;
 
