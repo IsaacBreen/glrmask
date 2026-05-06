@@ -153,7 +153,7 @@ use crate::ds::weight::{Weight, shared_rangeset};
 use crate::Vocab;
 
 use super::l2p::equivalence_analysis::compat::{TokenizerView, compute_byte_classes};
-use super::types::{TerminalColoring, TerminalDwaPhaseProfile, compile_profile_enabled, debug_profile_enabled};
+use super::types::{TerminalColoring, TerminalDwaPhaseProfile, compile_profile_enabled};
 
 /// Maximum L1 equivalence class count before falling back to L2+.
 ///
@@ -267,7 +267,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     let dwa_stats_before_compact = dwa.stats();
     let terminal_build_ms = dwa_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let profiling = compile_profile_enabled() || debug_profile_enabled();
+    let profiling = compile_profile_enabled();
     let tsids_before_compact = id_map.num_tsids();
     let tokens_before_compact = id_map.num_internal_tokens();
 
@@ -468,20 +468,6 @@ fn build_l1_id_map<'a>(
         }
     }
     let state_equiv_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
-    if debug_profile_enabled() {
-        eprintln!(
-            "[glrmask/debug][l1_id_map] state_equiv breakdown: view={:.1}ms max_length={:.1}ms exact_token_signature={:.1}ms mapping={:.1}ms total={:.1}ms tokens={} dfa_states={} max_length_reps={} exact_reps={}",
-            view_ms,
-            max_length_ms,
-            exact_state_equiv_ms,
-            state_equiv_ms - view_ms - max_length_ms - exact_state_equiv_ms - token_sort_ms,
-            state_equiv_ms,
-            vocab.entries.len(),
-            states.len(),
-            max_length_representatives.len(),
-            state_representatives.len(),
-        );
-    }
 
     let token_map_started_at = Instant::now();
     let mut token_original_to_internal = vec![u32::MAX; vocab.max_token_id() as usize + 1];
@@ -855,17 +841,6 @@ fn build_l1_terminal_dwa(
             }
         }
     }
-
-    let skipped_walks = std::sync::atomic::AtomicUsize::new(0);
-    let skipped_tokens = std::sync::atomic::AtomicUsize::new(0);
-    let fingerprint_dedup_walks = std::sync::atomic::AtomicUsize::new(0);
-    let fingerprint_dedup_eliminated = std::sync::atomic::AtomicUsize::new(0);
-    let phase1_transition_steps = std::sync::atomic::AtomicU64::new(0);
-    let phase1_successful_tokens = std::sync::atomic::AtomicU64::new(0);
-    let phase1_same_end_rep_hits = std::sync::atomic::AtomicU64::new(0);
-    let p2_collect_ns = std::sync::atomic::AtomicU64::new(0);
-    let p2_build_ns = std::sync::atomic::AtomicU64::new(0);
-    let p2_total_ranges = std::sync::atomic::AtomicU64::new(0);
     // Walk cache: compute once per unique (first_byte, target) and cache
     // the raw merged ranges. Self-loop optimization: if the target state
     // has self-loops on all suffix bytes, all tokens end at the target
@@ -888,32 +863,6 @@ fn build_l1_terminal_dwa(
             }
         }
         let unique_walk_keys: Vec<(u8, u32)> = unique_targets.into_keys().collect();
-
-        if debug_profile_enabled() {
-            // Count walks per first_byte and tokens per first_byte for work distribution.
-            let mut walks_per_byte = [0u32; 256];
-            for &(byte, _) in &unique_walk_keys {
-                walks_per_byte[byte as usize] += 1;
-            }
-            let mut total_token_iterations = 0u64;
-            let mut max_walks_for_byte = 0u32;
-            let mut max_tokens_per_byte = 0usize;
-            let mut active_bytes = 0u32;
-            for byte in 0..256 {
-                let w = walks_per_byte[byte];
-                let t = token_indices_by_first_byte[byte].len();
-                if t > 0 {
-                    active_bytes += 1;
-                    total_token_iterations += w as u64 * t as u64;
-                    max_walks_for_byte = max_walks_for_byte.max(w);
-                    max_tokens_per_byte = max_tokens_per_byte.max(t);
-                }
-            }
-            eprintln!(
-                "[glrmask/debug][l1_walk_distrib] unique_walks={} active_bytes={} max_walks_per_byte={} max_tokens_per_byte={} total_token_iterations={}",
-                unique_walk_keys.len(), active_bytes, max_walks_for_byte, max_tokens_per_byte, total_token_iterations,
-            );
-        }
 
         // Precompute self-loop mask per target state.
         let mut self_loop_masks: FxHashMap<u32, [u64; 4]> = FxHashMap::default();
@@ -971,8 +920,6 @@ fn build_l1_terminal_dwa(
 
                     // Handle self-loop targets.
                     if !selfloop_targets.is_empty() {
-                        skipped_walks.fetch_add(selfloop_targets.len(), std::sync::atomic::Ordering::Relaxed);
-                        skipped_tokens.fetch_add(selfloop_targets.len() * token_ids.len(), std::sync::atomic::Ordering::Relaxed);
                         let first = *token_ids.first().unwrap() as u32;
                         let last = *token_ids.last().unwrap() as u32;
                         for &target in &selfloop_targets {
@@ -1046,8 +993,6 @@ fn build_l1_terminal_dwa(
 
                             let total_eliminated = dead_eliminated + dup_eliminated;
                             if total_eliminated > 0 {
-                                fingerprint_dedup_walks.fetch_add(walk_targets.len(), std::sync::atomic::Ordering::Relaxed);
-                                fingerprint_dedup_eliminated.fetch_add(total_eliminated, std::sync::atomic::Ordering::Relaxed);
                                 dedup_others = Some(others);
                                 walk_targets = deduped_targets;
                             }
@@ -1059,8 +1004,6 @@ fn build_l1_terminal_dwa(
                     }
 
                     let num_walk = walk_targets.len();
-                    let mut local_transition_steps = 0u64;
-                    let mut local_successful_tokens = 0u64;
 
                     // suffix_states: flat [pos * num_walk + target_idx]
                     // Position 0 = initial target states (before any suffix bytes).
@@ -1092,7 +1035,6 @@ fn build_l1_terminal_dwa(
                                     flat_trans[prev_state as usize * 256 + b as usize]
                                 };
                                 suffix_states.push(next_state);
-                                local_transition_steps += (prev_state != dead) as u64;
                             }
                         }
 
@@ -1113,7 +1055,6 @@ fn build_l1_terminal_dwa(
                                     }
                                     continue;
                                 }
-                                local_successful_tokens += 1;
                                 if run_signature_ids[t] == sig_id
                                     && run_ends[t].wrapping_add(1) == token_id
                                 {
@@ -1153,9 +1094,6 @@ fn build_l1_terminal_dwa(
                         }
                     }
 
-                    phase1_transition_steps.fetch_add(local_transition_steps, std::sync::atomic::Ordering::Relaxed);
-                    phase1_successful_tokens.fetch_add(local_successful_tokens, std::sync::atomic::Ordering::Relaxed);
-
                     // Package per-target results.
                     for (t, map) in signature_maps.into_iter().enumerate() {
                         let target = walk_targets[t];
@@ -1194,11 +1132,6 @@ fn build_l1_terminal_dwa(
             cache
         };
 
-        let phase1_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0;
-        let phase1_wall_ms = phase1_ms;
-
-        let n_signatures = terminal_signatures.len();
-
         // Build indexed walk_cache: (byte, target) → Vec of (signature_id, &ranges, entry_hash, entry_range_count).
         // entry_hash is precomputed from the ranges so Phase 2 can combine hashes
         // in O(entries) instead of O(ranges).
@@ -1220,17 +1153,7 @@ fn build_l1_terminal_dwa(
             })
             .collect();
 
-        if debug_profile_enabled() {
-            eprintln!(
-                "[glrmask/debug][l1_phase2_setup] terminal_signatures={} walk_cache_entries={}",
-                n_signatures, walk_cache.len()
-            );
-        }
-
         // Phase 2: For each start_state, collect walk_cache references per
-        // terminal signature and build LazyRanges. Instead of copying 25M+ ranges into
-        // per-start-state Vecs, store references to walk_cache range slices.
-        // Materialization deferred to interning (only ~463 unique sets).
 
         // Pre-build empty token ranges (shared across all start_states).
         let empty_token_ranges: Vec<(u32, u32)> = {
@@ -1300,13 +1223,10 @@ fn build_l1_terminal_dwa(
                         }
                     }
                 }
-                p2_collect_ns.fetch_add(collect_start.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
 
                 // Finalize hashes and build LazyRanges entries.
-                let build_start = Instant::now();
                 let mut result: Vec<(u32, u32, LazyRanges)> = Vec::new();
                 for (sig_idx, refs, hash, total_len) in touched_signatures.into_iter() {
-                    p2_total_ranges.fetch_add(total_len as u64, std::sync::atomic::Ordering::Relaxed);
                     let lazy = LazyRanges { refs, hash, total_len };
                     if initial_tsids.len() > 1 {
                         for &tsid in &initial_tsids[..initial_tsids.len() - 1] {
@@ -1315,22 +1235,9 @@ fn build_l1_terminal_dwa(
                     }
                     result.push((sig_idx as u32, *initial_tsids.last().unwrap(), lazy));
                 }
-                p2_build_ns.fetch_add(build_start.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
                 result
             })
             .collect();
-
-    let phase2_wall_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0 - phase1_wall_ms;
-
-    if debug_profile_enabled() {
-        eprintln!(
-            "[glrmask/debug][l1_phase2_detail] collect_thread_ms={:.1} build_thread_ms={:.1} total_ranges={} wall_ms={:.1}",
-            p2_collect_ns.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1_000_000.0,
-            p2_build_ns.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1_000_000.0,
-            p2_total_ranges.load(std::sync::atomic::Ordering::Relaxed),
-            phase2_wall_ms,
-        );
-    }
 
     // Sort-based intern: sort entries by hash, find hash-group boundaries,
     // then verify and build Arcs in parallel. LazyRanges are compared by
@@ -1412,17 +1319,6 @@ fn build_l1_terminal_dwa(
     // Merge parallel results into deferred_arced (sequential).
     let mut deferred_arced: Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>> =
         vec![Vec::new(); terminal_signatures.len()];
-    // Count unique range sets: each distinct Arc pointer = one unique set.
-    let unique_range_set_count;
-    {
-        let mut seen_arcs: rustc_hash::FxHashSet<usize> = rustc_hash::FxHashSet::default();
-        for result in &group_results {
-            for &(_, _, ref arc) in result {
-                seen_arcs.insert(Arc::as_ptr(arc) as usize);
-            }
-        }
-        unique_range_set_count = seen_arcs.len();
-    }
     for result in group_results {
         for (sig_id, tsid, arc) in result {
             deferred_arced[sig_id as usize].push((tsid, arc));
@@ -1431,68 +1327,23 @@ fn build_l1_terminal_dwa(
 
     let token_set_intern_ms = token_set_intern_started_at.elapsed().as_secs_f64() * 1000.0;
     let traversal_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0;
-    if debug_profile_enabled() {
-        eprintln!(
-            "[glrmask/debug][l1_intern_detail] entries={} unique_sets={} hash_groups={} intern_ms={:.1}",
-            all_entries.len(), unique_range_set_count, hash_group_starts.len() - 1, token_set_intern_ms,
-        );
-        let successful_tokens = phase1_successful_tokens.load(std::sync::atomic::Ordering::Relaxed);
-        let same_end_rep_hits = phase1_same_end_rep_hits.load(std::sync::atomic::Ordering::Relaxed);
-        eprintln!(
-            "[glrmask/debug][l1_phase1_ops] transition_steps={} successful_tokens={} same_end_rep_hits={} same_end_rep_rate={:.3}",
-            phase1_transition_steps.load(std::sync::atomic::Ordering::Relaxed),
-            successful_tokens,
-            same_end_rep_hits,
-            if successful_tokens == 0 {
-                0.0
-            } else {
-                same_end_rep_hits as f64 / successful_tokens as f64
-            },
-        );
-        eprintln!(
-            "[glrmask/debug][l1_traversal] start_states={} phase1_walk_ms={:.1} phase2_assembly_ms={:.1} intern_ms={:.1} unique_range_sets={} skipped_walks={} skipped_tokens={} fp_dedup_walks={} fp_dedup_eliminated={} total_vt_ms={:.1}",
-            start_states_list.len(), phase1_wall_ms, phase2_wall_ms, token_set_intern_ms,
-            unique_range_set_count,
-            skipped_walks.load(std::sync::atomic::Ordering::Relaxed),
-            skipped_tokens.load(std::sync::atomic::Ordering::Relaxed),
-            fingerprint_dedup_walks.load(std::sync::atomic::Ordering::Relaxed),
-            fingerprint_dedup_eliminated.load(std::sync::atomic::Ordering::Relaxed),
-            traversal_ms,
-        );
-    }
 
     let tsid_profile_merge_started_at = Instant::now();
     let tsid_profile_merge_before = id_map.num_tsids() as usize;
     let tsid_profile_merge_report = merge_deferred_equivalent_tsids(id_map, &mut deferred_arced);
     let tsid_profile_merge_after = tsid_profile_merge_report.tsids_after;
     let tsid_profile_merge_ms = tsid_profile_merge_started_at.elapsed().as_secs_f64() * 1000.0;
-    if debug_profile_enabled() {
-        eprintln!(
-            "[glrmask/debug][l1_tsid_profile_merge] before={} after={} unique_arc_token_sets={} unique_range_token_sets={} profile_build_ms={:.3} group_ms={:.3} remap_ms={:.3} total_ms={:.3}",
-            tsid_profile_merge_before,
-            tsid_profile_merge_after,
-            tsid_profile_merge_report.unique_arc_token_sets,
-            tsid_profile_merge_report.unique_range_token_sets,
-            tsid_profile_merge_report.profile_build_ms,
-            tsid_profile_merge_report.group_ms,
-            tsid_profile_merge_report.remap_ms,
-            tsid_profile_merge_ms,
-        );
-    }
 
     let distribute_started_at = Instant::now();
-    let arc_wrap_ms = 0.0; // Arc wrapping is now done inside the traversal
 
     // Build terminal -> terminal-signature ids. Each signature is the exact
     // set of active terminals produced by the full-token end state.
-    let inverse_started_at = Instant::now();
     let mut terminal_to_signatures: Vec<Vec<u32>> = vec![Vec::new(); num_terminals as usize];
     for (sig_id, terminals) in terminal_signatures.iter().enumerate() {
         for &terminal in terminals {
             terminal_to_signatures[terminal as usize].push(sig_id as u32);
         }
     }
-    let inverse_map_ms = inverse_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // Pre-compute per-TSID full token set unions and contributing signatures.
     // For each terminal, TSIDs whose contributing signatures are all active reuse
@@ -1658,24 +1509,6 @@ fn build_l1_terminal_dwa(
     let direct_terminal_dwa_ms = merge_ms;
     let distribute_ms = distribute_started_at.elapsed().as_secs_f64() * 1000.0;
     let vocab_tree_traversal_ms = traversal_ms;
-
-    if debug_profile_enabled() {
-        eprintln!(
-            "[glrmask/debug][terminal_dwa] partition_build_l1_batch vocab={} tsids={} states={} transitions={} transition_pairs={} interned_ranges={} traversal_ms={:.1} arc_wrap_ms={:.1} inverse_map_ms={:.1} merge_ms={:.1} distribute_ms={:.1} total_ms={:.1}",
-            sorted_entries.len(),
-            id_map.num_tsids(),
-            dwa_stats.states,
-            dwa_stats.transitions,
-            dwa_stats.transition_pairs,
-            dwa_stats.interned_ranges,
-            traversal_ms,
-            arc_wrap_ms,
-            inverse_map_ms,
-            merge_ms,
-            distribute_ms,
-            total_started_at.elapsed().as_secs_f64() * 1000.0,
-        );
-    }
 
     Some((
         dwa,

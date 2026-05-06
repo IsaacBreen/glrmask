@@ -14,8 +14,7 @@ use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::classify_terminal_path_lengths;
 use crate::compiler::stages::id_map_and_terminal_dwa::merge::{LocalIdMapTerminalDwa, merge_local_id_maps_and_terminal_dwas};
 use crate::compiler::stages::id_map_and_terminal_dwa::types::{
-    TerminalColoring, TerminalPathLength, compile_profile_enabled, debug_profile_enabled,
-    debug_terminal_mapping_enabled,
+    TerminalColoring, TerminalPathLength, compile_profile_enabled,
 };
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::TerminalID;
@@ -85,28 +84,6 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                 num_zero += 1;
             }
         }
-    }
-
-    if debug_profile_enabled() || debug_terminal_mapping_enabled() {
-        let l1_ids: Vec<u32> = terminal_path_lengths.iter().enumerate()
-            .filter(|(_, l)| **l == TerminalPathLength::One)
-            .map(|(i, _)| i as u32)
-            .collect();
-        let l2p_ids: Vec<u32> = terminal_path_lengths.iter().enumerate()
-            .filter(|(_, l)| **l == TerminalPathLength::TwoPlus)
-            .map(|(i, _)| i as u32)
-            .collect();
-        let zero_ids: Vec<u32> = terminal_path_lengths.iter().enumerate()
-            .filter(|(_, l)| **l == TerminalPathLength::Zero)
-            .map(|(i, _)| i as u32)
-            .collect();
-        if debug_profile_enabled() || debug_terminal_mapping_enabled() {
-            eprintln!(
-                "[glrmask/debug][partition_classify] label={} l1_terminal_ids={:?} l2p_terminal_ids={:?} zero_terminal_ids={:?}",
-                partition_label, l1_ids, l2p_ids, zero_ids,
-            );
-        }
-
     }
 
     // Build L1 and L2+ terminal DWAs in parallel.
@@ -190,11 +167,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     merged.profile.id_map_ms += classify_ms;
     let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    if debug_terminal_mapping_enabled() {
-        super::emit_terminal_dwa_symbol_counts(partition_label, &merged.dwa, grammar);
-    }
-
-    if compile_profile_enabled() || debug_profile_enabled() {
+    if compile_profile_enabled() {
         eprintln!(
             "[glrmask/profile][partition] label={} vocab_tokens={} length0={} length1={} length2plus={} classify_ms={:.3} l1_ms={:.3} l2p_ms={:.3} merge_ms={:.3} accounted_id_map_ms={:.3} accounted_terminal_dwa_ms={:.3} accounted_compact_ms={:.3} accounted_total_ms={:.3} total_ms={:.3}",
             partition_label,

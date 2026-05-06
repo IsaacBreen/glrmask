@@ -30,42 +30,9 @@ use classify::classify_vocab_char_type;
 use l2p::equivalence_analysis::compat::{TokenizerView, compute_byte_classes};
 use l2p::equivalence_analysis::state::max_length::find_state_equivalence_classes_byte_restricted;
 use types::{
-    compile_profile_enabled, debug_profile_enabled, TerminalColoring,
+    compile_profile_enabled, TerminalColoring,
     TerminalDwaPhaseProfile,
 };
-
-fn format_terminal_edge_symbol_counts(num_terminals: usize, dwa: &DWA) -> Vec<String> {
-    let mut counts = vec![0usize; num_terminals];
-    for state in dwa.states() {
-        for (&label, _) in &state.transitions {
-            if label >= 0 {
-                let label = label as usize;
-                if label < counts.len() {
-                    counts[label] += 1;
-                }
-            }
-        }
-    }
-
-    counts
-        .into_iter()
-        .enumerate()
-        .map(|(terminal_id, count)| format!("{}={}", terminal_id, count))
-        .collect()
-}
-
-fn terminal_dwa_edge_count(dwa: &DWA) -> usize {
-    dwa.states().iter().map(|state| state.transitions.len()).sum()
-}
-
-fn emit_terminal_dwa_symbol_counts(label: &str, dwa: &DWA, grammar: &AnalyzedGrammar) {
-    eprintln!(
-        "[glrmask/debug][terminal_dwa][symbol_counts] label={} edges={} terminal_edge_symbol_counts={:?}",
-        label,
-        terminal_dwa_edge_count(dwa),
-        format_terminal_edge_symbol_counts(grammar.num_terminals as usize, dwa),
-    );
-}
 
 pub(crate) fn build_global_max_length_state_map(
     tokenizer: &Tokenizer,
@@ -107,7 +74,7 @@ pub(crate) fn build_global_max_length_state_map(
         original_to_internal[state] = internal;
     }
 
-    if compile_profile_enabled() || debug_profile_enabled() {
+    if compile_profile_enabled() {
         eprintln!(
             "[glrmask/profile][global_max_length] states={} reps={} tokens={} ms={:.3}",
             states.len(),
@@ -293,7 +260,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     profile.add_assign(dominant_partition_profile);
     profile.add_assign(global_merge_profile);
 
-    if compile_profile_enabled() || debug_profile_enabled() {
+    if compile_profile_enabled() {
         let partition_detail: String = sub_vocabs.iter().enumerate()
             .map(|(i, sv)| format!("p{}_tokens={} p{}_ms={:.3}", i, sv.entries.len(), i, partition_ms[i]))
             .collect::<Vec<_>>()
