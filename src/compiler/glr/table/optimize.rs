@@ -1491,6 +1491,143 @@ fn stack_shift_action(mut shifts: Vec<StackShift>) -> Option<Action> {
     Some(Action::StackShifts(shifts))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn table_with_stack_shifts(
+        shifts: Vec<StackShift>,
+        goto_rows: &[(u32, &[(NonterminalID, (u32, bool))])],
+    ) -> GLRTable {
+        let num_states = 8;
+        let mut action = vec![ActionRow::default(); num_states];
+        action[0].insert(0, Action::StackShifts(shifts));
+
+        let mut goto = vec![GotoRow::default(); num_states];
+        for &(state, row) in goto_rows {
+            for &(nt, target) in row {
+                goto[state as usize].insert(nt, target);
+            }
+        }
+
+        GLRTable {
+            action,
+            goto,
+            num_states: num_states as u32,
+            num_terminals: 1,
+            num_rules: 0,
+            rules: Vec::new(),
+            forwarded_shifts: FxHashSet::default(),
+        }
+    }
+
+    fn stack_shifts_at_start(table: &GLRTable) -> Vec<StackShift> {
+        match table.action(0, 0).expect("expected action at state 0 terminal 0") {
+            Action::StackShifts(shifts) => shifts.clone(),
+            action => panic!("expected stack shifts, got {action:?}"),
+        }
+    }
+
+    #[test]
+    fn canonicalizes_stack_shift_predecessor_to_goto_superset() {
+        let mut table = table_with_stack_shifts(
+            vec![
+                StackShift {
+                    pop: 1,
+                    pushes: vec![1, 3, 4],
+                },
+                StackShift {
+                    pop: 1,
+                    pushes: vec![2, 3, 4],
+                },
+            ],
+            &[
+                (1, &[(10, (20, true)), (11, (21, false))]),
+                (2, &[(10, (20, true))]),
+            ],
+        );
+
+        table.canonicalize_stack_shift_predecessors();
+
+        assert_eq!(
+            stack_shifts_at_start(&table),
+            vec![StackShift {
+                pop: 1,
+                pushes: vec![1, 3, 4],
+            }]
+        );
+    }
+
+    #[test]
+    fn does_not_canonicalize_stack_shift_predecessors_when_shared_goto_target_differs() {
+        let mut table = table_with_stack_shifts(
+            vec![
+                StackShift {
+                    pop: 1,
+                    pushes: vec![1, 3, 4],
+                },
+                StackShift {
+                    pop: 1,
+                    pushes: vec![2, 3, 4],
+                },
+            ],
+            &[
+                (1, &[(10, (20, true)), (11, (21, false))]),
+                (2, &[(10, (22, true))]),
+            ],
+        );
+
+        table.canonicalize_stack_shift_predecessors();
+
+        assert_eq!(
+            stack_shifts_at_start(&table),
+            vec![
+                StackShift {
+                    pop: 1,
+                    pushes: vec![1, 3, 4],
+                },
+                StackShift {
+                    pop: 1,
+                    pushes: vec![2, 3, 4],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn does_not_canonicalize_empty_goto_row_to_nonempty_superset() {
+        let mut table = table_with_stack_shifts(
+            vec![
+                StackShift {
+                    pop: 1,
+                    pushes: vec![1, 3, 4],
+                },
+                StackShift {
+                    pop: 1,
+                    pushes: vec![2, 3, 4],
+                },
+            ],
+            &[(1, &[(10, (20, true))])],
+        );
+
+        table.canonicalize_stack_shift_predecessors();
+
+        assert_eq!(
+            stack_shifts_at_start(&table),
+            vec![
+                StackShift {
+                    pop: 1,
+                    pushes: vec![1, 3, 4],
+                },
+                StackShift {
+                    pop: 1,
+                    pushes: vec![2, 3, 4],
+                },
+            ]
+        );
+    }
+}
+
 fn try_create_delayed_stack_shift_state(
     table: &mut GLRTable,
     predecessors: &[BTreeSet<u32>],
