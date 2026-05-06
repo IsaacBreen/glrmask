@@ -1,5 +1,21 @@
 use super::*;
 
+const DISABLE_STACK_SHIFT_PREDECESSOR_CANONICALIZATION_ENV: &str =
+    "GLRMASK_DISABLE_STACK_SHIFT_PREDECESSOR_CANONICALIZATION";
+
+fn stack_shift_predecessor_canonicalization_enabled() -> bool {
+    !env_flag_enabled(DISABLE_STACK_SHIFT_PREDECESSOR_CANONICALIZATION_ENV, false)
+}
+
+fn env_flag_enabled(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(default)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct TableRowKey {
     action: Vec<(TerminalID, Action)>,
@@ -8,6 +24,16 @@ struct TableRowKey {
 
 impl GLRTable {
     pub(super) fn canonicalize_stack_shift_predecessors(&mut self) {
+        self.canonicalize_stack_shift_predecessors_with_enabled(
+            stack_shift_predecessor_canonicalization_enabled(),
+        );
+    }
+
+    fn canonicalize_stack_shift_predecessors_with_enabled(&mut self, enabled: bool) {
+        if !enabled {
+            return;
+        }
+
         for state in 0..self.num_states as usize {
             let terminals: Vec<TerminalID> = self.action[state].keys().copied().collect();
             for terminal in terminals {
@@ -1358,7 +1384,9 @@ fn stack_effect_action(table: &GLRTable, mut effects: Vec<GuardedStackShift>) ->
                 pushes: effect.pushes,
             })
             .collect();
-        canonicalize_stack_shift_predecessors_by_goto_superset(table, &mut shifts);
+        if stack_shift_predecessor_canonicalization_enabled() {
+            canonicalize_stack_shift_predecessors_by_goto_superset(table, &mut shifts);
+        }
         return stack_shift_action(shifts);
     }
     Some(Action::GuardedStackShifts(effects))
@@ -1555,6 +1583,42 @@ mod tests {
                 pop: 1,
                 pushes: vec![1, 3, 4],
             }]
+        );
+    }
+
+    #[test]
+    fn leaves_stack_shift_predecessors_unchanged_when_canonicalization_is_disabled() {
+        let mut table = table_with_stack_shifts(
+            vec![
+                StackShift {
+                    pop: 1,
+                    pushes: vec![1, 3, 4],
+                },
+                StackShift {
+                    pop: 1,
+                    pushes: vec![2, 3, 4],
+                },
+            ],
+            &[
+                (1, &[(10, (20, true)), (11, (21, false))]),
+                (2, &[(10, (20, true))]),
+            ],
+        );
+
+        table.canonicalize_stack_shift_predecessors_with_enabled(false);
+
+        assert_eq!(
+            stack_shifts_at_start(&table),
+            vec![
+                StackShift {
+                    pop: 1,
+                    pushes: vec![1, 3, 4],
+                },
+                StackShift {
+                    pop: 1,
+                    pushes: vec![2, 3, 4],
+                },
+            ]
         );
     }
 
