@@ -307,7 +307,12 @@ impl PyConstraintState {
         dict.set_item("prune_ns", profile.prune_ns)?;
         dict.set_item("queue_ns", profile.queue_ns)?;
         dict.set_item("fuse_ns", profile.fuse_ns)?;
+        dict.set_item("initial_exec_ns", profile.initial_exec_ns)?;
         dict.set_item("exec_ns", profile.exec_ns)?;
+        dict.set_item("queue_exec_ns", profile.queue_exec_ns)?;
+        dict.set_item("queue_match_ns", profile.queue_match_ns)?;
+        dict.set_item("queue_enqueue_ns", profile.queue_enqueue_ns)?;
+        dict.set_item("queue_bookkeeping_ns", profile.queue_bookkeeping_ns)?;
         dict.set_item("advance_ns", profile.advance_ns)?;
         dict.set_item("advance_may_check_ns", profile.advance_may_check_ns)?;
         dict.set_item("advance_core_ns", profile.advance_core_ns)?;
@@ -323,6 +328,7 @@ impl PyConstraintState {
         dict.set_item("adv_n_nondet_branches", profile.adv_n_nondet_branches)?;
         dict.set_item("adv_clone_ns", profile.adv_clone_ns)?;
         dict.set_item("adv_fast_path_ns", profile.adv_fast_path_ns)?;
+        dict.set_item("adv_stack_shift_apply_ns", profile.adv_stack_shift_apply_ns)?;
         dict.set_item("adv_det_ns", profile.adv_det_ns)?;
         dict.set_item("adv_nondet_ns", profile.adv_nondet_ns)?;
         dict.set_item("adv_vstack_len", profile.adv_vstack_len)?;
@@ -412,6 +418,7 @@ impl PyConstraintState {
             d.set_item("total_ns", p.total_ns)?;
             d.set_item("clone_ns", p.clone_ns)?;
             d.set_item("fast_path_ns", p.fast_path_ns)?;
+            d.set_item("stack_shift_apply_ns", p.stack_shift_apply_ns)?;
             d.set_item("det_ns", p.det_ns)?;
             d.set_item("nondet_ns", p.nondet_ns)?;
             d.set_item("nondet_det_ns", p.nondet_det_ns)?;
@@ -433,7 +440,12 @@ impl PyConstraintState {
         commit_dict.set_item("prune_ns", commit_profile.prune_ns)?;
         commit_dict.set_item("queue_ns", commit_profile.queue_ns)?;
         commit_dict.set_item("fuse_ns", commit_profile.fuse_ns)?;
+        commit_dict.set_item("initial_exec_ns", commit_profile.initial_exec_ns)?;
         commit_dict.set_item("exec_ns", commit_profile.exec_ns)?;
+        commit_dict.set_item("queue_exec_ns", commit_profile.queue_exec_ns)?;
+        commit_dict.set_item("queue_match_ns", commit_profile.queue_match_ns)?;
+        commit_dict.set_item("queue_enqueue_ns", commit_profile.queue_enqueue_ns)?;
+        commit_dict.set_item("queue_bookkeeping_ns", commit_profile.queue_bookkeeping_ns)?;
         commit_dict.set_item("advance_ns", commit_profile.advance_ns)?;
         commit_dict.set_item("advance_may_check_ns", commit_profile.advance_may_check_ns)?;
         commit_dict.set_item("advance_core_ns", commit_profile.advance_core_ns)?;
@@ -449,6 +461,7 @@ impl PyConstraintState {
         commit_dict.set_item("adv_n_nondet_branches", commit_profile.adv_n_nondet_branches)?;
         commit_dict.set_item("adv_clone_ns", commit_profile.adv_clone_ns)?;
         commit_dict.set_item("adv_fast_path_ns", commit_profile.adv_fast_path_ns)?;
+        commit_dict.set_item("adv_stack_shift_apply_ns", commit_profile.adv_stack_shift_apply_ns)?;
         commit_dict.set_item("adv_det_ns", commit_profile.adv_det_ns)?;
         commit_dict.set_item("adv_nondet_ns", commit_profile.adv_nondet_ns)?;
         commit_dict.set_item("adv_vstack_len", commit_profile.adv_vstack_len)?;

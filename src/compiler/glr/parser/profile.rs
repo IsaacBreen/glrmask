@@ -14,6 +14,7 @@ pub struct AdvanceProfile {
     pub total_ns: u64,
     pub clone_ns: u64,
     pub fast_path_ns: u64,
+    pub stack_shift_apply_ns: u64,
     pub det_ns: u64,
     pub nondet_ns: u64,
     pub nondet_det_ns: u64,

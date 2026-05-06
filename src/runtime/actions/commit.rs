@@ -22,6 +22,10 @@ type ParserStatesByTokenizer = FxHashMap<u32, ParserGSS>;
 
 pub type GssProfileSummary = LeveledGSSSummary;
 
+// Commit is a central runtime method and this profiling surface is used by
+// CFA profile_step to choose optimization targets. Keep parent/child timing
+// buckets on one wall-clock accounting tree; do not remove or repurpose
+// fields without updating profile_step at the same time.
 #[derive(Clone, Debug, Default)]
 pub struct CommitProfile {
     pub total_ns: u64,
@@ -29,7 +33,12 @@ pub struct CommitProfile {
     pub prune_ns: u64,
     pub queue_ns: u64,
     pub fuse_ns: u64,
+    pub initial_exec_ns: u64,
     pub exec_ns: u64,
+    pub queue_exec_ns: u64,
+    pub queue_match_ns: u64,
+    pub queue_enqueue_ns: u64,
+    pub queue_bookkeeping_ns: u64,
     pub advance_ns: u64,
     pub advance_may_check_ns: u64,
     pub advance_core_ns: u64,
@@ -45,6 +54,7 @@ pub struct CommitProfile {
     pub adv_n_nondet_branches: u64,
     pub adv_clone_ns: u64,
     pub adv_fast_path_ns: u64,
+    pub adv_stack_shift_apply_ns: u64,
     pub adv_det_ns: u64,
     pub adv_nondet_ns: u64,
     pub adv_vstack_len: u64,
@@ -114,6 +124,7 @@ fn apply_advance_profile(commit_profile: &mut CommitProfile, profile: &AdvancePr
     commit_profile.adv_n_nondet_branches += profile.n_nondet_branches as u64;
     commit_profile.adv_clone_ns += profile.clone_ns;
     commit_profile.adv_fast_path_ns += profile.fast_path_ns;
+    commit_profile.adv_stack_shift_apply_ns += profile.stack_shift_apply_ns;
     commit_profile.adv_det_ns += profile.det_ns;
     commit_profile.adv_nondet_ns += profile.nondet_ns;
     commit_profile.adv_vstack_len = profile.vstack_len as u64;
@@ -690,6 +701,7 @@ fn commit_bytes_fast_path_profiled(
                         AdvanceProfile {
                             pure_shift: true,
                             fast_path_ns: profile.fast_path_advance_ns,
+                            stack_shift_apply_ns: profile.fast_path_advance_ns,
                             total_ns: profile.fast_path_advance_ns,
                             top_states: gss.peek_values().len() as u32,
                             gss_depth: gss.max_depth(),
@@ -857,8 +869,10 @@ fn commit_bytes_impl_profiled(
         let (&tokenizer_state, _) = state.iter().next().unwrap();
         let exec_start = Instant::now();
         let exec_result = constraint.tokenizer.execute_from_state(bytes, tokenizer_state);
-        profile.exec_ns = exec_start.elapsed().as_nanos() as u64;
-        profile.fast_path_tokenizer_exec_ns = profile.exec_ns;
+        let initial_exec_elapsed = exec_start.elapsed().as_nanos() as u64;
+        profile.initial_exec_ns = initial_exec_elapsed;
+        profile.exec_ns = initial_exec_elapsed;
+        profile.fast_path_tokenizer_exec_ns = initial_exec_elapsed;
 
         if let Some(result) = commit_bytes_fast_path_profiled(
             constraint,
@@ -916,24 +930,30 @@ fn commit_bytes_impl_profiled(
             } else {
                 constraint.tokenizer.execute_from_state(&bytes[offset..], tokenizer_state)
             };
-            profile.exec_ns += exec_start.elapsed().as_nanos() as u64;
+            let queue_exec_elapsed = exec_start.elapsed().as_nanos() as u64;
+            profile.queue_exec_ns += queue_exec_elapsed;
+            profile.exec_ns += queue_exec_elapsed;
 
             let mut seen_matches = FxHashSet::default();
 
             for matched in &exec_result.matches {
+                let match_start = Instant::now();
                 let new_offset = offset + matched.width;
                 let ignored = is_ignored_terminal(ignore_terminal, matched.id);
+                let actionable = ignored
+                    || is_actionable_terminal(actionable_terminals.as_ref(), constraint, matched.id);
+                let first_match = seen_matches.insert((matched.width, matched.id));
+                profile.queue_match_ns += match_start.elapsed().as_nanos() as u64;
 
-                if !ignored
-                    && !is_actionable_terminal(actionable_terminals.as_ref(), constraint, matched.id)
-                {
+                if !actionable {
                     continue;
                 }
-                if !seen_matches.insert((matched.width, matched.id)) {
+                if !first_match {
                     continue;
                 }
 
                 if ignored {
+                    let enqueue_start = Instant::now();
                     queue_parser_state(
                         &mut processing_queue,
                         &mut pending_state,
@@ -942,12 +962,14 @@ fn commit_bytes_impl_profiled(
                         constraint.tokenizer.initial_state(),
                         gss_at_offset.clone(),
                     );
+                    profile.queue_enqueue_ns += enqueue_start.elapsed().as_nanos() as u64;
                     continue;
                 }
 
                 let may_start = Instant::now();
                 let may_advance = stack_may_advance_on(&constraint.table, &gss_at_offset, matched.id);
-                profile.advance_may_check_ns += may_start.elapsed().as_nanos() as u64;
+                let may_elapsed = may_start.elapsed().as_nanos() as u64;
+                profile.advance_may_check_ns += may_elapsed;
                 if !may_advance {
                     continue;
                 }
@@ -955,7 +977,8 @@ fn commit_bytes_impl_profiled(
                 let advance_core_start = Instant::now();
                 let (advanced_before_disallow, advance_profile) =
                     advance_stacks_profiled(&constraint.table, &gss_at_offset, matched.id);
-                profile.advance_core_ns += advance_core_start.elapsed().as_nanos() as u64;
+                let advance_core_elapsed = advance_core_start.elapsed().as_nanos() as u64;
+                profile.advance_core_ns += advance_core_elapsed;
                 apply_advance_profile(&mut profile, &advance_profile);
 
                 if let Some(advances) = advances.as_deref_mut() {
@@ -980,14 +1003,16 @@ fn commit_bytes_impl_profiled(
                     matched.id,
                     advanced_before_disallow,
                 );
-                profile.advance_future_disallow_ns += future_start.elapsed().as_nanos() as u64;
-                profile.advance_ns += advance_profile.total_ns;
+                let future_elapsed = future_start.elapsed().as_nanos() as u64;
+                profile.advance_future_disallow_ns += future_elapsed;
+                profile.advance_ns += may_elapsed + advance_core_elapsed + future_elapsed;
                 profile.n_advances += 1;
 
                 if advanced.is_empty() {
                     continue;
                 }
 
+                let enqueue_start = Instant::now();
                 queue_parser_state(
                     &mut processing_queue,
                     &mut pending_state,
@@ -996,6 +1021,7 @@ fn commit_bytes_impl_profiled(
                     constraint.tokenizer.initial_state(),
                     advanced,
                 );
+                profile.queue_enqueue_ns += enqueue_start.elapsed().as_nanos() as u64;
             }
 
             if let Some(end_state) = exec_result.end_state {
@@ -1006,6 +1032,7 @@ fn commit_bytes_impl_profiled(
                     continue;
                 }
 
+                let enqueue_start = Instant::now();
                 queue_parser_state(
                     &mut processing_queue,
                     &mut pending_state,
@@ -1014,11 +1041,20 @@ fn commit_bytes_impl_profiled(
                     end_state,
                     gss_at_offset,
                 );
+                profile.queue_enqueue_ns += enqueue_start.elapsed().as_nanos() as u64;
             }
         }
         offset += 1;
     }
     profile.queue_ns = queue_start.elapsed().as_nanos() as u64;
+    let queue_accounted_ns = profile
+        .actionable_ns
+        .saturating_add(profile.queue_exec_ns)
+        .saturating_add(profile.queue_match_ns)
+        .saturating_add(profile.advance_ns)
+        .saturating_add(profile.may_advance_ns)
+        .saturating_add(profile.queue_enqueue_ns);
+    profile.queue_bookkeeping_ns = profile.queue_ns.saturating_sub(queue_accounted_ns);
 
     let fuse_start = Instant::now();
     let new_state = finalize_pending_state(std::mem::take(&mut pending_state));

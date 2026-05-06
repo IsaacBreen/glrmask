@@ -63,25 +63,31 @@ pub(crate) fn advance_stacks_profiled(
             Some(Action::Shift(target, is_replace)) => {
                 profile.pure_shift = true;
                 profile.fast_path_ns = fast_path_start.elapsed().as_nanos() as u64;
+                let apply_start = Instant::now();
+                let shifted = if *is_replace {
+                    gss.popn(1).push(*target)
+                } else {
+                    gss.push(*target)
+                };
+                profile.stack_shift_apply_ns = apply_start.elapsed().as_nanos() as u64;
                 profile.total_ns = total_start.elapsed().as_nanos() as u64;
-                return (
-                    if *is_replace {
-                        gss.popn(1).push(*target)
-                    } else {
-                        gss.push(*target)
-                    },
-                    profile,
-                );
+                return (shifted, profile);
             }
             Some(Action::StackShifts(shifts)) => {
                 profile.fast_path_ns = fast_path_start.elapsed().as_nanos() as u64;
+                let apply_start = Instant::now();
+                let shifted = apply_stack_shifts(gss, shifts);
+                profile.stack_shift_apply_ns = apply_start.elapsed().as_nanos() as u64;
                 profile.total_ns = total_start.elapsed().as_nanos() as u64;
-                return (apply_stack_shifts(gss, shifts), profile);
+                return (shifted, profile);
             }
             Some(Action::GuardedStackShifts(shifts)) => {
                 profile.fast_path_ns = fast_path_start.elapsed().as_nanos() as u64;
+                let apply_start = Instant::now();
+                let shifted = apply_guarded_stack_shifts(gss, shifts);
+                profile.stack_shift_apply_ns = apply_start.elapsed().as_nanos() as u64;
                 profile.total_ns = total_start.elapsed().as_nanos() as u64;
-                return (apply_guarded_stack_shifts(gss, shifts), profile);
+                return (shifted, profile);
             }
             _ => {}
         }
