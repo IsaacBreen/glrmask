@@ -936,7 +936,185 @@ fn commit_bytes_impl_profiled(
                     });
                     return result;
                 }
-                LinearFastPathResult::Continue { .. } | LinearFastPathResult::Restart => {
+                LinearFastPathResult::Continue { gss, offset } => {
+                    profile = linear_profile;
+                    state.clear();
+                    state.insert(constraint.tokenizer.initial_state(), gss);
+
+                    let queue_start = Instant::now();
+                    let needed_queue_len = bytes.len() + 1;
+                    let mut pending_state = ParserStatesByTokenizer::default();
+                    let mut processing_queue: Vec<ParserStatesByTokenizer> =
+                        (0..needed_queue_len).map(|_| ParserStatesByTokenizer::default()).collect();
+                    processing_queue[offset] = std::mem::take(state).into_iter().collect();
+
+                    let mut queue_offset = offset;
+                    while queue_offset < needed_queue_len {
+                        if processing_queue[queue_offset].is_empty() {
+                            queue_offset += 1;
+                            continue;
+                        }
+
+                        let states_to_process = std::mem::take(&mut processing_queue[queue_offset]);
+                        for (tokenizer_state, gss_at_offset) in states_to_process {
+                            profile.n_queue_entries += 1;
+
+                            let actionable_start = Instant::now();
+                            let actionable_terminals =
+                                ActionableTerminals::from_gss(constraint, &gss_at_offset);
+                            profile.actionable_ns += actionable_start.elapsed().as_nanos() as u64;
+
+                            let exec_start = Instant::now();
+                            let exec_result = constraint
+                                .tokenizer
+                                .execute_from_state(&bytes[queue_offset..], tokenizer_state);
+                            let queue_exec_elapsed = exec_start.elapsed().as_nanos() as u64;
+                            profile.queue_exec_ns += queue_exec_elapsed;
+                            profile.exec_ns += queue_exec_elapsed;
+
+                            let mut seen_matches = FxHashSet::default();
+
+                            for matched in &exec_result.matches {
+                                let match_start = Instant::now();
+                                let new_offset = queue_offset + matched.width;
+                                let ignored = is_ignored_terminal(ignore_terminal, matched.id);
+                                let actionable = ignored
+                                    || is_actionable_terminal(
+                                        actionable_terminals.as_ref(),
+                                        constraint,
+                                        matched.id,
+                                    );
+                                let first_match = seen_matches.insert((matched.width, matched.id));
+                                profile.queue_match_ns += match_start.elapsed().as_nanos() as u64;
+
+                                if !actionable || !first_match {
+                                    continue;
+                                }
+
+                                if ignored {
+                                    let enqueue_start = Instant::now();
+                                    queue_parser_state(
+                                        &mut processing_queue,
+                                        &mut pending_state,
+                                        new_offset,
+                                        bytes.len(),
+                                        constraint.tokenizer.initial_state(),
+                                        gss_at_offset.clone(),
+                                    );
+                                    profile.queue_enqueue_ns +=
+                                        enqueue_start.elapsed().as_nanos() as u64;
+                                    continue;
+                                }
+
+                                let may_start = Instant::now();
+                                let may_advance =
+                                    stack_may_advance_on(&constraint.table, &gss_at_offset, matched.id);
+                                let may_elapsed = may_start.elapsed().as_nanos() as u64;
+                                profile.advance_may_check_ns += may_elapsed;
+                                if !may_advance {
+                                    continue;
+                                }
+
+                                let advance_core_start = Instant::now();
+                                let (advanced_before_disallow, advance_profile) =
+                                    advance_stacks_profiled(&constraint.table, &gss_at_offset, matched.id);
+                                let advance_core_elapsed =
+                                    advance_core_start.elapsed().as_nanos() as u64;
+                                profile.advance_core_ns += advance_core_elapsed;
+                                apply_advance_profile(&mut profile, &advance_profile);
+
+                                if let Some(advances) = advances.as_deref_mut() {
+                                    profile.adv_summary_ns += record_per_advance_entry(
+                                        advances,
+                                        tokenizer_state,
+                                        matched.id,
+                                        &gss_at_offset,
+                                        &advanced_before_disallow,
+                                        queue_offset,
+                                        new_offset,
+                                        bytes.len(),
+                                        &bytes[queue_offset..new_offset],
+                                        advance_profile.clone(),
+                                    );
+                                }
+
+                                let future_start = Instant::now();
+                                let advanced = apply_future_terminal_disallow(
+                                    constraint,
+                                    &exec_result,
+                                    matched.id,
+                                    advanced_before_disallow,
+                                );
+                                let future_elapsed = future_start.elapsed().as_nanos() as u64;
+                                profile.advance_future_disallow_ns += future_elapsed;
+                                profile.advance_ns +=
+                                    may_elapsed + advance_core_elapsed + future_elapsed;
+                                profile.n_advances += 1;
+
+                                if advanced.is_empty() {
+                                    continue;
+                                }
+
+                                let enqueue_start = Instant::now();
+                                queue_parser_state(
+                                    &mut processing_queue,
+                                    &mut pending_state,
+                                    new_offset,
+                                    bytes.len(),
+                                    constraint.tokenizer.initial_state(),
+                                    advanced,
+                                );
+                                profile.queue_enqueue_ns += enqueue_start.elapsed().as_nanos() as u64;
+                            }
+
+                            if let Some(end_state) = exec_result.end_state {
+                                let may_start = Instant::now();
+                                let may_advance =
+                                    end_state_may_advance(constraint, &gss_at_offset, end_state);
+                                profile.may_advance_ns += may_start.elapsed().as_nanos() as u64;
+                                if !may_advance {
+                                    continue;
+                                }
+
+                                let enqueue_start = Instant::now();
+                                queue_parser_state(
+                                    &mut processing_queue,
+                                    &mut pending_state,
+                                    bytes.len(),
+                                    bytes.len(),
+                                    end_state,
+                                    gss_at_offset,
+                                );
+                                profile.queue_enqueue_ns += enqueue_start.elapsed().as_nanos() as u64;
+                            }
+                        }
+                        queue_offset += 1;
+                    }
+
+                    profile.queue_ns = queue_start.elapsed().as_nanos() as u64;
+                    let queue_accounted_ns = profile
+                        .actionable_ns
+                        .saturating_add(profile.queue_exec_ns)
+                        .saturating_add(profile.queue_match_ns)
+                        .saturating_add(profile.advance_ns)
+                        .saturating_add(profile.may_advance_ns)
+                        .saturating_add(profile.queue_enqueue_ns);
+                    profile.queue_bookkeeping_ns =
+                        profile.queue_ns.saturating_sub(queue_accounted_ns);
+
+                    let fuse_start = Instant::now();
+                    let new_state = finalize_pending_state(std::mem::take(&mut pending_state));
+                    profile.fuse_ns += fuse_start.elapsed().as_nanos() as u64;
+
+                    *state = new_state;
+                    if state.is_empty() {
+                        return Err("commit rejected: no valid parser states remain".to_string());
+                    }
+
+                    profile.total_ns = total_start.elapsed().as_nanos() as u64;
+                    return Ok(profile);
+                }
+                LinearFastPathResult::Restart => {
                     profile = linear_profile;
                 }
             }
