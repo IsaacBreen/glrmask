@@ -523,11 +523,6 @@ fn with_weight_op_memo<R>(f: impl FnOnce(&mut WeightOpMemo) -> R) -> R {
     })
 }
 
-/// Clear the global interned-weight tables entirely.
-pub fn clear_all_weights() {
-    interner_clear_all();
-}
-
 /// Prune only dead entries from the global weight interner.
 pub fn clear_stale_weights() {
     interner_clear_stale();

@@ -1,4 +1,4 @@
-.PHONY: ffi ffi-release runtime-ffi runtime-ffi-release show-grammar-glrmask
+.PHONY: ffi ffi-release runtime-ffi runtime-ffi-release
 
 ffi:
 	maturin develop --manifest-path python/Cargo.toml

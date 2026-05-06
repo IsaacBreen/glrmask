@@ -12,7 +12,6 @@ pub(crate) mod runtime;
 mod vocab;
 
 pub use ds::weight::{
-    clear_all_weights,
     clear_stale_weights,
     clear_weight_op_caches,
 };

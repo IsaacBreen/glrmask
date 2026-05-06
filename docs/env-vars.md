@@ -26,12 +26,6 @@ This document lists all `GLRMASK_*` environment variables used in this crate, gr
 | `GLRMASK_COMPILE_THREADS` | positive integer (`usize > 0`) | auto (rayon/macOS logic) |
 | `GLRMASK_PROFILE_COMPILE` | truthy bool | off |
 | `GLRMASK_PROFILE_COMPILE_SUMMARY` | truthy bool | off |
-| `GLRMASK_PROFILE_PHASES` | truthy bool | off |
-| `GLRMASK_DEBUG_PROFILE` | truthy bool | off |
-| `GLRMASK_DEBUG_VERBOSE` | truthy bool | off |
-| `GLRMASK_DEBUG_DUMP_GLR_TABLE` | strict `1` bool | off |
-| `GLRMASK_DEBUG_DUMP_TEMPLATES` | strict `1` bool | off |
-| `GLRMASK_WARN_PROBLEMATIC_BYTE_TERMINALS` | truthy bool | off |
 | `GLRMASK_DISABLE_TERMINAL_COLORING` | truthy bool | off |
 | `GLRMASK_L1_IDMAP` | strict `1` bool | off |
 | `GLRMASK_NO_PARTITION` | strict `1` bool | off |
@@ -95,33 +89,10 @@ This document lists all `GLRMASK_*` environment variables used in this crate, gr
 
 | Variable | Valid values | Default |
 |---|---|---|
-| `GLRMASK_NO_ADDITIONAL_PROPERTIES` | truthy bool | off |
-| `GLRMASK_AP_DEFAULT_FALSE` | truthy bool | off |
-| `GLRMASK_AP_SHARED_EXCLUSIONS` | truthy bool | off |
 | `GLRMASK_ADDPROP_NO_EXCLUSIONS` | truthy bool | off |
 | `GLRMASK_AP_KEY_ANY_STRING` | truthy bool | off |
 | `GLRMASK_MERGE_ANYOF` | strict `1` bool | off |
-| `GLRMASK_DISABLE_EXACT_CLOSED_OBJECT_UNION` | truthy bool | off |
-| `GLRMASK_ENABLE_FACTORED_CLOSED_OBJECT` | truthy bool | off |
-| `GLRMASK_PROFILE_OBJECT_FUSION` | presence toggle | off |
-| `GLRMASK_SPLIT_OPEN_QUOTE` | truthy bool | on |
-| `GLRMASK_SPLIT_CLOSE_QUOTE` | truthy bool | off |
-| `GLRMASK_SPLIT_COLON_SPACE` | truthy bool | on |
-| `GLRMASK_SPLIT_COLON_FROM_SPACE` | truthy bool | off |
 | `GLRMASK_STRING_REPEAT_CHUNK` | integer (`usize`) | `256` |
-| `GLRMASK_MAX_STRING_LENGTH_CAP` | integer (`usize`) | unset (`None`) |
-
-### Closed-object threshold knobs
-
-| Variable | Valid values | Default |
-|---|---|---|
-| `GLRMASK_CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_ALTS` | integer (`usize`) | `128` |
-| `GLRMASK_CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_TOTAL_BYTES` | integer (`usize`) | `65536` |
-| `GLRMASK_EXACT_CLOSED_OBJECT_UNION_MAX_VARIANTS` | integer (`usize`) | `8` |
-| `GLRMASK_EXACT_CLOSED_OBJECT_UNION_MAX_KEYS` | integer (`usize`) | `16` |
-| `GLRMASK_EXACT_CLOSED_OBJECT_SINGLE_MAX_KEYS` | integer (`usize`) | `16` |
-| `GLRMASK_EXACT_CLOSED_OBJECT_UNION_MAX_STATES` | integer (`usize`) | `128` |
-| `GLRMASK_FACTORED_OPEN_OBJECT_MAX_KEYS` | integer (`usize`) | `64` |
 
 ## Grammar AST Lowering
 
@@ -134,7 +105,6 @@ This document lists all `GLRMASK_*` environment variables used in this crate, gr
 
 | Variable | Valid values | Default |
 |---|---|---|
-| `GLRMASK_PROFILE_VERBOSE` | presence toggle | off |
 
 ## Notes
 

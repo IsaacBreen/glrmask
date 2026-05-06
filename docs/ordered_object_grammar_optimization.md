@@ -256,8 +256,6 @@ of the tokenizer dispatch (2 tokenizer states → split commit).
 | Variable | Default | Purpose |
 |---|---|---|
 | `GLRMASK_ENABLE_FACTORED_ORDERED_OBJECT=1` | off | Enable factored ordered-object grammar |
-| `GLRMASK_ENABLE_FACTORED_CLOSED_OBJECT=1` | off | Enable for closed objects specifically |
-| `GLRMASK_FACTORED_OPEN_OBJECT_MAX_KEYS` | 200 | Max keys for factored path (fallback to tree above this) |
 | `GLRMASK_ORDERED_OBJECT_SHAPE` | balanced | Shape for fallback tree (right/balanced/left/left-balanced) |
 
 ---
