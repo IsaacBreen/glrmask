@@ -582,12 +582,6 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(clear_weight_caches, m)?)?;
     m.add_function(wrap_pyfunction!(clear_stale_weights, m)?)?;
     m.add_function(wrap_pyfunction!(clear_weight_op_caches, m)?)?;
-    m.add_function(wrap_pyfunction!(dump_json_schema_grammar, m)?)?;
-    m.add_function(wrap_pyfunction!(dump_json_schema_grammar_glrm, m)?)?;
-    m.add_function(wrap_pyfunction!(dump_json_schema_terminals, m)?)?;
-    m.add_function(wrap_pyfunction!(dump_json_schema_grammar_def, m)?)?;
-    m.add_function(wrap_pyfunction!(dump_json_schema_prepared_grammar_def, m)?)?;
-    m.add_function(wrap_pyfunction!(dump_json_schema_glr_table, m)?)?;
     m.add_function(wrap_pyfunction!(compile_grammar_def_json, m)?)?;
     Ok(())
 }
@@ -605,42 +599,6 @@ fn clear_stale_weights() {
 #[pyfunction]
 fn clear_weight_op_caches() {
     glrmask::clear_weight_op_caches();
-}
-
-#[pyfunction]
-fn dump_json_schema_grammar(schema: &str) -> PyResult<String> {
-    glrmask::dump_json_schema_grammar(schema)
-        .map_err(|e| PyValueError::new_err(format!("{e}")))
-}
-
-#[pyfunction]
-fn dump_json_schema_grammar_glrm(schema: &str) -> PyResult<String> {
-    glrmask::dump_json_schema_grammar_glrm(schema)
-        .map_err(|e| PyValueError::new_err(format!("{e}")))
-}
-
-#[pyfunction]
-fn dump_json_schema_terminals(schema: &str) -> PyResult<String> {
-    glrmask::dump_json_schema_terminals(schema)
-        .map_err(|e| PyValueError::new_err(format!("{e}")))
-}
-
-#[pyfunction]
-fn dump_json_schema_grammar_def(schema: &str) -> PyResult<String> {
-    glrmask::dump_json_schema_grammar_def(schema)
-        .map_err(|e| PyValueError::new_err(format!("{e}")))
-}
-
-#[pyfunction]
-fn dump_json_schema_prepared_grammar_def(schema: &str) -> PyResult<String> {
-    glrmask::dump_json_schema_prepared_grammar_def(schema)
-        .map_err(|e| PyValueError::new_err(format!("{e}")))
-}
-
-#[pyfunction]
-fn dump_json_schema_glr_table(schema: &str) -> PyResult<String> {
-    glrmask::dump_json_schema_glr_table(schema)
-        .map_err(|e| PyValueError::new_err(format!("{e}")))
 }
 
 #[pyfunction]
