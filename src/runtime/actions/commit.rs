@@ -78,6 +78,7 @@ pub struct CommitProfile {
     pub fast_path_future_disallow_ns: u64,
     pub fast_path_fuse_ns: u64,
     pub fast_path_state_update_ns: u64,
+    pub failed_fast_path_probe_ns: u64,
     pub linear_fast_path_total_ns: u64,
     pub linear_fast_path_exec_ns: u64,
     pub linear_fast_path_match_scan_ns: u64,
@@ -85,6 +86,9 @@ pub struct CommitProfile {
     pub linear_fast_path_advance_ns: u64,
     pub linear_fast_path_future_disallow_ns: u64,
     pub linear_fast_path_fuse_ns: u64,
+    pub linear_fast_path_eligibility_ns: u64,
+    pub linear_fast_path_setup_ns: u64,
+    pub linear_fast_path_state_update_ns: u64,
     pub linear_fast_path_steps: u64,
 }
 
@@ -658,25 +662,34 @@ fn commit_bytes_fast_path_profiled(
     let mut sole_terminal: Option<u32> = None;
     for matched in &exec_result.matches {
         if matched.width != bytes.len() {
+            profile.failed_fast_path_probe_ns += total_start.elapsed().as_nanos() as u64;
             return None;
         }
         if is_ignored_terminal(ignore_terminal, matched.id) {
+            profile.failed_fast_path_probe_ns += total_start.elapsed().as_nanos() as u64;
             return None;
         }
         if !stack_may_advance_on(&constraint.table, gss, matched.id) {
             continue;
         }
         if sole_terminal.is_some() {
+            profile.failed_fast_path_probe_ns += total_start.elapsed().as_nanos() as u64;
             return None;
         }
         sole_terminal = Some(matched.id);
     }
     profile.fast_path_match_scan_ns = scan_start.elapsed().as_nanos() as u64;
-    let terminal = sole_terminal?;
+    let Some(terminal) = sole_terminal else {
+        profile.failed_fast_path_probe_ns += total_start.elapsed().as_nanos() as u64;
+        return None;
+    };
 
     let end_state_check_start = Instant::now();
     if let Some(end_state) = exec_result.end_state {
         if end_state_may_advance(constraint, gss, end_state) {
+            profile.fast_path_end_state_check_ns =
+                end_state_check_start.elapsed().as_nanos() as u64;
+            profile.failed_fast_path_probe_ns += total_start.elapsed().as_nanos() as u64;
             return None;
         }
     }
@@ -900,7 +913,8 @@ fn commit_bytes_impl_profiled(
             return result;
         }
 
-        if state
+        let linear_eligibility_start = Instant::now();
+        let linear_fast_path_eligible = state
             .values()
             .next()
             .is_some_and(|gss| gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()))
@@ -909,11 +923,16 @@ fn commit_bytes_impl_profiled(
                     .values()
                     .next()
                     .is_some_and(|gss| end_state_may_advance(constraint, gss, end_state))
-            })
-        {
+            });
+        profile.linear_fast_path_eligibility_ns +=
+            linear_eligibility_start.elapsed().as_nanos() as u64;
+        if linear_fast_path_eligible {
+            let linear_setup_start = Instant::now();
             let start_gss = state.values().next().unwrap().clone();
             let mut linear_profile = profile.clone();
             let mut linear_advances = Vec::new();
+            linear_profile.linear_fast_path_setup_ns +=
+                linear_setup_start.elapsed().as_nanos() as u64;
             match commit_bytes_linear_fast_path_profiled(
                 constraint,
                 start_gss,
@@ -929,8 +948,11 @@ fn commit_bytes_impl_profiled(
                         if let Some(advances) = advances.as_deref_mut() {
                             advances.extend(linear_advances);
                         }
+                        let update_start = Instant::now();
                         state.clear();
                         state.insert(constraint.tokenizer.initial_state(), final_gss);
+                        linear_profile.linear_fast_path_state_update_ns +=
+                            update_start.elapsed().as_nanos() as u64;
                         linear_profile.total_ns = total_start.elapsed().as_nanos() as u64;
                         linear_profile
                     });
@@ -938,8 +960,11 @@ fn commit_bytes_impl_profiled(
                 }
                 LinearFastPathResult::Continue { gss, offset } => {
                     profile = linear_profile;
+                    let update_start = Instant::now();
                     state.clear();
                     state.insert(constraint.tokenizer.initial_state(), gss);
+                    profile.linear_fast_path_state_update_ns +=
+                        update_start.elapsed().as_nanos() as u64;
 
                     let queue_start = Instant::now();
                     let needed_queue_len = bytes.len() + 1;

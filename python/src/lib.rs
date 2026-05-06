@@ -352,6 +352,7 @@ impl PyConstraintState {
         dict.set_item("fast_path_future_disallow_ns", profile.fast_path_future_disallow_ns)?;
         dict.set_item("fast_path_fuse_ns", profile.fast_path_fuse_ns)?;
         dict.set_item("fast_path_state_update_ns", profile.fast_path_state_update_ns)?;
+        dict.set_item("failed_fast_path_probe_ns", profile.failed_fast_path_probe_ns)?;
         dict.set_item("linear_fast_path_total_ns", profile.linear_fast_path_total_ns)?;
         dict.set_item("linear_fast_path_exec_ns", profile.linear_fast_path_exec_ns)?;
         dict.set_item("linear_fast_path_match_scan_ns", profile.linear_fast_path_match_scan_ns)?;
@@ -359,6 +360,9 @@ impl PyConstraintState {
         dict.set_item("linear_fast_path_advance_ns", profile.linear_fast_path_advance_ns)?;
         dict.set_item("linear_fast_path_future_disallow_ns", profile.linear_fast_path_future_disallow_ns)?;
         dict.set_item("linear_fast_path_fuse_ns", profile.linear_fast_path_fuse_ns)?;
+        dict.set_item("linear_fast_path_eligibility_ns", profile.linear_fast_path_eligibility_ns)?;
+        dict.set_item("linear_fast_path_setup_ns", profile.linear_fast_path_setup_ns)?;
+        dict.set_item("linear_fast_path_state_update_ns", profile.linear_fast_path_state_update_ns)?;
         dict.set_item("linear_fast_path_steps", profile.linear_fast_path_steps)?;
         Ok(dict)
     }
