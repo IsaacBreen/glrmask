@@ -129,16 +129,16 @@ fn measure_max_stack_and_path_counts(constraint: &Constraint, text: &str) -> (us
 }
 
 // Minimal reproducer for the ordered-object + singleton-required-anyOf ambiguity
-// behind the o21108 family. The growth comes from shared ordered properties plus
-// singleton anyOf requirements, not from array min/max cardinality itself.
+// behind the o21108 family. This should remain bounded even as capability
+// branches are added.
 #[test]
-fn ordered_anyof_singleton_required_ambiguity_grows() {
+fn ordered_anyof_singleton_required_ambiguity_stays_bounded() {
     let vocab = make_byte_vocab();
     let cases = [
         (2usize, 0b01usize, 2usize),
-        (5usize, 0b01111usize, 3usize),
-        (8usize, 0b00110011usize, 5usize),
-        (10usize, 0b0000110101usize, 6usize),
+        (5usize, 0b01111usize, 2usize),
+        (8usize, 0b00110011usize, 2usize),
+        (10usize, 0b0000110101usize, 2usize),
     ];
 
     for (n_caps, capability_mask, expected_max) in cases {
@@ -169,4 +169,140 @@ fn ordered_anyof_singleton_required_ambiguity_grows() {
             width = n_caps,
         );
     }
+}
+
+fn build_config_schema_with_optional_environment_branches() -> &'static str {
+    r#"{
+        "anyOf": [
+            {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "artifacts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "context": {"type": "string"},
+                                "image": {"type": "string"},
+                                "sync": {
+                                    "type": "object",
+                                    "additionalProperties": {"type": "string"}
+                                }
+                            }
+                        }
+                    },
+                    "tagPolicy": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "gitCommit": {}
+                        }
+                    }
+                }
+            },
+            {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "artifacts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "context": {"type": "string"},
+                                "image": {"type": "string"},
+                                "sync": {
+                                    "type": "object",
+                                    "additionalProperties": {"type": "string"}
+                                }
+                            }
+                        }
+                    },
+                    "local": {},
+                    "tagPolicy": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "gitCommit": {}
+                        }
+                    }
+                }
+            },
+            {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "artifacts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "context": {"type": "string"},
+                                "image": {"type": "string"},
+                                "sync": {
+                                    "type": "object",
+                                    "additionalProperties": {"type": "string"}
+                                }
+                            }
+                        }
+                    },
+                    "googleCloudBuild": {},
+                    "tagPolicy": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "gitCommit": {}
+                        }
+                    }
+                }
+            },
+            {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "artifacts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "context": {"type": "string"},
+                                "image": {"type": "string"},
+                                "sync": {
+                                    "type": "object",
+                                    "additionalProperties": {"type": "string"}
+                                }
+                            }
+                        }
+                    },
+                    "cluster": {},
+                    "tagPolicy": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "gitCommit": {}
+                        }
+                    }
+                }
+            }
+        ]
+    }"#
+}
+
+#[test]
+fn build_config_optional_environment_branches_keep_two_stack_continuations() {
+    let vocab = make_byte_vocab();
+    let constraint = Constraint::from_json_schema(
+        build_config_schema_with_optional_environment_branches(),
+        &vocab,
+    )
+    .unwrap();
+    let example = r#"{"artifacts": [{"context": ".", "image": "gcr.io/k8s-skaffold/example", "sync": {"*.py": ".", "css/**/*.css": "app/css"}}], "tagPolicy": {"gitCommit": {}}}"#;
+
+    let (max_stacks, max_paths) = measure_max_stack_and_path_counts(&constraint, example);
+    assert_eq!((max_stacks, max_paths), (2, 2));
 }
