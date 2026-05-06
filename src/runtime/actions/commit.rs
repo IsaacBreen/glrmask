@@ -17,6 +17,7 @@ use crate::ds::leveled_gss::LeveledGSSSummary;
 use crate::runtime::constraint::Constraint;
 use crate::runtime::state::{ConstraintState, CommitBuffers};
 use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 
 type ParserStatesByTokenizer = FxHashMap<u32, ParserGSS>;
 
@@ -225,33 +226,29 @@ fn end_state_may_advance(constraint: &Constraint, gss: &ParserGSS, end_state: u3
 
 enum ActionableTerminals {
     SingleState(u32),
-    Many(FxHashSet<u32>),
+    ManyStates(SmallVec<[u32; 8]>),
 }
 
 impl ActionableTerminals {
-    fn from_gss(constraint: &Constraint, gss: &ParserGSS) -> Option<Self> {
+    fn from_gss(_constraint: &Constraint, gss: &ParserGSS) -> Option<Self> {
         if let Some(state_id) = gss.single_top_value() {
             return Some(Self::SingleState(state_id));
         }
 
-        let mut terminals = FxHashSet::default();
-        for state_id in gss.peek_values() {
-            if let Some(by_terminal) = constraint.table.action.get(state_id as usize) {
-                terminals.extend(by_terminal.keys().copied());
-            }
-        }
-
-        if terminals.is_empty() {
+        let states = gss.peek_values();
+        if states.is_empty() {
             None
         } else {
-            Some(Self::Many(terminals))
+            Some(Self::ManyStates(states))
         }
     }
 
     fn contains(&self, constraint: &Constraint, terminal: u32) -> bool {
         match self {
             Self::SingleState(state_id) => constraint.table.action(*state_id, terminal).is_some(),
-            Self::Many(terminals) => terminals.contains(&terminal),
+            Self::ManyStates(states) => states
+                .iter()
+                .any(|state_id| constraint.table.action(*state_id, terminal).is_some()),
         }
     }
 }
@@ -433,6 +430,47 @@ fn apply_future_terminal_disallow(
     })
 }
 
+#[inline]
+fn apply_single_top_action_fast(gss: &ParserGSS, action: &Action) -> Option<ParserGSS> {
+    match action {
+        Action::Shift(target, is_replace) => {
+            if let Some(mut stack) = gss.try_virtual_stack() {
+                if *is_replace && stack.pop(1) != 0 {
+                    return Some(gss.popn(1).push(*target));
+                }
+                stack.push(*target);
+                return Some(stack.into_gss());
+            }
+            Some(if *is_replace {
+                gss.popn(1).push(*target)
+            } else {
+                gss.push(*target)
+            })
+        }
+        Action::StackShifts(shifts) => {
+            let stack = gss.try_virtual_stack()?;
+            let mut shifted = ParserGSS::empty();
+            for shift in shifts {
+                let mut branch = stack.clone();
+                if branch.pop(shift.pop as usize) != 0 {
+                    return None;
+                }
+                for &target in &shift.pushes {
+                    branch.push(target);
+                }
+                let branch = branch.into_gss();
+                shifted = if shifted.is_empty() {
+                    branch
+                } else {
+                    shifted.merge(&branch)
+                };
+            }
+            Some(shifted)
+        }
+        _ => None,
+    }
+}
+
 fn advance_terminal_match(
     constraint: &Constraint,
     gss_at_offset: &ParserGSS,
@@ -514,28 +552,12 @@ fn commit_bytes_fast_path(
     // Inlines the entire advance + prune + fuse to avoid all function call overhead.
     if all_accs_empty {
         if let Some(top_state) = gss.single_exclusive_top_value() {
-            if let Some(Action::Shift(target, is_replace)) = constraint.table.action(top_state, terminal) {
-                let shifted = if *is_replace {
-                    gss.popn(1).push(*target)
-                } else {
-                    gss.push(*target)
-                };
-                state.clear();
-                state.insert(constraint.tokenizer.initial_state(), shifted);
-                return Some(Ok(()));
-            }
-            if let Some(Action::StackShifts(shifts)) = constraint.table.action(top_state, terminal) {
-                let mut shifted = ParserGSS::empty();
-                for shift in shifts {
-                    let mut branch = gss.popn(shift.pop as isize);
-                    for &target in &shift.pushes {
-                        branch = branch.push(target);
-                    }
-                    shifted = if shifted.is_empty() { branch } else { shifted.merge(&branch) };
+            if let Some(action) = constraint.table.action(top_state, terminal) {
+                if let Some(shifted) = apply_single_top_action_fast(gss, action) {
+                    state.clear();
+                    state.insert(constraint.tokenizer.initial_state(), shifted);
+                    return Some(Ok(()));
                 }
-                state.clear();
-                state.insert(constraint.tokenizer.initial_state(), shifted);
-                return Some(Ok(()));
             }
         }
     }
@@ -603,6 +625,138 @@ enum LinearFastPathResult {
     Complete(Result<ParserGSS, String>),
     Continue { gss: ParserGSS, offset: usize },
     Restart,
+}
+
+struct DirectLinearStep {
+    width: usize,
+    terminal: u32,
+    ignored: bool,
+    end_state: Option<u32>,
+}
+
+fn choose_direct_linear_step(
+    constraint: &Constraint,
+    gss: &ParserGSS,
+    bytes: &[u8],
+    start_state: u32,
+) -> Option<DirectLinearStep> {
+    let actionable_terminals = ActionableTerminals::from_gss(constraint, gss);
+    let ignore_terminal = constraint.ignore_terminal;
+    let mut tokenizer_state = start_state;
+    let mut chosen: Option<(usize, u32, bool)> = None;
+    let mut consumed_all = true;
+
+    for (index, &byte) in bytes.iter().enumerate() {
+        let Some(next_state) = constraint.tokenizer.step(tokenizer_state, byte) else {
+            consumed_all = false;
+            break;
+        };
+        tokenizer_state = next_state;
+        let width = index + 1;
+        let mut chosen_at_width = false;
+
+        for terminal in constraint.tokenizer.matched_terminals_iter(tokenizer_state) {
+            let ignored = is_ignored_terminal(ignore_terminal, terminal);
+            if !ignored
+                && !is_actionable_terminal(actionable_terminals.as_ref(), constraint, terminal)
+            {
+                continue;
+            }
+
+            let candidate = (width, terminal, ignored);
+            chosen_at_width = true;
+            if let Some((_, existing_terminal, _)) = chosen {
+                if existing_terminal == terminal {
+                    chosen = Some(candidate);
+                } else {
+                    return None;
+                }
+            } else {
+                chosen = Some(candidate);
+            }
+        }
+
+        if chosen_at_width && chosen.is_some_and(|(_, _, ignored)| ignored) {
+            return Some(DirectLinearStep {
+                width,
+                terminal: chosen.unwrap().1,
+                ignored: true,
+                end_state: None,
+            });
+        }
+    }
+
+    let (width, terminal, ignored) = chosen?;
+    let end_state = consumed_all.then_some(tokenizer_state);
+    if end_state.is_some_and(|state| end_state_may_advance(constraint, gss, state)) {
+        return None;
+    }
+
+    Some(DirectLinearStep {
+        width,
+        terminal,
+        ignored,
+        end_state,
+    })
+}
+
+fn commit_bytes_direct_linear_fast_path(
+    constraint: &Constraint,
+    start_gss: ParserGSS,
+    bytes: &[u8],
+    start_tokenizer_state: u32,
+) -> Option<LinearFastPathResult> {
+    let mut gss = start_gss;
+    let mut offset = 0usize;
+    let mut tokenizer_state = start_tokenizer_state;
+
+    while offset < bytes.len() {
+        let step = choose_direct_linear_step(constraint, &gss, &bytes[offset..], tokenizer_state)?;
+        if !step.ignored {
+            let advanced = if let Some(top_state) = gss.single_exclusive_top_value()
+                && let Some(action) = constraint.table.action(top_state, step.terminal)
+                && let Some(advanced) = apply_single_top_action_fast(&gss, action)
+            {
+                advanced
+            } else {
+                if !stack_may_advance_on(&constraint.table, &gss, step.terminal) {
+                    return None;
+                }
+                advance_stacks_owned(&constraint.table, gss, step.terminal)
+            };
+            if advanced.is_empty() {
+                return Some(LinearFastPathResult::Complete(Err(
+                    "commit rejected: no valid parser states remain".to_string(),
+                )));
+            }
+            let exec_result = TokenizerExecResult {
+                end_state: step.end_state,
+                matches: Vec::new(),
+            };
+            gss = apply_future_terminal_disallow(
+                constraint,
+                &exec_result,
+                step.terminal,
+                advanced,
+            );
+            if gss.is_empty() {
+                return Some(LinearFastPathResult::Complete(Err(
+                    "commit rejected: no valid parser states remain".to_string(),
+                )));
+            }
+        }
+
+        offset += step.width;
+        tokenizer_state = constraint.tokenizer.initial_state();
+    }
+
+    let fused = gss.fuse(Some(1));
+    if fused.is_empty() {
+        return Some(LinearFastPathResult::Complete(Err(
+            "commit rejected: no valid parser states remain".to_string(),
+        )));
+    }
+    Some(LinearFastPathResult::Complete(Ok(fused)))
 }
 
 fn record_per_advance_entry(
@@ -1393,15 +1547,26 @@ fn commit_bytes_linear_fast_path(
         }
 
         if !ignored {
-            if !stack_may_advance_on(&constraint.table, &gss, terminal) {
-                return if offset > 0 {
-                    LinearFastPathResult::Continue { gss, offset }
-                } else {
-                    LinearFastPathResult::Restart
-                };
-            }
+            let fast_advanced = if let Some(top_state) = gss.single_exclusive_top_value()
+                && let Some(action) = constraint.table.action(top_state, terminal)
+            {
+                apply_single_top_action_fast(&gss, action)
+            } else {
+                None
+            };
 
-            let advanced = advance_stacks_owned(&constraint.table, gss, terminal);
+            let advanced = if let Some(advanced) = fast_advanced {
+                advanced
+            } else {
+                if !stack_may_advance_on(&constraint.table, &gss, terminal) {
+                    return if offset > 0 {
+                        LinearFastPathResult::Continue { gss, offset }
+                    } else {
+                        LinearFastPathResult::Restart
+                    };
+                }
+                advance_stacks_owned(&constraint.table, gss, terminal)
+            };
             if advanced.is_empty() {
                 return LinearFastPathResult::Complete(Err(
                     "commit rejected: no valid parser states remain".to_string(),
@@ -1613,7 +1778,26 @@ fn commit_bytes_impl(
 
     // Single tokenizer state: execute tokenizer ONCE, try fast path, reuse result
     if state.len() == 1 {
-        let (&tokenizer_state, _) = state.iter().next().unwrap();
+        let (&tokenizer_state, parser_gss) = state.iter().next().unwrap();
+        if parser_gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()) {
+            if let Some(LinearFastPathResult::Complete(result)) =
+                commit_bytes_direct_linear_fast_path(
+                    constraint,
+                    parser_gss.clone(),
+                    bytes,
+                    tokenizer_state,
+                )
+            {
+                match result {
+                    Ok(final_gss) => {
+                        state.clear();
+                        state.insert(constraint.tokenizer.initial_state(), final_gss);
+                        return Ok(());
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+        }
         let exec_result = constraint.tokenizer.execute_from_state(bytes, tokenizer_state);
 
         // Try fast path with pre-computed exec_result
