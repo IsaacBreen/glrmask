@@ -258,7 +258,7 @@ fn json_schema_kubernetes_container_ports_prefix_has_schema_shaped_two_stack_spl
     const K8S_ORDERED_PORTS_SCHEMA_FRAGMENT: &str = r####"
     {
       "properties": {
-        "a": {"items": {"properties": {"x": {"type": "string"}, "y": {"type": "string"}, "z": {}}}},
+        "a": {"items": {"properties": {"x": {"type": "string"}, "y": {"type": "string"}, "z": {"type": "string"}}}},
         "b": {"items": {"properties": {"x": {"type": "string"}, "y": {"type": "string"}}}}
       }
     }"####;
