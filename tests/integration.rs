@@ -255,7 +255,13 @@ fn json_schema_kubernetes_container_ports_prefix_has_schema_shaped_two_stack_spl
     // required shape is one array property with an item schema ending in
     // open key `g`, plus a later sibling array whose item schema shares the
     // prefix but lacks `g`.
-    const K8S_ORDERED_PORTS_SCHEMA_FRAGMENT: &str = r####"{"properties":{"":{"items":{"properties":{"":{"type":"string"},"l":{"type":"string"},"g":{}}}},"d":{"items":{"properties":{"":{"type":"string"},"l":{"type":"string"}}}}}}"####;
+    const K8S_ORDERED_PORTS_SCHEMA_FRAGMENT: &str = r####"
+    {
+      "properties": {
+        "": {"items": {"properties": {"": {"type": "string"}, "l": {"type": "string"}, "g": {}}}},
+        "d": {"items": {"properties": {"": {"type": "string"}, "l": {"type": "string"}}}}
+      }
+    }"####;
     const K8S_ORDERED_PORTS_PREFIX: &[u8] = br####"{"": [{"": "", "g"####;
 
     let constraint = Constraint::from_json_schema(K8S_ORDERED_PORTS_SCHEMA_FRAGMENT, &bytes_vocab()).unwrap();
