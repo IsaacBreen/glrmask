@@ -245,3 +245,47 @@ fn direct_glrm_ordered_suffix_model_has_stack_ambiguity() {
     let (max_paths, max_stacks) = max_paths_and_stacks(&constraint, "a,b,c,d,e,f,g,h");
     assert_eq!((max_paths, max_stacks), (3, 3));
 }
+
+#[test]
+fn direct_glrm_ordered_suffix_has_schema_shaped_two_stack_split() {
+    let grammar = r#"
+        start start;
+        nt f0 ::= "a";
+        nt f1 ::= "b";
+        nt f2 ::= "c";
+        nt f6 ::= "g";
+        nt f7 ::= "h";
+        nt v0 ::= f0 "," f1 ("," f2)? "," f6 ("," f7)?;
+        nt v1 ::= f0 "," f1 ("," f2)? ("," f6)? "," f7;
+        nt start ::= "x" v0 | "x" v1;
+    "#;
+    let constraint = Constraint::from_glrm_grammar(grammar, &bytes_vocab()).unwrap();
+
+    let mut state = constraint.start();
+    for &byte in b"xa,b,c,g,h" {
+        state.commit_bytes(&[byte]).unwrap();
+    }
+    let stacks = state.debug_parser_stacks();
+    let path_count = state.parser_path_count(10);
+
+    assert_eq!(path_count, 2, "{stacks:?}");
+    assert_eq!(stacks.len(), 1, "{stacks:?}");
+    assert_eq!(stack_count(&state), 2, "{stacks:?}");
+
+    // Same surface input, one tokenizer state, and the same stack shape as the
+    // Kubernetes `ports` split: one shared outer prefix, then suffixes of
+    // length 1 and 2 for the competing ordered-property continuations.
+    let stack_values = stacks
+        .iter()
+        .flat_map(|(_, stacks)| stacks.iter().map(|(stack, _)| stack.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(stack_values.len(), 2, "{stacks:?}");
+    assert_eq!(stack_values[0][..2], stack_values[1][..2], "{stacks:?}");
+    assert_eq!(
+        [stack_values[0].len() - 2, stack_values[1].len() - 2],
+        [1, 2],
+        "{stacks:?}",
+    );
+
+    assert!(state.is_finished());
+}
