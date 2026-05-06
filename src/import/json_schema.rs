@@ -2247,6 +2247,26 @@ fn has_structural_keywords(schema: &Map<String, Value>) -> bool {
     STRUCTURAL.iter().any(|k| schema.contains_key(*k))
 }
 
+fn bare_ref_value(schema: &Value) -> Option<&str> {
+    let object = schema.as_object()?;
+    let ref_value = object.get("$ref").and_then(Value::as_str)?;
+    let annotation_only = object.keys().all(|key| {
+        matches!(
+            key.as_str(),
+            "$ref"
+                | "title"
+                | "description"
+                | "$comment"
+                | "default"
+                | "examples"
+                | "deprecated"
+                | "readOnly"
+                | "writeOnly"
+        )
+    });
+    annotation_only.then_some(ref_value)
+}
+
 fn merge_two_schemas(s1: &Map<String, Value>, s2: &Map<String, Value>) -> Map<String, Value> {
     if s2.is_empty() {
         return s1.clone();
@@ -4917,6 +4937,10 @@ impl<'a> SchemaCtx<'a> {
             return Ok(None);
         };
 
+        if let Some(reference) = bare_ref_value(&options[j]) {
+            return Ok(Some(self.convert_ref(reference)?));
+        }
+
         let dominant = Value::Object(resolved[j].clone());
         Ok(Some(self.convert_schema(&dominant)?))
     }
@@ -5026,6 +5050,10 @@ impl<'a> SchemaCtx<'a> {
         let Some(j) = dominant_idx else {
             return Ok(None);
         };
+
+        if let Some(reference) = bare_ref_value(&options[j]) {
+            return Ok(Some(self.convert_ref(reference)?));
+        }
 
         let dominant = Value::Object(resolved[j].clone());
         Ok(Some(self.convert_schema(&dominant)?))
@@ -8400,6 +8428,36 @@ fn repeat_expr(item: GrammarExpr, min: usize, max: Option<usize>) -> GrammarExpr
             parts.push(GrammarExpr::Repeat(Box::new(item)));
             sequence_or_single(parts)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::schema_to_named_grammar;
+    use serde_json::json;
+
+    #[test]
+    fn duplicate_self_ref_anyof_closed_object_compiles() {
+        let schema = json!({
+            "$schema": "http://json-schema.org/draft-04/schema#",
+            "definitions": {
+                "Monster": {
+                    "type": "object",
+                    "properties": {
+                        "any_ambiguous": {
+                            "anyOf": [
+                                { "$ref": "#/definitions/Monster" },
+                                { "$ref": "#/definitions/Monster" }
+                            ]
+                        }
+                    },
+                    "additionalProperties": false
+                }
+            },
+            "$ref": "#/definitions/Monster"
+        });
+
+        assert!(schema_to_named_grammar(&schema).is_ok());
     }
 }
 
