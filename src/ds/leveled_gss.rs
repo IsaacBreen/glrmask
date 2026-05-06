@@ -2148,17 +2148,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         self.merge(&LeveledGSS { inner: Arc::new(Upper::Interface(base_iface.clone())) })
     }
 
-    /// Combined `isolate(Some(value)).popn(n)` helper.
-    pub fn isolate_popn(&self, value: T, n: isize) -> Self {
-        if n <= 0 {
-            return self.isolate(Some(value));
-        }
-        if self.is_empty() {
-            return Self::empty();
-        }
-        self.isolate(Some(value)).popn(n)
-    }
-
     pub fn popn(&self, n: isize) -> Self {
         if n <= 0 {
             return self.clone();

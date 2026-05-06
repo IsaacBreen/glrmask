@@ -2,7 +2,6 @@
         use std::hash::Hash;
         use std::marker::PhantomData;
         use std::ops::Index;
-        use std::sync::OnceLock;
 
         use rustc_hash::{FxHashMap, FxHashSet};
         use serde::{Deserialize, Serialize};
@@ -421,26 +420,8 @@ struct TableRowKey {
     goto: Vec<(NonterminalID, (u32, bool))>,
 }
 
-fn unit_reduction_inlining_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("GLRMASK_DISABLE_UNIT_REDUCTION_INLINING")
-            .map(|v| {
-                let n = v.trim().to_ascii_lowercase();
-                matches!(n.as_str(), "" | "0" | "false" | "no" | "off")
-            })
-            .unwrap_or(true)
-    })
-}
-
 impl GLRTable {
     pub fn build(grammar: &AnalyzedGrammar) -> Self {
-        Self::build_with_unit_reduction_inlining(grammar, unit_reduction_inlining_enabled())
-    }
-    pub(crate) fn build_with_unit_reduction_inlining(
-        grammar: &AnalyzedGrammar,
-        inline_unit_reductions: bool,
-    ) -> Self {
         let t0 = std::time::Instant::now();
         let (item_sets, transitions) = build_lr1_item_sets(grammar);
         let lr1_ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -452,9 +433,7 @@ impl GLRTable {
         let pre_merge_states = table.num_states;
         let t2 = std::time::Instant::now();
         table.merge_identical_rows();
-        if inline_unit_reductions {
-            table.collapse_sr_unit_reductions_with_compatible_gotos();
-        }
+        table.collapse_sr_unit_reductions_with_compatible_gotos();
         table.merge_identical_rows();
         let merge_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
