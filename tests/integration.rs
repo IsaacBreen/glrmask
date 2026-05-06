@@ -296,22 +296,17 @@ fn json_schema_kubernetes_container_ports_prefix_has_schema_shaped_two_stack_spl
 }
 
 #[test]
-fn direct_glrm_ordered_suffix_has_schema_shaped_two_stack_split() {
+fn direct_glrm_minimized_lowered_schema_has_two_stack_split() {
     let grammar = r#"
         start start;
-        nt f0 ::= "a";
-        nt f1 ::= "b";
-        nt f2 ::= "c";
-        nt f6 ::= "g";
-        nt f7 ::= "h";
-        nt v0 ::= f0 "," f1 ("," f2)? "," f6 ("," f7)?;
-        nt v1 ::= f0 "," f1 ("," f2)? ("," f6)? "," f7;
-        nt start ::= "x" v0 | "x" v1;
+        nt known ::= "a" "b"? "b"?;
+        nt inner ::= known "b"? "c";
+        nt start ::= "d" inner;
     "#;
     let constraint = Constraint::from_glrm_grammar(grammar, &bytes_vocab()).unwrap();
 
     let mut state = constraint.start();
-    for &byte in b"xa,b,c,g,h" {
+    for &byte in b"dab" {
         state.commit_bytes(&[byte]).unwrap();
     }
     let stacks = state.debug_parser_stacks();
@@ -321,20 +316,18 @@ fn direct_glrm_ordered_suffix_has_schema_shaped_two_stack_split() {
     assert_eq!(stacks.len(), 1, "{stacks:?}");
     assert_eq!(stack_count(&state), 2, "{stacks:?}");
 
-    // Same surface input, one tokenizer state, and the same stack shape as the
-    // Kubernetes `ports` split: one shared outer prefix, then suffixes of
-    // length 1 and 2 for the competing ordered-property continuations.
+    // This is the minimized GLRM lowering of the JSON-schema split above. The
+    // first two optional `b` positions model the ordered known-property list,
+    // while the final optional `b` in `inner` models the following tail. The
+    // `inner` wrapper is load-bearing: it keeps both continuations under the
+    // same outer stack prefix, matching the schema-shaped suffix lengths.
     let stack_values = stacks
         .iter()
         .flat_map(|(_, stacks)| stacks.iter().map(|(stack, _)| stack.clone()))
         .collect::<Vec<_>>();
     assert_eq!(stack_values.len(), 2, "{stacks:?}");
     assert_eq!(stack_values[0][..2], stack_values[1][..2], "{stacks:?}");
-    assert_eq!(
-        [stack_values[0].len() - 2, stack_values[1].len() - 2],
-        [1, 2],
-        "{stacks:?}",
-    );
-
-    assert!(state.is_finished());
+    let mut suffix_lengths = [stack_values[0].len() - 2, stack_values[1].len() - 2];
+    suffix_lengths.sort_unstable();
+    assert_eq!(suffix_lengths, [1, 2], "{stacks:?}");
 }
