@@ -14,7 +14,6 @@ mod vocab;
 pub use ds::weight::{
     clear_all_weights,
     clear_stale_weights,
-    clear_weight_caches,
     clear_weight_op_caches,
 };
 pub use error::{Error, GlrMaskError, Result};
@@ -22,7 +21,6 @@ pub use runtime::{
     CommitProfile,
     Constraint,
     ConstraintState,
-    FillMaskTimings,
     GssProfileSummary,
     PerAdvanceEntry,
 };

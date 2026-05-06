@@ -278,40 +278,6 @@ impl PyConstraintState {
         Ok(self.inner.with_dependent(|_owner, state| state.fill_mask_timed_ns(buf)))
     }
 
-    fn fill_mask_profiled<'py>(
-        &self,
-        py: Python<'py>,
-        mut bitmask: PyReadwriteArray1<i32>,
-    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-        let slice = bitmask.as_slice_mut().map_err(|e| {
-            PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
-        })?;
-        let buf: &mut [u32] = unsafe {
-            std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
-        };
-        let t = self.inner.with_dependent(|_owner, state| state.fill_mask_profiled(buf));
-        let dict = pyo3::types::PyDict::new(py);
-        dict.set_item("cache_hit_ns", t.cache_hit_ns)?;
-        dict.set_item("cache_miss_ns", t.cache_miss_ns)?;
-        dict.set_item("seed_ns", t.seed_ns)?;
-        dict.set_item("bfs_ns", t.bfs_ns)?;
-        dict.set_item("convert_ns", t.convert_ns)?;
-        dict.set_item("total_ns", t.total_ns)?;
-        dict.set_item("bfs_queue_pops", t.bfs_queue_pops)?;
-        dict.set_item("bfs_states_processed", t.bfs_states_processed)?;
-        dict.set_item("weight_intersections", t.weight_intersections)?;
-        dict.set_item("weight_pruned", t.weight_pruned)?;
-        dict.set_item("convert_incremental", t.convert_incremental)?;
-        dict.set_item("convert_delta_tokens", t.convert_delta_tokens)?;
-        dict.set_item("seed_tokenizer_states", t.seed_tokenizer_states)?;
-        dict.set_item("seed_chain_hits", t.seed_chain_hits)?;
-        dict.set_item("seed_chain_misses", t.seed_chain_misses)?;
-        dict.set_item("bfs_fast_path_ns", t.bfs_fast_path_ns)?;
-        dict.set_item("bfs_standard_path_ns", t.bfs_standard_path_ns)?;
-        dict.set_item("bfs_fw_merge_ns", t.bfs_fw_merge_ns)?;
-        Ok(dict)
-    }
-
     fn commit_token(&mut self, token_id: u32) -> PyResult<()> {
         self.inner
             .with_dependent_mut(|_owner, state| string_result(state.commit_token(token_id)))
@@ -541,16 +507,10 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVocab>()?;
     m.add_class::<PyConstraint>()?;
     m.add_class::<PyConstraintState>()?;
-    m.add_function(wrap_pyfunction!(clear_weight_caches, m)?)?;
     m.add_function(wrap_pyfunction!(clear_stale_weights, m)?)?;
     m.add_function(wrap_pyfunction!(clear_weight_op_caches, m)?)?;
     m.add_function(wrap_pyfunction!(compile_grammar_def_json, m)?)?;
     Ok(())
-}
-
-#[pyfunction]
-fn clear_weight_caches() {
-    glrmask::clear_weight_caches();
 }
 
 #[pyfunction]

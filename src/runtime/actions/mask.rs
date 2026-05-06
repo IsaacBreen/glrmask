@@ -13,37 +13,6 @@ type DenseTokenMaskCache = FxHashMap<usize, Box<[u64]>>;
 type DenseMaskGSS = LeveledGSS<u32, DenseMaskAcc>;
 type MaskQueue = BTreeMap<u32, FxHashMap<u32, DenseMaskGSS>>;
 
-/// Compatibility return type for [`ConstraintState::fill_mask_profiled`].
-///
-/// The old implementation reported many detailed profiling counters. This file
-/// intentionally does not keep that profiling machinery. `fill_mask_profiled`
-/// now behaves as a lightweight compatibility shim: `total_ns` is meaningful,
-/// `cache_hit_ns`/`cache_miss_ns` are coarse whole-call timings, and the
-/// remaining fields are left at their default values.
-#[derive(Debug, Default, Clone)]
-pub struct FillMaskTimings {
-    pub cache_hit_ns: u64,
-    pub cache_miss_ns: u64,
-    pub seed_ns: u64,
-    pub bfs_ns: u64,
-    pub convert_ns: u64,
-    pub total_ns: u64,
-
-    pub bfs_queue_pops: u64,
-    pub bfs_states_processed: u64,
-    pub weight_intersections: u64,
-    pub weight_pruned: u64,
-    pub convert_incremental: bool,
-    pub convert_delta_tokens: u64,
-    pub seed_tokenizer_states: u64,
-    pub seed_chain_hits: u64,
-    pub seed_chain_misses: u64,
-
-    pub bfs_fast_path_ns: u64,
-    pub bfs_standard_path_ns: u64,
-    pub bfs_fw_merge_ns: u64,
-}
-
 /// Dense bitmap accumulator used while walking the parser DWA.
 ///
 /// Key:
@@ -647,27 +616,5 @@ impl<'a> ConstraintState<'a> {
         let start = Instant::now();
         self.fill_mask(buf);
         start.elapsed().as_nanos() as u64
-    }
-
-    pub fn fill_mask_profiled(&self, buf: &mut [u32]) -> FillMaskTimings {
-        let start = Instant::now();
-
-        if self.try_fill_mask_from_cache(buf) {
-            let total_ns = start.elapsed().as_nanos() as u64;
-            return FillMaskTimings {
-                cache_hit_ns: total_ns,
-                total_ns,
-                ..Default::default()
-            };
-        }
-
-        self.fill_mask_uncached(buf);
-
-        let total_ns = start.elapsed().as_nanos() as u64;
-        FillMaskTimings {
-            cache_miss_ns: total_ns,
-            total_ns,
-            ..Default::default()
-        }
     }
 }

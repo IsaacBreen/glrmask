@@ -541,12 +541,6 @@ pub fn clear_weight_op_caches() {
     WEIGHT_OP_MEMO_GENERATION.fetch_add(1, Ordering::Release);
 }
 
-/// Compatibility wrapper retaining the previous behavior.
-pub fn clear_weight_caches() {
-    clear_weight_op_caches();
-    clear_all_weights();
-}
-
 fn lookup_memoized_weight_op(kind: WeightOpKind, left: &Weight, right: &Weight) -> Option<Weight> {
     with_weight_op_memo(|memo| memo.lookup(WeightOpKey::for_weights(kind, left, right)))
 }
