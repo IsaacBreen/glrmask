@@ -325,3 +325,22 @@ fn direct_glrm_minimized_lowered_schema_has_two_stack_split() {
     suffix_lengths.sort_unstable();
     assert_eq!(suffix_lengths, [1, 2], "{stacks:?}");
 }
+
+#[test]
+fn direct_glrm_minimized_lowered_schema_collapses_when_tail_token_differs() {
+    let grammar = r#"start s;nt k::="a""b"*;nt i::=k"c"?;nt s::="d"i;"#;
+    let constraint = Constraint::from_glrm_grammar(grammar, &bytes_vocab()).unwrap();
+
+    let mut state = constraint.start();
+    for &byte in b"dab" {
+        state.commit_bytes(&[byte]).unwrap();
+    }
+    let stacks = state.debug_parser_stacks();
+
+    // This differs from the split test by one literal: the tail continuation is
+    // `"c"?` instead of `"b"?`. The consumed `b` can only be part of `k`'s
+    // `"b"*`, so the parser has no competing "known-list vs tail" continuation.
+    assert_eq!(state.parser_path_count(10), 1, "{stacks:?}");
+    assert_eq!(stacks.len(), 1, "{stacks:?}");
+    assert_eq!(stack_count(&state), 1, "{stacks:?}");
+}
