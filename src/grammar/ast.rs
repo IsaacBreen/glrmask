@@ -60,9 +60,9 @@ pub enum GrammarExpr {
 /// `GLRMASK_ORDERED_OBJECT_SHAPE` environment variable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommaSepShape {
-    /// Split at the midpoint (balanced binary tree). Default.
+    /// Split at the midpoint (balanced binary tree).
     Balanced,
-    /// Always split one item from the left (left-linear tree).
+    /// Always split one item from the left (left-linear tree). Default.
     Left,
     /// Always split one item from the right (right-linear / factored tree).
     Right,
@@ -83,8 +83,8 @@ pub fn comma_sep_shape() -> CommaSepShape {
             CommaSepShape::LeftBalanced
         }
         Some("right") | Some("factored") => CommaSepShape::Right,
-        None => CommaSepShape::Balanced,
-        Some(_) => CommaSepShape::Balanced,
+        None => CommaSepShape::Left,
+        Some(_) => CommaSepShape::Left,
     }
 }
 
@@ -400,7 +400,7 @@ enum RepeatTreeShape {
 fn repeat_tree_shape() -> RepeatTreeShape {
     match std::env::var("GLRMASK_REPEAT_TREE_SHAPE").ok().as_deref() {
         Some(v) => repeat_tree_shape_from_value(v),
-        None => RepeatTreeShape::LeftBalanced,
+        None => RepeatTreeShape::Balanced,
     }
 }
 

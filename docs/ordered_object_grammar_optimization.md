@@ -255,7 +255,7 @@ of the tokenizer dispatch (2 tokenizer states → split commit).
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `GLRMASK_ORDERED_OBJECT_SHAPE` | balanced | Shape for fallback tree (right/balanced/left/left-balanced) |
+| `GLRMASK_ORDERED_OBJECT_SHAPE` | left | Shape for fallback tree (right/balanced/left/left-balanced) |
 
 ---
 
