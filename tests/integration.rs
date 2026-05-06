@@ -297,12 +297,7 @@ fn json_schema_kubernetes_container_ports_prefix_has_schema_shaped_two_stack_spl
 
 #[test]
 fn direct_glrm_minimized_lowered_schema_has_two_stack_split() {
-    let grammar = r#"
-        start start;
-        nt known ::= "a" "b"? "b"?;
-        nt inner ::= known "b"? "c";
-        nt start ::= "d" inner;
-    "#;
+    let grammar = r#"start s;nt k::="a""b"*;nt i::=k"b"?;nt s::="d"i;"#;
     let constraint = Constraint::from_glrm_grammar(grammar, &bytes_vocab()).unwrap();
 
     let mut state = constraint.start();
@@ -316,11 +311,10 @@ fn direct_glrm_minimized_lowered_schema_has_two_stack_split() {
     assert_eq!(stacks.len(), 1, "{stacks:?}");
     assert_eq!(stack_count(&state), 2, "{stacks:?}");
 
-    // This is the minimized GLRM lowering of the JSON-schema split above. The
-    // first two optional `b` positions model the ordered known-property list,
-    // while the final optional `b` in `inner` models the following tail. The
-    // `inner` wrapper is load-bearing: it keeps both continuations under the
-    // same outer stack prefix, matching the schema-shaped suffix lengths.
+    // This is the minimized GLRM lowering of the JSON-schema split above.
+    // `k` models the ordered known-property continuation, while `i` adds the
+    // following tail continuation. Both nonterminals are load-bearing for the
+    // schema-shaped suffix lengths.
     let stack_values = stacks
         .iter()
         .flat_map(|(_, stacks)| stacks.iter().map(|(stack, _)| stack.clone()))
