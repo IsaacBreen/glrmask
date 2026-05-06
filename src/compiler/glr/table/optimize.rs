@@ -1405,7 +1405,13 @@ fn try_inline_action_to_stack_shifts(
     stack_effect_action(effects)
 }
 
-fn stack_shift_action(shifts: Vec<StackShift>) -> Option<Action> {
+fn normalize_stack_shifts(shifts: &mut Vec<StackShift>) {
+    shifts.sort_by(|a, b| a.pop.cmp(&b.pop).then_with(|| a.pushes.cmp(&b.pushes)));
+    shifts.dedup();
+}
+
+fn stack_shift_action(mut shifts: Vec<StackShift>) -> Option<Action> {
+    normalize_stack_shifts(&mut shifts);
     if shifts.is_empty() {
         return None;
     }
@@ -1647,15 +1653,17 @@ fn try_inline_unit_reductions_for_cell_inner(
 fn remap_action_targets(action: &Action, mapping: &[u32]) -> Action {
     match action {
         Action::Shift(target, replace) => Action::Shift(mapping[*target as usize], *replace),
-        Action::StackShifts(shifts) => Action::StackShifts(
-            shifts
+        Action::StackShifts(shifts) => {
+            let mut remapped = shifts
                 .iter()
                 .map(|shift| StackShift {
                     pop: shift.pop,
                     pushes: shift.pushes.iter().map(|&state| mapping[state as usize]).collect(),
                 })
-                .collect(),
-        ),
+                .collect();
+            normalize_stack_shifts(&mut remapped);
+            Action::StackShifts(remapped)
+        }
         Action::GuardedStackShifts(shifts) => Action::GuardedStackShifts(
             shifts
                 .iter()
