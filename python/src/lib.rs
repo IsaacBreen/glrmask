@@ -342,6 +342,7 @@ impl PyConstraintState {
         dict.set_item("adv_n_nondet_merges", profile.adv_n_nondet_merges)?;
         dict.set_item("adv_n_nondet_isolates", profile.adv_n_nondet_isolates)?;
         dict.set_item("adv_nondet_det_ns", profile.adv_nondet_det_ns)?;
+        dict.set_item("adv_summary_ns", profile.adv_summary_ns)?;
         dict.set_item("fast_path_total_ns", profile.fast_path_total_ns)?;
         dict.set_item("fast_path_tokenizer_exec_ns", profile.fast_path_tokenizer_exec_ns)?;
         dict.set_item("fast_path_match_scan_ns", profile.fast_path_match_scan_ns)?;
@@ -430,6 +431,7 @@ impl PyConstraintState {
             d.set_item("n_nondet_reduce_ops", p.n_nondet_reduce_ops)?;
             d.set_item("n_nondet_merges", p.n_nondet_merges)?;
             d.set_item("n_nondet_isolates", p.n_nondet_isolates)?;
+            d.set_item("summary_ns", entry.summary_ns)?;
             advance_list.append(d)?;
         }
         result.set_item("advances", advance_list)?;
@@ -475,6 +477,7 @@ impl PyConstraintState {
         commit_dict.set_item("adv_n_nondet_merges", commit_profile.adv_n_nondet_merges)?;
         commit_dict.set_item("adv_n_nondet_isolates", commit_profile.adv_n_nondet_isolates)?;
         commit_dict.set_item("adv_nondet_det_ns", commit_profile.adv_nondet_det_ns)?;
+        commit_dict.set_item("adv_summary_ns", commit_profile.adv_summary_ns)?;
         commit_dict.set_item("fast_path_total_ns", commit_profile.fast_path_total_ns)?;
         commit_dict.set_item("fast_path_tokenizer_exec_ns", commit_profile.fast_path_tokenizer_exec_ns)?;
         commit_dict.set_item("fast_path_match_scan_ns", commit_profile.fast_path_match_scan_ns)?;

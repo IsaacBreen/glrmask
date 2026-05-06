@@ -53,6 +53,7 @@ pub struct CommitProfile {
     pub adv_n_nondet_waves: u64,
     pub adv_n_nondet_branches: u64,
     pub adv_clone_ns: u64,
+    pub adv_summary_ns: u64,
     pub adv_fast_path_ns: u64,
     pub adv_stack_shift_apply_ns: u64,
     pub adv_det_ns: u64,
@@ -100,6 +101,7 @@ pub struct PerAdvanceEntry {
     pub token_bound: usize,
     pub match_bytes: Vec<u8>,
     pub profile: AdvanceProfile,
+    pub summary_ns: u64,
 }
 
 /// Cache for `advance_stacks` results, keyed by (GSS pointer, terminal).
@@ -610,20 +612,31 @@ fn record_per_advance_entry(
     token_bound: usize,
     match_bytes: &[u8],
     profile: AdvanceProfile,
-) {
+) -> u64 {
+    use std::time::Instant;
+
+    let summary_start = Instant::now();
+    let gss_stacks_before = parser_stacks_only(before_gss);
+    let gss_stacks_after = parser_stacks_only(after_gss);
+    let gss_summary_before = before_gss.summary();
+    let gss_summary_after = after_gss.summary();
+    let match_bytes = match_bytes.to_vec();
+    let summary_ns = summary_start.elapsed().as_nanos() as u64;
     advances.push(PerAdvanceEntry {
         terminal_id,
         tokenizer_state,
-        gss_stacks_before: parser_stacks_only(before_gss),
-        gss_stacks_after: parser_stacks_only(after_gss),
-        gss_summary_before: before_gss.summary(),
-        gss_summary_after: after_gss.summary(),
+        gss_stacks_before,
+        gss_stacks_after,
+        gss_summary_before,
+        gss_summary_after,
         match_start,
         match_end,
         token_bound,
-        match_bytes: match_bytes.to_vec(),
+        match_bytes,
         profile,
+        summary_ns,
     });
+    summary_ns
 }
 
 fn commit_bytes_fast_path_profiled(
@@ -688,7 +701,7 @@ fn commit_bytes_fast_path_profiled(
                 profile.n_advances = 1;
 
                 if let Some(advances) = advances {
-                    record_per_advance_entry(
+                    profile.adv_summary_ns += record_per_advance_entry(
                         advances,
                         tokenizer_state,
                         terminal,
@@ -729,7 +742,7 @@ fn commit_bytes_fast_path_profiled(
                 profile.n_advances = 1;
                 apply_advance_profile(profile, &advance_profile);
                 if let Some(advances) = advances {
-                    record_per_advance_entry(
+                    profile.adv_summary_ns += record_per_advance_entry(
                         advances,
                         tokenizer_state,
                         terminal,
@@ -810,7 +823,7 @@ fn commit_bytes_fast_path_profiled(
 
     if let Some(advances) = advances {
         let (after_for_entry, advance_profile) = advance_stacks_profiled(&constraint.table, &pruned_gss, terminal);
-        record_per_advance_entry(
+        profile.adv_summary_ns += record_per_advance_entry(
             advances,
             tokenizer_state,
             terminal,
@@ -885,6 +898,48 @@ fn commit_bytes_impl_profiled(
         ) {
             let result = result.map(|()| profile);
             return result;
+        }
+
+        if state
+            .values()
+            .next()
+            .is_some_and(|gss| gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()))
+            && !exec_result.end_state.is_some_and(|end_state| {
+                state
+                    .values()
+                    .next()
+                    .is_some_and(|gss| end_state_may_advance(constraint, gss, end_state))
+            })
+        {
+            let start_gss = state.values().next().unwrap().clone();
+            let mut linear_profile = profile.clone();
+            let mut linear_advances = Vec::new();
+            match commit_bytes_linear_fast_path_profiled(
+                constraint,
+                start_gss,
+                bytes,
+                exec_result.clone(),
+                advances
+                    .as_ref()
+                    .map(|_| &mut linear_advances as &mut Vec<PerAdvanceEntry>),
+                &mut linear_profile,
+            ) {
+                LinearFastPathResult::Complete(result) => {
+                    let result = result.map(|final_gss| {
+                        if let Some(advances) = advances.as_deref_mut() {
+                            advances.extend(linear_advances);
+                        }
+                        state.clear();
+                        state.insert(constraint.tokenizer.initial_state(), final_gss);
+                        linear_profile.total_ns = total_start.elapsed().as_nanos() as u64;
+                        linear_profile
+                    });
+                    return result;
+                }
+                LinearFastPathResult::Continue { .. } | LinearFastPathResult::Restart => {
+                    profile = linear_profile;
+                }
+            }
         }
     }
 
@@ -982,7 +1037,7 @@ fn commit_bytes_impl_profiled(
                 apply_advance_profile(&mut profile, &advance_profile);
 
                 if let Some(advances) = advances.as_deref_mut() {
-                    record_per_advance_entry(
+                    profile.adv_summary_ns += record_per_advance_entry(
                         advances,
                         tokenizer_state,
                         matched.id,
@@ -1171,6 +1226,173 @@ fn commit_bytes_linear_fast_path(
         exec_result = constraint
             .tokenizer
             .execute_from_state(&bytes[offset..], constraint.tokenizer.initial_state());
+    }
+}
+
+fn commit_bytes_linear_fast_path_profiled(
+    constraint: &Constraint,
+    start_gss: ParserGSS,
+    bytes: &[u8],
+    first_exec_result: TokenizerExecResult,
+    mut advances: Option<&mut Vec<PerAdvanceEntry>>,
+    profile: &mut CommitProfile,
+) -> LinearFastPathResult {
+    use std::time::Instant;
+
+    let total_start = Instant::now();
+    let ignore_terminal = constraint.ignore_terminal;
+    let mut gss = start_gss;
+    let mut offset = 0usize;
+    let mut exec_result = first_exec_result;
+    profile.linear_fast_path_exec_ns = profile.initial_exec_ns;
+
+    loop {
+        profile.linear_fast_path_steps += 1;
+
+        let scan_start = Instant::now();
+        let actionable_terminals = ActionableTerminals::from_gss(constraint, &gss);
+        let mut chosen: Option<(usize, u32, bool)> = None;
+        for matched in &exec_result.matches {
+            let ignored = is_ignored_terminal(ignore_terminal, matched.id);
+            if !ignored
+                && !is_actionable_terminal(
+                    actionable_terminals.as_ref(),
+                    constraint,
+                    matched.id,
+                )
+            {
+                continue;
+            }
+
+            let candidate = (matched.width, matched.id, ignored);
+            if let Some(existing) = chosen {
+                if existing != candidate {
+                    let result = if offset > 0 {
+                        LinearFastPathResult::Continue { gss, offset }
+                    } else {
+                        LinearFastPathResult::Restart
+                    };
+                    profile.linear_fast_path_total_ns = total_start.elapsed().as_nanos() as u64;
+                    return result;
+                }
+            } else {
+                chosen = Some(candidate);
+            }
+        }
+        profile.linear_fast_path_match_scan_ns += scan_start.elapsed().as_nanos() as u64;
+
+        let Some((width, terminal, ignored)) = chosen else {
+            let result = if offset > 0 {
+                LinearFastPathResult::Continue { gss, offset }
+            } else {
+                LinearFastPathResult::Restart
+            };
+            profile.linear_fast_path_total_ns = total_start.elapsed().as_nanos() as u64;
+            return result;
+        };
+
+        let end_state_start = Instant::now();
+        if let Some(end_state) = exec_result.end_state {
+            if end_state_may_advance(constraint, &gss, end_state) {
+                profile.linear_fast_path_end_state_check_ns +=
+                    end_state_start.elapsed().as_nanos() as u64;
+                let result = if offset > 0 {
+                    LinearFastPathResult::Continue { gss, offset }
+                } else {
+                    LinearFastPathResult::Restart
+                };
+                profile.linear_fast_path_total_ns = total_start.elapsed().as_nanos() as u64;
+                return result;
+            }
+        }
+        profile.linear_fast_path_end_state_check_ns +=
+            end_state_start.elapsed().as_nanos() as u64;
+
+        if !ignored {
+            let may_start = Instant::now();
+            if !stack_may_advance_on(&constraint.table, &gss, terminal) {
+                profile.advance_may_check_ns += may_start.elapsed().as_nanos() as u64;
+                let result = if offset > 0 {
+                    LinearFastPathResult::Continue { gss, offset }
+                } else {
+                    LinearFastPathResult::Restart
+                };
+                profile.linear_fast_path_total_ns = total_start.elapsed().as_nanos() as u64;
+                return result;
+            }
+            let may_elapsed = may_start.elapsed().as_nanos() as u64;
+            profile.advance_may_check_ns += may_elapsed;
+
+            let advance_start = Instant::now();
+            let (advanced, advance_profile) =
+                advance_stacks_profiled(&constraint.table, &gss, terminal);
+            let advance_elapsed = advance_start.elapsed().as_nanos() as u64;
+            profile.advance_core_ns += advance_elapsed;
+            profile.linear_fast_path_advance_ns += may_elapsed + advance_elapsed;
+            apply_advance_profile(profile, &advance_profile);
+
+            if advanced.is_empty() {
+                profile.advance_ns += may_elapsed + advance_elapsed;
+                profile.linear_fast_path_total_ns = total_start.elapsed().as_nanos() as u64;
+                return LinearFastPathResult::Complete(Err(
+                    "commit rejected: no valid parser states remain".to_string(),
+                ));
+            }
+
+            if let Some(advances) = advances.as_deref_mut() {
+                let summary_ns = record_per_advance_entry(
+                    advances,
+                    constraint.tokenizer.initial_state(),
+                    terminal,
+                    &gss,
+                    &advanced,
+                    offset,
+                    offset + width,
+                    bytes.len(),
+                    &bytes[offset..offset + width],
+                    advance_profile.clone(),
+                );
+                profile.adv_summary_ns += summary_ns;
+            }
+
+            let future_start = Instant::now();
+            gss = apply_future_terminal_disallow(constraint, &exec_result, terminal, advanced);
+            let future_elapsed = future_start.elapsed().as_nanos() as u64;
+            profile.advance_future_disallow_ns += future_elapsed;
+            profile.linear_fast_path_future_disallow_ns += future_elapsed;
+            profile.linear_fast_path_advance_ns += future_elapsed;
+            profile.advance_ns += may_elapsed + advance_elapsed + future_elapsed;
+            profile.n_advances += 1;
+            if gss.is_empty() {
+                profile.linear_fast_path_total_ns = total_start.elapsed().as_nanos() as u64;
+                return LinearFastPathResult::Complete(Err(
+                    "commit rejected: no valid parser states remain".to_string(),
+                ));
+            }
+        }
+
+        offset += width;
+        if offset == bytes.len() {
+            let fuse_start = Instant::now();
+            let fused = gss.fuse(Some(1));
+            profile.linear_fast_path_fuse_ns = fuse_start.elapsed().as_nanos() as u64;
+            profile.fuse_ns = profile.linear_fast_path_fuse_ns;
+            profile.linear_fast_path_total_ns = total_start.elapsed().as_nanos() as u64;
+            if fused.is_empty() {
+                return LinearFastPathResult::Complete(Err(
+                    "commit rejected: no valid parser states remain".to_string(),
+                ));
+            }
+            return LinearFastPathResult::Complete(Ok(fused));
+        }
+
+        let exec_start = Instant::now();
+        exec_result = constraint
+            .tokenizer
+            .execute_from_state(&bytes[offset..], constraint.tokenizer.initial_state());
+        let exec_elapsed = exec_start.elapsed().as_nanos() as u64;
+        profile.linear_fast_path_exec_ns += exec_elapsed;
+        profile.exec_ns += exec_elapsed;
     }
 }
 
