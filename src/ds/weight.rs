@@ -61,7 +61,7 @@ use std::sync::{Arc, Weak};
 //    surprisingly expensive because each operation may trigger normalization
 //    and intern-table lookup. In hot paths, avoid building a Weight one item
 //    at a time. Prefer construction APIs that collect from sorted/ranged data
-//    (e.g. CompactRangeBuilder, from_per_tsid_shared, from_compact_ranges)
+//    (e.g. CompactRangeBuilder, from_per_tsid_shared)
 //    so normalization and interning happen once at the end.
 //
 // 5. Lookup / iteration implications
@@ -1180,21 +1180,7 @@ impl Weight {
         ALL_WEIGHT.clone()
     }
 
-    pub fn from_compact_ranges<I, J>(entries: I) -> Self
-    where
-        I: IntoIterator<Item = (std::ops::RangeInclusive<u32>, J)>,
-        J: IntoIterator<Item = std::ops::RangeInclusive<u32>>,
-    {
-        let mut out = Self::empty();
-        for (tsid_range, token_ranges) in entries {
-            let token_ranges: Vec<_> = token_ranges.into_iter().collect();
-            out.insert(tsid_range, &token_ranges);
-        }
-        out
-    }
-
     /// Create a weight where all tsids in the range share the same token set.
-    /// Avoids the expensive expand/compress cycle of `from_compact_ranges`.
     pub fn from_uniform(tsid_range: std::ops::RangeInclusive<u32>, tokens: RangeSetBlaze<u32>) -> Self {
         if tokens.is_empty() {
             return Self::empty();
@@ -1258,17 +1244,6 @@ impl Weight {
         *self = Self::empty();
     }
 
-    pub fn token_union(&self) -> RangeSetBlaze<u32> {
-        if self.is_full() {
-            return sentinel_token_set();
-        }
-        let mut out = RangeSetBlaze::new();
-        for (_, tokens) in self.0.range_values() {
-            out = out | tokens.as_ref().clone();
-        }
-        out
-    }
-
     pub fn is_full(&self) -> bool {
         let mut entries = self.0.range_values();
         let Some((range, tokens)) = entries.next() else {
@@ -1286,12 +1261,6 @@ impl Weight {
 
     pub fn num_ranges(&self) -> usize {
         self.0.ranges().count()
-    }
-
-    pub fn estimated_size_bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
-            + self.num_ranges()
-                * (std::mem::size_of::<u32>() + std::mem::size_of::<Arc<RangeSetBlaze<u32>>>())
     }
 
     pub fn union(&self, other: &Self) -> Self {

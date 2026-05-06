@@ -1,13 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::OnceLock;
 
-use serde_json::{Map, Value};
-use crate::GlrMaskError;
 use crate::automata::lexer::ast::Expr as LexerExpr;
 use crate::automata::lexer::compile::build_regex;
 use crate::automata::lexer::regex::parse_regex;
-use crate::grammar::flat::GrammarDef;
-use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, lower, promote_large_literal_alts, expr_to_grammar_expr};
+use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, expr_to_grammar_expr};
+use crate::GlrMaskError;
+use serde_json::{Map, Value};
 
 // WARNING: Do NOT break terminals containing repeats of multi-char subexpressions
 // into grammar-level repeats of single characters. Doing so creates terminals of
@@ -2695,21 +2694,6 @@ fn merge_two_schemas(s1: &Map<String, Value>, s2: &Map<String, Value>) -> Map<St
     }
 
     merged
-}
-
-pub fn json_schema_to_grammar(schema_json: &str) -> Result<GrammarDef, GlrMaskError> {
-    let schema: Value = serde_json::from_str(schema_json)
-        .map_err(|err| GlrMaskError::GrammarParse(err.to_string()))?;
-    let mut named = schema_to_named_grammar(&schema)?;
-
-    let promote_enabled = std::env::var("GLRMASK_PROMOTE_LARGE_LITERAL_ALTS")
-        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off"))
-        .unwrap_or(true);
-
-    if promote_enabled {
-        promote_large_literal_alts(&mut named, 10);
-    }
-    lower(&named)
 }
 
 pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskError> {

@@ -29,58 +29,14 @@ pub(crate) fn sequence_or_single(mut items: Vec<ast::GrammarExpr>) -> ast::Gramm
     }
 }
 
-fn env_var_is_truthy(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| {
-            let value = value.trim().to_ascii_lowercase();
-            !matches!(value.as_str(), "" | "0" | "false" | "no" | "off")
-        })
-        .unwrap_or(false)
-}
-
-fn maybe_print_grammar_glrm(source_kind: &str, grammar: &ast::NamedGrammar) {
-    if !env_var_is_truthy("GLRMASK_PRINT_GRAMMAR_GLRM") {
-        return;
-    }
-
-    let printable = grammar.prune_unreachable();
-    eprintln!(
-        "[glrmask/grammar][{source_kind}]\n{}",
-        crate::grammar::glrm::to_glrm(&printable)
-    );
-}
-
 fn lower_factored_named_grammar(
     source: &str,
-    source_kind: &str,
+    _source_kind: &str,
     parse_named: NamedGrammarParser,
 ) -> crate::Result<GrammarDef> {
-    let debug_import = env_var_is_truthy("GLRMASK_DEBUG_IMPORT_TIMES");
-    let phase_started_at = std::time::Instant::now();
     let named = parse_named(source)?;
-    let parse_ms = phase_started_at.elapsed().as_secs_f64() * 1000.0;
-
-    let factor_started_at = std::time::Instant::now();
     let factored = factor_named_grammar(named);
-    let factor_ms = factor_started_at.elapsed().as_secs_f64() * 1000.0;
-
-    maybe_print_grammar_glrm(source_kind, &factored);
-
-    let lower_started_at = std::time::Instant::now();
-    let lowered = ast::lower(&factored)?;
-    let lower_ms = lower_started_at.elapsed().as_secs_f64() * 1000.0;
-
-    if debug_import {
-        eprintln!(
-            "[glrmask/debug][import] source={} parse_ms={:.3} factor_ms={:.3} lower_ms={:.3}",
-            source_kind,
-            parse_ms,
-            factor_ms,
-            lower_ms,
-        );
-    }
-
-    Ok(lowered)
+    ast::lower(&factored)
 }
 
 fn compile_from_source(
