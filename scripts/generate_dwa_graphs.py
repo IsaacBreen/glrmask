@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate terminal-DWA graph SVGs from GLRMASK_DEBUG_PROFILE logs.
+"""Generate terminal-DWA graph SVGs from existing profile logs.
 
 Produces honest graph visualization that distinguishes between direct terminal
 matches and "future terminal" transitions (where tokens don't actually match the
@@ -7,50 +7,14 @@ labeled terminal but position the grammar for it).
 
 Usage:
     python scripts/generate_dwa_graphs.py --log /tmp/profile_*.log --output-dir output/
-
-Or generate logs and graphs in one step:
-    python scripts/generate_dwa_graphs.py --schema path/to/schema.json \
-        --vocab path/to/gpt2_vocab.json --config open_close --output-dir output/
 """
 
 import argparse
 import json
-import os
 import re
 import subprocess
 import sys
 from collections import defaultdict
-
-
-def generate_profile_log(schema_path, vocab_path, config_name, config_env):
-    """Run profiling and capture stderr to a log file."""
-    log_path = f"/tmp/profile_{config_name}_{os.path.basename(schema_path).replace('.json', '')}.log"
-
-    env_copy = os.environ.copy()
-    for k in ["GLRMASK_NO_OPEN_QUOTE_SPLIT", "GLRMASK_SPLIT_CLOSE_QUOTE"]:
-        if k in env_copy:
-            del env_copy[k]
-    for k, v in config_env.items():
-        if v:
-            env_copy[k] = v
-    env_copy["GLRMASK_DEBUG_PROFILE"] = "1"
-
-    code = f'''
-import json, _glrmask as glrmask
-with open("{vocab_path}") as f:
-    vd = json.load(f)
-vocab = glrmask.Vocab.from_dict({{k.encode(): v for k,v in vd.items()}})
-with open("{schema_path}") as f:
-    schema = f.read()
-c = glrmask.Constraint.from_json_schema(schema, vocab)
-'''
-    result = subprocess.run(
-        [sys.executable, "-c", code],
-        env=env_copy, capture_output=True, text=True, timeout=120
-    )
-    with open(log_path, "w") as f:
-        f.write(result.stderr)
-    return log_path
 
 
 def parse_token_map(log_path):
@@ -344,26 +308,6 @@ def generate_dot_svg(
     return svg_path
 
 
-CONFIGS = {
-    "no_split": {
-        "GLRMASK_NO_OPEN_QUOTE_SPLIT": "1",
-        "GLRMASK_SPLIT_CLOSE_QUOTE": "",
-    },
-    "open_only": {
-        "GLRMASK_NO_OPEN_QUOTE_SPLIT": "",
-        "GLRMASK_SPLIT_CLOSE_QUOTE": "",
-    },
-    "close_only": {
-        "GLRMASK_NO_OPEN_QUOTE_SPLIT": "1",
-        "GLRMASK_SPLIT_CLOSE_QUOTE": "1",
-    },
-    "open_close": {
-        "GLRMASK_NO_OPEN_QUOTE_SPLIT": "",
-        "GLRMASK_SPLIT_CLOSE_QUOTE": "1",
-    },
-}
-
-
 def process_log(log_path, title, output_dir, filename, annotate_future=False):
     """Process a single log file into a graph."""
     token_map = parse_token_map(log_path)
@@ -391,12 +335,8 @@ def process_log(log_path, title, output_dir, filename, annotate_future=False):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate terminal-DWA graph SVGs")
+    parser = argparse.ArgumentParser(description="Generate terminal-DWA graph SVGs from logs")
     parser.add_argument("--log", nargs="+", help="Pre-existing profile log file(s)")
-    parser.add_argument("--schema", help="Schema file to profile")
-    parser.add_argument("--vocab", help="Vocab JSON file")
-    parser.add_argument("--config", choices=list(CONFIGS.keys()), help="Single config to run")
-    parser.add_argument("--all-configs", action="store_true", help="Run all 4 configs")
     parser.add_argument("--output-dir", default=".", help="Output directory for SVGs")
     parser.add_argument("--title", help="Graph title prefix")
     parser.add_argument("--annotate-future", action="store_true",
@@ -412,22 +352,6 @@ def main():
             print(f"\n{'='*50}")
             print(f"Processing {log_path}...")
             svg = process_log(log_path, title, args.output_dir, f"dwa_{basename}",
-                            annotate_future=args.annotate_future)
-            if svg:
-                print(f"  SVG: {svg}")
-
-    elif args.schema and args.vocab:
-        configs_to_run = CONFIGS if args.all_configs else {args.config or "open_only": CONFIGS.get(args.config or "open_only")}
-        schema_name = os.path.basename(args.schema).replace(".json", "")
-
-        for config_name, config_env in configs_to_run.items():
-            print(f"\n{'='*50}")
-            print(f"Generating {schema_name}/{config_name}...")
-            log_path = generate_profile_log(args.schema, args.vocab, config_name, config_env)
-            print(f"  Log: {log_path}")
-            title = f"{schema_name} / {config_name.replace('_', ' ').title()}"
-            filename = f"dwa_{config_name}_{schema_name}"
-            svg = process_log(log_path, title, args.output_dir, filename,
                             annotate_future=args.annotate_future)
             if svg:
                 print(f"  SVG: {svg}")
