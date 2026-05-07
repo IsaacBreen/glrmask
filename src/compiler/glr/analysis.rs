@@ -649,11 +649,49 @@ fn find_nullable_runs(
     runs
 }
 
+fn compute_nonempty_productive(rules: &[Rule], num_nt: u32) -> BTreeSet<NonterminalID> {
+    let mut productive_any = BTreeSet::new();
+    let mut nonempty_productive = BTreeSet::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for rule in rules {
+            if rule.lhs >= num_nt {
+                continue;
+            }
+
+            let mut rhs_productive = true;
+            let mut rhs_nonempty = false;
+            for symbol in &rule.rhs {
+                match symbol {
+                    Symbol::Terminal(_) => rhs_nonempty = true,
+                    Symbol::Nonterminal(nonterminal) => {
+                        if !productive_any.contains(nonterminal) {
+                            rhs_productive = false;
+                            break;
+                        }
+                        rhs_nonempty |= nonempty_productive.contains(nonterminal);
+                    }
+                }
+            }
+
+            if rhs_productive {
+                changed |= productive_any.insert(rule.lhs);
+                if rhs_nonempty {
+                    changed |= nonempty_productive.insert(rule.lhs);
+                }
+            }
+        }
+    }
+    nonempty_productive
+}
+
 fn compress_nullable_runs_with_optional_tree(rules: &[Rule], num_nt: u32) -> Vec<Rule> {
     let nullable = compute_nullable(rules, num_nt);
     if nullable.is_empty() {
         return rules.to_vec();
     }
+    let nonempty_productive = compute_nonempty_productive(rules, num_nt);
 
     let mut run_count = 0usize;
     let mut max_run_len = 0usize;
@@ -691,15 +729,18 @@ fn compress_nullable_runs_with_optional_tree(rules: &[Rule], num_nt: u32) -> Vec
         let mut new_rhs = rule.rhs.clone();
         for &(start, end) in runs.iter().rev() {
             let segment: Vec<Symbol> = new_rhs.drain(start..=end).collect();
-            let root_nn = build_non_nullable_tree(
+            let Some(root_nn) = build_non_nullable_tree(
                 &segment,
                 2,
                 &mut fresh_nt,
                 &mut result,
                 &nullable,
+                &nonempty_productive,
                 &by_lhs,
                 &mut nn_cache,
-            );
+            ) else {
+                continue;
+            };
             let root_opt = fresh_nt();
             result.push(Rule {
                 lhs: root_opt,
@@ -728,31 +769,42 @@ fn build_non_nullable_tree(
     fresh_nt: &mut impl FnMut() -> NonterminalID,
     new_rules: &mut Vec<Rule>,
     nullable: &BTreeSet<NonterminalID>,
+    nonempty_productive: &BTreeSet<NonterminalID>,
     by_lhs: &BTreeMap<NonterminalID, Vec<Vec<Symbol>>>,
     nn_cache: &mut BTreeMap<NonterminalID, NonterminalID>,
-) -> NonterminalID {
+) -> Option<NonterminalID> {
     let k = k.max(2);
     let n = segment.len();
     if n == 0 {
-        let nt = fresh_nt();
-        new_rules.push(Rule { lhs: nt, rhs: vec![] });
-        return nt;
+        return None;
     }
 
     let nn_segment: Vec<Symbol> = segment
         .iter()
-        .map(|symbol| match symbol {
-            Symbol::Terminal(terminal) => Symbol::Terminal(*terminal),
-            Symbol::Nonterminal(nonterminal) => Symbol::Nonterminal(get_or_create_non_nullable_nt(
-                *nonterminal,
-                fresh_nt,
-                new_rules,
-                nullable,
-                by_lhs,
-                nn_cache,
-            )),
+        .filter_map(|symbol| match symbol {
+            Symbol::Terminal(terminal) => Some(Symbol::Terminal(*terminal)),
+            Symbol::Nonterminal(nonterminal) if !nullable.contains(nonterminal) => {
+                Some(Symbol::Nonterminal(*nonterminal))
+            }
+            Symbol::Nonterminal(nonterminal) if nonempty_productive.contains(nonterminal) => {
+                get_or_create_non_nullable_nt(
+                    *nonterminal,
+                    fresh_nt,
+                    new_rules,
+                    nullable,
+                    nonempty_productive,
+                    by_lhs,
+                    nn_cache,
+                )
+                .map(Symbol::Nonterminal)
+            }
+            Symbol::Nonterminal(_) => None,
         })
         .collect();
+    let n = nn_segment.len();
+    if n == 0 {
+        return None;
+    }
 
     if n <= k {
         let leaf_nt = fresh_nt();
@@ -765,7 +817,7 @@ fn build_non_nullable_tree(
                 .collect();
             new_rules.push(Rule { lhs: leaf_nt, rhs });
         }
-        return leaf_nt;
+        return Some(leaf_nt);
     }
 
     // Keep the default right-heavy decomposition; alternate shapes were only
@@ -779,14 +831,33 @@ fn build_non_nullable_tree(
     let chunk_nts: Vec<NonterminalID> = chunks
         .into_iter()
         .map(|chunk| {
-            build_non_nullable_tree(chunk, k, fresh_nt, new_rules, nullable, by_lhs, nn_cache)
+            build_non_nullable_tree(
+                chunk,
+                k,
+                fresh_nt,
+                new_rules,
+                nullable,
+                nonempty_productive,
+                by_lhs,
+                nn_cache,
+            )
+            .expect("nonempty chunk should have a nonnullable tree")
         })
         .collect();
     let chunk_symbols: Vec<Symbol> = chunk_nts
         .into_iter()
         .map(Symbol::Nonterminal)
         .collect();
-    build_non_nullable_tree(&chunk_symbols, k, fresh_nt, new_rules, nullable, by_lhs, nn_cache)
+    build_non_nullable_tree(
+        &chunk_symbols,
+        k,
+        fresh_nt,
+        new_rules,
+        nullable,
+        nonempty_productive,
+        by_lhs,
+        nn_cache,
+    )
 }
 
 fn get_or_create_non_nullable_nt(
@@ -794,18 +865,22 @@ fn get_or_create_non_nullable_nt(
     fresh_nt: &mut impl FnMut() -> NonterminalID,
     new_rules: &mut Vec<Rule>,
     nullable: &BTreeSet<NonterminalID>,
+    nonempty_productive: &BTreeSet<NonterminalID>,
     by_lhs: &BTreeMap<NonterminalID, Vec<Vec<Symbol>>>,
     nn_cache: &mut BTreeMap<NonterminalID, NonterminalID>,
-) -> NonterminalID {
+) -> Option<NonterminalID> {
     if !nullable.contains(&nt) {
-        return nt;
+        return Some(nt);
+    }
+    if !nonempty_productive.contains(&nt) {
+        return None;
     }
     if let Some(&cached) = nn_cache.get(&nt) {
-        return cached;
+        return Some(cached);
     }
 
     let Some(alts) = by_lhs.get(&nt) else {
-        return nt;
+        return None;
     };
     let nn_nt = fresh_nt();
     nn_cache.insert(nt, nn_nt);
@@ -823,15 +898,18 @@ fn get_or_create_non_nullable_nt(
             continue;
         }
 
-        let rhs_nn = build_non_nullable_tree(
+        let Some(rhs_nn) = build_non_nullable_tree(
             rhs,
             2,
             fresh_nt,
             new_rules,
             nullable,
+            nonempty_productive,
             by_lhs,
             nn_cache,
-        );
+        ) else {
+            continue;
+        };
         new_rules.push(Rule {
             lhs: nn_nt,
             rhs: vec![Symbol::Nonterminal(rhs_nn)],
@@ -841,9 +919,9 @@ fn get_or_create_non_nullable_nt(
 
     if !emitted {
         nn_cache.remove(&nt);
-        return nt;
+        return None;
     }
-    nn_nt
+    Some(nn_nt)
 }
 
 /// Inline null productions (ε-elimination).
