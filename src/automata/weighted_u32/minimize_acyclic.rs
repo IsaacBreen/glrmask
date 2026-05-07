@@ -1405,6 +1405,9 @@ impl MergedStateBuilder {
     }
 
     fn finalize_for_reuse(&mut self) {
+        if self.final_weights_pending.len() <= 1 {
+            return;
+        }
         let pending = std::mem::take(&mut self.final_weights_pending);
         let built = batch_build_weight(pending);
         if !built.is_empty() {
