@@ -598,6 +598,175 @@ fn are_compatible(
     true
 }
 
+#[derive(Clone)]
+struct ClassProfile {
+    targets: Vec<(Label, u32)>,
+    weights: Vec<(Label, Weight)>,
+    final_weight: Option<Weight>,
+}
+
+fn build_class_profile(
+    rep: usize,
+    old_to_new: &[u32],
+    productive_transitions: &[Vec<ProductiveTransition>],
+    dwa: &DWA,
+) -> ClassProfile {
+    let mut targets = Vec::with_capacity(productive_transitions[rep].len());
+    let mut weights = Vec::with_capacity(productive_transitions[rep].len());
+    for pt in &productive_transitions[rep] {
+        if let Some(mapped) = mapped_target(old_to_new, pt.target) {
+            targets.push((pt.label, mapped));
+        }
+        weights.push((pt.label, pt.weight.clone()));
+    }
+    targets.sort_unstable_by_key(|(label, _)| *label);
+    weights.sort_unstable_by_key(|(label, _)| *label);
+    ClassProfile {
+        targets,
+        weights,
+        final_weight: dwa.states()[rep].final_weight.clone(),
+    }
+}
+
+fn sorted_targets_compatible(class_targets: &[(Label, u32)], group_targets: &[(Label, u32)]) -> bool {
+    let mut class_idx = 0;
+    let mut group_idx = 0;
+
+    while class_idx < class_targets.len() && group_idx < group_targets.len() {
+        let (class_label, class_target) = class_targets[class_idx];
+        let (group_label, group_target) = group_targets[group_idx];
+        if class_label == group_label {
+            if class_target != group_target {
+                return false;
+            }
+            class_idx += 1;
+            group_idx += 1;
+        } else if class_label < group_label {
+            class_idx += 1;
+        } else {
+            group_idx += 1;
+        }
+    }
+
+    true
+}
+
+fn sorted_weights_compatible_on_overlap(
+    class_weights: &[(Label, Weight)],
+    group_weights: &[(Label, Weight)],
+    overlap: &Weight,
+) -> bool {
+    let mut class_idx = 0;
+    let mut group_idx = 0;
+
+    while class_idx < class_weights.len() && group_idx < group_weights.len() {
+        let (class_label, class_weight) = &class_weights[class_idx];
+        let (group_label, group_weight) = &group_weights[group_idx];
+        if class_label == group_label {
+            if class_weight != group_weight {
+                let class_disjoint = class_weight.is_disjoint(overlap);
+                let group_disjoint = group_weight.is_disjoint(overlap);
+                if class_disjoint != group_disjoint {
+                    return false;
+                }
+                if !class_disjoint && !weights_equal_on_domain(class_weight, group_weight, overlap) {
+                    return false;
+                }
+            }
+            class_idx += 1;
+            group_idx += 1;
+        } else if class_label < group_label {
+            if !class_weight.is_disjoint(overlap) {
+                return false;
+            }
+            class_idx += 1;
+        } else {
+            if !group_weight.is_disjoint(overlap) {
+                return false;
+            }
+            group_idx += 1;
+        }
+    }
+
+    for (_, class_weight) in &class_weights[class_idx..] {
+        if !class_weight.is_disjoint(overlap) {
+            return false;
+        }
+    }
+    for (_, group_weight) in &group_weights[group_idx..] {
+        if !group_weight.is_disjoint(overlap) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn merge_sorted_targets(existing: &mut Vec<(Label, u32)>, add: &[(Label, u32)]) {
+    if add.is_empty() {
+        return;
+    }
+    if existing.is_empty() {
+        existing.extend_from_slice(add);
+        return;
+    }
+
+    let mut merged = Vec::with_capacity(existing.len() + add.len());
+    let mut existing_idx = 0;
+    let mut add_idx = 0;
+    while existing_idx < existing.len() && add_idx < add.len() {
+        let existing_entry = existing[existing_idx];
+        let add_entry = add[add_idx];
+        if existing_entry.0 == add_entry.0 {
+            debug_assert_eq!(existing_entry.1, add_entry.1);
+            merged.push(existing_entry);
+            existing_idx += 1;
+            add_idx += 1;
+        } else if existing_entry.0 < add_entry.0 {
+            merged.push(existing_entry);
+            existing_idx += 1;
+        } else {
+            merged.push(add_entry);
+            add_idx += 1;
+        }
+    }
+    merged.extend_from_slice(&existing[existing_idx..]);
+    merged.extend_from_slice(&add[add_idx..]);
+    *existing = merged;
+}
+
+fn merge_sorted_weights(existing: &mut Vec<(Label, Weight)>, add: &[(Label, Weight)]) {
+    if add.is_empty() {
+        return;
+    }
+    if existing.is_empty() {
+        existing.extend(add.iter().cloned());
+        return;
+    }
+
+    let mut merged = Vec::with_capacity(existing.len() + add.len());
+    let mut existing_idx = 0;
+    let mut add_idx = 0;
+    while existing_idx < existing.len() && add_idx < add.len() {
+        let (existing_label, existing_weight) = &existing[existing_idx];
+        let (add_label, add_weight) = &add[add_idx];
+        if existing_label == add_label {
+            merged.push((*existing_label, existing_weight.union(add_weight)));
+            existing_idx += 1;
+            add_idx += 1;
+        } else if existing_label < add_label {
+            merged.push((*existing_label, existing_weight.clone()));
+            existing_idx += 1;
+        } else {
+            merged.push((*add_label, add_weight.clone()));
+            add_idx += 1;
+        }
+    }
+    merged.extend(existing[existing_idx..].iter().cloned());
+    merged.extend(add[add_idx..].iter().cloned());
+    *existing = merged;
+}
+
 /// Hybrid coloring: partition refinement to reduce candidates into classes,
 /// then graph coloring among class representatives.
 ///
@@ -638,6 +807,11 @@ fn build_and_color_hybrid(
         class_needed_union[class] = class_needed_union[class].union(&needed[state_id]);
     }
 
+    let class_profiles: Vec<ClassProfile> = class_rep_state
+        .iter()
+        .map(|&rep| build_class_profile(rep, old_to_new, productive_transitions, dwa))
+        .collect();
+
     // Step 3: Greedy merge of classes, handling both disjoint and overlapping
     // needed sets. Instead of building an O(K²) incompatibility graph, we check
     // each class against only the small number of existing groups (~14 for kb_684).
@@ -648,39 +822,21 @@ fn build_and_color_hybrid(
     // valid consensus for checking new candidates.
     struct OverlapMergeGroup {
         needed_union: Weight,
-        target_map: rustc_hash::FxHashMap<i32, u32>,
+        targets: Vec<(Label, u32)>,
         merged_final_weight: Option<Weight>,
-        merged_transition_weights: rustc_hash::FxHashMap<i32, Weight>,
+        merged_transition_weights: Vec<(Label, Weight)>,
         member_classes: Vec<usize>,
     }
 
     let mut groups: Vec<OverlapMergeGroup> = Vec::new();
 
     for class in 0..num_classes {
-        let rep = class_rep_state[class];
         let cn = &class_needed_union[class];
-
-        // Build this class's target profile
-        let tp: Vec<(i32, u32)> = productive_transitions[rep]
-            .iter()
-            .filter_map(|pt| {
-                mapped_target(old_to_new, pt.target).map(|mt| (pt.label, mt))
-            })
-            .collect();
+        let class_profile = &class_profiles[class];
 
         let mut placed = false;
         for g in &mut groups {
-            // Check target compatibility: no shared label maps to different targets
-            let mut target_compat = true;
-            for &(label, target) in &tp {
-                if let Some(&existing_target) = g.target_map.get(&label) {
-                    if existing_target != target {
-                        target_compat = false;
-                        break;
-                    }
-                }
-            }
-            if !target_compat {
+            if !sorted_targets_compatible(&class_profile.targets, &g.targets) {
                 continue;
             }
 
@@ -691,8 +847,7 @@ fn build_and_color_hybrid(
                 let overlap = cn.intersection(&g.needed_union);
 
                 // Check final weights on overlap
-                let fw_class = dwa.states()[rep].final_weight.as_ref();
-                let weight_ok = match (fw_class, &g.merged_final_weight) {
+                let weight_ok = match (&class_profile.final_weight, &g.merged_final_weight) {
                     (Some(fw), Some(gfw)) => weights_equal_on_domain(fw, gfw, &overlap),
                     (Some(fw), None) => fw.is_disjoint(&overlap),
                     (None, Some(gfw)) => gfw.is_disjoint(&overlap),
@@ -702,91 +857,36 @@ fn build_and_color_hybrid(
                     continue;
                 }
 
-                // Check transition weights on overlap.
-                // Labels present in the class:
-                let mut trans_compat = true;
-                let trans = &productive_transitions[rep];
-                for pt in trans {
-                    if let Some(gw) = g.merged_transition_weights.get(&pt.label) {
-                        // Both have this label — check weights agree on overlap
-                        if &pt.weight == gw {
-                            continue;
-                        }
-                        let c_disj = pt.weight.is_disjoint(&overlap);
-                        let g_disj = gw.is_disjoint(&overlap);
-                        if c_disj && g_disj {
-                            continue;
-                        }
-                        if c_disj != g_disj {
-                            trans_compat = false;
-                            break;
-                        }
-                        if !weights_equal_on_domain(&pt.weight, gw, &overlap) {
-                            trans_compat = false;
-                            break;
-                        }
-                    } else {
-                        // Only class has this label — weight must not touch overlap
-                        if !pt.weight.is_disjoint(&overlap) {
-                            trans_compat = false;
-                            break;
-                        }
-                    }
-                }
-                if trans_compat {
-                    // Labels present in group but not in class
-                    for (label, gw) in &g.merged_transition_weights {
-                        if trans.iter().any(|pt| pt.label == *label) {
-                            continue;
-                        }
-                        if !gw.is_disjoint(&overlap) {
-                            trans_compat = false;
-                            break;
-                        }
-                    }
-                }
-                if !trans_compat {
+                if !sorted_weights_compatible_on_overlap(
+                    &class_profile.weights,
+                    &g.merged_transition_weights,
+                    &overlap,
+                ) {
                     continue;
                 }
             }
 
             // Compatible — merge into this group
             g.needed_union = g.needed_union.union(cn);
-            for &(label, target) in &tp {
-                g.target_map.insert(label, target);
-            }
-            if let Some(fw) = &dwa.states()[rep].final_weight {
+            merge_sorted_targets(&mut g.targets, &class_profile.targets);
+            if let Some(fw) = &class_profile.final_weight {
                 g.merged_final_weight = Some(match g.merged_final_weight.take() {
                     Some(existing) => existing.union(fw),
                     None => fw.clone(),
                 });
             }
-            for pt in &productive_transitions[rep] {
-                let entry = g.merged_transition_weights
-                    .entry(pt.label)
-                    .or_insert_with(Weight::empty);
-                *entry = entry.union(&pt.weight);
-            }
+            merge_sorted_weights(&mut g.merged_transition_weights, &class_profile.weights);
             g.member_classes.push(class);
             placed = true;
             break;
         }
 
         if !placed {
-            let mut target_map = rustc_hash::FxHashMap::default();
-            for &(label, target) in &tp {
-                target_map.insert(label, target);
-            }
-            let merged_final_weight = dwa.states()[rep].final_weight.clone();
-            let mut merged_transition_weights = rustc_hash::FxHashMap::default();
-            for pt in &productive_transitions[rep] {
-                merged_transition_weights.insert(pt.label, pt.weight.clone());
-            }
             groups.push(OverlapMergeGroup {
                 needed_union: cn.clone(),
-                target_map,
-                merged_final_weight,
-                merged_transition_weights,
+                targets: class_profile.targets.clone(),
+                merged_final_weight: class_profile.final_weight.clone(),
+                merged_transition_weights: class_profile.weights.clone(),
                 member_classes: vec![class],
             });
         }
