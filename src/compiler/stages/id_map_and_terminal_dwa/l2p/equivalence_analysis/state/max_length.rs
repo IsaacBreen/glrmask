@@ -5,10 +5,43 @@
 //! equivalence classes.
 
 use rayon::prelude::*;
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use super::super::compat::{FlatDfa, TokenizerView};
 
 const MISSING_BLOCK: u32 = u32::MAX;
+
+struct ActiveTransitionTable {
+    width: usize,
+    targets_flat: Vec<u32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RefineMode {
+    Sorted,
+    Interned,
+    Auto,
+}
+
+fn refine_mode() -> RefineMode {
+    static MODE: OnceLock<RefineMode> = OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("GLRMASK_MAX_LENGTH_REFINE_MODE") {
+        Ok(value) if value.trim().eq_ignore_ascii_case("sorted") => RefineMode::Sorted,
+        Ok(value) if value.trim().eq_ignore_ascii_case("interned") => RefineMode::Interned,
+        _ => RefineMode::Auto,
+    })
+}
+
+fn is_full_state_query(states: &[usize], total_states: usize) -> bool {
+    if states.len() != total_states {
+        return false;
+    }
+    states
+        .iter()
+        .enumerate()
+        .all(|(index, &state)| state == index)
+}
 
 #[inline(always)]
 fn mix_u64(mut x: u64) -> u64 {
@@ -183,7 +216,27 @@ fn same_partition(left: &[u32], left_count: usize, right: &[u32], right_count: u
     true
 }
 
-fn refine_once(
+fn build_active_transition_table(
+    dfa: &FlatDfa,
+    active_bytes: &[u8],
+) -> ActiveTransitionTable {
+    let width = active_bytes.len();
+    let n = dfa.states.len();
+    let mut targets_flat = vec![MISSING_BLOCK; n * width];
+
+    targets_flat
+        .par_chunks_mut(width)
+        .enumerate()
+        .for_each(|(state, row)| {
+            for (slot, &byte) in active_bytes.iter().enumerate() {
+                row[slot] = dfa.trans(state, byte as usize);
+            }
+        });
+
+    ActiveTransitionTable { width, targets_flat }
+}
+
+fn refine_once_sorted(
     dfa: &FlatDfa,
     active_bytes: &[u8],
     label_ids: &[u32],
@@ -251,11 +304,122 @@ fn refine_once(
     (next_blocks, block_count)
 }
 
+#[inline(always)]
+fn row_hash(
+    state: usize,
+    label_ids: &[u32],
+    prev_blocks: &[u32],
+    active_targets: &ActiveTransitionTable,
+) -> u64 {
+    let mut hash = mix_u64(((1 + active_targets.width) as u64) ^ 0x9E37_79B9_7F4A_7C15);
+    hash = mix_u64(hash ^ (label_ids[state] as u64).wrapping_add(0xA24B_AED4_963E_E407));
+
+    let start = state * active_targets.width;
+    let end = start + active_targets.width;
+    for &target in &active_targets.targets_flat[start..end] {
+        let block = if target == MISSING_BLOCK {
+            MISSING_BLOCK
+        } else {
+            prev_blocks[target as usize]
+        };
+        hash = mix_u64(hash ^ (block as u64).wrapping_add(0xA24B_AED4_963E_E407));
+    }
+    hash
+}
+
+#[inline(always)]
+fn rows_equal(
+    state_a: usize,
+    state_b: usize,
+    label_ids: &[u32],
+    prev_blocks: &[u32],
+    active_targets: &ActiveTransitionTable,
+) -> bool {
+    if label_ids[state_a] != label_ids[state_b] {
+        return false;
+    }
+
+    let start_a = state_a * active_targets.width;
+    let start_b = state_b * active_targets.width;
+    for slot in 0..active_targets.width {
+        let target_a = active_targets.targets_flat[start_a + slot];
+        let target_b = active_targets.targets_flat[start_b + slot];
+        let block_a = if target_a == MISSING_BLOCK {
+            MISSING_BLOCK
+        } else {
+            prev_blocks[target_a as usize]
+        };
+        let block_b = if target_b == MISSING_BLOCK {
+            MISSING_BLOCK
+        } else {
+            prev_blocks[target_b as usize]
+        };
+        if block_a != block_b {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn refine_once_interned(
+    label_ids: &[u32],
+    prev_blocks: &[u32],
+    active_targets: &ActiveTransitionTable,
+    row_hashes: &mut [u64],
+) -> (Vec<u32>, usize) {
+    let n = prev_blocks.len();
+    debug_assert_eq!(label_ids.len(), n);
+    debug_assert_eq!(row_hashes.len(), n);
+
+    row_hashes
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(state, row_hash_out)| {
+            *row_hash_out = row_hash(state, label_ids, prev_blocks, active_targets);
+        });
+
+    let mut next_blocks = vec![0u32; n];
+    let mut block_count = 0usize;
+    let mut buckets = HashMap::<u64, Vec<(usize, u32)>>::new();
+
+    for state in 0..n {
+        let hash = row_hashes[state];
+        let reps = buckets.entry(hash).or_default();
+        let mut assigned_block = None;
+        for &(representative_state, block_id) in reps.iter() {
+            if rows_equal(
+                state,
+                representative_state,
+                label_ids,
+                prev_blocks,
+                active_targets,
+            ) {
+                assigned_block = Some(block_id);
+                break;
+            }
+        }
+
+        let block_id = if let Some(block_id) = assigned_block {
+            block_id
+        } else {
+            let block_id = usize_to_u32(block_count, "partition block id");
+            block_count += 1;
+            reps.push((state, block_id));
+            block_id
+        };
+        next_blocks[state] = block_id;
+    }
+
+    (next_blocks, block_count)
+}
+
 fn compute_kbounded_partition(
     dfa: &FlatDfa,
     k: usize,
     active_groups: Option<&[bool]>,
     active_bytes: &[u8],
+    is_full_state_query: bool,
 ) -> (Vec<u32>, usize, usize) {
     let n = dfa.states.len();
     if n == 0 {
@@ -269,21 +433,33 @@ fn compute_kbounded_partition(
         return (blocks, block_count, 0);
     }
 
+    let active_targets = build_active_transition_table(dfa, active_bytes);
     let width = 1 + active_bytes.len();
     let mut signatures = vec![0u32; n * width];
     let mut row_hashes = vec![0u64; n];
     let mut order: Vec<usize> = (0..n).collect();
+    let mode = refine_mode();
 
     for step in 0..k {
-        let (next_blocks, next_count) = refine_once(
-            dfa,
-            active_bytes,
-            &label_ids,
-            &blocks,
-            &mut signatures,
-            &mut row_hashes,
-            &mut order,
-        );
+        let use_sorted = match mode {
+            RefineMode::Sorted => true,
+            RefineMode::Interned => false,
+            RefineMode::Auto => is_full_state_query,
+        };
+
+        let (next_blocks, next_count) = if use_sorted {
+            refine_once_sorted(
+                dfa,
+                active_bytes,
+                &label_ids,
+                &blocks,
+                &mut signatures,
+                &mut row_hashes,
+                &mut order,
+            )
+        } else {
+            refine_once_interned(&label_ids, &blocks, &active_targets, &mut row_hashes)
+        };
 
         let iteration = step + 1;
         let stable = same_partition(&blocks, block_count, &next_blocks, next_count);
@@ -342,8 +518,9 @@ fn find_state_equivalence_classes_kbounded(
 
     let dfa = tokenizer.dfa();
     let active_bytes = active_byte_representatives(relevant_bytes, byte_to_class);
+    let full_state_query = is_full_state_query(states, dfa.states.len());
     let (blocks, block_count, iterations_run) =
-        compute_kbounded_partition(dfa, k, active_groups, &active_bytes);
+        compute_kbounded_partition(dfa, k, active_groups, &active_bytes, full_state_query);
     let _ = (block_count, iterations_run, mode);
 
     build_subset_mapping(states, &blocks)

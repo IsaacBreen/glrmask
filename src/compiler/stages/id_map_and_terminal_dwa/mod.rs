@@ -34,17 +34,65 @@ use types::{
     TerminalDwaPhaseProfile,
 };
 
+fn global_max_length_token_cap() -> Option<usize> {
+    static CAP: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("GLRMASK_GLOBAL_MAX_LENGTH_TOKEN_CAP")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|&cap| cap > 0)
+    })
+}
+
+fn use_global_max_length() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLRMASK_USE_GLOBAL_MAX_LENGTH")
+            .map(|value| {
+                let trimmed = value.trim();
+                !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+            })
+            .unwrap_or(false)
+    })
+}
+
 pub(crate) fn build_global_max_length_state_map(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     flat_trans: &Arc<[u32]>,
 ) -> ManyToOneIdMap {
     let started_at = Instant::now();
-    let tokenizer_view = TokenizerView::new_from_flat_trans(
-        flat_trans,
-        tokenizer,
-    );
-    let token_bytes: Vec<&[u8]> = vocab.entries.values().map(|bytes| bytes.as_slice()).collect();
+    let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
+
+    if !use_global_max_length() {
+        let original_to_internal: Vec<u32> = (0..states.len() as u32).collect();
+        let representative_original_ids: Vec<u32> = (0..states.len() as u32).collect();
+
+        if compile_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][global_max_length] mode=identity skipped=true states={} reps={} tokens_included=0 token_cap=none max_token_len=0 ms={:.3}",
+                states.len(),
+                representative_original_ids.len(),
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+
+        return ManyToOneIdMap::from_original_to_internal_with_representatives(
+            original_to_internal,
+            representative_original_ids.len() as u32,
+            representative_original_ids,
+        );
+    }
+
+    let tokenizer_view = TokenizerView::new_from_flat_trans(flat_trans, tokenizer);
+    let token_cap = global_max_length_token_cap();
+    let token_bytes: Vec<&[u8]> = vocab
+        .entries
+        .values()
+        .map(|bytes| bytes.as_slice())
+        .filter(|bytes| token_cap.is_none_or(|cap| bytes.len() <= cap))
+        .collect();
+    let max_token_len = token_bytes.iter().map(|bytes| bytes.len()).max().unwrap_or(0);
     let mut relevant_bytes = [false; 256];
     for bytes in &token_bytes {
         for &byte in *bytes {
@@ -52,7 +100,6 @@ pub(crate) fn build_global_max_length_state_map(
         }
     }
     let byte_to_class = compute_byte_classes(tokenizer_view.dfa());
-    let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
     let mapping = find_state_equivalence_classes_byte_restricted(
         &tokenizer_view,
         &token_bytes,
@@ -76,10 +123,14 @@ pub(crate) fn build_global_max_length_state_map(
 
     if compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][global_max_length] states={} reps={} tokens={} ms={:.3}",
+            "[glrmask/profile][global_max_length] mode=restored skipped=false states={} reps={} tokens_included={} token_cap={} max_token_len={} ms={:.3}",
             states.len(),
             representative_original_ids.len(),
             token_bytes.len(),
+            token_cap
+                .map(|cap| cap.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            max_token_len,
             started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
