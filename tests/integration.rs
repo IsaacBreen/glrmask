@@ -67,6 +67,12 @@ fn assert_rejects_token(constraint: &Constraint, prefix: &[u32], token: u32) {
     assert!(state.commit_token(token).is_err());
 }
 
+fn assert_accepts_bytes(constraint: &Constraint, bytes: &[u8]) {
+    let mut state = constraint.start();
+    state.commit_bytes(bytes).unwrap();
+    assert!(state.is_finished());
+}
+
 fn max_paths_and_stacks(constraint: &Constraint, text: &str) -> (usize, usize) {
     let mut state = constraint.start();
     let mut max_paths = state.parser_path_count(1_000_000);
@@ -173,6 +179,75 @@ fn json_schema_uri_format_accepts_basic_uri() {
     let mut state = constraint.start();
     state.commit_bytes(br#""https://example.com""#).unwrap();
     assert!(state.is_finished());
+}
+
+#[test]
+fn json_schema_pattern_accepts_decoded_quote_string() {
+    let constraint = byte_schema(r#"{"type":"string","pattern":"^\"$"}"#);
+    assert_accepts_bytes(&constraint, br#""\"""#);
+
+    let mut state = constraint.start();
+    state.commit_bytes(b"\"").unwrap();
+    assert!(state.commit_bytes(b"\"").is_err());
+}
+
+#[test]
+fn json_schema_pattern_accepts_decoded_backslash_string() {
+    let constraint = byte_schema(r#"{"type":"string","pattern":"^\\\\$"}"#);
+    assert_accepts_bytes(&constraint, br#""\\""#);
+}
+
+#[test]
+fn json_schema_pattern_accepts_decoded_newline_escape_spellings() {
+    let constraint = byte_schema(r#"{"type":"string","pattern":"^\\n$"}"#);
+    assert_accepts_bytes(&constraint, br#""\n""#);
+    assert_accepts_bytes(&constraint, br#""\u000A""#);
+}
+
+#[test]
+fn json_schema_dot_pattern_rejects_invalid_utf8_bytes() {
+    let constraint = byte_schema(r#"{"type":"string","pattern":"^.$"}"#);
+    assert_accepts_bytes(&constraint, br#""a""#);
+
+    let mut state = constraint.start();
+    state.commit_bytes(b"\"").unwrap();
+    assert!(state.commit_bytes(&[0xff]).is_err());
+}
+
+#[test]
+fn json_schema_pattern_properties_accepts_encoded_quote_key() {
+    let constraint = byte_schema(
+        r#"{"type":"object","patternProperties":{"^\"$":{"type":"integer"}},"additionalProperties":false}"#,
+    );
+    assert_accepts_bytes(&constraint, br#"{"\"": 1}"#);
+
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(br#"{"": 1}"#).is_err());
+}
+
+#[test]
+fn json_schema_pattern_properties_match_decoded_fixed_quote_key() {
+    let constraint = byte_schema(
+        r#"{
+            "type":"object",
+            "properties":{"\"":{"type":"integer"}},
+            "patternProperties":{"^\"$":{"minimum":2}},
+            "additionalProperties":false
+        }"#,
+    );
+    assert_accepts_bytes(&constraint, br#"{"\"": 2}"#);
+
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(br#"{"\"": 1}"#).is_err());
+}
+
+#[test]
+fn json_schema_const_quote_reencodes_literal() {
+    let constraint = byte_schema(r#"{"const":"\""}"#);
+    assert_accepts_bytes(&constraint, br#""\"""#);
+
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(br#""\\""#).is_err());
 }
 
 #[test]

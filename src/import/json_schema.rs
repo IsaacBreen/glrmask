@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::sync::Arc;
 
 use crate::automata::lexer::ast::Expr as LexerExpr;
 use crate::automata::lexer::compile::build_regex;
@@ -1473,6 +1474,191 @@ fn jsonify_regex_dot(pattern: &str) -> String {
         i += 1;
     }
     out
+}
+
+fn json_string_char_lexer_expr() -> LexerExpr {
+    parse_regex(JSON_STRING_CHAR_PATTERN, true)
+}
+
+fn decoded_utf8_char_lexer_expr() -> LexerExpr {
+    parse_regex(
+        &format!(r"(?:[\x00-\x7F]|{})", JSON_DIRECT_UTF8_PATTERN),
+        true,
+    )
+}
+
+fn lexer_repeat(expr: LexerExpr, min: usize, max: Option<usize>) -> LexerExpr {
+    LexerExpr::Repeat {
+        expr: Box::new(expr),
+        min,
+        max,
+    }
+}
+
+fn json_string_tail_lexer_expr(max_tail: Option<usize>) -> LexerExpr {
+    lexer_repeat(json_string_char_lexer_expr(), 0, max_tail)
+}
+
+fn decoded_string_tail_lexer_expr(max_tail: Option<usize>) -> LexerExpr {
+    lexer_repeat(decoded_utf8_char_lexer_expr(), 0, max_tail)
+}
+
+fn json_body_with_closing_quote_expr(body: LexerExpr) -> LexerExpr {
+    LexerExpr::make_seq(vec![body, LexerExpr::U8Seq(vec![b'"'])])
+}
+
+fn json_encoded_literal_byte_expr(byte: u8) -> LexerExpr {
+    let mut options = Vec::new();
+
+    if byte >= 0x80 || json_direct_ascii_bytes().contains(&byte) {
+        options.push(LexerExpr::U8Seq(vec![byte]));
+    }
+
+    if byte < 0x80 {
+        for fragment in json_escaped_byte_fragments(byte) {
+            options.push(parse_regex(&fragment, true));
+        }
+    }
+
+    LexerExpr::make_choice(options)
+}
+
+fn json_encoded_regex_expr(expr: LexerExpr) -> LexerExpr {
+    match expr {
+        LexerExpr::U8Seq(bytes) => LexerExpr::make_seq(
+            bytes
+                .into_iter()
+                .map(json_encoded_literal_byte_expr)
+                .collect(),
+        ),
+        LexerExpr::U8Class(set) => {
+            let matched: BTreeSet<u8> = set.iter().collect();
+            jsonified_char_class_fragment(&matched, false)
+                .map(|fragment| parse_regex(&fragment, true))
+                .unwrap_or_else(|| LexerExpr::Choice(vec![]))
+        }
+        LexerExpr::Intersect { expr, intersect } => LexerExpr::Intersect {
+            expr: Box::new(json_encoded_regex_expr(*expr)),
+            intersect: Box::new(json_encoded_regex_expr(*intersect)),
+        },
+        LexerExpr::Seq(parts) => LexerExpr::make_seq(
+            parts.into_iter().map(json_encoded_regex_expr).collect(),
+        ),
+        LexerExpr::Choice(options) => LexerExpr::make_choice(
+            options.into_iter().map(json_encoded_regex_expr).collect(),
+        ),
+        LexerExpr::Exclude { expr, exclude } => LexerExpr::Exclude {
+            expr: Box::new(json_encoded_regex_expr(*expr)),
+            exclude: Box::new(json_encoded_regex_expr(*exclude)),
+        },
+        LexerExpr::Repeat { expr, min, max } => LexerExpr::Repeat {
+            expr: Box::new(json_encoded_regex_expr(*expr)),
+            min,
+            max,
+        },
+        LexerExpr::Shared(inner) => LexerExpr::Shared(Arc::new(json_encoded_regex_expr((*inner).clone()))),
+        LexerExpr::Epsilon => LexerExpr::Epsilon,
+    }
+}
+
+fn decoded_regex_fullmatch_expr(pattern: &str) -> LexerExpr {
+    json_encoded_regex_expr(parse_regex(pattern, true))
+}
+
+fn decoded_regex_search_branch_expr(branch: &str, max_tail: Option<usize>) -> LexerExpr {
+    let (anchored_start, anchored_end, core) = strip_branch_outer_anchors(branch);
+    let inner = if core.is_empty() {
+        LexerExpr::Epsilon
+    } else {
+        decoded_regex_fullmatch_expr(core)
+    };
+
+    match (anchored_start, anchored_end) {
+        (true, true) => inner,
+        (true, false) => LexerExpr::make_seq(vec![inner, json_string_tail_lexer_expr(max_tail)]),
+        (false, true) => LexerExpr::make_seq(vec![json_string_tail_lexer_expr(max_tail), inner]),
+        (false, false) => match max_tail {
+            Some(n) => LexerExpr::make_choice(
+                (0..=n)
+                    .map(|left_budget| {
+                        let right_budget = n.saturating_sub(left_budget);
+                        LexerExpr::make_seq(vec![
+                            json_string_tail_lexer_expr(Some(left_budget)),
+                            inner.clone(),
+                            json_string_tail_lexer_expr(Some(right_budget)),
+                        ])
+                    })
+                    .collect(),
+            ),
+            None => LexerExpr::make_seq(vec![
+                json_string_tail_lexer_expr(None),
+                inner,
+                json_string_tail_lexer_expr(None),
+            ]),
+        },
+    }
+}
+
+fn decoded_regex_search_expr(pattern: &str, max_tail: Option<usize>) -> LexerExpr {
+    let branches = split_top_level_regex_branches(pattern);
+    LexerExpr::make_choice(
+        branches
+            .into_iter()
+            .map(|branch| decoded_regex_search_branch_expr(branch, max_tail))
+            .collect(),
+    )
+}
+
+fn decoded_search_branch_expr(branch: &str, max_tail: Option<usize>) -> LexerExpr {
+    let (anchored_start, anchored_end, core) = strip_branch_outer_anchors(branch);
+    let inner = if core.is_empty() {
+        LexerExpr::Epsilon
+    } else {
+        parse_regex(core, true)
+    };
+
+    match (anchored_start, anchored_end) {
+        (true, true) => inner,
+        (true, false) => LexerExpr::make_seq(vec![inner, decoded_string_tail_lexer_expr(max_tail)]),
+        (false, true) => LexerExpr::make_seq(vec![decoded_string_tail_lexer_expr(max_tail), inner]),
+        (false, false) => match max_tail {
+            Some(n) => LexerExpr::make_choice(
+                (0..=n)
+                    .map(|left_budget| {
+                        let right_budget = n.saturating_sub(left_budget);
+                        LexerExpr::make_seq(vec![
+                            decoded_string_tail_lexer_expr(Some(left_budget)),
+                            inner.clone(),
+                            decoded_string_tail_lexer_expr(Some(right_budget)),
+                        ])
+                    })
+                    .collect(),
+            ),
+            None => LexerExpr::make_seq(vec![
+                decoded_string_tail_lexer_expr(None),
+                inner,
+                decoded_string_tail_lexer_expr(None),
+            ]),
+        },
+    }
+}
+
+fn decoded_regex_matches_search(pattern: &str, text: &str) -> bool {
+    let expr = LexerExpr::make_choice(
+        split_top_level_regex_branches(pattern)
+            .into_iter()
+            .map(|branch| decoded_search_branch_expr(branch, None))
+            .collect(),
+    );
+    let regex = build_regex(&[expr]);
+    let mut state = 0u32;
+    for &byte in text.as_bytes() {
+        let Some(next) = regex.step(state, byte) else {
+            return false;
+        };
+        state = next;
+    }
+    regex.dfa.finalizers(state).contains(0)
 }
 
 fn env_flag(name: &str) -> bool {
@@ -6135,18 +6321,19 @@ impl<'a> SchemaCtx<'a> {
                 // Intersect with a minimum-length regex.  Use {min,} to
                 // keep the length DFA small (avoids explosion from large
                 // maxLength values).
-                let search_regex = string_value_body_regex(&json_search_pattern(&pattern));
+                let search_expr = decoded_regex_search_expr(&pattern, None);
                 let length_inner = match max_len {
                     Some(ml) if ml <= 100 => format!(r#"(?:{}){{{},{}}}"#, JSON_STRING_CHAR_PATTERN, min_len, ml),
                     _ => format!(r#"(?:{}){{{},}}"#, JSON_STRING_CHAR_PATTERN, min_len),
                 };
-                let length_regex = string_value_body_regex(&length_inner);
                 let intersected = LexerExpr::Intersect {
-                    expr: Box::new(parse_regex(&search_regex, true)),
-                    intersect: Box::new(parse_regex(&length_regex, true)),
+                    expr: Box::new(search_expr),
+                    intersect: Box::new(parse_regex(&length_inner, true)),
                 };
                 let body = self.build_lexer_expr(&intersected, "JSON_STRING_PATTERN_ANCHORED_BOUNDED");
-                return Ok(wrap_string_value_terminal(body));
+                let (terminal_body, wrap) = wrap_string_value_expr_parts(body);
+                let term = self.extract_terminal_rule(terminal_body, "JSON_STRING_PATTERN_ANCHORED_BOUNDED");
+                return Ok(wrap(term));
             }
             if min_len > 0 || max_len.is_some() {
                 // Unanchored pattern with length bounds. For reasonably small
@@ -6158,29 +6345,32 @@ impl<'a> SchemaCtx<'a> {
                 const MAX_BOUNDED_SEARCH_TAIL: usize = 100;
                 if let Some(ml) = max_len {
                     if ml <= MAX_BOUNDED_SEARCH_TAIL {
-                        let search_regex = string_value_body_regex(&json_search_pattern(&pattern));
-                        let length_regex = json_wrapped_string_length_regex(min_len, ml);
+                        let search_expr = decoded_regex_search_expr(&pattern, Some(ml));
+                        let length_inner = format!(r#"(?:{}){{{},{}}}"#, JSON_STRING_CHAR_PATTERN, min_len, ml);
                         let intersected = LexerExpr::Intersect {
-                            expr: Box::new(parse_regex(&search_regex, true)),
-                            intersect: Box::new(parse_regex(&length_regex, true)),
+                            expr: Box::new(search_expr),
+                            intersect: Box::new(parse_regex(&length_inner, true)),
                         };
                         let body = self.build_lexer_expr(&intersected, "JSON_STRING_PATTERN_BOUNDED");
-                        return Ok(wrap_string_value_terminal(body));
+                        let (terminal_body, wrap) = wrap_string_value_expr_parts(body);
+                        let term = self.extract_terminal_rule(terminal_body, "JSON_STRING_PATTERN_BOUNDED");
+                        return Ok(wrap(term));
                     }
                 }
                 // maxLength is too large for exact intersection — apply pattern
                 // with minLength enforcement only (drop maxLength to avoid
                 // DFA explosion).
                 if min_len > 0 {
-                    let search_regex = string_value_body_regex(&json_search_pattern(&pattern));
+                    let search_expr = decoded_regex_search_expr(&pattern, None);
                     let length_inner = format!(r#"(?:{}){{{},}}"#, JSON_STRING_CHAR_PATTERN, min_len);
-                    let length_regex = string_value_body_regex(&length_inner);
                     let intersected = LexerExpr::Intersect {
-                        expr: Box::new(parse_regex(&search_regex, true)),
-                        intersect: Box::new(parse_regex(&length_regex, true)),
+                        expr: Box::new(search_expr),
+                        intersect: Box::new(parse_regex(&length_inner, true)),
                     };
                     let body = self.build_lexer_expr(&intersected, "JSON_STRING_PATTERN_MINLEN");
-                    return Ok(wrap_string_value_terminal(body));
+                    let (terminal_body, wrap) = wrap_string_value_expr_parts(body);
+                    let term = self.extract_terminal_rule(terminal_body, "JSON_STRING_PATTERN_MINLEN");
+                    return Ok(wrap(term));
                 }
                 return Ok(self.build_json_wrapped_pattern(&pattern, "JSON_STRING_PATTERN"));
             } else {
@@ -7442,26 +7632,16 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn schema_pattern_matches_key(pattern: &str, key: &str) -> Result<bool, GlrMaskError> {
-        let regex = build_regex(&[parse_regex(&json_search_pattern(pattern), true)]);
-        let mut state = 0u32;
-        for &byte in key.as_bytes() {
-            let Some(next) = regex.step(state, byte) else {
-                return Ok(false);
-            };
-            state = next;
-        }
-        Ok(regex.dfa.finalizers(state).contains(0))
+        Ok(decoded_regex_matches_search(pattern, key))
     }
 
     fn scoped_key_colon_expr(property_names: Option<&Value>) -> Result<LexerExpr, GlrMaskError> {
-        let pattern = if let Some(property_names) = property_names {
-            key_colon_body_regex(
-                &json_search_pattern(Self::property_name_pattern(property_names)?),
-            )
+        let body = if let Some(property_names) = property_names {
+            decoded_regex_search_expr(Self::property_name_pattern(property_names)?, None)
         } else {
-            key_colon_body_regex(JSON_STRING_BODY_ONLY_REGEX)
+            lexer_repeat(json_string_char_lexer_expr(), 0, None)
         };
-        Ok(parse_regex(&pattern, true))
+        Ok(json_body_with_closing_quote_expr(body))
     }
 
     fn literal_key_colon_union_expr(keys: &BTreeSet<String>) -> Option<LexerExpr> {
@@ -7480,32 +7660,8 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn pattern_key_colon_body_expr(&mut self, pattern: &str, prefix: &str) -> GrammarExpr {
-        let branches = split_top_level_regex_branches(pattern);
-        let mut options = Vec::with_capacity(branches.len());
-
-        for branch in branches {
-            let (anchored_start, anchored_end, core) = strip_branch_outer_anchors(branch);
-            let inner = jsonify_regex_dot(core);
-
-            let mut parts = Vec::new();
-            if !anchored_start {
-                parts.push(GrammarExpr::Repeat(Box::new(self.json_string_char_ref())));
-            }
-
-            if core.is_empty() {
-                parts.push(empty_expr());
-            } else {
-                parts.push(regex_expr(&inner));
-            }
-
-            if !anchored_end {
-                parts.push(GrammarExpr::Repeat(Box::new(self.json_string_char_ref())));
-            }
-
-            options.push(sequence_or_single(parts));
-        }
-
-        self.extract_terminal_rule(choice_or_single(options), prefix)
+        let expr = decoded_regex_search_expr(pattern, None);
+        self.build_lexer_expr(&expr, prefix)
     }
 
     fn build_pattern_key_colon_expr(&mut self, pattern: &str, prefix: &str) -> GrammarExpr {
@@ -7516,8 +7672,8 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn build_json_wrapped_pattern(&mut self, pattern: &str, prefix: &str) -> GrammarExpr {
-        let inner = json_search_pattern(pattern);
-        let (terminal_body, wrap) = wrap_string_value_expr_parts(parsed_regex_expr(&inner, true));
+        let body = self.build_lexer_expr(&decoded_regex_search_expr(pattern, None), prefix);
+        let (terminal_body, wrap) = wrap_string_value_expr_parts(body);
         let term = self.extract_terminal_rule(terminal_body, prefix);
         wrap(term)
     }
@@ -7527,8 +7683,8 @@ impl<'a> SchemaCtx<'a> {
         pattern: &str,
         prefix: &str,
     ) -> GrammarExpr {
-        let inner = jsonify_regex_dot(pattern);
-        let (terminal_body, wrap) = wrap_string_value_expr_parts(parsed_regex_expr(&inner, true));
+        let body = self.build_lexer_expr(&decoded_regex_fullmatch_expr(pattern), prefix);
+        let (terminal_body, wrap) = wrap_string_value_expr_parts(body);
         let term = self.extract_terminal_rule(terminal_body, prefix);
         wrap(term)
     }
@@ -8019,9 +8175,10 @@ impl<'a> SchemaCtx<'a> {
                 _ => return Ok(self.json_object_ref()),
             };
             let unmatched_key_colon_body = if let Some(property_names) = property_names {
-                regex_expr(key_colon_body_regex(&json_search_pattern(
-                    Self::property_name_pattern(property_names)?,
-                )))
+                self.build_lexer_expr(
+                    &Self::scoped_key_colon_expr(Some(property_names))?,
+                    "PP_UNMATCHED_KEY_COLON_BODY",
+                )
             } else {
                 Self::json_key_colon_full_expr()
             };
