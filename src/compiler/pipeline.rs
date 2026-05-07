@@ -111,7 +111,7 @@ pub(crate) struct CompilePhaseProfile {
     pub(crate) terminal_dwa_ms: f64,
     pub(crate) templates_ms: f64,
     pub(crate) compact_ms: f64,
-    pub(crate) permute_possible_matches_ms: f64,
+    pub(crate) constraint_possible_matches_ms: f64,
     pub(crate) internal_token_bytes_ms: f64,
     pub(crate) parser_dwa_ms: f64,
     pub(crate) finalize_ms: f64,
@@ -134,7 +134,7 @@ pub(crate) fn emit_compile_profile_summary(
         .unwrap_or_default();
 
     eprintln!(
-        "[glrmask/profile][compile] source={}{} prepare_ms={:.3} tokenizer_build_ms={:.3} analyze_grammar_ms={:.3} glr_table_ms={:.3} terminal_coloring_ms={:.3} disallowed_follows_ms={:.3} analysis_wall_ms={:.3} classify_ms={:.3} id_map_ms={:.3} terminal_dwa_ms={:.3} templates_ms={:.3} compact_ms={:.3} permute_possible_matches_ms={:.3} internal_token_bytes_ms={:.3} parser_dwa_ms={:.3} finalize_ms={:.3} compile_ms={:.3} total_ms={:.3}",
+        "[glrmask/profile][compile] source={}{} prepare_ms={:.3} tokenizer_build_ms={:.3} analyze_grammar_ms={:.3} glr_table_ms={:.3} terminal_coloring_ms={:.3} disallowed_follows_ms={:.3} analysis_wall_ms={:.3} classify_ms={:.3} id_map_ms={:.3} terminal_dwa_ms={:.3} templates_ms={:.3} compact_ms={:.3} constraint_possible_matches_ms={:.3} internal_token_bytes_ms={:.3} parser_dwa_ms={:.3} finalize_ms={:.3} compile_ms={:.3} total_ms={:.3}",
         source,
         import_fragment,
         profile.prepare_ms,
@@ -149,7 +149,7 @@ pub(crate) fn emit_compile_profile_summary(
         profile.terminal_dwa_ms,
         profile.templates_ms,
         profile.compact_ms,
-        profile.permute_possible_matches_ms,
+        profile.constraint_possible_matches_ms,
         profile.internal_token_bytes_ms,
         profile.parser_dwa_ms,
         profile.finalize_ms,
@@ -405,7 +405,7 @@ fn compile_prepared_with_profile(
         let internal_token_bytes_ms = elapsed_ms(internal_token_bytes_started_at);
 
         profile.parser_dwa_ms = parser_dwa_ms;
-        profile.permute_possible_matches_ms =
+        profile.constraint_possible_matches_ms =
             cpm_profile.possible_matches_collect_ms + cpm_profile.constraint_vocab_ms + remap_parser_dwa_ms;
         profile.internal_token_bytes_ms = internal_token_bytes_ms;
 
