@@ -41,3 +41,24 @@ If duplicate vocab bytes, token ordering, or irrelevant-looking string edits are
 ## Root-Cause Standard
 
 Name the exact layer that first drops or admits the token, the invariant violated, why odd MRE details are load-bearing if relevant, and why the fix restores the invariant rather than masking the symptom.
+
+Equivalent grammar rewrites are not root causes. If a bug disappears after
+rewriting a grammar, lowering a schema differently, adding helper
+nonterminals, changing recursion direction, or otherwise producing an
+equivalent CFG, treat that as a workaround until you prove why the original
+equivalent shape failed. The investigation is not complete until it names the
+first non-equivalent artifact below the source grammar: flattened CFG,
+nullability/FIRST data, LR/GLR item set, parse table action, parser-DWA weight,
+terminal-DWA/id-map output, possible-matches, or runtime mask expansion.
+
+Before accepting a fix for a parser/mask mismatch:
+
+- Preserve or add a regression that fails on the original bad shape, preferably
+  with minimized grammar, vocab, prefix, and token.
+- Compare the bad shape and the proposed fixed shape at the first downstream
+  artifact where they diverge.
+- Explain why the proposed fix restores the violated invariant. Do not report
+  success merely because a language-equivalent rewrite makes the symptom pass.
+- If the fix intentionally normalizes away a problematic equivalent shape,
+  state the remaining footgun explicitly and either fix the lower layer or add
+  coverage that prevents the bad shape from re-entering through public inputs.
