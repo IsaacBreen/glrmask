@@ -281,6 +281,11 @@ pub(crate) fn inline_single_use_nonterminals(
             break;
         }
 
+        remove_cyclic_inline_candidates(&mut inline_candidates);
+        if inline_candidates.is_empty() {
+            break;
+        }
+
         // Transitively expand candidate RHS: if a candidate's RHS references
         // another candidate, substitute it. Iterate until stable.
         let inline_candidate_ids: BTreeSet<NonterminalID> =
@@ -355,6 +360,52 @@ pub(crate) fn inline_single_use_nonterminals(
         }
 
         *rules = rewritten;
+    }
+}
+
+fn remove_cyclic_inline_candidates(
+    inline_candidates: &mut BTreeMap<NonterminalID, (usize, Vec<Symbol>)>,
+) {
+    fn reaches_start(
+        start: NonterminalID,
+        current: NonterminalID,
+        deps: &BTreeMap<NonterminalID, BTreeSet<NonterminalID>>,
+        seen: &mut BTreeSet<NonterminalID>,
+    ) -> bool {
+        if !seen.insert(current) {
+            return false;
+        }
+        deps.get(&current).is_some_and(|nexts| {
+            nexts
+                .iter()
+                .any(|&next| next == start || reaches_start(start, next, deps, seen))
+        })
+    }
+
+    let inline_candidate_ids: BTreeSet<NonterminalID> =
+        inline_candidates.keys().copied().collect();
+    let deps: BTreeMap<NonterminalID, BTreeSet<NonterminalID>> = inline_candidates
+        .iter()
+        .map(|(&nt, (_, rhs))| {
+            let rhs_deps = rhs
+                .iter()
+                .filter_map(|symbol| match symbol {
+                    Symbol::Nonterminal(id) if inline_candidate_ids.contains(id) => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            (nt, rhs_deps)
+        })
+        .collect();
+
+    let cyclic: Vec<NonterminalID> = inline_candidate_ids
+        .iter()
+        .copied()
+        .filter(|&nt| reaches_start(nt, nt, &deps, &mut BTreeSet::new()))
+        .collect();
+
+    for nt in cyclic {
+        inline_candidates.remove(&nt);
     }
 }
 
@@ -634,3 +685,81 @@ fn prepare_grammar_transforms_impl(
     compact_unused_terminals(normalized);
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nt(id: NonterminalID) -> Symbol {
+        Symbol::Nonterminal(id)
+    }
+
+    fn t(id: TerminalID) -> Symbol {
+        Symbol::Terminal(id)
+    }
+
+    #[test]
+    fn inline_single_use_nonterminals_skips_candidate_cycles() {
+        let mut rules = vec![
+            Rule {
+                lhs: 0,
+                rhs: vec![nt(1), t(0)],
+            },
+            Rule {
+                lhs: 1,
+                rhs: vec![nt(2)],
+            },
+            Rule {
+                lhs: 2,
+                rhs: vec![nt(1)],
+            },
+        ];
+
+        inline_single_use_nonterminals(&mut rules, &BTreeSet::new());
+
+        assert_eq!(
+            rules,
+            vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![nt(1), t(0)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![nt(2)],
+                },
+                Rule {
+                    lhs: 2,
+                    rhs: vec![nt(1)],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn inline_single_use_nonterminals_still_expands_acyclic_chains() {
+        let mut rules = vec![
+            Rule {
+                lhs: 0,
+                rhs: vec![nt(1), t(2)],
+            },
+            Rule {
+                lhs: 1,
+                rhs: vec![nt(2)],
+            },
+            Rule {
+                lhs: 2,
+                rhs: vec![t(0), t(1)],
+            },
+        ];
+
+        inline_single_use_nonterminals(&mut rules, &BTreeSet::new());
+
+        assert_eq!(
+            rules,
+            vec![Rule {
+                lhs: 0,
+                rhs: vec![t(0), t(1), t(2)],
+            }]
+        );
+    }
+}
