@@ -1731,7 +1731,7 @@ fn simple_uri_format_enabled() -> bool {
 }
 
 fn restored_structured_uri_enabled() -> bool {
-    env_flag_default("GLRMASK_RESTORED_STRUCTURED_URI", false)
+    env_flag_default("GLRMASK_RESTORED_STRUCTURED_URI", true)
 }
 
 fn uri_rule_should_be_terminal(name: &str) -> Option<bool> {
@@ -2603,10 +2603,11 @@ struct SchemaCtx<'a> {
 }
 
 fn rule_name_is_terminal(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+    uri_rule_should_be_terminal(name).unwrap_or(false)
+        || (!name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()))
 }
 
 fn rule_name_force_visible_terminal(name: &str) -> bool {
@@ -6255,7 +6256,10 @@ impl<'a> SchemaCtx<'a> {
         );
         let uri_reg_name_char_terminal = self.insert_named_terminal_rule(
             "URI_REG_NAME_CHAR",
-            regex_expr(&uri_charclass_run_regex(r"a-zA-Z0-9\-._~!$&'()*+,;=", run_chunk_max)),
+            regex_expr(&uri_charclass_run_regex(
+                r"a-zA-Z0-9\-._~!$&'()*+,;=",
+                run_chunk_max,
+            )),
         );
         let uri_port_digit = self.insert_named_terminal_rule(
             "URI_PORT",
@@ -6263,11 +6267,41 @@ impl<'a> SchemaCtx<'a> {
         );
         let uri_pchar_base_terminal = self.insert_named_terminal_rule(
             "URI_PCHAR",
-            regex_expr(&uri_charclass_run_regex(r"a-zA-Z0-9\-._~!$&'()*+,;=:@", run_chunk_max)),
+            regex_expr(&uri_charclass_run_regex(
+                r"a-zA-Z0-9\-._~!$&'()*+,;=:@",
+                run_chunk_max,
+            )),
         );
         let uri_query_frag_char_terminal = self.insert_named_terminal_rule(
             "URI_QUERY_FRAG_CHAR",
-            regex_expr(&uri_charclass_run_regex(r"a-zA-Z0-9\-._~!$&'()*+,;=:@/?", run_chunk_max)),
+            regex_expr(&uri_charclass_run_regex(
+                r"a-zA-Z0-9\-._~!$&'()*+,;=:@/?",
+                run_chunk_max,
+            )),
+        );
+        let uri_scheme_terminal = self.insert_named_terminal_rule(
+            "URI_SCHEME",
+            regex_expr(r"(?:[a-zA-Z][a-zA-Z0-9+\-.]*)"),
+        );
+        let uri_reg_name_terminal = self.insert_named_terminal_rule(
+            "URI_REG_NAME",
+            regex_expr(r"(?:[a-zA-Z0-9\-._~!$&'()*+,;=]|%[0-9A-Fa-f]{2})*"),
+        );
+        let uri_port_terminal = self.insert_named_terminal_rule(
+            "URI_PORT_WITH_COLON",
+            regex_expr(r"(?::[0-9]*)"),
+        );
+        let uri_pchar_sequence_terminal = self.insert_named_terminal_rule(
+            "URI_PCHAR_SEQUENCE",
+            regex_expr(r"(?:[a-zA-Z0-9\-._~!$&'()*+,;=:@]|%[0-9A-Fa-f]{2})*"),
+        );
+        let uri_pchar_sequence_nonempty_terminal = self.insert_named_terminal_rule(
+            "URI_PCHAR_SEQUENCE_NONEMPTY",
+            regex_expr(r"(?:[a-zA-Z0-9\-._~!$&'()*+,;=:@]|%[0-9A-Fa-f]{2})+"),
+        );
+        let uri_query_frag_sequence_terminal = self.insert_named_terminal_rule(
+            "URI_QUERY_FRAG_SEQUENCE",
+            regex_expr(r"(?:[a-zA-Z0-9\-._~!$&'()*+,;=:@/?]|%[0-9A-Fa-f]{2})*"),
         );
         let uri_pchar_base = self.insert_uri_rule("uri_pchar_char", uri_pchar_base_terminal.clone());
         let uri_query_frag_char =
@@ -6449,25 +6483,19 @@ impl<'a> SchemaCtx<'a> {
             if ablated("scheme_rich") {
                 uri_alpha.clone()
             } else {
-                sequence_or_single(vec![
-                    uri_alpha.clone(),
-                    GrammarExpr::Repeat(Box::new(uri_scheme_char.clone())),
-                ])
+                uri_scheme_terminal.clone()
             },
         );
         let uri_query = self.insert_uri_rule(
             "uri_query",
             sequence_or_single(vec![
                 literal_expr(b"?"),
-                GrammarExpr::Repeat(Box::new(uri_query_frag.clone())),
+                uri_query_frag_sequence_terminal.clone(),
             ]),
         );
         let uri_fragment = self.insert_uri_rule(
             "uri_fragment",
-            sequence_or_single(vec![
-                literal_expr(b"#"),
-                GrammarExpr::Repeat(Box::new(uri_query_frag.clone())),
-            ]),
+            sequence_or_single(vec![literal_expr(b"#"), uri_query_frag_sequence_terminal.clone()]),
         );
 
         self.insert_rule(
@@ -6497,10 +6525,7 @@ impl<'a> SchemaCtx<'a> {
 
         self.insert_rule(
             "uri_reg_name",
-            GrammarExpr::Repeat(Box::new(choice_or_single(vec![
-                uri_reg_name_char.clone(),
-                uri_pct_encoded.clone(),
-            ]))),
+            uri_reg_name_terminal,
         );
         let uri_reg_name = GrammarExpr::Ref("uri_reg_name".into());
 
@@ -6541,10 +6566,7 @@ impl<'a> SchemaCtx<'a> {
 
         self.insert_rule(
             "uri_port",
-            sequence_or_single(vec![
-                literal_expr(b":"),
-                GrammarExpr::Repeat(Box::new(uri_port_digit.clone())),
-            ]),
+            uri_port_terminal,
         );
         let uri_port = GrammarExpr::Ref("uri_port".into());
 
@@ -6570,7 +6592,7 @@ impl<'a> SchemaCtx<'a> {
             "uri_path_abempty",
             GrammarExpr::Repeat(Box::new(sequence_or_single(vec![
                 literal_expr(b"/"),
-                GrammarExpr::Repeat(Box::new(uri_pchar.clone())),
+                uri_pchar_sequence_terminal.clone(),
             ]))),
         );
         let uri_path_abempty = GrammarExpr::Ref("uri_path_abempty".into());
@@ -6580,10 +6602,10 @@ impl<'a> SchemaCtx<'a> {
             sequence_or_single(vec![
                 literal_expr(b"/"),
                 GrammarExpr::Optional(Box::new(sequence_or_single(vec![
-                    GrammarExpr::RepeatOne(Box::new(uri_pchar.clone())),
+                    uri_pchar_sequence_nonempty_terminal.clone(),
                     GrammarExpr::Repeat(Box::new(sequence_or_single(vec![
                         literal_expr(b"/"),
-                        GrammarExpr::Repeat(Box::new(uri_pchar.clone())),
+                        uri_pchar_sequence_terminal.clone(),
                     ]))),
                 ]))),
             ]),
@@ -6593,10 +6615,10 @@ impl<'a> SchemaCtx<'a> {
         self.insert_rule(
             "uri_path_rootless",
             sequence_or_single(vec![
-                GrammarExpr::RepeatOne(Box::new(uri_pchar.clone())),
+                uri_pchar_sequence_nonempty_terminal,
                 GrammarExpr::Repeat(Box::new(sequence_or_single(vec![
                     literal_expr(b"/"),
-                    GrammarExpr::Repeat(Box::new(uri_pchar.clone())),
+                    uri_pchar_sequence_terminal,
                 ]))),
             ]),
         );
@@ -8972,4 +8994,3 @@ fn sanitize_rule_name(s: &str) -> String {
         .collect();
     if sanitized.is_empty() { "rule".into() } else { sanitized }
 }
-
