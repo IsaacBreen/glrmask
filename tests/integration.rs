@@ -180,23 +180,20 @@ fn nullable_repeat_alternative_accepts_nonempty_branch_before_nullable_suffix() 
     let grammar = r#"
         start s;
 
-        nt s ::= "\"" host "b"* "\"";
-        nt host ::= "1" | "a"*;
+        nt s ::= "a" host "c"* "a";
+        nt host ::= "d" | "b"*;
     "#;
 
-    let tiny_vocab = vocab(&["\"", "a"]);
+    let tiny_vocab = vocab(&["a", "b"]);
     let constraint = Constraint::from_glrm_grammar(grammar, &tiny_vocab).unwrap();
 
     let mut empty_host = constraint.start();
-    empty_host.commit_token(0).unwrap();
-    empty_host.commit_token(0).unwrap();
+    empty_host.commit_bytes(b"aa").unwrap();
     assert!(empty_host.is_finished());
 
-    let mut single_alpha_host = constraint.start();
-    single_alpha_host.commit_token(0).unwrap();
-    single_alpha_host.commit_token(1).unwrap();
-    single_alpha_host.commit_token(0).unwrap();
-    assert!(single_alpha_host.is_finished());
+    let mut single_repeat_host = constraint.start();
+    single_repeat_host.commit_bytes(b"aba").unwrap();
+    assert!(single_repeat_host.is_finished());
 }
 
 #[test]
