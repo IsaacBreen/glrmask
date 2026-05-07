@@ -807,26 +807,41 @@ fn get_or_create_non_nullable_nt(
     let Some(alts) = by_lhs.get(&nt) else {
         return nt;
     };
-    let kept: Vec<Vec<Symbol>> = alts
-        .iter()
-        .filter(|alt| {
-            !alt.is_empty()
-                && alt.iter().any(|symbol| match symbol {
-                    Symbol::Terminal(_) => true,
-                    Symbol::Nonterminal(inner) => !nullable.contains(inner),
-                })
-        })
-        .cloned()
-        .collect();
-
-    if kept.is_empty() {
-        return nt;
-    }
-
     let nn_nt = fresh_nt();
     nn_cache.insert(nt, nn_nt);
-    for rhs in kept {
-        new_rules.push(Rule { lhs: nn_nt, rhs });
+    let mut emitted = false;
+    for rhs in alts {
+        if rhs.is_empty() {
+            continue;
+        }
+        if rhs.iter().any(|symbol| match symbol {
+            Symbol::Terminal(_) => true,
+            Symbol::Nonterminal(inner) => !nullable.contains(inner),
+        }) {
+            new_rules.push(Rule { lhs: nn_nt, rhs: rhs.clone() });
+            emitted = true;
+            continue;
+        }
+
+        let rhs_nn = build_non_nullable_tree(
+            rhs,
+            2,
+            fresh_nt,
+            new_rules,
+            nullable,
+            by_lhs,
+            nn_cache,
+        );
+        new_rules.push(Rule {
+            lhs: nn_nt,
+            rhs: vec![Symbol::Nonterminal(rhs_nn)],
+        });
+        emitted = true;
+    }
+
+    if !emitted {
+        nn_cache.remove(&nt);
+        return nt;
     }
     nn_nt
 }
@@ -1814,4 +1829,3 @@ mod tests {
         assert!(grammar.check_table_build_normal_form().is_ok());
     }
 }
-
