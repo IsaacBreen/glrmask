@@ -1,7 +1,47 @@
 //! End-to-end smoke tests for grammar/schema construction, masks, commits, and
 //! serialization. Narrow regressions live in dedicated test files.
 
+use std::{env, ffi::OsString, sync::Mutex};
+
 use glrmask::{Constraint, ConstraintState, Vocab};
+
+static URI_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct EnvVarGuard {
+    key: &'static str,
+    original: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    fn unset(key: &'static str) -> Self {
+        let original = env::var_os(key);
+        unsafe {
+            env::remove_var(key);
+        }
+        Self { key, original }
+    }
+
+    fn set(key: &'static str, value: &str) -> Self {
+        let original = env::var_os(key);
+        unsafe {
+            env::set_var(key, value);
+        }
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(value) => unsafe {
+                env::set_var(self.key, value);
+            },
+            None => unsafe {
+                env::remove_var(self.key);
+            },
+        }
+    }
+}
 
 fn vocab(entries: &[&str]) -> Vocab {
     Vocab::new(
@@ -175,10 +215,59 @@ fn json_schema_rejects_invalid_utf8_in_string() {
 
 #[test]
 fn json_schema_uri_format_accepts_basic_uri() {
+    let _lock = URI_ENV_LOCK.lock().unwrap();
+    let _unset = EnvVarGuard::unset("GLRMASK_STRICT_URI_FORMAT");
+
     let constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
     let mut state = constraint.start();
     state.commit_bytes(br#""https://example.com""#).unwrap();
     assert!(state.is_finished());
+}
+
+#[test]
+fn json_schema_uri_format_strict_accepts_basic_uri() {
+    let _lock = URI_ENV_LOCK.lock().unwrap();
+    let _strict = EnvVarGuard::set("GLRMASK_STRICT_URI_FORMAT", "1");
+
+    let constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
+    let mut state = constraint.start();
+    state.commit_bytes(br#""https://example.com""#).unwrap();
+    assert!(state.is_finished());
+}
+
+#[test]
+fn json_schema_uri_format_default_approximates_bracketed_host() {
+    let _lock = URI_ENV_LOCK.lock().unwrap();
+    let _unset = EnvVarGuard::unset("GLRMASK_STRICT_URI_FORMAT");
+
+    let default_constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
+    assert_accepts_bytes(&default_constraint, br#""http://[not::strict::]/path""#);
+
+    drop(_unset);
+    let _strict = EnvVarGuard::set("GLRMASK_STRICT_URI_FORMAT", "1");
+
+    let strict_constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
+    let mut state = strict_constraint.start();
+    assert!(state.commit_bytes(br#""http://[not::strict::]/path""#).is_err());
+}
+
+#[test]
+fn json_schema_uri_format_default_accepts_non_uri_string() {
+    let _lock = URI_ENV_LOCK.lock().unwrap();
+    let _unset = EnvVarGuard::unset("GLRMASK_STRICT_URI_FORMAT");
+
+    let constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
+    assert_accepts_bytes(&constraint, br#""not a uri""#);
+}
+
+#[test]
+fn json_schema_uri_format_strict_rejects_missing_scheme() {
+    let _lock = URI_ENV_LOCK.lock().unwrap();
+    let _strict = EnvVarGuard::set("GLRMASK_STRICT_URI_FORMAT", "1");
+
+    let constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(br#""not a uri""#).is_err());
 }
 
 #[test]
