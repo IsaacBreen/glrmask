@@ -11,6 +11,10 @@ type SV<T> = DynStackVec<T>;
 
 pub trait Merge: Clone {
     fn merge(&self, other: &Self) -> Self;
+
+    fn subsumes(&self, _other: &Self) -> bool {
+        false
+    }
 }
 
 /// A map optimized for small sizes (≤4 entries). Uses inline SmallVec storage
@@ -1062,6 +1066,7 @@ fn merge_lower<T: Clone + Eq + Hash>(l1: &Arc<Lower<T>>, l2: &Arc<Lower<T>>) -> 
     if Arc::ptr_eq(l1, l2) {
         return l1.clone();
     }
+
     let new_empty = l1.empty() || l2.empty();
     let merged_children = match (&**l1, &**l2) {
         (Lower::Segment(s1), Lower::Segment(s2)) => {
@@ -1070,6 +1075,7 @@ fn merge_lower<T: Clone + Eq + Hash>(l1: &Arc<Lower<T>>, l2: &Arc<Lower<T>>) -> 
             if Arc::ptr_eq(&s1.next, &s2.next) && s1.values == s2.values {
                 return l1.clone();
             }
+
             let v1 = l1.segment_top_value();
             let v2 = l2.segment_top_value();
             let r1 = l1.segment_rest_arc();
@@ -1153,6 +1159,58 @@ where
     })
 }
 
+fn nonempty_deterministic_top_step<T>(lower: &Arc<Lower<T>>) -> Option<(T, Arc<Lower<T>>)> 
+where
+    T: Clone + Eq + Hash,
+{
+    match &**lower {
+        Lower::Segment(seg) => {
+            let value = seg.values.last()?.clone();
+            Some((value, lower.segment_rest_arc()))
+        }
+        Lower::General { children, empty, .. } if !*empty && children.len() == 1 => {
+            let (value, kids) = children.iter().next()?;
+            if kids.len() != 1 {
+                return None;
+            }
+            let child = kids.values().next()?.clone();
+            Some((value.clone(), child))
+        }
+        _ => None,
+    }
+}
+
+fn shared_nonempty_deterministic_prefix<T>(
+    left: &Arc<Lower<T>>,
+    right: &Arc<Lower<T>>,
+) -> (SmallVec<[T; 8]>, Arc<Lower<T>>, Arc<Lower<T>>)
+where
+    T: Clone + Eq + Hash,
+{
+    let mut prefix = SmallVec::<[T; 8]>::new();
+    let mut left_rest = left.clone();
+    let mut right_rest = right.clone();
+
+    loop {
+        let Some((left_value, next_left)) = nonempty_deterministic_top_step(&left_rest) else {
+            break;
+        };
+        let Some((right_value, next_right)) = nonempty_deterministic_top_step(&right_rest) else {
+            break;
+        };
+
+        if left_value != right_value {
+            break;
+        }
+
+        prefix.push(left_value);
+        left_rest = next_left;
+        right_rest = next_right;
+    }
+
+    (prefix, left_rest, right_rest)
+}
+
 fn merge_upperbranches<T, A>(
     a: &Arc<UpperBranch<T, A>>,
     b: &Arc<UpperBranch<T, A>>,
@@ -1179,14 +1237,45 @@ where
     T: Clone + Eq + Hash,
     A: Merge + Clone + Eq + Hash,
 {
-    if a.acc == b.acc || Arc::ptr_eq(&a.inner, &b.inner) {
+    let acc_equal = a.acc == b.acc;
+    let inner_ptr_eq = Arc::ptr_eq(&a.inner, &b.inner);
+    if inner_ptr_eq {
+        if b.acc.subsumes(&a.acc) {
+            return Arc::new(Upper::Interface(b.clone()));
+        }
+        if a.acc.subsumes(&b.acc) {
+            return Arc::new(Upper::Interface(a.clone()));
+        }
+        return new_interface(a.inner.clone(), a.acc.merge(&b.acc));
+    }
+    if acc_equal {
         let merged_lower = merge_lower(&a.inner, &b.inner);
         let new_acc = a.acc.merge(&b.acc);
         new_interface(merged_lower, new_acc)
     } else {
-        let ub1 = interface_to_upperbranch(a);
-        let ub2 = interface_to_upperbranch(b);
-        merge_upperbranches(&ub1, &ub2)
+        let (shared_prefix, left_rest, right_rest) =
+            shared_nonempty_deterministic_prefix(&a.inner, &b.inner);
+        if !shared_prefix.is_empty() {
+            let left_remainder = Arc::new(Interface {
+                inner: left_rest,
+                acc: a.acc.clone(),
+            });
+            let right_remainder = Arc::new(Interface {
+                inner: right_rest,
+                acc: b.acc.clone(),
+            });
+
+            let mut merged = merge_interfaces(&left_remainder, &right_remainder);
+            for value in shared_prefix.into_iter().rev() {
+                let children = CompactMap::unit(value, CompactOrdMap::unit(merged.max_depth(), merged));
+                merged = try_promote(&new_branch(children, None));
+            }
+            merged
+        } else {
+            let ub1 = interface_to_upperbranch(a);
+            let ub2 = interface_to_upperbranch(b);
+            merge_upperbranches(&ub1, &ub2)
+        }
     }
 }
 

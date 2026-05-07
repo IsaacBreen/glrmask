@@ -16,6 +16,24 @@ impl TerminalsDisallowed {
         TerminalsDisallowed(Arc::new(BTreeMap::new()))
     }
 
+    pub fn is_subset_of(&self, other: &Self) -> bool {
+        if Arc::ptr_eq(&self.0, &other.0) {
+            return true;
+        }
+        if self.0.len() > other.0.len() {
+            return false;
+        }
+        for (state, terminals) in self.0.iter() {
+            let Some(other_terminals) = other.0.get(state) else {
+                return false;
+            };
+            if !terminals.is_subset(other_terminals) {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Return a new TerminalsDisallowed with an additional entry inserted.
     pub fn with_insert(&self, state: u32, terminal: u32) -> Self {
         let mut inner = (*self.0).clone();
@@ -51,13 +69,29 @@ impl Merge for TerminalsDisallowed {
         if Arc::ptr_eq(&self.0, &other.0) {
             return self.clone();
         }
-        let mut merged = (*self.0).clone();
-        for (state, terminals) in other.0.iter() {
+        if self.is_subset_of(other) {
+            return other.clone();
+        }
+        if other.is_subset_of(self) {
+            return self.clone();
+        }
+
+        let (base, extra) = if self.0.len() >= other.0.len() {
+            (&self.0, &other.0)
+        } else {
+            (&other.0, &self.0)
+        };
+        let mut merged = (**base).clone();
+        for (state, terminals) in extra.iter() {
             merged
                 .entry(*state)
                 .or_default()
                 .extend(terminals.iter().copied());
         }
         TerminalsDisallowed(Arc::new(merged))
+    }
+
+    fn subsumes(&self, other: &Self) -> bool {
+        other.is_subset_of(self)
     }
 }

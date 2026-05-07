@@ -2,16 +2,461 @@ use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::labels::{encode_positive_label, DEFAULT_LABEL};
 use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use crate::ds::weight::Weight;
+use crate::runtime::constraint::{DeltaReplayProfileStats, DenseToBufProfileStats};
 use crate::runtime::state::{ConstraintState, MaskCacheData};
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 type DenseTokenMaskCache = FxHashMap<usize, Box<[u64]>>;
 type DenseMaskGSS = LeveledGSS<u32, DenseMaskAcc>;
-type MaskQueue = BTreeMap<u32, FxHashMap<u32, DenseMaskGSS>>;
+
+const DELTA_SEED_MIN_SAVINGS: u64 = 2048;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MaskQueueMode {
+    Target,
+    Depth,
+}
+
+fn mask_queue_mode() -> MaskQueueMode {
+    static MODE: OnceLock<MaskQueueMode> = OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("GLRMASK_MASK_QUEUE_MODE") {
+        Ok(value) if value.trim().eq_ignore_ascii_case("target") => MaskQueueMode::Target,
+        _ => MaskQueueMode::Depth,
+    })
+}
+
+fn bool_env(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
+fn mask_queue_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| bool_env("GLRMASK_DEBUG_MASK_QUEUE"))
+}
+
+fn mask_inner_profile_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| bool_env("GLRMASK_PROFILE_MASK_INNER"))
+}
+
+fn mask_delta_profile_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| bool_env("GLRMASK_PROFILE_MASK_DELTA"))
+}
+
+fn mask_queue_merge_profile_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| bool_env("GLRMASK_PROFILE_MASK_QUEUE_MERGE"))
+}
+
+fn mask_acc_merge_profile_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| bool_env("GLRMASK_PROFILE_MASK_ACC_MERGE"))
+}
+
+
+fn emit_line_with_optional_file(line: &str, file_env_var: &str) {
+    println!("{line}");
+
+    let Ok(path) = std::env::var(file_env_var) else {
+        return;
+    };
+
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let _ = writeln!(file, "{line}");
+}
+
+fn emit_mask_queue_debug_line(line: &str) {
+    emit_line_with_optional_file(line, "GLRMASK_DEBUG_MASK_QUEUE_FILE");
+}
+
+fn emit_mask_inner_profile_line(line: &str) {
+    emit_line_with_optional_file(line, "GLRMASK_PROFILE_MASK_INNER_FILE");
+}
+
+fn emit_mask_queue_merge_profile_line(line: &str) {
+    emit_line_with_optional_file(line, "GLRMASK_PROFILE_MASK_QUEUE_MERGE_FILE");
+}
+
+fn emit_mask_acc_merge_profile_line(line: &str) {
+    emit_line_with_optional_file(line, "GLRMASK_PROFILE_MASK_ACC_MERGE_FILE");
+}
+
+fn elapsed_ns(start: Instant) -> u64 {
+    start.elapsed().as_nanos() as u64
+}
+
+#[derive(Default)]
+struct MaskQueueDebugStats {
+    enqueue_calls: u64,
+    merge_hit_count: u64,
+    insert_without_merge_count: u64,
+    fuse_calls: u64,
+    fuse_changed_depth: u64,
+    stale_schedule_skips: u64,
+    popped_items: u64,
+    seed_decompose_callbacks: u64,
+    loop_decompose_callbacks: u64,
+    parser_dwa_transitions_enqueued: u64,
+    enqueue_total_ns: u64,
+    pop_total_ns: u64,
+    fuse_total_ns: u64,
+    lookup_total_ns: u64,
+    merge_total_ns: u64,
+    insert_total_ns: u64,
+}
+
+#[derive(Default)]
+struct MaskInnerProfileStats {
+    total_ns: u64,
+    seed_decompose_ns: u64,
+    queue_pop_ns: u64,
+    loop_decompose_total_ns: u64,
+    loop_decompose_callback_ns: u64,
+    transition_lookup_ns: u64,
+    transition_apply_ns: u64,
+    transition_apply_intersect_ns: u64,
+    transition_apply_gss_ns: u64,
+    token_accumulation_ns: u64,
+    finalize_ns: u64,
+    finalize_zero_ns: u64,
+    finalize_dense_to_buf_ns: u64,
+    finalize_eos_ns: u64,
+    finalize_cache_ns: u64,
+    delta_prev_available: u64,
+    delta_added_bits: u64,
+    delta_removed_bits: u64,
+    delta_unchanged_words: u64,
+    delta_unchanged_bits: u64,
+    delta_added_cost: u64,
+    delta_removed_cost: u64,
+    delta_copy_cost_words: u64,
+    delta_scratch_estimated_cost: u64,
+    delta_estimated_cost: u64,
+    delta_estimated_savings: u64,
+    delta_used_seed: u64,
+    delta_replay: DeltaReplayProfileStats,
+    finalize_equal_dense_copy_seed: u64,
+    finalize_delta_replay: u64,
+    finalize_scratch_rebuild: u64,
+    dense_to_buf: DenseToBufProfileStats,
+}
+
+
+enum MaskQueueInner {
+    Target {
+        by_target: FxHashMap<u32, DenseMaskGSS>,
+        ready_by_depth: BTreeMap<u32, SmallVec<[u32; 4]>>,
+    },
+    Depth {
+        by_depth: BTreeMap<u32, FxHashMap<u32, SmallVec<[DenseMaskGSS; 2]>>>,
+    },
+}
+
+struct MaskQueue {
+    inner: MaskQueueInner,
+    debug: MaskQueueDebugStats,
+}
+
+impl Default for MaskQueue {
+    fn default() -> Self {
+        let inner = match mask_queue_mode() {
+            MaskQueueMode::Target => MaskQueueInner::Target {
+                by_target: FxHashMap::default(),
+                ready_by_depth: BTreeMap::new(),
+            },
+            MaskQueueMode::Depth => MaskQueueInner::Depth {
+                by_depth: BTreeMap::new(),
+            },
+        };
+
+        Self {
+            inner,
+            debug: MaskQueueDebugStats::default(),
+        }
+    }
+}
+
+impl MaskQueue {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn enqueue(&mut self, target: u32, gss: DenseMaskGSS) {
+        if gss.is_empty() {
+            return;
+        }
+
+        let inner_profile_enabled = mask_inner_profile_enabled();
+        let merge_profile_enabled = mask_queue_merge_profile_enabled();
+        let enqueue_start = if inner_profile_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        self.debug.enqueue_calls += 1;
+
+        match &mut self.inner {
+            MaskQueueInner::Target {
+                by_target,
+                ready_by_depth,
+            } => {
+                let lookup_start = if inner_profile_enabled {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
+                let existing = by_target.remove(&target);
+                if let Some(start) = lookup_start {
+                    self.debug.lookup_total_ns += elapsed_ns(start);
+                }
+
+                let merged = match existing {
+                    Some(existing) => {
+                        self.debug.merge_hit_count += 1;
+                        let existing_depth = existing.max_depth();
+                        let incoming_depth = gss.max_depth();
+                        let merge_start = if inner_profile_enabled || merge_profile_enabled {
+                            Some(Instant::now())
+                        } else {
+                            None
+                        };
+                        let merged = existing.merge(&gss);
+                        let merge_ns = merge_start.map(elapsed_ns).unwrap_or(0);
+                        if inner_profile_enabled {
+                            self.debug.merge_total_ns += merge_ns;
+                        }
+                        let before_depth = merged.max_depth();
+                        self.debug.fuse_calls += 1;
+                        let fuse_start = if inner_profile_enabled {
+                            Some(Instant::now())
+                        } else {
+                            None
+                        };
+                        let fused = merged.fuse(Some(1));
+                        if let Some(start) = fuse_start {
+                            self.debug.fuse_total_ns += elapsed_ns(start);
+                        }
+                        if fused.max_depth() != before_depth {
+                            self.debug.fuse_changed_depth += 1;
+                        }
+                        if merge_profile_enabled {
+                            let existing_summary = existing.summary();
+                            let incoming_summary = gss.summary();
+                            let line = format!(
+                                "[glrmask/debug][mask_queue_merge] mode=Target target={} existing_depth={} incoming_depth={} merged_depth={} merge_ns={} existing_top_values={} incoming_top_values={} existing_nodes={} incoming_nodes={} existing_edges={} incoming_edges={} existing_accs={} incoming_accs={}",
+                                target,
+                                existing_depth,
+                                incoming_depth,
+                                fused.max_depth(),
+                                merge_ns,
+                                existing_summary.top_values_count,
+                                incoming_summary.top_values_count,
+                                existing_summary.total_unique_nodes,
+                                incoming_summary.total_unique_nodes,
+                                existing_summary.total_edges,
+                                incoming_summary.total_edges,
+                                existing_summary.accumulator_instances,
+                                incoming_summary.accumulator_instances,
+                            );
+                            emit_mask_queue_merge_profile_line(&line);
+                        }
+                        fused
+                    }
+                    None => {
+                        self.debug.insert_without_merge_count += 1;
+                        gss
+                    }
+                };
+
+                let depth = merged.max_depth();
+                let insert_start = if inner_profile_enabled {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
+                by_target.insert(target, merged);
+                ready_by_depth.entry(depth).or_default().push(target);
+                if let Some(start) = insert_start {
+                    self.debug.insert_total_ns += elapsed_ns(start);
+                }
+            }
+            MaskQueueInner::Depth { by_depth } => {
+                let depth = gss.max_depth();
+                let lookup_start = if inner_profile_enabled {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
+                let existing: Option<DenseMaskGSS> = None;
+                if let Some(start) = lookup_start {
+                    self.debug.lookup_total_ns += elapsed_ns(start);
+                }
+
+                let merged = match existing {
+                    Some(existing) => {
+                        self.debug.merge_hit_count += 1;
+                        let existing_depth = existing.max_depth();
+                        let incoming_depth = gss.max_depth();
+                        let merge_start = if inner_profile_enabled || merge_profile_enabled {
+                            Some(Instant::now())
+                        } else {
+                            None
+                        };
+                        let merged = existing.merge(&gss);
+                        let merge_ns = merge_start.map(elapsed_ns).unwrap_or(0);
+                        if inner_profile_enabled {
+                            self.debug.merge_total_ns += merge_ns;
+                        }
+                        if merge_profile_enabled {
+                            let existing_summary = existing.summary();
+                            let incoming_summary = gss.summary();
+                            let line = format!(
+                                "[glrmask/debug][mask_queue_merge] mode=Depth target={} existing_depth={} incoming_depth={} merged_depth={} merge_ns={} existing_top_values={} incoming_top_values={} existing_nodes={} incoming_nodes={} existing_edges={} incoming_edges={} existing_accs={} incoming_accs={}",
+                                target,
+                                existing_depth,
+                                incoming_depth,
+                                merged.max_depth(),
+                                merge_ns,
+                                existing_summary.top_values_count,
+                                incoming_summary.top_values_count,
+                                existing_summary.total_unique_nodes,
+                                incoming_summary.total_unique_nodes,
+                                existing_summary.total_edges,
+                                incoming_summary.total_edges,
+                                existing_summary.accumulator_instances,
+                                incoming_summary.accumulator_instances,
+                            );
+                            emit_mask_queue_merge_profile_line(&line);
+                        }
+                        merged
+                    }
+                    None => {
+                        self.debug.insert_without_merge_count += 1;
+                        gss
+                    }
+                };
+
+                let insert_start = if inner_profile_enabled {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
+                by_depth.entry(depth).or_default().entry(target).or_default().push(merged);
+                if let Some(start) = insert_start {
+                    self.debug.insert_total_ns += elapsed_ns(start);
+                }
+            }
+        }
+
+        if let Some(start) = enqueue_start {
+            self.debug.enqueue_total_ns += elapsed_ns(start);
+        }
+    }
+
+    fn pop_next(&mut self) -> Option<(u32, DenseMaskGSS)> {
+        let pop_start = if mask_inner_profile_enabled() {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        match &mut self.inner {
+            MaskQueueInner::Target {
+                by_target,
+                ready_by_depth,
+            } => loop {
+                let mut depth_entry = ready_by_depth.last_entry()?;
+                let depth = *depth_entry.key();
+                let target = match depth_entry.get_mut().pop() {
+                    Some(target) => target,
+                    None => {
+                        depth_entry.remove();
+                        continue;
+                    }
+                };
+
+                if depth_entry.get().is_empty() {
+                    depth_entry.remove();
+                }
+
+                let Some(current) = by_target.get(&target) else {
+                    self.debug.stale_schedule_skips += 1;
+                    continue;
+                };
+
+                if current.max_depth() != depth {
+                    self.debug.stale_schedule_skips += 1;
+                    continue;
+                }
+
+                let gss = by_target
+                    .remove(&target)
+                    .expect("target must exist after stale-check");
+                self.debug.popped_items += 1;
+                if let Some(start) = pop_start {
+                    self.debug.pop_total_ns += elapsed_ns(start);
+                }
+                return Some((target, gss));
+            },
+            MaskQueueInner::Depth { by_depth } => loop {
+                let mut depth_entry = by_depth.last_entry()?;
+                let target = match depth_entry.get().keys().next().copied() {
+                    Some(target) => target,
+                    None => {
+                        depth_entry.remove();
+                        continue;
+                    }
+                };
+                let items = depth_entry
+                    .get_mut()
+                    .get_mut(&target)
+                    .expect("target must exist in depth bucket");
+                let gss = items.pop().expect("target list must be non-empty");
+                if items.is_empty() {
+                    depth_entry.get_mut().remove(&target);
+                }
+                if depth_entry.get().is_empty() {
+                    depth_entry.remove();
+                }
+                self.debug.popped_items += 1;
+                if let Some(start) = pop_start {
+                    self.debug.pop_total_ns += elapsed_ns(start);
+                }
+                return Some((target, gss));
+            },
+        }
+    }
+
+    fn debug_stats(&self) -> &MaskQueueDebugStats {
+        &self.debug
+    }
+
+    fn record_seed_decompose_callback(&mut self) {
+        self.debug.seed_decompose_callbacks += 1;
+    }
+
+    fn record_loop_decompose_callback(&mut self) {
+        self.debug.loop_decompose_callbacks += 1;
+    }
+
+    fn record_parser_dwa_transition_enqueue(&mut self) {
+        self.debug.parser_dwa_transitions_enqueued += 1;
+    }
+}
 
 /// Dense bitmap accumulator used while walking the parser DWA.
 ///
@@ -245,6 +690,29 @@ impl Merge for DenseMaskAcc {
             return self.clone();
         }
 
+        if self.0.len() == 1 && other.0.len() == 1 {
+            let (&left_key, left_dense) = self.0.iter().next().expect("len checked");
+            let (&right_key, right_dense) = other.0.iter().next().expect("len checked");
+            if left_key != right_key {
+                return Self(BTreeMap::from([
+                    (left_key, Arc::clone(left_dense)),
+                    (right_key, Arc::clone(right_dense)),
+                ]));
+            }
+            if Arc::ptr_eq(left_dense, right_dense) || left_dense == right_dense {
+                return self.clone();
+            }
+            let len = left_dense.len().max(right_dense.len());
+            let mut combined = vec![0u64; len];
+            for (i, &word) in left_dense.iter().enumerate() {
+                combined[i] |= word;
+            }
+            for (i, &word) in right_dense.iter().enumerate() {
+                combined[i] |= word;
+            }
+            return Self(BTreeMap::from([(left_key, combined.into())]));
+        }
+
         let mut merged = self.0.clone();
 
         for (&tsid, other_dense) in &other.0 {
@@ -271,20 +739,7 @@ impl Merge for DenseMaskAcc {
 }
 
 fn enqueue_gss(queue: &mut MaskQueue, target: u32, gss: DenseMaskGSS) {
-    if gss.is_empty() {
-        return;
-    }
-
-    let depth = gss.max_depth();
-
-    queue
-        .entry(depth)
-        .or_default()
-        .entry(target)
-        .and_modify(|existing| {
-            *existing = existing.merge(&gss);
-        })
-        .or_insert(gss);
+    queue.enqueue(target, gss);
 }
 
 fn enqueue_weighted_transition(
@@ -293,15 +748,38 @@ fn enqueue_weighted_transition(
     target: u32,
     weight: &Weight,
     precomputed: &DenseTokenMaskCache,
+    profile: &mut Option<MaskInnerProfileStats>,
 ) {
     if weight.is_full() {
         enqueue_gss(queue, target, popped.clone());
         return;
     }
 
+    let profile_enabled = profile.is_some();
+    let apply_start = if profile_enabled {
+        Some(Instant::now())
+    } else {
+        None
+    };
+    let mut intersect_ns = 0u64;
     let pruned = popped.apply_and_prune_no_promote(|allowed| {
-        allowed.intersect_with_weight(weight, precomputed)
+        let intersect_start = if profile_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        let intersected = allowed.intersect_with_weight(weight, precomputed);
+        if let Some(start) = intersect_start {
+            intersect_ns += elapsed_ns(start);
+        }
+        intersected
     });
+    if let (Some(profile), Some(start)) = (profile.as_mut(), apply_start) {
+        let apply_ns = elapsed_ns(start);
+        profile.transition_apply_ns += apply_ns;
+        profile.transition_apply_intersect_ns += intersect_ns;
+        profile.transition_apply_gss_ns += apply_ns.saturating_sub(intersect_ns);
+    }
 
     enqueue_gss(queue, target, pruned);
 }
@@ -312,17 +790,30 @@ fn enqueue_parser_state_transition(
     parser_state: u32,
     popped: &DenseMaskGSS,
     precomputed: &DenseTokenMaskCache,
+    profile: &mut Option<MaskInnerProfileStats>,
 ) {
     let positive_label = encode_positive_label(parser_state);
 
+    let lookup_start = if profile.is_some() {
+        Some(Instant::now())
+    } else {
+        None
+    };
     let Some((target, weight)) = fast_transitions
         .get(&positive_label)
         .or_else(|| fast_transitions.get(&DEFAULT_LABEL))
     else {
+        if let (Some(profile), Some(start)) = (profile.as_mut(), lookup_start) {
+            profile.transition_lookup_ns += elapsed_ns(start);
+        }
         return;
     };
+    if let (Some(profile), Some(start)) = (profile.as_mut(), lookup_start) {
+        profile.transition_lookup_ns += elapsed_ns(start);
+    }
 
-    enqueue_weighted_transition(queue, popped, *target, weight, precomputed);
+    queue.record_parser_dwa_transition_enqueue();
+    enqueue_weighted_transition(queue, popped, *target, weight, precomputed, profile);
 }
 
 fn update_eos_mask(buf: &mut [u32], eos_token_id: Option<u32>, is_complete: bool) {
@@ -342,6 +833,17 @@ fn update_eos_mask(buf: &mut [u32], eos_token_id: Option<u32>, is_complete: bool
     if is_complete {
         *slot |= 1u32 << bit;
     }
+}
+
+fn eos_mask_bit(buf: &[u32], eos_token_id: Option<u32>) -> bool {
+    let Some(eos_token_id) = eos_token_id else {
+        return false;
+    };
+    let word = eos_token_id as usize / 32;
+    let bit = eos_token_id as usize % 32;
+    buf.get(word)
+        .map(|slot| (*slot & (1u32 << bit)) != 0)
+        .unwrap_or(false)
 }
 
 impl<'a> ConstraintState<'a> {
@@ -484,6 +986,7 @@ impl<'a> ConstraintState<'a> {
         precomputed: &DenseTokenMaskCache,
         queue: &mut MaskQueue,
         merged: &mut [u64],
+        profile: &mut Option<MaskInnerProfileStats>,
     ) {
         for (&tokenizer_state, gss) in &self.state {
             if gss.is_empty() {
@@ -493,6 +996,11 @@ impl<'a> ConstraintState<'a> {
             let original_tokenizer_state = tokenizer_state;
             let internal_tsid = self.constraint.internal_tsid_for_state(original_tokenizer_state);
 
+            let seed_decompose_start = if profile.is_some() {
+                Some(Instant::now())
+            } else {
+                None
+            };
             let (decomposed, root_accs) =
                 gss.apply_transform_and_decompose(|terminals_disallowed| {
                     self.terminals_disallowed_to_dense_acc(
@@ -501,28 +1009,67 @@ impl<'a> ConstraintState<'a> {
                         internal_tsid,
                     )
                 });
+            if let (Some(profile), Some(start)) = (profile.as_mut(), seed_decompose_start) {
+                profile.seed_decompose_ns += elapsed_ns(start);
+            }
 
             if decomposed.is_empty() && root_accs.is_empty() {
                 continue;
             }
 
             if let Some(final_weight) = start_final_weight {
+                let accumulate_start = if profile.is_some() {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
                 self.merge_final_weight_for_accs(final_weight, &root_accs, precomputed, merged);
 
                 for (_, sub_gss) in &decomposed {
                     self.merge_final_weight_for_gss(final_weight, sub_gss, precomputed, merged);
                 }
+                if let (Some(profile), Some(start)) = (profile.as_mut(), accumulate_start) {
+                    profile.token_accumulation_ns += elapsed_ns(start);
+                }
             }
 
             for (parser_state, popped) in &decomposed {
+                queue.record_seed_decompose_callback();
                 enqueue_parser_state_transition(
                     queue,
                     start_fast_transitions,
                     *parser_state,
                     popped,
                     precomputed,
+                    profile,
                 );
             }
+        }
+    }
+
+    fn store_mask_cache_reuse_dense(&self, buf: &[u32]) {
+        let mut cache = self.mask_cache.lock().unwrap();
+
+        match cache.as_mut() {
+            Some(cache_data) => {
+                cache_data.generation = self.generation;
+                cache_data.mask.clear();
+                cache_data.mask.extend_from_slice(buf);
+            }
+            None => {
+                *cache = Some(MaskCacheData {
+                    generation: self.generation,
+                    mask: buf.to_vec(),
+                    merged_dense: Vec::new(),
+                });
+            }
+        }
+    }
+
+    fn touch_mask_cache_generation(&self) {
+        let mut cache = self.mask_cache.lock().unwrap();
+        if let Some(cache_data) = cache.as_mut() {
+            cache_data.generation = self.generation;
         }
     }
 
@@ -548,6 +1095,13 @@ impl<'a> ConstraintState<'a> {
         merged.resize(dense_words, 0);
 
         let mut queue = MaskQueue::new();
+        let mut profile = if mask_inner_profile_enabled() {
+            Some(MaskInnerProfileStats::default())
+        } else {
+            None
+        };
+        let total_start = profile.as_ref().map(|_| Instant::now());
+        let delta_profile_enabled = profile.is_some() && mask_delta_profile_enabled();
 
         let start_state = parser_dwa.start_state();
         let start_dwa_state = &parser_dwa.states()[start_state as usize];
@@ -559,39 +1113,355 @@ impl<'a> ConstraintState<'a> {
             precomputed,
             &mut queue,
             &mut merged,
+            &mut profile,
         );
 
-        while let Some((_depth, states_at_depth)) = queue.pop_last() {
-            for (wa_state, gss) in states_at_depth {
-                let dwa_state = &parser_dwa.states()[wa_state as usize];
-                let fast_transitions = &self.constraint.dwa_fast_transitions[wa_state as usize];
+        loop {
+            let popped = queue.pop_next();
+            if let Some(profile) = profile.as_mut() {
+                profile.queue_pop_ns = queue.debug_stats().pop_total_ns;
+            }
 
-                if let Some(final_weight) = &dwa_state.final_weight {
-                    self.merge_final_weight_for_gss(final_weight, &gss, precomputed, &mut merged);
+            let Some((wa_state, gss)) = popped else {
+                break;
+            };
+
+            let dwa_state = &parser_dwa.states()[wa_state as usize];
+            let fast_transitions = &self.constraint.dwa_fast_transitions[wa_state as usize];
+
+            if let Some(final_weight) = &dwa_state.final_weight {
+                let accumulate_start = if profile.is_some() {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
+                self.merge_final_weight_for_gss(final_weight, &gss, precomputed, &mut merged);
+                if let (Some(profile), Some(start)) = (profile.as_mut(), accumulate_start) {
+                    profile.token_accumulation_ns += elapsed_ns(start);
                 }
+            }
 
-                gss.for_each_decomposed(|parser_state, popped| {
-                    enqueue_parser_state_transition(
-                        &mut queue,
-                        fast_transitions,
-                        parser_state,
-                        &popped,
-                        precomputed,
-                    );
-                });
+            let loop_decompose_start = if profile.is_some() {
+                Some(Instant::now())
+            } else {
+                None
+            };
+            gss.for_each_decomposed(|parser_state, popped| {
+                let callback_start = if profile.is_some() {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
+                queue.record_loop_decompose_callback();
+                enqueue_parser_state_transition(
+                    &mut queue,
+                    fast_transitions,
+                    parser_state,
+                    &popped,
+                    precomputed,
+                    &mut profile,
+                );
+                if let (Some(profile), Some(start)) = (profile.as_mut(), callback_start) {
+                    profile.loop_decompose_callback_ns += elapsed_ns(start);
+                }
+            });
+
+            if let (Some(profile), Some(start)) = (profile.as_mut(), loop_decompose_start) {
+                profile.loop_decompose_total_ns += elapsed_ns(start);
             }
         }
 
-        buf.fill(0);
-        self.constraint.or_internal_dense_to_buf(&merged, buf, true);
+        if mask_queue_debug_enabled() {
+            let debug = queue.debug_stats();
+            let line = format!(
+                "[glrmask/debug][mask_queue] mode={:?} enqueue_calls={} merge_hits={} fuse_calls={} fuse_changed_depth={} stale_skips={} popped_items={} seed_decompose_callbacks={} loop_decompose_callbacks={} parser_dwa_transitions_enqueued={}",
+                mask_queue_mode(),
+                debug.enqueue_calls,
+                debug.merge_hit_count,
+                debug.fuse_calls,
+                debug.fuse_changed_depth,
+                debug.stale_schedule_skips,
+                debug.popped_items,
+                debug.seed_decompose_callbacks,
+                debug.loop_decompose_callbacks,
+                debug.parser_dwa_transitions_enqueued,
+            );
+            emit_mask_queue_debug_line(&line);
+        }
+
+        let finalize_start = profile.as_ref().map(|_| Instant::now());
+
+        let mut use_delta_seed = false;
+        let mut reuse_existing_cache_dense = false;
+        {
+            let cache = self.mask_cache.lock().unwrap();
+            if let Some(cache_data) = cache.as_ref() {
+                if cache_data.mask.len() == buf.len() && cache_data.merged_dense == merged {
+                    let zero_start = profile.as_ref().map(|_| Instant::now());
+                    buf.copy_from_slice(&cache_data.mask);
+                    if let (Some(profile), Some(start)) = (profile.as_mut(), zero_start) {
+                        profile.finalize_zero_ns += elapsed_ns(start);
+                        profile.finalize_equal_dense_copy_seed = 1;
+                        if delta_profile_enabled {
+                            profile.delta_prev_available = 1;
+                            profile.delta_unchanged_words = merged.len() as u64;
+                            profile.delta_copy_cost_words = self.constraint.mask_len() as u64;
+                            profile.delta_used_seed = 1;
+                        }
+                    }
+                    reuse_existing_cache_dense = true;
+                    use_delta_seed = true;
+                }
+            }
+            if !use_delta_seed {
+            if let Some(cache_data) = cache.as_ref() {
+                let scratch_cost = self.constraint.estimate_internal_dense_to_buf_cost(&merged);
+                let copy_cost_words = self.constraint.mask_len() as u64;
+                let mut added_bits = 0u64;
+                let mut removed_bits = 0u64;
+                let mut unchanged_words = 0u64;
+                let mut unchanged_bits = 0u64;
+                let mut added_cost = 0u64;
+                let mut removed_cost = 0u64;
+                let capture_delta_summary = delta_profile_enabled;
+                let n_internal = self.constraint.internal_token_to_tokens.len();
+                let word_len = merged.len().max(cache_data.merged_dense.len());
+                for wi in 0..word_len {
+                    if wi * 64 >= n_internal {
+                        break;
+                    }
+                    let remaining = n_internal - wi * 64;
+                    let valid_mask = if remaining >= 64 { !0u64 } else { (1u64 << remaining) - 1 };
+                    let current = merged.get(wi).copied().unwrap_or(0) & valid_mask;
+                    let previous = cache_data.merged_dense.get(wi).copied().unwrap_or(0) & valid_mask;
+                    if capture_delta_summary && current == previous {
+                        unchanged_words += 1;
+                    }
+                    if capture_delta_summary {
+                        unchanged_bits += (!(current ^ previous) & valid_mask).count_ones() as u64;
+                    }
+
+                    let mut added = current & !previous;
+                    while added != 0 {
+                        let bit = added.trailing_zeros() as usize;
+                        let internal_token = wi * 64 + bit;
+                        if capture_delta_summary {
+                            added_bits += 1;
+                        }
+                        added_cost += self.constraint.internal_token_materialization_cost(internal_token);
+                        added &= added - 1;
+                    }
+
+                    let mut removed = previous & !current;
+                    while removed != 0 {
+                        let bit = removed.trailing_zeros() as usize;
+                        let internal_token = wi * 64 + bit;
+                        if capture_delta_summary {
+                            removed_bits += 1;
+                        }
+                        removed_cost += self.constraint.internal_token_materialization_cost(internal_token);
+                        removed &= removed - 1;
+                    }
+                }
+
+                let delta_cost = copy_cost_words + added_cost + removed_cost;
+                let delta_savings = scratch_cost.saturating_sub(delta_cost);
+
+                if delta_profile_enabled {
+                    if let Some(profile) = profile.as_mut() {
+                        profile.delta_prev_available = 1;
+                        profile.delta_added_bits = added_bits;
+                        profile.delta_removed_bits = removed_bits;
+                        profile.delta_unchanged_words = unchanged_words;
+                        profile.delta_unchanged_bits = unchanged_bits;
+                        profile.delta_added_cost = added_cost;
+                        profile.delta_removed_cost = removed_cost;
+                        profile.delta_copy_cost_words = copy_cost_words;
+                        profile.delta_scratch_estimated_cost = scratch_cost;
+                        profile.delta_estimated_cost = delta_cost;
+                        profile.delta_estimated_savings = delta_savings;
+                    }
+                }
+                if delta_savings > DELTA_SEED_MIN_SAVINGS && cache_data.mask.len() == buf.len() {
+                    let zero_start = profile.as_ref().map(|_| Instant::now());
+                    buf.copy_from_slice(&cache_data.mask);
+                    if let (Some(profile), Some(start)) = (profile.as_mut(), zero_start) {
+                        profile.finalize_zero_ns += elapsed_ns(start);
+                    }
+
+                    let dense_to_buf_start = profile.as_ref().map(|_| Instant::now());
+                    let delta_replay = self.constraint.apply_internal_dense_delta_to_buf(
+                        &cache_data.merged_dense,
+                        &merged,
+                        buf,
+                    );
+                    if let Some(profile) = profile.as_mut() {
+                        profile.delta_replay = delta_replay;
+                        profile.finalize_delta_replay = 1;
+                        if delta_profile_enabled {
+                            profile.delta_used_seed = 1;
+                        }
+                        if let Some(start) = dense_to_buf_start {
+                            profile.finalize_dense_to_buf_ns += elapsed_ns(start);
+                        }
+                    }
+                    use_delta_seed = true;
+                }
+            }
+            }
+        }
+
+        if !use_delta_seed {
+            let zero_start = profile.as_ref().map(|_| Instant::now());
+            buf.fill(0);
+            if let (Some(profile), Some(start)) = (profile.as_mut(), zero_start) {
+                profile.finalize_zero_ns += elapsed_ns(start);
+            }
+
+            let dense_to_buf_start = profile.as_ref().map(|_| Instant::now());
+            let dense_to_buf = self.constraint.or_internal_dense_to_buf(&merged, buf, true);
+            if let Some(profile) = profile.as_mut() {
+                profile.finalize_scratch_rebuild = 1;
+                if let Some(start) = dense_to_buf_start {
+                    profile.finalize_dense_to_buf_ns += elapsed_ns(start);
+                }
+                profile.dense_to_buf = dense_to_buf;
+            }
+        }
         // NOTE: NEVER EVER add any post-filter here that rechecks candidate
         // mask tokens through commit semantics. If mask and commit disagree,
         // the bug is in the seed/DWA mask construction logic itself and must
         // be fixed there. Hiding the mismatch with a second-pass filter is not
         // allowed. This note is intentional and must NEVER EVER be removed.
-        update_eos_mask(buf, self.constraint.eos_token_id, self.is_complete());
 
-        self.store_mask_cache(buf, &merged);
+        let eos_unchanged = reuse_existing_cache_dense
+            && eos_mask_bit(buf, self.constraint.eos_token_id) == self.is_complete();
+        if !eos_unchanged {
+            let eos_start = profile.as_ref().map(|_| Instant::now());
+            update_eos_mask(buf, self.constraint.eos_token_id, self.is_complete());
+            if let (Some(profile), Some(start)) = (profile.as_mut(), eos_start) {
+                profile.finalize_eos_ns += elapsed_ns(start);
+            }
+        }
+
+        let cache_start = profile.as_ref().map(|_| Instant::now());
+        if reuse_existing_cache_dense {
+            if eos_unchanged {
+                self.touch_mask_cache_generation();
+            } else {
+                self.store_mask_cache_reuse_dense(buf);
+            }
+        } else {
+            self.store_mask_cache(buf, &merged);
+        }
+        if let (Some(profile), Some(start)) = (profile.as_mut(), cache_start) {
+            profile.finalize_cache_ns += elapsed_ns(start);
+        }
+        let queue_debug = queue.debug_stats();
+
+        if let Some(profile) = profile.as_mut() {
+            if let Some(start) = finalize_start {
+                profile.finalize_ns += elapsed_ns(start);
+            }
+            profile.queue_pop_ns = queue.debug_stats().pop_total_ns;
+            if let Some(start) = total_start {
+                profile.total_ns = elapsed_ns(start);
+            }
+
+            let loop_decompose_ns = profile
+                .loop_decompose_total_ns
+                .saturating_sub(profile.loop_decompose_callback_ns);
+            let enqueue_exclusive_ns = queue_debug
+                .enqueue_total_ns
+                .saturating_sub(queue_debug.fuse_total_ns);
+            let accounted_ns = profile.seed_decompose_ns
+                + profile.queue_pop_ns
+                + loop_decompose_ns
+                + profile.transition_lookup_ns
+                + profile.transition_apply_ns
+                + profile.token_accumulation_ns
+                + enqueue_exclusive_ns
+                + queue_debug.fuse_total_ns
+                + profile.finalize_ns;
+            let other_ns = profile.total_ns.saturating_sub(accounted_ns);
+            let line = format!(
+                "[glrmask/debug][mask_inner] queue_mode={:?} total_ns={} seed_decompose_ns={} queue_pop_ns={} loop_decompose_ns={} transition_lookup_ns={} transition_apply_ns={} transition_apply_intersect_ns={} transition_apply_gss_ns={} token_accumulation_ns={} enqueue_merge_ns={} queue_lookup_ns={} queue_merge_ns={} queue_insert_ns={} insert_without_merge_count={} fuse_ns={} finalize_ns={} finalize_zero_ns={} finalize_dense_to_buf_ns={} finalize_eos_ns={} finalize_cache_ns={} delta_prev_available={} delta_added_bits={} delta_removed_bits={} delta_unchanged_words={} delta_unchanged_bits={} delta_added_cost={} delta_removed_cost={} delta_copy_cost_words={} delta_scratch_estimated_cost={} delta_estimated_cost={} delta_estimated_savings={} delta_used_seed={} delta_added_word_group_hits={} delta_added_word_group_entries={} delta_removed_word_group_hits={} delta_removed_word_group_entries={} delta_added_byte_group_hits={} delta_added_byte_group_entries={} delta_removed_byte_group_hits={} delta_removed_byte_group_entries={} delta_added_token_iterations={} delta_added_token_entries={} delta_removed_token_iterations={} delta_removed_token_entries={} finalize_equal_dense_copy_seed={} finalize_delta_replay={} finalize_scratch_rebuild={} dense_words_visited={} dense_complement_path_used={} dense_normal_full_word_hits={} dense_complement_full_word_hits={} dense_complement_full_byte_groups={} dense_complement_full_nibble_groups={} dense_complement_remaining_bits={} dense_normal_token_iterations={} dense_complement_token_iterations={} dense_normal_sparse_entries={} dense_complement_sparse_entries={} dense_complement_heavy_dense_clears={} dense_complement_max_sparse_span={} dense_group_or_sparse_entries={} dense_group_andnot_sparse_entries={} dense_group_sparse_groups={} dense_group_sparse_total_entries={} dense_group_sparse_max_entries={} dense_group_dense_storage_words={} dense_raw_token_sparse_entries={} other_ns={} enqueue_calls={} merge_hits={} popped_items={} parser_dwa_transitions_enqueued={}",
+                mask_queue_mode(),
+                profile.total_ns,
+                profile.seed_decompose_ns,
+                profile.queue_pop_ns,
+                loop_decompose_ns,
+                profile.transition_lookup_ns,
+                profile.transition_apply_ns,
+                profile.transition_apply_intersect_ns,
+                profile.transition_apply_gss_ns,
+                profile.token_accumulation_ns,
+                enqueue_exclusive_ns,
+                queue_debug.lookup_total_ns,
+                queue_debug.merge_total_ns,
+                queue_debug.insert_total_ns,
+                queue_debug.insert_without_merge_count,
+                queue_debug.fuse_total_ns,
+                profile.finalize_ns,
+                profile.finalize_zero_ns,
+                profile.finalize_dense_to_buf_ns,
+                profile.finalize_eos_ns,
+                profile.finalize_cache_ns,
+                profile.delta_prev_available,
+                profile.delta_added_bits,
+                profile.delta_removed_bits,
+                profile.delta_unchanged_words,
+                profile.delta_unchanged_bits,
+                profile.delta_added_cost,
+                profile.delta_removed_cost,
+                profile.delta_copy_cost_words,
+                profile.delta_scratch_estimated_cost,
+                profile.delta_estimated_cost,
+                profile.delta_estimated_savings,
+                profile.delta_used_seed,
+                profile.delta_replay.added_word_group_hits,
+                profile.delta_replay.added_word_group_entries,
+                profile.delta_replay.removed_word_group_hits,
+                profile.delta_replay.removed_word_group_entries,
+                profile.delta_replay.added_byte_group_hits,
+                profile.delta_replay.added_byte_group_entries,
+                profile.delta_replay.removed_byte_group_hits,
+                profile.delta_replay.removed_byte_group_entries,
+                profile.delta_replay.added_token_iterations,
+                profile.delta_replay.added_token_entries,
+                profile.delta_replay.removed_token_iterations,
+                profile.delta_replay.removed_token_entries,
+                profile.finalize_equal_dense_copy_seed,
+                profile.finalize_delta_replay,
+                profile.finalize_scratch_rebuild,
+                profile.dense_to_buf.dense_words_visited,
+                profile.dense_to_buf.complement_path_used,
+                profile.dense_to_buf.normal_full_word_hits,
+                profile.dense_to_buf.complement_full_word_hits,
+                profile.dense_to_buf.complement_full_byte_groups,
+                profile.dense_to_buf.complement_full_nibble_groups,
+                profile.dense_to_buf.complement_remaining_bits,
+                profile.dense_to_buf.normal_token_iterations,
+                profile.dense_to_buf.complement_token_iterations,
+                profile.dense_to_buf.normal_sparse_entries,
+                profile.dense_to_buf.complement_sparse_entries,
+                profile.dense_to_buf.complement_heavy_dense_clears,
+                profile.dense_to_buf.complement_max_sparse_span,
+                profile.dense_to_buf.group_or_sparse_entries,
+                profile.dense_to_buf.group_andnot_sparse_entries,
+                self.constraint.word_group_sparse_masks.len(),
+                self.constraint.word_group_sparse_total_entries,
+                self.constraint.word_group_sparse_max_entries,
+                self.constraint.word_group_sparse_masks.len() * self.constraint.mask_len(),
+                self.constraint.internal_token_buf_flat.len(),
+                other_ns,
+                queue_debug.enqueue_calls,
+                queue_debug.merge_hit_count,
+                queue_debug.popped_items,
+                queue_debug.parser_dwa_transitions_enqueued,
+            );
+            emit_mask_inner_profile_line(&line);
+        }
 
         let mut scratch = self.mask_scratch.lock().unwrap();
         scratch.merged_dense = merged;
