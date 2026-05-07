@@ -402,6 +402,319 @@ fn token_sets_agree_on_domain(
     true
 }
 
+fn token_sets_intersect_three(
+    a: &RangeSetBlaze<u32>,
+    b: &RangeSetBlaze<u32>,
+    c: &RangeSetBlaze<u32>,
+) -> bool {
+    let mut a_ranges = a.ranges().peekable();
+    let mut b_ranges = b.ranges().peekable();
+    let mut c_ranges = c.ranges().peekable();
+
+    loop {
+        let (Some(a_range), Some(b_range), Some(c_range)) =
+            (a_ranges.peek(), b_ranges.peek(), c_ranges.peek())
+        else {
+            return false;
+        };
+
+        let start = (*a_range.start()).max(*b_range.start()).max(*c_range.start());
+        let end = (*a_range.end()).min(*b_range.end()).min(*c_range.end());
+        if start <= end {
+            return true;
+        }
+
+        let min_end = (*a_range.end()).min(*b_range.end()).min(*c_range.end());
+        if *a_range.end() == min_end {
+            a_ranges.next();
+        }
+        if *b_range.end() == min_end {
+            b_ranges.next();
+        }
+        if *c_range.end() == min_end {
+            c_ranges.next();
+        }
+    }
+}
+
+fn token_sets_agree_on_domain_intersection(
+    a: &RangeSetBlaze<u32>,
+    b: &RangeSetBlaze<u32>,
+    left: &RangeSetBlaze<u32>,
+    right: &RangeSetBlaze<u32>,
+) -> bool {
+    let mut a_ranges = a.ranges().peekable();
+    let mut b_ranges = b.ranges().peekable();
+    let mut left_ranges = left.ranges().peekable();
+    let mut right_ranges = right.ranges().peekable();
+
+    loop {
+        while let (Some(left_range), Some(right_range)) = (left_ranges.peek(), right_ranges.peek()) {
+            if *left_range.end() < *right_range.start() {
+                left_ranges.next();
+            } else if *right_range.end() < *left_range.start() {
+                right_ranges.next();
+            } else {
+                break;
+            }
+        }
+
+        let (Some(left_range), Some(right_range)) = (left_ranges.peek(), right_ranges.peek()) else {
+            return true;
+        };
+
+        let d_lo = (*left_range.start()).max(*right_range.start());
+        let d_hi = (*left_range.end()).min(*right_range.end());
+        while a_ranges.peek().is_some_and(|r| *r.end() < d_lo) {
+            a_ranges.next();
+        }
+        while b_ranges.peek().is_some_and(|r| *r.end() < d_lo) {
+            b_ranges.next();
+        }
+
+        let mut pos = d_lo;
+        while pos <= d_hi {
+            let (in_a, a_end) = match a_ranges.peek() {
+                Some(r) if *r.start() <= pos => (true, *r.end()),
+                Some(r) => (false, r.start() - 1),
+                None => (false, d_hi),
+            };
+            let (in_b, b_end) = match b_ranges.peek() {
+                Some(r) if *r.start() <= pos => (true, *r.end()),
+                Some(r) => (false, r.start() - 1),
+                None => (false, d_hi),
+            };
+
+            if in_a != in_b {
+                return false;
+            }
+
+            let sub_end = d_hi.min(a_end).min(b_end);
+            if sub_end == u32::MAX {
+                break;
+            }
+            pos = sub_end + 1;
+            while a_ranges.peek().is_some_and(|r| *r.end() < pos) {
+                a_ranges.next();
+            }
+            while b_ranges.peek().is_some_and(|r| *r.end() < pos) {
+                b_ranges.next();
+            }
+        }
+
+        let left_ended = *left_range.end() == d_hi;
+        let right_ended = *right_range.end() == d_hi;
+        if left_ended {
+            left_ranges.next();
+        }
+        if right_ended {
+            right_ranges.next();
+        }
+    }
+}
+
+fn weight_is_disjoint_from_domain_intersection(
+    weight: &Weight,
+    left_domain: &Weight,
+    right_domain: &Weight,
+) -> bool {
+    let mut weight_iter = weight.0.range_values();
+    let mut weight_entry = weight_iter.next();
+    let mut left_iter = left_domain.0.range_values();
+    let mut right_iter = right_domain.0.range_values();
+    let mut left_entry = left_iter.next();
+    let mut right_entry = right_iter.next();
+
+    loop {
+        while let (Some((left_range, _)), Some((right_range, _))) = (&left_entry, &right_entry) {
+            if *left_range.end() < *right_range.start() {
+                left_entry = left_iter.next();
+            } else if *right_range.end() < *left_range.start() {
+                right_entry = right_iter.next();
+            } else {
+                break;
+            }
+        }
+
+        let (Some((left_range, left_tokens)), Some((right_range, right_tokens))) =
+            (&left_entry, &right_entry)
+        else {
+            return true;
+        };
+
+        let d_lo = (*left_range.start()).max(*right_range.start());
+        let d_hi = (*left_range.end()).min(*right_range.end());
+        while weight_entry.as_ref().is_some_and(|(r, _)| *r.end() < d_lo) {
+            weight_entry = weight_iter.next();
+        }
+
+        let mut pos = d_lo;
+        while pos <= d_hi {
+            let (weight_tokens, weight_end): (Option<&Arc<RangeSetBlaze<u32>>>, u32) = match &weight_entry {
+                Some((r, tokens)) if *r.start() <= pos => (Some(tokens), *r.end()),
+                Some((r, _)) => (None, r.start() - 1),
+                None => (None, d_hi),
+            };
+
+            let sub_end = d_hi.min(weight_end);
+            if let Some(weight_tokens) = weight_tokens {
+                if token_sets_intersect_three(
+                    weight_tokens.as_ref(),
+                    left_tokens.as_ref(),
+                    right_tokens.as_ref(),
+                ) {
+                    return false;
+                }
+            }
+
+            if sub_end == u32::MAX {
+                break;
+            }
+            pos = sub_end + 1;
+            while weight_entry.as_ref().is_some_and(|(r, _)| *r.end() < pos) {
+                weight_entry = weight_iter.next();
+            }
+        }
+
+        let left_ended = *left_range.end() == d_hi;
+        let right_ended = *right_range.end() == d_hi;
+        if left_ended {
+            left_entry = left_iter.next();
+        }
+        if right_ended {
+            right_entry = right_iter.next();
+        }
+    }
+}
+
+fn weights_equal_on_domain_intersection(
+    w_a: &Weight,
+    w_b: &Weight,
+    left_domain: &Weight,
+    right_domain: &Weight,
+) -> bool {
+    if Arc::ptr_eq(&w_a.0, &w_b.0) {
+        return true;
+    }
+
+    let mut a_iter = w_a.0.range_values();
+    let mut b_iter = w_b.0.range_values();
+    let mut left_iter = left_domain.0.range_values();
+    let mut right_iter = right_domain.0.range_values();
+    let mut a_entry = a_iter.next();
+    let mut b_entry = b_iter.next();
+    let mut left_entry = left_iter.next();
+    let mut right_entry = right_iter.next();
+
+    loop {
+        while let (Some((left_range, _)), Some((right_range, _))) = (&left_entry, &right_entry) {
+            if *left_range.end() < *right_range.start() {
+                left_entry = left_iter.next();
+            } else if *right_range.end() < *left_range.start() {
+                right_entry = right_iter.next();
+            } else {
+                break;
+            }
+        }
+
+        let (Some((left_range, left_tokens)), Some((right_range, right_tokens))) =
+            (&left_entry, &right_entry)
+        else {
+            return true;
+        };
+
+        if left_tokens.as_ref().is_disjoint(right_tokens.as_ref()) {
+            let left_ended = *left_range.end() <= *right_range.end();
+            let right_ended = *right_range.end() <= *left_range.end();
+            if left_ended {
+                left_entry = left_iter.next();
+            }
+            if right_ended {
+                right_entry = right_iter.next();
+            }
+            continue;
+        }
+
+        let d_lo = (*left_range.start()).max(*right_range.start());
+        let d_hi = (*left_range.end()).min(*right_range.end());
+        while a_entry.as_ref().is_some_and(|(r, _)| *r.end() < d_lo) {
+            a_entry = a_iter.next();
+        }
+        while b_entry.as_ref().is_some_and(|(r, _)| *r.end() < d_lo) {
+            b_entry = b_iter.next();
+        }
+
+        let mut pos = d_lo;
+        while pos <= d_hi {
+            let (a_tokens, a_bound): (Option<&Arc<RangeSetBlaze<u32>>>, u32) = match &a_entry {
+                Some((r, tokens)) if *r.start() <= pos => (Some(tokens), *r.end()),
+                Some((r, _)) => (None, r.start() - 1),
+                None => (None, d_hi),
+            };
+            let (b_tokens, b_bound): (Option<&Arc<RangeSetBlaze<u32>>>, u32) = match &b_entry {
+                Some((r, tokens)) if *r.start() <= pos => (Some(tokens), *r.end()),
+                Some((r, _)) => (None, r.start() - 1),
+                None => (None, d_hi),
+            };
+
+            let sub_end = d_hi.min(a_bound).min(b_bound);
+            match (a_tokens, b_tokens) {
+                (None, None) => {}
+                (Some(at), None) => {
+                    if token_sets_intersect_three(
+                        at.as_ref(),
+                        left_tokens.as_ref(),
+                        right_tokens.as_ref(),
+                    ) {
+                        return false;
+                    }
+                }
+                (None, Some(bt)) => {
+                    if token_sets_intersect_three(
+                        bt.as_ref(),
+                        left_tokens.as_ref(),
+                        right_tokens.as_ref(),
+                    ) {
+                        return false;
+                    }
+                }
+                (Some(at), Some(bt)) => {
+                    if !Arc::ptr_eq(at, bt) && at.as_ref() != bt.as_ref() {
+                        if !token_sets_agree_on_domain_intersection(
+                            at.as_ref(),
+                            bt.as_ref(),
+                            left_tokens.as_ref(),
+                            right_tokens.as_ref(),
+                        ) {
+                            return false;
+                        }
+                    }
+                }
+            }
+
+            if sub_end == u32::MAX {
+                break;
+            }
+            pos = sub_end + 1;
+            while a_entry.as_ref().is_some_and(|(r, _)| *r.end() < pos) {
+                a_entry = a_iter.next();
+            }
+            while b_entry.as_ref().is_some_and(|(r, _)| *r.end() < pos) {
+                b_entry = b_iter.next();
+            }
+        }
+
+        let left_ended = *left_range.end() == d_hi;
+        let right_ended = *right_range.end() == d_hi;
+        if left_ended {
+            left_entry = left_iter.next();
+        }
+        if right_ended {
+            right_entry = right_iter.next();
+        }
+    }
+}
+
 /// Check if two candidate states can be merged.
 ///
 /// States are compatible if:
@@ -651,10 +964,11 @@ fn sorted_targets_compatible(class_targets: &[(Label, u32)], group_targets: &[(L
     true
 }
 
-fn sorted_weights_compatible_on_overlap(
+fn sorted_weights_compatible_on_domain_intersection(
     class_weights: &[(Label, Weight)],
     group_weights: &[(Label, Weight)],
-    overlap: &Weight,
+    left_domain: &Weight,
+    right_domain: &Weight,
 ) -> bool {
     let mut class_idx = 0;
     let mut group_idx = 0;
@@ -664,24 +978,39 @@ fn sorted_weights_compatible_on_overlap(
         let (group_label, group_weight) = &group_weights[group_idx];
         if class_label == group_label {
             if class_weight != group_weight {
-                let class_disjoint = class_weight.is_disjoint(overlap);
-                let group_disjoint = group_weight.is_disjoint(overlap);
+                let class_disjoint = weight_is_disjoint_from_domain_intersection(
+                    class_weight,
+                    left_domain,
+                    right_domain,
+                );
+                let group_disjoint = weight_is_disjoint_from_domain_intersection(
+                    group_weight,
+                    left_domain,
+                    right_domain,
+                );
                 if class_disjoint != group_disjoint {
                     return false;
                 }
-                if !class_disjoint && !weights_equal_on_domain(class_weight, group_weight, overlap) {
+                if !class_disjoint
+                    && !weights_equal_on_domain_intersection(
+                        class_weight,
+                        group_weight,
+                        left_domain,
+                        right_domain,
+                    )
+                {
                     return false;
                 }
             }
             class_idx += 1;
             group_idx += 1;
         } else if class_label < group_label {
-            if !class_weight.is_disjoint(overlap) {
+            if !weight_is_disjoint_from_domain_intersection(class_weight, left_domain, right_domain) {
                 return false;
             }
             class_idx += 1;
         } else {
-            if !group_weight.is_disjoint(overlap) {
+            if !weight_is_disjoint_from_domain_intersection(group_weight, left_domain, right_domain) {
                 return false;
             }
             group_idx += 1;
@@ -689,12 +1018,12 @@ fn sorted_weights_compatible_on_overlap(
     }
 
     for (_, class_weight) in &class_weights[class_idx..] {
-        if !class_weight.is_disjoint(overlap) {
+        if !weight_is_disjoint_from_domain_intersection(class_weight, left_domain, right_domain) {
             return false;
         }
     }
     for (_, group_weight) in &group_weights[group_idx..] {
-        if !group_weight.is_disjoint(overlap) {
+        if !weight_is_disjoint_from_domain_intersection(group_weight, left_domain, right_domain) {
             return false;
         }
     }
@@ -843,24 +1172,29 @@ fn build_and_color_hybrid(
             let is_disjoint = cn.is_disjoint(&g.needed_union);
 
             if !is_disjoint {
-                // Check weight compatibility on the overlap domain.
-                let overlap = cn.intersection(&g.needed_union);
-
-                // Check final weights on overlap
+                // Check weight compatibility on the overlap domain without
+                // materializing cn ∩ g.needed_union as a Weight.
                 let weight_ok = match (&class_profile.final_weight, &g.merged_final_weight) {
-                    (Some(fw), Some(gfw)) => weights_equal_on_domain(fw, gfw, &overlap),
-                    (Some(fw), None) => fw.is_disjoint(&overlap),
-                    (None, Some(gfw)) => gfw.is_disjoint(&overlap),
+                    (Some(fw), Some(gfw)) => {
+                        weights_equal_on_domain_intersection(fw, gfw, cn, &g.needed_union)
+                    }
+                    (Some(fw), None) => {
+                        weight_is_disjoint_from_domain_intersection(fw, cn, &g.needed_union)
+                    }
+                    (None, Some(gfw)) => {
+                        weight_is_disjoint_from_domain_intersection(gfw, cn, &g.needed_union)
+                    }
                     (None, None) => true,
                 };
                 if !weight_ok {
                     continue;
                 }
 
-                if !sorted_weights_compatible_on_overlap(
+                if !sorted_weights_compatible_on_domain_intersection(
                     &class_profile.weights,
                     &g.merged_transition_weights,
-                    &overlap,
+                    cn,
+                    &g.needed_union,
                 ) {
                     continue;
                 }
@@ -1287,4 +1621,115 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
     }
 
     reconstruct_dwa(start_state, &old_to_new, new_states)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        weight_is_disjoint_from_domain_intersection, weights_equal_on_domain,
+        weights_equal_on_domain_intersection,
+    };
+    use crate::ds::weight::Weight;
+    use range_set_blaze::RangeSetBlaze;
+
+    fn token_set(ranges: &[(u32, u32)]) -> RangeSetBlaze<u32> {
+        ranges.iter().copied().map(|(start, end)| start..=end).collect()
+    }
+
+    fn weight(entries: &[(u32, &[(u32, u32)])]) -> Weight {
+        Weight::from_per_tsid_token_sets(
+            entries
+                .iter()
+                .copied()
+                .map(|(tsid, ranges)| (tsid, token_set(ranges))),
+        )
+    }
+
+    fn assert_disjoint_matches_overlap(weight: &Weight, left: &Weight, right: &Weight) {
+        let overlap = left.intersection(right);
+        assert_eq!(
+            weight_is_disjoint_from_domain_intersection(weight, left, right),
+            weight.is_disjoint(&overlap),
+        );
+    }
+
+    fn assert_equal_matches_overlap(a: &Weight, b: &Weight, left: &Weight, right: &Weight) {
+        let overlap = left.intersection(right);
+        assert_eq!(
+            weights_equal_on_domain_intersection(a, b, left, right),
+            weights_equal_on_domain(a, b, &overlap),
+        );
+    }
+
+    #[test]
+    fn minimize_acyclic_helpers_match_materialized_overlap_for_empty_tsid_intersection() {
+        let left = Weight::from_uniform(0..=1, token_set(&[(1, 3)]));
+        let right = Weight::from_uniform(4..=5, token_set(&[(1, 3)]));
+        let weight_a = weight(&[(0, &[(1, 2)]), (4, &[(2, 4)])]);
+        let weight_b = weight(&[(1, &[(1, 1)]), (5, &[(3, 5)])]);
+
+        assert_disjoint_matches_overlap(&weight_a, &left, &right);
+        assert_disjoint_matches_overlap(&weight_b, &left, &right);
+        assert_equal_matches_overlap(&weight_a, &weight_b, &left, &right);
+    }
+
+    #[test]
+    fn minimize_acyclic_helpers_match_materialized_overlap_for_disjoint_token_domains() {
+        let left = Weight::from_uniform(0..=2, token_set(&[(1, 2)]));
+        let right = Weight::from_uniform(0..=2, token_set(&[(5, 6)]));
+        let weight_a = weight(&[(0, &[(1, 2)]), (1, &[(5, 6)])]);
+        let weight_b = weight(&[(0, &[(2, 3)]), (2, &[(6, 7)])]);
+
+        assert_disjoint_matches_overlap(&weight_a, &left, &right);
+        assert_disjoint_matches_overlap(&weight_b, &left, &right);
+        assert_equal_matches_overlap(&weight_a, &weight_b, &left, &right);
+    }
+
+    #[test]
+    fn minimize_acyclic_helpers_match_materialized_overlap_when_weight_range_is_missing() {
+        let left = Weight::from_uniform(1..=3, token_set(&[(1, 4)]));
+        let right = Weight::from_uniform(2..=4, token_set(&[(2, 5)]));
+        let weight_a = weight(&[(2, &[(2, 4)])]);
+        let weight_b = weight(&[(2, &[(2, 4)]), (3, &[(2, 4)])]);
+
+        assert_disjoint_matches_overlap(&weight_a, &left, &right);
+        assert_disjoint_matches_overlap(&weight_b, &left, &right);
+        assert_equal_matches_overlap(&weight_a, &weight_b, &left, &right);
+    }
+
+    #[test]
+    fn minimize_acyclic_helpers_match_materialized_overlap_for_equal_weights_by_value() {
+        let left = weight(&[(0, &[(1, 3)]), (1, &[(2, 4)])]);
+        let right = weight(&[(0, &[(2, 5)]), (1, &[(1, 4)])]);
+        let weight_a = weight(&[(0, &[(2, 3)]), (1, &[(2, 4)])]);
+        let weight_b = weight(&[(0, &[(2, 3)]), (1, &[(2, 4)])]);
+
+        assert_disjoint_matches_overlap(&weight_a, &left, &right);
+        assert_disjoint_matches_overlap(&weight_b, &left, &right);
+        assert_equal_matches_overlap(&weight_a, &weight_b, &left, &right);
+    }
+
+    #[test]
+    fn minimize_acyclic_helpers_match_materialized_overlap_when_difference_is_outside_overlap() {
+        let left = Weight::from_uniform(0..=1, token_set(&[(1, 2)]));
+        let right = Weight::from_uniform(0..=1, token_set(&[(1, 2)]));
+        let weight_a = weight(&[(0, &[(1, 2), (5, 5)]), (1, &[(1, 2)])]);
+        let weight_b = weight(&[(0, &[(1, 2)]), (1, &[(1, 2)])]);
+
+        assert_disjoint_matches_overlap(&weight_a, &left, &right);
+        assert_disjoint_matches_overlap(&weight_b, &left, &right);
+        assert_equal_matches_overlap(&weight_a, &weight_b, &left, &right);
+    }
+
+    #[test]
+    fn minimize_acyclic_helpers_match_materialized_overlap_when_difference_is_inside_overlap() {
+        let left = Weight::from_uniform(0..=1, token_set(&[(1, 3)]));
+        let right = Weight::from_uniform(0..=1, token_set(&[(2, 4)]));
+        let weight_a = weight(&[(0, &[(1, 2)]), (1, &[(2, 3)])]);
+        let weight_b = weight(&[(0, &[(2, 3)]), (1, &[(2, 4)])]);
+
+        assert_disjoint_matches_overlap(&weight_a, &left, &right);
+        assert_disjoint_matches_overlap(&weight_b, &left, &right);
+        assert_equal_matches_overlap(&weight_a, &weight_b, &left, &right);
+    }
 }
