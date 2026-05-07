@@ -73,6 +73,27 @@ fn elapsed_ms(started_at: Instant) -> f64 {
     started_at.elapsed().as_secs_f64() * 1000.0
 }
 
+fn skip_parser_dwa_minimization_env_override() -> Option<bool> {
+    std::env::var("GLRMASK_SKIP_PARSER_DWA_MINIMIZE")
+        .ok()
+        .map(|value| {
+            let trimmed = value.trim();
+            !(trimmed.is_empty()
+                || trimmed == "0"
+                || trimmed.eq_ignore_ascii_case("false"))
+        })
+}
+
+#[inline]
+fn should_skip_parser_dwa_minimization(
+    pre_minimize_states: usize,
+    pre_minimize_transitions: usize,
+) -> bool {
+    skip_parser_dwa_minimization_env_override().unwrap_or(
+        pre_minimize_states <= 1024 && pre_minimize_transitions <= 10_000,
+    )
+}
+
 #[derive(Default)]
 struct ParserNwaBuildProfile {
     state_prep_ms: f64,
@@ -1247,11 +1268,31 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
 
     let pre_minimize_state_count = parser_dwa_pre_minimize.states().len();
     let pre_minimize_transition_count = parser_dwa_pre_minimize.num_transitions();
-    let minimize_started_at = Instant::now();
-    let minimized = minimize(&parser_dwa_pre_minimize);
-    let minimize_ms = elapsed_ms(minimize_started_at);
-    let post_minimize_state_count = minimized.states().len();
-    let post_minimize_transition_count = minimized.num_transitions();
+    let minimize_skipped = should_skip_parser_dwa_minimization(
+        pre_minimize_state_count,
+        pre_minimize_transition_count,
+    );
+    let (minimized, minimize_ms, post_minimize_state_count, post_minimize_transition_count) =
+        if minimize_skipped {
+            (
+                parser_dwa_pre_minimize,
+                0.0,
+                pre_minimize_state_count,
+                pre_minimize_transition_count,
+            )
+        } else {
+            let minimize_started_at = Instant::now();
+            let minimized = minimize(&parser_dwa_pre_minimize);
+            let minimize_ms = elapsed_ms(minimize_started_at);
+            let post_minimize_state_count = minimized.states().len();
+            let post_minimize_transition_count = minimized.num_transitions();
+            (
+                minimized,
+                minimize_ms,
+                post_minimize_state_count,
+                post_minimize_transition_count,
+            )
+        };
 
     if compile_profile_enabled() {
         eprintln!(

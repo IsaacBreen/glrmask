@@ -21,6 +21,9 @@ struct PreHashedRanges {
 }
 
 fn skip_max_length_for_partition(partition_label: &str) -> bool {
+    if partition_label == "p5" {
+        return true;
+    }
     static SKIPPED_PARTITIONS: OnceLock<Vec<String>> = OnceLock::new();
     SKIPPED_PARTITIONS
         .get_or_init(|| {
@@ -38,6 +41,16 @@ fn skip_max_length_for_partition(partition_label: &str) -> bool {
         })
         .iter()
         .any(|label| label == partition_label)
+}
+
+#[inline]
+fn should_skip_max_length_for_partition(
+    partition_label: &str,
+    initial_state_count: usize,
+    projected_by_global: bool,
+) -> bool {
+    skip_max_length_for_partition(partition_label)
+        || (projected_by_global && initial_state_count <= 8192)
 }
 
 /// Hash contribution of a single (start, end) range.
@@ -396,6 +409,7 @@ fn build_l1_id_map<'a>(
         Some(map) => map.representative_original_ids.iter().map(|&s| s as usize).collect(),
         None => (0..num_dfa_states).collect(),
     };
+    let projected_by_global = initial_state_map.is_some() && states.len() < num_dfa_states;
 
     // Max-length bounded state equivalence: merge DFA states that behave
     // identically when only tokens up to the max vocab token length are
@@ -419,7 +433,11 @@ fn build_l1_id_map<'a>(
         }
     }
     let byte_to_class = compute_byte_classes(tokenizer_view.dfa());
-    let max_length_skipped = skip_max_length_for_partition(partition_label);
+    let max_length_skipped = should_skip_max_length_for_partition(
+        partition_label,
+        states.len(),
+        projected_by_global,
+    );
     let equiv_mapping = if max_length_skipped {
         states.clone()
     } else {

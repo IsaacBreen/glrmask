@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -49,7 +50,7 @@ struct TrieMapBuildSegmentOutcome {
     end_state: Option<u32>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct TrieMapBuildTerminalSetInterner {
     ids: FxHashMap<Vec<TerminalID>, u32>,
     sets: Vec<Vec<TerminalID>>,
@@ -214,6 +215,19 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_interned(
         child_precompute_ms: 0.0,
     };
 
+    impl TrieBuildTimings {
+        fn add_assign(&mut self, other: Self) {
+            self.segment_table_ms += other.segment_table_ms;
+            self.signature_hash_ms += other.signature_hash_ms;
+            self.map_materialize_ms += other.map_materialize_ms;
+            self.classes_built += other.classes_built;
+            self.child_active_ms += other.child_active_ms;
+            self.recursive_ms += other.recursive_ms;
+            self.reachable_bitmap_ms += other.reachable_bitmap_ms;
+            self.child_precompute_ms += other.child_precompute_ms;
+        }
+    }
+
     fn segment_outcomes_for_states(
         table: &mut FxHashMap<u32, TrieMapBuildSegmentOutcome>,
         needed_states: &[u32],
@@ -331,6 +345,8 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_interned(
         timings: &mut TrieBuildTimings,
         stamp_gen: &mut u32,
         terminal_stamps: &mut [u32],
+        parallel_depth: u8,
+        parallel_min_active: usize,
     ) -> TrieMapBuildNodeClasses {
         struct ChildBuildData {
             outcomes: Vec<TrieMapBuildSegmentOutcome>,
@@ -339,7 +355,15 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_interned(
             result: TrieMapBuildNodeClasses,
         }
 
-        let mut child_data = Vec::new();
+        struct ChildPendingData<'a> {
+            child: &'a VocabPrefixTreeNode,
+            outcomes: Vec<TrieMapBuildSegmentOutcome>,
+            descend_end_states: Vec<u32>,
+            child_active_states: Vec<u32>,
+            reachable: Box<[u64]>,
+        }
+
+        let mut child_pending = Vec::new();
         for (segment, child) in node.iter_children() {
             let segment_table_idx = if let Some(&table_idx) = segment_cache.get(&segment_key(segment)) {
                 table_idx
@@ -391,62 +415,168 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_interned(
             }
             timings.child_active_ms += elapsed_ms(child_active_started_at);
 
-            let (result, child_class_ids) = if child_active_states.is_empty() {
-                (
-                    TrieMapBuildNodeClasses {
-                        classes: Vec::new(),
-                        class_maps: Vec::new(),
-                    },
-                    vec![u32::MAX; descend_end_states.len()],
-                )
-            } else {
-                let recursive_started_at = Instant::now();
-                let result = build_node(
-                    child,
-                    tokenizer,
-                    &child_active_states,
-                    matched_terminals,
-                    node_terminal_ids,
-                    empty_terminals_id,
-                    is_end,
-                    byte_transitions,
-                    self_loop_bytes,
-                    terminal_sets,
-                    segment_cache,
-                    segment_outcome_tables,
-                    num_words,
-                    timings,
-                    stamp_gen,
-                    terminal_stamps,
-                );
-                timings.recursive_ms += elapsed_ms(recursive_started_at);
-
-                let child_precompute_started_at = Instant::now();
-                let child_class_ids: Vec<u32> = descend_end_states
-                    .iter()
-                    .map(|&end_state| {
-                        if end_state == u32::MAX {
-                            u32::MAX
-                        } else {
-                            result.classes[end_state as usize]
-                        }
-                    })
-                    .collect();
-                timings.child_precompute_ms += elapsed_ms(child_precompute_started_at);
-
-                (result, child_class_ids)
-            };
-
             let reachable_started_at = Instant::now();
             let reachable = reachable_dense_bitmap(child, num_words);
             timings.reachable_bitmap_ms += elapsed_ms(reachable_started_at);
 
-            child_data.push(ChildBuildData {
+            child_pending.push(ChildPendingData {
+                child,
                 outcomes,
-                child_class_ids,
+                descend_end_states,
+                child_active_states,
                 reachable,
-                result,
             });
+        }
+
+        let should_parallelize = parallel_depth > 0
+            && child_pending.len() >= 4
+            && active_states.len() >= parallel_min_active;
+
+        let mut child_data = Vec::with_capacity(child_pending.len());
+        if should_parallelize {
+            let built: Vec<(ChildBuildData, TrieBuildTimings)> = child_pending
+                .into_par_iter()
+                .map(|pending| {
+                    let mut local_timings = TrieBuildTimings {
+                        segment_table_ms: 0.0,
+                        signature_hash_ms: 0.0,
+                        map_materialize_ms: 0.0,
+                        classes_built: 0,
+                        child_active_ms: 0.0,
+                        recursive_ms: 0.0,
+                        reachable_bitmap_ms: 0.0,
+                        child_precompute_ms: 0.0,
+                    };
+
+                    let (result, child_class_ids) = if pending.child_active_states.is_empty() {
+                        (
+                            TrieMapBuildNodeClasses {
+                                classes: Vec::new(),
+                                class_maps: Vec::new(),
+                            },
+                            vec![u32::MAX; pending.descend_end_states.len()],
+                        )
+                    } else {
+                        let mut local_terminal_sets = terminal_sets.clone();
+                        let mut local_segment_cache = segment_cache.clone();
+                        let mut local_segment_outcome_tables = segment_outcome_tables.clone();
+                        let mut local_stamp_gen = *stamp_gen;
+                        let mut local_terminal_stamps = terminal_stamps.to_vec();
+
+                        let recursive_started_at = Instant::now();
+                        let result = build_node(
+                            pending.child,
+                            tokenizer,
+                            &pending.child_active_states,
+                            matched_terminals,
+                            node_terminal_ids,
+                            empty_terminals_id,
+                            is_end,
+                            byte_transitions,
+                            self_loop_bytes,
+                            &mut local_terminal_sets,
+                            &mut local_segment_cache,
+                            &mut local_segment_outcome_tables,
+                            num_words,
+                            &mut local_timings,
+                            &mut local_stamp_gen,
+                            &mut local_terminal_stamps,
+                            0,
+                            parallel_min_active,
+                        );
+                        local_timings.recursive_ms += elapsed_ms(recursive_started_at);
+
+                        let child_precompute_started_at = Instant::now();
+                        let child_class_ids: Vec<u32> = pending
+                            .descend_end_states
+                            .iter()
+                            .map(|&end_state| {
+                                if end_state == u32::MAX {
+                                    u32::MAX
+                                } else {
+                                    result.classes[end_state as usize]
+                                }
+                            })
+                            .collect();
+                        local_timings.child_precompute_ms += elapsed_ms(child_precompute_started_at);
+
+                        (result, child_class_ids)
+                    };
+
+                    (
+                        ChildBuildData {
+                            outcomes: pending.outcomes,
+                            child_class_ids,
+                            reachable: pending.reachable,
+                            result,
+                        },
+                        local_timings,
+                    )
+                })
+                .collect();
+
+            for (data, local_timings) in built {
+                timings.add_assign(local_timings);
+                child_data.push(data);
+            }
+        } else {
+            for pending in child_pending {
+                let (result, child_class_ids) = if pending.child_active_states.is_empty() {
+                    (
+                        TrieMapBuildNodeClasses {
+                            classes: Vec::new(),
+                            class_maps: Vec::new(),
+                        },
+                        vec![u32::MAX; pending.descend_end_states.len()],
+                    )
+                } else {
+                    let recursive_started_at = Instant::now();
+                    let result = build_node(
+                        pending.child,
+                        tokenizer,
+                        &pending.child_active_states,
+                        matched_terminals,
+                        node_terminal_ids,
+                        empty_terminals_id,
+                        is_end,
+                        byte_transitions,
+                        self_loop_bytes,
+                        terminal_sets,
+                        segment_cache,
+                        segment_outcome_tables,
+                        num_words,
+                        timings,
+                        stamp_gen,
+                        terminal_stamps,
+                        parallel_depth.saturating_sub(1),
+                        parallel_min_active,
+                    );
+                    timings.recursive_ms += elapsed_ms(recursive_started_at);
+
+                    let child_precompute_started_at = Instant::now();
+                    let child_class_ids: Vec<u32> = pending
+                        .descend_end_states
+                        .iter()
+                        .map(|&end_state| {
+                            if end_state == u32::MAX {
+                                u32::MAX
+                            } else {
+                                result.classes[end_state as usize]
+                            }
+                        })
+                        .collect();
+                    timings.child_precompute_ms += elapsed_ms(child_precompute_started_at);
+
+                    (result, child_class_ids)
+                };
+
+                child_data.push(ChildBuildData {
+                    outcomes: pending.outcomes,
+                    child_class_ids,
+                    reachable: pending.reachable,
+                    result,
+                });
+            }
         }
 
         let t_sig = Instant::now();
@@ -597,6 +727,26 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_interned(
         TrieMapBuildNodeClasses { classes, class_maps }
     }
 
+    let parallel_depth = std::env::var("GLRMASK_PM_ROOT_PARALLEL_DEPTH")
+        .ok()
+        .and_then(|value| value.parse::<u8>().ok())
+        .unwrap_or(5);
+
+    let parallel_min_active = std::env::var("GLRMASK_PM_PARALLEL_MIN_ACTIVE_STATES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(1024);
+
+    if profile_summary_enabled() {
+        let num_root_children = root.children().len();
+        eprintln!(
+            "[glrmask/profile][trie_build_terminal_mask] mode=interned root_parallel_children={} parallel_depth={} parallel_min_active_states={}",
+            num_root_children,
+            parallel_depth,
+            parallel_min_active,
+        );
+    }
+
     let root_result = build_node(
         root,
         tokenizer,
@@ -614,6 +764,8 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_interned(
         &mut timings,
         &mut stamp_gen,
         &mut terminal_stamps,
+        parallel_depth,
+        parallel_min_active,
     );
     let root_compute_ms = elapsed_ms(t_root_start);
 
@@ -1156,7 +1308,7 @@ fn collect_possible_matches_dense_trie_class_build_with_classes_u64(
     let parallel_depth = std::env::var("GLRMASK_PM_ROOT_PARALLEL_DEPTH")
         .ok()
         .and_then(|value| value.parse::<u8>().ok())
-        .unwrap_or(4);
+        .unwrap_or(5);
 
     let parallel_min_active = std::env::var("GLRMASK_PM_PARALLEL_MIN_ACTIVE_STATES")
         .ok()

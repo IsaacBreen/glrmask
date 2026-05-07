@@ -37,23 +37,39 @@ use types::{
 fn global_max_length_token_cap() -> Option<usize> {
     static CAP: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
     *CAP.get_or_init(|| {
-        std::env::var("GLRMASK_GLOBAL_MAX_LENGTH_TOKEN_CAP")
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .filter(|&cap| cap > 0)
+        match std::env::var("GLRMASK_GLOBAL_MAX_LENGTH_TOKEN_CAP") {
+            Ok(value) => {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    Some(3)
+                } else if matches!(trimmed.to_ascii_lowercase().as_str(), "none" | "unlimited" | "all") {
+                    None
+                } else {
+                    trimmed.parse::<usize>().ok().filter(|&cap| cap > 0)
+                }
+            }
+            Err(_) => Some(3),
+        }
     })
 }
 
-fn use_global_max_length() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
+fn global_max_length_env_override() -> Option<bool> {
+    static OVERRIDE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *OVERRIDE.get_or_init(|| {
         std::env::var("GLRMASK_USE_GLOBAL_MAX_LENGTH")
+            .ok()
             .map(|value| {
                 let trimmed = value.trim();
                 !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
             })
-            .unwrap_or(false)
     })
+}
+
+fn use_global_max_length(tokenizer: &Tokenizer) -> bool {
+    match global_max_length_env_override() {
+        Some(enabled) => enabled,
+        None => tokenizer.num_states() > 50_000,
+    }
 }
 
 pub(crate) fn build_global_max_length_state_map(
@@ -64,7 +80,7 @@ pub(crate) fn build_global_max_length_state_map(
     let started_at = Instant::now();
     let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
 
-    if !use_global_max_length() {
+    if !use_global_max_length(tokenizer) {
         let original_to_internal: Vec<u32> = (0..states.len() as u32).collect();
         let representative_original_ids: Vec<u32> = (0..states.len() as u32).collect();
 

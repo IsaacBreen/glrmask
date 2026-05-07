@@ -235,6 +235,9 @@ struct TokenLengthStats {
 }
 
 fn skip_max_length_for_partition(partition_label: &str) -> bool {
+    if partition_label == "p5" {
+        return true;
+    }
     static SKIPPED_PARTITIONS: OnceLock<Vec<String>> = OnceLock::new();
     SKIPPED_PARTITIONS
         .get_or_init(|| {
@@ -252,6 +255,16 @@ fn skip_max_length_for_partition(partition_label: &str) -> bool {
         })
         .iter()
         .any(|label| label == partition_label)
+}
+
+#[inline]
+fn should_skip_max_length_for_partition(
+    partition_label: &str,
+    initial_state_count: usize,
+    projected_by_global: bool,
+) -> bool {
+    skip_max_length_for_partition(partition_label)
+        || (projected_by_global && initial_state_count <= 8192)
 }
 
 fn token_length_stats(tokens: &[&[u8]]) -> TokenLengthStats {
@@ -374,7 +387,12 @@ fn analyze_equivalences_impl(
             relevant_bytes[byte as usize] = true;
         }
     }
-    let max_length_skipped = skip_max_length_for_partition(partition_label);
+    let projected_by_global = prepared.initial_states.len() < tokenizer.num_states() as usize;
+    let max_length_skipped = should_skip_max_length_for_partition(
+        partition_label,
+        prepared.initial_states.len(),
+        projected_by_global,
+    );
     let max_length_started_at = Instant::now();
     let pre_state_reps = if max_length_skipped {
         prepared.initial_states.clone()
