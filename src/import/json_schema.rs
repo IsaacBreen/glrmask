@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use crate::automata::lexer::ast::Expr as LexerExpr;
 use crate::automata::lexer::compile::build_regex;
 use crate::automata::lexer::regex::parse_regex;
-use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, expr_to_grammar_expr};
+use crate::import::ast::{expr_to_grammar_expr, GrammarExpr, NamedGrammar, NamedRule};
 use crate::GlrMaskError;
 use serde_json::{Map, Value};
 
@@ -57,13 +57,16 @@ const JSON_KEY_COLON_BODY_REGEX: &str =
 /// Full key+colon including opening quote: `"key": `.
 const JSON_KEY_COLON_FULL_REGEX: &str =
     r#""([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*": "#;
-const JSON_STRING_CHAR_PATTERN: &str = r#"[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}"#;
+const JSON_STRING_CHAR_PATTERN: &str =
+    r#"[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}"#;
 const JSON_NUMBER_NONINTEGER_REGEX: &str =
     r#"-?(0|[1-9][0-9]*)(\.[0-9]+([eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+)"#;
 const JSON_NONNEG_NUMBER_NONINTEGER_REGEX: &str =
     r#"(0|[1-9][0-9]*)(\.[0-9]+([eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+)"#;
 const JSON_DIRECT_UTF8_PATTERN: &str =
-    r#"(?:[\xC2-\xDF][\x80-\xBF]|[\xE0][\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC][\x80-\xBF][\x80-\xBF]|[\xED][\x80-\x9F][\x80-\xBF]|[\xEE-\xEF][\x80-\xBF][\x80-\xBF]|[\xF0][\x90-\xBF][\x80-\xBF][\x80-\xBF]|[\xF1-\xF3][\x80-\xBF][\x80-\xBF][\x80-\xBF]|[\xF4][\x80-\x8F][\x80-\xBF][\x80-\xBF])"#;
+    r#"(?:[\xC2-\xDF][\x80-\xBF]|[\xE0][\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC][\x80-\xBF][\x80-\xBF]|[\xED][\x80-\x9F][\x80-\
+xBF]|[\xEE-\xEF][\x80-\xBF][\x80-\xBF]|[\xF0][\x90-\xBF][\x80-\xBF][\x80-\xBF]|[\xF1-\xF3][\x80-\xBF][\x80-\xBF][\x80-\x
+BF]|[\xF4][\x80-\x8F][\x80-\xBF][\x80-\xBF])"#;
 const JSON_ITEM_SEPARATOR: &[u8] = b", ";
 const JSON_KEY_SEPARATOR: &[u8] = b": ";
 const CLOSED_REQUIRED_OBJECT_FUSED_LITERAL_MAX_ALTS: usize = 128;
@@ -77,18 +80,8 @@ const UNTYPED_OBJECT_KEYWORD_KEYS: &[&str] = &[
     "minProperties",
     "maxProperties",
 ];
-const UNTYPED_ARRAY_KEYWORD_KEYS: &[&str] = &[
-    "items",
-    "prefixItems",
-    "minItems",
-    "maxItems",
-];
-const UNTYPED_STRING_KEYWORD_KEYS: &[&str] = &[
-    "pattern",
-    "format",
-    "minLength",
-    "maxLength",
-];
+const UNTYPED_ARRAY_KEYWORD_KEYS: &[&str] = &["items", "prefixItems", "minItems", "maxItems"];
+const UNTYPED_STRING_KEYWORD_KEYS: &[&str] = &["pattern", "format", "minLength", "maxLength"];
 const UNTYPED_NUMBER_KEYWORD_KEYS: &[&str] = &[
     "minimum",
     "maximum",
@@ -1766,6 +1759,32 @@ fn uri_aggregate_ipv6_ranges_enabled() -> bool {
     env_flag_default("GLRMASK_URI_AGGREGATE_IPV6_RANGES", true)
 }
 
+fn uri_explicit_ipv6_rules_enabled() -> bool {
+    env_flag("GLRMASK_URI_EXPLICIT_IPV6_RULES")
+        || env_flag("GLRMASK_URI_IPV6_ALT_NONTERMINALS")
+        || env_flag("GLRMASK_URI_IPV6_ADDRESS_TERMINAL")
+        || env_flag("GLRMASK_URI_HEXDIG_1_4_TERMINAL")
+        || env_flag("GLRMASK_URI_HEXDIG_1_PLUS_TERMINAL")
+        || env_flag("GLRMASK_URI_H16_COLON_TERMINAL")
+        || env_flag("GLRMASK_URI_COLON_H16_TERMINAL")
+        || env_flag("GLRMASK_URI_H16_COLON_7_TERMINAL")
+        || env_flag("GLRMASK_URI_H16_COLON_1_7_TERMINAL")
+        || env_flag("GLRMASK_URI_H16_COLON_1_6_TERMINAL")
+        || env_flag("GLRMASK_URI_H16_COLON_1_5_TERMINAL")
+        || env_flag("GLRMASK_URI_H16_COLON_1_4_TERMINAL")
+        || env_flag("GLRMASK_URI_H16_COLON_1_3_TERMINAL")
+        || env_flag("GLRMASK_URI_H16_COLON_1_2_TERMINAL")
+        || env_flag("GLRMASK_URI_COLON_H16_1_2_TERMINAL")
+        || env_flag("GLRMASK_URI_COLON_H16_1_3_TERMINAL")
+        || env_flag("GLRMASK_URI_COLON_H16_1_4_TERMINAL")
+        || env_flag("GLRMASK_URI_COLON_H16_1_5_TERMINAL")
+        || env_flag("GLRMASK_URI_COLON_H16_1_6_TERMINAL")
+        || env_flag("GLRMASK_URI_COLON_H16_1_7_TERMINAL")
+        || env_flag("GLRMASK_URI_AGGREGATE_H16_COLON_RANGES")
+        || env_flag("GLRMASK_URI_AGGREGATE_COLON_H16_RANGES")
+        || env_flag("GLRMASK_URI_AGGREGATE_IPV6_RANGES")
+}
+
 fn uri_rule_should_be_terminal(name: &str) -> Option<bool> {
     match name {
         "uri_scheme" => Some(env_flag_default("GLRMASK_URI_SCHEME_TERMINAL", false)),
@@ -1914,7 +1933,7 @@ fn env_flag_default(name: &str, default: bool) -> bool {
 
 fn json_wrapped_string_length_regex(min_len: usize, max_len: usize) -> String {
     let inner = if min_len == max_len {
-        format!(r#"(?:{}){{{}}}"# , JSON_STRING_CHAR_PATTERN, min_len)
+        format!(r#"(?:{}){{{}}}"#, JSON_STRING_CHAR_PATTERN, min_len)
     } else {
         format!(
             r#"(?:{}){{{},{}}}"#,
@@ -6631,7 +6650,7 @@ impl<'a> SchemaCtx<'a> {
             uri_rule_should_be_terminal("uri_ipv6_address").unwrap_or(false);
         let uri_ipv6_address_expr = if ablated("ipv6") {
             literal_expr(b"::")
-        } else {
+        } else if uri_explicit_ipv6_rules_enabled() {
             let ipv6_alts = vec![
                 sequence_or_single(vec![
                     uri_h16_colon_7.clone(),
@@ -6687,6 +6706,61 @@ impl<'a> SchemaCtx<'a> {
             } else {
                 choice_or_single(ipv6_alts)
             }
+        } else {
+            let inline_hexdig_1_4 = || GrammarExpr::RepeatRange {
+                expr: Box::new(uri_hexdig.clone()),
+                min: 1,
+                max: 4,
+            };
+            let inline_h16_colon = || {
+                sequence_or_single(vec![inline_hexdig_1_4(), literal_expr(b":")])
+            };
+            let inline_colon_h16 = || {
+                sequence_or_single(vec![literal_expr(b":"), inline_hexdig_1_4()])
+            };
+            let inline_h16_colon_range = |min, max| GrammarExpr::RepeatRange {
+                expr: Box::new(inline_h16_colon()),
+                min,
+                max,
+            };
+            let inline_colon_h16_range = |min, max| GrammarExpr::RepeatRange {
+                expr: Box::new(inline_colon_h16()),
+                min,
+                max,
+            };
+
+            choice_or_single(vec![
+                sequence_or_single(vec![inline_h16_colon_range(7, 7), inline_hexdig_1_4()]),
+                sequence_or_single(vec![inline_h16_colon_range(1, 7), literal_expr(b":")]),
+                sequence_or_single(vec![
+                    inline_h16_colon_range(1, 6),
+                    literal_expr(b":"),
+                    inline_hexdig_1_4(),
+                ]),
+                sequence_or_single(vec![
+                    inline_h16_colon_range(1, 5),
+                    inline_colon_h16_range(1, 2),
+                ]),
+                sequence_or_single(vec![
+                    inline_h16_colon_range(1, 4),
+                    inline_colon_h16_range(1, 3),
+                ]),
+                sequence_or_single(vec![
+                    inline_h16_colon_range(1, 3),
+                    inline_colon_h16_range(1, 4),
+                ]),
+                sequence_or_single(vec![
+                    inline_h16_colon_range(1, 2),
+                    inline_colon_h16_range(1, 5),
+                ]),
+                sequence_or_single(vec![
+                    inline_hexdig_1_4(),
+                    literal_expr(b":"),
+                    inline_colon_h16_range(1, 6),
+                ]),
+                sequence_or_single(vec![literal_expr(b":"), inline_colon_h16_range(1, 7)]),
+                literal_expr(b"::"),
+            ])
         };
         let uri_ipv6_address = self.insert_uri_rule("uri_ipv6_address", uri_ipv6_address_expr);
 
