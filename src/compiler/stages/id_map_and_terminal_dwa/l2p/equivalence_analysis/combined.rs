@@ -224,6 +224,7 @@ pub(crate) struct CombinedEquivalenceProfile {
     pub(crate) exact_state_equiv_ms: f64,
     pub(crate) max_length_reps: usize,
     pub(crate) exact_reps: usize,
+    pub(crate) exact_rep_confirmation_used: bool,
 }
 
 struct TokenLengthStats {
@@ -266,6 +267,9 @@ fn should_skip_max_length_for_partition(
     skip_max_length_for_partition(partition_label)
         || (projected_by_global && initial_state_count <= 8192)
 }
+
+const EXACT_REP_CONFIRMATION_MIN_STATES: usize = 2_000;
+const EXACT_REP_CONFIRMATION_MIN_TOKENS: usize = 200;
 
 fn token_length_stats(tokens: &[&[u8]]) -> TokenLengthStats {
     let mut stats = TokenLengthStats {
@@ -434,14 +438,27 @@ fn analyze_equivalences_impl(
         &dedup_vocab_classes,
         &dedup.representative_token_bytes,
     );
+    let exact_rep_confirmation_used = pre_reduced_states.len() >= EXACT_REP_CONFIRMATION_MIN_STATES
+        && vocab_representative_tokens.len() >= EXACT_REP_CONFIRMATION_MIN_TOKENS;
     let exact_started_at = Instant::now();
-    let reduced_state_reps_for_pre_reduced =
+    let reduced_state_reps_for_pre_reduced = if exact_rep_confirmation_used {
+        state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed(
+            &tokenizer_view,
+            &vocab_representative_tokens,
+            &pre_reduced_states,
+            &normalized_disallowed_follows,
+            None,
+            None,
+            Some(true),
+        )
+    } else {
         state_equivalence_analysis::find_state_equivalence_classes_with_disallowed(
             &tokenizer_view,
             &vocab_representative_tokens,
             &pre_reduced_states,
             &normalized_disallowed_follows,
-        );
+        )
+    };
     let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
     let rep_to_final: BTreeMap<usize, usize> = pre_reduced_states
         .iter()
@@ -480,6 +497,7 @@ fn analyze_equivalences_impl(
             exact_state_equiv_ms,
             max_length_reps,
             exact_reps,
+            exact_rep_confirmation_used,
         },
     )
 }
