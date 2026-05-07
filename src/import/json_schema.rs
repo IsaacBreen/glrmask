@@ -1726,6 +1726,10 @@ fn use_structured_uri() -> bool {
     env_flag_default("GLRMASK_STRUCT_URI_FORMAT", true)
 }
 
+fn simple_uri_format_enabled() -> bool {
+    env_flag_default("GLRMASK_SIMPLE_URI_FORMAT", false)
+}
+
 fn env_flag_default(name: &str, default: bool) -> bool {
     std::env::var(name)
         .map(|v| {
@@ -6087,6 +6091,9 @@ impl<'a> SchemaCtx<'a> {
                         label,
                     ]))),
                 ])))
+            }
+            "uri" if simple_uri_format_enabled() => {
+                Ok(quoted_expr(GrammarExpr::Repeat(Box::new(self.json_string_char_ref()))))
             }
             "uri" if use_structured_uri() => {
                 Ok(self.build_llguidance_uri_expr())

@@ -14,7 +14,7 @@ pub(crate) mod postprocess;
 
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -146,6 +146,166 @@ impl SharedSimplifyCache {
     }
 }
 
+fn project_initial_state_map_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLRMASK_L2P_PROJECT_INITIAL_STATE_MAP")
+            .map(|value| {
+                let trimmed = value.trim();
+                trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+            })
+            .unwrap_or(true)
+    })
+}
+
+struct ProjectInitialStateMapProfile {
+    used: bool,
+    reason: &'static str,
+    simplified_state_count: usize,
+    projected_simplified_states: usize,
+    unmapped_simplified_states_before_fill: usize,
+    projected_initial_classes_before_compaction: usize,
+    projected_initial_classes_after_compaction: usize,
+    dead_class_added: bool,
+}
+
+impl ProjectInitialStateMapProfile {
+    fn unused(reason: &'static str, simplified_state_count: usize) -> Self {
+        Self {
+            used: false,
+            reason,
+            simplified_state_count,
+            projected_simplified_states: 0,
+            unmapped_simplified_states_before_fill: 0,
+            projected_initial_classes_before_compaction: 0,
+            projected_initial_classes_after_compaction: 0,
+            dead_class_added: false,
+        }
+    }
+}
+
+fn project_initial_state_map_for_simplified_tokenizer(
+    initial_state_map: &ManyToOneIdMap,
+    simplify_state_map: &ManyToOneIdMap,
+) -> (Option<ManyToOneIdMap>, ProjectInitialStateMapProfile) {
+    let simplified_state_count = simplify_state_map.num_internal_ids() as usize;
+    if simplified_state_count == 0 {
+        return (
+            None,
+            ProjectInitialStateMapProfile::unused("empty_simplified", simplified_state_count),
+        );
+    }
+
+    let mut projected = vec![u32::MAX; simplified_state_count];
+    let mut has_projected_state = false;
+
+    for (original_state, &simplified_state) in simplify_state_map.original_to_internal.iter().enumerate() {
+        if simplified_state == u32::MAX {
+            continue;
+        }
+
+        let initial_class = initial_state_map
+            .original_to_internal
+            .get(original_state)
+            .copied()
+            .unwrap_or(u32::MAX);
+        if initial_class == u32::MAX {
+            continue;
+        }
+
+        let slot = &mut projected[simplified_state as usize];
+        if *slot == u32::MAX {
+            *slot = initial_class;
+            has_projected_state = true;
+        } else if *slot != initial_class {
+            let projected_simplified_states = projected
+                .iter()
+                .filter(|&&initial_class| initial_class != u32::MAX)
+                .count();
+            let projected_initial_classes_before_compaction = projected
+                .iter()
+                .copied()
+                .filter(|&initial_class| initial_class != u32::MAX)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
+            let unmapped_simplified_states_before_fill =
+                simplified_state_count.saturating_sub(projected_simplified_states);
+            return (
+                None,
+                ProjectInitialStateMapProfile {
+                    used: false,
+                    reason: "mixed_initial_class",
+                    simplified_state_count,
+                    projected_simplified_states,
+                    unmapped_simplified_states_before_fill,
+                    projected_initial_classes_before_compaction,
+                    projected_initial_classes_after_compaction: 0,
+                    dead_class_added: false,
+                },
+            );
+        }
+    }
+
+    if !has_projected_state {
+        return (
+            None,
+            ProjectInitialStateMapProfile::unused("no_projected_states", simplified_state_count),
+        );
+    }
+
+    let projected_simplified_states = projected
+        .iter()
+        .filter(|&&initial_class| initial_class != u32::MAX)
+        .count();
+    let projected_initial_classes_before_compaction = projected
+        .iter()
+        .copied()
+        .filter(|&initial_class| initial_class != u32::MAX)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let unmapped_simplified_states_before_fill =
+        simplified_state_count.saturating_sub(projected_simplified_states);
+
+    let mut remapped_classes = vec![u32::MAX; initial_state_map.num_internal_ids() as usize];
+    let mut next_class = 0u32;
+    let compacted_projected: Vec<u32> = projected
+        .into_iter()
+        .map(|initial_class| {
+            if initial_class == u32::MAX {
+                return u32::MAX;
+            }
+            let slot = &mut remapped_classes[initial_class as usize];
+            if *slot == u32::MAX {
+                *slot = next_class;
+                next_class += 1;
+            }
+            *slot
+        })
+        .collect();
+
+    let dead_class_added = compacted_projected.iter().any(|&initial_class| initial_class == u32::MAX);
+    let projected_initial_classes_after_compaction = next_class as usize;
+    (
+        Some(
+            ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+                compacted_projected,
+                next_class,
+            )
+            .fill_unmapped_with_new_class(),
+        ),
+        ProjectInitialStateMapProfile {
+            used: true,
+            reason: "used",
+            simplified_state_count,
+            projected_simplified_states,
+            unmapped_simplified_states_before_fill,
+            projected_initial_classes_before_compaction,
+            projected_initial_classes_after_compaction,
+            dead_class_added,
+        },
+    )
+}
+
 /// Build an L2+ id_map and terminal DWA for the given vocab and terminal set.
 ///
 /// Builds its own id_map via `InternalIdMap::build_with_group_filter` (full DFA-
@@ -224,10 +384,63 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             .filter(|&&state| state == u32::MAX)
             .count()
     });
+    let projection_enabled = project_initial_state_map_enabled();
+    let (projected_initial_state_map, projection_profile) = if !projection_enabled {
+        (
+            None,
+            ProjectInitialStateMapProfile::unused(
+                "env_disabled",
+                simplify_state_map
+                    .as_ref()
+                    .map(|simplified| simplified.num_internal_ids() as usize)
+                    .unwrap_or(0),
+            ),
+        )
+    } else if initial_state_map.is_none() {
+        (
+            None,
+            ProjectInitialStateMapProfile::unused(
+                "no_initial_map",
+                simplify_state_map
+                    .as_ref()
+                    .map(|simplified| simplified.num_internal_ids() as usize)
+                    .unwrap_or(0),
+            ),
+        )
+    } else if simplify_state_map.is_none() {
+        (None, ProjectInitialStateMapProfile::unused("no_simplify_map", 0))
+    } else {
+        project_initial_state_map_for_simplified_tokenizer(
+            initial_state_map.expect("checked above"),
+            simplify_state_map.as_ref().expect("checked above"),
+        )
+    };
+    let equivalence_initial_state_map = if use_simplified_tok {
+        projected_initial_state_map.as_ref()
+    } else {
+        initial_state_map
+    };
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][l2p_projection] partition={} projection_enabled={} simplify_branch_active={} projected_initial_state_map_used={} reason={} simplified_state_count={} projected_simplified_states={} unmapped_simplified_states_before_fill={} projected_initial_classes_before_compaction={} projected_initial_classes_after_compaction={} dead_class_added={}",
+            partition_label,
+            projection_enabled,
+            use_simplified_tok,
+            projection_profile.used,
+            projection_profile.reason,
+            projection_profile.simplified_state_count,
+            projection_profile.projected_simplified_states,
+            projection_profile.unmapped_simplified_states_before_fill,
+            projection_profile.projected_initial_classes_before_compaction,
+            projection_profile.projected_initial_classes_after_compaction,
+            projection_profile.dead_class_added,
+        );
+    }
 
     // ---- Step 1: Equivalence analysis (on simplified tokenizer) ----
     let id_map_started_at = Instant::now();
-    let simplified_id_map = equivalence_analysis::combined::analyze_equivalences_with_group_filter(
+    let (simplified_id_map, equiv_profile) = equivalence_analysis::combined::analyze_equivalences_with_group_filter(
+        partition_label,
         tokenizer_for_build,
         vocab,
         disallowed_follows,
@@ -235,7 +448,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         None,
         shared_vocab_dfa_cache,
         if use_simplified_tok { None } else { flat_trans },
-        if use_simplified_tok { None } else { initial_state_map },
+        equivalence_initial_state_map,
     );
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -257,6 +470,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             canonicalize_ms,
             determinize_ms,
             minimize_ms,
+            internal_vocab_count,
             nwa_states_after_build,
             nwa_states_after_collapse,
             nwa_states_after_disallowed,
@@ -269,12 +483,14 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             // ---- Step 2-3: Internal vocab + prefix tree ----
             let vocab_tree_started_at = Instant::now();
             let internal_vocab = internal_vocab_entries(vocab, &simplified_id_map);
+            let internal_vocab_count = internal_vocab.len();
             if internal_vocab.is_empty() {
                 // Signal early-None via a sentinel. Build a dummy DWA;
                 // outer code will observe `early_none=true` and return.
                 (
                     crate::automata::weighted_u32::dwa::DWA::new(0, 0),
                     0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    0usize,
                     0usize, 0usize, 0usize, 0usize, 0usize,
                     crate::automata::weighted_u32::dwa::DWA::new(0, 0).stats(),
                     crate::automata::weighted_u32::dwa::DWA::new(0, 0).stats(),
@@ -373,6 +589,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                     canonicalize_ms,
                     determinize_ms,
                     minimize_ms,
+                    internal_vocab_count,
                     nwa_states_after_build,
                     nwa_states_after_collapse,
                     nwa_states_after_disallowed,
@@ -400,15 +617,44 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         simplified_id_map.clone()
     };
     let postprocess_ms = always_allowed_ms + collapse_ms + disallowed_ms + prune_ms + canonicalize_ms;
+    let max_length_reduction_pct = if equiv_profile.initial_states_considered == 0 {
+        0.0
+    } else {
+        100.0
+            * (1.0
+                - equiv_profile.max_length_reps as f64
+                    / equiv_profile.initial_states_considered as f64)
+    };
+    let exact_reduction_pct = if equiv_profile.initial_states_considered == 0 {
+        0.0
+    } else {
+        100.0
+            * (1.0 - equiv_profile.exact_reps as f64 / equiv_profile.initial_states_considered as f64)
+    };
 
     if compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][l2p] partition={} vocab_tokens={} active_terminals={} original_states={} tsids={} simplify_ms={:.3} simplify_cache_hit={} simplified_states={} id_map_ms={:.3} tsid_fallback_ms={:.3} vocab_tree_ms={:.3} possible_matches_ms={:.3} seed_ms={:.3} terminal_nwa_build_ms={:.3} nwa_states={}->{}->{}->{}->{} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} prune_ms={:.3} canonicalize_ms={:.3} postprocess_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} minimize_states={} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} total_ms={:.3}",
+            "[glrmask/profile][l2p] partition={} vocab_tokens={} active_terminals={} original_states={} tsids={} internal_vocab_entries={} initial_states_considered={} max_length_skipped={} max_token_len={} token_len_gt_4={} token_len_gt_8={} token_len_gt_16={} token_len_gt_32={} token_len_gt_64={} max_length_state_equiv_ms={:.3} exact_state_equiv_ms={:.3} max_length_reps={} exact_reps={} max_length_reduction_pct={:.2} exact_reduction_pct={:.2} simplify_ms={:.3} simplify_cache_hit={} simplified_states={} id_map_ms={:.3} tsid_fallback_ms={:.3} vocab_tree_ms={:.3} possible_matches_ms={:.3} seed_ms={:.3} terminal_nwa_build_ms={:.3} nwa_states={}->{}->{}->{}->{} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} prune_ms={:.3} canonicalize_ms={:.3} postprocess_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} minimize_states={} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} total_ms={:.3}",
             partition_label,
             vocab.entries.len(),
             num_active_terminals,
             num_original_states,
             simplified_id_map.num_tsids(),
+            internal_vocab_count,
+            equiv_profile.initial_states_considered,
+            equiv_profile.max_length_skipped,
+            equiv_profile.max_token_len,
+            equiv_profile.token_len_gt_4,
+            equiv_profile.token_len_gt_8,
+            equiv_profile.token_len_gt_16,
+            equiv_profile.token_len_gt_32,
+            equiv_profile.token_len_gt_64,
+            equiv_profile.max_length_state_equiv_ms,
+            equiv_profile.exact_state_equiv_ms,
+            equiv_profile.max_length_reps,
+            equiv_profile.exact_reps,
+            max_length_reduction_pct,
+            exact_reduction_pct,
             simplify_ms,
             simplify_cache_hit,
             tokenizer_for_build.num_states(),

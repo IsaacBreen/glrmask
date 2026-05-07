@@ -4,7 +4,7 @@
 pub(crate) mod max_length;
 
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
@@ -18,6 +18,26 @@ use rustc_hash::FxHashMap;
 struct PreHashedRanges {
     hash: u64,
     ranges: Vec<(u32, u32)>,
+}
+
+fn skip_max_length_for_partition(partition_label: &str) -> bool {
+    static SKIPPED_PARTITIONS: OnceLock<Vec<String>> = OnceLock::new();
+    SKIPPED_PARTITIONS
+        .get_or_init(|| {
+            std::env::var("GLRMASK_SKIP_MAX_LENGTH_PARTITIONS")
+                .ok()
+                .map(|value| {
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|label| !label.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .iter()
+        .any(|label| label == partition_label)
 }
 
 /// Hash contribution of a single (start, end) range.
@@ -248,8 +268,14 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
 
     let total_started_at = Instant::now();
     let id_map_started_at = Instant::now();
-    let (mut id_map, sorted_entries, _state_to_rep, id_map_profile) =
-        build_l1_id_map(tokenizer, vocab, active_terminals, flat_trans, initial_state_map);
+    let (mut id_map, sorted_entries, _state_to_rep, id_map_profile) = build_l1_id_map(
+        partition_label,
+        tokenizer,
+        vocab,
+        active_terminals,
+        flat_trans,
+        initial_state_map,
+    );
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let num_terminals = grammar.num_terminals as u32;
@@ -305,11 +331,19 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
             )
         };
         eprintln!(
-            "[glrmask/profile][l1] partition={} vocab_tokens={} tsids={} rep_states={} state_equiv_ms={:.3} max_length_state_equiv_ms={:.3} exact_state_equiv_ms={:.3} max_length_reps={} exact_reps={} token_identity_map_ms={:.3} id_map_ms={:.3} internal_vocab_ms={:.3} vocab_tree_build_ms={:.3} state_seed_ms={:.3} token_set_intern_ms={:.3} tsid_profile_merge_ms={:.3} tsid_profile_merge_before={} tsid_profile_merge_after={} vocab_tree_traversal_ms={:.3} direct_terminal_dwa_ms={:.3} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} terminal_build_ms={:.3} compact_ms={:.3} determinize=none minimize=none prune=none total_ms={:.3}{}",
+            "[glrmask/profile][l1] partition={} vocab_tokens={} tsids={} rep_states={} initial_states_considered={} max_length_skipped={} max_token_len={} token_len_gt_4={} token_len_gt_8={} token_len_gt_16={} token_len_gt_32={} token_len_gt_64={} state_equiv_ms={:.3} max_length_state_equiv_ms={:.3} exact_state_equiv_ms={:.3} max_length_reps={} exact_reps={} token_identity_map_ms={:.3} id_map_ms={:.3} internal_vocab_ms={:.3} vocab_tree_build_ms={:.3} state_seed_ms={:.3} token_set_intern_ms={:.3} tsid_profile_merge_ms={:.3} tsid_profile_merge_before={} tsid_profile_merge_after={} vocab_tree_traversal_ms={:.3} direct_terminal_dwa_ms={:.3} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} terminal_build_ms={:.3} compact_ms={:.3} determinize=none minimize=none prune=none total_ms={:.3}{}",
             partition_label,
             vocab.entries.len(),
             id_map.num_tsids(),
             id_map.tokenizer_states.representative_original_ids.len(),
+            id_map_profile.initial_states_considered,
+            id_map_profile.max_length_skipped,
+            id_map_profile.max_token_len,
+            id_map_profile.token_len_gt_4,
+            id_map_profile.token_len_gt_8,
+            id_map_profile.token_len_gt_16,
+            id_map_profile.token_len_gt_32,
+            id_map_profile.token_len_gt_64,
             id_map_profile.state_equiv_ms,
             id_map_profile.max_length_state_equiv_ms,
             id_map_profile.exact_state_equiv_ms,
@@ -350,6 +384,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
 }
 
 fn build_l1_id_map<'a>(
+    partition_label: &str,
     tokenizer: &Tokenizer,
     vocab: &'a Vocab,
     active_terminals: &[bool],
@@ -375,6 +410,8 @@ fn build_l1_id_map<'a>(
         .map(|(&id, bytes)| (id, bytes.as_slice()))
         .collect();
     let token_bytes: Vec<&[u8]> = token_id_bytes.iter().map(|(_, bytes)| *bytes).collect();
+    let token_len_stats = token_length_stats(&token_bytes);
+    let max_token_len = token_bytes.iter().map(|bytes| bytes.len()).max().unwrap_or(0);
     let mut relevant_bytes = [false; 256];
     for bytes in &token_bytes {
         for &byte in *bytes {
@@ -382,14 +419,19 @@ fn build_l1_id_map<'a>(
         }
     }
     let byte_to_class = compute_byte_classes(tokenizer_view.dfa());
-    let equiv_mapping = super::l2p::equivalence_analysis::state::max_length::find_state_equivalence_classes_byte_restricted(
-        &tokenizer_view,
-        &token_bytes,
-        &states,
-        Some(&byte_to_class),
-        Some(active_terminals),
-        Some(&relevant_bytes),
-    );
+    let max_length_skipped = skip_max_length_for_partition(partition_label);
+    let equiv_mapping = if max_length_skipped {
+        states.clone()
+    } else {
+        super::l2p::equivalence_analysis::state::max_length::find_state_equivalence_classes_byte_restricted(
+            &tokenizer_view,
+            &token_bytes,
+            &states,
+            Some(&byte_to_class),
+            Some(active_terminals),
+            Some(&relevant_bytes),
+        )
+    };
 
     // Sort token IDs first by first byte, then by length, then lexicographically.
     // Keeping first-byte buckets contiguous preserves cheap whole-bucket unions,
@@ -405,7 +447,11 @@ fn build_l1_id_map<'a>(
     });
     let token_sort_ms = token_identity_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let max_length_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0 - view_ms - token_sort_ms;
+    let max_length_ms = if max_length_skipped {
+        0.0
+    } else {
+        state_equiv_started_at.elapsed().as_secs_f64() * 1000.0 - view_ms - token_sort_ms
+    };
     let exact_started_at = Instant::now();
     let mut max_length_representatives = equiv_mapping.clone();
     max_length_representatives.sort_unstable();
@@ -496,6 +542,14 @@ fn build_l1_id_map<'a>(
         token_id_bytes,
         state_to_rep,
         L1IdMapProfile {
+            initial_states_considered: states.len(),
+            max_length_skipped,
+            max_token_len,
+            token_len_gt_4: token_len_stats.gt_4,
+            token_len_gt_8: token_len_stats.gt_8,
+            token_len_gt_16: token_len_stats.gt_16,
+            token_len_gt_32: token_len_stats.gt_32,
+            token_len_gt_64: token_len_stats.gt_64,
             state_equiv_ms,
             max_length_state_equiv_ms: max_length_ms,
             exact_state_equiv_ms,
@@ -504,6 +558,43 @@ fn build_l1_id_map<'a>(
             token_identity_map_ms,
         },
     )
+}
+
+struct TokenLengthStats {
+    gt_4: usize,
+    gt_8: usize,
+    gt_16: usize,
+    gt_32: usize,
+    gt_64: usize,
+}
+
+fn token_length_stats(tokens: &[&[u8]]) -> TokenLengthStats {
+    let mut stats = TokenLengthStats {
+        gt_4: 0,
+        gt_8: 0,
+        gt_16: 0,
+        gt_32: 0,
+        gt_64: 0,
+    };
+    for token in tokens {
+        let len = token.len();
+        if len > 4 {
+            stats.gt_4 += 1;
+        }
+        if len > 8 {
+            stats.gt_8 += 1;
+        }
+        if len > 16 {
+            stats.gt_16 += 1;
+        }
+        if len > 32 {
+            stats.gt_32 += 1;
+        }
+        if len > 64 {
+            stats.gt_64 += 1;
+        }
+    }
+    stats
 }
 
 fn find_l1_exact_state_equivalence_by_token_signatures(
@@ -1822,6 +1913,14 @@ fn apply_tsid_perm_to_id_map(id_map: &mut ManyToOneIdMap, perm: &[u32], new_coun
 }
 
 struct L1IdMapProfile {
+    initial_states_considered: usize,
+    max_length_skipped: bool,
+    max_token_len: usize,
+    token_len_gt_4: usize,
+    token_len_gt_8: usize,
+    token_len_gt_16: usize,
+    token_len_gt_32: usize,
+    token_len_gt_64: usize,
     state_equiv_ms: f64,
     max_length_state_equiv_ms: f64,
     exact_state_equiv_ms: f64,

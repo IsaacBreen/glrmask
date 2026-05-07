@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::OnceLock;
+use std::time::Instant;
 
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -209,6 +211,78 @@ struct CombinedEquivalenceResult {
     state_classes: BTreeSet<BTreeSet<usize>>,
 }
 
+pub(crate) struct CombinedEquivalenceProfile {
+    pub(crate) initial_states_considered: usize,
+    pub(crate) max_length_skipped: bool,
+    pub(crate) max_token_len: usize,
+    pub(crate) token_len_gt_4: usize,
+    pub(crate) token_len_gt_8: usize,
+    pub(crate) token_len_gt_16: usize,
+    pub(crate) token_len_gt_32: usize,
+    pub(crate) token_len_gt_64: usize,
+    pub(crate) max_length_state_equiv_ms: f64,
+    pub(crate) exact_state_equiv_ms: f64,
+    pub(crate) max_length_reps: usize,
+    pub(crate) exact_reps: usize,
+}
+
+struct TokenLengthStats {
+    gt_4: usize,
+    gt_8: usize,
+    gt_16: usize,
+    gt_32: usize,
+    gt_64: usize,
+}
+
+fn skip_max_length_for_partition(partition_label: &str) -> bool {
+    static SKIPPED_PARTITIONS: OnceLock<Vec<String>> = OnceLock::new();
+    SKIPPED_PARTITIONS
+        .get_or_init(|| {
+            std::env::var("GLRMASK_SKIP_MAX_LENGTH_PARTITIONS")
+                .ok()
+                .map(|value| {
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|label| !label.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .iter()
+        .any(|label| label == partition_label)
+}
+
+fn token_length_stats(tokens: &[&[u8]]) -> TokenLengthStats {
+    let mut stats = TokenLengthStats {
+        gt_4: 0,
+        gt_8: 0,
+        gt_16: 0,
+        gt_32: 0,
+        gt_64: 0,
+    };
+    for token in tokens {
+        let len = token.len();
+        if len > 4 {
+            stats.gt_4 += 1;
+        }
+        if len > 8 {
+            stats.gt_8 += 1;
+        }
+        if len > 16 {
+            stats.gt_16 += 1;
+        }
+        if len > 32 {
+            stats.gt_32 += 1;
+        }
+        if len > 64 {
+            stats.gt_64 += 1;
+        }
+    }
+    stats
+}
+
 fn build_internal_id_map_from_combined_result(
     tokenizer: &Tokenizer,
     initial_state_map: Option<&ManyToOneIdMap>,
@@ -229,6 +303,7 @@ fn build_internal_id_map_from_combined_result(
 }
 
 pub(crate) fn analyze_equivalences_with_group_filter(
+    partition_label: &str,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     disallowed_follows: &BTreeMap<u32, BitSet>,
@@ -237,8 +312,8 @@ pub(crate) fn analyze_equivalences_with_group_filter(
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
-) -> InternalIdMap {
-    analyze_equivalences_impl(tokenizer, vocab, disallowed_follows, ignore_terminal, active_groups, shared_vocab_dfa_cache, flat_trans, initial_state_map)
+) -> (InternalIdMap, CombinedEquivalenceProfile) {
+    analyze_equivalences_impl(partition_label, tokenizer, vocab, disallowed_follows, ignore_terminal, active_groups, shared_vocab_dfa_cache, flat_trans, initial_state_map)
 }
 
 /// Combined equivalence analysis over a flattened tokenizer DFA.
@@ -246,6 +321,7 @@ pub(crate) fn analyze_equivalences_with_group_filter(
 /// Uses state equivalence (k-step hashing plus token-based refinement) followed
 /// by vocab equivalence (parallel batched with byte-class compression).
 fn analyze_equivalences_impl(
+    partition_label: &str,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     disallowed_follows: &BTreeMap<u32, BitSet>,
@@ -254,7 +330,7 @@ fn analyze_equivalences_impl(
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
-) -> InternalIdMap {
+) -> (InternalIdMap, CombinedEquivalenceProfile) {
     let adjusted_disallowed = adjust_disallowed_follows(disallowed_follows, ignore_terminal);
     let effective_disallowed = adjusted_disallowed.as_ref().unwrap_or(disallowed_follows);
     // Only use shared flat_trans when state count matches the (possibly
@@ -272,6 +348,7 @@ fn analyze_equivalences_impl(
     };
 
     let prepared = prepare_equivalence_inputs(tokenizer, vocab, initial_state_map);
+    let token_len_stats = token_length_stats(&prepared.token_bytes);
 
     if let Some(cache) = shared_vocab_dfa_cache {
         cache.get_or_init(|| vocab_equivalence_analysis::SharedVocabDfaBase::build_from_dfa(tokenizer_view.dfa()));
@@ -285,20 +362,38 @@ fn analyze_equivalences_impl(
         .unwrap_or_else(|| super::compat::compute_byte_classes(tokenizer_view.dfa()));
 
     let dedup = deduplicate_tokens_by_byte_class(&prepared.token_bytes, &byte_to_class);
+    let max_token_len = dedup
+        .representative_token_bytes
+        .iter()
+        .map(|token| token.len())
+        .max()
+        .unwrap_or(0);
     let mut relevant_bytes = [false; 256];
     for token in &dedup.representative_token_bytes {
         for &byte in *token {
             relevant_bytes[byte as usize] = true;
         }
     }
-    let pre_state_reps = super::state::max_length::find_state_equivalence_classes_byte_restricted(
-        &tokenizer_view,
-        &dedup.representative_token_bytes,
-        &prepared.initial_states,
-        Some(&byte_to_class),
-        active_groups,
-        Some(&relevant_bytes),
-    );
+    let max_length_skipped = skip_max_length_for_partition(partition_label);
+    let max_length_started_at = Instant::now();
+    let pre_state_reps = if max_length_skipped {
+        prepared.initial_states.clone()
+    } else {
+        super::state::max_length::find_state_equivalence_classes_byte_restricted(
+            &tokenizer_view,
+            &dedup.representative_token_bytes,
+            &prepared.initial_states,
+            Some(&byte_to_class),
+            active_groups,
+            Some(&relevant_bytes),
+        )
+    };
+    let max_length_state_equiv_ms = if max_length_skipped {
+        0.0
+    } else {
+        max_length_started_at.elapsed().as_secs_f64() * 1000.0
+    };
+    let max_length_reps = pre_state_reps.iter().copied().collect::<BTreeSet<_>>().len();
     let pre_reduced_states: Vec<usize> = pre_state_reps
         .iter()
         .copied()
@@ -321,6 +416,7 @@ fn analyze_equivalences_impl(
         &dedup_vocab_classes,
         &dedup.representative_token_bytes,
     );
+    let exact_started_at = Instant::now();
     let reduced_state_reps_for_pre_reduced =
         state_equivalence_analysis::find_state_equivalence_classes_with_disallowed(
             &tokenizer_view,
@@ -328,6 +424,7 @@ fn analyze_equivalences_impl(
             &pre_reduced_states,
             &normalized_disallowed_follows,
         );
+    let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
     let rep_to_final: BTreeMap<usize, usize> = pre_reduced_states
         .iter()
         .copied()
@@ -344,10 +441,27 @@ fn analyze_equivalences_impl(
     );
     let state_classes =
         state_equivalence_analysis::mapping_to_equivalence_classes(&prepared.initial_states, &representative_states);
+    let exact_reps = state_classes.len();
     let result = CombinedEquivalenceResult {
         vocab_classes,
         state_classes,
     };
 
-    build_internal_id_map_from_combined_result(tokenizer, initial_state_map, &prepared, &result)
+    (
+        build_internal_id_map_from_combined_result(tokenizer, initial_state_map, &prepared, &result),
+        CombinedEquivalenceProfile {
+            initial_states_considered: prepared.initial_states.len(),
+            max_length_skipped,
+            max_token_len,
+            token_len_gt_4: token_len_stats.gt_4,
+            token_len_gt_8: token_len_stats.gt_8,
+            token_len_gt_16: token_len_stats.gt_16,
+            token_len_gt_32: token_len_stats.gt_32,
+            token_len_gt_64: token_len_stats.gt_64,
+            max_length_state_equiv_ms,
+            exact_state_equiv_ms,
+            max_length_reps,
+            exact_reps,
+        },
+    )
 }

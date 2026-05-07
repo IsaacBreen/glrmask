@@ -14,6 +14,7 @@ use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::compiler::glr::table::GLRTable;
 use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::equiv_types::InternalIdMap;
+use crate::compiler::stages::id_map_and_terminal_dwa::types::compile_profile_enabled;
 use crate::compiler::stages::resolve_negatives::resolve_negative_codes_in_nwa;
 use crate::compiler::stages::templates::Templates;
 use crate::ds::bitset::BitSet;
@@ -70,6 +71,13 @@ struct CachedClosure {
 
 fn elapsed_ms(started_at: Instant) -> f64 {
     started_at.elapsed().as_secs_f64() * 1000.0
+}
+
+#[derive(Default)]
+struct ParserNwaBuildProfile {
+    state_prep_ms: f64,
+    compose_state_ms: f64,
+    parser_nwa_build_ms: f64,
 }
 
 fn accepting_nwa(final_weight: &Weight) -> Option<NWA> {
@@ -1141,12 +1149,16 @@ fn build_parser_nwa_from_terminal_dwa(
     terminal_dwa: &DWA,
     grammar: &AnalyzedGrammar,
     templates: Templates,
-) -> Option<NWA> {
+) -> Option<(NWA, ParserNwaBuildProfile)> {
+    let total_started_at = Instant::now();
+    let state_prep_started_at = Instant::now();
     let states = build_state_summaries(terminal_dwa, grammar, &templates);
+    let state_prep_ms = elapsed_ms(state_prep_started_at);
 
     let mut arena = NWA::new(0, 0);
     let mut body_memo = vec![None; states.len()];
     let mut concatenated_branches: ConcatMemo = FxHashMap::default();
+    let compose_state_started_at = Instant::now();
     let parser_body = compose_state(
         terminal_dwa.start_state(),
         &states,
@@ -1154,10 +1166,18 @@ fn build_parser_nwa_from_terminal_dwa(
         &mut body_memo,
         &mut concatenated_branches,
     )?;
+    let compose_state_ms = elapsed_ms(compose_state_started_at);
 
     arena.set_start_states(parser_body.start_states.clone());
 
-    Some(arena)
+    Some((
+        arena,
+        ParserNwaBuildProfile {
+            state_prep_ms,
+            compose_state_ms,
+            parser_nwa_build_ms: elapsed_ms(total_started_at),
+        },
+    ))
 }
 
 pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
@@ -1168,32 +1188,97 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     _vocab: &Vocab,
     _id_map: &InternalIdMap,
 ) -> DWA {
-    let Some(mut parser_nwa) = build_parser_nwa_from_terminal_dwa(terminal_dwa, grammar, templates) else {
+    let total_started_at = Instant::now();
+    let minimize_skipped = false;
+    let terminal_dwa_transition_count: usize = terminal_dwa
+        .states()
+        .iter()
+        .map(|state| state.transitions.len())
+        .sum();
+    let Some((mut parser_nwa, parser_nwa_profile)) = build_parser_nwa_from_terminal_dwa(terminal_dwa, grammar, templates) else {
+        if compile_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][parser_dwa_detail] terminal_dwa_states={} terminal_dwa_transitions={} parser_nwa_built=false pre_minimize_states=0 pre_minimize_transitions=0 post_minimize_states=0 post_minimize_transitions=0 minimize_skipped={} state_prep_ms=0.000 compose_state_ms=0.000 parser_nwa_build_ms=0.000 resolve_negative_ms=0.000 support_determinize_ms=0.000 possible_outgoing_ms=0.000 default_opt_ms=0.000 subtract_final_ms=0.000 fallback_determinize_ms=0.000 minimize_ms=0.000 total_ms={:.3}",
+                terminal_dwa.states().len(),
+                terminal_dwa_transition_count,
+                minimize_skipped,
+                elapsed_ms(total_started_at),
+            );
+        }
         return DWA::new(0, 0);
     };
 
+    let resolve_negative_started_at = Instant::now();
     resolve_negative_codes_in_nwa(&mut parser_nwa);
+    let resolve_negative_ms = elapsed_ms(resolve_negative_started_at);
 
+    let support_determinize_started_at = Instant::now();
     let determinized = determinize_with_supports(&parser_nwa, Some(table.num_states));
+    let support_determinize_ms = elapsed_ms(support_determinize_started_at);
     let mut parser_dwa_pre_minimize = determinized.dwa;
 
+    let possible_outgoing_started_at = Instant::now();
     let possible_by_state = build_possible_outgoing_ids_by_state(
         &parser_nwa,
         &determinized.supports,
         table.num_states,
     );
+    let possible_outgoing_ms = elapsed_ms(possible_outgoing_started_at);
+
+    let default_opt_started_at = Instant::now();
     optimize_parser_dwa_defaults(
         &mut parser_dwa_pre_minimize,
         &possible_by_state,
         table.num_states,
     );
+    let default_opt_ms = elapsed_ms(default_opt_started_at);
+
+    let subtract_final_started_at = Instant::now();
     subtract_final_weights_from_outgoing_dwa(&mut parser_dwa_pre_minimize);
+    let subtract_final_ms = elapsed_ms(subtract_final_started_at);
+
+    let fallback_determinize_started_at = Instant::now();
     parser_dwa_pre_minimize = determinize_parser_dwa_with_fallbacks(
         &parser_dwa_pre_minimize,
         &possible_by_state,
         table.num_states,
     );
+    let fallback_determinize_ms = elapsed_ms(fallback_determinize_started_at);
 
-    minimize(&parser_dwa_pre_minimize)
+    let pre_minimize_state_count = parser_dwa_pre_minimize.states().len();
+    let pre_minimize_transition_count = parser_dwa_pre_minimize.num_transitions();
+    let minimize_started_at = Instant::now();
+    let minimized = minimize(&parser_dwa_pre_minimize);
+    let minimize_ms = elapsed_ms(minimize_started_at);
+    let post_minimize_state_count = minimized.states().len();
+    let post_minimize_transition_count = minimized.num_transitions();
+
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][parser_dwa_detail] terminal_dwa_states={} terminal_dwa_transitions={} parser_nwa_states={} parser_nwa_start_states={} pre_minimize_states={} pre_minimize_transitions={} post_minimize_states={} post_minimize_transitions={} minimize_skipped={} state_prep_ms={:.3} compose_state_ms={:.3} parser_nwa_build_ms={:.3} resolve_negative_ms={:.3} support_determinize_ms={:.3} possible_outgoing_ms={:.3} default_opt_ms={:.3} subtract_final_ms={:.3} fallback_determinize_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
+            terminal_dwa.states().len(),
+            terminal_dwa_transition_count,
+            parser_nwa.states().len(),
+            parser_nwa.start_states().len(),
+            pre_minimize_state_count,
+            pre_minimize_transition_count,
+            post_minimize_state_count,
+            post_minimize_transition_count,
+            minimize_skipped,
+            parser_nwa_profile.state_prep_ms,
+            parser_nwa_profile.compose_state_ms,
+            parser_nwa_profile.parser_nwa_build_ms,
+            resolve_negative_ms,
+            support_determinize_ms,
+            possible_outgoing_ms,
+            default_opt_ms,
+            subtract_final_ms,
+            fallback_determinize_ms,
+            minimize_ms,
+            elapsed_ms(total_started_at),
+        );
+    }
+
+    minimized
 }
 
