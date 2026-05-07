@@ -287,6 +287,47 @@ fn json_schema_pattern_accepts_decoded_backslash_string() {
 }
 
 #[test]
+fn json_schema_pattern_accepts_decoded_backslash_incrementally() {
+    let constraint = byte_schema(r#"{"type":"string","pattern":"^[\\\\]+$"}"#);
+    let mut state = constraint.start();
+
+    state.commit_bytes(b"\"").unwrap();
+    state.commit_bytes(b"\\").unwrap();
+    state.commit_bytes(b"\\").unwrap();
+    assert!(allowed(&state.mask()).contains(&(b'"' as usize)));
+    state.commit_bytes(b"\"").unwrap();
+    assert!(state.is_finished());
+}
+
+#[test]
+fn json_schema_pattern_accepts_decoded_backslash_fused_token() {
+    let constraint = schema(
+        &["\"", "\\\\\"", "\\\\", "\\u"],
+        r#"{"type":"string","pattern":"^[\\\\]+$"}"#,
+    );
+    let mut state = constraint.start();
+
+    state.commit_token(0).unwrap();
+    assert!(allowed(&state.mask()).contains(&1));
+    state.commit_token(1).unwrap();
+    assert!(state.is_finished());
+}
+
+#[test]
+fn json_schema_pattern_range_accepts_backslash_fused_token() {
+    let constraint = schema(
+        &["\"", "\\\\\"", "\\\\", "\\u"],
+        r#"{"type":"string","pattern":"^[.-_]+$"}"#,
+    );
+    let mut state = constraint.start();
+
+    state.commit_token(0).unwrap();
+    assert!(allowed(&state.mask()).contains(&1));
+    state.commit_token(1).unwrap();
+    assert!(state.is_finished());
+}
+
+#[test]
 fn json_schema_pattern_accepts_decoded_newline_escape_spellings() {
     let constraint = byte_schema(r#"{"type":"string","pattern":"^\\n$"}"#);
     assert_accepts_bytes(&constraint, br#""\n""#);

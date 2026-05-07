@@ -2435,7 +2435,7 @@ fn json_hostname_label_pattern() -> &'static str {
     r#"[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?"#
 }
 
-fn simple_repeated_single_char_pattern(pattern: &str) -> Option<String> {
+fn simple_repeated_single_char_expr(pattern: &str) -> Option<LexerExpr> {
     // Only valid when the pattern is fully anchored (^...$), because JSON Schema
     // `pattern` is a search pattern. Without both anchors the string may contain
     // characters outside the char-class, so we must fall back to the general
@@ -2445,7 +2445,7 @@ fn simple_repeated_single_char_pattern(pattern: &str) -> Option<String> {
     if !(repeated.starts_with('[') && repeated.ends_with(']')) {
         return None;
     }
-    Some(jsonify_regex_dot(repeated))
+    Some(decoded_regex_fullmatch_expr(repeated))
 }
 
 /// Returns `true` when every top-level branch of `pattern` starts with `^` and
@@ -6281,13 +6281,15 @@ impl<'a> SchemaCtx<'a> {
             let Some(pattern) = prune_pattern_branches_for_min_length(pattern, min_len) else {
                 return Ok(self.extract_terminal_rule(never_expr(), "JSON_STRING_PATTERN_UNSAT"));
             };
-            if let Some(unit_pattern) = simple_repeated_single_char_pattern(&pattern) {
-                if min_len > 0 || max_len.is_some() {
-                    return Ok(self.build_bounded_string_from_unit_regex(&unit_pattern, min_len, max_len));
+            if let Some(unit_expr) = simple_repeated_single_char_expr(&pattern) {
+                let required_min = min_len.max(1);
+                if matches!(max_len, Some(max) if max < required_min) {
+                    return Ok(self.extract_terminal_rule(never_expr(), "JSON_STRING_PATTERN_UNSAT"));
                 }
-                return Ok(self.build_json_wrapped_fullmatch_pattern(
-                    &format!("{}+", unit_pattern),
-                    "JSON_STRING_PATTERN_FULLMATCH",
+                return Ok(self.build_bounded_string_from_unit_lexer_expr(
+                    unit_expr,
+                    required_min,
+                    max_len,
                 ));
             }
             // Fixed-length unanchored pattern optimization:
@@ -6440,14 +6442,14 @@ impl<'a> SchemaCtx<'a> {
         Ok(wrap(body))
     }
 
-    fn build_bounded_string_from_unit_regex(
+    fn build_bounded_string_from_unit_lexer_expr(
         &mut self,
-        unit_pattern: &str,
+        unit_expr: LexerExpr,
         min_len: usize,
         max_len: Option<usize>,
     ) -> GrammarExpr {
         let unit_expr = self.extract_terminal_rule(
-            parsed_regex_expr(unit_pattern, true),
+            expr_to_grammar_expr(&unit_expr),
             "JSON_STRING_PATTERN_CHAR",
         );
         let bounded_body = match max_len {
