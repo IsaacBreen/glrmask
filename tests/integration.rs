@@ -200,6 +200,27 @@ fn nullable_repeat_alternative_accepts_nonempty_branch_before_nullable_suffix() 
 }
 
 #[test]
+fn explicit_left_recursive_lowered_form_accepts_nonempty_branch_before_suffix() {
+    let grammar = r#"
+        start s;
+
+        nt s ::= "\"" host bs "\"";
+        nt host ::= "1" | as;
+        nt as ::= | as "a";
+        nt bs ::= | bs "b";
+    "#;
+
+    let tiny_vocab = vocab(&["\"", "a"]);
+    let constraint = Constraint::from_glrm_grammar(grammar, &tiny_vocab).unwrap();
+
+    let mut state = constraint.start();
+    state.commit_token(0).unwrap();
+    state.commit_token(1).unwrap();
+    state.commit_token(0).unwrap();
+    assert!(state.is_finished());
+}
+
+#[test]
 fn commit_bytes_and_commit_tokens_agree() {
     let constraint = ebnf(&["a", "b", "ab"], r#"start ::= "a" "b" | "ab""#);
 

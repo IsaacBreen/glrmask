@@ -1831,37 +1831,13 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
                 let rhs = parts.iter().map(|part| lowerer.lower_expr_terminalish(part)).collect::<Result<Vec<_>, _>>()?;
                 lowerer.rules.push(Rule { lhs, rhs });
             }
-            GrammarExpr::Choice(options) => {
-                for option in options {
-                    match option {
-                        GrammarExpr::Sequence(parts) => {
-                            let rhs = parts.iter().map(|part| lowerer.lower_expr_terminalish(part)).collect::<Result<Vec<_>, _>>()?;
-                            lowerer.rules.push(Rule { lhs, rhs });
-                        }
-                        _ => {
-                            let symbol = lowerer.lower_expr_terminalish(option)?;
-                            lowerer.rules.push(Rule { lhs, rhs: vec![symbol] });
-                        }
-                    }
-                }
-            }
-            GrammarExpr::Optional(inner) => {
-                lowerer.rules.push(Rule { lhs, rhs: Vec::new() });
-                let symbol = lowerer.lower_expr_terminalish(inner)?;
+            GrammarExpr::Choice(_)
+            | GrammarExpr::Optional(_)
+            | GrammarExpr::Repeat(_)
+            | GrammarExpr::RepeatOne(_)
+            | GrammarExpr::RepeatRange { .. } => {
+                let symbol = lowerer.lower_expr(&rule.expr);
                 lowerer.rules.push(Rule { lhs, rhs: vec![symbol] });
-            }
-            GrammarExpr::Repeat(inner) => {
-                let symbol = lowerer.lower_expr_terminalish(inner)?;
-                lowerer.rules.push(Rule { lhs, rhs: Vec::new() });
-                lowerer.rules.push(Rule { lhs, rhs: vec![Symbol::Nonterminal(lhs), symbol] });
-            }
-            GrammarExpr::RepeatOne(inner) => {
-                let symbol = lowerer.lower_expr_terminalish(inner)?;
-                lowerer.rules.push(Rule { lhs, rhs: vec![symbol.clone()] });
-                lowerer.rules.push(Rule { lhs, rhs: vec![Symbol::Nonterminal(lhs), symbol] });
-            }
-            GrammarExpr::RepeatRange { expr, min, max } => {
-                lowerer.emit_repeat_range(lhs, expr, *min, *max)?;
             }
             _ => {
                 let symbol = lowerer.lower_expr_terminalish(&rule.expr)?;
