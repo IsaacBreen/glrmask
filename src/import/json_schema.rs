@@ -1735,7 +1735,7 @@ fn restored_structured_uri_enabled() -> bool {
 }
 
 fn uri_aggregate_scheme_enabled() -> bool {
-    env_flag_default("GLRMASK_URI_AGGREGATE_SCHEME", true)
+    env_flag_default("GLRMASK_URI_AGGREGATE_SCHEME", false)
 }
 
 fn uri_aggregate_reg_name_enabled() -> bool {
@@ -1743,15 +1743,15 @@ fn uri_aggregate_reg_name_enabled() -> bool {
 }
 
 fn uri_aggregate_port_enabled() -> bool {
-    env_flag_default("GLRMASK_URI_AGGREGATE_PORT", true)
+    env_flag_default("GLRMASK_URI_AGGREGATE_PORT", false)
 }
 
 fn uri_aggregate_pchar_sequence_enabled() -> bool {
-    env_flag_default("GLRMASK_URI_AGGREGATE_PCHAR_SEQUENCE", true)
+    env_flag_default("GLRMASK_URI_AGGREGATE_PCHAR_SEQUENCE", false)
 }
 
 fn uri_aggregate_query_fragment_enabled() -> bool {
-    env_flag_default("GLRMASK_URI_AGGREGATE_QUERY_FRAGMENT", true)
+    env_flag_default("GLRMASK_URI_AGGREGATE_QUERY_FRAGMENT", false)
 }
 
 fn uri_aggregate_h16_colon_ranges_enabled() -> bool {
@@ -1763,7 +1763,7 @@ fn uri_aggregate_colon_h16_ranges_enabled() -> bool {
 }
 
 fn uri_aggregate_ipv6_ranges_enabled() -> bool {
-    env_flag_default("GLRMASK_URI_AGGREGATE_IPV6_RANGES", false)
+    env_flag_default("GLRMASK_URI_AGGREGATE_IPV6_RANGES", true)
 }
 
 fn uri_rule_should_be_terminal(name: &str) -> Option<bool> {
