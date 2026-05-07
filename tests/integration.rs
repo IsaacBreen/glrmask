@@ -184,14 +184,18 @@ fn nullable_repeat_alternative_accepts_nonempty_branch_before_nullable_suffix() 
         nt host ::= "1" | "a"*;
     "#;
 
-    let constraint = Constraint::from_glrm_grammar(grammar, &bytes_vocab()).unwrap();
+    let tiny_vocab = vocab(&["\"", "a"]);
+    let constraint = Constraint::from_glrm_grammar(grammar, &tiny_vocab).unwrap();
 
     let mut empty_host = constraint.start();
-    empty_host.commit_bytes(br#""""#).unwrap();
+    empty_host.commit_token(0).unwrap();
+    empty_host.commit_token(0).unwrap();
     assert!(empty_host.is_finished());
 
     let mut single_alpha_host = constraint.start();
-    single_alpha_host.commit_bytes(br#""a""#).unwrap();
+    single_alpha_host.commit_token(0).unwrap();
+    single_alpha_host.commit_token(1).unwrap();
+    single_alpha_host.commit_token(0).unwrap();
     assert!(single_alpha_host.is_finished());
 }
 
