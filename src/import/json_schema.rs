@@ -6469,7 +6469,6 @@ impl<'a> SchemaCtx<'a> {
                 GrammarExpr::Repeat(Box::new(uri_query_frag.clone())),
             ]),
         );
-        let uri_slash = choice_or_single(vec![literal_expr(b"/"), literal_expr(br"\/")]);
 
         self.insert_rule(
             "uri_ipv_future",
@@ -6496,23 +6495,14 @@ impl<'a> SchemaCtx<'a> {
         );
         let uri_ipv4_address = GrammarExpr::Ref("uri_ipv4_address".into());
 
-        let uri_reg_name_unit = choice_or_single(vec![
-            uri_reg_name_char.clone(),
-            uri_pct_encoded.clone(),
-        ]);
-        self.insert_rule(
-            "uri_reg_name_nonempty",
-            GrammarExpr::RepeatOne(Box::new(uri_reg_name_unit.clone())),
-        );
-        let uri_reg_name_nonempty = GrammarExpr::Ref("uri_reg_name_nonempty".into());
         self.insert_rule(
             "uri_reg_name",
-            choice_or_single(vec![
-                empty_expr(),
-                uri_reg_name_nonempty.clone(),
-            ]),
+            GrammarExpr::Repeat(Box::new(choice_or_single(vec![
+                uri_reg_name_char.clone(),
+                uri_pct_encoded.clone(),
+            ]))),
         );
-        let uri_reg_name_empty = empty_expr();
+        let uri_reg_name = GrammarExpr::Ref("uri_reg_name".into());
 
         let ip_literal_choice = if ablated("ipv_future") {
             uri_ipv6_address.clone()
@@ -6542,8 +6532,7 @@ impl<'a> SchemaCtx<'a> {
                     host_alts.push(uri_ipv4_address.clone());
                 }
                 if !ablated("reg_name") {
-                    host_alts.push(uri_reg_name_nonempty.clone());
-                    host_alts.push(uri_reg_name_empty);
+                    host_alts.push(uri_reg_name.clone());
                 }
                 choice_or_single(host_alts)
             },
@@ -6580,7 +6569,7 @@ impl<'a> SchemaCtx<'a> {
         self.insert_rule(
             "uri_path_abempty",
             GrammarExpr::Repeat(Box::new(sequence_or_single(vec![
-                uri_slash.clone(),
+                literal_expr(b"/"),
                 GrammarExpr::Repeat(Box::new(uri_pchar.clone())),
             ]))),
         );
@@ -6589,11 +6578,11 @@ impl<'a> SchemaCtx<'a> {
         self.insert_rule(
             "uri_path_absolute",
             sequence_or_single(vec![
-                uri_slash.clone(),
+                literal_expr(b"/"),
                 GrammarExpr::Optional(Box::new(sequence_or_single(vec![
                     GrammarExpr::RepeatOne(Box::new(uri_pchar.clone())),
                     GrammarExpr::Repeat(Box::new(sequence_or_single(vec![
-                        uri_slash.clone(),
+                        literal_expr(b"/"),
                         GrammarExpr::Repeat(Box::new(uri_pchar.clone())),
                     ]))),
                 ]))),
@@ -6606,7 +6595,7 @@ impl<'a> SchemaCtx<'a> {
             sequence_or_single(vec![
                 GrammarExpr::RepeatOne(Box::new(uri_pchar.clone())),
                 GrammarExpr::Repeat(Box::new(sequence_or_single(vec![
-                    uri_slash.clone(),
+                    literal_expr(b"/"),
                     GrammarExpr::Repeat(Box::new(uri_pchar.clone())),
                 ]))),
             ]),
@@ -6614,8 +6603,7 @@ impl<'a> SchemaCtx<'a> {
         let uri_path_rootless = GrammarExpr::Ref("uri_path_rootless".into());
 
         let mut hier_alts = vec![sequence_or_single(vec![
-            uri_slash.clone(),
-            uri_slash.clone(),
+            literal_expr(b"//"),
             uri_authority,
             if ablated("path_abempty") {
                 empty_expr()
@@ -8984,3 +8972,4 @@ fn sanitize_rule_name(s: &str) -> String {
         .collect();
     if sanitized.is_empty() { "rule".into() } else { sanitized }
 }
+
