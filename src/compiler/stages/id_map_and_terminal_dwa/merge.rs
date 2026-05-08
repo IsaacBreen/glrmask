@@ -6,16 +6,42 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
+use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
 
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::NWA;
+use crate::compiler::stages::compact::compact_dwa_dimensions_fast_with_stats;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::weight::Weight;
 
-use super::types::{LocalIdMapTerminalDwa, TerminalDwaPhaseProfile};
+use super::types::{LocalIdMapTerminalDwa, TerminalDwaPhaseProfile, compile_profile_enabled};
+
+fn minimize_merged_terminal_dwa_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLRMASK_MINIMIZE_MERGED_TERMINAL_DWA")
+            .map(|value| {
+                let trimmed = value.trim();
+                !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+            })
+            .unwrap_or(true)
+    })
+}
+
+fn compact_merged_terminal_dwa_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLRMASK_COMPACT_MERGED_TERMINAL_DWA")
+            .map(|value| {
+                let trimmed = value.trim();
+                !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+            })
+            .unwrap_or(true)
+    })
+}
 
 /// Merge local branch outputs for a single partition into one compacted DWA.
 pub(crate) fn merge_local_id_maps_and_terminal_dwas(
@@ -66,10 +92,13 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
     }
 }
 
-/// Merge already-compacted partition outputs into a single determinized global DWA.
+/// Merge already-compacted partition outputs into one global DWA.
 ///
-/// Partition-local merges have already paid the minimize cost, so the global
-/// merge keeps behavior unchanged by stopping after determinization.
+/// Partition-local merges have already minimized their local outputs. By
+/// default the final cross-partition merge also minimizes after determinizing;
+/// `GLRMASK_MINIMIZE_MERGED_TERMINAL_DWA=0` disables that final exact pass for
+/// A/B comparison. The merged result is then compacted before returning unless
+/// `GLRMASK_COMPACT_MERGED_TERMINAL_DWA=0` disables the final compaction pass.
 pub(crate) fn merge_id_maps_and_terminal_dwas(
     inputs: Vec<LocalIdMapTerminalDwa>,
     num_tokenizer_states: usize,
@@ -108,11 +137,53 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
 
     let det = determinize(&global_nwa)
         .expect("merge terminal NWA determinization failed");
+    let mut dwa = if minimize_merged_terminal_dwa_enabled() {
+        minimize(&det)
+    } else {
+        det.clone()
+    };
+    let before_compact_stats = dwa.stats();
+    let before_num_tsids = global_id_map.num_tsids();
+    let before_num_tokens = global_id_map.num_internal_tokens();
+    let mut id_map = global_id_map;
+    let compact_enabled = compact_merged_terminal_dwa_enabled();
+    let (compact_report, compact_ms) = if compact_enabled {
+        let compact_started_at = Instant::now();
+        let compact_report = compact_dwa_dimensions_fast_with_stats(&mut dwa, &mut id_map);
+        let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
+        (Some(compact_report), compact_ms)
+    } else {
+        (None, 0.0)
+    };
+    let after_compact_stats = dwa.stats();
+
+    if compile_profile_enabled() {
+        let profile_stats = compact_report.and_then(|report| report.profile_stats);
+        eprintln!(
+            "[glrmask/profile][merged_terminal_dwa] minimize_enabled={} compact_enabled={} states_before_compact={} transitions_before_compact={} interned_ranges_before_compact={} states_after_compact={} transitions_after_compact={} interned_ranges_after_compact={} tsids_before_compact={} tsids_after_compact={} tokens_before_compact={} tokens_after_compact={} compact_ms={:.3}",
+            minimize_merged_terminal_dwa_enabled(),
+            compact_enabled,
+            before_compact_stats.states,
+            before_compact_stats.transitions,
+            before_compact_stats.interned_ranges,
+            after_compact_stats.states,
+            after_compact_stats.transitions,
+            after_compact_stats.interned_ranges,
+            before_num_tsids,
+            profile_stats.map(|stats| stats.tsids_after).unwrap_or(before_num_tsids as usize),
+            before_num_tokens,
+            profile_stats.map(|stats| stats.tokens_after).unwrap_or(before_num_tokens as usize),
+            compact_ms,
+        );
+    }
 
     LocalIdMapTerminalDwa {
-        id_map: global_id_map,
-        dwa: det.clone(),
-        profile: TerminalDwaPhaseProfile::default(),
+        id_map,
+        dwa,
+        profile: TerminalDwaPhaseProfile {
+            compact_ms,
+            ..TerminalDwaPhaseProfile::default()
+        },
     }
 }
 

@@ -34,25 +34,6 @@ use types::{
     TerminalDwaPhaseProfile,
 };
 
-fn global_max_length_token_cap() -> Option<usize> {
-    static CAP: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
-    *CAP.get_or_init(|| {
-        match std::env::var("GLRMASK_GLOBAL_MAX_LENGTH_TOKEN_CAP") {
-            Ok(value) => {
-                let trimmed = value.trim();
-                if trimmed.is_empty() {
-                    Some(3)
-                } else if matches!(trimmed.to_ascii_lowercase().as_str(), "none" | "unlimited" | "all") {
-                    None
-                } else {
-                    trimmed.parse::<usize>().ok().filter(|&cap| cap > 0)
-                }
-            }
-            Err(_) => Some(3),
-        }
-    })
-}
-
 fn global_max_length_env_override() -> Option<bool> {
     static OVERRIDE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
     *OVERRIDE.get_or_init(|| {
@@ -86,7 +67,7 @@ pub(crate) fn build_global_max_length_state_map(
 
         if compile_profile_enabled() {
             eprintln!(
-                "[glrmask/profile][global_max_length] mode=identity skipped=true states={} reps={} tokens_included=0 token_cap=none max_token_len=0 ms={:.3}",
+                "[glrmask/profile][global_max_length] mode=identity skipped=true states={} reps={} tokens_included=0 max_token_len=0 ms={:.3}",
                 states.len(),
                 representative_original_ids.len(),
                 started_at.elapsed().as_secs_f64() * 1000.0,
@@ -101,12 +82,10 @@ pub(crate) fn build_global_max_length_state_map(
     }
 
     let tokenizer_view = TokenizerView::new_from_flat_trans(flat_trans, tokenizer);
-    let token_cap = global_max_length_token_cap();
     let token_bytes: Vec<&[u8]> = vocab
         .entries
         .values()
         .map(|bytes| bytes.as_slice())
-        .filter(|bytes| token_cap.is_none_or(|cap| bytes.len() <= cap))
         .collect();
     let max_token_len = token_bytes.iter().map(|bytes| bytes.len()).max().unwrap_or(0);
     let mut relevant_bytes = [false; 256];
@@ -139,13 +118,10 @@ pub(crate) fn build_global_max_length_state_map(
 
     if compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][global_max_length] mode=restored skipped=false states={} reps={} tokens_included={} token_cap={} max_token_len={} ms={:.3}",
+            "[glrmask/profile][global_max_length] mode=restored skipped=false states={} reps={} tokens_included={} max_token_len={} ms={:.3}",
             states.len(),
             representative_original_ids.len(),
             token_bytes.len(),
-            token_cap
-                .map(|cap| cap.to_string())
-                .unwrap_or_else(|| "none".to_string()),
             max_token_len,
             started_at.elapsed().as_secs_f64() * 1000.0,
         );
