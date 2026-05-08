@@ -300,10 +300,8 @@ where
 {
     let (left_artifact, left_id_map) = left.parts_mut();
     let (right_artifact, right_id_map) = right.parts_mut();
-    let left_weights = left_artifact.weight_refs_mut();
-    let right_weights = right_artifact.weight_refs_mut();
-    let mut left_weights: Vec<&mut Weight> = left_weights;
-    let mut right_weights: Vec<&mut Weight> = right_weights;
+    let mut left_weights = left_artifact.weight_refs_mut();
+    let mut right_weights = right_artifact.weight_refs_mut();
     reconcile_weight_id_maps(
         &mut left_weights,
         left_id_map,
@@ -324,8 +322,8 @@ where
     let mut a = a;
     let mut b = b;
     let common_id_map = reconcile_mapped_weight_artifacts(&mut a, &mut b);
-    let (artifact_a, _) = a.into_parts();
-    let (artifact_b, _) = b.into_parts();
+    let artifact_a = a.into_artifact();
+    let artifact_b = b.into_artifact();
     MappedArtifact::new((artifact_a, artifact_b), common_id_map)
 }
 
@@ -343,9 +341,9 @@ where
     for next in iter {
         let mut next = next;
         let common_id_map = reconcile_mapped_weight_artifacts(&mut acc, &mut next);
-        let (artifact, _) = next.into_parts();
-        acc.artifact_mut().push(artifact);
-        *acc.id_map_mut() = common_id_map;
+        let (artifacts, id_map) = acc.parts_mut();
+        artifacts.push(next.into_artifact());
+        *id_map = common_id_map;
     }
 
     acc
@@ -1747,6 +1745,24 @@ mod tests {
             .collect::<BTreeMap<_, _>>()
     }
 
+    fn mapped_runtime_possible_matches(
+        entries: &[(u32, Weight)],
+        tokenizer_original_to_internal: Vec<u32>,
+        tokenizer_num_internal: u32,
+        token_original_to_internal: Vec<u32>,
+        token_num_internal: u32,
+    ) -> MappedArtifact<RuntimePossibleMatchesByTerminal> {
+        MappedArtifact::new(
+            runtime_possible_matches(entries),
+            test_id_map(
+                tokenizer_original_to_internal,
+                tokenizer_num_internal,
+                token_original_to_internal,
+                token_num_internal,
+            ),
+        )
+    }
+
     fn test_id_map(
         tokenizer_original_to_internal: Vec<u32>,
         tokenizer_num_internal: u32,
@@ -1863,16 +1879,22 @@ mod tests {
 
     #[test]
     fn reconcile_mapped_pair_returns_shared_map_and_split_preserves_it() {
-        let left = MappedArtifact::new(
-            runtime_possible_matches(&[(7, Weight::from_per_tsid_token_sets(std::iter::once((0, token_set(&[0])))))]),
-            test_id_map(vec![0], 1, vec![0, 0], 1),
+        let left = mapped_runtime_possible_matches(
+            &[(7, Weight::from_per_tsid_token_sets(std::iter::once((0, token_set(&[0])))))],
+            vec![0],
+            1,
+            vec![0, 0],
+            1,
         );
-        let right = MappedArtifact::new(
-            runtime_possible_matches(&[
+        let right = mapped_runtime_possible_matches(
+            &[
                 (7, Weight::from_per_tsid_token_sets(std::iter::once((0, token_set(&[0]))))),
                 (8, Weight::from_per_tsid_token_sets(std::iter::once((0, token_set(&[1]))))),
-            ]),
-            test_id_map(vec![0], 1, vec![0, 1], 2),
+            ],
+            vec![0],
+            1,
+            vec![0, 1],
+            2,
         );
 
         let paired = reconcile_mapped_pair(left, right);
@@ -1889,13 +1911,19 @@ mod tests {
     #[test]
     fn reconcile_mapped_vec_and_split_vec_preserve_shared_map() {
         let inputs = vec![
-            MappedArtifact::new(
-                runtime_possible_matches(&[(7, Weight::from_per_tsid_token_sets(std::iter::once((0, token_set(&[0])))))]),
-                test_id_map(vec![0], 1, vec![0, 0], 1),
+            mapped_runtime_possible_matches(
+                &[(7, Weight::from_per_tsid_token_sets(std::iter::once((0, token_set(&[0])))))],
+                vec![0],
+                1,
+                vec![0, 0],
+                1,
             ),
-            MappedArtifact::new(
-                runtime_possible_matches(&[(8, Weight::from_per_tsid_token_sets(std::iter::once((0, token_set(&[1])))))]),
-                test_id_map(vec![0], 1, vec![0, 1], 2),
+            mapped_runtime_possible_matches(
+                &[(8, Weight::from_per_tsid_token_sets(std::iter::once((0, token_set(&[1])))))],
+                vec![0],
+                1,
+                vec![0, 1],
+                2,
             ),
         ];
 

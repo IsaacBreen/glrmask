@@ -133,16 +133,8 @@ impl<T> MappedArtifact<T> {
         &self.artifact
     }
 
-    pub(crate) fn artifact_mut(&mut self) -> &mut T {
-        &mut self.artifact
-    }
-
     pub(crate) fn id_map(&self) -> &InternalIdMap {
         &self.id_map
-    }
-
-    pub(crate) fn id_map_mut(&mut self) -> &mut InternalIdMap {
-        &mut self.id_map
     }
 
     pub(crate) fn parts_mut(&mut self) -> (&mut T, &mut InternalIdMap) {
@@ -171,10 +163,7 @@ impl<A, B> MappedArtifact<(A, B)> {
 impl<T> MappedArtifact<Vec<T>> {
     pub(crate) fn split_vec(self) -> Vec<MappedArtifact<T>> {
         let (artifacts, id_map) = self.into_parts();
-        artifacts
-            .into_iter()
-            .map(|artifact| MappedArtifact::new(artifact, id_map.clone()))
-            .collect()
+        artifacts.into_iter().map(|artifact| MappedArtifact::new(artifact, id_map.clone())).collect()
     }
 }
 
