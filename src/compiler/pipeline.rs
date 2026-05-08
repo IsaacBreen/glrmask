@@ -1,11 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::Instant;
 
 use once_cell::sync::Lazy;
-use rustc_hash::FxHashMap;
 
 use crate::Vocab;
-use crate::automata::weighted::dwa::DWA;
 use crate::automata::lexer::compile::build_regex;
 use crate::automata::lexer::regex::parse_regex;
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -22,6 +21,7 @@ use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::{
     compute_ever_allowed_follows,
     compute_terminal_coloring,
 };
+use crate::compiler::stages::compact::reconcile_weight_id_maps;
 use crate::compiler::stages::parser_dwa::build_parser_dwa_from_terminal_dwa_with_precomputed_templates;
 use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::characterize_terminals;
@@ -112,7 +112,7 @@ pub(crate) struct CompilePhaseProfile {
     pub(crate) templates_ms: f64,
     pub(crate) compact_ms: f64,
     pub(crate) possible_matches_collect_ms: f64,
-    pub(crate) constraint_vocab_ms: f64,
+    pub(crate) possible_match_vocab_ms: f64,
     pub(crate) remap_parser_dwa_ms: f64,
     pub(crate) constraint_possible_matches_ms: f64,
     pub(crate) internal_token_bytes_ms: f64,
@@ -137,7 +137,7 @@ pub(crate) fn emit_compile_profile_summary(
         .unwrap_or_default();
 
     eprintln!(
-        "[glrmask/profile][compile] source={}{} prepare_ms={:.3} tokenizer_build_ms={:.3} analyze_grammar_ms={:.3} glr_table_ms={:.3} terminal_coloring_ms={:.3} disallowed_follows_ms={:.3} analysis_wall_ms={:.3} classify_ms={:.3} id_map_ms={:.3} terminal_dwa_ms={:.3} templates_ms={:.3} compact_ms={:.3} possible_matches_collect_ms={:.3} constraint_vocab_ms={:.3} remap_parser_dwa_ms={:.3} constraint_possible_matches_ms={:.3} internal_token_bytes_ms={:.3} parser_dwa_ms={:.3} finalize_ms={:.3} compile_ms={:.3} total_ms={:.3}",
+        "[glrmask/profile][compile] source={}{} prepare_ms={:.3} tokenizer_build_ms={:.3} analyze_grammar_ms={:.3} glr_table_ms={:.3} terminal_coloring_ms={:.3} disallowed_follows_ms={:.3} analysis_wall_ms={:.3} classify_ms={:.3} id_map_ms={:.3} terminal_dwa_ms={:.3} templates_ms={:.3} compact_ms={:.3} possible_matches_collect_ms={:.3} possible_match_vocab_ms={:.3} remap_parser_dwa_ms={:.3} constraint_possible_matches_ms={:.3} internal_token_bytes_ms={:.3} parser_dwa_ms={:.3} finalize_ms={:.3} compile_ms={:.3} total_ms={:.3}",
         source,
         import_fragment,
         profile.prepare_ms,
@@ -153,7 +153,7 @@ pub(crate) fn emit_compile_profile_summary(
         profile.templates_ms,
         profile.compact_ms,
         profile.possible_matches_collect_ms,
-        profile.constraint_vocab_ms,
+        profile.possible_match_vocab_ms,
         profile.remap_parser_dwa_ms,
         profile.constraint_possible_matches_ms,
         profile.internal_token_bytes_ms,
@@ -216,31 +216,6 @@ fn set_dense_bit(words: &mut [u64], token_id: u32) {
 
     if let Some(slot) = words.get_mut(word) {
         *slot |= 1u64 << bit;
-    }
-}
-
-fn remap_parser_dwa_to_constraint_vocab(
-    parser_dwa: &mut DWA,
-    old_internal_to_constraint: &[Vec<u32>],
-) {
-    let mut token_set_cache = FxHashMap::default();
-
-    for state in parser_dwa.states_mut() {
-        if let Some(final_weight) = state.final_weight.as_mut() {
-            *final_weight = cpm::remap_weight_to_constraint_vocab(
-                final_weight,
-                old_internal_to_constraint,
-                &mut token_set_cache,
-            );
-        }
-
-        for (_, weight) in state.transitions.values_mut() {
-            *weight = cpm::remap_weight_to_constraint_vocab(
-                weight,
-                old_internal_to_constraint,
-                &mut token_set_cache,
-            );
-        }
     }
 }
 
@@ -329,20 +304,51 @@ fn compile_prepared_with_profile(
         );
         profile.classify_ms = elapsed_ms(classify_started_at);
 
-        let (((internal_ids, terminal_dwa, terminal_phase_profile, global_max_length_state_map), _id_map_wall_ms), (templates, templates_ms)) = rayon::join(
+        let flat_trans_started_at = Instant::now();
+        let flat_trans: Arc<[u32]> = Arc::from(
+            crate::compiler::stages::id_map_and_terminal_dwa::l1::build_flat_transition_table(
+                &tokenizer,
+            ),
+        );
+        let flat_trans_ms = elapsed_ms(flat_trans_started_at);
+
+        let global_max_length_started_at = Instant::now();
+        let global_max_length_state_map =
+            crate::compiler::stages::id_map_and_terminal_dwa::build_global_max_length_state_map(
+                &tokenizer,
+                vocab,
+                &flat_trans,
+            );
+        let global_max_length_ms = elapsed_ms(global_max_length_started_at);
+
+        let token_bytes = vocab.entries.clone();
+        let (((mut internal_ids, mut terminal_dwa, mut terminal_phase_profile), cpm_result), (templates, templates_ms)) = rayon::join(
             || {
-                let id_map_started_at = Instant::now();
-                let result = crate::compiler::stages::id_map_and_terminal_dwa::build_id_map_and_terminal_dwa(
-                    &tokenizer,
-                    vocab,
-                    &terminal_coloring,
-                    true,
-                    prepared_grammar.ignore_terminal,
-                    &analyzed_grammar,
-                    &adjusted_disallowed_for_classification,
-                    Some(&shared_classify_cache),
-                );
-                (result, elapsed_ms(id_map_started_at))
+                rayon::join(
+                    || {
+                        crate::compiler::stages::id_map_and_terminal_dwa::build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
+                            &tokenizer,
+                            vocab,
+                            &terminal_coloring,
+                            true,
+                            prepared_grammar.ignore_terminal,
+                            &analyzed_grammar,
+                            &adjusted_disallowed_for_classification,
+                            Arc::clone(&flat_trans),
+                            &global_max_length_state_map,
+                            Some(&shared_classify_cache),
+                        )
+                    },
+                    || {
+                        cpm::compute_constraint_possible_matches(
+                            &tokenizer,
+                            &token_bytes,
+                            cpm::ConstraintPossibleMatchesConfig {
+                                initial_state_map: Some(&global_max_length_state_map),
+                            },
+                        )
+                    },
+                )
             },
             || {
                 let templates_started_at = Instant::now();
@@ -351,71 +357,63 @@ fn compile_prepared_with_profile(
                 (templates, elapsed_ms(templates_started_at))
             },
         );
-        let global_max_length_state_map_ref = Some(&global_max_length_state_map);
+        terminal_phase_profile.terminal_dwa_ms += flat_trans_ms;
+        terminal_phase_profile.id_map_ms += global_max_length_ms;
         profile.templates_ms = templates_ms;
         profile.id_map_ms = terminal_phase_profile.id_map_ms;
         profile.terminal_dwa_ms = terminal_phase_profile.terminal_dwa_ms;
         profile.compact_ms = terminal_phase_profile.compact_ms;
 
-        let token_bytes = vocab.entries.clone();
-
-        // Compute constraint possible matches and build parser DWA
-        // concurrently. Parser DWA does not depend on possible matches
-        // or constraint-vocab; only the later remap step does.
-        let (cpm_result, (mut parser_dwa, parser_dwa_ms)) = rayon::join(
-            || {
-                cpm::compute_constraint_possible_matches(
-                    &tokenizer,
-                    &token_bytes,
-                    &internal_ids,
-                    cpm::ConstraintPossibleMatchesConfig {
-                        initial_state_map: global_max_length_state_map_ref,
-                    },
-                )
-            },
-            || {
-                let parser_dwa_started_at = Instant::now();
-                let parser_dwa =
-                    build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
-                        &table,
-                        &analyzed_grammar,
-                        &terminal_dwa,
-                        templates,
-                        vocab,
-                        &internal_ids,
-                    );
-                (parser_dwa, elapsed_ms(parser_dwa_started_at))
-            },
-        );
-
-        let constraint_vocab = cpm_result.constraint_vocab;
-        let possible_matches = cpm_result.possible_matches;
+        let mut possible_matches = cpm_result.possible_matches;
+        let mut possible_matches_id_map = cpm_result.id_map;
         let cpm_profile = cpm_result.profile;
 
         let remap_parser_dwa_started_at = Instant::now();
-        let remap_parser_dwa_ms = if cpm::constraint_vocab_is_identity(&constraint_vocab) {
-            0.0
-        } else {
-            remap_parser_dwa_to_constraint_vocab(
-                &mut parser_dwa,
-                &constraint_vocab.old_internal_to_constraint,
+        {
+            let mut terminal_weight_refs = Vec::new();
+            for state in terminal_dwa.states_mut() {
+                if let Some(final_weight) = state.final_weight.as_mut() {
+                    terminal_weight_refs.push(final_weight);
+                }
+                for (_, weight) in state.transitions.values_mut() {
+                    terminal_weight_refs.push(weight);
+                }
+            }
+
+            let mut possible_match_weight_refs: Vec<_> = possible_matches.values_mut().collect();
+            reconcile_weight_id_maps(
+                &mut terminal_weight_refs,
+                &mut internal_ids,
+                &mut possible_match_weight_refs,
+                &mut possible_matches_id_map,
             );
-            elapsed_ms(remap_parser_dwa_started_at)
-        };
+        }
+        let remap_parser_dwa_ms = elapsed_ms(remap_parser_dwa_started_at);
+
+        let parser_dwa_started_at = Instant::now();
+        let parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
+            &table,
+            &analyzed_grammar,
+            &terminal_dwa,
+            templates,
+            vocab,
+            &internal_ids,
+        );
+        let parser_dwa_ms = elapsed_ms(parser_dwa_started_at);
 
         let internal_token_bytes_started_at = Instant::now();
         let internal_token_bytes = cpm::build_internal_token_bytes_from_groups(
             vocab,
-            &constraint_vocab.internal_to_originals,
+            &internal_ids.vocab_tokens.internal_to_originals,
         );
         let internal_token_bytes_ms = elapsed_ms(internal_token_bytes_started_at);
 
         profile.parser_dwa_ms = parser_dwa_ms;
         profile.possible_matches_collect_ms = cpm_profile.possible_matches_collect_ms;
-        profile.constraint_vocab_ms = cpm_profile.constraint_vocab_ms;
+        profile.possible_match_vocab_ms = cpm_profile.possible_match_vocab_ms;
         profile.remap_parser_dwa_ms = remap_parser_dwa_ms;
         profile.constraint_possible_matches_ms =
-            cpm_profile.possible_matches_collect_ms + cpm_profile.constraint_vocab_ms + remap_parser_dwa_ms;
+            cpm_profile.possible_matches_collect_ms + cpm_profile.possible_match_vocab_ms + remap_parser_dwa_ms;
         profile.internal_token_bytes_ms = internal_token_bytes_ms;
 
         let finalize_started_at = Instant::now();
@@ -427,8 +425,8 @@ fn compile_prepared_with_profile(
             possible_matches,
             state_to_internal_tsid: internal_ids.tokenizer_states.original_to_internal.clone(),
             internal_tsid_to_states: internal_ids.tokenizer_states.internal_to_originals_vecs(),
-            original_token_to_internal: constraint_vocab.original_to_internal,
-            internal_token_to_tokens: constraint_vocab.internal_to_originals,
+            original_token_to_internal: internal_ids.vocab_tokens.original_to_internal.clone(),
+            internal_token_to_tokens: internal_ids.vocab_tokens.internal_to_originals_vecs(),
             eos_token_id: vocab.eos_token_id,
             token_bytes,
             internal_token_bytes,

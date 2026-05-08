@@ -908,16 +908,13 @@ impl<'a> ConstraintState<'a> {
 
         let mut dense = vec![0u64; base.len()];
 
-        // TerminalsDisallowed is keyed by ORIGINAL tokenizer state, because it
-        // describes tokenizer futures accumulated by the GLR parser.
+        // TerminalsDisallowed remains keyed by ORIGINAL tokenizer state because
+        // it describes tokenizer futures accumulated by the GLR parser.
         //
-        // possible_matches is keyed by TERMINAL; seed_terminal_dense (built from
-        // possible_matches) is keyed by (original_tokenizer_state, terminal_id).
-        //
-        // The resulting DenseMaskAcc is keyed by `internal_tsid`, which comes
-        // from the Constraint state's current tokenizer state mapped through
-        // parser-DWA TSID compaction. These two TSID spaces intentionally remain
-        // separate.
+        // possible_matches weights themselves are already in the final shared
+        // internal TSID/token spaces. `seed_terminal_dense` bridges back to
+        // original tokenizer states by expanding each internal TSID through
+        // `internal_tsid_to_states` during precomputation.
         for (&original_tokenizer_state, disallowed_in_state) in terminals_disallowed.iter() {
             if disallowed_in_state.is_empty() {
                 continue;

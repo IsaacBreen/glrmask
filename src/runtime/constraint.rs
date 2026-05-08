@@ -21,7 +21,7 @@ use super::state::ConstraintState;
 ///   grammar terminal id.
 ///
 /// Inner key (in each Weight):
-///   original tokenizer state id.
+///   final shared internal tokenizer-state id.
 ///
 /// Value (in each Weight):
 ///   final shared constraint-internal token ids.
@@ -54,13 +54,10 @@ pub struct Constraint {
 
     /// possible_matches keyed by grammar terminal id.
     ///
-    /// Each Weight maps original tokenizer state ids to token sets in the final
-    /// shared constraint-internal vocab space. That space is a refinement of the
-    /// parser-DWA internal vocab by possible-match signature and seed-state
-    /// lexical-live signature. Parser-DWA weights have also been remapped into
-    /// this same token space.
-    ///
-    /// Do not remap the inner tokenizer-state keys through state_to_internal_tsid.
+    /// Each Weight maps final shared internal tokenizer-state ids to token sets
+    /// in the final shared constraint-internal vocab space. Parser-DWA weights
+    /// and possible_matches weights are reconciled into this same space during
+    /// compilation.
     pub(crate) possible_matches: PossibleMatchesByTerminal,
     pub(crate) state_to_internal_tsid: Vec<u32>,
     pub(crate) internal_tsid_to_states: Vec<Vec<u32>>,
@@ -861,21 +858,15 @@ impl Constraint {
         &self,
         tokenizer_state: u32,
     ) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
-        // STICKY NOTE: DO NOT REMOVE THIS COMMENT.
-        //
-        // possible_matches is keyed by TERMINAL on the outside; each Weight
-        // maps ORIGINAL tokenizer state to token set. Do not remap through
-        // internal_tsid_for_state() here. That merges distinct original-state
-        // futures.
-        //
-        // The bitmap values are in the shared constraint-internal VOCAB space,
-        // not original token space. Expanding to original tokens below is safe
-        // because the constraint vocab refines parser-DWA token classes by
-        // possible-match signature.
+        // possible_matches weights are finalized into the same shared TSID and
+        // token spaces as parser-DWA weights. Original-state keyed views used
+        // by TerminalsDisallowed are rebuilt separately during seed-mask
+        // precomputation.
+        let internal_tsid = self.internal_tsid_for_state(tokenizer_state);
         self.possible_matches
             .iter()
             .filter_map(|(&terminal, weight)| {
-                let tokens = weight.tokens_for_tsid(tokenizer_state);
+                let tokens = weight.tokens_for_tsid(internal_tsid);
                 if tokens.is_empty() {
                     None
                 } else {
@@ -945,12 +936,10 @@ impl Constraint {
     ) -> Option<BTreeMap<TerminalID, RangeSetBlaze<u32>>> {
         // Return possible_matches in the final shared constraint-internal vocab
         // space. These ids match parser-DWA weight token ids after reconciliation.
-        //
-        // They are not guaranteed to equal the raw parser-DWA vocab ids produced
-        // before possible-match reconciliation.
+        let internal_tsid = self.internal_tsid_for_state(tokenizer_state);
         let mut result = BTreeMap::new();
         for (&terminal, weight) in &self.possible_matches {
-            let tokens = weight.tokens_for_tsid(tokenizer_state);
+            let tokens = weight.tokens_for_tsid(internal_tsid);
             if !tokens.is_empty() {
                 result.insert(terminal, tokens);
             }
@@ -986,9 +975,17 @@ impl Constraint {
                     .into_iter()
                     .flat_map(move |(start, end, token_set)| {
                         let dense = self.dense_words_from_internal_set(token_set.as_ref());
-                        (start..=end).map(move |tokenizer_state| {
-                            ((tokenizer_state, terminal_id), dense.clone())
-                        })
+                        let mut entries = Vec::new();
+                        for internal_tsid in start..=end {
+                            if let Some(states) = self.internal_tsid_to_states.get(internal_tsid as usize) {
+                                for &tokenizer_state in states {
+                                    entries.push(((tokenizer_state, terminal_id), dense.clone()));
+                                }
+                            } else {
+                                entries.push(((internal_tsid, terminal_id), dense.clone()));
+                            }
+                        }
+                        entries.into_iter()
                     })
             })
             .collect()

@@ -166,7 +166,7 @@ pub(crate) fn build_global_max_length_state_map(
 /// 2. Builds each partition's `(InternalIdMap, DWA)` in parallel via
 ///    [`partition::build_partition_id_map_and_terminal_dwa`].
 /// 3. Merges the 3 results via [`merge::merge_id_maps_and_terminal_dwas`].
-pub(crate) fn build_id_map_and_terminal_dwa(
+pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     terminal_coloring: &TerminalColoring,
@@ -174,11 +174,12 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     ignore_terminal: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
     disallowed_follows: &BTreeMap<u32, BitSet>,
+    flat_trans: Arc<[u32]>,
+    global_max_length_state_map: &ManyToOneIdMap,
     external_classify_cache: Option<&classify::SharedClassifyCache>,
-) -> (InternalIdMap, DWA, TerminalDwaPhaseProfile, ManyToOneIdMap) {
+) -> (InternalIdMap, DWA, TerminalDwaPhaseProfile) {
     let total_started_at = Instant::now();
     let mut profile = TerminalDwaPhaseProfile::default();
-
 
     // Shared cache for terminal classification byte sets. The DFA scanning
     // (reachable_bytes, first_bytes, last_bytes) is identical across partitions;
@@ -195,18 +196,12 @@ pub(crate) fn build_id_map_and_terminal_dwa(
         let idx = classify_vocab_char_type(bytes) as usize;
         partition_entries[idx].push((token_id, bytes.clone()));
     }
-    let sub_vocabs: Vec<Vocab> = partition_entries.into_iter().map(|entries| Vocab::new(entries, None)).collect();
+    let sub_vocabs: Vec<Vocab> = partition_entries
+        .into_iter()
+        .map(|entries| Vocab::new(entries, None))
+        .collect();
     let partition_vocab_ms = partition_vocab_started_at.elapsed().as_secs_f64() * 1000.0;
     profile.id_map_ms += partition_vocab_ms;
-
-    // Build flat DFA transition table once (shared across all partitions).
-    let flat_trans_started_at = Instant::now();
-    let flat_trans: Arc<[u32]> = Arc::from(l1::build_flat_transition_table(tokenizer));
-    profile.terminal_dwa_ms += flat_trans_started_at.elapsed().as_secs_f64() * 1000.0;
-
-    let global_max_length_started_at = Instant::now();
-    let global_max_length_state_map = build_global_max_length_state_map(tokenizer, vocab, &flat_trans);
-    profile.id_map_ms += global_max_length_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // Lazily-initialized shared compact transition table cache.
     // The first partition to reach vocab_build_dfa will build the cache from
@@ -235,11 +230,12 @@ pub(crate) fn build_id_map_and_terminal_dwa(
                 grammar,
                 disallowed_follows,
                 &flat_trans,
-                Some(&global_max_length_state_map),
+                Some(global_max_length_state_map),
                 Some(&shared_vocab_dfa_cache),
                 Some(&shared_simplify_cache),
                 Some(&shared_classify_cache),
-            ).map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0));
+            )
+            .map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0));
             (result, idx)
         })
         .collect();
@@ -280,7 +276,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
                 representative_original_ids: Vec::new(),
             },
         };
-        return (empty_map, DWA::new(1, 0), profile, global_max_length_state_map);
+        return (empty_map, DWA::new(1, 0), profile);
     }
 
     let num_tokenizer_states = tokenizer.num_states() as usize;
@@ -304,7 +300,9 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     profile.add_assign(global_merge_profile);
 
     if compile_profile_enabled() {
-        let partition_detail: String = sub_vocabs.iter().enumerate()
+        let partition_detail: String = sub_vocabs
+            .iter()
+            .enumerate()
             .map(|(i, sv)| format!("p{}_tokens={} p{}_ms={:.3}", i, sv.entries.len(), i, partition_ms[i]))
             .collect::<Vec<_>>()
             .join(" ");
@@ -321,5 +319,45 @@ pub(crate) fn build_id_map_and_terminal_dwa(
         );
     }
 
-    (merged.id_map, merged.dwa, profile, global_max_length_state_map)
+    (merged.id_map, merged.dwa, profile)
+}
+
+pub(crate) fn build_id_map_and_terminal_dwa(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
+    ignore_terminal: Option<TerminalID>,
+    grammar: &AnalyzedGrammar,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    external_classify_cache: Option<&classify::SharedClassifyCache>,
+) -> (InternalIdMap, DWA, TerminalDwaPhaseProfile, ManyToOneIdMap) {
+    let mut profile = TerminalDwaPhaseProfile::default();
+
+    let flat_trans_started_at = Instant::now();
+    let flat_trans: Arc<[u32]> = Arc::from(l1::build_flat_transition_table(tokenizer));
+    let flat_trans_ms = flat_trans_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let global_max_length_started_at = Instant::now();
+    let global_max_length_state_map = build_global_max_length_state_map(tokenizer, vocab, &flat_trans);
+    let global_max_length_ms = global_max_length_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let (id_map, dwa, mut inner_profile) =
+        build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
+            tokenizer,
+            vocab,
+            terminal_coloring,
+            use_terminal_coloring,
+            ignore_terminal,
+            grammar,
+            disallowed_follows,
+            flat_trans,
+            &global_max_length_state_map,
+            external_classify_cache,
+        );
+    inner_profile.terminal_dwa_ms += flat_trans_ms;
+    inner_profile.id_map_ms += global_max_length_ms;
+    profile.add_assign(inner_profile);
+
+    (id_map, dwa, profile, global_max_length_state_map)
 }

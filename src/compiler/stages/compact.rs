@@ -5,11 +5,12 @@
 //! placed adjacently. This reduces the number of ranges in the underlying
 //! `RangeMapBlaze` / `RangeSetBlaze` structures.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
+use rayon::prelude::*;
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 
 use crate::automata::weighted_u32::dwa::DWA;
@@ -30,6 +31,12 @@ pub struct CompactReport {
     pub tsid_perm: Vec<u32>,
     pub token_perm: Vec<u32>,
     pub profile_stats: Option<CompactProfileStats>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct InternedRangeCounts {
+    pub tsid_ranges: usize,
+    pub token_ranges: usize,
 }
 
 struct DimensionCompaction {
@@ -119,6 +126,94 @@ pub fn compact_dwa_dimensions_fast_with_stats(
     id_map: &mut InternalIdMap,
 ) -> CompactReport {
     compact_dwa_dimensions_inner(dwa, id_map, true, true)
+}
+
+pub fn compact_weights_with_id_map(
+    weights: &mut [&mut Weight],
+    id_map: &mut InternalIdMap,
+    collect_profile_stats: bool,
+) -> CompactReport {
+    let num_tsids = id_map.num_tsids();
+    let num_tokens = id_map.num_internal_tokens();
+    let storage_before = collect_profile_stats.then(|| count_unique_storage_for_weight_refs(&weight_ref_slice(weights)));
+
+    let unique_weights = collect_unique_weights_from_refs(weights);
+    let compaction = build_dimension_compaction(&unique_weights, num_tsids as usize, num_tokens, true);
+
+    apply_permutations_to_weight_refs(
+        weights,
+        &unique_weights,
+        &compaction.tsid_perm,
+        &compaction.token_perm,
+    );
+    apply_perm_to_id_map(
+        &mut id_map.tokenizer_states,
+        &compaction.tsid_perm,
+        compaction.ordered_num_tsids,
+    );
+    apply_perm_to_id_map(
+        &mut id_map.vocab_tokens,
+        &compaction.token_perm,
+        compaction.ordered_num_tokens,
+    );
+
+    let profile_stats = storage_before.map(|storage_before| {
+        let storage_after = count_unique_storage_for_weight_refs(&weight_ref_slice(weights));
+        CompactProfileStats {
+            tsids_before: num_tsids as usize,
+            tsids_after: compaction.ordered_num_tsids,
+            tokens_before: num_tokens as usize,
+            tokens_after: compaction.ordered_num_tokens,
+            weight_ranges_before: storage_before.weight_ranges,
+            weight_ranges_after: storage_after.weight_ranges,
+            token_ranges_before: storage_before.token_ranges,
+            token_ranges_after: storage_after.token_ranges,
+        }
+    });
+
+    CompactReport {
+        tsid_perm: compaction.tsid_perm,
+        token_perm: compaction.token_perm,
+        profile_stats,
+    }
+}
+
+pub fn count_interned_ranges_for_weights(weights: &[&Weight]) -> InternedRangeCounts {
+    let counts = count_unique_storage_for_weight_refs(weights);
+    InternedRangeCounts {
+        tsid_ranges: counts.weight_ranges,
+        token_ranges: counts.token_ranges,
+    }
+}
+
+pub fn reconcile_weight_id_maps(
+    left_weights: &mut [&mut Weight],
+    left_id_map: &mut InternalIdMap,
+    right_weights: &mut [&mut Weight],
+    right_id_map: &mut InternalIdMap,
+) {
+    let common_id_map = build_common_internal_id_map(&[left_id_map, right_id_map]);
+
+    let left_tsid_map = build_local_to_common_tsid_map(left_id_map, &common_id_map);
+    let left_token_map = build_local_to_common_token_map(left_id_map, &common_id_map);
+    let right_tsid_map = build_local_to_common_tsid_map(right_id_map, &common_id_map);
+    let right_token_map = build_local_to_common_token_map(right_id_map, &common_id_map);
+
+    remap_weights_with_maps(
+        left_weights,
+        &left_tsid_map,
+        &left_token_map,
+        common_id_map.num_tsids() as usize,
+    );
+    remap_weights_with_maps(
+        right_weights,
+        &right_tsid_map,
+        &right_token_map,
+        common_id_map.num_tsids() as usize,
+    );
+
+    *left_id_map = common_id_map.clone();
+    *right_id_map = common_id_map;
 }
 
 fn compact_dwa_dimensions_inner(
@@ -252,6 +347,10 @@ fn weight_refs(weights: &[Weight]) -> Vec<&Weight> {
     weights.iter().collect()
 }
 
+fn weight_ref_slice<'a>(weights: &'a [&'a mut Weight]) -> Vec<&'a Weight> {
+    weights.iter().map(|weight| &**weight).collect()
+}
+
 fn collect_unique_weights(dwa: &DWA) -> Vec<Weight> {
     let mut seen = std::collections::HashSet::new();
     let mut unique = Vec::new();
@@ -276,6 +375,17 @@ fn dedup_weights_by_storage_ptr(weights: Vec<Weight>) -> Vec<Weight> {
     for weight in weights {
         if seen.insert(Arc::as_ptr(&weight.0) as usize) {
             unique.push(weight);
+        }
+    }
+    unique
+}
+
+fn collect_unique_weights_from_refs(weights: &[&mut Weight]) -> Vec<Weight> {
+    let mut seen = std::collections::HashSet::new();
+    let mut unique = Vec::new();
+    for weight in weights {
+        if seen.insert(Arc::as_ptr(&weight.0) as usize) {
+            unique.push((**weight).clone());
         }
     }
     unique
@@ -813,6 +923,30 @@ fn apply_permutations_to_dwa(
     });
 }
 
+fn apply_permutations_to_weight_refs(
+    weights: &mut [&mut Weight],
+    unique_weights: &[Weight],
+    tsid_perm: &[u32],
+    token_perm: &[u32],
+) {
+    let weight_entries: Vec<(usize, Weight)> = unique_weights
+        .par_iter()
+        .map(|weight| {
+            let mut cache = HashMap::new();
+            let new_weight = permute_weight_with_cache(weight, tsid_perm, token_perm, &mut cache);
+            (Arc::as_ptr(&weight.0) as usize, new_weight)
+        })
+        .collect();
+    let weight_map: HashMap<usize, Weight> = weight_entries.into_iter().collect();
+
+    for weight in weights.iter_mut() {
+        let ptr = Arc::as_ptr(&weight.0) as usize;
+        if let Some(new_weight) = weight_map.get(&ptr) {
+            **weight = new_weight.clone();
+        }
+    }
+}
+
 fn apply_random_layout_move(layout: &mut [u32], rng: &mut StdRng) {
     if layout.len() < 2 {
         return;
@@ -1082,6 +1216,11 @@ fn count_unique_storage(dwa: &DWA) -> UniqueStorageCounts {
 }
 
 fn count_unique_storage_for_weights(weights: &[Weight]) -> UniqueStorageCounts {
+    let refs = weight_refs(weights);
+    count_unique_storage_for_weight_refs(&refs)
+}
+
+fn count_unique_storage_for_weight_refs(weights: &[&Weight]) -> UniqueStorageCounts {
     let mut seen_token_sets = std::collections::HashSet::new();
     let mut storage = UniqueStorageCounts::default();
     for weight in weights {
@@ -1093,5 +1232,470 @@ fn count_unique_storage_for_weights(weights: &[Weight]) -> UniqueStorageCounts {
         }
     }
     storage
+}
+
+fn build_common_internal_id_map(inputs: &[&InternalIdMap]) -> InternalIdMap {
+    let num_tokenizer_states = inputs
+        .iter()
+        .map(|input| input.tokenizer_states.original_to_internal.len())
+        .max()
+        .unwrap_or(0);
+    let num_original_tokens = inputs
+        .iter()
+        .map(|input| input.vocab_tokens.original_to_internal.len())
+        .max()
+        .unwrap_or(0);
+
+    let tokenizer_states = build_common_many_to_one_id_map(
+        inputs,
+        num_tokenizer_states,
+        |input| &input.tokenizer_states,
+        false,
+    );
+    let vocab_tokens = build_common_many_to_one_id_map(
+        inputs,
+        num_original_tokens,
+        |input| &input.vocab_tokens,
+        true,
+    );
+
+    InternalIdMap {
+        tokenizer_states,
+        vocab_tokens,
+    }
+}
+
+fn build_common_many_to_one_id_map(
+    inputs: &[&InternalIdMap],
+    num_originals: usize,
+    project: impl Fn(&InternalIdMap) -> &ManyToOneIdMap,
+    allow_unmapped: bool,
+) -> ManyToOneIdMap {
+    let mut composite_to_class: HashMap<Vec<u32>, u32> = HashMap::new();
+    let mut original_to_internal = vec![u32::MAX; num_originals];
+    let mut internal_to_originals: Vec<Vec<u32>> = Vec::new();
+    let mut representatives: Vec<u32> = Vec::new();
+
+    for original in 0..num_originals {
+        let composite: Vec<u32> = inputs
+            .iter()
+            .map(|input| {
+                project(input)
+                    .original_to_internal
+                    .get(original)
+                    .copied()
+                    .unwrap_or(u32::MAX)
+            })
+            .collect();
+        if allow_unmapped && composite.iter().all(|&value| value == u32::MAX) {
+            continue;
+        }
+
+        let next_id = internal_to_originals.len() as u32;
+        let class_id = *composite_to_class.entry(composite).or_insert_with(|| {
+            internal_to_originals.push(Vec::new());
+            representatives.push(original as u32);
+            next_id
+        });
+        original_to_internal[original] = class_id;
+        internal_to_originals[class_id as usize].push(original as u32);
+    }
+
+    reorder_common_classes(
+        composite_to_class,
+        &mut original_to_internal,
+        &mut internal_to_originals,
+        &mut representatives,
+        allow_unmapped,
+    );
+
+    ManyToOneIdMap {
+        original_to_internal,
+        internal_to_originals,
+        representative_original_ids: representatives,
+    }
+}
+
+fn reorder_common_classes(
+    composite_to_class: HashMap<Vec<u32>, u32>,
+    original_to_internal: &mut [u32],
+    internal_to_originals: &mut Vec<Vec<u32>>,
+    representatives: &mut Vec<u32>,
+    allow_unmapped: bool,
+) {
+    let num_classes = internal_to_originals.len();
+    if num_classes <= 1 {
+        return;
+    }
+
+    let mut sorted: Vec<(Vec<u32>, u32)> = composite_to_class.into_iter().collect();
+    sorted.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut old_to_new = vec![0u32; num_classes];
+    for (new_id, (_, old_id)) in sorted.iter().enumerate() {
+        old_to_new[*old_id as usize] = new_id as u32;
+    }
+
+    for value in original_to_internal.iter_mut() {
+        if *value == u32::MAX && allow_unmapped {
+            continue;
+        }
+        *value = old_to_new[*value as usize];
+    }
+
+    let mut new_internal_to_originals = vec![Vec::new(); num_classes];
+    let mut new_representatives = vec![u32::MAX; num_classes];
+    for (new_id, (_, old_id)) in sorted.iter().enumerate() {
+        new_internal_to_originals[new_id] = std::mem::take(&mut internal_to_originals[*old_id as usize]);
+        new_representatives[new_id] = representatives[*old_id as usize];
+    }
+    *internal_to_originals = new_internal_to_originals;
+    *representatives = new_representatives;
+}
+
+fn build_local_to_common_tsid_map(
+    local_id_map: &InternalIdMap,
+    common_id_map: &InternalIdMap,
+) -> Vec<Vec<u32>> {
+    let num_local = local_id_map.num_tsids() as usize;
+    let mut local_to_common = vec![BTreeSet::new(); num_local];
+
+    for (state, &local_tsid) in local_id_map
+        .tokenizer_states
+        .original_to_internal
+        .iter()
+        .enumerate()
+    {
+        if local_tsid == u32::MAX {
+            continue;
+        }
+        let common_tsid = common_id_map
+            .tokenizer_states
+            .original_to_internal
+            .get(state)
+            .copied()
+            .unwrap_or(u32::MAX);
+        if common_tsid == u32::MAX {
+            continue;
+        }
+        local_to_common[local_tsid as usize].insert(common_tsid);
+    }
+
+    local_to_common
+        .into_iter()
+        .map(|ids| ids.into_iter().collect())
+        .collect()
+}
+
+fn build_local_to_common_token_map(
+    local_id_map: &InternalIdMap,
+    common_id_map: &InternalIdMap,
+) -> Vec<Vec<u32>> {
+    let num_local = local_id_map.num_internal_tokens() as usize;
+    let mut local_to_common = vec![BTreeSet::new(); num_local];
+
+    for (original, &local_token) in local_id_map.vocab_tokens.original_to_internal.iter().enumerate() {
+        if local_token == u32::MAX {
+            continue;
+        }
+        let common_token = common_id_map
+            .vocab_tokens
+            .original_to_internal
+            .get(original)
+            .copied()
+            .unwrap_or(u32::MAX);
+        if common_token == u32::MAX {
+            continue;
+        }
+        local_to_common[local_token as usize].insert(common_token);
+    }
+
+    local_to_common
+        .into_iter()
+        .map(|ids| ids.into_iter().collect())
+        .collect()
+}
+
+fn remap_weights_with_maps(
+    weights: &mut [&mut Weight],
+    local_to_common_tsids: &[Vec<u32>],
+    local_to_common_tokens: &[Vec<u32>],
+    common_tsid_count: usize,
+) {
+    let mut cache = HashMap::<usize, Weight>::new();
+    for weight in weights.iter_mut() {
+        let remapped = remap_weight_cached_general(
+            weight,
+            local_to_common_tsids,
+            local_to_common_tokens,
+            common_tsid_count,
+            &mut cache,
+        );
+        **weight = remapped;
+    }
+}
+
+fn remap_weight_cached_general(
+    weight: &Weight,
+    local_to_common_tsids: &[Vec<u32>],
+    local_to_common_tokens: &[Vec<u32>],
+    common_tsid_count: usize,
+    cache: &mut HashMap<usize, Weight>,
+) -> Weight {
+    let ptr = Arc::as_ptr(&weight.0) as usize;
+    if let Some(cached) = cache.get(&ptr) {
+        return cached.clone();
+    }
+
+    let remapped = remap_weight_general(
+        weight,
+        local_to_common_tsids,
+        local_to_common_tokens,
+        common_tsid_count,
+    );
+    cache.insert(ptr, remapped.clone());
+    remapped
+}
+
+fn remap_weight_general(
+    weight: &Weight,
+    local_to_common_tsids: &[Vec<u32>],
+    local_to_common_tokens: &[Vec<u32>],
+    common_tsid_count: usize,
+) -> Weight {
+    if weight.is_empty() {
+        return weight.clone();
+    }
+
+    if weight.is_full() {
+        let mut all_common_tokens = RangeSetBlaze::new();
+        for common_tokens in local_to_common_tokens {
+            for &common_token in common_tokens {
+                all_common_tokens.insert(common_token);
+            }
+        }
+        if all_common_tokens.is_empty() {
+            return Weight::empty();
+        }
+
+        let mut all_common_tsids = BTreeSet::new();
+        for common_tsids in local_to_common_tsids {
+            for &common_tsid in common_tsids {
+                if (common_tsid as usize) < common_tsid_count {
+                    all_common_tsids.insert(common_tsid);
+                }
+            }
+        }
+        if all_common_tsids.is_empty() {
+            return Weight::empty();
+        }
+
+        return Weight::from_per_tsid_token_sets(
+            all_common_tsids
+                .into_iter()
+                .map(|common_tsid| (common_tsid, all_common_tokens.clone())),
+        );
+    }
+
+    let Some(entries) = weight.compact_entries() else {
+        return weight.clone();
+    };
+
+    let mut token_cache = HashMap::<usize, Arc<RangeSetBlaze<u32>>>::new();
+    let mut tokens_by_common_tsid: Vec<Option<Arc<RangeSetBlaze<u32>>>> = vec![None; common_tsid_count];
+    let mut any_set = false;
+
+    for (start, end, tokens) in entries {
+        let token_key = Arc::as_ptr(&tokens) as usize;
+        let mapped_tokens = token_cache
+            .entry(token_key)
+            .or_insert_with(|| {
+                let mut result = RangeSetBlaze::new();
+                for local_token in tokens.iter() {
+                    if let Some(common_tokens) = local_to_common_tokens.get(local_token as usize) {
+                        for &common_token in common_tokens {
+                            result.insert(common_token);
+                        }
+                    }
+                }
+                Arc::new(result)
+            })
+            .clone();
+
+        for local_tsid in start..=end {
+            let Some(common_tsids) = local_to_common_tsids.get(local_tsid as usize) else {
+                continue;
+            };
+            for &common_tsid in common_tsids {
+                let index = common_tsid as usize;
+                if index >= common_tsid_count {
+                    continue;
+                }
+                match &mut tokens_by_common_tsid[index] {
+                    Some(existing) => {
+                        let merged = existing.as_ref() | mapped_tokens.as_ref();
+                        *existing = shared_rangeset(merged);
+                    }
+                    slot @ None => {
+                        *slot = Some(Arc::clone(&mapped_tokens));
+                    }
+                }
+                any_set = true;
+            }
+        }
+    }
+
+    if !any_set {
+        return Weight::empty();
+    }
+
+    let mut map = RangeMapBlaze::<u32, Arc<RangeSetBlaze<u32>>>::new();
+    let mut run_start: Option<u32> = None;
+    let mut run_end = 0u32;
+    let mut run_tokens: Option<Arc<RangeSetBlaze<u32>>> = None;
+
+    for (index, slot) in tokens_by_common_tsid.iter().enumerate() {
+        let common_tsid = index as u32;
+        if let Some(tokens) = slot {
+            if let Some(ref current) = run_tokens {
+                if Arc::ptr_eq(current, tokens) || current.as_ref() == tokens.as_ref() {
+                    run_end = common_tsid;
+                    continue;
+                }
+                map.extend_simple(std::iter::once((
+                    run_start.unwrap()..=run_end,
+                    Arc::clone(current),
+                )));
+            }
+            run_start = Some(common_tsid);
+            run_end = common_tsid;
+            run_tokens = Some(Arc::clone(tokens));
+        } else if let Some(ref current) = run_tokens {
+            map.extend_simple(std::iter::once((
+                run_start.unwrap()..=run_end,
+                Arc::clone(current),
+            )));
+            run_start = None;
+            run_tokens = None;
+        }
+    }
+    if let Some(tokens) = run_tokens {
+        map.extend_simple(std::iter::once((run_start.unwrap()..=run_end, tokens)));
+    }
+
+    finalize_weight_map(map)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn token_set(tokens: &[u32]) -> RangeSetBlaze<u32> {
+        RangeSetBlaze::from_iter(tokens.iter().copied().map(|token| token..=token))
+    }
+
+    fn weight_entries(weight: &Weight) -> Vec<(u32, Vec<u32>)> {
+        let mut entries = Vec::new();
+        for (start, end, tokens) in weight.compact_entries().unwrap_or_default() {
+            for tsid in start..=end {
+                entries.push((tsid, tokens.iter().collect()));
+            }
+        }
+        entries
+    }
+
+    #[test]
+    fn reconcile_weight_id_maps_splits_token_classes() {
+        let mut left_weight = Weight::from_per_tsid_token_sets(std::iter::once((0, token_set(&[0]))));
+        let mut right_weight_a =
+            Weight::from_per_tsid_token_sets(std::iter::once((0, token_set(&[0]))));
+        let mut right_weight_b =
+            Weight::from_per_tsid_token_sets(std::iter::once((0, token_set(&[1]))));
+
+        let mut left_id_map = InternalIdMap {
+            tokenizer_states: ManyToOneIdMap::from_original_to_internal_with_representatives(
+                vec![0],
+                1,
+                vec![0],
+            ),
+            vocab_tokens: ManyToOneIdMap::from_original_to_internal_with_representatives(
+                vec![0, 0],
+                1,
+                vec![0],
+            ),
+        };
+        let mut right_id_map = InternalIdMap {
+            tokenizer_states: ManyToOneIdMap::from_original_to_internal_with_representatives(
+                vec![0],
+                1,
+                vec![0],
+            ),
+            vocab_tokens: ManyToOneIdMap::from_original_to_internal_with_representatives(
+                vec![0, 1],
+                2,
+                vec![0, 1],
+            ),
+        };
+
+        reconcile_weight_id_maps(
+            &mut [&mut left_weight],
+            &mut left_id_map,
+            &mut [&mut right_weight_a, &mut right_weight_b],
+            &mut right_id_map,
+        );
+
+        assert_eq!(left_id_map.vocab_tokens.original_to_internal, vec![0, 1]);
+        assert_eq!(left_id_map.vocab_tokens.original_to_internal, right_id_map.vocab_tokens.original_to_internal);
+        assert_eq!(weight_entries(&left_weight), vec![(0, vec![0, 1])]);
+        assert_eq!(weight_entries(&right_weight_a), vec![(0, vec![0])]);
+        assert_eq!(weight_entries(&right_weight_b), vec![(0, vec![1])]);
+    }
+
+    #[test]
+    fn reconcile_weight_id_maps_splits_tsid_classes() {
+        let mut left_weight = Weight::from_per_tsid_token_sets(std::iter::once((0, token_set(&[0]))));
+        let mut right_weight_left =
+            Weight::from_per_tsid_token_sets(std::iter::once((0, token_set(&[0]))));
+        let mut right_weight_right =
+            Weight::from_per_tsid_token_sets(std::iter::once((1, token_set(&[0]))));
+
+        let mut left_id_map = InternalIdMap {
+            tokenizer_states: ManyToOneIdMap::from_original_to_internal_with_representatives(
+                vec![0, 0],
+                1,
+                vec![0],
+            ),
+            vocab_tokens: ManyToOneIdMap::from_original_to_internal_with_representatives(
+                vec![0],
+                1,
+                vec![0],
+            ),
+        };
+        let mut right_id_map = InternalIdMap {
+            tokenizer_states: ManyToOneIdMap::from_original_to_internal_with_representatives(
+                vec![0, 1],
+                2,
+                vec![0, 1],
+            ),
+            vocab_tokens: ManyToOneIdMap::from_original_to_internal_with_representatives(
+                vec![0],
+                1,
+                vec![0],
+            ),
+        };
+
+        reconcile_weight_id_maps(
+            &mut [&mut left_weight],
+            &mut left_id_map,
+            &mut [&mut right_weight_left, &mut right_weight_right],
+            &mut right_id_map,
+        );
+
+        assert_eq!(left_id_map.tokenizer_states.original_to_internal, vec![0, 1]);
+        assert_eq!(left_id_map.tokenizer_states.original_to_internal, right_id_map.tokenizer_states.original_to_internal);
+        assert_eq!(weight_entries(&left_weight), vec![(0, vec![0]), (1, vec![0])]);
+        assert_eq!(weight_entries(&right_weight_left), vec![(0, vec![0])]);
+        assert_eq!(weight_entries(&right_weight_right), vec![(1, vec![0])]);
+    }
 }
 
