@@ -21,7 +21,7 @@ use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::{
     compute_ever_allowed_follows,
     compute_terminal_coloring,
 };
-use crate::compiler::stages::compact::reconcile_weight_id_maps;
+use crate::compiler::stages::compact::reconcile_mapped_weight_artifacts;
 use crate::compiler::stages::parser_dwa::build_parser_dwa_from_terminal_dwa_with_precomputed_templates;
 use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::characterize_terminals;
@@ -322,7 +322,7 @@ fn compile_prepared_with_profile(
         let global_max_length_ms = elapsed_ms(global_max_length_started_at);
 
         let token_bytes = vocab.entries.clone();
-        let (((mut internal_ids, mut terminal_dwa, mut terminal_phase_profile), cpm_result), (templates, templates_ms)) = rayon::join(
+        let (((mut terminal_dwa, mut terminal_phase_profile), cpm_result), (templates, templates_ms)) = rayon::join(
             || {
                 rayon::join(
                     || {
@@ -364,37 +364,20 @@ fn compile_prepared_with_profile(
         profile.terminal_dwa_ms = terminal_phase_profile.terminal_dwa_ms;
         profile.compact_ms = terminal_phase_profile.compact_ms;
 
-        let mut possible_matches = cpm_result.possible_matches;
-        let mut possible_matches_id_map = cpm_result.id_map;
+        let mut possible_matches = cpm_result.mapped_possible_matches;
         let cpm_profile = cpm_result.profile;
 
         let remap_parser_dwa_started_at = Instant::now();
-        {
-            let mut terminal_weight_refs = Vec::new();
-            for state in terminal_dwa.states_mut() {
-                if let Some(final_weight) = state.final_weight.as_mut() {
-                    terminal_weight_refs.push(final_weight);
-                }
-                for (_, weight) in state.transitions.values_mut() {
-                    terminal_weight_refs.push(weight);
-                }
-            }
-
-            let mut possible_match_weight_refs: Vec<_> = possible_matches.values_mut().collect();
-            reconcile_weight_id_maps(
-                &mut terminal_weight_refs,
-                &mut internal_ids,
-                &mut possible_match_weight_refs,
-                &mut possible_matches_id_map,
-            );
-        }
+        let internal_ids = {
+            reconcile_mapped_weight_artifacts(&mut terminal_dwa, &mut possible_matches)
+        };
         let remap_parser_dwa_ms = elapsed_ms(remap_parser_dwa_started_at);
 
         let parser_dwa_started_at = Instant::now();
         let parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
             &table,
             &analyzed_grammar,
-            &terminal_dwa,
+            terminal_dwa.artifact(),
             templates,
             vocab,
             &internal_ids,
@@ -422,7 +405,7 @@ fn compile_prepared_with_profile(
             table,
             tokenizer,
             ignore_terminal: prepared_grammar.ignore_terminal,
-            possible_matches,
+            possible_matches: possible_matches.into_artifact(),
             state_to_internal_tsid: internal_ids.tokenizer_states.original_to_internal.clone(),
             internal_tsid_to_states: internal_ids.tokenizer_states.internal_to_originals_vecs(),
             original_token_to_internal: internal_ids.vocab_tokens.original_to_internal.clone(),

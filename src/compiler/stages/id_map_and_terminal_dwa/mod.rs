@@ -21,7 +21,7 @@ use rustc_hash::FxHashMap;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
-use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
+use crate::compiler::stages::equiv_types::{InternalIdMap, MappedArtifact, ManyToOneIdMap};
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::TerminalID;
 use crate::Vocab;
@@ -177,7 +177,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     flat_trans: Arc<[u32]>,
     global_max_length_state_map: &ManyToOneIdMap,
     external_classify_cache: Option<&classify::SharedClassifyCache>,
-) -> (InternalIdMap, DWA, TerminalDwaPhaseProfile) {
+) -> (MappedArtifact<DWA>, TerminalDwaPhaseProfile) {
     let total_started_at = Instant::now();
     let mut profile = TerminalDwaPhaseProfile::default();
 
@@ -276,7 +276,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
                 representative_original_ids: Vec::new(),
             },
         };
-        return (empty_map, DWA::new(1, 0), profile);
+        return (MappedArtifact::new(DWA::new(1, 0), empty_map), profile);
     }
 
     let num_tokenizer_states = tokenizer.num_states() as usize;
@@ -319,7 +319,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
         );
     }
 
-    (merged.id_map, merged.dwa, profile)
+    (MappedArtifact::new(merged.dwa, merged.id_map), profile)
 }
 
 pub(crate) fn build_id_map_and_terminal_dwa(
@@ -331,7 +331,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     grammar: &AnalyzedGrammar,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     external_classify_cache: Option<&classify::SharedClassifyCache>,
-) -> (InternalIdMap, DWA, TerminalDwaPhaseProfile, ManyToOneIdMap) {
+) -> (MappedArtifact<DWA>, TerminalDwaPhaseProfile, ManyToOneIdMap) {
     let mut profile = TerminalDwaPhaseProfile::default();
 
     let flat_trans_started_at = Instant::now();
@@ -342,7 +342,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     let global_max_length_state_map = build_global_max_length_state_map(tokenizer, vocab, &flat_trans);
     let global_max_length_ms = global_max_length_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let (id_map, dwa, mut inner_profile) =
+    let (mapped_dwa, mut inner_profile) =
         build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
             tokenizer,
             vocab,
@@ -359,5 +359,5 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     inner_profile.id_map_ms += global_max_length_ms;
     profile.add_assign(inner_profile);
 
-    (id_map, dwa, profile, global_max_length_state_map)
+    (mapped_dwa, profile, global_max_length_state_map)
 }

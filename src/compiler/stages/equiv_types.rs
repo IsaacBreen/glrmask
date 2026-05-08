@@ -117,6 +117,47 @@ pub struct InternalIdMap {
     pub vocab_tokens: ManyToOneIdMap,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct MappedArtifact<T> {
+    artifact: T,
+    id_map: InternalIdMap,
+}
+
+impl<T> MappedArtifact<T> {
+    /// Invariant: `artifact` IDs are expressed in the internal spaces described by `id_map`.
+    pub(crate) fn new(artifact: T, id_map: InternalIdMap) -> Self {
+        Self { artifact, id_map }
+    }
+
+    pub(crate) fn artifact(&self) -> &T {
+        &self.artifact
+    }
+
+    pub(crate) fn artifact_mut(&mut self) -> &mut T {
+        &mut self.artifact
+    }
+
+    pub(crate) fn id_map(&self) -> &InternalIdMap {
+        &self.id_map
+    }
+
+    pub(crate) fn id_map_mut(&mut self) -> &mut InternalIdMap {
+        &mut self.id_map
+    }
+
+    pub(crate) fn parts_mut(&mut self) -> (&mut T, &mut InternalIdMap) {
+        (&mut self.artifact, &mut self.id_map)
+    }
+
+    pub(crate) fn into_parts(self) -> (T, InternalIdMap) {
+        (self.artifact, self.id_map)
+    }
+
+    pub(crate) fn into_artifact(self) -> T {
+        self.artifact
+    }
+}
+
 impl InternalIdMap {
     pub fn num_tsids(&self) -> u32 {
         self.tokenizer_states.num_internal_ids()

@@ -12,7 +12,7 @@ use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::constraint_possible_matches::collector::DensePossibleMatchMap;
 use crate::compiler::pm_profile::elapsed_ms;
-use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
+use crate::compiler::stages::equiv_types::{InternalIdMap, MappedArtifact, ManyToOneIdMap};
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::ds::weight::{Weight, shared_rangeset};
 use crate::grammar::flat::TerminalID;
@@ -44,8 +44,7 @@ pub(crate) struct ConstraintPossibleMatchesProfile {
 
 #[derive(Debug)]
 pub(crate) struct ConstraintPossibleMatchesComputation {
-    pub(crate) possible_matches: RuntimePossibleMatchesByTerminal,
-    pub(crate) id_map: InternalIdMap,
+    pub(crate) mapped_possible_matches: MappedArtifact<RuntimePossibleMatchesByTerminal>,
     pub(crate) profile: ConstraintPossibleMatchesProfile,
 }
 
@@ -969,8 +968,7 @@ pub(crate) fn compute_constraint_possible_matches(
     let possible_match_vocab_ms = elapsed_ms(possible_match_vocab_started_at);
 
     ConstraintPossibleMatchesComputation {
-        possible_matches,
-        id_map: possible_matches_id_map,
+        mapped_possible_matches: MappedArtifact::new(possible_matches, possible_matches_id_map),
         profile: ConstraintPossibleMatchesProfile {
             possible_matches_collect_ms,
             possible_match_vocab_ms,

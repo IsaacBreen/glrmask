@@ -14,9 +14,10 @@ use rayon::prelude::*;
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 
 use crate::automata::weighted_u32::dwa::DWA;
+use crate::compiler::constraint_possible_matches::RuntimePossibleMatchesByTerminal;
 use crate::ds::weight::{Weight, finalize_weight_map, shared_rangeset};
 
-use super::equiv_types::{InternalIdMap, ManyToOneIdMap};
+use super::equiv_types::{InternalIdMap, MappedArtifact, ManyToOneIdMap};
 
 // ── public entry point ──────────────────────────────────────────────────────
 
@@ -31,6 +32,31 @@ pub struct CompactReport {
     pub tsid_perm: Vec<u32>,
     pub token_perm: Vec<u32>,
     pub profile_stats: Option<CompactProfileStats>,
+}
+
+pub(crate) trait WeightRefs {
+    fn weight_refs_mut(&mut self) -> Vec<&mut Weight>;
+}
+
+impl WeightRefs for DWA {
+    fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
+        let mut weights = Vec::new();
+        for state in self.states_mut() {
+            if let Some(final_weight) = state.final_weight.as_mut() {
+                weights.push(final_weight);
+            }
+            for (_, weight) in state.transitions.values_mut() {
+                weights.push(weight);
+            }
+        }
+        weights
+    }
+}
+
+impl WeightRefs for RuntimePossibleMatchesByTerminal {
+    fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
+        self.values_mut().collect()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -214,6 +240,29 @@ pub fn reconcile_weight_id_maps(
 
     *left_id_map = common_id_map.clone();
     *right_id_map = common_id_map;
+}
+
+pub fn reconcile_mapped_weight_artifacts<L, R>(
+    left: &mut MappedArtifact<L>,
+    right: &mut MappedArtifact<R>,
+) -> InternalIdMap
+where
+    L: WeightRefs,
+    R: WeightRefs,
+{
+    let (left_artifact, left_id_map) = left.parts_mut();
+    let (right_artifact, right_id_map) = right.parts_mut();
+    let left_weights = left_artifact.weight_refs_mut();
+    let right_weights = right_artifact.weight_refs_mut();
+    let mut left_weights: Vec<&mut Weight> = left_weights;
+    let mut right_weights: Vec<&mut Weight> = right_weights;
+    reconcile_weight_id_maps(
+        &mut left_weights,
+        left_id_map,
+        &mut right_weights,
+        right_id_map,
+    );
+    left.id_map().clone()
 }
 
 fn compact_dwa_dimensions_inner(
