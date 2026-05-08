@@ -263,6 +263,21 @@ fn vocab_batch_size_override() -> Option<usize> {
         .filter(|&value| value > 0)
 }
 
+fn vocab_verify_token_pair_override() -> Option<(usize, usize)> {
+    let value = std::env::var("GLRMASK_VOCAB_VERIFY_TOKEN_PAIR").ok()?;
+    let mut parts = value.split(',').map(str::trim);
+    let left = parts.next()?.parse::<usize>().ok()?;
+    let right = parts.next()?.parse::<usize>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((left, right))
+}
+
+fn vocab_verify_token_pair_from_final_classes_enabled() -> bool {
+    env_flag_enabled("GLRMASK_VOCAB_VERIFY_TOKEN_PAIR_FROM_FINAL_CLASSES")
+}
+
 fn vocab_state_group_size(num_states: usize, num_groups: usize) -> usize {
     if *VOCAB_UNGROUPED_BATCH || num_states <= 1 || num_groups == 0 {
         return num_states;
@@ -1126,11 +1141,11 @@ fn finish_token_signature(
     sig
 }
 
-fn append_state_observation_row_words_and_cleanup(
+fn fill_state_observation_words_and_cleanup(
     dfa: &Dfa,
     batch_len: usize,
     scratch: &mut Scratch,
-    state_rows: &mut [Vec<u64>],
+    out: &mut [u64],
 ) {
     let num_groups = dfa.num_groups;
     let dirty_words = scratch.dirty_words;
@@ -1178,7 +1193,162 @@ fn append_state_observation_row_words_and_cleanup(
             completion
         };
 
-        state_rows[i].push(state_sig);
+        out[i] = state_sig;
+    }
+}
+
+fn compute_token_state_observation_words(
+    dfa: &Dfa,
+    token: &[u8],
+    batch: &[usize],
+    state_group_size: usize,
+    scratch: &mut Scratch,
+    out: &mut [u64],
+) {
+    scratch.single_target_hash_pos = usize::MAX;
+    scratch.single_target_hash = 0;
+    run_batch(dfa, scratch, token, batch, state_group_size, false);
+
+    let target_count = scratch.targets.len();
+    if target_count == 1 {
+        if try_hash_single_target_suffix(dfa, token, scratch).is_none() {
+            ensure_target_gids_map(
+                &mut scratch.target_gids,
+                scratch.single_target_pos,
+                scratch.single_target_gids.as_slice(),
+            );
+            hash_suffixes(dfa, token, scratch, false);
+        }
+    } else if target_count > 0 {
+        hash_suffixes(dfa, token, scratch, false);
+    }
+
+    fill_state_observation_words_and_cleanup(dfa, batch.len(), scratch, out);
+}
+
+fn first_distinguishing_state_for_token_pair_with_count<S: AsRef<[u8]>>(
+    dfa: &Dfa,
+    strings: &[S],
+    left_token_idx: usize,
+    right_token_idx: usize,
+    ordered_states: &[usize],
+    ordered_original_states: &[usize],
+    batch_size: usize,
+) -> (Option<usize>, usize) {
+    if left_token_idx >= strings.len() || right_token_idx >= strings.len() {
+        return (None, 0);
+    }
+
+    let left_token = strings[left_token_idx].as_ref();
+    let right_token = strings[right_token_idx].as_ref();
+    let mut states_checked = 0usize;
+    let mut left_words = vec![0u64; batch_size.max(1)];
+    let mut right_words = vec![0u64; batch_size.max(1)];
+
+    for batch_start in (0..ordered_states.len()).step_by(batch_size.max(1)) {
+        let batch_end = (batch_start + batch_size.max(1)).min(ordered_states.len());
+        let batch = &ordered_states[batch_start..batch_end];
+        let batch_len = batch.len();
+        let state_group_size = vocab_state_group_size(batch_len, dfa.num_groups);
+        let mut left_scratch = Scratch::new(batch_len, dfa.num_groups);
+        let mut right_scratch = Scratch::new(batch_len, dfa.num_groups);
+
+        compute_token_state_observation_words(
+            dfa,
+            left_token,
+            batch,
+            state_group_size,
+            &mut left_scratch,
+            &mut left_words[..batch_len],
+        );
+        compute_token_state_observation_words(
+            dfa,
+            right_token,
+            batch,
+            state_group_size,
+            &mut right_scratch,
+            &mut right_words[..batch_len],
+        );
+
+        for i in 0..batch_len {
+            states_checked += 1;
+            if left_words[i] != right_words[i] {
+                return (Some(ordered_original_states[batch_start + i]), states_checked);
+            }
+        }
+    }
+
+    (None, states_checked)
+}
+
+fn first_distinguishing_state_for_token_pair<S: AsRef<[u8]>>(
+    dfa: &Dfa,
+    strings: &[S],
+    left_token_idx: usize,
+    right_token_idx: usize,
+    ordered_states: &[usize],
+    ordered_original_states: &[usize],
+    batch_size: usize,
+) -> Option<usize> {
+    first_distinguishing_state_for_token_pair_with_count(
+        dfa,
+        strings,
+        left_token_idx,
+        right_token_idx,
+        ordered_states,
+        ordered_original_states,
+        batch_size,
+    )
+    .0
+}
+
+fn log_vocab_pair_verification<S: AsRef<[u8]>>(
+    dfa: &Dfa,
+    strings: &[S],
+    left_token_idx: usize,
+    right_token_idx: usize,
+    ordered_states: &[usize],
+    ordered_original_states: &[usize],
+    batch_size: usize,
+) {
+    if left_token_idx >= strings.len() || right_token_idx >= strings.len() {
+        eprintln!(
+            "[glrmask/profile][vocab_pair_verify] left={} right={} result=invalid states={} total_ms=0.000",
+            left_token_idx,
+            right_token_idx,
+            ordered_states.len(),
+        );
+        return;
+    }
+
+    let started_at = std::time::Instant::now();
+    let (witness_state, states_checked) = first_distinguishing_state_for_token_pair_with_count(
+        dfa,
+        strings,
+        left_token_idx,
+        right_token_idx,
+        ordered_states,
+        ordered_original_states,
+        batch_size,
+    );
+
+    if let Some(witness_state) = witness_state {
+        eprintln!(
+            "[glrmask/profile][vocab_pair_verify] left={} right={} result=different witness_state={} states_checked={} total_ms={:.3}",
+            left_token_idx,
+            right_token_idx,
+            witness_state,
+            states_checked,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    } else {
+        eprintln!(
+            "[glrmask/profile][vocab_pair_verify] left={} right={} result=equivalent states={} total_ms={:.3}",
+            left_token_idx,
+            right_token_idx,
+            ordered_states.len(),
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
     }
 }
 
@@ -1200,33 +1370,21 @@ fn run_vocab_row_cert_diag<S: AsRef<[u8]> + Sync>(
         let batch_len = batch.len();
         let state_group_size = state_group_size_for_batch(batch_len);
         let mut scratch = Scratch::new(batch_len, dfa.num_groups);
+        let mut state_words = vec![0u64; batch_len];
 
         for &token_idx in &rep_token_indices {
             let token = strings[token_idx].as_ref();
-            scratch.single_target_hash_pos = usize::MAX;
-            scratch.single_target_hash = 0;
-            run_batch(dfa, &mut scratch, token, batch, state_group_size, false);
-
-            let target_count = scratch.targets.len();
-            if target_count == 1 {
-                if try_hash_single_target_suffix(dfa, token, &mut scratch).is_none() {
-                    ensure_target_gids_map(
-                        &mut scratch.target_gids,
-                        scratch.single_target_pos,
-                        scratch.single_target_gids.as_slice(),
-                    );
-                    hash_suffixes(dfa, token, &mut scratch, false);
-                }
-            } else if target_count > 0 {
-                hash_suffixes(dfa, token, &mut scratch, false);
-            }
-
-            append_state_observation_row_words_and_cleanup(
+            compute_token_state_observation_words(
                 dfa,
-                batch_len,
+                token,
+                batch,
+                state_group_size,
                 &mut scratch,
-                &mut row_keys[batch_start..batch_end],
+                &mut state_words,
             );
+            for i in 0..batch_len {
+                row_keys[batch_start + i].push(state_words[i]);
+            }
         }
     }
 
@@ -1678,7 +1836,7 @@ fn compact_dfa_for_tokens<S: AsRef<[u8]>>(
     dfa: &Dfa,
     initial_states: &[usize],
     strings: &[S],
-) -> Option<(Dfa, Vec<usize>)> {
+) -> Option<(Dfa, Vec<usize>, Vec<usize>)> {
     if initial_states.len() < COMPACT_DFA_MIN_STATES
         || strings.is_empty()
         || initial_states.len() * strings.len() < COMPACT_DFA_MIN_WORK
@@ -1800,7 +1958,7 @@ fn compact_dfa_for_tokens<S: AsRef<[u8]>>(
         disallowed_follows: dfa.disallowed_follows.clone(),
     };
 
-    Some((compact_dfa, compact_initial))
+    Some((compact_dfa, compact_initial, compact_to_original))
 }
 
 /// When `active_groups` is provided, the DFA only tracks groups marked `true`.
@@ -1820,16 +1978,24 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
     // partition's token bytes.  This can dramatically shrink the transition
     // table (e.g. 77260 → 36598 for p0 of o62058) improving cache locality.
     let compacted = compact_dfa_for_tokens(&dfa, initial_states, strings);
-    let (dfa_ref, initial_states_ref): (&Dfa, &[usize]) = if let Some((ref cdfa, ref cstates)) = compacted {
-        (cdfa, cstates)
+    let (dfa_ref, initial_states_ref, compact_to_original): (&Dfa, &[usize], Option<&Vec<usize>>) = if let Some((ref cdfa, ref cstates, ref compact_to_original)) = compacted {
+        (cdfa, cstates, Some(compact_to_original))
     } else {
-        (&dfa, initial_states)
+        (&dfa, initial_states, None)
     };
 
     let ordered_states = if diversity_state_order_enabled() {
         states_by_transition_diversity(dfa_ref, initial_states_ref)
     } else {
         initial_states_ref.to_vec()
+    };
+    let ordered_original_states = if let Some(compact_to_original) = compact_to_original {
+        ordered_states
+            .iter()
+            .map(|&state| compact_to_original[state])
+            .collect::<Vec<_>>()
+    } else {
+        ordered_states.clone()
     };
     let num_tokens = strings.len();
     let num_initial_states = ordered_states.len();
@@ -1953,6 +2119,43 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
         groups[class_id].push(token_idx);
     }
     let groups: Vec<Vec<usize>> = groups.into_iter().filter(|group| !group.is_empty()).collect();
+
+    if let Some((left_token_idx, right_token_idx)) = vocab_verify_token_pair_override() {
+        log_vocab_pair_verification(
+            dfa_ref,
+            strings,
+            left_token_idx,
+            right_token_idx,
+            &ordered_states,
+            &ordered_original_states,
+            batch_size,
+        );
+    }
+
+    if vocab_verify_token_pair_from_final_classes_enabled() {
+        if let Some(group) = groups.iter().find(|group| group.len() >= 2) {
+            log_vocab_pair_verification(
+                dfa_ref,
+                strings,
+                group[0],
+                group[1],
+                &ordered_states,
+                &ordered_original_states,
+                batch_size,
+            );
+        }
+        if groups.len() >= 2 {
+            log_vocab_pair_verification(
+                dfa_ref,
+                strings,
+                groups[0][0],
+                groups[1][0],
+                &ordered_states,
+                &ordered_original_states,
+                batch_size,
+            );
+        }
+    }
 
     if *VOCAB_ROW_CERT_DIAG {
         run_vocab_row_cert_diag(
