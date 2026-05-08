@@ -239,6 +239,8 @@ static HASH_RANDOM_STATE: Lazy<RandomState> =
     Lazy::new(|| RandomState::with_seeds(HASH_SEED1, HASH_SEED2, HASH_SEED3, HASH_SEED4));
 static VOCAB_UNGROUPED_BATCH: Lazy<bool> =
     Lazy::new(|| env_flag_enabled("GLRMASK_VOCAB_UNGROUPED_BATCH"));
+static VOCAB_ROW_CERT_DIAG: Lazy<bool> =
+    Lazy::new(|| env_flag_enabled("GLRMASK_VOCAB_EQUIV_ROW_CERT_DIAG"));
 
 #[inline]
 fn new_hasher() -> AHasher {
@@ -1124,6 +1126,141 @@ fn finish_token_signature(
     sig
 }
 
+fn append_state_observation_row_words_and_cleanup(
+    dfa: &Dfa,
+    batch_len: usize,
+    scratch: &mut Scratch,
+    state_rows: &mut [Vec<u64>],
+) {
+    let num_groups = dfa.num_groups;
+    let dirty_words = scratch.dirty_words;
+    let dag = &scratch.dag_nodes;
+    let single_target_hash_pos = scratch.single_target_hash_pos;
+    let single_target_hash = scratch.single_target_hash;
+
+    for i in 0..batch_len {
+        let completion = dfa.completion(scratch.current_states[i]);
+        let base = i * num_groups;
+        let mask_base = i * dirty_words;
+
+        let state_sig = if scratch.dirty_state_flags[i] != 0 {
+            let mut h = new_hasher();
+            h.write_u64(completion);
+            for w in 0..dirty_words {
+                let mut dirty_mask = scratch.dirty_group_masks[mask_base + w];
+                while dirty_mask != 0 {
+                    let bit = dirty_mask.trailing_zeros() as usize;
+                    dirty_mask &= dirty_mask - 1;
+                    let gid = w * 64 + bit;
+                    if gid >= num_groups {
+                        break;
+                    }
+                    let pv = scratch.match_positions[base + gid];
+                    if pv != NONE && pv > 0 {
+                        h.write_u64(gid as u64);
+                        let target = pv as usize;
+                        let target_hash = if single_target_hash_pos == target {
+                            single_target_hash
+                        } else {
+                            dag.get(target)
+                                .and_then(|node| node.as_ref())
+                                .map_or(0, |node| node.hash)
+                        };
+                        h.write_u64(target_hash);
+                    }
+                    scratch.match_positions[base + gid] = NONE;
+                }
+                scratch.dirty_group_masks[mask_base + w] = 0;
+            }
+            scratch.dirty_state_flags[i] = 0;
+            h.finish()
+        } else {
+            completion
+        };
+
+        state_rows[i].push(state_sig);
+    }
+}
+
+fn run_vocab_row_cert_diag<S: AsRef<[u8]> + Sync>(
+    dfa: &Dfa,
+    strings: &[S],
+    ordered_states: &[usize],
+    batch_size: usize,
+    state_group_size_for_batch: impl Fn(usize) -> usize,
+    groups: &[Vec<usize>],
+) {
+    let started_at = std::time::Instant::now();
+    let rep_token_indices: Vec<usize> = groups.iter().map(|group| group[0]).collect();
+    let mut row_keys = vec![Vec::<u64>::with_capacity(rep_token_indices.len()); ordered_states.len()];
+
+    for batch_start in (0..ordered_states.len()).step_by(batch_size.max(1)) {
+        let batch_end = (batch_start + batch_size.max(1)).min(ordered_states.len());
+        let batch = &ordered_states[batch_start..batch_end];
+        let batch_len = batch.len();
+        let state_group_size = state_group_size_for_batch(batch_len);
+        let mut scratch = Scratch::new(batch_len, dfa.num_groups);
+
+        for &token_idx in &rep_token_indices {
+            let token = strings[token_idx].as_ref();
+            scratch.single_target_hash_pos = usize::MAX;
+            scratch.single_target_hash = 0;
+            run_batch(dfa, &mut scratch, token, batch, state_group_size, false);
+
+            let target_count = scratch.targets.len();
+            if target_count == 1 {
+                if try_hash_single_target_suffix(dfa, token, &mut scratch).is_none() {
+                    ensure_target_gids_map(
+                        &mut scratch.target_gids,
+                        scratch.single_target_pos,
+                        scratch.single_target_gids.as_slice(),
+                    );
+                    hash_suffixes(dfa, token, &mut scratch, false);
+                }
+            } else if target_count > 0 {
+                hash_suffixes(dfa, token, &mut scratch, false);
+            }
+
+            append_state_observation_row_words_and_cleanup(
+                dfa,
+                batch_len,
+                &mut scratch,
+                &mut row_keys[batch_start..batch_end],
+            );
+        }
+    }
+
+    let mut row_class_counts: HashMap<Vec<u64>, usize> =
+        HashMap::with_capacity(row_keys.len() / 2);
+    for row in row_keys {
+        *row_class_counts.entry(row).or_insert(0) += 1;
+    }
+
+    let row_classes = row_class_counts.len();
+    let largest_block = row_class_counts.values().copied().max().unwrap_or(0);
+    let singleton_rows = row_class_counts
+        .values()
+        .copied()
+        .filter(|&count| count == 1)
+        .count();
+    let reduction_pct = if ordered_states.is_empty() {
+        0.0
+    } else {
+        100.0 * (1.0 - row_classes as f64 / ordered_states.len() as f64)
+    };
+
+    eprintln!(
+        "[glrmask/profile][vocab_row_cert_diag] states={} rep_tokens={} row_classes={} reduction_pct={:.2} largest_block={} singleton_rows={} total_ms={:.3}",
+        ordered_states.len(),
+        rep_token_indices.len(),
+        row_classes,
+        reduction_pct,
+        largest_block,
+        singleton_rows,
+        started_at.elapsed().as_secs_f64() * 1000.0,
+    );
+}
+
 fn token_signature(
     dfa: &Dfa,
     token: &[u8],
@@ -1815,6 +1952,19 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
     for (token_idx, &class_id) in partition.iter().enumerate() {
         groups[class_id].push(token_idx);
     }
-    groups.into_iter().filter(|group| !group.is_empty()).collect()
+    let groups: Vec<Vec<usize>> = groups.into_iter().filter(|group| !group.is_empty()).collect();
+
+    if *VOCAB_ROW_CERT_DIAG {
+        run_vocab_row_cert_diag(
+            dfa_ref,
+            strings,
+            &ordered_states,
+            batch_size,
+            |batch_len| vocab_state_group_size(batch_len, num_groups),
+            &groups,
+        );
+    }
+
+    groups.into_iter().collect()
 }
 
