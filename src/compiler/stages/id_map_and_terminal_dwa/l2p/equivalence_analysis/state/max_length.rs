@@ -417,6 +417,15 @@ fn refine_once_interned(
     (next_blocks, block_count)
 }
 
+#[inline]
+fn auto_prefers_sorted_refinement(
+    is_full_state_query: bool,
+    num_states: usize,
+    active_byte_count: usize,
+) -> bool {
+    is_full_state_query && num_states <= 16_384 && active_byte_count <= 16
+}
+
 fn compute_kbounded_partition(
     dfa: &FlatDfa,
     k: usize,
@@ -447,7 +456,9 @@ fn compute_kbounded_partition(
         let use_sorted = match mode {
             RefineMode::Sorted => true,
             RefineMode::Interned => false,
-            RefineMode::Auto => is_full_state_query,
+            RefineMode::Auto => {
+                auto_prefers_sorted_refinement(is_full_state_query, n, active_bytes.len())
+            }
         };
 
         let (next_blocks, next_count) = if use_sorted {
