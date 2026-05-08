@@ -43,6 +43,29 @@ fn skip_max_length_for_partition(partition_label: &str) -> bool {
         .any(|label| label == partition_label)
 }
 
+fn skip_l1_max_length_for_partition(partition_label: &str) -> bool {
+    if matches!(partition_label, "p4" | "p6") {
+        return true;
+    }
+    static SKIPPED_L1_PARTITIONS: OnceLock<Vec<String>> = OnceLock::new();
+    SKIPPED_L1_PARTITIONS
+        .get_or_init(|| {
+            std::env::var("GLRMASK_SKIP_L1_MAX_LENGTH_PARTITIONS")
+                .ok()
+                .map(|value| {
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|label| !label.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .iter()
+        .any(|label| label == partition_label)
+}
+
 #[inline]
 fn should_skip_max_length_for_partition(
     partition_label: &str,
@@ -50,6 +73,7 @@ fn should_skip_max_length_for_partition(
     projected_by_global: bool,
 ) -> bool {
     skip_max_length_for_partition(partition_label)
+        || skip_l1_max_length_for_partition(partition_label)
         || (projected_by_global && initial_state_count <= 8192)
 }
 
