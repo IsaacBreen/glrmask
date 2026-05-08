@@ -813,10 +813,7 @@ pub(crate) fn remap_class_maps_to_possible_match_vocab(
 
     let mut terminal_entries: BTreeMap<TerminalID, Vec<(u32, RangeSetBlaze<u32>)>> = BTreeMap::new();
 
-    for (state, &class_id) in state_classes.iter().enumerate() {
-        if class_id == u32::MAX {
-            continue;
-        }
+    for class_id in used_state_class_ids(state_classes) {
         let Some(class_map) = class_maps.get(class_id as usize) else {
             continue;
         };
@@ -867,7 +864,7 @@ pub(crate) fn remap_class_maps_to_possible_match_vocab(
         };
 
         for (terminal_id, token_set) in remapped_terminals {
-            terminal_entries.entry(terminal_id).or_default().push((state as u32, token_set));
+            terminal_entries.entry(terminal_id).or_default().push((class_id, token_set));
         }
     }
 
@@ -916,7 +913,6 @@ pub(crate) fn compute_constraint_possible_matches(
     let possible_matches_collect_ms = elapsed_ms(pm_started_at);
 
     let possible_match_vocab_started_at = Instant::now();
-
     let tokens_with_same_bytes = build_tokens_with_same_bytes(token_bytes);
     let possible_match_signature_ids = build_possible_match_signature_ids_from_trie_classes(
         &trie_class_result.class_maps,
@@ -966,7 +962,7 @@ pub(crate) fn compute_constraint_possible_matches(
         eprintln!(
             "[glrmask/profile][possible_match_vocab] original_tokens={} possible_match_tokens={}",
             token_bytes.len(),
-            possible_match_vocab.internal_to_originals.len(),
+            possible_matches_id_map.vocab_tokens.internal_to_originals.len(),
         );
     }
 
