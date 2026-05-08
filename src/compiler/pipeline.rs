@@ -425,7 +425,7 @@ fn compile_prepared_with_profile(
             weight_token_dense_masks: rustc_hash::FxHashMap::default(),
             seed_terminal_dense: rustc_hash::FxHashMap::default(),
             seed_state_dense: Vec::new(),
-            seed_universe_dense: Box::new([]),
+            seed_universe_dense: std::sync::Arc::<[u64]>::from(Vec::<u64>::new().into_boxed_slice()),
             dwa_fast_transitions: Vec::new(),
             tokenizer_fast_transitions: Vec::new(),
             heavy_token_dense_masks: Vec::new(),

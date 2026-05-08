@@ -13,7 +13,7 @@ use std::io::Write;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-type DenseTokenMaskCache = FxHashMap<usize, Box<[u64]>>;
+type DenseTokenMaskCache = FxHashMap<usize, Arc<[u64]>>;
 type DenseMaskGSS = LeveledGSS<u32, DenseMaskAcc>;
 
 const DELTA_SEED_MIN_SAVINGS: u64 = 2048;

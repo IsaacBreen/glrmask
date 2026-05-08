@@ -16,22 +16,19 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use rustc_hash::FxHashMap;
-
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
-use crate::compiler::stages::equiv_types::{InternalIdMap, MappedArtifact, ManyToOneIdMap};
+use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap, MappedArtifact};
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 
 use classify::classify_vocab_char_type;
-use l2p::equivalence_analysis::compat::{TokenizerView, compute_byte_classes};
-use l2p::equivalence_analysis::state::max_length::find_state_equivalence_classes_byte_restricted;
+use l2p::equivalence_analysis::compat::{compute_byte_classes, TokenizerView};
+use l2p::equivalence_analysis::state::max_length::find_state_equivalence_classes_stable_byte_restricted;
 use types::{
-    compile_profile_enabled, LocalIdMapTerminalDwa, TerminalColoring,
-    TerminalDwaPhaseProfile,
+    compile_profile_enabled, LocalIdMapTerminalDwa, TerminalColoring, TerminalDwaPhaseProfile,
 };
 
 fn global_max_length_env_override() -> Option<bool> {
@@ -59,16 +56,17 @@ pub(crate) fn build_global_max_length_state_map(
     flat_trans: &Arc<[u32]>,
 ) -> ManyToOneIdMap {
     let started_at = Instant::now();
-    let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
+    let num_states_u32 = tokenizer.num_states();
+    let num_states = num_states_u32 as usize;
 
     if !use_global_max_length(tokenizer) {
-        let original_to_internal: Vec<u32> = (0..states.len() as u32).collect();
-        let representative_original_ids: Vec<u32> = (0..states.len() as u32).collect();
+        let original_to_internal: Vec<u32> = (0..num_states_u32).collect();
+        let representative_original_ids = original_to_internal.clone();
 
         if compile_profile_enabled() {
             eprintln!(
                 "[glrmask/profile][global_max_length] mode=identity skipped=true states={} reps={} tokens_included=0 max_token_len=0 ms={:.3}",
-                states.len(),
+                num_states,
                 representative_original_ids.len(),
                 started_at.elapsed().as_secs_f64() * 1000.0,
             );
@@ -87,7 +85,11 @@ pub(crate) fn build_global_max_length_state_map(
         .values()
         .map(|bytes| bytes.as_slice())
         .collect();
-    let max_token_len = token_bytes.iter().map(|bytes| bytes.len()).max().unwrap_or(0);
+    let max_token_len = token_bytes
+        .iter()
+        .map(|bytes| bytes.len())
+        .max()
+        .unwrap_or(0);
     let mut relevant_bytes = [false; 256];
     for bytes in &token_bytes {
         for &byte in *bytes {
@@ -95,31 +97,32 @@ pub(crate) fn build_global_max_length_state_map(
         }
     }
     let byte_to_class = compute_byte_classes(tokenizer_view.dfa());
-    let mapping = find_state_equivalence_classes_byte_restricted(
+    let mapping = find_state_equivalence_classes_stable_byte_restricted(
         &tokenizer_view,
-        &token_bytes,
-        &states,
         Some(&byte_to_class),
         None,
         Some(&relevant_bytes),
     );
+    debug_assert_eq!(mapping.len(), num_states);
 
-    let mut rep_to_internal = FxHashMap::<usize, u32>::default();
-    let mut original_to_internal = vec![u32::MAX; states.len()];
+    let mut rep_to_internal = vec![u32::MAX; num_states];
+    let mut original_to_internal = vec![u32::MAX; num_states];
     let mut representative_original_ids = Vec::new();
     for (state, &rep) in mapping.iter().enumerate() {
-        let internal = *rep_to_internal.entry(rep).or_insert_with(|| {
-            let id = representative_original_ids.len() as u32;
+        debug_assert!(rep < num_states);
+        let mut internal = rep_to_internal[rep];
+        if internal == u32::MAX {
+            internal = representative_original_ids.len() as u32;
+            rep_to_internal[rep] = internal;
             representative_original_ids.push(rep as u32);
-            id
-        });
+        }
         original_to_internal[state] = internal;
     }
 
     if compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][global_max_length] mode=restored skipped=false states={} reps={} tokens_included={} max_token_len={} ms={:.3}",
-            states.len(),
+            "[glrmask/profile][global_max_length] mode=stable skipped=false states={} reps={} tokens_included={} max_token_len={} ms={:.3}",
+            num_states,
             representative_original_ids.len(),
             token_bytes.len(),
             max_token_len,
@@ -285,13 +288,13 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     let merge_started_at = Instant::now();
     let (merged, global_merge_profile) = if pairs.len() == 1 {
         // Single partition — already compacted by partition merge. Skip redundant global compact.
-        (pairs.into_iter().next().unwrap(), TerminalDwaPhaseProfile::default())
+        (
+            pairs.into_iter().next().unwrap(),
+            TerminalDwaPhaseProfile::default(),
+        )
     } else {
-        let merged = merge::merge_id_maps_and_terminal_dwas(
-            pairs,
-            num_tokenizer_states,
-            max_token_id,
-        );
+        let merged =
+            merge::merge_id_maps_and_terminal_dwas(pairs, num_tokenizer_states, max_token_id);
         let global_merge_profile = merged.profile;
         (merged, global_merge_profile)
     };
@@ -303,7 +306,15 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
         let partition_detail: String = sub_vocabs
             .iter()
             .enumerate()
-            .map(|(i, sv)| format!("p{}_tokens={} p{}_ms={:.3}", i, sv.entries.len(), i, partition_ms[i]))
+            .map(|(i, sv)| {
+                format!(
+                    "p{}_tokens={} p{}_ms={:.3}",
+                    i,
+                    sv.entries.len(),
+                    i,
+                    partition_ms[i]
+                )
+            })
             .collect::<Vec<_>>()
             .join(" ");
         eprintln!(
@@ -339,7 +350,8 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     let flat_trans_ms = flat_trans_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let global_max_length_started_at = Instant::now();
-    let global_max_length_state_map = build_global_max_length_state_map(tokenizer, vocab, &flat_trans);
+    let global_max_length_state_map =
+        build_global_max_length_state_map(tokenizer, vocab, &flat_trans);
     let global_max_length_ms = global_max_length_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let (mapped_dwa, mut inner_profile) =

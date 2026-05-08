@@ -22,8 +22,6 @@ use crate::ds::weight::Weight;
 
 type TerminalBundle = BTreeMap<TerminalID, Weight>;
 type BundleSignature = Vec<(TerminalID, Weight)>;
-type ComposeMemo = Vec<Option<Option<NwaBody>>>;
-type ConcatMemo = FxHashMap<(usize, u32), Option<NwaBody>>;
 type TargetContribs = SmallVec<[(u32, Weight); 4]>;
 
 fn add_target_contribution(contribs: &mut TargetContribs, target: u32, add: Weight) {
@@ -39,22 +37,22 @@ fn add_target_contribution(contribs: &mut TargetContribs, target: u32, add: Weig
 }
 
 #[derive(Debug, Clone, Copy)]
-struct PendingBranch {
-    target: u32,
-    bundle_id: usize,
-}
-
-#[derive(Debug, Clone)]
 struct Branch {
     target: u32,
     bundle_id: usize,
-    bundle: Arc<NWA>,
 }
 
 #[derive(Debug, Clone)]
 struct StateSummary {
     final_weight: Option<Weight>,
     branches: Vec<Branch>,
+}
+
+#[derive(Debug, Clone)]
+struct StateSummaries {
+    states: Vec<StateSummary>,
+    unique_bundles: Vec<TerminalBundle>,
+    bundle_accepts: Vec<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -86,12 +84,15 @@ fn skip_parser_dwa_minimization_env_override() -> Option<bool> {
 
 #[inline]
 fn should_skip_parser_dwa_minimization(
-    pre_minimize_states: usize,
-    pre_minimize_transitions: usize,
+    _pre_minimize_states: usize,
+    _pre_minimize_transitions: usize,
 ) -> bool {
-    skip_parser_dwa_minimization_env_override().unwrap_or(
-        pre_minimize_states <= 1024 && pre_minimize_transitions <= 10_000,
-    )
+    // Parser-DWA minimization is behavior-preserving but comparatively expensive
+    // on the large-schema tail path.  The preceding construction already shares
+    // continuation subgraphs and applies default/fallback normalization, so the
+    // unminimized DWA is small enough for the runtime fast-transition cache.
+    // Keep an escape hatch for size-sensitive experiments.
+    skip_parser_dwa_minimization_env_override().unwrap_or(true)
 }
 
 #[derive(Default)]
@@ -99,18 +100,6 @@ struct ParserNwaBuildProfile {
     state_prep_ms: f64,
     compose_state_ms: f64,
     parser_nwa_build_ms: f64,
-}
-
-fn accepting_nwa(final_weight: &Weight) -> Option<NWA> {
-    if final_weight.is_empty() {
-        return None;
-    }
-
-    let mut nwa = NWA::new(0, 0);
-    let start = nwa.add_state();
-    nwa.start_states_mut().push(start);
-    nwa.set_final_weight(start, final_weight.clone());
-    Some(nwa)
 }
 
 fn group_terminal_edges_by_target(
@@ -146,19 +135,32 @@ fn bundle_signature(bundle: &TerminalBundle) -> BundleSignature {
         .collect()
 }
 
+fn terminal_template_has_acceptance(template: &NWA) -> bool {
+    template.states().iter().any(|state| state.final_weight.is_some())
+}
+
+fn terminal_bundle_has_acceptance(bundle: &TerminalBundle, templates: &Templates) -> bool {
+    bundle.iter().any(|(&terminal, weight)| {
+        !weight.is_empty()
+            && templates
+                .by_terminal_nwa
+                .get(&terminal)
+                .is_some_and(terminal_template_has_acceptance)
+    })
+}
+
 fn build_state_summaries(
     terminal_dwa: &DWA,
     grammar: &AnalyzedGrammar,
     templates: &Templates,
-) -> Vec<StateSummary> {
-    let mut pending_branches_by_state: Vec<Vec<PendingBranch>> =
-        Vec::with_capacity(terminal_dwa.states().len());
+) -> StateSummaries {
+    let mut branches_by_state: Vec<Vec<Branch>> = Vec::with_capacity(terminal_dwa.states().len());
     let mut bundle_ids_by_signature: FxHashMap<BundleSignature, usize> = FxHashMap::default();
     let mut unique_bundles: Vec<TerminalBundle> = Vec::new();
 
     for (state_id, _state) in terminal_dwa.states().iter().enumerate() {
         let bundles_by_target = group_terminal_edges_by_target(terminal_dwa, grammar, state_id as u32);
-        let mut pending_branches = Vec::with_capacity(bundles_by_target.len());
+        let mut branches = Vec::with_capacity(bundles_by_target.len());
         for (target, bundle) in bundles_by_target {
             let signature = bundle_signature(&bundle);
             let bundle_id = if let Some(&bundle_id) = bundle_ids_by_signature.get(&signature) {
@@ -166,101 +168,34 @@ fn build_state_summaries(
             } else {
                 let bundle_id = unique_bundles.len();
                 bundle_ids_by_signature.insert(signature, bundle_id);
-                unique_bundles.push(bundle.clone());
+                unique_bundles.push(bundle);
                 bundle_id
             };
-            pending_branches.push(PendingBranch { target, bundle_id });
+            branches.push(Branch { target, bundle_id });
         }
-        pending_branches_by_state.push(pending_branches);
+        branches_by_state.push(branches);
     }
 
-    let built_bundles: Vec<Arc<NWA>> = {
-        use rayon::prelude::*;
-        unique_bundles
-            .par_iter()
-            .map(|bundle| Arc::new(templates.build_bundle(bundle)))
-            .collect()
-    };
+    let bundle_accepts: Vec<bool> = unique_bundles
+        .iter()
+        .map(|bundle| terminal_bundle_has_acceptance(bundle, templates))
+        .collect();
 
-    terminal_dwa
+    let states = terminal_dwa
         .states()
         .iter()
         .enumerate()
-        .map(|(state_id, state)| {
-            let branches = pending_branches_by_state[state_id]
-                .iter()
-                .map(|pending| {
-                    let built_bundle = Arc::clone(&built_bundles[pending.bundle_id]);
-                    Branch {
-                        target: pending.target,
-                        bundle_id: pending.bundle_id,
-                        bundle: built_bundle,
-                    }
-                })
-                .collect();
-
-            StateSummary {
-                final_weight: state.final_weight.clone(),
-                branches,
-            }
+        .map(|(state_id, state)| StateSummary {
+            final_weight: state.final_weight.clone(),
+            branches: std::mem::take(&mut branches_by_state[state_id]),
         })
-        .collect()
-}
+        .collect();
 
-fn compose_state(
-    state_id: u32,
-    states: &[StateSummary],
-    arena: &mut NWA,
-    body_memo: &mut ComposeMemo,
-    concatenated_branches: &mut ConcatMemo,
-) -> Option<NwaBody> {
-    if let Some(Some(cached)) = body_memo.get(state_id as usize) {
-        return cached.clone();
+    StateSummaries {
+        states,
+        unique_bundles,
+        bundle_accepts,
     }
-
-    let Some(state) = states.get(state_id as usize) else {
-        return None;
-    };
-
-    let mut composed_body = state
-        .final_weight
-        .as_ref()
-        .and_then(accepting_nwa)
-        .map(|accepting| arena.append_with_body(&accepting));
-
-    for branch in &state.branches {
-        let Some(continuation) = compose_state(
-            branch.target,
-            states,
-            arena,
-            body_memo,
-            concatenated_branches,
-        ) else {
-            continue;
-        };
-
-        let concat_key = (branch.bundle_id, branch.target);
-        let branch_with_continuation = if let Some(cached) = concatenated_branches.get(&concat_key) {
-            cached.clone()
-        } else {
-            let built = Some(arena.concatenate_in_place(branch.bundle.as_ref(), &continuation));
-            concatenated_branches.insert(concat_key, built.clone());
-            built
-        };
-        let Some(branch_with_continuation) = branch_with_continuation else {
-            continue;
-        };
-
-        composed_body = Some(match composed_body {
-            Some(existing) => NwaBody::union(&existing, &branch_with_continuation),
-            None => branch_with_continuation,
-        });
-    }
-
-    if let Some(entry) = body_memo.get_mut(state_id as usize) {
-        *entry = Some(composed_body.clone());
-    }
-    composed_body
 }
 
 fn union_final_weight(slot: &mut Option<Weight>, add: Weight) -> bool {
@@ -1166,6 +1101,140 @@ fn dwa_to_nwa(dwa: &DWA) -> NWA {
     nwa
 }
 
+fn compute_productive_terminal_states(summaries: &StateSummaries) -> Vec<bool> {
+    let states = &summaries.states;
+    let mut reverse_edges: Vec<Vec<u32>> = vec![Vec::new(); states.len()];
+    let mut productive = vec![false; states.len()];
+    let mut worklist = VecDeque::new();
+
+    for (state_id, state) in states.iter().enumerate() {
+        if state
+            .final_weight
+            .as_ref()
+            .is_some_and(|weight| !weight.is_empty())
+        {
+            productive[state_id] = true;
+            worklist.push_back(state_id as u32);
+        }
+
+        for branch in &state.branches {
+            if (branch.target as usize) < states.len()
+                && summaries
+                    .bundle_accepts
+                    .get(branch.bundle_id)
+                    .copied()
+                    .unwrap_or(false)
+            {
+                reverse_edges[branch.target as usize].push(state_id as u32);
+            }
+        }
+    }
+
+    while let Some(target) = worklist.pop_front() {
+        for &source in &reverse_edges[target as usize] {
+            let source_idx = source as usize;
+            if !productive[source_idx] {
+                productive[source_idx] = true;
+                worklist.push_back(source);
+            }
+        }
+    }
+
+    productive
+}
+
+fn append_weighted_template_redirecting_finals(
+    arena: &mut NWA,
+    template: &NWA,
+    weight: &Weight,
+    continuation_state: u32,
+) -> NwaBody {
+    let offset = arena.states().len() as u32;
+    let body = arena.append_with_body(template);
+    let appended_len = template.states().len();
+
+    for state_id in offset as usize..offset as usize + appended_len {
+        let state = &mut arena.states_mut()[state_id];
+        for targets in state.transitions.values_mut() {
+            for (_, edge_weight) in targets {
+                *edge_weight = weight.clone();
+            }
+        }
+        for (_, epsilon_weight) in &mut state.epsilons {
+            *epsilon_weight = weight.clone();
+        }
+    }
+
+    for state_id in offset as usize..offset as usize + appended_len {
+        if arena.states_mut()[state_id].final_weight.take().is_some() {
+            arena.add_epsilon(state_id as u32, continuation_state, weight.clone());
+        }
+    }
+
+    body
+}
+
+fn append_bundle_redirecting_finals(
+    arena: &mut NWA,
+    bundle: &NWA,
+    continuation_state: u32,
+) -> NwaBody {
+    let offset = arena.states().len() as u32;
+    let body = arena.append_with_body(bundle);
+    let appended_len = bundle.states().len();
+
+    for state_id in offset as usize..offset as usize + appended_len {
+        let Some(final_weight) = arena.states_mut()[state_id].final_weight.take() else {
+            continue;
+        };
+        if !final_weight.is_empty() {
+            arena.add_epsilon(state_id as u32, continuation_state, final_weight);
+        }
+    }
+
+    body
+}
+
+fn append_branch_fragment(
+    arena: &mut NWA,
+    summaries: &StateSummaries,
+    templates: &Templates,
+    built_bundle_cache: &mut [Option<Arc<NWA>>],
+    bundle_id: usize,
+    continuation_state: u32,
+) -> Option<NwaBody> {
+    let bundle = summaries.unique_bundles.get(bundle_id)?;
+    if !summaries.bundle_accepts.get(bundle_id).copied().unwrap_or(false) {
+        return None;
+    }
+
+    if bundle.len() == 1 {
+        let (&terminal, weight) = bundle.iter().next().expect("len checked");
+        if weight.is_empty() {
+            return None;
+        }
+        let template = templates.by_terminal_nwa.get(&terminal)?;
+        return Some(append_weighted_template_redirecting_finals(
+            arena,
+            template,
+            weight,
+            continuation_state,
+        ));
+    }
+
+    if built_bundle_cache[bundle_id].is_none() {
+        built_bundle_cache[bundle_id] = Some(Arc::new(templates.build_bundle(bundle)));
+    }
+    let bundle_nwa = built_bundle_cache[bundle_id]
+        .as_ref()
+        .expect("bundle cache entry just initialized");
+    Some(append_bundle_redirecting_finals(
+        arena,
+        bundle_nwa.as_ref(),
+        continuation_state,
+    ))
+}
+
 fn build_parser_nwa_from_terminal_dwa(
     terminal_dwa: &DWA,
     grammar: &AnalyzedGrammar,
@@ -1173,23 +1242,90 @@ fn build_parser_nwa_from_terminal_dwa(
 ) -> Option<(NWA, ParserNwaBuildProfile)> {
     let total_started_at = Instant::now();
     let state_prep_started_at = Instant::now();
-    let states = build_state_summaries(terminal_dwa, grammar, &templates);
+    let summaries = build_state_summaries(terminal_dwa, grammar, &templates);
+    let productive = compute_productive_terminal_states(&summaries);
     let state_prep_ms = elapsed_ms(state_prep_started_at);
+    let states = &summaries.states;
 
+    if !productive
+        .get(terminal_dwa.start_state() as usize)
+        .copied()
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let graph_started_at = Instant::now();
     let mut arena = NWA::new(0, 0);
-    let mut body_memo = vec![None; states.len()];
-    let mut concatenated_branches: ConcatMemo = FxHashMap::default();
-    let compose_state_started_at = Instant::now();
-    let parser_body = compose_state(
-        terminal_dwa.start_state(),
-        &states,
-        &mut arena,
-        &mut body_memo,
-        &mut concatenated_branches,
-    )?;
-    let compose_state_ms = elapsed_ms(compose_state_started_at);
+    let mut continuation_states = vec![u32::MAX; states.len()];
 
-    arena.set_start_states(parser_body.start_states.clone());
+    for (state_id, state) in states.iter().enumerate() {
+        if !productive[state_id] {
+            continue;
+        }
+        let continuation_state = arena.add_state();
+        continuation_states[state_id] = continuation_state;
+        if let Some(final_weight) = state
+            .final_weight
+            .as_ref()
+            .filter(|weight| !weight.is_empty())
+        {
+            arena.set_final_weight(continuation_state, final_weight.clone());
+        }
+    }
+
+    let mut branch_fragment_memo: FxHashMap<(usize, u32), NwaBody> = FxHashMap::default();
+    let mut built_bundle_cache: Vec<Option<Arc<NWA>>> = vec![None; summaries.unique_bundles.len()];
+
+    for (state_id, state) in states.iter().enumerate() {
+        if !productive[state_id] {
+            continue;
+        }
+        let from = continuation_states[state_id];
+        debug_assert_ne!(from, u32::MAX);
+
+        for branch in &state.branches {
+            let target_idx = branch.target as usize;
+            if !productive.get(target_idx).copied().unwrap_or(false)
+                || !summaries
+                    .bundle_accepts
+                    .get(branch.bundle_id)
+                    .copied()
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+
+            let target_continuation = continuation_states[target_idx];
+            debug_assert_ne!(target_continuation, u32::MAX);
+            let fragment_key = (branch.bundle_id, branch.target);
+            let fragment = if let Some(existing) = branch_fragment_memo.get(&fragment_key) {
+                existing.clone()
+            } else {
+                let Some(body) = append_branch_fragment(
+                    &mut arena,
+                    &summaries,
+                    &templates,
+                    &mut built_bundle_cache,
+                    branch.bundle_id,
+                    target_continuation,
+                ) else {
+                    continue;
+                };
+                branch_fragment_memo.insert(fragment_key, body.clone());
+                body
+            };
+
+            for start in fragment.start_states {
+                arena.add_epsilon(from, start, Weight::all());
+            }
+        }
+    }
+
+    let start = continuation_states[terminal_dwa.start_state() as usize];
+    debug_assert_ne!(start, u32::MAX);
+    arena.set_start_states(vec![start]);
+    let compose_state_ms = elapsed_ms(graph_started_at);
 
     Some((
         arena,
@@ -1211,14 +1347,15 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
 ) -> DWA {
     let total_started_at = Instant::now();
     let minimize_skipped = false;
-    let terminal_dwa_interned_ranges = terminal_dwa.stats().interned_ranges;
-    let terminal_dwa_transition_count: usize = terminal_dwa
-        .states()
-        .iter()
-        .map(|state| state.transitions.len())
-        .sum();
+    let profiling_enabled = compile_profile_enabled();
+    let (terminal_dwa_transition_count, terminal_dwa_interned_ranges) = if profiling_enabled {
+        let stats = terminal_dwa.stats();
+        (stats.transitions, stats.interned_ranges)
+    } else {
+        (0, 0)
+    };
     let Some((mut parser_nwa, parser_nwa_profile)) = build_parser_nwa_from_terminal_dwa(terminal_dwa, grammar, templates) else {
-        if compile_profile_enabled() {
+        if profiling_enabled {
             eprintln!(
                 "[glrmask/profile][parser_dwa_detail] terminal_dwa_states={} terminal_dwa_transitions={} terminal_dwa_interned_ranges={} parser_nwa_built=false pre_minimize_states=0 pre_minimize_transitions=0 post_minimize_states=0 post_minimize_transitions=0 minimize_skipped={} state_prep_ms=0.000 compose_state_ms=0.000 parser_nwa_build_ms=0.000 resolve_negative_ms=0.000 support_determinize_ms=0.000 possible_outgoing_ms=0.000 default_opt_ms=0.000 subtract_final_ms=0.000 fallback_determinize_ms=0.000 minimize_ms=0.000 total_ms={:.3}",
                 terminal_dwa.states().len(),
@@ -1296,7 +1433,7 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
             )
         };
 
-    if compile_profile_enabled() {
+    if profiling_enabled {
         eprintln!(
             "[glrmask/profile][parser_dwa_detail] terminal_dwa_states={} terminal_dwa_transitions={} terminal_dwa_interned_ranges={} parser_nwa_states={} parser_nwa_start_states={} pre_minimize_states={} pre_minimize_transitions={} post_minimize_states={} post_minimize_transitions={} minimize_skipped={} state_prep_ms={:.3} compose_state_ms={:.3} parser_nwa_build_ms={:.3} resolve_negative_ms={:.3} support_determinize_ms={:.3} possible_outgoing_ms={:.3} default_opt_ms={:.3} subtract_final_ms={:.3} fallback_determinize_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
             terminal_dwa.states().len(),

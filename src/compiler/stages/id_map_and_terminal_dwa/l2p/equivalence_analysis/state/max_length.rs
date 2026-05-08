@@ -69,7 +69,9 @@ fn usize_to_u32(value: usize, what: &str) -> u32 {
 
 #[inline]
 fn is_active_group(group_id: usize, active_groups: Option<&[bool]>) -> bool {
-    active_groups.map_or(true, |groups| groups.get(group_id).copied().unwrap_or(false))
+    active_groups.map_or(true, |groups| {
+        groups.get(group_id).copied().unwrap_or(false)
+    })
 }
 
 fn filtered_group_ids(values: &[usize], active_groups: Option<&[bool]>) -> Vec<usize> {
@@ -216,10 +218,7 @@ fn same_partition(left: &[u32], left_count: usize, right: &[u32], right_count: u
     true
 }
 
-fn build_active_transition_table(
-    dfa: &FlatDfa,
-    active_bytes: &[u8],
-) -> ActiveTransitionTable {
+fn build_active_transition_table(dfa: &FlatDfa, active_bytes: &[u8]) -> ActiveTransitionTable {
     let width = active_bytes.len();
     let n = dfa.states.len();
     let mut targets_flat = vec![MISSING_BLOCK; n * width];
@@ -233,7 +232,10 @@ fn build_active_transition_table(
             }
         });
 
-    ActiveTransitionTable { width, targets_flat }
+    ActiveTransitionTable {
+        width,
+        targets_flat,
+    }
 }
 
 fn refine_once_sorted(
@@ -292,7 +294,8 @@ fn refine_once_sorted(
 
             let state_start = state * width;
             let prev_start = prev * width;
-            signatures[state_start..state_start + width] != signatures[prev_start..prev_start + width]
+            signatures[state_start..state_start + width]
+                != signatures[prev_start..prev_start + width]
         });
         if starts_new_block {
             block_count += 1;
@@ -474,6 +477,263 @@ fn compute_kbounded_partition(
     (blocks, block_count, k)
 }
 
+struct ReverseSymbolTransitions {
+    offsets: Vec<u32>,
+    predecessors: Vec<u32>,
+}
+
+impl ReverseSymbolTransitions {
+    #[inline]
+    fn predecessors_for_target(&self, target: usize) -> &[u32] {
+        let start = self.offsets[target] as usize;
+        let end = self.offsets[target + 1] as usize;
+        &self.predecessors[start..end]
+    }
+}
+
+struct ReverseTransitionTable {
+    by_symbol: Vec<ReverseSymbolTransitions>,
+}
+
+fn build_reverse_symbol_transitions(dfa: &FlatDfa, byte: u8) -> ReverseSymbolTransitions {
+    let n = dfa.states.len();
+    let mut counts = vec![0u32; n];
+
+    for state in 0..n {
+        let target = dfa.trans(state, byte as usize);
+        if target != MISSING_BLOCK {
+            let target = target as usize;
+            if target < n {
+                counts[target] += 1;
+            }
+        }
+    }
+
+    let mut offsets = vec![0u32; n + 1];
+    for state in 0..n {
+        offsets[state + 1] = offsets[state] + counts[state];
+    }
+
+    let mut next_offsets = offsets[..n].to_vec();
+    let mut predecessors = vec![0u32; offsets[n] as usize];
+    for state in 0..n {
+        let target = dfa.trans(state, byte as usize);
+        if target == MISSING_BLOCK {
+            continue;
+        }
+        let target = target as usize;
+        if target >= n {
+            continue;
+        }
+        let slot = next_offsets[target] as usize;
+        predecessors[slot] = usize_to_u32(state, "reverse transition predecessor state");
+        next_offsets[target] += 1;
+    }
+
+    ReverseSymbolTransitions {
+        offsets,
+        predecessors,
+    }
+}
+
+fn build_reverse_transition_table(dfa: &FlatDfa, active_bytes: &[u8]) -> ReverseTransitionTable {
+    let by_symbol = active_bytes
+        .par_iter()
+        .map(|&byte| build_reverse_symbol_transitions(dfa, byte))
+        .collect();
+    ReverseTransitionTable { by_symbol }
+}
+
+fn build_blocks_from_partition(block_ids: &[u32], block_count: usize) -> Vec<Vec<u32>> {
+    let mut sizes = vec![0usize; block_count];
+    for &block_id in block_ids {
+        sizes[block_id as usize] += 1;
+    }
+
+    let mut blocks: Vec<Vec<u32>> = sizes.into_iter().map(Vec::with_capacity).collect();
+    for (state, &block_id) in block_ids.iter().enumerate() {
+        blocks[block_id as usize].push(usize_to_u32(state, "partition state id"));
+    }
+
+    blocks
+}
+
+#[inline]
+fn pack_work_item(block_id: u32, symbol: usize) -> u64 {
+    debug_assert!(symbol < 256);
+    ((block_id as u64) << 8) | symbol as u64
+}
+
+#[inline]
+fn unpack_work_item(item: u64) -> (usize, usize) {
+    ((item >> 8) as usize, (item & 0xff) as usize)
+}
+
+fn stable_refinement_blocks(
+    dfa: &FlatDfa,
+    active_groups: Option<&[bool]>,
+    active_bytes: &[u8],
+) -> Vec<Vec<u32>> {
+    let n = dfa.states.len();
+    let (initial_blocks, initial_block_count) = build_initial_label_partition(dfa, active_groups);
+    let mut blocks = build_blocks_from_partition(&initial_blocks, initial_block_count);
+
+    if initial_block_count == n || active_bytes.is_empty() {
+        return blocks;
+    }
+
+    let reverse = build_reverse_transition_table(dfa, active_bytes);
+    let width = active_bytes.len();
+    debug_assert!(width <= 256);
+
+    let mut state_to_block = initial_blocks;
+    let mut worklist = Vec::with_capacity(blocks.len().saturating_mul(width));
+    for block_id in 0..blocks.len() {
+        let block_id = usize_to_u32(block_id, "partition block id");
+        for symbol in 0..width {
+            worklist.push(pack_work_item(block_id, symbol));
+        }
+    }
+
+    let mut mark_epoch = vec![0u32; n];
+    let mut epoch = 1u32;
+    let mut marked_count_by_block = vec![0u32; blocks.len()];
+    let mut touched_blocks = Vec::<u32>::new();
+
+    while let Some(item) = worklist.pop() {
+        let (splitter_block, symbol) = unpack_work_item(item);
+        if splitter_block >= blocks.len() || blocks[splitter_block].is_empty() {
+            continue;
+        }
+
+        for &target in &blocks[splitter_block] {
+            for &predecessor in reverse.by_symbol[symbol].predecessors_for_target(target as usize) {
+                let predecessor = predecessor as usize;
+                if mark_epoch[predecessor] == epoch {
+                    continue;
+                }
+                mark_epoch[predecessor] = epoch;
+                let block_id = state_to_block[predecessor] as usize;
+                if marked_count_by_block[block_id] == 0 {
+                    touched_blocks.push(block_id as u32);
+                }
+                marked_count_by_block[block_id] += 1;
+            }
+        }
+
+        for &block_id_u32 in &touched_blocks {
+            let block_id = block_id_u32 as usize;
+            let marked_count = marked_count_by_block[block_id] as usize;
+            marked_count_by_block[block_id] = 0;
+
+            let block_len = blocks[block_id].len();
+            if marked_count == 0 || marked_count == block_len {
+                continue;
+            }
+
+            // Keep the larger side in the existing block id and create a new
+            // block for the smaller side.  Since every old block starts with
+            // all symbols in the worklist and old ids are never re-added, this
+            // is the usual Hopcroft smaller-splitter rule without needing a
+            // separate pending-work membership table.
+            let unmarked_count = block_len - marked_count;
+            let move_marked_to_new = marked_count <= unmarked_count;
+            let new_capacity = if move_marked_to_new {
+                marked_count
+            } else {
+                unmarked_count
+            };
+            let kept_capacity = block_len - new_capacity;
+            let old_states = std::mem::take(&mut blocks[block_id]);
+            let mut kept_states = Vec::with_capacity(kept_capacity);
+            let mut new_states = Vec::with_capacity(new_capacity);
+
+            for state in old_states {
+                let is_marked = mark_epoch[state as usize] == epoch;
+                if is_marked == move_marked_to_new {
+                    new_states.push(state);
+                } else {
+                    kept_states.push(state);
+                }
+            }
+
+            debug_assert_eq!(new_states.len(), new_capacity);
+            debug_assert_eq!(kept_states.len(), kept_capacity);
+            debug_assert!(!new_states.is_empty());
+            debug_assert!(!kept_states.is_empty());
+
+            let new_block_id = usize_to_u32(blocks.len(), "partition block id");
+            for &state in &new_states {
+                state_to_block[state as usize] = new_block_id;
+            }
+
+            blocks[block_id] = kept_states;
+            blocks.push(new_states);
+            marked_count_by_block.push(0);
+
+            for symbol in 0..width {
+                worklist.push(pack_work_item(new_block_id, symbol));
+            }
+
+            if blocks.len() == n {
+                break;
+            }
+        }
+        touched_blocks.clear();
+
+        if blocks.len() == n {
+            break;
+        }
+
+        epoch = epoch.wrapping_add(1);
+        if epoch == 0 {
+            mark_epoch.fill(0);
+            epoch = 1;
+        }
+    }
+
+    blocks
+}
+
+fn build_full_mapping_from_blocks(blocks: &[Vec<u32>], num_states: usize) -> Vec<usize> {
+    let mut mapping = vec![0usize; num_states];
+    for block in blocks {
+        if block.is_empty() {
+            continue;
+        }
+        let representative = block.iter().copied().min().unwrap() as usize;
+        for &state in block {
+            mapping[state as usize] = representative;
+        }
+    }
+    mapping
+}
+
+/// Compute a stable Moore partition over the active byte classes.
+///
+/// This is intentionally stronger (finer) than the finite `k = max_token_len`
+/// prepass used by [`find_state_equivalence_classes_byte_restricted`]: states
+/// in the same returned class have identical labels and transition to the same
+/// returned class for every active byte class, so they are equivalent for all
+/// byte strings over that alphabet and therefore for every vocabulary token.
+/// It is used for the global pre-map where a conservative refinement is safe
+/// and avoids the `max_token_len` factor that dominates large-token schemas.
+pub fn find_state_equivalence_classes_stable_byte_restricted(
+    tokenizer: &TokenizerView,
+    byte_to_class: Option<&[u8; 256]>,
+    active_groups: Option<&[bool]>,
+    relevant_bytes: Option<&[bool; 256]>,
+) -> Vec<usize> {
+    let dfa = tokenizer.dfa();
+    if dfa.states.is_empty() {
+        return Vec::new();
+    }
+
+    let active_bytes = active_byte_representatives(relevant_bytes, byte_to_class);
+    let blocks = stable_refinement_blocks(dfa, active_groups, &active_bytes);
+    build_full_mapping_from_blocks(&blocks, dfa.states.len())
+}
+
 fn build_subset_mapping(states: &[usize], blocks: &[u32]) -> Vec<usize> {
     let mut indexed_blocks: Vec<(u32, usize, usize)> = states
         .par_iter()
@@ -533,7 +793,11 @@ pub fn find_state_equivalence_classes<S: AsRef<[u8]>>(
     active_groups: Option<&[bool]>,
     relevant_bytes: Option<&[bool; 256]>,
 ) -> Vec<usize> {
-    let max_len = tokens.iter().map(|token| token.as_ref().len()).max().unwrap_or(0);
+    let max_len = tokens
+        .iter()
+        .map(|token| token.as_ref().len())
+        .max()
+        .unwrap_or(0);
     let mapping = find_state_equivalence_classes_kbounded(
         tokenizer,
         states,
@@ -555,7 +819,11 @@ pub fn find_state_equivalence_classes_byte_restricted<S: AsRef<[u8]>>(
     active_groups: Option<&[bool]>,
     relevant_bytes: Option<&[bool; 256]>,
 ) -> Vec<usize> {
-    let max_len = tokens.iter().map(|token| token.as_ref().len()).max().unwrap_or(0);
+    let max_len = tokens
+        .iter()
+        .map(|token| token.as_ref().len())
+        .max()
+        .unwrap_or(0);
 
     let derived_relevant_bytes;
     let relevant_bytes = match relevant_bytes {

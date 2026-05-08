@@ -1,5 +1,5 @@
-use std::sync::Mutex;
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
@@ -36,7 +36,11 @@ use super::state::ConstraintState;
 /// the parser-DWA vocab by possible-match signature and seed-state lexical-live
 /// signature. Parser-DWA weights are remapped into this same token space.
 pub(crate) type PossibleMatchesByTerminal = BTreeMap<TerminalID, Weight>;
-type DenseWords = Box<[u64]>;
+type DenseWords = Arc<[u64]>;
+
+fn empty_dense_words() -> DenseWords {
+    Arc::<[u64]>::from(Vec::<u64>::new().into_boxed_slice())
+}
 type InternalTokenBufMasks = Vec<(u16, u32)>;
 type DenseWeightMaskCache = FxHashMap<usize, DenseWords>;
 type SeedTerminalDenseMasks = FxHashMap<(u32, TerminalID), DenseWords>;
@@ -117,7 +121,7 @@ pub struct Constraint {
     #[serde(skip)]
     pub(crate) seed_state_dense: SeedStateDenseMasks,
     /// Dense bitmap of the full internal token universe.
-    #[serde(skip)]
+    #[serde(skip, default = "empty_dense_words")]
     pub(crate) seed_universe_dense: DenseWords,
     /// Fast DWA transition lookup (FxHashMap instead of BTreeMap).
     /// Built from parser_dwa.states at load/build time.
@@ -522,21 +526,23 @@ impl Constraint {
     }
 
     pub(crate) fn rebuild_runtime_caches(&mut self) {
-        let (internal_token_buf_masks, ((dense_mask_words, dense_masks), fast_transitions)) = rayon::join(
-            || self.compute_buf_masks(),
-            || {
-                rayon::join(
-                    || self.compute_dense_token_masks(),
-                    || self.compute_fast_transitions(),
-                )
-            },
+        let ((internal_token_buf_masks, tokenizer_fast_transitions), ((dense_mask_words, dense_masks), fast_transitions)) = rayon::join(
+            || rayon::join(
+                || self.compute_buf_masks(),
+                || self.compute_tokenizer_fast_transitions(),
+            ),
+            || rayon::join(
+                || self.compute_dense_token_masks(),
+                || self.compute_fast_transitions(),
+            ),
         );
 
         self.internal_token_buf_masks = internal_token_buf_masks;
         self.word_group_buf_masks = Vec::new();
-        let (word_group_sparse_masks, word_group_sparse_total_entries, word_group_sparse_max_entries) =
-            self.compute_token_block_sparse_masks(64);
-        let (byte_group_sparse_masks, _, _) = self.compute_token_block_sparse_masks(8);
+        let ((word_group_sparse_masks, word_group_sparse_total_entries, word_group_sparse_max_entries), (byte_group_sparse_masks, _, _)) = rayon::join(
+            || self.compute_token_block_sparse_masks(64),
+            || self.compute_token_block_sparse_masks(8),
+        );
         self.word_group_sparse_masks = word_group_sparse_masks;
         self.byte_group_sparse_masks = byte_group_sparse_masks;
         self.word_group_sparse_total_entries = word_group_sparse_total_entries;
@@ -569,12 +575,13 @@ impl Constraint {
         self.internal_token_dense_words = dense_mask_words;
         self.weight_token_dense_masks = dense_masks;
         self.dwa_fast_transitions = fast_transitions;
-        self.tokenizer_fast_transitions = self.compute_tokenizer_fast_transitions();
+        self.tokenizer_fast_transitions = tokenizer_fast_transitions;
         self.build_seed_dense_masks();
     }
 
     fn compute_tokenizer_fast_transitions(&self) -> FastTokenizerTransitions {
         (0..self.tokenizer.num_states())
+            .into_par_iter()
             .map(|state| {
                 let dfa_state = &self.tokenizer.dfa.states()[state as usize];
                 let mut flat = Box::new([u32::MAX; 256]);
@@ -592,7 +599,7 @@ impl Constraint {
         }
 
         self.internal_token_to_tokens
-            .iter()
+            .par_iter()
             .map(|originals| Self::build_internal_token_buf_mask(originals))
             .collect()
     }
@@ -602,22 +609,22 @@ impl Constraint {
             return (Vec::new(), 0, 0);
         }
         let n_groups = self.internal_token_buf_masks.len().div_ceil(block_size);
-        let mut groups = Vec::with_capacity(n_groups);
-        let mut total_entries = 0usize;
-        let mut max_entries = 0usize;
-        for group_start in (0..self.internal_token_buf_masks.len()).step_by(block_size) {
-            let mut combined = BTreeMap::<u16, u32>::new();
-            let group_end = (group_start + block_size).min(self.internal_token_buf_masks.len());
-            for token_masks in &self.internal_token_buf_masks[group_start..group_end] {
-                for &(word_idx, mask) in token_masks {
-                    *combined.entry(word_idx).or_insert(0) |= mask;
+        let groups: Vec<InternalTokenBufMasks> = (0..n_groups)
+            .into_par_iter()
+            .map(|group_id| {
+                let group_start = group_id * block_size;
+                let group_end = (group_start + block_size).min(self.internal_token_buf_masks.len());
+                let mut combined = BTreeMap::<u16, u32>::new();
+                for token_masks in &self.internal_token_buf_masks[group_start..group_end] {
+                    for &(word_idx, mask) in token_masks {
+                        *combined.entry(word_idx).or_insert(0) |= mask;
+                    }
                 }
-            }
-            let sparse: Vec<(u16, u32)> = combined.into_iter().collect();
-            total_entries += sparse.len();
-            max_entries = max_entries.max(sparse.len());
-            groups.push(sparse);
-        }
+                combined.into_iter().collect()
+            })
+            .collect();
+        let total_entries = groups.iter().map(Vec::len).sum();
+        let max_entries = groups.iter().map(Vec::len).max().unwrap_or(0);
         (groups, total_entries, max_entries)
     }
 
@@ -647,7 +654,7 @@ impl Constraint {
         // so we only go dense when entries exceed half the buffer size.
         let threshold = buf_words / 4;
         self.internal_token_buf_masks
-            .iter()
+            .par_iter()
             .map(|sparse| {
                 if sparse.len() > threshold {
                     let mut dense = vec![0u32; buf_words];
@@ -710,7 +717,7 @@ impl Constraint {
     fn compute_fast_transitions(&self) -> FastDwaTransitions {
         self.parser_dwa
             .states()
-            .iter()
+            .par_iter()
             .map(|state| {
                 state
                     .transitions
@@ -727,19 +734,25 @@ impl Constraint {
             return (0, DenseWeightMaskCache::default());
         }
 
-        let mut dense_masks = DenseWeightMaskCache::default();
+        let mut unique_sets: FxHashMap<usize, &RangeSetBlaze<u32>> = FxHashMap::default();
         for state in self.parser_dwa.states() {
             if let Some(final_weight) = &state.final_weight {
-                self.collect_weight_dense_masks(
-                    final_weight,
-                    internal_token_dense_words,
-                    &mut dense_masks,
-                );
+                Self::collect_weight_token_sets(final_weight, &mut unique_sets);
             }
             for (_, weight) in state.transitions.values() {
-                self.collect_weight_dense_masks(weight, internal_token_dense_words, &mut dense_masks);
+                Self::collect_weight_token_sets(weight, &mut unique_sets);
             }
         }
+
+        let dense_masks: DenseWeightMaskCache = unique_sets
+            .into_par_iter()
+            .map(|(key, token_set)| {
+                (
+                    key,
+                    Self::dense_words_from_internal_set_with_words(token_set, internal_token_dense_words),
+                )
+            })
+            .collect();
 
         (internal_token_dense_words, dense_masks)
     }
@@ -781,8 +794,12 @@ impl Constraint {
         if dw == 0 {
             self.seed_terminal_dense.clear();
             self.seed_state_dense.clear();
-            self.seed_universe_dense = Box::new([]);
+            self.seed_universe_dense = empty_dense_words();
             return;
+        }
+
+        if self.tokenizer_fast_transitions.len() != self.tokenizer.num_states() as usize {
+            self.tokenizer_fast_transitions = self.compute_tokenizer_fast_transitions();
         }
 
         let universe = self.internal_token_universe();
@@ -792,25 +809,20 @@ impl Constraint {
         self.seed_state_dense = self.build_seed_state_dense_masks();
     }
 
-    fn collect_weight_dense_masks(
-        &self,
-        weight: &Weight,
-        internal_token_dense_words: usize,
-        dense_masks: &mut DenseWeightMaskCache,
+    fn collect_weight_token_sets<'a>(
+        weight: &'a Weight,
+        unique_sets: &mut FxHashMap<usize, &'a RangeSetBlaze<u32>>,
     ) {
         for token_set in weight.unique_token_sets() {
             let key = token_set as *const RangeSetBlaze<u32> as usize;
-            dense_masks
-                .entry(key)
-                .or_insert_with(|| self.dense_words_from_internal_set_with_words(token_set, internal_token_dense_words));
+            unique_sets.entry(key).or_insert(token_set);
         }
     }
 
     fn dense_words_from_internal_set_with_words(
-        &self,
         internal_tokens: &RangeSetBlaze<u32>,
         dense_word_count: usize,
-    ) -> Box<[u64]> {
+    ) -> DenseWords {
         let mut words = vec![0u64; dense_word_count];
         for internal_token in internal_tokens.iter() {
             let index = internal_token as usize / 64;
@@ -819,11 +831,11 @@ impl Constraint {
                 *word |= 1u64 << bit;
             }
         }
-        words.into_boxed_slice()
+        Arc::from(words.into_boxed_slice())
     }
 
-    fn dense_words_from_internal_set(&self, internal_tokens: &RangeSetBlaze<u32>) -> Box<[u64]> {
-        self.dense_words_from_internal_set_with_words(internal_tokens, self.internal_token_dense_words)
+    fn dense_words_from_internal_set(&self, internal_tokens: &RangeSetBlaze<u32>) -> DenseWords {
+        Self::dense_words_from_internal_set_with_words(internal_tokens, self.internal_token_dense_words)
     }
 
     pub fn start(&self) -> ConstraintState<'_> {
@@ -1024,7 +1036,7 @@ impl Constraint {
         node: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
         state: u32,
         mask: &mut [u64],
-        flat_transitions: &[[u32; 256]],
+        flat_transitions: &[Box<[u32; 256]>],
         terminal_states: &[bool],
         node_reachable_dense: &FxHashMap<usize, Vec<u64>>,
     ) {
@@ -1073,23 +1085,21 @@ impl Constraint {
         let dense_words = self.internal_token_dense_words;
         if state_count == 0 || dense_words == 0 {
             return (0..state_count)
-                .map(|_| vec![0u64; dense_words].into_boxed_slice())
+                .map(|_| Arc::from(vec![0u64; dense_words].into_boxed_slice()))
                 .collect();
         }
 
         let terminal_states: Vec<bool> = (0..self.tokenizer.num_states())
+            .into_par_iter()
             .map(|state| self.tokenizer.matched_terminals_iter(state).next().is_some())
             .collect();
-        let flat_transitions: Vec<[u32; 256]> = (0..self.tokenizer.num_states())
-            .map(|state| {
-                let dfa_state = &self.tokenizer.dfa.states()[state as usize];
-                let mut flat = [u32::MAX; 256];
-                for (byte, &target) in dfa_state.transitions.iter() {
-                    flat[byte as usize] = target;
-                }
-                flat
-            })
-            .collect();
+        let owned_flat_transitions;
+        let flat_transitions: &[Box<[u32; 256]>] = if self.tokenizer_fast_transitions.len() == state_count {
+            &self.tokenizer_fast_transitions
+        } else {
+            owned_flat_transitions = self.compute_tokenizer_fast_transitions();
+            &owned_flat_transitions
+        };
 
         // Build trie over internal token byte strings so common prefixes
         // are shared instead of re-simulated for every token.
@@ -1105,33 +1115,84 @@ impl Constraint {
         Self::precompute_node_reachable_dense(&trie.root, dense_words, &mut node_reachable_dense);
 
         let root_ptr = &trie.root as *const _ as usize;
-        let all_tokens_dense = node_reachable_dense
-            .get(&root_ptr)
-            .expect("root reachable-token bitmap must be precomputed")
-            .clone();
+        let all_tokens_dense: DenseWords = Arc::from(
+            node_reachable_dense
+                .get(&root_ptr)
+                .expect("root reachable-token bitmap must be precomputed")
+                .clone()
+                .into_boxed_slice(),
+        );
 
-        // Parallel fill: each start_state is independent.
-        let masks: Vec<Box<[u64]>> = (0..state_count as u32)
-            .into_par_iter()
-            .map(|start_state| {
-                let mut mask = vec![0u64; dense_words];
-                if terminal_states[start_state as usize] {
-                    mask.copy_from_slice(&all_tokens_dense);
-                } else {
-                    Self::walk_seed_trie(
-                        &trie.root,
-                        start_state,
-                        &mut mask,
-                        &flat_transitions,
-                        &terminal_states,
-                        &node_reachable_dense,
-                    );
+        let compute_for_state = |start_state: u32| -> DenseWords {
+            let start_idx = start_state as usize;
+            if terminal_states.get(start_idx).copied().unwrap_or(false) {
+                return Arc::clone(&all_tokens_dense);
+            }
+
+            let mut mask = vec![0u64; dense_words];
+            Self::walk_seed_trie(
+                &trie.root,
+                start_state,
+                &mut mask,
+                flat_transitions,
+                &terminal_states,
+                &node_reachable_dense,
+            );
+            Arc::from(mask.into_boxed_slice())
+        };
+
+        let mapping_covers_states = self.state_to_internal_tsid.len() >= state_count;
+        if mapping_covers_states && !self.internal_tsid_to_states.is_empty() {
+            let max_mapped_internal = self
+                .state_to_internal_tsid
+                .iter()
+                .take(state_count)
+                .filter(|&&internal| internal != u32::MAX)
+                .map(|&internal| internal as usize)
+                .max()
+                .unwrap_or(0);
+            let class_count = self.internal_tsid_to_states.len().max(max_mapped_internal + 1);
+            let mut representatives: Vec<Option<u32>> = vec![None; class_count];
+
+            for (internal_tsid, states) in self.internal_tsid_to_states.iter().enumerate() {
+                if internal_tsid < representatives.len() {
+                    representatives[internal_tsid] = states.first().copied();
                 }
-                mask.into_boxed_slice()
-            })
-            .collect();
+            }
+            for (state, &internal_tsid) in self.state_to_internal_tsid.iter().take(state_count).enumerate() {
+                if internal_tsid == u32::MAX {
+                    continue;
+                }
+                let internal_idx = internal_tsid as usize;
+                if let Some(slot) = representatives.get_mut(internal_idx) {
+                    slot.get_or_insert(state as u32);
+                }
+            }
 
-        masks
+            let class_masks: Vec<Option<DenseWords>> = representatives
+                .par_iter()
+                .map(|representative| (*representative).map(|state| compute_for_state(state)))
+                .collect();
+
+            return (0..state_count)
+                .into_par_iter()
+                .map(|state| {
+                    let internal_tsid = self.state_to_internal_tsid[state];
+                    if internal_tsid != u32::MAX {
+                        if let Some(Some(mask)) = class_masks.get(internal_tsid as usize) {
+                            return Arc::clone(mask);
+                        }
+                    }
+                    compute_for_state(state as u32)
+                })
+                .collect();
+        }
+
+        // Fallback for older/deserialized constraints without state-class maps.
+        (0..state_count as u32)
+            .into_par_iter()
+            .map(compute_for_state)
+            .collect()
     }
 
     fn or_internal_token_masks_to_buf(&self, internal_token: usize, buf: &mut [u32]) {

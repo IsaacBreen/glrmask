@@ -13,7 +13,7 @@ pub(crate) mod nwa_builder;
 pub(crate) mod postprocess;
 
 use std::collections::BTreeMap;
-use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -22,20 +22,18 @@ use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
-use crate::grammar::flat::TerminalID;
-use crate::compiler::possible_matches::{
-    PossibleMatchesComputer,
-};
+use crate::compiler::possible_matches::PossibleMatchesComputer;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::compiler::stages::id_map_and_terminal_dwa::types::LocalIdMapTerminalDwa;
 use crate::ds::bitset::BitSet;
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::ds::weight::Weight;
+use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 use rustc_hash::FxHashMap;
 
 use super::grammar_helpers::compute_always_allowed_follows;
-use super::types::{TerminalColoring, TerminalDwaPhaseProfile, compile_profile_enabled};
+use super::types::{compile_profile_enabled, TerminalColoring, TerminalDwaPhaseProfile};
 use nwa_builder::{build_nwa_via_trie_walk, internal_vocab_entries, seed_root_nodes};
 use postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
@@ -109,10 +107,7 @@ impl SharedSimplifyCache {
 
         if owns_compute {
             match catch_unwind(AssertUnwindSafe(|| {
-                Arc::new(tokenizer.simplify_for_terminals(
-                    active_terminals,
-                    Some(relevant_bytes),
-                ))
+                Arc::new(tokenizer.simplify_for_terminals(active_terminals, Some(relevant_bytes)))
             })) {
                 Ok(computed) => {
                     *entry.result.lock().unwrap() = Some(Ok(computed.clone()));
@@ -120,9 +115,8 @@ impl SharedSimplifyCache {
                     return (computed.0.clone(), computed.1.clone(), false);
                 }
                 Err(payload) => {
-                    *entry.result.lock().unwrap() = Some(Err(
-                        "tokenizer.simplify_for_terminals panicked".into(),
-                    ));
+                    *entry.result.lock().unwrap() =
+                        Some(Err("tokenizer.simplify_for_terminals panicked".into()));
                     entry.ready.notify_all();
                     resume_unwind(payload);
                 }
@@ -156,6 +150,172 @@ fn project_initial_state_map_enabled() -> bool {
             })
             .unwrap_or(true)
     })
+}
+
+fn fast_sound_l2p_id_map_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLRMASK_L2P_FAST_SOUND_ID_MAP")
+            .map(|value| {
+                let trimmed = value.trim();
+                trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+            })
+            .unwrap_or(true)
+    })
+}
+
+fn fast_sound_l2p_id_map_max_tsids() -> usize {
+    static MAX_TSID: OnceLock<usize> = OnceLock::new();
+    *MAX_TSID.get_or_init(|| {
+        std::env::var("GLRMASK_L2P_FAST_SOUND_ID_MAP_MAX_TSIDS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(32_768)
+    })
+}
+
+#[derive(Clone, Copy)]
+struct L2PTokenLengthStats {
+    max_len: usize,
+    gt_4: usize,
+    gt_8: usize,
+    gt_16: usize,
+    gt_32: usize,
+    gt_64: usize,
+}
+
+fn l2p_token_length_stats(vocab: &Vocab) -> L2PTokenLengthStats {
+    let mut stats = L2PTokenLengthStats {
+        max_len: 0,
+        gt_4: 0,
+        gt_8: 0,
+        gt_16: 0,
+        gt_32: 0,
+        gt_64: 0,
+    };
+
+    for bytes in vocab.entries.values() {
+        let len = bytes.len();
+        stats.max_len = stats.max_len.max(len);
+        if len > 4 {
+            stats.gt_4 += 1;
+        }
+        if len > 8 {
+            stats.gt_8 += 1;
+        }
+        if len > 16 {
+            stats.gt_16 += 1;
+        }
+        if len > 32 {
+            stats.gt_32 += 1;
+        }
+        if len > 64 {
+            stats.gt_64 += 1;
+        }
+    }
+
+    stats
+}
+
+fn build_l2p_identity_state_map(num_states: usize) -> ManyToOneIdMap {
+    let original_to_internal: Vec<u32> = (0..num_states as u32).collect();
+    let representative_original_ids: Vec<u32> = (0..num_states as u32).collect();
+    ManyToOneIdMap::from_original_to_internal_with_representatives(
+        original_to_internal,
+        num_states as u32,
+        representative_original_ids,
+    )
+}
+
+fn build_l2p_lex_dedup_vocab_map(vocab: &Vocab) -> ManyToOneIdMap {
+    let mut entries: Vec<(u32, &[u8])> = vocab
+        .entries
+        .iter()
+        .map(|(&token_id, bytes)| (token_id, bytes.as_slice()))
+        .collect();
+    entries.sort_unstable_by(|(left_id, left_bytes), (right_id, right_bytes)| {
+        left_bytes.cmp(right_bytes).then(left_id.cmp(right_id))
+    });
+
+    let mut original_to_internal = vec![u32::MAX; vocab.max_token_id() as usize + 1];
+    let mut representative_original_ids = Vec::<u32>::new();
+    let mut internal_id = 0u32;
+    let mut index = 0usize;
+    while index < entries.len() {
+        let group_bytes = entries[index].1;
+        representative_original_ids.push(entries[index].0);
+        loop {
+            let (token_id, bytes) = entries[index];
+            debug_assert_eq!(bytes, group_bytes);
+            original_to_internal[token_id as usize] = internal_id;
+            index += 1;
+            if index == entries.len() || entries[index].1 != group_bytes {
+                break;
+            }
+        }
+        internal_id += 1;
+    }
+
+    ManyToOneIdMap::from_original_to_internal_with_representatives(
+        original_to_internal,
+        internal_id,
+        representative_original_ids,
+    )
+}
+
+fn build_l2p_fast_sound_id_map(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    initial_state_map: Option<&ManyToOneIdMap>,
+) -> Option<(
+    InternalIdMap,
+    equivalence_analysis::combined::CombinedEquivalenceProfile,
+)> {
+    if !fast_sound_l2p_id_map_enabled() {
+        return None;
+    }
+
+    let num_dfa_states = tokenizer.num_states() as usize;
+    let max_tsids = fast_sound_l2p_id_map_max_tsids();
+    let (tokenizer_states, initial_states_considered) = match initial_state_map {
+        Some(map)
+            if map.original_to_internal.len() == num_dfa_states
+                && (map.num_internal_ids() as usize) <= max_tsids =>
+        {
+            (map.clone(), map.representative_original_ids.len())
+        }
+        Some(_) => return None,
+        None if num_dfa_states <= max_tsids => {
+            (build_l2p_identity_state_map(num_dfa_states), num_dfa_states)
+        }
+        None => return None,
+    };
+
+    let token_stats = l2p_token_length_stats(vocab);
+    let exact_reps = tokenizer_states.num_internal_ids() as usize;
+    let vocab_tokens = build_l2p_lex_dedup_vocab_map(vocab);
+
+    Some((
+        InternalIdMap {
+            tokenizer_states,
+            vocab_tokens,
+        },
+        equivalence_analysis::combined::CombinedEquivalenceProfile {
+            initial_states_considered,
+            max_length_skipped: true,
+            max_token_len: token_stats.max_len,
+            token_len_gt_4: token_stats.gt_4,
+            token_len_gt_8: token_stats.gt_8,
+            token_len_gt_16: token_stats.gt_16,
+            token_len_gt_32: token_stats.gt_32,
+            token_len_gt_64: token_stats.gt_64,
+            max_length_state_equiv_ms: 0.0,
+            exact_state_equiv_ms: 0.0,
+            max_length_reps: exact_reps,
+            exact_reps,
+            exact_rep_confirmation_used: false,
+        },
+    ))
 }
 
 struct ProjectInitialStateMapProfile {
@@ -199,7 +359,9 @@ fn project_initial_state_map_for_simplified_tokenizer(
     let mut projected = vec![u32::MAX; simplified_state_count];
     let mut has_projected_state = false;
 
-    for (original_state, &simplified_state) in simplify_state_map.original_to_internal.iter().enumerate() {
+    for (original_state, &simplified_state) in
+        simplify_state_map.original_to_internal.iter().enumerate()
+    {
         if simplified_state == u32::MAX {
             continue;
         }
@@ -283,7 +445,9 @@ fn project_initial_state_map_for_simplified_tokenizer(
         })
         .collect();
 
-    let dead_class_added = compacted_projected.iter().any(|&initial_class| initial_class == u32::MAX);
+    let dead_class_added = compacted_projected
+        .iter()
+        .any(|&initial_class| initial_class == u32::MAX);
     let projected_initial_classes_after_compaction = next_class as usize;
     (
         Some(
@@ -364,16 +528,16 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // use the simplified tokenizer.
     let simplify_started_at = Instant::now();
     let can_skip_simplify = num_active_terminals == active_terminals.len();
-    let (simplified_tok_storage, simplify_state_map, simplify_cache_hit) =
-        if can_skip_simplify {
-            (None, None, false)
-        } else if let Some(cache) = shared_simplify_cache {
-            let (tok, map, cache_hit) = cache.simplify_for_terminals(tokenizer, active_terminals, &relevant_bytes);
-            (Some(tok), Some(map), cache_hit)
-        } else {
-            let (tok, map) = tokenizer.simplify_for_terminals(active_terminals, Some(&relevant_bytes));
-            (Some(tok), Some(map), false)
-        };
+    let (simplified_tok_storage, simplify_state_map, simplify_cache_hit) = if can_skip_simplify {
+        (None, None, false)
+    } else if let Some(cache) = shared_simplify_cache {
+        let (tok, map, cache_hit) =
+            cache.simplify_for_terminals(tokenizer, active_terminals, &relevant_bytes);
+        (Some(tok), Some(map), cache_hit)
+    } else {
+        let (tok, map) = tokenizer.simplify_for_terminals(active_terminals, Some(&relevant_bytes));
+        (Some(tok), Some(map), false)
+    };
     let simplify_ms = simplify_started_at.elapsed().as_secs_f64() * 1000.0;
     let use_simplified_tok = simplified_tok_storage.is_some();
     let tokenizer_for_build = simplified_tok_storage.as_ref().unwrap_or(tokenizer);
@@ -408,7 +572,10 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             ),
         )
     } else if simplify_state_map.is_none() {
-        (None, ProjectInitialStateMapProfile::unused("no_simplify_map", 0))
+        (
+            None,
+            ProjectInitialStateMapProfile::unused("no_simplify_map", 0),
+        )
     } else {
         project_initial_state_map_for_simplified_tokenizer(
             initial_state_map.expect("checked above"),
@@ -439,17 +606,23 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
     // ---- Step 1: Equivalence analysis (on simplified tokenizer) ----
     let id_map_started_at = Instant::now();
-    let (simplified_id_map, equiv_profile) = equivalence_analysis::combined::analyze_equivalences_with_group_filter(
-        partition_label,
-        tokenizer_for_build,
-        vocab,
-        disallowed_follows,
-        ignore_terminal,
-        None,
-        shared_vocab_dfa_cache,
-        if use_simplified_tok { None } else { flat_trans },
-        equivalence_initial_state_map,
-    );
+    let fast_sound_id_map =
+        build_l2p_fast_sound_id_map(tokenizer_for_build, vocab, equivalence_initial_state_map);
+    let fast_sound_id_map_used = fast_sound_id_map.is_some();
+    let (simplified_id_map, equiv_profile) = match fast_sound_id_map {
+        Some(result) => result,
+        None => equivalence_analysis::combined::analyze_equivalences_with_group_filter(
+            partition_label,
+            tokenizer_for_build,
+            vocab,
+            disallowed_follows,
+            ignore_terminal,
+            None,
+            shared_vocab_dfa_cache,
+            if use_simplified_tok { None } else { flat_trans },
+            equivalence_initial_state_map,
+        ),
+    };
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // tsid_fallback is independent of the NWA build / postprocess /
@@ -458,149 +631,166 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // via rayon::join. On the critical partition this cuts ~150-200ms
     // off the per-partition sequential critical path.
     let (
-            dwa,
-            vocab_tree_ms,
-            possible_matches_ms,
-            seed_ms,
-            trie_build_ms,
-            always_allowed_ms,
-            collapse_ms,
-            disallowed_ms,
-            prune_ms,
-            canonicalize_ms,
-            determinize_ms,
-            minimize_ms,
-            internal_vocab_count,
-            nwa_states_after_build,
-            nwa_states_after_collapse,
-            nwa_states_after_disallowed,
-            nwa_states_after_prune,
-            nwa_states_after_canonicalize,
-            dwa_stats_before_compact,
-            dwa_stats_after_compact,
-            early_none,
-        ) = {
-            // ---- Step 2-3: Internal vocab + prefix tree ----
-            let vocab_tree_started_at = Instant::now();
-            let internal_vocab = internal_vocab_entries(vocab, &simplified_id_map);
-            let internal_vocab_count = internal_vocab.len();
-            if internal_vocab.is_empty() {
-                // Signal early-None via a sentinel. Build a dummy DWA;
-                // outer code will observe `early_none=true` and return.
-                (
-                    crate::automata::weighted_u32::dwa::DWA::new(0, 0),
-                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                    0usize,
-                    0usize, 0usize, 0usize, 0usize, 0usize,
-                    crate::automata::weighted_u32::dwa::DWA::new(0, 0).stats(),
-                    crate::automata::weighted_u32::dwa::DWA::new(0, 0).stats(),
-                    true,
-                )
-            } else {
-                let full_tree = VocabPrefixTree::build_owned(
-                    internal_vocab
-                        .iter()
-                        .map(|(token_id, bytes)| (*token_id as usize, bytes.clone()))
-                        .collect(),
-                );
-                let vocab_tree_ms = vocab_tree_started_at.elapsed().as_secs_f64() * 1000.0;
+        dwa,
+        vocab_tree_ms,
+        possible_matches_ms,
+        seed_ms,
+        trie_build_ms,
+        always_allowed_ms,
+        collapse_ms,
+        disallowed_ms,
+        prune_ms,
+        canonicalize_ms,
+        determinize_ms,
+        minimize_ms,
+        internal_vocab_count,
+        nwa_states_after_build,
+        nwa_states_after_collapse,
+        nwa_states_after_disallowed,
+        nwa_states_after_prune,
+        nwa_states_after_canonicalize,
+        dwa_stats_before_compact,
+        dwa_stats_after_compact,
+        early_none,
+    ) = {
+        // ---- Step 2-3: Internal vocab + prefix tree ----
+        let vocab_tree_started_at = Instant::now();
+        let internal_vocab = internal_vocab_entries(vocab, &simplified_id_map);
+        let internal_vocab_count = internal_vocab.len();
+        if internal_vocab.is_empty() {
+            // Signal early-None via a sentinel. Build a dummy DWA;
+            // outer code will observe `early_none=true` and return.
+            (
+                crate::automata::weighted_u32::dwa::DWA::new(0, 0),
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0usize,
+                0usize,
+                0usize,
+                0usize,
+                0usize,
+                0usize,
+                crate::automata::weighted_u32::dwa::DWA::new(0, 0).stats(),
+                crate::automata::weighted_u32::dwa::DWA::new(0, 0).stats(),
+                true,
+            )
+        } else {
+            let full_tree = VocabPrefixTree::build_owned(
+                internal_vocab
+                    .iter()
+                    .map(|(token_id, bytes)| (*token_id as usize, bytes.clone()))
+                    .collect(),
+            );
+            let vocab_tree_ms = vocab_tree_started_at.elapsed().as_secs_f64() * 1000.0;
 
-                // ---- Step 4: Possible matches (lazy via computer) ----
-                let mut pm_computer = PossibleMatchesComputer::new(tokenizer);
-                let possible_matches_ms = 0.0;
+            // ---- Step 4: Possible matches (lazy via computer) ----
+            let mut pm_computer = PossibleMatchesComputer::new(tokenizer_for_build);
+            let possible_matches_ms = 0.0;
 
-                // ---- Step 5: Create NWA and seed root nodes ----
-                let seed_started_at = Instant::now();
-                let mut nwa = NWA::new(simplified_id_map.num_tsids(), simplified_id_map.max_internal_token_id());
-                let leaf_state = nwa.add_state();
-                nwa.set_final_weight(leaf_state, Weight::all());
-                let start_state = nwa.add_state();
-                nwa.start_states_mut().push(start_state);
+            // ---- Step 5: Create NWA and seed root nodes ----
+            let seed_started_at = Instant::now();
+            let mut nwa = NWA::new(
+                simplified_id_map.num_tsids(),
+                simplified_id_map.max_internal_token_id(),
+            );
+            let leaf_state = nwa.add_state();
+            nwa.set_final_weight(leaf_state, Weight::all());
+            let start_state = nwa.add_state();
+            nwa.start_states_mut().push(start_state);
 
-                let roots = seed_root_nodes(
-                    &mut nwa,
-                    start_state,
-                    &simplified_id_map,
-                );
-                let seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
+            let roots = seed_root_nodes(&mut nwa, start_state, &simplified_id_map);
+            let seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
 
-                // ---- Step 6: Trie-walk NWA build ----
-                let trie_build_started_at = Instant::now();
-                let _build_profile = build_nwa_via_trie_walk(
-                    tokenizer_for_build,
-                    terminal_coloring,
-                    use_terminal_coloring,
-                    ignore_terminal,
-                    &mut nwa,
-                    leaf_state,
-                    simplified_id_map.num_tsids(),
-                    &full_tree.root,
-                    &roots,
-                    &mut pm_computer,
-                    None,
-                );
-                let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
+            // ---- Step 6: Trie-walk NWA build ----
+            let trie_build_started_at = Instant::now();
+            let _build_profile = build_nwa_via_trie_walk(
+                tokenizer_for_build,
+                terminal_coloring,
+                use_terminal_coloring,
+                ignore_terminal,
+                &mut nwa,
+                leaf_state,
+                simplified_id_map.num_tsids(),
+                &full_tree.root,
+                &roots,
+                &mut pm_computer,
+                None,
+            );
+            let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
-                let always_allowed_started_at = Instant::now();
-                let always_allowed = compute_always_allowed_follows(grammar);
-                let always_allowed_ms = always_allowed_started_at.elapsed().as_secs_f64() * 1000.0;
-                let nwa_states_after_build = nwa.states().len();
+            let always_allowed_started_at = Instant::now();
+            let always_allowed = compute_always_allowed_follows(grammar);
+            let always_allowed_ms = always_allowed_started_at.elapsed().as_secs_f64() * 1000.0;
+            let nwa_states_after_build = nwa.states().len();
 
-                let collapse_started_at = Instant::now();
-                collapse_always_allowed(&mut nwa, &always_allowed, grammar.num_terminals as usize);
-                let collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
-                let nwa_states_after_collapse = nwa.states().len();
+            let collapse_started_at = Instant::now();
+            collapse_always_allowed(&mut nwa, &always_allowed, grammar.num_terminals as usize);
+            let collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
+            let nwa_states_after_collapse = nwa.states().len();
 
-                let disallowed_started_at = Instant::now();
-                apply_disallowed_follow_constraints(&mut nwa, disallowed_follows, grammar.num_terminals as usize);
-                let disallowed_ms = disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
-                let nwa_states_after_disallowed = nwa.states().len();
+            let disallowed_started_at = Instant::now();
+            apply_disallowed_follow_constraints(
+                &mut nwa,
+                disallowed_follows,
+                grammar.num_terminals as usize,
+            );
+            let disallowed_ms = disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
+            let nwa_states_after_disallowed = nwa.states().len();
 
-                let prune_started_at = Instant::now();
-                prune_non_coreachable_states(&mut nwa);
-                let prune_ms = prune_started_at.elapsed().as_secs_f64() * 1000.0;
-                let nwa_states_after_prune = nwa.states().len();
+            let prune_started_at = Instant::now();
+            prune_non_coreachable_states(&mut nwa);
+            let prune_ms = prune_started_at.elapsed().as_secs_f64() * 1000.0;
+            let nwa_states_after_prune = nwa.states().len();
 
-                let canonicalize_started_at = Instant::now();
-                canonicalize_acyclic_nwa(&mut nwa);
-                let canonicalize_ms = canonicalize_started_at.elapsed().as_secs_f64() * 1000.0;
-                let nwa_states_after_canonicalize = nwa.states().len();
+            let canonicalize_started_at = Instant::now();
+            canonicalize_acyclic_nwa(&mut nwa);
+            let canonicalize_ms = canonicalize_started_at.elapsed().as_secs_f64() * 1000.0;
+            let nwa_states_after_canonicalize = nwa.states().len();
 
-                let determinize_started_at = Instant::now();
-                let det = determinize(&nwa).expect("L2+ terminal NWA determinization failed");
-                let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
+            let determinize_started_at = Instant::now();
+            let det = determinize(&nwa).expect("L2+ terminal NWA determinization failed");
+            let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
 
-                let minimize_started_at = Instant::now();
-                let dwa = minimize(&det);
-                let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
-                let dwa_stats_before_compact = dwa.stats();
-                let dwa_stats_after_compact = dwa.stats();
+            let minimize_started_at = Instant::now();
+            let dwa = minimize(&det);
+            let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
+            let dwa_stats_before_compact = dwa.stats();
+            let dwa_stats_after_compact = dwa.stats();
 
-                (
-                    dwa,
-                    vocab_tree_ms,
-                    possible_matches_ms,
-                    seed_ms,
-                    trie_build_ms,
-                    always_allowed_ms,
-                    collapse_ms,
-                    disallowed_ms,
-                    prune_ms,
-                    canonicalize_ms,
-                    determinize_ms,
-                    minimize_ms,
-                    internal_vocab_count,
-                    nwa_states_after_build,
-                    nwa_states_after_collapse,
-                    nwa_states_after_disallowed,
-                    nwa_states_after_prune,
-                    nwa_states_after_canonicalize,
-                    dwa_stats_before_compact,
-                    dwa_stats_after_compact,
-                    false,
-                )
-            }
-        };
+            (
+                dwa,
+                vocab_tree_ms,
+                possible_matches_ms,
+                seed_ms,
+                trie_build_ms,
+                always_allowed_ms,
+                collapse_ms,
+                disallowed_ms,
+                prune_ms,
+                canonicalize_ms,
+                determinize_ms,
+                minimize_ms,
+                internal_vocab_count,
+                nwa_states_after_build,
+                nwa_states_after_collapse,
+                nwa_states_after_disallowed,
+                nwa_states_after_prune,
+                nwa_states_after_canonicalize,
+                dwa_stats_before_compact,
+                dwa_stats_after_compact,
+                false,
+            )
+        }
+    };
     if early_none {
         return None;
     }
@@ -616,7 +806,8 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     } else {
         simplified_id_map.clone()
     };
-    let postprocess_ms = always_allowed_ms + collapse_ms + disallowed_ms + prune_ms + canonicalize_ms;
+    let postprocess_ms =
+        always_allowed_ms + collapse_ms + disallowed_ms + prune_ms + canonicalize_ms;
     let max_length_reduction_pct = if equiv_profile.initial_states_considered == 0 {
         0.0
     } else {
@@ -629,12 +820,13 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         0.0
     } else {
         100.0
-            * (1.0 - equiv_profile.exact_reps as f64 / equiv_profile.initial_states_considered as f64)
+            * (1.0
+                - equiv_profile.exact_reps as f64 / equiv_profile.initial_states_considered as f64)
     };
 
     if compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][l2p] partition={} vocab_tokens={} active_terminals={} original_states={} tsids={} internal_vocab_entries={} initial_states_considered={} max_length_skipped={} max_token_len={} token_len_gt_4={} token_len_gt_8={} token_len_gt_16={} token_len_gt_32={} token_len_gt_64={} max_length_state_equiv_ms={:.3} exact_state_equiv_ms={:.3} max_length_reps={} exact_reps={} exact_rep_confirmation_used={} max_length_reduction_pct={:.2} exact_reduction_pct={:.2} simplify_ms={:.3} simplify_cache_hit={} simplified_states={} id_map_ms={:.3} tsid_fallback_ms={:.3} vocab_tree_ms={:.3} possible_matches_ms={:.3} seed_ms={:.3} terminal_nwa_build_ms={:.3} nwa_states={}->{}->{}->{}->{} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} prune_ms={:.3} canonicalize_ms={:.3} postprocess_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} minimize_states={} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} total_ms={:.3}",
+            "[glrmask/profile][l2p] partition={} vocab_tokens={} active_terminals={} original_states={} tsids={} internal_vocab_entries={} initial_states_considered={} max_length_skipped={} max_token_len={} token_len_gt_4={} token_len_gt_8={} token_len_gt_16={} token_len_gt_32={} token_len_gt_64={} max_length_state_equiv_ms={:.3} exact_state_equiv_ms={:.3} max_length_reps={} exact_reps={} exact_rep_confirmation_used={} fast_sound_id_map_used={} max_length_reduction_pct={:.2} exact_reduction_pct={:.2} simplify_ms={:.3} simplify_cache_hit={} simplified_states={} id_map_ms={:.3} tsid_fallback_ms={:.3} vocab_tree_ms={:.3} possible_matches_ms={:.3} seed_ms={:.3} terminal_nwa_build_ms={:.3} nwa_states={}->{}->{}->{}->{} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} prune_ms={:.3} canonicalize_ms={:.3} postprocess_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} minimize_states={} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} total_ms={:.3}",
             partition_label,
             vocab.entries.len(),
             num_active_terminals,
@@ -654,6 +846,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             equiv_profile.max_length_reps,
             equiv_profile.exact_reps,
             equiv_profile.exact_rep_confirmation_used,
+            fast_sound_id_map_used,
             max_length_reduction_pct,
             exact_reduction_pct,
             simplify_ms,
@@ -704,4 +897,3 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         },
     })
 }
-
