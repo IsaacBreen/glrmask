@@ -158,6 +158,26 @@ impl<T> MappedArtifact<T> {
     }
 }
 
+impl<A, B> MappedArtifact<(A, B)> {
+    pub(crate) fn split_pair(self) -> (MappedArtifact<A>, MappedArtifact<B>) {
+        let ((left, right), id_map) = self.into_parts();
+        (
+            MappedArtifact::new(left, id_map.clone()),
+            MappedArtifact::new(right, id_map),
+        )
+    }
+}
+
+impl<T> MappedArtifact<Vec<T>> {
+    pub(crate) fn split_vec(self) -> Vec<MappedArtifact<T>> {
+        let (artifacts, id_map) = self.into_parts();
+        artifacts
+            .into_iter()
+            .map(|artifact| MappedArtifact::new(artifact, id_map.clone()))
+            .collect()
+    }
+}
+
 impl InternalIdMap {
     pub fn num_tsids(&self) -> u32 {
         self.tokenizer_states.num_internal_ids()

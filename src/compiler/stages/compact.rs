@@ -59,6 +59,54 @@ impl WeightRefs for RuntimePossibleMatchesByTerminal {
     }
 }
 
+impl<A, B> WeightRefs for (A, B)
+where
+    A: WeightRefs,
+    B: WeightRefs,
+{
+    fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
+        let mut weights = self.0.weight_refs_mut();
+        weights.extend(self.1.weight_refs_mut());
+        weights
+    }
+}
+
+impl<A, B, C> WeightRefs for (A, B, C)
+where
+    A: WeightRefs,
+    B: WeightRefs,
+    C: WeightRefs,
+{
+    fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
+        let mut weights = self.0.weight_refs_mut();
+        weights.extend(self.1.weight_refs_mut());
+        weights.extend(self.2.weight_refs_mut());
+        weights
+    }
+}
+
+impl<T> WeightRefs for [T]
+where
+    T: WeightRefs,
+{
+    fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
+        let mut weights = Vec::new();
+        for item in self.iter_mut() {
+            weights.extend(item.weight_refs_mut());
+        }
+        weights
+    }
+}
+
+impl<T> WeightRefs for Vec<T>
+where
+    T: WeightRefs,
+{
+    fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
+        self.as_mut_slice().weight_refs_mut()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct InternedRangeCounts {
     pub tsid_ranges: usize,
@@ -263,6 +311,44 @@ where
         right_id_map,
     );
     left.id_map().clone()
+}
+
+pub(crate) fn reconcile_mapped_pair<A, B>(
+    a: MappedArtifact<A>,
+    b: MappedArtifact<B>,
+) -> MappedArtifact<(A, B)>
+where
+    A: WeightRefs,
+    B: WeightRefs,
+{
+    let mut a = a;
+    let mut b = b;
+    let common_id_map = reconcile_mapped_weight_artifacts(&mut a, &mut b);
+    let (artifact_a, _) = a.into_parts();
+    let (artifact_b, _) = b.into_parts();
+    MappedArtifact::new((artifact_a, artifact_b), common_id_map)
+}
+
+pub(crate) fn reconcile_mapped_vec<T>(inputs: Vec<MappedArtifact<T>>) -> MappedArtifact<Vec<T>>
+where
+    T: WeightRefs,
+{
+    assert!(!inputs.is_empty(), "reconcile_mapped_vec called with empty inputs");
+
+    let mut iter = inputs.into_iter();
+    let first = iter.next().unwrap();
+    let (first_artifact, first_id_map) = first.into_parts();
+    let mut acc = MappedArtifact::new(vec![first_artifact], first_id_map);
+
+    for next in iter {
+        let mut next = next;
+        let common_id_map = reconcile_mapped_weight_artifacts(&mut acc, &mut next);
+        let (artifact, _) = next.into_parts();
+        acc.artifact_mut().push(artifact);
+        *acc.id_map_mut() = common_id_map;
+    }
+
+    acc
 }
 
 fn compact_dwa_dimensions_inner(
@@ -1638,6 +1724,7 @@ fn remap_weight_general(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     fn token_set(tokens: &[u32]) -> RangeSetBlaze<u32> {
         RangeSetBlaze::from_iter(tokens.iter().copied().map(|token| token..=token))
@@ -1651,6 +1738,33 @@ mod tests {
             }
         }
         entries
+    }
+
+    fn runtime_possible_matches(entries: &[(u32, Weight)]) -> RuntimePossibleMatchesByTerminal {
+        entries
+            .iter()
+            .map(|(terminal_id, weight)| (*terminal_id, weight.clone()))
+            .collect::<BTreeMap<_, _>>()
+    }
+
+    fn test_id_map(
+        tokenizer_original_to_internal: Vec<u32>,
+        tokenizer_num_internal: u32,
+        token_original_to_internal: Vec<u32>,
+        token_num_internal: u32,
+    ) -> InternalIdMap {
+        InternalIdMap {
+            tokenizer_states: ManyToOneIdMap::from_original_to_internal_with_representatives(
+                tokenizer_original_to_internal,
+                tokenizer_num_internal,
+                (0..tokenizer_num_internal).collect(),
+            ),
+            vocab_tokens: ManyToOneIdMap::from_original_to_internal_with_representatives(
+                token_original_to_internal,
+                token_num_internal,
+                (0..token_num_internal).collect(),
+            ),
+        }
     }
 
     #[test]
@@ -1745,6 +1859,56 @@ mod tests {
         assert_eq!(weight_entries(&left_weight), vec![(0, vec![0]), (1, vec![0])]);
         assert_eq!(weight_entries(&right_weight_left), vec![(0, vec![0])]);
         assert_eq!(weight_entries(&right_weight_right), vec![(1, vec![0])]);
+    }
+
+    #[test]
+    fn reconcile_mapped_pair_returns_shared_map_and_split_preserves_it() {
+        let left = MappedArtifact::new(
+            runtime_possible_matches(&[(7, Weight::from_per_tsid_token_sets(std::iter::once((0, token_set(&[0])))))]),
+            test_id_map(vec![0], 1, vec![0, 0], 1),
+        );
+        let right = MappedArtifact::new(
+            runtime_possible_matches(&[
+                (7, Weight::from_per_tsid_token_sets(std::iter::once((0, token_set(&[0]))))),
+                (8, Weight::from_per_tsid_token_sets(std::iter::once((0, token_set(&[1]))))),
+            ]),
+            test_id_map(vec![0], 1, vec![0, 1], 2),
+        );
+
+        let paired = reconcile_mapped_pair(left, right);
+        assert_eq!(paired.id_map().vocab_tokens.original_to_internal, vec![0, 1]);
+
+        let (left, right) = paired.split_pair();
+        assert_eq!(left.id_map().vocab_tokens.original_to_internal, vec![0, 1]);
+        assert_eq!(left.id_map().vocab_tokens.original_to_internal, right.id_map().vocab_tokens.original_to_internal);
+        assert_eq!(weight_entries(left.artifact().get(&7).unwrap()), vec![(0, vec![0, 1])]);
+        assert_eq!(weight_entries(right.artifact().get(&7).unwrap()), vec![(0, vec![0])]);
+        assert_eq!(weight_entries(right.artifact().get(&8).unwrap()), vec![(0, vec![1])]);
+    }
+
+    #[test]
+    fn reconcile_mapped_vec_and_split_vec_preserve_shared_map() {
+        let inputs = vec![
+            MappedArtifact::new(
+                runtime_possible_matches(&[(7, Weight::from_per_tsid_token_sets(std::iter::once((0, token_set(&[0])))))]),
+                test_id_map(vec![0], 1, vec![0, 0], 1),
+            ),
+            MappedArtifact::new(
+                runtime_possible_matches(&[(8, Weight::from_per_tsid_token_sets(std::iter::once((0, token_set(&[1])))))]),
+                test_id_map(vec![0], 1, vec![0, 1], 2),
+            ),
+        ];
+
+        let reconciled = reconcile_mapped_vec(inputs);
+        assert_eq!(reconciled.id_map().vocab_tokens.original_to_internal, vec![0, 1]);
+        assert_eq!(reconciled.artifact().len(), 2);
+
+        let split = reconciled.split_vec();
+        assert_eq!(split.len(), 2);
+        assert_eq!(split[0].id_map().vocab_tokens.original_to_internal, vec![0, 1]);
+        assert_eq!(split[0].id_map().vocab_tokens.original_to_internal, split[1].id_map().vocab_tokens.original_to_internal);
+        assert_eq!(weight_entries(split[0].artifact().get(&7).unwrap()), vec![(0, vec![0, 1])]);
+        assert_eq!(weight_entries(split[1].artifact().get(&8).unwrap()), vec![(0, vec![1])]);
     }
 }
 
