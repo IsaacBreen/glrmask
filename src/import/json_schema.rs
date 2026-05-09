@@ -1676,6 +1676,44 @@ fn env_flag(name: &str) -> bool {
     env_flag_default(name, false)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct JsonStringMergeConfig {
+    merge_open: bool,
+    merge_close: bool,
+}
+
+fn env_flag_optional(name: &str) -> Option<bool> {
+    std::env::var(name).ok().map(|v| {
+        let n = v.trim().to_ascii_lowercase();
+        !matches!(n.as_str(), "" | "0" | "false" | "no" | "off")
+    })
+}
+
+fn json_string_merge_config(is_pattern: bool) -> JsonStringMergeConfig {
+    let default = JsonStringMergeConfig {
+        merge_open: false,
+        merge_close: true,
+    };
+
+    let base = JsonStringMergeConfig {
+        merge_open: env_flag_optional("GLRMASK_JSON_STRING_MERGE_OPEN")
+            .unwrap_or(default.merge_open),
+        merge_close: env_flag_optional("GLRMASK_JSON_STRING_MERGE_CLOSE")
+            .unwrap_or(default.merge_close),
+    };
+
+    if !is_pattern {
+        return base;
+    }
+
+    JsonStringMergeConfig {
+        merge_open: env_flag_optional("GLRMASK_JSON_PATTERN_STRING_MERGE_OPEN")
+            .unwrap_or(base.merge_open),
+        merge_close: env_flag_optional("GLRMASK_JSON_PATTERN_STRING_MERGE_CLOSE")
+            .unwrap_or(base.merge_close),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Hierarchical string / key-colon construction
 // ---------------------------------------------------------------------------
@@ -1717,8 +1755,8 @@ fn env_flag(name: &str) -> bool {
 ///
 /// The caller wraps the result with `regex_expr()` and passes it to
 /// `wrap_string_value_terminal()`.
-fn string_value_body_regex(inner: &str) -> String {
-    quoted_body_regex(inner, false)
+fn string_value_body_regex(inner: &str, is_pattern: bool) -> String {
+    quoted_body_regex(inner, json_string_merge_config(is_pattern), false)
 }
 
 /// Build the regex pattern for the body terminal of a JSON object **key-colon**
@@ -1729,11 +1767,30 @@ fn string_value_body_regex(inner: &str) -> String {
 ///  - `split_close=false` → pattern includes close `"`
 ///  - `split_colon=false` → pattern includes `": "`
 fn key_colon_body_regex(inner: &str) -> String {
-    quoted_body_regex(inner, true)
+    quoted_body_regex(
+        inner,
+        JsonStringMergeConfig {
+            merge_open: false,
+            merge_close: true,
+        },
+        true,
+    )
 }
 
-fn quoted_body_regex(inner: &str, _include_colon_space: bool) -> String {
-    format!("(?:{inner})\"")
+fn quoted_body_regex(
+    inner: &str,
+    merge_config: JsonStringMergeConfig,
+    _include_colon_space: bool,
+) -> String {
+    let mut out = String::new();
+    if merge_config.merge_open {
+        out.push('"');
+    }
+    out.push_str(&format!("(?:{inner})"));
+    if merge_config.merge_close {
+        out.push('"');
+    }
+    out
 }
 
 /// Build literal bytes for the body terminal of a JSON object **key-colon**.
@@ -1756,8 +1813,16 @@ fn key_colon_suffix_expr() -> GrammarExpr {
 ///
 /// Adds split-off quote literals around the body terminal.
 /// The body terminal must already include fused (non-split) quotes.
-fn wrap_string_value_terminal(body: GrammarExpr) -> GrammarExpr {
-    sequence_or_single(vec![literal_expr(b"\""), body])
+fn wrap_string_value_terminal(body: GrammarExpr, merge_config: JsonStringMergeConfig) -> GrammarExpr {
+    let mut parts = Vec::new();
+    if !merge_config.merge_open {
+        parts.push(literal_expr(b"\""));
+    }
+    parts.push(body);
+    if !merge_config.merge_close {
+        parts.push(literal_expr(b"\""));
+    }
+    sequence_or_single(parts)
 }
 
 /// Wrap a body terminal expression as a JSON object **key-colon**.
@@ -2143,7 +2208,7 @@ fn json_wrapped_string_length_regex(min_len: usize, max_len: usize) -> String {
             max_len,
         )
     };
-    string_value_body_regex(&inner)
+    string_value_body_regex(&inner, false)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2338,11 +2403,23 @@ fn compile_regex_union_expr(regexes: &[String]) -> LexerExpr {
 /// This is the GrammarExpr analogue of `string_value_body_regex` +
 /// `wrap_string_value_terminal` for cases where the body is an
 /// expression tree rather than a regex string.
-fn wrap_string_value_expr_parts(body: GrammarExpr) -> (GrammarExpr, Box<dyn FnOnce(GrammarExpr) -> GrammarExpr>) {
-    let terminal_body = sequence_or_single(vec![body, literal_expr(b"\"")]);
+fn wrap_string_value_expr_parts(
+    body: GrammarExpr,
+    is_pattern: bool,
+) -> (GrammarExpr, Box<dyn FnOnce(GrammarExpr) -> GrammarExpr>) {
+    let merge_config = json_string_merge_config(is_pattern);
+    let mut terminal_parts = Vec::new();
+    if merge_config.merge_open {
+        terminal_parts.push(literal_expr(b"\""));
+    }
+    terminal_parts.push(body);
+    if merge_config.merge_close {
+        terminal_parts.push(literal_expr(b"\""));
+    }
+    let terminal_body = sequence_or_single(terminal_parts);
     // Wrap the terminal ref with split-off quotes
     let wrap = move |term: GrammarExpr| -> GrammarExpr {
-        wrap_string_value_terminal(term)
+        wrap_string_value_terminal(term, merge_config)
     };
     (terminal_body, Box::new(wrap))
 }
@@ -2357,8 +2434,8 @@ fn wrap_key_colon_expr_parts(body: GrammarExpr) -> (GrammarExpr, Box<dyn FnOnce(
 ///
 /// Equivalent to composing `wrap_string_value_expr_parts` but for cases
 /// where the body does not need to be named as a separate terminal rule.
-fn quoted_expr(inner: GrammarExpr) -> GrammarExpr {
-    let (body, wrap) = wrap_string_value_expr_parts(inner);
+fn quoted_expr(inner: GrammarExpr, is_pattern: bool) -> GrammarExpr {
+    let (body, wrap) = wrap_string_value_expr_parts(inner, is_pattern);
     wrap(body)
 }
 
@@ -2679,7 +2756,7 @@ fn json_value_literal_expr(value: &Value) -> GrammarExpr {
         let body = literal_expr(&body_bytes);
 
         // Wrap with split-off quotes
-        wrap_string_value_terminal(body)
+        wrap_string_value_terminal(body, json_string_merge_config(false))
     } else {
         literal_expr(&bytes)
     }
@@ -4380,7 +4457,10 @@ impl<'a> SchemaCtx<'a> {
 
         // JSON_STRING_BODY_RULE: split-aware body terminal used by json_string
         // so the nonterminal does not embed the character body directly.
-        let (body_expr, _) = wrap_string_value_expr_parts(GrammarExpr::Repeat(Box::new(self.json_string_char_ref())));
+        let (body_expr, _) = wrap_string_value_expr_parts(
+            GrammarExpr::Repeat(Box::new(self.json_string_char_ref())),
+            false,
+        );
         self.insert_rule(JSON_STRING_BODY_RULE, body_expr);
 
         // JSON_STRING_MIDDLE_RULE: reusable middle fragment used to build
@@ -4395,7 +4475,10 @@ impl<'a> SchemaCtx<'a> {
         );
 
         // JSON_STRING_RULE: always assembled from literals + named terminals.
-        let json_string_expr = wrap_string_value_terminal(GrammarExpr::Ref(JSON_STRING_BODY_RULE.into()));
+        let json_string_expr = wrap_string_value_terminal(
+            GrammarExpr::Ref(JSON_STRING_BODY_RULE.into()),
+            json_string_merge_config(false),
+        );
         self.insert_rule(JSON_STRING_RULE, json_string_expr);
         self.insert_rule(JSON_INTEGER_RULE, regex_expr(r#"-?(0|[1-9][0-9]*)"#));
         self.insert_rule(JSON_NUMBER_RULE, regex_expr(JSON_NUMBER_NONINTEGER_REGEX));
@@ -6492,7 +6575,7 @@ impl<'a> SchemaCtx<'a> {
                 };
                         let body = self
                             .build_pattern_lexer_expr(&intersected, "JSON_STRING_PATTERN_ANCHORED_BOUNDED");
-                let (terminal_body, wrap) = wrap_string_value_expr_parts(body);
+                let (terminal_body, wrap) = wrap_string_value_expr_parts(body, true);
                 let term = self.extract_terminal_rule(terminal_body, "JSON_STRING_PATTERN_ANCHORED_BOUNDED");
                 return Ok(wrap(term));
             }
@@ -6514,7 +6597,7 @@ impl<'a> SchemaCtx<'a> {
                         };
                         let body =
                             self.build_pattern_lexer_expr(&intersected, "JSON_STRING_PATTERN_BOUNDED");
-                        let (terminal_body, wrap) = wrap_string_value_expr_parts(body);
+                        let (terminal_body, wrap) = wrap_string_value_expr_parts(body, true);
                         let term = self.extract_terminal_rule(terminal_body, "JSON_STRING_PATTERN_BOUNDED");
                         return Ok(wrap(term));
                     }
@@ -6531,7 +6614,7 @@ impl<'a> SchemaCtx<'a> {
                     };
                     let body =
                         self.build_pattern_lexer_expr(&intersected, "JSON_STRING_PATTERN_MINLEN");
-                    let (terminal_body, wrap) = wrap_string_value_expr_parts(body);
+                    let (terminal_body, wrap) = wrap_string_value_expr_parts(body, true);
                     let term = self.extract_terminal_rule(terminal_body, "JSON_STRING_PATTERN_MINLEN");
                     return Ok(wrap(term));
                 }
@@ -6594,7 +6677,7 @@ impl<'a> SchemaCtx<'a> {
             }
         };
 
-        let (terminal_body, wrap) = wrap_string_value_expr_parts(bounded_body);
+        let (terminal_body, wrap) = wrap_string_value_expr_parts(bounded_body, false);
         let body = self.extract_terminal_rule(terminal_body, "JSON_STRING_BOUNDED");
         Ok(wrap(body))
     }
@@ -6631,7 +6714,7 @@ impl<'a> SchemaCtx<'a> {
             }
         };
 
-        let (terminal_body, wrap) = wrap_string_value_expr_parts(bounded_body);
+        let (terminal_body, wrap) = wrap_string_value_expr_parts(bounded_body, false);
         let body = self.extract_terminal_rule(terminal_body, "JSON_STRING_BOUNDED_PATTERN");
         wrap(body)
     }
@@ -6644,7 +6727,7 @@ impl<'a> SchemaCtx<'a> {
                     "time" => json_time_body_expr(),
                     _ => json_date_time_body_expr(),
                 };
-                let (terminal_body, wrap) = wrap_string_value_expr_parts(body_inner);
+                let (terminal_body, wrap) = wrap_string_value_expr_parts(body_inner, false);
                 let body = self.extract_terminal_rule(terminal_body, "JSON_FORMAT_STRING");
                 Ok(wrap(body))
             }
@@ -6659,10 +6742,10 @@ impl<'a> SchemaCtx<'a> {
                         literal_expr(b"."),
                         label,
                     ]))),
-                ])))
+                ]), false))
             }
             "uri" if simple_uri_format_enabled() => {
-                Ok(quoted_expr(GrammarExpr::Repeat(Box::new(self.json_string_char_ref()))))
+                Ok(quoted_expr(GrammarExpr::Repeat(Box::new(self.json_string_char_ref())), false))
             }
             "uri" if restored_structured_uri_enabled() => {
                 Ok(self.build_structured_uri_expr())
@@ -6721,7 +6804,7 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn build_approx_uri_expr(&mut self) -> GrammarExpr {
-        quoted_expr(GrammarExpr::Repeat(Box::new(self.json_string_char_ref())))
+        quoted_expr(GrammarExpr::Repeat(Box::new(self.json_string_char_ref())), false)
     }
 
     fn build_structured_uri_expr(&mut self) -> GrammarExpr {
@@ -7336,7 +7419,7 @@ impl<'a> SchemaCtx<'a> {
             ]),
         );
 
-        quoted_expr(GrammarExpr::Ref("uri".into()))
+        quoted_expr(GrammarExpr::Ref("uri".into()), false)
     }
 
     fn json_literal(&self, value: &Value) -> GrammarExpr {
@@ -7844,7 +7927,7 @@ impl<'a> SchemaCtx<'a> {
 
     fn build_json_wrapped_pattern(&mut self, pattern: &str, prefix: &str) -> GrammarExpr {
         let body = self.build_pattern_lexer_expr(&decoded_regex_search_expr(pattern, None), prefix);
-        let (terminal_body, wrap) = wrap_string_value_expr_parts(body);
+        let (terminal_body, wrap) = wrap_string_value_expr_parts(body, true);
         let term = self.extract_terminal_rule(terminal_body, prefix);
         wrap(term)
     }
@@ -7855,7 +7938,7 @@ impl<'a> SchemaCtx<'a> {
         prefix: &str,
     ) -> GrammarExpr {
         let body = self.build_pattern_lexer_expr(&decoded_regex_fullmatch_expr(pattern), prefix);
-        let (terminal_body, wrap) = wrap_string_value_expr_parts(body);
+        let (terminal_body, wrap) = wrap_string_value_expr_parts(body, true);
         let term = self.extract_terminal_rule(terminal_body, prefix);
         wrap(term)
     }
@@ -9602,8 +9685,61 @@ fn repeat_expr(item: GrammarExpr, min: usize, max: Option<usize>) -> GrammarExpr
 
 #[cfg(test)]
 mod tests {
+    use super::json_string_merge_config;
     use super::schema_to_named_grammar;
+    use super::string_value_body_regex;
+    use crate::grammar::glrm::to_glrm;
     use serde_json::json;
+    use std::{env, ffi::OsString, sync::Mutex};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = env::var_os(key);
+            unsafe {
+                env::set_var(key, value);
+            }
+            Self { key, original }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let original = env::var_os(key);
+            unsafe {
+                env::remove_var(key);
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => unsafe {
+                    env::set_var(self.key, value);
+                },
+                None => unsafe {
+                    env::remove_var(self.key);
+                },
+            }
+        }
+    }
+
+    fn dump_glrm(schema: serde_json::Value) -> String {
+        let named = schema_to_named_grammar(&schema).unwrap();
+        to_glrm(&named)
+    }
+
+    fn find_rule_line_with_prefix<'a>(glrm: &'a str, rule_prefix: &str) -> &'a str {
+        glrm.lines()
+            .find(|line| line.starts_with(&format!("t {rule_prefix}")))
+            .unwrap_or_else(|| panic!("missing rule prefix {rule_prefix} in grammar:\n{glrm}"))
+    }
 
     #[test]
     fn duplicate_self_ref_anyof_closed_object_compiles() {
@@ -9627,6 +9763,58 @@ mod tests {
         });
 
         assert!(schema_to_named_grammar(&schema).is_ok());
+    }
+
+    #[test]
+    fn json_string_merge_defaults_preserve_split_open_and_merged_close() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _string_open = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_OPEN");
+        let _string_close = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_CLOSE");
+        let _pattern_open = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_STRING_MERGE_OPEN");
+        let _pattern_close = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_STRING_MERGE_CLOSE");
+
+        let default_cfg = json_string_merge_config(false);
+        let pattern_cfg = json_string_merge_config(true);
+        assert_eq!(default_cfg.merge_open, false);
+        assert_eq!(default_cfg.merge_close, true);
+        assert_eq!(pattern_cfg, default_cfg);
+        assert_eq!(string_value_body_regex("a+", false), "(?:a+)\"");
+    }
+
+    #[test]
+    fn pattern_string_merge_override_changes_only_pattern_rule() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _string_open = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_OPEN");
+        let _string_close = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_CLOSE");
+        let _pattern_open = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_STRING_MERGE_OPEN");
+        let _pattern_close = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_STRING_MERGE_CLOSE");
+
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "patternValue": { "type": "string", "pattern": "^a+$" },
+                "boundedValue": { "type": "string", "minLength": 1, "maxLength": 2 }
+            },
+            "required": ["patternValue", "boundedValue"]
+        });
+
+        let baseline = dump_glrm(schema.clone());
+        let baseline_pattern = find_rule_line_with_prefix(&baseline, "JSON_STRING_PATTERN_").to_string();
+        let baseline_bounded = find_rule_line_with_prefix(&baseline, "JSON_STRING_BOUNDED_").to_string();
+
+        let _pattern_open = EnvVarGuard::set("GLRMASK_JSON_PATTERN_STRING_MERGE_OPEN", "1");
+        let _pattern_close = EnvVarGuard::set("GLRMASK_JSON_PATTERN_STRING_MERGE_CLOSE", "0");
+
+        let overridden = dump_glrm(schema);
+        let overridden_pattern = find_rule_line_with_prefix(&overridden, "JSON_STRING_PATTERN_").to_string();
+        let overridden_bounded = find_rule_line_with_prefix(&overridden, "JSON_STRING_BOUNDED_").to_string();
+
+        assert_ne!(baseline_pattern, overridden_pattern);
+        assert_eq!(baseline_bounded, overridden_bounded);
+        assert!(baseline_pattern.ends_with("\";"));
+        assert!(overridden_pattern.contains("::= \"\\\"\" "));
+        assert!(!overridden_pattern.ends_with("\";"));
     }
 }
 
