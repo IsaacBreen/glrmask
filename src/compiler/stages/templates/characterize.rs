@@ -67,11 +67,13 @@ pub(crate) struct TerminalCharacterizationProfile {
     pub(crate) quotient_disabled: bool,
 }
 
-type TerminalActionSignature = Vec<(u32, Option<Action>, bool)>;
+type DenseTerminalActionSignature = Vec<(u32, Option<Action>, bool)>;
+type TerminalActionSignature<'a> = Vec<(u32, Option<&'a Action>, bool)>;
 
 #[derive(Debug, Clone, Default)]
 struct CharacterizationIndex {
     action_states_by_terminal: Vec<Vec<u32>>,
+    forwarded_only_states_by_terminal: Vec<Vec<u32>>,
     goto_predecessors_by_target: Vec<Vec<(u32, NonterminalID, bool)>>,
 }
 
@@ -175,7 +177,14 @@ fn characterization_quotient_validation_enabled() -> bool {
     env_flag_enabled("GLRMASK_VALIDATE_CHARACTERIZATION_QUOTIENT")
 }
 
-fn terminal_action_signature(table: &GLRTable, terminal: TerminalID) -> TerminalActionSignature {
+fn sparse_action_signature_validation_enabled() -> bool {
+    env_flag_enabled("GLRMASK_VALIDATE_SPARSE_ACTION_SIGNATURES")
+}
+
+fn dense_terminal_action_signature(
+    table: &GLRTable,
+    terminal: TerminalID,
+) -> DenseTerminalActionSignature {
     let mut signature = Vec::new();
     for state in 0..table.num_states {
         let forwarded = table.forwarded_shifts.contains(&(state, terminal));
@@ -191,17 +200,65 @@ fn terminal_action_signature(table: &GLRTable, terminal: TerminalID) -> Terminal
     signature
 }
 
-fn group_terminals_by_action_signature(
+fn terminal_action_signature_from_index<'a>(
+    table: &'a GLRTable,
+    index: &CharacterizationIndex,
+    terminal: TerminalID,
+) -> TerminalActionSignature<'a> {
+    let action_states = index
+        .action_states_by_terminal
+        .get(terminal as usize)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let forwarded_only_states = index
+        .forwarded_only_states_by_terminal
+        .get(terminal as usize)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+
+    let mut signature = Vec::with_capacity(action_states.len() + forwarded_only_states.len());
+    for &state in action_states {
+        let action = table.action(state, terminal).unwrap_or_else(|| {
+            panic!("terminal action index referenced missing action ({state}, {terminal})")
+        });
+        let forwarded = table.forwarded_shifts.contains(&(state, terminal));
+        signature.push((state, Some(action), forwarded));
+    }
+
+    for &state in forwarded_only_states {
+        signature.push((state, None, true));
+    }
+
+    if !forwarded_only_states.is_empty() {
+        signature.sort_by_key(|(state, _, _)| *state);
+    }
+
+    signature
+}
+
+fn owned_terminal_action_signature_from_index(
     table: &GLRTable,
+    index: &CharacterizationIndex,
+    terminal: TerminalID,
+) -> DenseTerminalActionSignature {
+    terminal_action_signature_from_index(table, index, terminal)
+        .into_iter()
+        .map(|(state, action, forwarded)| (state, action.cloned(), forwarded))
+        .collect()
+}
+
+fn group_terminals_by_action_signature<'a>(
+    table: &'a GLRTable,
+    index: &CharacterizationIndex,
     grammar: &AnalyzedGrammar,
 ) -> (Vec<Vec<TerminalID>>, f64) {
     let signature_started_at = Instant::now();
-    let mut groups_by_signature: FxHashMap<TerminalActionSignature, Vec<TerminalID>> =
+    let mut groups_by_signature: FxHashMap<TerminalActionSignature<'a>, Vec<TerminalID>> =
         FxHashMap::default();
 
     for terminal in 0..grammar.num_terminals {
         groups_by_signature
-            .entry(terminal_action_signature(table, terminal))
+            .entry(terminal_action_signature_from_index(table, index, terminal))
             .or_default()
             .push(terminal);
     }
@@ -224,6 +281,27 @@ fn build_characterization_index(
         }
     }
 
+    debug_assert!(
+        action_states_by_terminal
+            .iter()
+            .all(|states| states.windows(2).all(|w| w[0] < w[1])),
+        "action states should be sorted and deduplicated by construction"
+    );
+
+    let mut forwarded_only_states_by_terminal = vec![Vec::new(); grammar.num_terminals as usize];
+    for &(state, terminal) in &table.forwarded_shifts {
+        if state >= table.num_states || table.action(state, terminal).is_some() {
+            continue;
+        }
+        if let Some(states) = forwarded_only_states_by_terminal.get_mut(terminal as usize) {
+            states.push(state);
+        }
+    }
+    for states in &mut forwarded_only_states_by_terminal {
+        states.sort_unstable();
+        states.dedup();
+    }
+
     let mut goto_predecessors_by_target = vec![Vec::new(); table.num_states as usize];
     for (revealed_state, row) in table.goto.iter().enumerate() {
         for (&nonterminal, &(goto_state, goto_replace)) in row.iter() {
@@ -235,6 +313,7 @@ fn build_characterization_index(
 
     CharacterizationIndex {
         action_states_by_terminal,
+        forwarded_only_states_by_terminal,
         goto_predecessors_by_target,
     }
 }
@@ -844,6 +923,22 @@ fn characterize_terminals_unquotiented(
         .collect()
 }
 
+fn validate_sparse_action_signatures(
+    index: &CharacterizationIndex,
+    table: &GLRTable,
+    grammar: &AnalyzedGrammar,
+) {
+    for terminal in 0..grammar.num_terminals {
+        let expected = dense_terminal_action_signature(table, terminal);
+        let actual = owned_terminal_action_signature_from_index(table, index, terminal);
+        assert_eq!(
+            actual,
+            expected,
+            "sparse terminal action signature mismatch for terminal {terminal}"
+        );
+    }
+}
+
 fn validate_characterization_quotient(
     index: &CharacterizationIndex,
     table: &GLRTable,
@@ -892,7 +987,7 @@ pub(crate) fn characterize_terminals_profiled(
         );
     }
 
-    let (groups, signature_ms) = group_terminals_by_action_signature(table, grammar);
+    let (groups, signature_ms) = group_terminals_by_action_signature(table, &index, grammar);
     let unique_action_signatures = groups.len();
     let max_action_signature_multiplicity = groups.iter().map(Vec::len).max().unwrap_or(0);
 
@@ -916,6 +1011,9 @@ pub(crate) fn characterize_terminals_profiled(
     let fanout_ms = elapsed_ms(fanout_started_at);
 
     let validation_started_at = Instant::now();
+    if sparse_action_signature_validation_enabled() {
+        validate_sparse_action_signatures(&index, table, grammar);
+    }
     if characterization_quotient_validation_enabled() {
         validate_characterization_quotient(&index, table, grammar, &characterizations);
     }
