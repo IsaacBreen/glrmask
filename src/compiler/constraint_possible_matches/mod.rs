@@ -6,8 +6,11 @@ use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
-use crate::compiler::constraint_possible_matches::collector::IntervalPossibleMatchMap;
+use crate::compiler::constraint_possible_matches::collector::{
+    IntervalPossibleMatchMap, TerminalRangeGroup, TrieClassBuildResult,
+};
 use crate::compiler::pm_profile::elapsed_ms;
+use crate::compiler::possible_matches::PossibleMatchesComputer;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap, MappedArtifact};
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::ds::weight::{shared_rangeset, Weight};
@@ -882,6 +885,111 @@ fn group_pmv_legacy_enabled() -> bool {
         .unwrap_or(false)
 }
 
+fn sparse_root_collect_enabled() -> bool {
+    std::env::var("GLRMASK_PM_SPARSE_ROOT_COLLECT")
+        .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
+}
+
+fn sparse_root_state_limit() -> usize {
+    std::env::var("GLRMASK_PM_SPARSE_ROOT_MAX_STATES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(128)
+}
+
+fn sparse_root_terminal_limit() -> usize {
+    std::env::var("GLRMASK_PM_SPARSE_ROOT_MAX_TERMINALS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(16)
+}
+
+fn root_terminal_union_count(tokenizer: &Tokenizer, states: &[u32]) -> usize {
+    let mut seen = vec![false; tokenizer.num_terminals as usize];
+    let mut count = 0usize;
+    for &state in states {
+        for terminal in tokenizer
+            .matched_terminals_iter(state)
+            .chain(tokenizer.possible_future_terminals_iter(state))
+        {
+            let slot = terminal as usize;
+            if slot < seen.len() && !seen[slot] {
+                seen[slot] = true;
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+fn interval_map_from_sparse_matches(
+    matches: &FxHashMap<TerminalID, RangeSetBlaze<u32>>,
+) -> IntervalPossibleMatchMap {
+    let mut by_ranges = BTreeMap::<Vec<(u32, u32)>, Vec<TerminalID>>::new();
+    for (&terminal, token_ids) in matches {
+        let ranges: Vec<(u32, u32)> = token_ids
+            .ranges()
+            .map(|range| (*range.start(), *range.end()))
+            .collect();
+        if !ranges.is_empty() {
+            by_ranges.entry(ranges).or_default().push(terminal);
+        }
+    }
+
+    let mut map = Vec::with_capacity(by_ranges.len());
+    for (ranges, mut terminals) in by_ranges {
+        terminals.sort_unstable();
+        terminals.dedup();
+        if !terminals.is_empty() {
+            map.push(TerminalRangeGroup {
+                terminals: terminals.into_boxed_slice(),
+                ranges,
+            });
+        }
+    }
+    map.sort_unstable_by(|left, right| {
+        left.terminals
+            .as_ref()
+            .cmp(right.terminals.as_ref())
+            .then_with(|| left.ranges.cmp(&right.ranges))
+    });
+    map
+}
+
+fn collect_sparse_root_possible_matches(
+    tokenizer: &Tokenizer,
+    root: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
+    entries: &[u32],
+    canonical_state: Option<&[u32]>,
+) -> TrieClassBuildResult {
+    let mut computer = PossibleMatchesComputer::new_with_canonical_state(tokenizer, canonical_state);
+    let mut state_classes = vec![u32::MAX; tokenizer.num_states() as usize];
+    let mut class_maps = Vec::<Arc<IntervalPossibleMatchMap>>::new();
+    let mut map_to_class = FxHashMap::<IntervalPossibleMatchMap, u32>::default();
+
+    for &state in entries {
+        let sparse_matches = computer.possible_matches_for_node(root, state);
+        let interval_map = interval_map_from_sparse_matches(sparse_matches.as_ref());
+        let class_id = if let Some(&class_id) = map_to_class.get(&interval_map) {
+            class_id
+        } else {
+            let class_id = class_maps.len() as u32;
+            map_to_class.insert(interval_map.clone(), class_id);
+            class_maps.push(Arc::new(interval_map));
+            class_id
+        };
+        if let Some(slot) = state_classes.get_mut(state as usize) {
+            *slot = class_id;
+        }
+    }
+
+    TrieClassBuildResult {
+        state_classes,
+        class_maps,
+    }
+}
+
 pub(crate) fn compute_constraint_possible_matches(
     tokenizer: &Tokenizer,
     token_bytes: &BTreeMap<u32, Vec<u8>>,
@@ -900,7 +1008,38 @@ pub(crate) fn compute_constraint_possible_matches(
         .initial_state_map
         .map(|init_map| canonical_states_from_initial_map(init_map, tokenizer.num_states()));
 
-    let (mut trie_class_result, _) = collector::collect_possible_matches_interval_trie_class_build_with_classes(tokenizer, &trie.root, &trie_build_states, canonical_states.as_deref());
+    let root_terminal_union = root_terminal_union_count(tokenizer, &trie_build_states);
+    let use_sparse_root_collect = sparse_root_collect_enabled()
+        && trie_build_states.len() <= sparse_root_state_limit()
+        && root_terminal_union <= sparse_root_terminal_limit();
+
+    let mut trie_class_result = if use_sparse_root_collect {
+        if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+        {
+            eprintln!(
+                "[glrmask/profile][trie_build_sparse_root] states={} terminals={} max_states={} max_terminals={}",
+                trie_build_states.len(),
+                root_terminal_union,
+                sparse_root_state_limit(),
+                sparse_root_terminal_limit(),
+            );
+        }
+        collect_sparse_root_possible_matches(
+            tokenizer,
+            &trie.root,
+            &trie_build_states,
+            canonical_states.as_deref(),
+        )
+    } else {
+        collector::collect_possible_matches_interval_trie_class_build_with_classes(
+            tokenizer,
+            &trie.root,
+            &trie_build_states,
+            canonical_states.as_deref(),
+        )
+        .0
+    };
     if let Some(init_map) = config.initial_state_map {
         trie_class_result.state_classes = compose_state_classes_with_initial_map(&trie_class_result.state_classes, init_map);
     }

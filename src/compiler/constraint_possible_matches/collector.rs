@@ -26,7 +26,7 @@ pub(crate) type TokenRange = (u32, u32);
 /// row denotes the Cartesian product `terminals × ranges`) and avoids creating
 /// millions of duplicate interval/event records for grammars where many
 /// terminals are recognized at the same tokenizer prefix.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct TerminalRangeGroup {
     pub(crate) terminals: Box<[TerminalID]>,
     pub(crate) ranges: Vec<TokenRange>,
@@ -477,7 +477,10 @@ pub(crate) fn collect_possible_matches_interval_trie_class_build_with_classes(
     let empty_terminals_id = terminal_sets.intern_slice(&[]);
     let node_terminal_ids: Vec<u32> = matched_terminals.iter().map(|terminals| terminal_sets.intern_slice(terminals)).collect();
     let parallel_depth = std::env::var("GLRMASK_PM_ROOT_PARALLEL_DEPTH").ok().and_then(|v| v.parse::<u8>().ok()).unwrap_or(5);
-    let parallel_min_active = std::env::var("GLRMASK_PM_PARALLEL_MIN_ACTIVE_STATES").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(1024);
+    let parallel_min_active = std::env::var("GLRMASK_PM_PARALLEL_MIN_ACTIVE_STATES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1024);
     if profile_summary_enabled() {
         eprintln!("[glrmask/profile][trie_build_interval] root_parallel_children={} parallel_depth={} parallel_min_active_states={}", root.children().len(), parallel_depth, parallel_min_active);
     }

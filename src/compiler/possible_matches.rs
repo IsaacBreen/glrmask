@@ -33,6 +33,7 @@ fn merge_possible_match_maps(into: &mut PossibleMatchMap, other: &PossibleMatchM
 
 pub(crate) struct PossibleMatchesComputer<'a> {
     tokenizer: &'a Tokenizer,
+    canonical_state: Option<&'a [u32]>,
     cache: FxHashMap<(usize, u32), Rc<PossibleMatchMap>>,
     reachable_cache: FxHashMap<usize, Rc<RangeSetBlaze<u32>>>,
     self_loop_bytes: FxHashMap<u32, U8Set>,
@@ -41,8 +42,16 @@ pub(crate) struct PossibleMatchesComputer<'a> {
 
 impl<'a> PossibleMatchesComputer<'a> {
     pub(crate) fn new(tokenizer: &'a Tokenizer) -> Self {
+        Self::new_with_canonical_state(tokenizer, None)
+    }
+
+    pub(crate) fn new_with_canonical_state(
+        tokenizer: &'a Tokenizer,
+        canonical_state: Option<&'a [u32]>,
+    ) -> Self {
         Self {
             tokenizer,
+            canonical_state,
             cache: FxHashMap::default(),
             reachable_cache: FxHashMap::default(),
             self_loop_bytes: FxHashMap::default(),
@@ -134,10 +143,14 @@ impl<'a> PossibleMatchesComputer<'a> {
             }
 
             if !segment_blocked && !self.tokenizer.is_end(current_state) {
-                if self.can_skip_self_loop_subtree(child, current_state) {
+                let descend_state = self
+                    .canonical_state
+                    .and_then(|map| map.get(current_state as usize).copied())
+                    .unwrap_or(current_state);
+                if self.can_skip_self_loop_subtree(child, descend_state) {
                     continue;
                 }
-                let child_matches = self.possible_matches_for_node(child, current_state);
+                let child_matches = self.possible_matches_for_node(child, descend_state);
                 merge_possible_match_maps(&mut result, child_matches.as_ref());
             }
         }
