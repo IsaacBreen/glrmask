@@ -2460,6 +2460,30 @@ fn pattern_all_branches_anchored(pattern: &str) -> bool {
     })
 }
 
+fn pattern_all_branches_unanchored(pattern: &str) -> bool {
+    let branches = split_top_level_regex_branches(pattern);
+    branches.iter().all(|b| {
+        let (start, end, _) = strip_branch_outer_anchors(b);
+        !start && !end
+    })
+}
+
+fn repeated_nonspace_words_max(pattern: &str) -> Option<usize> {
+    let branches = split_top_level_regex_branches(pattern);
+    let [branch] = branches.as_slice() else {
+        return None;
+    };
+    let (anchored_start, anchored_end, core) = strip_branch_outer_anchors(branch);
+    if !anchored_start || !anchored_end {
+        return None;
+    }
+
+    let prefix = r"(?:\S+\s+){0,";
+    let suffix = r"}\S+";
+    let digits = core.strip_prefix(prefix)?.strip_suffix(suffix)?;
+    digits.parse().ok()
+}
+
 fn json_string_literal_bytes(text: &str) -> Vec<u8> {
     serde_json::to_string(text)
         .unwrap_or_else(|_| format!("\"{}\"", text))
@@ -6281,6 +6305,9 @@ impl<'a> SchemaCtx<'a> {
             let Some(pattern) = prune_pattern_branches_for_min_length(pattern, min_len) else {
                 return Ok(self.extract_terminal_rule(never_expr(), "JSON_STRING_PATTERN_UNSAT"));
             };
+            if let Some(max_separators) = repeated_nonspace_words_max(&pattern) {
+                return Ok(self.build_json_nonspace_words_pattern(max_separators));
+            }
             if let Some(unit_expr) = simple_repeated_single_char_expr(&pattern) {
                 let required_min = min_len.max(1);
                 if matches!(max_len, Some(max) if max < required_min) {
@@ -6378,8 +6405,22 @@ impl<'a> SchemaCtx<'a> {
                     let term = self.extract_terminal_rule(terminal_body, "JSON_STRING_PATTERN_MINLEN");
                     return Ok(wrap(term));
                 }
+                if pattern_all_branches_unanchored(&pattern) {
+                    return Ok(self.build_unbounded_json_search_pattern(
+                        &pattern,
+                        "json_string_pattern_search",
+                        "JSON_STRING_PATTERN_CORE",
+                    ));
+                }
                 return Ok(self.build_json_wrapped_pattern(&pattern, "JSON_STRING_PATTERN"));
             } else {
+                if pattern_all_branches_unanchored(&pattern) {
+                    return Ok(self.build_unbounded_json_search_pattern(
+                        &pattern,
+                        "json_string_pattern_search",
+                        "JSON_STRING_PATTERN_CORE",
+                    ));
+                }
                 return Ok(self.build_json_wrapped_pattern(&pattern, "JSON_STRING_PATTERN"));
             }
         }
@@ -7690,6 +7731,69 @@ impl<'a> SchemaCtx<'a> {
         let (terminal_body, wrap) = wrap_string_value_expr_parts(body);
         let term = self.extract_terminal_rule(terminal_body, prefix);
         wrap(term)
+    }
+
+    fn build_unbounded_json_search_pattern(
+        &mut self,
+        pattern: &str,
+        rule_prefix: &str,
+        core_prefix: &str,
+    ) -> GrammarExpr {
+        let core_expr = LexerExpr::make_choice(
+            split_top_level_regex_branches(pattern)
+                .into_iter()
+                .map(|branch| {
+                    let (_, _, core) = strip_branch_outer_anchors(branch);
+                    decoded_regex_fullmatch_expr(core)
+                })
+                .collect(),
+        );
+        let core = self.build_lexer_expr(&core_expr, core_prefix);
+        self.extract_rule(
+            sequence_or_single(vec![
+                literal_expr(b"\""),
+                GrammarExpr::Ref(JSON_STRING_MIDDLE_RULE.into()),
+                core,
+                GrammarExpr::Ref(JSON_STRING_MIDDLE_END_RULE.into()),
+            ]),
+            rule_prefix,
+        )
+    }
+
+    fn build_json_nonspace_words_pattern(&mut self, max_separators: usize) -> GrammarExpr {
+        let whitespace_char = GrammarExpr::Ref(self.insert_shared_rule(
+            "JSON_STRING_PATTERN_WHITESPACE_CHAR",
+            expr_to_grammar_expr(&decoded_regex_fullmatch_expr(r"\s")),
+        ));
+        let nonspace_char = GrammarExpr::Ref(self.insert_shared_rule(
+            "JSON_STRING_PATTERN_NONSPACE_CHAR",
+            GrammarExpr::Exclude {
+                expr: Box::new(self.json_string_char_ref()),
+                exclude: Box::new(whitespace_char.clone()),
+            },
+        ));
+        let nonspace_run = GrammarExpr::Ref(self.insert_shared_rule(
+            "json_string_pattern_nonspace_run",
+            GrammarExpr::RepeatOne(Box::new(nonspace_char)),
+        ));
+        let whitespace_run = GrammarExpr::Ref(self.insert_shared_rule(
+            "json_string_pattern_whitespace_run",
+            GrammarExpr::RepeatOne(Box::new(whitespace_char)),
+        ));
+        let word_then_space = sequence_or_single(vec![nonspace_run.clone(), whitespace_run]);
+        self.extract_rule(
+            sequence_or_single(vec![
+                literal_expr(b"\""),
+                GrammarExpr::RepeatRange {
+                    expr: Box::new(word_then_space),
+                    min: 0,
+                    max: max_separators,
+                },
+                nonspace_run,
+                literal_expr(b"\""),
+            ]),
+            "json_string_pattern_words",
+        )
     }
 
     fn build_json_wrapped_fullmatch_pattern(
