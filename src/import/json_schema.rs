@@ -6413,7 +6413,8 @@ impl<'a> SchemaCtx<'a> {
                     expr: Box::new(search_expr),
                     intersect: Box::new(parse_regex(&length_inner, true)),
                 };
-                let body = self.build_lexer_expr(&intersected, "JSON_STRING_PATTERN_ANCHORED_BOUNDED");
+                        let body = self
+                            .build_pattern_lexer_expr(&intersected, "JSON_STRING_PATTERN_ANCHORED_BOUNDED");
                 let (terminal_body, wrap) = wrap_string_value_expr_parts(body);
                 let term = self.extract_terminal_rule(terminal_body, "JSON_STRING_PATTERN_ANCHORED_BOUNDED");
                 return Ok(wrap(term));
@@ -6434,7 +6435,8 @@ impl<'a> SchemaCtx<'a> {
                             expr: Box::new(search_expr),
                             intersect: Box::new(parse_regex(&length_inner, true)),
                         };
-                        let body = self.build_lexer_expr(&intersected, "JSON_STRING_PATTERN_BOUNDED");
+                        let body =
+                            self.build_pattern_lexer_expr(&intersected, "JSON_STRING_PATTERN_BOUNDED");
                         let (terminal_body, wrap) = wrap_string_value_expr_parts(body);
                         let term = self.extract_terminal_rule(terminal_body, "JSON_STRING_PATTERN_BOUNDED");
                         return Ok(wrap(term));
@@ -6450,7 +6452,8 @@ impl<'a> SchemaCtx<'a> {
                         expr: Box::new(search_expr),
                         intersect: Box::new(parse_regex(&length_inner, true)),
                     };
-                    let body = self.build_lexer_expr(&intersected, "JSON_STRING_PATTERN_MINLEN");
+                    let body =
+                        self.build_pattern_lexer_expr(&intersected, "JSON_STRING_PATTERN_MINLEN");
                     let (terminal_body, wrap) = wrap_string_value_expr_parts(body);
                     let term = self.extract_terminal_rule(terminal_body, "JSON_STRING_PATTERN_MINLEN");
                     return Ok(wrap(term));
@@ -7752,7 +7755,7 @@ impl<'a> SchemaCtx<'a> {
 
     fn pattern_key_colon_body_expr(&mut self, pattern: &str, prefix: &str) -> GrammarExpr {
         let expr = decoded_regex_search_expr(pattern, None);
-        self.build_lexer_expr(&expr, prefix)
+        self.build_pattern_lexer_expr(&expr, prefix)
     }
 
     fn build_pattern_key_colon_expr(&mut self, pattern: &str, prefix: &str) -> GrammarExpr {
@@ -7763,7 +7766,7 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn build_json_wrapped_pattern(&mut self, pattern: &str, prefix: &str) -> GrammarExpr {
-        let body = self.build_lexer_expr(&decoded_regex_search_expr(pattern, None), prefix);
+        let body = self.build_pattern_lexer_expr(&decoded_regex_search_expr(pattern, None), prefix);
         let (terminal_body, wrap) = wrap_string_value_expr_parts(body);
         let term = self.extract_terminal_rule(terminal_body, prefix);
         wrap(term)
@@ -7774,7 +7777,7 @@ impl<'a> SchemaCtx<'a> {
         pattern: &str,
         prefix: &str,
     ) -> GrammarExpr {
-        let body = self.build_lexer_expr(&decoded_regex_fullmatch_expr(pattern), prefix);
+        let body = self.build_pattern_lexer_expr(&decoded_regex_fullmatch_expr(pattern), prefix);
         let (terminal_body, wrap) = wrap_string_value_expr_parts(body);
         let term = self.extract_terminal_rule(terminal_body, prefix);
         wrap(term)
@@ -7889,6 +7892,10 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn build_lexer_expr(&mut self, expr: &LexerExpr, prefix: &str) -> GrammarExpr {
+        self.extract_terminal_rule(expr_to_grammar_expr(expr), prefix)
+    }
+
+    fn build_pattern_lexer_expr(&mut self, expr: &LexerExpr, prefix: &str) -> GrammarExpr {
         self.extract_terminal_rule(json_pattern_grammar_expr(expr), prefix)
     }
 
