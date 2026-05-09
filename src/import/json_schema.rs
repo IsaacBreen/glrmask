@@ -2408,20 +2408,56 @@ fn wrap_string_value_expr_parts(
     is_pattern: bool,
 ) -> (GrammarExpr, Box<dyn FnOnce(GrammarExpr) -> GrammarExpr>) {
     let merge_config = json_string_merge_config(is_pattern);
-    let mut terminal_parts = Vec::new();
-    if merge_config.merge_open {
-        terminal_parts.push(literal_expr(b"\""));
-    }
-    terminal_parts.push(body);
-    if merge_config.merge_close {
-        terminal_parts.push(literal_expr(b"\""));
-    }
-    let terminal_body = sequence_or_single(terminal_parts);
+    let terminal_body = wrap_expr_with_string_literals(body, merge_config);
     // Wrap the terminal ref with split-off quotes
     let wrap = move |term: GrammarExpr| -> GrammarExpr {
         wrap_string_value_terminal(term, merge_config)
     };
     (terminal_body, Box::new(wrap))
+}
+
+fn wrap_expr_with_string_literals(
+    body: GrammarExpr,
+    merge_config: JsonStringMergeConfig,
+) -> GrammarExpr {
+    let with_open = if merge_config.merge_open {
+        prepend_literal_preserving_group_ops(body, literal_expr(b"\""))
+    } else {
+        body
+    };
+    if merge_config.merge_close {
+        append_literal_preserving_group_ops(with_open, literal_expr(b"\""))
+    } else {
+        with_open
+    }
+}
+
+fn prepend_literal_preserving_group_ops(expr: GrammarExpr, literal: GrammarExpr) -> GrammarExpr {
+    match expr {
+        GrammarExpr::Intersect { expr, intersect } => GrammarExpr::Intersect {
+            expr: Box::new(prepend_literal_preserving_group_ops(*expr, literal.clone())),
+            intersect: Box::new(prepend_literal_preserving_group_ops(*intersect, literal)),
+        },
+        GrammarExpr::Exclude { expr, exclude } => GrammarExpr::Exclude {
+            expr: Box::new(prepend_literal_preserving_group_ops(*expr, literal.clone())),
+            exclude: Box::new(prepend_literal_preserving_group_ops(*exclude, literal)),
+        },
+        other => sequence_or_single(vec![literal, other]),
+    }
+}
+
+fn append_literal_preserving_group_ops(expr: GrammarExpr, literal: GrammarExpr) -> GrammarExpr {
+    match expr {
+        GrammarExpr::Intersect { expr, intersect } => GrammarExpr::Intersect {
+            expr: Box::new(append_literal_preserving_group_ops(*expr, literal.clone())),
+            intersect: Box::new(append_literal_preserving_group_ops(*intersect, literal)),
+        },
+        GrammarExpr::Exclude { expr, exclude } => GrammarExpr::Exclude {
+            expr: Box::new(append_literal_preserving_group_ops(*expr, literal.clone())),
+            exclude: Box::new(append_literal_preserving_group_ops(*exclude, literal)),
+        },
+        other => sequence_or_single(vec![other, literal]),
+    }
 }
 
 fn wrap_key_colon_expr_parts(body: GrammarExpr) -> (GrammarExpr, Box<dyn FnOnce(GrammarExpr) -> GrammarExpr>) {
@@ -8056,7 +8092,7 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn build_pattern_lexer_expr(&mut self, expr: &LexerExpr, prefix: &str) -> GrammarExpr {
-        self.extract_terminal_rule(json_pattern_grammar_expr(expr), prefix)
+        self.extract_json_pattern_lexer_expr_decomposed(expr.clone(), prefix)
     }
 
     fn add_option_expr(slot: &mut Option<LexerExpr>, new_expr: LexerExpr) {
@@ -8099,6 +8135,32 @@ impl<'a> SchemaCtx<'a> {
                 }
             }
             other => self.extract_terminal_rule(expr_to_grammar_expr(&other), prefix),
+        }
+    }
+
+    fn extract_json_pattern_lexer_expr_decomposed(
+        &mut self,
+        expr: LexerExpr,
+        prefix: &str,
+    ) -> GrammarExpr {
+        match expr {
+            LexerExpr::Intersect { expr, intersect } => {
+                let left = self.extract_json_pattern_lexer_expr_decomposed(*expr, prefix);
+                let right = self.extract_json_pattern_lexer_expr_decomposed(*intersect, prefix);
+                GrammarExpr::Intersect {
+                    expr: Box::new(left),
+                    intersect: Box::new(right),
+                }
+            }
+            LexerExpr::Exclude { expr, exclude } => {
+                let left = self.extract_json_pattern_lexer_expr_decomposed(*expr, prefix);
+                let right = self.extract_json_pattern_lexer_expr_decomposed(*exclude, prefix);
+                GrammarExpr::Exclude {
+                    expr: Box::new(left),
+                    exclude: Box::new(right),
+                }
+            }
+            other => self.extract_terminal_rule(json_pattern_grammar_expr(&other), prefix),
         }
     }
 
@@ -9688,7 +9750,9 @@ mod tests {
     use super::json_string_merge_config;
     use super::schema_to_named_grammar;
     use super::string_value_body_regex;
+    use super::wrap_string_value_expr_parts;
     use crate::grammar::glrm::to_glrm;
+    use crate::grammar::ast::GrammarExpr;
     use serde_json::json;
     use std::{env, ffi::OsString, sync::Mutex};
 
@@ -9815,6 +9879,36 @@ mod tests {
         assert!(baseline_pattern.ends_with("\";"));
         assert!(overridden_pattern.contains("::= \"\\\"\" "));
         assert!(!overridden_pattern.ends_with("\";"));
+    }
+
+    #[test]
+    fn pattern_string_wrap_keeps_intersect_top_level() {
+        let body = GrammarExpr::Intersect {
+            expr: Box::new(GrammarExpr::Ref("lhs".into())),
+            intersect: Box::new(GrammarExpr::Ref("rhs".into())),
+        };
+
+        let (wrapped, _) = wrap_string_value_expr_parts(body, true);
+
+        match wrapped {
+            GrammarExpr::Intersect { expr, intersect } => {
+                assert_eq!(
+                    *expr,
+                    GrammarExpr::Sequence(vec![
+                        GrammarExpr::Ref("lhs".into()),
+                        GrammarExpr::Literal(b"\"".to_vec()),
+                    ])
+                );
+                assert_eq!(
+                    *intersect,
+                    GrammarExpr::Sequence(vec![
+                        GrammarExpr::Ref("rhs".into()),
+                        GrammarExpr::Literal(b"\"".to_vec()),
+                    ])
+                );
+            }
+            other => panic!("expected top-level intersect, got {other:?}"),
+        }
     }
 }
 
