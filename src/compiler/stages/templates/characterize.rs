@@ -69,6 +69,12 @@ pub(crate) struct TerminalCharacterizationProfile {
 
 type TerminalActionSignature = Vec<(u32, Option<Action>, bool)>;
 
+#[derive(Debug, Clone, Default)]
+struct CharacterizationIndex {
+    action_states_by_terminal: Vec<Vec<u32>>,
+    goto_predecessors_by_target: Vec<Vec<(u32, NonterminalID, bool)>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct RelationConfig {
     input: Vec<StackMatcher>,
@@ -203,6 +209,34 @@ fn group_terminals_by_action_signature(
     let mut groups: Vec<Vec<TerminalID>> = groups_by_signature.into_values().collect();
     groups.sort_by_key(|terminals| terminals.first().copied().unwrap_or(u32::MAX));
     (groups, elapsed_ms(signature_started_at))
+}
+
+fn build_characterization_index(
+    table: &GLRTable,
+    grammar: &AnalyzedGrammar,
+) -> CharacterizationIndex {
+    let mut action_states_by_terminal = vec![Vec::new(); grammar.num_terminals as usize];
+    for (state, row) in table.action.iter().enumerate() {
+        for (&terminal, _) in row.iter() {
+            if let Some(states) = action_states_by_terminal.get_mut(terminal as usize) {
+                states.push(state as u32);
+            }
+        }
+    }
+
+    let mut goto_predecessors_by_target = vec![Vec::new(); table.num_states as usize];
+    for (revealed_state, row) in table.goto.iter().enumerate() {
+        for (&nonterminal, &(goto_state, goto_replace)) in row.iter() {
+            if let Some(predecessors) = goto_predecessors_by_target.get_mut(goto_state as usize) {
+                predecessors.push((revealed_state as u32, nonterminal, goto_replace));
+            }
+        }
+    }
+
+    CharacterizationIndex {
+        action_states_by_terminal,
+        goto_predecessors_by_target,
+    }
 }
 
 fn build_rereduce_adjacency(nt_rereduces: &[NtRereduce]) -> NtAdjacency {
@@ -678,10 +712,15 @@ fn drain_nonconsuming_worklist(
 
 fn characterize_initial_actions_for_terminal(
     table: &GLRTable,
+    index: &CharacterizationIndex,
     terminal: TerminalID,
     output: &mut CharacterizationOutput,
 ) {
-    for state in 0..table.num_states {
+    let Some(states) = index.action_states_by_terminal.get(terminal as usize) else {
+        return;
+    };
+
+    for &state in states {
         let Some(action) = table.action(state, terminal) else {
             continue;
         };
@@ -715,16 +754,21 @@ fn characterize_initial_actions_for_terminal(
 
 fn characterize_nt_continuations_for_terminal(
     table: &GLRTable,
+    index: &CharacterizationIndex,
     terminal: TerminalID,
     output: &mut CharacterizationOutput,
 ) {
-    for revealed_state in 0..table.num_states {
-        let Some(gotos) = table.goto.get(revealed_state as usize) else {
+    let Some(action_states) = index.action_states_by_terminal.get(terminal as usize) else {
+        return;
+    };
+
+    for &top_state in action_states {
+        let Some(predecessors) = index.goto_predecessors_by_target.get(top_state as usize) else {
             continue;
         };
 
-        for (&nonterminal, &(goto_state, goto_replace)) in gotos {
-            let config = start_relation_after_goto(revealed_state, goto_state, goto_replace);
+        for &(revealed_state, nonterminal, goto_replace) in predecessors {
+            let config = start_relation_after_goto(revealed_state, top_state, goto_replace);
             let mut seen = BTreeSet::from([config.clone()]);
             let mut worklist = VecDeque::from([config]);
 
@@ -742,11 +786,12 @@ fn characterize_nt_continuations_for_terminal(
 
 fn characterize_terminal(
     table: &GLRTable,
+    index: &CharacterizationIndex,
     terminal: TerminalID,
 ) -> TerminalCharacterization {
     let mut output = CharacterizationOutput::default();
-    characterize_initial_actions_for_terminal(table, terminal, &mut output);
-    characterize_nt_continuations_for_terminal(table, terminal, &mut output);
+    characterize_initial_actions_for_terminal(table, index, terminal, &mut output);
+    characterize_nt_continuations_for_terminal(table, index, terminal, &mut output);
 
     let mut referenced_nts = BTreeSet::new();
     for reduce in &output.reduces {
@@ -787,24 +832,26 @@ pub(crate) fn characterize_terminals(
 }
 
 fn characterize_terminals_unquotiented(
+    index: &CharacterizationIndex,
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
 ) -> BTreeMap<TerminalID, TerminalCharacterization> {
     (0..grammar.num_terminals)
         .map(|terminal| {
-            let characterization = characterize_terminal(table, terminal);
+            let characterization = characterize_terminal(table, index, terminal);
             (terminal, characterization)
         })
         .collect()
 }
 
 fn validate_characterization_quotient(
+    index: &CharacterizationIndex,
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
     characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
 ) {
     for terminal in 0..grammar.num_terminals {
-        let expected = characterize_terminal(table, terminal);
+        let expected = characterize_terminal(table, index, terminal);
         let actual = characterizations
             .get(&terminal)
             .unwrap_or_else(|| panic!("missing characterization for terminal {terminal}"));
@@ -824,10 +871,11 @@ pub(crate) fn characterize_terminals_profiled(
 
     let total_started_at = Instant::now();
     let terminal_count = grammar.num_terminals as usize;
+    let index = build_characterization_index(table, grammar);
 
     if characterization_quotient_disabled() {
         let characterize_started_at = Instant::now();
-        let characterizations = characterize_terminals_unquotiented(table, grammar);
+        let characterizations = characterize_terminals_unquotiented(&index, table, grammar);
         let characterize_ms = elapsed_ms(characterize_started_at);
         let total_ms = elapsed_ms(total_started_at);
         return (
@@ -853,7 +901,7 @@ pub(crate) fn characterize_terminals_profiled(
         .into_par_iter()
         .map(|terminals| {
             let representative = terminals[0];
-            (terminals, characterize_terminal(table, representative))
+            (terminals, characterize_terminal(table, &index, representative))
         })
         .collect();
     let characterize_ms = elapsed_ms(characterize_started_at);
@@ -869,7 +917,7 @@ pub(crate) fn characterize_terminals_profiled(
 
     let validation_started_at = Instant::now();
     if characterization_quotient_validation_enabled() {
-        validate_characterization_quotient(table, grammar, &characterizations);
+        validate_characterization_quotient(&index, table, grammar, &characterizations);
     }
     let validation_ms = elapsed_ms(validation_started_at);
 
