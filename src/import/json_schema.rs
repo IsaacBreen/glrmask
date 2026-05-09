@@ -1156,31 +1156,20 @@ fn is_regex_metachar(byte: u8) -> bool {
     matches!(byte, b'[' | b']' | b'(' | b')' | b'{' | b'}' | b'.' | b'*' | b'+' | b'?' | b'|' | b'^' | b'$' | b'\\')
 }
 
-fn hex_nibble_chars(value: u8) -> Vec<char> {
+fn hex_nibble_fragment(value: u8) -> String {
     match value {
-        0..=9 => vec![char::from(b'0' + value)],
-        10..=15 => vec![
-            char::from(b'A' + value - 10),
-            char::from(b'a' + value - 10),
-        ],
-        _ => Vec::new(),
+        0..=9 => char::from(b'0' + value).to_string(),
+        10..=15 => format!("[{}{}]", char::from(b'A' + value - 10), char::from(b'a' + value - 10)),
+        _ => String::new(),
     }
 }
 
 fn json_unicode_escape_fragment(byte: u8) -> String {
-    let high = hex_nibble_chars((byte >> 4) & 0x0F);
-    let low = hex_nibble_chars(byte & 0x0F);
-    let mut options = Vec::new();
-    for high in &high {
-        for low in &low {
-            options.push(format!(r#"\x5Cu00{high}{low}"#));
-        }
-    }
-    if options.len() == 1 {
-        options.pop().unwrap()
-    } else {
-        format!("(?:{})", options.join("|"))
-    }
+    format!(
+        r#"\x5Cu00{}{}"#,
+        hex_nibble_fragment((byte >> 4) & 0x0F),
+        hex_nibble_fragment(byte & 0x0F)
+    )
 }
 
 fn json_escaped_byte_fragments(byte: u8) -> Vec<String> {
