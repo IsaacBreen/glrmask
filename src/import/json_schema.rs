@@ -1706,10 +1706,25 @@ fn json_string_merge_config(is_pattern: bool) -> JsonStringMergeConfig {
         return base;
     }
 
+    let pattern_default = JsonStringMergeConfig {
+        merge_open: true,
+        merge_close: false,
+    };
+
     JsonStringMergeConfig {
         merge_open: env_flag_optional("GLRMASK_JSON_PATTERN_STRING_MERGE_OPEN")
-            .unwrap_or(base.merge_open),
+            .unwrap_or(pattern_default.merge_open),
         merge_close: env_flag_optional("GLRMASK_JSON_PATTERN_STRING_MERGE_CLOSE")
+            .unwrap_or(pattern_default.merge_close),
+    }
+}
+
+fn json_literal_string_merge_config() -> JsonStringMergeConfig {
+    let base = json_string_merge_config(false);
+    JsonStringMergeConfig {
+        merge_open: env_flag_optional("GLRMASK_JSON_LITERAL_STRING_MERGE_OPEN")
+            .unwrap_or(base.merge_open),
+        merge_close: env_flag_optional("GLRMASK_JSON_LITERAL_STRING_MERGE_CLOSE")
             .unwrap_or(base.merge_close),
     }
 }
@@ -2792,7 +2807,7 @@ fn json_value_literal_expr(value: &Value) -> GrammarExpr {
         let body = literal_expr(&body_bytes);
 
         // Wrap with split-off quotes
-        wrap_string_value_terminal(body, json_string_merge_config(false))
+        wrap_string_value_terminal(body, json_literal_string_merge_config())
     } else {
         literal_expr(&bytes)
     }
@@ -9747,6 +9762,7 @@ fn repeat_expr(item: GrammarExpr, min: usize, max: Option<usize>) -> GrammarExpr
 
 #[cfg(test)]
 mod tests {
+    use super::json_literal_string_merge_config;
     use super::json_string_merge_config;
     use super::schema_to_named_grammar;
     use super::string_value_body_regex;
@@ -9834,51 +9850,54 @@ mod tests {
         let _lock = ENV_LOCK.lock().unwrap();
         let _string_open = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_OPEN");
         let _string_close = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_CLOSE");
+        let _literal_open = EnvVarGuard::unset("GLRMASK_JSON_LITERAL_STRING_MERGE_OPEN");
+        let _literal_close = EnvVarGuard::unset("GLRMASK_JSON_LITERAL_STRING_MERGE_CLOSE");
         let _pattern_open = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_STRING_MERGE_OPEN");
         let _pattern_close = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_STRING_MERGE_CLOSE");
 
         let default_cfg = json_string_merge_config(false);
+        let literal_cfg = json_literal_string_merge_config();
         let pattern_cfg = json_string_merge_config(true);
         assert_eq!(default_cfg.merge_open, false);
         assert_eq!(default_cfg.merge_close, true);
-        assert_eq!(pattern_cfg, default_cfg);
+        assert_eq!(literal_cfg, default_cfg);
+        assert_eq!(pattern_cfg.merge_open, true);
+        assert_eq!(pattern_cfg.merge_close, false);
         assert_eq!(string_value_body_regex("a+", false), "(?:a+)\"");
+        assert_eq!(string_value_body_regex("a+", true), "\"(?:a+)");
     }
 
     #[test]
-    fn pattern_string_merge_override_changes_only_pattern_rule() {
+    fn string_merge_env_layers_resolve_pattern_and_literal_independently() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _string_open = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_OPEN");
         let _string_close = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_CLOSE");
+        let _literal_open = EnvVarGuard::unset("GLRMASK_JSON_LITERAL_STRING_MERGE_OPEN");
+        let _literal_close = EnvVarGuard::unset("GLRMASK_JSON_LITERAL_STRING_MERGE_CLOSE");
         let _pattern_open = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_STRING_MERGE_OPEN");
         let _pattern_close = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_STRING_MERGE_CLOSE");
 
-        let schema = json!({
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "patternValue": { "type": "string", "pattern": "^a+$" },
-                "boundedValue": { "type": "string", "minLength": 1, "maxLength": 2 }
-            },
-            "required": ["patternValue", "boundedValue"]
-        });
+        let _string_open = EnvVarGuard::set("GLRMASK_JSON_STRING_MERGE_OPEN", "1");
+        let _string_close = EnvVarGuard::set("GLRMASK_JSON_STRING_MERGE_CLOSE", "0");
+        let _literal_open = EnvVarGuard::set("GLRMASK_JSON_LITERAL_STRING_MERGE_OPEN", "0");
+        let _literal_close = EnvVarGuard::set("GLRMASK_JSON_LITERAL_STRING_MERGE_CLOSE", "1");
 
-        let baseline = dump_glrm(schema.clone());
-        let baseline_pattern = find_rule_line_with_prefix(&baseline, "JSON_STRING_PATTERN_").to_string();
-        let baseline_bounded = find_rule_line_with_prefix(&baseline, "JSON_STRING_BOUNDED_").to_string();
+        let generic_cfg = json_string_merge_config(false);
+        let literal_cfg = json_literal_string_merge_config();
+        let pattern_cfg = json_string_merge_config(true);
 
-        let _pattern_open = EnvVarGuard::set("GLRMASK_JSON_PATTERN_STRING_MERGE_OPEN", "1");
-        let _pattern_close = EnvVarGuard::set("GLRMASK_JSON_PATTERN_STRING_MERGE_CLOSE", "0");
+        assert_eq!(generic_cfg.merge_open, true);
+        assert_eq!(generic_cfg.merge_close, false);
+        assert_eq!(literal_cfg.merge_open, false);
+        assert_eq!(literal_cfg.merge_close, true);
+        assert_eq!(pattern_cfg.merge_open, true);
+        assert_eq!(pattern_cfg.merge_close, false);
 
-        let overridden = dump_glrm(schema);
-        let overridden_pattern = find_rule_line_with_prefix(&overridden, "JSON_STRING_PATTERN_").to_string();
-        let overridden_bounded = find_rule_line_with_prefix(&overridden, "JSON_STRING_BOUNDED_").to_string();
-
-        assert_ne!(baseline_pattern, overridden_pattern);
-        assert_eq!(baseline_bounded, overridden_bounded);
-        assert!(baseline_pattern.ends_with("\";"));
-        assert!(overridden_pattern.contains("::= \"\\\"\" "));
-        assert!(!overridden_pattern.ends_with("\";"));
+        let _pattern_open = EnvVarGuard::set("GLRMASK_JSON_PATTERN_STRING_MERGE_OPEN", "0");
+        let _pattern_close = EnvVarGuard::set("GLRMASK_JSON_PATTERN_STRING_MERGE_CLOSE", "1");
+        let pattern_override_cfg = json_string_merge_config(true);
+        assert_eq!(pattern_override_cfg.merge_open, false);
+        assert_eq!(pattern_override_cfg.merge_close, true);
     }
 
     #[test]
@@ -9895,15 +9914,15 @@ mod tests {
                 assert_eq!(
                     *expr,
                     GrammarExpr::Sequence(vec![
-                        GrammarExpr::Ref("lhs".into()),
                         GrammarExpr::Literal(b"\"".to_vec()),
+                        GrammarExpr::Ref("lhs".into()),
                     ])
                 );
                 assert_eq!(
                     *intersect,
                     GrammarExpr::Sequence(vec![
-                        GrammarExpr::Ref("rhs".into()),
                         GrammarExpr::Literal(b"\"".to_vec()),
+                        GrammarExpr::Ref("rhs".into()),
                     ])
                 );
             }
