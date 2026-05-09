@@ -125,10 +125,12 @@ struct PredEdge<'a> {
 #[derive(Clone)]
 struct GuardedFinalWeight {
     weight: Weight,
-    /// `Some(ptr_key)` is a proof that `weight` is a subset of the weight with
-    /// this interned pointer.  It lets finality propagation skip idempotent
-    /// intersections along chains of equal parser-template edge weights.
-    subset_of: Option<usize>,
+    /// `Some(weight)` is a proof that `weight` is a subset of the cloned,
+    /// interned edge weight stored here. Owning the guard prevents pointer
+    /// reuse / ABA issues while the proof exists and still lets finality
+    /// propagation skip idempotent intersections along chains of equal
+    /// parser-template edge weights.
+    subset_of: Option<Weight>,
 }
 
 impl GuardedFinalWeight {
@@ -139,34 +141,39 @@ impl GuardedFinalWeight {
         })
     }
 
+    fn is_guarded_by(&self, edge_weight: &Weight) -> bool {
+        self.subset_of
+            .as_ref()
+            .is_some_and(|guard| Arc::ptr_eq(&guard.0, &edge_weight.0))
+    }
+
     fn intersection_with_edge(&self, edge_weight: &Weight) -> Option<Self> {
         if self.weight.is_empty() || edge_weight.is_empty() {
             return None;
         }
 
-        let edge_key = edge_weight.ptr_key();
-        if self.subset_of == Some(edge_key) {
+        if self.is_guarded_by(edge_weight) {
             return Some(self.clone());
         }
 
         if edge_weight.is_full() {
             return Some(Self {
                 weight: self.weight.clone(),
-                subset_of: Some(edge_key),
+                subset_of: Some(edge_weight.clone()),
             });
         }
 
         if self.weight.is_full() {
             return Some(Self {
                 weight: edge_weight.clone(),
-                subset_of: Some(edge_key),
+                subset_of: Some(edge_weight.clone()),
             });
         }
 
         let weight = self.weight.intersection(edge_weight);
         (!weight.is_empty()).then_some(Self {
             weight,
-            subset_of: Some(edge_key),
+            subset_of: Some(edge_weight.clone()),
         })
     }
 }
@@ -183,8 +190,13 @@ fn merge_guarded_final_weight(
         Some(existing) => {
             let updated = existing.weight.union(&add.weight);
             if updated != existing.weight {
-                let subset_of = if existing.subset_of == add.subset_of {
-                    existing.subset_of
+                let subset_of = if existing
+                    .subset_of
+                    .as_ref()
+                    .zip(add.subset_of.as_ref())
+                    .is_some_and(|(left, right)| Arc::ptr_eq(&left.0, &right.0))
+                {
+                    existing.subset_of.clone()
                 } else {
                     None
                 };
@@ -209,12 +221,14 @@ fn union_guarded_pending(
         [] => None,
         [single] => Some(single.clone()),
         _ => {
-            let first_guard = pending[0].subset_of;
-            let shared_guard = pending
-                .iter()
-                .all(|entry| entry.subset_of == first_guard)
-                .then_some(first_guard)
-                .flatten();
+            let shared_guard = pending[0].subset_of.clone().filter(|first_guard| {
+                pending[1..].iter().all(|entry| {
+                    entry
+                        .subset_of
+                        .as_ref()
+                        .is_some_and(|guard| Arc::ptr_eq(&first_guard.0, &guard.0))
+                })
+            });
             let weight = Weight::union_all(pending.iter().map(|entry| &entry.weight));
             (!weight.is_empty()).then_some(GuardedFinalWeight {
                 weight,
