@@ -1588,7 +1588,9 @@ pub fn expr_to_grammar_expr(expr: &Expr) -> GrammarExpr {
         },
         Expr::Epsilon => GrammarExpr::Epsilon,
         Expr::Seq(parts) => {
-            let items: Vec<_> = parts.iter().map(expr_to_grammar_expr).collect();
+            let items = coalesce_adjacent_literal_exprs(
+                parts.iter().map(expr_to_grammar_expr).collect(),
+            );
             match items.len() {
                 0 => GrammarExpr::Epsilon,
                 1 => items.into_iter().next().unwrap(),
@@ -1629,6 +1631,33 @@ pub fn expr_to_grammar_expr(expr: &Expr) -> GrammarExpr {
         }
         Expr::Shared(inner) => expr_to_grammar_expr(inner),
     }
+}
+
+fn coalesce_adjacent_literal_exprs(items: Vec<GrammarExpr>) -> Vec<GrammarExpr> {
+    let mut out = Vec::with_capacity(items.len());
+    let mut pending_literal: Option<Vec<u8>> = None;
+
+    for item in items {
+        match item {
+            GrammarExpr::Literal(bytes) => {
+                pending_literal
+                    .get_or_insert_with(Vec::new)
+                    .extend_from_slice(&bytes);
+            }
+            other => {
+                if let Some(bytes) = pending_literal.take() {
+                    out.push(GrammarExpr::Literal(bytes));
+                }
+                out.push(other);
+            }
+        }
+    }
+
+    if let Some(bytes) = pending_literal {
+        out.push(GrammarExpr::Literal(bytes));
+    }
+
+    out
 }
 
 /// Encode a [`U8Set`] as a character-class definition string (without the surrounding `[...]`).
