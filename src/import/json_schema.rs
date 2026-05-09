@@ -1682,6 +1682,14 @@ struct JsonStringMergeConfig {
     merge_close: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum JsonSchemaUriMode {
+    Structured,
+    StructuredSingleTerminal,
+    LlguidancePattern,
+    Approx,
+}
+
 fn env_flag_optional(name: &str) -> Option<bool> {
     std::env::var(name).ok().map(|v| {
         let n = v.trim().to_ascii_lowercase();
@@ -1727,6 +1735,70 @@ fn json_literal_string_merge_config() -> JsonStringMergeConfig {
         merge_close: env_flag_optional("GLRMASK_JSON_LITERAL_STRING_MERGE_CLOSE")
             .unwrap_or(base.merge_close),
     }
+}
+
+fn json_uri_merge_config() -> JsonStringMergeConfig {
+    let base = json_string_merge_config(false);
+    JsonStringMergeConfig {
+        merge_open: env_flag_optional("GLRMASK_JSON_URI_MERGE_OPEN")
+            .unwrap_or(base.merge_open),
+        merge_close: env_flag_optional("GLRMASK_JSON_URI_MERGE_CLOSE")
+            .unwrap_or(base.merge_close),
+    }
+}
+
+fn json_uri_merge_env_explicitly_set() -> bool {
+    std::env::var_os("GLRMASK_JSON_URI_MERGE_OPEN").is_some()
+        || std::env::var_os("GLRMASK_JSON_URI_MERGE_CLOSE").is_some()
+}
+
+fn uri_quote_merge_warning_needed(mode: JsonSchemaUriMode, strict_uri: bool) -> bool {
+    mode == JsonSchemaUriMode::Structured
+        && strict_uri
+        && json_uri_merge_env_explicitly_set()
+}
+
+fn parse_json_schema_uri_mode(value: &str) -> Option<JsonSchemaUriMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "structured" => Some(JsonSchemaUriMode::Structured),
+        "structured_single_terminal" => Some(JsonSchemaUriMode::StructuredSingleTerminal),
+        "llguidance_pattern" => Some(JsonSchemaUriMode::LlguidancePattern),
+        "approx" => Some(JsonSchemaUriMode::Approx),
+        _ => None,
+    }
+}
+
+fn json_schema_uri_mode() -> JsonSchemaUriMode {
+    if let Ok(value) = std::env::var("GLRMASK_JSON_SCHEMA_URI_MODE") {
+        return parse_json_schema_uri_mode(&value).unwrap_or_else(|| {
+            panic!("invalid GLRMASK_JSON_SCHEMA_URI_MODE={value:?}; expected one of structured, structured_single_terminal, llguidance_pattern, approx")
+        });
+    }
+
+    if std::env::var_os("GLRMASK_RESTORED_STRUCTURED_URI").is_some() {
+        eprintln!(
+            "[glrmask/import][warn] GLRMASK_RESTORED_STRUCTURED_URI is deprecated; use GLRMASK_JSON_SCHEMA_URI_MODE instead"
+        );
+        return if restored_structured_uri_enabled() {
+            JsonSchemaUriMode::Structured
+        } else {
+            JsonSchemaUriMode::LlguidancePattern
+        };
+    }
+
+    if std::env::var_os("GLRMASK_SIMPLE_URI_FORMAT").is_some() && simple_uri_format_enabled() {
+        return JsonSchemaUriMode::Approx;
+    }
+
+    if std::env::var_os("GLRMASK_STRUCT_URI_FORMAT").is_some() {
+        return if use_structured_uri() {
+            JsonSchemaUriMode::LlguidancePattern
+        } else {
+            JsonSchemaUriMode::Structured
+        };
+    }
+
+    JsonSchemaUriMode::Structured
 }
 
 // ---------------------------------------------------------------------------
@@ -2067,6 +2139,12 @@ fn uri_explicit_ipv6_rules_enabled() -> bool {
 }
 
 fn uri_rule_should_be_terminal(name: &str) -> Option<bool> {
+    if json_schema_uri_mode() == JsonSchemaUriMode::StructuredSingleTerminal
+        && (name == "uri" || name.starts_with("uri_"))
+    {
+        return Some(true);
+    }
+
     match name {
         "uri_scheme" => Some(env_flag_default("GLRMASK_URI_SCHEME_TERMINAL", false)),
         "uri_alpha_char" => Some(env_flag_default("GLRMASK_URI_ALPHA_CHAR_TERMINAL", true)),
@@ -2423,6 +2501,13 @@ fn wrap_string_value_expr_parts(
     is_pattern: bool,
 ) -> (GrammarExpr, Box<dyn FnOnce(GrammarExpr) -> GrammarExpr>) {
     let merge_config = json_string_merge_config(is_pattern);
+    wrap_string_value_expr_parts_with_merge_config(body, merge_config)
+}
+
+fn wrap_string_value_expr_parts_with_merge_config(
+    body: GrammarExpr,
+    merge_config: JsonStringMergeConfig,
+) -> (GrammarExpr, Box<dyn FnOnce(GrammarExpr) -> GrammarExpr>) {
     let terminal_body = wrap_expr_with_string_literals(body, merge_config);
     // Wrap the terminal ref with split-off quotes
     let wrap = move |term: GrammarExpr| -> GrammarExpr {
@@ -2486,8 +2571,26 @@ fn wrap_key_colon_expr_parts(body: GrammarExpr) -> (GrammarExpr, Box<dyn FnOnce(
 /// Equivalent to composing `wrap_string_value_expr_parts` but for cases
 /// where the body does not need to be named as a separate terminal rule.
 fn quoted_expr(inner: GrammarExpr, is_pattern: bool) -> GrammarExpr {
-    let (body, wrap) = wrap_string_value_expr_parts(inner, is_pattern);
+    quoted_expr_with_merge_config(inner, json_string_merge_config(is_pattern))
+}
+
+fn quoted_expr_with_merge_config(
+    inner: GrammarExpr,
+    merge_config: JsonStringMergeConfig,
+) -> GrammarExpr {
+    let (body, wrap) = wrap_string_value_expr_parts_with_merge_config(inner, merge_config);
     wrap(body)
+}
+
+fn single_terminal_quoted_expr(
+    this: &mut SchemaCtx,
+    inner: GrammarExpr,
+    prefix: &str,
+    merge_config: JsonStringMergeConfig,
+) -> GrammarExpr {
+    let terminal_body = wrap_expr_with_string_literals(inner, merge_config);
+    let term = this.extract_terminal_rule(terminal_body, prefix);
+    wrap_string_value_terminal(term, merge_config)
 }
 
 fn json_date_body_expr() -> GrammarExpr {
@@ -6795,18 +6898,29 @@ impl<'a> SchemaCtx<'a> {
                     ]))),
                 ]), false))
             }
-            "uri" if simple_uri_format_enabled() => {
-                Ok(quoted_expr(GrammarExpr::Repeat(Box::new(self.json_string_char_ref())), false))
-            }
-            "uri" if restored_structured_uri_enabled() => {
-                Ok(self.build_structured_uri_expr())
-            }
-            "uri" if use_structured_uri() => {
-                Ok(self.build_llguidance_uri_expr())
-            }
+            "uri" => Ok(self.build_uri_expr()),
             _ => json_format_pattern(format_name)
                 .map(|pattern| self.build_json_wrapped_fullmatch_pattern(&pattern, "JSON_FORMAT_STRING"))
                 .ok_or_else(|| GlrMaskError::GrammarParse(format!("Unknown format: {format_name}"))),
+        }
+    }
+
+    fn build_uri_expr(&mut self) -> GrammarExpr {
+        let mode = json_schema_uri_mode();
+        let strict_uri = strict_uri_format_enabled();
+        if uri_quote_merge_warning_needed(mode, strict_uri) {
+            eprintln!(
+                "[glrmask/import][warn] GLRMASK_JSON_URI_MERGE_OPEN/CLOSE are ignored for strict multi-terminal structured URI mode"
+            );
+        }
+
+        match mode {
+            JsonSchemaUriMode::Structured => self.build_structured_uri_expr(),
+            JsonSchemaUriMode::StructuredSingleTerminal => {
+                self.build_structured_uri_single_terminal_expr()
+            }
+            JsonSchemaUriMode::LlguidancePattern => self.build_llguidance_uri_expr(),
+            JsonSchemaUriMode::Approx => self.build_approx_uri_expr(),
         }
     }
 
@@ -6851,17 +6965,44 @@ impl<'a> SchemaCtx<'a> {
             r"(?:\?(?P<query>(?:[a-zA-Z0-9\-._~!$&'()*+,;=:@/?]|%[0-9a-fA-F]{2})*))?",
             r"(?:\#(?P<fragment>(?:[a-zA-Z0-9\-._~!$&'()*+,;=:@/?]|%[0-9a-fA-F]{2})*))?"
         );
-        self.build_json_wrapped_fullmatch_pattern(pattern, "JSON_FORMAT_URI")
+        self.build_json_wrapped_fullmatch_pattern_with_merge_config(
+            pattern,
+            "JSON_FORMAT_URI",
+            json_uri_merge_config(),
+        )
     }
 
     fn build_approx_uri_expr(&mut self) -> GrammarExpr {
-        quoted_expr(GrammarExpr::Repeat(Box::new(self.json_string_char_ref())), false)
+        quoted_expr_with_merge_config(
+            GrammarExpr::Repeat(Box::new(self.json_string_char_ref())),
+            json_uri_merge_config(),
+        )
     }
 
     fn build_structured_uri_expr(&mut self) -> GrammarExpr {
         if !strict_uri_format_enabled() {
             return self.build_approx_uri_expr();
         }
+
+        quoted_expr(self.build_structured_uri_body_expr(), false)
+    }
+
+    fn build_structured_uri_single_terminal_expr(&mut self) -> GrammarExpr {
+        if !strict_uri_format_enabled() {
+            return self.build_approx_uri_expr();
+        }
+
+        let body = self.build_structured_uri_body_expr();
+        single_terminal_quoted_expr(
+            self,
+            body,
+            "JSON_FORMAT_URI_STRUCTURED",
+            json_uri_merge_config(),
+        )
+    }
+
+    fn build_structured_uri_body_expr(&mut self) -> GrammarExpr {
+        debug_assert!(strict_uri_format_enabled());
 
         let ablate: std::collections::BTreeSet<String> = std::env::var("URI_ABLATE")
             .ok()
@@ -7022,7 +7163,7 @@ impl<'a> SchemaCtx<'a> {
             sequence_or_single(vec![literal_expr(b"#"), uri_query_frag_sequence_expr.clone()]),
         );
 
-        self.insert_rule(
+        let uri_reg_name = self.insert_uri_rule(
             "uri_reg_name",
             uri_reg_name_terminal.unwrap_or_else(|| {
                 GrammarExpr::Repeat(Box::new(choice_or_single(vec![
@@ -7031,7 +7172,6 @@ impl<'a> SchemaCtx<'a> {
                 ])))
             }),
         );
-        let uri_reg_name = GrammarExpr::Ref("uri_reg_name".into());
 
         let uri_ipvfuture_char = self.insert_named_terminal_rule(
             "URI_IPVFUTURE_CHAR",
@@ -7305,7 +7445,7 @@ impl<'a> SchemaCtx<'a> {
             };
             let uri_ipv6_address = self.insert_uri_rule("uri_ipv6_address", uri_ipv6_address_expr);
 
-            self.insert_rule(
+            let uri_ipv_future = self.insert_uri_rule(
                 "uri_ipv_future",
                 sequence_or_single(vec![
                     literal_expr(b"v"),
@@ -7314,9 +7454,8 @@ impl<'a> SchemaCtx<'a> {
                     GrammarExpr::RepeatOne(Box::new(uri_ipvfuture_char.clone())),
                 ]),
             );
-            let uri_ipv_future = GrammarExpr::Ref("uri_ipv_future".into());
 
-            self.insert_rule(
+            let uri_ipv4_address = self.insert_uri_rule(
                 "uri_ipv4_address",
                 sequence_or_single(vec![
                     uri_dec_octet.clone(),
@@ -7328,14 +7467,13 @@ impl<'a> SchemaCtx<'a> {
                     uri_dec_octet.clone(),
                 ]),
             );
-            let uri_ipv4_address = GrammarExpr::Ref("uri_ipv4_address".into());
 
             let ip_literal_choice = if ablated("ipv_future") {
                 uri_ipv6_address.clone()
             } else {
                 choice_or_single(vec![uri_ipv6_address.clone(), uri_ipv_future.clone()])
             };
-            self.insert_rule(
+            let uri_ip_literal = self.insert_uri_rule(
                 "uri_ip_literal",
                 sequence_or_single(vec![
                     literal_expr(b"["),
@@ -7343,9 +7481,8 @@ impl<'a> SchemaCtx<'a> {
                     literal_expr(b"]"),
                 ]),
             );
-            let uri_ip_literal = GrammarExpr::Ref("uri_ip_literal".into());
 
-        self.insert_rule(
+        let uri_host = self.insert_uri_rule(
             "uri_host",
             if ablated("reg_name") && ablated("ip_literal") && ablated("ipv4") {
                 uri_alpha.clone()
@@ -7363,9 +7500,8 @@ impl<'a> SchemaCtx<'a> {
                 choice_or_single(host_alts)
             },
         );
-        let uri_host = GrammarExpr::Ref("uri_host".into());
 
-        self.insert_rule(
+        let uri_port = self.insert_uri_rule(
             "uri_port",
             uri_port_terminal.unwrap_or_else(|| {
                 sequence_or_single(vec![
@@ -7374,9 +7510,8 @@ impl<'a> SchemaCtx<'a> {
                 ])
             }),
         );
-        let uri_port = GrammarExpr::Ref("uri_port".into());
 
-        self.insert_rule(
+        let uri_authority = self.insert_uri_rule(
             "uri_authority",
             sequence_or_single(vec![
                 if ablated("userinfo") {
@@ -7392,18 +7527,16 @@ impl<'a> SchemaCtx<'a> {
                 },
             ]),
         );
-        let uri_authority = GrammarExpr::Ref("uri_authority".into());
 
-        self.insert_rule(
+        let uri_path_abempty = self.insert_uri_rule(
             "uri_path_abempty",
             GrammarExpr::Repeat(Box::new(sequence_or_single(vec![
                 literal_expr(b"/"),
                 uri_pchar_sequence_expr.clone(),
             ]))),
         );
-        let uri_path_abempty = GrammarExpr::Ref("uri_path_abempty".into());
 
-        self.insert_rule(
+        let uri_path_absolute = self.insert_uri_rule(
             "uri_path_absolute",
             sequence_or_single(vec![
                 literal_expr(b"/"),
@@ -7416,9 +7549,8 @@ impl<'a> SchemaCtx<'a> {
                 ]))),
             ]),
         );
-        let uri_path_absolute = GrammarExpr::Ref("uri_path_absolute".into());
 
-        self.insert_rule(
+        let uri_path_rootless = self.insert_uri_rule(
             "uri_path_rootless",
             sequence_or_single(vec![
                 uri_pchar_sequence_nonempty_expr,
@@ -7428,7 +7560,6 @@ impl<'a> SchemaCtx<'a> {
                 ]))),
             ]),
         );
-        let uri_path_rootless = GrammarExpr::Ref("uri_path_rootless".into());
 
         let mut hier_alts = vec![sequence_or_single(vec![
             literal_expr(b"//"),
@@ -7448,10 +7579,9 @@ impl<'a> SchemaCtx<'a> {
             }
             hier_alts.push(empty_expr());
         }
-        self.insert_rule("uri_hier_part", choice_or_single(hier_alts));
-        let uri_hier_part = GrammarExpr::Ref("uri_hier_part".into());
+        let uri_hier_part = self.insert_uri_rule("uri_hier_part", choice_or_single(hier_alts));
 
-        self.insert_rule(
+        self.insert_uri_rule(
             "uri",
             sequence_or_single(vec![
                 uri_scheme,
@@ -7470,7 +7600,7 @@ impl<'a> SchemaCtx<'a> {
             ]),
         );
 
-        quoted_expr(GrammarExpr::Ref("uri".into()), false)
+        GrammarExpr::Ref("uri".into())
     }
 
     fn json_literal(&self, value: &Value) -> GrammarExpr {
@@ -7988,8 +8118,22 @@ impl<'a> SchemaCtx<'a> {
         pattern: &str,
         prefix: &str,
     ) -> GrammarExpr {
+        self.build_json_wrapped_fullmatch_pattern_with_merge_config(
+            pattern,
+            prefix,
+            json_string_merge_config(true),
+        )
+    }
+
+    fn build_json_wrapped_fullmatch_pattern_with_merge_config(
+        &mut self,
+        pattern: &str,
+        prefix: &str,
+        merge_config: JsonStringMergeConfig,
+    ) -> GrammarExpr {
         let body = self.build_pattern_lexer_expr(&decoded_regex_fullmatch_expr(pattern), prefix);
-        let (terminal_body, wrap) = wrap_string_value_expr_parts(body, true);
+        let (terminal_body, wrap) =
+            wrap_string_value_expr_parts_with_merge_config(body, merge_config);
         let term = self.extract_terminal_rule(terminal_body, prefix);
         wrap(term)
     }
@@ -9762,10 +9906,13 @@ fn repeat_expr(item: GrammarExpr, min: usize, max: Option<usize>) -> GrammarExpr
 
 #[cfg(test)]
 mod tests {
+    use super::json_schema_uri_mode;
     use super::json_literal_string_merge_config;
     use super::json_string_merge_config;
+    use super::JsonSchemaUriMode;
     use super::schema_to_named_grammar;
     use super::string_value_body_regex;
+    use super::uri_quote_merge_warning_needed;
     use super::wrap_string_value_expr_parts;
     use crate::grammar::glrm::to_glrm;
     use crate::grammar::ast::GrammarExpr;
@@ -9898,6 +10045,63 @@ mod tests {
         let pattern_override_cfg = json_string_merge_config(true);
         assert_eq!(pattern_override_cfg.merge_open, false);
         assert_eq!(pattern_override_cfg.merge_close, true);
+    }
+
+    #[test]
+    fn json_schema_uri_mode_defaults_and_explicit_values() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _uri_mode = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_URI_MODE");
+        let _restored = EnvVarGuard::unset("GLRMASK_RESTORED_STRUCTURED_URI");
+        let _simple = EnvVarGuard::unset("GLRMASK_SIMPLE_URI_FORMAT");
+        let _struct = EnvVarGuard::unset("GLRMASK_STRUCT_URI_FORMAT");
+
+        assert_eq!(json_schema_uri_mode(), JsonSchemaUriMode::Structured);
+
+        let _uri_mode = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_URI_MODE", "structured_single_terminal");
+        assert_eq!(json_schema_uri_mode(), JsonSchemaUriMode::StructuredSingleTerminal);
+
+        let _uri_mode = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_URI_MODE", "llguidance_pattern");
+        assert_eq!(json_schema_uri_mode(), JsonSchemaUriMode::LlguidancePattern);
+
+        let _uri_mode = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_URI_MODE", "approx");
+        assert_eq!(json_schema_uri_mode(), JsonSchemaUriMode::Approx);
+    }
+
+    #[test]
+    fn uri_quote_merge_warning_is_only_for_strict_structured_mode() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _uri_open = EnvVarGuard::unset("GLRMASK_JSON_URI_MERGE_OPEN");
+        let _uri_close = EnvVarGuard::unset("GLRMASK_JSON_URI_MERGE_CLOSE");
+
+        assert!(!uri_quote_merge_warning_needed(JsonSchemaUriMode::Structured, true));
+
+        let _uri_open = EnvVarGuard::set("GLRMASK_JSON_URI_MERGE_OPEN", "1");
+        assert!(uri_quote_merge_warning_needed(JsonSchemaUriMode::Structured, true));
+        assert!(!uri_quote_merge_warning_needed(JsonSchemaUriMode::Structured, false));
+        assert!(!uri_quote_merge_warning_needed(JsonSchemaUriMode::StructuredSingleTerminal, true));
+        assert!(!uri_quote_merge_warning_needed(JsonSchemaUriMode::LlguidancePattern, true));
+        assert!(!uri_quote_merge_warning_needed(JsonSchemaUriMode::Approx, true));
+    }
+
+    #[test]
+    fn structured_single_terminal_uri_mode_respects_uri_quote_merge_envs() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _uri_mode = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_URI_MODE", "structured_single_terminal");
+        let _strict_uri = EnvVarGuard::set("GLRMASK_STRICT_URI_FORMAT", "1");
+        let _uri_open = EnvVarGuard::set("GLRMASK_JSON_URI_MERGE_OPEN", "1");
+        let _uri_close = EnvVarGuard::set("GLRMASK_JSON_URI_MERGE_CLOSE", "0");
+        let _string_open = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_OPEN");
+        let _string_close = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_CLOSE");
+
+        let schema = json!({
+            "type": "string",
+            "format": "uri"
+        });
+
+        let glrm = dump_glrm(schema);
+        let uri_rule = find_rule_line_with_prefix(&glrm, "JSON_FORMAT_URI_STRUCTURED");
+        assert!(uri_rule.contains("::= \"\\\"\" "));
+        assert!(!uri_rule.ends_with("\";"));
     }
 
     #[test]
