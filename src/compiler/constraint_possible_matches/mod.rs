@@ -131,6 +131,31 @@ fn range_set_from_sorted_ids(ids: &[u32]) -> RangeSetBlaze<u32> {
     RangeSetBlaze::from_iter(ranges)
 }
 
+fn range_set_from_u128_mask(mask: u128) -> RangeSetBlaze<u32> {
+    if mask == 0 {
+        return RangeSetBlaze::new();
+    }
+
+    let mut ranges = Vec::new();
+    let mut bits = mask;
+    while bits != 0 {
+        let start = bits.trailing_zeros();
+        let mut end = start;
+        bits &= !(1u128 << start);
+        while bits != 0 {
+            let next = bits.trailing_zeros();
+            if next != end + 1 {
+                break;
+            }
+            end = next;
+            bits &= !(1u128 << next);
+        }
+        ranges.push(start..=end);
+    }
+
+    RangeSetBlaze::from_iter(ranges)
+}
+
 fn compose_state_classes_with_initial_map(state_classes: &[u32], initial_state_map: &ManyToOneIdMap) -> Vec<u32> {
     let num_dfa_states = initial_state_map.original_to_internal.len();
     let mut composed_state_classes = vec![u32::MAX; num_dfa_states];
@@ -448,33 +473,80 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
     let sort_dedup_ms = elapsed_ms(sort_dedup_started_at);
 
     let ids_by_label_started_at = Instant::now();
-    let mut ids_by_label: BTreeMap<TerminalID, BTreeMap<u32, Vec<u32>>> = BTreeMap::new();
+    let use_bitmask_ids_by_label = signature_labels.len() <= u128::BITS as usize;
     let mut label_entries = 0usize;
-    for (signature_id, labels) in signature_labels.iter().enumerate() {
-        let signature_id = signature_id as u32;
-        for &(class_id, terminal_id) in labels {
-            label_entries += 1;
-            ids_by_label.entry(terminal_id).or_default().entry(class_id).or_default().push(signature_id);
+    let mut ids_by_label: BTreeMap<TerminalID, BTreeMap<u32, Vec<u32>>> = BTreeMap::new();
+    let mut pair_masks = FxHashMap::<(TerminalID, u32), u128>::default();
+    if use_bitmask_ids_by_label {
+        for (signature_id, labels) in signature_labels.iter().enumerate() {
+            let bit = 1u128 << signature_id;
+            for &(class_id, terminal_id) in labels {
+                label_entries += 1;
+                *pair_masks.entry((terminal_id, class_id)).or_insert(0) |= bit;
+            }
+        }
+    } else {
+        for (signature_id, labels) in signature_labels.iter().enumerate() {
+            let signature_id = signature_id as u32;
+            for &(class_id, terminal_id) in labels {
+                label_entries += 1;
+                ids_by_label.entry(terminal_id).or_default().entry(class_id).or_default().push(signature_id);
+            }
         }
     }
     let ids_by_label_ms = elapsed_ms(ids_by_label_started_at);
 
     let weight_build_started_at = Instant::now();
-    let terminal_ids = ids_by_label.len();
     let mut state_token_sets = 0usize;
-    let possible_matches = ids_by_label.into_iter().map(|(terminal_id, by_state)| {
-        let mut entries = Vec::new();
-        for (state, mut ids) in by_state {
-            ids.sort_unstable();
-            ids.dedup();
-            let token_set = range_set_from_sorted_ids(&ids);
-            if !token_set.is_empty() {
-                state_token_sets += 1;
-                entries.push((state, shared_rangeset(token_set)));
-            }
+    let mut bitmask_unique_masks = 0usize;
+    let mut bitmask_mask_cache_hits = 0usize;
+    let mut bitmask_mask_cache_misses = 0usize;
+    let possible_matches: RuntimePossibleMatchesByTerminal = if use_bitmask_ids_by_label {
+        let mut by_terminal: BTreeMap<TerminalID, Vec<(u32, u128)>> = BTreeMap::new();
+        for ((terminal_id, class_id), mask) in pair_masks {
+            by_terminal.entry(terminal_id).or_default().push((class_id, mask));
         }
-        (terminal_id, Weight::from_per_tsid_shared(entries.into_iter()))
-    }).filter(|(_, weight)| !weight.is_empty()).collect();
+        let mut shared_token_set_by_mask = FxHashMap::<u128, std::sync::Arc<RangeSetBlaze<u32>>>::default();
+        by_terminal.into_iter().map(|(terminal_id, mut by_state)| {
+            by_state.sort_unstable_by_key(|(state, _)| *state);
+            let mut entries = Vec::new();
+            for (state, mask) in by_state {
+                if mask == 0 {
+                    continue;
+                }
+                let shared_token_set = if let Some(existing) = shared_token_set_by_mask.get(&mask) {
+                    bitmask_mask_cache_hits += 1;
+                    existing.clone()
+                } else {
+                    bitmask_mask_cache_misses += 1;
+                    let token_set = shared_rangeset(range_set_from_u128_mask(mask));
+                    shared_token_set_by_mask.insert(mask, token_set.clone());
+                    token_set
+                };
+                state_token_sets += 1;
+                entries.push((state, shared_token_set));
+            }
+            if !entries.is_empty() {
+                bitmask_unique_masks = shared_token_set_by_mask.len();
+            }
+            (terminal_id, Weight::from_per_tsid_shared(entries.into_iter()))
+        }).filter(|(_, weight)| !weight.is_empty()).collect()
+    } else {
+        ids_by_label.into_iter().map(|(terminal_id, by_state)| {
+            let mut entries = Vec::new();
+            for (state, mut ids) in by_state {
+                ids.sort_unstable();
+                ids.dedup();
+                let token_set = range_set_from_sorted_ids(&ids);
+                if !token_set.is_empty() {
+                    state_token_sets += 1;
+                    entries.push((state, shared_rangeset(token_set)));
+                }
+            }
+            (terminal_id, Weight::from_per_tsid_shared(entries.into_iter()))
+        }).filter(|(_, weight)| !weight.is_empty()).collect()
+    };
+    let terminal_ids = possible_matches.len();
     let weight_build_ms = elapsed_ms(weight_build_started_at);
 
     if pmv_detail_enabled {
@@ -522,16 +594,21 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
             internal_to_originals.len(),
         );
         eprintln!(
-            "[glrmask/profile][pmv_detail] stage=ids_by_label ids_by_label_ms={:.3} label_entries={} terminal_ids={}",
+            "[glrmask/profile][pmv_detail] stage=ids_by_label ids_by_label_ms={:.3} label_entries={} terminal_ids={} bitmask_path_used={}",
             ids_by_label_ms,
             label_entries,
             terminal_ids,
+            use_bitmask_ids_by_label,
         );
         eprintln!(
-            "[glrmask/profile][pmv_detail] stage=weights weights_ms={:.3} terminal_ids={} state_token_sets={}",
+            "[glrmask/profile][pmv_detail] stage=weights weights_ms={:.3} terminal_ids={} state_token_sets={} bitmask_path_used={} bitmask_unique_masks={} bitmask_mask_cache_hits={} bitmask_mask_cache_misses={}",
             weight_build_ms,
             terminal_ids,
             state_token_sets,
+            use_bitmask_ids_by_label,
+            bitmask_unique_masks,
+            bitmask_mask_cache_hits,
+            bitmask_mask_cache_misses,
         );
     }
 
