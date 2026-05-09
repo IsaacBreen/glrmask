@@ -995,10 +995,21 @@ impl ProductComponent {
 fn compile_product_component(expr: &Expr) -> ProductComponent {
     match expr {
         Expr::Shared(inner) => compile_product_component(inner),
-        // Standalone bounded repeats must only finalize after the full repeat.
-        // The materialized DFA path preserves that invariant; the virtual path
-        // was finalizing exact repeats too early in the direct GLRM tokenizer.
-        Expr::Repeat { .. } => ProductComponent::Materialized(compile_product_component_dfa(expr)),
+        Expr::Repeat {
+            expr: repeat_expr,
+            min,
+            max: Some(max),
+        } => {
+            if let Some(base_dfa) = compile_direct_bounded_repeat_base_dfa(repeat_expr, *max) {
+                return ProductComponent::VirtualBoundedRepeat {
+                    base_dfa,
+                    min: *min as u32,
+                    max: *max as u32,
+                };
+            }
+
+            ProductComponent::Materialized(compile_product_component_dfa(expr))
+        }
         _ => ProductComponent::Materialized(compile_product_component_dfa(expr)),
     }
 }
@@ -1315,5 +1326,133 @@ mod tests {
             exec.matches,
         );
     }
+
+    #[test]
+    fn product_exact_repeat_matches_only_at_full_length() {
+        let space = Expr::U8Class(U8Set::single(b' '));
+        let exact_repeat = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::single(b' '))),
+            min: 16,
+            max: Some(16),
+        };
+
+        let regex = build_regex(&[space.clone(), exact_repeat.clone()]);
+        let tokenizer = Tokenizer {
+            dfa: regex.dfa,
+            num_terminals: 2,
+            exprs: Some(Arc::from(vec![space, exact_repeat].into_boxed_slice())),
+        };
+
+        for len in [1usize, 2, 15] {
+            let input = vec![b' '; len];
+            let exec = tokenizer.execute_from_state(&input, tokenizer.initial_state());
+            assert!(
+                !exec.matches.iter().any(|matched| matched.id == 1),
+                "product exact repeat matched too early at len {len}: {:?}",
+                exec.matches,
+            );
+        }
+
+        let input = vec![b' '; 16];
+        let exec = tokenizer.execute_from_state(&input, tokenizer.initial_state());
+        assert!(
+            exec.matches.iter().any(|matched| matched.id == 1 && matched.width == 16),
+            "product exact repeat did not match at len 16: {:?}",
+            exec.matches,
+        );
+    }
+
+    #[test]
+    fn product_vbr_exact_repeat_matches_only_at_full_length() {
+        let space = Expr::U8Class(U8Set::single(b' '));
+        let exact_repeat = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::single(b' '))),
+            min: 32,
+            max: Some(32),
+        };
+
+        let regex = build_regex(&[space.clone(), exact_repeat.clone()]);
+        let tokenizer = Tokenizer {
+            dfa: regex.dfa,
+            num_terminals: 2,
+            exprs: Some(Arc::from(vec![space, exact_repeat].into_boxed_slice())),
+        };
+
+        for len in [1usize, 2, 31] {
+            let input = vec![b' '; len];
+            let exec = tokenizer.execute_from_state(&input, tokenizer.initial_state());
+            assert!(
+                !exec.matches.iter().any(|matched| matched.id == 1),
+                "product VBR exact repeat matched too early at len {len}: {:?}",
+                exec.matches,
+            );
+        }
+
+        let input = vec![b' '; 32];
+        let exec = tokenizer.execute_from_state(&input, tokenizer.initial_state());
+        assert!(
+            exec.matches.iter().any(|matched| matched.id == 1 && matched.width == 32),
+            "product VBR exact repeat did not match at len 32: {:?}",
+            exec.matches,
+        );
+    }
+
+    #[test]
+    fn glrm_chunk16_terminal_family_keeps_exact_repeat_nonfinal_until_16() {
+        let space = Expr::U8Class(U8Set::single(b' '));
+        let quote = Expr::U8Seq(vec![b'"']);
+        let exact_16 = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::single(b' '))),
+            min: 16,
+            max: Some(16),
+        };
+        let upto_16 = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::single(b' '))),
+            min: 0,
+            max: Some(16),
+        };
+        let upto_close_16 = Expr::Seq(vec![upto_16.clone(), quote.clone()]);
+        let upto_3 = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::single(b' '))),
+            min: 0,
+            max: Some(3),
+        };
+        let upto_close_3 = Expr::Seq(vec![upto_3.clone(), quote.clone()]);
+
+        let exprs = vec![
+            space.clone(),
+            exact_16.clone(),
+            upto_16,
+            upto_close_16,
+            upto_3,
+            upto_close_3,
+            quote,
+        ];
+        let regex = build_regex(&exprs);
+        let tokenizer = Tokenizer {
+            dfa: regex.dfa,
+            num_terminals: exprs.len() as u32,
+            exprs: Some(Arc::from(exprs.into_boxed_slice())),
+        };
+
+        for len in [1usize, 2, 15] {
+            let input = vec![b' '; len];
+            let exec = tokenizer.execute_from_state(&input, tokenizer.initial_state());
+            assert!(
+                !exec.matches.iter().any(|matched| matched.id == 1),
+                "GLRM family exact repeat matched too early at len {len}: {:?}",
+                exec.matches,
+            );
+        }
+
+        let input = vec![b' '; 16];
+        let exec = tokenizer.execute_from_state(&input, tokenizer.initial_state());
+        assert!(
+            exec.matches.iter().any(|matched| matched.id == 1 && matched.width == 16),
+            "GLRM family exact repeat did not match at len 16: {:?}",
+            exec.matches,
+        );
+    }
+
 }
 
