@@ -873,7 +873,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 for matched in &matches_buf {
                     let next_offset = offset + matched.width;
 
-                    if next_offset == segment_bytes.len() && child_node.has_token() {
+                    if next_offset == segment_bytes.len() && child_node.has_token() && !end_state.is_some_and(|s| self.possible_future_terminals_for_state(s).contains(&matched.id)) {
                         self.profile.match_transition_additions += source_nodes.len() as u64;
                         self.add_leaf_token_from_sources(
                             &source_nodes,
