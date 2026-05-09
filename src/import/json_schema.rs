@@ -1156,31 +1156,20 @@ fn is_regex_metachar(byte: u8) -> bool {
     matches!(byte, b'[' | b']' | b'(' | b')' | b'{' | b'}' | b'.' | b'*' | b'+' | b'?' | b'|' | b'^' | b'$' | b'\\')
 }
 
-fn hex_nibble_chars(value: u8) -> Vec<char> {
+fn hex_nibble_fragment(value: u8) -> String {
     match value {
-        0..=9 => vec![char::from(b'0' + value)],
-        10..=15 => vec![
-            char::from(b'A' + value - 10),
-            char::from(b'a' + value - 10),
-        ],
-        _ => Vec::new(),
+        0..=9 => char::from(b'0' + value).to_string(),
+        10..=15 => format!("[{}{}]", char::from(b'A' + value - 10), char::from(b'a' + value - 10)),
+        _ => String::new(),
     }
 }
 
 fn json_unicode_escape_fragment(byte: u8) -> String {
-    let high = hex_nibble_chars((byte >> 4) & 0x0F);
-    let low = hex_nibble_chars(byte & 0x0F);
-    let mut options = Vec::new();
-    for high in &high {
-        for low in &low {
-            options.push(format!(r#"\x5Cu00{high}{low}"#));
-        }
-    }
-    if options.len() == 1 {
-        options.pop().unwrap()
-    } else {
-        format!("(?:{})", options.join("|"))
-    }
+    format!(
+        r#"\x5Cu00{}{}"#,
+        hex_nibble_fragment((byte >> 4) & 0x0F),
+        hex_nibble_fragment(byte & 0x0F)
+    )
 }
 
 fn json_escaped_byte_fragments(byte: u8) -> Vec<String> {
@@ -2469,96 +2458,6 @@ fn pattern_all_branches_anchored(pattern: &str) -> bool {
         let (start, end, _) = strip_branch_outer_anchors(b);
         start && end
     })
-}
-
-fn pattern_all_branches_unanchored(pattern: &str) -> bool {
-    let branches = split_top_level_regex_branches(pattern);
-    branches.iter().all(|b| {
-        let (start, end, _) = strip_branch_outer_anchors(b);
-        !start && !end
-    })
-}
-
-fn repeated_nonspace_words_max(pattern: &str) -> Option<usize> {
-    let branches = split_top_level_regex_branches(pattern);
-    let [branch] = branches.as_slice() else {
-        return None;
-    };
-    let (anchored_start, anchored_end, core) = strip_branch_outer_anchors(branch);
-    if !anchored_start || !anchored_end {
-        return None;
-    }
-
-    let prefix = r"(?:\S+\s+){0,";
-    let suffix = r"}\S+";
-    let digits = core.strip_prefix(prefix)?.strip_suffix(suffix)?;
-    digits.parse().ok()
-}
-
-fn coalesce_json_pattern_literals(expr: GrammarExpr) -> GrammarExpr {
-    match expr {
-        GrammarExpr::Sequence(items) => {
-            let mut out = Vec::with_capacity(items.len());
-            let mut pending_literal: Option<Vec<u8>> = None;
-            for item in items.into_iter().map(coalesce_json_pattern_literals) {
-                match item {
-                    GrammarExpr::Literal(bytes) => {
-                        pending_literal
-                            .get_or_insert_with(Vec::new)
-                            .extend_from_slice(&bytes);
-                    }
-                    other => {
-                        if let Some(bytes) = pending_literal.take() {
-                            out.push(GrammarExpr::Literal(bytes));
-                        }
-                        out.push(other);
-                    }
-                }
-            }
-            if let Some(bytes) = pending_literal {
-                out.push(GrammarExpr::Literal(bytes));
-            }
-            sequence_or_single(out)
-        }
-        GrammarExpr::Choice(options) => {
-            choice_or_single(options.into_iter().map(coalesce_json_pattern_literals).collect())
-        }
-        GrammarExpr::Exclude { expr, exclude } => GrammarExpr::Exclude {
-            expr: Box::new(coalesce_json_pattern_literals(*expr)),
-            exclude: Box::new(coalesce_json_pattern_literals(*exclude)),
-        },
-        GrammarExpr::Intersect { expr, intersect } => GrammarExpr::Intersect {
-            expr: Box::new(coalesce_json_pattern_literals(*expr)),
-            intersect: Box::new(coalesce_json_pattern_literals(*intersect)),
-        },
-        GrammarExpr::Optional(inner) => {
-            GrammarExpr::Optional(Box::new(coalesce_json_pattern_literals(*inner)))
-        }
-        GrammarExpr::Repeat(inner) => {
-            GrammarExpr::Repeat(Box::new(coalesce_json_pattern_literals(*inner)))
-        }
-        GrammarExpr::RepeatOne(inner) => {
-            GrammarExpr::RepeatOne(Box::new(coalesce_json_pattern_literals(*inner)))
-        }
-        GrammarExpr::RepeatRange { expr, min, max } => GrammarExpr::RepeatRange {
-            expr: Box::new(coalesce_json_pattern_literals(*expr)),
-            min,
-            max,
-        },
-        GrammarExpr::SeparatedSequence { items, separator, allow_empty } => GrammarExpr::SeparatedSequence {
-            items: items
-                .into_iter()
-                .map(|(item, required)| (coalesce_json_pattern_literals(item), required))
-                .collect(),
-            separator: Box::new(coalesce_json_pattern_literals(*separator)),
-            allow_empty,
-        },
-        other => other,
-    }
-}
-
-fn json_pattern_grammar_expr(expr: &LexerExpr) -> GrammarExpr {
-    coalesce_json_pattern_literals(expr_to_grammar_expr(expr))
 }
 
 fn json_string_literal_bytes(text: &str) -> Vec<u8> {
@@ -6382,9 +6281,6 @@ impl<'a> SchemaCtx<'a> {
             let Some(pattern) = prune_pattern_branches_for_min_length(pattern, min_len) else {
                 return Ok(self.extract_terminal_rule(never_expr(), "JSON_STRING_PATTERN_UNSAT"));
             };
-            if let Some(max_separators) = repeated_nonspace_words_max(&pattern) {
-                return Ok(self.build_json_nonspace_words_pattern(max_separators));
-            }
             if let Some(unit_expr) = simple_repeated_single_char_expr(&pattern) {
                 let required_min = min_len.max(1);
                 if matches!(max_len, Some(max) if max < required_min) {
@@ -6482,22 +6378,8 @@ impl<'a> SchemaCtx<'a> {
                     let term = self.extract_terminal_rule(terminal_body, "JSON_STRING_PATTERN_MINLEN");
                     return Ok(wrap(term));
                 }
-                if pattern_all_branches_unanchored(&pattern) {
-                    return Ok(self.build_unbounded_json_search_pattern(
-                        &pattern,
-                        "json_string_pattern_search",
-                        "JSON_STRING_PATTERN_CORE",
-                    ));
-                }
                 return Ok(self.build_json_wrapped_pattern(&pattern, "JSON_STRING_PATTERN"));
             } else {
-                if pattern_all_branches_unanchored(&pattern) {
-                    return Ok(self.build_unbounded_json_search_pattern(
-                        &pattern,
-                        "json_string_pattern_search",
-                        "JSON_STRING_PATTERN_CORE",
-                    ));
-                }
                 return Ok(self.build_json_wrapped_pattern(&pattern, "JSON_STRING_PATTERN"));
             }
         }
@@ -7810,69 +7692,6 @@ impl<'a> SchemaCtx<'a> {
         wrap(term)
     }
 
-    fn build_unbounded_json_search_pattern(
-        &mut self,
-        pattern: &str,
-        rule_prefix: &str,
-        core_prefix: &str,
-    ) -> GrammarExpr {
-        let core_expr = LexerExpr::make_choice(
-            split_top_level_regex_branches(pattern)
-                .into_iter()
-                .map(|branch| {
-                    let (_, _, core) = strip_branch_outer_anchors(branch);
-                    decoded_regex_fullmatch_expr(core)
-                })
-                .collect(),
-        );
-        let core = self.build_lexer_expr(&core_expr, core_prefix);
-        self.extract_rule(
-            sequence_or_single(vec![
-                literal_expr(b"\""),
-                GrammarExpr::Ref(JSON_STRING_MIDDLE_RULE.into()),
-                core,
-                GrammarExpr::Ref(JSON_STRING_MIDDLE_END_RULE.into()),
-            ]),
-            rule_prefix,
-        )
-    }
-
-    fn build_json_nonspace_words_pattern(&mut self, max_separators: usize) -> GrammarExpr {
-        let whitespace_char = GrammarExpr::Ref(self.insert_shared_rule(
-            "JSON_STRING_PATTERN_WHITESPACE_CHAR",
-            json_pattern_grammar_expr(&decoded_regex_fullmatch_expr(r"\s")),
-        ));
-        let nonspace_char = GrammarExpr::Ref(self.insert_shared_rule(
-            "JSON_STRING_PATTERN_NONSPACE_CHAR",
-            GrammarExpr::Exclude {
-                expr: Box::new(self.json_string_char_ref()),
-                exclude: Box::new(whitespace_char.clone()),
-            },
-        ));
-        let nonspace_run = GrammarExpr::Ref(self.insert_shared_rule(
-            "json_string_pattern_nonspace_run",
-            GrammarExpr::RepeatOne(Box::new(nonspace_char)),
-        ));
-        let whitespace_run = GrammarExpr::Ref(self.insert_shared_rule(
-            "json_string_pattern_whitespace_run",
-            GrammarExpr::RepeatOne(Box::new(whitespace_char)),
-        ));
-        let word_then_space = sequence_or_single(vec![nonspace_run.clone(), whitespace_run]);
-        self.extract_rule(
-            sequence_or_single(vec![
-                literal_expr(b"\""),
-                GrammarExpr::RepeatRange {
-                    expr: Box::new(word_then_space),
-                    min: 0,
-                    max: max_separators,
-                },
-                nonspace_run,
-                literal_expr(b"\""),
-            ]),
-            "json_string_pattern_words",
-        )
-    }
-
     fn build_json_wrapped_fullmatch_pattern(
         &mut self,
         pattern: &str,
@@ -7993,7 +7812,7 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn build_lexer_expr(&mut self, expr: &LexerExpr, prefix: &str) -> GrammarExpr {
-        self.extract_terminal_rule(json_pattern_grammar_expr(expr), prefix)
+        self.extract_terminal_rule(expr_to_grammar_expr(expr), prefix)
     }
 
     fn add_option_expr(slot: &mut Option<LexerExpr>, new_expr: LexerExpr) {

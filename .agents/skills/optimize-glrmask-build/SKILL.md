@@ -14,6 +14,7 @@ user-invocable: true
 - Max-length may be skipped in controlled cases, but the full exact state/vocab equivalence pass must not be bypassed.
 - Generated masks must be exact.
 - No over-approximation, no under-approximation in generated masks or in the artifacts used to generate masks, including in equivalence analysis (not over-merging, although under-merging itself isn't incorrect per se), terminal DWA computation, or parser DWA computation.
+- JSON Schema import shape is not a presentation detail. Do not change a pattern, terminal, or lexer expression into helper nonterminals just to make GLRM dumps shorter or prettier. Such changes alter terminal structure and can materially change tokenizer/DWA/id-map build behavior; make them only when the user explicitly asks for an importer/grammar-structure change and the compatibility implications have been discussed.
 
 ## Example Commands
 
