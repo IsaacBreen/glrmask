@@ -33,7 +33,7 @@ const JSON_BOOL_RULE: &str = "JSON_BOOL";
 const JSON_NULL_RULE: &str = "JSON_NULL";
 const JSON_KEY_COLON_RULE: &str = "json_key_colon";
 const JSON_KEY_COLON_BODY_RULE: &str = "JSON_KEY_COLON_BODY";
-const JSON_STRING_REPEAT_CHUNK_DEFAULT: usize = 256;
+const JSON_STRING_REPEAT_CHUNK_DEFAULT: usize = 32;
 
 fn json_string_repeat_chunk() -> usize {
     std::env::var("GLRMASK_STRING_REPEAT_CHUNK")
