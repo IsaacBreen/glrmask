@@ -152,28 +152,6 @@ fn project_initial_state_map_enabled() -> bool {
     })
 }
 
-fn fast_sound_l2p_id_map_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("GLRMASK_L2P_FAST_SOUND_ID_MAP")
-            .map(|value| {
-                let trimmed = value.trim();
-                trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
-            })
-            .unwrap_or(true)
-    })
-}
-
-fn fast_sound_l2p_id_map_max_tsids() -> usize {
-    static MAX_TSID: OnceLock<usize> = OnceLock::new();
-    *MAX_TSID.get_or_init(|| {
-        std::env::var("GLRMASK_L2P_FAST_SOUND_ID_MAP_MAX_TSIDS")
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .unwrap_or(32_768)
-    })
-}
-
 #[derive(Clone, Copy)]
 struct L2PTokenLengthStats {
     max_len: usize,
@@ -215,107 +193,6 @@ fn l2p_token_length_stats(vocab: &Vocab) -> L2PTokenLengthStats {
     }
 
     stats
-}
-
-fn build_l2p_identity_state_map(num_states: usize) -> ManyToOneIdMap {
-    let original_to_internal: Vec<u32> = (0..num_states as u32).collect();
-    let representative_original_ids: Vec<u32> = (0..num_states as u32).collect();
-    ManyToOneIdMap::from_original_to_internal_with_representatives(
-        original_to_internal,
-        num_states as u32,
-        representative_original_ids,
-    )
-}
-
-fn build_l2p_lex_dedup_vocab_map(vocab: &Vocab) -> ManyToOneIdMap {
-    let mut entries: Vec<(u32, &[u8])> = vocab
-        .entries
-        .iter()
-        .map(|(&token_id, bytes)| (token_id, bytes.as_slice()))
-        .collect();
-    entries.sort_unstable_by(|(left_id, left_bytes), (right_id, right_bytes)| {
-        left_bytes.cmp(right_bytes).then(left_id.cmp(right_id))
-    });
-
-    let mut original_to_internal = vec![u32::MAX; vocab.max_token_id() as usize + 1];
-    let mut representative_original_ids = Vec::<u32>::new();
-    let mut internal_id = 0u32;
-    let mut index = 0usize;
-    while index < entries.len() {
-        let group_bytes = entries[index].1;
-        representative_original_ids.push(entries[index].0);
-        loop {
-            let (token_id, bytes) = entries[index];
-            debug_assert_eq!(bytes, group_bytes);
-            original_to_internal[token_id as usize] = internal_id;
-            index += 1;
-            if index == entries.len() || entries[index].1 != group_bytes {
-                break;
-            }
-        }
-        internal_id += 1;
-    }
-
-    ManyToOneIdMap::from_original_to_internal_with_representatives(
-        original_to_internal,
-        internal_id,
-        representative_original_ids,
-    )
-}
-
-fn build_l2p_fast_sound_id_map(
-    tokenizer: &Tokenizer,
-    vocab: &Vocab,
-    initial_state_map: Option<&ManyToOneIdMap>,
-) -> Option<(
-    InternalIdMap,
-    equivalence_analysis::combined::CombinedEquivalenceProfile,
-)> {
-    if !fast_sound_l2p_id_map_enabled() {
-        return None;
-    }
-
-    let num_dfa_states = tokenizer.num_states() as usize;
-    let max_tsids = fast_sound_l2p_id_map_max_tsids();
-    let (tokenizer_states, initial_states_considered) = match initial_state_map {
-        Some(map)
-            if map.original_to_internal.len() == num_dfa_states
-                && (map.num_internal_ids() as usize) <= max_tsids =>
-        {
-            (map.clone(), map.representative_original_ids.len())
-        }
-        Some(_) => return None,
-        None if num_dfa_states <= max_tsids => {
-            (build_l2p_identity_state_map(num_dfa_states), num_dfa_states)
-        }
-        None => return None,
-    };
-
-    let token_stats = l2p_token_length_stats(vocab);
-    let exact_reps = tokenizer_states.num_internal_ids() as usize;
-    let vocab_tokens = build_l2p_lex_dedup_vocab_map(vocab);
-
-    Some((
-        InternalIdMap {
-            tokenizer_states,
-            vocab_tokens,
-        },
-        equivalence_analysis::combined::CombinedEquivalenceProfile {
-            initial_states_considered,
-            max_length_skipped: true,
-            max_token_len: token_stats.max_len,
-            token_len_gt_4: token_stats.gt_4,
-            token_len_gt_8: token_stats.gt_8,
-            token_len_gt_16: token_stats.gt_16,
-            token_len_gt_32: token_stats.gt_32,
-            token_len_gt_64: token_stats.gt_64,
-            max_length_state_equiv_ms: 0.0,
-            exact_state_equiv_ms: 0.0,
-            max_length_reps: exact_reps,
-            exact_reps,
-            exact_rep_confirmation_used: false,
-        },
-    ))
 }
 
 struct ProjectInitialStateMapProfile {
@@ -606,12 +483,9 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
     // ---- Step 1: Equivalence analysis (on simplified tokenizer) ----
     let id_map_started_at = Instant::now();
-    let fast_sound_id_map =
-        build_l2p_fast_sound_id_map(tokenizer_for_build, vocab, equivalence_initial_state_map);
-    let fast_sound_id_map_used = fast_sound_id_map.is_some();
-    let (simplified_id_map, equiv_profile) = match fast_sound_id_map {
-        Some(result) => result,
-        None => equivalence_analysis::combined::analyze_equivalences_with_group_filter(
+    let fast_sound_id_map_used = false;
+    let (simplified_id_map, equiv_profile) =
+        equivalence_analysis::combined::analyze_equivalences_with_group_filter(
             partition_label,
             tokenizer_for_build,
             vocab,
@@ -621,8 +495,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             shared_vocab_dfa_cache,
             if use_simplified_tok { None } else { flat_trans },
             equivalence_initial_state_map,
-        ),
-    };
+        );
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // tsid_fallback is independent of the NWA build / postprocess /
