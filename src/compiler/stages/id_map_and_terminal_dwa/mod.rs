@@ -31,6 +31,91 @@ use types::{
     compile_profile_enabled, LocalIdMapTerminalDwa, TerminalColoring, TerminalDwaPhaseProfile,
 };
 
+fn l2p_partition_cost_fn_from_env() -> classify::L2pPartitionCostFn {
+    match std::env::var("GLRMASK_L2P_COST_FN").as_deref() {
+        Ok("size") | Err(_) => classify::L2pPartitionCostFn::Size,
+        Ok("size_log") => classify::L2pPartitionCostFn::SizeLog,
+        Ok("log_log") => classify::L2pPartitionCostFn::LogLog,
+        Ok("union_size") => classify::L2pPartitionCostFn::UnionSize,
+        Ok(other) => panic!(
+            "Invalid GLRMASK_L2P_COST_FN={other}; expected one of: size, size_log, log_log, union_size"
+        ),
+    }
+}
+
+fn l2p_partition_objective_from_env() -> classify::L2pPartitionObjective {
+    match std::env::var("GLRMASK_L2P_COST_OBJECTIVE").as_deref() {
+        Ok("max") | Err(_) => classify::L2pPartitionObjective::Max,
+        Ok("sum") => classify::L2pPartitionObjective::Sum,
+        Ok(other) => panic!(
+            "Invalid GLRMASK_L2P_COST_OBJECTIVE={other}; expected one of: max, sum"
+        ),
+    }
+}
+
+fn l2p_partition_count_from_env() -> usize {
+    std::env::var("GLRMASK_L2P_COST_PARTITIONS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&count| count > 0)
+        .unwrap_or(10)
+}
+
+fn l2p_auto_second_largest_limit_from_env() -> usize {
+    std::env::var("GLRMASK_L2P_AUTO_SECOND_LARGEST_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&count| count > 0)
+        .unwrap_or(12_000)
+}
+
+fn l2p_auto_max_estimated_l2p_terminals_from_env() -> usize {
+    std::env::var("GLRMASK_L2P_AUTO_MAX_ESTIMATED_L2P_TERMINALS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&count| count > 0)
+        .unwrap_or(7)
+}
+
+fn l2p_auto_min_estimated_l2p_terminals_from_env() -> usize {
+    std::env::var("GLRMASK_L2P_AUTO_MIN_ESTIMATED_L2P_TERMINALS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(6)
+}
+
+fn l2p_auto_min_grammar_terminals_from_env() -> usize {
+    std::env::var("GLRMASK_L2P_AUTO_MIN_GRAMMAR_TERMINALS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(12)
+}
+
+fn vocab_from_token_partitions(vocab: &Vocab, token_partitions: Vec<Vec<u32>>) -> Vec<Vocab> {
+    token_partitions
+        .into_iter()
+        .map(|token_ids| {
+            let entries = token_ids
+                .into_iter()
+                .filter_map(|token_id| vocab.entries.get(&token_id).map(|bytes| (token_id, bytes.clone())))
+                .collect();
+            Vocab::new(entries, None)
+        })
+        .collect()
+}
+
+fn build_char_type_sub_vocabs(vocab: &Vocab) -> Vec<Vocab> {
+    let mut partition_entries: Vec<Vec<(u32, Vec<u8>)>> = (0..7).map(|_| Vec::new()).collect();
+    for (&token_id, bytes) in &vocab.entries {
+        let idx = classify_vocab_char_type(bytes) as usize;
+        partition_entries[idx].push((token_id, bytes.clone()));
+    }
+    partition_entries
+        .into_iter()
+        .map(|entries| Vocab::new(entries, None))
+        .collect()
+}
+
 fn global_max_length_env_override() -> Option<bool> {
     static OVERRIDE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
     *OVERRIDE.get_or_init(|| {
@@ -194,15 +279,160 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
         external_classify_cache.unwrap_or(&owned_classify_cache);
 
     let partition_vocab_started_at = Instant::now();
-    let mut partition_entries: Vec<Vec<(u32, Vec<u8>)>> = (0..7).map(|_| Vec::new()).collect();
-    for (&token_id, bytes) in &vocab.entries {
-        let idx = classify_vocab_char_type(bytes) as usize;
-        partition_entries[idx].push((token_id, bytes.clone()));
-    }
-    let sub_vocabs: Vec<Vocab> = partition_entries
-        .into_iter()
-        .map(|entries| Vocab::new(entries, None))
-        .collect();
+    let partition_scheme =
+        std::env::var("GLRMASK_PARTITION_SCHEME").unwrap_or_else(|_| "char_type".to_string());
+    let sub_vocabs: Vec<Vocab> = match partition_scheme.as_str() {
+        "char_type" => build_char_type_sub_vocabs(vocab),
+        "l2p_cost" => {
+            let cost_fn = l2p_partition_cost_fn_from_env();
+            let objective = l2p_partition_objective_from_env();
+            let num_partitions = l2p_partition_count_from_env();
+            let bytesets = shared_classify_cache.get_or_init(|| {
+                classify::SharedClassifyBytesets::build(tokenizer, grammar.num_terminals)
+            });
+            let partitioning = classify::partition_vocab_by_l2p_cost(
+                vocab,
+                bytesets,
+                disallowed_follows,
+                grammar.num_terminals,
+                num_partitions,
+                cost_fn,
+                objective,
+            );
+
+            if compile_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][l2p_cost_partitioning] cost_fn={} objective={} partitions={} estimated_costs={:?} estimated_l2p_terminals={:?} objective_score={:.3}",
+                    cost_fn.as_str(),
+                    objective.as_str(),
+                    num_partitions,
+                    partitioning.estimated_partition_costs,
+                    partitioning.estimated_l2p_terminals,
+                    partitioning.objective_score,
+                );
+            }
+
+            vocab_from_token_partitions(vocab, partitioning.partitions)
+        }
+        "auto_l2p_cost" => {
+            let cost_fn = l2p_partition_cost_fn_from_env();
+            let objective = l2p_partition_objective_from_env();
+            let num_partitions = l2p_partition_count_from_env();
+            let min_grammar_terminals_limit = l2p_auto_min_grammar_terminals_from_env();
+            let char_token_partitions = classify::partition_vocab_char_type_tokens(vocab);
+            let char_partition_sizes = char_token_partitions
+                .iter()
+                .map(|partition| partition.len())
+                .collect::<Vec<_>>();
+
+            if (grammar.num_terminals as usize) < min_grammar_terminals_limit {
+                if compile_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][auto_l2p_partition] cost_fn={} objective={} l2p_partitions={} grammar_terminals={} disallowed_follows_len={} min_grammar_terminals_limit={} char_partition_sizes={:?} chosen=char_type reason=low_grammar_terminal_count",
+                        cost_fn.as_str(),
+                        objective.as_str(),
+                        num_partitions,
+                        grammar.num_terminals,
+                        disallowed_follows.len(),
+                        min_grammar_terminals_limit,
+                        char_partition_sizes,
+                    );
+                }
+                vocab_from_token_partitions(vocab, char_token_partitions)
+            } else {
+                let bytesets = shared_classify_cache.get_or_init(|| {
+                    classify::SharedClassifyBytesets::build(tokenizer, grammar.num_terminals)
+                });
+                let second_largest_limit = l2p_auto_second_largest_limit_from_env();
+                let max_estimated_l2p_terminals_limit =
+                    l2p_auto_max_estimated_l2p_terminals_from_env();
+                let min_estimated_l2p_terminals_limit =
+                    l2p_auto_min_estimated_l2p_terminals_from_env();
+
+                let (l2p_partitioning, token_l2p_map) =
+                    classify::partition_vocab_by_l2p_cost_with_token_map(
+                        vocab,
+                        bytesets,
+                        disallowed_follows,
+                        grammar.num_terminals,
+                        num_partitions,
+                        cost_fn,
+                        objective,
+                    );
+
+                let l2p_partition_sizes = l2p_partitioning
+                    .partitions
+                    .iter()
+                    .map(|token_ids| token_ids.len())
+                    .collect::<Vec<_>>();
+                let mut sorted_sizes = l2p_partition_sizes.clone();
+                sorted_sizes.sort_unstable_by(|left, right| right.cmp(left));
+                let second_largest = sorted_sizes.get(1).copied().unwrap_or(0);
+                let max_estimated_l2p_terminals = l2p_partitioning
+                    .estimated_l2p_terminals
+                    .iter()
+                    .copied()
+                    .max()
+                    .unwrap_or(0);
+
+                let mut char_costs = Vec::new();
+                let mut char_l2p_terminals = Vec::new();
+                let mut char_score = f64::INFINITY;
+
+                let use_l2p = if second_largest <= second_largest_limit
+                    && max_estimated_l2p_terminals >= min_estimated_l2p_terminals_limit
+                    && max_estimated_l2p_terminals <= max_estimated_l2p_terminals_limit
+                {
+                    let (computed_char_costs, computed_char_l2p_terminals, computed_char_score) =
+                        classify::estimate_l2p_objective_for_token_partitions(
+                            &char_token_partitions,
+                            &token_l2p_map,
+                            cost_fn,
+                            objective,
+                        );
+                    char_costs = computed_char_costs;
+                    char_l2p_terminals = computed_char_l2p_terminals;
+                    char_score = computed_char_score;
+                    l2p_partitioning.objective_score < char_score
+                } else {
+                    false
+                };
+
+                if compile_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][auto_l2p_partition] cost_fn={} objective={} l2p_partitions={} l2p_score={:.3} char_score={:.3} second_largest={} second_largest_limit={} disallowed_follows_len={} max_estimated_l2p_terminals={} min_estimated_l2p_terminals_limit={} max_estimated_l2p_terminals_limit={} char_partition_sizes={:?} chosen={} l2p_sizes={:?} l2p_costs={:?} char_costs={:?} l2p_l2p_terminals={:?} char_l2p_terminals={:?}",
+                        cost_fn.as_str(),
+                        objective.as_str(),
+                        num_partitions,
+                        l2p_partitioning.objective_score,
+                        char_score,
+                        second_largest,
+                        second_largest_limit,
+                        disallowed_follows.len(),
+                        max_estimated_l2p_terminals,
+                        min_estimated_l2p_terminals_limit,
+                        max_estimated_l2p_terminals_limit,
+                        char_partition_sizes,
+                        if use_l2p { "l2p_cost" } else { "char_type" },
+                        l2p_partition_sizes,
+                        l2p_partitioning.estimated_partition_costs,
+                        char_costs,
+                        l2p_partitioning.estimated_l2p_terminals,
+                        char_l2p_terminals,
+                    );
+                }
+
+                if use_l2p {
+                    vocab_from_token_partitions(vocab, l2p_partitioning.partitions)
+                } else {
+                    vocab_from_token_partitions(vocab, char_token_partitions)
+                }
+            }
+        }
+        other => panic!(
+            "Invalid GLRMASK_PARTITION_SCHEME={other}; expected one of: char_type, l2p_cost, auto_l2p_cost"
+        ),
+    };
     let partition_vocab_ms = partition_vocab_started_at.elapsed().as_secs_f64() * 1000.0;
     profile.id_map_ms += partition_vocab_ms;
 
