@@ -25,8 +25,9 @@ use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 
 use classify::classify_vocab_char_type;
-use l2p::equivalence_analysis::compat::{compute_byte_classes, TokenizerView};
-use l2p::equivalence_analysis::state::max_length::find_state_equivalence_classes_stable_byte_restricted;
+use l2p::equivalence_analysis::state_equivalence::{
+    resolve_global_pipeline_config, run_state_equivalence_pipeline, StateEquivalenceScope,
+};
 use types::{
     compile_profile_enabled, LocalIdMapTerminalDwa, TerminalColoring, TerminalDwaPhaseProfile,
 };
@@ -138,33 +139,11 @@ fn use_global_max_length(tokenizer: &Tokenizer) -> bool {
 pub(crate) fn build_global_max_length_state_map(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
-    flat_trans: &Arc<[u32]>,
+    _flat_trans: &Arc<[u32]>,
 ) -> ManyToOneIdMap {
     let started_at = Instant::now();
     let num_states_u32 = tokenizer.num_states();
     let num_states = num_states_u32 as usize;
-
-    if !use_global_max_length(tokenizer) {
-        let original_to_internal: Vec<u32> = (0..num_states_u32).collect();
-        let representative_original_ids = original_to_internal.clone();
-
-        if compile_profile_enabled() {
-            eprintln!(
-                "[glrmask/profile][global_max_length] mode=identity skipped=true states={} reps={} tokens_included=0 max_token_len=0 ms={:.3}",
-                num_states,
-                representative_original_ids.len(),
-                started_at.elapsed().as_secs_f64() * 1000.0,
-            );
-        }
-
-        return ManyToOneIdMap::from_original_to_internal_with_representatives(
-            original_to_internal,
-            representative_original_ids.len() as u32,
-            representative_original_ids,
-        );
-    }
-
-    let tokenizer_view = TokenizerView::new_from_flat_trans(flat_trans, tokenizer);
     let token_bytes: Vec<&[u8]> = vocab
         .entries
         .values()
@@ -175,51 +154,38 @@ pub(crate) fn build_global_max_length_state_map(
         .map(|bytes| bytes.len())
         .max()
         .unwrap_or(0);
-    let mut relevant_bytes = [false; 256];
-    for bytes in &token_bytes {
-        for &byte in *bytes {
-            relevant_bytes[byte as usize] = true;
-        }
-    }
-    let byte_to_class = compute_byte_classes(tokenizer_view.dfa());
-    let mapping = find_state_equivalence_classes_stable_byte_restricted(
-        &tokenizer_view,
-        Some(&byte_to_class),
-        None,
-        Some(&relevant_bytes),
-    );
-    debug_assert_eq!(mapping.len(), num_states);
 
-    let mut rep_to_internal = vec![u32::MAX; num_states];
-    let mut original_to_internal = vec![u32::MAX; num_states];
-    let mut representative_original_ids = Vec::new();
-    for (state, &rep) in mapping.iter().enumerate() {
-        debug_assert!(rep < num_states);
-        let mut internal = rep_to_internal[rep];
-        if internal == u32::MAX {
-            internal = representative_original_ids.len() as u32;
-            rep_to_internal[rep] = internal;
-            representative_original_ids.push(rep as u32);
-        }
-        original_to_internal[state] = internal;
-    }
+    let config = resolve_global_pipeline_config(use_global_max_length(tokenizer));
+    let (state_map, profile) = run_state_equivalence_pipeline(
+        tokenizer,
+        vocab,
+        None,
+        None,
+        StateEquivalenceScope::Global,
+        &config,
+    );
 
     if compile_profile_enabled() {
-        eprintln!(
-            "[glrmask/profile][global_max_length] mode=stable skipped=false states={} reps={} tokens_included={} max_token_len={} ms={:.3}",
-            num_states,
-            representative_original_ids.len(),
-            token_bytes.len(),
-            max_token_len,
-            started_at.elapsed().as_secs_f64() * 1000.0,
-        );
+        if profile.max_length_skipped {
+            eprintln!(
+                "[glrmask/profile][global_max_length] mode=identity skipped=true states={} reps={} tokens_included=0 max_token_len=0 ms={:.3}",
+                num_states,
+                state_map.representative_original_ids.len(),
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        } else {
+            eprintln!(
+                "[glrmask/profile][global_max_length] mode=stable skipped=false states={} reps={} tokens_included={} max_token_len={} ms={:.3}",
+                num_states,
+                state_map.representative_original_ids.len(),
+                token_bytes.len(),
+                max_token_len,
+                profile.max_length_state_equiv_ms,
+            );
+        }
     }
 
-    ManyToOneIdMap::from_original_to_internal_with_representatives(
-        original_to_internal,
-        representative_original_ids.len() as u32,
-        representative_original_ids,
-    )
+    state_map
 }
 
 /// Build the global `(InternalIdMap, DWA)` for the full vocabulary.

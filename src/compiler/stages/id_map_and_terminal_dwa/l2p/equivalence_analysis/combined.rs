@@ -5,6 +5,9 @@ use std::time::Instant;
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
+use super::state_equivalence::{
+    resolve_l2p_pipeline_config, run_state_equivalence_pipeline, StateEquivalenceScope,
+};
 use crate::ds::bitset::BitSet;
 use super::compat::TokenizerView;
 use super::disallowed_follows::normalize_disallowed_follows;
@@ -397,30 +400,19 @@ fn analyze_equivalences_impl(
         prepared.initial_states.len(),
         projected_by_global,
     );
-    let max_length_started_at = Instant::now();
-    let pre_state_reps = if max_length_skipped {
-        prepared.initial_states.clone()
-    } else {
-        super::state::max_length::find_state_equivalence_classes_byte_restricted(
-            &tokenizer_view,
-            &dedup.representative_token_bytes,
-            &prepared.initial_states,
-            Some(&byte_to_class),
-            active_groups,
-            Some(&relevant_bytes),
-        )
-    };
-    let max_length_state_equiv_ms = if max_length_skipped {
-        0.0
-    } else {
-        max_length_started_at.elapsed().as_secs_f64() * 1000.0
-    };
-    let max_length_reps = pre_state_reps.iter().copied().collect::<BTreeSet<_>>().len();
-    let pre_reduced_states: Vec<usize> = pre_state_reps
+    let pipeline_config = resolve_l2p_pipeline_config(!max_length_skipped);
+    let (pre_state_map, pipeline_profile) = run_state_equivalence_pipeline(
+        tokenizer,
+        vocab,
+        initial_state_map,
+        active_groups,
+        StateEquivalenceScope::L2p,
+        &pipeline_config,
+    );
+    let pre_reduced_states: Vec<usize> = pre_state_map
+        .representative_original_ids
         .iter()
-        .copied()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
+        .map(|&state| state as usize)
         .collect();
     let normalized_disallowed_follows =
         normalize_disallowed_follows(tokenizer_group_count(&tokenizer_view), effective_disallowed);
@@ -465,9 +457,13 @@ fn analyze_equivalences_impl(
         .copied()
         .zip(reduced_state_reps_for_pre_reduced.iter().copied())
         .collect();
-    let representative_states = pre_state_reps
+    let representative_states = prepared.initial_states
         .iter()
-        .map(|pre_rep| rep_to_final[pre_rep])
+        .map(|&state| {
+            let pre_internal = pre_state_map.original_to_internal[state];
+            let pre_rep = pre_state_map.representative_original_ids[pre_internal as usize] as usize;
+            rep_to_final[&pre_rep]
+        })
         .collect::<Vec<_>>();
     let vocab_classes = expand_vocab_classes(
         dedup_vocab_classes,
@@ -486,16 +482,16 @@ fn analyze_equivalences_impl(
         build_internal_id_map_from_combined_result(tokenizer, initial_state_map, &prepared, &result),
         CombinedEquivalenceProfile {
             initial_states_considered: prepared.initial_states.len(),
-            max_length_skipped,
+            max_length_skipped: pipeline_profile.max_length_skipped,
             max_token_len,
             token_len_gt_4: token_len_stats.gt_4,
             token_len_gt_8: token_len_stats.gt_8,
             token_len_gt_16: token_len_stats.gt_16,
             token_len_gt_32: token_len_stats.gt_32,
             token_len_gt_64: token_len_stats.gt_64,
-            max_length_state_equiv_ms,
+            max_length_state_equiv_ms: pipeline_profile.max_length_state_equiv_ms,
             exact_state_equiv_ms,
-            max_length_reps,
+            max_length_reps: pipeline_profile.max_length_reps,
             exact_reps,
             exact_rep_confirmation_used,
         },
