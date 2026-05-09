@@ -24,7 +24,7 @@ use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::{
 use crate::compiler::stages::compact::reconcile_mapped_weight_artifacts;
 use crate::compiler::stages::parser_dwa::build_parser_dwa_from_terminal_dwa_with_precomputed_templates;
 use crate::compiler::stages::templates::Templates;
-use crate::compiler::stages::templates::characterize::characterize_terminals;
+use crate::compiler::stages::templates::characterize::characterize_terminals_profiled;
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::{GrammarDef, Terminal};
 use crate::runtime::Constraint;
@@ -352,8 +352,45 @@ fn compile_prepared_with_profile(
             },
             || {
                 let templates_started_at = Instant::now();
-                let characterizations = characterize_terminals(&table, &analyzed_grammar);
-                let templates = Templates::from_characterizations(&characterizations);
+                let (characterizations, characterization_profile) =
+                    characterize_terminals_profiled(&table, &analyzed_grammar);
+                let (templates, template_profile) =
+                    Templates::from_characterizations_profiled(&characterizations);
+                if compile_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][templates] terminals={} action_signature_classes={} action_quotient_hits={} max_action_signature_multiplicity={} characterization_signature_ms={:.3} characterization_ms={:.3} characterization_fanout_ms={:.3} characterization_validation_ms={:.3} characterization_total_ms={:.3} characterization_quotient_disabled={} unique_characterizations={} compiled_characterizations={} template_quotient_hits={} max_characterization_multiplicity={} build_nfa_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} template_fanout_ms={:.3} template_validation_ms={:.3} template_total_ms={:.3} template_wall_ms={:.3} template_minimize_skipped={} avg_nfa_states={:.2} avg_nfa_transitions={:.2} avg_premin_dfa_states={:.2} avg_premin_dfa_transitions={:.2} avg_dfa_states={:.2} avg_dfa_transitions={:.2} max_dfa_states={} max_dfa_transitions={}",
+                        characterization_profile.terminals,
+                        characterization_profile.unique_action_signatures,
+                        characterization_profile.quotient_hits,
+                        characterization_profile.max_action_signature_multiplicity,
+                        characterization_profile.signature_ms,
+                        characterization_profile.characterize_ms,
+                        characterization_profile.fanout_ms,
+                        characterization_profile.validation_ms,
+                        characterization_profile.total_ms,
+                        characterization_profile.quotient_disabled,
+                        template_profile.unique_characterizations,
+                        template_profile.compiled_characterizations,
+                        template_profile.quotient_hits,
+                        template_profile.max_characterization_multiplicity,
+                        template_profile.build_nfa_ms,
+                        template_profile.determinize_ms,
+                        template_profile.minimize_ms,
+                        template_profile.fanout_ms,
+                        template_profile.validation_ms,
+                        template_profile.total_ms,
+                        template_profile.wall_ms,
+                        template_profile.minimize_skipped,
+                        template_profile.avg_nfa_states(),
+                        template_profile.avg_nfa_transitions(),
+                        template_profile.avg_premin_dfa_states(),
+                        template_profile.avg_premin_dfa_transitions(),
+                        template_profile.avg_dfa_states(),
+                        template_profile.avg_dfa_transitions(),
+                        template_profile.max_dfa_states,
+                        template_profile.max_dfa_transitions,
+                    );
+                }
                 (templates, elapsed_ms(templates_started_at))
             },
         );

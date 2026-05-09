@@ -4,7 +4,7 @@
 //! path, epsilon-connected to NT nodes) and then determinizes + minimizes to
 //! produce an acyclic unweighted DFA.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Instant;
 
 use crate::automata::weighted::nwa::{NWA, NWAState};
@@ -22,10 +22,16 @@ pub(crate) struct TemplateCompileProfile {
     pub(crate) build_nfa_ms: f64,
     pub(crate) determinize_ms: f64,
     pub(crate) minimize_ms: f64,
+    pub(crate) fanout_ms: f64,
+    pub(crate) validation_ms: f64,
     pub(crate) total_ms: f64,
+    pub(crate) wall_ms: f64,
     pub(crate) num_terminals: usize,
     pub(crate) unique_characterizations: usize,
+    pub(crate) compiled_characterizations: usize,
+    pub(crate) quotient_hits: usize,
     pub(crate) max_characterization_multiplicity: usize,
+    pub(crate) minimize_skipped: bool,
     pub(crate) total_nfa_states: usize,
     pub(crate) max_nfa_states: usize,
     pub(crate) total_nfa_transitions: usize,
@@ -65,23 +71,24 @@ impl TemplateCompileProfile {
         average(self.total_premin_dfa_transitions, self.num_terminals)
     }
 
-    fn observe_compilation(&mut self, sample: &TemplateCompilationSample) {
+    fn observe_compilation(&mut self, sample: &TemplateCompilationSample, multiplicity: usize) {
         self.build_nfa_ms += sample.build_nfa_ms;
         self.determinize_ms += sample.determinize_ms;
         self.minimize_ms += sample.minimize_ms;
         self.total_ms += sample.total_ms();
-        self.num_terminals += 1;
-        self.total_nfa_states += sample.nfa_states;
+        self.compiled_characterizations += 1;
+        self.num_terminals += multiplicity;
+        self.total_nfa_states += sample.nfa_states * multiplicity;
         self.max_nfa_states = self.max_nfa_states.max(sample.nfa_states);
-        self.total_nfa_transitions += sample.nfa_transitions;
+        self.total_nfa_transitions += sample.nfa_transitions * multiplicity;
         self.max_nfa_transitions = self.max_nfa_transitions.max(sample.nfa_transitions);
-        self.total_dfa_states += sample.dfa_states;
+        self.total_dfa_states += sample.dfa_states * multiplicity;
         self.max_dfa_states = self.max_dfa_states.max(sample.dfa_states);
-        self.total_dfa_transitions += sample.dfa_transitions;
+        self.total_dfa_transitions += sample.dfa_transitions * multiplicity;
         self.max_dfa_transitions = self.max_dfa_transitions.max(sample.dfa_transitions);
-        self.total_premin_dfa_states += sample.premin_dfa_states;
+        self.total_premin_dfa_states += sample.premin_dfa_states * multiplicity;
         self.max_premin_dfa_states = self.max_premin_dfa_states.max(sample.premin_dfa_states);
-        self.total_premin_dfa_transitions += sample.premin_dfa_transitions;
+        self.total_premin_dfa_transitions += sample.premin_dfa_transitions * multiplicity;
         self.max_premin_dfa_transitions =
             self.max_premin_dfa_transitions.max(sample.premin_dfa_transitions);
     }
@@ -116,6 +123,23 @@ fn average(total: usize, count: usize) -> f64 {
     } else {
         total as f64 / count as f64
     }
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(false)
+}
+
+fn skip_template_minimization_enabled() -> bool {
+    env_flag_enabled("GLRMASK_SKIP_TEMPLATE_MINIMIZE")
+}
+
+fn template_quotient_validation_enabled() -> bool {
+    env_flag_enabled("GLRMASK_VALIDATE_TEMPLATE_QUOTIENT")
 }
 
 fn nfa_size(nfa: &NFA) -> (usize, usize) {
@@ -167,6 +191,16 @@ fn dfa_to_nwa_skeleton(dfa: &UnweightedDfa) -> NWA {
 fn compile_template_with_profile(
     characterization: &TerminalCharacterization,
 ) -> (UnweightedDfa, NWA, TemplateCompilationSample) {
+    compile_template_with_profile_and_minimize(
+        characterization,
+        skip_template_minimization_enabled(),
+    )
+}
+
+fn compile_template_with_profile_and_minimize(
+    characterization: &TerminalCharacterization,
+    skip_minimize: bool,
+) -> (UnweightedDfa, NWA, TemplateCompilationSample) {
     let build_nfa_started_at = Instant::now();
     let nfa = build_template_nfa(characterization);
     let build_nfa_ms = elapsed_ms(build_nfa_started_at);
@@ -178,8 +212,16 @@ fn compile_template_with_profile(
     let (premin_dfa_states, premin_dfa_transitions) = dfa_size(&determinized);
 
     let minimize_started_at = Instant::now();
-    let dfa = minimize_dfa(&determinized);
-    let minimize_ms = elapsed_ms(minimize_started_at);
+    let dfa = if skip_minimize {
+        determinized
+    } else {
+        minimize_dfa(&determinized)
+    };
+    let minimize_ms = if skip_minimize {
+        0.0
+    } else {
+        elapsed_ms(minimize_started_at)
+    };
     let (dfa_states, dfa_transitions) = dfa_size(&dfa);
 
     let skeleton = dfa_to_nwa_skeleton(&dfa);
@@ -219,33 +261,56 @@ impl Templates {
     ) -> (Self, TemplateCompileProfile) {
         use rayon::prelude::*;
 
-        let mut multiplicities = BTreeMap::<&TerminalCharacterization, usize>::new();
-        for characterization in characterizations.values() {
-            *multiplicities.entry(characterization).or_default() += 1;
-        }
+        let total_started_at = Instant::now();
+        let skip_minimize = skip_template_minimization_enabled();
 
-        let compiled: Vec<(TerminalID, UnweightedDfa, NWA, TemplateCompilationSample)> =
-            characterizations
-                .par_iter()
-                .map(|(&terminal, characterization)| {
-                    let (dfa, skeleton, sample) = compile_template_with_profile(characterization);
-                    (terminal, dfa, skeleton, sample)
-                })
-                .collect();
+        let mut grouped = BTreeMap::<&TerminalCharacterization, Vec<TerminalID>>::new();
+        for (&terminal, characterization) in characterizations {
+            grouped.entry(characterization).or_default().push(terminal);
+        }
+        let groups: Vec<(&TerminalCharacterization, Vec<TerminalID>)> = grouped.into_iter().collect();
+
+        let compiled: Vec<(Vec<TerminalID>, UnweightedDfa, NWA, TemplateCompilationSample)> = groups
+            .par_iter()
+            .map(|(characterization, terminals)| {
+                let (dfa, skeleton, sample) =
+                    compile_template_with_profile_and_minimize(*characterization, skip_minimize);
+                (terminals.clone(), dfa, skeleton, sample)
+            })
+            .collect();
 
         let mut profile = TemplateCompileProfile {
-            unique_characterizations: multiplicities.len(),
-            max_characterization_multiplicity: multiplicities.values().copied().max().unwrap_or(0),
+            unique_characterizations: groups.len(),
+            max_characterization_multiplicity: groups
+                .iter()
+                .map(|(_, terminals)| terminals.len())
+                .max()
+                .unwrap_or(0),
+            quotient_hits: characterizations.len().saturating_sub(groups.len()),
+            minimize_skipped: skip_minimize,
             ..TemplateCompileProfile::default()
         };
 
         let mut by_terminal = BTreeMap::new();
         let mut by_terminal_nwa = BTreeMap::new();
-        for (terminal, dfa, skeleton, sample) in compiled {
-            profile.observe_compilation(&sample);
-            by_terminal.insert(terminal, dfa);
-            by_terminal_nwa.insert(terminal, skeleton);
+        let fanout_started_at = Instant::now();
+        for (terminals, dfa, skeleton, sample) in compiled {
+            profile.observe_compilation(&sample, terminals.len());
+            for terminal in terminals {
+                by_terminal.insert(terminal, dfa.clone());
+                by_terminal_nwa.insert(terminal, skeleton.clone());
+            }
         }
+        profile.fanout_ms = elapsed_ms(fanout_started_at);
+        profile.total_ms += profile.fanout_ms;
+
+        let validation_started_at = Instant::now();
+        if template_quotient_validation_enabled() {
+            validate_template_quotient(characterizations, &by_terminal, &by_terminal_nwa);
+        }
+        profile.validation_ms = elapsed_ms(validation_started_at);
+        profile.total_ms += profile.validation_ms;
+        profile.wall_ms = elapsed_ms(total_started_at);
 
         (
             Self {
@@ -254,6 +319,105 @@ impl Templates {
             },
             profile,
         )
+    }
+}
+
+fn dfa_accepts_at(dfa: &UnweightedDfa, state: Option<u32>) -> bool {
+    state
+        .and_then(|state| dfa.states.get(state as usize))
+        .is_some_and(|state| state.is_accepting)
+}
+
+fn dfa_target(dfa: &UnweightedDfa, state: Option<u32>, label: i32) -> Option<u32> {
+    state
+        .and_then(|state| dfa.states.get(state as usize))
+        .and_then(|state| state.transitions.get(&label).copied())
+}
+
+fn add_outgoing_labels(dfa: &UnweightedDfa, state: Option<u32>, labels: &mut BTreeSet<i32>) {
+    if let Some(state) = state.and_then(|state| dfa.states.get(state as usize)) {
+        labels.extend(state.transitions.keys().copied());
+    }
+}
+
+fn find_dfa_language_mismatch(
+    left: &UnweightedDfa,
+    right: &UnweightedDfa,
+) -> Option<Vec<i32>> {
+    let mut seen = BTreeSet::<(Option<u32>, Option<u32>)>::new();
+    let mut worklist = VecDeque::<(Option<u32>, Option<u32>, Vec<i32>)>::new();
+
+    let start = (Some(left.start_state), Some(right.start_state));
+    seen.insert(start);
+    worklist.push_back((start.0, start.1, Vec::new()));
+
+    while let Some((left_state, right_state, witness)) = worklist.pop_front() {
+        if dfa_accepts_at(left, left_state) != dfa_accepts_at(right, right_state) {
+            return Some(witness);
+        }
+
+        let mut labels = BTreeSet::new();
+        add_outgoing_labels(left, left_state, &mut labels);
+        add_outgoing_labels(right, right_state, &mut labels);
+
+        for label in labels {
+            let next = (
+                dfa_target(left, left_state, label),
+                dfa_target(right, right_state, label),
+            );
+            if seen.insert(next) {
+                let mut next_witness = witness.clone();
+                next_witness.push(label);
+                worklist.push_back((next.0, next.1, next_witness));
+            }
+        }
+    }
+
+    None
+}
+
+fn nwa_skeleton_matches_dfa(dfa: &UnweightedDfa, skeleton: &NWA) -> bool {
+    let expected = dfa_to_nwa_skeleton(dfa);
+    expected.start_states() == skeleton.start_states() && expected.states() == skeleton.states()
+}
+
+fn validate_template_quotient(
+    characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
+    by_terminal: &BTreeMap<TerminalID, UnweightedDfa>,
+    by_terminal_nwa: &BTreeMap<TerminalID, NWA>,
+) {
+    let skip_minimize = skip_template_minimization_enabled();
+    for (&terminal, characterization) in characterizations {
+        let cached = by_terminal
+            .get(&terminal)
+            .unwrap_or_else(|| panic!("missing template DFA for terminal {terminal}"));
+        let cached_skeleton = by_terminal_nwa
+            .get(&terminal)
+            .unwrap_or_else(|| panic!("missing template NWA skeleton for terminal {terminal}"));
+        let (direct, _, _) = compile_template_with_profile(characterization);
+
+        if let Some(witness) = find_dfa_language_mismatch(cached, &direct) {
+            panic!(
+                "template quotient mismatch for terminal {terminal}; witness label path: {:?}",
+                witness
+            );
+        }
+
+        assert!(
+            nwa_skeleton_matches_dfa(cached, cached_skeleton),
+            "template NWA skeleton is not the DFA skeleton for terminal {terminal}"
+        );
+
+        if skip_minimize {
+            let (old_minimized, _, _) =
+                compile_template_with_profile_and_minimize(characterization, false);
+            if let Some(witness) = find_dfa_language_mismatch(cached, &old_minimized) {
+                panic!(
+                    "template minimization-skip mismatch for terminal {terminal}; witness label path: {:?}",
+                    witness
+                );
+            }
+        }
     }
 }
 
