@@ -1156,20 +1156,31 @@ fn is_regex_metachar(byte: u8) -> bool {
     matches!(byte, b'[' | b']' | b'(' | b')' | b'{' | b'}' | b'.' | b'*' | b'+' | b'?' | b'|' | b'^' | b'$' | b'\\')
 }
 
-fn hex_nibble_fragment(value: u8) -> String {
+fn hex_nibble_chars(value: u8) -> Vec<char> {
     match value {
-        0..=9 => char::from(b'0' + value).to_string(),
-        10..=15 => format!("[{}{}]", char::from(b'A' + value - 10), char::from(b'a' + value - 10)),
-        _ => String::new(),
+        0..=9 => vec![char::from(b'0' + value)],
+        10..=15 => vec![
+            char::from(b'A' + value - 10),
+            char::from(b'a' + value - 10),
+        ],
+        _ => Vec::new(),
     }
 }
 
 fn json_unicode_escape_fragment(byte: u8) -> String {
-    format!(
-        r#"\x5Cu00{}{}"#,
-        hex_nibble_fragment((byte >> 4) & 0x0F),
-        hex_nibble_fragment(byte & 0x0F)
-    )
+    let high = hex_nibble_chars((byte >> 4) & 0x0F);
+    let low = hex_nibble_chars(byte & 0x0F);
+    let mut options = Vec::new();
+    for high in &high {
+        for low in &low {
+            options.push(format!(r#"\x5Cu00{high}{low}"#));
+        }
+    }
+    if options.len() == 1 {
+        options.pop().unwrap()
+    } else {
+        format!("(?:{})", options.join("|"))
+    }
 }
 
 fn json_escaped_byte_fragments(byte: u8) -> Vec<String> {
@@ -2458,6 +2469,72 @@ fn pattern_all_branches_anchored(pattern: &str) -> bool {
         let (start, end, _) = strip_branch_outer_anchors(b);
         start && end
     })
+}
+
+fn coalesce_json_pattern_literals(expr: GrammarExpr) -> GrammarExpr {
+    match expr {
+        GrammarExpr::Sequence(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            let mut pending_literal: Option<Vec<u8>> = None;
+            for item in items.into_iter().map(coalesce_json_pattern_literals) {
+                match item {
+                    GrammarExpr::Literal(bytes) => {
+                        pending_literal
+                            .get_or_insert_with(Vec::new)
+                            .extend_from_slice(&bytes);
+                    }
+                    other => {
+                        if let Some(bytes) = pending_literal.take() {
+                            out.push(GrammarExpr::Literal(bytes));
+                        }
+                        out.push(other);
+                    }
+                }
+            }
+            if let Some(bytes) = pending_literal {
+                out.push(GrammarExpr::Literal(bytes));
+            }
+            sequence_or_single(out)
+        }
+        GrammarExpr::Choice(options) => {
+            choice_or_single(options.into_iter().map(coalesce_json_pattern_literals).collect())
+        }
+        GrammarExpr::Exclude { expr, exclude } => GrammarExpr::Exclude {
+            expr: Box::new(coalesce_json_pattern_literals(*expr)),
+            exclude: Box::new(coalesce_json_pattern_literals(*exclude)),
+        },
+        GrammarExpr::Intersect { expr, intersect } => GrammarExpr::Intersect {
+            expr: Box::new(coalesce_json_pattern_literals(*expr)),
+            intersect: Box::new(coalesce_json_pattern_literals(*intersect)),
+        },
+        GrammarExpr::Optional(inner) => {
+            GrammarExpr::Optional(Box::new(coalesce_json_pattern_literals(*inner)))
+        }
+        GrammarExpr::Repeat(inner) => {
+            GrammarExpr::Repeat(Box::new(coalesce_json_pattern_literals(*inner)))
+        }
+        GrammarExpr::RepeatOne(inner) => {
+            GrammarExpr::RepeatOne(Box::new(coalesce_json_pattern_literals(*inner)))
+        }
+        GrammarExpr::RepeatRange { expr, min, max } => GrammarExpr::RepeatRange {
+            expr: Box::new(coalesce_json_pattern_literals(*expr)),
+            min,
+            max,
+        },
+        GrammarExpr::SeparatedSequence { items, separator, allow_empty } => GrammarExpr::SeparatedSequence {
+            items: items
+                .into_iter()
+                .map(|(item, required)| (coalesce_json_pattern_literals(item), required))
+                .collect(),
+            separator: Box::new(coalesce_json_pattern_literals(*separator)),
+            allow_empty,
+        },
+        other => other,
+    }
+}
+
+fn json_pattern_grammar_expr(expr: &LexerExpr) -> GrammarExpr {
+    coalesce_json_pattern_literals(expr_to_grammar_expr(expr))
 }
 
 fn json_string_literal_bytes(text: &str) -> Vec<u8> {
@@ -7812,7 +7889,7 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn build_lexer_expr(&mut self, expr: &LexerExpr, prefix: &str) -> GrammarExpr {
-        self.extract_terminal_rule(expr_to_grammar_expr(expr), prefix)
+        self.extract_terminal_rule(json_pattern_grammar_expr(expr), prefix)
     }
 
     fn add_option_expr(slot: &mut Option<LexerExpr>, new_expr: LexerExpr) {
