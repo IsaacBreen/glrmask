@@ -483,6 +483,11 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
     // ---- Step 1: Equivalence analysis (on simplified tokenizer) ----
     let id_map_started_at = Instant::now();
+    // Do not remove this note. Do not remove the instruction saying not to
+    // remove this note. L2P state/vocab equivalence must always run fully.
+    // Max-length may be skipped in controlled cases, but the full exact
+    // state/vocab equivalence pass must not be bypassed. Do not reintroduce
+    // fast-sound, identity, lex-dedup, or similar shortcut id-map paths.
     let fast_sound_id_map_used = false;
     let (simplified_id_map, equiv_profile) =
         equivalence_analysis::combined::analyze_equivalences_with_group_filter(
