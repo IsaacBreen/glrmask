@@ -37,7 +37,7 @@ use super::types::{compile_profile_enabled, TerminalColoring, TerminalDwaPhasePr
 use nwa_builder::{build_nwa_via_trie_walk, internal_vocab_entries, seed_root_nodes};
 use postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
-    prune_non_coreachable_states,
+    prune_non_coreachable_states, SharedDisallowedFollowDfaCache,
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -377,6 +377,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     shared_vocab_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
     shared_simplify_cache: Option<&SharedSimplifyCache>,
+    shared_disallowed_follow_dfa_cache: Option<&SharedDisallowedFollowDfaCache>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
 ) -> Option<LocalIdMapTerminalDwa> {
@@ -620,6 +621,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 &mut nwa,
                 disallowed_follows,
                 grammar.num_terminals as usize,
+                shared_disallowed_follow_dfa_cache,
             );
             let disallowed_ms = disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_disallowed = nwa.states().len();

@@ -5,7 +5,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
+use std::sync::{Arc, OnceLock};
 
+use crate::automata::unweighted::dfa::DFA;
 use crate::automata::weighted::nwa::{NWA, NWAState as NWAStateType};
 use crate::grammar::flat::TerminalID;
 use super::equivalence_analysis::disallowed_follows::{
@@ -44,18 +46,7 @@ fn structural_hash_nwa_state(state: &NWAStateType) -> u64 {
 }
 
 fn hash_weight(weight: &Weight, hasher: &mut impl Hasher) {
-    if weight.is_full() {
-        0xFFFF_FFFFu32.hash(hasher);
-        return;
-    }
-    for (range, tokens) in weight.0.range_values() {
-        range.start().hash(hasher);
-        range.end().hash(hasher);
-        for r in tokens.ranges() {
-            r.start().hash(hasher);
-            r.end().hash(hasher);
-        }
-    }
+    weight.structural_hash_cached().hash(hasher);
 }
 
 pub(crate) fn canonicalize_acyclic_nwa(nwa: &mut NWA) {
@@ -595,13 +586,59 @@ pub(crate) fn collapse_always_allowed(
 
 // ─── Disallowed-follow subtraction ───────────────────────────────────────────
 
+/// Per-build cache for the grammar-global disallowed-follow DFA.
+///
+/// Every L2P partition receives the same `disallowed_follows` table and the same
+/// terminal count, but the old path normalized that table and rebuilt the same
+/// DFA independently inside every partition. The normalized table can dominate
+/// small partitions and p0 postprocess time on the target workloads. This cache
+/// is constructed once per global terminal-DWA build and is filled lazily by the
+/// first partition that reaches the disallowed-follow phase; other partitions
+/// share the exact same DFA.
+#[derive(Default)]
+pub(crate) struct SharedDisallowedFollowDfaCache {
+    dfa: OnceLock<Option<Arc<DFA>>>,
+}
+
+impl SharedDisallowedFollowDfaCache {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    fn get_or_build(
+        &self,
+        num_terminals: usize,
+        disallowed_follows: &BTreeMap<u32, BitSet>,
+    ) -> Option<Arc<DFA>> {
+        self.dfa
+            .get_or_init(|| {
+                let normalized = normalize_disallowed_follows(num_terminals, disallowed_follows);
+                if normalized.iter().all(|bits| bits.is_zero()) {
+                    None
+                } else {
+                    Some(Arc::new(build_disallowed_follow_dfa(&normalized)))
+                }
+            })
+            .clone()
+    }
+}
+
 /// Apply disallowed-follow constraints by subtracting a follow-pair DFA from
 /// the NWA. Takes the pre-computed `disallowed_follows` map and `num_terminals`.
 pub(crate) fn apply_disallowed_follow_constraints(
     nwa: &mut NWA,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     num_terminals: usize,
+    shared_cache: Option<&SharedDisallowedFollowDfaCache>,
 ) {
+    if let Some(cache) = shared_cache {
+        let Some(disallowed_dfa) = cache.get_or_build(num_terminals, disallowed_follows) else {
+            return;
+        };
+        *nwa = subtract_disallowed_dfa(nwa, disallowed_dfa.as_ref());
+        return;
+    }
+
     let normalized = normalize_disallowed_follows(num_terminals, disallowed_follows);
     if normalized.iter().all(|bits| bits.is_zero()) {
         return;
@@ -611,7 +648,7 @@ pub(crate) fn apply_disallowed_follow_constraints(
     *nwa = subtract_disallowed_dfa(nwa, &disallowed_dfa);
 }
 
-fn subtract_disallowed_dfa(nwa: &NWA, right: &crate::automata::unweighted::dfa::DFA) -> NWA {
+fn subtract_disallowed_dfa(nwa: &NWA, right: &DFA) -> NWA {
     type ProdState = (u32, Option<u32>);
 
     let right_start = (!right.states.is_empty()).then_some(right.start_state);

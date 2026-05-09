@@ -411,6 +411,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     // changes the DFA (reducing state count via minimization).
     let shared_vocab_dfa_cache = l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
     let shared_simplify_cache = l2p::SharedSimplifyCache::default();
+    let shared_disallowed_follow_dfa_cache = l2p::postprocess::SharedDisallowedFollowDfaCache::new();
 
     use rayon::prelude::*;
     let partition_results: Vec<(Option<(LocalIdMapTerminalDwa, f64)>, usize)> = sub_vocabs
@@ -432,6 +433,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
                 Some(global_max_length_state_map),
                 Some(&shared_vocab_dfa_cache),
                 Some(&shared_simplify_cache),
+                Some(&shared_disallowed_follow_dfa_cache),
                 Some(&shared_classify_cache),
             )
             .map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0));

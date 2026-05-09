@@ -523,6 +523,82 @@ fn with_weight_op_memo<R>(f: impl FnOnce(&mut WeightOpMemo) -> R) -> R {
     })
 }
 
+/// Cached structural hashes for interned `Weight` maps.
+///
+/// DWA minimization and merge code hash the same interned weights many times.
+/// Computing the structural hash repeatedly walks every outer range and every
+/// inner token range, which is especially costly for p0/global terminal-DWA
+/// workloads. The cache key is the interned `Arc` pointer, guarded by a weak
+/// reference to avoid ABA reuse; the cached value is still the full structural
+/// hash, so equal weights keep identical `Hash` output even if a future caller
+/// constructs an equal map under a different `Arc`.
+struct WeightHashMemoEntry {
+    result: u64,
+    weight: Weak<WeightMap>,
+}
+
+#[derive(Default)]
+struct WeightHashMemo {
+    results: FxHashMap<usize, WeightHashMemoEntry>,
+    inserts_since_cleanup: usize,
+}
+
+impl WeightHashMemo {
+    fn maybe_cleanup(&mut self) {
+        if self.inserts_since_cleanup < INTERNER_CLEANUP_INTERVAL {
+            return;
+        }
+        self.results.retain(|_, entry| entry.weight.strong_count() > 0);
+        self.inserts_since_cleanup = 0;
+    }
+
+    fn get_or_insert(&mut self, weight: &Weight) -> u64 {
+        self.maybe_cleanup();
+        let key = weight.ptr_key();
+        if let Some(entry) = self.results.get(&key) {
+            if let Some(existing) = entry.weight.upgrade() {
+                if Arc::ptr_eq(&existing, &weight.0) {
+                    return entry.result;
+                }
+            }
+        }
+
+        let result = structural_weight_hash_uncached(weight);
+        self.results.insert(
+            key,
+            WeightHashMemoEntry {
+                result,
+                weight: Arc::downgrade(&weight.0),
+            },
+        );
+        self.inserts_since_cleanup += 1;
+        result
+    }
+}
+
+thread_local! {
+    static WEIGHT_HASH_MEMO: RefCell<WeightHashMemo> = RefCell::new(WeightHashMemo::default());
+}
+
+fn structural_weight_hash_uncached(weight: &Weight) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = rustc_hash::FxHasher::default();
+    let is_full = weight.is_full();
+    is_full.hash(&mut hasher);
+    if !is_full {
+        for (range, tokens) in weight.0.range_values() {
+            range.hash(&mut hasher);
+            tokens.as_ref().hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+fn cached_structural_weight_hash(weight: &Weight) -> u64 {
+    WEIGHT_HASH_MEMO.with(|memo| memo.borrow_mut().get_or_insert(weight))
+}
+
 /// Prune only dead entries from the global weight interner.
 pub fn clear_stale_weights() {
     interner_clear_stale();
@@ -1154,6 +1230,10 @@ impl Weight {
         Arc::as_ptr(&self.0) as usize
     }
 
+    pub(crate) fn structural_hash_cached(&self) -> u64 {
+        cached_structural_weight_hash(self)
+    }
+
     pub(crate) fn compact_entries(&self) -> Option<Vec<(u32, u32, SharedTokenSet)>> {
         if self.is_full() {
             return None;
@@ -1677,13 +1757,7 @@ impl super::leveled_gss::Merge for Weight {
 
 impl std::hash::Hash for Weight {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.is_full().hash(state);
-        if !self.is_full() {
-            for (range, tokens) in self.0.range_values() {
-                range.hash(state);
-                tokens.as_ref().hash(state);
-            }
-        }
+        state.write_u64(self.structural_hash_cached());
     }
 }
 
