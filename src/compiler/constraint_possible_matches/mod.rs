@@ -53,12 +53,20 @@ struct OrderedVocab {
 #[derive(Debug, Clone, Copy)]
 struct SweepEvent {
     add: bool,
-    label_id: u32,
+    group_id: u32,
+}
+
+#[derive(Debug, Clone)]
+struct SweepGroup {
+    label_ids: Box<[u32]>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
 struct SweepBuildStats {
     used_state_classes: usize,
+    terminal_groups: usize,
+    terminal_labels: usize,
+    group_label_refs: usize,
     total_intervals: usize,
     total_events: usize,
 }
@@ -153,19 +161,44 @@ fn used_state_class_ids(state_classes: &[u32]) -> Vec<u32> {
     ids
 }
 
+fn next_nonzero_stamp(generation: &mut u32, stamps: &mut [u32]) -> u32 {
+    *generation = generation.wrapping_add(1);
+    if *generation == 0 {
+        stamps.fill(0);
+        *generation = 1;
+    }
+    *generation
+}
+
 fn push_sweep_event(events: &mut [Vec<SweepEvent>], event_positions: &mut Vec<u32>, position: u32, event: SweepEvent) {
     let Some(bucket) = events.get_mut(position as usize) else { return; };
     if bucket.is_empty() { event_positions.push(position); }
     bucket.push(event);
 }
 
+fn intern_state_terminal_label(
+    label_ids: &mut FxHashMap<StateTerminalLabel, u32>,
+    labels_by_id: &mut Vec<StateTerminalLabel>,
+    label: StateTerminalLabel,
+) -> u32 {
+    if let Some(&label_id) = label_ids.get(&label) {
+        label_id
+    } else {
+        let label_id = labels_by_id.len() as u32;
+        labels_by_id.push(label);
+        label_ids.insert(label, label_id);
+        label_id
+    }
+}
+
 fn build_sweep_events(
     class_maps: &[Arc<IntervalPossibleMatchMap>],
     state_classes: &[u32],
     num_ordered_tokens: usize,
-) -> (Vec<Vec<SweepEvent>>, Vec<u32>, Vec<StateTerminalLabel>, SweepBuildStats) {
+) -> (Vec<Vec<SweepEvent>>, Vec<u32>, Vec<SweepGroup>, Vec<StateTerminalLabel>, SweepBuildStats) {
     let mut events = vec![Vec::new(); num_ordered_tokens + 1];
     let mut event_positions = Vec::new();
+    let mut groups = Vec::<SweepGroup>::new();
     let mut labels_by_id = Vec::<StateTerminalLabel>::new();
     let mut label_ids = FxHashMap::<StateTerminalLabel, u32>::default();
     let mut stats = SweepBuildStats::default();
@@ -175,28 +208,33 @@ fn build_sweep_events(
 
     for class_id in used_state_classes {
         let Some(class_map) = class_maps.get(class_id as usize) else { continue; };
-        for (&terminal_id, ranges) in class_map.iter() {
-            let label = (class_id, terminal_id);
-            let label_id = if let Some(&label_id) = label_ids.get(&label) {
-                label_id
-            } else {
-                let label_id = labels_by_id.len() as u32;
-                labels_by_id.push(label);
-                label_ids.insert(label, label_id);
-                label_id
-            };
-            for &(lo, mut hi) in ranges {
+        for entry in class_map.iter() {
+            if entry.terminals.is_empty() || entry.ranges.is_empty() { continue; }
+
+            let mut group_label_ids = Vec::with_capacity(entry.terminals.len());
+            for &terminal_id in entry.terminals.iter() {
+                group_label_ids.push(intern_state_terminal_label(&mut label_ids, &mut labels_by_id, (class_id, terminal_id)));
+            }
+            group_label_ids.sort_unstable();
+            group_label_ids.dedup();
+            if group_label_ids.is_empty() { continue; }
+
+            let group_id = groups.len() as u32;
+            stats.group_label_refs += group_label_ids.len();
+            groups.push(SweepGroup { label_ids: group_label_ids.into_boxed_slice() });
+
+            for &(lo, mut hi) in entry.ranges.iter() {
                 if num_ordered_tokens == 0 { continue; }
                 let max_token = num_ordered_tokens as u32 - 1;
                 if lo > max_token { continue; }
                 hi = hi.min(max_token);
                 if lo > hi { continue; }
                 stats.total_intervals += 1;
-                push_sweep_event(&mut events, &mut event_positions, lo, SweepEvent { add: true, label_id });
+                push_sweep_event(&mut events, &mut event_positions, lo, SweepEvent { add: true, group_id });
                 stats.total_events += 1;
                 let after = hi.saturating_add(1);
                 if after <= num_ordered_tokens as u32 {
-                    push_sweep_event(&mut events, &mut event_positions, after, SweepEvent { add: false, label_id });
+                    push_sweep_event(&mut events, &mut event_positions, after, SweepEvent { add: false, group_id });
                     stats.total_events += 1;
                 }
             }
@@ -205,25 +243,52 @@ fn build_sweep_events(
 
     event_positions.sort_unstable();
     event_positions.dedup();
-    (events, event_positions, labels_by_id, stats)
+    stats.terminal_groups = groups.len();
+    stats.terminal_labels = labels_by_id.len();
+    (events, event_positions, groups, labels_by_id, stats)
 }
 
-fn apply_sweep_events(active_counts: &mut [u32], events: &[SweepEvent], active_label_count: &mut usize) {
+fn apply_sweep_events(active_group_counts: &mut [u32], events: &[SweepEvent], active_group_count: &mut usize) {
     for event in events.iter().filter(|event| !event.add) {
-        let count = &mut active_counts[event.label_id as usize];
-        assert!(*count > 0, "pmv sweep removal underflow for label_id={}", event.label_id);
+        let count = &mut active_group_counts[event.group_id as usize];
+        assert!(*count > 0, "pmv sweep removal underflow for group_id={}", event.group_id);
         if *count == 1 {
-            *active_label_count -= 1;
+            *active_group_count -= 1;
         }
         *count -= 1;
     }
     for event in events.iter().filter(|event| event.add) {
-        let count = &mut active_counts[event.label_id as usize];
+        let count = &mut active_group_counts[event.group_id as usize];
         if *count == 0 {
-            *active_label_count += 1;
+            *active_group_count += 1;
         }
         *count += 1;
     }
+}
+
+fn build_signature_from_active_groups(
+    active_group_counts: &[u32],
+    active_group_count: usize,
+    groups: &[SweepGroup],
+    labels_by_id: &[StateTerminalLabel],
+    label_stamps: &mut [u32],
+    stamp_generation: &mut u32,
+) -> Vec<StateTerminalLabel> {
+    if active_group_count == 0 { return Vec::new(); }
+    let stamp = next_nonzero_stamp(stamp_generation, label_stamps);
+    let mut signature = Vec::new();
+    for (group_id, group) in groups.iter().enumerate() {
+        if active_group_counts[group_id] == 0 { continue; }
+        for &label_id in group.label_ids.iter() {
+            let stamp_slot = &mut label_stamps[label_id as usize];
+            if *stamp_slot != stamp {
+                *stamp_slot = stamp;
+                signature.push(labels_by_id[label_id as usize]);
+            }
+        }
+    }
+    signature.sort_unstable();
+    signature
 }
 
 fn build_possible_match_vocab_and_weights_from_interval_maps(
@@ -236,8 +301,15 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
         .map(|value| value == "1")
         .unwrap_or(false);
 
+    if group_pmv_legacy_enabled() {
+        if pmv_detail_enabled {
+            eprintln!("[glrmask/profile][pmv_detail] stage=legacy_expanded enabled=1");
+        }
+        return build_legacy_possible_match_vocab_and_weights_from_interval_maps(class_maps, state_classes, ordered_vocab);
+    }
+
     let sweep_events_started_at = Instant::now();
-    let (events, event_positions, labels_by_id, sweep_build_stats) =
+    let (events, event_positions, groups, labels_by_id, sweep_build_stats) =
         build_sweep_events(class_maps, state_classes, num_ordered_tokens);
     let sweep_events_ms = elapsed_ms(sweep_events_started_at);
 
@@ -245,8 +317,10 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
     let mut signature_labels: Vec<Vec<StateTerminalLabel>> = Vec::new();
     let mut original_to_internal = vec![u32::MAX; ordered_vocab.original_slot_count];
     let mut internal_to_originals: Vec<Vec<u32>> = Vec::new();
-    let mut active_counts = vec![0u32; labels_by_id.len()];
-    let mut active_label_count = 0usize;
+    let mut active_group_counts = vec![0u32; groups.len()];
+    let mut active_group_count = 0usize;
+    let mut label_stamps = vec![0u32; labels_by_id.len()];
+    let mut stamp_generation = 0u32;
 
     let sweep_started_at = Instant::now();
     let mut signature_build_ms = 0.0;
@@ -255,27 +329,33 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
     let mut sweep_segments = 0usize;
     let mut total_active_signature_len = 0usize;
     let mut max_active_signature_len = 0usize;
+    let mut total_active_group_len = 0usize;
+    let mut max_active_group_len = 0usize;
 
     let mut event_index = 0usize;
     let mut position = 0usize;
     while position < num_ordered_tokens {
         while event_index < event_positions.len() && event_positions[event_index] as usize == position {
-            apply_sweep_events(&mut active_counts, &events[position], &mut active_label_count);
+            apply_sweep_events(&mut active_group_counts, &events[position], &mut active_group_count);
             event_index += 1;
         }
 
         let next_position = event_positions.get(event_index).map(|&next| (next as usize).min(num_ordered_tokens)).unwrap_or(num_ordered_tokens);
         let signature_started_at = Instant::now();
-        let mut signature = Vec::with_capacity(active_label_count);
-        for (label_id, &label) in labels_by_id.iter().enumerate() {
-            if active_counts[label_id] > 0 {
-                signature.push(label);
-            }
-        }
+        let signature = build_signature_from_active_groups(
+            &active_group_counts,
+            active_group_count,
+            &groups,
+            &labels_by_id,
+            &mut label_stamps,
+            &mut stamp_generation,
+        );
         signature_build_ms += elapsed_ms(signature_started_at);
         sweep_segments += 1;
         total_active_signature_len += signature.len();
         max_active_signature_len = max_active_signature_len.max(signature.len());
+        total_active_group_len += active_group_count;
+        max_active_group_len = max_active_group_len.max(active_group_count);
 
         let signature_lookup_started_at = Instant::now();
         let signature_id = if let Some(&existing) = signature_to_id.get(&signature) { existing } else {
@@ -339,16 +419,24 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
         } else {
             total_active_signature_len as f64 / sweep_segments as f64
         };
+        let mean_active_group_len = if sweep_segments == 0 {
+            0.0
+        } else {
+            total_active_group_len as f64 / sweep_segments as f64
+        };
         eprintln!(
-            "[glrmask/profile][pmv_detail] stage=sweep_events sweep_events_ms={:.3} event_positions={} total_events={} used_state_classes={} total_intervals={}",
+            "[glrmask/profile][pmv_detail] stage=group_sweep_events sweep_events_ms={:.3} event_positions={} total_group_events={} used_state_classes={} total_group_intervals={} terminal_groups={} terminal_labels={} group_label_refs={}",
             sweep_events_ms,
             event_positions.len(),
             sweep_build_stats.total_events,
             sweep_build_stats.used_state_classes,
             sweep_build_stats.total_intervals,
+            sweep_build_stats.terminal_groups,
+            sweep_build_stats.terminal_labels,
+            sweep_build_stats.group_label_refs,
         );
         eprintln!(
-            "[glrmask/profile][pmv_detail] stage=sweep sweep_ms={:.3} segments={} signature_build_ms={:.3} signature_lookup_ms={:.3} assignment_ms={:.3} unique_signatures={} max_active_signature_len={} mean_active_signature_len={:.3}",
+            "[glrmask/profile][pmv_detail] stage=sweep sweep_ms={:.3} segments={} signature_build_ms={:.3} signature_lookup_ms={:.3} assignment_ms={:.3} unique_signatures={} max_active_signature_len={} mean_active_signature_len={:.3} max_active_groups={} mean_active_groups={:.3}",
             sweep_ms,
             sweep_segments,
             signature_build_ms,
@@ -357,6 +445,8 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
             signature_labels.len(),
             max_active_signature_len,
             mean_active_signature_len,
+            max_active_group_len,
+            mean_active_group_len,
         );
         eprintln!(
             "[glrmask/profile][pmv_detail] stage=sort_dedup sort_dedup_ms={:.3} internal_signature_classes={}",
@@ -377,7 +467,274 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
         );
     }
 
+    let possible_match_vocab = PossibleMatchVocabMap { original_to_internal, internal_to_originals };
+    if group_pmv_validation_enabled() {
+        validate_group_pmv_outputs(class_maps, state_classes, ordered_vocab, &possible_match_vocab, &possible_matches);
+    }
+
+    (possible_match_vocab, possible_matches)
+}
+
+
+type ExpandedIntervalPossibleMatchMap = BTreeMap<TerminalID, Vec<(u32, u32)>>;
+
+#[derive(Debug, Clone, Copy)]
+struct LegacySweepEvent {
+    add: bool,
+    label_id: u32,
+}
+
+fn normalize_token_ranges(ranges: &mut Vec<(u32, u32)>) {
+    if ranges.len() <= 1 { return; }
+    ranges.sort_unstable();
+    let mut write = 0usize;
+    for read in 1..ranges.len() {
+        let (start, end) = ranges[read];
+        let current = &mut ranges[write];
+        if start <= current.1.saturating_add(1) {
+            current.1 = current.1.max(end);
+        } else {
+            write += 1;
+            ranges[write] = (start, end);
+        }
+    }
+    ranges.truncate(write + 1);
+}
+
+fn append_expanded_ranges(
+    map: &mut ExpandedIntervalPossibleMatchMap,
+    terminal: TerminalID,
+    ranges: &[(u32, u32)],
+) {
+    if !ranges.is_empty() {
+        map.entry(terminal).or_default().extend_from_slice(ranges);
+    }
+}
+
+fn normalize_expanded_interval_map(map: &mut ExpandedIntervalPossibleMatchMap) {
+    map.retain(|_, ranges| {
+        normalize_token_ranges(ranges);
+        !ranges.is_empty()
+    });
+}
+
+fn expand_interval_class_maps(
+    class_maps: &[Arc<IntervalPossibleMatchMap>],
+) -> Vec<Arc<ExpandedIntervalPossibleMatchMap>> {
+    class_maps.iter().map(|class_map| {
+        let mut expanded = ExpandedIntervalPossibleMatchMap::new();
+        for entry in class_map.iter() {
+            for &terminal_id in entry.terminals.iter() {
+                append_expanded_ranges(&mut expanded, terminal_id, &entry.ranges);
+            }
+        }
+        normalize_expanded_interval_map(&mut expanded);
+        Arc::new(expanded)
+    }).collect()
+}
+
+fn push_legacy_sweep_event(
+    events: &mut [Vec<LegacySweepEvent>],
+    event_positions: &mut Vec<u32>,
+    position: u32,
+    event: LegacySweepEvent,
+) {
+    let Some(bucket) = events.get_mut(position as usize) else { return; };
+    if bucket.is_empty() { event_positions.push(position); }
+    bucket.push(event);
+}
+
+fn build_legacy_sweep_events(
+    class_maps: &[Arc<ExpandedIntervalPossibleMatchMap>],
+    state_classes: &[u32],
+    num_ordered_tokens: usize,
+) -> (Vec<Vec<LegacySweepEvent>>, Vec<u32>, Vec<StateTerminalLabel>) {
+    let mut events = vec![Vec::new(); num_ordered_tokens + 1];
+    let mut event_positions = Vec::new();
+    let mut labels_by_id = Vec::<StateTerminalLabel>::new();
+    let mut label_ids = FxHashMap::<StateTerminalLabel, u32>::default();
+
+    for class_id in used_state_class_ids(state_classes) {
+        let Some(class_map) = class_maps.get(class_id as usize) else { continue; };
+        for (&terminal_id, ranges) in class_map.iter() {
+            let label_id = intern_state_terminal_label(&mut label_ids, &mut labels_by_id, (class_id, terminal_id));
+            for &(lo, mut hi) in ranges.iter() {
+                if num_ordered_tokens == 0 { continue; }
+                let max_token = num_ordered_tokens as u32 - 1;
+                if lo > max_token { continue; }
+                hi = hi.min(max_token);
+                if lo > hi { continue; }
+                push_legacy_sweep_event(&mut events, &mut event_positions, lo, LegacySweepEvent { add: true, label_id });
+                let after = hi.saturating_add(1);
+                if after <= num_ordered_tokens as u32 {
+                    push_legacy_sweep_event(&mut events, &mut event_positions, after, LegacySweepEvent { add: false, label_id });
+                }
+            }
+        }
+    }
+
+    event_positions.sort_unstable();
+    event_positions.dedup();
+    (events, event_positions, labels_by_id)
+}
+
+fn apply_legacy_sweep_events(
+    active_counts: &mut [u32],
+    events: &[LegacySweepEvent],
+    active_label_count: &mut usize,
+) {
+    for event in events.iter().filter(|event| !event.add) {
+        let count = &mut active_counts[event.label_id as usize];
+        assert!(*count > 0, "legacy pmv sweep removal underflow for label_id={}", event.label_id);
+        if *count == 1 {
+            *active_label_count -= 1;
+        }
+        *count -= 1;
+    }
+    for event in events.iter().filter(|event| event.add) {
+        let count = &mut active_counts[event.label_id as usize];
+        if *count == 0 {
+            *active_label_count += 1;
+        }
+        *count += 1;
+    }
+}
+
+fn build_legacy_possible_match_vocab_and_weights_from_interval_maps(
+    class_maps: &[Arc<IntervalPossibleMatchMap>],
+    state_classes: &[u32],
+    ordered_vocab: &OrderedVocab,
+) -> (PossibleMatchVocabMap, RuntimePossibleMatchesByTerminal) {
+    let expanded_class_maps = expand_interval_class_maps(class_maps);
+    let num_ordered_tokens = ordered_vocab.ordered_to_originals.len();
+    let (events, event_positions, labels_by_id) =
+        build_legacy_sweep_events(&expanded_class_maps, state_classes, num_ordered_tokens);
+
+    let mut signature_to_id: FxHashMap<Vec<StateTerminalLabel>, SignatureClassId> = FxHashMap::default();
+    let mut signature_labels: Vec<Vec<StateTerminalLabel>> = Vec::new();
+    let mut original_to_internal = vec![u32::MAX; ordered_vocab.original_slot_count];
+    let mut internal_to_originals: Vec<Vec<u32>> = Vec::new();
+    let mut active_counts = vec![0u32; labels_by_id.len()];
+    let mut active_label_count = 0usize;
+
+    let mut event_index = 0usize;
+    let mut position = 0usize;
+    while position < num_ordered_tokens {
+        while event_index < event_positions.len() && event_positions[event_index] as usize == position {
+            apply_legacy_sweep_events(&mut active_counts, &events[position], &mut active_label_count);
+            event_index += 1;
+        }
+
+        let next_position = event_positions.get(event_index).map(|&next| (next as usize).min(num_ordered_tokens)).unwrap_or(num_ordered_tokens);
+        let mut signature = Vec::with_capacity(active_label_count);
+        for (label_id, &label) in labels_by_id.iter().enumerate() {
+            if active_counts[label_id] > 0 {
+                signature.push(label);
+            }
+        }
+        signature.sort_unstable();
+
+        let signature_id = if let Some(&existing) = signature_to_id.get(&signature) { existing } else {
+            let new_id = signature_labels.len() as SignatureClassId;
+            signature_to_id.insert(signature.clone(), new_id);
+            signature_labels.push(signature);
+            internal_to_originals.push(Vec::new());
+            new_id
+        };
+
+        for ordered_id in position..next_position {
+            for &original in &ordered_vocab.ordered_to_originals[ordered_id] {
+                if let Some(slot) = original_to_internal.get_mut(original as usize) { *slot = signature_id; }
+                internal_to_originals[signature_id as usize].push(original);
+            }
+        }
+        position = next_position;
+    }
+
+    for originals in &mut internal_to_originals { originals.sort_unstable(); originals.dedup(); }
+
+    let mut ids_by_label: BTreeMap<TerminalID, BTreeMap<u32, Vec<u32>>> = BTreeMap::new();
+    for (signature_id, labels) in signature_labels.iter().enumerate() {
+        let signature_id = signature_id as u32;
+        for &(class_id, terminal_id) in labels {
+            ids_by_label.entry(terminal_id).or_default().entry(class_id).or_default().push(signature_id);
+        }
+    }
+
+    let possible_matches = ids_by_label.into_iter().map(|(terminal_id, by_state)| {
+        let mut entries = Vec::new();
+        for (state, mut ids) in by_state {
+            ids.sort_unstable();
+            ids.dedup();
+            let token_set = range_set_from_sorted_ids(&ids);
+            if !token_set.is_empty() {
+                entries.push((state, shared_rangeset(token_set)));
+            }
+        }
+        (terminal_id, Weight::from_per_tsid_shared(entries.into_iter()))
+    }).filter(|(_, weight)| !weight.is_empty()).collect();
+
     (PossibleMatchVocabMap { original_to_internal, internal_to_originals }, possible_matches)
+}
+
+fn validate_group_pmv_outputs(
+    class_maps: &[Arc<IntervalPossibleMatchMap>],
+    state_classes: &[u32],
+    ordered_vocab: &OrderedVocab,
+    actual_vocab: &PossibleMatchVocabMap,
+    actual_matches: &RuntimePossibleMatchesByTerminal,
+) {
+    let started_at = Instant::now();
+    let (expected_vocab, expected_matches) =
+        build_legacy_possible_match_vocab_and_weights_from_interval_maps(class_maps, state_classes, ordered_vocab);
+
+    if actual_vocab.original_to_internal != expected_vocab.original_to_internal {
+        let mut mismatch = None;
+        for idx in 0..actual_vocab.original_to_internal.len().min(expected_vocab.original_to_internal.len()) {
+            let actual = actual_vocab.original_to_internal[idx];
+            let expected = expected_vocab.original_to_internal[idx];
+            if actual != expected {
+                mismatch = Some((idx, actual, expected));
+                break;
+            }
+        }
+        panic!("group PMV validation failed: original_to_internal mismatch at {:?}", mismatch);
+    }
+    if actual_vocab.internal_to_originals != expected_vocab.internal_to_originals {
+        let mut mismatch = None;
+        for idx in 0..actual_vocab.internal_to_originals.len().min(expected_vocab.internal_to_originals.len()) {
+            let actual = &actual_vocab.internal_to_originals[idx];
+            let expected = &expected_vocab.internal_to_originals[idx];
+            if actual != expected {
+                mismatch = Some((idx, actual.clone(), expected.clone()));
+                break;
+            }
+        }
+        panic!("group PMV validation failed: internal_to_originals mismatch at {:?}; actual_len={} expected_len={}", mismatch, actual_vocab.internal_to_originals.len(), expected_vocab.internal_to_originals.len());
+    }
+    if actual_matches != &expected_matches {
+        let mut terminal_ids: Vec<TerminalID> = actual_matches.keys().chain(expected_matches.keys()).copied().collect();
+        terminal_ids.sort_unstable();
+        terminal_ids.dedup();
+        let mismatch = terminal_ids.into_iter().find(|terminal_id| actual_matches.get(terminal_id) != expected_matches.get(terminal_id));
+        panic!("group PMV validation failed: possible match weight mismatch for terminal {:?}", mismatch);
+    }
+
+    if std::env::var_os("GLRMASK_PROFILE_PMV_DETAIL").is_some() {
+        eprintln!("[glrmask/profile][pmv_validate] legacy_expand_compare_ms={:.3}", elapsed_ms(started_at));
+    }
+}
+
+fn group_pmv_validation_enabled() -> bool {
+    std::env::var("GLRMASK_VALIDATE_GROUP_PMV")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn group_pmv_legacy_enabled() -> bool {
+    std::env::var("GLRMASK_PM_USE_LEGACY_PMV")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 pub(crate) fn compute_constraint_possible_matches(
