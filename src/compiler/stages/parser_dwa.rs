@@ -102,6 +102,42 @@ struct ParserNwaBuildProfile {
     parser_nwa_build_ms: f64,
 }
 
+#[derive(Default)]
+struct ParserDwaComposeDetailProfile {
+    total_states: usize,
+    productive_states: usize,
+    total_branches: usize,
+    productive_branches: usize,
+    unique_bundles: usize,
+    accepting_bundles: usize,
+    state_init_ms: f64,
+    branch_walk_ms: f64,
+    memo_hit_clone_ms: f64,
+    fragment_build_ms: f64,
+    epsilon_link_ms: f64,
+    bundle_profile_total_ms: f64,
+    bundle_profile_build_group_dfas_ms: f64,
+    bundle_profile_union_groups_ms: f64,
+    bundle_profile_determinize_ms: f64,
+    bundle_profile_minimize_ms: f64,
+    bundle_profile_dwa_to_nwa_ms: f64,
+    memo_hits: usize,
+    memo_misses: usize,
+    bundle_cache_builds: usize,
+    bundle_profile_result_dwa_states: usize,
+    bundle_profile_result_dwa_transitions: usize,
+    bundle_profile_result_nwa_states: usize,
+    bundle_profile_result_nwa_transitions: usize,
+    epsilon_edges_added: usize,
+    fragment_start_states_total: usize,
+}
+
+fn parser_dwa_compose_detail_enabled() -> bool {
+    std::env::var("GLRMASK_PROFILE_PARSER_DWA_COMPOSE_DETAIL")
+        .map(|value| value == "1")
+        .unwrap_or(false)
+}
+
 fn group_terminal_edges_by_target(
     terminal_dwa: &DWA,
     grammar: &AnalyzedGrammar,
@@ -1202,6 +1238,7 @@ fn append_branch_fragment(
     built_bundle_cache: &mut [Option<Arc<NWA>>],
     bundle_id: usize,
     continuation_state: u32,
+    compose_detail: Option<&mut ParserDwaComposeDetailProfile>,
 ) -> Option<NwaBody> {
     let bundle = summaries.unique_bundles.get(bundle_id)?;
     if !summaries.bundle_accepts.get(bundle_id).copied().unwrap_or(false) {
@@ -1223,7 +1260,39 @@ fn append_branch_fragment(
     }
 
     if built_bundle_cache[bundle_id].is_none() {
-        built_bundle_cache[bundle_id] = Some(Arc::new(templates.build_bundle(bundle)));
+        if let Some(detail) = compose_detail {
+            let (bundle_nwa, bundle_profile) = templates.build_bundle_profiled(bundle);
+            detail.bundle_profile_total_ms += bundle_profile.total_ms;
+            detail.bundle_profile_build_group_dfas_ms += bundle_profile.build_group_dfas_ms;
+            detail.bundle_profile_union_groups_ms += bundle_profile.union_groups_ms;
+            detail.bundle_profile_determinize_ms += bundle_profile.determinize_bundle_ms;
+            detail.bundle_profile_minimize_ms += bundle_profile.minimize_ms;
+            detail.bundle_profile_dwa_to_nwa_ms += bundle_profile.dwa_to_nwa_ms;
+            detail.bundle_profile_result_dwa_states += bundle_profile.result_dwa_states;
+            detail.bundle_profile_result_dwa_transitions += bundle_profile.result_dwa_transitions;
+            detail.bundle_profile_result_nwa_states += bundle_profile.result_nwa_states;
+            detail.bundle_profile_result_nwa_transitions += bundle_profile.result_nwa_transitions;
+            eprintln!(
+                "[glrmask/profile][parser_bundle] bundle_id={} terminals={} weight_groups={} build_group_dfas_ms={:.3} union_groups_ms={:.3} determinize_bundle_ms={:.3} minimize_ms={:.3} minimize_skipped={} dwa_to_nwa_ms={:.3} total_ms={:.3} result_dwa_states={} result_dwa_transitions={} result_nwa_states={} result_nwa_transitions={}",
+                bundle_id,
+                bundle_profile.input_terminals,
+                bundle_profile.weight_groups,
+                bundle_profile.build_group_dfas_ms,
+                bundle_profile.union_groups_ms,
+                bundle_profile.determinize_bundle_ms,
+                bundle_profile.minimize_ms,
+                bundle_profile.minimize_skipped,
+                bundle_profile.dwa_to_nwa_ms,
+                bundle_profile.total_ms,
+                bundle_profile.result_dwa_states,
+                bundle_profile.result_dwa_transitions,
+                bundle_profile.result_nwa_states,
+                bundle_profile.result_nwa_transitions,
+            );
+            built_bundle_cache[bundle_id] = Some(Arc::new(bundle_nwa));
+        } else {
+            built_bundle_cache[bundle_id] = Some(Arc::new(templates.build_bundle(bundle)));
+        }
     }
     let bundle_nwa = built_bundle_cache[bundle_id]
         .as_ref()
@@ -1246,6 +1315,16 @@ fn build_parser_nwa_from_terminal_dwa(
     let productive = compute_productive_terminal_states(&summaries);
     let state_prep_ms = elapsed_ms(state_prep_started_at);
     let states = &summaries.states;
+    let compose_detail_enabled = parser_dwa_compose_detail_enabled();
+    let mut compose_detail = ParserDwaComposeDetailProfile {
+        total_states: states.len(),
+        productive_states: productive.iter().filter(|&&is_productive| is_productive).count(),
+        total_branches: states.iter().map(|state| state.branches.len()).sum(),
+        productive_branches: 0,
+        unique_bundles: summaries.unique_bundles.len(),
+        accepting_bundles: summaries.bundle_accepts.iter().filter(|&&accepts| accepts).count(),
+        ..ParserDwaComposeDetailProfile::default()
+    };
 
     if !productive
         .get(terminal_dwa.start_state() as usize)
@@ -1259,6 +1338,7 @@ fn build_parser_nwa_from_terminal_dwa(
     let mut arena = NWA::new(0, 0);
     let mut continuation_states = vec![u32::MAX; states.len()];
 
+    let state_init_started_at = Instant::now();
     for (state_id, state) in states.iter().enumerate() {
         if !productive[state_id] {
             continue;
@@ -1273,10 +1353,12 @@ fn build_parser_nwa_from_terminal_dwa(
             arena.set_final_weight(continuation_state, final_weight.clone());
         }
     }
+    compose_detail.state_init_ms = elapsed_ms(state_init_started_at);
 
     let mut branch_fragment_memo: FxHashMap<(usize, u32), NwaBody> = FxHashMap::default();
     let mut built_bundle_cache: Vec<Option<Arc<NWA>>> = vec![None; summaries.unique_bundles.len()];
 
+    let branch_walk_started_at = Instant::now();
     for (state_id, state) in states.iter().enumerate() {
         if !productive[state_id] {
             continue;
@@ -1295,13 +1377,31 @@ fn build_parser_nwa_from_terminal_dwa(
             {
                 continue;
             }
+            compose_detail.productive_branches += 1;
 
             let target_continuation = continuation_states[target_idx];
             debug_assert_ne!(target_continuation, u32::MAX);
             let fragment_key = (branch.bundle_id, branch.target);
             let fragment = if let Some(existing) = branch_fragment_memo.get(&fragment_key) {
-                existing.clone()
+                if compose_detail_enabled {
+                    let memo_hit_started_at = Instant::now();
+                    compose_detail.memo_hits += 1;
+                    let cloned = existing.clone();
+                    compose_detail.memo_hit_clone_ms += elapsed_ms(memo_hit_started_at);
+                    cloned
+                } else {
+                    existing.clone()
+                }
             } else {
+                if compose_detail_enabled {
+                    compose_detail.memo_misses += 1;
+                    if built_bundle_cache[branch.bundle_id].is_none()
+                        && summaries.unique_bundles[branch.bundle_id].len() > 1
+                    {
+                        compose_detail.bundle_cache_builds += 1;
+                    }
+                }
+                let fragment_build_started_at = Instant::now();
                 let Some(body) = append_branch_fragment(
                     &mut arena,
                     &summaries,
@@ -1309,23 +1409,67 @@ fn build_parser_nwa_from_terminal_dwa(
                     &mut built_bundle_cache,
                     branch.bundle_id,
                     target_continuation,
+                    compose_detail_enabled.then_some(&mut compose_detail),
                 ) else {
                     continue;
                 };
+                compose_detail.fragment_build_ms += elapsed_ms(fragment_build_started_at);
                 branch_fragment_memo.insert(fragment_key, body.clone());
                 body
             };
 
+            let epsilon_link_started_at = Instant::now();
+            let fragment_start_states_len = fragment.start_states.len();
             for start in fragment.start_states {
                 arena.add_epsilon(from, start, Weight::all());
+                compose_detail.epsilon_edges_added += 1;
             }
+            compose_detail.fragment_start_states_total += fragment_start_states_len;
+            compose_detail.epsilon_link_ms += elapsed_ms(epsilon_link_started_at);
         }
     }
+    compose_detail.branch_walk_ms = elapsed_ms(branch_walk_started_at);
 
     let start = continuation_states[terminal_dwa.start_state() as usize];
     debug_assert_ne!(start, u32::MAX);
     arena.set_start_states(vec![start]);
     let compose_state_ms = elapsed_ms(graph_started_at);
+
+    if compose_detail_enabled {
+        eprintln!(
+            "[glrmask/profile][parser_dwa_compose] total_states={} productive_states={} total_branches={} productive_branches={} unique_bundles={} accepting_bundles={} state_init_ms={:.3} branch_walk_ms={:.3} memo_hit_clone_ms={:.3} fragment_build_ms={:.3} epsilon_link_ms={:.3} memo_hits={} memo_misses={} bundle_cache_builds={} epsilon_edges_added={} fragment_start_states_total={}",
+            compose_detail.total_states,
+            compose_detail.productive_states,
+            compose_detail.total_branches,
+            compose_detail.productive_branches,
+            compose_detail.unique_bundles,
+            compose_detail.accepting_bundles,
+            compose_detail.state_init_ms,
+            compose_detail.branch_walk_ms,
+            compose_detail.memo_hit_clone_ms,
+            compose_detail.fragment_build_ms,
+            compose_detail.epsilon_link_ms,
+            compose_detail.memo_hits,
+            compose_detail.memo_misses,
+            compose_detail.bundle_cache_builds,
+            compose_detail.epsilon_edges_added,
+            compose_detail.fragment_start_states_total,
+        );
+        eprintln!(
+            "[glrmask/profile][parser_dwa_compose_bundles] bundle_cache_builds={} bundle_profile_total_ms={:.3} build_group_dfas_ms={:.3} union_groups_ms={:.3} determinize_bundle_ms={:.3} minimize_ms={:.3} dwa_to_nwa_ms={:.3} result_dwa_states_total={} result_dwa_transitions_total={} result_nwa_states_total={} result_nwa_transitions_total={}",
+            compose_detail.bundle_cache_builds,
+            compose_detail.bundle_profile_total_ms,
+            compose_detail.bundle_profile_build_group_dfas_ms,
+            compose_detail.bundle_profile_union_groups_ms,
+            compose_detail.bundle_profile_determinize_ms,
+            compose_detail.bundle_profile_minimize_ms,
+            compose_detail.bundle_profile_dwa_to_nwa_ms,
+            compose_detail.bundle_profile_result_dwa_states,
+            compose_detail.bundle_profile_result_dwa_transitions,
+            compose_detail.bundle_profile_result_nwa_states,
+            compose_detail.bundle_profile_result_nwa_transitions,
+        );
+    }
 
     Some((
         arena,

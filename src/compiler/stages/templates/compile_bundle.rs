@@ -160,10 +160,17 @@ pub(crate) struct BundleBuildProfile {
     pub(crate) result_nwa_transitions: usize,
     pub(crate) total_ms: f64,
     pub(crate) used_single_terminal_fast_path: bool,
+    pub(crate) minimize_skipped: bool,
 }
 
 fn elapsed_ms(started_at: Instant) -> f64 {
     started_at.elapsed().as_secs_f64() * 1000.0
+}
+
+fn minimize_template_bundles_enabled() -> bool {
+    std::env::var("GLRMASK_MINIMIZE_TEMPLATE_BUNDLES")
+        .map(|value| value == "1")
+        .unwrap_or(false)
 }
 
 fn count_unweighted_dfa_transitions(dfa: &UnweightedDfa) -> usize {
@@ -303,7 +310,8 @@ impl Templates {
         profile.result_dwa_transitions = count_weighted_dwa_transitions(&bundle_dwa);
 
         let minimize_started_at = Instant::now();
-        let minimized = if profile.weight_groups > 1 {
+        profile.minimize_skipped = !minimize_template_bundles_enabled();
+        let minimized = if profile.weight_groups > 1 && !profile.minimize_skipped {
             minimize(&bundle_dwa)
         } else {
             bundle_dwa
@@ -325,7 +333,10 @@ impl Templates {
     /// Assemble a weighted NWA for one bundle of (terminal, weight) entries.
     ///
     /// Pipeline: group by weight, merge each group, determinize the product,
-    /// optionally minimize it, then convert back to an NWA.
+    /// then convert back to an NWA. Bundle minimization is skipped by default
+    /// because parser-DWA composition reuses these fragments directly and the
+    /// minimization cost dominates compile time on large schemas. Set
+    /// `GLRMASK_MINIMIZE_TEMPLATE_BUNDLES=1` to restore the old behavior.
     pub(crate) fn build_bundle(
         &self,
         terminal_weights: &BTreeMap<TerminalID, Weight>,
