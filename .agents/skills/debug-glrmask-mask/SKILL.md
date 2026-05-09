@@ -12,13 +12,16 @@ Find the first layer where `mask()`, `commit_token`, and `commit_bytes` diverge.
 ## Workflow
 
 1. Establish the oracle on the same prefix/token. Treat `commit_bytes` as the byte-level parser oracle until proven otherwise.
-2. Reproduce in release mode and tee long output to `/tmp/*.log`.
-3. Localize with one toggle at a time:
+2. Before proposing any grammar, importer, or lowering change, classify the failure:
+   - If `commit_bytes(token_bytes)` accepts but `mask()` or `commit_token(token_id)` rejects, the matched language is already correct. The bug is in mask/token construction, parser-DWA, terminal-DWA/id-map, possible-matches, runtime mask expansion, or token remapping. Do not "fix" it by changing grammar shape, terminal grouping, factoring, chunking, or lowering.
+   - If `commit_bytes(token_bytes)` rejects and the token should be legal, then investigate source/importer/grammar semantics. Only then is a grammar or importer edit a candidate fix.
+3. Reproduce in release mode and tee long output to `/tmp/*.log`.
+4. Localize with one toggle at a time:
    - `GLRMASK_FORCE_ALL_L2P=1`: keep partitioning but route all terminals through L2P.
    - `GLRMASK_PM_BRUTE_FORCE=1`: replace optimized constraint possible-matches.
    - `GLRMASK_PM_TRIE_CLASS_BUILD=0`: bypass trie-class possible-match grouping.
-4. If possible-matches toggles do not affect the oracle, inspect parser-DWA weights, terminal-DWA weights, id-map remapping, and runtime mask expansion in that order.
-5. If partition toggles change the oracle, inspect `src/compiler/stages/id_map_and_terminal_dwa/{partition,merge,l1,l2p}.rs` and compare original ids, internal ids, tokenizer-state ids, and DWA weights before/after merge.
+5. If possible-matches toggles do not affect the oracle, inspect parser-DWA weights, terminal-DWA weights, id-map remapping, and runtime mask expansion in that order.
+6. If partition toggles change the oracle, inspect `src/compiler/stages/id_map_and_terminal_dwa/{partition,merge,l1,l2p}.rs` and compare original ids, internal ids, tokenizer-state ids, and DWA weights before/after merge.
 
 ## High-Value Pitfalls
 
@@ -53,10 +56,21 @@ flattened CFG, nullability/FIRST data, LR/GLR item set, parse table action,
 parser-DWA weight, terminal-DWA/id-map output, possible-matches, or runtime mask
 expansion.
 
+The mask must be a function of the language accepted from the current parser
+state, not of incidental grammar presentation. A change that only alters parse
+structure, terminal boundaries, helper nonterminals, factoring, chunk sizes, or
+where bytes are fused into terminals is not a valid fix for a mask mismatch
+unless the `commit_bytes` oracle proves the old structure accepted the wrong
+language. If equivalent-language grammars produce different masks, fix the
+compiler/runtime layer that made the mask structure-dependent.
+
 Before accepting a fix for a parser/mask mismatch:
 
 - Preserve or add a regression that fails on the original bad path, preferably
   with minimized input, configuration, vocab/data, prefix, and token.
+- Include a same-prefix/same-token `commit_bytes` check in the regression or in
+  the saved investigation log, and state whether the failure is language
+  semantics or mask/token construction.
 - Compare the failing path and the proposed fixed path at the first downstream
   artifact where they diverge.
 - Explain why the proposed fix restores the violated invariant. Do not report

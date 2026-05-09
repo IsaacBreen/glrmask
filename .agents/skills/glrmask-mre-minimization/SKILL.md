@@ -20,6 +20,21 @@ Distinguish these runtime failures:
 
 Use `GLRMASK_ASSERT_COMMIT_TOKEN_MASK_EQUIVALENCE=1` when investigating mask/commit behavior. Treat any equivalence failure as serious: a token should be in the mask if and only if it can be committed.
 
+Before changing grammar/importer/lowering code, run the same prefix and token
+through `commit_bytes(token_bytes)` and classify the bug:
+
+- `commit_bytes` accepts but `mask` or `commit_token` rejects: the language is
+  correct and the bug is below the grammar. Do not repair it by changing
+  equivalent grammar structure, terminal grouping, helper nonterminals,
+  factoring, chunking, or byte fusion. Minimize the lower-layer mismatch.
+- `commit_bytes` rejects and the token should be valid: the source/importer or
+  generated grammar may have wrong language semantics. A grammar/importer fix is
+  allowed only after this is established.
+
+For mask mismatches, the MRE must preserve this classification. A smaller repro
+that makes the symptom disappear by changing only parse structure is a
+workaround, not evidence of a fix.
+
 Debug straightforward breakages normally first, especially when recent local changes make the likely cause obvious. If the bug remains elusive, build and recursively minimize a repro.
 
 ## Repro Workflow
@@ -37,7 +52,10 @@ make show-schema PROBLEM=$SCHEMA
 make show-example PROBLEM=$SCHEMA INDEX=N
 ```
 
-Commit the prefix with `commit_bytes`. Then commit the token with `commit_token` or `commit_bytes`, choosing whichever best exposes the failure. For mask/commit equivalence issues, compare both paths explicitly.
+Commit the prefix with `commit_bytes`. Then check the same token three ways:
+`mask()`, `commit_token(token_id)`, and `commit_bytes(token_bytes)`. For
+mask/commit equivalence issues, compare all three paths explicitly and record the
+truth table in the MRE notes or test comments.
 
 Minimize recursively:
 
