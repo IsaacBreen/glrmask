@@ -291,6 +291,46 @@ fn build_signature_from_active_groups(
     signature
 }
 
+fn build_active_group_ids(
+    active_group_counts: &[u32],
+    active_group_count: usize,
+) -> Vec<u32> {
+    if active_group_count == 0 { return Vec::new(); }
+
+    let mut active_group_ids = Vec::with_capacity(active_group_count);
+    for (group_id, &count) in active_group_counts.iter().enumerate() {
+        if count > 0 {
+            active_group_ids.push(group_id as u32);
+        }
+    }
+    active_group_ids
+}
+
+fn build_signature_from_active_group_ids(
+    active_group_ids: &[u32],
+    groups: &[SweepGroup],
+    labels_by_id: &[StateTerminalLabel],
+    label_stamps: &mut [u32],
+    stamp_generation: &mut u32,
+) -> Vec<StateTerminalLabel> {
+    if active_group_ids.is_empty() { return Vec::new(); }
+
+    let stamp = next_nonzero_stamp(stamp_generation, label_stamps);
+    let mut signature = Vec::new();
+    for &group_id in active_group_ids {
+        let Some(group) = groups.get(group_id as usize) else { continue; };
+        for &label_id in group.label_ids.iter() {
+            let stamp_slot = &mut label_stamps[label_id as usize];
+            if *stamp_slot != stamp {
+                *stamp_slot = stamp;
+                signature.push(labels_by_id[label_id as usize]);
+            }
+        }
+    }
+    signature.sort_unstable();
+    signature
+}
+
 fn build_possible_match_vocab_and_weights_from_interval_maps(
     class_maps: &[Arc<IntervalPossibleMatchMap>],
     state_classes: &[u32],
@@ -314,6 +354,7 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
     let sweep_events_ms = elapsed_ms(sweep_events_started_at);
 
     let mut signature_to_id: FxHashMap<Vec<StateTerminalLabel>, SignatureClassId> = FxHashMap::default();
+    let mut active_group_signature_to_signature_id: FxHashMap<Vec<u32>, SignatureClassId> = FxHashMap::default();
     let mut signature_labels: Vec<Vec<StateTerminalLabel>> = Vec::new();
     let mut original_to_internal = vec![u32::MAX; ordered_vocab.original_slot_count];
     let mut internal_to_originals: Vec<Vec<u32>> = Vec::new();
@@ -327,6 +368,10 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
     let mut signature_lookup_ms = 0.0;
     let mut assignment_ms = 0.0;
     let mut sweep_segments = 0usize;
+    let mut active_group_signature_cache_hits = 0usize;
+    let mut active_group_signature_cache_misses = 0usize;
+    let mut active_group_signature_build_ms = 0.0;
+    let mut label_signature_build_ms = 0.0;
     let mut total_active_signature_len = 0usize;
     let mut max_active_signature_len = 0usize;
     let mut total_active_group_len = 0usize;
@@ -341,31 +386,50 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
         }
 
         let next_position = event_positions.get(event_index).map(|&next| (next as usize).min(num_ordered_tokens)).unwrap_or(num_ordered_tokens);
-        let signature_started_at = Instant::now();
-        let signature = build_signature_from_active_groups(
-            &active_group_counts,
-            active_group_count,
-            &groups,
-            &labels_by_id,
-            &mut label_stamps,
-            &mut stamp_generation,
-        );
-        signature_build_ms += elapsed_ms(signature_started_at);
+        let active_group_signature_started_at = Instant::now();
+        let active_group_ids = build_active_group_ids(&active_group_counts, active_group_count);
+        active_group_signature_build_ms += elapsed_ms(active_group_signature_started_at);
         sweep_segments += 1;
-        total_active_signature_len += signature.len();
-        max_active_signature_len = max_active_signature_len.max(signature.len());
-        total_active_group_len += active_group_count;
-        max_active_group_len = max_active_group_len.max(active_group_count);
+        total_active_group_len += active_group_ids.len();
+        max_active_group_len = max_active_group_len.max(active_group_ids.len());
 
         let signature_lookup_started_at = Instant::now();
-        let signature_id = if let Some(&existing) = signature_to_id.get(&signature) { existing } else {
-            let new_id = signature_labels.len() as SignatureClassId;
-            signature_to_id.insert(signature.clone(), new_id);
-            signature_labels.push(signature);
-            internal_to_originals.push(Vec::new());
-            new_id
+        let signature_id = if let Some(&existing) = active_group_signature_to_signature_id.get(&active_group_ids) {
+            active_group_signature_cache_hits += 1;
+            existing
+        } else {
+            active_group_signature_cache_misses += 1;
+            let label_signature_started_at = Instant::now();
+            let signature = build_signature_from_active_group_ids(
+                &active_group_ids,
+                &groups,
+                &labels_by_id,
+                &mut label_stamps,
+                &mut stamp_generation,
+            );
+            label_signature_build_ms += elapsed_ms(label_signature_started_at);
+
+            let signature_id = if let Some(&existing) = signature_to_id.get(&signature) {
+                existing
+            } else {
+                let new_id = signature_labels.len() as SignatureClassId;
+                signature_to_id.insert(signature.clone(), new_id);
+                signature_labels.push(signature);
+                internal_to_originals.push(Vec::new());
+                new_id
+            };
+            active_group_signature_to_signature_id.insert(active_group_ids, signature_id);
+            signature_id
         };
         signature_lookup_ms += elapsed_ms(signature_lookup_started_at);
+        signature_build_ms = active_group_signature_build_ms + label_signature_build_ms;
+
+        let signature_len = signature_labels
+            .get(signature_id as usize)
+            .map(|labels| labels.len())
+            .unwrap_or(0);
+        total_active_signature_len += signature_len;
+        max_active_signature_len = max_active_signature_len.max(signature_len);
 
         let assignment_started_at = Instant::now();
         for ordered_id in position..next_position {
@@ -436,12 +500,16 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
             sweep_build_stats.group_label_refs,
         );
         eprintln!(
-            "[glrmask/profile][pmv_detail] stage=sweep sweep_ms={:.3} segments={} signature_build_ms={:.3} signature_lookup_ms={:.3} assignment_ms={:.3} unique_signatures={} max_active_signature_len={} mean_active_signature_len={:.3} max_active_groups={} mean_active_groups={:.3}",
+            "[glrmask/profile][pmv_detail] stage=sweep sweep_ms={:.3} segments={} signature_build_ms={:.3} signature_lookup_ms={:.3} assignment_ms={:.3} active_group_signature_cache_hits={} active_group_signature_cache_misses={} active_group_signature_build_ms={:.3} label_signature_build_ms={:.3} unique_signatures={} max_active_signature_len={} mean_active_signature_len={:.3} max_active_groups={} mean_active_groups={:.3}",
             sweep_ms,
             sweep_segments,
             signature_build_ms,
             signature_lookup_ms,
             assignment_ms,
+            active_group_signature_cache_hits,
+            active_group_signature_cache_misses,
+            active_group_signature_build_ms,
+            label_signature_build_ms,
             signature_labels.len(),
             max_active_signature_len,
             mean_active_signature_len,
