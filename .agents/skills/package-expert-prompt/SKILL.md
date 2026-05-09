@@ -7,9 +7,10 @@ description: Build a self-contained expert prompt zip for offline or external re
 
 ## Goal
 
-Create a zip that gives an expert enough context to answer a focused technical
-question without access to the live workspace. Include a clear prompt and the
-smallest useful source snapshot.
+Create a zip that lets an expert return a complete technical solution without
+access to the live workspace. Include a clear prompt, the smallest useful source
+snapshot, and explicit instructions that the expert should reason
+mathematically.
 
 ## Output Location
 
@@ -37,6 +38,18 @@ At minimum include:
 - `README.md`: brief inventory of the bundle and how it was created.
 - Source files needed to reason about the question.
 
+Tell the expert that their returned artifact should itself be a zip containing:
+
+- A Markdown document explaining the solution in full, including the reasoning,
+  invariants, correctness argument, complexity or performance implications, and
+  validation plan.
+- Code for the solution, either as one or more patch files or as full modified
+  files.
+
+The expert's returned zip should not include unrelated or unmodified files. If
+there are multiple viable solutions, ask the expert to include each one as a
+separate option with tradeoffs and enough code or patch detail to implement it.
+
 For Rust codebase questions, prefer including:
 
 - `src/`
@@ -59,6 +72,10 @@ Include:
 - What the expert should deliver, such as critique, algorithm proposal, bug
   diagnosis, or review checklist.
 - Any non-goals or approaches already rejected.
+
+Also instruct the expert to think mathematically: define the objects involved,
+state invariants, reason about equivalence or correctness precisely, and explain
+why the proposed algorithm preserves the required semantics.
 
 If the expert is expected to review a partially implemented change, include the
 current intended semantics and any open risks.
@@ -108,4 +125,3 @@ After creating the zip:
 3. If unified file sending is available, send the zip to `HUMAN`.
 4. Run `git status --short` and confirm the zip is untracked unless the user
    asked for it to be committed.
-
