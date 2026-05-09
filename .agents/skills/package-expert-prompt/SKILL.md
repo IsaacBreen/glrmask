@@ -33,10 +33,20 @@ or publish them.
 
 At minimum include:
 
-- `PROMPT.md`: the exact question for the expert, with relevant background,
+- `TASK.md`: the exact question for the expert, with relevant background,
   constraints, what to inspect, and the expected output.
-- `README.md`: brief inventory of the bundle and how it was created.
-- Source files needed to reason about the question.
+- `references/`: a subfolder containing all source files, tests, logs,
+  fixtures, schemas, notes, or other material needed to reason about the task.
+
+The zip should contain only these two top-level entries:
+
+```text
+TASK.md
+references/
+```
+
+Do not put `README.md`, source folders, patches, logs, or any other files at the
+archive root. Put every supporting file under `references/`.
 
 Tell the expert that their returned artifact should itself be a zip containing:
 
@@ -63,7 +73,7 @@ artifacts, `.git/`, `target/`, virtualenvs, and unrelated datasets.
 
 ## Prompt Requirements
 
-Write `PROMPT.md` yourself. Do not leave the key question for a worker to infer.
+Write `TASK.md` yourself. Do not leave the key question for a worker to infer.
 Include:
 
 - The concrete problem or design question.
@@ -97,15 +107,11 @@ out="$repo/.agents/expert-prompts/${name}.zip"
 rm -rf "$stage"
 mkdir -p "$stage"
 cp "$repo/Cargo.toml" "$repo/Cargo.lock" "$stage/"
-cp -R "$repo/src" "$stage/src"
-cp -R "$repo/tests" "$stage/tests"
-$EDITOR "$stage/PROMPT.md"
-cat > "$stage/README.md" <<'EOF'
-# Expert Bundle
-
-This archive contains a focused prompt plus source snapshot for expert review.
-Start with PROMPT.md.
-EOF
+mkdir -p "$stage/references"
+mv "$stage/Cargo.toml" "$stage/Cargo.lock" "$stage/references/"
+cp -R "$repo/src" "$stage/references/src"
+cp -R "$repo/tests" "$stage/references/tests"
+$EDITOR "$stage/TASK.md"
 
 mkdir -p "$(dirname "$out")"
 (cd "$stage" && zip -r "$out" . -x 'target/*' '.git/*')
@@ -119,8 +125,8 @@ overwrite an existing bundle without checking whether it is still needed.
 
 After creating the zip:
 
-1. Inspect the archive listing to confirm `PROMPT.md` and source files are at
-   the archive root, not nested under a temporary parent directory.
+1. Inspect the archive listing to confirm only `TASK.md` and `references/` are
+   at the archive root, not nested under a temporary parent directory.
 2. Report the path and a short inventory to the user.
 3. If unified file sending is available, send the zip to `HUMAN`.
 4. Run `git status --short` and confirm the zip is untracked unless the user
