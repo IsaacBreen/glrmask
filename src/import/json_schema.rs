@@ -2471,6 +2471,78 @@ fn pattern_all_branches_anchored(pattern: &str) -> bool {
     })
 }
 
+#[derive(Default)]
+struct LiteralTrieNode {
+    terminal: bool,
+    children: BTreeMap<u8, LiteralTrieNode>,
+}
+
+fn char_class_expr_for_bytes(bytes: &[u8]) -> GrammarExpr {
+    if bytes.len() == 1 {
+        GrammarExpr::Literal(vec![bytes[0]])
+    } else {
+        let set: BTreeSet<u8> = bytes.iter().copied().collect();
+        let class_def = regex_char_class_from_ranges(&compress_byte_set(&set));
+        GrammarExpr::CharClass {
+            def: class_def[1..class_def.len() - 1].to_string(),
+            negate: false,
+            utf8: false,
+        }
+    }
+}
+
+fn literal_trie_to_grammar_expr(node: &LiteralTrieNode) -> GrammarExpr {
+    let mut options = Vec::new();
+
+    if node.terminal {
+        options.push(GrammarExpr::Epsilon);
+    }
+
+    let mut grouped_children: HashMap<GrammarExpr, Vec<u8>> = HashMap::new();
+    for (&byte, child) in &node.children {
+        let suffix = literal_trie_to_grammar_expr(child);
+        grouped_children.entry(suffix).or_default().push(byte);
+    }
+
+    let mut grouped_children: Vec<_> = grouped_children.into_iter().collect();
+    grouped_children.sort_by_key(|(_, bytes)| bytes.first().copied().unwrap_or(0));
+
+    for (suffix, bytes) in grouped_children {
+        let head = char_class_expr_for_bytes(&bytes);
+        let item = match suffix {
+            GrammarExpr::Epsilon => head,
+            other => sequence_or_single(vec![head, other]),
+        };
+        options.push(item);
+    }
+
+    choice_or_single(options)
+}
+
+fn compact_literal_choice(options: Vec<GrammarExpr>) -> GrammarExpr {
+    let mut trie = LiteralTrieNode::default();
+    let mut others = Vec::new();
+
+    for option in options {
+        match option {
+            GrammarExpr::Literal(bytes) => {
+                let mut node = &mut trie;
+                for byte in bytes {
+                    node = node.children.entry(byte).or_default();
+                }
+                node.terminal = true;
+            }
+            other => others.push(other),
+        }
+    }
+
+    if trie.terminal || !trie.children.is_empty() {
+        others.push(literal_trie_to_grammar_expr(&trie));
+    }
+
+    choice_or_single(others)
+}
+
 fn coalesce_json_pattern_literals(expr: GrammarExpr) -> GrammarExpr {
     match expr {
         GrammarExpr::Sequence(items) => {
@@ -2497,7 +2569,12 @@ fn coalesce_json_pattern_literals(expr: GrammarExpr) -> GrammarExpr {
             sequence_or_single(out)
         }
         GrammarExpr::Choice(options) => {
-            choice_or_single(options.into_iter().map(coalesce_json_pattern_literals).collect())
+            compact_literal_choice(
+                options
+                    .into_iter()
+                    .map(coalesce_json_pattern_literals)
+                    .collect(),
+            )
         }
         GrammarExpr::Exclude { expr, exclude } => GrammarExpr::Exclude {
             expr: Box::new(coalesce_json_pattern_literals(*expr)),
