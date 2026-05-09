@@ -124,6 +124,7 @@ fn dump_nt_expr(expr: &GrammarExpr, needs_parens: bool) -> String {
 fn dump_nt_seq(expr: &GrammarExpr) -> String {
     match expr {
         GrammarExpr::Sequence(items) => {
+            let items = coalesce_adjacent_literals(items);
             items.iter()
                 .map(|e| dump_nt_postfix(e))
                 .collect::<Vec<_>>()
@@ -131,6 +132,33 @@ fn dump_nt_seq(expr: &GrammarExpr) -> String {
         }
         _ => dump_nt_postfix(expr),
     }
+}
+
+fn coalesce_adjacent_literals(items: &[GrammarExpr]) -> Vec<GrammarExpr> {
+    let mut out = Vec::with_capacity(items.len());
+    let mut pending_literal: Option<Vec<u8>> = None;
+
+    for item in items {
+        match item {
+            GrammarExpr::Literal(bytes) => {
+                pending_literal
+                    .get_or_insert_with(Vec::new)
+                    .extend_from_slice(bytes);
+            }
+            _ => {
+                if let Some(bytes) = pending_literal.take() {
+                    out.push(GrammarExpr::Literal(bytes));
+                }
+                out.push(item.clone());
+            }
+        }
+    }
+
+    if let Some(bytes) = pending_literal {
+        out.push(GrammarExpr::Literal(bytes));
+    }
+
+    out
 }
 
 fn dump_nt_postfix(expr: &GrammarExpr) -> String {
