@@ -73,7 +73,7 @@ struct OrderedVocabCacheFingerprint {
 #[derive(Debug, Clone)]
 struct OrderedVocabCacheEntry {
     fingerprint: OrderedVocabCacheFingerprint,
-    source_entries: Arc<[(u32, Vec<u8>)]>,
+    source_original_to_ordered: Arc<[u32]>,
     artifacts: OrderedVocabTrieArtifacts,
 }
 
@@ -138,22 +138,25 @@ pub(crate) fn build_internal_token_bytes_from_groups(
 
 fn build_ordered_vocab(token_bytes: &BTreeMap<u32, Vec<u8>>) -> OrderedVocab {
     let original_slot_count = token_bytes.keys().next_back().map(|token_id| *token_id as usize + 1).unwrap_or(0);
-    let mut entries: Vec<(Vec<u8>, u32)> = token_bytes.iter().map(|(&token_id, bytes)| (bytes.clone(), token_id)).collect();
-    entries.sort_unstable_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    let mut entries: Vec<(u32, &[u8])> = token_bytes
+        .iter()
+        .map(|(&token_id, bytes)| (token_id, bytes.as_slice()))
+        .collect();
+    entries.sort_unstable_by(|left, right| left.1.cmp(right.1).then_with(|| left.0.cmp(&right.0)));
 
     let mut ordered_to_originals = Vec::new();
     let mut ordered_token_bytes = Vec::new();
     let mut index = 0usize;
     while index < entries.len() {
-        let bytes = entries[index].0.clone();
+        let bytes = entries[index].1;
         let mut originals = Vec::new();
-        while index < entries.len() && entries[index].0 == bytes {
-            originals.push(entries[index].1);
+        while index < entries.len() && entries[index].1 == bytes {
+            originals.push(entries[index].0);
             index += 1;
         }
         originals.sort_unstable();
         originals.dedup();
-        ordered_token_bytes.push(bytes);
+        ordered_token_bytes.push(bytes.to_vec());
         ordered_to_originals.push(originals);
     }
 
@@ -215,27 +218,64 @@ fn ordered_vocab_cache_fingerprint(
     }
 }
 
-fn ordered_vocab_cache_source_entries(
-    token_bytes: &BTreeMap<u32, Vec<u8>>,
-) -> Arc<[(u32, Vec<u8>)]> {
-    token_bytes
-        .iter()
-        .map(|(&token_id, bytes)| (token_id, bytes.clone()))
-        .collect::<Vec<_>>()
-        .into()
-}
-
 fn ordered_vocab_cache_source_matches(
     token_bytes: &BTreeMap<u32, Vec<u8>>,
-    source_entries: &[(u32, Vec<u8>)],
+    source_original_to_ordered: &[u32],
+    ordered_vocab: &OrderedVocab,
 ) -> bool {
-    token_bytes.len() == source_entries.len()
-        && token_bytes
-            .iter()
-            .zip(source_entries.iter())
-            .all(|((&actual_id, actual_bytes), (cached_id, cached_bytes))| {
-                actual_id == *cached_id && actual_bytes == cached_bytes
-            })
+    if ordered_vocab.ordered_token_bytes.len() != ordered_vocab.ordered_to_originals.len() {
+        return false;
+    }
+
+    let cached_token_count: usize = ordered_vocab
+        .ordered_to_originals
+        .iter()
+        .map(|originals| originals.len())
+        .sum();
+    if token_bytes.len() != cached_token_count {
+        return false;
+    }
+
+    let actual_slot_count = token_bytes
+        .keys()
+        .next_back()
+        .map(|token_id| *token_id as usize + 1)
+        .unwrap_or(0);
+    if actual_slot_count != ordered_vocab.original_slot_count {
+        return false;
+    }
+
+    if source_original_to_ordered.len() != ordered_vocab.original_slot_count {
+        return false;
+    }
+
+    for (&original_id, actual_bytes) in token_bytes {
+        let Some(&ordered_id) = source_original_to_ordered.get(original_id as usize) else {
+            return false;
+        };
+        let Some(cached_bytes) = ordered_vocab.ordered_token_bytes.get(ordered_id as usize) else {
+            return false;
+        };
+        if actual_bytes != cached_bytes {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn ordered_vocab_cache_source_original_to_ordered(
+    ordered_vocab: &OrderedVocab,
+) -> Arc<[u32]> {
+    let mut original_to_ordered = vec![u32::MAX; ordered_vocab.original_slot_count];
+    for (ordered_id, originals) in ordered_vocab.ordered_to_originals.iter().enumerate() {
+        for &original_id in originals {
+            let slot = &mut original_to_ordered[original_id as usize];
+            debug_assert_eq!(*slot, u32::MAX);
+            *slot = ordered_id as u32;
+        }
+    }
+    original_to_ordered.into()
 }
 
 fn compile_profile_requested() -> bool {
@@ -296,7 +336,11 @@ fn get_ordered_vocab_trie_artifacts(
                 continue;
             }
             let verify_started_at = Instant::now();
-            let is_match = ordered_vocab_cache_source_matches(token_bytes, entry.source_entries.as_ref());
+            let is_match = ordered_vocab_cache_source_matches(
+                token_bytes,
+                entry.source_original_to_ordered.as_ref(),
+                entry.artifacts.ordered_vocab.as_ref(),
+            );
             verify_ns += verify_started_at.elapsed().as_nanos();
             if is_match {
                 hit_index = Some(index);
@@ -330,10 +374,10 @@ fn get_ordered_vocab_trie_artifacts(
     let trie_started_at = Instant::now();
     let trie = Arc::new(build_ordered_vocab_prefix_tree(ordered_vocab.as_ref()));
     let trie_build_ns = trie_started_at.elapsed().as_nanos();
-    let source_entries = ordered_vocab_cache_source_entries(token_bytes);
+    let source_original_to_ordered = ordered_vocab_cache_source_original_to_ordered(ordered_vocab.as_ref());
     let entry = OrderedVocabCacheEntry {
         fingerprint,
-        source_entries,
+        source_original_to_ordered,
         artifacts: OrderedVocabTrieArtifacts {
             ordered_vocab: Arc::clone(&ordered_vocab),
             trie: Arc::clone(&trie),
