@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
+use std::hash::Hasher;
+use std::sync::Mutex;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
@@ -51,6 +54,55 @@ struct OrderedVocab {
     original_slot_count: usize,
     ordered_to_originals: Vec<Vec<u32>>,
     ordered_token_bytes: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, Clone)]
+struct OrderedVocabTrieArtifacts {
+    ordered_vocab: Arc<OrderedVocab>,
+    trie: Arc<VocabPrefixTree>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OrderedVocabCacheFingerprint {
+    token_count: usize,
+    max_token_id: u32,
+    total_bytes: usize,
+    hash: u64,
+}
+
+#[derive(Debug, Clone)]
+struct OrderedVocabCacheEntry {
+    fingerprint: OrderedVocabCacheFingerprint,
+    source_entries: Arc<[(u32, Vec<u8>)]>,
+    artifacts: OrderedVocabTrieArtifacts,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OrderedVocabCacheStatus {
+    Disabled,
+    Hit,
+    Miss,
+}
+
+impl OrderedVocabCacheStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Hit => "hit",
+            Self::Miss => "miss",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OrderedVocabCacheProfile {
+    status: OrderedVocabCacheStatus,
+    probe_ns: u128,
+    verify_ns: u128,
+    ordered_vocab_build_ns: u128,
+    trie_build_ns: u128,
+    cache_entries: usize,
+    capacity: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -111,6 +163,204 @@ fn build_ordered_vocab(token_bytes: &BTreeMap<u32, Vec<u8>>) -> OrderedVocab {
 fn build_ordered_vocab_prefix_tree(ordered_vocab: &OrderedVocab) -> VocabPrefixTree {
     let entries: Vec<(usize, &[u8])> = ordered_vocab.ordered_token_bytes.iter().enumerate().map(|(ordered_id, bytes)| (ordered_id, bytes.as_slice())).collect();
     VocabPrefixTree::build_presorted(&entries)
+}
+
+fn ordered_vocab_cache_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLRMASK_PM_ORDERED_VOCAB_CACHE")
+            .map(|value| {
+                let trimmed = value.trim();
+                trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+            })
+            .unwrap_or(true)
+    })
+}
+
+fn ordered_vocab_cache_capacity() -> usize {
+    static CAPACITY: OnceLock<usize> = OnceLock::new();
+    *CAPACITY.get_or_init(|| {
+        std::env::var("GLRMASK_PM_ORDERED_VOCAB_CACHE_CAPACITY")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(4)
+    })
+}
+
+fn ordered_vocab_cache() -> &'static Mutex<Vec<OrderedVocabCacheEntry>> {
+    static CACHE: OnceLock<Mutex<Vec<OrderedVocabCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn ordered_vocab_cache_fingerprint(
+    token_bytes: &BTreeMap<u32, Vec<u8>>,
+) -> OrderedVocabCacheFingerprint {
+    let mut hasher = rustc_hash::FxHasher::default();
+    let mut token_count = 0usize;
+    let mut max_token_id = 0u32;
+    let mut total_bytes = 0usize;
+    for (&token_id, bytes) in token_bytes {
+        hasher.write_u32(token_id);
+        hasher.write_usize(bytes.len());
+        hasher.write(bytes);
+        token_count += 1;
+        max_token_id = token_id;
+        total_bytes += bytes.len();
+    }
+    OrderedVocabCacheFingerprint {
+        token_count,
+        max_token_id,
+        total_bytes,
+        hash: hasher.finish(),
+    }
+}
+
+fn ordered_vocab_cache_source_entries(
+    token_bytes: &BTreeMap<u32, Vec<u8>>,
+) -> Arc<[(u32, Vec<u8>)]> {
+    token_bytes
+        .iter()
+        .map(|(&token_id, bytes)| (token_id, bytes.clone()))
+        .collect::<Vec<_>>()
+        .into()
+}
+
+fn ordered_vocab_cache_source_matches(
+    token_bytes: &BTreeMap<u32, Vec<u8>>,
+    source_entries: &[(u32, Vec<u8>)],
+) -> bool {
+    token_bytes.len() == source_entries.len()
+        && token_bytes
+            .iter()
+            .zip(source_entries.iter())
+            .all(|((&actual_id, actual_bytes), (cached_id, cached_bytes))| {
+                actual_id == *cached_id && actual_bytes == cached_bytes
+            })
+}
+
+fn compile_profile_requested() -> bool {
+    std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+}
+
+fn emit_ordered_vocab_cache_profile(profile: OrderedVocabCacheProfile) {
+    if !compile_profile_requested() {
+        return;
+    }
+    eprintln!(
+        "[glrmask/profile][ordered_vocab_cache] status={} probe_ms={:.3} verify_ms={:.3} ordered_vocab_ms={:.3} vocab_prefix_tree_ms={:.3} cache_entries={} capacity={}",
+        profile.status.as_str(),
+        profile.probe_ns as f64 / 1_000_000.0,
+        profile.verify_ns as f64 / 1_000_000.0,
+        profile.ordered_vocab_build_ns as f64 / 1_000_000.0,
+        profile.trie_build_ns as f64 / 1_000_000.0,
+        profile.cache_entries,
+        profile.capacity,
+    );
+}
+
+fn get_ordered_vocab_trie_artifacts(
+    token_bytes: &BTreeMap<u32, Vec<u8>>,
+) -> (OrderedVocabTrieArtifacts, OrderedVocabCacheProfile) {
+    let capacity = ordered_vocab_cache_capacity();
+    if !ordered_vocab_cache_enabled() || capacity == 0 {
+        let ordered_vocab_started_at = Instant::now();
+        let ordered_vocab = Arc::new(build_ordered_vocab(token_bytes));
+        let ordered_vocab_build_ns = ordered_vocab_started_at.elapsed().as_nanos();
+        let trie_started_at = Instant::now();
+        let trie = Arc::new(build_ordered_vocab_prefix_tree(ordered_vocab.as_ref()));
+        let trie_build_ns = trie_started_at.elapsed().as_nanos();
+        return (
+            OrderedVocabTrieArtifacts { ordered_vocab, trie },
+            OrderedVocabCacheProfile {
+                status: OrderedVocabCacheStatus::Disabled,
+                probe_ns: 0,
+                verify_ns: 0,
+                ordered_vocab_build_ns,
+                trie_build_ns,
+                cache_entries: 0,
+                capacity,
+            },
+        );
+    }
+
+    let probe_started_at = Instant::now();
+    let fingerprint = ordered_vocab_cache_fingerprint(token_bytes);
+    let mut verify_ns = 0u128;
+
+    {
+        let mut cache = ordered_vocab_cache().lock().unwrap();
+        let mut hit_index = None;
+        for (index, entry) in cache.iter().enumerate() {
+            if entry.fingerprint != fingerprint {
+                continue;
+            }
+            let verify_started_at = Instant::now();
+            let is_match = ordered_vocab_cache_source_matches(token_bytes, entry.source_entries.as_ref());
+            verify_ns += verify_started_at.elapsed().as_nanos();
+            if is_match {
+                hit_index = Some(index);
+                break;
+            }
+        }
+
+        if let Some(index) = hit_index {
+            let entry = cache.remove(index);
+            let artifacts = entry.artifacts.clone();
+            cache.push(entry);
+            let cache_entries = cache.len();
+            return (
+                artifacts,
+                OrderedVocabCacheProfile {
+                    status: OrderedVocabCacheStatus::Hit,
+                    probe_ns: probe_started_at.elapsed().as_nanos(),
+                    verify_ns,
+                    ordered_vocab_build_ns: 0,
+                    trie_build_ns: 0,
+                    cache_entries,
+                    capacity,
+                },
+            );
+        }
+    }
+
+    let ordered_vocab_started_at = Instant::now();
+    let ordered_vocab = Arc::new(build_ordered_vocab(token_bytes));
+    let ordered_vocab_build_ns = ordered_vocab_started_at.elapsed().as_nanos();
+    let trie_started_at = Instant::now();
+    let trie = Arc::new(build_ordered_vocab_prefix_tree(ordered_vocab.as_ref()));
+    let trie_build_ns = trie_started_at.elapsed().as_nanos();
+    let source_entries = ordered_vocab_cache_source_entries(token_bytes);
+    let entry = OrderedVocabCacheEntry {
+        fingerprint,
+        source_entries,
+        artifacts: OrderedVocabTrieArtifacts {
+            ordered_vocab: Arc::clone(&ordered_vocab),
+            trie: Arc::clone(&trie),
+        },
+    };
+
+    let cache_entries = {
+        let mut cache = ordered_vocab_cache().lock().unwrap();
+        if cache.len() >= capacity {
+            cache.remove(0);
+        }
+        cache.push(entry);
+        cache.len()
+    };
+
+    (
+        OrderedVocabTrieArtifacts { ordered_vocab, trie },
+        OrderedVocabCacheProfile {
+            status: OrderedVocabCacheStatus::Miss,
+            probe_ns: probe_started_at.elapsed().as_nanos(),
+            verify_ns,
+            ordered_vocab_build_ns,
+            trie_build_ns,
+            cache_entries,
+            capacity,
+        },
+    )
 }
 
 #[allow(dead_code)]
@@ -979,6 +1229,7 @@ fn collect_sparse_root_possible_matches(
             class_maps.push(Arc::new(interval_map));
             class_id
         };
+
         if let Some(slot) = state_classes.get_mut(state as usize) {
             *slot = class_id;
         }
@@ -997,8 +1248,10 @@ pub(crate) fn compute_constraint_possible_matches(
 ) -> ConstraintPossibleMatchesComputation {
     let pm_started_at = Instant::now();
 
-    let ordered_vocab = build_ordered_vocab(token_bytes);
-    let trie = build_ordered_vocab_prefix_tree(&ordered_vocab);
+    let (artifacts, ordered_vocab_cache_profile) = get_ordered_vocab_trie_artifacts(token_bytes);
+    emit_ordered_vocab_cache_profile(ordered_vocab_cache_profile);
+    let ordered_vocab = artifacts.ordered_vocab;
+    let trie = artifacts.trie;
 
     let trie_build_states: Vec<u32> = match config.initial_state_map {
         Some(init_map) => init_map.representative_original_ids.clone(),
@@ -1040,13 +1293,15 @@ pub(crate) fn compute_constraint_possible_matches(
         )
         .0
     };
+
     if let Some(init_map) = config.initial_state_map {
         trie_class_result.state_classes = compose_state_classes_with_initial_map(&trie_class_result.state_classes, init_map);
     }
+
     let possible_matches_collect_ms = elapsed_ms(pm_started_at);
 
     let possible_match_vocab_started_at = Instant::now();
-    let (possible_match_vocab, possible_matches) = build_possible_match_vocab_and_weights_from_interval_maps(&trie_class_result.class_maps, &trie_class_result.state_classes, &ordered_vocab);
+    let (possible_match_vocab, possible_matches) = build_possible_match_vocab_and_weights_from_interval_maps(&trie_class_result.class_maps, &trie_class_result.state_classes, ordered_vocab.as_ref());
 
     let possible_matches_id_map = InternalIdMap {
         tokenizer_states: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
