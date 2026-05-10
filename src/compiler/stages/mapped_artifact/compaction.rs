@@ -210,9 +210,10 @@ fn build_dimension_compaction(
     let (tsid_merge_perm, merged_num_tsids) =
         build_exact_tsid_merge_permutation(&token_compacted_refs, num_tsids);
     let tsid_perm = order_tsid_groups(
-        &token_compacted_refs,
+        &token_compacted_weights,
         tsid_merge_perm,
         merged_num_tsids,
+        merged_num_tokens,
     );
 
     DimensionCompaction {
@@ -530,6 +531,75 @@ fn exact_layout_from_pair_weights_or_panic(
     layout
 }
 
+fn fast_default_layout_from_pair_weights(pair_weights: &[usize], num_groups: usize) -> Vec<usize> {
+    debug_assert_eq!(pair_weights.len(), num_groups * num_groups);
+    if num_groups < 2 {
+        return (0..num_groups).collect();
+    }
+
+    if legacy_exact_adjacency_proxy_enabled() && num_groups <= EXACT_LAYOUT_MAX_GROUPS {
+        return exact_max_adjacency_layout(pair_weights, num_groups);
+    }
+
+    let components = positive_pair_weight_components(pair_weights, num_groups);
+    let mut layout = Vec::with_capacity(num_groups);
+    for component in components {
+        if component.len() <= 1 {
+            layout.extend(component);
+            continue;
+        }
+
+        let local_weights = project_pair_weights(pair_weights, num_groups, &component);
+        let local_layout = fast_default_component_layout(&local_weights, component.len());
+        layout.extend(local_layout.into_iter().map(|local| component[local]));
+    }
+    layout
+}
+
+fn fast_default_component_layout(adjacency: &[usize], num_groups: usize) -> Vec<usize> {
+    debug_assert_eq!(adjacency.len(), num_groups * num_groups);
+    if num_groups < 2 {
+        return (0..num_groups).collect();
+    }
+
+    let weighted_degree = weighted_degrees(adjacency, num_groups);
+    let degree_order = top_weighted_vertices(&weighted_degree, num_groups);
+    let top_neighbors = top_neighbors_by_vertex(adjacency, &weighted_degree, num_groups);
+    let start_limit = if num_groups > LARGE_ALMOST_OPTIMAL_COMPONENT_GROUPS {
+        8.min(num_groups)
+    } else {
+        24.min(num_groups)
+    };
+
+    let mut best_layout = Vec::new();
+    let mut best_score = 0usize;
+    let mut rng = SplitMix64::new(almost_optimal_seed() ^ ((num_groups as u64) << 33) ^ 0xd1b5_4a32_d192_ed03);
+
+    for &start in degree_order.iter().take(start_limit) {
+        let mut candidate = bounded_greedy_adjacency_layout(
+            adjacency,
+            &weighted_degree,
+            num_groups,
+            &top_neighbors,
+            &degree_order,
+            start,
+            None,
+            &mut rng,
+        );
+        polish_layout_bounded(adjacency, &mut candidate, num_groups);
+        let score = path_score(adjacency, &candidate, num_groups);
+        if best_layout.is_empty()
+            || score > best_score
+            || (score == best_score && candidate.as_slice() < best_layout.as_slice())
+        {
+            best_score = score;
+            best_layout = candidate;
+        }
+    }
+
+    best_layout
+}
+
 fn positive_pair_weight_components(pair_weights: &[usize], num_groups: usize) -> Vec<Vec<usize>> {
     let mut visited = vec![false; num_groups];
     let mut components = Vec::new();
@@ -595,140 +665,33 @@ fn order_token_groups(
         return initial_perm;
     }
 
-    let mut adjacency = vec![0usize; num_groups * num_groups];
-    let mut first_seen = vec![usize::MAX; num_groups];
-    let mut frequency = vec![0usize; num_groups];
-
-    for (set_idx, token_set) in token_sets.iter().enumerate() {
-        let groups: Vec<usize> = token_set
-            .ranges()
-            .flat_map(|range| *range.start()..=*range.end())
-            .map(|group| group as usize)
-            .filter(|&group| group < num_groups)
-            .collect();
-        for &group in &groups {
-            first_seen[group] = first_seen[group].min(set_idx);
-            frequency[group] += 1;
-        }
-        for pair in groups.windows(2) {
-            let left = pair[0];
-            let right = pair[1];
-            adjacency[left * num_groups + right] += 1;
-            adjacency[right * num_groups + left] += 1;
-        }
-    }
-
-    if legacy_exact_adjacency_proxy_enabled() && num_groups <= EXACT_LAYOUT_MAX_GROUPS {
-        let layout = exact_max_adjacency_layout(&adjacency, num_groups);
-        return compose_group_layout(initial_perm, &layout);
-    }
-
-    let mut remaining: HashSet<usize> = (0..num_groups).collect();
-    let mut layout = Vec::<usize>::with_capacity(num_groups);
-    while !remaining.is_empty() {
-        let next = if let Some(&last) = layout.last() {
-            *remaining
-                .iter()
-                .max_by_key(|&&candidate| {
-                    (
-                        adjacency[last * num_groups + candidate],
-                        frequency[candidate],
-                        usize::MAX - first_seen[candidate],
-                        usize::MAX - candidate,
-                    )
-                })
-                .unwrap()
-        } else {
-            *remaining
-                .iter()
-                .max_by_key(|&&candidate| {
-                    (
-                        frequency[candidate],
-                        usize::MAX - first_seen[candidate],
-                        usize::MAX - candidate,
-                    )
-                })
-                .unwrap()
-        };
-        remaining.remove(&next);
-        layout.push(next);
-    }
-
+    let pair_weights = build_token_cooccurrence_pair_weights(&token_sets, num_groups);
+    let layout = fast_default_layout_from_pair_weights(&pair_weights, num_groups);
     compose_group_layout(initial_perm, &layout)
 }
 
 fn order_tsid_groups(
-    weights: &[&Weight],
+    token_compacted_weights: &[Weight],
     initial_perm: Vec<u32>,
     num_groups: usize,
+    num_tokens: usize,
 ) -> Vec<u32> {
     if num_groups < 2 {
         return initial_perm;
     }
 
-    let mut adjacency = vec![0usize; num_groups * num_groups];
-    let mut group_profiles = vec![Vec::<(u32, Vec<(u32, u32)>)>::new(); num_groups];
-    for (weight_idx, weight) in weights.iter().enumerate() {
-        if weight.is_full() || weight.is_empty() {
-            continue;
-        }
-        for (tsid_range, token_set) in weight.0.range_values() {
-            let token_key = rangeset_key(token_set);
-            for tsid in *tsid_range.start()..=*tsid_range.end() {
-                let Some(&group) = initial_perm.get(tsid as usize) else {
-                    continue;
-                };
-                group_profiles[group as usize].push((weight_idx as u32, token_key.clone()));
-            }
-        }
-    }
-    for profile in &mut group_profiles {
-        profile.sort_unstable();
-        profile.dedup();
+    let quotient_weights = apply_permutations_to_weight_set(
+        token_compacted_weights,
+        &initial_perm,
+        &identity_perm(num_tokens),
+    );
+    if quotient_weights.is_empty() {
+        return initial_perm;
     }
 
-    for left in 0..num_groups {
-        for right in (left + 1)..num_groups {
-            let bonus = shared_tsid_profile_entry_count(&group_profiles[left], &group_profiles[right]);
-            adjacency[left * num_groups + right] = bonus;
-            adjacency[right * num_groups + left] = bonus;
-        }
-    }
-
-    if legacy_exact_adjacency_proxy_enabled() && num_groups <= EXACT_LAYOUT_MAX_GROUPS {
-        let layout = exact_max_adjacency_layout(&adjacency, num_groups);
-        return compose_group_layout(initial_perm, &layout);
-    }
-
-    let mut layout: Vec<usize> = (0..num_groups).collect();
-    layout.sort_by(|&left, &right| {
-        group_profiles[left]
-            .cmp(&group_profiles[right])
-            .then(left.cmp(&right))
-    });
-
+    let pair_weights = build_tsid_equal_value_pair_weights(&quotient_weights, num_groups);
+    let layout = fast_default_layout_from_pair_weights(&pair_weights, num_groups);
     compose_group_layout(initial_perm, &layout)
-}
-
-fn shared_tsid_profile_entry_count(
-    left: &[(u32, Vec<(u32, u32)>)],
-    right: &[(u32, Vec<(u32, u32)>)],
-) -> usize {
-    let mut left_idx = 0usize;
-    let mut right_idx = 0usize;
-    let mut shared = 0usize;
-    while left_idx < left.len() && right_idx < right.len() {
-        match left[left_idx].cmp(&right[right_idx]) {
-            std::cmp::Ordering::Less => left_idx += 1,
-            std::cmp::Ordering::Greater => right_idx += 1,
-            std::cmp::Ordering::Equal => {
-                shared += 1;
-                left_idx += 1;
-                right_idx += 1;
-            }
-        }
-    }
-    shared
 }
 
 fn exact_max_adjacency_layout(adjacency: &[usize], num_groups: usize) -> Vec<usize> {
@@ -858,12 +821,7 @@ fn almost_optimal_adjacency_layout(adjacency: &[usize], num_groups: usize) -> Ve
         return (0..num_groups).collect();
     }
 
-    let mut weighted_degree = vec![0usize; num_groups];
-    for left in 0..num_groups {
-        for right in 0..num_groups {
-            weighted_degree[left] += adjacency[left * num_groups + right];
-        }
-    }
+    let weighted_degree = weighted_degrees(adjacency, num_groups);
 
     if num_groups > LARGE_ALMOST_OPTIMAL_COMPONENT_GROUPS {
         return almost_optimal_large_adjacency_layout(adjacency, num_groups, &weighted_degree);
@@ -914,6 +872,16 @@ fn almost_optimal_adjacency_layout(adjacency: &[usize], num_groups: usize) -> Ve
         upper_bound.saturating_sub(best_score),
     );
     best_layout
+}
+
+fn weighted_degrees(adjacency: &[usize], num_groups: usize) -> Vec<usize> {
+    let mut weighted_degree = vec![0usize; num_groups];
+    for left in 0..num_groups {
+        for right in 0..num_groups {
+            weighted_degree[left] += adjacency[left * num_groups + right];
+        }
+    }
+    weighted_degree
 }
 
 fn almost_optimal_large_adjacency_layout(
@@ -1237,6 +1205,16 @@ fn top_neighbors_by_vertex(
             let mut neighbors: Vec<usize> = (0..num_groups)
                 .filter(|&right| right != left && adjacency[left * num_groups + right] > 0)
                 .collect();
+            if neighbors.len() > limit * 4 {
+                neighbors.select_nth_unstable_by_key(limit, |&right| {
+                    (
+                        usize::MAX - adjacency[left * num_groups + right],
+                        usize::MAX - weighted_degree[right],
+                        right,
+                    )
+                });
+                neighbors.truncate(limit);
+            }
             neighbors.sort_by_key(|&right| {
                 (
                     usize::MAX - adjacency[left * num_groups + right],
