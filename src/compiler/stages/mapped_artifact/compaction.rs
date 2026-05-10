@@ -419,20 +419,21 @@ fn exact_max_adjacency_layout(adjacency: &[usize], num_groups: usize) -> Vec<usi
     }
 
     let states = 1usize << num_groups;
-    let mut best = vec![usize::MAX; states * num_groups];
+    let mut best = vec![0usize; states * num_groups];
+    let mut reachable = vec![false; states * num_groups];
     let mut parent = vec![usize::MAX; states * num_groups];
 
     for group in 0..num_groups {
-        best[(1usize << group) * num_groups + group] = 0;
+        reachable[(1usize << group) * num_groups + group] = true;
     }
 
     for mask in 1usize..states {
         for last in 0..num_groups {
             let state_idx = mask * num_groups + last;
-            let current = best[state_idx];
-            if current == usize::MAX {
+            if !reachable[state_idx] {
                 continue;
             }
+            let current = best[state_idx];
             for next in 0..num_groups {
                 let bit = 1usize << next;
                 if mask & bit != 0 {
@@ -441,9 +442,11 @@ fn exact_max_adjacency_layout(adjacency: &[usize], num_groups: usize) -> Vec<usi
                 let next_mask = mask | bit;
                 let next_score = current + adjacency[last * num_groups + next];
                 let next_idx = next_mask * num_groups + next;
-                if next_score > best[next_idx]
+                if !reachable[next_idx]
+                    || next_score > best[next_idx]
                     || (next_score == best[next_idx] && last < parent[next_idx])
                 {
+                    reachable[next_idx] = true;
                     best[next_idx] = next_score;
                     parent[next_idx] = last;
                 }
