@@ -35,6 +35,7 @@ const LARGE_ALMOST_OPTIMAL_NEIGHBORS: usize = 384;
 const LARGE_ALMOST_OPTIMAL_RANDOM_WINDOW: usize = 16;
 const LARGE_ALMOST_OPTIMAL_2OPT_WINDOW: usize = 64;
 const DEFAULT_LAYOUT_SKETCH_WORDS: usize = 4;
+const MIN_UNIQUE_WEIGHTS_FOR_COMPACTION_POOL: usize = 1024;
 
 #[derive(Clone, Debug)]
 pub struct CompactReport {
@@ -147,6 +148,7 @@ struct PermRun {
 #[derive(Clone, Debug)]
 struct PermutationContext {
     tsid_runs: Vec<PermRun>,
+    tsid_perm_is_identity: bool,
     new_tsid_count: usize,
     token_runs: Vec<PermRun>,
     token_perm_is_identity: bool,
@@ -156,6 +158,10 @@ impl PermutationContext {
     fn new(tsid_perm: &[u32], token_perm: &[u32]) -> Self {
         Self {
             tsid_runs: permutation_runs(tsid_perm),
+            tsid_perm_is_identity: tsid_perm
+                .iter()
+                .enumerate()
+                .all(|(idx, &value)| value == idx as u32),
             new_tsid_count: tsid_perm
                 .iter()
                 .copied()
@@ -299,7 +305,8 @@ pub(super) fn plan_compaction_for_weight_refs(
     let unique_weights = collect_unique_weights_from_weight_refs(weights);
     let unique_ms = unique_started_at.map_or(0.0, elapsed_ms);
     let build_started_at = profile_compaction.then(Instant::now);
-    let use_thread_pool = allow_expensive_layout || use_default_layout;
+    let use_thread_pool = allow_expensive_layout
+        || unique_weights.len() >= MIN_UNIQUE_WEIGHTS_FOR_COMPACTION_POOL;
     let build_compaction = || {
         build_dimension_compaction(
             &unique_weights,
@@ -346,9 +353,11 @@ pub(super) fn apply_compaction_plan_to_weight_refs(
     let num_tsids = id_map.num_tsids() as usize;
     let num_tokens = id_map.num_internal_tokens() as usize;
     let storage_before_started_at = profile_compaction.then(Instant::now);
-    let storage_before = collect_profile_stats.then(|| {
-        count_unique_storage_for_weight_refs(&weight_ref_slice(weights))
-    });
+    let storage_before = if collect_profile_stats && weights.len() <= 4096 {
+        Some(count_unique_storage_for_weight_refs(&weight_ref_slice(weights)))
+    } else {
+        None
+    };
     let storage_before_ms = storage_before_started_at.map_or(0.0, elapsed_ms);
 
     let unique_started_at = profile_compaction.then(Instant::now);
@@ -356,7 +365,7 @@ pub(super) fn apply_compaction_plan_to_weight_refs(
     let unique_ms = unique_started_at.map_or(0.0, elapsed_ms);
 
     let apply_weights_started_at = profile_compaction.then(Instant::now);
-    let use_thread_pool = true;
+    let use_thread_pool = unique_weights.len() >= MIN_UNIQUE_WEIGHTS_FOR_COMPACTION_POOL;
     if !plan.is_identity(num_tsids, num_tokens) {
         let mut apply_compaction = || {
             apply_permutations_to_weight_refs(
@@ -546,20 +555,44 @@ fn build_exact_token_merge_permutation(weights: &[&Weight], num_tokens: usize) -
         }
     }
 
-    let mut profile_to_group = HashMap::<Vec<u64>, u32>::new();
+    let mut profile_hash_to_groups = HashMap::<u64, Vec<(Vec<u64>, u32)>>::new();
     let mut perm = vec![0u32; num_tokens];
     let mut next_group = 0u32;
     for token in 0..num_tokens {
         let profile_start = token * profile_words;
-        let profile = profiles[profile_start..profile_start + profile_words].to_vec();
-        perm[token] = *profile_to_group.entry(profile).or_insert_with(|| {
-            let group = next_group;
-            next_group += 1;
-            group
-        });
+        let profile = &profiles[profile_start..profile_start + profile_words];
+        let profile_hash = hash_profile_words(profile);
+        let groups = profile_hash_to_groups.entry(profile_hash).or_default();
+        if let Some((_, group)) = groups
+            .iter()
+            .find(|(existing_profile, _)| existing_profile.as_slice() == profile)
+        {
+            perm[token] = *group;
+            continue;
+        }
+
+        let group = next_group;
+        groups.push((profile.to_vec(), group));
+        perm[token] = group;
+        next_group += 1;
     }
 
     (perm, next_group as usize)
+}
+
+fn hash_profile_words(profile: &[u64]) -> u64 {
+    let mut hash = 0x9e37_79b9_7f4a_7c15 ^ profile.len() as u64;
+    for &word in profile {
+        hash ^= mix_profile_word(word.wrapping_add(0x9e37_79b9_7f4a_7c15));
+        hash = hash.rotate_left(27).wrapping_mul(0x94d0_49bb_1331_11eb);
+    }
+    hash
+}
+
+fn mix_profile_word(mut value: u64) -> u64 {
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
 }
 
 fn build_exact_tsid_merge_permutation(weights: &[&Weight], num_tsids: usize) -> (Vec<u32>, usize) {
@@ -696,6 +729,25 @@ fn permute_weight_with_cache(
     }
     if weight.is_full() {
         return Weight::all();
+    }
+    if perm_context.tsid_perm_is_identity {
+        if perm_context.token_perm_is_identity {
+            return weight.clone();
+        }
+
+        let mut map = RangeMapBlaze::new();
+        for (tsid_range, token_set) in weight.0.range_values() {
+            let token_set_ptr = Arc::as_ptr(token_set) as usize;
+            let mapped_tokens = permuted_token_cache
+                .get(&token_set_ptr)
+                .cloned()
+                .unwrap_or_else(|| permute_rangeset_with_runs(token_set, &perm_context.token_runs));
+            map.extend_simple(std::iter::once((
+                *tsid_range.start()..=*tsid_range.end(),
+                shared_rangeset(mapped_tokens),
+            )));
+        }
+        return finalize_weight_map(map);
     }
 
     let mut tokens_by_new_tsid = vec![None::<RangeSetBlaze<u32>>; perm_context.new_tsid_count];

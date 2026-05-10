@@ -193,6 +193,11 @@ impl<T: WeightRefs> MappedArtifact<T> {
         self.apply_compaction_plan_with_stats(&plan)
     }
 
+    pub(crate) fn compact_dimensions(&mut self) -> CompactReport {
+        let plan = self.plan_dimensions_compaction(true, true);
+        self.apply_compaction_plan(&plan)
+    }
+
     pub(crate) fn compact_dimensions_fast_with_stats(&mut self) -> CompactReport {
         let plan = self.plan_dimensions_compaction(false, true);
         self.apply_compaction_plan_with_stats(&plan)
@@ -221,12 +226,24 @@ impl<T: WeightRefs> MappedArtifact<T> {
         &mut self,
         plan: &CompactPlan,
     ) -> CompactReport {
+        self.apply_compaction_plan_collecting_stats(plan, true)
+    }
+
+    pub(crate) fn apply_compaction_plan(&mut self, plan: &CompactPlan) -> CompactReport {
+        self.apply_compaction_plan_collecting_stats(plan, false)
+    }
+
+    fn apply_compaction_plan_collecting_stats(
+        &mut self,
+        plan: &CompactPlan,
+        collect_profile_stats: bool,
+    ) -> CompactReport {
         let (artifact, id_map) = self.parts_mut();
         let mut weights = artifact.weight_refs_mut();
         compaction::apply_compaction_plan_to_weight_refs(
             &mut weights,
             id_map,
-            true,
+            collect_profile_stats,
             plan,
         )
     }

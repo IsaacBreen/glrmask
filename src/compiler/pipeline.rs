@@ -530,25 +530,40 @@ fn compile_prepared_with_profile(
             let mut terminal_pm_pair = MappedArtifact::from((terminal_dwa, possible_matches));
             shared_id_reconcile_ms += elapsed_ms(shared_id_reconcile_started_at);
             if dwa_pm_mode.does_parser_compact() {
-                let compact_started_at = Instant::now();
-                terminal_pm_pair.compact_dimensions_with_stats();
-                profile.compact_ms += elapsed_ms(compact_started_at);
+                let compact_plan_started_at = Instant::now();
+                let terminal_compaction_plan = terminal_pm_pair.plan_dimensions_compaction(true, true);
+                profile.compact_ms += elapsed_ms(compact_plan_started_at);
                 let ((terminal_dwa_artifact, possible_matches_artifact), compacted_ids) =
                     terminal_pm_pair.into_parts();
                 terminal_dwa = MappedArtifact::new(terminal_dwa_artifact, compacted_ids.clone());
                 possible_matches = MappedArtifact::new(possible_matches_artifact, compacted_ids.clone());
-                internal_ids = compacted_ids;
+                let terminal_apply_started_at = Instant::now();
+                terminal_dwa.apply_compaction_plan(&terminal_compaction_plan);
+                profile.compact_ms += elapsed_ms(terminal_apply_started_at);
+                internal_ids = terminal_dwa.id_map().clone();
 
-                let parser_dwa_started_at = Instant::now();
-                let parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
-                    &table,
-                    &analyzed_grammar,
-                    terminal_dwa.artifact(),
-                    templates,
-                    vocab,
-                    &internal_ids,
+                let ((parser_dwa, parser_dwa_ms), possible_matches_compact_ms) = rayon::join(
+                    || {
+                        let parser_dwa_started_at = Instant::now();
+                        let parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
+                            &table,
+                            &analyzed_grammar,
+                            terminal_dwa.artifact(),
+                            templates,
+                            vocab,
+                            &internal_ids,
+                        );
+                        (parser_dwa, elapsed_ms(parser_dwa_started_at))
+                    },
+                    || {
+                        let possible_matches_apply_started_at = Instant::now();
+                        possible_matches.apply_compaction_plan(&terminal_compaction_plan);
+                        elapsed_ms(possible_matches_apply_started_at)
+                    },
                 );
-                let parser_dwa_ms = elapsed_ms(parser_dwa_started_at);
+                if possible_matches_compact_ms > parser_dwa_ms {
+                    profile.compact_ms += possible_matches_compact_ms - parser_dwa_ms;
+                }
                 (MappedArtifact::new(parser_dwa, internal_ids.clone()), parser_dwa_ms)
             } else {
                 let pre_compact_ids = terminal_pm_pair.id_map().clone();
@@ -574,9 +589,9 @@ fn compile_prepared_with_profile(
                     );
 
                 let compact_apply_started_at = Instant::now();
-                terminal_pm_pair.apply_compaction_plan_with_stats(&terminal_compaction_plan);
+                terminal_pm_pair.apply_compaction_plan(&terminal_compaction_plan);
                 let mut parser_dwa = MappedArtifact::new(parser_dwa, pre_compact_ids);
-                parser_dwa.apply_compaction_plan_with_stats(&terminal_compaction_plan);
+                parser_dwa.apply_compaction_plan(&terminal_compaction_plan);
                 profile.compact_ms += terminal_compaction_plan_ms + elapsed_ms(compact_apply_started_at);
 
                 let ((terminal_dwa_artifact, possible_matches_artifact), compacted_ids) =
@@ -614,7 +629,7 @@ fn compile_prepared_with_profile(
                 let mut parser_pm_pair = MappedArtifact::from((parser_dwa, possible_matches));
                 shared_id_reconcile_ms += elapsed_ms(shared_id_reconcile_started_at);
                 let compact_started_at = Instant::now();
-                parser_pm_pair.compact_dimensions_with_stats();
+                parser_pm_pair.compact_dimensions();
                 profile.compact_ms += elapsed_ms(compact_started_at);
                 let ((parser_dwa_artifact, possible_matches_artifact), compacted_ids) =
                     parser_pm_pair.into_parts();
@@ -628,7 +643,7 @@ fn compile_prepared_with_profile(
             shared_id_reconcile_ms += elapsed_ms(shared_id_reconcile_started_at);
             if dwa_pm_mode.does_parser_compact() {
                 let compact_started_at = Instant::now();
-                parser_pm_pair.compact_dimensions_with_stats();
+                parser_pm_pair.compact_dimensions();
                 profile.compact_ms += elapsed_ms(compact_started_at);
             }
             let ((parser_dwa_artifact, possible_matches_artifact), reconciled_ids) =
