@@ -174,18 +174,16 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     if compile_profile_enabled() {
         let profile_stats = compact_report.and_then(|report| report.profile_stats);
         eprintln!(
-            "[glrmask/profile][merged_terminal_dwa] minimize_enabled={} compact_enabled={} states_before_compact={} transitions_before_compact={} interned_ranges_before_compact={} weight_ranges_before_compact={} token_ranges_before_compact={} states_after_compact={} transitions_after_compact={} interned_ranges_after_compact={} weight_ranges_after_compact={} token_ranges_after_compact={} tsids_before_compact={} tsids_after_compact={} tokens_before_compact={} tokens_after_compact={} compact_ms={:.3}",
+            "[glrmask/profile][merged_terminal_dwa] minimize_enabled={} compact_enabled={} states_before_compact={} transitions_before_compact={} interned_ranges_before_compact={} token_ranges_before_compact={} states_after_compact={} transitions_after_compact={} interned_ranges_after_compact={} token_ranges_after_compact={} tsids_before_compact={} tsids_after_compact={} tokens_before_compact={} tokens_after_compact={} compact_ms={:.3}",
             minimize_merged_terminal_dwa_enabled(),
             compact_enabled,
             before_compact_stats.states,
             before_compact_stats.transitions,
             before_compact_stats.interned_ranges,
-            before_compact_range_counts.tsid_ranges,
             before_compact_range_counts.token_ranges,
             after_compact_stats.states,
             after_compact_stats.transitions,
             after_compact_stats.interned_ranges,
-            after_compact_range_counts.tsid_ranges,
             after_compact_range_counts.token_ranges,
             before_num_tsids,
             profile_stats.map(|stats| stats.tsids_after).unwrap_or(before_num_tsids as usize),

@@ -487,11 +487,10 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     if profiling {
         let stats_str = if let Some(stats) = compact_report.as_ref().and_then(|report| report.profile_stats) {
             format!(
-                " compact_tsids_before={} compact_tsids_after={} compact_tokens_before={} compact_tokens_after={} compact_tsid_shrink_pct={:.2} compact_vocab_shrink_pct={:.2} compact_weight_ranges_before={} compact_weight_ranges_after={} compact_token_ranges_before={} compact_token_ranges_after={}",
+                " compact_tsids_before={} compact_tsids_after={} compact_tokens_before={} compact_tokens_after={} compact_tsid_shrink_pct={:.2} compact_vocab_shrink_pct={:.2} compact_token_ranges_before={} compact_token_ranges_after={}",
                 stats.tsids_before, stats.tsids_after,
                 stats.tokens_before, stats.tokens_after,
                 compact_tsid_shrink_pct, compact_vocab_shrink_pct,
-                stats.weight_ranges_before, stats.weight_ranges_after,
                 stats.token_ranges_before, stats.token_ranges_after,
             )
         } else {

@@ -41,8 +41,6 @@ pub struct CompactProfileStats {
     pub tsids_after: usize,
     pub tokens_before: usize,
     pub tokens_after: usize,
-    pub weight_ranges_before: usize,
-    pub weight_ranges_after: usize,
     pub token_ranges_before: usize,
     pub token_ranges_after: usize,
 }
@@ -154,8 +152,6 @@ pub(super) fn compact_weights_with_id_map(
             tsids_after: compaction.ordered_num_tsids,
             tokens_before: num_tokens,
             tokens_after: compaction.ordered_num_tokens,
-            weight_ranges_before: storage_before.weight_ranges,
-            weight_ranges_after: storage_after.weight_ranges,
             token_ranges_before: storage_before.token_ranges,
             token_ranges_after: storage_after.token_ranges,
         }
