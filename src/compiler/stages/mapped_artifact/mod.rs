@@ -8,13 +8,27 @@ use crate::compiler::constraint_possible_matches::RuntimePossibleMatchesByTermin
 use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::ds::weight::Weight;
 
-pub(crate) use compaction::{CompactReport, InternedRangeCounts};
+pub(crate) use compaction::{CompactPlan, CompactReport, InternedRangeCounts};
 
 pub(crate) trait WeightRefs {
+    fn weight_refs(&self) -> Vec<&Weight>;
     fn weight_refs_mut(&mut self) -> Vec<&mut Weight>;
 }
 
 impl WeightRefs for DWA {
+    fn weight_refs(&self) -> Vec<&Weight> {
+        let mut weights = Vec::new();
+        for state in self.states() {
+            if let Some(final_weight) = state.final_weight.as_ref() {
+                weights.push(final_weight);
+            }
+            for (_, weight) in state.transitions.values() {
+                weights.push(weight);
+            }
+        }
+        weights
+    }
+
     fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
         let mut weights = Vec::new();
         for state in self.states_mut() {
@@ -30,6 +44,10 @@ impl WeightRefs for DWA {
 }
 
 impl WeightRefs for RuntimePossibleMatchesByTerminal {
+    fn weight_refs(&self) -> Vec<&Weight> {
+        self.values().collect()
+    }
+
     fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
         self.values_mut().collect()
     }
@@ -40,6 +58,12 @@ where
     A: WeightRefs,
     B: WeightRefs,
 {
+    fn weight_refs(&self) -> Vec<&Weight> {
+        let mut weights = self.0.weight_refs();
+        weights.extend(self.1.weight_refs());
+        weights
+    }
+
     fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
         let mut weights = self.0.weight_refs_mut();
         weights.extend(self.1.weight_refs_mut());
@@ -53,6 +77,13 @@ where
     B: WeightRefs,
     C: WeightRefs,
 {
+    fn weight_refs(&self) -> Vec<&Weight> {
+        let mut weights = self.0.weight_refs();
+        weights.extend(self.1.weight_refs());
+        weights.extend(self.2.weight_refs());
+        weights
+    }
+
     fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
         let mut weights = self.0.weight_refs_mut();
         weights.extend(self.1.weight_refs_mut());
@@ -65,6 +96,14 @@ impl<T> WeightRefs for [T]
 where
     T: WeightRefs,
 {
+    fn weight_refs(&self) -> Vec<&Weight> {
+        let mut weights = Vec::new();
+        for item in self.iter() {
+            weights.extend(item.weight_refs());
+        }
+        weights
+    }
+
     fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
         let mut weights = Vec::new();
         for item in self.iter_mut() {
@@ -78,8 +117,38 @@ impl<T> WeightRefs for Vec<T>
 where
     T: WeightRefs,
 {
+    fn weight_refs(&self) -> Vec<&Weight> {
+        self.as_slice().weight_refs()
+    }
+
     fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
         self.as_mut_slice().weight_refs_mut()
+    }
+}
+
+impl<T> WeightRefs for &mut T
+where
+    T: WeightRefs + ?Sized,
+{
+    fn weight_refs(&self) -> Vec<&Weight> {
+        (**self).weight_refs()
+    }
+
+    fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
+        (**self).weight_refs_mut()
+    }
+}
+
+impl<T> WeightRefs for Box<T>
+where
+    T: WeightRefs + ?Sized,
+{
+    fn weight_refs(&self) -> Vec<&Weight> {
+        (**self).weight_refs()
+    }
+
+    fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
+        (**self).weight_refs_mut()
     }
 }
 
@@ -120,37 +189,50 @@ impl<T: WeightRefs> MappedArtifact<T> {
     }
 
     pub(crate) fn compact_dimensions_with_stats(&mut self) -> CompactReport {
-        self.compact_dimensions_with_layout_stats(true, true)
+        let plan = self.plan_dimensions_compaction(true, true);
+        self.apply_compaction_plan_with_stats(&plan)
     }
 
     pub(crate) fn compact_dimensions_fast_with_stats(&mut self) -> CompactReport {
-        self.compact_dimensions_with_layout_stats(false, true)
+        let plan = self.plan_dimensions_compaction(false, true);
+        self.apply_compaction_plan_with_stats(&plan)
     }
 
     pub(crate) fn compact_dimensions_merge_only_fast_with_stats(&mut self) -> CompactReport {
-        self.compact_dimensions_with_layout_stats(false, false)
+        let plan = self.plan_dimensions_compaction(false, false);
+        self.apply_compaction_plan_with_stats(&plan)
     }
 
-    fn compact_dimensions_with_layout_stats(
-        &mut self,
+    pub(crate) fn plan_dimensions_compaction(
+        &self,
         allow_expensive_layout: bool,
         use_default_layout: bool,
-    ) -> CompactReport {
-        let (artifact, id_map) = self.parts_mut();
-        let mut weights = artifact.weight_refs_mut();
-        compaction::compact_weights_with_id_map(
-            &mut weights,
-            id_map,
-            true,
+    ) -> CompactPlan {
+        let weights = self.artifact.weight_refs();
+        compaction::plan_compaction_for_weight_refs(
+            &weights,
+            &self.id_map,
             allow_expensive_layout,
             use_default_layout,
         )
     }
 
+    pub(crate) fn apply_compaction_plan_with_stats(
+        &mut self,
+        plan: &CompactPlan,
+    ) -> CompactReport {
+        let (artifact, id_map) = self.parts_mut();
+        let mut weights = artifact.weight_refs_mut();
+        compaction::apply_compaction_plan_to_weight_refs(
+            &mut weights,
+            id_map,
+            true,
+            plan,
+        )
+    }
+
     pub(crate) fn interned_range_counts(&mut self) -> InternedRangeCounts {
-        let weights = self.artifact.weight_refs_mut();
-        let weight_refs: Vec<_> = weights.iter().map(|weight| &**weight).collect();
-        count_interned_ranges_for_weights(weight_refs)
+        count_interned_ranges_for_weights(self.artifact.weight_refs())
     }
 
     pub(crate) fn num_interned_ranges(&mut self) -> usize {

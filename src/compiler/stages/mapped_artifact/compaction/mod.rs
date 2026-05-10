@@ -43,6 +43,14 @@ pub struct CompactReport {
     pub profile_stats: Option<CompactProfileStats>,
 }
 
+#[derive(Clone, Debug)]
+pub struct CompactPlan {
+    tsid_perm: Vec<u32>,
+    ordered_num_tsids: usize,
+    token_perm: Vec<u32>,
+    ordered_num_tokens: usize,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct InternedRangeCounts {
     pub tsid_ranges: usize,
@@ -73,6 +81,39 @@ struct DimensionCompaction {
 }
 
 impl DimensionCompaction {
+    fn is_identity(&self, num_tsids: usize, num_tokens: usize) -> bool {
+        self.tsid_perm_is_identity(num_tsids) && self.token_perm_is_identity(num_tokens)
+    }
+
+    fn tsid_perm_is_identity(&self, num_tsids: usize) -> bool {
+        self.ordered_num_tsids == num_tsids
+            && self
+                .tsid_perm
+                .iter()
+                .enumerate()
+                .all(|(idx, &mapped)| mapped == idx as u32)
+    }
+
+    fn token_perm_is_identity(&self, num_tokens: usize) -> bool {
+        self.ordered_num_tokens == num_tokens
+            && self
+                .token_perm
+                .iter()
+                .enumerate()
+                .all(|(idx, &mapped)| mapped == idx as u32)
+    }
+}
+
+impl CompactPlan {
+    fn from_dimension_compaction(compaction: DimensionCompaction) -> Self {
+        Self {
+            tsid_perm: compaction.tsid_perm,
+            ordered_num_tsids: compaction.ordered_num_tsids,
+            token_perm: compaction.token_perm,
+            ordered_num_tokens: compaction.ordered_num_tokens,
+        }
+    }
+
     fn is_identity(&self, num_tsids: usize, num_tokens: usize) -> bool {
         self.tsid_perm_is_identity(num_tsids) && self.token_perm_is_identity(num_tokens)
     }
@@ -233,18 +274,29 @@ pub(super) fn compact_weights_with_id_map(
     allow_expensive_layout: bool,
     use_default_layout: bool,
 ) -> CompactReport {
+    let weight_refs = weight_ref_slice(weights);
+    let plan = plan_compaction_for_weight_refs(
+        &weight_refs,
+        id_map,
+        allow_expensive_layout,
+        use_default_layout,
+    );
+    apply_compaction_plan_to_weight_refs(weights, id_map, collect_profile_stats, &plan)
+}
+
+pub(super) fn plan_compaction_for_weight_refs(
+    weights: &[&Weight],
+    id_map: &InternalIdMap,
+    allow_expensive_layout: bool,
+    use_default_layout: bool,
+) -> CompactPlan {
     let profile_compaction = env_flag("GLRMASK_PROFILE_COMPILE");
     let total_started_at = profile_compaction.then(Instant::now);
     let num_tsids = id_map.num_tsids() as usize;
     let num_tokens = id_map.num_internal_tokens() as usize;
-    let storage_before_started_at = profile_compaction.then(Instant::now);
-    let storage_before = collect_profile_stats.then(|| {
-        count_unique_storage_for_weight_refs(&weight_ref_slice(weights))
-    });
-    let storage_before_ms = storage_before_started_at.map_or(0.0, elapsed_ms);
 
     let unique_started_at = profile_compaction.then(Instant::now);
-    let unique_weights = collect_unique_weights_from_refs(weights);
+    let unique_weights = collect_unique_weights_from_weight_refs(weights);
     let unique_ms = unique_started_at.map_or(0.0, elapsed_ms);
     let build_started_at = profile_compaction.then(Instant::now);
     let use_thread_pool = allow_expensive_layout || use_default_layout;
@@ -264,14 +316,54 @@ pub(super) fn compact_weights_with_id_map(
     };
     let build_ms = build_started_at.map_or(0.0, elapsed_ms);
 
+    if let Some(total_started_at) = total_started_at {
+        eprintln!(
+            "[glrmask/profile][mapped_compaction_plan] weights={} unique_weights={} tsids_before={} tsids_after={} tokens_before={} tokens_after={} expensive_layout={} unique_ms={:.3} build_ms={:.3} total_ms={:.3}",
+            weights.len(),
+            unique_weights.len(),
+            num_tsids,
+            compaction.ordered_num_tsids,
+            num_tokens,
+            compaction.ordered_num_tokens,
+            allow_expensive_layout,
+            unique_ms,
+            build_ms,
+            elapsed_ms(total_started_at),
+        );
+    }
+
+    CompactPlan::from_dimension_compaction(compaction)
+}
+
+pub(super) fn apply_compaction_plan_to_weight_refs(
+    weights: &mut [&mut Weight],
+    id_map: &mut InternalIdMap,
+    collect_profile_stats: bool,
+    plan: &CompactPlan,
+) -> CompactReport {
+    let profile_compaction = env_flag("GLRMASK_PROFILE_COMPILE");
+    let total_started_at = profile_compaction.then(Instant::now);
+    let num_tsids = id_map.num_tsids() as usize;
+    let num_tokens = id_map.num_internal_tokens() as usize;
+    let storage_before_started_at = profile_compaction.then(Instant::now);
+    let storage_before = collect_profile_stats.then(|| {
+        count_unique_storage_for_weight_refs(&weight_ref_slice(weights))
+    });
+    let storage_before_ms = storage_before_started_at.map_or(0.0, elapsed_ms);
+
+    let unique_started_at = profile_compaction.then(Instant::now);
+    let unique_weights = collect_unique_weights_from_refs(weights);
+    let unique_ms = unique_started_at.map_or(0.0, elapsed_ms);
+
     let apply_weights_started_at = profile_compaction.then(Instant::now);
-    if !compaction.is_identity(num_tsids, num_tokens) {
+    let use_thread_pool = true;
+    if !plan.is_identity(num_tsids, num_tokens) {
         let mut apply_compaction = || {
             apply_permutations_to_weight_refs(
                 weights,
                 &unique_weights,
-                &compaction.tsid_perm,
-                &compaction.token_perm,
+                &plan.tsid_perm,
+                &plan.token_perm,
             );
         };
         if use_thread_pool {
@@ -282,18 +374,18 @@ pub(super) fn compact_weights_with_id_map(
     }
     let apply_weights_ms = apply_weights_started_at.map_or(0.0, elapsed_ms);
     let apply_id_map_started_at = profile_compaction.then(Instant::now);
-    if !compaction.tsid_perm_is_identity(num_tsids) {
+    if !plan.tsid_perm_is_identity(num_tsids) {
         apply_perm_to_id_map(
             &mut id_map.tokenizer_states,
-            &compaction.tsid_perm,
-            compaction.ordered_num_tsids,
+            &plan.tsid_perm,
+            plan.ordered_num_tsids,
         );
     }
-    if !compaction.token_perm_is_identity(num_tokens) {
+    if !plan.token_perm_is_identity(num_tokens) {
         apply_perm_to_id_map(
             &mut id_map.vocab_tokens,
-            &compaction.token_perm,
-            compaction.ordered_num_tokens,
+            &plan.token_perm,
+            plan.ordered_num_tokens,
         );
     }
     let apply_id_map_ms = apply_id_map_started_at.map_or(0.0, elapsed_ms);
@@ -303,9 +395,9 @@ pub(super) fn compact_weights_with_id_map(
         let storage_after = count_unique_storage_for_weight_refs(&weight_ref_slice(weights));
         CompactProfileStats {
             tsids_before: num_tsids,
-            tsids_after: compaction.ordered_num_tsids,
+            tsids_after: plan.ordered_num_tsids,
             tokens_before: num_tokens,
-            tokens_after: compaction.ordered_num_tokens,
+            tokens_after: plan.ordered_num_tokens,
             token_ranges_before: storage_before.token_ranges,
             token_ranges_after: storage_after.token_ranges,
         }
@@ -314,17 +406,15 @@ pub(super) fn compact_weights_with_id_map(
 
     if let Some(total_started_at) = total_started_at {
         eprintln!(
-            "[glrmask/profile][mapped_compaction_detail] weights={} unique_weights={} tsids_before={} tsids_after={} tokens_before={} tokens_after={} expensive_layout={} storage_before_ms={:.3} unique_ms={:.3} build_ms={:.3} apply_weights_ms={:.3} apply_id_map_ms={:.3} storage_after_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][mapped_compaction_apply] weights={} unique_weights={} tsids_before={} tsids_after={} tokens_before={} tokens_after={} storage_before_ms={:.3} unique_ms={:.3} apply_weights_ms={:.3} apply_id_map_ms={:.3} storage_after_ms={:.3} total_ms={:.3}",
             weights.len(),
             unique_weights.len(),
             num_tsids,
-            compaction.ordered_num_tsids,
+            plan.ordered_num_tsids,
             num_tokens,
-            compaction.ordered_num_tokens,
-            allow_expensive_layout,
+            plan.ordered_num_tokens,
             storage_before_ms,
             unique_ms,
-            build_ms,
             apply_weights_ms,
             apply_id_map_ms,
             storage_after_ms,
@@ -333,8 +423,8 @@ pub(super) fn compact_weights_with_id_map(
     }
 
     CompactReport {
-        tsid_perm: compaction.tsid_perm,
-        token_perm: compaction.token_perm,
+        tsid_perm: plan.tsid_perm.clone(),
+        token_perm: plan.token_perm.clone(),
         profile_stats,
     }
 }
@@ -851,6 +941,17 @@ fn collect_token_sets_after_permutation(
 }
 
 fn collect_unique_weights_from_refs(weights: &[&mut Weight]) -> Vec<Weight> {
+    let mut seen = HashSet::new();
+    let mut unique = Vec::new();
+    for weight in weights {
+        if seen.insert(Arc::as_ptr(&weight.0) as usize) {
+            unique.push((**weight).clone());
+        }
+    }
+    unique
+}
+
+fn collect_unique_weights_from_weight_refs(weights: &[&Weight]) -> Vec<Weight> {
     let mut seen = HashSet::new();
     let mut unique = Vec::new();
     for weight in weights {
