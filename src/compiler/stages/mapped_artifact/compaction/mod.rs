@@ -539,6 +539,10 @@ fn build_exact_token_merge_permutation(weights: &[&Weight], num_tokens: usize) -
     }
 
     let profile_words = token_sets.len().div_ceil(64);
+    if profile_words == 1 {
+        return build_exact_token_merge_permutation_one_word(&token_sets, num_tokens);
+    }
+
     let mut profiles = vec![0u64; num_tokens * profile_words];
     for (context, token_set) in token_sets.iter().enumerate() {
         let word = context / 64;
@@ -575,6 +579,89 @@ fn build_exact_token_merge_permutation(weights: &[&Weight], num_tokens: usize) -
         groups.push((profile.to_vec(), group));
         perm[token] = group;
         next_group += 1;
+    }
+
+    (perm, next_group as usize)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TokenProfileEvent {
+    pos: usize,
+    bit: u64,
+    add: bool,
+}
+
+fn build_exact_token_merge_permutation_one_word(
+    token_sets: &[Arc<RangeSetBlaze<u32>>],
+    num_tokens: usize,
+) -> (Vec<u32>, usize) {
+    let mut events = Vec::new();
+    for (context, token_set) in token_sets.iter().enumerate() {
+        let bit = 1u64 << context;
+        for token_range in token_set.ranges() {
+            let start = (*token_range.start() as usize).min(num_tokens);
+            let end = (*token_range.end() as usize).min(num_tokens.saturating_sub(1));
+            if start > end {
+                continue;
+            }
+            events.push(TokenProfileEvent {
+                pos: start,
+                bit,
+                add: true,
+            });
+            let remove_pos = end + 1;
+            if remove_pos < num_tokens {
+                events.push(TokenProfileEvent {
+                    pos: remove_pos,
+                    bit,
+                    add: false,
+                });
+            }
+        }
+    }
+
+    if events.is_empty() {
+        return (vec![0; num_tokens], 1);
+    }
+
+    events.sort_unstable_by_key(|event| (event.pos, event.add));
+
+    let mut profile_to_group = HashMap::<u64, u32>::new();
+    let mut perm = vec![0u32; num_tokens];
+    let mut next_group = 0u32;
+    let mut active_profile = 0u64;
+    let mut cursor = 0usize;
+    let mut idx = 0usize;
+
+    while idx < events.len() {
+        let pos = events[idx].pos;
+        if cursor < pos {
+            let group = *profile_to_group.entry(active_profile).or_insert_with(|| {
+                let group = next_group;
+                next_group += 1;
+                group
+            });
+            perm[cursor..pos].fill(group);
+            cursor = pos;
+        }
+
+        while idx < events.len() && events[idx].pos == pos && !events[idx].add {
+            active_profile &= !events[idx].bit;
+            idx += 1;
+        }
+        while idx < events.len() && events[idx].pos == pos && events[idx].add {
+            active_profile |= events[idx].bit;
+            idx += 1;
+        }
+    }
+
+    if cursor < num_tokens {
+        let group = *profile_to_group.entry(active_profile).or_insert_with(|| {
+            let group = next_group;
+            next_group += 1;
+            group
+        });
+        perm[cursor..num_tokens].fill(group);
     }
 
     (perm, next_group as usize)
