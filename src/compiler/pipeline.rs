@@ -487,6 +487,18 @@ fn compile_prepared_with_profile(
         } else {
             terminal_dwa.id_map().clone()
         };
+        if parser_pm_compaction_mode == ParserDwaPossibleMatchesCompactionMode::Both {
+            let compact_started_at = Instant::now();
+            let mut terminal_pm_pair =
+                MappedArtifact::new((terminal_dwa.into_artifact(), possible_matches.into_artifact()), internal_ids);
+            terminal_pm_pair.compact_dimensions_with_stats();
+            profile.compact_ms += elapsed_ms(compact_started_at);
+            let ((terminal_dwa_artifact, possible_matches_artifact), compacted_ids) =
+                terminal_pm_pair.into_parts();
+            terminal_dwa = MappedArtifact::new(terminal_dwa_artifact, compacted_ids.clone());
+            possible_matches = MappedArtifact::new(possible_matches_artifact, compacted_ids.clone());
+            internal_ids = compacted_ids;
+        }
         let terminal_pm_joint_interned_ranges =
             joint_interned_range_count_for_artifacts(terminal_dwa.artifact_mut(), possible_matches.artifact_mut());
 
