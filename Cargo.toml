@@ -33,5 +33,9 @@ rand = "0.8"
 thiserror = "1"
 
 [dev-dependencies]
+criterion = "0.5"
 pretty_assertions = "1"
 
+[[bench]]
+name = "github_trivial_o70256_build"
+harness = false
