@@ -2938,6 +2938,16 @@ pub(crate) fn promote_literal_choices_enabled() -> bool {
     env_flag_default_true("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES")
 }
 
+pub(crate) fn simplify_grammar_enabled() -> bool {
+    std::env::var("GLRMASK_JSON_SCHEMA_SIMPLIFY_GRAMMAR")
+        .ok()
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            matches!(value.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
 fn seq_elements(expr: &GrammarExpr) -> Vec<GrammarExpr> {
     match expr {
         GrammarExpr::Sequence(parts) => parts.clone(),

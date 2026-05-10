@@ -6,8 +6,9 @@ pub mod numeric_range;
 
 use crate::compiler::compile::{compile_owned_profiled, compile_profile_enabled, emit_compile_profile_summary};
 use crate::compiler::compile_owned;
-use crate::grammar::flat::GrammarDef;
 use crate::grammar::factoring::factor_named_grammar;
+use crate::grammar::flat::GrammarDef;
+use crate::grammar::named_simplify::simplify_named_grammar;
 use crate::grammar::terminal_choice_promotion::promote_choice_terminals_exact;
 use crate::runtime::Constraint;
 
@@ -37,8 +38,13 @@ fn lower_factored_named_grammar(
 ) -> crate::Result<GrammarDef> {
     let named = parse_named(source)?;
     let mut factored = factor_named_grammar(named);
-    if source_kind == "json_schema" && json_schema::promote_literal_choices_enabled() {
-        promote_choice_terminals_exact(&mut factored, false);
+    if source_kind == "json_schema" {
+        if json_schema::simplify_grammar_enabled() {
+            simplify_named_grammar(&mut factored);
+        }
+        if json_schema::promote_literal_choices_enabled() {
+            promote_choice_terminals_exact(&mut factored, false);
+        }
     }
     ast::lower(&factored)
 }
