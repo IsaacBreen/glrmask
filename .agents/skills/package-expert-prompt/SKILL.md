@@ -14,20 +14,21 @@ mathematically.
 
 ## Output Location
 
-Use the repository-local output directory unless the user specifies otherwise:
+Put generated expert prompt zip files in `/tmp` unless the user specifies
+otherwise:
 
 ```text
-.agents/expert-prompts/
+/tmp/
 ```
 
 Name bundles after the question or area, for example:
 
 ```text
-.agents/expert-prompts/shared-state-equivalence-expert.zip
+/tmp/shared-state-equivalence-expert.zip
 ```
 
-Keep generated expert zips untracked unless the user explicitly asks to commit
-or publish them.
+Do not place generated expert zips under `.agents/` unless the user explicitly
+asks for that location.
 
 ## Bundle Contents
 
@@ -90,6 +91,10 @@ why the proposed algorithm preserves the required semantics.
 If the expert is expected to review a partially implemented change, include the
 current intended semantics and any open risks.
 
+Do not mention `.agents/` paths, local storage conventions, or where the zip was
+created in `TASK.md`; those details are for the local packaging workflow only,
+not for the expert prompt.
+
 ## Build Workflow
 
 Create a temporary staging directory under `/tmp`, copy the selected files into
@@ -101,8 +106,8 @@ Example:
 ```bash
 repo=/Users/isaacbreen/Projects2/glrmask2
 name=shared-state-equivalence-expert
-stage=/tmp/${name}
-out="$repo/.agents/expert-prompts/${name}.zip"
+stage=/tmp/${name}-stage
+out="/tmp/${name}.zip"
 
 rm -rf "$stage"
 mkdir -p "$stage"
