@@ -117,6 +117,7 @@ pub(crate) struct CompilePhaseProfile {
     pub(crate) constraint_possible_matches_ms: f64,
     pub(crate) internal_token_bytes_ms: f64,
     pub(crate) parser_dwa_ms: f64,
+    pub(crate) parser_dwa_interned_ranges: usize,
     pub(crate) finalize_ms: f64,
     pub(crate) compile_ms: f64,
     pub(crate) total_ms: f64,
@@ -137,7 +138,7 @@ pub(crate) fn emit_compile_profile_summary(
         .unwrap_or_default();
 
     eprintln!(
-        "[glrmask/profile][compile] source={}{} prepare_ms={:.3} tokenizer_build_ms={:.3} analyze_grammar_ms={:.3} glr_table_ms={:.3} terminal_coloring_ms={:.3} disallowed_follows_ms={:.3} analysis_wall_ms={:.3} classify_ms={:.3} id_map_ms={:.3} terminal_dwa_ms={:.3} templates_ms={:.3} compact_ms={:.3} possible_matches_collect_ms={:.3} possible_match_vocab_ms={:.3} remap_parser_dwa_ms={:.3} constraint_possible_matches_ms={:.3} internal_token_bytes_ms={:.3} parser_dwa_ms={:.3} finalize_ms={:.3} compile_ms={:.3} total_ms={:.3}",
+        "[glrmask/profile][compile] source={}{} prepare_ms={:.3} tokenizer_build_ms={:.3} analyze_grammar_ms={:.3} glr_table_ms={:.3} terminal_coloring_ms={:.3} disallowed_follows_ms={:.3} analysis_wall_ms={:.3} classify_ms={:.3} id_map_ms={:.3} terminal_dwa_ms={:.3} templates_ms={:.3} compact_ms={:.3} possible_matches_collect_ms={:.3} possible_match_vocab_ms={:.3} remap_parser_dwa_ms={:.3} constraint_possible_matches_ms={:.3} internal_token_bytes_ms={:.3} parser_dwa_ms={:.3} parser_dwa_interned_ranges={} finalize_ms={:.3} compile_ms={:.3} total_ms={:.3}",
         source,
         import_fragment,
         profile.prepare_ms,
@@ -158,6 +159,7 @@ pub(crate) fn emit_compile_profile_summary(
         profile.constraint_possible_matches_ms,
         profile.internal_token_bytes_ms,
         profile.parser_dwa_ms,
+        profile.parser_dwa_interned_ranges,
         profile.finalize_ms,
         profile.compile_ms,
         profile.total_ms,
@@ -419,6 +421,7 @@ fn compile_prepared_with_profile(
             &internal_ids,
         );
         let parser_dwa_ms = elapsed_ms(parser_dwa_started_at);
+        let parser_dwa_interned_ranges = parser_dwa.stats().interned_ranges;
 
         let internal_token_bytes_started_at = Instant::now();
         let internal_token_bytes = cpm::build_internal_token_bytes_from_groups(
@@ -434,6 +437,7 @@ fn compile_prepared_with_profile(
         profile.constraint_possible_matches_ms =
             cpm_profile.possible_matches_collect_ms + cpm_profile.possible_match_vocab_ms + remap_parser_dwa_ms;
         profile.internal_token_bytes_ms = internal_token_bytes_ms;
+        profile.parser_dwa_interned_ranges = parser_dwa_interned_ranges;
 
         let finalize_started_at = Instant::now();
         let token_bytes = vocab.entries.clone();
