@@ -1,9 +1,46 @@
+use std::any::{Any, TypeId};
 use std::collections::BTreeMap;
+use std::fmt;
+use std::sync::{Arc, Mutex};
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Vocab {
     pub entries: BTreeMap<u32, Vec<u8>>,
     pub eos_token_id: Option<u32>,
+    #[serde(skip)]
+    compiler_cache: VocabCompilerCache,
+}
+
+#[derive(Default)]
+struct VocabCompilerCache {
+    artifacts: Mutex<BTreeMap<TypeId, Arc<dyn Any + Send + Sync>>>,
+}
+
+impl fmt::Debug for VocabCompilerCache {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VocabCompilerCache")
+            .field("entries", &self.artifacts.lock().map(|artifacts| artifacts.len()).unwrap_or(0))
+            .finish()
+    }
+}
+
+impl fmt::Debug for Vocab {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Vocab")
+            .field("entries", &self.entries)
+            .field("eos_token_id", &self.eos_token_id)
+            .finish()
+    }
+}
+
+impl Clone for Vocab {
+    fn clone(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+            eos_token_id: self.eos_token_id,
+            compiler_cache: VocabCompilerCache::default(),
+        }
+    }
 }
 
 impl Vocab {
@@ -22,6 +59,7 @@ impl Vocab {
         Self {
             entries,
             eos_token_id,
+            compiler_cache: VocabCompilerCache::default(),
         }
     }
 
@@ -35,5 +73,22 @@ impl Vocab {
 
     pub fn max_token_id(&self) -> u32 {
         self.entries.last_key_value().map_or(0, |(&token_id, _)| token_id)
+    }
+
+    pub(crate) fn compiler_cache_get<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
+        self.compiler_cache
+            .artifacts
+            .lock()
+            .ok()?
+            .get(&TypeId::of::<T>())
+            .cloned()
+            .and_then(|artifact| artifact.downcast::<T>().ok())
+    }
+
+    pub(crate) fn compiler_cache_set<T: Any + Send + Sync>(&self, artifact: Arc<T>) {
+        let erased: Arc<dyn Any + Send + Sync> = artifact;
+        if let Ok(mut artifacts) = self.compiler_cache.artifacts.lock() {
+            artifacts.entry(TypeId::of::<T>()).or_insert(erased);
+        }
     }
 }

@@ -407,6 +407,53 @@ fn get_ordered_vocab_trie_artifacts(
     )
 }
 
+fn get_ordered_vocab_trie_artifacts_for_vocab(
+    vocab: &Vocab,
+) -> (OrderedVocabTrieArtifacts, OrderedVocabCacheProfile) {
+    let capacity = ordered_vocab_cache_capacity();
+    if !ordered_vocab_cache_enabled() || capacity == 0 {
+        return get_ordered_vocab_trie_artifacts(&vocab.entries);
+    }
+
+    let probe_started_at = Instant::now();
+    if let Some(artifacts) = vocab.compiler_cache_get::<OrderedVocabTrieArtifacts>() {
+        return (
+            artifacts.as_ref().clone(),
+            OrderedVocabCacheProfile {
+                status: OrderedVocabCacheStatus::Hit,
+                probe_ns: probe_started_at.elapsed().as_nanos(),
+                verify_ns: 0,
+                ordered_vocab_build_ns: 0,
+                trie_build_ns: 0,
+                cache_entries: 1,
+                capacity,
+            },
+        );
+    }
+
+    let ordered_vocab_started_at = Instant::now();
+    let ordered_vocab = Arc::new(build_ordered_vocab(&vocab.entries));
+    let ordered_vocab_build_ns = ordered_vocab_started_at.elapsed().as_nanos();
+    let trie_started_at = Instant::now();
+    let trie = Arc::new(build_ordered_vocab_prefix_tree(ordered_vocab.as_ref()));
+    let trie_build_ns = trie_started_at.elapsed().as_nanos();
+    let artifacts = OrderedVocabTrieArtifacts { ordered_vocab, trie };
+    vocab.compiler_cache_set(Arc::new(artifacts.clone()));
+
+    (
+        artifacts,
+        OrderedVocabCacheProfile {
+            status: OrderedVocabCacheStatus::Miss,
+            probe_ns: probe_started_at.elapsed().as_nanos(),
+            verify_ns: 0,
+            ordered_vocab_build_ns,
+            trie_build_ns,
+            cache_entries: 1,
+            capacity,
+        },
+    )
+}
+
 #[allow(dead_code)]
 pub(crate) fn dense_word_count(token_slots: u32) -> usize { (token_slots as usize + 63) / 64 }
 
@@ -1290,9 +1337,23 @@ pub(crate) fn compute_constraint_possible_matches(
     token_bytes: &BTreeMap<u32, Vec<u8>>,
     config: ConstraintPossibleMatchesConfig,
 ) -> ConstraintPossibleMatchesComputation {
+    compute_constraint_possible_matches_with_artifacts(
+        tokenizer,
+        token_bytes.len(),
+        get_ordered_vocab_trie_artifacts(token_bytes),
+        config,
+    )
+}
+
+fn compute_constraint_possible_matches_with_artifacts(
+    tokenizer: &Tokenizer,
+    original_token_count: usize,
+    artifacts_and_profile: (OrderedVocabTrieArtifacts, OrderedVocabCacheProfile),
+    config: ConstraintPossibleMatchesConfig,
+) -> ConstraintPossibleMatchesComputation {
     let pm_started_at = Instant::now();
 
-    let (artifacts, ordered_vocab_cache_profile) = get_ordered_vocab_trie_artifacts(token_bytes);
+    let (artifacts, ordered_vocab_cache_profile) = artifacts_and_profile;
     emit_ordered_vocab_cache_profile(ordered_vocab_cache_profile);
     let ordered_vocab = artifacts.ordered_vocab;
     let trie = artifacts.trie;
@@ -1359,7 +1420,7 @@ pub(crate) fn compute_constraint_possible_matches(
     };
 
     if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some() || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
-        eprintln!("[glrmask/profile][possible_match_vocab] original_tokens={} ordered_byte_tokens={} possible_match_tokens={}", token_bytes.len(), ordered_vocab.ordered_to_originals.len(), possible_matches_id_map.vocab_tokens.internal_to_originals.len());
+        eprintln!("[glrmask/profile][possible_match_vocab] original_tokens={} ordered_byte_tokens={} possible_match_tokens={}", original_token_count, ordered_vocab.ordered_to_originals.len(), possible_matches_id_map.vocab_tokens.internal_to_originals.len());
     }
 
     let possible_match_vocab_ms = elapsed_ms(possible_match_vocab_started_at);
@@ -1368,4 +1429,17 @@ pub(crate) fn compute_constraint_possible_matches(
         mapped_possible_matches: MappedArtifact::new(possible_matches, possible_matches_id_map),
         profile: ConstraintPossibleMatchesProfile { possible_matches_collect_ms, possible_match_vocab_ms },
     }
+}
+
+pub(crate) fn compute_constraint_possible_matches_for_vocab(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    config: ConstraintPossibleMatchesConfig,
+) -> ConstraintPossibleMatchesComputation {
+    compute_constraint_possible_matches_with_artifacts(
+        tokenizer,
+        vocab.entries.len(),
+        get_ordered_vocab_trie_artifacts_for_vocab(vocab),
+        config,
+    )
 }

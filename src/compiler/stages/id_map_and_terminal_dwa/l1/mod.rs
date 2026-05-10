@@ -20,6 +20,60 @@ struct PreHashedRanges {
     ranges: Vec<(u32, u32)>,
 }
 
+#[derive(Debug)]
+struct L1IdentityVocabOrder {
+    token_ids_sorted: Arc<[u32]>,
+    original_to_internal: Arc<[u32]>,
+}
+
+fn l1_identity_vocab_order(vocab: &Vocab) -> Arc<L1IdentityVocabOrder> {
+    if let Some(cached) = vocab.compiler_cache_get::<L1IdentityVocabOrder>() {
+        return cached;
+    }
+
+    let mut token_id_bytes: Vec<(u32, &[u8])> = vocab
+        .entries
+        .iter()
+        .map(|(&id, bytes)| (id, bytes.as_slice()))
+        .collect();
+
+    token_id_bytes.sort_unstable_by(|(_, left_bytes), (_, right_bytes)| {
+        left_bytes
+            .first()
+            .cmp(&right_bytes.first())
+            .then(left_bytes.len().cmp(&right_bytes.len()))
+            .then(left_bytes.cmp(right_bytes))
+    });
+
+    let mut token_original_to_internal = vec![u32::MAX; vocab.max_token_id() as usize + 1];
+    let token_ids_sorted: Vec<u32> = token_id_bytes
+        .iter()
+        .enumerate()
+        .map(|(internal_id, &(original_id, _))| {
+            token_original_to_internal[original_id as usize] = internal_id as u32;
+            original_id
+        })
+        .collect();
+
+    let order = Arc::new(L1IdentityVocabOrder {
+        token_ids_sorted: token_ids_sorted.into(),
+        original_to_internal: token_original_to_internal.into(),
+    });
+    vocab.compiler_cache_set(Arc::clone(&order));
+    order
+}
+
+fn l1_sorted_token_entries<'a>(
+    vocab: &'a Vocab,
+    order: &L1IdentityVocabOrder,
+) -> Vec<(u32, &'a [u8])> {
+    order
+        .token_ids_sorted
+        .iter()
+        .filter_map(|&id| vocab.entries.get(&id).map(|bytes| (id, bytes.as_slice())))
+        .collect()
+}
+
 fn skip_max_length_for_partition(partition_label: &str) -> bool {
     if partition_label == "p5" {
         return true;
@@ -66,6 +120,16 @@ fn skip_l1_max_length_for_partition(partition_label: &str) -> bool {
         .any(|label| label == partition_label)
 }
 
+fn l1_max_length_min_states() -> usize {
+    static MIN_STATES: OnceLock<usize> = OnceLock::new();
+    *MIN_STATES.get_or_init(|| {
+        std::env::var("GLRMASK_L1_MAX_LENGTH_MIN_STATES")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(128)
+    })
+}
+
 #[inline]
 fn should_skip_max_length_for_partition(
     partition_label: &str,
@@ -74,6 +138,7 @@ fn should_skip_max_length_for_partition(
 ) -> bool {
     skip_max_length_for_partition(partition_label)
         || skip_l1_max_length_for_partition(partition_label)
+        || initial_state_count < l1_max_length_min_states()
         || (projected_by_global && initial_state_count <= 8192)
 }
 
@@ -547,30 +612,27 @@ fn build_l1_id_map<'a>(
     let tokenizer_view =
         TokenizerView::new_filtered_from_flat_trans(flat_trans, tokenizer, active_terminals);
     let view_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
-    let mut token_id_bytes: Vec<(u32, &[u8])> = vocab
-        .entries
+    let order = l1_identity_vocab_order(vocab);
+    let token_id_bytes = l1_sorted_token_entries(vocab, order.as_ref());
+    let token_len_stats = token_length_stats_from_entries(&token_id_bytes);
+    let max_token_len = token_id_bytes
         .iter()
-        .map(|(&id, bytes)| (id, bytes.as_slice()))
-        .collect();
-    let token_bytes: Vec<&[u8]> = token_id_bytes.iter().map(|(_, bytes)| *bytes).collect();
-    let token_len_stats = token_length_stats(&token_bytes);
-    let max_token_len = token_bytes
-        .iter()
-        .map(|bytes| bytes.len())
+        .map(|(_, bytes)| bytes.len())
         .max()
         .unwrap_or(0);
-    let mut relevant_bytes = [false; 256];
-    for bytes in &token_bytes {
-        for &byte in *bytes {
-            relevant_bytes[byte as usize] = true;
-        }
-    }
-    let byte_to_class = compute_byte_classes(tokenizer_view.dfa());
     let max_length_skipped =
         should_skip_max_length_for_partition(partition_label, states.len(), projected_by_global);
     let equiv_mapping = if max_length_skipped {
         states.clone()
     } else {
+        let token_bytes: Vec<&[u8]> = token_id_bytes.iter().map(|(_, bytes)| *bytes).collect();
+        let mut relevant_bytes = [false; 256];
+        for bytes in &token_bytes {
+            for &byte in *bytes {
+                relevant_bytes[byte as usize] = true;
+            }
+        }
+        let byte_to_class = compute_byte_classes(tokenizer_view.dfa());
         super::l2p::equivalence_analysis::state::max_length::find_state_equivalence_classes_byte_restricted(
             &tokenizer_view,
             &token_bytes,
@@ -585,15 +647,7 @@ fn build_l1_id_map<'a>(
     // Keeping first-byte buckets contiguous preserves cheap whole-bucket unions,
     // while length-major order can reduce fragmentation for length-sensitive
     // token sets before the later compact pass.
-    let token_identity_started_at = Instant::now();
-    token_id_bytes.sort_unstable_by(|(_, left_bytes), (_, right_bytes)| {
-        left_bytes
-            .first()
-            .cmp(&right_bytes.first())
-            .then(left_bytes.len().cmp(&right_bytes.len()))
-            .then(left_bytes.cmp(right_bytes))
-    });
-    let token_sort_ms = token_identity_started_at.elapsed().as_secs_f64() * 1000.0;
+    let token_sort_ms = 0.0;
 
     let max_length_ms = if max_length_skipped {
         0.0
@@ -664,15 +718,8 @@ fn build_l1_id_map<'a>(
     let state_equiv_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let token_map_started_at = Instant::now();
-    let mut token_original_to_internal = vec![u32::MAX; vocab.max_token_id() as usize + 1];
-    let token_ids_sorted: Vec<u32> = token_id_bytes
-        .iter()
-        .enumerate()
-        .map(|(internal_id, &(original_id, _))| {
-            token_original_to_internal[original_id as usize] = internal_id as u32;
-            original_id
-        })
-        .collect();
+    let token_original_to_internal = order.original_to_internal.to_vec();
+    let token_ids_sorted = order.token_ids_sorted.to_vec();
     let token_identity_map_ms =
         token_sort_ms + token_map_started_at.elapsed().as_secs_f64() * 1000.0;
     let exact_reps = state_representatives.len();
@@ -715,29 +762,10 @@ fn build_l1_identity_vocab_map<'a>(
     vocab: &'a Vocab,
 ) -> (ManyToOneIdMap, Vec<(u32, &'a [u8])>, f64) {
     let token_identity_started_at = Instant::now();
-    let mut token_id_bytes: Vec<(u32, &[u8])> = vocab
-        .entries
-        .iter()
-        .map(|(&id, bytes)| (id, bytes.as_slice()))
-        .collect();
-
-    token_id_bytes.sort_unstable_by(|(_, left_bytes), (_, right_bytes)| {
-        left_bytes
-            .first()
-            .cmp(&right_bytes.first())
-            .then(left_bytes.len().cmp(&right_bytes.len()))
-            .then(left_bytes.cmp(right_bytes))
-    });
-
-    let mut token_original_to_internal = vec![u32::MAX; vocab.max_token_id() as usize + 1];
-    let token_ids_sorted: Vec<u32> = token_id_bytes
-        .iter()
-        .enumerate()
-        .map(|(internal_id, &(original_id, _))| {
-            token_original_to_internal[original_id as usize] = internal_id as u32;
-            original_id
-        })
-        .collect();
+    let order = l1_identity_vocab_order(vocab);
+    let token_id_bytes = l1_sorted_token_entries(vocab, order.as_ref());
+    let token_original_to_internal = order.original_to_internal.to_vec();
+    let token_ids_sorted = order.token_ids_sorted.to_vec();
 
     let token_identity_map_ms = token_identity_started_at.elapsed().as_secs_f64() * 1000.0;
     (
@@ -780,6 +808,35 @@ fn token_length_stats(tokens: &[&[u8]]) -> TokenLengthStats {
         gt_64: 0,
     };
     for token in tokens {
+        let len = token.len();
+        if len > 4 {
+            stats.gt_4 += 1;
+        }
+        if len > 8 {
+            stats.gt_8 += 1;
+        }
+        if len > 16 {
+            stats.gt_16 += 1;
+        }
+        if len > 32 {
+            stats.gt_32 += 1;
+        }
+        if len > 64 {
+            stats.gt_64 += 1;
+        }
+    }
+    stats
+}
+
+fn token_length_stats_from_entries(tokens: &[(u32, &[u8])]) -> TokenLengthStats {
+    let mut stats = TokenLengthStats {
+        gt_4: 0,
+        gt_8: 0,
+        gt_16: 0,
+        gt_32: 0,
+        gt_64: 0,
+    };
+    for &(_, token) in tokens {
         let len = token.len();
         if len > 4 {
             stats.gt_4 += 1;

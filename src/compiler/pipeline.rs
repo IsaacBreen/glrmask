@@ -321,7 +321,6 @@ fn compile_prepared_with_profile(
             );
         let global_max_length_ms = elapsed_ms(global_max_length_started_at);
 
-        let token_bytes = vocab.entries.clone();
         let (((mut terminal_dwa, mut terminal_phase_profile), cpm_result), (templates, templates_ms)) = rayon::join(
             || {
                 rayon::join(
@@ -340,9 +339,9 @@ fn compile_prepared_with_profile(
                         )
                     },
                     || {
-                        cpm::compute_constraint_possible_matches(
+                        cpm::compute_constraint_possible_matches_for_vocab(
                             &tokenizer,
-                            &token_bytes,
+                            vocab,
                             cpm::ConstraintPossibleMatchesConfig {
                                 initial_state_map: Some(&global_max_length_state_map),
                             },
@@ -437,6 +436,7 @@ fn compile_prepared_with_profile(
         profile.internal_token_bytes_ms = internal_token_bytes_ms;
 
         let finalize_started_at = Instant::now();
+        let token_bytes = vocab.entries.clone();
         let constraint = finalize_constraint(Constraint {
             parser_dwa,
             table,

@@ -92,7 +92,12 @@ fn l2p_auto_min_grammar_terminals_from_env() -> usize {
         .unwrap_or(12)
 }
 
-fn vocab_from_token_partitions(vocab: &Vocab, token_partitions: Vec<Vec<u32>>) -> Vec<Vocab> {
+#[derive(Debug)]
+struct CharTypeSubVocabs {
+    sub_vocabs: Arc<[Vocab]>,
+}
+
+fn vocab_from_token_partitions(vocab: &Vocab, token_partitions: Vec<Vec<u32>>) -> Arc<[Vocab]> {
     token_partitions
         .into_iter()
         .map(|token_ids| {
@@ -102,19 +107,29 @@ fn vocab_from_token_partitions(vocab: &Vocab, token_partitions: Vec<Vec<u32>>) -
                 .collect();
             Vocab::new(entries, None)
         })
-        .collect()
+        .collect::<Vec<_>>()
+        .into()
 }
 
-fn build_char_type_sub_vocabs(vocab: &Vocab) -> Vec<Vocab> {
+fn build_char_type_sub_vocabs(vocab: &Vocab) -> Arc<[Vocab]> {
+    if let Some(cached) = vocab.compiler_cache_get::<CharTypeSubVocabs>() {
+        return Arc::clone(&cached.sub_vocabs);
+    }
+
     let mut partition_entries: Vec<Vec<(u32, Vec<u8>)>> = (0..7).map(|_| Vec::new()).collect();
     for (&token_id, bytes) in &vocab.entries {
         let idx = classify_vocab_char_type(bytes) as usize;
         partition_entries[idx].push((token_id, bytes.clone()));
     }
-    partition_entries
+    let sub_vocabs: Arc<[Vocab]> = partition_entries
         .into_iter()
         .map(|entries| Vocab::new(entries, None))
-        .collect()
+        .collect::<Vec<_>>()
+        .into();
+    vocab.compiler_cache_set(Arc::new(CharTypeSubVocabs {
+        sub_vocabs: Arc::clone(&sub_vocabs),
+    }));
+    sub_vocabs
 }
 
 fn global_max_length_env_override() -> Option<bool> {
@@ -247,7 +262,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     let partition_vocab_started_at = Instant::now();
     let partition_scheme =
         std::env::var("GLRMASK_PARTITION_SCHEME").unwrap_or_else(|_| "char_type".to_string());
-    let sub_vocabs: Vec<Vocab> = match partition_scheme.as_str() {
+    let sub_vocabs: Arc<[Vocab]> = match partition_scheme.as_str() {
         "char_type" => build_char_type_sub_vocabs(vocab),
         "l2p_cost" => {
             let cost_fn = l2p_partition_cost_fn_from_env();

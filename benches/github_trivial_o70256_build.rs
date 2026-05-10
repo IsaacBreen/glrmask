@@ -78,7 +78,7 @@ fn configure_benchmark_environment() {
 }
 
 fn run_one_profiled_build(vocab: &Vocab) {
-    eprintln!("[bench][github_trivial_o70256_build] diagnostic_build=1 compile_profile=1");
+    eprintln!("[bench][github_trivial_o70256_build] diagnostic_build=1 cache_state=warm compile_profile=1");
     unsafe {
         std::env::set_var("GLRMASK_PROFILE_COMPILE", "1");
         std::env::set_var("GLRMASK_PROFILE_COMPILE_SUMMARY", "1");
@@ -93,6 +93,12 @@ fn run_one_profiled_build(vocab: &Vocab) {
     eprintln!("[bench][github_trivial_o70256_build] diagnostic_build=done compile_profile=0");
 }
 
+fn run_one_warmup_build(vocab: &Vocab) {
+    let constraint = Constraint::from_glrm_grammar(GITHUB_TRIVIAL_O70256_GLRM, vocab)
+        .expect("Github_trivial---o70256 GLRM grammar should compile");
+    black_box(constraint);
+}
+
 fn bench_github_trivial_o70256_build(c: &mut Criterion) {
     assert_release_benchmark();
     configure_benchmark_environment();
@@ -103,6 +109,7 @@ fn bench_github_trivial_o70256_build(c: &mut Criterion) {
         "[bench][github_trivial_o70256_build] vocab_tokens={} rayon_threads=1 profile_once=1",
         vocab.len()
     );
+    run_one_warmup_build(&vocab);
     run_one_profiled_build(&vocab);
 
     c.bench_function("github_trivial_o70256_glrmask_build_llama3", |b| {
