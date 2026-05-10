@@ -39,3 +39,7 @@ pretty_assertions = "1"
 [[bench]]
 name = "github_trivial_o70256_build"
 harness = false
+
+[[bench]]
+name = "github_trivial_o70256_build_multithreaded"
+harness = false
