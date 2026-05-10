@@ -22,11 +22,16 @@ use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::{
     compute_ever_allowed_follows,
     compute_terminal_coloring,
 };
-use crate::compiler::stages::compact::reconcile_mapped_weight_artifacts;
+use crate::compiler::stages::compact::{
+    WeightRefs,
+    count_interned_ranges_for_weights,
+    reconcile_mapped_weight_artifacts,
+};
 use crate::compiler::stages::parser_dwa::build_parser_dwa_from_terminal_dwa_with_precomputed_templates;
 use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::characterize_terminals_profiled;
 use crate::ds::bitset::BitSet;
+use crate::ds::weight::Weight;
 use crate::grammar::flat::{GrammarDef, Terminal};
 use crate::runtime::Constraint;
 
@@ -141,9 +146,12 @@ pub(crate) struct CompilePhaseProfile {
     pub(crate) possible_matches_materialize_ms: f64,
     pub(crate) shared_id_reconcile_ms: f64,
     pub(crate) possible_matches_pipeline_ms: f64,
+    pub(crate) terminal_pm_joint_interned_ranges: usize,
     pub(crate) internal_token_bytes_ms: f64,
     pub(crate) parser_dwa_ms: f64,
     pub(crate) parser_dwa_interned_ranges: usize,
+    pub(crate) possible_matches_interned_ranges: usize,
+    pub(crate) parser_pm_joint_interned_ranges: usize,
     pub(crate) finalize_ms: f64,
     pub(crate) compile_ms: f64,
     pub(crate) total_ms: f64,
@@ -164,7 +172,7 @@ pub(crate) fn emit_compile_profile_summary(
         .unwrap_or_default();
 
     eprintln!(
-        "[glrmask/profile][compile] source={}{} prepare_ms={:.3} tokenizer_build_ms={:.3} analyze_grammar_ms={:.3} glr_table_ms={:.3} terminal_coloring_ms={:.3} disallowed_follows_ms={:.3} analysis_wall_ms={:.3} classify_ms={:.3} id_map_ms={:.3} terminal_dwa_ms={:.3} templates_ms={:.3} compact_ms={:.3} possible_matches_collect_ms={:.3} possible_matches_materialize_ms={:.3} shared_id_reconcile_ms={:.3} possible_matches_pipeline_ms={:.3} internal_token_bytes_ms={:.3} parser_dwa_ms={:.3} parser_dwa_interned_ranges={} finalize_ms={:.3} compile_ms={:.3} total_ms={:.3}",
+        "[glrmask/profile][compile] source={}{} prepare_ms={:.3} tokenizer_build_ms={:.3} analyze_grammar_ms={:.3} glr_table_ms={:.3} terminal_coloring_ms={:.3} disallowed_follows_ms={:.3} analysis_wall_ms={:.3} classify_ms={:.3} id_map_ms={:.3} terminal_dwa_ms={:.3} templates_ms={:.3} compact_ms={:.3} possible_matches_collect_ms={:.3} possible_matches_materialize_ms={:.3} shared_id_reconcile_ms={:.3} possible_matches_pipeline_ms={:.3} terminal_pm_joint_interned_ranges={} internal_token_bytes_ms={:.3} parser_dwa_ms={:.3} parser_dwa_interned_ranges={} possible_matches_interned_ranges={} parser_pm_joint_interned_ranges={} finalize_ms={:.3} compile_ms={:.3} total_ms={:.3}",
         source,
         import_fragment,
         profile.prepare_ms,
@@ -183,13 +191,40 @@ pub(crate) fn emit_compile_profile_summary(
         profile.possible_matches_materialize_ms,
         profile.shared_id_reconcile_ms,
         profile.possible_matches_pipeline_ms,
+        profile.terminal_pm_joint_interned_ranges,
         profile.internal_token_bytes_ms,
         profile.parser_dwa_ms,
         profile.parser_dwa_interned_ranges,
+        profile.possible_matches_interned_ranges,
+        profile.parser_pm_joint_interned_ranges,
         profile.finalize_ms,
         profile.compile_ms,
         profile.total_ms,
     );
+}
+
+fn interned_range_count_for_weight_refs(weight_refs: &[&Weight]) -> usize {
+    let counts = count_interned_ranges_for_weights(weight_refs);
+    counts.tsid_ranges + counts.token_ranges
+}
+
+fn interned_range_count_for_artifact<T: WeightRefs>(artifact: &mut T) -> usize {
+    let weights = artifact.weight_refs_mut();
+    let weight_refs: Vec<_> = weights.iter().map(|weight| &**weight).collect();
+    interned_range_count_for_weight_refs(&weight_refs)
+}
+
+fn joint_interned_range_count_for_artifacts<L, R>(left: &mut L, right: &mut R) -> usize
+where
+    L: WeightRefs,
+    R: WeightRefs,
+{
+    let left_weights = left.weight_refs_mut();
+    let right_weights = right.weight_refs_mut();
+    let mut weight_refs = Vec::with_capacity(left_weights.len() + right_weights.len());
+    weight_refs.extend(left_weights.iter().map(|weight| &**weight));
+    weight_refs.extend(right_weights.iter().map(|weight| &**weight));
+    interned_range_count_for_weight_refs(&weight_refs)
 }
 
 pub(crate) fn compute_disallowed_follows(grammar: &AnalyzedGrammar) -> BTreeMap<u32, BitSet> {
@@ -441,6 +476,8 @@ fn compile_prepared_with_profile(
         } else {
             terminal_dwa.id_map().clone()
         };
+        let terminal_pm_joint_interned_ranges =
+            joint_interned_range_count_for_artifacts(terminal_dwa.artifact_mut(), possible_matches.artifact_mut());
 
         let parser_dwa_started_at = Instant::now();
         let parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
@@ -461,6 +498,14 @@ fn compile_prepared_with_profile(
         }
 
         let parser_dwa_interned_ranges = parser_dwa.artifact().stats().interned_ranges;
+        let (possible_matches_interned_ranges, parser_pm_joint_interned_ranges) = {
+            let (parser_dwa_artifact, _) = parser_dwa.parts_mut();
+            let (possible_matches_artifact, _) = possible_matches.parts_mut();
+            (
+                interned_range_count_for_artifact(possible_matches_artifact),
+                joint_interned_range_count_for_artifacts(parser_dwa_artifact, possible_matches_artifact),
+            )
+        };
         let parser_dwa = parser_dwa.into_artifact();
 
         let internal_token_bytes_started_at = Instant::now();
@@ -476,8 +521,11 @@ fn compile_prepared_with_profile(
         profile.shared_id_reconcile_ms = shared_id_reconcile_ms;
         profile.possible_matches_pipeline_ms =
             cpm_profile.possible_matches_collect_ms + cpm_profile.possible_match_vocab_ms + shared_id_reconcile_ms;
+        profile.terminal_pm_joint_interned_ranges = terminal_pm_joint_interned_ranges;
         profile.internal_token_bytes_ms = internal_token_bytes_ms;
         profile.parser_dwa_interned_ranges = parser_dwa_interned_ranges;
+        profile.possible_matches_interned_ranges = possible_matches_interned_ranges;
+        profile.parser_pm_joint_interned_ranges = parser_pm_joint_interned_ranges;
 
         let finalize_started_at = Instant::now();
         let token_bytes = vocab.entries.clone();

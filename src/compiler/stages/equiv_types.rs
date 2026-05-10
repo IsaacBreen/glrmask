@@ -133,6 +133,10 @@ impl<T> MappedArtifact<T> {
         &self.artifact
     }
 
+    pub(crate) fn artifact_mut(&mut self) -> &mut T {
+        &mut self.artifact
+    }
+
     pub(crate) fn id_map(&self) -> &InternalIdMap {
         &self.id_map
     }

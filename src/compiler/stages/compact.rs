@@ -1354,10 +1354,13 @@ fn count_unique_storage_for_weights(weights: &[Weight]) -> UniqueStorageCounts {
 }
 
 fn count_unique_storage_for_weight_refs(weights: &[&Weight]) -> UniqueStorageCounts {
+    let mut seen_weights = std::collections::HashSet::new();
     let mut seen_token_sets = std::collections::HashSet::new();
     let mut storage = UniqueStorageCounts::default();
     for weight in weights {
-        storage.weight_ranges += weight.num_ranges();
+        if seen_weights.insert(Arc::as_ptr(&weight.0) as usize) {
+            storage.weight_ranges += weight.num_ranges();
+        }
         for (_, token_set) in weight.0.range_values() {
             if seen_token_sets.insert(Arc::as_ptr(token_set) as usize) {
                 storage.token_ranges += token_set.ranges().count();
@@ -1939,4 +1942,3 @@ mod tests {
         assert_eq!(weight_entries(split[1].artifact().get(&8).unwrap()), vec![(0, vec![1])]);
     }
 }
-
