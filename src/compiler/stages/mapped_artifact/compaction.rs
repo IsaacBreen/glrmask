@@ -71,6 +71,10 @@ fn globally_exact_compaction_enabled() -> bool {
     env_flag("GLRMASK_GLOBALLY_EXACT_COMPACTION")
 }
 
+fn almost_optimal_compaction_enabled() -> bool {
+    env_flag("GLRMASK_ALMOST_OPTIMAL_COMPACTION")
+}
+
 fn globally_exact_component_max_groups() -> usize {
     static MAX_GROUPS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *MAX_GROUPS.get_or_init(|| {
@@ -79,6 +83,27 @@ fn globally_exact_component_max_groups() -> usize {
             .and_then(|value| value.trim().parse::<usize>().ok())
             .filter(|&value| value > 0)
             .unwrap_or(GLOBALLY_EXACT_COMPONENT_MAX_GROUPS_DEFAULT)
+    })
+}
+
+fn almost_optimal_passes() -> usize {
+    static PASSES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *PASSES.get_or_init(|| {
+        std::env::var("GLRMASK_ALMOST_OPTIMAL_COMPACTION_PASSES")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(64)
+    })
+}
+
+fn almost_optimal_seed() -> u64 {
+    static SEED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *SEED.get_or_init(|| {
+        std::env::var("GLRMASK_ALMOST_OPTIMAL_COMPACTION_SEED")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(0x9e37_79b9_7f4a_7c15)
     })
 }
 
@@ -156,8 +181,8 @@ fn build_dimension_compaction(
     num_tsids: usize,
     num_tokens: usize,
 ) -> DimensionCompaction {
-    if globally_exact_compaction_enabled() {
-        return build_globally_exact_dimension_compaction(unique_weights, num_tsids, num_tokens);
+    if globally_exact_compaction_enabled() || almost_optimal_compaction_enabled() {
+        return build_global_objective_dimension_compaction(unique_weights, num_tsids, num_tokens);
     }
 
     let original_weight_refs = weight_refs(unique_weights);
@@ -188,7 +213,7 @@ fn build_dimension_compaction(
     }
 }
 
-fn build_globally_exact_dimension_compaction(
+fn build_global_objective_dimension_compaction(
     unique_weights: &[Weight],
     num_tsids: usize,
     num_tokens: usize,
@@ -472,7 +497,14 @@ fn exact_layout_from_pair_weights_or_panic(
         }
 
         let local_weights = project_pair_weights(pair_weights, num_groups, &component);
-        let local_layout = if component.len() <= max_component_groups {
+        let local_layout = if almost_optimal_compaction_enabled() {
+            eprintln!(
+                "[glrmask/profile][almost_optimal_compaction] dimension={dimension_name} component_groups={} passes={} using=iterated_local_search",
+                component.len(),
+                almost_optimal_passes(),
+            );
+            almost_optimal_adjacency_layout(&local_weights, component.len())
+        } else if component.len() <= max_component_groups {
             exact_max_adjacency_layout(&local_weights, component.len())
         } else {
             eprintln!(
@@ -810,6 +842,92 @@ fn exact_max_adjacency_layout_branch_and_bound(
     best_layout
 }
 
+fn almost_optimal_adjacency_layout(adjacency: &[usize], num_groups: usize) -> Vec<usize> {
+    debug_assert_eq!(adjacency.len(), num_groups * num_groups);
+    if num_groups < 2 {
+        return (0..num_groups).collect();
+    }
+
+    let mut weighted_degree = vec![0usize; num_groups];
+    for left in 0..num_groups {
+        for right in 0..num_groups {
+            weighted_degree[left] += adjacency[left * num_groups + right];
+        }
+    }
+
+    let mut rng = SplitMix64::new(almost_optimal_seed() ^ ((num_groups as u64) << 32));
+    let mut best_layout = greedy_adjacency_layout(adjacency, &weighted_degree, num_groups);
+    polish_layout(adjacency, &mut best_layout, num_groups);
+    let mut best_score = path_score(adjacency, &best_layout, num_groups);
+    let upper_bound =
+        remaining_path_score_upper_bound(adjacency, num_groups, None, &vec![false; num_groups]);
+
+    if best_score == upper_bound {
+        eprintln!(
+            "[glrmask/profile][almost_optimal_compaction] groups={num_groups} score={best_score} upper_bound={upper_bound} proven=upper_bound_tight"
+        );
+        return best_layout;
+    }
+
+    let passes = almost_optimal_passes();
+    for pass in 0..passes {
+        let mut candidate = if pass % 4 == 0 {
+            randomized_greedy_adjacency_layout(adjacency, &weighted_degree, num_groups, &mut rng)
+        } else {
+            best_layout.clone()
+        };
+        perturb_layout(&mut candidate, &mut rng, pass);
+        polish_layout(adjacency, &mut candidate, num_groups);
+        let score = path_score(adjacency, &candidate, num_groups);
+        if score > best_score || (score == best_score && candidate.as_slice() < best_layout.as_slice()) {
+            best_score = score;
+            best_layout = candidate;
+            eprintln!(
+                "[glrmask/profile][almost_optimal_compaction] groups={num_groups} pass={pass} improved_score={best_score} upper_bound={upper_bound} gap={}",
+                upper_bound.saturating_sub(best_score),
+            );
+            if best_score == upper_bound {
+                eprintln!(
+                    "[glrmask/profile][almost_optimal_compaction] groups={num_groups} score={best_score} upper_bound={upper_bound} proven=upper_bound_tight"
+                );
+                break;
+            }
+        }
+    }
+
+    eprintln!(
+        "[glrmask/profile][almost_optimal_compaction] groups={num_groups} final_score={best_score} upper_bound={upper_bound} gap={}",
+        upper_bound.saturating_sub(best_score),
+    );
+    best_layout
+}
+
+#[derive(Clone, Debug)]
+struct SplitMix64 {
+    state: u64,
+}
+
+impl SplitMix64 {
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut value = self.state;
+        value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        value ^ (value >> 31)
+    }
+
+    fn gen_usize(&mut self, upper_exclusive: usize) -> usize {
+        if upper_exclusive <= 1 {
+            return 0;
+        }
+        (self.next_u64() as usize) % upper_exclusive
+    }
+}
+
 fn exact_layout_branch_and_bound_dfs(
     adjacency: &[usize],
     num_groups: usize,
@@ -970,6 +1088,92 @@ fn greedy_adjacency_layout(
     best_layout
 }
 
+fn randomized_greedy_adjacency_layout(
+    adjacency: &[usize],
+    weighted_degree: &[usize],
+    num_groups: usize,
+    rng: &mut SplitMix64,
+) -> Vec<usize> {
+    let start_pool = top_weighted_vertices(weighted_degree, 32.min(num_groups));
+    let start = start_pool[rng.gen_usize(start_pool.len())];
+    let mut used = vec![false; num_groups];
+    let mut layout = Vec::with_capacity(num_groups);
+    used[start] = true;
+    layout.push(start);
+
+    while layout.len() < num_groups {
+        let last = *layout.last().unwrap();
+        let mut candidates: Vec<usize> = (0..num_groups).filter(|&group| !used[group]).collect();
+        candidates.sort_by_key(|&group| {
+            (
+                usize::MAX - adjacency[last * num_groups + group],
+                usize::MAX - weighted_degree[group],
+                group,
+            )
+        });
+        let window = 8.min(candidates.len());
+        let next = candidates[rng.gen_usize(window)];
+        used[next] = true;
+        layout.push(next);
+    }
+
+    layout
+}
+
+fn top_weighted_vertices(weighted_degree: &[usize], limit: usize) -> Vec<usize> {
+    let mut vertices: Vec<usize> = (0..weighted_degree.len()).collect();
+    vertices.sort_by_key(|&vertex| (usize::MAX - weighted_degree[vertex], vertex));
+    vertices.truncate(limit.max(1));
+    vertices
+}
+
+fn perturb_layout(layout: &mut Vec<usize>, rng: &mut SplitMix64, pass: usize) {
+    if layout.len() < 4 {
+        return;
+    }
+
+    let moves = 1 + (pass % 7);
+    for _ in 0..moves {
+        match rng.gen_usize(3) {
+            0 => {
+                let left = rng.gen_usize(layout.len());
+                let right = rng.gen_usize(layout.len());
+                if left != right {
+                    layout.swap(left, right);
+                }
+            }
+            1 => {
+                let mut left = rng.gen_usize(layout.len());
+                let mut right = rng.gen_usize(layout.len());
+                if left > right {
+                    std::mem::swap(&mut left, &mut right);
+                }
+                if right > left {
+                    layout[left..=right].reverse();
+                }
+            }
+            _ => {
+                let from = rng.gen_usize(layout.len());
+                let value = layout.remove(from);
+                let to = rng.gen_usize(layout.len() + 1);
+                layout.insert(to, value);
+            }
+        }
+    }
+}
+
+fn polish_layout(adjacency: &[usize], layout: &mut Vec<usize>, num_groups: usize) {
+    loop {
+        let before = path_score(adjacency, layout, num_groups);
+        improve_layout_2opt(adjacency, layout, num_groups);
+        improve_layout_reinsert(adjacency, layout, num_groups);
+        let after = path_score(adjacency, layout, num_groups);
+        if after == before {
+            break;
+        }
+    }
+}
+
 fn improve_layout_2opt(adjacency: &[usize], layout: &mut [usize], num_groups: usize) {
     if layout.len() < 4 {
         return;
@@ -1025,18 +1229,18 @@ fn improve_layout_reinsert(adjacency: &[usize], layout: &mut Vec<usize>, num_gro
             for to in 0..=reduced_len {
                 let insert_gain = if to == 0 {
                     let right = reduced_layout_at(layout, from, 0);
-                    adjacency[removed * num_groups + right]
+                    adjacency[removed * num_groups + right] as isize
                 } else if to == reduced_len {
                     let left = reduced_layout_at(layout, from, reduced_len - 1);
-                    adjacency[left * num_groups + removed]
+                    adjacency[left * num_groups + removed] as isize
                 } else {
                     let left = reduced_layout_at(layout, from, to - 1);
                     let right = reduced_layout_at(layout, from, to);
-                    adjacency[left * num_groups + removed]
-                        + adjacency[removed * num_groups + right]
-                        - adjacency[left * num_groups + right]
+                    adjacency[left * num_groups + removed] as isize
+                        + adjacency[removed * num_groups + right] as isize
+                        - adjacency[left * num_groups + right] as isize
                 };
-                let gain = base_gain + insert_gain as isize;
+                let gain = base_gain + insert_gain;
                 if gain > best_gain {
                     best_gain = gain;
                     best_from = from;
