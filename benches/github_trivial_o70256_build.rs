@@ -69,11 +69,28 @@ fn assert_release_benchmark() {
     }
 }
 
+fn configure_benchmark_environment() {
+    // This benchmark is intended to be diagnostic: emit glrmask's compile-phase
+    // timing lines and avoid Rayon scheduling noise unless the benchmark itself
+    // is edited.
+    unsafe {
+        std::env::set_var("GLRMASK_PROFILE_COMPILE", "1");
+        std::env::set_var("GLRMASK_PROFILE_COMPILE_SUMMARY", "1");
+        std::env::set_var("GLRMASK_COMPILE_THREADS", "1");
+        std::env::set_var("RAYON_NUM_THREADS", "1");
+    }
+}
+
 fn bench_github_trivial_o70256_build(c: &mut Criterion) {
     assert_release_benchmark();
+    configure_benchmark_environment();
 
     let vocab = load_llama3_vocab();
     assert_eq!(vocab.len(), 128_002, "expected the full Llama 3 vocabulary");
+    eprintln!(
+        "[bench][github_trivial_o70256_build] vocab_tokens={} rayon_threads=1 compile_profile=1",
+        vocab.len()
+    );
 
     c.bench_function("github_trivial_o70256_glrmask_build_llama3", |b| {
         b.iter(|| {
