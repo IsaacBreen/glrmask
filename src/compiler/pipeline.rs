@@ -44,27 +44,72 @@ fn env_flag_enabled(name: &str) -> bool {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ParserDwaPossibleMatchesCompactionMode {
-    Disabled,
-    ParserOnly,
-    Both,
+enum DwaPossibleMatchesMode {
+    TerminalReconcile,
+    TerminalReconcileAndCompact,
+    TerminalReconcileAndParserCompact,
+    TerminalReconcileAndTerminalCompactAndParserCompact,
+    ParserReconcile,
+    ParserReconcileAndCompact,
 }
 
-fn parser_dwa_possible_matches_compaction_mode() -> ParserDwaPossibleMatchesCompactionMode {
-    match std::env::var("GLRMASK_PARSER_DWA_PM_COMPACTION") {
+impl DwaPossibleMatchesMode {
+    fn does_terminal_reconcile(self) -> bool {
+        matches!(
+            self,
+            Self::TerminalReconcile
+                | Self::TerminalReconcileAndCompact
+                | Self::TerminalReconcileAndParserCompact
+                | Self::TerminalReconcileAndTerminalCompactAndParserCompact
+        )
+    }
+
+    fn does_terminal_compact(self) -> bool {
+        matches!(
+            self,
+            Self::TerminalReconcileAndCompact
+                | Self::TerminalReconcileAndTerminalCompactAndParserCompact
+        )
+    }
+
+    fn does_parser_compact(self) -> bool {
+        matches!(
+            self,
+            Self::TerminalReconcileAndParserCompact
+                | Self::TerminalReconcileAndTerminalCompactAndParserCompact
+                | Self::ParserReconcileAndCompact
+        )
+    }
+}
+
+fn dwa_possible_matches_mode() -> DwaPossibleMatchesMode {
+    match std::env::var("GLRMASK_DWA_PM_MODE")
+        .or_else(|_| std::env::var("GLRMASK_PARSER_DWA_PM_COMPACTION"))
+    {
         Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "" | "0" | "false" | "no" | "off" | "terminal" => {
-                ParserDwaPossibleMatchesCompactionMode::Disabled
+            "" | "0" | "false" | "no" | "off" | "terminal" | "term"
+            | "term_pm_reconcile" | "terminal_pm_reconcile" => DwaPossibleMatchesMode::TerminalReconcile,
+            "term_compact" | "terminal_compact" | "term_pm_compact"
+            | "terminal_pm_compact" | "term_pm_reconcile_compact"
+            | "terminal_pm_reconcile_compact" => DwaPossibleMatchesMode::TerminalReconcileAndCompact,
+            "parser_compact" | "term_parser_compact" | "terminal_parser_compact"
+            | "term_pm_reconcile_parser_pm_compact"
+            | "terminal_pm_reconcile_parser_pm_compact" => {
+                DwaPossibleMatchesMode::TerminalReconcileAndParserCompact
             }
-            "parser" | "only" | "parser_only" | "replace" => {
-                ParserDwaPossibleMatchesCompactionMode::ParserOnly
+            "both" | "1" | "true" | "yes" | "on" | "term_and_parser_compact"
+            | "terminal_and_parser_compact" | "term_pm_compact_parser_pm_compact"
+            | "terminal_pm_compact_parser_pm_compact" => {
+                DwaPossibleMatchesMode::TerminalReconcileAndTerminalCompactAndParserCompact
             }
-            "1" | "true" | "yes" | "on" | "both" => {
-                ParserDwaPossibleMatchesCompactionMode::Both
+            "parser" | "only" | "parser_only" | "replace" | "parser_pm_reconcile" => {
+                DwaPossibleMatchesMode::ParserReconcile
             }
-            _ => ParserDwaPossibleMatchesCompactionMode::Disabled,
+            "parser_pm_compact" | "parser_reconcile_compact"
+            | "parser_pm_reconcile_compact" => DwaPossibleMatchesMode::ParserReconcileAndCompact,
+            _ => DwaPossibleMatchesMode::TerminalReconcile,
         },
-        Err(_) => ParserDwaPossibleMatchesCompactionMode::Disabled,
+        Err(_) => DwaPossibleMatchesMode::TerminalReconcile,
     }
 }
 
@@ -470,7 +515,7 @@ fn compile_prepared_with_profile(
 
         let mut possible_matches = cpm_result.mapped_possible_matches;
         let cpm_profile = cpm_result.profile;
-        let parser_pm_compaction_mode = parser_dwa_possible_matches_compaction_mode();
+        let dwa_pm_mode = dwa_possible_matches_mode();
 
         let mut shared_id_reconcile_ms = 0.0;
         let terminal_dwa_interned_ranges_before_pm_reconcile =
@@ -479,7 +524,7 @@ fn compile_prepared_with_profile(
             interned_range_count_for_artifact(possible_matches.artifact_mut());
         let terminal_pm_joint_interned_ranges_before_reconcile =
             joint_interned_range_count_for_artifacts(terminal_dwa.artifact_mut(), possible_matches.artifact_mut());
-        let mut internal_ids = if parser_pm_compaction_mode != ParserDwaPossibleMatchesCompactionMode::ParserOnly {
+        let mut internal_ids = if dwa_pm_mode.does_terminal_reconcile() {
             let shared_id_reconcile_started_at = Instant::now();
             let reconciled = terminal_dwa.reconcile_with(&mut possible_matches);
             shared_id_reconcile_ms += elapsed_ms(shared_id_reconcile_started_at);
@@ -487,10 +532,10 @@ fn compile_prepared_with_profile(
         } else {
             terminal_dwa.id_map().clone()
         };
-        if parser_pm_compaction_mode == ParserDwaPossibleMatchesCompactionMode::Both {
+        if dwa_pm_mode.does_terminal_compact() {
             let compact_started_at = Instant::now();
             let mut terminal_pm_pair =
-                MappedArtifact::new((terminal_dwa.into_artifact(), possible_matches.into_artifact()), internal_ids);
+                terminal_dwa.pair_assuming_same_id_map(possible_matches);
             terminal_pm_pair.compact_dimensions_with_stats();
             profile.compact_ms += elapsed_ms(compact_started_at);
             let ((terminal_dwa_artifact, possible_matches_artifact), compacted_ids) =
@@ -514,10 +559,32 @@ fn compile_prepared_with_profile(
         let parser_dwa_ms = elapsed_ms(parser_dwa_started_at);
         let mut parser_dwa = MappedArtifact::new(parser_dwa, internal_ids.clone());
 
-        if parser_pm_compaction_mode != ParserDwaPossibleMatchesCompactionMode::Disabled {
+        if dwa_pm_mode.does_terminal_reconcile() {
+            if dwa_pm_mode.does_parser_compact() {
+                let compact_started_at = Instant::now();
+                let mut parser_pm_pair = parser_dwa.pair_assuming_same_id_map(possible_matches);
+                parser_pm_pair.compact_dimensions_with_stats();
+                profile.compact_ms += elapsed_ms(compact_started_at);
+                let ((parser_dwa_artifact, possible_matches_artifact), compacted_ids) =
+                    parser_pm_pair.into_parts();
+                parser_dwa = MappedArtifact::new(parser_dwa_artifact, compacted_ids.clone());
+                possible_matches = MappedArtifact::new(possible_matches_artifact, compacted_ids.clone());
+                internal_ids = compacted_ids;
+            }
+        } else {
             let shared_id_reconcile_started_at = Instant::now();
-            internal_ids = parser_dwa.reconcile_with(&mut possible_matches);
+            let mut parser_pm_pair = parser_dwa.reconcile_pair(possible_matches);
             shared_id_reconcile_ms += elapsed_ms(shared_id_reconcile_started_at);
+            if dwa_pm_mode.does_parser_compact() {
+                let compact_started_at = Instant::now();
+                parser_pm_pair.compact_dimensions_with_stats();
+                profile.compact_ms += elapsed_ms(compact_started_at);
+            }
+            let ((parser_dwa_artifact, possible_matches_artifact), reconciled_ids) =
+                parser_pm_pair.into_parts();
+            parser_dwa = MappedArtifact::new(parser_dwa_artifact, reconciled_ids.clone());
+            possible_matches = MappedArtifact::new(possible_matches_artifact, reconciled_ids.clone());
+            internal_ids = reconciled_ids;
         }
 
         let parser_dwa_interned_ranges = parser_dwa.artifact().stats().interned_ranges;

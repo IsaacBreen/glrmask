@@ -324,6 +324,18 @@ use crate::Vocab;
 use super::l2p::equivalence_analysis::compat::{compute_byte_classes, TokenizerView};
 use super::types::{compile_profile_enabled, TerminalColoring, TerminalDwaPhaseProfile};
 
+fn compact_l1_terminal_dwa_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLRMASK_COMPACT_L1_TERMINAL_DWA")
+            .map(|value| {
+                let trimmed = value.trim();
+                !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+            })
+            .unwrap_or(true)
+    })
+}
+
 /// Maximum L1 equivalence class count before falling back to L2+.
 ///
 /// When the tokenizer DFA has more than this many distinct equivalence classes
@@ -446,10 +458,15 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     let tsids_before_compact = id_map.num_tsids();
     let tokens_before_compact = id_map.num_internal_tokens();
 
-    let compact_started_at = Instant::now();
     let mut mapped_dwa = MappedArtifact::new(dwa, id_map);
-    let compact_report = mapped_dwa.compact_dimensions_with_stats();
-    let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
+    let (compact_report, compact_ms) = if compact_l1_terminal_dwa_enabled() {
+        let compact_started_at = Instant::now();
+        let compact_report = mapped_dwa.compact_dimensions_with_stats();
+        let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
+        (Some(compact_report), compact_ms)
+    } else {
+        (None, 0.0)
+    };
     let dwa_stats_after_compact = mapped_dwa.artifact().stats();
     let tsids_after_compact = mapped_dwa.id_map().num_tsids();
     let tokens_after_compact = mapped_dwa.id_map().num_internal_tokens();
@@ -468,7 +485,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     };
 
     if profiling {
-        let stats_str = if let Some(stats) = compact_report.profile_stats {
+        let stats_str = if let Some(stats) = compact_report.as_ref().and_then(|report| report.profile_stats) {
             format!(
                 " compact_tsids_before={} compact_tsids_after={} compact_tokens_before={} compact_tokens_after={} compact_tsid_shrink_pct={:.2} compact_vocab_shrink_pct={:.2} compact_weight_ranges_before={} compact_weight_ranges_after={} compact_token_ranges_before={} compact_token_ranges_after={}",
                 stats.tsids_before, stats.tsids_after,

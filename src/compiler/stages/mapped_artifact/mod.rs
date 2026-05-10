@@ -156,8 +156,39 @@ impl<T: WeightRefs> MappedArtifact<T> {
     where
         U: WeightRefs,
     {
-        let common_id_map = self.reconcile_with(&mut other);
+        let common_id_map = {
+            let (left_artifact, left_id_map) = self.parts_mut();
+            let (right_artifact, right_id_map) = other.parts_mut();
+            let mut left_weights = left_artifact.weight_refs_mut();
+            let mut right_weights = right_artifact.weight_refs_mut();
+            reconcile::reconcile_weight_id_maps(
+                &mut left_weights,
+                left_id_map,
+                &mut right_weights,
+                right_id_map,
+            );
+            left_id_map.clone()
+        };
         MappedArtifact::new((self.into_artifact(), other.into_artifact()), common_id_map)
+    }
+
+    pub(crate) fn pair_assuming_same_id_map<U>(self, other: MappedArtifact<U>) -> MappedArtifact<(T, U)>
+    where
+        U: WeightRefs,
+    {
+        let (left, left_id_map) = self.into_parts();
+        let (right, right_id_map) = other.into_parts();
+        debug_assert_eq!(
+            left_id_map.tokenizer_states.original_to_internal,
+            right_id_map.tokenizer_states.original_to_internal,
+            "MappedArtifact::pair_assuming_same_id_map called with mismatched TSID maps",
+        );
+        debug_assert_eq!(
+            left_id_map.vocab_tokens.original_to_internal,
+            right_id_map.vocab_tokens.original_to_internal,
+            "MappedArtifact::pair_assuming_same_id_map called with mismatched token maps",
+        );
+        MappedArtifact::new((left, right), left_id_map)
     }
 }
 
