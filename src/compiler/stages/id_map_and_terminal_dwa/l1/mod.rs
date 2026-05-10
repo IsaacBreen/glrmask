@@ -26,8 +26,10 @@ struct L1IdentityVocabOrder {
     original_to_internal: Arc<[u32]>,
 }
 
+impl crate::vocab::VocabDerivedArtifact for L1IdentityVocabOrder {}
+
 fn l1_identity_vocab_order(vocab: &Vocab) -> Arc<L1IdentityVocabOrder> {
-    if let Some(cached) = vocab.compiler_cache_get::<L1IdentityVocabOrder>() {
+    if let Some(cached) = vocab.vocab_derived_cache_get::<L1IdentityVocabOrder>() {
         return cached;
     }
 
@@ -59,7 +61,7 @@ fn l1_identity_vocab_order(vocab: &Vocab) -> Arc<L1IdentityVocabOrder> {
         token_ids_sorted: token_ids_sorted.into(),
         original_to_internal: token_original_to_internal.into(),
     });
-    vocab.compiler_cache_set(Arc::clone(&order));
+    vocab.vocab_derived_cache_set(Arc::clone(&order));
     order
 }
 

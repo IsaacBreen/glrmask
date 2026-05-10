@@ -16,6 +16,14 @@ struct VocabCompilerCache {
     artifacts: Mutex<BTreeMap<TypeId, Arc<dyn Any + Send + Sync>>>,
 }
 
+/// Marker for artifacts that are pure functions of a `Vocab`'s token bytes.
+///
+/// Do not implement this for grammar-, tokenizer-, or constraint-specific
+/// artifacts. `Vocab` instances can be reused across many grammar compiles, so
+/// this cache must only contain data that remains valid for every grammar using
+/// the same token bytes.
+pub(crate) trait VocabDerivedArtifact: Any + Send + Sync {}
+
 impl fmt::Debug for VocabCompilerCache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VocabCompilerCache")
@@ -75,7 +83,7 @@ impl Vocab {
         self.entries.last_key_value().map_or(0, |(&token_id, _)| token_id)
     }
 
-    pub(crate) fn compiler_cache_get<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
+    pub(crate) fn vocab_derived_cache_get<T: VocabDerivedArtifact>(&self) -> Option<Arc<T>> {
         self.compiler_cache
             .artifacts
             .lock()
@@ -85,7 +93,7 @@ impl Vocab {
             .and_then(|artifact| artifact.downcast::<T>().ok())
     }
 
-    pub(crate) fn compiler_cache_set<T: Any + Send + Sync>(&self, artifact: Arc<T>) {
+    pub(crate) fn vocab_derived_cache_set<T: VocabDerivedArtifact>(&self, artifact: Arc<T>) {
         let erased: Arc<dyn Any + Send + Sync> = artifact;
         if let Ok(mut artifacts) = self.compiler_cache.artifacts.lock() {
             artifacts.entry(TypeId::of::<T>()).or_insert(erased);

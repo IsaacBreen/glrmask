@@ -18,6 +18,7 @@ use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap, Mapped
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::ds::weight::{shared_rangeset, Weight};
 use crate::grammar::flat::TerminalID;
+use crate::vocab::VocabDerivedArtifact;
 use crate::Vocab;
 
 pub(crate) mod collector;
@@ -61,6 +62,8 @@ struct OrderedVocabTrieArtifacts {
     ordered_vocab: Arc<OrderedVocab>,
     trie: Arc<VocabPrefixTree>,
 }
+
+impl VocabDerivedArtifact for OrderedVocabTrieArtifacts {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct OrderedVocabCacheFingerprint {
@@ -416,7 +419,7 @@ fn get_ordered_vocab_trie_artifacts_for_vocab(
     }
 
     let probe_started_at = Instant::now();
-    if let Some(artifacts) = vocab.compiler_cache_get::<OrderedVocabTrieArtifacts>() {
+    if let Some(artifacts) = vocab.vocab_derived_cache_get::<OrderedVocabTrieArtifacts>() {
         return (
             artifacts.as_ref().clone(),
             OrderedVocabCacheProfile {
@@ -438,7 +441,7 @@ fn get_ordered_vocab_trie_artifacts_for_vocab(
     let trie = Arc::new(build_ordered_vocab_prefix_tree(ordered_vocab.as_ref()));
     let trie_build_ns = trie_started_at.elapsed().as_nanos();
     let artifacts = OrderedVocabTrieArtifacts { ordered_vocab, trie };
-    vocab.compiler_cache_set(Arc::new(artifacts.clone()));
+    vocab.vocab_derived_cache_set(Arc::new(artifacts.clone()));
 
     (
         artifacts,

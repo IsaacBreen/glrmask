@@ -97,6 +97,8 @@ struct CharTypeSubVocabs {
     sub_vocabs: Arc<[Vocab]>,
 }
 
+impl crate::vocab::VocabDerivedArtifact for CharTypeSubVocabs {}
+
 fn vocab_from_token_partitions(vocab: &Vocab, token_partitions: Vec<Vec<u32>>) -> Arc<[Vocab]> {
     token_partitions
         .into_iter()
@@ -112,7 +114,7 @@ fn vocab_from_token_partitions(vocab: &Vocab, token_partitions: Vec<Vec<u32>>) -
 }
 
 fn build_char_type_sub_vocabs(vocab: &Vocab) -> Arc<[Vocab]> {
-    if let Some(cached) = vocab.compiler_cache_get::<CharTypeSubVocabs>() {
+    if let Some(cached) = vocab.vocab_derived_cache_get::<CharTypeSubVocabs>() {
         return Arc::clone(&cached.sub_vocabs);
     }
 
@@ -126,7 +128,7 @@ fn build_char_type_sub_vocabs(vocab: &Vocab) -> Arc<[Vocab]> {
         .map(|entries| Vocab::new(entries, None))
         .collect::<Vec<_>>()
         .into();
-    vocab.compiler_cache_set(Arc::new(CharTypeSubVocabs {
+    vocab.vocab_derived_cache_set(Arc::new(CharTypeSubVocabs {
         sub_vocabs: Arc::clone(&sub_vocabs),
     }));
     sub_vocabs
