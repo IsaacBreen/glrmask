@@ -109,7 +109,7 @@ fn dwa_possible_matches_mode() -> DwaPossibleMatchesMode {
             | "parser_pm_reconcile_compact" => DwaPossibleMatchesMode::ParserReconcileAndCompact,
             _ => DwaPossibleMatchesMode::TerminalReconcile,
         },
-        Err(_) => DwaPossibleMatchesMode::TerminalReconcile,
+        Err(_) => DwaPossibleMatchesMode::TerminalReconcileAndTerminalCompactAndParserCompact,
     }
 }
 

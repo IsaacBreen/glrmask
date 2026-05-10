@@ -237,7 +237,7 @@ fn compaction_thread_count() -> Option<usize> {
 
     std::thread::available_parallelism()
         .ok()
-        .map(|parallelism| parallelism.get().min(8))
+        .map(|parallelism| parallelism.get().min(16))
         .filter(|&value| value > 1)
 }
 
