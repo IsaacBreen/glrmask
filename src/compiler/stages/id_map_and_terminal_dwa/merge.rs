@@ -161,7 +161,7 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     let compact_enabled = compact_merged_terminal_dwa_enabled();
     let (compact_report, compact_ms) = if compact_enabled {
         let compact_started_at = Instant::now();
-        let compact_report = mapped_dwa.compact_dimensions_with_stats();
+        let compact_report = mapped_dwa.compact_dimensions_fast_with_stats();
         let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
         (Some(compact_report), compact_ms)
     } else {

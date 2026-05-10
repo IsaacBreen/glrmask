@@ -21,6 +21,9 @@ use crate::ds::weight::{Weight, finalize_weight_map, shared_rangeset};
 
 const EXACT_LAYOUT_MAX_GROUPS: usize = 20;
 const GLOBALLY_EXACT_COMPONENT_MAX_GROUPS_DEFAULT: usize = EXACT_LAYOUT_MAX_GROUPS;
+const LARGE_ALMOST_OPTIMAL_COMPONENT_GROUPS: usize = 512;
+const LARGE_ALMOST_OPTIMAL_GREEDY_STARTS: usize = 32;
+const LARGE_ALMOST_OPTIMAL_2OPT_WINDOW: usize = 64;
 
 #[derive(Clone, Debug)]
 pub struct CompactReport {
@@ -118,6 +121,7 @@ pub(super) fn compact_weights_with_id_map(
     weights: &mut [&mut Weight],
     id_map: &mut InternalIdMap,
     collect_profile_stats: bool,
+    allow_expensive_layout: bool,
 ) -> CompactReport {
     let num_tsids = id_map.num_tsids() as usize;
     let num_tokens = id_map.num_internal_tokens() as usize;
@@ -126,7 +130,12 @@ pub(super) fn compact_weights_with_id_map(
     });
 
     let unique_weights = collect_unique_weights_from_refs(weights);
-    let compaction = build_dimension_compaction(&unique_weights, num_tsids, num_tokens);
+    let compaction = build_dimension_compaction(
+        &unique_weights,
+        num_tsids,
+        num_tokens,
+        allow_expensive_layout,
+    );
 
     apply_permutations_to_weight_refs(
         weights,
@@ -176,8 +185,11 @@ fn build_dimension_compaction(
     unique_weights: &[Weight],
     num_tsids: usize,
     num_tokens: usize,
+    allow_expensive_layout: bool,
 ) -> DimensionCompaction {
-    if globally_exact_compaction_enabled() || almost_optimal_compaction_enabled() {
+    if allow_expensive_layout
+        && (globally_exact_compaction_enabled() || almost_optimal_compaction_enabled())
+    {
         return build_global_objective_dimension_compaction(unique_weights, num_tsids, num_tokens);
     }
 
@@ -1046,10 +1058,15 @@ fn greedy_adjacency_layout(
     weighted_degree: &[usize],
     num_groups: usize,
 ) -> Vec<usize> {
+    let starts = if num_groups > LARGE_ALMOST_OPTIMAL_COMPONENT_GROUPS {
+        top_weighted_vertices(weighted_degree, LARGE_ALMOST_OPTIMAL_GREEDY_STARTS.min(num_groups))
+    } else {
+        (0..num_groups).collect()
+    };
     let mut best_layout = Vec::new();
     let mut best_score = 0usize;
 
-    for start in 0..num_groups {
+    for start in starts {
         let mut used = vec![false; num_groups];
         let mut layout = Vec::with_capacity(num_groups);
         used[start] = true;
@@ -1159,6 +1176,11 @@ fn perturb_layout(layout: &mut Vec<usize>, rng: &mut SplitMix64, pass: usize) {
 }
 
 fn polish_layout(adjacency: &[usize], layout: &mut Vec<usize>, num_groups: usize) {
+    if num_groups > LARGE_ALMOST_OPTIMAL_COMPONENT_GROUPS {
+        polish_layout_bounded(adjacency, layout, num_groups);
+        return;
+    }
+
     loop {
         let before = path_score(adjacency, layout, num_groups);
         improve_layout_2opt(adjacency, layout, num_groups);
@@ -1168,6 +1190,94 @@ fn polish_layout(adjacency: &[usize], layout: &mut Vec<usize>, num_groups: usize
             break;
         }
     }
+}
+
+fn polish_layout_bounded(adjacency: &[usize], layout: &mut [usize], num_groups: usize) {
+    for _ in 0..4 {
+        let mut improved = false;
+        improved |= improve_layout_bounded_2opt(adjacency, layout, num_groups);
+        improved |= improve_layout_adjacent_swaps(adjacency, layout, num_groups);
+        if !improved {
+            break;
+        }
+    }
+}
+
+fn improve_layout_bounded_2opt(
+    adjacency: &[usize],
+    layout: &mut [usize],
+    num_groups: usize,
+) -> bool {
+    if layout.len() < 4 {
+        return false;
+    }
+
+    let mut improved_any = false;
+    for left_edge in 0..layout.len() - 2 {
+        let a = layout[left_edge];
+        let b = layout[left_edge + 1];
+        let right_limit = (left_edge + LARGE_ALMOST_OPTIMAL_2OPT_WINDOW).min(layout.len() - 2);
+        let mut best_gain = 0usize;
+        let mut best_right_edge = None;
+
+        for right_edge in left_edge + 2..=right_limit {
+            let c = layout[right_edge];
+            let d = layout[right_edge + 1];
+            let old = adjacency[a * num_groups + b] + adjacency[c * num_groups + d];
+            let new = adjacency[a * num_groups + c] + adjacency[b * num_groups + d];
+            if new > old {
+                let gain = new - old;
+                if gain > best_gain {
+                    best_gain = gain;
+                    best_right_edge = Some(right_edge);
+                }
+            }
+        }
+
+        if let Some(right_edge) = best_right_edge {
+            layout[left_edge + 1..=right_edge].reverse();
+            improved_any = true;
+        }
+    }
+
+    improved_any
+}
+
+fn improve_layout_adjacent_swaps(
+    adjacency: &[usize],
+    layout: &mut [usize],
+    num_groups: usize,
+) -> bool {
+    if layout.len() < 2 {
+        return false;
+    }
+
+    let mut improved_any = false;
+    for index in 0..layout.len() - 1 {
+        let old = local_path_score_around(adjacency, layout, num_groups, index, index + 1);
+        layout.swap(index, index + 1);
+        let new = local_path_score_around(adjacency, layout, num_groups, index, index + 1);
+        if new > old {
+            improved_any = true;
+        } else {
+            layout.swap(index, index + 1);
+        }
+    }
+    improved_any
+}
+
+fn local_path_score_around(
+    adjacency: &[usize],
+    layout: &[usize],
+    num_groups: usize,
+    left: usize,
+    right: usize,
+) -> usize {
+    let start = left.saturating_sub(1);
+    let end = (right + 1).min(layout.len().saturating_sub(1));
+    (start..end)
+        .map(|index| adjacency[layout[index] * num_groups + layout[index + 1]])
+        .sum()
 }
 
 fn improve_layout_2opt(adjacency: &[usize], layout: &mut [usize], num_groups: usize) {

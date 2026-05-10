@@ -124,9 +124,17 @@ impl<T: WeightRefs> MappedArtifact<T> {
     }
 
     pub(crate) fn compact_dimensions_with_stats(&mut self) -> CompactReport {
+        self.compact_dimensions_with_layout_stats(true)
+    }
+
+    pub(crate) fn compact_dimensions_fast_with_stats(&mut self) -> CompactReport {
+        self.compact_dimensions_with_layout_stats(false)
+    }
+
+    fn compact_dimensions_with_layout_stats(&mut self, allow_expensive_layout: bool) -> CompactReport {
         let (artifact, id_map) = self.parts_mut();
         let mut weights = artifact.weight_refs_mut();
-        compaction::compact_weights_with_id_map(&mut weights, id_map, true)
+        compaction::compact_weights_with_id_map(&mut weights, id_map, true, allow_expensive_layout)
     }
 
     pub(crate) fn interned_range_counts(&mut self) -> InternedRangeCounts {

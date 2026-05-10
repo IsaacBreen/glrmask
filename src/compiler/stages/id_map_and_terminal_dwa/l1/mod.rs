@@ -461,7 +461,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     let mut mapped_dwa = MappedArtifact::new(dwa, id_map);
     let (compact_report, compact_ms) = if compact_l1_terminal_dwa_enabled() {
         let compact_started_at = Instant::now();
-        let compact_report = mapped_dwa.compact_dimensions_with_stats();
+        let compact_report = mapped_dwa.compact_dimensions_fast_with_stats();
         let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
         (Some(compact_report), compact_ms)
     } else {
