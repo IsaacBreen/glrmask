@@ -10,12 +10,10 @@ pub(super) fn order_token_groups(
         return initial_perm;
     }
 
-    let token_sets = collect_token_sets_after_permutation(weights, &initial_perm);
-    if token_sets.is_empty() {
+    let layout = sketch_layout_from_mapped_weight_token_sets(weights, &initial_perm, num_groups);
+    if layout.is_empty() {
         return initial_perm;
     }
-
-    let layout = sketch_layout_from_token_sets(&token_sets, num_groups);
     compose_group_layout(initial_perm, &layout)
 }
 
@@ -57,6 +55,89 @@ fn sketch_layout_from_token_sets(
     }
 
     sketch_layout_from_group_sketches(sketches, degrees)
+}
+
+fn sketch_layout_from_mapped_weight_token_sets(
+    weights: &[Weight],
+    token_perm: &[u32],
+    num_groups: usize,
+) -> Vec<usize> {
+    let token_runs = permutation_runs(token_perm);
+    let mut seen_ptrs = HashSet::new();
+    let mut seen_mapped_sets = HashSet::<Vec<(u32, u32)>>::new();
+    let mut sketches = vec![[u64::MAX; DEFAULT_LAYOUT_SKETCH_WORDS]; num_groups];
+    let mut degrees = vec![0usize; num_groups];
+    let mut context = 0u64;
+
+    for weight in weights {
+        if weight.is_full() || weight.is_empty() {
+            continue;
+        }
+        for (_tsid_range, token_set) in weight.0.range_values() {
+            let ptr = Arc::as_ptr(token_set) as usize;
+            if !seen_ptrs.insert(ptr) {
+                continue;
+            }
+
+            let mapped_ranges = mapped_rangeset_key_with_runs(token_set, &token_runs);
+            if mapped_ranges.is_empty() || !seen_mapped_sets.insert(mapped_ranges.clone()) {
+                continue;
+            }
+
+            for &(start, end) in &mapped_ranges {
+                let start = (start as usize).min(num_groups);
+                let end = (end as usize).min(num_groups.saturating_sub(1));
+                if start > end {
+                    continue;
+                }
+                for member in start..=end {
+                    update_membership_sketch(&mut sketches[member], context);
+                    degrees[member] += 1;
+                }
+            }
+            context += 1;
+        }
+    }
+
+    if context == 0 {
+        Vec::new()
+    } else {
+        sketch_layout_from_group_sketches(sketches, degrees)
+    }
+}
+
+fn mapped_rangeset_key_with_runs(
+    set: &RangeSetBlaze<u32>,
+    runs: &[PermRun],
+) -> Vec<(u32, u32)> {
+    let mut mapped = Vec::new();
+    for range in set.ranges() {
+        mapped.extend(
+            overlapping_perm_runs(runs, *range.start(), *range.end())
+                .iter()
+                .map(|run| run.mapped),
+        );
+    }
+    mapped.sort_unstable();
+    mapped.dedup();
+
+    let mut ranges = Vec::new();
+    let Some((&first, rest)) = mapped.split_first() else {
+        return ranges;
+    };
+    let mut start = first;
+    let mut end = first;
+    for &member in rest {
+        if member == end + 1 {
+            end = member;
+        } else {
+            ranges.push((start, end));
+            start = member;
+            end = member;
+        }
+    }
+    ranges.push((start, end));
+    ranges
 }
 
 fn sketch_layout_from_tsid_equal_values(weights: &[Weight], num_groups: usize) -> Vec<usize> {
