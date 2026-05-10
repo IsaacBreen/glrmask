@@ -19,6 +19,8 @@ use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::weight::{Weight, finalize_weight_map, shared_rangeset};
 
+const EXACT_LAYOUT_MAX_GROUPS: usize = 20;
+
 #[derive(Clone, Debug)]
 pub struct CompactReport {
     pub tsid_perm: Vec<u32>,
@@ -55,6 +57,18 @@ struct DimensionCompaction {
     ordered_num_tsids: usize,
     token_perm: Vec<u32>,
     ordered_num_tokens: usize,
+}
+
+fn exact_compaction_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLRMASK_EXACT_COMPACTION")
+            .map(|value| {
+                let value = value.trim();
+                !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+            })
+            .unwrap_or(false)
+    })
 }
 
 pub(super) fn compact_weights_with_id_map(
@@ -285,6 +299,11 @@ fn order_token_groups(
         }
     }
 
+    if exact_compaction_enabled() && num_groups <= EXACT_LAYOUT_MAX_GROUPS {
+        let layout = exact_max_adjacency_layout(&adjacency, num_groups);
+        return compose_group_layout(initial_perm, &layout);
+    }
+
     let mut remaining: HashSet<usize> = (0..num_groups).collect();
     let mut layout = Vec::<usize>::with_capacity(num_groups);
     while !remaining.is_empty() {
@@ -328,28 +347,38 @@ fn order_tsid_groups(
         return initial_perm;
     }
 
-    let mut group_profiles = vec![Vec::<(u32, u32, u32)>::new(); num_groups];
+    let mut adjacency = vec![0usize; num_groups * num_groups];
+    let mut group_profiles = vec![Vec::<(u32, Vec<(u32, u32)>)>::new(); num_groups];
     for (weight_idx, weight) in weights.iter().enumerate() {
         if weight.is_full() || weight.is_empty() {
             continue;
         }
         for (tsid_range, token_set) in weight.0.range_values() {
-            let token_range_count = token_set.ranges().count() as u32;
+            let token_key = rangeset_key(token_set);
             for tsid in *tsid_range.start()..=*tsid_range.end() {
                 let Some(&group) = initial_perm.get(tsid as usize) else {
                     continue;
                 };
-                group_profiles[group as usize].push((
-                    weight_idx as u32,
-                    token_range_count,
-                    token_set.iter().next().unwrap_or(u32::MAX),
-                ));
+                group_profiles[group as usize].push((weight_idx as u32, token_key.clone()));
             }
         }
     }
     for profile in &mut group_profiles {
         profile.sort_unstable();
         profile.dedup();
+    }
+
+    for left in 0..num_groups {
+        for right in (left + 1)..num_groups {
+            let bonus = shared_tsid_profile_entry_count(&group_profiles[left], &group_profiles[right]);
+            adjacency[left * num_groups + right] = bonus;
+            adjacency[right * num_groups + left] = bonus;
+        }
+    }
+
+    if exact_compaction_enabled() && num_groups <= EXACT_LAYOUT_MAX_GROUPS {
+        let layout = exact_max_adjacency_layout(&adjacency, num_groups);
+        return compose_group_layout(initial_perm, &layout);
     }
 
     let mut layout: Vec<usize> = (0..num_groups).collect();
@@ -360,6 +389,87 @@ fn order_tsid_groups(
     });
 
     compose_group_layout(initial_perm, &layout)
+}
+
+fn shared_tsid_profile_entry_count(
+    left: &[(u32, Vec<(u32, u32)>)],
+    right: &[(u32, Vec<(u32, u32)>)],
+) -> usize {
+    let mut left_idx = 0usize;
+    let mut right_idx = 0usize;
+    let mut shared = 0usize;
+    while left_idx < left.len() && right_idx < right.len() {
+        match left[left_idx].cmp(&right[right_idx]) {
+            std::cmp::Ordering::Less => left_idx += 1,
+            std::cmp::Ordering::Greater => right_idx += 1,
+            std::cmp::Ordering::Equal => {
+                shared += 1;
+                left_idx += 1;
+                right_idx += 1;
+            }
+        }
+    }
+    shared
+}
+
+fn exact_max_adjacency_layout(adjacency: &[usize], num_groups: usize) -> Vec<usize> {
+    debug_assert!(num_groups <= EXACT_LAYOUT_MAX_GROUPS);
+    if num_groups < 2 {
+        return (0..num_groups).collect();
+    }
+
+    let states = 1usize << num_groups;
+    let mut best = vec![usize::MAX; states * num_groups];
+    let mut parent = vec![usize::MAX; states * num_groups];
+
+    for group in 0..num_groups {
+        best[(1usize << group) * num_groups + group] = 0;
+    }
+
+    for mask in 1usize..states {
+        for last in 0..num_groups {
+            let state_idx = mask * num_groups + last;
+            let current = best[state_idx];
+            if current == usize::MAX {
+                continue;
+            }
+            for next in 0..num_groups {
+                let bit = 1usize << next;
+                if mask & bit != 0 {
+                    continue;
+                }
+                let next_mask = mask | bit;
+                let next_score = current + adjacency[last * num_groups + next];
+                let next_idx = next_mask * num_groups + next;
+                if next_score > best[next_idx]
+                    || (next_score == best[next_idx] && last < parent[next_idx])
+                {
+                    best[next_idx] = next_score;
+                    parent[next_idx] = last;
+                }
+            }
+        }
+    }
+
+    let full_mask = states - 1;
+    let mut last = (0..num_groups)
+        .max_by_key(|&group| (best[full_mask * num_groups + group], usize::MAX - group))
+        .unwrap();
+    let mut mask = full_mask;
+    let mut reversed = Vec::with_capacity(num_groups);
+
+    loop {
+        reversed.push(last);
+        let prev = parent[mask * num_groups + last];
+        if prev == usize::MAX {
+            break;
+        }
+        mask &= !(1usize << last);
+        last = prev;
+    }
+
+    reversed.reverse();
+    reversed
 }
 
 fn compose_group_layout(initial_perm: Vec<u32>, layout: &[usize]) -> Vec<u32> {
