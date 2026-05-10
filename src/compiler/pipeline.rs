@@ -145,6 +145,7 @@ pub(crate) struct CompilePhaseProfile {
     pub(crate) possible_matches_materialize_ms: f64,
     pub(crate) shared_id_reconcile_ms: f64,
     pub(crate) possible_matches_pipeline_ms: f64,
+    pub(crate) terminal_pm_joint_interned_ranges_before_reconcile: usize,
     pub(crate) terminal_pm_joint_interned_ranges: usize,
     pub(crate) internal_token_bytes_ms: f64,
     pub(crate) parser_dwa_ms: f64,
@@ -171,7 +172,7 @@ pub(crate) fn emit_compile_profile_summary(
         .unwrap_or_default();
 
     eprintln!(
-        "[glrmask/profile][compile] source={}{} prepare_ms={:.3} tokenizer_build_ms={:.3} analyze_grammar_ms={:.3} glr_table_ms={:.3} terminal_coloring_ms={:.3} disallowed_follows_ms={:.3} analysis_wall_ms={:.3} classify_ms={:.3} id_map_ms={:.3} terminal_dwa_ms={:.3} templates_ms={:.3} compact_ms={:.3} possible_matches_collect_ms={:.3} possible_matches_materialize_ms={:.3} shared_id_reconcile_ms={:.3} possible_matches_pipeline_ms={:.3} terminal_pm_joint_interned_ranges={} internal_token_bytes_ms={:.3} parser_dwa_ms={:.3} parser_dwa_interned_ranges={} possible_matches_interned_ranges={} parser_pm_joint_interned_ranges={} finalize_ms={:.3} compile_ms={:.3} total_ms={:.3}",
+        "[glrmask/profile][compile] source={}{} prepare_ms={:.3} tokenizer_build_ms={:.3} analyze_grammar_ms={:.3} glr_table_ms={:.3} terminal_coloring_ms={:.3} disallowed_follows_ms={:.3} analysis_wall_ms={:.3} classify_ms={:.3} id_map_ms={:.3} terminal_dwa_ms={:.3} templates_ms={:.3} compact_ms={:.3} possible_matches_collect_ms={:.3} possible_matches_materialize_ms={:.3} shared_id_reconcile_ms={:.3} possible_matches_pipeline_ms={:.3} terminal_pm_joint_interned_ranges_before_reconcile={} terminal_pm_joint_interned_ranges={} internal_token_bytes_ms={:.3} parser_dwa_ms={:.3} parser_dwa_interned_ranges={} possible_matches_interned_ranges={} parser_pm_joint_interned_ranges={} finalize_ms={:.3} compile_ms={:.3} total_ms={:.3}",
         source,
         import_fragment,
         profile.prepare_ms,
@@ -190,6 +191,7 @@ pub(crate) fn emit_compile_profile_summary(
         profile.possible_matches_materialize_ms,
         profile.shared_id_reconcile_ms,
         profile.possible_matches_pipeline_ms,
+        profile.terminal_pm_joint_interned_ranges_before_reconcile,
         profile.terminal_pm_joint_interned_ranges,
         profile.internal_token_bytes_ms,
         profile.parser_dwa_ms,
@@ -467,6 +469,8 @@ fn compile_prepared_with_profile(
         let parser_pm_compaction_mode = parser_dwa_possible_matches_compaction_mode();
 
         let mut shared_id_reconcile_ms = 0.0;
+        let terminal_pm_joint_interned_ranges_before_reconcile =
+            joint_interned_range_count_for_artifacts(terminal_dwa.artifact_mut(), possible_matches.artifact_mut());
         let mut internal_ids = if parser_pm_compaction_mode != ParserDwaPossibleMatchesCompactionMode::ParserOnly {
             let shared_id_reconcile_started_at = Instant::now();
             let reconciled = terminal_dwa.reconcile_with(&mut possible_matches);
@@ -520,6 +524,8 @@ fn compile_prepared_with_profile(
         profile.shared_id_reconcile_ms = shared_id_reconcile_ms;
         profile.possible_matches_pipeline_ms =
             cpm_profile.possible_matches_collect_ms + cpm_profile.possible_match_vocab_ms + shared_id_reconcile_ms;
+        profile.terminal_pm_joint_interned_ranges_before_reconcile =
+            terminal_pm_joint_interned_ranges_before_reconcile;
         profile.terminal_pm_joint_interned_ranges = terminal_pm_joint_interned_ranges;
         profile.internal_token_bytes_ms = internal_token_bytes_ms;
         profile.parser_dwa_interned_ranges = parser_dwa_interned_ranges;
