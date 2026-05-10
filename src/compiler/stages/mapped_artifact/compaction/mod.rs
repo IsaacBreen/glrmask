@@ -35,7 +35,6 @@ const LARGE_ALMOST_OPTIMAL_NEIGHBORS: usize = 384;
 const LARGE_ALMOST_OPTIMAL_RANDOM_WINDOW: usize = 16;
 const LARGE_ALMOST_OPTIMAL_2OPT_WINDOW: usize = 64;
 const DEFAULT_LAYOUT_SKETCH_WORDS: usize = 4;
-const DEFAULT_FAST_MAX_WEIGHT_REFS: usize = 300;
 
 #[derive(Clone, Debug)]
 pub struct CompactReport {
@@ -95,13 +94,6 @@ impl DimensionCompaction {
                 .enumerate()
                 .all(|(idx, &mapped)| mapped == idx as u32)
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct ActiveProfileKey {
-    hash0: u64,
-    hash1: u64,
-    len: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -193,14 +185,45 @@ fn env_flag(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn elapsed_ms(started_at: Instant) -> f64 {
-    started_at.elapsed().as_secs_f64() * 1000.0
+fn compaction_thread_count() -> Option<usize> {
+    if let Some(value) = std::env::var("GLRMASK_COMPACTION_THREADS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value > 0)
+    {
+        return (value > 1).then_some(value);
+    }
+
+    std::thread::available_parallelism()
+        .ok()
+        .map(|parallelism| parallelism.get().min(8))
+        .filter(|&value| value > 1)
 }
 
-fn mix64(mut value: u64) -> u64 {
-    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    value ^ (value >> 31)
+fn run_with_compaction_thread_pool<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R + Send,
+    R: Send,
+{
+    static COMPACTION_THREAD_POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> =
+        std::sync::OnceLock::new();
+    let pool = COMPACTION_THREAD_POOL.get_or_init(|| {
+        let thread_count = compaction_thread_count()?;
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(thread_count)
+            .thread_name(|index| format!("glrmask-compact-{index}"))
+            .build()
+            .ok()
+    });
+
+    match pool {
+        Some(pool) => pool.install(f),
+        None => f(),
+    }
+}
+
+fn elapsed_ms(started_at: Instant) -> f64 {
+    started_at.elapsed().as_secs_f64() * 1000.0
 }
 
 pub(super) fn compact_weights_with_id_map(
@@ -208,6 +231,7 @@ pub(super) fn compact_weights_with_id_map(
     id_map: &mut InternalIdMap,
     collect_profile_stats: bool,
     allow_expensive_layout: bool,
+    use_default_layout: bool,
 ) -> CompactReport {
     let profile_compaction = env_flag("GLRMASK_PROFILE_COMPILE");
     let total_started_at = profile_compaction.then(Instant::now);
@@ -223,34 +247,38 @@ pub(super) fn compact_weights_with_id_map(
     let unique_weights = collect_unique_weights_from_refs(weights);
     let unique_ms = unique_started_at.map_or(0.0, elapsed_ms);
     let build_started_at = profile_compaction.then(Instant::now);
-    let should_skip_default_compaction = !globally_exact_compaction_enabled()
-        && !almost_optimal_compaction_enabled()
-        && weights.len() > DEFAULT_FAST_MAX_WEIGHT_REFS;
-    let compaction = if should_skip_default_compaction {
-        DimensionCompaction {
-            tsid_perm: identity_perm(num_tsids),
-            ordered_num_tsids: num_tsids,
-            token_perm: identity_perm(num_tokens),
-            ordered_num_tokens: num_tokens,
-        }
-    } else {
+    let use_thread_pool = allow_expensive_layout || use_default_layout;
+    let build_compaction = || {
         build_dimension_compaction(
             &unique_weights,
             num_tsids,
             num_tokens,
             allow_expensive_layout,
+            use_default_layout,
         )
+    };
+    let compaction = if use_thread_pool {
+        run_with_compaction_thread_pool(build_compaction)
+    } else {
+        build_compaction()
     };
     let build_ms = build_started_at.map_or(0.0, elapsed_ms);
 
     let apply_weights_started_at = profile_compaction.then(Instant::now);
     if !compaction.is_identity(num_tsids, num_tokens) {
-        apply_permutations_to_weight_refs(
-            weights,
-            &unique_weights,
-            &compaction.tsid_perm,
-            &compaction.token_perm,
-        );
+        let mut apply_compaction = || {
+            apply_permutations_to_weight_refs(
+                weights,
+                &unique_weights,
+                &compaction.tsid_perm,
+                &compaction.token_perm,
+            );
+        };
+        if use_thread_pool {
+            run_with_compaction_thread_pool(apply_compaction);
+        } else {
+            apply_compaction();
+        }
     }
     let apply_weights_ms = apply_weights_started_at.map_or(0.0, elapsed_ms);
     let apply_id_map_started_at = profile_compaction.then(Instant::now);
@@ -286,7 +314,7 @@ pub(super) fn compact_weights_with_id_map(
 
     if let Some(total_started_at) = total_started_at {
         eprintln!(
-            "[glrmask/profile][mapped_compaction_detail] weights={} unique_weights={} tsids_before={} tsids_after={} tokens_before={} tokens_after={} expensive_layout={} skipped_by_fast_budget={} storage_before_ms={:.3} unique_ms={:.3} build_ms={:.3} apply_weights_ms={:.3} apply_id_map_ms={:.3} storage_after_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][mapped_compaction_detail] weights={} unique_weights={} tsids_before={} tsids_after={} tokens_before={} tokens_after={} expensive_layout={} storage_before_ms={:.3} unique_ms={:.3} build_ms={:.3} apply_weights_ms={:.3} apply_id_map_ms={:.3} storage_after_ms={:.3} total_ms={:.3}",
             weights.len(),
             unique_weights.len(),
             num_tsids,
@@ -294,7 +322,6 @@ pub(super) fn compact_weights_with_id_map(
             num_tokens,
             compaction.ordered_num_tokens,
             allow_expensive_layout,
-            should_skip_default_compaction,
             storage_before_ms,
             unique_ms,
             build_ms,
@@ -325,6 +352,7 @@ fn build_dimension_compaction(
     num_tsids: usize,
     num_tokens: usize,
     allow_expensive_layout: bool,
+    use_default_layout: bool,
 ) -> DimensionCompaction {
     if allow_expensive_layout
         && (globally_exact_compaction_enabled() || almost_optimal_compaction_enabled())
@@ -336,7 +364,11 @@ fn build_dimension_compaction(
 
     let (token_merge_perm, merged_num_tokens) =
         build_exact_token_merge_permutation(&original_weight_refs, num_tokens);
-    let token_perm = order_token_groups(unique_weights, token_merge_perm, merged_num_tokens);
+    let token_perm = if use_default_layout {
+        order_token_groups(unique_weights, token_merge_perm, merged_num_tokens)
+    } else {
+        token_merge_perm
+    };
 
     DimensionCompaction {
         tsid_perm: identity_perm(num_tsids),
@@ -389,131 +421,55 @@ fn build_exact_token_merge_permutation(weights: &[&Weight], num_tokens: usize) -
         return (Vec::new(), 0);
     }
 
-    let mut events: Vec<(u32, bool, u32)> = Vec::new();
-    let mut context = 0u32;
+    let mut seen_token_sets = HashSet::new();
+    let mut token_sets = Vec::new();
     for weight in weights {
         if weight.is_full() || weight.is_empty() {
             continue;
         }
         for (_tsid_range, token_set) in weight.0.range_values() {
-            for token_range in token_set.ranges() {
-                let lo = *token_range.start();
-                if lo as usize >= num_tokens {
-                    continue;
-                }
-                events.push((lo, true, context));
-                let end = token_range.end().saturating_add(1).min(num_tokens as u32);
-                if end < num_tokens as u32 {
-                    events.push((end, false, context));
-                }
+            let ptr = Arc::as_ptr(token_set) as usize;
+            if seen_token_sets.insert(ptr) {
+                token_sets.push(Arc::clone(token_set));
             }
-            context += 1;
         }
     }
 
-    if events.is_empty() {
+    if token_sets.is_empty() {
         return (vec![0; num_tokens], 1);
     }
 
-    events.sort_unstable_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
-
-    let mut perm = vec![0u32; num_tokens];
-    let mut active = vec![false; context as usize];
-    let mut active_key = ActiveProfileKey {
-        hash0: 0,
-        hash1: 0,
-        len: 0,
-    };
-    let mut profile_to_group = HashMap::<ActiveProfileKey, Vec<(Vec<u32>, u32)>>::new();
-    let mut next_group = 0u32;
-    let mut current_group = group_for_active_profile(
-        &active,
-        active_key,
-        &mut profile_to_group,
-        &mut next_group,
-    );
-    let mut prev_pos = 0u32;
-    let mut event_idx = 0usize;
-
-    while event_idx < events.len() {
-        let boundary = events[event_idx].0.min(num_tokens as u32);
-        if prev_pos < boundary {
-            for token in prev_pos..boundary {
-                perm[token as usize] = current_group;
+    let profile_words = token_sets.len().div_ceil(64);
+    let mut profiles = vec![0u64; num_tokens * profile_words];
+    for (context, token_set) in token_sets.iter().enumerate() {
+        let word = context / 64;
+        let bit = 1u64 << (context % 64);
+        for token_range in token_set.ranges() {
+            let start = (*token_range.start() as usize).min(num_tokens);
+            let end = (*token_range.end() as usize).min(num_tokens.saturating_sub(1));
+            if start > end {
+                continue;
+            }
+            for token in start..=end {
+                profiles[token * profile_words + word] |= bit;
             }
         }
-        prev_pos = boundary;
-
-        while event_idx < events.len() && events[event_idx].0 == boundary {
-            let (_, is_addition, context) = events[event_idx];
-            let context_idx = context as usize;
-            let context_key = active_context_key(context);
-            if is_addition {
-                if !active[context_idx] {
-                    active[context_idx] = true;
-                    active_key.hash0 ^= context_key.hash0;
-                    active_key.hash1 ^= context_key.hash1;
-                    active_key.len += 1;
-                }
-            } else if active[context_idx] {
-                active[context_idx] = false;
-                active_key.hash0 ^= context_key.hash0;
-                active_key.hash1 ^= context_key.hash1;
-                active_key.len -= 1;
-            }
-            event_idx += 1;
-        }
-
-        current_group = group_for_active_profile(
-            &active,
-            active_key,
-            &mut profile_to_group,
-            &mut next_group,
-        );
     }
 
-    for token in prev_pos..num_tokens as u32 {
-        perm[token as usize] = current_group;
+    let mut profile_to_group = HashMap::<Vec<u64>, u32>::new();
+    let mut perm = vec![0u32; num_tokens];
+    let mut next_group = 0u32;
+    for token in 0..num_tokens {
+        let profile_start = token * profile_words;
+        let profile = profiles[profile_start..profile_start + profile_words].to_vec();
+        perm[token] = *profile_to_group.entry(profile).or_insert_with(|| {
+            let group = next_group;
+            next_group += 1;
+            group
+        });
     }
 
     (perm, next_group as usize)
-}
-
-fn active_context_key(context: u32) -> ActiveProfileKey {
-    let value = context as u64;
-    ActiveProfileKey {
-        hash0: mix64(value ^ 0x243f_6a88_85a3_08d3),
-        hash1: mix64(value ^ 0x1319_8a2e_0370_7344),
-        len: 1,
-    }
-}
-
-fn group_for_active_profile(
-    active: &[bool],
-    active_key: ActiveProfileKey,
-    profile_to_group: &mut HashMap<ActiveProfileKey, Vec<(Vec<u32>, u32)>>,
-    next_group: &mut u32,
-) -> u32 {
-    let candidates = profile_to_group.entry(active_key).or_default();
-    for (profile, group) in candidates.iter() {
-        if profile.len() == active_key.len as usize
-            && profile.iter().all(|&context| active[context as usize])
-        {
-            return *group;
-        }
-    }
-
-    let group = *next_group;
-    *next_group += 1;
-    candidates.push((
-        active
-            .iter()
-            .enumerate()
-            .filter_map(|(context, &is_active)| is_active.then_some(context as u32))
-            .collect(),
-        group,
-    ));
-    group
 }
 
 fn build_exact_tsid_merge_permutation(weights: &[&Weight], num_tsids: usize) -> (Vec<u32>, usize) {
