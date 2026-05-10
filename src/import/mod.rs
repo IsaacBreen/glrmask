@@ -8,6 +8,7 @@ use crate::compiler::compile::{compile_owned_profiled, compile_profile_enabled, 
 use crate::compiler::compile_owned;
 use crate::grammar::flat::GrammarDef;
 use crate::grammar::factoring::factor_named_grammar;
+use crate::grammar::terminal_choice_promotion::promote_choice_terminals_exact;
 use crate::runtime::Constraint;
 
 type GrammarParser = fn(&str) -> crate::Result<GrammarDef>;
@@ -31,11 +32,14 @@ pub(crate) fn sequence_or_single(mut items: Vec<ast::GrammarExpr>) -> ast::Gramm
 
 fn lower_factored_named_grammar(
     source: &str,
-    _source_kind: &str,
+    source_kind: &str,
     parse_named: NamedGrammarParser,
 ) -> crate::Result<GrammarDef> {
     let named = parse_named(source)?;
-    let factored = factor_named_grammar(named);
+    let mut factored = factor_named_grammar(named);
+    if source_kind == "json_schema" && json_schema::promote_literal_choices_enabled() {
+        promote_choice_terminals_exact(&mut factored, false);
+    }
     ast::lower(&factored)
 }
 

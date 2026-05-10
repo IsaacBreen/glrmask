@@ -38,6 +38,9 @@ pub fn dump_json_schema_grammar_glrm(schema_json: &str) -> Result<String> {
     let schema: serde_json::Value = serde_json::from_str(schema_json)
         .map_err(|e| GlrMaskError::GrammarParse(format!("invalid JSON: {e}")))?;
     let named = import::json_schema::schema_to_named_grammar(&schema)?;
-    let factored = grammar::factoring::factor_named_grammar(named);
+    let mut factored = grammar::factoring::factor_named_grammar(named);
+    if import::json_schema::promote_literal_choices_enabled() {
+        grammar::terminal_choice_promotion::promote_choice_terminals_exact(&mut factored, false);
+    }
     Ok(grammar::glrm::to_glrm(&factored))
 }

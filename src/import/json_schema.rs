@@ -2920,6 +2920,24 @@ fn expr_key(expr: &GrammarExpr) -> String {
     format!("{expr:?}")
 }
 
+fn env_flag_default_true(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !matches!(value.as_str(), "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(true)
+}
+
+pub(crate) fn factor_common_affixes_enabled() -> bool {
+    env_flag_default_true("GLRMASK_JSON_SCHEMA_FACTOR_COMMON_AFFIXES")
+}
+
+pub(crate) fn promote_literal_choices_enabled() -> bool {
+    env_flag_default_true("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES")
+}
+
 fn seq_elements(expr: &GrammarExpr) -> Vec<GrammarExpr> {
     match expr {
         GrammarExpr::Sequence(parts) => parts.clone(),
@@ -2928,6 +2946,10 @@ fn seq_elements(expr: &GrammarExpr) -> Vec<GrammarExpr> {
 }
 
 fn factor_common_affixes(options: Vec<GrammarExpr>) -> GrammarExpr {
+    if !factor_common_affixes_enabled() {
+        return choice_or_single(options);
+    }
+
     if options.len() <= 1 {
         return choice_or_single(options);
     }
