@@ -22,7 +22,9 @@ use crate::ds::weight::{Weight, finalize_weight_map, shared_rangeset};
 const EXACT_LAYOUT_MAX_GROUPS: usize = 20;
 const GLOBALLY_EXACT_COMPONENT_MAX_GROUPS_DEFAULT: usize = EXACT_LAYOUT_MAX_GROUPS;
 const LARGE_ALMOST_OPTIMAL_COMPONENT_GROUPS: usize = 512;
-const LARGE_ALMOST_OPTIMAL_GREEDY_STARTS: usize = 32;
+const LARGE_ALMOST_OPTIMAL_GREEDY_STARTS: usize = 64;
+const LARGE_ALMOST_OPTIMAL_NEIGHBORS: usize = 384;
+const LARGE_ALMOST_OPTIMAL_RANDOM_WINDOW: usize = 16;
 const LARGE_ALMOST_OPTIMAL_2OPT_WINDOW: usize = 64;
 
 #[derive(Clone, Debug)]
@@ -863,6 +865,10 @@ fn almost_optimal_adjacency_layout(adjacency: &[usize], num_groups: usize) -> Ve
         }
     }
 
+    if num_groups > LARGE_ALMOST_OPTIMAL_COMPONENT_GROUPS {
+        return almost_optimal_large_adjacency_layout(adjacency, num_groups, &weighted_degree);
+    }
+
     let mut rng = SplitMix64::new(almost_optimal_seed() ^ ((num_groups as u64) << 32));
     let mut best_layout = greedy_adjacency_layout(adjacency, &weighted_degree, num_groups);
     polish_layout(adjacency, &mut best_layout, num_groups);
@@ -886,6 +892,93 @@ fn almost_optimal_adjacency_layout(adjacency: &[usize], num_groups: usize) -> Ve
         };
         perturb_layout(&mut candidate, &mut rng, pass);
         polish_layout(adjacency, &mut candidate, num_groups);
+        let score = path_score(adjacency, &candidate, num_groups);
+        if score > best_score || (score == best_score && candidate.as_slice() < best_layout.as_slice()) {
+            best_score = score;
+            best_layout = candidate;
+            eprintln!(
+                "[glrmask/profile][almost_optimal_compaction] groups={num_groups} pass={pass} improved_score={best_score} upper_bound={upper_bound} gap={}",
+                upper_bound.saturating_sub(best_score),
+            );
+            if best_score == upper_bound {
+                eprintln!(
+                    "[glrmask/profile][almost_optimal_compaction] groups={num_groups} score={best_score} upper_bound={upper_bound} proven=upper_bound_tight"
+                );
+                break;
+            }
+        }
+    }
+
+    eprintln!(
+        "[glrmask/profile][almost_optimal_compaction] groups={num_groups} final_score={best_score} upper_bound={upper_bound} gap={}",
+        upper_bound.saturating_sub(best_score),
+    );
+    best_layout
+}
+
+fn almost_optimal_large_adjacency_layout(
+    adjacency: &[usize],
+    num_groups: usize,
+    weighted_degree: &[usize],
+) -> Vec<usize> {
+    let mut rng = SplitMix64::new(almost_optimal_seed() ^ ((num_groups as u64) << 32));
+    let top_neighbors = top_neighbors_by_vertex(adjacency, weighted_degree, num_groups);
+    let degree_order = top_weighted_vertices(weighted_degree, num_groups);
+    let starts = LARGE_ALMOST_OPTIMAL_GREEDY_STARTS.min(num_groups);
+    let mut best_layout = Vec::new();
+    let mut best_score = 0usize;
+
+    for &start in degree_order.iter().take(starts) {
+        let mut candidate = bounded_greedy_adjacency_layout(
+            adjacency,
+            weighted_degree,
+            num_groups,
+            &top_neighbors,
+            &degree_order,
+            start,
+            None,
+            &mut rng,
+        );
+        polish_layout_bounded(adjacency, &mut candidate, num_groups);
+        let score = path_score(adjacency, &candidate, num_groups);
+        if best_layout.is_empty()
+            || score > best_score
+            || (score == best_score && candidate.as_slice() < best_layout.as_slice())
+        {
+            best_score = score;
+            best_layout = candidate;
+        }
+    }
+
+    let upper_bound =
+        remaining_path_score_upper_bound(adjacency, num_groups, None, &vec![false; num_groups]);
+    if best_score == upper_bound {
+        eprintln!(
+            "[glrmask/profile][almost_optimal_compaction] groups={num_groups} score={best_score} upper_bound={upper_bound} proven=upper_bound_tight"
+        );
+        return best_layout;
+    }
+
+    let passes = almost_optimal_passes();
+    for pass in 0..passes {
+        let start = degree_order[rng.gen_usize(starts)];
+        let random_window = if pass % 2 == 0 {
+            Some(LARGE_ALMOST_OPTIMAL_RANDOM_WINDOW)
+        } else {
+            None
+        };
+        let mut candidate = bounded_greedy_adjacency_layout(
+            adjacency,
+            weighted_degree,
+            num_groups,
+            &top_neighbors,
+            &degree_order,
+            start,
+            random_window,
+            &mut rng,
+        );
+        perturb_layout(&mut candidate, &mut rng, pass);
+        polish_layout_bounded(adjacency, &mut candidate, num_groups);
         let score = path_score(adjacency, &candidate, num_groups);
         if score > best_score || (score == best_score && candidate.as_slice() < best_layout.as_slice()) {
             best_score = score;
@@ -1130,6 +1223,94 @@ fn randomized_greedy_adjacency_layout(
         layout.push(next);
     }
 
+    layout
+}
+
+fn top_neighbors_by_vertex(
+    adjacency: &[usize],
+    weighted_degree: &[usize],
+    num_groups: usize,
+) -> Vec<Vec<usize>> {
+    let limit = LARGE_ALMOST_OPTIMAL_NEIGHBORS.min(num_groups.saturating_sub(1)).max(1);
+    (0..num_groups)
+        .map(|left| {
+            let mut neighbors: Vec<usize> = (0..num_groups)
+                .filter(|&right| right != left && adjacency[left * num_groups + right] > 0)
+                .collect();
+            neighbors.sort_by_key(|&right| {
+                (
+                    usize::MAX - adjacency[left * num_groups + right],
+                    usize::MAX - weighted_degree[right],
+                    right,
+                )
+            });
+            neighbors.truncate(limit);
+            neighbors
+        })
+        .collect()
+}
+
+fn bounded_greedy_adjacency_layout(
+    adjacency: &[usize],
+    weighted_degree: &[usize],
+    num_groups: usize,
+    top_neighbors: &[Vec<usize>],
+    degree_order: &[usize],
+    start: usize,
+    random_window: Option<usize>,
+    rng: &mut SplitMix64,
+) -> Vec<usize> {
+    let mut used = vec![false; num_groups];
+    let mut layout = Vec::with_capacity(num_groups);
+    let mut degree_cursor = 0usize;
+    used[start] = true;
+    layout.push(start);
+
+    while layout.len() < num_groups {
+        let last = *layout.last().unwrap();
+        let mut candidates = [usize::MAX; LARGE_ALMOST_OPTIMAL_RANDOM_WINDOW];
+        let mut candidate_len = 0usize;
+        let mut best = None;
+
+        for &candidate in &top_neighbors[last] {
+            if used[candidate] {
+                continue;
+            }
+            if let Some(window) = random_window {
+                if candidate_len < window.min(candidates.len()) {
+                    candidates[candidate_len] = candidate;
+                    candidate_len += 1;
+                    continue;
+                }
+            }
+            best = Some(candidate);
+            break;
+        }
+
+        let next = if candidate_len > 0 {
+            candidates[rng.gen_usize(candidate_len)]
+        } else if let Some(best) = best {
+            best
+        } else {
+            while degree_cursor < degree_order.len() && used[degree_order[degree_cursor]] {
+                degree_cursor += 1;
+            }
+            if degree_cursor < degree_order.len() {
+                degree_order[degree_cursor]
+            } else {
+                (0..num_groups)
+                    .filter(|&group| !used[group])
+                    .max_by_key(|&group| (weighted_degree[group], usize::MAX - group))
+                    .unwrap()
+            }
+        };
+
+        debug_assert!(!used[next]);
+        used[next] = true;
+        layout.push(next);
+    }
+
+    debug_assert_eq!(layout.len(), num_groups);
     layout
 }
 
