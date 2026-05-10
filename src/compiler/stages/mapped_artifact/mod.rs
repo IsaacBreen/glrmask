@@ -115,10 +115,6 @@ impl<T: WeightRefs> MappedArtifact<T> {
         (self.artifact, self.id_map)
     }
 
-    pub(crate) fn split(self) -> (T, InternalIdMap) {
-        self.into_parts()
-    }
-
     pub(crate) fn into_artifact(self) -> T {
         self.artifact
     }
