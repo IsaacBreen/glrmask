@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Instant;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{Action, GLRTable, GuardedStackShift, StackShiftGuard};
 use crate::grammar::flat::{NonterminalID, TerminalID};
@@ -77,7 +77,7 @@ struct CharacterizationIndex {
     goto_predecessors_by_target: Vec<Vec<(u32, NonterminalID, bool)>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct RelationConfig {
     input: Vec<StackMatcher>,
     segment: Vec<u32>,
@@ -630,7 +630,7 @@ fn process_reduce_from_config(
     lhs: NonterminalID,
     reduce_len: usize,
     output: &mut CharacterizationOutput,
-    seen: &mut BTreeSet<RelationConfig>,
+    seen: &mut FxHashSet<RelationConfig>,
     worklist: &mut VecDeque<RelationConfig>,
 ) {
     if reduce_len == 0 {
@@ -691,7 +691,7 @@ fn process_action_from_config(
     action: &Action,
     reduce_len_adjustment: usize,
     output: &mut CharacterizationOutput,
-    seen: &mut BTreeSet<RelationConfig>,
+    seen: &mut FxHashSet<RelationConfig>,
     worklist: &mut VecDeque<RelationConfig>,
 ) {
     match action {
@@ -774,7 +774,7 @@ fn drain_nonconsuming_worklist(
     terminal: TerminalID,
     source: CharacterizationSource,
     output: &mut CharacterizationOutput,
-    seen: &mut BTreeSet<RelationConfig>,
+    seen: &mut FxHashSet<RelationConfig>,
     worklist: &mut VecDeque<RelationConfig>,
 ) {
     while let Some(config) = worklist.pop_front() {
@@ -805,7 +805,8 @@ fn characterize_initial_actions_for_terminal(
         };
 
         let config = identity_config(state);
-        let mut seen = BTreeSet::from([config.clone()]);
+        let mut seen = FxHashSet::default();
+        seen.insert(config.clone());
         let mut worklist = VecDeque::new();
         let reduce_len_adjustment = usize::from(table.forwarded_shifts.contains(&(state, terminal)));
 
@@ -848,7 +849,8 @@ fn characterize_nt_continuations_for_terminal(
 
         for &(revealed_state, nonterminal, goto_replace) in predecessors {
             let config = start_relation_after_goto(revealed_state, top_state, goto_replace);
-            let mut seen = BTreeSet::from([config.clone()]);
+            let mut seen = FxHashSet::default();
+            seen.insert(config.clone());
             let mut worklist = VecDeque::from([config]);
 
             drain_nonconsuming_worklist(
@@ -1036,4 +1038,3 @@ pub(crate) fn characterize_terminals_profiled(
         },
     )
 }
-

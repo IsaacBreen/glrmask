@@ -620,19 +620,32 @@ fn build_sweep_events(
     (events, event_positions, groups, labels_by_id, stats)
 }
 
-fn apply_sweep_events(active_group_counts: &mut [u32], events: &[SweepEvent], active_group_count: &mut usize) {
+fn insert_sorted_group_id(active_group_ids: &mut Vec<u32>, group_id: u32) {
+    match active_group_ids.binary_search(&group_id) {
+        Ok(_) => {}
+        Err(index) => active_group_ids.insert(index, group_id),
+    }
+}
+
+fn remove_sorted_group_id(active_group_ids: &mut Vec<u32>, group_id: u32) {
+    if let Ok(index) = active_group_ids.binary_search(&group_id) {
+        active_group_ids.remove(index);
+    }
+}
+
+fn apply_sweep_events(active_group_counts: &mut [u32], events: &[SweepEvent], active_group_ids: &mut Vec<u32>) {
     for event in events.iter().filter(|event| !event.add) {
         let count = &mut active_group_counts[event.group_id as usize];
         assert!(*count > 0, "pmv sweep removal underflow for group_id={}", event.group_id);
         if *count == 1 {
-            *active_group_count -= 1;
+            remove_sorted_group_id(active_group_ids, event.group_id);
         }
         *count -= 1;
     }
     for event in events.iter().filter(|event| event.add) {
         let count = &mut active_group_counts[event.group_id as usize];
         if *count == 0 {
-            *active_group_count += 1;
+            insert_sorted_group_id(active_group_ids, event.group_id);
         }
         *count += 1;
     }
@@ -661,21 +674,6 @@ fn build_signature_from_active_groups(
     }
     signature.sort_unstable();
     signature
-}
-
-fn build_active_group_ids(
-    active_group_counts: &[u32],
-    active_group_count: usize,
-) -> Vec<u32> {
-    if active_group_count == 0 { return Vec::new(); }
-
-    let mut active_group_ids = Vec::with_capacity(active_group_count);
-    for (group_id, &count) in active_group_counts.iter().enumerate() {
-        if count > 0 {
-            active_group_ids.push(group_id as u32);
-        }
-    }
-    active_group_ids
 }
 
 fn build_signature_from_active_group_ids(
@@ -731,7 +729,7 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
     let mut original_to_internal = vec![u32::MAX; ordered_vocab.original_slot_count];
     let mut internal_to_originals: Vec<Vec<u32>> = Vec::new();
     let mut active_group_counts = vec![0u32; groups.len()];
-    let mut active_group_count = 0usize;
+    let mut active_group_ids = Vec::<u32>::new();
     let mut label_stamps = vec![0u32; labels_by_id.len()];
     let mut stamp_generation = 0u32;
 
@@ -753,20 +751,19 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
     let mut position = 0usize;
     while position < num_ordered_tokens {
         while event_index < event_positions.len() && event_positions[event_index] as usize == position {
-            apply_sweep_events(&mut active_group_counts, &events[position], &mut active_group_count);
+            apply_sweep_events(&mut active_group_counts, &events[position], &mut active_group_ids);
             event_index += 1;
         }
 
         let next_position = event_positions.get(event_index).map(|&next| (next as usize).min(num_ordered_tokens)).unwrap_or(num_ordered_tokens);
         let active_group_signature_started_at = Instant::now();
-        let active_group_ids = build_active_group_ids(&active_group_counts, active_group_count);
         active_group_signature_build_ms += elapsed_ms(active_group_signature_started_at);
         sweep_segments += 1;
         total_active_group_len += active_group_ids.len();
         max_active_group_len = max_active_group_len.max(active_group_ids.len());
 
         let signature_lookup_started_at = Instant::now();
-        let signature_id = if let Some(&existing) = active_group_signature_to_signature_id.get(&active_group_ids) {
+        let signature_id = if let Some(&existing) = active_group_signature_to_signature_id.get(active_group_ids.as_slice()) {
             active_group_signature_cache_hits += 1;
             existing
         } else {
@@ -790,7 +787,7 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
                 internal_to_originals.push(Vec::new());
                 new_id
             };
-            active_group_signature_to_signature_id.insert(active_group_ids, signature_id);
+            active_group_signature_to_signature_id.insert(active_group_ids.clone(), signature_id);
             signature_id
         };
         signature_lookup_ms += elapsed_ms(signature_lookup_started_at);
