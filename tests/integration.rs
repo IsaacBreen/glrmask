@@ -206,6 +206,16 @@ fn json_schema_scalar_and_enum() {
 }
 
 #[test]
+fn json_schema_filtered_enum_does_not_overaccept_merged_group() {
+    let enum_schema = schema(
+        &[r#""a""#, r#""bb""#],
+        r#"{"enum":["a","bb"],"minLength":2}"#,
+    );
+    assert_rejects_token(&enum_schema, &[], 0);
+    assert_accepts_tokens(&enum_schema, &[1]);
+}
+
+#[test]
 fn json_schema_rejects_invalid_utf8_in_string() {
     let constraint = byte_schema(r#"{"type":"string"}"#);
     let mut state = constraint.start();

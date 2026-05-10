@@ -2894,6 +2894,11 @@ fn json_value_literal_bytes(value: &Value) -> Vec<u8> {
     rendered.into_bytes()
 }
 
+fn json_enum_string_terminal_bytes(text: &str) -> Vec<u8> {
+    let full = json_string_literal_bytes(text);
+    full[1..].to_vec()
+}
+
 fn json_value_literal_expr(value: &Value) -> GrammarExpr {
     let bytes = json_value_literal_bytes(value);
     if value.is_string() && bytes.len() >= 2 && bytes[0] == b'"' {
@@ -2935,7 +2940,13 @@ pub(crate) fn factor_common_affixes_enabled() -> bool {
 }
 
 pub(crate) fn promote_literal_choices_enabled() -> bool {
-    env_flag_default_true("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES")
+    std::env::var("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES")
+        .ok()
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            matches!(value.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
 }
 
 pub(crate) fn simplify_grammar_enabled() -> bool {
@@ -3357,6 +3368,182 @@ struct SchemaCtx<'a> {
     /// Cache for `convert_schema`: identical sub-schemas produce the same
     /// grammar expression, avoiding duplicate rule generation.
     schema_convert_cache: BTreeMap<String, GrammarExpr>,
+    enum_terminal_plan: EnumTerminalPlan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnumAtomKind {
+    String,
+    Number,
+}
+
+#[derive(Debug, Clone)]
+struct EnumTerminalGroup {
+    name: String,
+    values: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct EnumTerminalPlan {
+    string_value_to_group: HashMap<Vec<u8>, usize>,
+    number_value_to_group: HashMap<Vec<u8>, usize>,
+    string_groups: Vec<EnumTerminalGroup>,
+    number_groups: Vec<EnumTerminalGroup>,
+}
+
+impl EnumTerminalPlan {
+    fn for_root(root: &Value) -> Self {
+        let mut string_signatures: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
+        let mut number_signatures: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
+        collect_enum_terminal_signatures(
+            root,
+            &mut string_signatures,
+            &mut number_signatures,
+        );
+
+        let (string_value_to_group, string_groups) =
+            build_enum_terminal_groups("JSON_ENUM_STRING", string_signatures);
+        let (number_value_to_group, number_groups) =
+            build_enum_terminal_groups("JSON_ENUM_NUMBER", number_signatures);
+
+        Self {
+            string_value_to_group,
+            number_value_to_group,
+            string_groups,
+            number_groups,
+        }
+    }
+
+    fn group(&self, kind: EnumAtomKind, group_id: usize) -> &EnumTerminalGroup {
+        match kind {
+            EnumAtomKind::String => &self.string_groups[group_id],
+            EnumAtomKind::Number => &self.number_groups[group_id],
+        }
+    }
+
+    fn group_for_value(&self, kind: EnumAtomKind, bytes: &[u8]) -> Option<usize> {
+        match kind {
+            EnumAtomKind::String => self.string_value_to_group.get(bytes).copied(),
+            EnumAtomKind::Number => self.number_value_to_group.get(bytes).copied(),
+        }
+    }
+}
+
+fn collect_enum_terminal_signatures(
+    root: &Value,
+    string_signatures: &mut BTreeMap<Vec<u8>, Vec<usize>>,
+    number_signatures: &mut BTreeMap<Vec<u8>, Vec<usize>>,
+) {
+    let mut queue = VecDeque::from([root]);
+    let mut visited = BTreeSet::new();
+    let mut enum_count = 0usize;
+
+    while let Some(node) = queue.pop_front() {
+        let node_id = node as *const Value as usize;
+        if !visited.insert(node_id) {
+            continue;
+        }
+
+        let Some(object) = node.as_object() else {
+            continue;
+        };
+
+        if let Some(values) = object.get("enum").and_then(Value::as_array) {
+            let enum_id = enum_count;
+            enum_count += 1;
+
+            let mut string_values_in_enum = BTreeSet::new();
+            let mut number_values_in_enum = BTreeSet::new();
+            for value in values {
+                if let Some(text) = value.as_str() {
+                    string_values_in_enum.insert(json_enum_string_terminal_bytes(text));
+                } else if value.is_number() {
+                    number_values_in_enum.insert(json_value_literal_bytes(value));
+                }
+            }
+            for bytes in string_values_in_enum {
+                string_signatures.entry(bytes).or_default().push(enum_id);
+            }
+            for bytes in number_values_in_enum {
+                number_signatures.entry(bytes).or_default().push(enum_id);
+            }
+        }
+
+        enqueue_child_schemas(root, object, &mut queue);
+    }
+}
+
+fn enqueue_child_schemas<'a>(
+    root: &'a Value,
+    object: &'a Map<String, Value>,
+    queue: &mut VecDeque<&'a Value>,
+) {
+    if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+        queue.extend(properties.values());
+    }
+    if let Some(pattern_properties) = object.get("patternProperties").and_then(Value::as_object) {
+        queue.extend(pattern_properties.values());
+    }
+
+    if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+        if let Some(target) = resolve_shared_ap_ref_target(root, reference) {
+            queue.push_back(target);
+        }
+    }
+
+    for keyword in [
+        "additionalProperties",
+        "propertyNames",
+        "items",
+        "additionalItems",
+        "contains",
+        "unevaluatedProperties",
+        "if",
+        "then",
+        "else",
+        "not",
+    ] {
+        if let Some(value) = object.get(keyword) {
+            queue.push_back(value);
+        }
+    }
+
+    for keyword in ["prefixItems", "allOf", "anyOf", "oneOf"] {
+        if let Some(values) = object.get(keyword).and_then(Value::as_array) {
+            queue.extend(values);
+        }
+    }
+
+    for keyword in ["$defs", "definitions", "dependentSchemas"] {
+        if let Some(values) = object.get(keyword).and_then(Value::as_object) {
+            queue.extend(values.values());
+        }
+    }
+}
+
+fn build_enum_terminal_groups(
+    prefix: &str,
+    value_signatures: BTreeMap<Vec<u8>, Vec<usize>>,
+) -> (HashMap<Vec<u8>, usize>, Vec<EnumTerminalGroup>) {
+    let mut signature_to_values = BTreeMap::<Vec<usize>, Vec<Vec<u8>>>::new();
+    for (bytes, signature) in value_signatures {
+        signature_to_values.entry(signature).or_default().push(bytes);
+    }
+
+    let mut value_to_group = HashMap::new();
+    let mut groups = Vec::new();
+    for values in signature_to_values.into_values() {
+        let group_id = groups.len();
+        for value in &values {
+            value_to_group.insert(value.clone(), group_id);
+        }
+        groups.push(EnumTerminalGroup {
+            name: format!("{prefix}_{group_id}"),
+            values,
+        });
+    }
+
+    (value_to_group, groups)
 }
 
 fn rule_name_is_terminal(name: &str) -> bool {
@@ -3390,6 +3577,7 @@ impl<'a> SchemaCtx<'a> {
                 )
             })
             .unwrap_or((false, false));
+        let enum_terminal_plan = EnumTerminalPlan::for_root(root);
 
         let mut ctx = Self {
             root_schema: root,
@@ -3413,9 +3601,40 @@ impl<'a> SchemaCtx<'a> {
             draft_stack: vec![DEFAULT_JSON_SCHEMA_DRAFT],
             convert_depth: 0,
             schema_convert_cache: BTreeMap::new(),
+            enum_terminal_plan,
         };
         ctx.ensure_base_rules();
+        ctx.ensure_enum_terminal_rules();
         ctx
+    }
+
+    fn ensure_enum_terminal_rules(&mut self) {
+        let string_rules = self
+            .enum_terminal_plan
+            .string_groups
+            .iter()
+            .map(|group| {
+                (
+                    group.name.clone(),
+                    choice_or_single(group.values.iter().map(|bytes| literal_expr(bytes)).collect()),
+                )
+            })
+            .collect::<Vec<_>>();
+        let number_rules = self
+            .enum_terminal_plan
+            .number_groups
+            .iter()
+            .map(|group| {
+                (
+                    group.name.clone(),
+                    choice_or_single(group.values.iter().map(|bytes| literal_expr(bytes)).collect()),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for (name, expr) in string_rules.into_iter().chain(number_rules) {
+            self.insert_rule(name, expr);
+        }
     }
 
     fn try_append_suffix_to_trailing_literal_expr(
@@ -6120,11 +6339,7 @@ impl<'a> SchemaCtx<'a> {
 
         if let Some(values) = object.get("enum").and_then(Value::as_array) {
             let remaining_schema = Value::Object(Self::schema_without_keys(object, &["enum"]));
-            let options: Vec<GrammarExpr> = values
-                .iter()
-                .filter(|value| self.value_satisfies_schema(value, &remaining_schema))
-                .map(|value| self.json_literal(value))
-                .collect();
+            let options = self.optimized_enum_options(values, &remaining_schema);
             if !options.is_empty() {
                 return Ok(Some(factor_common_affixes(options)));
             }
@@ -6132,6 +6347,105 @@ impl<'a> SchemaCtx<'a> {
         }
 
         Ok(None)
+    }
+
+    fn optimized_enum_options(&self, values: &[Value], remaining_schema: &Value) -> Vec<GrammarExpr> {
+        self.optimized_prescanned_enum_options(values, remaining_schema)
+    }
+
+    fn optimized_prescanned_enum_options(
+        &self,
+        values: &[Value],
+        remaining_schema: &Value,
+    ) -> Vec<GrammarExpr> {
+        let mut valid_string_values = BTreeSet::new();
+        let mut valid_number_values = BTreeSet::new();
+        let mut other_options = Vec::new();
+
+        for value in values {
+            if !self.value_satisfies_schema(value, remaining_schema) {
+                continue;
+            }
+            if let Some(text) = value.as_str() {
+                valid_string_values.insert(json_enum_string_terminal_bytes(text));
+            } else if value.is_number() {
+                valid_number_values.insert(json_value_literal_bytes(value));
+            } else {
+                other_options.push(self.json_literal(value));
+            }
+        }
+
+        let mut options = Vec::new();
+        self.push_optimized_enum_group_options(
+            EnumAtomKind::String,
+            &valid_string_values,
+            &mut options,
+        );
+        self.push_optimized_enum_group_options(
+            EnumAtomKind::Number,
+            &valid_number_values,
+            &mut options,
+        );
+        options.extend(other_options);
+        options
+    }
+
+    fn push_optimized_enum_group_options(
+        &self,
+        kind: EnumAtomKind,
+        valid_values: &BTreeSet<Vec<u8>>,
+        options: &mut Vec<GrammarExpr>,
+    ) {
+        let mut group_ids = BTreeSet::new();
+        for value in valid_values {
+            if let Some(group_id) = self.enum_terminal_plan.group_for_value(kind, value) {
+                group_ids.insert(group_id);
+            } else {
+                match kind {
+                    EnumAtomKind::String => {
+                        options.push(wrap_string_value_terminal(
+                            literal_expr(value),
+                            json_literal_string_merge_config(),
+                        ));
+                    }
+                    EnumAtomKind::Number => options.push(literal_expr(value)),
+                }
+            }
+        }
+
+        for group_id in group_ids {
+            let group = self.enum_terminal_plan.group(kind, group_id);
+            if group
+                .values
+                .iter()
+                .all(|value| valid_values.contains(value))
+            {
+                let terminal_ref = GrammarExpr::Ref(group.name.clone());
+                match kind {
+                    EnumAtomKind::String => {
+                        options.push(wrap_string_value_terminal(
+                            terminal_ref,
+                            json_literal_string_merge_config(),
+                        ));
+                    }
+                    EnumAtomKind::Number => options.push(terminal_ref),
+                }
+            } else {
+                for value in &group.values {
+                    if valid_values.contains(value) {
+                        match kind {
+                            EnumAtomKind::String => {
+                                options.push(wrap_string_value_terminal(
+                                    literal_expr(value),
+                                    json_literal_string_merge_config(),
+                                ));
+                            }
+                            EnumAtomKind::Number => options.push(literal_expr(value)),
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn string_value_satisfies_schema(
@@ -10022,6 +10336,40 @@ mod tests {
         });
 
         assert!(schema_to_named_grammar(&schema).is_ok());
+    }
+
+    #[test]
+    fn enum_string_values_with_same_membership_share_terminal() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "left": { "enum": ["a", "b"] },
+                "right": { "enum": ["a", "b"] }
+            },
+            "required": ["left", "right"],
+            "additionalProperties": false
+        });
+
+        let glrm = dump_glrm(schema);
+
+        assert!(glrm.contains("t JSON_ENUM_STRING_0 ::= \"a\\\"\" | \"b\\\"\";"), "{glrm}");
+        assert_eq!(glrm.matches("t JSON_ENUM_STRING_").count(), 1, "{glrm}");
+        assert!(!glrm.contains("\"a\\\"\" | \"b\\\"\" |"), "{glrm}");
+    }
+
+    #[test]
+    fn enum_number_values_are_grouped_separately_from_strings() {
+        let schema = json!({
+            "anyOf": [
+                { "enum": [1, 2, "1", "2"] },
+                { "enum": [1, 2, "1", "2"] }
+            ]
+        });
+
+        let glrm = dump_glrm(schema);
+
+        assert!(glrm.contains("t JSON_ENUM_NUMBER_0 ::= \"1\" | \"2\";"), "{glrm}");
+        assert!(glrm.contains("t JSON_ENUM_STRING_0 ::= \"1\\\"\" | \"2\\\"\";"), "{glrm}");
     }
 
     #[test]
