@@ -49,6 +49,10 @@ fn compile_result_cache_enabled() -> bool {
     )
 }
 
+fn compile_result_cache_enabled_for_source_kind(source_kind: &str) -> bool {
+    source_kind == "glrm" && compile_result_cache_enabled()
+}
+
 fn stable_hash<T: Hash + ?Sized>(value: &T) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     value.hash(&mut hasher);
@@ -153,7 +157,7 @@ fn compile_from_source(
     source_kind: &str,
     parse: NamedGrammarParser,
 ) -> crate::Result<Constraint> {
-    let cache_key = if !compile_profile_enabled() && compile_result_cache_enabled() {
+    let cache_key = if !compile_profile_enabled() && compile_result_cache_enabled_for_source_kind(source_kind) {
         let key = compile_result_cache_key(source, vocab, source_kind);
         if let Some(constraint) = compile_result_cache_get(key, source, source_kind) {
             return Ok(constraint);
