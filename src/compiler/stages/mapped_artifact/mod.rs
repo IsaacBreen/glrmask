@@ -8,7 +8,7 @@ use crate::compiler::constraint_possible_matches::RuntimePossibleMatchesByTermin
 use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::ds::weight::Weight;
 
-pub(crate) use compaction::{CompactProfileStats, CompactReport, InternedRangeCounts};
+pub(crate) use compaction::{CompactReport, InternedRangeCounts};
 
 pub(crate) trait WeightRefs {
     fn weight_refs_mut(&mut self) -> Vec<&mut Weight>;

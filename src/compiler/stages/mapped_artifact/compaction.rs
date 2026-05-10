@@ -5,7 +5,7 @@
 //! placed adjacently. This reduces the number of ranges in the underlying
 //! `RangeMapBlaze` / `RangeSetBlaze` structures.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use rand::{Rng, SeedableRng};
@@ -15,7 +15,6 @@ use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 
 use crate::ds::weight::{Weight, finalize_weight_map, shared_rangeset};
 
-use super::WeightRefs;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 
 // ── public entry point ──────────────────────────────────────────────────────
@@ -1091,4 +1090,3 @@ fn count_unique_storage_for_weight_refs(weights: &[&Weight]) -> UniqueStorageCou
     }
     storage
 }
-

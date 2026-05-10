@@ -431,7 +431,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
 
     let num_terminals = grammar.num_terminals as u32;
     let dwa_started_at = Instant::now();
-    let (mut dwa, terminal_profile) = build_l1_terminal_dwa(
+    let (dwa, terminal_profile) = build_l1_terminal_dwa(
         tokenizer,
         sorted_entries,
         &mut id_map,
