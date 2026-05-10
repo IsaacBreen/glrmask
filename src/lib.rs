@@ -13,6 +13,7 @@ mod vocab;
 
 pub use ds::weight::{
     clear_stale_weights,
+    clear_weight_interners,
     clear_weight_op_caches,
 };
 pub use error::{Error, GlrMaskError, Result};

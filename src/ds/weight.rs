@@ -427,6 +427,7 @@ struct TokenSetOpMemoEntry {
 /// Global generation counter. Incremented by `clear_weight_op_caches()` so
 /// that every thread's thread-local memo detects the invalidation on next access.
 static WEIGHT_OP_MEMO_GENERATION: AtomicU64 = AtomicU64::new(0);
+static WEIGHT_HASH_MEMO_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Default)]
 struct WeightOpMemo {
@@ -541,6 +542,7 @@ struct WeightHashMemoEntry {
 struct WeightHashMemo {
     results: FxHashMap<usize, WeightHashMemoEntry>,
     inserts_since_cleanup: usize,
+    generation: u64,
 }
 
 impl WeightHashMemo {
@@ -552,7 +554,17 @@ impl WeightHashMemo {
         self.inserts_since_cleanup = 0;
     }
 
+    fn clear_all(&mut self) {
+        self.results.clear();
+        self.inserts_since_cleanup = 0;
+    }
+
     fn get_or_insert(&mut self, weight: &Weight) -> u64 {
+        let current_gen = WEIGHT_HASH_MEMO_GENERATION.load(Ordering::Acquire);
+        if self.generation != current_gen {
+            self.clear_all();
+            self.generation = current_gen;
+        }
         self.maybe_cleanup();
         let key = weight.ptr_key();
         if let Some(entry) = self.results.get(&key) {
@@ -604,12 +616,21 @@ pub fn clear_stale_weights() {
     interner_clear_stale();
 }
 
-/// Clear weight-operation memo caches on **all** threads.
+/// Clear all live entries from the global weight/token-set interners.
+///
+/// This is mainly useful for benchmarks that need to prevent interner reuse
+/// from contaminating repeated compile measurements.
+pub fn clear_weight_interners() {
+    interner_clear_all();
+}
+
+/// Clear weight-operation and structural-hash memo caches on **all** threads.
 ///
 /// Increments the global generation counter so that every thread's
 /// thread-local memo is lazily cleared on its next access.
 pub fn clear_weight_op_caches() {
     WEIGHT_OP_MEMO_GENERATION.fetch_add(1, Ordering::Release);
+    WEIGHT_HASH_MEMO_GENERATION.fetch_add(1, Ordering::Release);
 }
 
 fn lookup_memoized_weight_op(kind: WeightOpKind, left: &Weight, right: &Weight) -> Option<Weight> {
@@ -1821,4 +1842,3 @@ impl<'de> Deserialize<'de> for Weight {
         Ok(weight_from_serde_entries(serde_weight.entries))
     }
 }
-

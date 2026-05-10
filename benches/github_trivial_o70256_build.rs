@@ -4,7 +4,7 @@ use std::{
 };
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use glrmask::{Constraint, Vocab};
+use glrmask::{clear_weight_interners, clear_weight_op_caches, Constraint, Vocab};
 
 const GITHUB_TRIVIAL_O70256_GLRM: &str = r#"start start;
 
@@ -77,7 +77,13 @@ fn configure_benchmark_environment() {
     }
 }
 
+fn clear_benchmark_weight_caches() {
+    clear_weight_interners();
+    clear_weight_op_caches();
+}
+
 fn run_one_profiled_build(vocab: &Vocab) {
+    clear_benchmark_weight_caches();
     eprintln!("[bench][github_trivial_o70256_build] diagnostic_build=1 cache_state=warm compile_profile=1");
     unsafe {
         std::env::set_var("GLRMASK_PROFILE_COMPILE", "1");
@@ -114,6 +120,7 @@ fn bench_github_trivial_o70256_build(c: &mut Criterion) {
 
     c.bench_function("github_trivial_o70256_glrmask_build_llama3", |b| {
         b.iter(|| {
+            clear_benchmark_weight_caches();
             let constraint = Constraint::from_glrm_grammar(black_box(GITHUB_TRIVIAL_O70256_GLRM), black_box(&vocab))
                 .expect("Github_trivial---o70256 GLRM grammar should compile");
             black_box(constraint);
