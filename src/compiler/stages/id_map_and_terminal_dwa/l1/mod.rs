@@ -742,9 +742,8 @@ fn build_l1_id_map<'a>(
                 exact_reps as u32,
                 state_representatives,
             ),
-            vocab_tokens: ManyToOneIdMap::from_original_to_internal_with_representatives(
+            vocab_tokens: ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
                 token_original_to_internal,
-                token_ids_sorted.len() as u32,
                 token_ids_sorted,
             ),
         },
@@ -777,9 +776,8 @@ fn build_l1_identity_vocab_map(vocab: &Vocab) -> (ManyToOneIdMap, Arc<L1Identity
 
     let token_identity_map_ms = token_identity_started_at.elapsed().as_secs_f64() * 1000.0;
     (
-        ManyToOneIdMap::from_original_to_internal_with_representatives(
+        ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
             token_original_to_internal,
-            token_ids_sorted.len() as u32,
             token_ids_sorted,
         ),
         order,

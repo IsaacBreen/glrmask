@@ -526,6 +526,10 @@ impl Constraint {
     }
 
     pub(crate) fn rebuild_runtime_caches(&mut self) {
+        let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+        let total_started_at = profile.then(std::time::Instant::now);
+        let primary_started_at = profile.then(std::time::Instant::now);
         let (
             internal_token_buf_masks,
             tokenizer_fast_transitions,
@@ -556,9 +560,11 @@ impl Constraint {
                 fast_transitions,
             )
         };
+        let primary_ms = primary_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
         self.internal_token_buf_masks = internal_token_buf_masks;
         self.word_group_buf_masks = Vec::new();
+        let block_started_at = profile.then(std::time::Instant::now);
         let ((word_group_sparse_masks, word_group_sparse_total_entries, word_group_sparse_max_entries), (byte_group_sparse_masks, _, _)) =
             if rayon::current_num_threads() == 1 {
                 (
@@ -575,6 +581,8 @@ impl Constraint {
         self.byte_group_sparse_masks = byte_group_sparse_masks;
         self.word_group_sparse_total_entries = word_group_sparse_total_entries;
         self.word_group_sparse_max_entries = word_group_sparse_max_entries;
+        let block_ms = block_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let derived_started_at = profile.then(std::time::Instant::now);
         self.all_tokens_buf_mask = self.compute_all_tokens_buf_mask();
         self.heavy_token_dense_masks = self.compute_heavy_token_dense_masks();
         let (flat, offsets) = Self::compute_flat_buf_masks(&self.internal_token_buf_masks);
@@ -604,7 +612,20 @@ impl Constraint {
         self.weight_token_dense_masks = dense_masks;
         self.dwa_fast_transitions = fast_transitions;
         self.tokenizer_fast_transitions = tokenizer_fast_transitions;
+        let derived_ms = derived_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let seed_started_at = profile.then(std::time::Instant::now);
         self.build_seed_dense_masks();
+        let seed_ms = seed_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        if let Some(total_started_at) = total_started_at {
+            eprintln!(
+                "[glrmask/profile][runtime_finalize] primary_ms={:.3} block_masks_ms={:.3} derived_masks_ms={:.3} seed_dense_ms={:.3} total_ms={:.3}",
+                primary_ms,
+                block_ms,
+                derived_ms,
+                seed_ms,
+                total_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
     }
 
     fn compute_tokenizer_fast_transitions(&self) -> FastTokenizerTransitions {
@@ -626,6 +647,29 @@ impl Constraint {
     fn compute_buf_masks(&self) -> Vec<InternalTokenBufMasks> {
         if self.internal_token_to_tokens.is_empty() {
             return Vec::new();
+        }
+
+        if !self.original_token_to_internal.is_empty() {
+            let mut masks = vec![Vec::<(u16, u32)>::new(); self.internal_token_to_tokens.len()];
+            for (original, &internal) in self.original_token_to_internal.iter().enumerate() {
+                if internal == u32::MAX {
+                    continue;
+                }
+                let internal = internal as usize;
+                let Some(mask) = masks.get_mut(internal) else {
+                    continue;
+                };
+                let word = (original as u32 / 32) as u16;
+                let bit = original as u32 % 32;
+                if let Some((last_word, last_mask)) = mask.last_mut() {
+                    if *last_word == word {
+                        *last_mask |= 1u32 << bit;
+                        continue;
+                    }
+                }
+                mask.push((word, 1u32 << bit));
+            }
+            return masks;
         }
 
         if rayon::current_num_threads() == 1 {

@@ -31,6 +31,28 @@ impl ManyToOneIdMap {
         }
     }
 
+    pub fn from_singleton_original_to_internal_with_representatives(
+        original_to_internal: Vec<u32>,
+        representative_original_ids: Vec<u32>,
+    ) -> Self {
+        debug_assert!(representative_original_ids
+            .iter()
+            .enumerate()
+            .all(|(internal, &original)| original_to_internal
+                .get(original as usize)
+                .copied()
+                == Some(internal as u32)));
+        let internal_to_originals = representative_original_ids
+            .iter()
+            .map(|&original| vec![original])
+            .collect();
+        Self {
+            original_to_internal,
+            internal_to_originals,
+            representative_original_ids,
+        }
+    }
+
     pub fn from_original_to_internal_allowing_unmapped(
         original_to_internal: Vec<u32>,
         num_internal: u32,
