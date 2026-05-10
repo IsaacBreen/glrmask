@@ -42,6 +42,10 @@ fn json_string_repeat_chunk() -> usize {
         .unwrap_or(JSON_STRING_REPEAT_CHUNK_DEFAULT)
 }
 
+fn split_bounded_json_string_close_quote() -> bool {
+    env_flag("GLRMASK_JSON_STRING_SPLIT_BOUNDED_CLOSE")
+}
+
 const JSON_STRING_BODY_REGEX: &str =
     r#"([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*""#;
 /// Body chars only, no surrounding quotes.
@@ -4349,10 +4353,7 @@ impl<'a> SchemaCtx<'a> {
         }
         if max <= chunk {
             let upto = self.json_string_char_upto_ref(max);
-            return self.extract_terminal_rule(
-                sequence_or_single(vec![upto, suffix]),
-                "JSON_STRING_CHAR_UPTO_CLOSE",
-            );
+            return self.extract_upto_close_rule(upto, suffix);
         }
 
         let full_chunks = max / chunk;
@@ -4361,10 +4362,7 @@ impl<'a> SchemaCtx<'a> {
 
         let upto_chunk_close = {
             let upto = self.json_string_char_upto_ref(chunk);
-            self.extract_terminal_rule(
-                sequence_or_single(vec![upto, suffix.clone()]),
-                "JSON_STRING_CHAR_UPTO_CLOSE",
-            )
+            self.extract_upto_close_rule(upto, suffix.clone())
         };
 
         if full_chunks == 1 {
@@ -4383,10 +4381,7 @@ impl<'a> SchemaCtx<'a> {
         if remainder > 0 {
             let upto_rem_close = {
                 let upto = self.json_string_char_upto_ref(remainder);
-                self.extract_terminal_rule(
-                    sequence_or_single(vec![upto, suffix]),
-                    "JSON_STRING_CHAR_UPTO_CLOSE",
-                )
+                self.extract_upto_close_rule(upto, suffix)
             };
             options.push(sequence_or_single(vec![
                 self.build_split_json_string_exact_expr(full_chunks * chunk),
@@ -4395,6 +4390,15 @@ impl<'a> SchemaCtx<'a> {
         }
 
         choice_or_single(options)
+    }
+
+    fn extract_upto_close_rule(&mut self, upto: GrammarExpr, suffix: GrammarExpr) -> GrammarExpr {
+        let expr = sequence_or_single(vec![upto, suffix]);
+        if split_bounded_json_string_close_quote() {
+            self.extract_rule(expr, "json_string_char_upto_close")
+        } else {
+            self.extract_terminal_rule(expr, "JSON_STRING_CHAR_UPTO_CLOSE")
+        }
     }
 
     /// Like `build_split_json_string_exact_expr`, but the last terminal chunk
@@ -4618,10 +4622,7 @@ impl<'a> SchemaCtx<'a> {
                 "JSON_STRING_CHAR_EXACT_OPEN",
             );
             let upto_chunk2 = self.json_string_char_upto_ref(chunk);
-            let upto_close = self.extract_terminal_rule(
-                sequence_or_single(vec![upto_chunk2, suffix.clone()]),
-                "JSON_STRING_CHAR_UPTO_CLOSE",
-            );
+            let upto_close = self.extract_upto_close_rule(upto_chunk2, suffix.clone());
             let mut subparts = vec![exact_open];
             if full_chunks > 2 {
                 subparts.push(repeat_expr(
@@ -4641,10 +4642,7 @@ impl<'a> SchemaCtx<'a> {
                 "JSON_STRING_CHAR_EXACT_OPEN",
             );
             let upto_rem = self.json_string_char_upto_ref(remainder);
-            let upto_rem_close = self.extract_terminal_rule(
-                sequence_or_single(vec![upto_rem, suffix.clone()]),
-                "JSON_STRING_CHAR_UPTO_CLOSE",
-            );
+            let upto_rem_close = self.extract_upto_close_rule(upto_rem, suffix.clone());
             let mut subparts = vec![exact_open];
             if full_chunks > 1 {
                 subparts.push(repeat_expr(
@@ -10255,6 +10253,7 @@ mod tests {
     use super::json_schema_uri_mode;
     use super::json_literal_string_merge_config;
     use super::json_string_merge_config;
+    use super::split_bounded_json_string_close_quote;
     use super::JsonSchemaUriMode;
     use super::schema_to_named_grammar;
     use super::string_value_body_regex;
@@ -10425,6 +10424,41 @@ mod tests {
         let pattern_override_cfg = json_string_merge_config(true);
         assert_eq!(pattern_override_cfg.merge_open, false);
         assert_eq!(pattern_override_cfg.merge_close, true);
+    }
+
+    #[test]
+    fn bounded_string_close_split_env_splits_upto_close_terminal() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _split_close = EnvVarGuard::unset("GLRMASK_JSON_STRING_SPLIT_BOUNDED_CLOSE");
+        let schema = json!({
+            "type": "string",
+            "minLength": 32,
+            "maxLength": 94
+        });
+
+        assert!(!split_bounded_json_string_close_quote());
+        let default_glrm = dump_glrm(schema.clone());
+        assert!(
+            default_glrm.contains("t JSON_STRING_CHAR_UPTO_CLOSE_"),
+            "{default_glrm}"
+        );
+        assert!(
+            !default_glrm.contains("nt json_string_char_upto_close_"),
+            "{default_glrm}"
+        );
+
+        let _split_close = EnvVarGuard::set("GLRMASK_JSON_STRING_SPLIT_BOUNDED_CLOSE", "1");
+
+        assert!(split_bounded_json_string_close_quote());
+        let split_glrm = dump_glrm(schema);
+        assert!(
+            split_glrm.contains("nt json_string_char_upto_close_"),
+            "{split_glrm}"
+        );
+        assert!(
+            !split_glrm.contains("t JSON_STRING_CHAR_UPTO_CLOSE_"),
+            "{split_glrm}"
+        );
     }
 
     #[test]
