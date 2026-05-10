@@ -13,6 +13,7 @@ use crate::compiler::constraint_possible_matches as cpm;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar::transforms::prepare_grammar_transforms_only;
+use crate::compiler::stages::equiv_types::MappedArtifact;
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
     SharedClassifyCache,
     classify_terminal_path_lengths,
@@ -36,6 +37,31 @@ fn env_flag_enabled(name: &str) -> bool {
             !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
         })
         .unwrap_or(false)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ParserDwaPossibleMatchesCompactionMode {
+    Disabled,
+    ParserOnly,
+    Both,
+}
+
+fn parser_dwa_possible_matches_compaction_mode() -> ParserDwaPossibleMatchesCompactionMode {
+    match std::env::var("GLRMASK_PARSER_DWA_PM_COMPACTION") {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "" | "0" | "false" | "no" | "off" | "terminal" => {
+                ParserDwaPossibleMatchesCompactionMode::Disabled
+            }
+            "parser" | "only" | "parser_only" | "replace" => {
+                ParserDwaPossibleMatchesCompactionMode::ParserOnly
+            }
+            "1" | "true" | "yes" | "on" | "both" => {
+                ParserDwaPossibleMatchesCompactionMode::Both
+            }
+            _ => ParserDwaPossibleMatchesCompactionMode::Disabled,
+        },
+        Err(_) => ParserDwaPossibleMatchesCompactionMode::Disabled,
+    }
 }
 
 pub(crate) fn compile_profile_summary_enabled() -> bool {
@@ -404,12 +430,17 @@ fn compile_prepared_with_profile(
 
         let mut possible_matches = cpm_result.mapped_possible_matches;
         let cpm_profile = cpm_result.profile;
+        let parser_pm_compaction_mode = parser_dwa_possible_matches_compaction_mode();
 
-        let remap_parser_dwa_started_at = Instant::now();
-        let internal_ids = {
-            reconcile_mapped_weight_artifacts(&mut terminal_dwa, &mut possible_matches)
+        let mut remap_parser_dwa_ms = 0.0;
+        let mut internal_ids = if parser_pm_compaction_mode != ParserDwaPossibleMatchesCompactionMode::ParserOnly {
+            let remap_parser_dwa_started_at = Instant::now();
+            let reconciled = reconcile_mapped_weight_artifacts(&mut terminal_dwa, &mut possible_matches);
+            remap_parser_dwa_ms += elapsed_ms(remap_parser_dwa_started_at);
+            reconciled
+        } else {
+            terminal_dwa.id_map().clone()
         };
-        let remap_parser_dwa_ms = elapsed_ms(remap_parser_dwa_started_at);
 
         let parser_dwa_started_at = Instant::now();
         let parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
@@ -421,7 +452,16 @@ fn compile_prepared_with_profile(
             &internal_ids,
         );
         let parser_dwa_ms = elapsed_ms(parser_dwa_started_at);
-        let parser_dwa_interned_ranges = parser_dwa.stats().interned_ranges;
+        let mut parser_dwa = MappedArtifact::new(parser_dwa, internal_ids.clone());
+
+        if parser_pm_compaction_mode != ParserDwaPossibleMatchesCompactionMode::Disabled {
+            let remap_parser_dwa_started_at = Instant::now();
+            internal_ids = reconcile_mapped_weight_artifacts(&mut parser_dwa, &mut possible_matches);
+            remap_parser_dwa_ms += elapsed_ms(remap_parser_dwa_started_at);
+        }
+
+        let parser_dwa_interned_ranges = parser_dwa.artifact().stats().interned_ranges;
+        let parser_dwa = parser_dwa.into_artifact();
 
         let internal_token_bytes_started_at = Instant::now();
         let internal_token_bytes = cpm::build_internal_token_bytes_from_groups(
