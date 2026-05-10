@@ -13,12 +13,8 @@ use range_set_blaze::RangeSetBlaze;
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::NWA;
-use crate::compiler::stages::compact::{
-    WeightRefs,
-    compact_dwa_dimensions_fast_with_stats,
-    count_interned_ranges_for_weights,
-};
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
+use crate::compiler::stages::mapped_artifact::MappedArtifact;
 use crate::ds::weight::Weight;
 
 use super::types::{LocalIdMapTerminalDwa, TerminalDwaPhaseProfile, compile_profile_enabled};
@@ -152,35 +148,28 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     let det = determinize(&global_nwa)
         .expect("merge terminal NWA determinization failed");
 
-    let mut dwa = if minimize_merged_terminal_dwa_enabled() {
+    let dwa = if minimize_merged_terminal_dwa_enabled() {
         minimize(&det)
     } else {
         det.clone()
     };
-    let before_compact_stats = dwa.stats();
-    let before_compact_range_counts = {
-        let weights = dwa.weight_refs_mut();
-        let weight_refs: Vec<_> = weights.iter().map(|weight| &**weight).collect();
-        count_interned_ranges_for_weights(&weight_refs)
-    };
-    let before_num_tsids = global_id_map.num_tsids();
-    let before_num_tokens = global_id_map.num_internal_tokens();
-    let mut id_map = global_id_map;
+    let mut mapped_dwa = MappedArtifact::new(dwa, global_id_map);
+    let before_compact_stats = mapped_dwa.artifact().stats();
+    let before_compact_range_counts = mapped_dwa.interned_range_counts();
+    let before_num_tsids = mapped_dwa.id_map().num_tsids();
+    let before_num_tokens = mapped_dwa.id_map().num_internal_tokens();
     let compact_enabled = compact_merged_terminal_dwa_enabled();
     let (compact_report, compact_ms) = if compact_enabled {
         let compact_started_at = Instant::now();
-        let compact_report = compact_dwa_dimensions_fast_with_stats(&mut dwa, &mut id_map);
+        let compact_report = mapped_dwa.compact_dimensions_with_stats();
         let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
         (Some(compact_report), compact_ms)
     } else {
         (None, 0.0)
     };
-    let after_compact_stats = dwa.stats();
-    let after_compact_range_counts = {
-        let weights = dwa.weight_refs_mut();
-        let weight_refs: Vec<_> = weights.iter().map(|weight| &**weight).collect();
-        count_interned_ranges_for_weights(&weight_refs)
-    };
+    let after_compact_stats = mapped_dwa.artifact().stats();
+    let after_compact_range_counts = mapped_dwa.interned_range_counts();
+    let (dwa, id_map) = mapped_dwa.into_parts();
 
     if compile_profile_enabled() {
         let profile_stats = compact_report.and_then(|report| report.profile_stats);

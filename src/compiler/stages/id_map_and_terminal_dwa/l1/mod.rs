@@ -314,7 +314,7 @@ impl<'a> Eq for LazyRanges<'a> {}
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
-use crate::compiler::stages::compact::compact_dwa_dimensions_fast_with_stats;
+use crate::compiler::stages::mapped_artifact::MappedArtifact;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::compiler::stages::id_map_and_terminal_dwa::types::LocalIdMapTerminalDwa;
 use crate::ds::weight::{shared_rangeset, Weight};
@@ -447,11 +447,13 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     let tokens_before_compact = id_map.num_internal_tokens();
 
     let compact_started_at = Instant::now();
-    let compact_report = compact_dwa_dimensions_fast_with_stats(&mut dwa, &mut id_map);
+    let mut mapped_dwa = MappedArtifact::new(dwa, id_map);
+    let compact_report = mapped_dwa.compact_dimensions_with_stats();
     let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
-    let dwa_stats_after_compact = dwa.stats();
-    let tsids_after_compact = id_map.num_tsids();
-    let tokens_after_compact = id_map.num_internal_tokens();
+    let dwa_stats_after_compact = mapped_dwa.artifact().stats();
+    let tsids_after_compact = mapped_dwa.id_map().num_tsids();
+    let tokens_after_compact = mapped_dwa.id_map().num_internal_tokens();
+    let (dwa, id_map) = mapped_dwa.into_parts();
     let compact_tsid_shrink_pct = if tsids_before_compact > 0 {
         (tsids_before_compact as f64 - tsids_after_compact as f64) * 100.0
             / tsids_before_compact as f64

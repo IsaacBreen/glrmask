@@ -13,7 +13,6 @@ use crate::compiler::constraint_possible_matches as cpm;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::GLRTable;
 use crate::compiler::grammar::transforms::prepare_grammar_transforms_only;
-use crate::compiler::stages::equiv_types::MappedArtifact;
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
     SharedClassifyCache,
     classify_terminal_path_lengths,
@@ -22,10 +21,10 @@ use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::{
     compute_ever_allowed_follows,
     compute_terminal_coloring,
 };
-use crate::compiler::stages::compact::{
+use crate::compiler::stages::mapped_artifact::{
+    MappedArtifact,
     WeightRefs,
     count_interned_ranges_for_weights,
-    reconcile_mapped_weight_artifacts,
 };
 use crate::compiler::stages::parser_dwa::build_parser_dwa_from_terminal_dwa_with_precomputed_templates;
 use crate::compiler::stages::templates::Templates;
@@ -204,7 +203,7 @@ pub(crate) fn emit_compile_profile_summary(
 }
 
 fn interned_range_count_for_weight_refs(weight_refs: &[&Weight]) -> usize {
-    let counts = count_interned_ranges_for_weights(weight_refs);
+    let counts = count_interned_ranges_for_weights(weight_refs.iter().copied());
     counts.tsid_ranges + counts.token_ranges
 }
 
@@ -470,7 +469,7 @@ fn compile_prepared_with_profile(
         let mut shared_id_reconcile_ms = 0.0;
         let mut internal_ids = if parser_pm_compaction_mode != ParserDwaPossibleMatchesCompactionMode::ParserOnly {
             let shared_id_reconcile_started_at = Instant::now();
-            let reconciled = reconcile_mapped_weight_artifacts(&mut terminal_dwa, &mut possible_matches);
+            let reconciled = terminal_dwa.reconcile_with(&mut possible_matches);
             shared_id_reconcile_ms += elapsed_ms(shared_id_reconcile_started_at);
             reconciled
         } else {
@@ -493,7 +492,7 @@ fn compile_prepared_with_profile(
 
         if parser_pm_compaction_mode != ParserDwaPossibleMatchesCompactionMode::Disabled {
             let shared_id_reconcile_started_at = Instant::now();
-            internal_ids = reconcile_mapped_weight_artifacts(&mut parser_dwa, &mut possible_matches);
+            internal_ids = parser_dwa.reconcile_with(&mut possible_matches);
             shared_id_reconcile_ms += elapsed_ms(shared_id_reconcile_started_at);
         }
 

@@ -117,59 +117,7 @@ pub struct InternalIdMap {
     pub vocab_tokens: ManyToOneIdMap,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct MappedArtifact<T> {
-    artifact: T,
-    id_map: InternalIdMap,
-}
-
-impl<T> MappedArtifact<T> {
-    /// Invariant: `artifact` IDs are expressed in the internal spaces described by `id_map`.
-    pub(crate) fn new(artifact: T, id_map: InternalIdMap) -> Self {
-        Self { artifact, id_map }
-    }
-
-    pub(crate) fn artifact(&self) -> &T {
-        &self.artifact
-    }
-
-    pub(crate) fn artifact_mut(&mut self) -> &mut T {
-        &mut self.artifact
-    }
-
-    pub(crate) fn id_map(&self) -> &InternalIdMap {
-        &self.id_map
-    }
-
-    pub(crate) fn parts_mut(&mut self) -> (&mut T, &mut InternalIdMap) {
-        (&mut self.artifact, &mut self.id_map)
-    }
-
-    pub(crate) fn into_parts(self) -> (T, InternalIdMap) {
-        (self.artifact, self.id_map)
-    }
-
-    pub(crate) fn into_artifact(self) -> T {
-        self.artifact
-    }
-}
-
-impl<A, B> MappedArtifact<(A, B)> {
-    pub(crate) fn split_pair(self) -> (MappedArtifact<A>, MappedArtifact<B>) {
-        let ((left, right), id_map) = self.into_parts();
-        (
-            MappedArtifact::new(left, id_map.clone()),
-            MappedArtifact::new(right, id_map),
-        )
-    }
-}
-
-impl<T> MappedArtifact<Vec<T>> {
-    pub(crate) fn split_vec(self) -> Vec<MappedArtifact<T>> {
-        let (artifacts, id_map) = self.into_parts();
-        artifacts.into_iter().map(|artifact| MappedArtifact::new(artifact, id_map.clone())).collect()
-    }
-}
+pub(crate) use super::mapped_artifact::MappedArtifact;
 
 impl InternalIdMap {
     pub fn num_tsids(&self) -> u32 {
