@@ -59,7 +59,8 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
 
     let input_refs: Vec<&LocalIdMapTerminalDwa> = inputs.iter().collect();
     let id_map_refs: Vec<&InternalIdMap> = input_refs.iter().map(|input| &input.id_map).collect();
-    let global_id_map = build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
+    let (global_id_map, _) =
+        build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
 
     let mut global_nwa = NWA::new(
         global_id_map.num_tsids(),
@@ -113,7 +114,8 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     }
 
     let id_map_refs: Vec<&InternalIdMap> = inputs.iter().map(|input| &input.id_map).collect();
-    let global_id_map = build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
+    let (global_id_map, direct_local_to_global_token_maps) =
+        build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
 
     let mut global_nwa = NWA::new(
         global_id_map.num_tsids(),
@@ -121,22 +123,31 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     );
     let mut global_body = global_nwa.body();
 
-    for input in &inputs {
+    for (input_idx, input) in inputs.iter().enumerate() {
         let mut nwa = input.dwa.to_nwa();
+
         let tsid_map = build_local_to_global_tsid_map(&input.id_map, &global_id_map);
-        let token_map = build_local_to_global_token_map(&input.id_map, &global_id_map);
+
+        let token_map = direct_local_to_global_token_maps
+            .as_ref()
+            .and_then(|maps| maps.get(input_idx))
+            .map(|direct_map| build_direct_local_to_global_token_map(direct_map))
+            .unwrap_or_else(|| build_local_to_global_token_map(&input.id_map, &global_id_map));
+
         remap_nwa_with_maps(
             &mut nwa,
             &tsid_map,
             &token_map,
             global_id_map.num_tsids() as usize,
         );
+
         global_body = global_nwa.union_in_place(&nwa, &global_body);
     }
     global_nwa.set_start_states(global_body.start_states);
 
     let det = determinize(&global_nwa)
         .expect("merge terminal NWA determinization failed");
+
     let mut dwa = if minimize_merged_terminal_dwa_enabled() {
         minimize(&det)
     } else {
@@ -191,7 +202,7 @@ fn build_unified_global_id_map(
     inputs: &[&InternalIdMap],
     num_tokenizer_states: usize,
     max_token_id: u32,
-) -> InternalIdMap {
+) -> (InternalIdMap, Option<Vec<Vec<u32>>>) {
     let mut composite_to_class: HashMap<Vec<u32>, u32> = HashMap::new();
     let mut state_o2i = vec![0u32; num_tokenizer_states];
     let mut state_i2o: Vec<Vec<u32>> = Vec::new();
@@ -214,6 +225,26 @@ fn build_unified_global_id_map(
 
     reorder_classes(composite_to_class, &mut state_o2i, &mut state_i2o, &mut state_reps);
 
+    let (vocab_tokens, direct_local_to_global_token_maps) =
+        build_unified_global_token_id_map_disjoint(inputs, max_token_id)
+            .unwrap_or_else(|| (build_unified_global_token_id_map_generic(inputs, max_token_id), None));
+    (
+        InternalIdMap {
+            tokenizer_states: ManyToOneIdMap {
+                original_to_internal: state_o2i,
+                internal_to_originals: state_i2o,
+                representative_original_ids: state_reps,
+            },
+            vocab_tokens,
+        },
+        direct_local_to_global_token_maps,
+    )
+}
+
+fn build_unified_global_token_id_map_generic(
+    inputs: &[&InternalIdMap],
+    max_token_id: u32,
+) -> ManyToOneIdMap {
     let mut token_composite_to_class: HashMap<Vec<u32>, u32> = HashMap::new();
     let mut token_o2i = vec![u32::MAX; max_token_id as usize + 1];
     let mut token_i2o: Vec<Vec<u32>> = Vec::new();
@@ -255,18 +286,78 @@ fn build_unified_global_id_map(
         u32::MAX,
     );
 
-    InternalIdMap {
-        tokenizer_states: ManyToOneIdMap {
-            original_to_internal: state_o2i,
-            internal_to_originals: state_i2o,
-            representative_original_ids: state_reps,
-        },
-        vocab_tokens: ManyToOneIdMap {
+    ManyToOneIdMap {
+        original_to_internal: token_o2i,
+        internal_to_originals: token_i2o,
+        representative_original_ids: token_reps,
+    }
+}
+
+fn build_unified_global_token_id_map_disjoint(
+    inputs: &[&InternalIdMap],
+    max_token_id: u32,
+) -> Option<(ManyToOneIdMap, Option<Vec<Vec<u32>>>)> {
+    let mut owner_by_token = vec![usize::MAX; max_token_id as usize + 1];
+
+    for (input_idx, input) in inputs.iter().enumerate() {
+        for (token_id, &local_class) in input.vocab_tokens.original_to_internal.iter().enumerate() {
+            if local_class == u32::MAX {
+                continue;
+            }
+            let owner = &mut owner_by_token[token_id];
+            if *owner != usize::MAX && *owner != input_idx {
+                return None;
+            }
+            *owner = input_idx;
+        }
+    }
+
+    let mut token_o2i = vec![u32::MAX; max_token_id as usize + 1];
+    let mut token_i2o: Vec<Vec<u32>> = Vec::new();
+    let mut token_reps: Vec<u32> = Vec::new();
+    let mut direct_local_to_global_token_maps = Vec::with_capacity(inputs.len());
+
+    for input in inputs {
+        let mut local_to_global = vec![u32::MAX; input.num_internal_tokens() as usize];
+
+        for (local_class, originals) in input.vocab_tokens.internal_to_originals.iter().enumerate() {
+            if originals.is_empty() {
+                continue;
+            }
+
+            let global_class = token_i2o.len() as u32;
+            local_to_global[local_class] = global_class;
+            token_reps.push(input.vocab_tokens.representative_original_ids[local_class]);
+            token_i2o.push(originals.clone());
+            for &token_id in originals {
+                token_o2i[token_id as usize] = global_class;
+            }
+        }
+
+        direct_local_to_global_token_maps.push(local_to_global);
+    }
+
+    Some((
+        ManyToOneIdMap {
             original_to_internal: token_o2i,
             internal_to_originals: token_i2o,
             representative_original_ids: token_reps,
         },
-    }
+        Some(direct_local_to_global_token_maps),
+    ))
+}
+
+fn build_direct_local_to_global_token_map(local_to_global: &[u32]) -> Vec<Vec<u32>> {
+    local_to_global
+        .iter()
+        .map(|&global_class| {
+            if global_class == u32::MAX {
+                Vec::new()
+            } else {
+                vec![global_class]
+            }
+        })
+        .collect()
 }
 
 fn reorder_classes(
