@@ -115,6 +115,10 @@ impl<T: WeightRefs> MappedArtifact<T> {
         (self.artifact, self.id_map)
     }
 
+    pub(crate) fn split(self) -> (T, InternalIdMap) {
+        self.into_parts()
+    }
+
     pub(crate) fn into_artifact(self) -> T {
         self.artifact
     }
@@ -152,13 +156,23 @@ impl<T: WeightRefs> MappedArtifact<T> {
         left_id_map.clone()
     }
 
-    pub(crate) fn reconcile_pair<U>(mut self, mut other: MappedArtifact<U>) -> MappedArtifact<(T, U)>
-    where
-        U: WeightRefs,
-    {
+}
+
+impl<T, U> From<(MappedArtifact<T>, MappedArtifact<U>)> for MappedArtifact<(T, U)>
+where
+    T: WeightRefs,
+    U: WeightRefs,
+{
+    fn from((mut left, mut right): (MappedArtifact<T>, MappedArtifact<U>)) -> Self {
+        if same_internal_id_maps(left.id_map(), right.id_map()) {
+            let (left_artifact, id_map) = left.into_parts();
+            let right_artifact = right.into_artifact();
+            return MappedArtifact::new((left_artifact, right_artifact), id_map);
+        }
+
         let common_id_map = {
-            let (left_artifact, left_id_map) = self.parts_mut();
-            let (right_artifact, right_id_map) = other.parts_mut();
+            let (left_artifact, left_id_map) = left.parts_mut();
+            let (right_artifact, right_id_map) = right.parts_mut();
             let mut left_weights = left_artifact.weight_refs_mut();
             let mut right_weights = right_artifact.weight_refs_mut();
             reconcile::reconcile_weight_id_maps(
@@ -169,27 +183,13 @@ impl<T: WeightRefs> MappedArtifact<T> {
             );
             left_id_map.clone()
         };
-        MappedArtifact::new((self.into_artifact(), other.into_artifact()), common_id_map)
+        MappedArtifact::new((left.into_artifact(), right.into_artifact()), common_id_map)
     }
+}
 
-    pub(crate) fn pair_assuming_same_id_map<U>(self, other: MappedArtifact<U>) -> MappedArtifact<(T, U)>
-    where
-        U: WeightRefs,
-    {
-        let (left, left_id_map) = self.into_parts();
-        let (right, right_id_map) = other.into_parts();
-        debug_assert_eq!(
-            left_id_map.tokenizer_states.original_to_internal,
-            right_id_map.tokenizer_states.original_to_internal,
-            "MappedArtifact::pair_assuming_same_id_map called with mismatched TSID maps",
-        );
-        debug_assert_eq!(
-            left_id_map.vocab_tokens.original_to_internal,
-            right_id_map.vocab_tokens.original_to_internal,
-            "MappedArtifact::pair_assuming_same_id_map called with mismatched token maps",
-        );
-        MappedArtifact::new((left, right), left_id_map)
-    }
+fn same_internal_id_maps(left: &InternalIdMap, right: &InternalIdMap) -> bool {
+    left.tokenizer_states.original_to_internal == right.tokenizer_states.original_to_internal
+        && left.vocab_tokens.original_to_internal == right.vocab_tokens.original_to_internal
 }
 
 impl<A, B> MappedArtifact<(A, B)>
