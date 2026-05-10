@@ -79,7 +79,7 @@ pub struct Constraint {
     #[serde(default)]
     pub(crate) internal_token_to_tokens: Vec<Vec<u32>>,
     pub(crate) eos_token_id: Option<u32>,
-    pub(crate) token_bytes: BTreeMap<u32, Vec<u8>>,
+    pub(crate) token_bytes: Arc<BTreeMap<u32, Vec<u8>>>,
     #[serde(default)]
     pub(crate) internal_token_bytes: BTreeMap<u32, Vec<u8>>,
     #[serde(skip)]
@@ -526,23 +526,51 @@ impl Constraint {
     }
 
     pub(crate) fn rebuild_runtime_caches(&mut self) {
-        let ((internal_token_buf_masks, tokenizer_fast_transitions), ((dense_mask_words, dense_masks), fast_transitions)) = rayon::join(
-            || rayon::join(
-                || self.compute_buf_masks(),
-                || self.compute_tokenizer_fast_transitions(),
-            ),
-            || rayon::join(
-                || self.compute_dense_token_masks(),
-                || self.compute_fast_transitions(),
-            ),
-        );
+        let (
+            internal_token_buf_masks,
+            tokenizer_fast_transitions,
+            (dense_mask_words, dense_masks),
+            fast_transitions,
+        ) = if rayon::current_num_threads() == 1 {
+            (
+                self.compute_buf_masks(),
+                self.compute_tokenizer_fast_transitions(),
+                self.compute_dense_token_masks(),
+                self.compute_fast_transitions(),
+            )
+        } else {
+            let ((internal_token_buf_masks, tokenizer_fast_transitions), ((dense_mask_words, dense_masks), fast_transitions)) = rayon::join(
+                || rayon::join(
+                    || self.compute_buf_masks(),
+                    || self.compute_tokenizer_fast_transitions(),
+                ),
+                || rayon::join(
+                    || self.compute_dense_token_masks(),
+                    || self.compute_fast_transitions(),
+                ),
+            );
+            (
+                internal_token_buf_masks,
+                tokenizer_fast_transitions,
+                (dense_mask_words, dense_masks),
+                fast_transitions,
+            )
+        };
 
         self.internal_token_buf_masks = internal_token_buf_masks;
         self.word_group_buf_masks = Vec::new();
-        let ((word_group_sparse_masks, word_group_sparse_total_entries, word_group_sparse_max_entries), (byte_group_sparse_masks, _, _)) = rayon::join(
-            || self.compute_token_block_sparse_masks(64),
-            || self.compute_token_block_sparse_masks(8),
-        );
+        let ((word_group_sparse_masks, word_group_sparse_total_entries, word_group_sparse_max_entries), (byte_group_sparse_masks, _, _)) =
+            if rayon::current_num_threads() == 1 {
+                (
+                    self.compute_token_block_sparse_masks(64),
+                    self.compute_token_block_sparse_masks(8),
+                )
+            } else {
+                rayon::join(
+                    || self.compute_token_block_sparse_masks(64),
+                    || self.compute_token_block_sparse_masks(8),
+                )
+            };
         self.word_group_sparse_masks = word_group_sparse_masks;
         self.byte_group_sparse_masks = byte_group_sparse_masks;
         self.word_group_sparse_total_entries = word_group_sparse_total_entries;
@@ -580,17 +608,19 @@ impl Constraint {
     }
 
     fn compute_tokenizer_fast_transitions(&self) -> FastTokenizerTransitions {
-        (0..self.tokenizer.num_states())
-            .into_par_iter()
-            .map(|state| {
+        let build = |state| {
                 let dfa_state = &self.tokenizer.dfa.states()[state as usize];
                 let mut flat = Box::new([u32::MAX; 256]);
                 for (byte, &target) in dfa_state.transitions.iter() {
                     flat[byte as usize] = target;
                 }
                 flat
-            })
-            .collect()
+            };
+        if rayon::current_num_threads() == 1 {
+            (0..self.tokenizer.num_states()).map(build).collect()
+        } else {
+            (0..self.tokenizer.num_states()).into_par_iter().map(build).collect()
+        }
     }
 
     fn compute_buf_masks(&self) -> Vec<InternalTokenBufMasks> {
@@ -598,10 +628,17 @@ impl Constraint {
             return Vec::new();
         }
 
-        self.internal_token_to_tokens
-            .par_iter()
-            .map(|originals| Self::build_internal_token_buf_mask(originals))
-            .collect()
+        if rayon::current_num_threads() == 1 {
+            self.internal_token_to_tokens
+                .iter()
+                .map(|originals| Self::build_internal_token_buf_mask(originals))
+                .collect()
+        } else {
+            self.internal_token_to_tokens
+                .par_iter()
+                .map(|originals| Self::build_internal_token_buf_mask(originals))
+                .collect()
+        }
     }
 
     fn compute_token_block_sparse_masks(&self, block_size: usize) -> (Vec<InternalTokenBufMasks>, usize, usize) {
@@ -609,9 +646,7 @@ impl Constraint {
             return (Vec::new(), 0, 0);
         }
         let n_groups = self.internal_token_buf_masks.len().div_ceil(block_size);
-        let groups: Vec<InternalTokenBufMasks> = (0..n_groups)
-            .into_par_iter()
-            .map(|group_id| {
+        let build_group = |group_id: usize| {
                 let group_start = group_id * block_size;
                 let group_end = (group_start + block_size).min(self.internal_token_buf_masks.len());
                 let mut combined = BTreeMap::<u16, u32>::new();
@@ -621,8 +656,12 @@ impl Constraint {
                     }
                 }
                 combined.into_iter().collect()
-            })
-            .collect();
+            };
+        let groups: Vec<InternalTokenBufMasks> = if rayon::current_num_threads() == 1 {
+            (0..n_groups).map(build_group).collect()
+        } else {
+            (0..n_groups).into_par_iter().map(build_group).collect()
+        };
         let total_entries = groups.iter().map(Vec::len).sum();
         let max_entries = groups.iter().map(Vec::len).max().unwrap_or(0);
         (groups, total_entries, max_entries)
@@ -653,9 +692,7 @@ impl Constraint {
         // With buf in L1 cache (≤16KB), sparse random writes are fast,
         // so we only go dense when entries exceed half the buffer size.
         let threshold = buf_words / 4;
-        self.internal_token_buf_masks
-            .par_iter()
-            .map(|sparse| {
+        let build = |sparse: &InternalTokenBufMasks| {
                 if sparse.len() > threshold {
                     let mut dense = vec![0u32; buf_words];
                     for &(word_idx, mask) in sparse {
@@ -665,8 +702,12 @@ impl Constraint {
                 } else {
                     None
                 }
-            })
-            .collect()
+            };
+        if rayon::current_num_threads() == 1 {
+            self.internal_token_buf_masks.iter().map(build).collect()
+        } else {
+            self.internal_token_buf_masks.par_iter().map(build).collect()
+        }
     }
 
     /// Flatten all per-token sparse entries into a single contiguous array
@@ -708,24 +749,25 @@ impl Constraint {
         };
 
         let mut dense = vec![None; max_token_id as usize + 1];
-        for (&token_id, bytes) in &self.token_bytes {
+        for (&token_id, bytes) in self.token_bytes.iter() {
             dense[token_id as usize] = Some(bytes.clone().into_boxed_slice());
         }
         dense
     }
 
     fn compute_fast_transitions(&self) -> FastDwaTransitions {
-        self.parser_dwa
-            .states()
-            .par_iter()
-            .map(|state| {
+        let build = |state: &crate::automata::weighted_u32::dwa::DWAState| {
                 state
                     .transitions
                     .iter()
                     .map(|(&label, (target, weight))| (label, (*target, weight.clone())))
                     .collect()
-            })
-            .collect()
+            };
+        if rayon::current_num_threads() == 1 {
+            self.parser_dwa.states().iter().map(build).collect()
+        } else {
+            self.parser_dwa.states().par_iter().map(build).collect()
+        }
     }
 
     fn compute_dense_token_masks(&self) -> (usize, DenseWeightMaskCache) {
@@ -744,15 +786,17 @@ impl Constraint {
             }
         }
 
-        let dense_masks: DenseWeightMaskCache = unique_sets
-            .into_par_iter()
-            .map(|(key, token_set)| {
+        let build = |(key, token_set): (usize, &RangeSetBlaze<u32>)| {
                 (
                     key,
                     Self::dense_words_from_internal_set_with_words(token_set, internal_token_dense_words),
                 )
-            })
-            .collect();
+            };
+        let dense_masks: DenseWeightMaskCache = if rayon::current_num_threads() == 1 {
+            unique_sets.into_iter().map(build).collect()
+        } else {
+            unique_sets.into_par_iter().map(build).collect()
+        };
 
         (internal_token_dense_words, dense_masks)
     }

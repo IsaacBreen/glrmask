@@ -415,7 +415,7 @@ fn get_ordered_vocab_trie_artifacts_for_vocab(
 ) -> (OrderedVocabTrieArtifacts, OrderedVocabCacheProfile) {
     let capacity = ordered_vocab_cache_capacity();
     if !ordered_vocab_cache_enabled() || capacity == 0 {
-        return get_ordered_vocab_trie_artifacts(&vocab.entries);
+        return get_ordered_vocab_trie_artifacts(&*vocab.entries);
     }
 
     let probe_started_at = Instant::now();
@@ -435,7 +435,7 @@ fn get_ordered_vocab_trie_artifacts_for_vocab(
     }
 
     let ordered_vocab_started_at = Instant::now();
-    let ordered_vocab = Arc::new(build_ordered_vocab(&vocab.entries));
+    let ordered_vocab = Arc::new(build_ordered_vocab(&*vocab.entries));
     let ordered_vocab_build_ns = ordered_vocab_started_at.elapsed().as_nanos();
     let trie_started_at = Instant::now();
     let trie = Arc::new(build_ordered_vocab_prefix_tree(ordered_vocab.as_ref()));

@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
+use rustc_hash::FxHashMap;
 
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::weight::{Weight, finalize_weight_map, shared_rangeset};
@@ -73,6 +74,15 @@ fn build_common_many_to_one_id_map(
     project: impl Fn(&InternalIdMap) -> &ManyToOneIdMap,
     allow_unmapped: bool,
 ) -> ManyToOneIdMap {
+    if let [left, right] = inputs {
+        return build_common_many_to_one_id_map_pair(
+            project(left),
+            project(right),
+            num_originals,
+            allow_unmapped,
+        );
+    }
+
     let mut composite_to_class: HashMap<Vec<u32>, u32> = HashMap::new();
     let mut original_to_internal = vec![u32::MAX; num_originals];
     let mut internal_to_originals: Vec<Vec<u32>> = Vec::new();
@@ -118,6 +128,95 @@ fn build_common_many_to_one_id_map(
     }
 }
 
+fn build_common_many_to_one_id_map_pair(
+    left: &ManyToOneIdMap,
+    right: &ManyToOneIdMap,
+    num_originals: usize,
+    allow_unmapped: bool,
+) -> ManyToOneIdMap {
+    let mut composite_to_class: FxHashMap<(u32, u32), u32> = FxHashMap::default();
+    let mut original_to_internal = vec![u32::MAX; num_originals];
+    let mut internal_to_originals: Vec<Vec<u32>> = Vec::new();
+    let mut representatives: Vec<u32> = Vec::new();
+
+    for (original, slot) in original_to_internal.iter_mut().enumerate() {
+        let left_internal = left
+            .original_to_internal
+            .get(original)
+            .copied()
+            .unwrap_or(u32::MAX);
+        let right_internal = right
+            .original_to_internal
+            .get(original)
+            .copied()
+            .unwrap_or(u32::MAX);
+        if allow_unmapped && left_internal == u32::MAX && right_internal == u32::MAX {
+            continue;
+        }
+
+        let composite = (left_internal, right_internal);
+        let next_id = internal_to_originals.len() as u32;
+        let class_id = *composite_to_class.entry(composite).or_insert_with(|| {
+            internal_to_originals.push(Vec::new());
+            representatives.push(original as u32);
+            next_id
+        });
+        *slot = class_id;
+        internal_to_originals[class_id as usize].push(original as u32);
+    }
+
+    reorder_common_pair_classes(
+        composite_to_class,
+        &mut original_to_internal,
+        &mut internal_to_originals,
+        &mut representatives,
+        allow_unmapped,
+    );
+
+    ManyToOneIdMap {
+        original_to_internal,
+        internal_to_originals,
+        representative_original_ids: representatives,
+    }
+}
+
+fn reorder_common_pair_classes(
+    composite_to_class: FxHashMap<(u32, u32), u32>,
+    original_to_internal: &mut [u32],
+    internal_to_originals: &mut Vec<Vec<u32>>,
+    representatives: &mut Vec<u32>,
+    allow_unmapped: bool,
+) {
+    let num_classes = internal_to_originals.len();
+    if num_classes <= 1 {
+        return;
+    }
+
+    let mut sorted: Vec<((u32, u32), u32)> = composite_to_class.into_iter().collect();
+    sorted.sort_unstable_by_key(|(composite, _)| *composite);
+
+    let mut old_to_new = vec![0u32; num_classes];
+    for (new_id, (_, old_id)) in sorted.iter().enumerate() {
+        old_to_new[*old_id as usize] = new_id as u32;
+    }
+
+    for value in original_to_internal.iter_mut() {
+        if *value == u32::MAX && allow_unmapped {
+            continue;
+        }
+        *value = old_to_new[*value as usize];
+    }
+
+    let mut new_internal_to_originals = vec![Vec::new(); num_classes];
+    let mut new_representatives = vec![u32::MAX; num_classes];
+    for (new_id, (_, old_id)) in sorted.iter().enumerate() {
+        new_internal_to_originals[new_id] = std::mem::take(&mut internal_to_originals[*old_id as usize]);
+        new_representatives[new_id] = representatives[*old_id as usize];
+    }
+    *internal_to_originals = new_internal_to_originals;
+    *representatives = new_representatives;
+}
+
 fn reorder_common_classes(
     composite_to_class: HashMap<Vec<u32>, u32>,
     original_to_internal: &mut [u32],
@@ -160,7 +259,7 @@ fn build_local_to_common_tsid_map(
     common_id_map: &InternalIdMap,
 ) -> Vec<Vec<u32>> {
     let num_local = local_id_map.num_tsids() as usize;
-    let mut local_to_common = vec![BTreeSet::new(); num_local];
+    let mut local_to_common = vec![Vec::new(); num_local];
 
     for (state, &local_tsid) in local_id_map
         .tokenizer_states
@@ -180,13 +279,10 @@ fn build_local_to_common_tsid_map(
         if common_tsid == u32::MAX {
             continue;
         }
-        local_to_common[local_tsid as usize].insert(common_tsid);
+        local_to_common[local_tsid as usize].push(common_tsid);
     }
 
-    local_to_common
-        .into_iter()
-        .map(|ids| ids.into_iter().collect())
-        .collect()
+    sort_dedup_local_to_common(local_to_common)
 }
 
 fn build_local_to_common_token_map(
@@ -194,7 +290,7 @@ fn build_local_to_common_token_map(
     common_id_map: &InternalIdMap,
 ) -> Vec<Vec<u32>> {
     let num_local = local_id_map.num_internal_tokens() as usize;
-    let mut local_to_common = vec![BTreeSet::new(); num_local];
+    let mut local_to_common = vec![Vec::new(); num_local];
 
     for (original, &local_token) in local_id_map.vocab_tokens.original_to_internal.iter().enumerate() {
         if local_token == u32::MAX {
@@ -209,13 +305,21 @@ fn build_local_to_common_token_map(
         if common_token == u32::MAX {
             continue;
         }
-        local_to_common[local_token as usize].insert(common_token);
+        local_to_common[local_token as usize].push(common_token);
     }
 
+    sort_dedup_local_to_common(local_to_common)
+}
+
+fn sort_dedup_local_to_common(mut local_to_common: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
+    for ids in &mut local_to_common {
+        if ids.len() <= 1 {
+            continue;
+        }
+        ids.sort_unstable();
+        ids.dedup();
+    }
     local_to_common
-        .into_iter()
-        .map(|ids| ids.into_iter().collect())
-        .collect()
 }
 
 fn remap_weights_with_maps(

@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Vocab {
-    pub entries: BTreeMap<u32, Vec<u8>>,
+    pub entries: Arc<BTreeMap<u32, Vec<u8>>>,
     pub eos_token_id: Option<u32>,
     #[serde(skip)]
     compiler_cache: VocabCompilerCache,
@@ -44,7 +44,7 @@ impl fmt::Debug for Vocab {
 impl Clone for Vocab {
     fn clone(&self) -> Self {
         Self {
-            entries: self.entries.clone(),
+            entries: Arc::clone(&self.entries),
             eos_token_id: self.eos_token_id,
             compiler_cache: VocabCompilerCache::default(),
         }
@@ -65,7 +65,7 @@ impl Vocab {
         });
 
         Self {
-            entries,
+            entries: Arc::new(entries),
             eos_token_id,
             compiler_cache: VocabCompilerCache::default(),
         }

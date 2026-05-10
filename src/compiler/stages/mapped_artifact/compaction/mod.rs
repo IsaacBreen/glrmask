@@ -702,13 +702,15 @@ fn apply_permutations_to_weight_refs(
 ) {
     let perm_context = PermutationContext::new(tsid_perm, token_perm);
     let token_cache = build_global_permuted_token_cache(unique_weights, &perm_context);
-    let weight_entries: Vec<(usize, Weight)> = unique_weights
-        .par_iter()
-        .map(|weight| {
+    let permute_entry = |weight: &Weight| {
             let new_weight = permute_weight_with_cache(weight, &perm_context, &token_cache);
             (Arc::as_ptr(&weight.0) as usize, new_weight)
-        })
-        .collect();
+        };
+    let weight_entries: Vec<(usize, Weight)> = if rayon::current_num_threads() == 1 {
+        unique_weights.iter().map(permute_entry).collect()
+    } else {
+        unique_weights.par_iter().map(permute_entry).collect()
+    };
     let weight_map: HashMap<usize, Weight> = weight_entries.into_iter().collect();
 
     for weight in weights.iter_mut() {
@@ -802,15 +804,17 @@ fn build_global_permuted_token_cache(
         }
     }
 
-    token_sets
-        .par_iter()
-        .map(|(ptr, token_set)| {
+    let permute_token_set = |(ptr, token_set): &(usize, Arc<RangeSetBlaze<u32>>)| {
             (
                 *ptr,
                 permute_rangeset_with_runs(token_set, &perm_context.token_runs),
             )
-        })
-        .collect()
+        };
+    if rayon::current_num_threads() == 1 {
+        token_sets.iter().map(permute_token_set).collect()
+    } else {
+        token_sets.par_iter().map(permute_token_set).collect()
+    }
 }
 
 fn permutation_runs(perm: &[u32]) -> Vec<PermRun> {

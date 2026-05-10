@@ -164,7 +164,7 @@ impl<'a> ConstraintState<'a> {
         let mut best_match = None;
         let mut blocked_by_longer_token = false;
 
-        for (&token_id, token_bytes) in &self.constraint.token_bytes {
+        for (&token_id, token_bytes) in self.constraint.token_bytes.iter() {
             if token_bytes.is_empty() {
                 continue;
             }

@@ -190,7 +190,7 @@ fn prepare_equivalence_inputs<'a>(
     let max_token_id = vocab.max_token_id();
     let mut token_bytes: Vec<&[u8]> = Vec::with_capacity(vocab.len());
     let mut token_ids: Vec<u32> = Vec::with_capacity(vocab.len());
-    for (&tid, bytes) in &vocab.entries {
+    for (&tid, bytes) in vocab.entries.iter() {
         token_ids.push(tid);
         token_bytes.push(bytes.as_slice());
     }

@@ -451,7 +451,7 @@ fn compute_token_l2p_map(
         build_byte_terminal_reverse_index(bytesets, num_terminals);
 
     let mut token_l2p_map = BTreeMap::<u32, BitSet>::new();
-    for (&token_id, bytes) in &vocab.entries {
+    for (&token_id, bytes) in vocab.entries.iter() {
         token_l2p_map.insert(
             token_id,
             token_l2p_terminals(
@@ -468,7 +468,7 @@ fn compute_token_l2p_map(
 
 pub(crate) fn partition_vocab_char_type_tokens(vocab: &Vocab) -> Vec<Vec<u32>> {
     let mut partitions: Vec<Vec<u32>> = (0..7).map(|_| Vec::new()).collect();
-    for (&token_id, bytes) in &vocab.entries {
+    for (&token_id, bytes) in vocab.entries.iter() {
         let idx = classify_vocab_char_type(bytes) as usize;
         partitions[idx].push(token_id);
     }

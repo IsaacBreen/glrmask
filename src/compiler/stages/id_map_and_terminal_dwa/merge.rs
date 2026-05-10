@@ -154,24 +154,35 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
         det.clone()
     };
     let mut mapped_dwa = MappedArtifact::new(dwa, global_id_map);
-    let before_compact_stats = mapped_dwa.artifact().stats();
-    let before_compact_range_counts = mapped_dwa.interned_range_counts();
-    let before_num_tsids = mapped_dwa.id_map().num_tsids();
-    let before_num_tokens = mapped_dwa.id_map().num_internal_tokens();
+    let profiling = compile_profile_enabled();
+    let before_compact_stats = profiling.then(|| mapped_dwa.artifact().stats());
+    let before_compact_range_counts = profiling.then(|| mapped_dwa.interned_range_counts());
+    let before_num_tsids = profiling.then(|| mapped_dwa.id_map().num_tsids());
+    let before_num_tokens = profiling.then(|| mapped_dwa.id_map().num_internal_tokens());
     let compact_enabled = compact_merged_terminal_dwa_enabled();
     let (compact_report, compact_ms) = if compact_enabled {
         let compact_started_at = Instant::now();
-        let compact_report = mapped_dwa.compact_dimensions_fast_with_stats();
+        let compact_report = if profiling {
+            mapped_dwa.compact_dimensions_fast_with_stats()
+        } else {
+            mapped_dwa.compact_dimensions_fast()
+        };
         let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
         (Some(compact_report), compact_ms)
     } else {
         (None, 0.0)
     };
-    let after_compact_stats = mapped_dwa.artifact().stats();
-    let after_compact_range_counts = mapped_dwa.interned_range_counts();
+    let after_compact_stats = profiling.then(|| mapped_dwa.artifact().stats());
+    let after_compact_range_counts = profiling.then(|| mapped_dwa.interned_range_counts());
     let (dwa, id_map) = mapped_dwa.into_parts();
 
-    if compile_profile_enabled() {
+    if profiling {
+        let before_compact_stats = before_compact_stats.unwrap();
+        let before_compact_range_counts = before_compact_range_counts.unwrap();
+        let before_num_tsids = before_num_tsids.unwrap();
+        let before_num_tokens = before_num_tokens.unwrap();
+        let after_compact_stats = after_compact_stats.unwrap();
+        let after_compact_range_counts = after_compact_range_counts.unwrap();
         let profile_stats = compact_report.and_then(|report| report.profile_stats);
         eprintln!(
             "[glrmask/profile][merged_terminal_dwa] minimize_enabled={} compact_enabled={} states_before_compact={} transitions_before_compact={} interned_ranges_before_compact={} token_ranges_before_compact={} states_after_compact={} transitions_after_compact={} interned_ranges_after_compact={} token_ranges_after_compact={} tsids_before_compact={} tsids_after_compact={} tokens_before_compact={} tokens_after_compact={} compact_ms={:.3}",

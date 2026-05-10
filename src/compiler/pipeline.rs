@@ -690,7 +690,7 @@ fn compile_prepared_with_profile(
         profile.parser_pm_joint_interned_ranges = parser_pm_joint_interned_ranges;
 
         let finalize_started_at = Instant::now();
-        let token_bytes = vocab.entries.clone();
+        let token_bytes = std::sync::Arc::clone(&vocab.entries);
         let constraint = finalize_constraint(Constraint {
             parser_dwa,
             table,
