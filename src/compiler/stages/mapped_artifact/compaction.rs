@@ -761,18 +761,30 @@ fn exact_max_adjacency_layout_branch_and_bound(
         return (0..num_groups).collect();
     }
 
-    let mut max_edge = 0usize;
     let mut weighted_degree = vec![0usize; num_groups];
     for left in 0..num_groups {
         for right in 0..num_groups {
             let weight = adjacency[left * num_groups + right];
-            max_edge = max_edge.max(weight);
             weighted_degree[left] += weight;
         }
     }
 
     let mut best_layout = greedy_adjacency_layout(adjacency, &weighted_degree, num_groups);
+    improve_layout_2opt(adjacency, &mut best_layout, num_groups);
+    improve_layout_reinsert(adjacency, &mut best_layout, num_groups);
     let mut best_score = path_score(adjacency, &best_layout, num_groups);
+    let initial_upper_bound =
+        remaining_path_score_upper_bound(adjacency, num_groups, None, &vec![false; num_groups]);
+    eprintln!(
+        "[glrmask/profile][globally_exact_compaction_bnb] groups={num_groups} incumbent_score={best_score} initial_upper_bound={initial_upper_bound}"
+    );
+    if best_score == initial_upper_bound {
+        eprintln!(
+            "[glrmask/profile][globally_exact_compaction_bnb] groups={num_groups} proven=upper_bound_tight"
+        );
+        return best_layout;
+    }
+
     let mut used = vec![false; num_groups];
     let mut path = Vec::with_capacity(num_groups);
     let mut starts: Vec<usize> = (0..num_groups).collect();
@@ -784,7 +796,6 @@ fn exact_max_adjacency_layout_branch_and_bound(
         exact_layout_branch_and_bound_dfs(
             adjacency,
             num_groups,
-            max_edge,
             &weighted_degree,
             &mut used,
             &mut path,
@@ -802,7 +813,6 @@ fn exact_max_adjacency_layout_branch_and_bound(
 fn exact_layout_branch_and_bound_dfs(
     adjacency: &[usize],
     num_groups: usize,
-    max_edge: usize,
     weighted_degree: &[usize],
     used: &mut [bool],
     path: &mut Vec<usize>,
@@ -820,7 +830,12 @@ fn exact_layout_branch_and_bound_dfs(
         return;
     }
 
-    let optimistic = score.saturating_add(remaining.saturating_mul(max_edge));
+    let optimistic = score.saturating_add(remaining_path_score_upper_bound(
+        adjacency,
+        num_groups,
+        path.last().copied(),
+        used,
+    ));
     if optimistic < *best_score {
         return;
     }
@@ -841,7 +856,6 @@ fn exact_layout_branch_and_bound_dfs(
         exact_layout_branch_and_bound_dfs(
             adjacency,
             num_groups,
-            max_edge,
             weighted_degree,
             used,
             path,
@@ -852,6 +866,65 @@ fn exact_layout_branch_and_bound_dfs(
         path.pop();
         used[next] = false;
     }
+}
+
+fn remaining_path_score_upper_bound(
+    adjacency: &[usize],
+    num_groups: usize,
+    last: Option<usize>,
+    used: &[bool],
+) -> usize {
+    let unused_count = used.iter().filter(|&&is_used| !is_used).count();
+    if unused_count == 0 {
+        return 0;
+    }
+
+    let mut degree_capacity_sum = 0usize;
+    let mut endpoint_loss_candidates = Vec::with_capacity(unused_count);
+
+    if let Some(last) = last {
+        let best_from_last = (0..num_groups)
+            .filter(|&candidate| !used[candidate])
+            .map(|candidate| adjacency[last * num_groups + candidate])
+            .max()
+            .unwrap_or(0);
+        degree_capacity_sum += best_from_last;
+    }
+
+    for vertex in 0..num_groups {
+        if used[vertex] {
+            continue;
+        }
+
+        let mut best = 0usize;
+        let mut second = 0usize;
+        for other in 0..num_groups {
+            if other == vertex {
+                continue;
+            }
+            if used[other] && Some(other) != last {
+                continue;
+            }
+            let weight = adjacency[vertex * num_groups + other];
+            if weight >= best {
+                second = best;
+                best = weight;
+            } else if weight > second {
+                second = weight;
+            }
+        }
+        degree_capacity_sum += best + second;
+        endpoint_loss_candidates.push(second);
+    }
+
+    endpoint_loss_candidates.sort_unstable();
+    let endpoint_losses_needed = if last.is_some() { 1 } else { 2 };
+    let endpoint_loss: usize = endpoint_loss_candidates
+        .iter()
+        .take(endpoint_losses_needed.min(endpoint_loss_candidates.len()))
+        .sum();
+
+    degree_capacity_sum.saturating_sub(endpoint_loss) / 2
 }
 
 fn greedy_adjacency_layout(
@@ -895,6 +968,114 @@ fn greedy_adjacency_layout(
     }
 
     best_layout
+}
+
+fn improve_layout_2opt(adjacency: &[usize], layout: &mut [usize], num_groups: usize) {
+    if layout.len() < 4 {
+        return;
+    }
+
+    loop {
+        let mut improved = false;
+        for left_edge in 0..layout.len() - 2 {
+            let a = layout[left_edge];
+            let b = layout[left_edge + 1];
+            for right_edge in left_edge + 2..layout.len() - 1 {
+                let c = layout[right_edge];
+                let d = layout[right_edge + 1];
+                let old = adjacency[a * num_groups + b] + adjacency[c * num_groups + d];
+                let new = adjacency[a * num_groups + c] + adjacency[b * num_groups + d];
+                if new > old {
+                    layout[left_edge + 1..=right_edge].reverse();
+                    improved = true;
+                    break;
+                }
+            }
+            if improved {
+                break;
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+}
+
+fn improve_layout_reinsert(adjacency: &[usize], layout: &mut Vec<usize>, num_groups: usize) {
+    if layout.len() < 3 {
+        return;
+    }
+
+    loop {
+        let mut best_gain = 0isize;
+        let mut best_from = 0usize;
+        let mut best_to = 0usize;
+
+        for from in 0..layout.len() {
+            let removed = layout[from];
+            let remove_loss = incident_path_score_at(adjacency, layout, num_groups, from);
+            let close_gain = if from > 0 && from + 1 < layout.len() {
+                adjacency[layout[from - 1] * num_groups + layout[from + 1]]
+            } else {
+                0
+            };
+            let base_gain = close_gain as isize - remove_loss as isize;
+
+            let reduced_len = layout.len() - 1;
+            for to in 0..=reduced_len {
+                let insert_gain = if to == 0 {
+                    let right = reduced_layout_at(layout, from, 0);
+                    adjacency[removed * num_groups + right]
+                } else if to == reduced_len {
+                    let left = reduced_layout_at(layout, from, reduced_len - 1);
+                    adjacency[left * num_groups + removed]
+                } else {
+                    let left = reduced_layout_at(layout, from, to - 1);
+                    let right = reduced_layout_at(layout, from, to);
+                    adjacency[left * num_groups + removed]
+                        + adjacency[removed * num_groups + right]
+                        - adjacency[left * num_groups + right]
+                };
+                let gain = base_gain + insert_gain as isize;
+                if gain > best_gain {
+                    best_gain = gain;
+                    best_from = from;
+                    best_to = to;
+                }
+            }
+        }
+
+        if best_gain <= 0 {
+            break;
+        }
+
+        let value = layout.remove(best_from);
+        layout.insert(best_to, value);
+    }
+}
+
+fn reduced_layout_at(layout: &[usize], removed: usize, index: usize) -> usize {
+    if index < removed {
+        layout[index]
+    } else {
+        layout[index + 1]
+    }
+}
+
+fn incident_path_score_at(
+    adjacency: &[usize],
+    layout: &[usize],
+    num_groups: usize,
+    index: usize,
+) -> usize {
+    let mut score = 0usize;
+    if index > 0 {
+        score += adjacency[layout[index - 1] * num_groups + layout[index]];
+    }
+    if index + 1 < layout.len() {
+        score += adjacency[layout[index] * num_groups + layout[index + 1]];
+    }
+    score
 }
 
 fn path_score(adjacency: &[usize], layout: &[usize], num_groups: usize) -> usize {
