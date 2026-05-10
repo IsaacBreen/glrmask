@@ -2073,7 +2073,7 @@ fn simple_uri_format_enabled() -> bool {
 }
 
 fn restored_structured_uri_enabled() -> bool {
-    env_flag_default("GLRMASK_RESTORED_STRUCTURED_URI", true)
+    env_flag_default("GLRMASK_STRING_REPEAT_CHUNK", true)
 }
 
 fn strict_uri_format_enabled() -> bool {
