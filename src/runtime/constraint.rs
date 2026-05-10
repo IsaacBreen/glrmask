@@ -646,16 +646,26 @@ impl Constraint {
             return (Vec::new(), 0, 0);
         }
         let n_groups = self.internal_token_buf_masks.len().div_ceil(block_size);
+        let mask_words = self.mask_len();
         let build_group = |group_id: usize| {
                 let group_start = group_id * block_size;
                 let group_end = (group_start + block_size).min(self.internal_token_buf_masks.len());
-                let mut combined = BTreeMap::<u16, u32>::new();
+                let mut dense = vec![0u32; mask_words];
+                let mut touched = Vec::<u16>::new();
                 for token_masks in &self.internal_token_buf_masks[group_start..group_end] {
                     for &(word_idx, mask) in token_masks {
-                        *combined.entry(word_idx).or_insert(0) |= mask;
+                        let slot = &mut dense[word_idx as usize];
+                        if *slot == 0 {
+                            touched.push(word_idx);
+                        }
+                        *slot |= mask;
                     }
                 }
-                combined.into_iter().collect()
+                touched.sort_unstable();
+                touched
+                    .into_iter()
+                    .map(|word_idx| (word_idx, dense[word_idx as usize]))
+                    .collect()
             };
         let groups: Vec<InternalTokenBufMasks> = if rayon::current_num_threads() == 1 {
             (0..n_groups).map(build_group).collect()
@@ -1008,6 +1018,37 @@ impl Constraint {
     }
 
     fn build_internal_token_buf_mask(originals: &[u32]) -> InternalTokenBufMasks {
+        let mut result = Vec::<(u16, u32)>::new();
+        let mut current_word = None::<u16>;
+        let mut current_mask = 0u32;
+        for &original in originals {
+            let word = (original / 32) as u16;
+            let bit = original % 32;
+            match current_word {
+                None => {
+                    current_word = Some(word);
+                    current_mask = 1u32 << bit;
+                }
+                Some(current) if current == word => {
+                    current_mask |= 1u32 << bit;
+                }
+                Some(current) if current < word => {
+                    result.push((current, current_mask));
+                    current_word = Some(word);
+                    current_mask = 1u32 << bit;
+                }
+                Some(_) => {
+                    return Self::build_internal_token_buf_mask_unsorted(originals);
+                }
+            }
+        }
+        if let Some(word) = current_word {
+            result.push((word, current_mask));
+        }
+        result
+    }
+
+    fn build_internal_token_buf_mask_unsorted(originals: &[u32]) -> InternalTokenBufMasks {
         let mut word_map = BTreeMap::<u16, u32>::new();
         for &original in originals {
             let word = (original / 32) as u16;
@@ -1133,10 +1174,15 @@ impl Constraint {
                 .collect();
         }
 
-        let terminal_states: Vec<bool> = (0..self.tokenizer.num_states())
-            .into_par_iter()
-            .map(|state| self.tokenizer.matched_terminals_iter(state).next().is_some())
-            .collect();
+        let terminal_state = |state| self.tokenizer.matched_terminals_iter(state).next().is_some();
+        let terminal_states: Vec<bool> = if rayon::current_num_threads() == 1 {
+            (0..self.tokenizer.num_states()).map(terminal_state).collect()
+        } else {
+            (0..self.tokenizer.num_states())
+                .into_par_iter()
+                .map(terminal_state)
+                .collect()
+        };
         let owned_flat_transitions;
         let flat_transitions: &[Box<[u32; 256]>] = if self.tokenizer_fast_transitions.len() == state_count {
             &self.tokenizer_fast_transitions
@@ -1213,14 +1259,15 @@ impl Constraint {
                 }
             }
 
-            let class_masks: Vec<Option<DenseWords>> = representatives
-                .par_iter()
-                .map(|representative| (*representative).map(|state| compute_for_state(state)))
-                .collect();
+            let build_class_mask =
+                |representative: &Option<u32>| (*representative).map(|state| compute_for_state(state));
+            let class_masks: Vec<Option<DenseWords>> = if rayon::current_num_threads() == 1 {
+                representatives.iter().map(build_class_mask).collect()
+            } else {
+                representatives.par_iter().map(build_class_mask).collect()
+            };
 
-            return (0..state_count)
-                .into_par_iter()
-                .map(|state| {
+            let build_state_mask = |state: usize| {
                     let internal_tsid = self.state_to_internal_tsid[state];
                     if internal_tsid != u32::MAX {
                         if let Some(Some(mask)) = class_masks.get(internal_tsid as usize) {
@@ -1228,15 +1275,23 @@ impl Constraint {
                         }
                     }
                     compute_for_state(state as u32)
-                })
-                .collect();
+                };
+            return if rayon::current_num_threads() == 1 {
+                (0..state_count).map(build_state_mask).collect()
+            } else {
+                (0..state_count).into_par_iter().map(build_state_mask).collect()
+            };
         }
 
         // Fallback for older/deserialized constraints without state-class maps.
-        (0..state_count as u32)
-            .into_par_iter()
-            .map(compute_for_state)
-            .collect()
+        if rayon::current_num_threads() == 1 {
+            (0..state_count as u32).map(compute_for_state).collect()
+        } else {
+            (0..state_count as u32)
+                .into_par_iter()
+                .map(compute_for_state)
+                .collect()
+        }
     }
 
     fn or_internal_token_masks_to_buf(&self, internal_token: usize, buf: &mut [u32]) {

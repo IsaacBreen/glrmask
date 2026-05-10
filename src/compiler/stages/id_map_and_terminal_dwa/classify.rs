@@ -24,6 +24,28 @@ pub struct SharedClassifyBytesets {
 /// Cache type for lazy `SharedClassifyBytesets` initialization across partitions.
 pub type SharedClassifyCache = std::sync::OnceLock<SharedClassifyBytesets>;
 
+#[derive(Debug)]
+struct VocabByteSet {
+    bytes: U8Set,
+}
+
+impl crate::vocab::VocabDerivedArtifact for VocabByteSet {}
+
+fn vocab_byte_set(vocab: &Vocab) -> U8Set {
+    if let Some(cached) = vocab.vocab_derived_cache_get::<VocabByteSet>() {
+        return cached.bytes;
+    }
+
+    let mut byteset = U8Set::empty();
+    for bytes in vocab.entries.values() {
+        for &byte in bytes {
+            byteset.insert(byte);
+        }
+    }
+    vocab.vocab_derived_cache_set(std::sync::Arc::new(VocabByteSet { bytes: byteset }));
+    byteset
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum L2pPartitionCostFn {
     Size,
@@ -289,12 +311,7 @@ pub(crate) fn classify_terminal_path_lengths(
     let nt = num_terminals as usize;
 
     // 1. Vocab byte bitset: all bytes appearing in any vocab token.
-    let mut vocab_bytes = U8Set::empty();
-    for bytes in vocab.entries.values() {
-        for &b in bytes {
-            vocab_bytes.insert(b);
-        }
-    }
+    let vocab_bytes = vocab_byte_set(vocab);
 
     // 2. Byte bitsets per terminal — use cache if available.
     let owned_bytesets: Option<SharedClassifyBytesets>;

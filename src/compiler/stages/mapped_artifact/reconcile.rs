@@ -16,9 +16,9 @@ pub(super) fn reconcile_weight_id_maps(
     let common_id_map = build_common_internal_id_map(&[left_id_map, right_id_map]);
 
     let left_tsid_map = build_local_to_common_tsid_map(left_id_map, &common_id_map);
-    let left_token_map = build_local_to_common_token_map(left_id_map, &common_id_map);
+    let left_token_map = build_local_to_common_token_map_from_common_classes(left_id_map, &common_id_map);
     let right_tsid_map = build_local_to_common_tsid_map(right_id_map, &common_id_map);
-    let right_token_map = build_local_to_common_token_map(right_id_map, &common_id_map);
+    let right_token_map = build_local_to_common_token_map_from_common_classes(right_id_map, &common_id_map);
 
     remap_weights_with_maps(
         left_weights,
@@ -35,6 +35,35 @@ pub(super) fn reconcile_weight_id_maps(
 
     *left_id_map = common_id_map.clone();
     *right_id_map = common_id_map;
+}
+
+pub(super) fn reconcile_weight_id_maps_into_common(
+    left_weights: &mut [&mut Weight],
+    left_id_map: &InternalIdMap,
+    right_weights: &mut [&mut Weight],
+    right_id_map: &InternalIdMap,
+) -> InternalIdMap {
+    let common_id_map = build_common_internal_id_map(&[left_id_map, right_id_map]);
+
+    let left_tsid_map = build_local_to_common_tsid_map(left_id_map, &common_id_map);
+    let left_token_map = build_local_to_common_token_map_from_common_classes(left_id_map, &common_id_map);
+    let right_tsid_map = build_local_to_common_tsid_map(right_id_map, &common_id_map);
+    let right_token_map = build_local_to_common_token_map_from_common_classes(right_id_map, &common_id_map);
+
+    remap_weights_with_maps(
+        left_weights,
+        &left_tsid_map,
+        &left_token_map,
+        common_id_map.num_tsids() as usize,
+    );
+    remap_weights_with_maps(
+        right_weights,
+        &right_tsid_map,
+        &right_token_map,
+        common_id_map.num_tsids() as usize,
+    );
+
+    common_id_map
 }
 
 fn build_common_internal_id_map(inputs: &[&InternalIdMap]) -> InternalIdMap {
@@ -285,27 +314,34 @@ fn build_local_to_common_tsid_map(
     sort_dedup_local_to_common(local_to_common)
 }
 
-fn build_local_to_common_token_map(
+fn build_local_to_common_token_map_from_common_classes(
     local_id_map: &InternalIdMap,
     common_id_map: &InternalIdMap,
 ) -> Vec<Vec<u32>> {
     let num_local = local_id_map.num_internal_tokens() as usize;
     let mut local_to_common = vec![Vec::new(); num_local];
 
-    for (original, &local_token) in local_id_map.vocab_tokens.original_to_internal.iter().enumerate() {
+    for (common_token, originals) in common_id_map
+        .vocab_tokens
+        .internal_to_originals
+        .iter()
+        .enumerate()
+    {
+        let Some(&representative) = originals.first() else {
+            continue;
+        };
+        let local_token = local_id_map
+            .vocab_tokens
+            .original_to_internal
+            .get(representative as usize)
+            .copied()
+            .unwrap_or(u32::MAX);
         if local_token == u32::MAX {
             continue;
         }
-        let common_token = common_id_map
-            .vocab_tokens
-            .original_to_internal
-            .get(original)
-            .copied()
-            .unwrap_or(u32::MAX);
-        if common_token == u32::MAX {
-            continue;
+        if let Some(common_tokens) = local_to_common.get_mut(local_token as usize) {
+            common_tokens.push(common_token as u32);
         }
-        local_to_common[local_token as usize].push(common_token);
     }
 
     sort_dedup_local_to_common(local_to_common)

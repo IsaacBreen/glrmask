@@ -804,7 +804,6 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
         for ordered_id in position..next_position {
             for &original in &ordered_vocab.ordered_to_originals[ordered_id] {
                 if let Some(slot) = original_to_internal.get_mut(original as usize) { *slot = signature_id; }
-                internal_to_originals[signature_id as usize].push(original);
             }
         }
         assignment_ms += elapsed_ms(assignment_started_at);
@@ -812,9 +811,13 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
     }
     let sweep_ms = elapsed_ms(sweep_started_at);
 
-    let sort_dedup_started_at = Instant::now();
-    for originals in &mut internal_to_originals { originals.sort_unstable(); originals.dedup(); }
-    let sort_dedup_ms = elapsed_ms(sort_dedup_started_at);
+    let internal_to_originals_started_at = Instant::now();
+    for (original, &signature_id) in original_to_internal.iter().enumerate() {
+        if signature_id != u32::MAX {
+            internal_to_originals[signature_id as usize].push(original as u32);
+        }
+    }
+    let sort_dedup_ms = elapsed_ms(internal_to_originals_started_at);
 
     let ids_by_label_started_at = Instant::now();
     let use_bitmask_ids_by_label = signature_labels.len() <= u128::BITS as usize;

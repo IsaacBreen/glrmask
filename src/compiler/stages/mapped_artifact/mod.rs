@@ -297,13 +297,12 @@ where
             let (right_artifact, right_id_map) = right.parts_mut();
             let mut left_weights = left_artifact.weight_refs_mut();
             let mut right_weights = right_artifact.weight_refs_mut();
-            reconcile::reconcile_weight_id_maps(
+            reconcile::reconcile_weight_id_maps_into_common(
                 &mut left_weights,
                 left_id_map,
                 &mut right_weights,
                 right_id_map,
-            );
-            left_id_map.clone()
+            )
         };
         MappedArtifact::new((left.into_artifact(), right.into_artifact()), common_id_map)
     }
