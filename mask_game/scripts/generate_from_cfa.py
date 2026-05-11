@@ -192,7 +192,7 @@ def main() -> int:
 
     maps: list[dict[str, Any]] = []
     cases: list[dict[str, Any]] = []
-    seen_cases: set[tuple[int, int, int]] = set()
+    seen_cases: set[tuple[str, int, int, int]] = set()
     hash_to_map_id: dict[str, int] = {}
     buf_words = 0
     skipped: list[dict[str, str]] = []
@@ -239,7 +239,7 @@ def main() -> int:
         buf = np.zeros(mask_words, dtype=np.int32)
 
         def append_case(item: PendingCase) -> None:
-            key = (item.map_id, item.example_index, item.step)
+            key = (item.problem, item.map_id, item.example_index, item.step)
             if key in seen_cases:
                 return
             seen_cases.add(key)
