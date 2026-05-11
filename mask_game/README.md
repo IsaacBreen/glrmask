@@ -53,8 +53,9 @@ python mask_game/scripts/generate_from_cfa.py \
 ```
 
 That emits every non-empty mask step from the same problem set, including the
-`token_id` and original-token `allowed_count` for each case. The full corpus is
-intended as a local benchmark artifact and is ignored by git.
+`token_id`, original-token `allowed_count`, and dense internal-token words for
+each case. The full corpus is intended as a local benchmark artifact and is
+ignored by git.
 
 ## Evaluate
 
@@ -65,6 +66,9 @@ cargo run --release --manifest-path mask_game/Cargo.toml --bin evaluate -- \
 
 The second argument is the number of repetitions. The third argument is the
 candidate: `baseline`, `group`, `copy`, `complement`, `parallel`, or `all`.
+Use `final`/`glrmask_final_dense` to benchmark the same
+`glrmask::FinalMaskMapping` dense-to-output conversion that the runtime
+`Constraint` delegates to.
 The evaluator prepares each mapping once, clears the output buffer outside the
 measured section, times only `Candidate::fill`, then verifies the produced bitset
 after each timed call.

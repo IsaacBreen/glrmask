@@ -21,6 +21,7 @@ pub use runtime::{
     CommitProfile,
     Constraint,
     ConstraintState,
+    FinalMaskMapping,
     GssProfileSummary,
     PerAdvanceEntry,
 };

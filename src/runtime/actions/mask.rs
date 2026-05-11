@@ -967,6 +967,12 @@ impl<'a> ConstraintState<'a> {
                     let Some(token_set) = final_weight.0.get(tsid) else {
                         continue;
                     };
+                    if self
+                        .constraint
+                        .or_weight_token_set_to_buf_if_contained(dense, token_set, buf)
+                    {
+                        continue;
+                    }
                     let Some(seed_idx) = self.constraint.seed_state_index_for_dense(dense) else {
                         direct_handled = false;
                         continue;
@@ -1319,26 +1325,44 @@ impl<'a> ConstraintState<'a> {
                         unchanged_bits += (!(current ^ previous) & valid_mask).count_ones() as u64;
                     }
 
-                    let mut added = current & !previous;
-                    while added != 0 {
-                        let bit = added.trailing_zeros() as usize;
-                        let internal_token = wi * 64 + bit;
-                        if capture_delta_summary {
-                            added_bits += 1;
+                    let added = current & !previous;
+                    if capture_delta_summary {
+                        added_bits += added.count_ones() as u64;
+                    }
+                    if added == valid_mask {
+                        if let Some(group_mask) = self.constraint.word_group_sparse_masks.get(wi) {
+                            added_cost += group_mask.len() as u64;
+                        } else {
+                            added_cost += self
+                                .constraint
+                                .internal_bits_grouped_buf_op_cost(wi, added, valid_mask, copy_cost_words as usize)
+                                as u64;
                         }
-                        added_cost += self.constraint.internal_token_materialization_cost(internal_token);
-                        added &= added - 1;
+                    } else if added != 0 {
+                        added_cost += self
+                            .constraint
+                            .internal_bits_grouped_buf_op_cost(wi, added, valid_mask, copy_cost_words as usize)
+                            as u64;
                     }
 
-                    let mut removed = previous & !current;
-                    while removed != 0 {
-                        let bit = removed.trailing_zeros() as usize;
-                        let internal_token = wi * 64 + bit;
-                        if capture_delta_summary {
-                            removed_bits += 1;
+                    let removed = previous & !current;
+                    if capture_delta_summary {
+                        removed_bits += removed.count_ones() as u64;
+                    }
+                    if removed == valid_mask {
+                        if let Some(group_mask) = self.constraint.word_group_sparse_masks.get(wi) {
+                            removed_cost += group_mask.len() as u64;
+                        } else {
+                            removed_cost += self
+                                .constraint
+                                .internal_bits_grouped_buf_op_cost(wi, removed, valid_mask, copy_cost_words as usize)
+                                as u64;
                         }
-                        removed_cost += self.constraint.internal_token_materialization_cost(internal_token);
-                        removed &= removed - 1;
+                    } else if removed != 0 {
+                        removed_cost += self
+                            .constraint
+                            .internal_bits_grouped_buf_op_cost(wi, removed, valid_mask, copy_cost_words as usize)
+                            as u64;
                     }
                 }
 
@@ -1360,7 +1384,9 @@ impl<'a> ConstraintState<'a> {
                         profile.delta_estimated_savings = delta_savings;
                     }
                 }
-                if delta_savings > DELTA_SEED_MIN_SAVINGS && cache_data.mask.len() == buf.len() {
+                let delta_wins_decisively =
+                    delta_savings > DELTA_SEED_MIN_SAVINGS && delta_cost.saturating_mul(2) < scratch_cost;
+                if delta_wins_decisively && cache_data.mask.len() == buf.len() {
                     let zero_start = profile.as_ref().map(|_| Instant::now());
                     buf.copy_from_slice(&cache_data.mask);
                     if let (Some(profile), Some(start)) = (profile.as_mut(), zero_start) {

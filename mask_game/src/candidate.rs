@@ -1,4 +1,5 @@
-use crate::{Candidate, Mapping};
+use crate::{Candidate, Case, Mapping};
+use glrmask::FinalMaskMapping;
 use rayon::prelude::*;
 
 pub struct BaselineCandidate;
@@ -44,7 +45,8 @@ impl Candidate for BaselineCandidate {
         }
     }
 
-    fn fill(prepared: &Self::Prepared, internal_ids: &[u32], out: &mut [u32]) {
+    fn fill(prepared: &Self::Prepared, case: &Case, out: &mut [u32]) {
+        let internal_ids = &case.internal_ids;
         for &internal_id in internal_ids {
             let Some(entries) = prepared.entries_by_internal.get(internal_id as usize) else {
                 continue;
@@ -101,7 +103,8 @@ impl Candidate for GlrMaskLikeCandidate {
         }
     }
 
-    fn fill(prepared: &Self::Prepared, internal_ids: &[u32], out: &mut [u32]) {
+    fn fill(prepared: &Self::Prepared, case: &Case, out: &mut [u32]) {
+        let internal_ids = &case.internal_ids;
         let mut idx = 0usize;
         while idx < internal_ids.len() {
             let run_start = internal_ids[idx] as usize;
@@ -139,7 +142,8 @@ impl Candidate for CopyFirstGroupRunCandidate {
         GlrMaskLikeCandidate::prepare(mapping, buf_words)
     }
 
-    fn fill(prepared: &Self::Prepared, internal_ids: &[u32], out: &mut [u32]) {
+    fn fill(prepared: &Self::Prepared, case: &Case, out: &mut [u32]) {
+        let internal_ids = &case.internal_ids;
         let mut idx = 0usize;
         let mut wrote = false;
         while idx < internal_ids.len() {
@@ -178,7 +182,8 @@ impl Candidate for ComplementCandidate {
         GlrMaskLikeCandidate::prepare(mapping, buf_words)
     }
 
-    fn fill(prepared: &Self::Prepared, internal_ids: &[u32], out: &mut [u32]) {
+    fn fill(prepared: &Self::Prepared, case: &Case, out: &mut [u32]) {
+        let internal_ids = &case.internal_ids;
         let n_internal = prepared.token_entries.len();
         let selected = internal_ids.len().min(n_internal);
         let missing = n_internal.saturating_sub(selected);
@@ -187,7 +192,7 @@ impl Candidate for ComplementCandidate {
             copy_dense(out, &prepared.all_tokens_mask);
             andnot_missing_ids(prepared, internal_ids, out);
         } else {
-            CopyFirstGroupRunCandidate::fill(prepared, internal_ids, out);
+            CopyFirstGroupRunCandidate::fill(prepared, case, out);
         }
     }
 }
@@ -205,7 +210,8 @@ impl Candidate for ParallelComplementCandidate {
         GlrMaskLikeCandidate::prepare(mapping, buf_words)
     }
 
-    fn fill(prepared: &Self::Prepared, internal_ids: &[u32], out: &mut [u32]) {
+    fn fill(prepared: &Self::Prepared, case: &Case, out: &mut [u32]) {
+        let internal_ids = &case.internal_ids;
         let n_internal = prepared.token_entries.len();
         let selected = internal_ids.len().min(n_internal);
         let missing = n_internal.saturating_sub(selected);
@@ -214,7 +220,29 @@ impl Candidate for ParallelComplementCandidate {
             parallel_copy_dense(out, &prepared.all_tokens_mask);
             andnot_missing_ids(prepared, internal_ids, out);
         } else {
-            CopyFirstGroupRunCandidate::fill(prepared, internal_ids, out);
+            CopyFirstGroupRunCandidate::fill(prepared, case, out);
+        }
+    }
+}
+
+pub struct GlrMaskFinalDenseCandidate;
+
+impl Candidate for GlrMaskFinalDenseCandidate {
+    type Prepared = FinalMaskMapping;
+
+    fn name() -> &'static str {
+        "glrmask_final_dense"
+    }
+
+    fn prepare(mapping: &Mapping, buf_words: usize) -> Self::Prepared {
+        FinalMaskMapping::new(&mapping.internal_to_original, buf_words)
+    }
+
+    fn fill(prepared: &Self::Prepared, case: &Case, out: &mut [u32]) {
+        if case.internal_dense_words.is_empty() {
+            prepared.fill_internal_ids(&case.internal_ids, out);
+        } else {
+            prepared.fill_dense_words(&case.internal_dense_words, out);
         }
     }
 }

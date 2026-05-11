@@ -35,6 +35,8 @@ pub struct Case {
     #[serde(default)]
     pub allowed_count: Option<u32>,
     pub internal_ids: Vec<u32>,
+    #[serde(default)]
+    pub internal_dense_words: Vec<u64>,
     pub expected_sparse_words: Vec<[u32; 2]>,
 }
 
@@ -43,7 +45,7 @@ pub trait Candidate {
 
     fn name() -> &'static str;
     fn prepare(mapping: &Mapping, buf_words: usize) -> Self::Prepared;
-    fn fill(prepared: &Self::Prepared, internal_ids: &[u32], out: &mut [u32]);
+    fn fill(prepared: &Self::Prepared, case: &Case, out: &mut [u32]);
 }
 
 #[derive(Debug, Clone)]
@@ -106,7 +108,7 @@ pub fn evaluate<C: Candidate>(
 
             out.fill(0);
             let started = Instant::now();
-            C::fill(prepared, &case.internal_ids, &mut out);
+            C::fill(prepared, case, &mut out);
             let elapsed = started.elapsed();
 
             verify_output(case, &out)?;
@@ -218,8 +220,8 @@ fn summarize(
 mod tests {
     use super::*;
     use crate::candidate::{
-        BaselineCandidate, ComplementCandidate, CopyFirstGroupRunCandidate, GlrMaskLikeCandidate,
-        ParallelComplementCandidate,
+        BaselineCandidate, ComplementCandidate, CopyFirstGroupRunCandidate, GlrMaskFinalDenseCandidate,
+        GlrMaskLikeCandidate, ParallelComplementCandidate,
     };
 
     fn tiny_data() -> GameData {
@@ -246,6 +248,7 @@ mod tests {
                     token_id: Some(11),
                     allowed_count: Some(4),
                     internal_ids: vec![0, 2],
+                    internal_dense_words: vec![0b0101],
                     expected_sparse_words: vec![[0, 0b11], [1, 0b1], [2, 0b1]],
                 },
                 Case {
@@ -256,6 +259,7 @@ mod tests {
                     token_id: Some(12),
                     allowed_count: Some(3),
                     internal_ids: vec![1, 3],
+                    internal_dense_words: vec![0b1010],
                     expected_sparse_words: vec![
                         [0, 0b100],
                         [1, 1u32 << 31],
@@ -309,6 +313,15 @@ mod tests {
         assert_eq!(summary.total_calls, 6);
     }
 
+    #[test]
+    fn glrmask_final_dense_candidate_expands_internal_dense_to_original_bitset() {
+        let summary =
+            evaluate::<GlrMaskFinalDenseCandidate>(&tiny_data(), 3).expect("final dense verifies");
+        assert_eq!(summary.cases, 2);
+        assert_eq!(summary.repetitions, 3);
+        assert_eq!(summary.total_calls, 6);
+    }
+
     struct EmptyCandidate;
 
     impl Candidate for EmptyCandidate {
@@ -320,7 +333,7 @@ mod tests {
 
         fn prepare(_mapping: &Mapping, _buf_words: usize) -> Self::Prepared {}
 
-        fn fill(_prepared: &Self::Prepared, _internal_ids: &[u32], _out: &mut [u32]) {}
+        fn fill(_prepared: &Self::Prepared, _case: &Case, _out: &mut [u32]) {}
     }
 
     #[test]

@@ -132,6 +132,14 @@ def sparse_words_from_internal_ids(
     return [[idx, word] for idx, word in sorted(words.items()) if word]
 
 
+def dense_words_from_internal_ids(internal_ids: list[int], n_internal: int) -> list[int]:
+    words = [0] * ((n_internal + 63) // 64)
+    for internal in internal_ids:
+        if 0 <= internal < n_internal:
+            words[internal // 64] |= 1 << (internal & 63)
+    return words
+
+
 def score_case(internal_ids: list[int], internal_to_original: list[list[int]], sparse_words: list[list[int]]) -> int:
     fanout = 0
     for internal in internal_ids:
@@ -251,6 +259,10 @@ def main() -> int:
                 "token_id": item.token_id,
                 "allowed_count": item.allowed_count,
                 "internal_ids": item.internal_ids,
+                "internal_dense_words": dense_words_from_internal_ids(
+                    item.internal_ids,
+                    len(internal_to_original),
+                ),
                 "expected_sparse_words": item.expected_sparse_words,
             })
 

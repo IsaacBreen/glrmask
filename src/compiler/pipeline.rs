@@ -744,6 +744,7 @@ fn compile_prepared_with_profile(
             all_tokens_buf_mask: Box::new([]),
             internal_token_dense_words: 0,
             weight_token_dense_masks: rustc_hash::FxHashMap::default(),
+            weight_token_buf_masks: rustc_hash::FxHashMap::default(),
             seed_terminal_dense: rustc_hash::FxHashMap::default(),
             seed_state_dense: Vec::new(),
             seed_state_by_dense_hash: rustc_hash::FxHashMap::default(),
@@ -760,6 +761,7 @@ fn compile_prepared_with_profile(
             light_avg_cost_x256: 0,
             internal_token_buf_op_costs: Vec::new(),
             word_group_buf_op_costs: Vec::new(),
+            final_mask_mapping: crate::runtime::FinalMaskMapping::default(),
         });
         profile.finalize_ms = elapsed_ms(finalize_started_at);
         profile.compile_ms = elapsed_ms(compile_started_at);
