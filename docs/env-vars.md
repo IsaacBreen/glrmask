@@ -18,7 +18,7 @@ This document lists all `GLRMASK_*` environment variables used in this crate, gr
 | `GLRMASK_PROFILE_COMPILE` | truthy bool | off |
 | `GLRMASK_PROFILE_COMPILE_SUMMARY` | truthy bool | off |
 | `GLRMASK_DISABLE_TERMINAL_COLORING` | truthy bool | off |
-| `GLRMASK_COMPACT_POSSIBLE_MATCHES_BEFORE_RECONCILE` | truthy bool | off |
+| `GLRMASK_COMPACT_POSSIBLE_MATCHES_BEFORE_RECONCILE` | truthy bool | on |
 
 ## Terminal DWA / ID Map (L1/L2P/Merge)
 

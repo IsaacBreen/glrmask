@@ -43,8 +43,17 @@ fn env_flag_enabled(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn env_flag_enabled_by_default(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(true)
+}
+
 fn compact_possible_matches_before_reconcile_enabled() -> bool {
-    env_flag_enabled("GLRMASK_COMPACT_POSSIBLE_MATCHES_BEFORE_RECONCILE")
+    env_flag_enabled_by_default("GLRMASK_COMPACT_POSSIBLE_MATCHES_BEFORE_RECONCILE")
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
