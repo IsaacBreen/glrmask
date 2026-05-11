@@ -24,7 +24,10 @@ mod almost_optimal_layout;
 mod default_layout;
 mod exact_layout;
 
-use default_layout::order_token_groups;
+use default_layout::{
+    order_token_groups_exact_profile, order_token_groups_sketch,
+    order_tsid_groups_exact_profile, order_tsid_groups_sketch,
+};
 use exact_layout::{order_token_groups_globally_exact, order_tsid_groups_globally_exact};
 
 const EXACT_LAYOUT_MAX_GROUPS: usize = 20;
@@ -310,6 +313,7 @@ pub(super) fn plan_compaction_for_weight_refs(
     let build_compaction = || {
         build_dimension_compaction(
             &unique_weights,
+            weights.len(),
             num_tsids,
             num_tokens,
             allow_expensive_layout,
@@ -448,6 +452,7 @@ pub(super) fn count_interned_ranges_for_weight_refs(weights: &[&Weight]) -> Inte
 
 fn build_dimension_compaction(
     unique_weights: &[Weight],
+    weight_ref_count: usize,
     num_tsids: usize,
     num_tokens: usize,
     allow_expensive_layout: bool,
@@ -459,19 +464,67 @@ fn build_dimension_compaction(
         return build_global_objective_dimension_compaction(unique_weights, num_tsids, num_tokens);
     }
 
+    let use_exact_profile_layout = use_default_layout
+        && allow_expensive_layout
+        && weight_ref_count > unique_weights.len().saturating_mul(4);
+    build_default_dimension_compaction(
+        unique_weights,
+        num_tsids,
+        num_tokens,
+        use_default_layout,
+        use_exact_profile_layout,
+    )
+}
+
+fn build_default_dimension_compaction(
+    unique_weights: &[Weight],
+    num_tsids: usize,
+    num_tokens: usize,
+    use_default_layout: bool,
+    adaptive_layout: bool,
+) -> DimensionCompaction {
     let original_weight_refs = weight_refs(unique_weights);
 
     let (token_merge_perm, merged_num_tokens) =
         build_exact_token_merge_permutation(&original_weight_refs, num_tokens);
     let token_perm = if use_default_layout {
-        order_token_groups(unique_weights, token_merge_perm, merged_num_tokens)
+        if adaptive_layout {
+            order_token_groups_exact_profile(unique_weights, token_merge_perm, merged_num_tokens)
+        } else {
+            order_token_groups_sketch(unique_weights, token_merge_perm, merged_num_tokens)
+        }
     } else {
         token_merge_perm
     };
 
+    let token_compacted_weights =
+        apply_permutations_to_weight_set(unique_weights, &identity_perm(num_tsids), &token_perm);
+    let token_compacted_refs = weight_refs(&token_compacted_weights);
+    let (tsid_merge_perm, merged_num_tsids) =
+        build_exact_tsid_merge_permutation(&token_compacted_refs, num_tsids);
+    let tsid_perm = if use_default_layout {
+        if adaptive_layout {
+            order_tsid_groups_exact_profile(
+                &token_compacted_weights,
+                tsid_merge_perm,
+                merged_num_tsids,
+                merged_num_tokens,
+            )
+        } else {
+            order_tsid_groups_sketch(
+                &token_compacted_weights,
+                tsid_merge_perm,
+                merged_num_tsids,
+                merged_num_tokens,
+            )
+        }
+    } else {
+        tsid_merge_perm
+    };
+
     DimensionCompaction {
-        tsid_perm: identity_perm(num_tsids),
-        ordered_num_tsids: num_tsids,
+        tsid_perm,
+        ordered_num_tsids: merged_num_tsids,
         token_perm,
         ordered_num_tokens: merged_num_tokens,
     }
