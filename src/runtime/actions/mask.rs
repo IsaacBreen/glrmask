@@ -1425,14 +1425,18 @@ impl<'a> ConstraintState<'a> {
                     profile.finalize_zero_ns += elapsed_ns(start);
                 }
 
-                let dense_to_buf_start = profile.as_ref().map(|_| Instant::now());
-                let dense_to_buf = self.constraint.or_internal_dense_to_buf(&merged, buf, true);
-                if let Some(profile) = profile.as_mut() {
-                    if let Some(start) = dense_to_buf_start {
-                        profile.finalize_dense_to_buf_ns += elapsed_ns(start);
+                if profile.is_some() {
+                    let dense_to_buf_start = Instant::now();
+                    let dense_to_buf = self.constraint.or_internal_dense_to_buf(&merged, buf, true);
+                    if let Some(profile) = profile.as_mut() {
+                        profile.finalize_dense_to_buf_ns += elapsed_ns(dense_to_buf_start);
                     }
+                    dense_to_buf
+                } else {
+                    self.constraint
+                        .or_internal_dense_to_buf_fast(&merged, buf, true);
+                    DenseToBufProfileStats::default()
                 }
-                dense_to_buf
             };
             if let Some(profile) = profile.as_mut() {
                 profile.finalize_scratch_rebuild = 1;

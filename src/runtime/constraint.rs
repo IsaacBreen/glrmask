@@ -2357,6 +2357,21 @@ impl Constraint {
         stats
     }
 
+    pub(crate) fn or_internal_dense_to_buf_fast(
+        &self,
+        dense: &[u64],
+        buf: &mut [u32],
+        buf_zeroed: bool,
+    ) {
+        if self.final_mask_mapping.internal_len() > 0 {
+            self.final_mask_mapping
+                .or_dense_to_buf_fast(dense, buf, buf_zeroed);
+            return;
+        }
+
+        let _ = self.or_internal_dense_to_buf(dense, buf, buf_zeroed);
+    }
+
     fn or_original_token_to_buf(&self, token_id: u32, buf: &mut [u32]) {
         let word = token_id as usize / 32;
         let bit = token_id as usize % 32;
