@@ -79,6 +79,12 @@ fn print_summary(
         println!("max_problem: {}", case.problem);
         println!("max_example_index: {}", case.example_index);
         println!("max_step: {}", case.step);
+        if let Some(token_id) = case.token_id {
+            println!("max_token_id: {}", token_id);
+        }
+        if let Some(allowed_count) = case.allowed_count {
+            println!("max_allowed_count: {}", allowed_count);
+        }
         println!("max_internal_ids: {}", case.internal_ids.len());
         println!("max_expected_words: {}", case.expected_sparse_words.len());
     }
@@ -87,6 +93,12 @@ fn print_summary(
         println!("stabilized_max_problem: {}", case.problem);
         println!("stabilized_max_example_index: {}", case.example_index);
         println!("stabilized_max_step: {}", case.step);
+        if let Some(token_id) = case.token_id {
+            println!("stabilized_max_token_id: {}", token_id);
+        }
+        if let Some(allowed_count) = case.allowed_count {
+            println!("stabilized_max_allowed_count: {}", allowed_count);
+        }
         println!("stabilized_max_internal_ids: {}", case.internal_ids.len());
         println!("stabilized_max_expected_words: {}", case.expected_sparse_words.len());
     }

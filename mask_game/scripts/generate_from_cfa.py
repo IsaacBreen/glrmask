@@ -26,8 +26,17 @@ class PendingCase:
     problem: str
     example_index: int
     step: int
+    token_id: int
+    allowed_count: int
     internal_ids: list[int]
     expected_sparse_words: list[list[int]]
+
+
+@dataclass(frozen=True)
+class IncludeStep:
+    problem: str
+    example_index: int
+    step: int
 
 
 def _add_import_paths(cfa_root: Path) -> None:
@@ -58,6 +67,16 @@ def slow_example_problem_ids(cfa_root: Path) -> list[str]:
     return out
 
 
+def parse_include_step(raw: str) -> IncludeStep:
+    try:
+        problem, example_index, step = raw.rsplit(":", 2)
+        return IncludeStep(problem=problem, example_index=int(example_index), step=int(step))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "include steps must look like jsb/data/Problem---name:EXAMPLE:STEP"
+        ) from exc
+
+
 def sparse_words_from_buf(buf: np.ndarray) -> list[list[int]]:
     sparse: list[list[int]] = []
     for idx, raw in enumerate(buf):
@@ -65,6 +84,17 @@ def sparse_words_from_buf(buf: np.ndarray) -> list[list[int]]:
         if word:
             sparse.append([idx, word])
     return sparse
+
+
+def fill_public_sparse_words(state: Any, buf: np.ndarray) -> list[list[int]]:
+    """Capture the same original-token mask bits exposed by the native adapter."""
+    buf.fill(0)
+    state._constraint_state.fill_mask(buf)
+    return sparse_words_from_buf(buf)
+
+
+def sparse_bit_count(sparse_words: list[list[int]]) -> int:
+    return sum((int(word) & 0xFFFFFFFF).bit_count() for _, word in sparse_words)
 
 
 def internal_ids_from_sparse(
@@ -126,6 +156,13 @@ def main() -> int:
     parser.add_argument("--cases-per-example", type=int, default=3)
     parser.add_argument("--max-examples-per-problem", type=int, default=-1)
     parser.add_argument("--max-problems", type=int, default=0)
+    parser.add_argument("--problem", action="append", default=[])
+    parser.add_argument("--include-step", type=parse_include_step, action="append", default=[])
+    parser.add_argument(
+        "--all-steps",
+        action="store_true",
+        help="emit every non-empty mask step instead of only the heaviest prefixes",
+    )
     args = parser.parse_args()
 
     _add_import_paths(args.cfa_root)
@@ -145,12 +182,17 @@ def main() -> int:
     tokenizer = GreedyTokenizer(vocab.vocab)
     adapter = GlrMaskNativeAdapter()
 
-    problem_ids = slow_example_problem_ids(args.cfa_root)
+    problem_ids = args.problem or slow_example_problem_ids(args.cfa_root)
+    for include in args.include_step:
+        if include.problem not in problem_ids:
+            problem_ids.append(include.problem)
     if args.max_problems > 0:
         problem_ids = problem_ids[: args.max_problems]
+    include_steps = {(item.problem, item.example_index, item.step) for item in args.include_step}
 
     maps: list[dict[str, Any]] = []
     cases: list[dict[str, Any]] = []
+    seen_cases: set[tuple[int, int, int]] = set()
     hash_to_map_id: dict[str, int] = {}
     buf_words = 0
     skipped: list[dict[str, str]] = []
@@ -196,6 +238,22 @@ def main() -> int:
         buf_words = max(buf_words, mask_words)
         buf = np.zeros(mask_words, dtype=np.int32)
 
+        def append_case(item: PendingCase) -> None:
+            key = (item.map_id, item.example_index, item.step)
+            if key in seen_cases:
+                return
+            seen_cases.add(key)
+            cases.append({
+                "map_id": item.map_id,
+                "problem": item.problem,
+                "example_index": item.example_index,
+                "step": item.step,
+                "token_id": item.token_id,
+                "allowed_count": item.allowed_count,
+                "internal_ids": item.internal_ids,
+                "expected_sparse_words": item.expected_sparse_words,
+            })
+
         for example_index, example in enumerate(examples):
             try:
                 token_ids = tokenizer.encode(example.text.encode("utf-8"))
@@ -206,14 +264,12 @@ def main() -> int:
             state.reset()
             best: list[PendingCase] = []
             for step, token_id in enumerate(token_ids):
-                buf.fill(0)
                 try:
-                    state._constraint_state.fill_mask(buf)
+                    public_sparse = fill_public_sparse_words(state, buf)
                 except BaseException as exc:
                     skipped.append({"problem": problem_id, "reason": f"fill example {example_index} step {step}: {exc}"})
                     break
 
-                public_sparse = sparse_words_from_buf(buf)
                 internal_ids = internal_ids_from_sparse(public_sparse, original_to_internal)
                 expanded_sparse = sparse_words_from_internal_ids(
                     internal_ids,
@@ -222,17 +278,23 @@ def main() -> int:
                 )
                 score = score_case(internal_ids, internal_to_original, expanded_sparse)
                 if expanded_sparse and internal_ids:
-                    best.append(PendingCase(
+                    pending = PendingCase(
                         score=score,
                         map_id=map_id,
                         problem=problem_id,
                         example_index=example_index,
                         step=step,
+                        token_id=int(token_id),
+                        allowed_count=sparse_bit_count(public_sparse),
                         internal_ids=internal_ids,
                         expected_sparse_words=expanded_sparse,
-                    ))
-                    best.sort(key=lambda item: item.score, reverse=True)
-                    del best[args.cases_per_example :]
+                    )
+                    if args.all_steps or (problem_id, example_index, step) in include_steps:
+                        append_case(pending)
+                    if not args.all_steps:
+                        best.append(pending)
+                        best.sort(key=lambda item: item.score, reverse=True)
+                        del best[args.cases_per_example :]
 
                 try:
                     state.commit(int(token_id))
@@ -241,14 +303,7 @@ def main() -> int:
                     break
 
             for item in best:
-                cases.append({
-                    "map_id": item.map_id,
-                    "problem": item.problem,
-                    "example_index": item.example_index,
-                    "step": item.step,
-                    "internal_ids": item.internal_ids,
-                    "expected_sparse_words": item.expected_sparse_words,
-                })
+                append_case(item)
 
     payload = {
         "version": 1,

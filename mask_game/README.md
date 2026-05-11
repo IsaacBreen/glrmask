@@ -43,6 +43,19 @@ The generator traverses all `example-slow` problem/example prefixes, then keeps 
 small number of the heaviest prefixes per example so the checked-in-style data is
 real but not absurdly large.
 
+For optimization work where the selected cases are too narrow, generate the full
+step corpus locally:
+
+```bash
+python mask_game/scripts/generate_from_cfa.py \
+  --all-steps \
+  --output mask_game/data/example_slow_all_steps_mask_game.json.gz
+```
+
+That emits every non-empty mask step from the same problem set, including the
+`token_id` and original-token `allowed_count` for each case. The full corpus is
+intended as a local benchmark artifact and is ignored by git.
+
 ## Evaluate
 
 ```bash

@@ -30,6 +30,10 @@ pub struct Case {
     pub problem: String,
     pub example_index: u32,
     pub step: u32,
+    #[serde(default)]
+    pub token_id: Option<u32>,
+    #[serde(default)]
+    pub allowed_count: Option<u32>,
     pub internal_ids: Vec<u32>,
     pub expected_sparse_words: Vec<[u32; 2]>,
 }
@@ -239,6 +243,8 @@ mod tests {
                     problem: "tiny".to_string(),
                     example_index: 0,
                     step: 0,
+                    token_id: Some(11),
+                    allowed_count: Some(4),
                     internal_ids: vec![0, 2],
                     expected_sparse_words: vec![[0, 0b11], [1, 0b1], [2, 0b1]],
                 },
@@ -247,6 +253,8 @@ mod tests {
                     problem: "tiny".to_string(),
                     example_index: 0,
                     step: 1,
+                    token_id: Some(12),
+                    allowed_count: Some(3),
                     internal_ids: vec![1, 3],
                     expected_sparse_words: vec![
                         [0, 0b100],
