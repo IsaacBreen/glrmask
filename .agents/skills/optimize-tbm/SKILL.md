@@ -7,6 +7,14 @@ description: Optimize glrmask/CFA time-between-mask performance; use when invest
 
 Use only stabilized timings for decisions: compare per-step values after cross-run per-step minimum stabilization, not raw single-pass sweep spikes.
 
+Do not optimize by caching across timing runs or repeated invocations of the same
+step/example. Cross-run memoization, warmed materialized-mask caches, and
+constraint-level caches keyed by a completed mask/dense set are invalid for TBM
+work because they measure benchmark reuse instead of single-call mask generation
+cost. Caches are only acceptable when they represent normal precomputed
+constraint artifacts built before timing, or per-state/generation caches that
+serve the real API semantics without relying on repeated benchmark runs.
+
 Requirements:
 - `commit` max: below `10us`; `10us` is the hard ceiling.
 - `mask` max: below `20us`.
