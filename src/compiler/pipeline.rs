@@ -43,6 +43,10 @@ fn env_flag_enabled(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn compact_possible_matches_before_reconcile_enabled() -> bool {
+    env_flag_enabled("GLRMASK_COMPACT_POSSIBLE_MATCHES_BEFORE_RECONCILE")
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DwaPossibleMatchesMode {
     TerminalReconcile,
@@ -518,6 +522,15 @@ fn compile_prepared_with_profile(
         let dwa_pm_mode = dwa_possible_matches_mode();
 
         let mut shared_id_reconcile_ms = 0.0;
+        if compact_possible_matches_before_reconcile_enabled() {
+            let compact_started_at = Instant::now();
+            if compile_profile_enabled() {
+                let _ = possible_matches.compact_dimensions_fast_with_stats();
+            } else {
+                let _ = possible_matches.compact_dimensions_fast();
+            }
+            profile.compact_ms += elapsed_ms(compact_started_at);
+        }
         let terminal_dwa_interned_ranges_before_pm_reconcile =
             interned_range_count_for_artifact(terminal_dwa.artifact_mut());
         let possible_matches_interned_ranges_before_pm_reconcile =
