@@ -119,7 +119,11 @@ pub struct FinalMaskMapping {
     token_entry_lens: Vec<usize>,
     word_entry_len_sums: Vec<usize>,
     quad_group_entries: EntryTable,
+    quad_group_dense: Vec<Option<Box<[u32]>>>,
     byte_group_entries: EntryTable,
+    byte_group_dense: Vec<Option<Box<[u32]>>>,
+    halfword_group_entries: EntryTable,
+    word32_group_entries: EntryTable,
     word_group_entries: EntryTable,
     word_group_entry_prefix: Vec<usize>,
     word_group_dense_prefix: Vec<Box<[u32]>>,
@@ -140,7 +144,14 @@ impl FinalMaskMapping {
             .collect::<Vec<_>>();
         let quad_group_entries = compute_block_entries(&token_entries, buf_words, 4);
         let byte_group_entries = compute_block_entries(&token_entries, buf_words, 8);
+        let halfword_group_entries = compute_block_entries(&token_entries, buf_words, 16);
+        let word32_group_entries = compute_block_entries(&token_entries, buf_words, 32);
         let word_group_entries = compute_block_entries(&token_entries, buf_words, 64);
+        let dense_group_threshold = dense_group_threshold(buf_words);
+        let quad_group_dense =
+            compute_heavy_group_dense(&quad_group_entries, buf_words, dense_group_threshold);
+        let byte_group_dense =
+            compute_heavy_group_dense(&byte_group_entries, buf_words, dense_group_threshold);
         let word_group_entry_prefix = compute_entry_prefix(&word_group_entries);
         let word_group_dense_prefix = compute_dense_prefix(&word_group_entries, buf_words);
         let all_tokens_mask = word_group_dense_prefix
@@ -153,7 +164,11 @@ impl FinalMaskMapping {
             token_entry_lens,
             word_entry_len_sums,
             quad_group_entries: EntryTable::from_groups(quad_group_entries),
+            quad_group_dense,
             byte_group_entries: EntryTable::from_groups(byte_group_entries),
+            byte_group_dense,
+            halfword_group_entries: EntryTable::from_groups(halfword_group_entries),
+            word32_group_entries: EntryTable::from_groups(word32_group_entries),
             word_group_entries: EntryTable::from_groups(word_group_entries),
             word_group_entry_prefix,
             word_group_dense_prefix,
@@ -752,7 +767,29 @@ impl FinalMaskMapping {
     }
 
     #[inline(always)]
+    fn andnot_halfword_group(&self, group_id: usize, out: &mut [u32]) -> bool {
+        let Some(entries) = self.halfword_group_entries.get(group_id) else {
+            return false;
+        };
+        andnot_sparse(out, entries);
+        !entries.is_empty()
+    }
+
+    #[inline(always)]
+    fn andnot_word32_group(&self, group_id: usize, out: &mut [u32]) -> bool {
+        let Some(entries) = self.word32_group_entries.get(group_id) else {
+            return false;
+        };
+        andnot_sparse(out, entries);
+        !entries.is_empty()
+    }
+
+    #[inline(always)]
     fn or_quad_group(&self, group_id: usize, out: &mut [u32]) -> bool {
+        if let Some(Some(dense)) = self.quad_group_dense.get(group_id) {
+            or_dense(out, dense);
+            return true;
+        }
         let Some(entries) = self.quad_group_entries.get(group_id) else {
             return false;
         };
@@ -762,6 +799,10 @@ impl FinalMaskMapping {
 
     #[inline(always)]
     fn or_byte_group(&self, group_id: usize, out: &mut [u32]) -> bool {
+        if let Some(Some(dense)) = self.byte_group_dense.get(group_id) {
+            or_dense(out, dense);
+            return true;
+        }
         let Some(entries) = self.byte_group_entries.get(group_id) else {
             return false;
         };
@@ -873,6 +914,36 @@ impl FinalMaskMapping {
         out: &mut [u32],
         stats: &mut DenseToBufProfileStats,
     ) {
+        let word32_base = base / 32;
+        for lane in 0..2 {
+            let shift = lane * 32;
+            let mask = 0xffff_ffffu64 << shift;
+            if bits & mask == mask {
+                if self.andnot_word32_group(word32_base + lane, out) {
+                    stats.group_andnot_sparse_entries += self
+                        .word32_group_entries
+                        .get(word32_base + lane)
+                        .map_or(0, |entries| entries.len()) as u64;
+                }
+                bits &= !mask;
+            }
+        }
+
+        let halfword_base = base / 16;
+        for lane in 0..4 {
+            let shift = lane * 16;
+            let mask = 0xffffu64 << shift;
+            if bits & mask == mask {
+                if self.andnot_halfword_group(halfword_base + lane, out) {
+                    stats.group_andnot_sparse_entries += self
+                        .halfword_group_entries
+                        .get(halfword_base + lane)
+                        .map_or(0, |entries| entries.len()) as u64;
+                }
+                bits &= !mask;
+            }
+        }
+
         let byte_base = base / 8;
         for lane in 0..8 {
             let shift = lane * 8;
@@ -918,6 +989,26 @@ impl FinalMaskMapping {
     }
 
     fn andnot_bits_fast(&self, base: usize, mut bits: u64, out: &mut [u32]) {
+        let word32_base = base / 32;
+        for lane in 0..2 {
+            let shift = lane * 32;
+            let mask = 0xffff_ffffu64 << shift;
+            if bits & mask == mask {
+                self.andnot_word32_group(word32_base + lane, out);
+                bits &= !mask;
+            }
+        }
+
+        let halfword_base = base / 16;
+        for lane in 0..4 {
+            let shift = lane * 16;
+            let mask = 0xffffu64 << shift;
+            if bits & mask == mask {
+                self.andnot_halfword_group(halfword_base + lane, out);
+                bits &= !mask;
+            }
+        }
+
         let byte_base = base / 8;
         for lane in 0..8 {
             let shift = lane * 8;
@@ -1032,6 +1123,30 @@ fn compute_dense_prefix(group_entries: &[Box<[SparseEntry]>], buf_words: usize) 
         prefixes.push(current.clone().into_boxed_slice());
     }
     prefixes
+}
+
+fn dense_group_threshold(buf_words: usize) -> usize {
+    (buf_words / 4).max(64)
+}
+
+fn compute_heavy_group_dense(
+    group_entries: &[Box<[SparseEntry]>],
+    buf_words: usize,
+    threshold: usize,
+) -> Vec<Option<Box<[u32]>>> {
+    group_entries
+        .iter()
+        .map(|entries| {
+            if entries.len() <= threshold {
+                return None;
+            }
+            let mut dense = vec![0u32; buf_words];
+            for &entry in entries.iter() {
+                dense[entry.word_idx() as usize] |= entry.mask();
+            }
+            Some(dense.into_boxed_slice())
+        })
+        .collect()
 }
 
 #[inline(always)]
