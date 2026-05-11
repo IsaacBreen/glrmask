@@ -878,6 +878,13 @@ impl Constraint {
         true
     }
 
+    #[inline(always)]
+    pub(crate) fn has_seed_state_buf_mask(&self, seed_idx: usize) -> bool {
+        self.seed_state_buf_masks
+            .get(seed_idx)
+            .is_some_and(Option::is_some)
+    }
+
     pub(crate) fn or_seed_dense_token_set_to_buf(
         &self,
         seed_idx: usize,

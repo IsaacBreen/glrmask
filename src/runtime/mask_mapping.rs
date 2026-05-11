@@ -125,6 +125,7 @@ pub struct FinalMaskMapping {
     halfword_group_entries: EntryTable,
     word32_group_entries: EntryTable,
     word_group_entries: EntryTable,
+    word_group_dense: Vec<Option<Box<[u32]>>>,
     word_group_entry_prefix: Vec<usize>,
     word_group_dense_prefix: Vec<Box<[u32]>>,
     all_tokens_mask: Box<[u32]>,
@@ -155,6 +156,8 @@ impl FinalMaskMapping {
             compute_heavy_group_dense(&quad_group_entries, buf_words, dense_group_threshold);
         let byte_group_dense =
             compute_heavy_group_dense(&byte_group_entries, buf_words, dense_group_threshold);
+        let word_group_dense =
+            compute_heavy_group_dense(&word_group_entries, buf_words, dense_group_threshold);
         let word_group_entry_prefix = compute_entry_prefix(&word_group_entries);
         let word_group_dense_prefix = compute_dense_prefix(&word_group_entries, buf_words);
         let all_tokens_mask = word_group_dense_prefix
@@ -175,6 +178,7 @@ impl FinalMaskMapping {
             halfword_group_entries: EntryTable::from_groups(halfword_group_entries),
             word32_group_entries: EntryTable::from_groups(word32_group_entries),
             word_group_entries: EntryTable::from_groups(word_group_entries),
+            word_group_dense,
             word_group_entry_prefix,
             word_group_dense_prefix,
             all_tokens_mask,
@@ -213,8 +217,7 @@ impl FinalMaskMapping {
             return;
         }
 
-        let selection = self.dense_selection_stats(dense);
-        let n_set = selection.n_set;
+        let n_set = self.count_dense_set_bits(dense);
         if n_set >= n_internal && !self.all_tokens_mask.is_empty() {
             if buf_zeroed {
                 copy_dense(buf, &self.all_tokens_mask);
@@ -231,9 +234,14 @@ impl FinalMaskMapping {
         if !self.all_tokens_mask.is_empty()
             && n_set.saturating_mul(5) >= n_internal.saturating_mul(3)
             && n_missing <= 800
-            && self.buf_words + self.estimate_missing_dense_clear_cost(dense)
-                < selection.selected_entry_cost
         {
+            let selection = self.dense_selection_stats(dense);
+            if self.buf_words + self.estimate_missing_dense_clear_cost(dense)
+                >= selection.selected_entry_cost
+            {
+                self.or_selected_dense_fast(dense, buf, buf_zeroed);
+                return;
+            }
             if buf_zeroed {
                 copy_dense(buf, &self.all_tokens_mask);
             } else {
@@ -251,8 +259,7 @@ impl FinalMaskMapping {
         if n_internal == 0 || dense.is_empty() {
             return 0;
         }
-        let stats = self.dense_selection_stats(dense);
-        let n_set = stats.n_set;
+        let n_set = self.count_dense_set_bits(dense);
         if n_set >= n_internal && !self.all_tokens_mask.is_empty() {
             return self.buf_words as u64;
         }
@@ -264,6 +271,7 @@ impl FinalMaskMapping {
             && n_set.saturating_mul(5) >= n_internal.saturating_mul(3)
             && n_missing <= 800
         {
+            let stats = self.dense_selection_stats(dense);
             let clear_cost = self.estimate_missing_dense_clear_cost(dense);
             if self.buf_words + clear_cost < stats.selected_entry_cost {
                 return (self.buf_words + clear_cost) as u64;
@@ -287,8 +295,7 @@ impl FinalMaskMapping {
             return stats;
         }
 
-        let selection = self.dense_selection_stats(dense);
-        let n_set = selection.n_set;
+        let n_set = self.count_dense_set_bits(dense);
         if n_set >= n_internal && !self.all_tokens_mask.is_empty() {
             if buf_zeroed {
                 copy_dense(buf, &self.all_tokens_mask);
@@ -305,9 +312,14 @@ impl FinalMaskMapping {
         if !self.all_tokens_mask.is_empty()
             && n_set.saturating_mul(5) >= n_internal.saturating_mul(3)
             && n_missing <= 800
-            && self.buf_words + self.estimate_missing_dense_clear_cost(dense)
-                < selection.selected_entry_cost
         {
+            let selection = self.dense_selection_stats(dense);
+            if self.buf_words + self.estimate_missing_dense_clear_cost(dense)
+                >= selection.selected_entry_cost
+            {
+                self.or_selected_dense(dense, buf, buf_zeroed, &mut stats);
+                return stats;
+            }
             stats.complement_path_used = true;
             if buf_zeroed {
                 copy_dense(buf, &self.all_tokens_mask);
@@ -835,6 +847,16 @@ impl FinalMaskMapping {
         if start >= end {
             return false;
         }
+        if end == start + 1
+            && let Some(Some(dense)) = self.word_group_dense.get(start)
+        {
+            if can_copy {
+                copy_dense(out, dense);
+            } else {
+                or_dense(out, dense);
+            }
+            return true;
+        }
         let sparse_entries = self.group_entries_in(start, end);
         if sparse_entries > self.buf_words / 4 && end < self.word_group_dense_prefix.len() {
             let before = &self.word_group_dense_prefix[start];
@@ -937,6 +959,10 @@ impl FinalMaskMapping {
         let Some(entries) = self.word_group_entries.get(group_id) else {
             return false;
         };
+        if let Some(Some(dense)) = self.word_group_dense.get(group_id) {
+            andnot_dense(out, dense);
+            return true;
+        }
         if entries.len() > self.buf_words / 4 && group_id + 1 < self.word_group_dense_prefix.len()
         {
             let before = &self.word_group_dense_prefix[group_id];
@@ -951,6 +977,9 @@ impl FinalMaskMapping {
     fn andnot_word_group_run(&self, start: usize, end: usize, out: &mut [u32]) -> bool {
         if start >= end {
             return false;
+        }
+        if end == start + 1 {
+            return self.andnot_word_group(start, out);
         }
         let sparse_entries = self.group_entries_in(start, end);
         if sparse_entries > self.buf_words / 4 && end < self.word_group_dense_prefix.len() {

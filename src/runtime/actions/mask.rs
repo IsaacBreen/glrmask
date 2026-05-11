@@ -946,23 +946,25 @@ impl<'a> ConstraintState<'a> {
         merged: &mut [u64],
         mut direct_buf: Option<&mut [u32]>,
     ) -> bool {
-        let mut direct_handled = direct_buf.is_some();
+        let direct_handled = direct_buf
+            .as_ref()
+            .is_some_and(|_| self.can_direct_final_weight_to_buf(final_weight, acc));
         if final_weight.is_full() {
             acc.or_into_merged(merged);
-            if let Some(buf) = direct_buf.as_deref_mut() {
+            if direct_handled
+                && let Some(buf) = direct_buf.as_deref_mut()
+            {
                 for dense in acc.0.values() {
-                    let Some(seed_idx) = self.constraint.seed_state_index_for_dense(dense) else {
-                        direct_handled = false;
-                        continue;
-                    };
-                    if !self.constraint.or_seed_state_dense_to_buf(seed_idx, buf) {
-                        direct_handled = false;
+                    if let Some(seed_idx) = self.constraint.seed_state_index_for_dense(dense) {
+                        self.constraint.or_seed_state_dense_to_buf(seed_idx, buf);
                     }
                 }
             }
         } else {
             acc.or_intersection_into_merged(final_weight, precomputed, merged);
-            if let Some(buf) = direct_buf.as_deref_mut() {
+            if direct_handled
+                && let Some(buf) = direct_buf.as_deref_mut()
+            {
                 for (&tsid, dense) in &acc.0 {
                     let Some(token_set) = final_weight.0.get(tsid) else {
                         continue;
@@ -973,21 +975,28 @@ impl<'a> ConstraintState<'a> {
                     {
                         continue;
                     }
-                    let Some(seed_idx) = self.constraint.seed_state_index_for_dense(dense) else {
-                        direct_handled = false;
-                        continue;
-                    };
-                    if !self
-                        .constraint
-                        .or_seed_dense_token_set_to_buf(seed_idx, token_set, buf)
-                    {
-                        direct_handled = false;
+                    if let Some(seed_idx) = self.constraint.seed_state_index_for_dense(dense) {
+                        self.constraint
+                            .or_seed_dense_token_set_to_buf(seed_idx, token_set, buf);
                     }
                 }
             }
         }
 
         direct_handled
+    }
+
+    fn can_direct_final_weight_to_buf(&self, final_weight: &Weight, acc: &DenseMaskAcc) -> bool {
+        if final_weight.is_full() {
+            return acc.0.values().all(|dense| {
+                self.constraint
+                    .seed_state_index_for_dense(dense)
+                    .is_some_and(|seed_idx| self.constraint.has_seed_state_buf_mask(seed_idx))
+            });
+        }
+
+        let _ = acc;
+        false
     }
 
     fn merge_final_weight_for_accs(
