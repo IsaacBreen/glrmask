@@ -949,16 +949,8 @@ impl<'a> ConstraintState<'a> {
         let mut direct_handled = direct_buf.is_some();
         if final_weight.is_full() {
             acc.or_into_merged(merged);
-            if let Some(buf) = direct_buf.as_deref_mut() {
-                for dense in acc.0.values() {
-                    let Some(seed_idx) = self.constraint.seed_state_index_for_dense(dense) else {
-                        direct_handled = false;
-                        continue;
-                    };
-                    if !self.constraint.or_seed_state_buf_mask(seed_idx, buf) {
-                        direct_handled = false;
-                    }
-                }
+            if direct_buf.is_some() && !acc.0.is_empty() {
+                direct_handled = false;
             }
         } else {
             acc.or_intersection_into_merged(final_weight, precomputed, merged);
@@ -1400,14 +1392,7 @@ impl<'a> ConstraintState<'a> {
                 }
 
                 let dense_to_buf_start = profile.as_ref().map(|_| Instant::now());
-                let copied_seed_buf = self
-                    .constraint
-                    .try_copy_seed_state_buf_mask(&merged, buf);
-                let dense_to_buf = if copied_seed_buf {
-                    DenseToBufProfileStats::default()
-                } else {
-                    self.constraint.or_internal_dense_to_buf(&merged, buf, true)
-                };
+                let dense_to_buf = self.constraint.or_internal_dense_to_buf(&merged, buf, true);
                 if let Some(profile) = profile.as_mut() {
                     if let Some(start) = dense_to_buf_start {
                         profile.finalize_dense_to_buf_ns += elapsed_ns(start);

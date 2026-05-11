@@ -146,12 +146,9 @@ pub struct Constraint {
     /// whose original token bytes are lexically live from original tokenizer state s.
     #[serde(skip)]
     pub(crate) seed_state_dense: SeedStateDenseMasks,
-    /// Pre-materialized original-token output masks for each `seed_state_dense`.
+    /// Exact hash lookup for `seed_state_dense` -> `seed_state_dense` index.
     #[serde(skip)]
-    pub(crate) seed_state_buf_masks: Vec<Box<[u32]>>,
-    /// Exact hash lookup for `seed_state_dense` -> `seed_state_buf_masks` index.
-    #[serde(skip)]
-    pub(crate) seed_state_buf_mask_by_dense_hash: FxHashMap<u64, Vec<usize>>,
+    pub(crate) seed_state_by_dense_hash: FxHashMap<u64, Vec<usize>>,
     /// Dense bitmap of the full internal token universe.
     #[serde(skip, default = "empty_dense_words")]
     pub(crate) seed_universe_dense: DenseWords,
@@ -860,18 +857,7 @@ impl Constraint {
         hash ^ (words.len() as u64)
     }
 
-    fn compute_seed_state_buf_masks(&self) -> Vec<Box<[u32]>> {
-        self.seed_state_dense
-            .iter()
-            .map(|dense| {
-                let mut buf = vec![0u32; self.mask_len()];
-                self.or_internal_dense_to_buf(dense, &mut buf, true);
-                buf.into_boxed_slice()
-            })
-            .collect()
-    }
-
-    fn compute_seed_state_buf_mask_hashes(
+    fn compute_seed_state_hashes(
         seed_state_dense: &[DenseWords],
     ) -> FxHashMap<u64, Vec<usize>> {
         let mut by_hash: FxHashMap<u64, Vec<usize>> = FxHashMap::default();
@@ -886,19 +872,11 @@ impl Constraint {
 
     pub(crate) fn seed_state_index_for_dense(&self, dense: &[u64]) -> Option<usize> {
         let hash = Self::dense_words_hash(dense);
-        let candidates = self.seed_state_buf_mask_by_dense_hash.get(&hash)?;
+        let candidates = self.seed_state_by_dense_hash.get(&hash)?;
         candidates
             .iter()
             .copied()
             .find(|&idx| self.seed_state_dense.get(idx).is_some_and(|seed| seed.as_ref() == dense))
-    }
-
-    pub(crate) fn or_seed_state_buf_mask(&self, seed_idx: usize, buf: &mut [u32]) -> bool {
-        let Some(seed_buf) = self.seed_state_buf_masks.get(seed_idx) else {
-            return false;
-        };
-        or_dense_buf(buf, seed_buf);
-        true
     }
 
     pub(crate) fn or_seed_dense_token_set_to_buf(
@@ -982,27 +960,6 @@ impl Constraint {
             wi += 1;
         }
         true
-    }
-
-    pub(crate) fn try_copy_seed_state_buf_mask(&self, dense: &[u64], buf: &mut [u32]) -> bool {
-        let hash = Self::dense_words_hash(dense);
-        let Some(candidates) = self.seed_state_buf_mask_by_dense_hash.get(&hash) else {
-            return false;
-        };
-        for &idx in candidates {
-            let Some(seed_dense) = self.seed_state_dense.get(idx) else {
-                continue;
-            };
-            if seed_dense.as_ref() != dense {
-                continue;
-            }
-            let Some(seed_buf) = self.seed_state_buf_masks.get(idx) else {
-                continue;
-            };
-            copy_dense_buf(buf, seed_buf);
-            return true;
-        }
-        false
     }
 
     /// Build dense buf masks for internal tokens with many sparse entries.
@@ -1208,8 +1165,7 @@ impl Constraint {
         if dw == 0 {
             self.seed_terminal_dense.clear();
             self.seed_state_dense.clear();
-            self.seed_state_buf_masks.clear();
-            self.seed_state_buf_mask_by_dense_hash.clear();
+            self.seed_state_by_dense_hash.clear();
             self.seed_universe_dense = empty_dense_words();
             return;
         }
@@ -1223,9 +1179,8 @@ impl Constraint {
 
         self.seed_terminal_dense = self.build_seed_terminal_dense_masks();
         self.seed_state_dense = self.build_seed_state_dense_masks();
-        self.seed_state_buf_masks = self.compute_seed_state_buf_masks();
-        self.seed_state_buf_mask_by_dense_hash =
-            Self::compute_seed_state_buf_mask_hashes(&self.seed_state_dense);
+        self.seed_state_by_dense_hash =
+            Self::compute_seed_state_hashes(&self.seed_state_dense);
     }
 
     fn collect_weight_token_sets<'a>(
