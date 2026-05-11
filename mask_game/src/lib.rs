@@ -1,5 +1,6 @@
 pub mod candidate;
 
+use base64::Engine;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -34,6 +35,11 @@ pub struct Case {
     pub token_id: Option<u32>,
     #[serde(default)]
     pub allowed_count: Option<u32>,
+    #[serde(default)]
+    pub internal_ids_vb64: Option<String>,
+    #[serde(default)]
+    pub internal_ids_b64: Option<String>,
+    #[serde(default)]
     pub internal_ids: Vec<u32>,
     #[serde(default)]
     pub internal_dense_words: Vec<u64>,
@@ -75,7 +81,98 @@ pub fn load_game_data(path: impl AsRef<Path>) -> Result<GameData, Box<dyn std::e
     };
     let mut bytes = Vec::new();
     reader.read_to_end(&mut bytes)?;
-    Ok(serde_json::from_slice(&bytes)?)
+    let mut data: GameData = serde_json::from_slice(&bytes)?;
+    normalize_cases(&mut data)?;
+    Ok(data)
+}
+
+fn normalize_cases(data: &mut GameData) -> Result<(), Box<dyn std::error::Error>> {
+    for case in &mut data.cases {
+        if case.internal_ids.is_empty() {
+            if let Some(encoded) = case.internal_ids_vb64.as_deref() {
+                case.internal_ids = decode_internal_ids_varint(encoded)?;
+            } else if let Some(encoded) = case.internal_ids_b64.as_deref() {
+                case.internal_ids = decode_internal_ids_fixed(encoded)?;
+            }
+        }
+
+        let map_len = data
+            .maps
+            .get(case.map_id as usize)
+            .map(|mapping| mapping.internal_to_original.len())
+            .unwrap_or(0);
+        case.internal_dense_words = dense_words_from_internal_ids(&case.internal_ids, map_len);
+    }
+    Ok(())
+}
+
+fn decode_internal_ids_fixed(encoded: &str) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
+    if encoded.is_empty() {
+        return Ok(Vec::new());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded)?;
+    if bytes.len() % 4 != 0 {
+        return Err(format!("internal_ids_b64 length {} is not divisible by 4", bytes.len()).into());
+    }
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect())
+}
+
+fn decode_internal_ids_varint(encoded: &str) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
+    if encoded.is_empty() {
+        return Ok(Vec::new());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded)?;
+    let mut ids = Vec::new();
+    let mut offset = 0usize;
+    let mut prev = 0u32;
+
+    while offset < bytes.len() {
+        let mut value = 0u32;
+        let mut shift = 0u32;
+        loop {
+            if offset >= bytes.len() {
+                return Err("truncated internal_ids_vb64 varint".into());
+            }
+            let byte = bytes[offset];
+            offset += 1;
+
+            let part = (byte & 0x7f) as u32;
+            let shifted = part
+                .checked_shl(shift)
+                .ok_or("internal_ids_vb64 varint shift overflow")?;
+            value |= shifted;
+
+            if byte & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+            if shift >= 32 {
+                return Err("internal_ids_vb64 varint is too large for u32".into());
+            }
+        }
+
+        let id = prev
+            .checked_add(value)
+            .ok_or("internal_ids_vb64 delta overflow")?;
+        ids.push(id);
+        prev = id;
+    }
+
+    Ok(ids)
+}
+
+fn dense_words_from_internal_ids(internal_ids: &[u32], n_internal: usize) -> Vec<u64> {
+    let mut words = vec![0u64; n_internal.div_ceil(64)];
+    for &internal in internal_ids {
+        let internal = internal as usize;
+        if internal < n_internal {
+            words[internal / 64] |= 1u64 << (internal & 63);
+        }
+    }
+    words
 }
 
 pub fn evaluate<C: Candidate>(
@@ -247,6 +344,8 @@ mod tests {
                     step: 0,
                     token_id: Some(11),
                     allowed_count: Some(4),
+                    internal_ids_vb64: None,
+                    internal_ids_b64: None,
                     internal_ids: vec![0, 2],
                     internal_dense_words: vec![0b0101],
                     expected_sparse_words: vec![[0, 0b11], [1, 0b1], [2, 0b1]],
@@ -258,6 +357,8 @@ mod tests {
                     step: 1,
                     token_id: Some(12),
                     allowed_count: Some(3),
+                    internal_ids_vb64: None,
+                    internal_ids_b64: None,
                     internal_ids: vec![1, 3],
                     internal_dense_words: vec![0b1010],
                     expected_sparse_words: vec![

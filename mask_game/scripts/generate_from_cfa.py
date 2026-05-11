@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import gzip
 import hashlib
 import json
@@ -132,12 +133,19 @@ def sparse_words_from_internal_ids(
     return [[idx, word] for idx, word in sorted(words.items()) if word]
 
 
-def dense_words_from_internal_ids(internal_ids: list[int], n_internal: int) -> list[int]:
-    words = [0] * ((n_internal + 63) // 64)
+def encode_internal_ids(internal_ids: list[int]) -> str:
+    out = bytearray()
+    prev = 0
     for internal in internal_ids:
-        if 0 <= internal < n_internal:
-            words[internal // 64] |= 1 << (internal & 63)
-    return words
+        if internal < prev:
+            raise ValueError("internal ids must be sorted before delta-varint encoding")
+        value = internal - prev
+        prev = internal
+        while value >= 0x80:
+            out.append((value & 0x7F) | 0x80)
+            value >>= 7
+        out.append(value)
+    return base64.b64encode(out).decode("ascii")
 
 
 def score_case(internal_ids: list[int], internal_to_original: list[list[int]], sparse_words: list[list[int]]) -> int:
@@ -258,11 +266,7 @@ def main() -> int:
                 "step": item.step,
                 "token_id": item.token_id,
                 "allowed_count": item.allowed_count,
-                "internal_ids": item.internal_ids,
-                "internal_dense_words": dense_words_from_internal_ids(
-                    item.internal_ids,
-                    len(internal_to_original),
-                ),
+                "internal_ids_vb64": encode_internal_ids(item.internal_ids),
                 "expected_sparse_words": item.expected_sparse_words,
             })
 

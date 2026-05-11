@@ -53,9 +53,10 @@ python mask_game/scripts/generate_from_cfa.py \
 ```
 
 That emits every non-empty mask step from the same problem set, including the
-`token_id`, original-token `allowed_count`, and dense internal-token words for
-each case. The full corpus is intended as a local benchmark artifact and is
-ignored by git.
+`token_id`, original-token `allowed_count`, and base64-encoded delta-varint
+internal IDs for each case. The loader decodes those IDs and precomputes the
+dense internal-token words outside the timed section. The full corpus is
+intended as a local benchmark artifact and is ignored by git.
 
 ## Evaluate
 
@@ -86,10 +87,11 @@ pub trait Candidate {
 
     fn name() -> &'static str;
     fn prepare(mapping: &Mapping, buf_words: usize) -> Self::Prepared;
-    fn fill(prepared: &Self::Prepared, internal_ids: &[u32], out: &mut [u32]);
+    fn fill(prepared: &Self::Prepared, case: &Case, out: &mut [u32]);
 }
 ```
 
 `prepare` may build indexes from `mapping.internal_to_original`; its cost is not
-timed. `fill` is the timed operation and must be a pure expansion of the supplied
-`internal_ids` into the empty `out` bitset.
+timed. `fill` is the timed operation and must be a pure expansion of the
+supplied case's internal IDs or prebuilt dense internal words into the empty
+`out` bitset.

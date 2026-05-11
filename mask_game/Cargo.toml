@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+base64 = "0.22"
 flate2 = "1"
 glrmask = { path = ".." }
 rayon = "1"
