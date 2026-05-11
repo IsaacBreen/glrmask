@@ -17,8 +17,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .transpose()?
         .unwrap_or(100);
     let candidate = args.next().unwrap_or_else(|| "complement".to_string());
+    let case_filter = args.next();
 
-    let data = load_game_data(&data_path)?;
+    let mut data = load_game_data(&data_path)?;
+    if let Some(raw_filter) = case_filter {
+        data = filter_data(data, &raw_filter)?;
+    }
     match candidate.as_str() {
         "baseline" => print_summary(&data, evaluate::<BaselineCandidate>(&data, repetitions)?)?,
         "group" | "glrmask_like" => {
@@ -55,6 +59,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn filter_data(
+    mut data: mask_game::GameData,
+    raw: &str,
+) -> Result<mask_game::GameData, Box<dyn std::error::Error>> {
+    let (problem, example_index, step) = parse_case_filter(raw)?;
+    data.cases.retain(|case| {
+        case.problem == problem && case.example_index == example_index && case.step == step
+    });
+    if data.cases.is_empty() {
+        return Err(format!("case filter {raw:?} matched no cases").into());
+    }
+    Ok(data)
+}
+
+fn parse_case_filter(raw: &str) -> Result<(String, u32, u32), Box<dyn std::error::Error>> {
+    let (problem, example, step) = raw
+        .rsplit_once(':')
+        .and_then(|(prefix, step)| {
+            prefix
+                .rsplit_once(':')
+                .map(|(problem, example)| (problem, example, step))
+        })
+        .ok_or_else(|| format!("case filter must be PROBLEM:EXAMPLE:STEP, got {raw:?}"))?;
+    Ok((problem.to_string(), example.parse()?, step.parse()?))
 }
 
 fn print_summary(
