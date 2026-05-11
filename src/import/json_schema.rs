@@ -9651,22 +9651,6 @@ impl<'a> SchemaCtx<'a> {
             return Ok(sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]));
         }
 
-        if pattern_properties.is_empty()
-            && property_names.is_none()
-            && additional_properties_schema.is_some()
-            && ordered.iter().all(|(_, _, required)| !*required)
-            && ordered
-                .iter()
-                .all(|(_, value_expr, _)| Self::supports_literal_properties_any_order_fast_path(value_expr))
-        {
-            return self.build_literal_properties_any_order_object_expr(
-                properties,
-                required_list,
-                required_keys,
-                additional_properties_schema,
-            );
-        }
-
         let mut base_index = self.generated_object_rule_counter;
         let base_name = loop {
             let candidate = format!("obj_ord_{base_index}");
