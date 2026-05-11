@@ -1,6 +1,7 @@
 use rayon::prelude::*;
 
 pub type InternalTokenBufMasks = Vec<(u16, u32)>;
+type SparseEntry = (u16, u32);
 
 #[derive(Default, Clone, Copy)]
 pub(crate) struct DenseToBufProfileStats {
@@ -39,12 +40,65 @@ pub(crate) struct DeltaReplayProfileStats {
     pub removed_token_entries: u64,
 }
 
+#[derive(Default, Clone, Copy)]
+struct DenseSelectionStats {
+    n_set: usize,
+    selected_entry_cost: usize,
+    missing_entry_cost: usize,
+    complement_entry_cost: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct EntryRange {
+    start: u32,
+    len: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+struct EntryTable {
+    ranges: Box<[EntryRange]>,
+    entries: Box<[SparseEntry]>,
+}
+
+impl EntryTable {
+    fn from_groups(groups: Vec<Box<[SparseEntry]>>) -> Self {
+        let mut ranges = Vec::with_capacity(groups.len());
+        let total_entries = groups.iter().map(|group| group.len()).sum();
+        let mut entries = Vec::with_capacity(total_entries);
+        for group in groups {
+            let start = entries.len();
+            entries.extend(group.iter().copied());
+            ranges.push(EntryRange {
+                start: start as u32,
+                len: entries.len().saturating_sub(start) as u32,
+            });
+        }
+        Self {
+            ranges: ranges.into_boxed_slice(),
+            entries: entries.into_boxed_slice(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.ranges.len()
+    }
+
+    fn get(&self, index: usize) -> Option<&[SparseEntry]> {
+        let range = *self.ranges.get(index)?;
+        let start = range.start as usize;
+        let end = start + range.len as usize;
+        Some(&self.entries[start..end])
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct FinalMaskMapping {
-    token_entries: Vec<Box<[(usize, u32)]>>,
-    quad_group_entries: Vec<Box<[(usize, u32)]>>,
-    byte_group_entries: Vec<Box<[(usize, u32)]>>,
-    word_group_entries: Vec<Box<[(usize, u32)]>>,
+    token_entries: EntryTable,
+    token_entry_lens: Vec<usize>,
+    word_entry_len_sums: Vec<usize>,
+    quad_group_entries: EntryTable,
+    byte_group_entries: EntryTable,
+    word_group_entries: EntryTable,
     word_group_entry_prefix: Vec<usize>,
     word_group_dense_prefix: Vec<Box<[u32]>>,
     all_tokens_mask: Box<[u32]>,
@@ -54,6 +108,14 @@ pub struct FinalMaskMapping {
 impl FinalMaskMapping {
     pub fn new(internal_to_original: &[Vec<u32>], buf_words: usize) -> Self {
         let token_entries = compute_token_entries(internal_to_original, buf_words);
+        let token_entry_lens = token_entries
+            .iter()
+            .map(|entries| entries.len())
+            .collect::<Vec<_>>();
+        let word_entry_len_sums = token_entry_lens
+            .chunks(64)
+            .map(|chunk| chunk.iter().sum())
+            .collect::<Vec<_>>();
         let quad_group_entries = compute_block_entries(&token_entries, buf_words, 4);
         let byte_group_entries = compute_block_entries(&token_entries, buf_words, 8);
         let word_group_entries = compute_block_entries(&token_entries, buf_words, 64);
@@ -65,10 +127,12 @@ impl FinalMaskMapping {
             .unwrap_or_else(|| vec![0u32; buf_words].into_boxed_slice());
 
         Self {
-            token_entries,
-            quad_group_entries,
-            byte_group_entries,
-            word_group_entries,
+            token_entries: EntryTable::from_groups(token_entries),
+            token_entry_lens,
+            word_entry_len_sums,
+            quad_group_entries: EntryTable::from_groups(quad_group_entries),
+            byte_group_entries: EntryTable::from_groups(byte_group_entries),
+            word_group_entries: EntryTable::from_groups(word_group_entries),
             word_group_entry_prefix,
             word_group_dense_prefix,
             all_tokens_mask,
@@ -106,12 +170,21 @@ impl FinalMaskMapping {
         if n_internal == 0 || dense.is_empty() {
             return 0;
         }
-        let n_set: usize = dense.iter().map(|w| w.count_ones() as usize).sum();
+        let stats = self.dense_selection_stats(dense);
+        let n_set = stats.n_set;
         if n_set >= n_internal && !self.all_tokens_mask.is_empty() {
             return self.buf_words as u64;
         }
         if n_set == 0 {
             return 0;
+        }
+        let n_missing = n_internal - n_set;
+        if !self.all_tokens_mask.is_empty()
+            && n_set.saturating_mul(5) >= n_internal.saturating_mul(3)
+            && n_missing <= 300
+            && stats.complement_entry_cost <= stats.selected_entry_cost.saturating_mul(6) / 5
+        {
+            return (self.buf_words + stats.missing_entry_cost) as u64;
         }
         self.internal_ids_from_dense(dense)
             .iter()
@@ -131,7 +204,8 @@ impl FinalMaskMapping {
             return stats;
         }
 
-        let n_set: usize = dense.iter().map(|w| w.count_ones() as usize).sum();
+        let selection = self.dense_selection_stats(dense);
+        let n_set = selection.n_set;
         if n_set >= n_internal && !self.all_tokens_mask.is_empty() {
             if buf_zeroed {
                 copy_dense(buf, &self.all_tokens_mask);
@@ -146,8 +220,9 @@ impl FinalMaskMapping {
 
         let n_missing = n_internal - n_set;
         if !self.all_tokens_mask.is_empty()
-            && n_set.saturating_mul(5) >= n_internal.saturating_mul(4)
-            && n_missing <= 128
+            && n_set.saturating_mul(5) >= n_internal.saturating_mul(3)
+            && n_missing <= 300
+            && selection.complement_entry_cost <= selection.selected_entry_cost.saturating_mul(6) / 5
         {
             stats.complement_path_used = true;
             if buf_zeroed {
@@ -185,6 +260,47 @@ impl FinalMaskMapping {
             }
         }
         internal_ids
+    }
+
+    fn dense_selection_stats(&self, dense: &[u64]) -> DenseSelectionStats {
+        let n_internal = self.token_entries.len();
+        let mut stats = DenseSelectionStats::default();
+        for (wi, &word) in dense.iter().enumerate() {
+            let base = wi * 64;
+            if base >= n_internal {
+                break;
+            }
+            let remaining = n_internal - base;
+            let valid_bits = remaining.min(64);
+            let valid_mask = if valid_bits == 64 { !0u64 } else { (1u64 << valid_bits) - 1 };
+            let selected = word & valid_mask;
+            let missing = !word & valid_mask;
+            let selected_count = selected.count_ones() as usize;
+            let missing_count = valid_bits - selected_count;
+            stats.n_set += selected_count;
+
+            let word_sum = self.word_entry_len_sums.get(wi).copied().unwrap_or(0);
+            let missing_cost = self.entry_cost_for_bits(base, missing);
+            let selected_cost = if selected_count <= missing_count {
+                self.entry_cost_for_bits(base, selected)
+            } else {
+                word_sum.saturating_sub(missing_cost)
+            };
+            stats.selected_entry_cost += selected_cost;
+            stats.missing_entry_cost += missing_cost;
+        }
+        stats.complement_entry_cost = self.buf_words + stats.missing_entry_cost;
+        stats
+    }
+
+    fn entry_cost_for_bits(&self, base: usize, mut bits: u64) -> usize {
+        let mut cost = 0usize;
+        while bits != 0 {
+            let bit = bits.trailing_zeros() as usize;
+            cost += self.token_entry_lens.get(base + bit).copied().unwrap_or(0);
+            bits &= bits - 1;
+        }
+        cost
     }
 
     fn fill_internal_ids_by_runs(&self, internal_ids: &[u32], out: &mut [u32]) {
@@ -334,9 +450,12 @@ impl FinalMaskMapping {
             .zip(self.word_group_entry_prefix.get(start))
             .map(|(end, start)| end - start)
             .unwrap_or_else(|| {
-                self.word_group_entries[start..end]
-                    .iter()
-                    .map(|entries| entries.len())
+                (start..end)
+                    .map(|group_id| {
+                        self.word_group_entries
+                            .get(group_id)
+                            .map_or(0, |entries| entries.len())
+                    })
                     .sum()
             })
     }
@@ -356,6 +475,24 @@ impl FinalMaskMapping {
             return;
         };
         andnot_sparse(out, entries);
+    }
+
+    #[inline(always)]
+    fn andnot_quad_group(&self, group_id: usize, out: &mut [u32]) -> bool {
+        let Some(entries) = self.quad_group_entries.get(group_id) else {
+            return false;
+        };
+        andnot_sparse(out, entries);
+        !entries.is_empty()
+    }
+
+    #[inline(always)]
+    fn andnot_byte_group(&self, group_id: usize, out: &mut [u32]) -> bool {
+        let Some(entries) = self.byte_group_entries.get(group_id) else {
+            return false;
+        };
+        andnot_sparse(out, entries);
+        !entries.is_empty()
     }
 
     #[inline(always)]
@@ -402,6 +539,36 @@ impl FinalMaskMapping {
         out: &mut [u32],
         stats: &mut DenseToBufProfileStats,
     ) {
+        let byte_base = base / 8;
+        for lane in 0..8 {
+            let shift = lane * 8;
+            let mask = 0xffu64 << shift;
+            if bits & mask == mask {
+                if self.or_byte_group(byte_base + lane, out) {
+                    stats.group_or_sparse_entries += self
+                        .byte_group_entries
+                        .get(byte_base + lane)
+                        .map_or(0, |entries| entries.len()) as u64;
+                }
+                bits &= !mask;
+            }
+        }
+
+        let quad_base = base / 4;
+        for lane in 0..16 {
+            let shift = lane * 4;
+            let mask = 0x0fu64 << shift;
+            if bits & mask == mask {
+                if self.or_quad_group(quad_base + lane, out) {
+                    stats.group_or_sparse_entries += self
+                        .quad_group_entries
+                        .get(quad_base + lane)
+                        .map_or(0, |entries| entries.len()) as u64;
+                }
+                bits &= !mask;
+            }
+        }
+
         while bits != 0 {
             stats.normal_token_iterations += 1;
             let bit = bits.trailing_zeros() as usize;
@@ -422,6 +589,38 @@ impl FinalMaskMapping {
         out: &mut [u32],
         stats: &mut DenseToBufProfileStats,
     ) {
+        let byte_base = base / 8;
+        for lane in 0..8 {
+            let shift = lane * 8;
+            let mask = 0xffu64 << shift;
+            if bits & mask == mask {
+                if self.andnot_byte_group(byte_base + lane, out) {
+                    stats.group_andnot_sparse_entries += self
+                        .byte_group_entries
+                        .get(byte_base + lane)
+                        .map_or(0, |entries| entries.len()) as u64;
+                }
+                stats.complement_full_byte_groups += 1;
+                bits &= !mask;
+            }
+        }
+
+        let quad_base = base / 4;
+        for lane in 0..16 {
+            let shift = lane * 4;
+            let mask = 0x0fu64 << shift;
+            if bits & mask == mask {
+                if self.andnot_quad_group(quad_base + lane, out) {
+                    stats.group_andnot_sparse_entries += self
+                        .quad_group_entries
+                        .get(quad_base + lane)
+                        .map_or(0, |entries| entries.len()) as u64;
+                }
+                stats.complement_full_nibble_groups += 1;
+                bits &= !mask;
+            }
+        }
+
         while bits != 0 {
             stats.complement_token_iterations += 1;
             let bit = bits.trailing_zeros() as usize;
@@ -438,17 +637,18 @@ impl FinalMaskMapping {
 fn compute_token_entries(
     internal_to_original: &[Vec<u32>],
     buf_words: usize,
-) -> Vec<Box<[(usize, u32)]>> {
+) -> Vec<Box<[SparseEntry]>> {
     internal_to_original
         .iter()
         .map(|original_ids| {
-            let mut entries = Vec::<(usize, u32)>::new();
+            let mut entries = Vec::<SparseEntry>::new();
             for &original in original_ids {
                 let word_idx = (original / 32) as usize;
                 if word_idx >= buf_words {
                     continue;
                 }
                 let mask = 1u32 << (original & 31);
+                let word_idx = word_idx as u16;
                 if let Some((_, existing)) = entries
                     .iter_mut()
                     .find(|(existing_word_idx, _)| *existing_word_idx == word_idx)
@@ -464,10 +664,10 @@ fn compute_token_entries(
 }
 
 fn compute_block_entries(
-    token_entries: &[Box<[(usize, u32)]>],
+    token_entries: &[Box<[SparseEntry]>],
     buf_words: usize,
     block_size: usize,
-) -> Vec<Box<[(usize, u32)]>> {
+) -> Vec<Box<[SparseEntry]>> {
     let n_groups = token_entries.len().div_ceil(block_size);
     let build = |group_id: usize| {
         let start = group_id * block_size;
@@ -476,6 +676,7 @@ fn compute_block_entries(
         let mut touched = Vec::<usize>::new();
         for entries in &token_entries[start..end] {
             for &(word_idx, mask) in entries.iter() {
+                let word_idx = word_idx as usize;
                 if dense[word_idx] == 0 {
                     touched.push(word_idx);
                 }
@@ -484,11 +685,11 @@ fn compute_block_entries(
         }
         touched.sort_unstable();
         touched.dedup();
-        touched
-            .into_iter()
-            .map(|word_idx| (word_idx, dense[word_idx]))
-            .collect::<Vec<_>>()
-            .into_boxed_slice()
+            touched
+                .into_iter()
+                .map(|word_idx| (word_idx as u16, dense[word_idx]))
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
     };
     if rayon::current_num_threads() == 1 {
         (0..n_groups).map(build).collect()
@@ -497,7 +698,7 @@ fn compute_block_entries(
     }
 }
 
-fn compute_entry_prefix(group_entries: &[Box<[(usize, u32)]>]) -> Vec<usize> {
+fn compute_entry_prefix(group_entries: &[Box<[SparseEntry]>]) -> Vec<usize> {
     let mut prefix = Vec::with_capacity(group_entries.len() + 1);
     let mut total = 0usize;
     prefix.push(total);
@@ -508,13 +709,13 @@ fn compute_entry_prefix(group_entries: &[Box<[(usize, u32)]>]) -> Vec<usize> {
     prefix
 }
 
-fn compute_dense_prefix(group_entries: &[Box<[(usize, u32)]>], buf_words: usize) -> Vec<Box<[u32]>> {
+fn compute_dense_prefix(group_entries: &[Box<[SparseEntry]>], buf_words: usize) -> Vec<Box<[u32]>> {
     let mut prefixes = Vec::with_capacity(group_entries.len() + 1);
     let mut current = vec![0u32; buf_words];
     prefixes.push(current.clone().into_boxed_slice());
     for group in group_entries {
         for &(word_idx, mask) in group.iter() {
-            current[word_idx] |= mask;
+            current[word_idx as usize] |= mask;
         }
         prefixes.push(current.clone().into_boxed_slice());
     }
@@ -522,16 +723,16 @@ fn compute_dense_prefix(group_entries: &[Box<[(usize, u32)]>], buf_words: usize)
 }
 
 #[inline(always)]
-fn or_sparse(out: &mut [u32], entries: &[(usize, u32)]) {
+fn or_sparse(out: &mut [u32], entries: &[SparseEntry]) {
     for &(word_idx, mask) in entries.iter() {
-        out[word_idx] |= mask;
+        out[word_idx as usize] |= mask;
     }
 }
 
 #[inline(always)]
-fn andnot_sparse(out: &mut [u32], entries: &[(usize, u32)]) {
+fn andnot_sparse(out: &mut [u32], entries: &[SparseEntry]) {
     for &(word_idx, mask) in entries.iter() {
-        out[word_idx] &= !mask;
+        out[word_idx as usize] &= !mask;
     }
 }
 
