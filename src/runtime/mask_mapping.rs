@@ -66,8 +66,6 @@ pub(crate) struct DeltaReplayProfileStats {
 struct DenseSelectionStats {
     n_set: usize,
     selected_entry_cost: usize,
-    missing_entry_cost: usize,
-    complement_entry_cost: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -118,6 +116,8 @@ pub struct FinalMaskMapping {
     token_entries: EntryTable,
     token_entry_lens: Vec<usize>,
     word_entry_len_sums: Vec<usize>,
+    quad_pattern_entries: EntryTable,
+    quad_pattern_dense: Vec<Option<Box<[u32]>>>,
     quad_group_entries: EntryTable,
     quad_group_dense: Vec<Option<Box<[u32]>>>,
     byte_group_entries: EntryTable,
@@ -142,12 +142,15 @@ impl FinalMaskMapping {
             .chunks(64)
             .map(|chunk| chunk.iter().sum())
             .collect::<Vec<_>>();
+        let quad_pattern_entries = compute_quad_pattern_entries(&token_entries, buf_words);
         let quad_group_entries = compute_block_entries(&token_entries, buf_words, 4);
         let byte_group_entries = compute_block_entries(&token_entries, buf_words, 8);
         let halfword_group_entries = compute_block_entries(&token_entries, buf_words, 16);
         let word32_group_entries = compute_block_entries(&token_entries, buf_words, 32);
         let word_group_entries = compute_block_entries(&token_entries, buf_words, 64);
         let dense_group_threshold = dense_group_threshold(buf_words);
+        let quad_pattern_dense =
+            compute_heavy_group_dense(&quad_pattern_entries, buf_words, dense_group_threshold);
         let quad_group_dense =
             compute_heavy_group_dense(&quad_group_entries, buf_words, dense_group_threshold);
         let byte_group_dense =
@@ -163,6 +166,8 @@ impl FinalMaskMapping {
             token_entries: EntryTable::from_groups(token_entries),
             token_entry_lens,
             word_entry_len_sums,
+            quad_pattern_entries: EntryTable::from_groups(quad_pattern_entries),
+            quad_pattern_dense,
             quad_group_entries: EntryTable::from_groups(quad_group_entries),
             quad_group_dense,
             byte_group_entries: EntryTable::from_groups(byte_group_entries),
@@ -257,10 +262,12 @@ impl FinalMaskMapping {
         let n_missing = n_internal - n_set;
         if !self.all_tokens_mask.is_empty()
             && n_set.saturating_mul(5) >= n_internal.saturating_mul(3)
-            && n_missing <= 300
-            && stats.complement_entry_cost <= stats.selected_entry_cost.saturating_mul(6) / 5
+            && n_missing <= 800
         {
-            return (self.buf_words + stats.missing_entry_cost) as u64;
+            let clear_cost = self.estimate_missing_dense_clear_cost(dense);
+            if self.buf_words + clear_cost < stats.selected_entry_cost {
+                return (self.buf_words + clear_cost) as u64;
+            }
         }
         self.internal_ids_from_dense(dense)
             .iter()
@@ -297,8 +304,9 @@ impl FinalMaskMapping {
         let n_missing = n_internal - n_set;
         if !self.all_tokens_mask.is_empty()
             && n_set.saturating_mul(5) >= n_internal.saturating_mul(3)
-            && n_missing <= 300
-            && selection.complement_entry_cost <= selection.selected_entry_cost.saturating_mul(6) / 5
+            && n_missing <= 800
+            && self.buf_words + self.estimate_missing_dense_clear_cost(dense)
+                < selection.selected_entry_cost
         {
             stats.complement_path_used = true;
             if buf_zeroed {
@@ -465,13 +473,13 @@ impl FinalMaskMapping {
         let quad_base = base / 4;
         for lane in 0..16 {
             let shift = lane * 4;
-            let mask = 0x0fu64 << shift;
-            if bits & mask == mask {
+            let pattern = ((bits >> shift) & 0x0f) as usize;
+            if pattern != 0 {
                 cost += self
-                    .quad_group_entries
-                    .get(quad_base + lane)
+                    .quad_pattern_entries
+                    .get((quad_base + lane) * 16 + pattern)
                     .map_or(0, |entries| entries.len());
-                bits &= !mask;
+                bits &= !(0x0fu64 << shift);
             }
         }
 
@@ -503,9 +511,7 @@ impl FinalMaskMapping {
                 word_sum.saturating_sub(missing_cost)
             };
             stats.selected_entry_cost += selected_cost;
-            stats.missing_entry_cost += missing_cost;
         }
-        stats.complement_entry_cost = self.buf_words + stats.missing_entry_cost;
         stats
     }
 
@@ -885,6 +891,10 @@ impl FinalMaskMapping {
 
     #[inline(always)]
     fn andnot_quad_group(&self, group_id: usize, out: &mut [u32]) -> bool {
+        if let Some(Some(dense)) = self.quad_group_dense.get(group_id) {
+            andnot_dense(out, dense);
+            return true;
+        }
         let Some(entries) = self.quad_group_entries.get(group_id) else {
             return false;
         };
@@ -894,6 +904,10 @@ impl FinalMaskMapping {
 
     #[inline(always)]
     fn andnot_byte_group(&self, group_id: usize, out: &mut [u32]) -> bool {
+        if let Some(Some(dense)) = self.byte_group_dense.get(group_id) {
+            andnot_dense(out, dense);
+            return true;
+        }
         let Some(entries) = self.byte_group_entries.get(group_id) else {
             return false;
         };
@@ -953,6 +967,34 @@ impl FinalMaskMapping {
             }
         }
         cleared
+    }
+
+    #[inline(always)]
+    fn or_quad_pattern(&self, group_id: usize, pattern: usize, out: &mut [u32]) -> bool {
+        let idx = group_id * 16 + pattern;
+        if let Some(Some(dense)) = self.quad_pattern_dense.get(idx) {
+            or_dense(out, dense);
+            return true;
+        }
+        let Some(entries) = self.quad_pattern_entries.get(group_id * 16 + pattern) else {
+            return false;
+        };
+        or_sparse(out, entries);
+        !entries.is_empty()
+    }
+
+    #[inline(always)]
+    fn andnot_quad_pattern(&self, group_id: usize, pattern: usize, out: &mut [u32]) -> bool {
+        let idx = group_id * 16 + pattern;
+        if let Some(Some(dense)) = self.quad_pattern_dense.get(idx) {
+            andnot_dense(out, dense);
+            return true;
+        }
+        let Some(entries) = self.quad_pattern_entries.get(group_id * 16 + pattern) else {
+            return false;
+        };
+        andnot_sparse(out, entries);
+        !entries.is_empty()
     }
 
     #[inline(always)]
@@ -1037,15 +1079,15 @@ impl FinalMaskMapping {
         let quad_base = base / 4;
         for lane in 0..16 {
             let shift = lane * 4;
-            let mask = 0x0fu64 << shift;
-            if bits & mask == mask {
-                if self.or_quad_group(quad_base + lane, out) {
+            let pattern = ((bits >> shift) & 0x0f) as usize;
+            if pattern != 0 {
+                if self.or_quad_pattern(quad_base + lane, pattern, out) {
                     stats.group_or_sparse_entries += self
-                        .quad_group_entries
-                        .get(quad_base + lane)
+                        .quad_pattern_entries
+                        .get((quad_base + lane) * 16 + pattern)
                         .map_or(0, |entries| entries.len()) as u64;
                 }
-                bits &= !mask;
+                bits &= !(0x0fu64 << shift);
             }
         }
 
@@ -1082,10 +1124,10 @@ impl FinalMaskMapping {
         let quad_base = base / 4;
         for lane in 0..16 {
             let shift = lane * 4;
-            let mask = 0x0fu64 << shift;
-            if bits & mask == mask {
-                self.or_quad_group(quad_base + lane, out);
-                bits &= !mask;
+            let pattern = ((bits >> shift) & 0x0f) as usize;
+            if pattern != 0 {
+                self.or_quad_pattern(quad_base + lane, pattern, out);
+                bits &= !(0x0fu64 << shift);
             }
         }
 
@@ -1192,16 +1234,18 @@ impl FinalMaskMapping {
         let quad_base = base / 4;
         for lane in 0..16 {
             let shift = lane * 4;
-            let mask = 0x0fu64 << shift;
-            if bits & mask == mask {
-                if self.andnot_quad_group(quad_base + lane, out) {
+            let pattern = ((bits >> shift) & 0x0f) as usize;
+            if pattern != 0 {
+                if self.andnot_quad_pattern(quad_base + lane, pattern, out) {
                     stats.group_andnot_sparse_entries += self
-                        .quad_group_entries
-                        .get(quad_base + lane)
+                        .quad_pattern_entries
+                        .get((quad_base + lane) * 16 + pattern)
                         .map_or(0, |entries| entries.len()) as u64;
                 }
-                stats.complement_full_nibble_groups += 1;
-                bits &= !mask;
+                if pattern == 0x0f {
+                    stats.complement_full_nibble_groups += 1;
+                }
+                bits &= !(0x0fu64 << shift);
             }
         }
 
@@ -1256,10 +1300,10 @@ impl FinalMaskMapping {
         let quad_base = base / 4;
         for lane in 0..16 {
             let shift = lane * 4;
-            let mask = 0x0fu64 << shift;
-            if bits & mask == mask {
-                self.andnot_quad_group(quad_base + lane, out);
-                bits &= !mask;
+            let pattern = ((bits >> shift) & 0x0f) as usize;
+            if pattern != 0 {
+                self.andnot_quad_pattern(quad_base + lane, pattern, out);
+                bits &= !(0x0fu64 << shift);
             }
         }
 
@@ -1332,6 +1376,61 @@ fn compute_block_entries(
         (0..n_groups).map(build).collect()
     } else {
         (0..n_groups).into_par_iter().map(build).collect()
+    }
+}
+
+fn compute_quad_pattern_entries(
+    token_entries: &[Box<[SparseEntry]>],
+    buf_words: usize,
+) -> Vec<Box<[SparseEntry]>> {
+    let n_groups = token_entries.len().div_ceil(4);
+    let build_group = |group_id: usize| {
+        let start = group_id * 4;
+        let end = (start + 4).min(token_entries.len());
+        let mut groups = Vec::with_capacity(16);
+        groups.push(Vec::<SparseEntry>::new().into_boxed_slice());
+        for pattern in 1usize..16 {
+            let mut dense = vec![0u32; buf_words];
+            let mut touched = Vec::<usize>::new();
+            for bit in 0..4 {
+                if pattern & (1usize << bit) == 0 {
+                    continue;
+                }
+                let token_idx = start + bit;
+                if token_idx >= end {
+                    continue;
+                }
+                for &entry in token_entries[token_idx].iter() {
+                    let word_idx = entry.word_idx() as usize;
+                    if dense[word_idx] == 0 {
+                        touched.push(word_idx);
+                    }
+                    dense[word_idx] |= entry.mask();
+                }
+            }
+            touched.sort_unstable();
+            touched.dedup();
+            groups.push(
+                touched
+                    .into_iter()
+                    .map(|word_idx| SparseEntry::new(word_idx as u16, dense[word_idx]))
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            );
+        }
+        groups
+    };
+
+    if rayon::current_num_threads() == 1 {
+        (0..n_groups).flat_map(build_group).collect()
+    } else {
+        (0..n_groups)
+            .into_par_iter()
+            .map(build_group)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flatten()
+            .collect()
     }
 }
 
@@ -1420,6 +1519,25 @@ fn or_dense(out: &mut [u32], mask: &[u32]) {
         }
         for i in (n_pairs * 2)..n {
             *out_ptr.add(i) |= *mask_ptr.add(i);
+        }
+    }
+}
+
+#[inline(always)]
+fn andnot_dense(out: &mut [u32], mask: &[u32]) {
+    let n = out.len().min(mask.len());
+    let n_pairs = n / 2;
+    unsafe {
+        let out_ptr = out.as_mut_ptr();
+        let mask_ptr = mask.as_ptr();
+        for i in 0..n_pairs {
+            let offset = i * 2;
+            let b = std::ptr::read_unaligned(out_ptr.add(offset) as *const u64);
+            let m = std::ptr::read_unaligned(mask_ptr.add(offset) as *const u64);
+            std::ptr::write_unaligned(out_ptr.add(offset) as *mut u64, b & !m);
+        }
+        for i in (n_pairs * 2)..n {
+            *out_ptr.add(i) &= !*mask_ptr.add(i);
         }
     }
 }
