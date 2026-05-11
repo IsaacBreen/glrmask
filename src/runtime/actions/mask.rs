@@ -949,8 +949,16 @@ impl<'a> ConstraintState<'a> {
         let mut direct_handled = direct_buf.is_some();
         if final_weight.is_full() {
             acc.or_into_merged(merged);
-            if direct_buf.is_some() && !acc.0.is_empty() {
-                direct_handled = false;
+            if let Some(buf) = direct_buf.as_deref_mut() {
+                for dense in acc.0.values() {
+                    let Some(seed_idx) = self.constraint.seed_state_index_for_dense(dense) else {
+                        direct_handled = false;
+                        continue;
+                    };
+                    if !self.constraint.or_seed_state_dense_to_buf(seed_idx, buf) {
+                        direct_handled = false;
+                    }
+                }
             }
         } else {
             acc.or_intersection_into_merged(final_weight, precomputed, merged);

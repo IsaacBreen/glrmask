@@ -210,6 +210,14 @@ impl PyConstraint {
         self.inner.mask_len()
     }
 
+    /// Return the final constraint-internal vocab remapping used by mask materialization.
+    fn mask_game_mapping(&self) -> (Vec<Vec<u32>>, Vec<u32>) {
+        (
+            self.inner.mask_game_internal_to_original().to_vec(),
+            self.inner.mask_game_original_to_internal().to_vec(),
+        )
+    }
+
     /// Return the number of GLR parser states.
     fn num_parser_states(&self) -> u32 {
         self.inner.num_parser_states()
