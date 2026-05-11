@@ -8722,7 +8722,7 @@ impl<'a> SchemaCtx<'a> {
         excluded_exprs: Vec<GrammarExpr>,
         prefix: &str,
     ) -> GrammarExpr {
-        let base_body = self.extract_lexer_expr_decomposed(base_expr, prefix);
+        let base_body = self.extract_json_pattern_lexer_expr_decomposed(base_expr, prefix);
         let body = if excluded_exprs.is_empty() {
             base_body
         } else {
@@ -9029,7 +9029,7 @@ impl<'a> SchemaCtx<'a> {
                 _ => return Ok(self.json_object_ref()),
             };
             let unmatched_key_colon_body = if let Some(property_names) = property_names {
-                self.build_lexer_expr(
+                self.build_pattern_lexer_expr(
                     &Self::scoped_key_colon_expr(Some(property_names))?,
                     "PP_UNMATCHED_KEY_COLON_BODY",
                 )
