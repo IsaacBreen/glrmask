@@ -113,6 +113,17 @@ pub struct Constraint {
     /// Sparse OR-union for each 64-token internal word group.
     #[serde(skip)]
     pub(crate) word_group_sparse_masks: Vec<InternalTokenBufMasks>,
+    /// Dense prefix-unions of 64-token internal word groups.
+    ///
+    /// `word_group_prefix_buf_masks[i]` is the OR-union of word groups
+    /// `[0, i)`. Internal-token groups are disjoint in original-token space,
+    /// so `prefix[end] & !prefix[start]` is the exact dense mask for a full
+    /// internal-word run `[start, end)`.
+    #[serde(skip)]
+    pub(crate) word_group_prefix_buf_masks: Vec<Box<[u32]>>,
+    /// Prefix sums of `word_group_sparse_masks[i].len()`.
+    #[serde(skip)]
+    pub(crate) word_group_sparse_prefix_entries: Vec<usize>,
     #[serde(skip)]
     pub(crate) byte_group_sparse_masks: Vec<InternalTokenBufMasks>,
     pub(crate) word_group_sparse_total_entries: usize,
@@ -135,6 +146,12 @@ pub struct Constraint {
     /// whose original token bytes are lexically live from original tokenizer state s.
     #[serde(skip)]
     pub(crate) seed_state_dense: SeedStateDenseMasks,
+    /// Pre-materialized original-token output masks for each `seed_state_dense`.
+    #[serde(skip)]
+    pub(crate) seed_state_buf_masks: Vec<Box<[u32]>>,
+    /// Exact hash lookup for `seed_state_dense` -> `seed_state_buf_masks` index.
+    #[serde(skip)]
+    pub(crate) seed_state_buf_mask_by_dense_hash: FxHashMap<u64, Vec<usize>>,
     /// Dense bitmap of the full internal token universe.
     #[serde(skip, default = "empty_dense_words")]
     pub(crate) seed_universe_dense: DenseWords,
@@ -187,18 +204,19 @@ pub struct Constraint {
 #[inline(always)]
 fn or_dense_buf(buf: &mut [u32], mask: &[u32]) {
     let n = buf.len().min(mask.len());
-    // Process pairs of u32 as u64 for 2× fewer iterations.
     let n_pairs = n / 2;
-    if n_pairs > 0 {
-        let buf64 = unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u64, n_pairs) };
-        let mask64 = unsafe { std::slice::from_raw_parts(mask.as_ptr() as *const u64, n_pairs) };
-        for (b, &m) in buf64.iter_mut().zip(mask64.iter()) {
-            *b |= m;
+    unsafe {
+        let buf_ptr = buf.as_mut_ptr();
+        let mask_ptr = mask.as_ptr();
+        for i in 0..n_pairs {
+            let offset = i * 2;
+            let b = std::ptr::read_unaligned(buf_ptr.add(offset) as *const u64);
+            let m = std::ptr::read_unaligned(mask_ptr.add(offset) as *const u64);
+            std::ptr::write_unaligned(buf_ptr.add(offset) as *mut u64, b | m);
         }
-    }
-    // Handle trailing u32.
-    if n % 2 == 1 {
-        buf[n - 1] |= mask[n - 1];
+        for i in (n_pairs * 2)..n {
+            *buf_ptr.add(i) |= *mask_ptr.add(i);
+        }
     }
 }
 
@@ -208,22 +226,27 @@ fn or_dense_buf(buf: &mut [u32], mask: &[u32]) {
 fn andnot_dense_buf(buf: &mut [u32], mask: &[u32]) {
     let n = buf.len().min(mask.len());
     let n_pairs = n / 2;
-    if n_pairs > 0 {
-        let buf64 = unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u64, n_pairs) };
-        let mask64 = unsafe { std::slice::from_raw_parts(mask.as_ptr() as *const u64, n_pairs) };
-        for (b, &m) in buf64.iter_mut().zip(mask64.iter()) {
-            *b &= !m;
+    unsafe {
+        let buf_ptr = buf.as_mut_ptr();
+        let mask_ptr = mask.as_ptr();
+        for i in 0..n_pairs {
+            let offset = i * 2;
+            let b = std::ptr::read_unaligned(buf_ptr.add(offset) as *const u64);
+            let m = std::ptr::read_unaligned(mask_ptr.add(offset) as *const u64);
+            std::ptr::write_unaligned(buf_ptr.add(offset) as *mut u64, b & !m);
         }
-    }
-    if n % 2 == 1 {
-        buf[n - 1] &= !mask[n - 1];
+        for i in (n_pairs * 2)..n {
+            *buf_ptr.add(i) &= !*mask_ptr.add(i);
+        }
     }
 }
 
 #[inline(always)]
 fn copy_dense_buf(buf: &mut [u32], mask: &[u32]) {
     let n = buf.len().min(mask.len());
-    buf[..n].copy_from_slice(&mask[..n]);
+    unsafe {
+        std::ptr::copy_nonoverlapping(mask.as_ptr(), buf.as_mut_ptr(), n);
+    }
 }
 
 #[inline(always)]
@@ -608,8 +631,11 @@ impl Constraint {
                     || self.compute_token_block_sparse_masks(64),
                     || self.compute_token_block_sparse_masks(8),
                 )
-            };
+        };
         self.word_group_sparse_masks = word_group_sparse_masks;
+        self.word_group_prefix_buf_masks = self.compute_word_group_prefix_buf_masks();
+        self.word_group_sparse_prefix_entries =
+            Self::compute_sparse_entry_prefix(&self.word_group_sparse_masks);
         self.byte_group_sparse_masks = byte_group_sparse_masks;
         self.word_group_sparse_total_entries = word_group_sparse_total_entries;
         self.word_group_sparse_max_entries = word_group_sparse_max_entries;
@@ -800,6 +826,185 @@ impl Constraint {
         combined.into_boxed_slice()
     }
 
+    fn compute_word_group_prefix_buf_masks(&self) -> Vec<Box<[u32]>> {
+        let buf_words = self.mask_len();
+        let mut prefixes = Vec::with_capacity(self.word_group_sparse_masks.len() + 1);
+        let mut current = vec![0u32; buf_words];
+        prefixes.push(current.clone().into_boxed_slice());
+        for group in &self.word_group_sparse_masks {
+            for &(word_idx, mask) in group {
+                current[word_idx as usize] |= mask;
+            }
+            prefixes.push(current.clone().into_boxed_slice());
+        }
+        prefixes
+    }
+
+    fn compute_sparse_entry_prefix(groups: &[InternalTokenBufMasks]) -> Vec<usize> {
+        let mut prefix = Vec::with_capacity(groups.len() + 1);
+        let mut total = 0usize;
+        prefix.push(0);
+        for group in groups {
+            total += group.len();
+            prefix.push(total);
+        }
+        prefix
+    }
+
+    fn dense_words_hash(words: &[u64]) -> u64 {
+        let mut hash = 0xcbf29ce484222325u64;
+        for &word in words {
+            hash ^= word;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash ^ (words.len() as u64)
+    }
+
+    fn compute_seed_state_buf_masks(&self) -> Vec<Box<[u32]>> {
+        self.seed_state_dense
+            .iter()
+            .map(|dense| {
+                let mut buf = vec![0u32; self.mask_len()];
+                self.or_internal_dense_to_buf(dense, &mut buf, true);
+                buf.into_boxed_slice()
+            })
+            .collect()
+    }
+
+    fn compute_seed_state_buf_mask_hashes(
+        seed_state_dense: &[DenseWords],
+    ) -> FxHashMap<u64, Vec<usize>> {
+        let mut by_hash: FxHashMap<u64, Vec<usize>> = FxHashMap::default();
+        for (idx, dense) in seed_state_dense.iter().enumerate() {
+            by_hash
+                .entry(Self::dense_words_hash(dense))
+                .or_default()
+                .push(idx);
+        }
+        by_hash
+    }
+
+    pub(crate) fn seed_state_index_for_dense(&self, dense: &[u64]) -> Option<usize> {
+        let hash = Self::dense_words_hash(dense);
+        let candidates = self.seed_state_buf_mask_by_dense_hash.get(&hash)?;
+        candidates
+            .iter()
+            .copied()
+            .find(|&idx| self.seed_state_dense.get(idx).is_some_and(|seed| seed.as_ref() == dense))
+    }
+
+    pub(crate) fn or_seed_state_buf_mask(&self, seed_idx: usize, buf: &mut [u32]) -> bool {
+        let Some(seed_buf) = self.seed_state_buf_masks.get(seed_idx) else {
+            return false;
+        };
+        or_dense_buf(buf, seed_buf);
+        true
+    }
+
+    pub(crate) fn or_seed_dense_token_set_to_buf(
+        &self,
+        seed_idx: usize,
+        token_set: &Arc<RangeSetBlaze<u32>>,
+        buf: &mut [u32],
+    ) -> bool {
+        let Some(seed_dense) = self.seed_state_dense.get(seed_idx) else {
+            return false;
+        };
+        if seed_dense.is_empty() || token_set.is_empty() {
+            return true;
+        }
+
+        let mut token_words = vec![0u64; seed_dense.len()];
+        let max_token_exclusive = token_words.len().saturating_mul(64);
+        for range in token_set.ranges() {
+            let lo = *range.start() as usize;
+            if lo >= max_token_exclusive {
+                continue;
+            }
+            let hi = (*range.end() as usize).min(max_token_exclusive - 1);
+            let word_lo = lo / 64;
+            let word_hi = hi / 64;
+            for wi in word_lo..=word_hi {
+                let lo_bit = if wi == word_lo { lo % 64 } else { 0 };
+                let hi_bit = if wi == word_hi { hi % 64 } else { 63 };
+                let high_mask = if hi_bit == 63 {
+                    !0u64
+                } else {
+                    (1u64 << (hi_bit + 1)) - 1
+                };
+                let low_mask = if lo_bit == 0 {
+                    0
+                } else {
+                    (1u64 << lo_bit) - 1
+                };
+                token_words[wi] |= high_mask & !low_mask;
+            }
+        }
+
+        let n_internal = self.internal_token_to_tokens.len();
+        let mut stats = DenseToBufProfileStats::default();
+        let mut wi = 0usize;
+        while wi < seed_dense.len() && wi * 64 < n_internal {
+            let remaining = n_internal - wi * 64;
+            let valid_mask = if remaining >= 64 {
+                !0u64
+            } else {
+                (1u64 << remaining) - 1
+            };
+            let bits = seed_dense[wi] & token_words[wi] & valid_mask;
+            if bits == 0 {
+                wi += 1;
+                continue;
+            }
+            if bits == valid_mask && remaining >= 64 {
+                let run_start = wi;
+                wi += 1;
+                while wi < seed_dense.len() && wi * 64 < n_internal {
+                    let remaining = n_internal - wi * 64;
+                    if remaining < 64 || (seed_dense[wi] & token_words[wi]) != !0u64 {
+                        break;
+                    }
+                    wi += 1;
+                }
+                self.or_full_internal_word_run_to_buf(run_start, wi, buf, &mut stats);
+                continue;
+            }
+            let mut remaining_bits = bits;
+            while remaining_bits != 0 {
+                let bit = remaining_bits.trailing_zeros() as usize;
+                self.or_internal_token_to_buf_fast(
+                    wi * 64 + bit,
+                    buf,
+                    &mut stats.normal_sparse_entries,
+                );
+                remaining_bits &= remaining_bits - 1;
+            }
+            wi += 1;
+        }
+        true
+    }
+
+    pub(crate) fn try_copy_seed_state_buf_mask(&self, dense: &[u64], buf: &mut [u32]) -> bool {
+        let hash = Self::dense_words_hash(dense);
+        let Some(candidates) = self.seed_state_buf_mask_by_dense_hash.get(&hash) else {
+            return false;
+        };
+        for &idx in candidates {
+            let Some(seed_dense) = self.seed_state_dense.get(idx) else {
+                continue;
+            };
+            if seed_dense.as_ref() != dense {
+                continue;
+            }
+            let Some(seed_buf) = self.seed_state_buf_masks.get(idx) else {
+                continue;
+            };
+            copy_dense_buf(buf, seed_buf);
+            return true;
+        }
+        false
+    }
+
     /// Build dense buf masks for internal tokens with many sparse entries.
     /// A token with >THRESHOLD entries benefits from a sequential 16KB scan
     /// instead of thousands of indexed read-modify-writes.
@@ -955,6 +1160,9 @@ impl Constraint {
             self.compute_token_block_sparse_masks(64);
         let (byte_group_sparse_masks, _, _) = self.compute_token_block_sparse_masks(8);
         self.word_group_sparse_masks = word_group_sparse_masks;
+        self.word_group_prefix_buf_masks = self.compute_word_group_prefix_buf_masks();
+        self.word_group_sparse_prefix_entries =
+            Self::compute_sparse_entry_prefix(&self.word_group_sparse_masks);
         self.byte_group_sparse_masks = byte_group_sparse_masks;
         self.word_group_sparse_total_entries = word_group_sparse_total_entries;
         self.word_group_sparse_max_entries = word_group_sparse_max_entries;
@@ -1000,6 +1208,8 @@ impl Constraint {
         if dw == 0 {
             self.seed_terminal_dense.clear();
             self.seed_state_dense.clear();
+            self.seed_state_buf_masks.clear();
+            self.seed_state_buf_mask_by_dense_hash.clear();
             self.seed_universe_dense = empty_dense_words();
             return;
         }
@@ -1013,6 +1223,9 @@ impl Constraint {
 
         self.seed_terminal_dense = self.build_seed_terminal_dense_masks();
         self.seed_state_dense = self.build_seed_state_dense_masks();
+        self.seed_state_buf_masks = self.compute_seed_state_buf_masks();
+        self.seed_state_buf_mask_by_dense_hash =
+            Self::compute_seed_state_buf_mask_hashes(&self.seed_state_dense);
     }
 
     fn collect_weight_token_sets<'a>(
@@ -1454,10 +1667,69 @@ impl Constraint {
     }
 
     fn sparse_word_group_entries_in(&self, start: usize, len: usize) -> usize {
-        self.word_group_sparse_masks[start..start + len]
-            .iter()
-            .map(Vec::len)
-            .sum()
+        let end = start + len;
+        if end < self.word_group_sparse_prefix_entries.len() {
+            self.word_group_sparse_prefix_entries[end] - self.word_group_sparse_prefix_entries[start]
+        } else {
+            self.word_group_sparse_masks[start..end]
+                .iter()
+                .map(Vec::len)
+                .sum()
+        }
+    }
+
+    #[inline(always)]
+    fn or_word_group_prefix_diff_to_buf(&self, start: usize, end: usize, buf: &mut [u32]) {
+        let Some(start_mask) = self.word_group_prefix_buf_masks.get(start) else {
+            return;
+        };
+        let Some(end_mask) = self.word_group_prefix_buf_masks.get(end) else {
+            return;
+        };
+        let n = buf.len().min(start_mask.len()).min(end_mask.len());
+        let n_pairs = n / 2;
+        unsafe {
+            let buf_ptr = buf.as_mut_ptr();
+            let start_ptr = start_mask.as_ptr();
+            let end_ptr = end_mask.as_ptr();
+            for i in 0..n_pairs {
+                let offset = i * 2;
+                let b = std::ptr::read_unaligned(buf_ptr.add(offset) as *const u64);
+                let s = std::ptr::read_unaligned(start_ptr.add(offset) as *const u64);
+                let e = std::ptr::read_unaligned(end_ptr.add(offset) as *const u64);
+                std::ptr::write_unaligned(buf_ptr.add(offset) as *mut u64, b | (e & !s));
+            }
+            for i in (n_pairs * 2)..n {
+                *buf_ptr.add(i) |= *end_ptr.add(i) & !*start_ptr.add(i);
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn andnot_word_group_prefix_diff_from_buf(&self, start: usize, end: usize, buf: &mut [u32]) {
+        let Some(start_mask) = self.word_group_prefix_buf_masks.get(start) else {
+            return;
+        };
+        let Some(end_mask) = self.word_group_prefix_buf_masks.get(end) else {
+            return;
+        };
+        let n = buf.len().min(start_mask.len()).min(end_mask.len());
+        let n_pairs = n / 2;
+        unsafe {
+            let buf_ptr = buf.as_mut_ptr();
+            let start_ptr = start_mask.as_ptr();
+            let end_ptr = end_mask.as_ptr();
+            for i in 0..n_pairs {
+                let offset = i * 2;
+                let b = std::ptr::read_unaligned(buf_ptr.add(offset) as *const u64);
+                let s = std::ptr::read_unaligned(start_ptr.add(offset) as *const u64);
+                let e = std::ptr::read_unaligned(end_ptr.add(offset) as *const u64);
+                std::ptr::write_unaligned(buf_ptr.add(offset) as *mut u64, b & !(e & !s));
+            }
+            for i in (n_pairs * 2)..n {
+                *buf_ptr.add(i) &= !(*end_ptr.add(i) & !*start_ptr.add(i));
+            }
+        }
     }
 
     fn or_full_internal_word_run_to_buf(
@@ -1467,6 +1739,17 @@ impl Constraint {
         buf: &mut [u32],
         stats: &mut DenseToBufProfileStats,
     ) {
+        let run_len = end.saturating_sub(wi);
+        if run_len > 0
+            && end < self.word_group_prefix_buf_masks.len()
+            && self.sparse_word_group_entries_in(wi, run_len) > buf.len()
+        {
+            stats.normal_full_word_hits += run_len as u64;
+            stats.group_or_sparse_entries += buf.len() as u64;
+            self.or_word_group_prefix_diff_to_buf(wi, end, buf);
+            return;
+        }
+
         while wi < end {
             let remaining = end - wi;
             let block = if remaining >= 32
@@ -1532,6 +1815,17 @@ impl Constraint {
         buf: &mut [u32],
         stats: &mut DenseToBufProfileStats,
     ) {
+        let run_len = end.saturating_sub(wi);
+        if run_len > 0
+            && end < self.word_group_prefix_buf_masks.len()
+            && self.sparse_word_group_entries_in(wi, run_len) > buf.len()
+        {
+            stats.complement_full_word_hits += run_len as u64;
+            stats.group_andnot_sparse_entries += buf.len() as u64;
+            self.andnot_word_group_prefix_diff_from_buf(wi, end, buf);
+            return;
+        }
+
         while wi < end {
             let remaining = end - wi;
             let block = if remaining >= 32

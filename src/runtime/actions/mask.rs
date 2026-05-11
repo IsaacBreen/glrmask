@@ -944,12 +944,44 @@ impl<'a> ConstraintState<'a> {
         acc: &DenseMaskAcc,
         precomputed: &DenseTokenMaskCache,
         merged: &mut [u64],
-    ) {
+        mut direct_buf: Option<&mut [u32]>,
+    ) -> bool {
+        let mut direct_handled = direct_buf.is_some();
         if final_weight.is_full() {
             acc.or_into_merged(merged);
+            if let Some(buf) = direct_buf.as_deref_mut() {
+                for dense in acc.0.values() {
+                    let Some(seed_idx) = self.constraint.seed_state_index_for_dense(dense) else {
+                        direct_handled = false;
+                        continue;
+                    };
+                    if !self.constraint.or_seed_state_buf_mask(seed_idx, buf) {
+                        direct_handled = false;
+                    }
+                }
+            }
         } else {
             acc.or_intersection_into_merged(final_weight, precomputed, merged);
+            if let Some(buf) = direct_buf.as_deref_mut() {
+                for (&tsid, dense) in &acc.0 {
+                    let Some(token_set) = final_weight.0.get(tsid) else {
+                        continue;
+                    };
+                    let Some(seed_idx) = self.constraint.seed_state_index_for_dense(dense) else {
+                        direct_handled = false;
+                        continue;
+                    };
+                    if !self
+                        .constraint
+                        .or_seed_dense_token_set_to_buf(seed_idx, token_set, buf)
+                    {
+                        direct_handled = false;
+                    }
+                }
+            }
         }
+
+        direct_handled
     }
 
     fn merge_final_weight_for_accs(
@@ -958,10 +990,19 @@ impl<'a> ConstraintState<'a> {
         accs: &[DenseMaskAcc],
         precomputed: &DenseTokenMaskCache,
         merged: &mut [u64],
-    ) {
+        direct_buf: &mut Option<&mut [u32]>,
+    ) -> bool {
+        let mut all_direct = true;
         for acc in accs {
-            self.merge_final_weight_to_internal(final_weight, acc, precomputed, merged);
+            all_direct &= self.merge_final_weight_to_internal(
+                final_weight,
+                acc,
+                precomputed,
+                merged,
+                direct_buf.as_deref_mut(),
+            );
         }
+        all_direct
     }
 
     fn merge_final_weight_for_gss(
@@ -970,10 +1011,19 @@ impl<'a> ConstraintState<'a> {
         gss: &DenseMaskGSS,
         precomputed: &DenseTokenMaskCache,
         merged: &mut [u64],
-    ) {
+        direct_buf: &mut Option<&mut [u32]>,
+    ) -> bool {
+        let mut all_direct = true;
         gss.for_each_acc(|acc| {
-            self.merge_final_weight_to_internal(final_weight, acc, precomputed, merged);
+            all_direct &= self.merge_final_weight_to_internal(
+                final_weight,
+                acc,
+                precomputed,
+                merged,
+                direct_buf.as_deref_mut(),
+            );
         });
+        all_direct
     }
 
     fn seed_mask_queue_merged(
@@ -983,6 +1033,9 @@ impl<'a> ConstraintState<'a> {
         precomputed: &DenseTokenMaskCache,
         queue: &mut MaskQueue,
         merged: &mut [u64],
+        direct_buf: &mut Option<&mut [u32]>,
+        direct_buf_possible: &mut bool,
+        direct_buf_used: &mut bool,
         profile: &mut Option<MaskInnerProfileStats>,
     ) {
         for (&tokenizer_state, gss) in &self.state {
@@ -1020,10 +1073,23 @@ impl<'a> ConstraintState<'a> {
                 } else {
                     None
                 };
-                self.merge_final_weight_for_accs(final_weight, &root_accs, precomputed, merged);
+                *direct_buf_used = true;
+                *direct_buf_possible &= self.merge_final_weight_for_accs(
+                    final_weight,
+                    &root_accs,
+                    precomputed,
+                    merged,
+                    direct_buf,
+                );
 
                 for (_, sub_gss) in &decomposed {
-                    self.merge_final_weight_for_gss(final_weight, sub_gss, precomputed, merged);
+                    *direct_buf_possible &= self.merge_final_weight_for_gss(
+                        final_weight,
+                        sub_gss,
+                        precomputed,
+                        merged,
+                        direct_buf,
+                    );
                 }
                 if let (Some(profile), Some(start)) = (profile.as_mut(), accumulate_start) {
                     profile.token_accumulation_ns += elapsed_ns(start);
@@ -1090,6 +1156,10 @@ impl<'a> ConstraintState<'a> {
 
         merged.clear();
         merged.resize(dense_words, 0);
+        buf.fill(0);
+        let mut direct_buf = Some(&mut *buf);
+        let mut direct_buf_possible = true;
+        let mut direct_buf_used = false;
 
         let mut queue = MaskQueue::new();
         let mut profile = if mask_inner_profile_enabled() {
@@ -1110,6 +1180,9 @@ impl<'a> ConstraintState<'a> {
             precomputed,
             &mut queue,
             &mut merged,
+            &mut direct_buf,
+            &mut direct_buf_possible,
+            &mut direct_buf_used,
             &mut profile,
         );
 
@@ -1132,7 +1205,14 @@ impl<'a> ConstraintState<'a> {
                 } else {
                     None
                 };
-                self.merge_final_weight_for_gss(final_weight, &gss, precomputed, &mut merged);
+                direct_buf_used = true;
+                direct_buf_possible &= self.merge_final_weight_for_gss(
+                    final_weight,
+                    &gss,
+                    precomputed,
+                    &mut merged,
+                    &mut direct_buf,
+                );
                 if let (Some(profile), Some(start)) = (profile.as_mut(), accumulate_start) {
                     profile.token_accumulation_ns += elapsed_ns(start);
                 }
@@ -1186,6 +1266,7 @@ impl<'a> ConstraintState<'a> {
             emit_mask_queue_debug_line(&line);
         }
 
+        drop(direct_buf);
         let finalize_start = profile.as_ref().map(|_| Instant::now());
 
         let mut use_delta_seed = false;
@@ -1309,19 +1390,33 @@ impl<'a> ConstraintState<'a> {
         }
 
         if !use_delta_seed {
-            let zero_start = profile.as_ref().map(|_| Instant::now());
-            buf.fill(0);
-            if let (Some(profile), Some(start)) = (profile.as_mut(), zero_start) {
-                profile.finalize_zero_ns += elapsed_ns(start);
-            }
+            let dense_to_buf = if direct_buf_used && direct_buf_possible {
+                DenseToBufProfileStats::default()
+            } else {
+                let zero_start = profile.as_ref().map(|_| Instant::now());
+                buf.fill(0);
+                if let (Some(profile), Some(start)) = (profile.as_mut(), zero_start) {
+                    profile.finalize_zero_ns += elapsed_ns(start);
+                }
 
-            let dense_to_buf_start = profile.as_ref().map(|_| Instant::now());
-            let dense_to_buf = self.constraint.or_internal_dense_to_buf(&merged, buf, true);
+                let dense_to_buf_start = profile.as_ref().map(|_| Instant::now());
+                let copied_seed_buf = self
+                    .constraint
+                    .try_copy_seed_state_buf_mask(&merged, buf);
+                let dense_to_buf = if copied_seed_buf {
+                    DenseToBufProfileStats::default()
+                } else {
+                    self.constraint.or_internal_dense_to_buf(&merged, buf, true)
+                };
+                if let Some(profile) = profile.as_mut() {
+                    if let Some(start) = dense_to_buf_start {
+                        profile.finalize_dense_to_buf_ns += elapsed_ns(start);
+                    }
+                }
+                dense_to_buf
+            };
             if let Some(profile) = profile.as_mut() {
                 profile.finalize_scratch_rebuild = 1;
-                if let Some(start) = dense_to_buf_start {
-                    profile.finalize_dense_to_buf_ns += elapsed_ns(start);
-                }
                 profile.dense_to_buf = dense_to_buf;
             }
         }
