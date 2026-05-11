@@ -95,6 +95,21 @@ pub struct Constraint {
     /// Used as a fast path in `or_to_buf` when a dense word is all-ones (!0u64).
     #[serde(skip)]
     pub(crate) word_group_buf_masks: Vec<Box<[u32]>>,
+    /// Precomputed dense output masks for groups of 128 internal tokens.
+    #[serde(skip)]
+    pub(crate) pair_word_group_buf_masks: Vec<Box<[u32]>>,
+    /// Precomputed dense output masks for groups of 256 internal tokens.
+    #[serde(skip)]
+    pub(crate) quad_word_group_buf_masks: Vec<Box<[u32]>>,
+    /// Precomputed dense output masks for groups of 512 internal tokens.
+    #[serde(skip)]
+    pub(crate) super_word_group_buf_masks: Vec<Box<[u32]>>,
+    /// Precomputed dense output masks for groups of 1024 internal tokens.
+    #[serde(skip)]
+    pub(crate) mega_word_group_buf_masks: Vec<Box<[u32]>>,
+    /// Precomputed dense output masks for groups of 2048 internal tokens.
+    #[serde(skip)]
+    pub(crate) giga_word_group_buf_masks: Vec<Box<[u32]>>,
     /// Sparse OR-union for each 64-token internal word group.
     #[serde(skip)]
     pub(crate) word_group_sparse_masks: Vec<InternalTokenBufMasks>,
@@ -202,6 +217,26 @@ fn andnot_dense_buf(buf: &mut [u32], mask: &[u32]) {
 fn copy_dense_buf(buf: &mut [u32], mask: &[u32]) {
     let n = buf.len().min(mask.len());
     buf[..n].copy_from_slice(&mask[..n]);
+}
+
+#[inline(always)]
+fn or_sparse_buf_entries(buf: &mut [u32], entries: &[(u16, u32)]) {
+    for &(word_idx, mask) in entries {
+        unsafe {
+            let slot = buf.get_unchecked_mut(word_idx as usize);
+            *slot |= mask;
+        }
+    }
+}
+
+#[inline(always)]
+fn andnot_sparse_buf_entries(buf: &mut [u32], entries: &[(u16, u32)]) {
+    for &(word_idx, mask) in entries {
+        unsafe {
+            let slot = buf.get_unchecked_mut(word_idx as usize);
+            *slot &= !mask;
+        }
+    }
 }
 
 #[derive(Default, Clone, Copy)]
@@ -421,9 +456,7 @@ impl Constraint {
                 if let Some(group_mask) = self.word_group_sparse_masks.get(wi) {
                     stats.added_word_group_hits += 1;
                     stats.added_word_group_entries += group_mask.len() as u64;
-                    for &(buf_word, mask) in group_mask {
-                        buf[buf_word as usize] |= mask;
-                    }
+                    or_sparse_buf_entries(buf, group_mask);
                     continue;
                 }
             }
@@ -435,9 +468,7 @@ impl Constraint {
                     if let Some(group_mask) = self.byte_group_sparse_masks.get(wi * 8 + byte_idx) {
                         stats.added_byte_group_hits += 1;
                         stats.added_byte_group_entries += group_mask.len() as u64;
-                        for &(buf_word, mask) in group_mask {
-                            buf[buf_word as usize] |= mask;
-                        }
+                        or_sparse_buf_entries(buf, group_mask);
                         added &= !(0xffu64 << shift);
                     }
                 }
@@ -457,9 +488,7 @@ impl Constraint {
                 let start = offsets[internal_token] as usize;
                 let end = offsets[internal_token + 1] as usize;
                 stats.added_token_entries += (end - start) as u64;
-                for &(buf_word, mask) in &flat[start..end] {
-                    buf[buf_word as usize] |= mask;
-                }
+                or_sparse_buf_entries(buf, &flat[start..end]);
                 added &= added - 1;
             }
 
@@ -479,9 +508,7 @@ impl Constraint {
                 if let Some(group_mask) = self.word_group_sparse_masks.get(wi) {
                     stats.removed_word_group_hits += 1;
                     stats.removed_word_group_entries += group_mask.len() as u64;
-                    for &(buf_word, mask) in group_mask {
-                        buf[buf_word as usize] &= !mask;
-                    }
+                    andnot_sparse_buf_entries(buf, group_mask);
                     continue;
                 }
             }
@@ -493,9 +520,7 @@ impl Constraint {
                     if let Some(group_mask) = self.byte_group_sparse_masks.get(wi * 8 + byte_idx) {
                         stats.removed_byte_group_hits += 1;
                         stats.removed_byte_group_entries += group_mask.len() as u64;
-                        for &(buf_word, mask) in group_mask {
-                            buf[buf_word as usize] &= !mask;
-                        }
+                        andnot_sparse_buf_entries(buf, group_mask);
                         removed &= !(0xffu64 << shift);
                     }
                 }
@@ -515,9 +540,7 @@ impl Constraint {
                 let start = offsets[internal_token] as usize;
                 let end = offsets[internal_token + 1] as usize;
                 stats.removed_token_entries += (end - start) as u64;
-                for &(buf_word, mask) in &flat[start..end] {
-                    buf[buf_word as usize] &= !mask;
-                }
+                andnot_sparse_buf_entries(buf, &flat[start..end]);
                 removed &= removed - 1;
             }
         }
@@ -583,6 +606,11 @@ impl Constraint {
         self.word_group_sparse_max_entries = word_group_sparse_max_entries;
         let block_ms = block_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let derived_started_at = profile.then(std::time::Instant::now);
+        self.pair_word_group_buf_masks = self.compute_sliding_word_group_dense_masks(2);
+        self.quad_word_group_buf_masks = self.compute_sliding_word_group_dense_masks(4);
+        self.super_word_group_buf_masks = self.compute_sliding_word_group_dense_masks(8);
+        self.mega_word_group_buf_masks = self.compute_sliding_word_group_dense_masks(16);
+        self.giga_word_group_buf_masks = self.compute_sliding_word_group_dense_masks(32);
         self.all_tokens_buf_mask = self.compute_all_tokens_buf_mask();
         self.heavy_token_dense_masks = self.compute_heavy_token_dense_masks();
         let (flat, offsets) = Self::compute_flat_buf_masks(&self.internal_token_buf_masks);
@@ -719,6 +747,30 @@ impl Constraint {
         let total_entries = groups.iter().map(Vec::len).sum();
         let max_entries = groups.iter().map(Vec::len).max().unwrap_or(0);
         (groups, total_entries, max_entries)
+    }
+
+    fn compute_sliding_word_group_dense_masks(&self, word_group_len: usize) -> Vec<Box<[u32]>> {
+        if self.internal_token_buf_masks.is_empty() || word_group_len == 0 {
+            return Vec::new();
+        }
+        let n_word_groups = self.internal_token_buf_masks.len().div_ceil(64);
+        let mask_words = self.mask_len();
+        let build_group = |word_group_start: usize| {
+            let group_start = word_group_start * 64;
+            let group_end = (group_start + word_group_len * 64).min(self.internal_token_buf_masks.len());
+            let mut dense = vec![0u32; mask_words];
+            for token_masks in &self.internal_token_buf_masks[group_start..group_end] {
+                for &(word_idx, mask) in token_masks {
+                    dense[word_idx as usize] |= mask;
+                }
+            }
+            dense.into_boxed_slice()
+        };
+        if rayon::current_num_threads() == 1 {
+            (0..n_word_groups).map(build_group).collect()
+        } else {
+            (0..n_word_groups).into_par_iter().map(build_group).collect()
+        }
     }
 
     fn compute_all_tokens_buf_mask(&self) -> Box<[u32]> {
@@ -866,6 +918,11 @@ impl Constraint {
         self.byte_group_sparse_masks = byte_group_sparse_masks;
         self.word_group_sparse_total_entries = word_group_sparse_total_entries;
         self.word_group_sparse_max_entries = word_group_sparse_max_entries;
+        self.pair_word_group_buf_masks = self.compute_sliding_word_group_dense_masks(2);
+        self.quad_word_group_buf_masks = self.compute_sliding_word_group_dense_masks(4);
+        self.super_word_group_buf_masks = self.compute_sliding_word_group_dense_masks(8);
+        self.mega_word_group_buf_masks = self.compute_sliding_word_group_dense_masks(16);
+        self.giga_word_group_buf_masks = self.compute_sliding_word_group_dense_masks(32);
         self.all_tokens_buf_mask = self.compute_all_tokens_buf_mask();
     }
 
@@ -1345,6 +1402,143 @@ impl Constraint {
         }
     }
 
+    fn sparse_word_group_entries_in(&self, start: usize, len: usize) -> usize {
+        self.word_group_sparse_masks[start..start + len]
+            .iter()
+            .map(Vec::len)
+            .sum()
+    }
+
+    fn or_full_internal_word_run_to_buf(
+        &self,
+        mut wi: usize,
+        end: usize,
+        buf: &mut [u32],
+        stats: &mut DenseToBufProfileStats,
+    ) {
+        while wi < end {
+            let remaining = end - wi;
+            let block = if remaining >= 32
+                && self
+                    .giga_word_group_buf_masks
+                    .get(wi)
+                    .is_some_and(|dense| dense.len() < self.sparse_word_group_entries_in(wi, 32))
+            {
+                Some((32, &self.giga_word_group_buf_masks[wi]))
+            } else if remaining >= 16
+                && self
+                    .mega_word_group_buf_masks
+                    .get(wi)
+                    .is_some_and(|dense| dense.len() < self.sparse_word_group_entries_in(wi, 16))
+            {
+                Some((16, &self.mega_word_group_buf_masks[wi]))
+            } else if remaining >= 8
+                && self
+                    .super_word_group_buf_masks
+                    .get(wi)
+                    .is_some_and(|dense| dense.len() < self.sparse_word_group_entries_in(wi, 8))
+            {
+                Some((8, &self.super_word_group_buf_masks[wi]))
+            } else if remaining >= 4
+                && self
+                    .quad_word_group_buf_masks
+                    .get(wi)
+                    .is_some_and(|dense| dense.len() < self.sparse_word_group_entries_in(wi, 4))
+            {
+                Some((4, &self.quad_word_group_buf_masks[wi]))
+            } else if remaining >= 2
+                && self
+                    .pair_word_group_buf_masks
+                    .get(wi)
+                    .is_some_and(|dense| dense.len() < self.sparse_word_group_entries_in(wi, 2))
+            {
+                Some((2, &self.pair_word_group_buf_masks[wi]))
+            } else {
+                None
+            };
+
+            if let Some((block_len, dense_mask)) = block {
+                stats.normal_full_word_hits += block_len as u64;
+                stats.group_or_sparse_entries += dense_mask.len() as u64;
+                or_dense_buf(buf, dense_mask);
+                wi += block_len;
+                continue;
+            }
+
+            if let Some(group_mask) = self.word_group_sparse_masks.get(wi) {
+                stats.normal_full_word_hits += 1;
+                stats.group_or_sparse_entries += group_mask.len() as u64;
+                or_sparse_buf_entries(buf, group_mask);
+            }
+            wi += 1;
+        }
+    }
+
+    fn andnot_full_internal_word_run_from_buf(
+        &self,
+        mut wi: usize,
+        end: usize,
+        buf: &mut [u32],
+        stats: &mut DenseToBufProfileStats,
+    ) {
+        while wi < end {
+            let remaining = end - wi;
+            let block = if remaining >= 32
+                && self
+                    .giga_word_group_buf_masks
+                    .get(wi)
+                    .is_some_and(|dense| dense.len() < self.sparse_word_group_entries_in(wi, 32))
+            {
+                Some((32, &self.giga_word_group_buf_masks[wi]))
+            } else if remaining >= 16
+                && self
+                    .mega_word_group_buf_masks
+                    .get(wi)
+                    .is_some_and(|dense| dense.len() < self.sparse_word_group_entries_in(wi, 16))
+            {
+                Some((16, &self.mega_word_group_buf_masks[wi]))
+            } else if remaining >= 8
+                && self
+                    .super_word_group_buf_masks
+                    .get(wi)
+                    .is_some_and(|dense| dense.len() < self.sparse_word_group_entries_in(wi, 8))
+            {
+                Some((8, &self.super_word_group_buf_masks[wi]))
+            } else if remaining >= 4
+                && self
+                    .quad_word_group_buf_masks
+                    .get(wi)
+                    .is_some_and(|dense| dense.len() < self.sparse_word_group_entries_in(wi, 4))
+            {
+                Some((4, &self.quad_word_group_buf_masks[wi]))
+            } else if remaining >= 2
+                && self
+                    .pair_word_group_buf_masks
+                    .get(wi)
+                    .is_some_and(|dense| dense.len() < self.sparse_word_group_entries_in(wi, 2))
+            {
+                Some((2, &self.pair_word_group_buf_masks[wi]))
+            } else {
+                None
+            };
+
+            if let Some((block_len, dense_mask)) = block {
+                stats.complement_full_word_hits += block_len as u64;
+                stats.group_andnot_sparse_entries += dense_mask.len() as u64;
+                andnot_dense_buf(buf, dense_mask);
+                wi += block_len;
+                continue;
+            }
+
+            if let Some(group_mask) = self.word_group_sparse_masks.get(wi) {
+                stats.complement_full_word_hits += 1;
+                stats.group_andnot_sparse_entries += group_mask.len() as u64;
+                andnot_sparse_buf_entries(buf, group_mask);
+            }
+            wi += 1;
+        }
+    }
+
     /// Convert a merged internal token dense bitmap to the output buffer.
     /// Uses a contiguous flat entry array for cache-friendly sequential access,
     /// with word_group fast paths for fully-set 64-bit words and heavy token
@@ -1422,26 +1616,33 @@ impl Constraint {
             } else {
                 or_dense_buf(buf, all_mask);
             }
-            for (wi, &w) in dense.iter().enumerate() {
+            let mut wi = 0usize;
+            while wi < dense.len() {
                 if wi * 64 >= n_internal {
                     break;
                 }
                 stats.dense_words_visited += 1;
+                let w = dense[wi];
                 let remaining = n_internal - wi * 64;
                 let valid_mask = if remaining >= 64 { !0u64 } else { (1u64 << remaining) - 1 };
                 let missing = !w & valid_mask;
                 if missing == 0 {
+                    wi += 1;
                     continue;
                 }
                 if missing == valid_mask {
-                    if let Some(group_mask) = sparse_word_groups.get(wi) {
-                        stats.complement_full_word_hits += 1;
-                        stats.group_andnot_sparse_entries += group_mask.len() as u64;
-                        for &(buf_word, mask) in group_mask {
-                            buf[buf_word as usize] &= !mask;
+                    let run_start = wi;
+                    wi += 1;
+                    while wi < dense.len() && wi * 64 < n_internal {
+                        let remaining = n_internal - wi * 64;
+                        if remaining < 64 || dense[wi] != 0 {
+                            break;
                         }
-                        continue;
+                        stats.dense_words_visited += 1;
+                        wi += 1;
                     }
+                    self.andnot_full_internal_word_run_from_buf(run_start, wi, buf, &mut stats);
+                    continue;
                 }
                 let mut bits = missing;
                 let (full_bytes, full_nibbles, remaining_bits) =
@@ -1466,34 +1667,40 @@ impl Constraint {
                     let span = end.saturating_sub(start) as u64;
                     stats.complement_sparse_entries += span;
                     stats.complement_max_sparse_span = stats.complement_max_sparse_span.max(span);
-                    for &(buf_word, mask) in &flat[start..end] {
-                        buf[buf_word as usize] &= !mask;
-                    }
+                    andnot_sparse_buf_entries(buf, &flat[start..end]);
                     bits &= bits - 1;
                 }
+                wi += 1;
             }
         } else {
             // Normal path: process sparse light tokens and dense heavy tokens.
-            for (wi, &w) in dense.iter().enumerate() {
+            let mut wi = 0usize;
+            while wi < dense.len() {
                 if wi * 64 >= n_internal {
                     break;
                 }
                 stats.dense_words_visited += 1;
+                let w = dense[wi];
                 let remaining = n_internal - wi * 64;
                 let valid_mask = if remaining >= 64 { !0u64 } else { (1u64 << remaining) - 1 };
                 let valid_bits = w & valid_mask;
                 if valid_bits == 0 {
+                    wi += 1;
                     continue;
                 }
                 if valid_bits == valid_mask {
-                    if let Some(group_mask) = sparse_word_groups.get(wi) {
-                        stats.normal_full_word_hits += 1;
-                        stats.group_or_sparse_entries += group_mask.len() as u64;
-                        for &(buf_word, mask) in group_mask {
-                            buf[buf_word as usize] |= mask;
+                    let run_start = wi;
+                    wi += 1;
+                    while wi < dense.len() && wi * 64 < n_internal {
+                        let remaining = n_internal - wi * 64;
+                        if remaining < 64 || dense[wi] != !0u64 {
+                            break;
                         }
-                        continue;
+                        stats.dense_words_visited += 1;
+                        wi += 1;
                     }
+                    self.or_full_internal_word_run_to_buf(run_start, wi, buf, &mut stats);
+                    continue;
                 }
                 let mut bits = valid_bits;
                 while bits != 0 {
@@ -1511,12 +1718,11 @@ impl Constraint {
                         let start = offsets[internal_token] as usize;
                         let end = offsets[internal_token + 1] as usize;
                         stats.normal_sparse_entries += end.saturating_sub(start) as u64;
-                        for &(buf_word, mask) in &flat[start..end] {
-                            buf[buf_word as usize] |= mask;
-                        }
+                        or_sparse_buf_entries(buf, &flat[start..end]);
                     }
                     bits &= bits - 1;
                 }
+                wi += 1;
             }
         }
 
