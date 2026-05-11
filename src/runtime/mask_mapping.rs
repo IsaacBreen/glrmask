@@ -208,7 +208,8 @@ impl FinalMaskMapping {
             return;
         }
 
-        let n_set = self.count_dense_set_bits(dense);
+        let selection = self.dense_selection_stats(dense);
+        let n_set = selection.n_set;
         if n_set >= n_internal && !self.all_tokens_mask.is_empty() {
             if buf_zeroed {
                 copy_dense(buf, &self.all_tokens_mask);
@@ -224,8 +225,9 @@ impl FinalMaskMapping {
         let n_missing = n_internal - n_set;
         if !self.all_tokens_mask.is_empty()
             && n_set.saturating_mul(5) >= n_internal.saturating_mul(3)
-            && n_missing <= 300
-            && self.missing_dense_entry_cost(dense) + self.buf_words <= self.buf_words * 3
+            && n_missing <= 800
+            && self.buf_words + self.estimate_missing_dense_clear_cost(dense)
+                < selection.selected_entry_cost
         {
             if buf_zeroed {
                 copy_dense(buf, &self.all_tokens_mask);
@@ -377,6 +379,103 @@ impl FinalMaskMapping {
             }
         }
         cost
+    }
+
+    fn estimate_missing_dense_clear_cost(&self, dense: &[u64]) -> usize {
+        let n_internal = self.token_entries.len();
+        let mut cost = 0usize;
+        let mut wi = 0usize;
+        while wi < dense.len() {
+            let word = dense[wi];
+            let base = wi * 64;
+            if base >= n_internal {
+                break;
+            }
+            let valid_bits = (n_internal - base).min(64);
+            let valid_mask = if valid_bits == 64 {
+                !0u64
+            } else {
+                (1u64 << valid_bits) - 1
+            };
+            let missing = !word & valid_mask;
+            if missing == 0 {
+                wi += 1;
+                continue;
+            }
+            if valid_bits == 64 && missing == !0u64 {
+                let run_start = wi;
+                wi += 1;
+                while wi < dense.len() {
+                    let base = wi * 64;
+                    if base >= n_internal || n_internal - base < 64 || dense[wi] != 0 {
+                        break;
+                    }
+                    wi += 1;
+                }
+                cost += self.group_entries_in(run_start, wi).min(self.buf_words);
+                continue;
+            }
+            cost += self.estimate_andnot_bits_cost(base, missing);
+            wi += 1;
+        }
+        cost
+    }
+
+    fn estimate_andnot_bits_cost(&self, base: usize, mut bits: u64) -> usize {
+        let mut cost = 0usize;
+        let word32_base = base / 32;
+        for lane in 0..2 {
+            let shift = lane * 32;
+            let mask = 0xffff_ffffu64 << shift;
+            if bits & mask == mask {
+                cost += self
+                    .word32_group_entries
+                    .get(word32_base + lane)
+                    .map_or(0, |entries| entries.len());
+                bits &= !mask;
+            }
+        }
+
+        let halfword_base = base / 16;
+        for lane in 0..4 {
+            let shift = lane * 16;
+            let mask = 0xffffu64 << shift;
+            if bits & mask == mask {
+                cost += self
+                    .halfword_group_entries
+                    .get(halfword_base + lane)
+                    .map_or(0, |entries| entries.len());
+                bits &= !mask;
+            }
+        }
+
+        let byte_base = base / 8;
+        for lane in 0..8 {
+            let shift = lane * 8;
+            let mask = 0xffu64 << shift;
+            if bits & mask == mask {
+                cost += self
+                    .byte_group_entries
+                    .get(byte_base + lane)
+                    .map_or(0, |entries| entries.len());
+                bits &= !mask;
+            }
+        }
+
+        let quad_base = base / 4;
+        for lane in 0..16 {
+            let shift = lane * 4;
+            let mask = 0x0fu64 << shift;
+            if bits & mask == mask {
+                cost += self
+                    .quad_group_entries
+                    .get(quad_base + lane)
+                    .map_or(0, |entries| entries.len());
+                bits &= !mask;
+            }
+        }
+
+        cost + self.entry_cost_for_bits(base, bits)
     }
 
     fn dense_selection_stats(&self, dense: &[u64]) -> DenseSelectionStats {
@@ -609,7 +708,9 @@ impl FinalMaskMapping {
         stats: &mut DenseToBufProfileStats,
     ) {
         let n_internal = self.token_entries.len();
-        for (wi, &word) in dense.iter().enumerate() {
+        let mut wi = 0usize;
+        while wi < dense.len() {
+            let word = dense[wi];
             let base = wi * 64;
             if base >= n_internal {
                 break;
@@ -620,15 +721,35 @@ impl FinalMaskMapping {
             let valid_mask = if valid_bits == 64 { !0u64 } else { (1u64 << valid_bits) - 1 };
             let missing = !word & valid_mask;
             if missing == 0 {
+                wi += 1;
+                continue;
+            }
+            if valid_bits == 64 && missing == !0u64 {
+                let run_start = wi;
+                wi += 1;
+                while wi < dense.len() {
+                    let base = wi * 64;
+                    if base >= n_internal || n_internal - base < 64 || dense[wi] != 0 {
+                        break;
+                    }
+                    stats.dense_words_visited += 1;
+                    wi += 1;
+                }
+                if self.andnot_word_group_run(run_start, wi, out) {
+                    stats.complement_full_word_hits += (wi - run_start) as u64;
+                }
                 continue;
             }
             self.andnot_bits(base, missing, out, stats);
+            wi += 1;
         }
     }
 
     fn andnot_missing_dense_fast(&self, dense: &[u64], out: &mut [u32]) {
         let n_internal = self.token_entries.len();
-        for (wi, &word) in dense.iter().enumerate() {
+        let mut wi = 0usize;
+        while wi < dense.len() {
+            let word = dense[wi];
             let base = wi * 64;
             if base >= n_internal {
                 break;
@@ -641,9 +762,23 @@ impl FinalMaskMapping {
                 (1u64 << valid_bits) - 1
             };
             let missing = !word & valid_mask;
+            if valid_bits == 64 && missing == !0u64 {
+                let run_start = wi;
+                wi += 1;
+                while wi < dense.len() {
+                    let base = wi * 64;
+                    if base >= n_internal || n_internal - base < 64 || dense[wi] != 0 {
+                        break;
+                    }
+                    wi += 1;
+                }
+                self.andnot_word_group_run(run_start, wi, out);
+                continue;
+            }
             if missing != 0 {
                 self.andnot_bits_fast(base, missing, out);
             }
+            wi += 1;
         }
     }
 
@@ -784,6 +919,42 @@ impl FinalMaskMapping {
         !entries.is_empty()
     }
 
+    fn andnot_word_group(&self, group_id: usize, out: &mut [u32]) -> bool {
+        let Some(entries) = self.word_group_entries.get(group_id) else {
+            return false;
+        };
+        if entries.len() > self.buf_words / 4 && group_id + 1 < self.word_group_dense_prefix.len()
+        {
+            let before = &self.word_group_dense_prefix[group_id];
+            let after = &self.word_group_dense_prefix[group_id + 1];
+            andnot_prefix_diff(out, before, after);
+            return true;
+        }
+        andnot_sparse(out, entries);
+        !entries.is_empty()
+    }
+
+    fn andnot_word_group_run(&self, start: usize, end: usize, out: &mut [u32]) -> bool {
+        if start >= end {
+            return false;
+        }
+        let sparse_entries = self.group_entries_in(start, end);
+        if sparse_entries > self.buf_words / 4 && end < self.word_group_dense_prefix.len() {
+            let before = &self.word_group_dense_prefix[start];
+            let after = &self.word_group_dense_prefix[end];
+            andnot_prefix_diff(out, before, after);
+            return true;
+        }
+        let mut cleared = false;
+        for group_id in start..end {
+            if let Some(entries) = self.word_group_entries.get(group_id) {
+                andnot_sparse(out, entries);
+                cleared |= !entries.is_empty();
+            }
+        }
+        cleared
+    }
+
     #[inline(always)]
     fn or_quad_group(&self, group_id: usize, out: &mut [u32]) -> bool {
         if let Some(Some(dense)) = self.quad_group_dense.get(group_id) {
@@ -836,6 +1007,18 @@ impl FinalMaskMapping {
         out: &mut [u32],
         stats: &mut DenseToBufProfileStats,
     ) {
+        if let Some((group_id, missing)) = self.group_complement_bits(base, bits) {
+            if self.or_full_group_run(group_id, group_id + 1, out, false) {
+                stats.normal_group_complement_hits += 1;
+                stats.normal_group_complement_sparse_entries += self
+                    .word_group_entries
+                    .get(group_id)
+                    .map_or(0, |entries| entries.len()) as u64;
+            }
+            self.andnot_bits(base, missing, out, stats);
+            return;
+        }
+
         let byte_base = base / 8;
         for lane in 0..8 {
             let shift = lane * 8;
@@ -880,6 +1063,12 @@ impl FinalMaskMapping {
     }
 
     fn or_bits_fast(&self, base: usize, mut bits: u64, out: &mut [u32]) {
+        if let Some((group_id, missing)) = self.group_complement_bits(base, bits) {
+            self.or_full_group_run(group_id, group_id + 1, out, false);
+            self.andnot_bits_fast(base, missing, out);
+            return;
+        }
+
         let byte_base = base / 8;
         for lane in 0..8 {
             let shift = lane * 8;
@@ -907,6 +1096,35 @@ impl FinalMaskMapping {
         }
     }
 
+    fn group_complement_bits(&self, base: usize, bits: u64) -> Option<(usize, u64)> {
+        let remaining = self.token_entries.len().checked_sub(base)?;
+        if remaining < 64 {
+            return None;
+        }
+        let selected_count = bits.count_ones() as usize;
+        if selected_count < 48 {
+            return None;
+        }
+        let missing = !bits;
+        let selected_cost = self.entry_cost_for_bits(base, bits);
+        let missing_cost = self.entry_cost_for_bits(base, missing);
+        let group_id = base / 64;
+        let group_sparse_cost = self
+            .word_group_entries
+            .get(group_id)
+            .map_or(0, |entries| entries.len());
+        let group_or_cost = if group_sparse_cost > self.buf_words / 4 {
+            self.buf_words
+        } else {
+            group_sparse_cost
+        };
+        if group_or_cost + missing_cost < selected_cost {
+            Some((group_id, missing))
+        } else {
+            None
+        }
+    }
+
     fn andnot_bits(
         &self,
         base: usize,
@@ -914,6 +1132,17 @@ impl FinalMaskMapping {
         out: &mut [u32],
         stats: &mut DenseToBufProfileStats,
     ) {
+        if bits == !0u64 {
+            if self.andnot_word_group(base / 64, out) {
+                stats.complement_full_word_hits += 1;
+                stats.group_andnot_sparse_entries += self
+                    .word_group_entries
+                    .get(base / 64)
+                    .map_or(0, |entries| entries.len()) as u64;
+            }
+            return;
+        }
+
         let word32_base = base / 32;
         for lane in 0..2 {
             let shift = lane * 32;
@@ -989,6 +1218,11 @@ impl FinalMaskMapping {
     }
 
     fn andnot_bits_fast(&self, base: usize, mut bits: u64, out: &mut [u32]) {
+        if bits == !0u64 {
+            self.andnot_word_group(base / 64, out);
+            return;
+        }
+
         let word32_base = base / 32;
         for lane in 0..2 {
             let shift = lane * 32;
@@ -1233,6 +1467,27 @@ fn copy_prefix_diff(out: &mut [u32], before: &[u32], after: &[u32]) {
         }
         for i in (n_pairs * 2)..n {
             *out_ptr.add(i) = *after_ptr.add(i) & !*before_ptr.add(i);
+        }
+    }
+}
+
+#[inline(always)]
+fn andnot_prefix_diff(out: &mut [u32], before: &[u32], after: &[u32]) {
+    let n = out.len().min(before.len()).min(after.len());
+    let n_pairs = n / 2;
+    unsafe {
+        let out_ptr = out.as_mut_ptr();
+        let before_ptr = before.as_ptr();
+        let after_ptr = after.as_ptr();
+        for i in 0..n_pairs {
+            let offset = i * 2;
+            let b = std::ptr::read_unaligned(out_ptr.add(offset) as *const u64);
+            let s = std::ptr::read_unaligned(before_ptr.add(offset) as *const u64);
+            let e = std::ptr::read_unaligned(after_ptr.add(offset) as *const u64);
+            std::ptr::write_unaligned(out_ptr.add(offset) as *mut u64, b & !(e & !s));
+        }
+        for i in (n_pairs * 2)..n {
+            *out_ptr.add(i) &= !(*after_ptr.add(i) & !*before_ptr.add(i));
         }
     }
 }

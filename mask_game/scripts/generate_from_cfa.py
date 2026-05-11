@@ -173,6 +173,7 @@ def main() -> int:
     parser.add_argument("--max-examples-per-problem", type=int, default=-1)
     parser.add_argument("--max-problems", type=int, default=0)
     parser.add_argument("--problem", action="append", default=[])
+    parser.add_argument("--vocab", default="llama3")
     parser.add_argument("--include-step", type=parse_include_step, action="append", default=[])
     parser.add_argument(
         "--all-steps",
@@ -186,7 +187,7 @@ def main() -> int:
     from cfa.adapters.glrmask_native_adapter import GlrMaskNativeAdapter
     from cfa.config import get_paths
     from cfa.registry import default_registry
-    from cfa.tokenization import load_vocab_info
+    from cfa.tokenization import VOCAB_LOADERS
     from cfa.tokenizer import GreedyTokenizer
     from scripts.inspect_step_stabilized import _problem_from_spec
     from scripts.sweep import collect_examples_for_spec
@@ -194,7 +195,11 @@ def main() -> int:
     os.environ.setdefault("CFA_BUILD_TIMEOUT_SECONDS", "180")
 
     registry = default_registry(get_paths().data_dir)
-    vocab = load_vocab_info()
+    try:
+        vocab_loader = VOCAB_LOADERS[args.vocab]
+    except KeyError as exc:
+        raise ValueError(f"unknown vocab {args.vocab!r}; choices: {sorted(VOCAB_LOADERS)}") from exc
+    vocab = vocab_loader()
     tokenizer = GreedyTokenizer(vocab.vocab)
     adapter = GlrMaskNativeAdapter()
 
@@ -323,7 +328,7 @@ def main() -> int:
 
     payload = {
         "version": 1,
-        "source": "constraint-framework-analysis make example-slow glrmask_native",
+        "source": f"constraint-framework-analysis make example-slow glrmask_native vocab={args.vocab}",
         "buf_words": buf_words,
         "maps": maps,
         "cases": cases,

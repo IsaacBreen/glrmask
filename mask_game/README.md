@@ -36,6 +36,7 @@ From the glrmask2 repo root:
 
 ```bash
 python mask_game/scripts/generate_from_cfa.py \
+  --vocab llama3 \
   --output mask_game/data/example_slow_mask_game.json.gz
 ```
 
@@ -48,6 +49,7 @@ step corpus locally:
 
 ```bash
 python mask_game/scripts/generate_from_cfa.py \
+  --vocab llama3 \
   --all-steps \
   --output mask_game/data/example_slow_all_steps_mask_game.json.gz
 ```
