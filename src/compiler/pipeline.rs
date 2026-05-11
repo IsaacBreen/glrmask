@@ -753,6 +753,8 @@ fn compile_prepared_with_profile(
             total_internal_buf_cost: 0,
             heavy_total_cost: 0,
             light_avg_cost_x256: 0,
+            internal_token_buf_op_costs: Vec::new(),
+            word_group_buf_op_costs: Vec::new(),
         });
         profile.finalize_ms = elapsed_ms(finalize_started_at);
         profile.compile_ms = elapsed_ms(compile_started_at);

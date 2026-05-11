@@ -173,6 +173,13 @@ pub struct Constraint {
     /// Pre-multiplied by 256 for fixed-point arithmetic to avoid float.
     #[serde(skip)]
     pub(crate) light_avg_cost_x256: usize,
+    /// Exact materialization cost per internal token, after heavy-token dense masks
+    /// have been chosen.
+    #[serde(skip)]
+    pub(crate) internal_token_buf_op_costs: Vec<usize>,
+    /// Exact materialization cost per 64-token internal word group.
+    #[serde(skip)]
+    pub(crate) word_group_buf_op_costs: Vec<usize>,
 }
 
 /// Dense buf OR: `buf[i] |= mask[i]` for all i in min(buf.len(), mask.len()).
@@ -243,6 +250,7 @@ fn andnot_sparse_buf_entries(buf: &mut [u32], entries: &[(u16, u32)]) {
 pub(crate) struct DenseToBufProfileStats {
     pub dense_words_visited: u64,
     pub normal_full_word_hits: u64,
+    pub normal_group_complement_hits: u64,
     pub complement_full_word_hits: u64,
     pub complement_full_byte_groups: u64,
     pub complement_full_nibble_groups: u64,
@@ -250,6 +258,7 @@ pub(crate) struct DenseToBufProfileStats {
     pub normal_token_iterations: u64,
     pub complement_token_iterations: u64,
     pub normal_sparse_entries: u64,
+    pub normal_group_complement_sparse_entries: u64,
     pub complement_sparse_entries: u64,
     pub complement_heavy_dense_clears: u64,
     pub complement_max_sparse_span: u64,
@@ -631,6 +640,13 @@ impl Constraint {
         };
         self.heavy_token_indices = self.heavy_token_dense_masks.iter().enumerate().filter_map(|(i, m)| if m.is_some() { Some(i) } else { None }).collect();
         self.heavy_total_cost = self.heavy_token_indices.len() * buf_len;
+        self.internal_token_buf_op_costs = Self::compute_internal_token_buf_op_costs(
+            &self.internal_token_buf_offsets,
+            &self.heavy_token_dense_masks,
+            buf_len,
+        );
+        self.word_group_buf_op_costs =
+            Self::compute_word_group_buf_op_costs(&self.internal_token_buf_op_costs);
         let n_light = n_internal.saturating_sub(self.heavy_token_indices.len());
         let light_total = self.total_internal_buf_cost.saturating_sub(self.heavy_total_cost);
         self.light_avg_cost_x256 = if n_light > 0 { (light_total * 256) / n_light } else { 0 };
@@ -849,6 +865,30 @@ impl Constraint {
         total
     }
 
+    fn compute_internal_token_buf_op_costs(
+        offsets: &[u32],
+        heavy: &[Option<Box<[u32]>>],
+        buf_len: usize,
+    ) -> Vec<usize> {
+        let n_internal = if offsets.len() > 1 { offsets.len() - 1 } else { 0 };
+        (0..n_internal)
+            .map(|idx| {
+                if idx < heavy.len() && heavy[idx].is_some() {
+                    buf_len
+                } else {
+                    (offsets[idx + 1] - offsets[idx]) as usize
+                }
+            })
+            .collect()
+    }
+
+    fn compute_word_group_buf_op_costs(costs: &[usize]) -> Vec<usize> {
+        costs
+            .chunks(64)
+            .map(|chunk| chunk.iter().copied().sum())
+            .collect()
+    }
+
     fn compute_dense_token_bytes(&self) -> Vec<Option<Box<[u8]>>> {
         let Some(max_token_id) = self.max_original_token_id() else {
             return Vec::new();
@@ -924,6 +964,17 @@ impl Constraint {
         self.mega_word_group_buf_masks = self.compute_sliding_word_group_dense_masks(16);
         self.giga_word_group_buf_masks = self.compute_sliding_word_group_dense_masks(32);
         self.all_tokens_buf_mask = self.compute_all_tokens_buf_mask();
+        self.heavy_token_dense_masks = self.compute_heavy_token_dense_masks();
+        let (flat, offsets) = Self::compute_flat_buf_masks(&self.internal_token_buf_masks);
+        self.internal_token_buf_flat = flat;
+        self.internal_token_buf_offsets = offsets;
+        self.internal_token_buf_op_costs = Self::compute_internal_token_buf_op_costs(
+            &self.internal_token_buf_offsets,
+            &self.heavy_token_dense_masks,
+            self.mask_len(),
+        );
+        self.word_group_buf_op_costs =
+            Self::compute_word_group_buf_op_costs(&self.internal_token_buf_op_costs);
     }
 
     pub(crate) fn build_dense_token_bytes(&mut self) {
@@ -1539,6 +1590,73 @@ impl Constraint {
         }
     }
 
+    #[inline(always)]
+    fn internal_token_buf_op_cost(&self, internal_token: usize, buf_len: usize) -> usize {
+        if let Some(&cost) = self.internal_token_buf_op_costs.get(internal_token) {
+            return cost;
+        }
+        if internal_token < self.heavy_token_dense_masks.len()
+            && self.heavy_token_dense_masks[internal_token].is_some()
+        {
+            buf_len
+        } else {
+            (self.internal_token_buf_offsets[internal_token + 1]
+                - self.internal_token_buf_offsets[internal_token]) as usize
+        }
+    }
+
+    #[inline(always)]
+    fn internal_bits_buf_op_cost(&self, wi: usize, mut bits: u64, buf_len: usize) -> usize {
+        let mut cost = 0usize;
+        while bits != 0 {
+            let bit = bits.trailing_zeros() as usize;
+            let internal_token = wi * 64 + bit;
+            cost += self.internal_token_buf_op_cost(internal_token, buf_len);
+            bits &= bits - 1;
+        }
+        cost
+    }
+
+    #[inline(always)]
+    fn or_internal_token_to_buf_fast(
+        &self,
+        internal_token: usize,
+        buf: &mut [u32],
+        stats_entries: &mut u64,
+    ) {
+        if internal_token < self.heavy_token_dense_masks.len() {
+            if let Some(ref dense_mask) = self.heavy_token_dense_masks[internal_token] {
+                *stats_entries += dense_mask.len() as u64;
+                or_dense_buf(buf, dense_mask);
+                return;
+            }
+        }
+        let start = self.internal_token_buf_offsets[internal_token] as usize;
+        let end = self.internal_token_buf_offsets[internal_token + 1] as usize;
+        *stats_entries += end.saturating_sub(start) as u64;
+        or_sparse_buf_entries(buf, &self.internal_token_buf_flat[start..end]);
+    }
+
+    #[inline(always)]
+    fn andnot_internal_token_from_buf_fast(
+        &self,
+        internal_token: usize,
+        buf: &mut [u32],
+        stats_entries: &mut u64,
+    ) {
+        if internal_token < self.heavy_token_dense_masks.len() {
+            if let Some(ref dense_mask) = self.heavy_token_dense_masks[internal_token] {
+                *stats_entries += dense_mask.len() as u64;
+                andnot_dense_buf(buf, dense_mask);
+                return;
+            }
+        }
+        let start = self.internal_token_buf_offsets[internal_token] as usize;
+        let end = self.internal_token_buf_offsets[internal_token + 1] as usize;
+        *stats_entries += end.saturating_sub(start) as u64;
+        andnot_sparse_buf_entries(buf, &self.internal_token_buf_flat[start..end]);
+    }
+
     /// Convert a merged internal token dense bitmap to the output buffer.
     /// Uses a contiguous flat entry array for cache-friendly sequential access,
     /// with word_group fast paths for fully-set 64-bit words and heavy token
@@ -1702,23 +1820,48 @@ impl Constraint {
                     self.or_full_internal_word_run_to_buf(run_start, wi, buf, &mut stats);
                     continue;
                 }
+                let missing_bits = !valid_bits & valid_mask;
+                if missing_bits != 0 {
+                    if let Some(group_mask) = sparse_word_groups.get(wi) {
+                        let selected_cost = self.internal_bits_buf_op_cost(wi, valid_bits, buf_len);
+                        let missing_cost = self
+                            .word_group_buf_op_costs
+                            .get(wi)
+                            .copied()
+                            .unwrap_or_else(|| selected_cost + self.internal_bits_buf_op_cost(wi, missing_bits, buf_len))
+                            .saturating_sub(selected_cost);
+                        if group_mask.len() + missing_cost < selected_cost {
+                            stats.normal_group_complement_hits += 1;
+                            stats.group_or_sparse_entries += group_mask.len() as u64;
+                            or_sparse_buf_entries(buf, group_mask);
+                            let mut missing = missing_bits;
+                            while missing != 0 {
+                                let bit = missing.trailing_zeros() as usize;
+                                let internal_token = wi * 64 + bit;
+                                self.andnot_internal_token_from_buf_fast(
+                                    internal_token,
+                                    buf,
+                                    &mut stats.normal_group_complement_sparse_entries,
+                                );
+                                missing &= missing - 1;
+                            }
+                            wi += 1;
+                            continue;
+                        }
+                    }
+                }
+
                 let mut bits = valid_bits;
                 while bits != 0 {
                     stats.normal_token_iterations += 1;
                     let bit = bits.trailing_zeros() as usize;
                     let internal_token = wi * 64 + bit;
                     if internal_token < n_internal {
-                        if internal_token < heavy.len() {
-                            if let Some(ref dense_mask) = heavy[internal_token] {
-                                or_dense_buf(buf, dense_mask);
-                                bits &= bits - 1;
-                                continue;
-                            }
-                        }
-                        let start = offsets[internal_token] as usize;
-                        let end = offsets[internal_token + 1] as usize;
-                        stats.normal_sparse_entries += end.saturating_sub(start) as u64;
-                        or_sparse_buf_entries(buf, &flat[start..end]);
+                        self.or_internal_token_to_buf_fast(
+                            internal_token,
+                            buf,
+                            &mut stats.normal_sparse_entries,
+                        );
                     }
                     bits &= bits - 1;
                 }
