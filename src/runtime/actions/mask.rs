@@ -66,6 +66,10 @@ fn mask_acc_merge_profile_enabled() -> bool {
     *ENABLED.get_or_init(|| bool_env("GLRMASK_PROFILE_MASK_ACC_MERGE"))
 }
 
+fn mask_fast_conversion_profile_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| bool_env("GLRMASK_PROFILE_MASK_FAST_CONVERSION"))
+}
 
 fn emit_line_with_optional_file(line: &str, file_env_var: &str) {
     println!("{line}");
@@ -94,6 +98,17 @@ fn emit_mask_queue_merge_profile_line(line: &str) {
 
 fn emit_mask_acc_merge_profile_line(line: &str) {
     emit_line_with_optional_file(line, "GLRMASK_PROFILE_MASK_ACC_MERGE_FILE");
+}
+
+fn emit_mask_fast_conversion_profile_line(line: &str) {
+    let Ok(path) = std::env::var("GLRMASK_PROFILE_MASK_FAST_CONVERSION_FILE") else {
+        return;
+    };
+
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let _ = writeln!(file, "{line}");
 }
 
 fn elapsed_ns(start: Instant) -> u64 {
@@ -1442,8 +1457,22 @@ impl<'a> ConstraintState<'a> {
                     }
                     dense_to_buf
                 } else {
+                    let fast_conversion_start =
+                        mask_fast_conversion_profile_enabled().then(Instant::now);
                     self.constraint
                         .or_internal_dense_to_buf_fast(&merged, buf, true);
+                    if let Some(start) = fast_conversion_start {
+                        let merged_set_bits =
+                            merged.iter().map(|word| word.count_ones() as u64).sum::<u64>();
+                        emit_mask_fast_conversion_profile_line(&format!(
+                            "[glrmask/debug][mask_fast_conversion] ns={} internal_set_bits={} buf_words={} direct_buf_used={} direct_buf_possible={}",
+                            elapsed_ns(start),
+                            merged_set_bits,
+                            buf.len(),
+                            direct_buf_used,
+                            direct_buf_possible
+                        ));
+                    }
                     DenseToBufProfileStats::default()
                 }
             };
