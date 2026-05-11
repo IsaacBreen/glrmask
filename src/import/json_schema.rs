@@ -2841,8 +2841,43 @@ fn coalesce_json_pattern_literals(expr: GrammarExpr) -> GrammarExpr {
     }
 }
 
+fn json_pattern_grammar_expr_impl(expr: &LexerExpr, json_char: &LexerExpr) -> GrammarExpr {
+    if expr == json_char {
+        return GrammarExpr::Ref(JSON_STRING_CHAR_RULE.into());
+    }
+
+    match expr {
+        LexerExpr::U8Seq(_) | LexerExpr::U8Class(_) | LexerExpr::Epsilon => expr_to_grammar_expr(expr),
+        LexerExpr::Seq(parts) => sequence_or_single(
+            parts
+                .iter()
+                .map(|part| json_pattern_grammar_expr_impl(part, json_char))
+                .collect(),
+        ),
+        LexerExpr::Choice(options) => choice_or_single(
+            options
+                .iter()
+                .map(|option| json_pattern_grammar_expr_impl(option, json_char))
+                .collect(),
+        ),
+        LexerExpr::Repeat { expr, min, max } => {
+            repeat_expr(json_pattern_grammar_expr_impl(expr, json_char), *min, *max)
+        }
+        LexerExpr::Intersect { expr, intersect } => GrammarExpr::Intersect {
+            expr: Box::new(json_pattern_grammar_expr_impl(expr, json_char)),
+            intersect: Box::new(json_pattern_grammar_expr_impl(intersect, json_char)),
+        },
+        LexerExpr::Exclude { expr, exclude } => GrammarExpr::Exclude {
+            expr: Box::new(json_pattern_grammar_expr_impl(expr, json_char)),
+            exclude: Box::new(json_pattern_grammar_expr_impl(exclude, json_char)),
+        },
+        LexerExpr::Shared(inner) => json_pattern_grammar_expr_impl(inner, json_char),
+    }
+}
+
 fn json_pattern_grammar_expr(expr: &LexerExpr) -> GrammarExpr {
-    coalesce_json_pattern_literals(expr_to_grammar_expr(expr))
+    let json_char = json_string_char_lexer_expr();
+    coalesce_json_pattern_literals(json_pattern_grammar_expr_impl(expr, &json_char))
 }
 
 fn json_string_literal_bytes(text: &str) -> Vec<u8> {
@@ -7065,13 +7100,9 @@ impl<'a> SchemaCtx<'a> {
                 // keep the length DFA small (avoids explosion from large
                 // maxLength values).
                 let search_expr = decoded_regex_search_expr(&pattern, None);
-                let length_inner = match max_len {
-                    Some(ml) if ml <= 100 => format!(r#"(?:{}){{{},{}}}"#, JSON_STRING_CHAR_PATTERN, min_len, ml),
-                    _ => format!(r#"(?:{}){{{},}}"#, JSON_STRING_CHAR_PATTERN, min_len),
-                };
                 let intersected = LexerExpr::Intersect {
                     expr: Box::new(search_expr),
-                    intersect: Box::new(parse_regex(&length_inner, true)),
+                    intersect: Box::new(lexer_repeat(json_string_char_lexer_expr(), min_len, max_len.filter(|ml| *ml <= 100))),
                 };
                         let body = self
                             .build_pattern_lexer_expr(&intersected, "JSON_STRING_PATTERN_ANCHORED_BOUNDED");
@@ -7089,11 +7120,10 @@ impl<'a> SchemaCtx<'a> {
                 const MAX_BOUNDED_SEARCH_TAIL: usize = 100;
                 if let Some(ml) = max_len {
                     if ml <= MAX_BOUNDED_SEARCH_TAIL {
-                        let search_expr = decoded_regex_search_expr(&pattern, Some(ml));
-                        let length_inner = format!(r#"(?:{}){{{},{}}}"#, JSON_STRING_CHAR_PATTERN, min_len, ml);
+                        let search_expr = decoded_regex_search_expr(&pattern, None);
                         let intersected = LexerExpr::Intersect {
                             expr: Box::new(search_expr),
-                            intersect: Box::new(parse_regex(&length_inner, true)),
+                            intersect: Box::new(lexer_repeat(json_string_char_lexer_expr(), min_len, Some(ml))),
                         };
                         let body =
                             self.build_pattern_lexer_expr(&intersected, "JSON_STRING_PATTERN_BOUNDED");
@@ -7107,10 +7137,9 @@ impl<'a> SchemaCtx<'a> {
                 // DFA explosion).
                 if min_len > 0 {
                     let search_expr = decoded_regex_search_expr(&pattern, None);
-                    let length_inner = format!(r#"(?:{}){{{},}}"#, JSON_STRING_CHAR_PATTERN, min_len);
                     let intersected = LexerExpr::Intersect {
                         expr: Box::new(search_expr),
-                        intersect: Box::new(parse_regex(&length_inner, true)),
+                        intersect: Box::new(lexer_repeat(json_string_char_lexer_expr(), min_len, None)),
                     };
                     let body =
                         self.build_pattern_lexer_expr(&intersected, "JSON_STRING_PATTERN_MINLEN");
