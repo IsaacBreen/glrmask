@@ -531,6 +531,7 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(clear_weight_op_caches, m)?)?;
     m.add_function(wrap_pyfunction!(compile_grammar_def_json, m)?)?;
     m.add_function(wrap_pyfunction!(dump_json_schema_grammar_glrm, m)?)?;
+    m.add_function(wrap_pyfunction!(prepare_vocab_for_compile, m)?)?;
     Ok(())
 }
 
@@ -542,6 +543,11 @@ fn clear_stale_weights() {
 #[pyfunction]
 fn clear_weight_op_caches() {
     glrmask::clear_weight_op_caches();
+}
+
+#[pyfunction]
+fn prepare_vocab_for_compile(vocab: &PyVocab) {
+    glrmask::prepare_vocab_for_compile(&vocab.inner);
 }
 
 #[pyfunction]

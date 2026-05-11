@@ -134,6 +134,18 @@ fn build_char_type_sub_vocabs(vocab: &Vocab) -> Arc<[Vocab]> {
     sub_vocabs
 }
 
+pub(crate) fn prepare_vocab_for_terminal_dwa(vocab: &Vocab) {
+    classify::prepare_vocab_for_terminal_classification(vocab);
+    l1::prepare_l1_identity_vocab_order(vocab);
+
+    if std::env::var("GLRMASK_PARTITION_SCHEME").as_deref().unwrap_or("char_type") == "char_type" {
+        for sub_vocab in build_char_type_sub_vocabs(vocab).iter() {
+            classify::prepare_vocab_for_terminal_classification(sub_vocab);
+            l1::prepare_l1_identity_vocab_order(sub_vocab);
+        }
+    }
+}
+
 fn global_max_length_env_override() -> Option<bool> {
     static OVERRIDE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
     *OVERRIDE.get_or_init(|| {

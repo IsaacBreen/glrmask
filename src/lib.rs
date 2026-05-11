@@ -34,6 +34,13 @@ pub fn compile_grammar_def_json(grammar_def_json: &str, vocab: &Vocab) -> Result
     Ok(compiler::compile_owned(gdef, vocab))
 }
 
+/// Populate compile-time artifacts that are pure functions of the vocabulary.
+///
+/// This intentionally does not compile any grammar/schema-dependent artifact.
+pub fn prepare_vocab_for_compile(vocab: &Vocab) {
+    compiler::compile::prepare_vocab_for_compile(vocab);
+}
+
 /// Dump the imported JSON Schema grammar in GLRM format.
 pub fn dump_json_schema_grammar_glrm(schema_json: &str) -> Result<String> {
     let schema: serde_json::Value = serde_json::from_str(schema_json)

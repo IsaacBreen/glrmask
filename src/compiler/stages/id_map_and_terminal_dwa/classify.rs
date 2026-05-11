@@ -46,6 +46,10 @@ fn vocab_byte_set(vocab: &Vocab) -> U8Set {
     byteset
 }
 
+pub(crate) fn prepare_vocab_for_terminal_classification(vocab: &Vocab) {
+    let _ = vocab_byte_set(vocab);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum L2pPartitionCostFn {
     Size,

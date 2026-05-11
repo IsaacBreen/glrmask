@@ -1446,3 +1446,7 @@ pub(crate) fn compute_constraint_possible_matches_for_vocab(
         config,
     )
 }
+
+pub(crate) fn prepare_vocab_for_possible_matches(vocab: &Vocab) {
+    let _ = get_ordered_vocab_trie_artifacts_for_vocab(vocab);
+}

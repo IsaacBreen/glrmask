@@ -70,6 +70,10 @@ fn l1_identity_vocab_order(vocab: &Vocab) -> Arc<L1IdentityVocabOrder> {
     order
 }
 
+pub(crate) fn prepare_l1_identity_vocab_order(vocab: &Vocab) {
+    let _ = l1_identity_vocab_order(vocab);
+}
+
 fn skip_max_length_for_partition(partition_label: &str) -> bool {
     if partition_label == "p5" {
         return true;
