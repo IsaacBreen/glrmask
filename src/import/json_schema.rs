@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crate::automata::lexer::ast::Expr as LexerExpr;
 use crate::automata::lexer::compile::build_regex;
 use crate::automata::lexer::regex::parse_regex;
+use crate::grammar::expr_dfa::ExprDfaBuilder;
 use crate::import::ast::{expr_to_grammar_expr, GrammarExpr, NamedGrammar, NamedRule};
 use crate::GlrMaskError;
 use serde_json::{Map, Value};
@@ -101,6 +102,7 @@ const EXACT_CLOSED_OBJECT_UNION_MAX_VARIANTS: usize = 8;
 const EXACT_CLOSED_OBJECT_UNION_MAX_KEYS: usize = 16;
 const EXACT_CLOSED_OBJECT_SINGLE_MAX_KEYS: usize = 16;
 const EXACT_CLOSED_OBJECT_UNION_MAX_STATES: usize = 128;
+const ANYOF_OBJECT_EXPR_DFA_MAX_STATES: usize = 512;
 const FACTORED_OPEN_OBJECT_MAX_KEYS: usize = 200;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -142,13 +144,66 @@ struct OrderedClosedObjectVariant {
     items: Vec<OrderedClosedObjectItem>,
 }
 
+#[derive(Debug, Clone)]
+struct AnyOfObjectVariant {
+    items: Vec<OrderedClosedObjectItem>,
+    fixed_keys: BTreeSet<String>,
+    additional_value_expr: Option<GrammarExpr>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct OrderedSubsetCursor {
     variant_idx: u16,
     cursor: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct AnyOfObjectDfaState {
+    variant_idx: u16,
+    cursor: u16,
+    has_content: bool,
+}
+
 impl OrderedClosedObjectVariant {
+    fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    fn advance_cursor(&self, cursor: usize, key: &str) -> Option<usize> {
+        let idx = self.items[cursor..]
+            .iter()
+            .position(|item| item.key == key)
+            .map(|offset| cursor + offset)?;
+        if self.items[cursor..idx].iter().any(|item| item.required) {
+            return None;
+        }
+        Some(idx + 1)
+    }
+
+    fn close_allowed(&self, cursor: usize) -> bool {
+        !self.items[cursor..].iter().any(|item| item.required)
+    }
+
+    fn legal_next_keys(&self, cursor: usize) -> Vec<&str> {
+        let mut keys = Vec::new();
+        for item in &self.items[cursor..] {
+            keys.push(item.key.as_str());
+            if item.required {
+                break;
+            }
+        }
+        keys
+    }
+
+    fn value_expr_for_key(&self, key: &str) -> Option<GrammarExpr> {
+        self.items
+            .iter()
+            .find(|item| item.key == key)
+            .map(|item| item.value_expr.clone())
+    }
+}
+
+impl AnyOfObjectVariant {
     fn len(&self) -> usize {
         self.items.len()
     }
@@ -5696,6 +5751,322 @@ impl<'a> SchemaCtx<'a> {
         self.build_exact_ordered_closed_object_variants(variants, mode)
     }
 
+    fn collect_anyof_expr_dfa_object_variant(
+        &mut self,
+        variant: &Map<String, Value>,
+    ) -> Result<Option<AnyOfObjectVariant>, GlrMaskError> {
+        if variant.get("type").and_then(Value::as_str) != Some("object") {
+            return Ok(None);
+        }
+        for key in &[
+            "patternProperties",
+            "propertyNames",
+            "minProperties",
+            "maxProperties",
+            "anyOf",
+            "oneOf",
+            "allOf",
+            "$ref",
+            "if",
+            "then",
+            "else",
+        ] {
+            if variant.contains_key(*key) {
+                return Ok(None);
+            }
+        }
+
+        let properties = variant
+            .get("properties")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let required: BTreeSet<String> = variant
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|arr| arr.iter().filter_map(Value::as_str).map(String::from).collect())
+            .unwrap_or_default();
+        if required.iter().any(|key| !properties.contains_key(key)) {
+            return Ok(None);
+        }
+
+        let mut fixed_keys = properties.keys().cloned().collect::<BTreeSet<_>>();
+        fixed_keys.extend(required.iter().cloned());
+
+        let mut items = Vec::new();
+        for (key, value_schema) in properties {
+            let value_expr = match self.convert_schema(&value_schema) {
+                Ok(expr) => expr,
+                Err(err) if is_unsat_schema_error(&err) => {
+                    if required.contains(&key) {
+                        return Ok(None);
+                    }
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
+            items.push(OrderedClosedObjectItem {
+                key: key.clone(),
+                value_expr,
+                required: required.contains(&key),
+            });
+        }
+
+        let additional_value_expr =
+            match self.normalized_additional_properties_schema(variant.get("additionalProperties")) {
+                Some(schema) => match self.convert_schema(&schema) {
+                    Ok(expr) => Some(expr),
+                    Err(err) if is_unsat_schema_error(&err) => None,
+                    Err(err) => return Err(err),
+                },
+                None => None,
+            };
+
+        Ok(Some(AnyOfObjectVariant {
+            items,
+            fixed_keys,
+            additional_value_expr,
+        }))
+    }
+
+    fn build_anyof_object_ap_key_expr(
+        &mut self,
+        base_name: &str,
+        variant_idx: usize,
+        all_keys: &BTreeSet<String>,
+        variant_keys: &BTreeSet<String>,
+    ) -> GrammarExpr {
+        let upper_base_name = base_name.to_uppercase();
+        let excluded = all_keys
+            .iter()
+            .map(|key| {
+                self.force_extract_terminal_rule(
+                    literal_expr(&key_colon_literal_body_bytes(key)),
+                    &format!("{upper_base_name}_AP_LITERAL_KEY"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let shared_body = if excluded.is_empty() {
+            GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())
+        } else {
+            GrammarExpr::Exclude {
+                expr: Box::new(GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())),
+                exclude: Box::new(choice_or_single(excluded)),
+            }
+        };
+        let shared_body = self.insert_named_terminal_rule(
+            format!("{upper_base_name}_AP_SHARED_KEY"),
+            shared_body,
+        );
+
+        let allowed_back_keys = all_keys
+            .iter()
+            .filter(|key| !variant_keys.contains(*key))
+            .cloned()
+            .collect::<Vec<_>>();
+        if allowed_back_keys.is_empty() {
+            return wrap_key_colon_terminal(shared_body);
+        }
+
+        let mut body_options = Vec::with_capacity(1 + allowed_back_keys.len());
+        body_options.push(shared_body);
+        body_options.extend(
+            allowed_back_keys
+                .iter()
+                .map(|key| literal_expr(&key_colon_literal_body_bytes(key))),
+        );
+        let variant_body = self.insert_named_terminal_rule(
+            format!("{upper_base_name}_AP_KEY_V{variant_idx}"),
+            choice_or_single(body_options),
+        );
+        wrap_key_colon_terminal(variant_body)
+    }
+
+    fn add_expr_dfa_symbol_path(
+        builder: &mut ExprDfaBuilder,
+        from: u32,
+        symbols: Vec<GrammarExpr>,
+        to: u32,
+    ) {
+        if symbols.is_empty() {
+            builder.add_epsilon(from, to);
+            return;
+        }
+
+        let mut current = from;
+        let last = symbols.len() - 1;
+        for (index, symbol) in symbols.into_iter().enumerate() {
+            let next = if index == last { to } else { builder.add_state() };
+            builder.add_transition(current, symbol, next);
+            current = next;
+        }
+    }
+
+    fn build_anyof_object_expr_dfa_body(
+        &mut self,
+        variants: &[AnyOfObjectVariant],
+        base_name: &str,
+    ) -> Option<GrammarExpr> {
+        if variants.is_empty() {
+            return None;
+        }
+
+        let all_keys = variants
+            .iter()
+            .flat_map(|variant| variant.fixed_keys.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        let mut builder = ExprDfaBuilder::new();
+        let accept = builder.add_state();
+        builder.set_accepting(accept);
+
+        let mut state_ids = BTreeMap::<AnyOfObjectDfaState, u32>::new();
+        let mut queue = VecDeque::<AnyOfObjectDfaState>::new();
+        for variant_idx in 0..variants.len() {
+            let state = AnyOfObjectDfaState {
+                variant_idx: variant_idx as u16,
+                cursor: 0,
+                has_content: false,
+            };
+            let state_id = builder.add_state();
+            builder.add_epsilon(builder.start_state(), state_id);
+            state_ids.insert(state, state_id);
+            queue.push_back(state);
+        }
+
+        while let Some(state) = queue.pop_front() {
+            if state_ids.len() > ANYOF_OBJECT_EXPR_DFA_MAX_STATES {
+                return None;
+            }
+            let state_id = state_ids[&state];
+            let variant = &variants[state.variant_idx as usize];
+            let cursor = state.cursor as usize;
+
+            if variant.close_allowed(cursor) {
+                builder.add_epsilon(state_id, accept);
+                if let Some(value_expr) = &variant.additional_value_expr {
+                    let ap_state = AnyOfObjectDfaState {
+                        variant_idx: state.variant_idx,
+                        cursor: variant.len() as u16,
+                        has_content: true,
+                    };
+                    let ap_state_id = if let Some(&existing) = state_ids.get(&ap_state) {
+                        existing
+                    } else {
+                        let id = builder.add_state();
+                        state_ids.insert(ap_state, id);
+                        queue.push_back(ap_state);
+                        id
+                    };
+                    let mut symbols = Vec::new();
+                    if state.has_content {
+                        symbols.push(self.json_item_separator_expr());
+                    }
+                    symbols.push(self.build_anyof_object_ap_key_expr(
+                        base_name,
+                        state.variant_idx as usize,
+                        &all_keys,
+                        &variant.fixed_keys,
+                    ));
+                    symbols.push(value_expr.clone());
+                    Self::add_expr_dfa_symbol_path(&mut builder, state_id, symbols, ap_state_id);
+                }
+            }
+
+            for key in variant.legal_next_keys(cursor) {
+                let Some(next_cursor) = variant.advance_cursor(cursor, key) else {
+                    continue;
+                };
+                let Some(value_expr) = variant.value_expr_for_key(key) else {
+                    continue;
+                };
+                let next_state = AnyOfObjectDfaState {
+                    variant_idx: state.variant_idx,
+                    cursor: next_cursor as u16,
+                    has_content: true,
+                };
+                let next_state_id = if let Some(&existing) = state_ids.get(&next_state) {
+                    existing
+                } else {
+                    let id = builder.add_state();
+                    state_ids.insert(next_state, id);
+                    queue.push_back(next_state);
+                    id
+                };
+
+                let mut symbols = Vec::new();
+                if state.has_content {
+                    symbols.push(self.json_item_separator_expr());
+                }
+                symbols.push(self.fused_json_key_colon_literal(key));
+                symbols.push(value_expr);
+                Self::add_expr_dfa_symbol_path(&mut builder, state_id, symbols, next_state_id);
+            }
+        }
+
+        Some(GrammarExpr::ExprDFA(Box::new(builder.build())))
+    }
+
+    fn try_build_anyof_object_expr_dfa(
+        &mut self,
+        schema: &Map<String, Value>,
+        options: &[Value],
+    ) -> Result<Option<GrammarExpr>, GlrMaskError> {
+        if options.len() < 2 {
+            return Ok(None);
+        }
+
+        let resolved = options
+            .iter()
+            .map(|opt| {
+                if has_structural_keywords(schema) {
+                    let base = Self::schema_without_keys(schema, &["anyOf", "oneOf"]);
+                    self.merge_resolved_subschemas(&base, std::slice::from_ref(opt))
+                } else {
+                    self.schema_for_intersection(opt)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let mut object_variants = Vec::new();
+        let mut non_object_options = Vec::new();
+        for resolved_option in resolved {
+            if resolved_option.get("type").and_then(Value::as_str) == Some("object") {
+                let Some(variant) = self.collect_anyof_expr_dfa_object_variant(&resolved_option)? else {
+                    return Ok(None);
+                };
+                object_variants.push(variant);
+            } else {
+                non_object_options.push(Value::Object(resolved_option));
+            }
+        }
+
+        if object_variants.len() < 2 {
+            return Ok(None);
+        }
+
+        let mut base_index = self.generated_object_rule_counter;
+        let base_name = loop {
+            let candidate = format!("obj_anyof_dfa_{base_index}");
+            if !self.used_rule_names.contains(&format!("{candidate}_obj")) {
+                break candidate;
+            }
+            base_index += 1;
+        };
+        self.generated_object_rule_counter = base_index + 1;
+
+        let Some(body) = self.build_anyof_object_expr_dfa_body(&object_variants, &base_name) else {
+            return Ok(None);
+        };
+        let object_expr = sequence_or_single(vec![literal_expr(b"{"), body, literal_expr(b"}")]);
+        let object_rule = self.insert_shared_rule(format!("{base_name}_obj"), object_expr);
+
+        let mut alts = vec![GrammarExpr::Ref(object_rule)];
+        for option in non_object_options {
+            alts.push(self.convert_schema(&option)?);
+        }
+        Ok(Some(factor_common_affixes(alts)))
+    }
+
     /// Try to merge anyOf/oneOf variants that are all closed objects
     /// (additionalProperties: false) with shared + mutually-exclusive unique
     /// properties into a single ordering tree with a one-shot unique-kv
@@ -6194,9 +6565,9 @@ impl<'a> SchemaCtx<'a> {
             if let Some(expr) = self.try_reduce_anyof_closed_objects(schema, options)? {
                 return Ok(Some(expr));
             }
-            // Deliberately keep anyOf lowering rudimentary for now: emit a plain
-            // choice over branch object definitions and accept the extra GLR
-            // ambiguity instead of trying to factor object unions.
+            if let Some(expr) = self.try_build_anyof_object_expr_dfa(schema, options)? {
+                return Ok(Some(expr));
+            }
         } else if keyword != "oneOf" {
             return Ok(None);
         }
@@ -10348,10 +10719,94 @@ mod tests {
         to_glrm(&named)
     }
 
+    fn expr_contains_expr_dfa(expr: &GrammarExpr) -> bool {
+        match expr {
+            GrammarExpr::ExprDFA(_) => true,
+            GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
+                parts.iter().any(expr_contains_expr_dfa)
+            }
+            GrammarExpr::Optional(inner)
+            | GrammarExpr::Repeat(inner)
+            | GrammarExpr::RepeatOne(inner) => expr_contains_expr_dfa(inner),
+            GrammarExpr::RepeatRange { expr, .. } => expr_contains_expr_dfa(expr),
+            GrammarExpr::Exclude { expr, exclude } | GrammarExpr::Intersect { expr, intersect: exclude } => {
+                expr_contains_expr_dfa(expr) || expr_contains_expr_dfa(exclude)
+            }
+            GrammarExpr::SeparatedSequence { items, separator, .. } => {
+                items.iter().any(|(item, _)| expr_contains_expr_dfa(item))
+                    || expr_contains_expr_dfa(separator)
+            }
+            GrammarExpr::Ref(_)
+            | GrammarExpr::Literal(_)
+            | GrammarExpr::Epsilon
+            | GrammarExpr::CharClass { .. }
+            | GrammarExpr::RawRegex(_)
+            | GrammarExpr::AnyByte => false,
+        }
+    }
+
+    fn grammar_contains_expr_dfa(schema: serde_json::Value) -> bool {
+        let named = schema_to_named_grammar(&schema).unwrap();
+        named.rules
+            .iter()
+            .any(|rule| expr_contains_expr_dfa(&rule.expr))
+    }
+
     fn find_rule_line_with_prefix<'a>(glrm: &'a str, rule_prefix: &str) -> &'a str {
         glrm.lines()
             .find(|line| line.starts_with(&format!("t {rule_prefix}")))
             .unwrap_or_else(|| panic!("missing rule prefix {rule_prefix} in grammar:\n{glrm}"))
+    }
+
+    #[test]
+    fn anyof_object_variants_lower_through_expr_dfa() {
+        let schema = json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"const": "left"},
+                        "a": {"type": "string"}
+                    },
+                    "required": ["kind"],
+                    "additionalProperties": {"type": "number"}
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"const": "right"},
+                        "b": {"type": "boolean"}
+                    },
+                    "required": ["kind"],
+                    "additionalProperties": {"type": "number"}
+                }
+            ]
+        });
+
+        assert!(grammar_contains_expr_dfa(schema));
+    }
+
+    #[test]
+    fn anyof_object_expr_dfa_keeps_non_object_options() {
+        let schema = json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}},
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {"b": {"type": "string"}},
+                    "additionalProperties": false
+                },
+                {"type": "string"}
+            ]
+        });
+
+        let glrm = dump_glrm(schema);
+        assert!(glrm.contains("ExprDFA"), "{glrm}");
+        assert!(glrm.contains("json_string"), "{glrm}");
     }
 
     #[test]

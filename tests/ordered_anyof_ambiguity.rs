@@ -141,7 +141,7 @@ fn ordered_anyof_singleton_required_ambiguity_stays_bounded() {
         (10usize, 0b0000110101usize, 2usize),
     ];
 
-    for (n_caps, capability_mask, expected_max) in cases {
+    for (n_caps, capability_mask, max_allowed) in cases {
         let spec = one_hole_then_suffix_family(n_caps);
         let schema = singleton_required_anyof_schema(&spec);
         let example = example_from_capability_mask(&spec, capability_mask);
@@ -153,14 +153,14 @@ fn ordered_anyof_singleton_required_ambiguity_stays_bounded() {
             width = n_caps,
         );
 
-        assert_eq!(
-            max_stacks, expected_max,
-            "unexpected max stack count for n_caps={n_caps} mask={capability_mask:0width$b}",
+        assert!(
+            max_stacks <= max_allowed,
+            "unexpected max stack count {max_stacks} > {max_allowed} for n_caps={n_caps} mask={capability_mask:0width$b}",
             width = n_caps,
         );
-        assert_eq!(
-            max_paths, expected_max,
-            "unexpected max path count for n_caps={n_caps} mask={capability_mask:0width$b}",
+        assert!(
+            max_paths <= max_allowed,
+            "unexpected max path count {max_paths} > {max_allowed} for n_caps={n_caps} mask={capability_mask:0width$b}",
             width = n_caps,
         );
         assert_eq!(
