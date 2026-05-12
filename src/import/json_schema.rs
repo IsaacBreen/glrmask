@@ -6575,14 +6575,14 @@ impl<'a> SchemaCtx<'a> {
             // compile the oneOf as a plain anyOf-style union of branches.
         }
 
-        if keyword == "anyOf" {
+        if keyword == "anyOf" || keyword == "oneOf" {
             if let Some(expr) = self.try_reduce_anyof_closed_objects(schema, options)? {
                 return Ok(Some(expr));
             }
             if let Some(expr) = self.try_build_anyof_object_expr_dfa(schema, options)? {
                 return Ok(Some(expr));
             }
-        } else if keyword != "oneOf" {
+        } else {
             return Ok(None);
         }
 
@@ -10833,6 +10833,37 @@ mod tests {
             "anyOf": [
                 {"$ref": "#/definitions/person"},
                 {"$ref": "#/definitions/organization"}
+            ]
+        });
+
+        let named = schema_to_named_grammar(&schema).unwrap();
+        assert!(named.rules.iter().any(|rule| expr_contains_expr_dfa(&rule.expr)));
+        lower(&named).unwrap();
+    }
+
+    #[test]
+    fn coerced_oneof_object_variants_use_expr_dfa_like_anyof() {
+        let schema = json!({
+            "x-guidance": {"coerce_one_of": true},
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"const": "left"},
+                        "a": {"type": "string"}
+                    },
+                    "required": ["kind"],
+                    "additionalProperties": {"type": "number"}
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"const": "right"},
+                        "b": {"type": "boolean"}
+                    },
+                    "required": ["kind"],
+                    "additionalProperties": {"type": "number"}
+                }
             ]
         });
 
