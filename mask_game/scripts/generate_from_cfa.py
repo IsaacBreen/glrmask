@@ -94,6 +94,23 @@ def fill_public_sparse_words(state: Any, buf: np.ndarray) -> list[list[int]]:
     return sparse_words_from_buf(buf)
 
 
+def fill_public_sparse_words_and_internal_ids(
+    state: Any,
+    buf: np.ndarray,
+    original_to_internal: list[int],
+) -> tuple[list[list[int]], list[int]]:
+    """Capture production output plus the exact production internal dense mask."""
+    buf.fill(0)
+    fill_and_ids = getattr(state._constraint_state, "mask_game_fill_mask_and_internal_ids", None)
+    if fill_and_ids is not None:
+        internal_ids = [int(x) for x in fill_and_ids(buf)]
+        return sparse_words_from_buf(buf), internal_ids
+
+    state._constraint_state.fill_mask(buf)
+    public_sparse = sparse_words_from_buf(buf)
+    return public_sparse, internal_ids_from_sparse(public_sparse, original_to_internal)
+
+
 def sparse_bit_count(sparse_words: list[list[int]]) -> int:
     return sum((int(word) & 0xFFFFFFFF).bit_count() for _, word in sparse_words)
 
@@ -286,12 +303,15 @@ def main() -> int:
             best: list[PendingCase] = []
             for step, token_id in enumerate(token_ids):
                 try:
-                    public_sparse = fill_public_sparse_words(state, buf)
+                    public_sparse, internal_ids = fill_public_sparse_words_and_internal_ids(
+                        state,
+                        buf,
+                        original_to_internal,
+                    )
                 except BaseException as exc:
                     skipped.append({"problem": problem_id, "reason": f"fill example {example_index} step {step}: {exc}"})
                     break
 
-                internal_ids = internal_ids_from_sparse(public_sparse, original_to_internal)
                 expanded_sparse = sparse_words_from_internal_ids(
                     internal_ids,
                     internal_to_original,

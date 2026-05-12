@@ -485,7 +485,7 @@ impl MaskQueue {
 /// Constraint.possible_matches bitmap token ids after compile-time vocab
 /// reconciliation.
 #[derive(Clone, PartialEq, Eq, Hash)]
-struct DenseMaskAcc(BTreeMap<u32, Arc<[u64]>>);
+struct DenseMaskAcc(SmallVec<[(u32, Arc<[u64]>); 2]>);
 
 impl DenseMaskAcc {
     fn from_dense(tsid: u32, dense: Vec<u64>) -> Option<Self> {
@@ -494,7 +494,9 @@ impl DenseMaskAcc {
         }
 
         let dense: Arc<[u64]> = dense.into();
-        Some(Self(BTreeMap::from([(tsid, dense)])))
+        let mut entries = SmallVec::new();
+        entries.push((tsid, dense));
+        Some(Self(entries))
     }
 
     fn is_empty(&self) -> bool {
@@ -645,17 +647,17 @@ impl DenseMaskAcc {
             return Some(self.clone());
         }
 
-        let mut result = BTreeMap::new();
+        let mut result = SmallVec::new();
 
-        for (&tsid, dense) in &self.0 {
-            let Some(token_set) = weight.0.get(tsid) else {
+        for (tsid, dense) in &self.0 {
+            let Some(token_set) = weight.0.get(*tsid) else {
                 continue;
             };
 
             if let Some(intersection) =
                 Self::intersect_dense_with_token_set(dense, token_set, precomputed)
             {
-                result.insert(tsid, intersection);
+                result.push((*tsid, intersection));
             }
         }
 
@@ -667,7 +669,7 @@ impl DenseMaskAcc {
     }
 
     fn or_into_merged(&self, merged: &mut [u64]) {
-        for dense in self.0.values() {
+        for (_, dense) in &self.0 {
             let n = dense.len().min(merged.len());
             for i in 0..n {
                 merged[i] |= dense[i];
@@ -686,8 +688,8 @@ impl DenseMaskAcc {
             return;
         }
 
-        for (&tsid, dense) in &self.0 {
-            let Some(token_set) = final_weight.0.get(tsid) else {
+        for (tsid, dense) in &self.0 {
+            let Some(token_set) = final_weight.0.get(*tsid) else {
                 continue;
             };
 
@@ -706,13 +708,18 @@ impl Merge for DenseMaskAcc {
         }
 
         if self.0.len() == 1 && other.0.len() == 1 {
-            let (&left_key, left_dense) = self.0.iter().next().expect("len checked");
-            let (&right_key, right_dense) = other.0.iter().next().expect("len checked");
+            let (left_key, left_dense) = self.0.iter().next().expect("len checked");
+            let (right_key, right_dense) = other.0.iter().next().expect("len checked");
             if left_key != right_key {
-                return Self(BTreeMap::from([
-                    (left_key, Arc::clone(left_dense)),
-                    (right_key, Arc::clone(right_dense)),
-                ]));
+                let mut entries = SmallVec::new();
+                if left_key < right_key {
+                    entries.push((*left_key, Arc::clone(left_dense)));
+                    entries.push((*right_key, Arc::clone(right_dense)));
+                } else {
+                    entries.push((*right_key, Arc::clone(right_dense)));
+                    entries.push((*left_key, Arc::clone(left_dense)));
+                }
+                return Self(entries);
             }
             if Arc::ptr_eq(left_dense, right_dense) || left_dense == right_dense {
                 return self.clone();
@@ -725,15 +732,17 @@ impl Merge for DenseMaskAcc {
             for (i, &word) in right_dense.iter().enumerate() {
                 combined[i] |= word;
             }
-            return Self(BTreeMap::from([(left_key, combined.into())]));
+            let mut entries = SmallVec::new();
+            entries.push((*left_key, combined.into()));
+            return Self(entries);
         }
 
         let mut merged = self.0.clone();
 
-        for (&tsid, other_dense) in &other.0 {
-            merged
-                .entry(tsid)
-                .and_modify(|dense| {
+        for (tsid, other_dense) in &other.0 {
+            match merged.iter().position(|(existing_tsid, _)| existing_tsid == tsid) {
+                Some(idx) => {
+                    let dense = &mut merged[idx].1;
                     let len = dense.len().max(other_dense.len());
                     let mut combined = vec![0u64; len];
 
@@ -745,8 +754,15 @@ impl Merge for DenseMaskAcc {
                     }
 
                     *dense = combined.into();
-                })
-                .or_insert_with(|| Arc::clone(other_dense));
+                }
+                None => {
+                    let insert_at = merged
+                        .iter()
+                        .position(|(existing_tsid, _)| existing_tsid > tsid)
+                        .unwrap_or(merged.len());
+                    merged.insert(insert_at, (*tsid, Arc::clone(other_dense)));
+                }
+            }
         }
 
         Self(merged)
@@ -969,7 +985,7 @@ impl<'a> ConstraintState<'a> {
             if direct_handled
                 && let Some(buf) = direct_buf.as_deref_mut()
             {
-                for dense in acc.0.values() {
+                for (_, dense) in &acc.0 {
                     if let Some(seed_idx) = self.constraint.seed_state_index_for_dense(dense) {
                         self.constraint.or_seed_state_dense_to_buf(seed_idx, buf);
                     }
@@ -980,8 +996,8 @@ impl<'a> ConstraintState<'a> {
             if direct_handled
                 && let Some(buf) = direct_buf.as_deref_mut()
             {
-                for (&tsid, dense) in &acc.0 {
-                    let Some(token_set) = final_weight.0.get(tsid) else {
+                for (tsid, dense) in &acc.0 {
+                    let Some(token_set) = final_weight.0.get(*tsid) else {
                         continue;
                     };
                     if self
@@ -1003,7 +1019,7 @@ impl<'a> ConstraintState<'a> {
 
     fn can_direct_final_weight_to_buf(&self, final_weight: &Weight, acc: &DenseMaskAcc) -> bool {
         if final_weight.is_full() {
-            return acc.0.values().all(|dense| {
+            return acc.0.iter().all(|(_, dense)| {
                 self.constraint
                     .seed_state_index_for_dense(dense)
                     .is_some_and(|seed_idx| self.constraint.has_seed_state_buf_mask(seed_idx))
@@ -1186,9 +1202,8 @@ impl<'a> ConstraintState<'a> {
 
         merged.clear();
         merged.resize(dense_words, 0);
-        buf.fill(0);
-        let mut direct_buf = Some(&mut *buf);
-        let mut direct_buf_possible = true;
+        let mut direct_buf = None;
+        let mut direct_buf_possible = false;
         let mut direct_buf_used = false;
 
         let mut queue = MaskQueue::new();
@@ -1641,5 +1656,29 @@ impl<'a> ConstraintState<'a> {
         let start = Instant::now();
         self.fill_mask(buf);
         start.elapsed().as_nanos() as u64
+    }
+
+    pub fn mask_game_fill_mask_and_internal_ids(&self, buf: &mut [u32]) -> Vec<u32> {
+        self.fill_mask(buf);
+
+        let cache = self.mask_cache.lock().unwrap();
+        let Some(cache_data) = cache.as_ref() else {
+            return Vec::new();
+        };
+
+        let n_internal = self.constraint.internal_token_to_tokens.len();
+        let mut out = Vec::new();
+        for (word_idx, &word) in cache_data.merged_dense.iter().enumerate() {
+            let mut word = word;
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                let internal = word_idx * 64 + bit;
+                if internal < n_internal {
+                    out.push(internal as u32);
+                }
+                word &= word - 1;
+            }
+        }
+        out
     }
 }
