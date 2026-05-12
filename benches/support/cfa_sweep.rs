@@ -143,9 +143,18 @@ fn criterion_positional_filters() -> Vec<String> {
         if arg.starts_with('-') {
             continue;
         }
-        filters.push(arg);
+        filters.extend(split_cli_filter(&arg));
     }
     filters
+}
+
+fn split_cli_filter(arg: &str) -> Vec<String> {
+    if let Some((key, value)) = arg.split_once('=') {
+        if matches!(key, "CASE" | "case" | "FILTER" | "filter") {
+            return split_filters(value).collect();
+        }
+    }
+    vec![arg.to_owned()]
 }
 
 fn option_takes_value(arg: &str) -> bool {
