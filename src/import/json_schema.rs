@@ -5248,10 +5248,7 @@ impl<'a> SchemaCtx<'a> {
         options: &[Value],
     ) -> Result<Vec<GrammarExpr>, GlrMaskError> {
         if self.shared_string_value_exclusions_default_enabled() {
-            let string_exclusions = self.string_option_exclusions(options);
-            if string_exclusions.iter().any(|(literals, patterns)| {
-                !literals.is_empty() || !patterns.is_empty()
-            }) {
+            if let Some(string_exclusions) = self.string_option_exclusions(options) {
                 return options
                     .iter()
                     .enumerate()
@@ -5286,7 +5283,15 @@ impl<'a> SchemaCtx<'a> {
     fn string_option_exclusions(
         &self,
         options: &[Value],
-    ) -> Vec<(Vec<String>, Vec<String>)> {
+    ) -> Option<Vec<(Vec<String>, Vec<String>)>> {
+        let plain_string_options = options
+            .iter()
+            .map(Self::is_plain_unbounded_string_schema)
+            .collect::<Vec<_>>();
+        if !plain_string_options.iter().any(|&is_plain| is_plain) {
+            return None;
+        }
+
         let mut literal_by_option = Vec::with_capacity(options.len());
         let mut pattern_by_option = Vec::with_capacity(options.len());
         for option in options {
@@ -5294,9 +5299,9 @@ impl<'a> SchemaCtx<'a> {
             pattern_by_option.push(Self::string_pattern_covered_by_schema(option));
         }
 
-        (0..options.len())
+        let exclusions = (0..options.len())
             .map(|index| {
-                if !Self::is_plain_unbounded_string_schema(&options[index]) {
+                if !plain_string_options[index] {
                     return (Vec::new(), Vec::new());
                 }
 
@@ -5313,7 +5318,16 @@ impl<'a> SchemaCtx<'a> {
                 }
                 (literals.into_iter().collect(), patterns.into_iter().collect())
             })
-            .collect()
+            .collect::<Vec<_>>();
+
+        if exclusions
+            .iter()
+            .any(|(literals, patterns)| !literals.is_empty() || !patterns.is_empty())
+        {
+            Some(exclusions)
+        } else {
+            None
+        }
     }
 
     fn is_plain_unbounded_string_schema(schema: &Value) -> bool {
