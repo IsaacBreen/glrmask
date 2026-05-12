@@ -10,13 +10,17 @@ fn bench_cfa_sweep_schema_build_single_threaded(c: &mut Criterion) {
     let vocab = cfa_sweep::load_llama3_vocab();
     assert_eq!(vocab.len(), 128_002, "expected the full Llama 3 vocabulary");
     let cases = cfa_sweep::selected_cases("cfa_sweep_schema_build_single_threaded");
+    let profile_once = cfa_sweep::profile_once_requested();
     eprintln!(
-        "[bench][cfa_sweep_schema_build_single_threaded] selected_cases={} total_cases={} vocab_tokens={} profile_once=1",
+        "[bench][cfa_sweep_schema_build_single_threaded] selected_cases={} total_cases={} vocab_tokens={} profile_once={}",
         cases.len(),
         cfa_sweep::CASES.len(),
-        vocab.len()
+        vocab.len(),
+        profile_once as u8
     );
-    cfa_sweep::profile_single_builds(&cases, &vocab);
+    if profile_once {
+        cfa_sweep::profile_single_builds(&cases, &vocab);
+    }
     cfa_sweep::bench_cases(c, "cfa_sweep_schema_build_single_threaded", &cases, &vocab);
 }
 

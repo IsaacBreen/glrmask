@@ -159,8 +159,27 @@ fn split_cli_filter(arg: &str) -> Vec<String> {
             }
             return split_filters(value).collect();
         }
+        if matches!(key, "PROFILE" | "profile") {
+            return Vec::new();
+        }
     }
     vec![arg.to_owned()]
+}
+
+pub fn profile_once_requested() -> bool {
+    ["GLRMASK_BENCH_PROFILE", "GLRMASK_BENCH_PROFILE_ONCE"]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .any(|value| truthy(&value))
+        || std::env::args().skip(1).any(|arg| {
+            arg.split_once('=')
+                .filter(|(key, _)| matches!(*key, "PROFILE" | "profile"))
+                .is_some_and(|(_, value)| truthy(value))
+        })
+}
+
+fn truthy(value: &str) -> bool {
+    matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
 }
 
 fn available_case_ids() -> String {
@@ -235,5 +254,9 @@ pub fn bench_cases(c: &mut Criterion, group_name: &str, cases: &[&BenchCase], vo
 }
 
 fn criterion_case_id(case: &BenchCase) -> String {
-    format!("{} CASE={} FILTER={}", case.id, case.id, case.id)
+    let mut id = format!("{} CASE={} FILTER={}", case.id, case.id, case.id);
+    if profile_once_requested() {
+        id.push_str(" PROFILE=1");
+    }
+    id
 }
