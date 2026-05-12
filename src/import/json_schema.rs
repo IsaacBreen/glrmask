@@ -2065,8 +2065,9 @@ struct SharedAdditionalKeyPlan {
     pattern_keys: BTreeSet<String>,
     common_body_expr: Option<GrammarExpr>,
     pattern_body_cache: BTreeMap<String, GrammarExpr>,
-    body_rule_cache: BTreeMap<(Vec<String>, Vec<String>), String>,
-    key_rule_cache: BTreeMap<(Vec<String>, Vec<String>), String>,
+    constrained_pattern_body_cache: BTreeMap<(String, Vec<String>), GrammarExpr>,
+    body_rule_cache: BTreeMap<(Vec<String>, Vec<String>, Vec<String>), String>,
+    key_rule_cache: BTreeMap<(Vec<String>, Vec<String>, Vec<String>), String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -9451,6 +9452,51 @@ impl<'a> SchemaCtx<'a> {
         expr
     }
 
+    fn shared_additional_pattern_key_body_expr_excluding_literals(
+        &mut self,
+        pattern: &str,
+        excluded_literal_keys: &BTreeSet<String>,
+    ) -> GrammarExpr {
+        if excluded_literal_keys.is_empty() {
+            return self.shared_additional_pattern_key_body_expr(pattern);
+        }
+
+        let excluded_keys = excluded_literal_keys.iter().cloned().collect::<Vec<_>>();
+        let cache_key = (pattern.to_string(), excluded_keys.clone());
+        if let Some(expr) = self
+            .shared_additional_key_plan
+            .constrained_pattern_body_cache
+            .get(&cache_key)
+        {
+            return expr.clone();
+        }
+
+        let pattern_expr = self.shared_additional_pattern_key_body_expr(pattern);
+        let excluded = excluded_keys
+            .iter()
+            .map(|key| {
+                self.force_extract_terminal_rule(
+                    literal_expr(&key_colon_literal_body_bytes(key)),
+                    "AP_SHARED_LITERAL_KEY",
+                )
+            })
+            .collect::<Vec<_>>();
+        let expr = self.insert_named_terminal_rule(
+            format!(
+                "AP_SHARED_PATTERN_KEY_FILTERED_{}",
+                self.shared_additional_key_plan.constrained_pattern_body_cache.len()
+            ),
+            GrammarExpr::Exclude {
+                expr: Box::new(pattern_expr),
+                exclude: Box::new(choice_or_single(excluded)),
+            },
+        );
+        self.shared_additional_key_plan
+            .constrained_pattern_body_cache
+            .insert(cache_key, expr.clone());
+        expr
+    }
+
     fn build_shared_additional_key_body_choice_expr(
         &mut self,
         excluded_literal_keys: &BTreeSet<String>,
@@ -9481,7 +9527,12 @@ impl<'a> SchemaCtx<'a> {
             return Ok(self.shared_additional_key_body_expr());
         }
 
-        let cache_key = (allowed_back_keys.clone(), allowed_back_patterns.clone());
+        let excluded_keys = excluded_literal_keys.iter().cloned().collect::<Vec<_>>();
+        let cache_key = (
+            allowed_back_keys.clone(),
+            allowed_back_patterns.clone(),
+            excluded_keys,
+        );
         if let Some(rule_name) = self.shared_additional_key_plan.body_rule_cache.get(&cache_key) {
             return Ok(GrammarExpr::Ref(rule_name.clone()));
         }
@@ -9494,7 +9545,12 @@ impl<'a> SchemaCtx<'a> {
                 .map(|key| literal_expr(&key_colon_literal_body_bytes(key))),
         );
         for pattern in &allowed_back_patterns {
-            options.push(self.shared_additional_pattern_key_body_expr(pattern));
+            options.push(
+                self.shared_additional_pattern_key_body_expr_excluding_literals(
+                    pattern,
+                    excluded_literal_keys,
+                ),
+            );
         }
 
         let rule_name = self.fresh_rule_name(prefix);
@@ -9530,7 +9586,12 @@ impl<'a> SchemaCtx<'a> {
             })
             .cloned()
             .collect();
-        let cache_key = (allowed_back_keys.clone(), allowed_back_patterns.clone());
+        let excluded_keys = excluded_literal_keys.iter().cloned().collect::<Vec<_>>();
+        let cache_key = (
+            allowed_back_keys.clone(),
+            allowed_back_patterns.clone(),
+            excluded_keys,
+        );
 
         if let Some(rule_name) = self.shared_additional_key_plan.key_rule_cache.get(&cache_key) {
             return Ok(GrammarExpr::Ref(rule_name.clone()));
@@ -11625,7 +11686,13 @@ mod tests {
         assert!(glrm.contains("AP_SHARED_PATTERN_KEY_0"), "{glrm}");
         assert!(glrm.contains(" - AP_SHARED_PATTERN_KEY_0"), "{glrm}");
         assert!(
-            glrm.contains("AP_SHARED_KEY | \"first\\\"\" | \"second\\\"\" | AP_SHARED_PATTERN_KEY_0"),
+            glrm.contains("AP_SHARED_KEY | \"first\\\"\" | \"second\\\"\" | AP_SHARED_PATTERN_KEY_FILTERED_"),
+            "{glrm}"
+        );
+        assert!(
+            glrm.contains(
+                "AP_SHARED_PATTERN_KEY_FILTERED_0 ::= AP_SHARED_PATTERN_KEY_0_5 - AP_SHARED_LITERAL_KEY_0 - AP_SHARED_LITERAL_KEY_1"
+            ),
             "{glrm}"
         );
         assert!(glrm.contains("AP_SHARED_KEY | \"a\\\"\""), "{glrm}");

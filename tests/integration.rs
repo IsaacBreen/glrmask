@@ -382,6 +382,30 @@ fn json_schema_pattern_properties_match_decoded_fixed_quote_key() {
 }
 
 #[test]
+fn json_schema_additional_property_pattern_addback_does_not_reaccept_declared_key() {
+    let constraint = byte_schema(
+        r#"{
+            "type": "object",
+            "properties": {
+                "applicationId": {"type": "string"},
+                "nested": {
+                    "type": "object",
+                    "patternProperties": {
+                        "^[0-9A-Za-z_-]{1,255}$": {"type": "number"}
+                    },
+                    "additionalProperties": true
+                }
+            },
+            "additionalProperties": true
+        }"#,
+    );
+
+    assert_accepts_bytes(&constraint, br#"{"x_key": 123}"#);
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(br#"{"applicationId": 123}"#).is_err());
+}
+
+#[test]
 fn json_schema_const_quote_reencodes_literal() {
     let constraint = byte_schema(r#"{"const":"\""}"#);
     assert_accepts_bytes(&constraint, br#""\"""#);
