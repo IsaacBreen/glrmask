@@ -1766,13 +1766,6 @@ fn env_flag_optional(name: &str) -> Option<bool> {
     })
 }
 
-fn env_usize_default(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(default)
-}
-
 fn json_string_merge_config(is_pattern: bool) -> JsonStringMergeConfig {
     let default = JsonStringMergeConfig {
         merge_open: false,
@@ -2174,6 +2167,10 @@ fn schema_allows_string_values(object: &Map<String, Value>) -> bool {
 }
 
 fn collect_shared_string_value_plan(root: &Value) -> SharedStringValuePlan {
+    if !env_flag_default("GLRMASK_SHARED_STRING_VALUE_EXCLUSIONS", false) {
+        return SharedStringValuePlan::default();
+    }
+
     let mut literal_values = BTreeSet::new();
     let mut pattern_values = BTreeSet::new();
     let mut queue = VecDeque::from([root]);
@@ -2204,19 +2201,11 @@ fn collect_shared_string_value_plan(root: &Value) -> SharedStringValuePlan {
         enqueue_child_schemas(root, object, &mut queue);
     }
 
-    if literal_values.len() + pattern_values.len() > shared_string_value_exclusion_limit() {
-        SharedStringValuePlan::default()
-    } else {
-        SharedStringValuePlan {
-            literal_values,
-            pattern_values,
-            ..Default::default()
-        }
+    SharedStringValuePlan {
+        literal_values,
+        pattern_values,
+        ..Default::default()
     }
-}
-
-fn shared_string_value_exclusion_limit() -> usize {
-    env_usize_default("GLRMASK_SHARED_STRING_VALUE_EXCLUSION_LIMIT", 32)
 }
 
 fn use_structured_uri() -> bool {
@@ -11777,6 +11766,9 @@ mod tests {
 
     #[test]
     fn unconstrained_string_values_share_literal_and_pattern_exclusions() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _shared = EnvVarGuard::set("GLRMASK_SHARED_STRING_VALUE_EXCLUSIONS", "1");
+
         let schema = json!({
             "type": "object",
             "properties": {
@@ -11803,7 +11795,10 @@ mod tests {
     }
 
     #[test]
-    fn shared_string_value_exclusions_are_capped_for_large_literal_sets() {
+    fn shared_string_value_exclusions_are_not_enabled_by_count() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _shared = EnvVarGuard::unset("GLRMASK_SHARED_STRING_VALUE_EXCLUSIONS");
+
         let values = (0..40)
             .map(|idx| Value::String(format!("value-{idx}")))
             .collect::<Vec<_>>();
@@ -11819,6 +11814,28 @@ mod tests {
         let glrm = dump_glrm(schema);
 
         assert!(!glrm.contains("t STRING_SHARED_VALUE ::="), "{glrm}");
+    }
+
+    #[test]
+    fn shared_string_value_exclusions_can_be_forced_without_a_threshold() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _shared = EnvVarGuard::set("GLRMASK_SHARED_STRING_VALUE_EXCLUSIONS", "1");
+
+        let values = (0..40)
+            .map(|idx| Value::String(format!("value-{idx}")))
+            .collect::<Vec<_>>();
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "plain": {"type": "string"},
+                "choice": {"enum": values}
+            },
+            "additionalProperties": false
+        });
+
+        let glrm = dump_glrm(schema);
+
+        assert!(glrm.contains("t STRING_SHARED_VALUE ::="), "{glrm}");
     }
 
     #[test]
