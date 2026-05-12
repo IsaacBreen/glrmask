@@ -55,6 +55,8 @@ This document lists all `GLRMASK_*` environment variables used in this crate, gr
 |---|---|---|
 | `GLRMASK_ADDPROP_NO_EXCLUSIONS` | truthy bool | off |
 | `GLRMASK_AP_KEY_ANY_STRING` | truthy bool | off |
+| `GLRMASK_SHARED_STRING_VALUE_EXCLUSIONS` | truthy bool | on |
+| `GLRMASK_GLOBAL_SHARED_STRING_VALUE_EXCLUSIONS` | truthy bool | off |
 | `GLRMASK_MERGE_ANYOF` | strict `1` bool | off |
 | `GLRMASK_STRING_REPEAT_CHUNK` | integer (`usize`) | `256` |
 

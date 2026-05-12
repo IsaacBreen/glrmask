@@ -2167,7 +2167,7 @@ fn schema_allows_string_values(object: &Map<String, Value>) -> bool {
 }
 
 fn collect_shared_string_value_plan(root: &Value) -> SharedStringValuePlan {
-    if !env_flag_default("GLRMASK_SHARED_STRING_VALUE_EXCLUSIONS", false) {
+    if !env_flag_default("GLRMASK_GLOBAL_SHARED_STRING_VALUE_EXCLUSIONS", false) {
         return SharedStringValuePlan::default();
     }
 
@@ -5241,10 +5241,126 @@ impl<'a> SchemaCtx<'a> {
         &mut self,
         options: &[Value],
     ) -> Result<Vec<GrammarExpr>, GlrMaskError> {
+        if self.shared_string_value_exclusions_default_enabled() {
+            let string_exclusions = self.string_option_exclusions(options);
+            if string_exclusions.iter().any(|(literals, patterns)| {
+                !literals.is_empty() || !patterns.is_empty()
+            }) {
+                return options
+                    .iter()
+                    .enumerate()
+                    .map(|(index, option)| {
+                        let (literals, patterns) = &string_exclusions[index];
+                        if Self::is_plain_unbounded_string_schema(option)
+                            && (!literals.is_empty() || !patterns.is_empty())
+                        {
+                            Ok(self.build_excluding_string_value_expr(
+                                literals,
+                                patterns,
+                                "STRING_ANYOF_VALUE",
+                            ))
+                        } else {
+                            self.convert_schema(option)
+                        }
+                    })
+                    .collect();
+            }
+        }
+
         options
             .iter()
             .map(|option| self.convert_schema(option))
             .collect()
+    }
+
+    fn shared_string_value_exclusions_default_enabled(&self) -> bool {
+        env_flag_default("GLRMASK_SHARED_STRING_VALUE_EXCLUSIONS", true)
+    }
+
+    fn string_option_exclusions(
+        &self,
+        options: &[Value],
+    ) -> Vec<(Vec<String>, Vec<String>)> {
+        let mut literal_by_option = Vec::with_capacity(options.len());
+        let mut pattern_by_option = Vec::with_capacity(options.len());
+        for option in options {
+            literal_by_option.push(Self::string_literals_covered_by_schema(option));
+            pattern_by_option.push(Self::string_pattern_covered_by_schema(option));
+        }
+
+        (0..options.len())
+            .map(|index| {
+                if !Self::is_plain_unbounded_string_schema(&options[index]) {
+                    return (Vec::new(), Vec::new());
+                }
+
+                let mut literals = BTreeSet::new();
+                let mut patterns = BTreeSet::new();
+                for sibling_index in 0..options.len() {
+                    if sibling_index == index {
+                        continue;
+                    }
+                    literals.extend(literal_by_option[sibling_index].iter().cloned());
+                    if let Some(pattern) = &pattern_by_option[sibling_index] {
+                        patterns.insert(pattern.clone());
+                    }
+                }
+                (literals.into_iter().collect(), patterns.into_iter().collect())
+            })
+            .collect()
+    }
+
+    fn is_plain_unbounded_string_schema(schema: &Value) -> bool {
+        let Some(object) = schema.as_object() else {
+            return false;
+        };
+        matches!(object.get("type").and_then(Value::as_str), Some("string"))
+            && !object.contains_key("const")
+            && !object.contains_key("enum")
+            && !object.contains_key("pattern")
+            && !object.contains_key("format")
+            && !object.contains_key("minLength")
+            && !object.contains_key("maxLength")
+            && !object.contains_key("allOf")
+            && !object.contains_key("anyOf")
+            && !object.contains_key("oneOf")
+            && !object.contains_key("not")
+    }
+
+    fn string_literals_covered_by_schema(schema: &Value) -> Vec<String> {
+        let Some(object) = schema.as_object() else {
+            return Vec::new();
+        };
+        if !schema_allows_string_values(object) {
+            return Vec::new();
+        }
+
+        let mut values = BTreeSet::new();
+        if let Some(value) = object.get("const").and_then(Value::as_str) {
+            values.insert(value.to_string());
+        }
+        if let Some(enum_values) = object.get("enum").and_then(Value::as_array) {
+            values.extend(enum_values.iter().filter_map(Value::as_str).map(String::from));
+        }
+        values.into_iter().collect()
+    }
+
+    fn string_pattern_covered_by_schema(schema: &Value) -> Option<String> {
+        let object = schema.as_object()?;
+        if !schema_allows_string_values(object) {
+            return None;
+        }
+        if object
+            .get("minLength")
+            .and_then(Value::as_u64)
+            .is_some_and(|min| min != 0)
+            || object.contains_key("maxLength")
+            || object.contains_key("const")
+            || object.contains_key("enum")
+        {
+            return None;
+        }
+        object.get("pattern").and_then(Value::as_str).map(String::from)
     }
 
     fn collect_ordered_closed_object_schema_variant(
@@ -9636,6 +9752,13 @@ impl<'a> SchemaCtx<'a> {
         wrap_expr_with_string_literals(body_only, merge_config)
     }
 
+    fn shared_string_literal_value_body_inline_expr(text: &str) -> GrammarExpr {
+        Self::string_value_literal_body_expr_with_merge_config(
+            text,
+            json_literal_string_merge_config(),
+        )
+    }
+
     fn shared_string_literal_value_body_expr(&mut self, text: &str) -> GrammarExpr {
         if let Some(expr) = self.shared_string_value_plan.literal_body_cache.get(text) {
             return expr.clone();
@@ -9714,7 +9837,7 @@ impl<'a> SchemaCtx<'a> {
             .collect::<Vec<_>>();
         let mut excluded = literal_values
             .iter()
-            .map(|value| self.shared_string_literal_value_body_expr(value))
+            .map(|value| Self::shared_string_literal_value_body_inline_expr(value))
             .collect::<Vec<_>>();
         let pattern_values = self
             .shared_string_value_plan
@@ -9765,9 +9888,7 @@ impl<'a> SchemaCtx<'a> {
 
         let mut body_options = Vec::with_capacity(1 + allowed_literals.len() + allowed_patterns.len());
         body_options.push(self.shared_string_value_common_body_expr());
-        for value in &allowed_literals {
-            body_options.push(self.shared_string_literal_value_body_expr(value));
-        }
+        self.push_shared_string_literal_body_options(&allowed_literals, &mut body_options);
         for pattern in &allowed_patterns {
             body_options.push(self.shared_string_pattern_value_body_expr(pattern));
         }
@@ -9780,6 +9901,68 @@ impl<'a> SchemaCtx<'a> {
             .value_rule_cache
             .insert(cache_key, rule_name.clone());
         GrammarExpr::Ref(rule_name)
+    }
+
+    fn push_shared_string_literal_body_options(
+        &self,
+        allowed_literals: &[String],
+        body_options: &mut Vec<GrammarExpr>,
+    ) {
+        let mut valid_values = BTreeSet::new();
+        for value in allowed_literals {
+            valid_values.insert(json_enum_string_terminal_bytes(value));
+        }
+
+        let mut group_ids = BTreeSet::new();
+        for value in &valid_values {
+            if let Some(group_id) = self
+                .enum_terminal_plan
+                .group_for_value(EnumAtomKind::String, value)
+            {
+                group_ids.insert(group_id);
+            } else {
+                body_options.push(literal_expr(value));
+            }
+        }
+
+        for group_id in group_ids {
+            let group = self.enum_terminal_plan.group(EnumAtomKind::String, group_id);
+            if group.values.iter().all(|value| valid_values.contains(value)) {
+                body_options.push(GrammarExpr::Ref(group.name.clone()));
+            } else {
+                for value in &group.values {
+                    if valid_values.contains(value) {
+                        body_options.push(literal_expr(value));
+                    }
+                }
+            }
+        }
+    }
+
+    fn build_excluding_string_value_expr(
+        &mut self,
+        excluded_literals: &[String],
+        excluded_patterns: &[String],
+        prefix: &str,
+    ) -> GrammarExpr {
+        let mut excluded = excluded_literals
+            .iter()
+            .map(|value| Self::shared_string_literal_value_body_inline_expr(value))
+            .collect::<Vec<_>>();
+        for pattern in excluded_patterns {
+            excluded.push(self.shared_string_pattern_value_body_expr(pattern));
+        }
+
+        let body = if excluded.is_empty() {
+            GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())
+        } else {
+            GrammarExpr::Exclude {
+                expr: Box::new(GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())),
+                exclude: Box::new(choice_or_single(excluded)),
+            }
+        };
+        let body = self.force_extract_terminal_rule(body, prefix);
+        wrap_string_value_terminal(body, json_literal_string_merge_config())
     }
 
     fn shared_unconstrained_string_value_expr(&mut self) -> GrammarExpr {
@@ -11767,7 +11950,7 @@ mod tests {
     #[test]
     fn unconstrained_string_values_share_literal_and_pattern_exclusions() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let _shared = EnvVarGuard::set("GLRMASK_SHARED_STRING_VALUE_EXCLUSIONS", "1");
+        let _shared = EnvVarGuard::set("GLRMASK_GLOBAL_SHARED_STRING_VALUE_EXCLUSIONS", "1");
 
         let schema = json!({
             "type": "object",
@@ -11785,17 +11968,17 @@ mod tests {
         assert!(glrm.contains("t STRING_SHARED_VALUE ::="), "{glrm}");
         assert!(glrm.contains("STRING_SHARED_LITERAL_VALUE"), "{glrm}");
         assert!(glrm.contains("STRING_SHARED_PATTERN_VALUE"), "{glrm}");
-        assert!(glrm.contains(" - STRING_SHARED_LITERAL_VALUE"), "{glrm}");
+        assert!(glrm.contains(" - \"ready\""), "{glrm}");
         assert!(glrm.contains(" - STRING_SHARED_PATTERN_VALUE"), "{glrm}");
         assert!(
-            glrm.contains("STRING_SHARED_VALUE | STRING_SHARED_LITERAL_VALUE")
+            glrm.contains("STRING_SHARED_VALUE | \"ready\\\"\"")
                 && glrm.contains("STRING_SHARED_PATTERN_VALUE"),
             "{glrm}"
         );
     }
 
     #[test]
-    fn shared_string_value_exclusions_are_not_enabled_by_count() {
+    fn shared_string_value_exclusions_are_enabled_by_default_without_a_threshold() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _shared = EnvVarGuard::unset("GLRMASK_SHARED_STRING_VALUE_EXCLUSIONS");
 
@@ -11803,39 +11986,36 @@ mod tests {
             .map(|idx| Value::String(format!("value-{idx}")))
             .collect::<Vec<_>>();
         let schema = json!({
-            "type": "object",
-            "properties": {
-                "plain": {"type": "string"},
-                "choice": {"enum": values}
-            },
-            "additionalProperties": false
+            "anyOf": [
+                {"type": "string"},
+                {"enum": values}
+            ]
         });
 
         let glrm = dump_glrm(schema);
 
-        assert!(!glrm.contains("t STRING_SHARED_VALUE ::="), "{glrm}");
+        assert!(glrm.contains("t STRING_ANYOF_VALUE_"), "{glrm}");
+        assert!(glrm.contains(" - \"value-0\""), "{glrm}");
     }
 
     #[test]
-    fn shared_string_value_exclusions_can_be_forced_without_a_threshold() {
+    fn shared_string_value_exclusions_can_be_disabled() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let _shared = EnvVarGuard::set("GLRMASK_SHARED_STRING_VALUE_EXCLUSIONS", "1");
+        let _shared = EnvVarGuard::set("GLRMASK_SHARED_STRING_VALUE_EXCLUSIONS", "0");
 
         let values = (0..40)
             .map(|idx| Value::String(format!("value-{idx}")))
             .collect::<Vec<_>>();
         let schema = json!({
-            "type": "object",
-            "properties": {
-                "plain": {"type": "string"},
-                "choice": {"enum": values}
-            },
-            "additionalProperties": false
+            "anyOf": [
+                {"type": "string"},
+                {"enum": values}
+            ]
         });
 
         let glrm = dump_glrm(schema);
 
-        assert!(glrm.contains("t STRING_SHARED_VALUE ::="), "{glrm}");
+        assert!(!glrm.contains("t STRING_ANYOF_VALUE_"), "{glrm}");
     }
 
     #[test]
