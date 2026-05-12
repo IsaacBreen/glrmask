@@ -21,7 +21,7 @@ fn visit_successors(state: &NFAState, mut visit: impl FnMut(u32)) {
 }
 
 /// A single NFA state with non-deterministic transitions and epsilon edges.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct NFAState {
     /// Whether this state is accepting (final).
     pub is_accepting: bool,
@@ -32,7 +32,7 @@ pub struct NFAState {
 }
 
 /// Non-deterministic Finite Automaton with i32 labels and epsilon transitions.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct NFA {
     pub states: Vec<NFAState>,
     pub start_states: Vec<u32>,

@@ -7,25 +7,28 @@ use crate::automata::unweighted_u32::nfa::NFA;
 
 use super::ast::GrammarExpr;
 
-/// A DFA whose transition labels are indices into `symbols`.
+/// An NFA whose transition labels are indices into `symbols`.
 ///
 /// This keeps the transition graph compact while allowing each transition
 /// symbol to be an arbitrary [`GrammarExpr`]. A transition label is valid when
 /// it is non-negative and less than `symbols.len()`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ExprDFA {
-    pub dfa: DFA,
+pub struct ExprNFA {
+    pub nfa: NFA,
     pub symbols: Vec<GrammarExpr>,
 }
 
-impl ExprDFA {
-    pub fn new(dfa: DFA, symbols: Vec<GrammarExpr>) -> Self {
-        Self { dfa, symbols }
+impl ExprNFA {
+    pub fn new(nfa: NFA, symbols: Vec<GrammarExpr>) -> Self {
+        Self { nfa, symbols }
     }
 
-    pub fn from_nfa(nfa: &NFA, symbols: Vec<GrammarExpr>) -> Self {
-        let dfa = determinize_nfa(nfa);
-        Self::new(minimize_dfa(&dfa), symbols)
+    pub fn determinize(&self) -> DFA {
+        determinize_nfa(&self.nfa)
+    }
+
+    pub fn determinize_and_minimize(&self) -> DFA {
+        minimize_dfa(&self.determinize())
     }
 
     pub fn symbol_for_label(&self, label: Label) -> Option<&GrammarExpr> {
@@ -33,25 +36,25 @@ impl ExprDFA {
     }
 }
 
-/// Builder for an [`ExprDFA`] through an intermediate NFA.
+/// Builder for an [`ExprNFA`] through an intermediate NFA.
 ///
 /// Transitions are labeled by arbitrary [`GrammarExpr`] symbols. Equal symbols
 /// are automatically interned to the same label, so callers can construct paths
 /// directly without managing the side table by hand.
 #[derive(Debug, Clone)]
-pub struct ExprDfaBuilder {
+pub struct ExprNfaBuilder {
     nfa: NFA,
     symbols: Vec<GrammarExpr>,
     symbol_labels: HashMap<GrammarExpr, Label>,
 }
 
-impl Default for ExprDfaBuilder {
+impl Default for ExprNfaBuilder {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl ExprDfaBuilder {
+impl ExprNfaBuilder {
     pub fn new() -> Self {
         Self {
             nfa: NFA::new(),
@@ -87,7 +90,7 @@ impl ExprDfaBuilder {
             return label;
         }
         let label = i32::try_from(self.symbols.len())
-            .expect("ExprDFA symbol table exceeded i32 labels");
+            .expect("ExprNFA symbol table exceeded i32 labels");
         self.symbols.push(symbol.clone());
         self.symbol_labels.insert(symbol, label);
         label
@@ -107,13 +110,13 @@ impl ExprDfaBuilder {
         (self.nfa, self.symbols)
     }
 
-    pub fn build(self) -> ExprDFA {
+    pub fn build(self) -> ExprNFA {
         let (nfa, symbols) = self.into_nfa_and_symbols();
-        ExprDFA::from_nfa(&nfa, symbols)
+        ExprNFA::new(nfa, symbols)
     }
 }
 
-fn minimize_dfa(dfa: &DFA) -> DFA {
+pub fn minimize_dfa(dfa: &DFA) -> DFA {
     if dfa.is_acyclic() {
         minimize_acyclic(dfa)
     } else {
@@ -175,7 +178,7 @@ fn get_or_create_subset_state(
     state
 }
 
-fn determinize_nfa(nfa: &NFA) -> DFA {
+pub fn determinize_nfa(nfa: &NFA) -> DFA {
     if nfa.states.is_empty() || nfa.start_states.is_empty() {
         return DFA::new();
     }
@@ -223,19 +226,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lowers_expr_dfa_transition_symbols() {
-        let mut dfa = DFA::new();
-        let accept = dfa.add_state();
-        dfa.add_transition(0, 0, accept);
-        dfa.set_accepting(accept, true);
+    fn lowers_expr_nfa_transition_symbols() {
+        let mut nfa = NFA::new();
+        let accept = nfa.add_state();
+        nfa.add_transition(0, 0, accept);
+        nfa.set_accepting(accept);
 
         let grammar = NamedGrammar {
             rules: vec![NamedRule {
                 name: "start".into(),
-                expr: GrammarExpr::ExprDFA(Box::new(ExprDFA::new(
-                    dfa,
-                    vec![GrammarExpr::Literal(b"a".to_vec())],
-                ))),
+                expr: GrammarExpr::ExprNFA(Box::new(ExprNFA::new(nfa, vec![
+                    GrammarExpr::Literal(b"a".to_vec()),
+                ]))),
                 is_terminal: false,
                 is_internal: false,
             }],
@@ -243,7 +245,7 @@ mod tests {
             ignore: None,
         };
 
-        let lowered = lower(&grammar).expect("ExprDFA should lower");
+        let lowered = lower(&grammar).expect("ExprNFA should lower");
         assert_eq!(lowered.terminals.len(), 1);
         assert!(lowered
             .rules
@@ -252,8 +254,8 @@ mod tests {
     }
 
     #[test]
-    fn builder_determinizes_and_minimizes_cyclic_nfa() {
-        let mut builder = ExprDfaBuilder::new();
+    fn builder_preserves_nfa_and_exposes_determinize_minimize() {
+        let mut builder = ExprNfaBuilder::new();
         let start = builder.start_state();
         let loop_state = builder.add_state();
         let accept = builder.add_state();
@@ -263,12 +265,15 @@ mod tests {
         builder.add_transition(loop_state, GrammarExpr::Literal(b"b".to_vec()), accept);
         builder.set_accepting(accept);
 
-        let expr_dfa = builder.build();
-        assert_eq!(expr_dfa.symbols.len(), 2);
-        assert!(expr_dfa.dfa.states[expr_dfa.dfa.start_state as usize]
+        let expr_nfa = builder.build();
+        assert_eq!(expr_nfa.symbols.len(), 2);
+        assert_eq!(expr_nfa.nfa.states[start as usize].epsilons, vec![loop_state]);
+
+        let dfa = expr_nfa.determinize_and_minimize();
+        assert!(dfa.states[dfa.start_state as usize]
             .transitions
             .values()
-            .any(|&target| target == expr_dfa.dfa.start_state));
-        assert!(expr_dfa.dfa.states.iter().any(|state| state.is_accepting));
+            .any(|&target| target == dfa.start_state));
+        assert!(dfa.states.iter().any(|state| state.is_accepting));
     }
 }

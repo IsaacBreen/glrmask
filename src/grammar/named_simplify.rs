@@ -67,13 +67,13 @@ fn simplify_expr(expr: GrammarExpr, stats: &mut SimplifyStats) -> GrammarExpr {
             separator: Box::new(simplify_expr(*separator, stats)),
             allow_empty,
         },
-        GrammarExpr::ExprDFA(mut expr_dfa) => {
-            expr_dfa.symbols = expr_dfa
+        GrammarExpr::ExprNFA(mut expr_nfa) => {
+            expr_nfa.symbols = expr_nfa
                 .symbols
                 .into_iter()
                 .map(|symbol| simplify_expr(symbol, stats))
                 .collect();
-            GrammarExpr::ExprDFA(expr_dfa)
+            GrammarExpr::ExprNFA(expr_nfa)
         }
         atom => atom,
     }
@@ -273,8 +273,8 @@ fn collect_ref_counts(expr: &GrammarExpr, counts: &mut HashMap<String, usize>) {
             }
             collect_ref_counts(separator, counts);
         }
-        GrammarExpr::ExprDFA(expr_dfa) => {
-            for symbol in &expr_dfa.symbols {
+        GrammarExpr::ExprNFA(expr_nfa) => {
+            for symbol in &expr_nfa.symbols {
                 collect_ref_counts(symbol, counts);
             }
         }
@@ -293,7 +293,7 @@ fn protected_rule_names(grammar: &NamedGrammar) -> HashSet<String> {
         protected.insert(ignore.clone());
     }
     for rule in &grammar.rules {
-        if rule.is_terminal {
+        if rule.is_terminal || matches!(rule.expr, GrammarExpr::ExprNFA(_)) {
             protected.insert(rule.name.clone());
         }
     }
@@ -343,8 +343,8 @@ fn inline_refs_in_expr(
             }
             inline_refs_in_expr(separator, rule_exprs, ref_counts, protected, removed, stats);
         }
-        GrammarExpr::ExprDFA(expr_dfa) => {
-            for symbol in &mut expr_dfa.symbols {
+        GrammarExpr::ExprNFA(expr_nfa) => {
+            for symbol in &mut expr_nfa.symbols {
                 inline_refs_in_expr(symbol, rule_exprs, ref_counts, protected, removed, stats);
             }
         }

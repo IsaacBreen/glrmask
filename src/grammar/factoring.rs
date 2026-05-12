@@ -34,7 +34,7 @@ fn contains_regex_features(expr: &GrammarExpr) -> bool {
             items.iter().any(|(item, _)| contains_regex_features(item))
                 || contains_regex_features(separator)
         }
-        GrammarExpr::ExprDFA(expr_dfa) => expr_dfa.symbols.iter().any(contains_regex_features),
+        GrammarExpr::ExprNFA(expr_nfa) => expr_nfa.symbols.iter().any(contains_regex_features),
     }
 }
 
@@ -271,8 +271,8 @@ impl ChoiceFactorer {
                 }
                 Self::collect_refs_impl(separator, refs);
             }
-            GrammarExpr::ExprDFA(expr_dfa) => {
-                for symbol in &expr_dfa.symbols {
+            GrammarExpr::ExprNFA(expr_nfa) => {
+                for symbol in &expr_nfa.symbols {
                     Self::collect_refs_impl(symbol, refs);
                 }
             }
@@ -417,8 +417,8 @@ impl ChoiceFactorer {
                 }
                 Self::collect_refs_static(separator, refs);
             }
-            GrammarExpr::ExprDFA(expr_dfa) => {
-                for symbol in &expr_dfa.symbols {
+            GrammarExpr::ExprNFA(expr_nfa) => {
+                for symbol in &expr_nfa.symbols {
                     Self::collect_refs_static(symbol, refs);
                 }
             }

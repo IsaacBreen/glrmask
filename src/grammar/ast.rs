@@ -8,7 +8,7 @@ use crate::ds::u8set::U8Set;
 use crate::grammar::flat::{
     GrammarDef, NonterminalID, Rule, Symbol, Terminal, TerminalID,
 };
-use crate::grammar::expr_dfa::ExprDFA;
+use crate::grammar::expr_nfa::ExprNFA;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GrammarExpr {
@@ -52,9 +52,12 @@ pub enum GrammarExpr {
         separator: Box<GrammarExpr>,
         allow_empty: bool,
     },
-    /// A DFA whose transition labels are indices into a side table of grammar
+    /// An NFA whose transition labels are indices into a side table of grammar
     /// expressions.
-    ExprDFA(Box<ExprDFA>),
+    ///
+    /// This is only valid as the complete expression of a nonterminal rule.
+    /// GLRM likewise serializes it as a named top-level definition.
+    ExprNFA(Box<ExprNFA>),
 }
 
 /// Controls the tree shape used when lowering [`GrammarExpr::SeparatedSequence`].
@@ -147,8 +150,8 @@ impl NamedGrammar {
                     for (e, _) in items { collect_refs(e, out); }
                     collect_refs(separator, out);
                 }
-                GrammarExpr::ExprDFA(expr_dfa) => {
-                    for symbol in &expr_dfa.symbols {
+                GrammarExpr::ExprNFA(expr_nfa) => {
+                    for symbol in &expr_nfa.symbols {
                         collect_refs(symbol, out);
                     }
                 }
@@ -364,12 +367,12 @@ fn grammar_expr_to_lark_with_indent(
             }
             write!(out, "])*/").unwrap();
         }
-        GrammarExpr::ExprDFA(expr_dfa) => {
+        GrammarExpr::ExprNFA(expr_nfa) => {
             write!(
                 out,
-                "/*ExprDFA(states={}, symbols={})*/",
-                expr_dfa.dfa.states.len(),
-                expr_dfa.symbols.len()
+                "/*ExprNFA(states={}, symbols={})*/",
+                expr_nfa.nfa.states.len(),
+                expr_nfa.symbols.len()
             )
             .unwrap();
         }
@@ -753,8 +756,8 @@ impl Lowerer {
                     rhs: vec![symbol],
                 });
             }
-            GrammarExpr::ExprDFA(expr_dfa) => {
-                self.emit_expr_dfa_nonnullable(lhs, expr_dfa)?;
+            GrammarExpr::ExprNFA(expr_nfa) => {
+                self.emit_expr_nfa_nonnullable(lhs, expr_nfa)?;
             }
             GrammarExpr::Epsilon => {}
         }
@@ -1127,18 +1130,17 @@ impl Lowerer {
         Ok(())
     }
 
-    fn expr_dfa_state_nonterminals(
+    fn expr_nfa_state_nonterminals(
         &mut self,
-        expr_dfa: &ExprDFA,
+        state_count: usize,
+        start: usize,
         hint: &str,
         start_lhs: Option<NonterminalID>,
     ) -> Result<Vec<NonterminalID>, GlrMaskError> {
-        let state_count = expr_dfa.dfa.states.len();
-        let start = expr_dfa.dfa.start_state as usize;
         if start >= state_count {
             return Err(GlrMaskError::GrammarParse(format!(
-                "ExprDFA start state {} is out of range for {} states",
-                expr_dfa.dfa.start_state, state_count
+                "ExprNFA start state {} is out of range for {} states",
+                start, state_count
             )));
         }
 
@@ -1154,9 +1156,15 @@ impl Lowerer {
         Ok(nts)
     }
 
-    fn emit_expr_dfa(&mut self, lhs: NonterminalID, expr_dfa: &ExprDFA) -> Result<(), GlrMaskError> {
-        let nts = self.expr_dfa_state_nonterminals(expr_dfa, "expr_dfa", Some(lhs))?;
-        for (state_index, state) in expr_dfa.dfa.states.iter().enumerate() {
+    fn emit_expr_nfa(&mut self, lhs: NonterminalID, expr_nfa: &ExprNFA) -> Result<(), GlrMaskError> {
+        let dfa = expr_nfa.determinize_and_minimize();
+        let nts = self.expr_nfa_state_nonterminals(
+            dfa.states.len(),
+            dfa.start_state as usize,
+            "expr_nfa",
+            Some(lhs),
+        )?;
+        for (state_index, state) in dfa.states.iter().enumerate() {
             let state_nt = nts[state_index];
             if state.is_accepting {
                 self.rules.push(Rule { lhs: state_nt, rhs: Vec::new() });
@@ -1165,12 +1173,12 @@ impl Lowerer {
                 let target = *target as usize;
                 if target >= nts.len() {
                     return Err(GlrMaskError::GrammarParse(format!(
-                        "ExprDFA transition from state {state_index} targets out-of-range state {target}"
+                        "ExprNFA transition from state {state_index} targets out-of-range state {target}"
                     )));
                 }
-                let symbol_expr = expr_dfa.symbol_for_label(*label).ok_or_else(|| {
+                let symbol_expr = expr_nfa.symbol_for_label(*label).ok_or_else(|| {
                     GlrMaskError::GrammarParse(format!(
-                        "ExprDFA transition label {label} is not a valid symbol index"
+                        "ExprNFA transition label {label} is not a valid symbol index"
                     ))
                 })?;
                 let symbol = self.lower_expr_terminalish(symbol_expr)?;
@@ -1183,17 +1191,18 @@ impl Lowerer {
         Ok(())
     }
 
-    fn emit_expr_dfa_nonnullable(
+    fn emit_expr_nfa_nonnullable(
         &mut self,
         lhs: NonterminalID,
-        expr_dfa: &ExprDFA,
+        expr_nfa: &ExprNFA,
     ) -> Result<(), GlrMaskError> {
-        let state_count = expr_dfa.dfa.states.len();
-        let start = expr_dfa.dfa.start_state as usize;
+        let dfa = expr_nfa.determinize_and_minimize();
+        let state_count = dfa.states.len();
+        let start = dfa.start_state as usize;
         if start >= state_count {
             return Err(GlrMaskError::GrammarParse(format!(
-                "ExprDFA start state {} is out of range for {} states",
-                expr_dfa.dfa.start_state, state_count
+                "ExprNFA start state {} is out of range for {} states",
+                dfa.start_state, state_count
             )));
         }
 
@@ -1203,14 +1212,14 @@ impl Lowerer {
             if state_index == start {
                 nullable_nts.push(lhs);
             } else {
-                let (_, nt) = self.fresh_nonterminal("expr_dfa_nullable_prefix");
+                let (_, nt) = self.fresh_nonterminal("expr_nfa_nullable_prefix");
                 nullable_nts.push(nt);
             }
-            let (_, nt) = self.fresh_nonterminal("expr_dfa_nonnullable");
+            let (_, nt) = self.fresh_nonterminal("expr_nfa_nonnullable");
             nonnullable_nts.push(nt);
         }
 
-        for (state_index, state) in expr_dfa.dfa.states.iter().enumerate() {
+        for (state_index, state) in dfa.states.iter().enumerate() {
             if state.is_accepting {
                 self.rules.push(Rule {
                     lhs: nonnullable_nts[state_index],
@@ -1222,12 +1231,12 @@ impl Lowerer {
                 let target = *target as usize;
                 if target >= state_count {
                     return Err(GlrMaskError::GrammarParse(format!(
-                        "ExprDFA transition from state {state_index} targets out-of-range state {target}"
+                        "ExprNFA transition from state {state_index} targets out-of-range state {target}"
                     )));
                 }
-                let symbol_expr = expr_dfa.symbol_for_label(*label).ok_or_else(|| {
+                let symbol_expr = expr_nfa.symbol_for_label(*label).ok_or_else(|| {
                     GlrMaskError::GrammarParse(format!(
-                        "ExprDFA transition label {label} is not a valid symbol index"
+                        "ExprNFA transition label {label} is not a valid symbol index"
                     ))
                 })?;
 
@@ -1309,8 +1318,8 @@ impl Lowerer {
                 GrammarExpr::Epsilon => {
                     lowerer.rules.push(Rule { lhs, rhs: Vec::new() });
                 }
-                GrammarExpr::ExprDFA(expr_dfa) => {
-                    lowerer.emit_expr_dfa(lhs, expr_dfa)?;
+                GrammarExpr::ExprNFA(expr_nfa) => {
+                    lowerer.emit_expr_nfa(lhs, expr_nfa)?;
                 }
                 _ => {
                     let symbol = lowerer.lower_expr_terminalish(expr)?;
@@ -1383,8 +1392,13 @@ impl Lowerer {
             | GrammarExpr::Repeat(_)
             | GrammarExpr::RepeatOne(_)
             | GrammarExpr::RepeatRange { .. }
-            | GrammarExpr::SeparatedSequence { .. }
-            | GrammarExpr::ExprDFA(_) => self.lower_expr(expr),
+            | GrammarExpr::SeparatedSequence { .. } => self.lower_expr(expr),
+            | GrammarExpr::ExprNFA(_) => {
+                return Err(GlrMaskError::GrammarParse(
+                    "GrammarExpr::ExprNFA must be the complete expression of a nonterminal rule"
+                        .into(),
+                ));
+            }
         })
     }
 
@@ -1663,9 +1677,9 @@ fn grammar_expr_to_expr(
                 "GrammarExpr::SeparatedSequence cannot appear inside a terminal rule".into(),
             ));
         }
-        GrammarExpr::ExprDFA(_) => {
+        GrammarExpr::ExprNFA(_) => {
             return Err(GlrMaskError::GrammarParse(
-                "GrammarExpr::ExprDFA cannot appear inside a terminal rule".into(),
+                "GrammarExpr::ExprNFA cannot appear inside a terminal rule".into(),
             ));
         }
     })
@@ -1705,28 +1719,29 @@ fn grammar_expr_is_nullable(
                     .iter()
                     .all(|(item, is_required)| !*is_required || grammar_expr_is_nullable(item, rule_nullable))
         }
-        GrammarExpr::ExprDFA(expr_dfa) => {
-            let state_count = expr_dfa.dfa.states.len();
-            let start = expr_dfa.dfa.start_state as usize;
+        GrammarExpr::ExprNFA(expr_nfa) => {
+            let dfa = expr_nfa.determinize_and_minimize();
+            let state_count = dfa.states.len();
+            let start = dfa.start_state as usize;
             if start >= state_count {
                 return false;
             }
 
             let mut nullable_from_state = vec![false; state_count];
-            for (state_index, state) in expr_dfa.dfa.states.iter().enumerate() {
+            for (state_index, state) in dfa.states.iter().enumerate() {
                 nullable_from_state[state_index] = state.is_accepting;
             }
 
             let mut changed = true;
             while changed {
                 changed = false;
-                for (state_index, state) in expr_dfa.dfa.states.iter().enumerate() {
+                for (state_index, state) in dfa.states.iter().enumerate() {
                     if nullable_from_state[state_index] {
                         continue;
                     }
                     for (label, target) in &state.transitions {
                         let target = *target as usize;
-                        let Some(symbol) = expr_dfa.symbol_for_label(*label) else {
+                        let Some(symbol) = expr_nfa.symbol_for_label(*label) else {
                             continue;
                         };
                         if target < state_count
@@ -1767,6 +1782,63 @@ fn compute_rule_nullability(grammar: &NamedGrammar) -> HashMap<String, bool> {
     }
 
     nullable
+}
+
+fn validate_expr_nfa_placement(grammar: &NamedGrammar) -> Result<(), GlrMaskError> {
+    fn walk(expr: &GrammarExpr, top_level: bool, rule_name: &str) -> Result<(), GlrMaskError> {
+        match expr {
+            GrammarExpr::ExprNFA(_) => {
+                if !top_level {
+                    return Err(GlrMaskError::GrammarParse(format!(
+                        "GrammarExpr::ExprNFA must be the complete expression of a nonterminal rule; found nested in {rule_name}"
+                    )));
+                }
+            }
+            GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
+                for part in parts {
+                    walk(part, false, rule_name)?;
+                }
+            }
+            GrammarExpr::Exclude { expr, exclude } => {
+                walk(expr, false, rule_name)?;
+                walk(exclude, false, rule_name)?;
+            }
+            GrammarExpr::Intersect { expr, intersect } => {
+                walk(expr, false, rule_name)?;
+                walk(intersect, false, rule_name)?;
+            }
+            GrammarExpr::Optional(inner)
+            | GrammarExpr::Repeat(inner)
+            | GrammarExpr::RepeatOne(inner)
+            | GrammarExpr::RepeatRange { expr: inner, .. } => {
+                walk(inner, false, rule_name)?;
+            }
+            GrammarExpr::SeparatedSequence { items, separator, .. } => {
+                for (item, _) in items {
+                    walk(item, false, rule_name)?;
+                }
+                walk(separator, false, rule_name)?;
+            }
+            GrammarExpr::Ref(_)
+            | GrammarExpr::Epsilon
+            | GrammarExpr::Literal(_)
+            | GrammarExpr::CharClass { .. }
+            | GrammarExpr::RawRegex(_)
+            | GrammarExpr::AnyByte => {}
+        }
+        Ok(())
+    }
+
+    for rule in &grammar.rules {
+        if rule.is_terminal && matches!(rule.expr, GrammarExpr::ExprNFA(_)) {
+            return Err(GlrMaskError::GrammarParse(format!(
+                "GrammarExpr::ExprNFA cannot be used as terminal rule {}",
+                rule.name
+            )));
+        }
+        walk(&rule.expr, true, &rule.name)?;
+    }
+    Ok(())
 }
 
 /// Convert a lexer-level [`Expr`] into an equivalent [`GrammarExpr`].
@@ -1868,6 +1940,8 @@ fn push_class_char(out: &mut String, b: u8) {
 }
 
 pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
+    validate_expr_nfa_placement(grammar)?;
+
     let mut lowerer = Lowerer::new();
     lowerer.named_rule_exprs = grammar
         .rules
@@ -1961,6 +2035,9 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
             }
             GrammarExpr::RepeatRange { expr, min, max } => {
                 lowerer.emit_repeat_range(lhs, expr, *min, *max)?;
+            }
+            GrammarExpr::ExprNFA(expr_nfa) => {
+                lowerer.emit_expr_nfa(lhs, expr_nfa)?;
             }
             _ => {
                 let symbol = lowerer.lower_expr_terminalish(&rule.expr)?;

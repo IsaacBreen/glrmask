@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::automata::lexer::ast::Expr as LexerExpr;
 use crate::automata::lexer::compile::build_regex;
 use crate::automata::lexer::regex::parse_regex;
-use crate::grammar::expr_dfa::ExprDfaBuilder;
+use crate::grammar::expr_nfa::ExprNfaBuilder;
 use crate::import::ast::{expr_to_grammar_expr, GrammarExpr, NamedGrammar, NamedRule};
 use crate::GlrMaskError;
 use serde_json::{Map, Value};
@@ -522,7 +522,7 @@ fn finite_literal_alternatives(
         | GrammarExpr::AnyByte
         | GrammarExpr::Intersect { .. }
         | GrammarExpr::SeparatedSequence { .. }
-        | GrammarExpr::ExprDFA(_) => return None,
+        | GrammarExpr::ExprNFA(_) => return None,
     };
 
     let total_bytes = alts.iter().map(Vec::len).sum::<usize>();
@@ -4213,13 +4213,13 @@ impl<'a> SchemaCtx<'a> {
                 separator: Box::new(self.hoist_patterns_in_expr(*separator, prefix)),
                 allow_empty,
             },
-            GrammarExpr::ExprDFA(mut expr_dfa) => {
-                expr_dfa.symbols = expr_dfa
+            GrammarExpr::ExprNFA(mut expr_nfa) => {
+                expr_nfa.symbols = expr_nfa
                     .symbols
                     .into_iter()
                     .map(|symbol| self.hoist_patterns_in_expr(symbol, prefix))
                     .collect();
-                GrammarExpr::ExprDFA(expr_dfa)
+                GrammarExpr::ExprNFA(expr_nfa)
             }
         }
     }
@@ -5761,7 +5761,7 @@ impl<'a> SchemaCtx<'a> {
         self.build_exact_ordered_closed_object_variants(variants, mode)
     }
 
-    fn collect_anyof_expr_dfa_object_variant(
+    fn collect_anyof_expr_nfa_object_variant(
         &mut self,
         variant: &Map<String, Value>,
     ) -> Result<Option<AnyOfObjectVariant>, GlrMaskError> {
@@ -5946,8 +5946,8 @@ impl<'a> SchemaCtx<'a> {
         wrap_key_colon_terminal(variant_body)
     }
 
-    fn add_expr_dfa_symbol_path(
-        builder: &mut ExprDfaBuilder,
+    fn add_expr_nfa_symbol_path(
+        builder: &mut ExprNfaBuilder,
         from: u32,
         symbols: Vec<GrammarExpr>,
         to: u32,
@@ -5966,7 +5966,7 @@ impl<'a> SchemaCtx<'a> {
         }
     }
 
-    fn build_anyof_object_expr_dfa_body(
+    fn build_anyof_object_expr_nfa_body(
         &mut self,
         variants: &[AnyOfObjectVariant],
         base_name: &str,
@@ -5979,7 +5979,7 @@ impl<'a> SchemaCtx<'a> {
             .iter()
             .flat_map(|variant| variant.fixed_keys.iter().cloned())
             .collect::<BTreeSet<_>>();
-        let mut builder = ExprDfaBuilder::new();
+        let mut builder = ExprNfaBuilder::new();
         let accept = builder.add_state();
         builder.set_accepting(accept);
 
@@ -6037,7 +6037,7 @@ impl<'a> SchemaCtx<'a> {
                         symbols.push(self.json_item_separator_expr());
                     }
                     symbols.push(pattern_pair_expr.clone());
-                    Self::add_expr_dfa_symbol_path(
+                    Self::add_expr_nfa_symbol_path(
                         &mut builder,
                         state_id,
                         symbols,
@@ -6074,7 +6074,7 @@ impl<'a> SchemaCtx<'a> {
                         &variant.pattern_key_terminals,
                     ));
                     symbols.push(value_expr.clone());
-                    Self::add_expr_dfa_symbol_path(&mut builder, state_id, symbols, ap_state_id);
+                    Self::add_expr_nfa_symbol_path(&mut builder, state_id, symbols, ap_state_id);
                 }
             }
 
@@ -6110,14 +6110,14 @@ impl<'a> SchemaCtx<'a> {
                 }
                 symbols.push(self.fused_json_key_colon_literal(key));
                 symbols.push(value_expr);
-                Self::add_expr_dfa_symbol_path(&mut builder, state_id, symbols, next_state_id);
+                Self::add_expr_nfa_symbol_path(&mut builder, state_id, symbols, next_state_id);
             }
         }
 
-        Some(GrammarExpr::ExprDFA(Box::new(builder.build())))
+        Some(GrammarExpr::ExprNFA(Box::new(builder.build())))
     }
 
-    fn try_build_anyof_object_expr_dfa(
+    fn try_build_anyof_object_expr_nfa(
         &mut self,
         schema: &Map<String, Value>,
         options: &[Value],
@@ -6142,7 +6142,7 @@ impl<'a> SchemaCtx<'a> {
         let mut non_object_options = Vec::new();
         for resolved_option in resolved {
             if resolved_option.get("type").and_then(Value::as_str) == Some("object") {
-                let Some(variant) = self.collect_anyof_expr_dfa_object_variant(&resolved_option)? else {
+                let Some(variant) = self.collect_anyof_expr_nfa_object_variant(&resolved_option)? else {
                     return Ok(None);
                 };
                 object_variants.push(variant);
@@ -6157,7 +6157,7 @@ impl<'a> SchemaCtx<'a> {
 
         let mut base_index = self.generated_object_rule_counter;
         let base_name = loop {
-            let candidate = format!("obj_anyof_dfa_{base_index}");
+            let candidate = format!("obj_anyof_nfa_{base_index}");
             if !self.used_rule_names.contains(&format!("{candidate}_obj")) {
                 break candidate;
             }
@@ -6165,10 +6165,15 @@ impl<'a> SchemaCtx<'a> {
         };
         self.generated_object_rule_counter = base_index + 1;
 
-        let Some(body) = self.build_anyof_object_expr_dfa_body(&object_variants, &base_name) else {
+        let Some(body) = self.build_anyof_object_expr_nfa_body(&object_variants, &base_name) else {
             return Ok(None);
         };
-        let object_expr = sequence_or_single(vec![literal_expr(b"{"), body, literal_expr(b"}")]);
+        let body_rule = self.insert_shared_rule(format!("{base_name}_body"), body);
+        let object_expr = sequence_or_single(vec![
+            literal_expr(b"{"),
+            GrammarExpr::Ref(body_rule),
+            literal_expr(b"}"),
+        ]);
         let object_rule = self.insert_shared_rule(format!("{base_name}_obj"), object_expr);
 
         let mut alts = vec![GrammarExpr::Ref(object_rule)];
@@ -6676,7 +6681,7 @@ impl<'a> SchemaCtx<'a> {
             if let Some(expr) = self.try_reduce_anyof_closed_objects(schema, options)? {
                 return Ok(Some(expr));
             }
-            if let Some(expr) = self.try_build_anyof_object_expr_dfa(schema, options)? {
+            if let Some(expr) = self.try_build_anyof_object_expr_nfa(schema, options)? {
                 return Ok(Some(expr));
             }
         } else {
@@ -10701,8 +10706,8 @@ fn collect_grammar_visible_refs(
                 }
                 walk(separator, terminal_names, out);
             }
-            GrammarExpr::ExprDFA(expr_dfa) => {
-                for symbol in &expr_dfa.symbols {
+            GrammarExpr::ExprNFA(expr_nfa) => {
+                for symbol in &expr_nfa.symbols {
                     walk(symbol, terminal_names, out);
                 }
             }
@@ -10831,22 +10836,22 @@ mod tests {
         to_glrm(&named)
     }
 
-    fn expr_contains_expr_dfa(expr: &GrammarExpr) -> bool {
+    fn expr_contains_expr_nfa(expr: &GrammarExpr) -> bool {
         match expr {
-            GrammarExpr::ExprDFA(_) => true,
+            GrammarExpr::ExprNFA(_) => true,
             GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
-                parts.iter().any(expr_contains_expr_dfa)
+                parts.iter().any(expr_contains_expr_nfa)
             }
             GrammarExpr::Optional(inner)
             | GrammarExpr::Repeat(inner)
-            | GrammarExpr::RepeatOne(inner) => expr_contains_expr_dfa(inner),
-            GrammarExpr::RepeatRange { expr, .. } => expr_contains_expr_dfa(expr),
+            | GrammarExpr::RepeatOne(inner) => expr_contains_expr_nfa(inner),
+            GrammarExpr::RepeatRange { expr, .. } => expr_contains_expr_nfa(expr),
             GrammarExpr::Exclude { expr, exclude } | GrammarExpr::Intersect { expr, intersect: exclude } => {
-                expr_contains_expr_dfa(expr) || expr_contains_expr_dfa(exclude)
+                expr_contains_expr_nfa(expr) || expr_contains_expr_nfa(exclude)
             }
             GrammarExpr::SeparatedSequence { items, separator, .. } => {
-                items.iter().any(|(item, _)| expr_contains_expr_dfa(item))
-                    || expr_contains_expr_dfa(separator)
+                items.iter().any(|(item, _)| expr_contains_expr_nfa(item))
+                    || expr_contains_expr_nfa(separator)
             }
             GrammarExpr::Ref(_)
             | GrammarExpr::Literal(_)
@@ -10857,11 +10862,11 @@ mod tests {
         }
     }
 
-    fn grammar_contains_expr_dfa(schema: serde_json::Value) -> bool {
+    fn grammar_contains_expr_nfa(schema: serde_json::Value) -> bool {
         let named = schema_to_named_grammar(&schema).unwrap();
         named.rules
             .iter()
-            .any(|rule| expr_contains_expr_dfa(&rule.expr))
+            .any(|rule| expr_contains_expr_nfa(&rule.expr))
     }
 
     fn find_rule_line_with_prefix<'a>(glrm: &'a str, rule_prefix: &str) -> &'a str {
@@ -10871,7 +10876,7 @@ mod tests {
     }
 
     #[test]
-    fn anyof_object_variants_lower_through_expr_dfa() {
+    fn anyof_object_variants_lower_through_expr_nfa() {
         let schema = json!({
             "anyOf": [
                 {
@@ -10895,11 +10900,11 @@ mod tests {
             ]
         });
 
-        assert!(grammar_contains_expr_dfa(schema));
+        assert!(grammar_contains_expr_nfa(schema));
     }
 
     #[test]
-    fn anyof_object_expr_dfa_open_variants_lower_without_nested_excludes() {
+    fn anyof_object_expr_nfa_open_variants_lower_without_nested_excludes() {
         let schema = json!({
             "definitions": {
                 "organization": {
@@ -10934,12 +10939,12 @@ mod tests {
         });
 
         let named = schema_to_named_grammar(&schema).unwrap();
-        assert!(named.rules.iter().any(|rule| expr_contains_expr_dfa(&rule.expr)));
+        assert!(named.rules.iter().any(|rule| expr_contains_expr_nfa(&rule.expr)));
         lower(&named).unwrap();
     }
 
     #[test]
-    fn coerced_oneof_object_variants_use_expr_dfa_like_anyof() {
+    fn coerced_oneof_object_variants_use_expr_nfa_like_anyof() {
         let schema = json!({
             "x-guidance": {"coerce_one_of": true},
             "oneOf": [
@@ -10965,12 +10970,12 @@ mod tests {
         });
 
         let named = schema_to_named_grammar(&schema).unwrap();
-        assert!(named.rules.iter().any(|rule| expr_contains_expr_dfa(&rule.expr)));
+        assert!(named.rules.iter().any(|rule| expr_contains_expr_nfa(&rule.expr)));
         lower(&named).unwrap();
     }
 
     #[test]
-    fn anyof_object_expr_dfa_supports_pattern_properties_tail() {
+    fn anyof_object_expr_nfa_supports_pattern_properties_tail() {
         let schema = json!({
             "anyOf": [
                 {
@@ -11001,12 +11006,12 @@ mod tests {
         });
 
         let named = schema_to_named_grammar(&schema).unwrap();
-        assert!(named.rules.iter().any(|rule| expr_contains_expr_dfa(&rule.expr)));
+        assert!(named.rules.iter().any(|rule| expr_contains_expr_nfa(&rule.expr)));
         lower(&named).unwrap();
     }
 
     #[test]
-    fn anyof_object_expr_dfa_keeps_non_object_options() {
+    fn anyof_object_expr_nfa_keeps_non_object_options() {
         let schema = json!({
             "anyOf": [
                 {
@@ -11024,7 +11029,7 @@ mod tests {
         });
 
         let glrm = dump_glrm(schema);
-        assert!(glrm.contains("ExprDFA"), "{glrm}");
+        assert!(glrm.contains("nfa obj_anyof_nfa_0_body"), "{glrm}");
         assert!(glrm.contains("json_string"), "{glrm}");
     }
 

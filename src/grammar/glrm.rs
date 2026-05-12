@@ -44,7 +44,11 @@
 //! | `sep ~ ( i1? i2 i3? )`           | SeparatedSequence                    |
 
 use crate::GlrMaskError;
+use crate::automata::unweighted_u32::dfa::Label;
+use crate::automata::unweighted_u32::nfa::NFA;
 use crate::grammar::ast::{GrammarExpr, NamedGrammar, NamedRule};
+use crate::grammar::expr_nfa::ExprNFA;
+use std::collections::HashMap;
 
 // ============================================================
 // Dumper
@@ -60,6 +64,14 @@ pub fn to_glrm(grammar: &NamedGrammar) -> String {
     out.push('\n');
 
     for rule in &grammar.rules {
+        if !rule.is_terminal {
+            if let GrammarExpr::ExprNFA(expr_nfa) = &rule.expr {
+                out.push_str(&format!("nfa {} ::= {{\n", rule.name));
+                out.push_str(&dump_expr_nfa(expr_nfa));
+                out.push_str("};\n");
+                continue;
+            }
+        }
         let prefix = match (rule.is_terminal, rule.is_internal) {
             (true, true) => "internal t",
             (true, false) => "t",
@@ -69,6 +81,44 @@ pub fn to_glrm(grammar: &NamedGrammar) -> String {
         out.push_str(&format!("{} {} ::= {};\n", prefix, rule.name, body));
     }
 
+    out
+}
+
+fn dump_expr_nfa(expr_nfa: &ExprNFA) -> String {
+    let mut out = String::new();
+    let starts = expr_nfa
+        .nfa
+        .start_states
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&format!("start {};\n", starts));
+
+    let accepts = expr_nfa
+        .nfa
+        .states
+        .iter()
+        .enumerate()
+        .filter_map(|(state_id, state)| state.is_accepting.then(|| state_id.to_string()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&format!("accept {};\n\n", accepts));
+
+    for (state_id, state) in expr_nfa.nfa.states.iter().enumerate() {
+        for &target in &state.epsilons {
+            out.push_str(&format!("{state_id} --> {target};\n"));
+        }
+        for (&label, targets) in &state.transitions {
+            let symbol = expr_nfa
+                .symbol_for_label(label)
+                .map(|expr| dump_nt_expr(expr, false))
+                .unwrap_or_else(|| format!("/*invalid-symbol-{label}*/ eps"));
+            for &target in targets {
+                out.push_str(&format!("{state_id} -- {symbol} --> {target};\n"));
+            }
+        }
+    }
     out
 }
 
@@ -197,11 +247,11 @@ fn dump_nt_atom(expr: &GrammarExpr) -> String {
                 format!("{} ~+ ( {} )", sep_str, items_str)
             }
         }
-        GrammarExpr::ExprDFA(expr_dfa) => {
+        GrammarExpr::ExprNFA(expr_nfa) => {
             format!(
-                "ExprDFA(states={}, symbols={})",
-                expr_dfa.dfa.states.len(),
-                expr_dfa.symbols.len()
+                "ExprNFA(states={}, symbols={})",
+                expr_nfa.nfa.states.len(),
+                expr_nfa.symbols.len()
             )
         }
         // For compound exprs that need parens as atoms:
@@ -291,6 +341,10 @@ enum Tok {
     Amp,
     /// `-`
     Minus,
+    /// `--`
+    Dashes,
+    /// `-->`
+    Arrow,
     /// `~`
     Tilde,
     /// `*`
@@ -494,7 +548,17 @@ impl<'a> Lexer<'a> {
                         b'}' => tokens.push(Tok::RBrace),
                         b'|' => tokens.push(Tok::Pipe),
                         b'&' => tokens.push(Tok::Amp),
-                        b'-' => tokens.push(Tok::Minus),
+                        b'-' => {
+                            if self.peek() == Some(b'-') && self.peek2() == Some(b'>') {
+                                self.pos += 2;
+                                tokens.push(Tok::Arrow);
+                            } else if self.peek() == Some(b'-') {
+                                self.pos += 1;
+                                tokens.push(Tok::Dashes);
+                            } else {
+                                tokens.push(Tok::Minus);
+                            }
+                        }
                         b'~' => tokens.push(Tok::Tilde),
                         b'*' => tokens.push(Tok::Star),
                         b'+' => tokens.push(Tok::Plus),
@@ -605,6 +669,10 @@ impl GlrmParser {
                         self.advance();
                         rules.push(self.parse_rule(false, false)?);
                     }
+                    "nfa" => {
+                        self.advance();
+                        rules.push(self.parse_expr_nfa_rule()?);
+                    }
                     "t" => {
                         self.advance();
                         rules.push(self.parse_rule(true, false)?);
@@ -635,6 +703,115 @@ impl GlrmParser {
         let expr = self.parse_nt_expr(is_terminal)?;
         self.consume(&Tok::Semi)?;
         Ok(NamedRule { name, expr, is_terminal, is_internal })
+    }
+
+    fn parse_expr_nfa_rule(&mut self) -> Result<NamedRule, GlrMaskError> {
+        let name = self.expect_ident()?;
+        self.consume(&Tok::DeclEq)?;
+        self.consume(&Tok::LBrace)?;
+
+        let mut nfa = NFA::new_empty();
+        let mut symbols = Vec::<GrammarExpr>::new();
+        let mut symbol_labels = HashMap::<GrammarExpr, Label>::new();
+
+        loop {
+            match self.peek().clone() {
+                Tok::RBrace => {
+                    self.advance();
+                    break;
+                }
+                Tok::Ident(ref kw) if kw == "start" => {
+                    self.advance();
+                    nfa.start_states.clear();
+                    loop {
+                        let state = self.expect_int()? as u32;
+                        ensure_nfa_state(&mut nfa, state);
+                        nfa.start_states.push(state);
+                        if matches!(self.peek(), Tok::Comma) {
+                            self.advance();
+                            continue;
+                        }
+                        break;
+                    }
+                    self.consume(&Tok::Semi)?;
+                }
+                Tok::Ident(ref kw) if kw == "accept" => {
+                    self.advance();
+                    if !matches!(self.peek(), Tok::Semi) {
+                        loop {
+                            let state = self.expect_int()? as u32;
+                            ensure_nfa_state(&mut nfa, state);
+                            nfa.set_accepting(state);
+                            if matches!(self.peek(), Tok::Comma) {
+                                self.advance();
+                                continue;
+                            }
+                            break;
+                        }
+                    }
+                    self.consume(&Tok::Semi)?;
+                }
+                Tok::Int(_) => {
+                    let from = self.expect_int()? as u32;
+                    ensure_nfa_state(&mut nfa, from);
+                    match self.peek() {
+                        Tok::Arrow => {
+                            self.advance();
+                            let to = self.expect_int()? as u32;
+                            ensure_nfa_state(&mut nfa, to);
+                            nfa.add_epsilon(from, to);
+                        }
+                        Tok::Dashes => {
+                            self.advance();
+                            let symbol = self.parse_expr_nfa_transition_expr()?;
+                            self.consume(&Tok::Arrow)?;
+                            let to = self.expect_int()? as u32;
+                            ensure_nfa_state(&mut nfa, to);
+                            let label = intern_expr_nfa_symbol(
+                                &mut symbols,
+                                &mut symbol_labels,
+                                symbol,
+                            );
+                            nfa.add_transition(from, label, to);
+                        }
+                        other => {
+                            return Err(err(&format!(
+                                "expected '--' or '-->' after NFA transition source, got {:?}",
+                                other
+                            )));
+                        }
+                    }
+                    self.consume(&Tok::Semi)?;
+                }
+                other => return Err(err(&format!("unexpected token {:?} in NFA definition", other))),
+            }
+        }
+
+        self.consume(&Tok::Semi)?;
+        if nfa.start_states.is_empty() {
+            return Err(err("NFA definition has no start state"));
+        }
+        Ok(NamedRule {
+            name,
+            expr: GrammarExpr::ExprNFA(Box::new(ExprNFA::new(nfa, symbols))),
+            is_terminal: false,
+            is_internal: false,
+        })
+    }
+
+    fn parse_expr_nfa_transition_expr(&mut self) -> Result<GrammarExpr, GlrMaskError> {
+        if matches!(self.peek(), Tok::Arrow) {
+            return Err(err(
+                "NFA transition expression cannot be empty; use epsilon transition syntax",
+            ));
+        }
+        if !self.can_start_nt_atom() {
+            return Err(err(&format!(
+                "expected NFA transition expression item before '-->', got {:?}",
+                self.peek()
+            )));
+        }
+        self.parse_nt_expr(true)
     }
 
     // ---- NT expression parsing ---------------------------------------------
@@ -910,6 +1087,26 @@ fn hex_digit(b: u8) -> Result<u8, GlrMaskError> {
     }
 }
 
+fn ensure_nfa_state(nfa: &mut NFA, state: u32) {
+    while nfa.states.len() <= state as usize {
+        nfa.add_state();
+    }
+}
+
+fn intern_expr_nfa_symbol(
+    symbols: &mut Vec<GrammarExpr>,
+    symbol_labels: &mut HashMap<GrammarExpr, Label>,
+    symbol: GrammarExpr,
+) -> Label {
+    if let Some(&label) = symbol_labels.get(&symbol) {
+        return label;
+    }
+    let label = i32::try_from(symbols.len()).expect("ExprNFA symbol table exceeded i32 labels");
+    symbols.push(symbol.clone());
+    symbol_labels.insert(symbol, label);
+    label
+}
+
 fn err(msg: &str) -> GlrMaskError {
     GlrMaskError::GrammarParse(msg.to_string())
 }
@@ -917,3 +1114,109 @@ fn err(msg: &str) -> GlrMaskError {
 // ============================================================
 // Tests
 // ============================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grammar::ast::lower;
+
+    #[test]
+    fn parses_named_expr_nfa_definition() {
+        let grammar = from_glrm(
+            r#"
+start obj;
+
+nfa obj ::= {
+start 0;
+accept 4;
+
+0 -- "\"name\": " --> 1;
+1 -- "," "\"email\": " --> 2;
+1 -- "," "\"description\": " --> 3;
+2 -- "," "\"thumbnail\": " --> 3;
+2 --> 4;
+3 --> 4;
+};
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(grammar.rules.len(), 1);
+        assert!(matches!(grammar.rules[0].expr, GrammarExpr::ExprNFA(_)));
+        lower(&grammar).unwrap();
+    }
+
+    #[test]
+    fn dumps_expr_nfa_as_own_definition() {
+        let grammar = from_glrm(
+            r#"
+start obj;
+nfa obj ::= {
+start 0;
+accept 1;
+0 -- "a" --> 1;
+};
+"#,
+        )
+        .unwrap();
+        let dumped = to_glrm(&grammar);
+        assert!(dumped.contains("nfa obj ::= {"), "{dumped}");
+        assert!(dumped.contains("0 -- \"a\" --> 1;"), "{dumped}");
+        assert!(!dumped.contains("ExprNFA("), "{dumped}");
+    }
+
+    #[test]
+    fn expr_nfa_transition_symbols_accept_full_expressions() {
+        let grammar = from_glrm(
+            r#"
+start obj;
+nfa obj ::= {
+start 0;
+accept 1;
+0 -- [a-z] - "x" --> 1;
+};
+"#,
+        )
+        .unwrap();
+        let GrammarExpr::ExprNFA(expr_nfa) = &grammar.rules[0].expr else {
+            panic!("expected ExprNFA rule");
+        };
+        assert!(matches!(
+            expr_nfa.symbols.first(),
+            Some(GrammarExpr::Exclude { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_nested_expr_nfa_at_lowering() {
+        let nfa_rule = from_glrm(
+            r#"
+start inner;
+nfa inner ::= {
+start 0;
+accept 1;
+0 -- "a" --> 1;
+};
+"#,
+        )
+        .unwrap()
+        .rules
+        .into_iter()
+        .next()
+        .unwrap();
+
+        let grammar = NamedGrammar {
+            rules: vec![NamedRule {
+                name: "start".to_string(),
+                expr: GrammarExpr::Sequence(vec![nfa_rule.expr, GrammarExpr::Literal(b"b".to_vec())]),
+                is_terminal: false,
+                is_internal: false,
+            }],
+            start: "start".to_string(),
+            ignore: None,
+        };
+
+        let err = lower(&grammar).unwrap_err().to_string();
+        assert!(err.contains("complete expression of a nonterminal rule"), "{err}");
+    }
+}

@@ -673,8 +673,8 @@ fn expand_lark_expr(
                 allow_empty: *allow_empty,
             }
         }
-        GrammarExpr::ExprDFA(expr_dfa) => {
-            let mut expanded = expr_dfa.as_ref().clone();
+        GrammarExpr::ExprNFA(expr_nfa) => {
+            let mut expanded = expr_nfa.as_ref().clone();
             expanded.symbols = expanded
                 .symbols
                 .iter()
@@ -690,7 +690,7 @@ fn expand_lark_expr(
                     )
                 })
                 .collect::<Result<Vec<_>, GlrMaskError>>()?;
-            GrammarExpr::ExprDFA(Box::new(expanded))
+            GrammarExpr::ExprNFA(Box::new(expanded))
         }
     })
 }
