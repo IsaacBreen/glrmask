@@ -5913,37 +5913,21 @@ impl<'a> SchemaCtx<'a> {
             .filter(|key| !variant_keys.contains(*key))
             .cloned()
             .collect::<Vec<_>>();
-        if allowed_back_keys.is_empty() {
-            return wrap_key_colon_terminal(shared_body);
+        let mut key_body_options = vec![shared_body];
+        key_body_options.extend(
+            allowed_back_keys
+                .iter()
+                .map(|key| literal_expr(&key_colon_literal_body_bytes(key))),
+        );
+        if pattern_key_terminals.is_empty() {
+            return wrap_key_colon_terminal(choice_or_single(key_body_options));
         }
 
-        // `shared_body | sibling_literals` is equivalent to excluding only this
-        // variant's fixed keys from the full JSON string body. Keep that as a
-        // single top-level Exclude; otherwise the lexer compiler sees a
-        // Shared(Exclude) nested under Choice after terminal refs resolve.
-        let mut variant_excluded = variant_keys
-            .iter()
-            .map(|key| {
-                self.force_extract_terminal_rule(
-                    literal_expr(&key_colon_literal_body_bytes(key)),
-                    &format!("{upper_base_name}_AP_LITERAL_KEY"),
-                )
-            })
-            .collect::<Vec<_>>();
-        variant_excluded.extend(pattern_key_terminals.iter().cloned());
-        let variant_body_expr = if variant_excluded.is_empty() {
-            GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())
-        } else {
-            GrammarExpr::Exclude {
-                expr: Box::new(GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())),
-                exclude: Box::new(choice_or_single(variant_excluded)),
-            }
+        let variant_pattern_filtered_body = GrammarExpr::Exclude {
+            expr: Box::new(choice_or_single(key_body_options)),
+            exclude: Box::new(choice_or_single(pattern_key_terminals.to_vec())),
         };
-        let variant_body = self.insert_named_terminal_rule(
-            format!("{upper_base_name}_AP_KEY_V{variant_idx}"),
-            variant_body_expr,
-        );
-        wrap_key_colon_terminal(variant_body)
+        wrap_key_colon_terminal(variant_pattern_filtered_body)
     }
 
     fn add_expr_nfa_symbol_path(
@@ -10972,6 +10956,37 @@ mod tests {
         );
         assert!(
             !glrm.contains("-- \"\\\"thumbnail\\\": \" -->"),
+            "{glrm}"
+        );
+    }
+
+    #[test]
+    fn anyof_object_expr_nfa_uses_one_ap_terminal_with_sibling_literals() {
+        let schema = json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "thumbnail": {"type": "string"}
+                    },
+                    "additionalProperties": {"type": "number"}
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"}
+                    },
+                    "additionalProperties": {"type": "number"}
+                }
+            ]
+        });
+
+        let glrm = dump_glrm(schema);
+        assert!(glrm.contains("t OBJ_ANYOF_FA_0_AP_SHARED_KEY ::="), "{glrm}");
+        assert!(!glrm.contains("_AP_KEY_V"), "{glrm}");
+        assert!(
+            glrm.contains("(OBJ_ANYOF_FA_0_AP_SHARED_KEY | \"thumbnail\\\"\")"),
             "{glrm}"
         );
     }

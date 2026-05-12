@@ -1371,17 +1371,10 @@ impl Lowerer {
                 self.rules.push(Rule { lhs: nt, rhs: Vec::new() });
                 Symbol::Nonterminal(nt)
             }
-            GrammarExpr::Exclude { .. } => {
-                return Err(GlrMaskError::GrammarParse(
-                    "GrammarExpr::Exclude must be extracted into a terminal rule before lowering"
-                        .into(),
-                ));
-            }
-            GrammarExpr::Intersect { .. } => {
-                return Err(GlrMaskError::GrammarParse(
-                    "GrammarExpr::Intersect must be extracted into a terminal rule before lowering"
-                        .into(),
-                ));
+            GrammarExpr::Exclude { .. } | GrammarExpr::Intersect { .. } => {
+                let expr = self.resolve_terminal_expr(None, expr)?;
+                let name = format!("__terminal_expr_{}", self.generated_nonterminal_counter);
+                Symbol::Terminal(self.register_terminal_expr(&name, expr))
             }
             GrammarExpr::AnyByte => {
                 Symbol::Terminal(self.terminal_id(".", ".", false))
