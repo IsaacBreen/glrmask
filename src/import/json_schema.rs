@@ -3473,6 +3473,7 @@ struct SchemaCtx<'a> {
     shared_ap_key_body_rule_cache: BTreeMap<Vec<String>, String>,
     shared_ap_key_colon_expr: Option<GrammarExpr>,
     shared_ap_key_rule_cache: BTreeMap<Vec<String>, String>,
+    anyof_object_expr_nfa_cache: BTreeMap<String, GrammarExpr>,
     draft_stack: Vec<JsonSchemaDraft>,
     convert_depth: usize,
     /// Cache for `convert_schema`: identical sub-schemas produce the same
@@ -3708,6 +3709,7 @@ impl<'a> SchemaCtx<'a> {
             shared_ap_key_body_rule_cache: BTreeMap::new(),
             shared_ap_key_colon_expr: None,
             shared_ap_key_rule_cache: BTreeMap::new(),
+            anyof_object_expr_nfa_cache: BTreeMap::new(),
             draft_stack: vec![DEFAULT_JSON_SCHEMA_DRAFT],
             convert_depth: 0,
             schema_convert_cache: BTreeMap::new(),
@@ -6121,7 +6123,6 @@ impl<'a> SchemaCtx<'a> {
                 }
             })
             .collect::<Vec<_>>();
-
         let mut object_variants = Vec::new();
         let mut non_object_options = Vec::new();
         for resolved_option in resolved {
@@ -6137,6 +6138,10 @@ impl<'a> SchemaCtx<'a> {
 
         if object_variants.len() < 2 {
             return Ok(None);
+        }
+        let cache_key = Self::anyof_object_expr_nfa_cache_key(&object_variants, &non_object_options);
+        if let Some(expr) = self.anyof_object_expr_nfa_cache.get(&cache_key).cloned() {
+            return Ok(Some(expr));
         }
 
         let mut base_index = self.generated_object_rule_counter;
@@ -6164,7 +6169,54 @@ impl<'a> SchemaCtx<'a> {
         for option in non_object_options {
             alts.push(self.convert_schema(&option)?);
         }
-        Ok(Some(factor_common_affixes(alts)))
+        let expr = factor_common_affixes(alts);
+        self.anyof_object_expr_nfa_cache.insert(cache_key, expr.clone());
+        Ok(Some(expr))
+    }
+
+    fn anyof_object_expr_nfa_cache_key(
+        variants: &[AnyOfObjectVariant],
+        non_object_options: &[Value],
+    ) -> String {
+        let mut key = String::new();
+        key.push_str("objects:");
+        for variant in variants {
+            key.push('[');
+            for item in &variant.items {
+                key.push_str(&item.key);
+                key.push('=');
+                key.push_str(if item.required { "required" } else { "optional" });
+                key.push(':');
+                key.push_str(&expr_key(&item.value_expr));
+                key.push(';');
+            }
+            key.push_str("|fixed=");
+            for fixed_key in &variant.fixed_keys {
+                key.push_str(fixed_key);
+                key.push(',');
+            }
+            key.push_str("|patterns=");
+            for pattern_expr in &variant.pattern_pair_exprs {
+                key.push_str(&expr_key(pattern_expr));
+                key.push(';');
+            }
+            key.push_str("|pattern_keys=");
+            for pattern_key in &variant.pattern_key_terminals {
+                key.push_str(&expr_key(pattern_key));
+                key.push(';');
+            }
+            key.push_str("|additional=");
+            if let Some(additional_value_expr) = &variant.additional_value_expr {
+                key.push_str(&expr_key(additional_value_expr));
+            }
+            key.push(']');
+        }
+        key.push_str("|non_objects:");
+        for option in non_object_options {
+            append_json_native(option, &mut key);
+            key.push(';');
+        }
+        key
     }
 
     /// Try to merge anyOf/oneOf variants that are all closed objects
@@ -10989,6 +11041,52 @@ mod tests {
             glrm.contains("(OBJ_ANYOF_FA_0_AP_SHARED_KEY | \"thumbnail\\\"\")"),
             "{glrm}"
         );
+    }
+
+    #[test]
+    fn repeated_anyof_object_expr_nfa_sites_share_generated_fa() {
+        let schema = json!({
+            "definitions": {
+                "person": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "thumbnail": {"type": "string"}
+                    },
+                    "additionalProperties": {"type": "number"}
+                },
+                "organization": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"}
+                    },
+                    "additionalProperties": {"type": "number"}
+                }
+            },
+            "type": "object",
+            "properties": {
+                "attributions": {
+                    "type": "array",
+                    "items": {
+                        "anyOf": [
+                            {"$ref": "#/definitions/person"},
+                            {"$ref": "#/definitions/organization"}
+                        ]
+                    }
+                },
+                "copyright_holder": {
+                    "anyOf": [
+                        {"$ref": "#/definitions/person"},
+                        {"$ref": "#/definitions/organization"}
+                    ]
+                }
+            }
+        });
+
+        let glrm = dump_glrm(schema);
+        assert_eq!(glrm.matches("fa obj_anyof_fa_").count(), 1, "{glrm}");
+        assert_eq!(glrm.matches("_AP_SHARED_KEY ::=").count(), 1, "{glrm}");
+        assert!(!glrm.contains("_AP_KEY_V"), "{glrm}");
     }
 
     #[test]
