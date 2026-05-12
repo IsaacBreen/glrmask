@@ -1871,6 +1871,20 @@ impl<'a> ConstraintState<'a> {
         buf
     }
 
+    pub(crate) fn prefill_mask_cache(&self) {
+        let cache = self.mask_cache.lock().unwrap();
+        if cache
+            .as_ref()
+            .is_some_and(|cache_data| cache_data.generation == self.generation)
+        {
+            return;
+        }
+        drop(cache);
+
+        let mut buf = vec![0u32; self.constraint.mask_len()];
+        self.fill_mask_uncached(&mut buf);
+    }
+
     pub fn fill_mask(&self, buf: &mut [u32]) {
         if self.try_fill_mask_from_cache(buf) {
             return;
