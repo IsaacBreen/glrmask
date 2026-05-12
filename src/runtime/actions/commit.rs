@@ -1082,7 +1082,9 @@ fn commit_bytes_impl_profiled(
 
     if state.len() == 1 {
         let (&tokenizer_state, parser_gss) = state.iter().next().unwrap();
-        if parser_gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()) {
+        if parser_gss.single_exclusive_top_value().is_some()
+            && parser_gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty())
+        {
             let direct_start = Instant::now();
             match commit_bytes_direct_linear_fast_path(
                 constraint,
@@ -1863,7 +1865,9 @@ fn commit_bytes_impl(
     // Single tokenizer state: execute tokenizer ONCE, try fast path, reuse result
     if state.len() == 1 {
         let (&tokenizer_state, parser_gss) = state.iter().next().unwrap();
-        if parser_gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()) {
+        if parser_gss.single_exclusive_top_value().is_some()
+            && parser_gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty())
+        {
             if let Some(LinearFastPathResult::Complete(result)) =
                 commit_bytes_direct_linear_fast_path(
                     constraint,

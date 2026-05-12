@@ -180,9 +180,14 @@ fn advance_pure_frontier_shifts(
 
     let mut shifts: SmallVec<[(u32, u32, bool); 8]> = SmallVec::new();
     for state in states {
-        let action = table.action(state, token)?;
+        let Some(action) = table.action(state, token) else {
+            continue;
+        };
         let (target, replace_top) = pure_frontier_shift(action)?;
         shifts.push((state, target, replace_top));
+    }
+    if shifts.is_empty() {
+        return None;
     }
     Some(gss.apply_top_pure_shifts(shifts))
 }
