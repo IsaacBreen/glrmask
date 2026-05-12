@@ -2063,6 +2063,7 @@ fn resolve_shared_ap_ref_target<'a>(root: &'a Value, ref_value: &str) -> Option<
 struct SharedAdditionalKeyPlan {
     literal_keys: BTreeSet<String>,
     pattern_keys: BTreeSet<String>,
+    literal_keys_by_pattern: BTreeMap<String, BTreeSet<String>>,
     common_body_expr: Option<GrammarExpr>,
     pattern_body_cache: BTreeMap<String, GrammarExpr>,
     constrained_pattern_body_cache: BTreeMap<(String, Vec<String>), GrammarExpr>,
@@ -2152,9 +2153,20 @@ fn collect_shared_additional_key_plan(root: &Value) -> SharedAdditionalKeyPlan {
         }
     }
 
+    let mut literal_keys_by_pattern = BTreeMap::new();
+    for pattern in &pattern_keys {
+        let matching_keys = literal_keys
+            .iter()
+            .filter(|key| decoded_regex_matches_search(pattern, key))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        literal_keys_by_pattern.insert(pattern.clone(), matching_keys);
+    }
+
     SharedAdditionalKeyPlan {
         literal_keys,
         pattern_keys,
+        literal_keys_by_pattern,
         ..Default::default()
     }
 }
@@ -9680,15 +9692,26 @@ impl<'a> SchemaCtx<'a> {
             .filter(|pattern| !excluded_pattern_keys.contains(*pattern))
             .cloned()
             .collect();
-        let allowed_back_pattern_set = allowed_back_patterns.iter().cloned().collect::<BTreeSet<_>>();
+        let excluded_by_patterns =
+            self.shared_additional_literal_keys_matched_by_any_pattern(excluded_pattern_keys);
+        let allowed_back_by_patterns = allowed_back_patterns
+            .iter()
+            .flat_map(|pattern| {
+                self.shared_additional_key_plan
+                    .literal_keys_by_pattern
+                    .get(pattern)
+                    .into_iter()
+                    .flat_map(|keys| keys.iter().cloned())
+            })
+            .collect::<BTreeSet<_>>();
         let allowed_back_keys: Vec<String> = self
             .shared_additional_key_plan
             .literal_keys
             .iter()
             .filter(|key| {
                 !excluded_literal_keys.contains(*key)
-                    && !Self::key_matches_any_pattern(excluded_pattern_keys, key).unwrap_or(false)
-                    && !Self::key_matches_any_pattern(&allowed_back_pattern_set, key).unwrap_or(false)
+                    && !excluded_by_patterns.contains(*key)
+                    && !allowed_back_by_patterns.contains(*key)
             })
             .cloned()
             .collect();
@@ -9744,15 +9767,26 @@ impl<'a> SchemaCtx<'a> {
             .filter(|pattern| !excluded_pattern_keys.contains(*pattern))
             .cloned()
             .collect();
-        let allowed_back_pattern_set = allowed_back_patterns.iter().cloned().collect::<BTreeSet<_>>();
+        let excluded_by_patterns =
+            self.shared_additional_literal_keys_matched_by_any_pattern(excluded_pattern_keys);
+        let allowed_back_by_patterns = allowed_back_patterns
+            .iter()
+            .flat_map(|pattern| {
+                self.shared_additional_key_plan
+                    .literal_keys_by_pattern
+                    .get(pattern)
+                    .into_iter()
+                    .flat_map(|keys| keys.iter().cloned())
+            })
+            .collect::<BTreeSet<_>>();
         let allowed_back_keys: Vec<String> = self
             .shared_additional_key_plan
             .literal_keys
             .iter()
             .filter(|key| {
                 !excluded_literal_keys.contains(*key)
-                    && !Self::key_matches_any_pattern(excluded_pattern_keys, key).unwrap_or(false)
-                    && !Self::key_matches_any_pattern(&allowed_back_pattern_set, key).unwrap_or(false)
+                    && !excluded_by_patterns.contains(*key)
+                    && !allowed_back_by_patterns.contains(*key)
             })
             .cloned()
             .collect();
@@ -9782,13 +9816,20 @@ impl<'a> SchemaCtx<'a> {
         Ok(GrammarExpr::Ref(rule_name))
     }
 
-    fn key_matches_any_pattern(patterns: &BTreeSet<String>, key: &str) -> Result<bool, GlrMaskError> {
-        for pattern in patterns {
-            if Self::schema_pattern_matches_key(pattern, key)? {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+    fn shared_additional_literal_keys_matched_by_any_pattern(
+        &self,
+        patterns: &BTreeSet<String>,
+    ) -> BTreeSet<String> {
+        patterns
+            .iter()
+            .flat_map(|pattern| {
+                self.shared_additional_key_plan
+                    .literal_keys_by_pattern
+                    .get(pattern)
+                    .into_iter()
+                    .flat_map(|keys| keys.iter().cloned())
+            })
+            .collect()
     }
 
     fn string_value_literal_body_expr_with_merge_config(
