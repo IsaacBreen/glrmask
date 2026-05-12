@@ -2069,6 +2069,16 @@ struct SharedAdditionalKeyPlan {
     key_rule_cache: BTreeMap<(Vec<String>, Vec<String>), String>,
 }
 
+#[derive(Debug, Default, Clone)]
+struct SharedStringValuePlan {
+    literal_values: BTreeSet<String>,
+    pattern_values: BTreeSet<String>,
+    common_body_expr: Option<GrammarExpr>,
+    literal_body_cache: BTreeMap<String, GrammarExpr>,
+    pattern_body_cache: BTreeMap<String, GrammarExpr>,
+    value_rule_cache: BTreeMap<(Vec<String>, Vec<String>), String>,
+}
+
 fn collect_shared_additional_key_plan(root: &Value) -> SharedAdditionalKeyPlan {
     let mut literal_keys = BTreeSet::new();
     let mut pattern_keys = BTreeSet::new();
@@ -2143,6 +2153,52 @@ fn collect_shared_additional_key_plan(root: &Value) -> SharedAdditionalKeyPlan {
     SharedAdditionalKeyPlan {
         literal_keys,
         pattern_keys,
+        ..Default::default()
+    }
+}
+
+fn schema_allows_string_values(object: &Map<String, Value>) -> bool {
+    match object.get("type") {
+        Some(Value::String(type_name)) => type_name == "string",
+        Some(Value::Array(type_names)) => type_names.iter().filter_map(Value::as_str).any(|name| name == "string"),
+        _ => true,
+    }
+}
+
+fn collect_shared_string_value_plan(root: &Value) -> SharedStringValuePlan {
+    let mut literal_values = BTreeSet::new();
+    let mut pattern_values = BTreeSet::new();
+    let mut queue = VecDeque::from([root]);
+    let mut visited = BTreeSet::new();
+
+    while let Some(node) = queue.pop_front() {
+        let node_id = node as *const Value as usize;
+        if !visited.insert(node_id) {
+            continue;
+        }
+
+        let Some(object) = node.as_object() else {
+            continue;
+        };
+
+        if schema_allows_string_values(object) {
+            if let Some(Value::String(value)) = object.get("const") {
+                literal_values.insert(value.clone());
+            }
+            if let Some(values) = object.get("enum").and_then(Value::as_array) {
+                literal_values.extend(values.iter().filter_map(Value::as_str).map(String::from));
+            }
+            if let Some(pattern) = object.get("pattern").and_then(Value::as_str) {
+                pattern_values.insert(pattern.to_string());
+            }
+        }
+
+        enqueue_child_schemas(root, object, &mut queue);
+    }
+
+    SharedStringValuePlan {
+        literal_values,
+        pattern_values,
         ..Default::default()
     }
 }
@@ -3477,6 +3533,7 @@ struct SchemaCtx<'a> {
     json_string_exact_cache: BTreeMap<usize, String>,
     json_string_upto_cache: BTreeMap<usize, String>,
     shared_additional_key_plan: SharedAdditionalKeyPlan,
+    shared_string_value_plan: SharedStringValuePlan,
     anyof_object_expr_nfa_cache: BTreeMap<String, GrammarExpr>,
     draft_stack: Vec<JsonSchemaDraft>,
     convert_depth: usize,
@@ -3709,6 +3766,7 @@ impl<'a> SchemaCtx<'a> {
             json_string_exact_cache: BTreeMap::new(),
             json_string_upto_cache: BTreeMap::new(),
             shared_additional_key_plan: collect_shared_additional_key_plan(root),
+            shared_string_value_plan: collect_shared_string_value_plan(root),
             anyof_object_expr_nfa_cache: BTreeMap::new(),
             draft_stack: vec![DEFAULT_JSON_SCHEMA_DRAFT],
             convert_depth: 0,
@@ -6936,6 +6994,9 @@ impl<'a> SchemaCtx<'a> {
         if let Some(value) = object.get("const") {
             let remaining_schema = Value::Object(Self::schema_without_keys(object, &["const"]));
             if self.value_satisfies_schema(value, &remaining_schema) {
+                if let Some(text) = value.as_str() {
+                    return Ok(Some(self.shared_string_literal_value_expr(text)));
+                }
                 return Ok(Some(self.json_literal(value)));
             }
             return Err(unsat_schema_error());
@@ -7622,6 +7683,9 @@ impl<'a> SchemaCtx<'a> {
             let Some(pattern) = prune_pattern_branches_for_min_length(pattern, min_len) else {
                 return Ok(self.extract_terminal_rule(never_expr(), "JSON_STRING_PATTERN_UNSAT"));
             };
+            if min_len == 0 && max_len.is_none() {
+                return Ok(self.shared_string_pattern_value_expr(&pattern));
+            }
             if let Some(unit_expr) = simple_repeated_single_char_expr(&pattern) {
                 let required_min = min_len.max(1);
                 if matches!(max_len, Some(max) if max < required_min) {
@@ -7730,7 +7794,7 @@ impl<'a> SchemaCtx<'a> {
             }
         }
         if min_len == 0 && max_len.is_none() {
-            return Ok(self.json_string_ref());
+            return Ok(self.shared_unconstrained_string_value_expr());
         }
 
         if self.should_split_bounded_string(min_len, max_len) {
@@ -9494,6 +9558,182 @@ impl<'a> SchemaCtx<'a> {
             }
         }
         Ok(false)
+    }
+
+    fn string_value_literal_body_expr_with_merge_config(
+        text: &str,
+        merge_config: JsonStringMergeConfig,
+    ) -> GrammarExpr {
+        let full = json_string_literal_bytes(text);
+        let body_only = literal_expr(&full[1..full.len() - 1]);
+        wrap_expr_with_string_literals(body_only, merge_config)
+    }
+
+    fn shared_string_literal_value_body_expr(&mut self, text: &str) -> GrammarExpr {
+        if let Some(expr) = self.shared_string_value_plan.literal_body_cache.get(text) {
+            return expr.clone();
+        }
+
+        let expr = self.force_extract_terminal_rule(
+            Self::string_value_literal_body_expr_with_merge_config(
+                text,
+                json_literal_string_merge_config(),
+            ),
+            "STRING_SHARED_LITERAL_VALUE",
+        );
+        self.shared_string_value_plan
+            .literal_body_cache
+            .insert(text.to_string(), expr.clone());
+        expr
+    }
+
+    fn shared_string_pattern_value_body_expr(&mut self, pattern: &str) -> GrammarExpr {
+        if let Some(expr) = self.shared_string_value_plan.pattern_body_cache.get(pattern) {
+            return expr.clone();
+        }
+
+        let prefix = format!(
+            "STRING_SHARED_PATTERN_VALUE_{}",
+            self.shared_string_value_plan.pattern_body_cache.len()
+        );
+        let body = self.build_pattern_lexer_expr(&decoded_regex_search_expr(pattern, None), &format!("{prefix}_BODY"));
+        let (terminal_body, _) =
+            wrap_string_value_expr_parts_with_merge_config(body, json_literal_string_merge_config());
+        let expr = self.extract_terminal_rule(terminal_body, &prefix);
+        self.shared_string_value_plan
+            .pattern_body_cache
+            .insert(pattern.to_string(), expr.clone());
+        expr
+    }
+
+    fn shared_string_literal_value_expr(&mut self, text: &str) -> GrammarExpr {
+        wrap_string_value_terminal(
+            self.shared_string_literal_value_body_expr(text),
+            json_literal_string_merge_config(),
+        )
+    }
+
+    fn shared_string_pattern_value_expr(&mut self, pattern: &str) -> GrammarExpr {
+        wrap_string_value_terminal(
+            self.shared_string_pattern_value_body_expr(pattern),
+            json_literal_string_merge_config(),
+        )
+    }
+
+    fn shared_string_value_common_body_expr(&mut self) -> GrammarExpr {
+        if let Some(expr) = &self.shared_string_value_plan.common_body_expr {
+            return expr.clone();
+        }
+
+        let merge_config = json_literal_string_merge_config();
+        let base_body = self.extract_terminal_rule(
+            wrap_expr_with_string_literals(
+                GrammarExpr::Repeat(Box::new(self.json_string_char_ref())),
+                merge_config,
+            ),
+            "STRING_SHARED_VALUE_BASE",
+        );
+
+        let literal_values = self
+            .shared_string_value_plan
+            .literal_values
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut excluded = literal_values
+            .iter()
+            .map(|value| self.shared_string_literal_value_body_expr(value))
+            .collect::<Vec<_>>();
+        let pattern_values = self
+            .shared_string_value_plan
+            .pattern_values
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        for pattern in pattern_values {
+            excluded.push(self.shared_string_pattern_value_body_expr(&pattern));
+        }
+
+        let body = if excluded.is_empty() {
+            base_body
+        } else {
+            GrammarExpr::Exclude {
+                expr: Box::new(base_body),
+                exclude: Box::new(choice_or_single(excluded)),
+            }
+        };
+
+        let expr = self.insert_named_terminal_rule("STRING_SHARED_VALUE", body);
+        self.shared_string_value_plan.common_body_expr = Some(expr.clone());
+        expr
+    }
+
+    fn build_shared_string_value_expr(
+        &mut self,
+        allowed_literals: Vec<String>,
+        allowed_patterns: Vec<String>,
+        prefix: &str,
+    ) -> GrammarExpr {
+        let mut allowed_literals = allowed_literals;
+        let mut allowed_patterns = allowed_patterns;
+        allowed_literals.sort();
+        allowed_literals.dedup();
+        allowed_patterns.sort();
+        allowed_patterns.dedup();
+        allowed_literals.retain(|value| {
+            !allowed_patterns
+                .iter()
+                .any(|pattern| decoded_regex_matches_search(pattern, value))
+        });
+
+        let cache_key = (allowed_literals.clone(), allowed_patterns.clone());
+        if let Some(rule_name) = self.shared_string_value_plan.value_rule_cache.get(&cache_key) {
+            return GrammarExpr::Ref(rule_name.clone());
+        }
+
+        let mut body_options = Vec::with_capacity(1 + allowed_literals.len() + allowed_patterns.len());
+        body_options.push(self.shared_string_value_common_body_expr());
+        for value in &allowed_literals {
+            body_options.push(self.shared_string_literal_value_body_expr(value));
+        }
+        for pattern in &allowed_patterns {
+            body_options.push(self.shared_string_pattern_value_body_expr(pattern));
+        }
+
+        let body = choice_or_single(body_options);
+        let expr = wrap_string_value_terminal(body, json_literal_string_merge_config());
+        let rule_name = self.fresh_rule_name(prefix);
+        self.insert_rule(rule_name.clone(), expr);
+        self.shared_string_value_plan
+            .value_rule_cache
+            .insert(cache_key, rule_name.clone());
+        GrammarExpr::Ref(rule_name)
+    }
+
+    fn shared_unconstrained_string_value_expr(&mut self) -> GrammarExpr {
+        if self.shared_string_value_plan.literal_values.is_empty()
+            && self.shared_string_value_plan.pattern_values.is_empty()
+        {
+            return self.json_string_ref();
+        }
+
+        let allowed_literals = self
+            .shared_string_value_plan
+            .literal_values
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let allowed_patterns = self
+            .shared_string_value_plan
+            .pattern_values
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        self.build_shared_string_value_expr(
+            allowed_literals,
+            allowed_patterns,
+            "string_shared_value",
+        )
     }
 
     fn build_object_expr(&mut self, schema: &Map<String, Value>) -> Result<GrammarExpr, GlrMaskError> {
@@ -11446,6 +11686,33 @@ mod tests {
 
         assert!(glrm.contains("t JSON_ENUM_NUMBER_0 ::= \"1\" | \"2\";"), "{glrm}");
         assert!(glrm.contains("t JSON_ENUM_STRING_0 ::= \"1\\\"\" | \"2\\\"\";"), "{glrm}");
+    }
+
+    #[test]
+    fn unconstrained_string_values_share_literal_and_pattern_exclusions() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "plain": {"type": "string"},
+                "literal": {"const": "ready"},
+                "choice": {"enum": ["open", "closed"]},
+                "patterned": {"type": "string", "pattern": "^x_"}
+            },
+            "additionalProperties": false
+        });
+
+        let glrm = dump_glrm(schema);
+
+        assert!(glrm.contains("t STRING_SHARED_VALUE ::="), "{glrm}");
+        assert!(glrm.contains("STRING_SHARED_LITERAL_VALUE"), "{glrm}");
+        assert!(glrm.contains("STRING_SHARED_PATTERN_VALUE"), "{glrm}");
+        assert!(glrm.contains(" - STRING_SHARED_LITERAL_VALUE"), "{glrm}");
+        assert!(glrm.contains(" - STRING_SHARED_PATTERN_VALUE"), "{glrm}");
+        assert!(
+            glrm.contains("STRING_SHARED_VALUE | STRING_SHARED_LITERAL_VALUE")
+                && glrm.contains("STRING_SHARED_PATTERN_VALUE"),
+            "{glrm}"
+        );
     }
 
     #[test]
