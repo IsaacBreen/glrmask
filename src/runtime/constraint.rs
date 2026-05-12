@@ -57,6 +57,8 @@ type FastTokenizerTransitions = Vec<Box<[u32; 256]>>;
 pub struct Constraint {
     pub(crate) parser_dwa: DWA,
     pub(crate) table: GLRTable,
+    #[serde(default)]
+    pub(crate) terminal_display_names: Vec<String>,
     pub(crate) tokenizer: Tokenizer,
     #[serde(default)]
     pub(crate) ignore_terminal: Option<TerminalID>,
@@ -322,6 +324,16 @@ fn count_complement_subgroups(missing: u64, valid_mask: u64) -> (u32, u32, u32) 
 }
 
 impl Constraint {
+    pub fn terminal_display_names(&self) -> &[String] {
+        &self.terminal_display_names
+    }
+
+    pub fn terminal_display_name(&self, terminal_id: TerminalID) -> Option<&str> {
+        self.terminal_display_names
+            .get(terminal_id as usize)
+            .map(String::as_str)
+    }
+
     pub(crate) fn internal_token_materialization_cost(&self, internal_token: usize) -> u64 {
         if internal_token < self.heavy_token_dense_masks.len()
             && self.heavy_token_dense_masks[internal_token].is_some()

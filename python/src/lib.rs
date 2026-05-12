@@ -222,6 +222,18 @@ impl PyConstraint {
     fn num_parser_states(&self) -> u32 {
         self.inner.num_parser_states()
     }
+
+    /// Return display names for grammar terminals by terminal id.
+    fn terminal_display_names(&self) -> Vec<String> {
+        self.inner.terminal_display_names().to_vec()
+    }
+
+    /// Return the display name for a grammar terminal id, if present.
+    fn terminal_display_name(&self, terminal_id: u32) -> Option<String> {
+        self.inner
+            .terminal_display_name(terminal_id)
+            .map(str::to_string)
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -716,6 +716,7 @@ fn compile_prepared_with_profile(
         let constraint = finalize_constraint(Constraint {
             parser_dwa,
             table,
+            terminal_display_names: analyzed_grammar.terminal_display_names.clone(),
             tokenizer,
             ignore_terminal: prepared_grammar.ignore_terminal,
             possible_matches: possible_matches.into_artifact(),
