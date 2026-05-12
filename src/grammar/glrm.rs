@@ -93,7 +93,7 @@ fn dump_expr_nfa(expr_nfa: &ExprNFA) -> String {
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(", ");
-    out.push_str(&format!("start {};\n", starts));
+    out.push_str(&format!("  start {};\n", starts));
 
     let accepts = expr_nfa
         .nfa
@@ -103,11 +103,11 @@ fn dump_expr_nfa(expr_nfa: &ExprNFA) -> String {
         .filter_map(|(state_id, state)| state.is_accepting.then(|| state_id.to_string()))
         .collect::<Vec<_>>()
         .join(", ");
-    out.push_str(&format!("accept {};\n\n", accepts));
+    out.push_str(&format!("  accept {};\n\n", accepts));
 
     for (state_id, state) in expr_nfa.nfa.states.iter().enumerate() {
         for &target in &state.epsilons {
-            out.push_str(&format!("{state_id} --> {target};\n"));
+            out.push_str(&format!("  {state_id} --> {target};\n"));
         }
         for (&label, targets) in &state.transitions {
             let symbol = expr_nfa
@@ -115,7 +115,7 @@ fn dump_expr_nfa(expr_nfa: &ExprNFA) -> String {
                 .map(|expr| dump_nt_expr(expr, false))
                 .unwrap_or_else(|| format!("/*invalid-symbol-{label}*/ eps"));
             for &target in targets {
-                out.push_str(&format!("{state_id} -- {symbol} --> {target};\n"));
+                out.push_str(&format!("  {state_id} -- {symbol} --> {target};\n"));
             }
         }
     }
@@ -1161,7 +1161,9 @@ accept 1;
         .unwrap();
         let dumped = to_glrm(&grammar);
         assert!(dumped.contains("fa obj ::= {"), "{dumped}");
-        assert!(dumped.contains("0 -- \"a\" --> 1;"), "{dumped}");
+        assert!(dumped.contains("  start 0;"), "{dumped}");
+        assert!(dumped.contains("  accept 1;"), "{dumped}");
+        assert!(dumped.contains("  0 -- \"a\" --> 1;"), "{dumped}");
         assert!(!dumped.contains("ExprNFA("), "{dumped}");
     }
 
