@@ -1,3 +1,4 @@
+tmp/
 /target
 /python/target
 *.DS_Store
