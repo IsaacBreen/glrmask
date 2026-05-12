@@ -5868,16 +5868,30 @@ impl<'a> SchemaCtx<'a> {
             return wrap_key_colon_terminal(shared_body);
         }
 
-        let mut body_options = Vec::with_capacity(1 + allowed_back_keys.len());
-        body_options.push(shared_body);
-        body_options.extend(
-            allowed_back_keys
-                .iter()
-                .map(|key| literal_expr(&key_colon_literal_body_bytes(key))),
-        );
+        // `shared_body | sibling_literals` is equivalent to excluding only this
+        // variant's fixed keys from the full JSON string body. Keep that as a
+        // single top-level Exclude; otherwise the lexer compiler sees a
+        // Shared(Exclude) nested under Choice after terminal refs resolve.
+        let variant_excluded = variant_keys
+            .iter()
+            .map(|key| {
+                self.force_extract_terminal_rule(
+                    literal_expr(&key_colon_literal_body_bytes(key)),
+                    &format!("{upper_base_name}_AP_LITERAL_KEY"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let variant_body_expr = if variant_excluded.is_empty() {
+            GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())
+        } else {
+            GrammarExpr::Exclude {
+                expr: Box::new(GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())),
+                exclude: Box::new(choice_or_single(variant_excluded)),
+            }
+        };
         let variant_body = self.insert_named_terminal_rule(
             format!("{upper_base_name}_AP_KEY_V{variant_idx}"),
-            choice_or_single(body_options),
+            variant_body_expr,
         );
         wrap_key_colon_terminal(variant_body)
     }
@@ -10671,6 +10685,7 @@ mod tests {
     use super::string_value_body_regex;
     use super::uri_quote_merge_warning_needed;
     use super::wrap_string_value_expr_parts;
+    use crate::grammar::ast::lower;
     use crate::grammar::glrm::to_glrm;
     use crate::grammar::ast::GrammarExpr;
     use serde_json::json;
@@ -10784,6 +10799,46 @@ mod tests {
         });
 
         assert!(grammar_contains_expr_dfa(schema));
+    }
+
+    #[test]
+    fn anyof_object_expr_dfa_open_variants_lower_without_nested_excludes() {
+        let schema = json!({
+            "definitions": {
+                "organization": {
+                    "type": "object",
+                    "properties": {
+                        "email": {"type": "string"},
+                        "links": {"type": "array", "items": {"type": "string"}},
+                        "name": {"type": "string"},
+                        "role": {"type": "string"},
+                        "sort": {"type": "string"}
+                    },
+                    "required": ["name"]
+                },
+                "person": {
+                    "type": "object",
+                    "properties": {
+                        "description": {"type": "string"},
+                        "email": {"type": "string"},
+                        "links": {"type": "array", "items": {"type": "string"}},
+                        "name": {"type": "string"},
+                        "role": {"type": "string"},
+                        "sort": {"type": "string"},
+                        "thumbnail": {"type": "string"}
+                    },
+                    "required": ["name"]
+                }
+            },
+            "anyOf": [
+                {"$ref": "#/definitions/person"},
+                {"$ref": "#/definitions/organization"}
+            ]
+        });
+
+        let named = schema_to_named_grammar(&schema).unwrap();
+        assert!(named.rules.iter().any(|rule| expr_contains_expr_dfa(&rule.expr)));
+        lower(&named).unwrap();
     }
 
     #[test]
