@@ -1333,9 +1333,10 @@ impl<'a> ConstraintState<'a> {
         drop(direct_buf);
         let finalize_start = profile.as_ref().map(|_| Instant::now());
 
-        let mut use_delta_seed = false;
+        let direct_finalized = direct_buf_used && direct_buf_possible;
+        let mut use_delta_seed = direct_finalized;
         let mut reuse_existing_cache_dense = false;
-        {
+        if !direct_finalized {
             let cache = self.mask_cache.lock().unwrap();
             if let Some(cache_data) = cache.as_ref() {
                 if cache_data.mask.len() == buf.len() && cache_data.merged_dense == merged {
