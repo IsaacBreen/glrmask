@@ -629,16 +629,33 @@ impl Constraint {
         self.word_group_sparse_max_entries = word_group_sparse_max_entries;
         let block_ms = block_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let derived_started_at = profile.then(std::time::Instant::now);
+        let derived_piece_started_at = profile.then(std::time::Instant::now);
         self.pair_word_group_buf_masks = self.compute_sliding_word_group_dense_masks(2);
+        let pair_ms = derived_piece_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let derived_piece_started_at = profile.then(std::time::Instant::now);
         self.quad_word_group_buf_masks = self.compute_sliding_word_group_dense_masks(4);
+        let quad_ms = derived_piece_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let derived_piece_started_at = profile.then(std::time::Instant::now);
         self.super_word_group_buf_masks = self.compute_sliding_word_group_dense_masks(8);
+        let super_ms = derived_piece_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let derived_piece_started_at = profile.then(std::time::Instant::now);
         self.mega_word_group_buf_masks = self.compute_sliding_word_group_dense_masks(16);
+        let mega_ms = derived_piece_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let derived_piece_started_at = profile.then(std::time::Instant::now);
         self.giga_word_group_buf_masks = self.compute_sliding_word_group_dense_masks(32);
+        let giga_ms = derived_piece_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let derived_piece_started_at = profile.then(std::time::Instant::now);
         self.all_tokens_buf_mask = self.compute_all_tokens_buf_mask();
+        let all_tokens_ms = derived_piece_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let derived_piece_started_at = profile.then(std::time::Instant::now);
         self.heavy_token_dense_masks = self.compute_heavy_token_dense_masks();
+        let heavy_ms = derived_piece_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let derived_piece_started_at = profile.then(std::time::Instant::now);
         let (flat, offsets) = Self::compute_flat_buf_masks(&self.internal_token_buf_masks);
         self.internal_token_buf_flat = flat;
         self.internal_token_buf_offsets = offsets;
+        let flat_ms = derived_piece_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let derived_piece_started_at = profile.then(std::time::Instant::now);
         self.total_internal_buf_cost = Self::compute_total_internal_buf_cost(
             &self.internal_token_buf_offsets,
             &self.heavy_token_dense_masks,
@@ -661,7 +678,8 @@ impl Constraint {
         );
         self.word_group_buf_op_costs =
             Self::compute_word_group_buf_op_costs(&self.internal_token_buf_op_costs);
-        self.final_mask_mapping = FinalMaskMapping::new(&self.internal_token_to_tokens, self.mask_len());
+        self.final_mask_mapping = FinalMaskMapping::default();
+        let costs_ms = derived_piece_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let n_light = n_internal.saturating_sub(self.heavy_token_indices.len());
         let light_total = self.total_internal_buf_cost.saturating_sub(self.heavy_total_cost);
         self.light_avg_cost_x256 = if n_light > 0 { (light_total * 256) / n_light } else { 0 };
@@ -669,8 +687,12 @@ impl Constraint {
         self.token_bytes_dense = Vec::new();
         self.internal_token_dense_words = dense_mask_words;
         self.weight_token_dense_masks = dense_masks;
+        let derived_piece_started_at = profile.then(std::time::Instant::now);
         self.weight_token_buf_masks = self.compute_weight_token_buf_masks();
+        let weight_buf_ms = derived_piece_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let derived_piece_started_at = profile.then(std::time::Instant::now);
         self.weight_token_sparse_buf_masks = self.compute_weight_token_sparse_buf_masks();
+        let weight_sparse_ms = derived_piece_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         self.dwa_fast_transitions = fast_transitions;
         self.tokenizer_fast_transitions = tokenizer_fast_transitions;
         let derived_ms = derived_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
@@ -678,6 +700,21 @@ impl Constraint {
         self.build_seed_dense_masks();
         let seed_ms = seed_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         if let Some(total_started_at) = total_started_at {
+            eprintln!(
+                "[glrmask/profile][runtime_finalize_derived] pair_ms={:.3} quad_ms={:.3} super_ms={:.3} mega_ms={:.3} giga_ms={:.3} all_tokens_ms={:.3} heavy_ms={:.3} flat_ms={:.3} costs_ms={:.3} weight_buf_ms={:.3} weight_sparse_ms={:.3} final_weight_sets={}",
+                pair_ms,
+                quad_ms,
+                super_ms,
+                mega_ms,
+                giga_ms,
+                all_tokens_ms,
+                heavy_ms,
+                flat_ms,
+                costs_ms,
+                weight_buf_ms,
+                weight_sparse_ms,
+                self.weight_token_buf_masks.len(),
+            );
             eprintln!(
                 "[glrmask/profile][runtime_finalize] primary_ms={:.3} block_masks_ms={:.3} derived_masks_ms={:.3} seed_dense_ms={:.3} total_ms={:.3}",
                 primary_ms,
@@ -1077,6 +1114,7 @@ impl Constraint {
             return FxHashMap::default();
         }
 
+        let final_dense_masks = self.final_weight_token_dense_masks();
         let build = |(&key, dense): (&usize, &DenseWords)| {
             let estimated_cost = self.estimate_internal_dense_to_buf_cost(dense);
             if estimated_cost == 0 {
@@ -1088,11 +1126,7 @@ impl Constraint {
             Some((key, buf.into_boxed_slice()))
         };
 
-        if rayon::current_num_threads() == 1 {
-            self.weight_token_dense_masks.iter().filter_map(build).collect()
-        } else {
-            self.weight_token_dense_masks.par_iter().filter_map(build).collect()
-        }
+        final_dense_masks.into_iter().filter_map(build).collect()
     }
 
     fn dense_buf_to_sparse_entries(buf: &[u32]) -> Box<[(u16, u32)]> {
@@ -1115,6 +1149,7 @@ impl Constraint {
             return FxHashMap::default();
         }
 
+        let final_dense_masks = self.final_weight_token_dense_masks();
         let build = |(&key, dense): (&usize, &DenseWords)| {
             let estimated_cost = self.estimate_internal_dense_to_buf_cost(dense);
             if estimated_cost == 0 || estimated_cost >= (buf_words / 2) as u64 {
@@ -1131,14 +1166,7 @@ impl Constraint {
             }
         };
 
-        if rayon::current_num_threads() == 1 {
-            self.weight_token_dense_masks.iter().filter_map(build).collect()
-        } else {
-            self.weight_token_dense_masks
-                .par_iter()
-                .filter_map(build)
-                .collect()
-        }
+        final_dense_masks.into_iter().filter_map(build).collect()
     }
 
     fn compute_seed_state_buf_masks(&self) -> SeedStateBufMasks {
@@ -1443,6 +1471,30 @@ impl Constraint {
             let key = token_set as *const RangeSetBlaze<u32> as usize;
             unique_sets.entry(key).or_insert(token_set);
         }
+    }
+
+    fn final_weight_token_dense_masks(&self) -> Vec<(&usize, &DenseWords)> {
+        let mut keys: FxHashMap<usize, ()> = FxHashMap::default();
+        let mut dense_masks = Vec::new();
+
+        for state in self.parser_dwa.states() {
+            let Some(final_weight) = &state.final_weight else {
+                continue;
+            };
+
+            for token_set in final_weight.unique_token_sets() {
+                let key = token_set as *const RangeSetBlaze<u32> as usize;
+                if keys.insert(key, ()).is_some() {
+                    continue;
+                }
+                if let Some((stored_key, dense)) = self.weight_token_dense_masks.get_key_value(&key)
+                {
+                    dense_masks.push((stored_key, dense));
+                }
+            }
+        }
+
+        dense_masks
     }
 
     fn dense_words_from_internal_set_with_words(
