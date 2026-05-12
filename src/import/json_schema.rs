@@ -1766,6 +1766,13 @@ fn env_flag_optional(name: &str) -> Option<bool> {
     })
 }
 
+fn env_usize_default(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
 fn json_string_merge_config(is_pattern: bool) -> JsonStringMergeConfig {
     let default = JsonStringMergeConfig {
         merge_open: false,
@@ -2197,11 +2204,19 @@ fn collect_shared_string_value_plan(root: &Value) -> SharedStringValuePlan {
         enqueue_child_schemas(root, object, &mut queue);
     }
 
-    SharedStringValuePlan {
-        literal_values,
-        pattern_values,
-        ..Default::default()
+    if literal_values.len() + pattern_values.len() > shared_string_value_exclusion_limit() {
+        SharedStringValuePlan::default()
+    } else {
+        SharedStringValuePlan {
+            literal_values,
+            pattern_values,
+            ..Default::default()
+        }
     }
+}
+
+fn shared_string_value_exclusion_limit() -> usize {
+    env_usize_default("GLRMASK_SHARED_STRING_VALUE_EXCLUSION_LIMIT", 32)
 }
 
 fn use_structured_uri() -> bool {
@@ -6995,7 +7010,9 @@ impl<'a> SchemaCtx<'a> {
         if let Some(value) = object.get("const") {
             let remaining_schema = Value::Object(Self::schema_without_keys(object, &["const"]));
             if self.value_satisfies_schema(value, &remaining_schema) {
-                if let Some(text) = value.as_str() {
+                if let Some(text) = value.as_str()
+                    && self.shared_string_value_exclusions_active()
+                {
                     return Ok(Some(self.shared_string_literal_value_expr(text)));
                 }
                 return Ok(Some(self.json_literal(value)));
@@ -7684,7 +7701,7 @@ impl<'a> SchemaCtx<'a> {
             let Some(pattern) = prune_pattern_branches_for_min_length(pattern, min_len) else {
                 return Ok(self.extract_terminal_rule(never_expr(), "JSON_STRING_PATTERN_UNSAT"));
             };
-            if min_len == 0 && max_len.is_none() {
+            if min_len == 0 && max_len.is_none() && self.shared_string_value_exclusions_active() {
                 return Ok(self.shared_string_pattern_value_expr(&pattern));
             }
             if let Some(unit_expr) = simple_repeated_single_char_expr(&pattern) {
@@ -9681,6 +9698,11 @@ impl<'a> SchemaCtx<'a> {
         )
     }
 
+    fn shared_string_value_exclusions_active(&self) -> bool {
+        !self.shared_string_value_plan.literal_values.is_empty()
+            || !self.shared_string_value_plan.pattern_values.is_empty()
+    }
+
     fn shared_string_value_common_body_expr(&mut self) -> GrammarExpr {
         if let Some(expr) = &self.shared_string_value_plan.common_body_expr {
             return expr.clone();
@@ -9772,9 +9794,7 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn shared_unconstrained_string_value_expr(&mut self) -> GrammarExpr {
-        if self.shared_string_value_plan.literal_values.is_empty()
-            && self.shared_string_value_plan.pattern_values.is_empty()
-        {
+        if !self.shared_string_value_exclusions_active() {
             return self.json_string_ref();
         }
 
@@ -11170,7 +11190,7 @@ mod tests {
     use crate::grammar::ast::lower;
     use crate::grammar::glrm::to_glrm;
     use crate::grammar::ast::GrammarExpr;
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::{env, ffi::OsString, sync::Mutex};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -11780,6 +11800,25 @@ mod tests {
                 && glrm.contains("STRING_SHARED_PATTERN_VALUE"),
             "{glrm}"
         );
+    }
+
+    #[test]
+    fn shared_string_value_exclusions_are_capped_for_large_literal_sets() {
+        let values = (0..40)
+            .map(|idx| Value::String(format!("value-{idx}")))
+            .collect::<Vec<_>>();
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "plain": {"type": "string"},
+                "choice": {"enum": values}
+            },
+            "additionalProperties": false
+        });
+
+        let glrm = dump_glrm(schema);
+
+        assert!(!glrm.contains("t STRING_SHARED_VALUE ::="), "{glrm}");
     }
 
     #[test]
