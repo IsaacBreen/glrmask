@@ -6108,7 +6108,7 @@ impl<'a> SchemaCtx<'a> {
                 if state.has_content {
                     symbols.push(self.json_item_separator_expr());
                 }
-                symbols.push(self.fused_json_key_colon_literal(key));
+                symbols.push(self.json_key_colon_literal(key));
                 symbols.push(value_expr);
                 Self::add_expr_nfa_symbol_path(&mut builder, state_id, symbols, next_state_id);
             }
@@ -10941,6 +10941,39 @@ mod tests {
         let named = schema_to_named_grammar(&schema).unwrap();
         assert!(named.rules.iter().any(|rule| expr_contains_expr_nfa(&rule.expr)));
         lower(&named).unwrap();
+    }
+
+    #[test]
+    fn anyof_object_expr_nfa_fixed_keys_use_split_key_colon_symbols() {
+        let schema = json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "thumbnail": {"type": "string"}
+                    },
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"}
+                    },
+                    "additionalProperties": false
+                }
+            ]
+        });
+
+        let glrm = dump_glrm(schema);
+        assert!(glrm.contains("fa obj_anyof_fa_0_body"), "{glrm}");
+        assert!(
+            glrm.contains("-- \"\\\"\" \"thumbnail\\\"\" \": \" -->"),
+            "{glrm}"
+        );
+        assert!(
+            !glrm.contains("-- \"\\\"thumbnail\\\": \" -->"),
+            "{glrm}"
+        );
     }
 
     #[test]
