@@ -6505,10 +6505,16 @@ impl<'a> SchemaCtx<'a> {
     /// For `anyOf` of open objects, detect when one variant's language dominates the union
     /// and compile just that variant to eliminate GLR ambiguity.
     ///
-    /// For open objects (no `additionalProperties: false`), `language(A) ⊆ language(B)` iff:
+    /// For open objects with unconstrained additional properties on B,
+    /// `language(A) ⊆ language(B)` iff:
     ///   1. `B.required ⊆ A.required`  (B requires fewer keys → accepts more objects)
     ///   2. `B.properties.keys() ⊆ A.properties.keys()`  (B has fewer typed constraints)
     ///   3. For every key `k` shared by both: `B.properties[k] == A.properties[k]`
+    ///
+    /// This intentionally only uses a dominant B whose additionalProperties are
+    /// absent/true/{} so keys that are typed only by A are accepted by B as JSON
+    /// values. A constrained additionalProperties schema would need a real
+    /// schema-subset proof for each omitted key.
     ///
     /// When these hold for all `i ≠ j`, `anyOf[A₀…Aₙ] = B` exactly, so compiling just `B`
     /// is language-preserving and eliminates the ambiguous GLR branching.
@@ -6571,6 +6577,10 @@ impl<'a> SchemaCtx<'a> {
         // Find a dominant variant j such that for all i ≠ j: language(i) ⊆ language(j).
         let empty_props = Map::new();
         let dominant_idx = (0..resolved.len()).find(|&j| {
+            if !Self::additional_properties_are_unconstrained(resolved[j].get("additionalProperties"))
+            {
+                return false;
+            }
             let (req_j, keys_j) = &info[j];
             let req_j_set: std::collections::BTreeSet<&str> =
                 req_j.iter().map(String::as_str).collect();
@@ -6610,6 +6620,14 @@ impl<'a> SchemaCtx<'a> {
 
         let dominant = Value::Object(resolved[j].clone());
         Ok(Some(self.convert_schema(&dominant)?))
+    }
+
+    fn additional_properties_are_unconstrained(additional_properties: Option<&Value>) -> bool {
+        match additional_properties {
+            None | Some(Value::Bool(true)) => true,
+            Some(Value::Object(map)) => map.is_empty(),
+            _ => false,
+        }
     }
 
     /// For closed objects (`additionalProperties: false`), `language(A) ⊆ language(B)` iff:
@@ -6754,6 +6772,9 @@ impl<'a> SchemaCtx<'a> {
 
         if keyword == "anyOf" || keyword == "oneOf" {
             if let Some(expr) = self.try_reduce_anyof_closed_objects(schema, options)? {
+                return Ok(Some(expr));
+            }
+            if let Some(expr) = self.try_reduce_anyof_open_objects(schema, options)? {
                 return Ok(Some(expr));
             }
             if let Some(expr) = self.try_build_anyof_object_expr_nfa(schema, options)? {
@@ -11010,6 +11031,38 @@ mod tests {
             "anyOf": [
                 {"$ref": "#/definitions/person"},
                 {"$ref": "#/definitions/organization"}
+            ]
+        });
+
+        let named = schema_to_named_grammar(&schema).unwrap();
+        assert!(
+            !named.rules.iter().any(|rule| expr_contains_expr_nfa(&rule.expr)),
+            "{named:#?}"
+        );
+        lower(&named).unwrap();
+    }
+
+    #[test]
+    fn anyof_open_object_dominance_does_not_reduce_constrained_additional_properties() {
+        let schema = json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "thumbnail": {"type": "string"}
+                    },
+                    "required": ["name"],
+                    "additionalProperties": {"type": "number"}
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"}
+                    },
+                    "required": ["name"],
+                    "additionalProperties": {"type": "number"}
+                }
             ]
         });
 
