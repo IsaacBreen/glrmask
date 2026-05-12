@@ -5970,6 +5970,7 @@ impl<'a> SchemaCtx<'a> {
         builder.set_accepting(accept);
 
         let mut state_ids = BTreeMap::<AnyOfObjectDfaState, u32>::new();
+        let mut additional_entry_state_ids = BTreeMap::<(u16, bool), u32>::new();
         let mut queue = VecDeque::<AnyOfObjectDfaState>::new();
         for variant_idx in 0..variants.len() {
             let state = AnyOfObjectDfaState {
@@ -6048,19 +6049,29 @@ impl<'a> SchemaCtx<'a> {
                         queue.push_back(ap_state);
                         id
                     };
-                    let mut symbols = Vec::new();
-                    if state.has_content {
-                        symbols.push(self.json_item_separator_expr());
-                    }
-                    symbols.push(self.build_anyof_object_ap_key_expr(
-                        base_name,
-                        state.variant_idx as usize,
-                        &all_keys,
-                        &variant.fixed_keys,
-                        &variant.pattern_key_terminals,
-                    ));
-                    symbols.push(value_expr.clone());
-                    Self::add_expr_nfa_symbol_path(&mut builder, state_id, symbols, ap_state_id);
+                    let entry_key = (state.variant_idx, state.has_content);
+                    let entry_state_id =
+                        if let Some(&existing) = additional_entry_state_ids.get(&entry_key) {
+                            existing
+                        } else {
+                            let id = builder.add_state();
+                            additional_entry_state_ids.insert(entry_key, id);
+                            let mut symbols = Vec::new();
+                            if state.has_content {
+                                symbols.push(self.json_item_separator_expr());
+                            }
+                            symbols.push(self.build_anyof_object_ap_key_expr(
+                                base_name,
+                                state.variant_idx as usize,
+                                &all_keys,
+                                &variant.fixed_keys,
+                                &variant.pattern_key_terminals,
+                            ));
+                            symbols.push(value_expr.clone());
+                            Self::add_expr_nfa_symbol_path(&mut builder, id, symbols, ap_state_id);
+                            id
+                        };
+                    builder.add_epsilon(state_id, entry_state_id);
                 }
             }
 
@@ -11039,6 +11050,11 @@ mod tests {
         assert!(!glrm.contains("_AP_KEY_V"), "{glrm}");
         assert!(
             glrm.contains("(OBJ_ANYOF_FA_0_AP_SHARED_KEY | \"thumbnail\\\"\")"),
+            "{glrm}"
+        );
+        assert_eq!(
+            glrm.matches("OBJ_ANYOF_FA_0_AP_SHARED_KEY").count(),
+            5,
             "{glrm}"
         );
     }
