@@ -1466,14 +1466,17 @@ impl Constraint {
 
     pub fn start(&self) -> ConstraintState<'_> {
         let state = self.initial_state_map();
-        ConstraintState {
+        let state = ConstraintState {
             constraint: self,
             state,
             buffers: Default::default(),
             generation: 0,
             mask_cache: Mutex::new(None),
             mask_scratch: Mutex::new(Default::default()),
-        }
+        };
+        let mut mask = vec![0u32; self.mask_len()];
+        state.fill_mask(&mut mask);
+        state
     }
 
     pub fn mask_len(&self) -> usize {
