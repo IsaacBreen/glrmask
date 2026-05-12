@@ -88,12 +88,95 @@ pub fn build_schema(case: &BenchCase, vocab: &Vocab) {
     black_box(constraint);
 }
 
-pub fn profile_single_builds(vocab: &Vocab) {
+pub fn selected_cases(group_name: &str) -> Vec<&'static BenchCase> {
+    let filters = requested_case_filters();
+    if filters.is_empty() {
+        return CASES.iter().collect();
+    }
+
+    let selected: Vec<_> = CASES
+        .iter()
+        .filter(|case| filters.iter().any(|filter| case_matches_filter(group_name, case, filter)))
+        .collect();
+    if selected.is_empty() {
+        let available = CASES.iter().map(|case| case.id).collect::<Vec<_>>().join(", ");
+        panic!(
+            "no CFA sweep cases matched filters {:?}; available case ids: {}",
+            filters, available
+        );
+    }
+    selected
+}
+
+fn requested_case_filters() -> Vec<String> {
+    let mut filters = Vec::new();
+    for env_name in ["GLRMASK_BENCH_CASE", "GLRMASK_BENCH_FILTER"] {
+        if let Ok(raw) = std::env::var(env_name) {
+            filters.extend(split_filters(&raw));
+        }
+    }
+    filters.extend(criterion_positional_filters());
+    filters.sort();
+    filters.dedup();
+    filters
+}
+
+fn split_filters(raw: &str) -> impl Iterator<Item = String> + '_ {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|filter| !filter.is_empty())
+        .map(str::to_owned)
+}
+
+fn criterion_positional_filters() -> Vec<String> {
+    let mut filters = Vec::new();
+    let mut skip_next = false;
+    for arg in std::env::args().skip(1) {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if option_takes_value(&arg) {
+            skip_next = !arg.contains('=');
+            continue;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        filters.push(arg);
+    }
+    filters
+}
+
+fn option_takes_value(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--baseline"
+            | "--color"
+            | "--confidence-level"
+            | "--measurement-time"
+            | "--nresamples"
+            | "--output-format"
+            | "--plotting-backend"
+            | "--profile-time"
+            | "--sample-size"
+            | "--save-baseline"
+            | "--significance-level"
+            | "--warm-up-time"
+    )
+}
+
+fn case_matches_filter(group_name: &str, case: &BenchCase, filter: &str) -> bool {
+    let benchmark_id = format!("{}/{}", group_name, case.id);
+    case.id.contains(filter) || case.cfa_name.contains(filter) || benchmark_id.contains(filter)
+}
+
+pub fn profile_single_builds(cases: &[&BenchCase], vocab: &Vocab) {
     unsafe {
         std::env::set_var("GLRMASK_PROFILE_COMPILE", "1");
         std::env::set_var("GLRMASK_PROFILE_COMPILE_SUMMARY", "1");
     }
-    for case in CASES {
+    for case in cases {
         eprintln!(
             "[bench][cfa_sweep_schema_build] diagnostic_build=1 case={} cfa_build_seconds={:.6}",
             case.id, case.cfa_build_seconds
@@ -106,9 +189,9 @@ pub fn profile_single_builds(vocab: &Vocab) {
     }
 }
 
-pub fn bench_cases(c: &mut Criterion, group_name: &str, vocab: &Vocab) {
+pub fn bench_cases(c: &mut Criterion, group_name: &str, cases: &[&BenchCase], vocab: &Vocab) {
     let mut group = c.benchmark_group(group_name);
-    for case in CASES {
+    for case in cases {
         group.bench_with_input(BenchmarkId::from_parameter(case.id), case, |b, case| {
             b.iter(|| build_schema(case, vocab));
         });

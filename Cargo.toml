@@ -37,9 +37,9 @@ criterion = "0.5"
 pretty_assertions = "1"
 
 [[bench]]
-name = "github_trivial_o70256_build"
+name = "cfa_sweep_schema_build_single_threaded"
 harness = false
 
 [[bench]]
-name = "github_trivial_o70256_build_multithreaded"
+name = "cfa_sweep_schema_build_multithreaded"
 harness = false
