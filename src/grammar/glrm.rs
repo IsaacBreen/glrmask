@@ -66,7 +66,7 @@ pub fn to_glrm(grammar: &NamedGrammar) -> String {
     for rule in &grammar.rules {
         if !rule.is_terminal {
             if let GrammarExpr::ExprNFA(expr_nfa) = &rule.expr {
-                out.push_str(&format!("nfa {} ::= {{\n", rule.name));
+                out.push_str(&format!("fa {} ::= {{\n", rule.name));
                 out.push_str(&dump_expr_nfa(expr_nfa));
                 out.push_str("};\n");
                 continue;
@@ -669,7 +669,7 @@ impl GlrmParser {
                         self.advance();
                         rules.push(self.parse_rule(false, false)?);
                     }
-                    "nfa" => {
+                    "fa" | "nfa" => {
                         self.advance();
                         rules.push(self.parse_expr_nfa_rule()?);
                     }
@@ -776,20 +776,20 @@ impl GlrmParser {
                         }
                         other => {
                             return Err(err(&format!(
-                                "expected '--' or '-->' after NFA transition source, got {:?}",
+                                "expected '--' or '-->' after FA transition source, got {:?}",
                                 other
                             )));
                         }
                     }
                     self.consume(&Tok::Semi)?;
                 }
-                other => return Err(err(&format!("unexpected token {:?} in NFA definition", other))),
+                other => return Err(err(&format!("unexpected token {:?} in FA definition", other))),
             }
         }
 
         self.consume(&Tok::Semi)?;
         if nfa.start_states.is_empty() {
-            return Err(err("NFA definition has no start state"));
+            return Err(err("FA definition has no start state"));
         }
         Ok(NamedRule {
             name,
@@ -802,12 +802,12 @@ impl GlrmParser {
     fn parse_expr_nfa_transition_expr(&mut self) -> Result<GrammarExpr, GlrMaskError> {
         if matches!(self.peek(), Tok::Arrow) {
             return Err(err(
-                "NFA transition expression cannot be empty; use epsilon transition syntax",
+                "FA transition expression cannot be empty; use epsilon transition syntax",
             ));
         }
         if !self.can_start_nt_atom() {
             return Err(err(&format!(
-                "expected NFA transition expression item before '-->', got {:?}",
+                "expected FA transition expression item before '-->', got {:?}",
                 self.peek()
             )));
         }
@@ -1126,7 +1126,7 @@ mod tests {
             r#"
 start obj;
 
-nfa obj ::= {
+fa obj ::= {
 start 0;
 accept 4;
 
@@ -1151,7 +1151,7 @@ accept 4;
         let grammar = from_glrm(
             r#"
 start obj;
-nfa obj ::= {
+fa obj ::= {
 start 0;
 accept 1;
 0 -- "a" --> 1;
@@ -1160,7 +1160,7 @@ accept 1;
         )
         .unwrap();
         let dumped = to_glrm(&grammar);
-        assert!(dumped.contains("nfa obj ::= {"), "{dumped}");
+        assert!(dumped.contains("fa obj ::= {"), "{dumped}");
         assert!(dumped.contains("0 -- \"a\" --> 1;"), "{dumped}");
         assert!(!dumped.contains("ExprNFA("), "{dumped}");
     }
@@ -1170,7 +1170,7 @@ accept 1;
         let grammar = from_glrm(
             r#"
 start obj;
-nfa obj ::= {
+fa obj ::= {
 start 0;
 accept 1;
 0 -- [a-z] - "x" --> 1;
@@ -1192,7 +1192,7 @@ accept 1;
         let nfa_rule = from_glrm(
             r#"
 start inner;
-nfa inner ::= {
+fa inner ::= {
 start 0;
 accept 1;
 0 -- "a" --> 1;

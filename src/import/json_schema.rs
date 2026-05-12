@@ -6157,7 +6157,7 @@ impl<'a> SchemaCtx<'a> {
 
         let mut base_index = self.generated_object_rule_counter;
         let base_name = loop {
-            let candidate = format!("obj_anyof_nfa_{base_index}");
+            let candidate = format!("obj_anyof_fa_{base_index}");
             if !self.used_rule_names.contains(&format!("{candidate}_obj")) {
                 break candidate;
             }
@@ -11029,7 +11029,7 @@ mod tests {
         });
 
         let glrm = dump_glrm(schema);
-        assert!(glrm.contains("nfa obj_anyof_nfa_0_body"), "{glrm}");
+        assert!(glrm.contains("fa obj_anyof_fa_0_body"), "{glrm}");
         assert!(glrm.contains("json_string"), "{glrm}");
     }
 
