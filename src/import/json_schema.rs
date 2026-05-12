@@ -1938,13 +1938,13 @@ fn ap_key_any_string() -> bool {
     env_flag("GLRMASK_AP_KEY_ANY_STRING") || env_flag("GLRMASK_ADDPROP_NO_EXCLUSIONS")
 }
 
-fn shared_ap_key_exclusions_enabled() -> bool {
+fn shared_ap_key_exclusions_override() -> Option<bool> {
     std::env::var("GLRMASK_AP_SHARED_EXCLUSIONS")
+        .ok()
         .map(|v| {
             let n = v.trim().to_ascii_lowercase();
             !matches!(n.as_str(), "" | "0" | "false" | "no" | "off")
         })
-        .unwrap_or(true)
 }
 
 fn decode_local_ref_token(token: &str) -> String {
@@ -8887,8 +8887,12 @@ impl<'a> SchemaCtx<'a> {
         &self,
         excluded_literal_keys: &BTreeSet<String>,
     ) -> bool {
-        if !shared_ap_key_exclusions_enabled() || ap_key_any_string() {
+        if ap_key_any_string() {
             return false;
+        }
+
+        if let Some(enabled) = shared_ap_key_exclusions_override() {
+            return enabled;
         }
 
         let allowed_back = self
@@ -10429,6 +10433,48 @@ mod tests {
 
         let glrm = dump_glrm(schema);
         assert!(!glrm.contains("t AP_SHARED_KEY ::= "), "{glrm}");
+    }
+
+    #[test]
+    fn shared_additional_properties_key_exclusions_can_be_forced_on_past_threshold() {
+        let _lock = ENV_LOCK.lock().unwrap();
+
+        let mut properties = serde_json::Map::new();
+        properties.insert(
+            "target".into(),
+            json!({
+                "type": "object",
+                "properties": {"target_key": {"type": "string"}},
+                "additionalProperties": {"type": "string"}
+            }),
+        );
+
+        for index in 0..40 {
+            properties.insert(
+                format!("branch_{index}"),
+                json!({
+                    "type": "object",
+                    "properties": {
+                        format!("shared_key_{index}"): {"type": "string"}
+                    },
+                    "additionalProperties": {"type": "string"}
+                }),
+            );
+        }
+
+        let schema = serde_json::Value::Object(serde_json::Map::from_iter([
+            ("type".into(), json!("object")),
+            ("properties".into(), serde_json::Value::Object(properties)),
+            ("additionalProperties".into(), json!(false)),
+        ]));
+
+        let _shared = EnvVarGuard::unset("GLRMASK_AP_SHARED_EXCLUSIONS");
+        let default_glrm = dump_glrm(schema.clone());
+        assert!(!default_glrm.contains("t AP_SHARED_KEY ::= "), "{default_glrm}");
+
+        let _shared = EnvVarGuard::set("GLRMASK_AP_SHARED_EXCLUSIONS", "1");
+        let forced_glrm = dump_glrm(schema);
+        assert!(forced_glrm.contains("t AP_SHARED_KEY ::= "), "{forced_glrm}");
     }
 
     #[test]
