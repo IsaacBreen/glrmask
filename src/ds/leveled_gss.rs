@@ -3670,6 +3670,76 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         self.path_count_at_most(2) <= 1
     }
 
+    pub fn single_path_top_first_and_acc(&self, out: &mut SmallVec<[T; 16]>) -> Option<A> {
+        fn push_lower_path<T>(node: &Arc<Lower<T>>, out: &mut SmallVec<[T; 16]>) -> bool
+        where
+            T: Clone + Eq + Hash,
+        {
+            match &**node {
+                Lower::Segment(seg) => {
+                    for value in seg.values.iter().rev() {
+                        out.push(value.clone());
+                    }
+                    push_lower_path(&seg.next, out)
+                }
+                Lower::General { children, empty, .. } => {
+                    if *empty {
+                        return children.is_empty();
+                    }
+                    if children.len() != 1 {
+                        return false;
+                    }
+                    let (value, kids) = children.iter().next().unwrap();
+                    if kids.len() != 1 {
+                        return false;
+                    }
+                    out.push(value.clone());
+                    push_lower_path(kids.values().next().unwrap(), out)
+                }
+            }
+        }
+
+        fn push_upper_path<T, A>(
+            node: &Arc<Upper<T, A>>,
+            out: &mut SmallVec<[T; 16]>,
+        ) -> Option<A>
+        where
+            T: Clone + Eq + Hash,
+            A: Merge + Clone + Eq + Hash,
+        {
+            match &**node {
+                Upper::Interface(interface) => {
+                    if push_lower_path(&interface.inner, out) {
+                        Some(interface.acc.clone())
+                    } else {
+                        None
+                    }
+                }
+                Upper::Branch(branch) => {
+                    if branch.empty.is_some() || branch.children.len() != 1 {
+                        return None;
+                    }
+                    let (value, kids) = branch.children.iter().next().unwrap();
+                    if kids.len() != 1 {
+                        return None;
+                    }
+                    out.push(value.clone());
+                    push_upper_path(kids.values().next().unwrap(), out)
+                }
+            }
+        }
+
+        out.clear();
+        let start_len = out.len();
+        match push_upper_path(&self.inner, out) {
+            Some(acc) => Some(acc),
+            None => {
+                out.truncate(start_len);
+                None
+            }
+        }
+    }
+
     pub fn reduce_acc(&self) -> Option<A> {
 
         let mut unique: HashSet<A> = HashSet::new();

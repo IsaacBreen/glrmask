@@ -46,6 +46,7 @@ fn empty_dense_words() -> DenseWords {
 type InternalTokenBufMasks = Vec<(u16, u32)>;
 type DenseWeightMaskCache = FxHashMap<usize, DenseWords>;
 type DenseWeightBufMaskCache = FxHashMap<usize, Box<[u32]>>;
+type SparseWeightBufMaskCache = FxHashMap<usize, Box<[(u16, u32)]>>;
 type SeedTerminalDenseMasks = FxHashMap<(u32, TerminalID), DenseWords>;
 type SeedStateDenseMasks = Vec<DenseWords>;
 type SeedStateBufMasks = Vec<Option<Box<[u32]>>>;
@@ -144,6 +145,8 @@ pub struct Constraint {
     pub(crate) weight_token_dense_masks: DenseWeightMaskCache,
     #[serde(skip)]
     pub(crate) weight_token_buf_masks: DenseWeightBufMaskCache,
+    #[serde(skip)]
+    pub(crate) weight_token_sparse_buf_masks: SparseWeightBufMaskCache,
     /// Precomputed dense bitmask for the seed phase: for each (tokenizer_state, terminal_id),
     /// the dense bitmap of internal tokens that terminal covers in that state.
     #[serde(skip)]
@@ -667,6 +670,7 @@ impl Constraint {
         self.internal_token_dense_words = dense_mask_words;
         self.weight_token_dense_masks = dense_masks;
         self.weight_token_buf_masks = self.compute_weight_token_buf_masks();
+        self.weight_token_sparse_buf_masks = self.compute_weight_token_sparse_buf_masks();
         self.dwa_fast_transitions = fast_transitions;
         self.tokenizer_fast_transitions = tokenizer_fast_transitions;
         let derived_ms = derived_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
@@ -990,8 +994,57 @@ impl Constraint {
             }
         }
 
-        or_dense_buf(buf, mask);
+        if let Some(sparse_mask) = self.weight_token_sparse_buf_masks.get(&key) {
+            or_sparse_buf_entries(buf, sparse_mask);
+        } else {
+            or_dense_buf(buf, mask);
+        }
         true
+    }
+
+    #[inline(always)]
+    pub(crate) fn or_dense_token_set_to_buf_sparse(
+        &self,
+        dense: &[u64],
+        token_set: &Arc<RangeSetBlaze<u32>>,
+        max_tokens: u64,
+        buf: &mut [u32],
+    ) -> Option<bool> {
+        if dense.is_empty() || token_set.is_empty() {
+            return Some(false);
+        }
+
+        let mut total = 0u64;
+        for range in token_set.ranges() {
+            total = total.saturating_add((*range.end() as u64).saturating_sub(*range.start() as u64) + 1);
+            if total > max_tokens {
+                return None;
+            }
+        }
+
+        let n_internal = self.internal_token_to_tokens.len();
+        let mut any = false;
+        let mut stats_entries = 0u64;
+        for range in token_set.ranges() {
+            let start = *range.start() as usize;
+            let end = (*range.end() as usize).min(n_internal.saturating_sub(1));
+            if start > end {
+                continue;
+            }
+            for internal_token in start..=end {
+                let word_idx = internal_token / 64;
+                let bit = internal_token % 64;
+                if dense
+                    .get(word_idx)
+                    .is_some_and(|word| (word & (1u64 << bit)) != 0)
+                {
+                    self.or_internal_token_to_buf_fast(internal_token, buf, &mut stats_entries);
+                    any = true;
+                }
+            }
+        }
+
+        Some(any)
     }
 
     #[inline(always)]
@@ -1039,6 +1092,52 @@ impl Constraint {
             self.weight_token_dense_masks.iter().filter_map(build).collect()
         } else {
             self.weight_token_dense_masks.par_iter().filter_map(build).collect()
+        }
+    }
+
+    fn dense_buf_to_sparse_entries(buf: &[u32]) -> Box<[(u16, u32)]> {
+        buf.iter()
+            .enumerate()
+            .filter_map(|(idx, &word)| {
+                if word == 0 {
+                    None
+                } else {
+                    Some((idx as u16, word))
+                }
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+    }
+
+    fn compute_weight_token_sparse_buf_masks(&self) -> SparseWeightBufMaskCache {
+        let buf_words = self.mask_len();
+        if buf_words == 0 || buf_words > u16::MAX as usize {
+            return FxHashMap::default();
+        }
+
+        let build = |(&key, dense): (&usize, &DenseWords)| {
+            let estimated_cost = self.estimate_internal_dense_to_buf_cost(dense);
+            if estimated_cost == 0 || estimated_cost >= (buf_words / 2) as u64 {
+                return None;
+            }
+
+            let mut buf = vec![0u32; buf_words];
+            self.or_internal_dense_to_buf(dense, &mut buf, true);
+            let sparse = Self::dense_buf_to_sparse_entries(&buf);
+            if sparse.len() < buf_words / 2 {
+                Some((key, sparse))
+            } else {
+                None
+            }
+        };
+
+        if rayon::current_num_threads() == 1 {
+            self.weight_token_dense_masks.iter().filter_map(build).collect()
+        } else {
+            self.weight_token_dense_masks
+                .par_iter()
+                .filter_map(build)
+                .collect()
         }
     }
 

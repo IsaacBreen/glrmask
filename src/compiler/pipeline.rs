@@ -745,6 +745,7 @@ fn compile_prepared_with_profile(
             internal_token_dense_words: 0,
             weight_token_dense_masks: rustc_hash::FxHashMap::default(),
             weight_token_buf_masks: rustc_hash::FxHashMap::default(),
+            weight_token_sparse_buf_masks: rustc_hash::FxHashMap::default(),
             seed_terminal_dense: rustc_hash::FxHashMap::default(),
             seed_state_dense: Vec::new(),
             seed_state_by_dense_hash: rustc_hash::FxHashMap::default(),
