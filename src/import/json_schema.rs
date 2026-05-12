@@ -9088,18 +9088,39 @@ impl<'a> SchemaCtx<'a> {
         Ok(matching)
     }
 
-    fn build_repeated_object_pairs(&self, pair: GrammarExpr) -> GrammarExpr {
+    fn build_repeated_object_pairs(&mut self, pair: GrammarExpr) -> GrammarExpr {
         self.build_repeated_object_pairs_with_bounds(pair, 0, None)
     }
 
     fn build_repeated_object_pairs_with_bounds(
-        &self,
+        &mut self,
         pair: GrammarExpr,
         min_pairs: usize,
         max_pairs: Option<usize>,
     ) -> GrammarExpr {
         if max_pairs == Some(0) {
             return sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]);
+        }
+
+        if min_pairs == 0 && max_pairs.is_none() {
+            let base_name = self.fresh_rule_name("obj_pairs");
+            let pair_rule = self.insert_shared_rule(format!("{base_name}_pair"), pair);
+            let list_rule = self.insert_shared_rule(
+                format!("{base_name}_list"),
+                choice_or_single(vec![
+                    GrammarExpr::Ref(pair_rule.clone()),
+                    sequence_or_single(vec![
+                        GrammarExpr::Ref(format!("{base_name}_list")),
+                        self.json_item_separator_expr(),
+                        GrammarExpr::Ref(pair_rule),
+                    ]),
+                ]),
+            );
+            return sequence_or_single(vec![
+                literal_expr(b"{"),
+                choice_or_single(vec![empty_expr(), GrammarExpr::Ref(list_rule)]),
+                literal_expr(b"}"),
+            ]);
         }
 
         let body = GrammarExpr::SeparatedSequence {
@@ -11825,6 +11846,33 @@ mod tests {
         let named = schema_to_named_grammar(&schema).unwrap();
         assert!(named.rules.iter().any(|rule| expr_contains_expr_nfa(&rule.expr)));
         lower(&named).unwrap();
+    }
+
+    #[test]
+    fn match_all_pattern_properties_use_left_recursive_pair_list() {
+        let schema = json!({
+            "type": "object",
+            "patternProperties": {
+                ".*": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"}
+                    },
+                    "required": ["name"],
+                    "additionalProperties": false
+                }
+            }
+        });
+
+        let glrm = dump_glrm(schema.clone());
+        assert!(glrm.contains("nt obj_pairs_"), "{glrm}");
+        assert!(glrm.contains("_list ::= obj_pairs_"), "{glrm}");
+        let start_line = glrm
+            .lines()
+            .find(|line| line.starts_with("nt start ::="))
+            .unwrap();
+        assert!(!start_line.contains("\", \" ~ ("), "{glrm}");
+        lower(&schema_to_named_grammar(&schema).unwrap()).unwrap();
     }
 
     #[test]
