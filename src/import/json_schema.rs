@@ -148,6 +148,8 @@ struct OrderedClosedObjectVariant {
 struct AnyOfObjectVariant {
     items: Vec<OrderedClosedObjectItem>,
     fixed_keys: BTreeSet<String>,
+    pattern_pair_exprs: Vec<GrammarExpr>,
+    pattern_key_terminals: Vec<GrammarExpr>,
     additional_value_expr: Option<GrammarExpr>,
 }
 
@@ -158,10 +160,18 @@ struct OrderedSubsetCursor {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum AnyOfObjectDfaPhase {
+    Fixed,
+    Pattern,
+    Additional,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct AnyOfObjectDfaState {
     variant_idx: u16,
     cursor: u16,
     has_content: bool,
+    phase: AnyOfObjectDfaPhase,
 }
 
 impl OrderedClosedObjectVariant {
@@ -5759,7 +5769,6 @@ impl<'a> SchemaCtx<'a> {
             return Ok(None);
         }
         for key in &[
-            "patternProperties",
             "propertyNames",
             "minProperties",
             "maxProperties",
@@ -5793,9 +5802,18 @@ impl<'a> SchemaCtx<'a> {
         let mut fixed_keys = properties.keys().cloned().collect::<BTreeSet<_>>();
         fixed_keys.extend(required.iter().cloned());
 
+        let pattern_properties =
+            Self::pattern_property_entries(variant.get("patternProperties").and_then(Value::as_object));
+
         let mut items = Vec::new();
         for (key, value_schema) in properties {
-            let value_expr = match self.convert_schema(&value_schema) {
+            let mut schemas = vec![value_schema];
+            schemas.extend(Self::matching_pattern_schemas_for_key(
+                &pattern_properties,
+                &key,
+            )?);
+            let effective_schema = Self::schema_all_of(schemas);
+            let value_expr = match self.convert_schema(&effective_schema) {
                 Ok(expr) => expr,
                 Err(err) if is_unsat_schema_error(&err) => {
                     if required.contains(&key) {
@@ -5812,6 +5830,34 @@ impl<'a> SchemaCtx<'a> {
             });
         }
 
+        let upper_base_name = format!(
+            "ANYOF_OBJECT_VARIANT_{}",
+            self.generated_object_rule_counter
+        );
+        let mut pattern_pair_exprs = Vec::new();
+        let mut pattern_key_terminals = Vec::new();
+        for (pattern_idx, (pattern, pattern_schema)) in pattern_properties.iter().enumerate() {
+            let body = self.pattern_key_colon_body_expr(
+                pattern,
+                &format!("{upper_base_name}_PP{pattern_idx}_KEY_BODY"),
+            );
+            let (terminal_body, wrap) = wrap_key_colon_expr_parts(body);
+            let term_ref = self.extract_terminal_rule(
+                terminal_body,
+                &format!("{upper_base_name}_PP{pattern_idx}_KEY"),
+            );
+            let key_expr = wrap(term_ref.clone());
+
+            let value_expr = match self.convert_schema(pattern_schema) {
+                Ok(expr) => expr,
+                Err(err) if is_unsat_schema_error(&err) => continue,
+                Err(err) => return Err(err),
+            };
+
+            pattern_pair_exprs.push(sequence_or_single(vec![key_expr, value_expr]));
+            pattern_key_terminals.push(term_ref);
+        }
+
         let additional_value_expr =
             match self.normalized_additional_properties_schema(variant.get("additionalProperties")) {
                 Some(schema) => match self.convert_schema(&schema) {
@@ -5825,6 +5871,8 @@ impl<'a> SchemaCtx<'a> {
         Ok(Some(AnyOfObjectVariant {
             items,
             fixed_keys,
+            pattern_pair_exprs,
+            pattern_key_terminals,
             additional_value_expr,
         }))
     }
@@ -5835,6 +5883,7 @@ impl<'a> SchemaCtx<'a> {
         variant_idx: usize,
         all_keys: &BTreeSet<String>,
         variant_keys: &BTreeSet<String>,
+        pattern_key_terminals: &[GrammarExpr],
     ) -> GrammarExpr {
         let upper_base_name = base_name.to_uppercase();
         let excluded = all_keys
@@ -5872,7 +5921,7 @@ impl<'a> SchemaCtx<'a> {
         // variant's fixed keys from the full JSON string body. Keep that as a
         // single top-level Exclude; otherwise the lexer compiler sees a
         // Shared(Exclude) nested under Choice after terminal refs resolve.
-        let variant_excluded = variant_keys
+        let mut variant_excluded = variant_keys
             .iter()
             .map(|key| {
                 self.force_extract_terminal_rule(
@@ -5881,6 +5930,7 @@ impl<'a> SchemaCtx<'a> {
                 )
             })
             .collect::<Vec<_>>();
+        variant_excluded.extend(pattern_key_terminals.iter().cloned());
         let variant_body_expr = if variant_excluded.is_empty() {
             GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())
         } else {
@@ -5940,6 +5990,7 @@ impl<'a> SchemaCtx<'a> {
                 variant_idx: variant_idx as u16,
                 cursor: 0,
                 has_content: false,
+                phase: AnyOfObjectDfaPhase::Fixed,
             };
             let state_id = builder.add_state();
             builder.add_epsilon(builder.start_state(), state_id);
@@ -5955,13 +6006,53 @@ impl<'a> SchemaCtx<'a> {
             let variant = &variants[state.variant_idx as usize];
             let cursor = state.cursor as usize;
 
-            if variant.close_allowed(cursor) {
+            let fixed_phase = state.phase == AnyOfObjectDfaPhase::Fixed;
+            let can_leave_fixed_tail = !fixed_phase || variant.close_allowed(cursor);
+
+            if can_leave_fixed_tail {
                 builder.add_epsilon(state_id, accept);
+            }
+
+            if can_leave_fixed_tail
+                && state.phase != AnyOfObjectDfaPhase::Additional
+                && !variant.pattern_pair_exprs.is_empty()
+            {
+                let pattern_state = AnyOfObjectDfaState {
+                    variant_idx: state.variant_idx,
+                    cursor: variant.len() as u16,
+                    has_content: true,
+                    phase: AnyOfObjectDfaPhase::Pattern,
+                };
+                let pattern_state_id = if let Some(&existing) = state_ids.get(&pattern_state) {
+                    existing
+                } else {
+                    let id = builder.add_state();
+                    state_ids.insert(pattern_state, id);
+                    queue.push_back(pattern_state);
+                    id
+                };
+                for pattern_pair_expr in &variant.pattern_pair_exprs {
+                    let mut symbols = Vec::new();
+                    if state.has_content {
+                        symbols.push(self.json_item_separator_expr());
+                    }
+                    symbols.push(pattern_pair_expr.clone());
+                    Self::add_expr_dfa_symbol_path(
+                        &mut builder,
+                        state_id,
+                        symbols,
+                        pattern_state_id,
+                    );
+                }
+            }
+
+            if can_leave_fixed_tail {
                 if let Some(value_expr) = &variant.additional_value_expr {
                     let ap_state = AnyOfObjectDfaState {
                         variant_idx: state.variant_idx,
                         cursor: variant.len() as u16,
                         has_content: true,
+                        phase: AnyOfObjectDfaPhase::Additional,
                     };
                     let ap_state_id = if let Some(&existing) = state_ids.get(&ap_state) {
                         existing
@@ -5980,10 +6071,15 @@ impl<'a> SchemaCtx<'a> {
                         state.variant_idx as usize,
                         &all_keys,
                         &variant.fixed_keys,
+                        &variant.pattern_key_terminals,
                     ));
                     symbols.push(value_expr.clone());
                     Self::add_expr_dfa_symbol_path(&mut builder, state_id, symbols, ap_state_id);
                 }
+            }
+
+            if !fixed_phase {
+                continue;
             }
 
             for key in variant.legal_next_keys(cursor) {
@@ -5997,6 +6093,7 @@ impl<'a> SchemaCtx<'a> {
                     variant_idx: state.variant_idx,
                     cursor: next_cursor as u16,
                     has_content: true,
+                    phase: AnyOfObjectDfaPhase::Fixed,
                 };
                 let next_state_id = if let Some(&existing) = state_ids.get(&next_state) {
                     existing
@@ -10860,6 +10957,42 @@ mod tests {
                     "properties": {
                         "kind": {"const": "right"},
                         "b": {"type": "boolean"}
+                    },
+                    "required": ["kind"],
+                    "additionalProperties": {"type": "number"}
+                }
+            ]
+        });
+
+        let named = schema_to_named_grammar(&schema).unwrap();
+        assert!(named.rules.iter().any(|rule| expr_contains_expr_dfa(&rule.expr)));
+        lower(&named).unwrap();
+    }
+
+    #[test]
+    fn anyof_object_expr_dfa_supports_pattern_properties_tail() {
+        let schema = json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"const": "left"},
+                        "a": {"type": "string"}
+                    },
+                    "patternProperties": {
+                        "^x_": {"type": "string"}
+                    },
+                    "required": ["kind"],
+                    "additionalProperties": {"type": "number"}
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"const": "right"},
+                        "b": {"type": "boolean"}
+                    },
+                    "patternProperties": {
+                        "^y_": {"type": "boolean"}
                     },
                     "required": ["kind"],
                     "additionalProperties": {"type": "number"}
