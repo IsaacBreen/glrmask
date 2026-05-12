@@ -2077,6 +2077,7 @@ struct SharedStringValuePlan {
     common_body_expr: Option<GrammarExpr>,
     literal_body_cache: BTreeMap<String, GrammarExpr>,
     pattern_body_cache: BTreeMap<String, GrammarExpr>,
+    local_excluding_value_cache: BTreeMap<(Vec<String>, Vec<String>), GrammarExpr>,
     value_rule_cache: BTreeMap<(Vec<String>, Vec<String>), String>,
 }
 
@@ -3539,6 +3540,7 @@ struct SchemaCtx<'a> {
     json_string_upto_cache: BTreeMap<usize, String>,
     shared_additional_key_plan: SharedAdditionalKeyPlan,
     shared_string_value_plan: SharedStringValuePlan,
+    shared_string_value_exclusions_enabled: bool,
     anyof_object_expr_nfa_cache: BTreeMap<String, GrammarExpr>,
     draft_stack: Vec<JsonSchemaDraft>,
     convert_depth: usize,
@@ -3772,6 +3774,10 @@ impl<'a> SchemaCtx<'a> {
             json_string_upto_cache: BTreeMap::new(),
             shared_additional_key_plan: collect_shared_additional_key_plan(root),
             shared_string_value_plan: collect_shared_string_value_plan(root),
+            shared_string_value_exclusions_enabled: env_flag_default(
+                "GLRMASK_SHARED_STRING_VALUE_EXCLUSIONS",
+                true,
+            ),
             anyof_object_expr_nfa_cache: BTreeMap::new(),
             draft_stack: vec![DEFAULT_JSON_SCHEMA_DRAFT],
             convert_depth: 0,
@@ -5274,7 +5280,7 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn shared_string_value_exclusions_default_enabled(&self) -> bool {
-        env_flag_default("GLRMASK_SHARED_STRING_VALUE_EXCLUSIONS", true)
+        self.shared_string_value_exclusions_enabled
     }
 
     fn string_option_exclusions(
@@ -9945,6 +9951,15 @@ impl<'a> SchemaCtx<'a> {
         excluded_patterns: &[String],
         prefix: &str,
     ) -> GrammarExpr {
+        let cache_key = (excluded_literals.to_vec(), excluded_patterns.to_vec());
+        if let Some(expr) = self
+            .shared_string_value_plan
+            .local_excluding_value_cache
+            .get(&cache_key)
+        {
+            return expr.clone();
+        }
+
         let mut excluded = excluded_literals
             .iter()
             .map(|value| Self::shared_string_literal_value_body_inline_expr(value))
@@ -9962,7 +9977,11 @@ impl<'a> SchemaCtx<'a> {
             }
         };
         let body = self.force_extract_terminal_rule(body, prefix);
-        wrap_string_value_terminal(body, json_literal_string_merge_config())
+        let expr = wrap_string_value_terminal(body, json_literal_string_merge_config());
+        self.shared_string_value_plan
+            .local_excluding_value_cache
+            .insert(cache_key, expr.clone());
+        expr
     }
 
     fn shared_unconstrained_string_value_expr(&mut self) -> GrammarExpr {
