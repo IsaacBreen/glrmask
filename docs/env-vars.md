@@ -57,8 +57,19 @@ This document lists all `GLRMASK_*` environment variables used in this crate, gr
 | `GLRMASK_AP_KEY_ANY_STRING` | truthy bool | off |
 | `GLRMASK_SHARED_STRING_VALUE_EXCLUSIONS` | truthy bool | on |
 | `GLRMASK_GLOBAL_SHARED_STRING_VALUE_EXCLUSIONS` | truthy bool | off |
+| `GLRMASK_SHARED_STRING_VALUE_EXCLUSION_LIMIT` | integer (`usize`) | unset |
+| `GLRMASK_STRING_VALUE_EXCLUSIONS_COMPAT` | `abdcffb6b` | unset |
 | `GLRMASK_MERGE_ANYOF` | strict `1` bool | off |
 | `GLRMASK_STRING_REPEAT_CHUNK` | integer (`usize`) | `256` |
+
+`GLRMASK_STRING_VALUE_EXCLUSIONS_COMPAT=abdcffb6b` restores the old capped
+schema-wide string-value exclusion profile from `abdcffb6b`: global shared
+string-value exclusions are enabled, the default cap is 32 excluded
+literals/patterns, and the newer local anyOf string-value exclusions are
+disabled. The same pieces can be configured manually with
+`GLRMASK_GLOBAL_SHARED_STRING_VALUE_EXCLUSIONS=1`,
+`GLRMASK_SHARED_STRING_VALUE_EXCLUSION_LIMIT=32`, and
+`GLRMASK_SHARED_STRING_VALUE_EXCLUSIONS=0`.
 
 ## Grammar AST Lowering
 
