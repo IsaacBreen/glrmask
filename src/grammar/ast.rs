@@ -8,6 +8,7 @@ use crate::ds::u8set::U8Set;
 use crate::grammar::flat::{
     GrammarDef, NonterminalID, Rule, Symbol, Terminal, TerminalID,
 };
+use crate::grammar::expr_dfa::ExprDFA;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GrammarExpr {
@@ -51,6 +52,9 @@ pub enum GrammarExpr {
         separator: Box<GrammarExpr>,
         allow_empty: bool,
     },
+    /// A DFA whose transition labels are indices into a side table of grammar
+    /// expressions.
+    ExprDFA(Box<ExprDFA>),
 }
 
 /// Controls the tree shape used when lowering [`GrammarExpr::SeparatedSequence`].
@@ -142,6 +146,11 @@ impl NamedGrammar {
                 GrammarExpr::SeparatedSequence { items, separator, .. } => {
                     for (e, _) in items { collect_refs(e, out); }
                     collect_refs(separator, out);
+                }
+                GrammarExpr::ExprDFA(expr_dfa) => {
+                    for symbol in &expr_dfa.symbols {
+                        collect_refs(symbol, out);
+                    }
                 }
                 GrammarExpr::Epsilon | GrammarExpr::Literal(_)
                 | GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_)
@@ -354,6 +363,15 @@ fn grammar_expr_to_lark_with_indent(
                 if !required { write!(out, "?").unwrap(); }
             }
             write!(out, "])*/").unwrap();
+        }
+        GrammarExpr::ExprDFA(expr_dfa) => {
+            write!(
+                out,
+                "/*ExprDFA(states={}, symbols={})*/",
+                expr_dfa.dfa.states.len(),
+                expr_dfa.symbols.len()
+            )
+            .unwrap();
         }
     }
 }
@@ -735,6 +753,9 @@ impl Lowerer {
                     rhs: vec![symbol],
                 });
             }
+            GrammarExpr::ExprDFA(expr_dfa) => {
+                self.emit_expr_dfa_nonnullable(lhs, expr_dfa)?;
+            }
             GrammarExpr::Epsilon => {}
         }
         Ok(())
@@ -1106,6 +1127,135 @@ impl Lowerer {
         Ok(())
     }
 
+    fn expr_dfa_state_nonterminals(
+        &mut self,
+        expr_dfa: &ExprDFA,
+        hint: &str,
+        start_lhs: Option<NonterminalID>,
+    ) -> Result<Vec<NonterminalID>, GlrMaskError> {
+        let state_count = expr_dfa.dfa.states.len();
+        let start = expr_dfa.dfa.start_state as usize;
+        if start >= state_count {
+            return Err(GlrMaskError::GrammarParse(format!(
+                "ExprDFA start state {} is out of range for {} states",
+                expr_dfa.dfa.start_state, state_count
+            )));
+        }
+
+        let mut nts = Vec::with_capacity(state_count);
+        for state_index in 0..state_count {
+            if Some(state_index) == start_lhs.map(|_| start) {
+                nts.push(start_lhs.unwrap());
+            } else {
+                let (_, nt) = self.fresh_nonterminal(hint);
+                nts.push(nt);
+            }
+        }
+        Ok(nts)
+    }
+
+    fn emit_expr_dfa(&mut self, lhs: NonterminalID, expr_dfa: &ExprDFA) -> Result<(), GlrMaskError> {
+        let nts = self.expr_dfa_state_nonterminals(expr_dfa, "expr_dfa", Some(lhs))?;
+        for (state_index, state) in expr_dfa.dfa.states.iter().enumerate() {
+            let state_nt = nts[state_index];
+            if state.is_accepting {
+                self.rules.push(Rule { lhs: state_nt, rhs: Vec::new() });
+            }
+            for (label, target) in &state.transitions {
+                let target = *target as usize;
+                if target >= nts.len() {
+                    return Err(GlrMaskError::GrammarParse(format!(
+                        "ExprDFA transition from state {state_index} targets out-of-range state {target}"
+                    )));
+                }
+                let symbol_expr = expr_dfa.symbol_for_label(*label).ok_or_else(|| {
+                    GlrMaskError::GrammarParse(format!(
+                        "ExprDFA transition label {label} is not a valid symbol index"
+                    ))
+                })?;
+                let symbol = self.lower_expr_terminalish(symbol_expr)?;
+                self.rules.push(Rule {
+                    lhs: state_nt,
+                    rhs: vec![symbol, Symbol::Nonterminal(nts[target])],
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_expr_dfa_nonnullable(
+        &mut self,
+        lhs: NonterminalID,
+        expr_dfa: &ExprDFA,
+    ) -> Result<(), GlrMaskError> {
+        let state_count = expr_dfa.dfa.states.len();
+        let start = expr_dfa.dfa.start_state as usize;
+        if start >= state_count {
+            return Err(GlrMaskError::GrammarParse(format!(
+                "ExprDFA start state {} is out of range for {} states",
+                expr_dfa.dfa.start_state, state_count
+            )));
+        }
+
+        let mut nullable_nts = Vec::with_capacity(state_count);
+        let mut nonnullable_nts = Vec::with_capacity(state_count);
+        for state_index in 0..state_count {
+            if state_index == start {
+                nullable_nts.push(lhs);
+            } else {
+                let (_, nt) = self.fresh_nonterminal("expr_dfa_nullable_prefix");
+                nullable_nts.push(nt);
+            }
+            let (_, nt) = self.fresh_nonterminal("expr_dfa_nonnullable");
+            nonnullable_nts.push(nt);
+        }
+
+        for (state_index, state) in expr_dfa.dfa.states.iter().enumerate() {
+            if state.is_accepting {
+                self.rules.push(Rule {
+                    lhs: nonnullable_nts[state_index],
+                    rhs: Vec::new(),
+                });
+            }
+
+            for (label, target) in &state.transitions {
+                let target = *target as usize;
+                if target >= state_count {
+                    return Err(GlrMaskError::GrammarParse(format!(
+                        "ExprDFA transition from state {state_index} targets out-of-range state {target}"
+                    )));
+                }
+                let symbol_expr = expr_dfa.symbol_for_label(*label).ok_or_else(|| {
+                    GlrMaskError::GrammarParse(format!(
+                        "ExprDFA transition label {label} is not a valid symbol index"
+                    ))
+                })?;
+
+                if self.expr_is_nullable(symbol_expr) {
+                    let symbol = self.lower_expr_terminalish(symbol_expr)?;
+                    self.rules.push(Rule {
+                        lhs: nullable_nts[state_index],
+                        rhs: vec![symbol, Symbol::Nonterminal(nullable_nts[target])],
+                    });
+                }
+                if let Some(symbol) = self.lower_nonnullable_expr_symbol(symbol_expr)? {
+                    self.rules.push(Rule {
+                        lhs: nullable_nts[state_index],
+                        rhs: vec![symbol, Symbol::Nonterminal(nonnullable_nts[target])],
+                    });
+                }
+
+                let symbol = self.lower_expr_terminalish(symbol_expr)?;
+                self.rules.push(Rule {
+                    lhs: nonnullable_nts[state_index],
+                    rhs: vec![symbol, Symbol::Nonterminal(nonnullable_nts[target])],
+                });
+            }
+        }
+
+        Ok(())
+    }
+
     fn lower_expr(&mut self, expr: &GrammarExpr) -> Symbol {
         fn emit(lowerer: &mut Lowerer, lhs: NonterminalID, expr: &GrammarExpr) -> Result<(), GlrMaskError> {
             match expr {
@@ -1158,6 +1308,9 @@ impl Lowerer {
                 }
                 GrammarExpr::Epsilon => {
                     lowerer.rules.push(Rule { lhs, rhs: Vec::new() });
+                }
+                GrammarExpr::ExprDFA(expr_dfa) => {
+                    lowerer.emit_expr_dfa(lhs, expr_dfa)?;
                 }
                 _ => {
                     let symbol = lowerer.lower_expr_terminalish(expr)?;
@@ -1230,7 +1383,8 @@ impl Lowerer {
             | GrammarExpr::Repeat(_)
             | GrammarExpr::RepeatOne(_)
             | GrammarExpr::RepeatRange { .. }
-            | GrammarExpr::SeparatedSequence { .. } => self.lower_expr(expr),
+            | GrammarExpr::SeparatedSequence { .. }
+            | GrammarExpr::ExprDFA(_) => self.lower_expr(expr),
         })
     }
 
@@ -1509,6 +1663,11 @@ fn grammar_expr_to_expr(
                 "GrammarExpr::SeparatedSequence cannot appear inside a terminal rule".into(),
             ));
         }
+        GrammarExpr::ExprDFA(_) => {
+            return Err(GlrMaskError::GrammarParse(
+                "GrammarExpr::ExprDFA cannot appear inside a terminal rule".into(),
+            ));
+        }
     })
 }
 
@@ -1545,6 +1704,43 @@ fn grammar_expr_is_nullable(
                 && items
                     .iter()
                     .all(|(item, is_required)| !*is_required || grammar_expr_is_nullable(item, rule_nullable))
+        }
+        GrammarExpr::ExprDFA(expr_dfa) => {
+            let state_count = expr_dfa.dfa.states.len();
+            let start = expr_dfa.dfa.start_state as usize;
+            if start >= state_count {
+                return false;
+            }
+
+            let mut nullable_from_state = vec![false; state_count];
+            for (state_index, state) in expr_dfa.dfa.states.iter().enumerate() {
+                nullable_from_state[state_index] = state.is_accepting;
+            }
+
+            let mut changed = true;
+            while changed {
+                changed = false;
+                for (state_index, state) in expr_dfa.dfa.states.iter().enumerate() {
+                    if nullable_from_state[state_index] {
+                        continue;
+                    }
+                    for (label, target) in &state.transitions {
+                        let target = *target as usize;
+                        let Some(symbol) = expr_dfa.symbol_for_label(*label) else {
+                            continue;
+                        };
+                        if target < state_count
+                            && nullable_from_state[target]
+                            && grammar_expr_is_nullable(symbol, rule_nullable)
+                        {
+                            nullable_from_state[state_index] = true;
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            nullable_from_state[start]
         }
     }
 }

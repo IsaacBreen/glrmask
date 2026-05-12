@@ -456,7 +456,8 @@ fn finite_literal_alternatives(
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::AnyByte
         | GrammarExpr::Intersect { .. }
-        | GrammarExpr::SeparatedSequence { .. } => return None,
+        | GrammarExpr::SeparatedSequence { .. }
+        | GrammarExpr::ExprDFA(_) => return None,
     };
 
     let total_bytes = alts.iter().map(Vec::len).sum::<usize>();
@@ -4147,6 +4148,14 @@ impl<'a> SchemaCtx<'a> {
                 separator: Box::new(self.hoist_patterns_in_expr(*separator, prefix)),
                 allow_empty,
             },
+            GrammarExpr::ExprDFA(mut expr_dfa) => {
+                expr_dfa.symbols = expr_dfa
+                    .symbols
+                    .into_iter()
+                    .map(|symbol| self.hoist_patterns_in_expr(symbol, prefix))
+                    .collect();
+                GrammarExpr::ExprDFA(expr_dfa)
+            }
         }
     }
 
@@ -10209,6 +10218,11 @@ fn collect_grammar_visible_refs(
                     walk(item_expr, terminal_names, out);
                 }
                 walk(separator, terminal_names, out);
+            }
+            GrammarExpr::ExprDFA(expr_dfa) => {
+                for symbol in &expr_dfa.symbols {
+                    walk(symbol, terminal_names, out);
+                }
             }
             GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }

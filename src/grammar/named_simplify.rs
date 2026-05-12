@@ -67,6 +67,14 @@ fn simplify_expr(expr: GrammarExpr, stats: &mut SimplifyStats) -> GrammarExpr {
             separator: Box::new(simplify_expr(*separator, stats)),
             allow_empty,
         },
+        GrammarExpr::ExprDFA(mut expr_dfa) => {
+            expr_dfa.symbols = expr_dfa
+                .symbols
+                .into_iter()
+                .map(|symbol| simplify_expr(symbol, stats))
+                .collect();
+            GrammarExpr::ExprDFA(expr_dfa)
+        }
         atom => atom,
     }
 }
@@ -265,6 +273,11 @@ fn collect_ref_counts(expr: &GrammarExpr, counts: &mut HashMap<String, usize>) {
             }
             collect_ref_counts(separator, counts);
         }
+        GrammarExpr::ExprDFA(expr_dfa) => {
+            for symbol in &expr_dfa.symbols {
+                collect_ref_counts(symbol, counts);
+            }
+        }
         GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
         | GrammarExpr::CharClass { .. }
@@ -329,6 +342,11 @@ fn inline_refs_in_expr(
                 inline_refs_in_expr(item, rule_exprs, ref_counts, protected, removed, stats);
             }
             inline_refs_in_expr(separator, rule_exprs, ref_counts, protected, removed, stats);
+        }
+        GrammarExpr::ExprDFA(expr_dfa) => {
+            for symbol in &mut expr_dfa.symbols {
+                inline_refs_in_expr(symbol, rule_exprs, ref_counts, protected, removed, stats);
+            }
         }
         GrammarExpr::Ref(_)
         | GrammarExpr::Epsilon

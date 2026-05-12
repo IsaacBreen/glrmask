@@ -673,6 +673,25 @@ fn expand_lark_expr(
                 allow_empty: *allow_empty,
             }
         }
+        GrammarExpr::ExprDFA(expr_dfa) => {
+            let mut expanded = expr_dfa.as_ref().clone();
+            expanded.symbols = expanded
+                .symbols
+                .iter()
+                .map(|symbol| {
+                    expand_lark_expr(
+                        symbol,
+                        in_terminal_rule,
+                        rule_map,
+                        terminal_names,
+                        parser_names,
+                        memo,
+                        visiting,
+                    )
+                })
+                .collect::<Result<Vec<_>, GlrMaskError>>()?;
+            GrammarExpr::ExprDFA(Box::new(expanded))
+        }
     })
 }
 
@@ -1060,4 +1079,3 @@ pub fn parse_lark_to_named(input: &str) -> Result<NamedGrammar, GlrMaskError> {
     let named = parser.parse_grammar()?;
     normalize_lark_named(named)
 }
-

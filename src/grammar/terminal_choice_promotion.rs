@@ -79,6 +79,7 @@ enum PathStep {
     IntersectIntersect,
     SeparatedItem(usize),
     SeparatedSeparator,
+    ExprDFASymbol(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -211,6 +212,13 @@ impl CandidateCollector {
                 path.push(PathStep::SeparatedSeparator);
                 self.collect_expr(rule_idx, separator, path);
                 path.pop();
+            }
+            GrammarExpr::ExprDFA(expr_dfa) => {
+                for (idx, symbol) in expr_dfa.symbols.iter().enumerate() {
+                    path.push(PathStep::ExprDFASymbol(idx));
+                    self.collect_expr(rule_idx, symbol, path);
+                    path.pop();
+                }
             }
             GrammarExpr::Ref(_)
             | GrammarExpr::Epsilon
@@ -429,6 +437,9 @@ fn expr_at_path_mut<'a>(mut expr: &'a mut GrammarExpr, path: &[PathStep]) -> &'a
                 PathStep::SeparatedSeparator,
                 GrammarExpr::SeparatedSequence { separator, .. },
             ) => separator,
+            (PathStep::ExprDFASymbol(idx), GrammarExpr::ExprDFA(expr_dfa)) => {
+                &mut expr_dfa.symbols[*idx]
+            }
             _ => panic!("candidate path no longer matches expression shape"),
         };
     }

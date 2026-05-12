@@ -197,6 +197,13 @@ fn dump_nt_atom(expr: &GrammarExpr) -> String {
                 format!("{} ~+ ( {} )", sep_str, items_str)
             }
         }
+        GrammarExpr::ExprDFA(expr_dfa) => {
+            format!(
+                "ExprDFA(states={}, symbols={})",
+                expr_dfa.dfa.states.len(),
+                expr_dfa.symbols.len()
+            )
+        }
         // For compound exprs that need parens as atoms:
         GrammarExpr::Sequence(_) | GrammarExpr::Choice(_) => {
             format!("({})", dump_nt_expr(expr, false))

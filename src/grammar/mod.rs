@@ -1,5 +1,6 @@
 pub mod flat;
 pub mod ast;
+pub mod expr_dfa;
 pub mod factoring;
 pub mod glrm;
 pub mod named_simplify;
