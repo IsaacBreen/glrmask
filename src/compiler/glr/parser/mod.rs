@@ -242,6 +242,26 @@ fn apply_push_sequences(base: ParserGSS, pushes: &[&[u32]]) -> ParserGSS {
 }
 
 fn apply_stack_shifts(gss: ParserGSS, shifts: &[StackShift]) -> ParserGSS {
+    if shifts.len() > 1
+        && let Some(shifted) = gss.apply_stack_effects_to_single_concrete_path(
+            shifts
+                .iter()
+                .map(|shift| (shift.pop as usize, shift.pushes.as_slice())),
+        )
+    {
+        return shifted;
+    }
+
+    if let [shift] = shifts
+        && let Some(mut stack) = gss.try_virtual_stack()
+        && stack.pop(shift.pop as usize) == 0
+    {
+        for &state in &shift.pushes {
+            stack.push(state);
+        }
+        return stack.into_gss();
+    }
+
     if let Some(stack) = gss.try_virtual_stack()
         && let Some(first) = shifts.first()
         && !first.pushes.is_empty()
@@ -277,6 +297,25 @@ fn apply_stack_shifts(gss: ParserGSS, shifts: &[StackShift]) -> ParserGSS {
 }
 
 fn apply_guarded_stack_shifts(gss: ParserGSS, shifts: &[GuardedStackShift]) -> ParserGSS {
+    if let Some(stack) = gss.try_virtual_stack() {
+        return apply_guarded_stack_shifts_to_vstack(&stack, shifts);
+    }
+
+    if let Some(shifted) = gss.apply_guarded_stack_effects_to_single_concrete_path(
+        shifts.iter().map(|shift| {
+            (
+                shift
+                    .guards
+                    .iter()
+                    .map(|guard| (guard.pop as usize, guard.states.as_slice())),
+                shift.pop as usize,
+                shift.pushes.as_slice(),
+            )
+        }),
+    ) {
+        return shifted;
+    }
+
     let mut out = ParserGSS::empty();
 
     for shift in shifts {
@@ -328,7 +367,24 @@ fn apply_guarded_stack_shifts_to_vstack(
     stack: &VirtualStack<u32, TerminalsDisallowed>,
     shifts: &[GuardedStackShift],
 ) -> ParserGSS {
-    let mut out = ParserGSS::empty();
+    let mut groups: SmallVec<[(u32, SmallVec<[&[u32]; 4]>); 4]> = SmallVec::new();
+    let mut empty_pushes: SmallVec<[u32; 4]> = SmallVec::new();
+    let stack_len = stack.len();
+    let mut state_after_pop_cache: SmallVec<[(u32, Option<u32>); 8]> = SmallVec::new();
+
+    #[inline]
+    fn state_after_popping(
+        stack: &VirtualStack<u32, TerminalsDisallowed>,
+        cache: &mut SmallVec<[(u32, Option<u32>); 8]>,
+        pop: u32,
+    ) -> Option<u32> {
+        if let Some((_, cached)) = cache.iter().find(|(cached_pop, _)| *cached_pop == pop) {
+            return *cached;
+        }
+        let value = stack.top_after_popping(pop as usize).copied();
+        cache.push((pop, value));
+        value
+    }
 
     for shift in shifts {
         debug_assert!(shift.guards.windows(2).all(|w| w[0].pop <= w[1].pop));
@@ -337,7 +393,7 @@ fn apply_guarded_stack_shifts_to_vstack(
         let mut dead = false;
 
         for guard in &shift.guards {
-            let Some(&state) = stack.top_after_popping(guard.pop as usize) else {
+            let Some(state) = state_after_popping(stack, &mut state_after_pop_cache, guard.pop) else {
                 dead = true;
                 break;
             };
@@ -347,21 +403,35 @@ fn apply_guarded_stack_shifts_to_vstack(
             }
         }
 
-        if dead || (shift.pop > 0 && stack.top_after_popping(shift.pop as usize - 1).is_none()) {
+        if dead || shift.pop as usize > stack_len {
             continue;
         }
 
-        let mut branch = stack.clone();
-        if branch.pop(shift.pop as usize) != 0 {
-            continue;
+        if shift.pushes.is_empty() {
+            empty_pushes.push(shift.pop);
+        } else if let Some((_, pushes)) = groups.iter_mut().find(|(pop, _)| *pop == shift.pop) {
+            pushes.push(shift.pushes.as_slice());
+        } else {
+            let mut pushes = SmallVec::new();
+            pushes.push(shift.pushes.as_slice());
+            groups.push((shift.pop, pushes));
         }
-
-        for &state in &shift.pushes {
-            branch.push(state);
-        }
-        merge_into(&mut out, branch.into_gss());
     }
 
+    let mut out = ParserGSS::empty();
+    for (pop, pushes) in groups {
+        if let Some(branch) =
+            stack.clone().into_gss_after_popping_and_pushing_branches(pop as usize, pushes)
+        {
+            merge_into(&mut out, branch);
+        }
+    }
+    for pop in empty_pushes {
+        let mut branch = stack.clone();
+        if branch.pop(pop as usize) == 0 {
+            merge_into(&mut out, branch.into_gss());
+        }
+    }
     out
 }
 

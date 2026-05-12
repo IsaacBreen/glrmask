@@ -594,7 +594,24 @@ fn apply_single_top_action_fast(gss: &ParserGSS, action: &Action) -> Option<Pars
             })
         }
         Action::StackShifts(shifts) => {
+            if shifts.len() > 1 {
+                return gss.apply_stack_effects_to_single_concrete_path(
+                    shifts
+                        .iter()
+                        .map(|shift| (shift.pop as usize, shift.pushes.as_slice())),
+                );
+            }
             let stack = gss.try_virtual_stack()?;
+            if let [shift] = shifts.as_slice() {
+                let mut branch = stack;
+                if branch.pop(shift.pop as usize) != 0 {
+                    return None;
+                }
+                for &target in &shift.pushes {
+                    branch.push(target);
+                }
+                return Some(branch.into_gss());
+            }
             if let Some(first) = shifts.first() {
                 if !first.pushes.is_empty()
                     && shifts

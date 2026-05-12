@@ -1898,6 +1898,100 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         res
     }
 
+    /// Apply a set of stack effects by materializing the single concrete stack.
+    ///
+    /// This is only a win for already-deterministic parser states that have a
+    /// large `StackShifts` action. In that shape, the generic GSS branch builder
+    /// can spend most of its time constructing and merging branches that collapse
+    /// back to one or two concrete stacks.
+    pub fn apply_stack_effects_to_single_concrete_path<'a, I>(&self, effects: I) -> Option<Self>
+    where
+        I: IntoIterator<Item = (usize, &'a [T])>,
+        T: 'a,
+    {
+        let mut stacks = self.to_stacks();
+        if stacks.len() != 1 {
+            return None;
+        }
+        let (stack, acc) = stacks.pop().unwrap();
+
+        let mut out: Vec<(Vec<T>, A)> = Vec::new();
+        for (pop, pushes) in effects {
+            if pop > stack.len() {
+                continue;
+            }
+
+            let keep = stack.len() - pop;
+            let mut next = Vec::with_capacity(keep + pushes.len());
+            next.extend_from_slice(&stack[..keep]);
+            next.extend_from_slice(pushes);
+
+            if let Some((_, existing_acc)) =
+                out.iter_mut().find(|(existing_stack, _)| *existing_stack == next)
+            {
+                *existing_acc = existing_acc.merge(&acc);
+            } else {
+                out.push((next, acc.clone()));
+            }
+        }
+
+        Some(Self::from_stacks(&out))
+    }
+
+    pub fn apply_guarded_stack_effects_to_single_concrete_path<'a, I, G>(
+        &self,
+        effects: I,
+    ) -> Option<Self>
+    where
+        I: IntoIterator<Item = (G, usize, &'a [T])>,
+        G: IntoIterator<Item = (usize, &'a [T])>,
+        T: 'a,
+    {
+        let mut stacks = self.to_stacks();
+        if stacks.len() != 1 {
+            return None;
+        }
+        let (stack, acc) = stacks.pop().unwrap();
+
+        let mut out: Vec<(Vec<T>, A)> = Vec::new();
+        for (guards, pop, pushes) in effects {
+            if pop > stack.len() {
+                continue;
+            }
+
+            let mut allowed = true;
+            for (guard_pop, guard_states) in guards {
+                if guard_pop >= stack.len() {
+                    allowed = false;
+                    break;
+                }
+                let state = &stack[stack.len() - 1 - guard_pop];
+                if !guard_states.iter().any(|candidate| candidate == state) {
+                    allowed = false;
+                    break;
+                }
+            }
+            if !allowed {
+                continue;
+            }
+
+            let keep = stack.len() - pop;
+            let mut next = Vec::with_capacity(keep + pushes.len());
+            next.extend_from_slice(&stack[..keep]);
+            next.extend_from_slice(pushes);
+
+            if let Some((_, existing_acc)) =
+                out.iter_mut().find(|(existing_stack, _)| *existing_stack == next)
+            {
+                *existing_acc = existing_acc.merge(&acc);
+            } else {
+                out.push((next, acc.clone()));
+            }
+        }
+
+        Some(Self::from_stacks(&out))
+    }
+
     pub fn push(&self, value: T) -> Self {
         if self.is_empty() {
             return self.clone();
