@@ -318,7 +318,7 @@ mod tests {
     use super::*;
     use crate::candidate::{
         BaselineCandidate, ComplementCandidate, CopyFirstGroupRunCandidate, GlrMaskFinalDenseCandidate,
-        GlrMaskLikeCandidate, ParallelComplementCandidate,
+        GlrMaskFinalDenseComplementCandidate, GlrMaskLikeCandidate, ParallelComplementCandidate,
     };
 
     fn tiny_data() -> GameData {
@@ -418,6 +418,15 @@ mod tests {
     fn glrmask_final_dense_candidate_expands_internal_dense_to_original_bitset() {
         let summary =
             evaluate::<GlrMaskFinalDenseCandidate>(&tiny_data(), 3).expect("final dense verifies");
+        assert_eq!(summary.cases, 2);
+        assert_eq!(summary.repetitions, 3);
+        assert_eq!(summary.total_calls, 6);
+    }
+
+    #[test]
+    fn glrmask_final_dense_complement_candidate_expands_internal_dense_to_original_bitset() {
+        let summary = evaluate::<GlrMaskFinalDenseComplementCandidate>(&tiny_data(), 3)
+            .expect("final dense complement verifies");
         assert_eq!(summary.cases, 2);
         assert_eq!(summary.repetitions, 3);
         assert_eq!(summary.total_calls, 6);

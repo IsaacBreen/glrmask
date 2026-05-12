@@ -226,6 +226,7 @@ impl Candidate for ParallelComplementCandidate {
 }
 
 pub struct GlrMaskFinalDenseCandidate;
+pub struct GlrMaskFinalDenseComplementCandidate;
 
 impl Candidate for GlrMaskFinalDenseCandidate {
     type Prepared = FinalMaskMapping;
@@ -243,6 +244,26 @@ impl Candidate for GlrMaskFinalDenseCandidate {
             prepared.fill_internal_ids(&case.internal_ids, out);
         } else {
             prepared.fill_dense_words(&case.internal_dense_words, out);
+        }
+    }
+}
+
+impl Candidate for GlrMaskFinalDenseComplementCandidate {
+    type Prepared = FinalMaskMapping;
+
+    fn name() -> &'static str {
+        "glrmask_final_dense_force_complement"
+    }
+
+    fn prepare(mapping: &Mapping, buf_words: usize) -> Self::Prepared {
+        FinalMaskMapping::new(&mapping.internal_to_original, buf_words)
+    }
+
+    fn fill(prepared: &Self::Prepared, case: &Case, out: &mut [u32]) {
+        if case.internal_dense_words.is_empty() {
+            prepared.fill_internal_ids(&case.internal_ids, out);
+        } else {
+            prepared.fill_dense_words_complement(&case.internal_dense_words, out);
         }
     }
 }

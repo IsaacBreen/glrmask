@@ -976,6 +976,7 @@ impl<'a> ConstraintState<'a> {
         precomputed: &DenseTokenMaskCache,
         merged: &mut [u64],
         mut direct_buf: Option<&mut [u32]>,
+        direct_buf_dirty: &mut bool,
     ) -> bool {
         let direct_handled = direct_buf
             .as_ref()
@@ -988,6 +989,7 @@ impl<'a> ConstraintState<'a> {
                 for (_, dense) in &acc.0 {
                     if let Some(seed_idx) = self.constraint.seed_state_index_for_dense(dense) {
                         self.constraint.or_seed_state_dense_to_buf(seed_idx, buf);
+                        *direct_buf_dirty = true;
                     }
                 }
             }
@@ -1004,11 +1006,13 @@ impl<'a> ConstraintState<'a> {
                         .constraint
                         .or_weight_token_set_to_buf_if_contained(dense, token_set, buf)
                     {
+                        *direct_buf_dirty = true;
                         continue;
                     }
                     if let Some(seed_idx) = self.constraint.seed_state_index_for_dense(dense) {
                         self.constraint
                             .or_seed_dense_token_set_to_buf(seed_idx, token_set, buf);
+                        *direct_buf_dirty = true;
                     }
                 }
             }
@@ -1026,8 +1030,12 @@ impl<'a> ConstraintState<'a> {
             });
         }
 
-        let _ = acc;
-        false
+        acc.0.iter().all(|(tsid, dense)| {
+            final_weight.0.get(*tsid).is_none_or(|token_set| {
+                self.constraint
+                    .has_weight_token_set_buf_if_contained(dense, token_set)
+            })
+        })
     }
 
     fn merge_final_weight_for_accs(
@@ -1037,6 +1045,7 @@ impl<'a> ConstraintState<'a> {
         precomputed: &DenseTokenMaskCache,
         merged: &mut [u64],
         direct_buf: &mut Option<&mut [u32]>,
+        direct_buf_dirty: &mut bool,
     ) -> bool {
         let mut all_direct = true;
         for acc in accs {
@@ -1046,6 +1055,7 @@ impl<'a> ConstraintState<'a> {
                 precomputed,
                 merged,
                 direct_buf.as_deref_mut(),
+                direct_buf_dirty,
             );
         }
         all_direct
@@ -1058,6 +1068,7 @@ impl<'a> ConstraintState<'a> {
         precomputed: &DenseTokenMaskCache,
         merged: &mut [u64],
         direct_buf: &mut Option<&mut [u32]>,
+        direct_buf_dirty: &mut bool,
     ) -> bool {
         let mut all_direct = true;
         gss.for_each_acc(|acc| {
@@ -1067,6 +1078,7 @@ impl<'a> ConstraintState<'a> {
                 precomputed,
                 merged,
                 direct_buf.as_deref_mut(),
+                direct_buf_dirty,
             );
         });
         all_direct
@@ -1082,6 +1094,7 @@ impl<'a> ConstraintState<'a> {
         direct_buf: &mut Option<&mut [u32]>,
         direct_buf_possible: &mut bool,
         direct_buf_used: &mut bool,
+        direct_buf_dirty: &mut bool,
         profile: &mut Option<MaskInnerProfileStats>,
     ) {
         for (&tokenizer_state, gss) in &self.state {
@@ -1126,6 +1139,7 @@ impl<'a> ConstraintState<'a> {
                     precomputed,
                     merged,
                     direct_buf,
+                    direct_buf_dirty,
                 );
 
                 for (_, sub_gss) in &decomposed {
@@ -1135,6 +1149,7 @@ impl<'a> ConstraintState<'a> {
                         precomputed,
                         merged,
                         direct_buf,
+                        direct_buf_dirty,
                     );
                 }
                 if let (Some(profile), Some(start)) = (profile.as_mut(), accumulate_start) {
@@ -1200,11 +1215,13 @@ impl<'a> ConstraintState<'a> {
             std::mem::take(&mut scratch.merged_dense)
         };
 
+        buf.fill(0);
         merged.clear();
         merged.resize(dense_words, 0);
-        let mut direct_buf = None;
-        let mut direct_buf_possible = false;
+        let mut direct_buf = Some(&mut *buf);
+        let mut direct_buf_possible = true;
         let mut direct_buf_used = false;
+        let mut direct_buf_dirty = false;
 
         let mut queue = MaskQueue::new();
         let mut profile = if mask_inner_profile_enabled() {
@@ -1228,6 +1245,7 @@ impl<'a> ConstraintState<'a> {
             &mut direct_buf,
             &mut direct_buf_possible,
             &mut direct_buf_used,
+            &mut direct_buf_dirty,
             &mut profile,
         );
 
@@ -1257,6 +1275,7 @@ impl<'a> ConstraintState<'a> {
                     precomputed,
                     &mut merged,
                     &mut direct_buf,
+                    &mut direct_buf_dirty,
                 );
                 if let (Some(profile), Some(start)) = (profile.as_mut(), accumulate_start) {
                     profile.token_accumulation_ns += elapsed_ns(start);
@@ -1458,10 +1477,12 @@ impl<'a> ConstraintState<'a> {
             let dense_to_buf = if direct_buf_used && direct_buf_possible {
                 DenseToBufProfileStats::default()
             } else {
-                let zero_start = profile.as_ref().map(|_| Instant::now());
-                buf.fill(0);
-                if let (Some(profile), Some(start)) = (profile.as_mut(), zero_start) {
-                    profile.finalize_zero_ns += elapsed_ns(start);
+                if direct_buf_dirty {
+                    let zero_start = profile.as_ref().map(|_| Instant::now());
+                    buf.fill(0);
+                    if let (Some(profile), Some(start)) = (profile.as_mut(), zero_start) {
+                        profile.finalize_zero_ns += elapsed_ns(start);
+                    }
                 }
 
                 if profile.is_some() {

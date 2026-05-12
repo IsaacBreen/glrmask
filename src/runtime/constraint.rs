@@ -994,6 +994,30 @@ impl Constraint {
         true
     }
 
+    #[inline(always)]
+    pub(crate) fn has_weight_token_set_buf_if_contained(
+        &self,
+        dense: &[u64],
+        token_set: &Arc<RangeSetBlaze<u32>>,
+    ) -> bool {
+        let key = Arc::as_ptr(token_set) as usize;
+        if !self.weight_token_buf_masks.contains_key(&key) {
+            return false;
+        }
+        let Some(token_dense) = self.weight_token_dense_masks.get(&key) else {
+            return false;
+        };
+
+        for (i, &token_word) in token_dense.iter().enumerate() {
+            let dense_word = dense.get(i).copied().unwrap_or(0);
+            if token_word & !dense_word != 0 {
+                return false;
+            }
+        }
+
+        true
+    }
+
     fn compute_weight_token_buf_masks(&self) -> DenseWeightBufMaskCache {
         let buf_words = self.mask_len();
         if buf_words == 0 {
@@ -1002,7 +1026,7 @@ impl Constraint {
 
         let build = |(&key, dense): (&usize, &DenseWords)| {
             let estimated_cost = self.estimate_internal_dense_to_buf_cost(dense);
-            if estimated_cost <= (buf_words as u64) * 2 {
+            if estimated_cost == 0 {
                 return None;
             }
 
@@ -1026,7 +1050,7 @@ impl Constraint {
 
         let build = |dense: &DenseWords| {
             let estimated_cost = self.estimate_internal_dense_to_buf_cost(dense);
-            if estimated_cost <= (buf_words as u64) * 2 {
+            if estimated_cost == 0 {
                 return None;
             }
 

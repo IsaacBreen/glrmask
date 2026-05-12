@@ -123,7 +123,9 @@ pub struct FinalMaskMapping {
     byte_group_entries: EntryTable,
     byte_group_dense: Vec<Option<Box<[u32]>>>,
     halfword_group_entries: EntryTable,
+    halfword_group_dense: Vec<Option<Box<[u32]>>>,
     word32_group_entries: EntryTable,
+    word32_group_dense: Vec<Option<Box<[u32]>>>,
     word_group_entries: EntryTable,
     word_group_dense: Vec<Option<Box<[u32]>>>,
     word_group_entry_prefix: Vec<usize>,
@@ -156,6 +158,10 @@ impl FinalMaskMapping {
             compute_heavy_group_dense(&quad_group_entries, buf_words, dense_group_threshold);
         let byte_group_dense =
             compute_heavy_group_dense(&byte_group_entries, buf_words, dense_group_threshold);
+        let halfword_group_dense =
+            compute_heavy_group_dense(&halfword_group_entries, buf_words, dense_group_threshold);
+        let word32_group_dense =
+            compute_heavy_group_dense(&word32_group_entries, buf_words, dense_group_threshold);
         let word_group_dense =
             compute_heavy_group_dense(&word_group_entries, buf_words, dense_group_threshold);
         let word_group_entry_prefix = compute_entry_prefix(&word_group_entries);
@@ -176,7 +182,9 @@ impl FinalMaskMapping {
             byte_group_entries: EntryTable::from_groups(byte_group_entries),
             byte_group_dense,
             halfword_group_entries: EntryTable::from_groups(halfword_group_entries),
+            halfword_group_dense,
             word32_group_entries: EntryTable::from_groups(word32_group_entries),
+            word32_group_dense,
             word_group_entries: EntryTable::from_groups(word_group_entries),
             word_group_dense,
             word_group_entry_prefix,
@@ -211,6 +219,11 @@ impl FinalMaskMapping {
         self.or_dense_to_buf_fast(dense, out, true);
     }
 
+    pub fn fill_dense_words_complement(&self, dense: &[u64], out: &mut [u32]) {
+        copy_dense(out, &self.all_tokens_mask);
+        self.andnot_missing_dense_fast(dense, out);
+    }
+
     pub(crate) fn or_dense_to_buf_fast(&self, dense: &[u64], buf: &mut [u32], buf_zeroed: bool) {
         let n_internal = self.token_entries.len();
         if n_internal == 0 || dense.is_empty() {
@@ -236,8 +249,12 @@ impl FinalMaskMapping {
             && n_missing <= 800
         {
             let selection = self.dense_selection_stats(dense);
-            if self.buf_words + self.estimate_missing_dense_clear_cost(dense)
-                >= selection.selected_entry_cost
+            let clear_cost = self.estimate_missing_dense_clear_cost(dense);
+            let scattered_dense_selected =
+                n_set.saturating_mul(3) >= n_internal.saturating_mul(2)
+                    && selection.selected_entry_cost > self.buf_words.saturating_mul(3);
+            if !scattered_dense_selected
+                && self.buf_words + clear_cost >= selection.selected_entry_cost
             {
                 self.or_selected_dense_fast(dense, buf, buf_zeroed);
                 return;
@@ -273,7 +290,10 @@ impl FinalMaskMapping {
         {
             let stats = self.dense_selection_stats(dense);
             let clear_cost = self.estimate_missing_dense_clear_cost(dense);
-            if self.buf_words + clear_cost < stats.selected_entry_cost {
+            let scattered_dense_selected =
+                n_set.saturating_mul(3) >= n_internal.saturating_mul(2)
+                    && stats.selected_entry_cost > self.buf_words.saturating_mul(3);
+            if scattered_dense_selected || self.buf_words + clear_cost < stats.selected_entry_cost {
                 return (self.buf_words + clear_cost) as u64;
             }
         }
@@ -314,8 +334,12 @@ impl FinalMaskMapping {
             && n_missing <= 800
         {
             let selection = self.dense_selection_stats(dense);
-            if self.buf_words + self.estimate_missing_dense_clear_cost(dense)
-                >= selection.selected_entry_cost
+            let clear_cost = self.estimate_missing_dense_clear_cost(dense);
+            let scattered_dense_selected =
+                n_set.saturating_mul(3) >= n_internal.saturating_mul(2)
+                    && selection.selected_entry_cost > self.buf_words.saturating_mul(3);
+            if !scattered_dense_selected
+                && self.buf_words + clear_cost >= selection.selected_entry_cost
             {
                 self.or_selected_dense(dense, buf, buf_zeroed, &mut stats);
                 return stats;
@@ -939,6 +963,10 @@ impl FinalMaskMapping {
 
     #[inline(always)]
     fn andnot_halfword_group(&self, group_id: usize, out: &mut [u32]) -> bool {
+        if let Some(Some(dense)) = self.halfword_group_dense.get(group_id) {
+            andnot_dense(out, dense);
+            return true;
+        }
         let Some(entries) = self.halfword_group_entries.get(group_id) else {
             return false;
         };
@@ -948,6 +976,10 @@ impl FinalMaskMapping {
 
     #[inline(always)]
     fn andnot_word32_group(&self, group_id: usize, out: &mut [u32]) -> bool {
+        if let Some(Some(dense)) = self.word32_group_dense.get(group_id) {
+            andnot_dense(out, dense);
+            return true;
+        }
         let Some(entries) = self.word32_group_entries.get(group_id) else {
             return false;
         };

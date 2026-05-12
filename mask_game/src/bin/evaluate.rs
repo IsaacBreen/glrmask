@@ -2,7 +2,7 @@ use std::env;
 
 use mask_game::candidate::{
     BaselineCandidate, ComplementCandidate, CopyFirstGroupRunCandidate, GlrMaskFinalDenseCandidate,
-    GlrMaskLikeCandidate, ParallelComplementCandidate,
+    GlrMaskFinalDenseComplementCandidate, GlrMaskLikeCandidate, ParallelComplementCandidate,
 };
 use mask_game::{evaluate, load_game_data};
 
@@ -41,6 +41,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &data,
             evaluate::<GlrMaskFinalDenseCandidate>(&data, repetitions)?,
         )?,
+        "final_complement" | "glrmask_final_dense_force_complement" => print_summary(
+            &data,
+            evaluate::<GlrMaskFinalDenseComplementCandidate>(&data, repetitions)?,
+        )?,
         "all" => {
             print_summary(&data, evaluate::<BaselineCandidate>(&data, repetitions)?)?;
             print_summary(&data, evaluate::<GlrMaskLikeCandidate>(&data, repetitions)?)?;
@@ -56,6 +60,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             print_summary(
                 &data,
                 evaluate::<GlrMaskFinalDenseCandidate>(&data, repetitions)?,
+            )?;
+            print_summary(
+                &data,
+                evaluate::<GlrMaskFinalDenseComplementCandidate>(&data, repetitions)?,
             )?;
         }
         other => {
