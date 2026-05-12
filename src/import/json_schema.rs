@@ -1938,6 +1938,15 @@ fn ap_key_any_string() -> bool {
     env_flag("GLRMASK_AP_KEY_ANY_STRING") || env_flag("GLRMASK_ADDPROP_NO_EXCLUSIONS")
 }
 
+fn shared_ap_key_exclusions_enabled() -> bool {
+    std::env::var("GLRMASK_AP_SHARED_EXCLUSIONS")
+        .map(|v| {
+            let n = v.trim().to_ascii_lowercase();
+            !matches!(n.as_str(), "" | "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(true)
+}
+
 fn decode_local_ref_token(token: &str) -> String {
     token.replace("~1", "/").replace("~0", "~")
 }
@@ -8878,7 +8887,7 @@ impl<'a> SchemaCtx<'a> {
         &self,
         excluded_literal_keys: &BTreeSet<String>,
     ) -> bool {
-        if ap_key_any_string() {
+        if !shared_ap_key_exclusions_enabled() || ap_key_any_string() {
             return false;
         }
 
@@ -10368,6 +10377,58 @@ mod tests {
         assert!(glrm.contains("t JSON_ENUM_STRING_0 ::= \"a\\\"\" | \"b\\\"\";"), "{glrm}");
         assert_eq!(glrm.matches("t JSON_ENUM_STRING_").count(), 1, "{glrm}");
         assert!(!glrm.contains("\"a\\\"\" | \"b\\\"\" |"), "{glrm}");
+    }
+
+    #[test]
+    fn shared_additional_properties_key_exclusions_are_on_by_default() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _shared = EnvVarGuard::unset("GLRMASK_AP_SHARED_EXCLUSIONS");
+
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "left": {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}},
+                    "additionalProperties": {"type": "string"}
+                },
+                "right": {
+                    "type": "object",
+                    "properties": {"b": {"type": "string"}},
+                    "additionalProperties": {"type": "string"}
+                }
+            },
+            "additionalProperties": false
+        });
+
+        let glrm = dump_glrm(schema);
+        assert!(glrm.contains("t AP_SHARED_KEY ::= "), "{glrm}");
+    }
+
+    #[test]
+    fn shared_additional_properties_key_exclusions_can_be_disabled_explicitly() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _shared = EnvVarGuard::set("GLRMASK_AP_SHARED_EXCLUSIONS", "0");
+
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "left": {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}},
+                    "additionalProperties": {"type": "string"}
+                },
+                "right": {
+                    "type": "object",
+                    "properties": {"b": {"type": "string"}},
+                    "additionalProperties": {"type": "string"}
+                }
+            },
+            "additionalProperties": false
+        });
+
+        let glrm = dump_glrm(schema);
+        assert!(!glrm.contains("t AP_SHARED_KEY ::= "), "{glrm}");
     }
 
     #[test]
