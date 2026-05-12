@@ -99,10 +99,10 @@ pub fn selected_cases(group_name: &str) -> Vec<&'static BenchCase> {
         .filter(|case| filters.iter().any(|filter| case_matches_filter(group_name, case, filter)))
         .collect();
     if selected.is_empty() {
-        let available = CASES.iter().map(|case| case.id).collect::<Vec<_>>().join(", ");
         panic!(
             "no CFA sweep cases matched filters {:?}; available case ids: {}",
-            filters, available
+            filters,
+            available_case_ids()
         );
     }
     selected
@@ -112,6 +112,9 @@ fn requested_case_filters() -> Vec<String> {
     let mut filters = Vec::new();
     for env_name in ["GLRMASK_BENCH_CASE", "GLRMASK_BENCH_FILTER"] {
         if let Ok(raw) = std::env::var(env_name) {
+            if raw.trim().is_empty() {
+                print_available_cases_and_exit(env_name);
+            }
             filters.extend(split_filters(&raw));
         }
     }
@@ -151,10 +154,29 @@ fn criterion_positional_filters() -> Vec<String> {
 fn split_cli_filter(arg: &str) -> Vec<String> {
     if let Some((key, value)) = arg.split_once('=') {
         if matches!(key, "CASE" | "case" | "FILTER" | "filter") {
+            if value.trim().is_empty() {
+                print_available_cases_and_exit(key);
+            }
             return split_filters(value).collect();
         }
     }
     vec![arg.to_owned()]
+}
+
+fn available_case_ids() -> String {
+    CASES
+        .iter()
+        .map(|case| case.id)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn print_available_cases_and_exit(filter_name: &str) -> ! {
+    eprintln!("{filter_name} is empty; set it to one of:");
+    for case in CASES {
+        eprintln!("  {}", case.id);
+    }
+    std::process::exit(2);
 }
 
 fn option_takes_value(arg: &str) -> bool {
