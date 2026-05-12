@@ -223,9 +223,17 @@ pub fn profile_single_builds(cases: &[&BenchCase], vocab: &Vocab) {
 pub fn bench_cases(c: &mut Criterion, group_name: &str, cases: &[&BenchCase], vocab: &Vocab) {
     let mut group = c.benchmark_group(group_name);
     for case in cases {
-        group.bench_with_input(BenchmarkId::from_parameter(case.id), case, |b, case| {
-            b.iter(|| build_schema(case, vocab));
-        });
+        group.bench_with_input(
+            BenchmarkId::from_parameter(criterion_case_id(case)),
+            case,
+            |b, case| {
+                b.iter(|| build_schema(case, vocab));
+            },
+        );
     }
     group.finish();
+}
+
+fn criterion_case_id(case: &BenchCase) -> String {
+    format!("{} CASE={} FILTER={}", case.id, case.id, case.id)
 }
