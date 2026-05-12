@@ -1938,6 +1938,10 @@ fn ap_key_any_string() -> bool {
     env_flag("GLRMASK_AP_KEY_ANY_STRING") || env_flag("GLRMASK_ADDPROP_NO_EXCLUSIONS")
 }
 
+fn anyof_exact_union_enabled() -> bool {
+    env_flag("GLRMASK_ANYOF_EXACT_UNION")
+}
+
 fn shared_ap_key_exclusions_override() -> Option<bool> {
     std::env::var("GLRMASK_AP_SHARED_EXCLUSIONS")
         .ok()
@@ -6182,6 +6186,13 @@ impl<'a> SchemaCtx<'a> {
         }
 
         if keyword == "anyOf" {
+            if anyof_exact_union_enabled() {
+                if let Some(expr) =
+                    self.try_build_exact_closed_object_union(schema, options, StructuralBranchMode::AnyOf)?
+                {
+                    return Ok(Some(expr));
+                }
+            }
             if let Some(expr) = self.try_reduce_anyof_closed_objects(schema, options)? {
                 return Ok(Some(expr));
             }
@@ -10475,6 +10486,41 @@ mod tests {
         let _shared = EnvVarGuard::set("GLRMASK_AP_SHARED_EXCLUSIONS", "1");
         let forced_glrm = dump_glrm(schema);
         assert!(forced_glrm.contains("t AP_SHARED_KEY ::= "), "{forced_glrm}");
+    }
+
+    #[test]
+    fn anyof_exact_union_can_be_toggled_via_env_var() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let schema = json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "a": {"type": "string"}
+                    }
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "b": {"type": "string"}
+                    }
+                }
+            ]
+        });
+
+        let _exact = EnvVarGuard::unset("GLRMASK_ANYOF_EXACT_UNION");
+        let default_glrm = dump_glrm(schema.clone());
+        assert!(!default_glrm.contains("nt obj_ord_q_"), "{default_glrm}");
+
+        let _exact = EnvVarGuard::set("GLRMASK_ANYOF_EXACT_UNION", "1");
+        let exact_glrm = dump_glrm(schema.clone());
+        assert!(exact_glrm.contains("nt obj_ord_q_"), "{exact_glrm}");
+
+        let _exact = EnvVarGuard::set("GLRMASK_ANYOF_EXACT_UNION", "0");
+        let disabled_glrm = dump_glrm(schema);
+        assert!(!disabled_glrm.contains("nt obj_ord_q_"), "{disabled_glrm}");
     }
 
     #[test]
