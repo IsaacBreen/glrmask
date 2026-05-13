@@ -10886,7 +10886,21 @@ impl<'a> SchemaCtx<'a> {
             for (pattern_idx, (pattern, pattern_schema)) in pattern_properties.iter().enumerate() {
                 let body = self.pattern_key_colon_body_expr(pattern, &format!("{}_PP{}_KEY_BODY", upper_base_name, pattern_idx));
                 let (terminal_body, wrap) = wrap_key_colon_expr_parts(body);
-                let term_ref = self.extract_terminal_rule(terminal_body, &format!("{}_PP{}_KEY", upper_base_name, pattern_idx));
+                let raw_term_ref = self.extract_terminal_rule(
+                    terminal_body,
+                    &format!("{}_PP{}_KEY", upper_base_name, pattern_idx),
+                );
+                let term_ref = if let Some(np_terminal) = &np_terminal {
+                    self.insert_named_terminal_rule(
+                        format!("{upper_base_name}_PP{pattern_idx}_KEY_FILTERED"),
+                        GrammarExpr::Exclude {
+                            expr: Box::new(raw_term_ref),
+                            exclude: Box::new(np_terminal.clone()),
+                        },
+                    )
+                } else {
+                    raw_term_ref
+                };
                 let key_expr = wrap(term_ref.clone());
 
                 let value_expr = match self.convert_schema(pattern_schema) {
