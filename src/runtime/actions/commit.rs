@@ -888,27 +888,40 @@ fn commit_bytes_direct_linear_fast_path(
     start_gss: ParserGSS,
     bytes: &[u8],
     start_tokenizer_state: u32,
+    mut profile: Option<&mut CommitProfile>,
 ) -> Option<LinearFastPathResult> {
     let mut gss = start_gss;
     let mut offset = 0usize;
     let mut tokenizer_state = start_tokenizer_state;
 
     while offset < bytes.len() {
+        let choose_start = profile.as_ref().map(|_| std::time::Instant::now());
         let step = choose_direct_linear_step(constraint, &gss, &bytes[offset..], tokenizer_state)?;
+        if let (Some(profile), Some(start)) = (profile.as_deref_mut(), choose_start) {
+            profile.linear_fast_path_match_scan_ns += start.elapsed().as_nanos() as u64;
+            profile.linear_fast_path_steps += 1;
+        }
         if !step.ignored {
             if offset == 0 {
-                gss = prune_single_initial_state_for_terminal(
-                    gss,
-                    tokenizer_state,
-                    step.terminal,
-                    step.end_state,
-                );
-                if gss.is_empty() {
-                    return Some(LinearFastPathResult::Complete(Err(
-                        "commit rejected: no valid parser states remain".to_string(),
-                    )));
+                if !gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()) {
+                    let prune_start = profile.as_ref().map(|_| std::time::Instant::now());
+                    gss = prune_single_initial_state_for_terminal(
+                        gss,
+                        tokenizer_state,
+                        step.terminal,
+                        step.end_state,
+                    );
+                    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), prune_start) {
+                        profile.prune_ns += start.elapsed().as_nanos() as u64;
+                    }
+                    if gss.is_empty() {
+                        return Some(LinearFastPathResult::Complete(Err(
+                            "commit rejected: no valid parser states remain".to_string(),
+                        )));
+                    }
                 }
             }
+            let advance_start = profile.as_ref().map(|_| std::time::Instant::now());
             let advanced = if let Some(top_state) = gss.single_exclusive_top_value()
                 && let Some(action) = constraint.table.action(top_state, step.terminal)
                 && let Some(advanced) = apply_single_top_action_fast(&gss, action)
@@ -918,8 +931,22 @@ fn commit_bytes_direct_linear_fast_path(
                 if !stack_may_advance_on(&constraint.table, &gss, step.terminal) {
                     return None;
                 }
-                advance_stacks_owned(&constraint.table, gss, step.terminal)
+                if let Some(profile) = profile.as_deref_mut() {
+                    let (advanced, advance_profile) =
+                        advance_stacks_profiled(&constraint.table, &gss, step.terminal);
+                    profile.advance_core_ns += advance_profile.total_ns;
+                    apply_advance_profile(profile, &advance_profile);
+                    advanced
+                } else {
+                    advance_stacks_owned(&constraint.table, gss, step.terminal)
+                }
             };
+            if let (Some(profile), Some(start)) = (profile.as_deref_mut(), advance_start) {
+                let elapsed = start.elapsed().as_nanos() as u64;
+                profile.advance_ns += elapsed;
+                profile.linear_fast_path_advance_ns += elapsed;
+                profile.n_advances += 1;
+            }
             if advanced.is_empty() {
                 return Some(LinearFastPathResult::Complete(Err(
                     "commit rejected: no valid parser states remain".to_string(),
@@ -929,12 +956,19 @@ fn commit_bytes_direct_linear_fast_path(
                 end_state: step.end_state,
                 matches: Vec::new(),
             };
+            let future_start = profile.as_ref().map(|_| std::time::Instant::now());
             gss = apply_future_terminal_disallow(
                 constraint,
                 &exec_result,
                 step.terminal,
                 advanced,
             );
+            if let (Some(profile), Some(start)) = (profile.as_deref_mut(), future_start) {
+                let elapsed = start.elapsed().as_nanos() as u64;
+                profile.advance_future_disallow_ns += elapsed;
+                profile.linear_fast_path_future_disallow_ns += elapsed;
+                profile.linear_fast_path_advance_ns += elapsed;
+            }
             if gss.is_empty() {
                 return Some(LinearFastPathResult::Complete(Err(
                     "commit rejected: no valid parser states remain".to_string(),
@@ -946,7 +980,13 @@ fn commit_bytes_direct_linear_fast_path(
         tokenizer_state = constraint.tokenizer.initial_state();
     }
 
+    let fuse_start = profile.as_ref().map(|_| std::time::Instant::now());
     let fused = gss.fuse(Some(1));
+    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), fuse_start) {
+        let elapsed = start.elapsed().as_nanos() as u64;
+        profile.linear_fast_path_fuse_ns += elapsed;
+        profile.fuse_ns += elapsed;
+    }
     if fused.is_empty() {
         return Some(LinearFastPathResult::Complete(Err(
             "commit rejected: no valid parser states remain".to_string(),
@@ -1250,6 +1290,7 @@ fn commit_bytes_impl_profiled(
                 parser_gss.clone(),
                 bytes,
                 tokenizer_state,
+                Some(&mut profile),
             ) {
                 Some(LinearFastPathResult::Complete(result)) => {
                     profile.linear_fast_path_total_ns = direct_start.elapsed().as_nanos() as u64;
@@ -2046,6 +2087,7 @@ fn commit_bytes_impl(
                     parser_gss.clone(),
                     bytes,
                     tokenizer_state,
+                    None,
                 )
             {
                 match result {
@@ -2058,6 +2100,10 @@ fn commit_bytes_impl(
                 }
             }
         }
+    }
+
+    if state.len() == 1 {
+        let (&tokenizer_state, _) = state.iter().next().unwrap();
         let exec_result = execute_tokenizer_from_state_small(constraint, bytes, tokenizer_state);
 
         // Try fast path with pre-computed exec_result

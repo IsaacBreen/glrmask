@@ -1909,6 +1909,29 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         I: IntoIterator<Item = (usize, &'a [T])>,
         T: 'a,
     {
+        if let Some(stack) = self.try_virtual_stack() {
+            let mut out: Option<Self> = None;
+            for (pop, pushes) in effects {
+                let mut branch = stack.clone();
+                if branch.pop(pop) != 0 {
+                    continue;
+                }
+                for value in pushes {
+                    branch.push(value.clone());
+                }
+                let branch = branch.into_gss();
+                out = Some(match out {
+                    Some(existing) => existing.merge(&branch),
+                    None => branch,
+                });
+            }
+            if let Some(out) = out {
+                return Some(out);
+            }
+            let empty: Vec<(Vec<T>, A)> = Vec::new();
+            return Some(Self::from_stacks(&empty));
+        }
+
         let mut stacks = self.to_stacks();
         if stacks.len() != 1 {
             return None;
