@@ -55,6 +55,34 @@ fn tiny_array_text() -> &'static str {
     r#"["x"]"#
 }
 
+fn minimized_stack_growth_schema(n_props: usize) -> String {
+    let mut properties = Map::new();
+    for index in 1..=n_props {
+        properties.insert(format!("a{index}"), json!({ "type": "string" }));
+    }
+    properties.insert("y".to_string(), json!({ "type": "array" }));
+
+    json!({
+        "type": "object",
+        "patternProperties": {},
+        "properties": properties,
+        "anyOf": [
+            { "properties": { "x": { "type": "array" } } },
+            { "properties": { "y": { "type": "array" } } },
+        ],
+    })
+    .to_string()
+}
+
+fn minimized_stack_growth_example(n_props: usize) -> String {
+    let mut fields = Vec::with_capacity(n_props + 1);
+    for index in 1..=n_props {
+        fields.push(format!("\"a{index}\": \"z\""));
+    }
+    fields.push("\"y\": [\"z\"]".to_string());
+    format!("{{{}}}", fields.join(", "))
+}
+
 fn singleton_required_anyof_schema(spec: &FamilySpec) -> String {
     let properties = spec
         .order
@@ -128,6 +156,33 @@ fn measure_max_stack_and_path_counts(constraint: &Constraint, text: &str) -> (us
     (max_stacks, max_paths)
 }
 
+fn max_stack_depth(state: &ConstraintState<'_>) -> usize {
+    state
+        .debug_parser_stacks()
+        .iter()
+        .flat_map(|(_, stacks)| stacks.iter().map(|(stack, _)| stack.len()))
+        .max()
+        .unwrap_or(0)
+}
+
+fn stack_depth_before_closing_suffix(constraint: &Constraint, text: &str) -> usize {
+    let mut state = constraint.start();
+    let prefix = text
+        .strip_suffix(r#""]}"#)
+        .expect("example should end with closing \"]}\" suffix");
+
+    for (index, &byte) in prefix.as_bytes().iter().enumerate() {
+        state.commit_bytes(&[byte]).unwrap_or_else(|err| {
+            panic!(
+                "prefix replay failed at byte_index={index} byte={byte:?} char={} for text={text}: {err}",
+                byte as char
+            )
+        });
+    }
+
+    max_stack_depth(&state)
+}
+
 // Minimal reproducer for the ordered-object + singleton-required-anyOf ambiguity
 // behind the o21108 family. This should remain bounded even as capability
 // branches are added.
@@ -169,6 +224,35 @@ fn ordered_anyof_singleton_required_ambiguity_stays_bounded() {
             width = n_caps,
         );
     }
+}
+
+#[test]
+fn minimized_anyof_pattern_object_stack_depth_stays_bounded() {
+    let vocab = make_byte_vocab();
+    let cases = [5usize, 35usize];
+    let mut measured = Vec::new();
+
+    for n_props in cases {
+        let schema = minimized_stack_growth_schema(n_props);
+        let example = minimized_stack_growth_example(n_props);
+        let constraint = Constraint::from_json_schema(&schema, &vocab).unwrap();
+        let depth = stack_depth_before_closing_suffix(&constraint, &example);
+
+        println!("n_props={n_props} depth_before_suffix={depth}");
+        assert!(depth > 0, "expected a live parser stack before the closing suffix for n_props={n_props}");
+        measured.push((n_props, depth));
+    }
+
+    let depth_at_5 = measured[0].1;
+    let depth_at_35 = measured[1].1;
+    assert!(
+        depth_at_35 <= depth_at_5 + 2,
+        "stack depth should remain nearly flat across sibling growth; n=5 depth={depth_at_5}, n=35 depth={depth_at_35}"
+    );
+    assert!(
+        depth_at_35 <= 16,
+        "stack depth should stay absolutely bounded at the closing suffix; n=35 depth={depth_at_35}"
+    );
 }
 
 fn build_config_schema_with_optional_environment_branches() -> &'static str {
