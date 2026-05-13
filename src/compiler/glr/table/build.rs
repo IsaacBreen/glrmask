@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::ds::bitset::BitSet;
+
 pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
     let t0 = std::time::Instant::now();
     let (item_sets, transitions) = build_lr1_item_sets(grammar);
@@ -181,6 +183,48 @@ fn finish_table(
 
 // LR(1) item set construction.
 
+fn lookahead_bit(term: TerminalID, num_terminals: u32) -> usize {
+    if term == EOF {
+        num_terminals as usize
+    } else {
+        term as usize
+    }
+}
+
+fn bit_lookahead(bit: usize, num_terminals: u32) -> TerminalID {
+    if bit == num_terminals as usize {
+        EOF
+    } else {
+        bit as TerminalID
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct LR1ItemCore {
+    rule: u32,
+    dot: u32,
+    stack_depth: u32,
+    transferred: bool,
+}
+
+impl LR1ItemCore {
+    fn new(rule: u32, dot: u32, stack_depth: u32) -> Self {
+        Self {
+            rule,
+            dot,
+            stack_depth,
+            transferred: false,
+        }
+    }
+
+    fn next_symbol<'a>(&self, rules: &'a [Rule]) -> Option<&'a Symbol> {
+        let rhs = &rules[self.rule as usize].rhs;
+        rhs.get(self.dot as usize)
+    }
+}
+
+type LR1ItemSet = BTreeMap<LR1ItemCore, BitSet>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct LR1Item {
     rule: u32,
@@ -205,23 +249,24 @@ impl LR1Item {
 }
 
 /// Compute FIRST set for a sequence of symbols followed by a lookahead terminal.
-fn first_of_sequence(
+fn first_of_sequence_bits(
     symbols: &[Symbol],
-    lookahead: TerminalID,
-    first: &[BTreeSet<TerminalID>],
+    lookaheads: &BitSet,
+    first: &[BitSet],
     nullable: &BTreeSet<NonterminalID>,
-) -> BTreeSet<TerminalID> {
-    let mut result = BTreeSet::new();
+    num_terminals: u32,
+) -> BitSet {
+    let mut result = BitSet::new(num_terminals as usize + 1);
     let mut all_nullable = true;
     for sym in symbols {
         match sym {
             Symbol::Terminal(t) => {
-                result.insert(*t);
+                result.set(*t as usize);
                 all_nullable = false;
                 break;
             }
             Symbol::Nonterminal(nt) => {
-                result.extend(&first[*nt as usize]);
+                result.union_with(&first[*nt as usize]);
                 if !nullable.contains(nt) {
                     all_nullable = false;
                     break;
@@ -230,20 +275,51 @@ fn first_of_sequence(
         }
     }
     if all_nullable {
-        result.insert(lookahead);
+        result.union_with(lookaheads);
     }
     result
 }
 
+fn first_bitsets(grammar: &AnalyzedGrammar) -> Vec<BitSet> {
+    grammar
+        .first
+        .iter()
+        .map(|terminals| {
+            let mut bits = BitSet::new(grammar.num_terminals as usize + 1);
+            for &terminal in terminals {
+                if terminal != EOF {
+                    bits.set(lookahead_bit(terminal, grammar.num_terminals));
+                }
+            }
+            bits
+        })
+        .collect()
+}
+
+fn union_lookaheads(item_set: &mut LR1ItemSet, core: LR1ItemCore, lookaheads: &BitSet) -> BitSet {
+    let entry = item_set
+        .entry(core)
+        .or_insert_with(|| BitSet::new(lookaheads.len()));
+    let delta = lookaheads.difference(entry);
+    if !delta.is_empty() {
+        entry.union_with(&delta);
+    }
+    delta
+}
+
 fn lr1_closure(
-    items: &BTreeSet<LR1Item>,
+    items: &LR1ItemSet,
     grammar: &AnalyzedGrammar,
-) -> BTreeSet<LR1Item> {
+    first: &[BitSet],
+) -> LR1ItemSet {
     let rules = &grammar.rules;
     let mut result = items.clone();
-    let mut queue: VecDeque<LR1Item> = items.iter().copied().collect();
+    let mut queue: VecDeque<(LR1ItemCore, BitSet)> = items
+        .iter()
+        .map(|(core, lookaheads)| (*core, lookaheads.clone()))
+        .collect();
 
-    while let Some(item) = queue.pop_front() {
+    while let Some((item, lookahead_delta)) = queue.pop_front() {
         // Transferred items do not participate in closure.
         if item.transferred {
             continue;
@@ -252,20 +328,29 @@ fn lr1_closure(
             let rhs = &rules[item.rule as usize].rhs;
             let beta = &rhs[(item.dot as usize + 1)..];
 
-            let lookaheads = first_of_sequence(beta, item.lookahead, &grammar.first, &grammar.nullable);
+            let lookaheads = first_of_sequence_bits(
+                beta,
+                &lookahead_delta,
+                &first,
+                &grammar.nullable,
+                grammar.num_terminals,
+            );
 
             for &i in &grammar.rules_by_lhs[*nt as usize] {
                 let sd = grammar.rules[i as usize].rhs.len() as u32;
-                for &la in &lookaheads {
-                    let new_item = LR1Item::new(i, 0, la, sd);
-                    if result.insert(new_item) {
-                        queue.push_back(new_item);
-                    }
+                let new_item = LR1ItemCore::new(i, 0, sd);
+                let delta = union_lookaheads(&mut result, new_item, &lookaheads);
+                if !delta.is_empty() {
+                    queue.push_back((new_item, delta));
                 }
             }
         }
     }
     result
+}
+
+fn item_set_key(items: &LR1ItemSet) -> Vec<(LR1ItemCore, BitSet)> {
+    items.iter().map(|(core, lookaheads)| (*core, lookaheads.clone())).collect()
 }
 
 /// Compute transferred items for the local-forward replace optimisation.
@@ -365,58 +450,57 @@ fn compute_transfer_items(
 
 fn build_lr1_item_sets(
     grammar: &AnalyzedGrammar,
-) -> (Vec<BTreeSet<LR1Item>>, Vec<BTreeMap<Symbol, (u32, bool, bool)>>) {
+) -> (Vec<LR1ItemSet>, Vec<BTreeMap<Symbol, (u32, bool, bool)>>) {
     let rules = &grammar.rules;
+    let lookahead_len = grammar.num_terminals as usize + 1;
+    let first = first_bitsets(grammar);
 
     let initial = {
-        let mut s = BTreeSet::new();
+        let mut s = LR1ItemSet::new();
         let sd = rules[0].rhs.len() as u32;
-        s.insert(LR1Item::new(0, 0, EOF, sd));
-        lr1_closure(&s, grammar)
+        let mut lookaheads = BitSet::new(lookahead_len);
+        lookaheads.set(lookahead_bit(EOF, grammar.num_terminals));
+        s.insert(LR1ItemCore::new(0, 0, sd), lookaheads);
+        lr1_closure(&s, grammar, &first)
     };
 
     let mut item_sets = vec![initial.clone()];
     let mut transitions: Vec<BTreeMap<Symbol, (u32, bool, bool)>> = vec![BTreeMap::new()];
-    let mut set_to_id: FxHashMap<Vec<LR1Item>, u32> = FxHashMap::default();
-    set_to_id.insert(initial.iter().copied().collect(), 0);
+    let mut set_to_id: FxHashMap<Vec<(LR1ItemCore, BitSet)>, u32> = FxHashMap::default();
+    set_to_id.insert(item_set_key(&initial), 0);
 
-    // Pre-compute safety checks for the transfer mechanism only when the
-    // mechanism is enabled. Recursion detection can be expensive on large
-    // grammars, so avoid paying that cost on the default path.
-    let transfer_safe = if local_forward_replace_enabled() {
-        !grammar.nullable.iter().any(|&n| n != 0) && !grammar_has_recursion(rules)
-    } else {
-        false
-    };
+    // Grouped lookaheads keep ordinary LR(1) correctness, but the older
+    // local-forward transfer logic is written for scalar LR1 items.
+    // Keep replace flags conservative on this path.
+    let transfer_safe = false;
 
     let mut queue = VecDeque::from([0u32]);
     while let Some(state_id) = queue.pop_front() {
         let source_items = item_sets[state_id as usize].clone();
 
         // Build all goto kernels in a single pass over items.
-        let mut kernels: BTreeMap<Symbol, BTreeSet<LR1Item>> = BTreeMap::new();
-        for item in &source_items {
+        let mut kernels: BTreeMap<Symbol, LR1ItemSet> = BTreeMap::new();
+        for (item, lookaheads) in &source_items {
             // Transferred items only advance through nonterminal gotos.
             if item.transferred {
                 if let Some(Symbol::Nonterminal(nt)) = item.next_symbol(rules) {
-                    kernels
-                        .entry(Symbol::Nonterminal(*nt))
-                        .or_default()
-                        .insert(LR1Item {
-                            rule: item.rule,
-                            dot: item.dot + 1,
-                            lookahead: item.lookahead,
-                            stack_depth: item.stack_depth,
-                            transferred: false, // un-transfer on goto
-                        });
+                    let advanced = LR1ItemCore {
+                        rule: item.rule,
+                        dot: item.dot + 1,
+                        stack_depth: item.stack_depth,
+                        transferred: false,
+                    };
+                    union_lookaheads(
+                        kernels.entry(Symbol::Nonterminal(*nt)).or_default(),
+                        advanced,
+                        lookaheads,
+                    );
                 }
                 continue;
             }
             if let Some(sym) = item.next_symbol(rules) {
-                kernels
-                    .entry(sym.clone())
-                    .or_default()
-                    .insert(LR1Item::new(item.rule, item.dot + 1, item.lookahead, item.stack_depth));
+                let advanced = LR1ItemCore::new(item.rule, item.dot + 1, item.stack_depth);
+                union_lookaheads(kernels.entry(sym.clone()).or_default(), advanced, lookaheads);
             }
         }
 
@@ -425,90 +509,61 @@ fn build_lr1_item_sets(
             // Check replace condition: is_replace iff no item in the kernel
             // has dot at position 1 (i.e., all items came from items that
             // already had dot > 0).
-            let has_dot_1 = kernel.iter().any(|item| item.dot == 1);
+            let has_dot_1 = kernel.keys().any(|item| item.dot == 1);
             let mut is_replace = match &symbol {
                 Symbol::Terminal(_) => !has_dot_1 && replace_shifts_enabled(),
                 Symbol::Nonterminal(_) => !has_dot_1 && replace_gotos_enabled(),
             };
-            let mut used_transfer = false;
+            let used_transfer = false;
 
             // Local-forward transfer: when has_dot_1 but transfer is enabled,
             // try to transfer foo items from the source state into the kernel
             // so the transition can still be marked as replace.
-            if has_dot_1 && !is_replace && local_forward_replace_enabled() && transfer_safe {
-                let enable_for_this = match &symbol {
-                    Symbol::Terminal(_) => replace_shifts_enabled(),
-                    Symbol::Nonterminal(_) => replace_gotos_enabled(),
-                };
-                if enable_for_this {
-                    if let Some(transferred) =
-                        compute_transfer_items(&kernel, &source_items, rules)
-                    {
-                        kernel.extend(transferred);
-                        // De-duplicate: remove transferred items that also
-                        // exist as non-transferred.
-                        let to_remove: Vec<LR1Item> = kernel
-                            .iter()
-                            .filter(|it| it.transferred)
-                            .filter(|it| {
-                                kernel.contains(&LR1Item {
-                                    transferred: false,
-                                    ..**it
-                                })
-                            })
-                            .copied()
-                            .collect();
-                        for item in to_remove {
-                            kernel.remove(&item);
-                        }
-                        is_replace = true;
-                        used_transfer = true;
-                    }
-                }
-            }
+            let _ = transfer_safe;
 
-            let mut kernel_has_transferred = used_transfer && kernel.iter().any(|it| it.transferred);
+            let kernel_has_transferred = used_transfer && kernel.keys().any(|item| item.transferred);
 
             // If replace, decrement stack_depth for non-transferred kernel
             // items — the replace absorbs one stack level for items that
             // went through the shift. Transferred items didn't go through
             // the shift; they were copied from the source state and await
             // nonterminal gotos, so their sd is already correct.
-            let mut adjusted_kernel: BTreeSet<LR1Item> = if is_replace {
+            let adjusted_kernel: LR1ItemSet = if is_replace {
                 kernel
                     .iter()
-                    .map(|item| {
-                        if item.transferred {
+                    .map(|(item, lookaheads)| {
+                        let adjusted = if item.transferred {
                             *item
                         } else {
-                            LR1Item {
+                            LR1ItemCore {
+                                rule: item.rule,
+                                dot: item.dot,
                                 stack_depth: item.stack_depth.saturating_sub(1),
                                 ..*item
                             }
-                        }
+                        };
+                        (adjusted, lookaheads.clone())
                     })
                     .collect()
             } else {
                 kernel
             };
 
-            let mut target_items = lr1_closure(&adjusted_kernel, grammar);
+            let mut target_items = lr1_closure(&adjusted_kernel, grammar, &first);
             if used_transfer && matches!(symbol, Symbol::Terminal(_)) {
-                let base_target_items = lr1_closure(&base_kernel, grammar);
-                let base_has_zero_pop_completed = base_target_items.iter().any(|item| {
+                let base_target_items = lr1_closure(&base_kernel, grammar, &first);
+                let base_has_zero_pop_completed = base_target_items.iter().any(|(item, _)| {
                     let rule = &rules[item.rule as usize];
                     (item.dot as usize) == rule.rhs.len() && item.stack_depth == 0
                 });
-                let transferred_has_zero_pop_completed = target_items.iter().any(|item| {
+                let transferred_has_zero_pop_completed = target_items.iter().any(|(item, _)| {
                     let rule = &rules[item.rule as usize];
                     (item.dot as usize) == rule.rhs.len() && item.stack_depth == 0
                 });
                 if transferred_has_zero_pop_completed && !base_has_zero_pop_completed {
                     kernel = base_kernel;
                     is_replace = false;
-                    kernel_has_transferred = false;
-                    adjusted_kernel = kernel;
-                    target_items = lr1_closure(&adjusted_kernel, grammar);
+                    target_items = lr1_closure(&kernel, grammar, &first);
                 }
             }
 
@@ -519,7 +574,7 @@ fn build_lr1_item_sets(
                 continue;
             }
 
-            let key: Vec<LR1Item> = target_items.iter().copied().collect();
+            let key = item_set_key(&target_items);
             let target_id = if let Some(&existing_id) = set_to_id.get(&key) {
                 existing_id
             } else {
@@ -841,7 +896,7 @@ fn inline_zero_pop_reduces(
 
 fn build_lr1_table(
     grammar: &AnalyzedGrammar,
-    item_sets: &[BTreeSet<LR1Item>],
+    item_sets: &[LR1ItemSet],
     transitions: &[BTreeMap<Symbol, (u32, bool, bool)>],
 ) -> GLRTable {
     let (pending, goto, forwarded_shifts) = initialize_pending_and_goto(transitions);
@@ -850,10 +905,10 @@ fn build_lr1_table(
     // build_lr1_item_sets, so we don't need to recompute them here.
 
     let mut pending = pending;
-    let mut goto = goto;
+    let goto = goto;
     for (state_id, items) in item_sets.iter().enumerate() {
 
-        for item in items {
+        for (item, lookaheads) in items {
             // Transferred items do not generate reduces.
             if item.transferred {
                 continue;
@@ -863,66 +918,119 @@ fn build_lr1_table(
                 continue;
             }
 
-            if item.rule == 0 {
-                pending[state_id].entry(item.lookahead).or_default().push_accept();
-                continue;
-            }
+            for bit in lookaheads.iter_ones() {
+                let lookahead = bit_lookahead(bit, grammar.num_terminals);
+                if item.rule == 0 {
+                    pending[state_id].entry(lookahead).or_default().push_accept();
+                    continue;
+                }
 
-            pending[state_id]
-                .entry(item.lookahead)
-                .or_default()
-                .push_reduce(rule.lhs, item.stack_depth);
+                pending[state_id]
+                    .entry(lookahead)
+                    .or_default()
+                    .push_reduce(rule.lhs, item.stack_depth);
+            }
         }
     }
 
-    // Post-process: convert non-replace transitions to replace where
-    // possible by following the dot-1 items through to their reduce
-    // states and rewriting sd=1 reduces to sd=0 with forwarded gotos.
-    // Only safe for grammars that are:
-    // - not using the transferred-item mechanism
-    // - non-recursive (no shared reduce states)
-    // - non-nullable (no epsilon productions that create split actions)
-    let local_forward_enabled = local_forward_replace_enabled();
-    let has_forwarded = transitions.iter().any(|t| t.values().any(|&(_, _, f)| f));
-    let has_nullable = grammar.nullable.iter().any(|&n| n != 0);
-    let has_recursion = if local_forward_enabled {
-        grammar_has_recursion(&grammar.rules)
-    } else {
-        false
-    };
-    if local_forward_enabled && !has_forwarded && !has_recursion && !has_nullable {
-        apply_local_forward_replace(
-            &mut pending,
-            &mut goto,
-            item_sets,
-            transitions,
-            &grammar.rules,
-        );
-    }
-    // For non-forwarded grammars (apply_local_forward_replace path),
-    // inline the zero-pop reduces it created.
-    if local_forward_enabled && !has_forwarded && !has_recursion && !has_nullable {
-        inline_zero_pop_reduces(&mut pending, &mut goto);
-    }
+    // Grouped LR(1) lookahead sets delay scalar fanout until pending-action
+    // emission. The old local-forward path is written for scalar LR1 items,
+    // so keep replace handling conservative here rather than approximating.
 
     finish_table(grammar, pending, goto, forwarded_shifts)
 }
 
 // IELR-style merge.
 
-fn lr1_core_key(items: &BTreeSet<LR1Item>) -> Vec<Item> {
+fn lr1_core_key(items: &LR1ItemSet) -> Vec<Item> {
     let mut core = BTreeSet::new();
-    for item in items {
+    for item in items.keys() {
         core.insert(Item::new(item.rule, item.dot, item.stack_depth));
     }
     core.into_iter().collect()
 }
 fn build_ielr_table(
     grammar: &AnalyzedGrammar,
-    item_sets: &[BTreeSet<LR1Item>],
+    item_sets: &[LR1ItemSet],
     transitions: &[BTreeMap<Symbol, (u32, bool, bool)>],
 ) -> GLRTable {
     let canonical = build_lr1_table(grammar, item_sets, transitions);
     let core_keys = item_sets.iter().map(lr1_core_key).collect::<Vec<_>>();
     merge_same_core_lr1_states(canonical, &core_keys)
+}
+
+#[cfg(test)]
+fn grouped_item_lookahead_counts(grammar: &AnalyzedGrammar) -> Vec<Vec<(u32, u32, u32, usize)>> {
+    let (item_sets, _) = build_lr1_item_sets(grammar);
+    item_sets
+        .into_iter()
+        .map(|items| {
+            items
+                .into_iter()
+                .map(|(core, lookaheads)| (core.rule, core.dot, core.stack_depth, lookaheads.count_ones()))
+                .collect()
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_table, grouped_item_lookahead_counts};
+    use crate::compiler::glr::analysis::AnalyzedGrammar;
+    use crate::compiler::glr::table::Action;
+    use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
+
+    fn multi_lookahead_grammar() -> AnalyzedGrammar {
+        let grammar = GrammarDef {
+            rules: vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(1)],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(2)],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(3)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
+            ],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal { id: 0, bytes: b"x".to_vec() },
+                Terminal::Literal { id: 1, bytes: b"a".to_vec() },
+                Terminal::Literal { id: 2, bytes: b"b".to_vec() },
+                Terminal::Literal { id: 3, bytes: b"c".to_vec() },
+            ],
+            ..GrammarDef::default()
+        };
+        AnalyzedGrammar::from_grammar_def(&grammar)
+    }
+
+    #[test]
+    fn grouped_lr1_items_merge_multiple_lookaheads_on_one_core() {
+        let grammar = multi_lookahead_grammar();
+        let counts = grouped_item_lookahead_counts(&grammar);
+
+        assert!(counts.iter().flatten().any(|&(rule, dot, _stack_depth, lookahead_count)| {
+            rule == 4 && dot == 1 && lookahead_count == 3
+        }), "{counts:?}");
+    }
+
+    #[test]
+    fn grouped_lr1_items_still_emit_expected_reduce_actions() {
+        let grammar = multi_lookahead_grammar();
+        let table = build_table(&grammar);
+
+        assert!(table.action.iter().any(|row| {
+            matches!(row.get(&1), Some(Action::Reduce(1, 1)))
+                && matches!(row.get(&2), Some(Action::Reduce(1, 1)))
+                && matches!(row.get(&3), Some(Action::Reduce(1, 1)))
+        }));
+    }
 }
