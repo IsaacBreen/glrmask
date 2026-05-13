@@ -51,6 +51,9 @@ pub fn dump_json_schema_grammar_glrm(schema_json: &str) -> Result<String> {
     if import::json_schema::simplify_grammar_enabled() {
         grammar::named_simplify::simplify_named_grammar(&mut factored);
     }
+    if import::json_schema::lower_exact_subtractions_enabled() {
+        grammar::exact_subtraction_lowering::lower_exact_subtractions(&mut factored)?;
+    }
     if import::json_schema::promote_literal_choices_enabled() {
         grammar::terminal_choice_promotion::promote_choice_terminals_exact(&mut factored, false);
     }

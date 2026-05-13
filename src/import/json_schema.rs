@@ -3337,6 +3337,10 @@ pub(crate) fn simplify_grammar_enabled() -> bool {
         .unwrap_or(false)
 }
 
+pub(crate) fn lower_exact_subtractions_enabled() -> bool {
+    env_flag_default_true("GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS")
+}
+
 fn seq_elements(expr: &GrammarExpr) -> Vec<GrammarExpr> {
     match expr {
         GrammarExpr::Sequence(parts) => parts.clone(),
@@ -3924,6 +3928,9 @@ fn build_enum_terminal_groups(
 }
 
 fn rule_name_is_terminal(name: &str) -> bool {
+    if name == "AP_SHARED_LITERAL_KEY_SET" {
+        return false;
+    }
     uri_rule_should_be_terminal(name).unwrap_or(false)
         || (!name.is_empty()
             && name
@@ -9776,9 +9783,13 @@ impl<'a> SchemaCtx<'a> {
             })
             .collect::<Vec<_>>();
         if !literal_excluded.is_empty() {
+            let literal_alt_set = excluded_keys
+                .iter()
+                .map(|key| literal_expr(&key_colon_literal_body_bytes(key)))
+                .collect::<Vec<_>>();
             self.insert_rule(
                 "AP_SHARED_LITERAL_KEY_SET",
-                choice_or_single(literal_excluded.clone()),
+                choice_or_single(literal_alt_set),
             );
         }
         let mut excluded = literal_excluded;
