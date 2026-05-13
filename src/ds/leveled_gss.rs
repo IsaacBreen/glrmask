@@ -1807,6 +1807,16 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
+    pub fn from_single_stack(values: Vec<T>, acc: A) -> Self {
+        let floor = new_lower(CompactMap::new(), true);
+        let inner = if values.is_empty() {
+            new_interface(floor, acc)
+        } else {
+            new_interface(new_segment(SV::from_vec(values), floor), acc)
+        };
+        LeveledGSS { inner }
+    }
+
     pub fn to_stacks(&self) -> Vec<(Vec<T>, A)> {
         let mut res: Vec<(Vec<T>, A)> = Vec::new();
 
@@ -1966,7 +1976,13 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             }
         }
 
-        Some(Self::from_stacks(&out))
+        match out.len() {
+            1 => {
+                let (stack, acc) = out.pop().unwrap();
+                Some(Self::from_single_stack(stack, acc))
+            }
+            _ => Some(Self::from_stacks(&out)),
+        }
     }
 
     pub fn apply_guarded_stack_effects_to_single_concrete_path<'a, I, G>(
@@ -2025,7 +2041,13 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             }
         }
 
-        Some(Self::from_stacks(&out))
+        match out.len() {
+            1 => {
+                let (stack, acc) = out.pop().unwrap();
+                Some(Self::from_single_stack(stack, acc))
+            }
+            _ => Some(Self::from_stacks(&out)),
+        }
     }
 
     pub fn push(&self, value: T) -> Self {

@@ -12,7 +12,7 @@ use crate::compiler::glr::parser::{
     stack_may_advance_on,
     stack_may_advance_on_any,
 };
-use crate::compiler::glr::table::Action;
+use crate::compiler::glr::table::{Action, GLRTable};
 use crate::ds::leveled_gss::LeveledGSSSummary;
 use crate::runtime::constraint::Constraint;
 use crate::runtime::state::{CommitBuffers, ConstraintState};
@@ -23,7 +23,7 @@ type ParserStatesByTokenizer = FxHashMap<u32, ParserGSS>;
 
 pub type GssProfileSummary = LeveledGSSSummary;
 
-const SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH: usize = 64;
+const SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH: usize = 256;
 
 // Commit is a central runtime method and this profiling surface is used by
 // CFA profile_step to choose optimization targets. Keep parent/child timing
@@ -579,7 +579,12 @@ fn apply_future_terminal_disallow(
 }
 
 #[inline]
-fn apply_single_top_action_fast(gss: &ParserGSS, action: &Action) -> Option<ParserGSS> {
+fn apply_single_top_action_fast(
+    table: &GLRTable,
+    gss: &ParserGSS,
+    terminal: u32,
+    action: &Action,
+) -> Option<ParserGSS> {
     match action {
         Action::Shift(target, is_replace) => {
             if let Some(mut stack) = gss.try_virtual_stack() {
@@ -588,21 +593,22 @@ fn apply_single_top_action_fast(gss: &ParserGSS, action: &Action) -> Option<Pars
                 }
                 stack.push(*target);
                 return Some(stack.into_gss());
-            }
-            Some(if *is_replace {
-                gss.popn(1).push(*target)
             } else {
-                gss.push(*target)
-            })
+                Some(if *is_replace {
+                    gss.popn(1).push(*target)
+                } else {
+                    gss.push(*target)
+                })
+            }
         }
         Action::StackShifts(shifts) => {
-            if shifts.len() > 1 {
-                return gss.apply_stack_effects_to_single_concrete_path(
-                    shifts
-                        .iter()
-                        .map(|shift| (shift.pop as usize, shift.pushes.as_slice())),
-                    SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH,
-                );
+            if let Some(shifted) = gss.apply_stack_effects_to_single_concrete_path(
+                shifts
+                    .iter()
+                    .map(|shift| (shift.pop as usize, shift.pushes.as_slice())),
+                SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH,
+            ) {
+                return Some(shifted);
             }
             let stack = gss.try_virtual_stack()?;
             if let [shift] = shifts.as_slice() {
@@ -646,7 +652,62 @@ fn apply_single_top_action_fast(gss: &ParserGSS, action: &Action) -> Option<Pars
             }
             Some(shifted)
         }
+        Action::Reduce(..) => apply_single_path_reduce_chain_fast(table, gss, terminal),
         _ => None,
+    }
+}
+
+fn apply_single_path_reduce_chain_fast(
+    table: &GLRTable,
+    gss: &ParserGSS,
+    terminal: u32,
+) -> Option<ParserGSS> {
+    if gss.max_depth() as usize > SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH {
+        return None;
+    }
+
+    let mut stacks = gss.to_stacks();
+    if stacks.len() != 1 {
+        return None;
+    }
+    let (mut stack, acc) = stacks.pop().unwrap();
+
+    loop {
+        let state = *stack.last()?;
+        match table.action(state, terminal)? {
+            Action::Reduce(nt, len) => {
+                let rhs_len = *len as usize;
+                if rhs_len >= stack.len() {
+                    return None;
+                }
+                stack.truncate(stack.len() - rhs_len);
+                let goto_from = *stack.last()?;
+                let (target, is_replace) = table.goto_target(goto_from, *nt)?;
+                if is_replace {
+                    *stack.last_mut()? = target;
+                } else {
+                    stack.push(target);
+                }
+            }
+            Action::Shift(target, is_replace) => {
+                if *is_replace {
+                    *stack.last_mut()? = *target;
+                } else {
+                    stack.push(*target);
+                }
+                return Some(ParserGSS::from_single_stack(stack, acc));
+            }
+            Action::StackShifts(shifts) => {
+                return ParserGSS::from_single_stack(stack, acc)
+                    .apply_stack_effects_to_single_concrete_path(
+                        shifts
+                            .iter()
+                            .map(|shift| (shift.pop as usize, shift.pushes.as_slice())),
+                        SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH,
+                    );
+            }
+            _ => return None,
+        }
     }
 }
 
@@ -732,7 +793,9 @@ fn commit_bytes_fast_path(
     if all_accs_empty {
         if let Some(top_state) = gss.single_exclusive_top_value() {
             if let Some(action) = constraint.table.action(top_state, terminal) {
-                if let Some(shifted) = apply_single_top_action_fast(gss, action) {
+                if let Some(shifted) =
+                    apply_single_top_action_fast(&constraint.table, gss, terminal, action)
+                {
                     state.clear();
                     state.insert(constraint.tokenizer.initial_state(), shifted);
                     return Some(Ok(()));
@@ -927,7 +990,8 @@ fn commit_bytes_direct_linear_fast_path(
             let advance_start = profile.as_ref().map(|_| std::time::Instant::now());
             let advanced = if let Some(top_state) = gss.single_exclusive_top_value()
                 && let Some(action) = constraint.table.action(top_state, step.terminal)
-                && let Some(advanced) = apply_single_top_action_fast(&gss, action)
+                && let Some(advanced) =
+                    apply_single_top_action_fast(&constraint.table, &gss, step.terminal, action)
             {
                 advanced
             } else {
@@ -1831,7 +1895,7 @@ fn commit_bytes_linear_fast_path(
             let fast_advanced = if let Some(top_state) = gss.single_exclusive_top_value()
                 && let Some(action) = constraint.table.action(top_state, terminal)
             {
-                apply_single_top_action_fast(&gss, action)
+                apply_single_top_action_fast(&constraint.table, &gss, terminal, action)
             } else {
                 None
             };
@@ -1963,7 +2027,8 @@ fn commit_bytes_linear_fast_path_profiled(
             let fast_start = Instant::now();
             let fast_advanced = if let Some(top_state) = gss.single_exclusive_top_value()
                 && let Some(action) = constraint.table.action(top_state, terminal)
-                && let Some(advanced) = apply_single_top_action_fast(&gss, action)
+                && let Some(advanced) =
+                    apply_single_top_action_fast(&constraint.table, &gss, terminal, action)
             {
                 let elapsed = fast_start.elapsed().as_nanos() as u64;
                 Some((advanced, fast_action_advance_profile(&gss, action, elapsed)))
