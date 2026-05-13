@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 
+use crate::ds::bitset::BitSet;
 use crate::grammar::flat::{GrammarDef, NonterminalID, Rule, Symbol, TerminalID};
 
 pub const EOF: TerminalID = u32::MAX;
@@ -12,14 +13,15 @@ pub struct AnalyzedGrammar {
     pub terminal_display_names: Vec<String>,
     pub num_nonterminals: u32,
     pub nullable: BTreeSet<NonterminalID>,
-    pub first: Vec<BTreeSet<TerminalID>>,
-    pub follow: Vec<BTreeSet<TerminalID>>,
+    pub first: Vec<BitSet>,
+    pub follow: Vec<BitSet>,
     /// Index: nonterminal -> list of rule indices with that nonterminal as LHS.
     pub rules_by_lhs: Vec<Vec<u32>>,
 }
 
 impl AnalyzedGrammar {
     pub fn from_grammar_def(g: &GrammarDef) -> Self {
+        let num_terminals = g.num_terminals();
         let mut rules = Vec::with_capacity(g.rules.len() + 1);
         let augmented_start = g.num_nonterminals();
         rules.push(Rule {
@@ -30,8 +32,15 @@ impl AnalyzedGrammar {
 
         let num_nonterminals = augmented_start + 1;
         let nullable = compute_nullable(&rules, num_nonterminals);
-        let first = compute_first(&rules, num_nonterminals, &nullable);
-        let follow = compute_follow(&rules, num_nonterminals, augmented_start, &first, &nullable);
+        let first = compute_first(&rules, num_nonterminals, num_terminals, &nullable);
+        let follow = compute_follow(
+            &rules,
+            num_nonterminals,
+            num_terminals,
+            augmented_start,
+            &first,
+            &nullable,
+        );
 
         let mut rules_by_lhs = vec![Vec::new(); num_nonterminals as usize];
         for (i, r) in rules.iter().enumerate() {
@@ -42,8 +51,8 @@ impl AnalyzedGrammar {
 
         Self {
             rules,
-            num_terminals: g.num_terminals(),
-            terminal_display_names: (0..g.num_terminals())
+            num_terminals,
+            terminal_display_names: (0..num_terminals)
                 .map(|terminal| g.terminal_display_name(terminal))
                 .collect(),
             num_nonterminals,
@@ -1719,9 +1728,11 @@ fn compute_nullable(rules: &[Rule], num_nt: u32) -> BTreeSet<NonterminalID> {
 fn compute_first(
     rules: &[Rule],
     num_nt: u32,
+    num_terminals: u32,
     nullable: &BTreeSet<NonterminalID>,
-) -> Vec<BTreeSet<TerminalID>> {
-    let mut first = vec![BTreeSet::new(); num_nt as usize];
+) -> Vec<BitSet> {
+    let set_len = num_terminals as usize + 1;
+    let mut first = vec![BitSet::new(set_len); num_nt as usize];
     let mut changed = true;
     while changed {
         changed = false;
@@ -1730,14 +1741,19 @@ fn compute_first(
             for symbol in &rule.rhs {
                 match symbol {
                     Symbol::Terminal(terminal) => {
-                        changed |= first[lhs].insert(*terminal);
+                        let bit = terminal_bit(*terminal, num_terminals);
+                        if !first[lhs].contains(bit) {
+                            first[lhs].set(bit);
+                            changed = true;
+                        }
                         break;
                     }
                     Symbol::Nonterminal(nonterminal) => {
-                        let additions = first[*nonterminal as usize].clone();
-                        let old_len = first[lhs].len();
-                        first[lhs].extend(additions);
-                        changed |= first[lhs].len() != old_len;
+                        let additions = first[*nonterminal as usize].difference(&first[lhs]);
+                        if !additions.is_empty() {
+                            first[lhs].union_with(&additions);
+                            changed = true;
+                        }
                         if !nullable.contains(nonterminal) {
                             break;
                         }
@@ -1752,37 +1768,39 @@ fn compute_first(
 fn compute_follow(
     rules: &[Rule],
     num_nt: u32,
+    num_terminals: u32,
     start: NonterminalID,
-    first: &[BTreeSet<TerminalID>],
+    first: &[BitSet],
     nullable: &BTreeSet<NonterminalID>,
-) -> Vec<BTreeSet<TerminalID>> {
-    let mut follow = vec![BTreeSet::new(); num_nt as usize];
+) -> Vec<BitSet> {
+    let set_len = num_terminals as usize + 1;
+    let mut follow = vec![BitSet::new(set_len); num_nt as usize];
     if let Some(start_follow) = follow.get_mut(start as usize) {
-        start_follow.insert(EOF);
+        start_follow.set(terminal_bit(EOF, num_terminals));
     }
 
     let mut changed = true;
     while changed {
         changed = false;
         for rule in rules {
-            let lhs_follow = follow[rule.lhs as usize].clone();
+            let mut lhs_follow = None;
             for (index, symbol) in rule.rhs.iter().enumerate() {
                 let Symbol::Nonterminal(nonterminal) = symbol else {
                     continue;
                 };
 
                 let suffix = &rule.rhs[index + 1..];
-                let mut additions = BTreeSet::new();
+                let mut additions = BitSet::new(set_len);
                 let mut suffix_nullable = true;
                 for suffix_symbol in suffix {
                     match suffix_symbol {
                         Symbol::Terminal(terminal) => {
-                            additions.insert(*terminal);
+                            additions.set(terminal_bit(*terminal, num_terminals));
                             suffix_nullable = false;
                             break;
                         }
                         Symbol::Nonterminal(next_nonterminal) => {
-                            additions.extend(first[*next_nonterminal as usize].iter().copied());
+                            additions.union_with(&first[*next_nonterminal as usize]);
                             if !nullable.contains(next_nonterminal) {
                                 suffix_nullable = false;
                                 break;
@@ -1791,18 +1809,31 @@ fn compute_follow(
                     }
                 }
                 if suffix_nullable {
-                    additions.extend(lhs_follow.iter().copied());
+                    let lhs_follow = lhs_follow
+                        .get_or_insert_with(|| follow[rule.lhs as usize].clone());
+                    additions.union_with(lhs_follow);
                 }
 
                 let target = &mut follow[*nonterminal as usize];
-                let old_len = target.len();
-                target.extend(additions);
-                changed |= target.len() != old_len;
+                let delta = additions.difference(target);
+                if !delta.is_empty() {
+                    target.union_with(&delta);
+                    changed = true;
+                }
             }
         }
     }
 
     follow
+}
+
+#[inline]
+fn terminal_bit(terminal: TerminalID, num_terminals: u32) -> usize {
+    if terminal == EOF {
+        num_terminals as usize
+    } else {
+        terminal as usize
+    }
 }
 
 fn filter_graph_to_reachable(

@@ -281,19 +281,7 @@ fn first_of_sequence_bits(
 }
 
 fn first_bitsets(grammar: &AnalyzedGrammar) -> Vec<BitSet> {
-    grammar
-        .first
-        .iter()
-        .map(|terminals| {
-            let mut bits = BitSet::new(grammar.num_terminals as usize + 1);
-            for &terminal in terminals {
-                if terminal != EOF {
-                    bits.set(lookahead_bit(terminal, grammar.num_terminals));
-                }
-            }
-            bits
-        })
-        .collect()
+    grammar.first.clone()
 }
 
 fn union_lookaheads(item_set: &mut LR1ItemSet, core: LR1ItemCore, lookaheads: &BitSet) -> BitSet {

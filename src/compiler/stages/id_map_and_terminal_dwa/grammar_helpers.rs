@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::compiler::glr::analysis::{AnalyzedGrammar, EOF};
+use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::GLRTable;
 use crate::grammar::flat::{Symbol, TerminalID};
 use crate::ds::bitset::BitSet;
@@ -141,7 +141,12 @@ fn occurrence_follow_set(
             }
             Symbol::Nonterminal(nonterminal) => {
                 if let Some(first) = grammar.first.get(*nonterminal as usize) {
-                    follows.extend(first.iter().copied().filter(|terminal| *terminal != EOF));
+                    follows.extend(
+                        first
+                            .iter_ones()
+                            .filter(|bit| *bit < grammar.num_terminals as usize)
+                            .map(|bit| bit as TerminalID),
+                    );
                 }
                 if !grammar.nullable.contains(nonterminal) {
                     suffix_nullable = false;
@@ -153,7 +158,12 @@ fn occurrence_follow_set(
 
     if suffix_nullable {
         if let Some(follow) = grammar.follow.get(lhs as usize) {
-            follows.extend(follow.iter().copied().filter(|terminal| *terminal != EOF));
+            follows.extend(
+                follow
+                    .iter_ones()
+                    .filter(|bit| *bit < grammar.num_terminals as usize)
+                    .map(|bit| bit as TerminalID),
+            );
         }
     }
 
