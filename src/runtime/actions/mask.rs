@@ -17,6 +17,7 @@ type DenseTokenMaskCache = FxHashMap<usize, Arc<[u64]>>;
 type DenseMaskGSS = LeveledGSS<u32, DenseMaskAcc>;
 
 const DELTA_SEED_MIN_SAVINGS: u64 = 2048;
+const MASK_SINGLE_PATH_DIRECT_MAX_DEPTH: u32 = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MaskQueueMode {
@@ -69,6 +70,11 @@ fn mask_acc_merge_profile_enabled() -> bool {
 fn mask_fast_conversion_profile_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| bool_env("GLRMASK_PROFILE_MASK_FAST_CONVERSION"))
+}
+
+fn mask_single_path_to_stacks_fallback_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| bool_env("GLRMASK_DISABLE_MASK_SINGLE_PATH_TO_STACKS_FALLBACK"))
 }
 
 fn emit_line_with_optional_file(line: &str, file_env_var: &str) {
@@ -992,12 +998,19 @@ impl<'a> ConstraintState<'a> {
 
         let mut paths = SmallVec::<[(u32, TerminalsDisallowed, SmallVec<[u32; 16]>); 4]>::new();
         for (&original_tokenizer_state, gss) in &self.state {
+            if gss.max_depth() > MASK_SINGLE_PATH_DIRECT_MAX_DEPTH {
+                return false;
+            }
+
             let mut stack = SmallVec::<[u32; 16]>::new();
             if let Some(terminals_disallowed) = gss.single_path_top_first_and_acc(&mut stack) {
                 paths.push((original_tokenizer_state, terminals_disallowed, stack));
                 continue;
             }
 
+            if mask_single_path_to_stacks_fallback_disabled() {
+                return false;
+            }
             if gss.path_count_at_most(5) > 4 {
                 return false;
             }

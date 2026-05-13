@@ -5,6 +5,7 @@ use crate::ds::bitset::BitSet;
 use crate::ds::leveled_gss::{LeveledGSS, VirtualStack};
 use crate::grammar::flat::TerminalID;
 use smallvec::SmallVec;
+use std::sync::OnceLock;
 
 mod profile;
 
@@ -14,6 +15,28 @@ pub type ParserGSS = LeveledGSS<u32, TerminalsDisallowed>;
 
 type ReduceSources = SmallVec<[(u32, ParserGSS); 4]>;
 type ReduceBranches = SmallVec<[(ParserGSS, u32, bool); 4]>;
+
+const SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH: usize = 64;
+const GUARDED_STACK_TO_STACKS_MAX_DEPTH: usize = 64;
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
+fn guarded_stack_to_stacks_fallback_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| env_flag_enabled("GLRMASK_DISABLE_GUARDED_STACK_TO_STACKS_FALLBACK"))
+}
+
+fn stack_effect_to_stacks_fallback_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| env_flag_enabled("GLRMASK_DISABLE_STACK_EFFECT_TO_STACKS_FALLBACK"))
+}
 
 enum AdvancedBranch {
     Stack(VirtualStack<u32, TerminalsDisallowed>),
@@ -247,6 +270,11 @@ fn apply_stack_shifts(gss: ParserGSS, shifts: &[StackShift]) -> ParserGSS {
             shifts
                 .iter()
                 .map(|shift| (shift.pop as usize, shift.pushes.as_slice())),
+            if stack_effect_to_stacks_fallback_disabled() {
+                0
+            } else {
+                SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH
+            },
         )
     {
         return shifted;
@@ -301,7 +329,8 @@ fn apply_guarded_stack_shifts(gss: ParserGSS, shifts: &[GuardedStackShift]) -> P
         return apply_guarded_stack_shifts_to_vstack(&stack, shifts);
     }
 
-    if let Some(shifted) = gss.apply_guarded_stack_effects_to_single_concrete_path(
+    if !guarded_stack_to_stacks_fallback_disabled()
+        && let Some(shifted) = gss.apply_guarded_stack_effects_to_single_concrete_path(
         shifts.iter().map(|shift| {
             (
                 shift
@@ -312,6 +341,7 @@ fn apply_guarded_stack_shifts(gss: ParserGSS, shifts: &[GuardedStackShift]) -> P
                 shift.pushes.as_slice(),
             )
         }),
+        GUARDED_STACK_TO_STACKS_MAX_DEPTH,
     ) {
         return shifted;
     }

@@ -23,6 +23,8 @@ type ParserStatesByTokenizer = FxHashMap<u32, ParserGSS>;
 
 pub type GssProfileSummary = LeveledGSSSummary;
 
+const SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH: usize = 64;
+
 // Commit is a central runtime method and this profiling surface is used by
 // CFA profile_step to choose optimization targets. Keep parent/child timing
 // buckets on one wall-clock accounting tree; do not remove or repurpose
@@ -599,6 +601,7 @@ fn apply_single_top_action_fast(gss: &ParserGSS, action: &Action) -> Option<Pars
                     shifts
                         .iter()
                         .map(|shift| (shift.pop as usize, shift.pushes.as_slice())),
+                    SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH,
                 );
             }
             let stack = gss.try_virtual_stack()?;

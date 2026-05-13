@@ -1904,7 +1904,11 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     /// large `StackShifts` action. In that shape, the generic GSS branch builder
     /// can spend most of its time constructing and merging branches that collapse
     /// back to one or two concrete stacks.
-    pub fn apply_stack_effects_to_single_concrete_path<'a, I>(&self, effects: I) -> Option<Self>
+    pub fn apply_stack_effects_to_single_concrete_path<'a, I>(
+        &self,
+        effects: I,
+        max_materialized_depth: usize,
+    ) -> Option<Self>
     where
         I: IntoIterator<Item = (usize, &'a [T])>,
         T: 'a,
@@ -1930,6 +1934,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             }
             let empty: Vec<(Vec<T>, A)> = Vec::new();
             return Some(Self::from_stacks(&empty));
+        }
+
+        if self.max_depth() as usize > max_materialized_depth {
+            return None;
         }
 
         let mut stacks = self.to_stacks();
@@ -1964,12 +1972,17 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     pub fn apply_guarded_stack_effects_to_single_concrete_path<'a, I, G>(
         &self,
         effects: I,
+        max_materialized_depth: usize,
     ) -> Option<Self>
     where
         I: IntoIterator<Item = (G, usize, &'a [T])>,
         G: IntoIterator<Item = (usize, &'a [T])>,
         T: 'a,
     {
+        if self.max_depth() as usize > max_materialized_depth {
+            return None;
+        }
+
         let mut stacks = self.to_stacks();
         if stacks.len() != 1 {
             return None;
