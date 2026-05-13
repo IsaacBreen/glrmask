@@ -128,6 +128,9 @@ impl CandidateCollector {
 
     fn collect_expr(&mut self, rule_idx: usize, expr: &GrammarExpr, path: &mut Vec<PathStep>) {
         match expr {
+            GrammarExpr::Grouped(inner) => {
+                self.collect_expr(rule_idx, inner, path);
+            }
             GrammarExpr::Choice(options) => {
                 let mut option_indices = Vec::new();
                 let mut promoted_options = Vec::new();
@@ -236,6 +239,7 @@ impl CandidateCollector {
 
     fn eligible_atom(&self, expr: &GrammarExpr) -> Option<GrammarExpr> {
         match expr {
+            GrammarExpr::Grouped(inner) => self.eligible_atom(inner),
             GrammarExpr::Literal(_) => Some(expr.clone()),
             GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_) | GrammarExpr::AnyByte
                 if self.include_non_literal_terminals =>

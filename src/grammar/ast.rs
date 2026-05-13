@@ -13,6 +13,7 @@ use crate::grammar::expr_nfa::ExprNFA;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GrammarExpr {
     Ref(String),
+    Grouped(Box<GrammarExpr>),
     Sequence(Vec<GrammarExpr>),
     Choice(Vec<GrammarExpr>),
     /// Empty string / epsilon. Equivalent to `Sequence([])` for grammar purposes;
@@ -134,6 +135,7 @@ impl NamedGrammar {
         fn collect_refs(expr: &GrammarExpr, out: &mut HashSet<String>) {
             match expr {
                 GrammarExpr::Ref(name) => { out.insert(name.clone()); }
+                GrammarExpr::Grouped(inner) => collect_refs(inner, out),
                 GrammarExpr::Sequence(items) => { for e in items { collect_refs(e, out); } }
                 GrammarExpr::Choice(alts) => { for e in alts { collect_refs(e, out); } }
                 GrammarExpr::Exclude { expr, exclude } => {
@@ -253,6 +255,11 @@ fn grammar_expr_to_lark_with_indent(
     match expr {
         GrammarExpr::Ref(name) => {
             out.push_str(name);
+        }
+        GrammarExpr::Grouped(inner) => {
+            out.push('(');
+            grammar_expr_to_lark_with_indent(inner, out, false, indent);
+            out.push(')');
         }
         GrammarExpr::Sequence(items) => {
             if parens && items.len() > 1 {
@@ -532,6 +539,91 @@ impl Lowerer {
         grammar_expr_is_nullable(expr, &self.rule_nullable)
     }
 
+    fn strip_grouping(expr: &GrammarExpr) -> &GrammarExpr {
+        match expr {
+            GrammarExpr::Grouped(inner) => Self::strip_grouping(inner),
+            _ => expr,
+        }
+    }
+
+    fn top_level_alternatives(expr: &GrammarExpr) -> Vec<GrammarExpr> {
+        match Self::strip_grouping(expr) {
+            GrammarExpr::Choice(options) => options
+                .iter()
+                .map(|option| Self::strip_grouping(option).clone())
+                .collect(),
+            other => vec![other.clone()],
+        }
+    }
+
+    fn exact_subtraction_alternatives(
+        &self,
+        lhs_name: &str,
+        exclude: &GrammarExpr,
+    ) -> Result<Vec<GrammarExpr>, GlrMaskError> {
+        match exclude {
+            GrammarExpr::Choice(options) => {
+                let mut out = Vec::new();
+                for option in options {
+                    out.extend(self.exact_subtraction_alternatives(lhs_name, option)?);
+                }
+                Ok(out)
+            }
+            GrammarExpr::Grouped(inner) => Ok(Self::top_level_alternatives(inner)),
+            GrammarExpr::Ref(name) => {
+                let Some(false) = self.named_rule_is_terminal.get(name).copied() else {
+                    return Err(GlrMaskError::GrammarParse(format!(
+                        "{lhs_name} - {name} requires {name} to name a nonterminal rule"
+                    )));
+                };
+                let referenced_expr = self.named_rule_exprs.get(name).ok_or_else(|| {
+                    GlrMaskError::GrammarParse(format!(
+                        "unknown rule referenced in exact alternative subtraction: {name}"
+                    ))
+                })?;
+                Ok(Self::top_level_alternatives(referenced_expr))
+            }
+            other => Ok(Self::top_level_alternatives(other)),
+        }
+    }
+
+    fn exact_nonterminal_subtraction_expr(
+        &self,
+        expr: &GrammarExpr,
+    ) -> Result<Option<GrammarExpr>, GlrMaskError> {
+        let GrammarExpr::Exclude { expr: lhs_expr, exclude } = expr else {
+            return Ok(None);
+        };
+        let GrammarExpr::Ref(lhs_name) = Self::strip_grouping(lhs_expr) else {
+            return Ok(None);
+        };
+        let Some(false) = self.named_rule_is_terminal.get(lhs_name).copied() else {
+            return Ok(None);
+        };
+
+        let lhs_rule_expr = self.named_rule_exprs.get(lhs_name).ok_or_else(|| {
+            GlrMaskError::GrammarParse(format!(
+                "unknown nonterminal referenced in exact alternative subtraction: {lhs_name}"
+            ))
+        })?;
+        let mut remaining = Self::top_level_alternatives(lhs_rule_expr);
+        for remove_alt in self.exact_subtraction_alternatives(lhs_name, exclude)? {
+            let Some(position) = remaining.iter().position(|candidate| candidate == &remove_alt) else {
+                return Err(GlrMaskError::GrammarParse(format!(
+                    "no exact alternative {:?} in {}",
+                    remove_alt, lhs_name
+                )));
+            };
+            remaining.remove(position);
+        }
+
+        Ok(Some(match remaining.len() {
+            0 => GrammarExpr::Choice(Vec::new()),
+            1 => remaining.pop().unwrap(),
+            _ => GrammarExpr::Choice(remaining),
+        }))
+    }
+
     fn resolve_terminal_expr(
         &mut self,
         owner_name: Option<&str>,
@@ -562,6 +654,7 @@ impl Lowerer {
                 let tid = self.terminal_id(&String::from_utf8_lossy(bytes), &pattern, false);
                 Ok(Some(Symbol::Terminal(tid)))
             }
+            GrammarExpr::Grouped(inner) => self.nonnullable_terminal_symbol(inner),
             GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::AnyByte
@@ -642,13 +735,19 @@ impl Lowerer {
         match expr {
             GrammarExpr::Epsilon => Ok(None),
             GrammarExpr::Literal(bytes) if bytes.is_empty() => Ok(None),
+            GrammarExpr::Grouped(inner) => self.lower_nonnullable_expr_symbol(inner),
             GrammarExpr::Ref(name) => Ok(Some(self.lower_nonnullable_named_rule(name)?)),
             GrammarExpr::Optional(inner) => self.lower_nonnullable_expr_symbol(inner),
+            GrammarExpr::Exclude { .. } => {
+                if let Some(lowered) = self.exact_nonterminal_subtraction_expr(expr)? {
+                    return self.lower_nonnullable_expr_symbol(&lowered);
+                }
+                self.nonnullable_terminal_symbol(expr)
+            }
             GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::AnyByte
-            | GrammarExpr::Exclude { .. }
             | GrammarExpr::Intersect { .. } => self.nonnullable_terminal_symbol(expr),
             _ => {
                 let (_, nt) = self.fresh_nonterminal("nonnullable_expr");
@@ -687,15 +786,24 @@ impl Lowerer {
         expr: &GrammarExpr,
     ) -> Result<(), GlrMaskError> {
         match expr {
+            GrammarExpr::Grouped(inner) => {
+                self.emit_nonnullable_expr(lhs, inner)?;
+            }
             GrammarExpr::Ref(name) => {
                 let symbol = self.lower_nonnullable_named_rule(name)?;
                 self.rules.push(Rule { lhs, rhs: vec![symbol] });
+            }
+            GrammarExpr::Exclude { .. } => {
+                if let Some(lowered) = self.exact_nonterminal_subtraction_expr(expr)? {
+                    self.emit_nonnullable_expr(lhs, &lowered)?;
+                } else if let Some(symbol) = self.nonnullable_terminal_symbol(expr)? {
+                    self.rules.push(Rule { lhs, rhs: vec![symbol] });
+                }
             }
             GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::AnyByte
-            | GrammarExpr::Exclude { .. }
             | GrammarExpr::Intersect { .. } => {
                 if let Some(symbol) = self.nonnullable_terminal_symbol(expr)? {
                     self.rules.push(Rule { lhs, rhs: vec![symbol] });
@@ -1268,6 +1376,7 @@ impl Lowerer {
     fn lower_expr(&mut self, expr: &GrammarExpr) -> Symbol {
         fn emit(lowerer: &mut Lowerer, lhs: NonterminalID, expr: &GrammarExpr) -> Result<(), GlrMaskError> {
             match expr {
+                GrammarExpr::Grouped(inner) => emit(lowerer, lhs, inner)?,
                 GrammarExpr::Sequence(parts) => {
                     let mut rhs = Vec::new();
                     for part in parts {
@@ -1322,6 +1431,10 @@ impl Lowerer {
                     lowerer.emit_expr_nfa(lhs, expr_nfa)?;
                 }
                 _ => {
+                    if let Some(lowered) = lowerer.exact_nonterminal_subtraction_expr(expr)? {
+                        emit(lowerer, lhs, &lowered)?;
+                        return Ok(());
+                    }
                     let symbol = lowerer.lower_expr_terminalish(expr)?;
                     lowerer.rules.push(Rule {
                         lhs,
@@ -1340,6 +1453,7 @@ impl Lowerer {
 
     fn lower_expr_terminalish(&mut self, expr: &GrammarExpr) -> Result<Symbol, GlrMaskError> {
         Ok(match expr {
+            GrammarExpr::Grouped(inner) => return self.lower_expr_terminalish(inner),
             GrammarExpr::Ref(name) => {
                 if !self.named_rule_exprs.contains_key(name) {
                     return Err(GlrMaskError::GrammarParse(format!(
@@ -1372,6 +1486,9 @@ impl Lowerer {
                 Symbol::Nonterminal(nt)
             }
             GrammarExpr::Exclude { .. } | GrammarExpr::Intersect { .. } => {
+                if let Some(lowered) = self.exact_nonterminal_subtraction_expr(expr)? {
+                    return Ok(self.lower_expr(&lowered));
+                }
                 let expr = self.resolve_terminal_expr(None, expr)?;
                 let name = format!("__terminal_expr_{}", self.generated_nonterminal_counter);
                 Symbol::Terminal(self.register_terminal_expr(&name, expr))
@@ -1590,6 +1707,9 @@ fn grammar_expr_to_expr(
     visiting: &mut HashSet<String>,
 ) -> Result<Expr, GlrMaskError> {
     Ok(match expr {
+        GrammarExpr::Grouped(inner) => {
+            return grammar_expr_to_expr(inner, terminal_bodies, terminal_expr_cache, visiting);
+        }
         GrammarExpr::Literal(bytes) => Expr::U8Seq(bytes.clone()),
         GrammarExpr::CharClass { def, negate, utf8 } => {
             let pattern = char_class_pattern(def, *negate);
@@ -1684,6 +1804,7 @@ fn grammar_expr_is_nullable(
 ) -> bool {
     match expr {
         GrammarExpr::Ref(name) => rule_nullable.get(name).copied().unwrap_or(false),
+        GrammarExpr::Grouped(inner) => grammar_expr_is_nullable(inner, rule_nullable),
         GrammarExpr::Sequence(parts) => parts.iter().all(|part| grammar_expr_is_nullable(part, rule_nullable)),
         GrammarExpr::Choice(options) => options.iter().any(|option| grammar_expr_is_nullable(option, rule_nullable)),
         GrammarExpr::Epsilon => true,
@@ -1792,6 +1913,9 @@ fn validate_expr_nfa_placement(grammar: &NamedGrammar) -> Result<(), GlrMaskErro
                     walk(part, false, rule_name)?;
                 }
             }
+            GrammarExpr::Grouped(inner) => {
+                walk(inner, false, rule_name)?;
+            }
             GrammarExpr::Exclude { expr, exclude } => {
                 walk(expr, false, rule_name)?;
                 walk(exclude, false, rule_name)?;
@@ -1841,6 +1965,7 @@ fn validate_expr_nfa_placement(grammar: &NamedGrammar) -> Result<(), GlrMaskErro
 /// range-encoded string representation.
 pub fn expr_to_grammar_expr(expr: &Expr) -> GrammarExpr {
     match expr {
+        Expr::Shared(inner) => expr_to_grammar_expr(inner),
         Expr::U8Seq(bytes) => GrammarExpr::Literal(bytes.clone()),
         Expr::U8Class(set) => GrammarExpr::CharClass {
             def: u8set_to_class_def(set),
@@ -1888,7 +2013,6 @@ pub fn expr_to_grammar_expr(expr: &Expr) -> GrammarExpr {
                 }
             }
         }
-        Expr::Shared(inner) => expr_to_grammar_expr(inner),
     }
 }
 
@@ -1993,6 +2117,10 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
         let lhs = lowerer.nonterminal_id(&rule.name);
 
         match &rule.expr {
+            GrammarExpr::Grouped(inner) => {
+                let symbol = lowerer.lower_expr_terminalish(inner)?;
+                lowerer.rules.push(Rule { lhs, rhs: vec![symbol] });
+            }
             GrammarExpr::Sequence(parts) => {
                 let rhs = parts.iter().map(|part| lowerer.lower_expr_terminalish(part)).collect::<Result<Vec<_>, _>>()?;
                 lowerer.rules.push(Rule { lhs, rhs });

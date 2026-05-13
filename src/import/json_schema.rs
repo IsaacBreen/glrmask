@@ -459,6 +459,10 @@ fn empty_expr() -> GrammarExpr {
     GrammarExpr::Sequence(Vec::new())
 }
 
+fn parenthesized_expr(expr: GrammarExpr) -> GrammarExpr {
+    GrammarExpr::Grouped(Box::new(expr))
+}
+
 fn dedup_literal_alternatives(mut alts: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
     if alts.len() > 1 {
         alts.sort();
@@ -472,6 +476,7 @@ fn finite_literal_alternatives(
     max_alts: usize,
 ) -> Option<Vec<Vec<u8>>> {
     let alts = match expr {
+        GrammarExpr::Grouped(inner) => return finite_literal_alternatives(inner, max_alts),
         GrammarExpr::Literal(bytes) => vec![bytes.clone()],
         GrammarExpr::Sequence(parts) => {
             let mut acc = vec![Vec::new()];
@@ -4427,6 +4432,9 @@ impl<'a> SchemaCtx<'a> {
 
     fn hoist_patterns_in_expr(&mut self, expr: GrammarExpr, prefix: &str) -> GrammarExpr {
         match expr {
+            GrammarExpr::Grouped(inner) => {
+                GrammarExpr::Grouped(Box::new(self.hoist_patterns_in_expr(*inner, prefix)))
+            }
             GrammarExpr::Ref(_) | GrammarExpr::Literal(_) | GrammarExpr::Epsilon => expr,
             GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_) | GrammarExpr::AnyByte => {
                 self.extract_pattern_terminal_rule(expr, prefix)
@@ -9758,7 +9766,7 @@ impl<'a> SchemaCtx<'a> {
             .iter()
             .cloned()
             .collect();
-        let mut excluded = excluded_keys
+        let literal_excluded = excluded_keys
             .iter()
             .map(|key| {
                 self.force_extract_terminal_rule(
@@ -9767,6 +9775,13 @@ impl<'a> SchemaCtx<'a> {
                 )
             })
             .collect::<Vec<_>>();
+        if !literal_excluded.is_empty() {
+            self.insert_rule(
+                "AP_SHARED_LITERAL_KEY_SET",
+                choice_or_single(literal_excluded.clone()),
+            );
+        }
+        let mut excluded = literal_excluded;
         let excluded_patterns = self
             .shared_additional_key_plan
             .pattern_keys
@@ -9904,11 +9919,24 @@ impl<'a> SchemaCtx<'a> {
 
         let mut options = Vec::with_capacity(1 + allowed_back_keys.len() + allowed_back_patterns.len());
         options.push(self.shared_additional_key_body_expr());
-        options.extend(
-            allowed_back_keys
+        if !allowed_back_keys.is_empty() {
+            let still_excluded_literal_alts = self
+                .shared_additional_key_plan
+                .literal_keys
                 .iter()
-                .map(|key| literal_expr(&key_colon_literal_body_bytes(key))),
-        );
+                .filter(|key| !allowed_back_keys.contains(*key))
+                .cloned()
+                .map(|key| literal_expr(&key_colon_literal_body_bytes(&key)))
+                .collect::<Vec<_>>();
+            if still_excluded_literal_alts.is_empty() {
+                options.push(GrammarExpr::Ref("AP_SHARED_LITERAL_KEY_SET".into()));
+            } else {
+                options.push(GrammarExpr::Exclude {
+                    expr: Box::new(GrammarExpr::Ref("AP_SHARED_LITERAL_KEY_SET".into())),
+                    exclude: Box::new(parenthesized_expr(choice_or_single(still_excluded_literal_alts))),
+                });
+            }
+        }
         for pattern in &allowed_back_patterns {
             options.push(
                 self.shared_additional_pattern_key_body_expr_excluding_literals(
@@ -10226,6 +10254,11 @@ impl<'a> SchemaCtx<'a> {
         let body = if excluded.is_empty() {
             GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())
         } else {
+            let literal_alt_set = choice_or_single(excluded.clone());
+            self.insert_rule(
+                "AP_SHARED_LITERAL_KEY_SET",
+                literal_alt_set,
+            );
             GrammarExpr::Exclude {
                 expr: Box::new(GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())),
                 exclude: Box::new(choice_or_single(excluded)),
@@ -11547,6 +11580,7 @@ fn collect_grammar_visible_refs(
                     out.insert(name.clone());
                 }
             }
+            GrammarExpr::Grouped(inner) => walk(inner, terminal_names, out),
             GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
                 for p in parts {
                     walk(p, terminal_names, out);
@@ -11703,6 +11737,7 @@ mod tests {
 
     fn expr_contains_expr_nfa(expr: &GrammarExpr) -> bool {
         match expr {
+            GrammarExpr::Grouped(inner) => expr_contains_expr_nfa(inner),
             GrammarExpr::ExprNFA(_) => true,
             GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
                 parts.iter().any(expr_contains_expr_nfa)
@@ -11899,7 +11934,7 @@ mod tests {
         assert!(glrm.contains("t AP_SHARED_KEY ::="), "{glrm}");
         assert!(
             glrm.contains("nt obj_anyof_fa_0_ap_key_v1_body")
-                && glrm.contains("AP_SHARED_KEY | \"thumbnail\\\"\""),
+                && glrm.contains("AP_SHARED_KEY | (AP_SHARED_LITERAL_KEY_SET - (\"name\\\"\"))"),
             "{glrm}"
         );
         assert_eq!(glrm.matches("t AP_SHARED_KEY ::=").count(), 1, "{glrm}");
@@ -12198,7 +12233,7 @@ mod tests {
         assert!(glrm.contains("AP_SHARED_PATTERN_KEY_0"), "{glrm}");
         assert!(glrm.contains(" - AP_SHARED_PATTERN_KEY_0"), "{glrm}");
         assert!(
-            glrm.contains("AP_SHARED_KEY | \"first\\\"\" | \"second\\\"\" | AP_SHARED_PATTERN_KEY_FILTERED_"),
+            glrm.contains("AP_SHARED_LITERAL_KEY_SET - (\"a\\\"\" | \"b\\\"\")"),
             "{glrm}"
         );
         assert!(
@@ -12207,7 +12242,7 @@ mod tests {
             ),
             "{glrm}"
         );
-        assert!(glrm.contains("AP_SHARED_KEY | \"a\\\"\""), "{glrm}");
+        assert!(!glrm.contains("AP_SHARED_KEY | \"a\\\"\""), "{glrm}");
     }
 
     #[test]

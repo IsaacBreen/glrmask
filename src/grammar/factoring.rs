@@ -13,6 +13,7 @@ use super::ast::{GrammarExpr, NamedGrammar, NamedRule};
 
 fn contains_regex_features(expr: &GrammarExpr) -> bool {
     match expr {
+        GrammarExpr::Grouped(inner) => contains_regex_features(inner),
         GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::AnyByte => true,
@@ -240,6 +241,9 @@ impl ChoiceFactorer {
 
     fn collect_refs_impl(expr: &GrammarExpr, refs: &mut HashSet<String>) {
         match expr {
+            GrammarExpr::Grouped(inner) => {
+                Self::collect_refs_impl(inner, refs);
+            }
             GrammarExpr::Ref(name) => {
                 refs.insert(name.clone());
             }
@@ -322,6 +326,7 @@ impl ChoiceFactorer {
 
     fn is_complex_head(expr: &GrammarExpr) -> bool {
         match expr {
+            GrammarExpr::Grouped(inner) => Self::is_complex_head(inner),
             GrammarExpr::Sequence(parts) => parts.len() > 2,
             GrammarExpr::Choice(_) => true,
             GrammarExpr::Exclude { .. } => true,
@@ -386,6 +391,9 @@ impl ChoiceFactorer {
 
     fn collect_refs_static(expr: &GrammarExpr, refs: &mut HashSet<String>) {
         match expr {
+            GrammarExpr::Grouped(inner) => {
+                Self::collect_refs_static(inner, refs);
+            }
             GrammarExpr::Ref(name) => {
                 refs.insert(name.clone());
             }

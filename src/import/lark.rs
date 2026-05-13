@@ -511,6 +511,15 @@ fn expand_lark_expr(
     visiting: &mut HashSet<String>,
 ) -> Result<GrammarExpr, GlrMaskError> {
     Ok(match expr {
+        GrammarExpr::Grouped(inner) => GrammarExpr::Grouped(expand_lark_boxed_expr(
+            inner,
+            in_terminal_rule,
+            rule_map,
+            terminal_names,
+            parser_names,
+            memo,
+            visiting,
+        )?),
         GrammarExpr::Ref(name) => {
             if terminal_names.contains(name) {
                 if in_terminal_rule {

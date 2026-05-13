@@ -202,6 +202,7 @@ fn dump_nt_postfix(expr: &GrammarExpr) -> String {
 fn dump_nt_atom(expr: &GrammarExpr) -> String {
     match expr {
         GrammarExpr::Ref(name) => name.clone(),
+        GrammarExpr::Grouped(inner) => format!("({})", dump_nt_expr(inner, false)),
         GrammarExpr::Literal(bytes) => format!("\"{}\"", escape_bytes_for_string(bytes)),
         GrammarExpr::RawRegex(pat) => format!("/{}/", escape_regex_for_slash(pat)),
         GrammarExpr::CharClass { def, negate, utf8 } => {
@@ -844,7 +845,7 @@ impl GlrmParser {
         let mut excludes = Vec::new();
         while matches!(self.peek(), Tok::Minus) {
             self.advance();
-            excludes.push(self.parse_nt_intersect(allow_raw_regex)?);
+            excludes.push(self.parse_nt_exclude_rhs(allow_raw_regex)?);
         }
         if excludes.is_empty() {
             Ok(expr)
@@ -870,6 +871,29 @@ impl GlrmParser {
                 expr: Box::new(expr),
                 intersect: Box::new(rhs),
             };
+        }
+        Ok(expr)
+    }
+
+    fn parse_nt_exclude_rhs(&mut self, allow_raw_regex: bool) -> Result<GrammarExpr, GlrMaskError> {
+        if matches!(self.peek(), Tok::LParen) {
+            self.advance();
+            let inner = self.parse_nt_expr(allow_raw_regex)?;
+            self.consume(&Tok::RParen)?;
+            return Ok(GrammarExpr::Grouped(Box::new(inner)));
+        }
+
+        let mut expr = self.parse_nt_postfix(allow_raw_regex)?;
+        while matches!(self.peek(), Tok::Amp) {
+            self.advance();
+            let rhs = self.parse_nt_postfix(allow_raw_regex)?;
+            expr = GrammarExpr::Intersect {
+                expr: Box::new(expr),
+                intersect: Box::new(rhs),
+            };
+        }
+        if self.can_start_nt_atom() {
+            return Err(err("invalid syntax: RHS sequence subtraction must be parenthesized"));
         }
         Ok(expr)
     }
@@ -1119,6 +1143,29 @@ fn err(msg: &str) -> GlrMaskError {
 mod tests {
     use super::*;
     use crate::grammar::ast::lower;
+    use crate::grammar::flat::Symbol;
+
+    fn single_path_terminal_names(
+        lowered: &crate::grammar::flat::GrammarDef,
+        symbol: &Symbol,
+    ) -> Vec<String> {
+        match symbol {
+            Symbol::Terminal(id) => vec![lowered.terminal_display_name(*id)],
+            Symbol::Nonterminal(id) => {
+                let rules = lowered
+                    .rules
+                    .iter()
+                    .filter(|rule| rule.lhs == *id)
+                    .collect::<Vec<_>>();
+                assert_eq!(rules.len(), 1, "expected a single-path helper nonterminal");
+                rules[0]
+                    .rhs
+                    .iter()
+                    .flat_map(|child| single_path_terminal_names(lowered, child))
+                    .collect()
+            }
+        }
+    }
 
     #[test]
     fn parses_named_expr_nfa_definition() {
@@ -1187,6 +1234,102 @@ accept 1;
             expr_nfa.symbols.first(),
             Some(GrammarExpr::Exclude { .. })
         ));
+    }
+
+    #[test]
+    fn exclude_rhs_sequence_requires_parentheses() {
+        let err = from_glrm(
+            r#"
+start z;
+nt A ::= a b | c d | e f;
+nt z ::= x (A - c d);
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("RHS sequence subtraction must be parenthesized"), "{err}");
+    }
+
+    #[test]
+    fn grouped_exclude_rhs_preserves_parenthesized_ref() {
+        let grammar = from_glrm(
+            r#"
+start z;
+nt A ::= a b | c d | e f;
+nt B ::= c d | e f;
+nt z ::= x (A - B) | x (A - (B));
+"#,
+        )
+        .unwrap();
+        let GrammarExpr::Choice(options) = &grammar.rules[2].expr else {
+            panic!("expected choice");
+        };
+        assert!(matches!(
+            options[0],
+            GrammarExpr::Sequence(_)
+        ));
+        let GrammarExpr::Sequence(second_parts) = &options[1] else {
+            panic!("expected sequence");
+        };
+        let GrammarExpr::Exclude { exclude, .. } = &second_parts[1] else {
+            panic!("expected exclude expr");
+        };
+        assert!(matches!(exclude.as_ref(), GrammarExpr::Grouped(_)));
+    }
+
+    #[test]
+    fn lowering_subtracts_exact_nonterminal_alternatives() {
+        let grammar = from_glrm(
+            r#"
+start z;
+nt A ::= "a" "b" | "c" "d" | "e" "f";
+nt B ::= "c" "d" | "e" "f";
+nt z ::= "x" (A - B);
+"#,
+        )
+        .unwrap();
+
+        let lowered = lower(&grammar).unwrap();
+        let z_rule = lowered
+            .rules
+            .iter()
+            .find(|rule| rule.lhs == lowered.start)
+            .expect("start rule should exist");
+        assert_eq!(z_rule.rhs.len(), 2);
+
+        let Symbol::Nonterminal(filtered_nt) = z_rule.rhs[1] else {
+            panic!("expected filtered nonterminal");
+        };
+        let filtered_rules = lowered
+            .rules
+            .iter()
+            .filter(|rule| rule.lhs == filtered_nt)
+            .collect::<Vec<_>>();
+        assert_eq!(filtered_rules.len(), 1);
+        assert_eq!(filtered_rules[0].rhs.len(), 2);
+
+        let filtered_terminals = filtered_rules[0]
+            .rhs
+            .iter()
+            .flat_map(|symbol| single_path_terminal_names(&lowered, symbol))
+            .collect::<Vec<_>>();
+        assert_eq!(filtered_terminals, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn lowering_rejects_parenthesized_ref_without_exact_alternative() {
+        let grammar = from_glrm(
+            r#"
+start z;
+nt A ::= "a" "b" | "c" "d" | "e" "f";
+nt B ::= "c" "d" | "e" "f";
+nt z ::= "x" (A - (B));
+"#,
+        )
+        .unwrap();
+
+        let err = lower(&grammar).unwrap_err().to_string();
+        assert!(err.contains("no exact alternative"), "{err}");
     }
 
     #[test]

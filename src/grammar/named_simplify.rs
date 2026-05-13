@@ -248,6 +248,9 @@ fn collect_ref_counts(expr: &GrammarExpr, counts: &mut HashMap<String, usize>) {
         GrammarExpr::Ref(name) => {
             *counts.entry(name.clone()).or_insert(0) += 1;
         }
+        GrammarExpr::Grouped(inner) => {
+            collect_ref_counts(inner, counts);
+        }
         GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
             for part in parts {
                 collect_ref_counts(part, counts);
@@ -309,6 +312,9 @@ fn inline_refs_in_expr(
     stats: &mut SimplifyStats,
 ) {
     match expr {
+        GrammarExpr::Grouped(inner) => {
+            inline_refs_in_expr(inner, rule_exprs, ref_counts, protected, removed, stats);
+        }
         GrammarExpr::Sequence(parts) => {
             inline_sequence_refs(parts, rule_exprs, ref_counts, protected, removed, stats);
             for part in parts {
