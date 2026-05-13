@@ -2127,8 +2127,21 @@ fn parsed_regex_expr(pattern: &str, utf8: bool) -> GrammarExpr {
     expr_to_grammar_expr(&parse_regex(pattern, utf8))
 }
 
-fn per_object_ap_keys_enabled() -> bool {
-    env_flag("GLRMASK_JSON_SCHEMA_PER_OBJECT_AP_KEYS")
+fn per_object_ap_key_threshold() -> usize {
+    std::env::var("GLRMASK_JSON_SCHEMA_PER_OBJECT_AP_KEY_THRESHOLD")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|threshold| *threshold > 0)
+        .unwrap_or(128)
+}
+
+fn per_object_ap_keys_enabled_for_plan(plan: &SharedAdditionalKeyPlan) -> bool {
+    if let Some(enabled) = env_flag_optional("GLRMASK_JSON_SCHEMA_PER_OBJECT_AP_KEYS") {
+        return enabled;
+    }
+
+    let score = plan.literal_keys.len() + 8 * plan.pattern_keys.len();
+    score >= per_object_ap_key_threshold()
 }
 
 fn ap_key_any_string() -> bool {
@@ -4017,6 +4030,10 @@ impl<'a> SchemaCtx<'a> {
         for (name, expr) in string_rules.into_iter().chain(number_rules) {
             self.insert_rule(name, expr);
         }
+    }
+
+    fn per_object_ap_keys_enabled(&self) -> bool {
+        per_object_ap_keys_enabled_for_plan(&self.shared_additional_key_plan)
     }
 
     fn try_append_suffix_to_trailing_literal_expr(
@@ -6302,7 +6319,7 @@ impl<'a> SchemaCtx<'a> {
                 &format!("{upper_base_name}_AP_KEY_V{variant_idx}"),
             ));
         }
-        if per_object_ap_keys_enabled() {
+        if self.per_object_ap_keys_enabled() {
             return Ok(self.build_per_object_additional_key_choice_expr(
                 variant_keys,
                 variant_pattern_keys,
@@ -10712,7 +10729,7 @@ impl<'a> SchemaCtx<'a> {
                     ),
                     extra_value_expr,
                 ]))
-            } else if per_object_ap_keys_enabled() {
+            } else if self.per_object_ap_keys_enabled() {
                 let excluded_pattern_keys = BTreeSet::new();
                 Some(sequence_or_single(vec![
                     self.build_per_object_additional_key_choice_expr(
@@ -11199,7 +11216,7 @@ impl<'a> SchemaCtx<'a> {
                     }
                 };
                 self.insert_named_terminal_rule(format!("{upper_base_name}_AP"), ap_body)
-            } else if per_object_ap_keys_enabled() {
+            } else if self.per_object_ap_keys_enabled() {
                 self.build_per_object_additional_key_body_expr(
                     &fixed_literal_keys,
                     &excluded_pattern_keys,
@@ -11747,9 +11764,11 @@ mod tests {
     use super::common_outer_anchor_pattern;
     use super::integer_multiple_expr;
     use super::json_string_merge_config;
+    use super::per_object_ap_keys_enabled_for_plan;
     use super::pattern_all_branches_anchored;
     use super::promote_literal_choices_enabled;
     use super::JsonSchemaUriMode;
+    use super::SharedAdditionalKeyPlan;
     use super::schema_to_named_grammar;
     use super::strip_branch_outer_anchors;
     use super::string_value_body_regex;
@@ -12368,6 +12387,62 @@ mod tests {
         let _shared = EnvVarGuard::set("GLRMASK_AP_SHARED_EXCLUSIONS", "1");
         let forced_glrm = dump_glrm(schema);
         assert!(forced_glrm.contains("t AP_SHARED_KEY ::= "), "{forced_glrm}");
+    }
+
+    #[test]
+    fn per_object_ap_keys_override_forces_true_for_small_plan() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _enabled = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PER_OBJECT_AP_KEYS", "1");
+        let _threshold = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PER_OBJECT_AP_KEY_THRESHOLD", "1000");
+
+        let plan = SharedAdditionalKeyPlan::default();
+
+        assert!(per_object_ap_keys_enabled_for_plan(&plan));
+    }
+
+    #[test]
+    fn per_object_ap_keys_override_forces_false_for_large_plan() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _enabled = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PER_OBJECT_AP_KEYS", "0");
+        let _threshold = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PER_OBJECT_AP_KEY_THRESHOLD", "1");
+
+        let plan = SharedAdditionalKeyPlan {
+            literal_keys: (0..32).map(|idx| format!("k{idx}")).collect(),
+            pattern_keys: [String::from("^p")].into_iter().collect(),
+            ..Default::default()
+        };
+
+        assert!(!per_object_ap_keys_enabled_for_plan(&plan));
+    }
+
+    #[test]
+    fn per_object_ap_keys_auto_enables_at_threshold() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _enabled = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_PER_OBJECT_AP_KEYS");
+        let _threshold = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PER_OBJECT_AP_KEY_THRESHOLD", "17");
+
+        let plan = SharedAdditionalKeyPlan {
+            literal_keys: (0..9).map(|idx| format!("k{idx}")).collect(),
+            pattern_keys: [String::from("^p")].into_iter().collect(),
+            ..Default::default()
+        };
+
+        assert!(per_object_ap_keys_enabled_for_plan(&plan));
+    }
+
+    #[test]
+    fn per_object_ap_keys_auto_stays_off_below_threshold() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _enabled = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_PER_OBJECT_AP_KEYS");
+        let _threshold = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PER_OBJECT_AP_KEY_THRESHOLD", "18");
+
+        let plan = SharedAdditionalKeyPlan {
+            literal_keys: (0..9).map(|idx| format!("k{idx}")).collect(),
+            pattern_keys: [String::from("^p")].into_iter().collect(),
+            ..Default::default()
+        };
+
+        assert!(!per_object_ap_keys_enabled_for_plan(&plan));
     }
 
     #[test]
