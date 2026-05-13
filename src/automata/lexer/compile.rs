@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::time::Instant;
 
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -1015,10 +1016,36 @@ fn compile_product_component(expr: &Expr) -> ProductComponent {
 }
 
 fn build_product_dfa(exprs: &[Expr]) -> DFA {
+    let profile_detail = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
+    let profile_started_at = Instant::now();
     let components: Vec<ProductComponent> = exprs
         .par_iter()
         .map(compile_product_component)
         .collect();
+    if profile_detail {
+        eprintln!(
+            "[glrmask/profile][tokenizer] product_components groups={} compile_components_ms={:.3}",
+            components.len(),
+            profile_started_at.elapsed().as_secs_f64() * 1000.0
+        );
+        for (index, component) in components.iter().enumerate() {
+            let states = component.partition_dfa().num_states();
+            match component {
+                ProductComponent::Materialized(_) => {
+                    eprintln!(
+                        "[glrmask/profile][tokenizer] component index={} kind=materialized states={}",
+                        index, states
+                    );
+                }
+                ProductComponent::VirtualBoundedRepeat { min, max, .. } => {
+                    eprintln!(
+                        "[glrmask/profile][tokenizer] component index={} kind=virtual_bounded_repeat base_states={} min={} max={}",
+                        index, states, min, max
+                    );
+                }
+            }
+        }
+    }
     let num_groups = components.len();
     let component_dead_states: Vec<Option<u32>> = components
         .iter()
@@ -1129,6 +1156,15 @@ fn build_product_dfa(exprs: &[Expr]) -> DFA {
         }
         used_classes.clear();
         pending_class_transitions[current_state as usize] = class_transitions;
+    }
+
+    if profile_detail {
+        eprintln!(
+            "[glrmask/profile][tokenizer] product_reachable states={} classes={} construct_ms={:.3}",
+            dfa.num_states(),
+            num_classes,
+            profile_started_at.elapsed().as_secs_f64() * 1000.0
+        );
     }
 
     let expanded_transitions: Vec<crate::ds::char_transitions::CharTransitions<u32>> = pending_class_transitions
@@ -1455,4 +1491,3 @@ mod tests {
     }
 
 }
-

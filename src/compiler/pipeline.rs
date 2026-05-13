@@ -315,6 +315,25 @@ pub(crate) fn compute_disallowed_follows(grammar: &AnalyzedGrammar) -> BTreeMap<
 
 pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
     let exprs: Vec<Expr> = grammar.terminals.iter().map(terminal_expr).collect();
+    if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some() {
+        eprintln!(
+            "[glrmask/profile][tokenizer] terminals={}",
+            grammar.terminals.len()
+        );
+        for (index, expr) in exprs.iter().enumerate() {
+            let started_at = Instant::now();
+            let regex = build_regex(std::slice::from_ref(expr));
+            let elapsed = elapsed_ms(started_at);
+            let name = grammar.terminal_display_name(index as u32);
+            eprintln!(
+                "[glrmask/profile][tokenizer] terminal id={} name={:?} states={} alone_ms={:.3}",
+                index,
+                name,
+                regex.num_states(),
+                elapsed
+            );
+        }
+    }
     build_tokenizer_from_exprs(&exprs)
 }
 
