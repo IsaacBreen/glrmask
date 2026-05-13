@@ -2127,6 +2127,10 @@ fn parsed_regex_expr(pattern: &str, utf8: bool) -> GrammarExpr {
     expr_to_grammar_expr(&parse_regex(pattern, utf8))
 }
 
+fn per_object_ap_keys_enabled() -> bool {
+    env_flag("GLRMASK_JSON_SCHEMA_PER_OBJECT_AP_KEYS")
+}
+
 fn ap_key_any_string() -> bool {
     env_flag("GLRMASK_AP_KEY_ANY_STRING") || env_flag("GLRMASK_ADDPROP_NO_EXCLUSIONS")
 }
@@ -6298,6 +6302,13 @@ impl<'a> SchemaCtx<'a> {
                 &format!("{upper_base_name}_AP_KEY_V{variant_idx}"),
             ));
         }
+        if per_object_ap_keys_enabled() {
+            return Ok(self.build_per_object_additional_key_choice_expr(
+                variant_keys,
+                variant_pattern_keys,
+                &format!("{}_AP_KEY_V{}", base_name.to_uppercase(), variant_idx),
+            ));
+        }
 
         self.build_shared_additional_key_choice_expr(
             variant_keys,
@@ -9756,6 +9767,48 @@ impl<'a> SchemaCtx<'a> {
         wrap_key_colon_terminal(self.extract_terminal_rule(expr, prefix))
     }
 
+    fn build_per_object_additional_key_body_expr(
+        &mut self,
+        excluded_literal_keys: &BTreeSet<String>,
+        excluded_pattern_keys: &BTreeSet<String>,
+        prefix: &str,
+    ) -> GrammarExpr {
+        let mut excluded = excluded_literal_keys
+            .iter()
+            .map(|key| literal_expr(&key_colon_literal_body_bytes(key)))
+            .collect::<Vec<_>>();
+        for (pattern_idx, pattern) in excluded_pattern_keys.iter().enumerate() {
+            excluded.push(self.pattern_key_colon_body_expr(
+                pattern,
+                &format!("{prefix}_PATTERN_{pattern_idx}"),
+            ));
+        }
+
+        let body = if excluded.is_empty() {
+            GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())
+        } else {
+            GrammarExpr::Exclude {
+                expr: Box::new(GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())),
+                exclude: Box::new(choice_or_single(excluded)),
+            }
+        };
+
+        self.extract_terminal_rule(body, prefix)
+    }
+
+    fn build_per_object_additional_key_choice_expr(
+        &mut self,
+        excluded_literal_keys: &BTreeSet<String>,
+        excluded_pattern_keys: &BTreeSet<String>,
+        prefix: &str,
+    ) -> GrammarExpr {
+        wrap_key_colon_terminal(self.build_per_object_additional_key_body_expr(
+            excluded_literal_keys,
+            excluded_pattern_keys,
+            prefix,
+        ))
+    }
+
     fn shared_additional_key_body_expr(&mut self) -> GrammarExpr {
         if let Some(expr) = &self.shared_additional_key_plan.common_body_expr {
             return expr.clone();
@@ -10659,6 +10712,16 @@ impl<'a> SchemaCtx<'a> {
                     ),
                     extra_value_expr,
                 ]))
+            } else if per_object_ap_keys_enabled() {
+                let excluded_pattern_keys = BTreeSet::new();
+                Some(sequence_or_single(vec![
+                    self.build_per_object_additional_key_choice_expr(
+                        &excluded_literal_keys,
+                        &excluded_pattern_keys,
+                        &format!("{}_AP_KEY", base_name.to_uppercase()),
+                    ),
+                    extra_value_expr,
+                ]))
             } else {
                 let excluded_pattern_keys = BTreeSet::new();
                 Some(sequence_or_single(vec![
@@ -11136,6 +11199,12 @@ impl<'a> SchemaCtx<'a> {
                     }
                 };
                 self.insert_named_terminal_rule(format!("{upper_base_name}_AP"), ap_body)
+            } else if per_object_ap_keys_enabled() {
+                self.build_per_object_additional_key_body_expr(
+                    &fixed_literal_keys,
+                    &excluded_pattern_keys,
+                    &format!("{upper_base_name}_AP"),
+                )
             } else {
                 self.build_shared_additional_key_body_choice_expr(
                     &fixed_literal_keys,

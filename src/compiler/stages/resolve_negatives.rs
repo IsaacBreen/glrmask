@@ -16,6 +16,7 @@ type CancellationTask = (u32, u32, i32);
 type QueryWeights = Vec<Option<FxHashMap<QueryKey, Weight>>>;
 type QueuedQueries = Vec<SmallQueuedQueries>;
 type DerivedEpsilons = Vec<Option<FxHashMap<u32, Weight>>>;
+type SubsetMemo = FxHashMap<(usize, usize), bool>;
 
 #[derive(Clone, Default)]
 enum SmallQueuedQueries {
@@ -110,6 +111,22 @@ fn intersect_with_single_weight_hint(
 
 fn intersect_or_clone_right_if_subset(left: &Weight, right: &Weight) -> Weight {
     if right.is_subset(left) {
+        right.clone()
+    } else {
+        left.intersection(right)
+    }
+}
+
+fn intersect_or_clone_right_if_subset_cached(
+    left: &Weight,
+    right: &Weight,
+    subset_memo: &mut SubsetMemo,
+) -> Weight {
+    let key = (left.ptr_key(), right.ptr_key());
+    let subset = *subset_memo
+        .entry(key)
+        .or_insert_with(|| right.is_subset(left));
+    if subset {
         right.clone()
     } else {
         left.intersection(right)
@@ -341,6 +358,7 @@ fn extend_derived_epsilons(
     worklist: &mut VecDeque<CancellationTask>,
     queued: &mut QueuedQueries,
     derived_epsilons: &mut DerivedEpsilons,
+    subset_memo: &mut SubsetMemo,
 ) {
     let new_derived_weight = intersect_with_single_weight_hint(
         query_weight_to_current,
@@ -375,7 +393,11 @@ fn extend_derived_epsilons(
     let mut propagated_updates = Vec::with_capacity(existing_queries.len());
 
     for ((upstream_source_state, upstream_label), upstream_weight) in existing_queries {
-        let propagated = intersect_or_clone_right_if_subset(upstream_weight, derived_weight);
+        let propagated = intersect_or_clone_right_if_subset_cached(
+            upstream_weight,
+            derived_weight,
+            subset_memo,
+        );
         if propagated.is_empty() {
             continue;
         }
@@ -435,6 +457,7 @@ fn compute_cancellations_range_inner(
     let mut worklist = VecDeque::<CancellationTask>::new();
     let mut queued: QueuedQueries = vec![SmallQueuedQueries::Empty; state_count as usize];
     let mut derived_epsilons: DerivedEpsilons = vec![None; state_count as usize];
+    let mut subset_memo = SubsetMemo::default();
 
     for source_state in range {
         if source_state >= state_count {
@@ -502,6 +525,7 @@ fn compute_cancellations_range_inner(
                         &mut worklist,
                         &mut queued,
                         &mut derived_epsilons,
+                        &mut subset_memo,
                     );
                 }
             }
@@ -523,6 +547,7 @@ fn compute_cancellations_range_inner(
                         &mut worklist,
                         &mut queued,
                         &mut derived_epsilons,
+                        &mut subset_memo,
                     );
                 }
             }
