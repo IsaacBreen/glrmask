@@ -3318,13 +3318,7 @@ pub(crate) fn factor_common_affixes_enabled() -> bool {
 }
 
 pub(crate) fn promote_literal_choices_enabled() -> bool {
-    std::env::var("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES")
-        .ok()
-        .map(|value| {
-            let value = value.trim().to_ascii_lowercase();
-            matches!(value.as_str(), "1" | "true" | "yes" | "on")
-        })
-        .unwrap_or(false)
+    env_flag_default_true("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES")
 }
 
 pub(crate) fn simplify_grammar_enabled() -> bool {
@@ -11685,6 +11679,7 @@ mod tests {
     use super::integer_multiple_expr;
     use super::json_string_merge_config;
     use super::pattern_all_branches_anchored;
+    use super::promote_literal_choices_enabled;
     use super::JsonSchemaUriMode;
     use super::schema_to_named_grammar;
     use super::strip_branch_outer_anchors;
@@ -11695,6 +11690,7 @@ mod tests {
     use crate::grammar::ast::lower;
     use crate::grammar::glrm::to_glrm;
     use crate::grammar::ast::GrammarExpr;
+    use crate::dump_json_schema_grammar_glrm;
     use serde_json::{json, Value};
     use std::{env, ffi::OsString, sync::Mutex};
 
@@ -11916,6 +11912,9 @@ mod tests {
 
     #[test]
     fn anyof_object_expr_nfa_uses_one_ap_terminal_with_sibling_literals() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _promote = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES", "0");
+
         let schema = json!({
             "anyOf": [
                 {
@@ -11948,6 +11947,9 @@ mod tests {
 
     #[test]
     fn repeated_anyof_object_expr_nfa_sites_share_generated_fa() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _promote = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES", "0");
+
         let schema = json!({
             "definitions": {
                 "person": {
@@ -12155,6 +12157,7 @@ mod tests {
     #[test]
     fn shared_additional_properties_key_exclusions_are_on_by_default() {
         let _lock = ENV_LOCK.lock().unwrap();
+        let _promote = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES", "0");
 
         let schema = json!({
             "type": "object",
@@ -12185,6 +12188,7 @@ mod tests {
     fn shared_additional_properties_key_exclusions_are_ubiquitous() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _shared = EnvVarGuard::set("GLRMASK_AP_SHARED_EXCLUSIONS", "0");
+        let _promote = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES", "0");
 
         let schema = json!({
             "type": "object",
@@ -12209,6 +12213,9 @@ mod tests {
 
     #[test]
     fn shared_additional_properties_key_excludes_global_patterns_and_adds_back_siblings() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _promote = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES", "0");
+
         let schema = json!({
             "type": "object",
             "properties": {
@@ -12254,6 +12261,7 @@ mod tests {
     #[test]
     fn shared_additional_properties_key_exclusions_are_not_thresholded() {
         let _lock = ENV_LOCK.lock().unwrap();
+        let _promote = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES", "0");
 
         let mut properties = serde_json::Map::new();
         properties.insert(
@@ -12291,6 +12299,49 @@ mod tests {
         let _shared = EnvVarGuard::set("GLRMASK_AP_SHARED_EXCLUSIONS", "1");
         let forced_glrm = dump_glrm(schema);
         assert!(forced_glrm.contains("t AP_SHARED_KEY ::= "), "{forced_glrm}");
+    }
+
+    #[test]
+    fn shared_additional_properties_promote_literal_choices_by_default() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _promote = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES");
+
+        assert!(promote_literal_choices_enabled());
+    }
+
+    #[test]
+    fn shared_additional_properties_can_disable_literal_choice_promotion() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _promote = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES", "0");
+
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "first": {
+                    "type": "object",
+                    "properties": {
+                        "a": {"type": "string"},
+                        "b": {"type": "string"}
+                    },
+                    "additionalProperties": {"type": "string"}
+                },
+                "second": {
+                    "type": "object",
+                    "properties": {
+                        "b": {"type": "string"}
+                    },
+                    "patternProperties": {
+                        "^x_": {"type": "number"}
+                    },
+                    "additionalProperties": {"type": "string"}
+                }
+            },
+            "additionalProperties": false
+        });
+
+        let glrm = dump_json_schema_grammar_glrm(&schema.to_string()).unwrap();
+        assert!(!glrm.contains("__GLRMASK_LITERAL_CHOICE_"), "{glrm}");
+        assert!(glrm.contains("nt AP_SHARED_LITERAL_KEY_SET ::= "), "{glrm}");
     }
 
     #[test]

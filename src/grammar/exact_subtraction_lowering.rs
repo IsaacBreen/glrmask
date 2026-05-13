@@ -827,6 +827,7 @@ mod tests {
     fn exact_subtraction_json_schema_dump_keeps_direct_subtraction_when_disabled() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let _lower = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS", "0");
+        let _promote = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES", "0");
 
         let schema = json!({
             "type": "object",
