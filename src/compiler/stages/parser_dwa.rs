@@ -1273,13 +1273,31 @@ fn append_branch_fragment(
             detail.bundle_profile_result_nwa_states += bundle_profile.result_nwa_states;
             detail.bundle_profile_result_nwa_transitions += bundle_profile.result_nwa_transitions;
             eprintln!(
-                "[glrmask/profile][parser_bundle] bundle_id={} terminals={} weight_groups={} build_group_dfas_ms={:.3} union_groups_ms={:.3} determinize_bundle_ms={:.3} minimize_ms={:.3} minimize_skipped={} dwa_to_nwa_ms={:.3} total_ms={:.3} result_dwa_states={} result_dwa_transitions={} result_nwa_states={} result_nwa_transitions={}",
+                "[glrmask/profile][parser_bundle] bundle_id={} terminals={} weight_groups={} single_entry_weights={} single_tsid_weights={} total_weight_outer_ranges={} build_group_dfas_ms={:.3} union_groups_ms={:.3} determinize_bundle_ms={:.3} det_pop_ms={:.3} det_alive_ms={:.3} det_final_ms={:.3} det_collect_labels_ms={:.3} det_next_state_ms={:.3} det_edge_weight_ms={:.3} det_lookup_ms={:.3} det_add_transition_ms={:.3} det_states={} det_labels={} det_transitions={} det_edge_subset_total={} det_edge_subset_max={} det_edge_cache_hits={} det_edge_cache_misses={} minimize_ms={:.3} minimize_skipped={} dwa_to_nwa_ms={:.3} total_ms={:.3} result_dwa_states={} result_dwa_transitions={} result_nwa_states={} result_nwa_transitions={}",
                 bundle_id,
                 bundle_profile.input_terminals,
                 bundle_profile.weight_groups,
+                bundle_profile.single_entry_weights,
+                bundle_profile.single_tsid_weights,
+                bundle_profile.total_weight_outer_ranges,
                 bundle_profile.build_group_dfas_ms,
                 bundle_profile.union_groups_ms,
                 bundle_profile.determinize_bundle_ms,
+                bundle_profile.determinize_pop_state_ms,
+                bundle_profile.determinize_alive_groups_ms,
+                bundle_profile.determinize_final_weight_ms,
+                bundle_profile.determinize_collect_labels_ms,
+                bundle_profile.determinize_next_state_ms,
+                bundle_profile.determinize_edge_weight_ms,
+                bundle_profile.determinize_state_lookup_ms,
+                bundle_profile.determinize_add_transition_ms,
+                bundle_profile.determinize_states_visited,
+                bundle_profile.determinize_labels_processed,
+                bundle_profile.determinize_transitions_added,
+                bundle_profile.determinize_edge_subset_total,
+                bundle_profile.determinize_edge_subset_max,
+                bundle_profile.determinize_edge_cache_hits,
+                bundle_profile.determinize_edge_cache_misses,
                 bundle_profile.minimize_ms,
                 bundle_profile.minimize_skipped,
                 bundle_profile.dwa_to_nwa_ms,
@@ -1606,4 +1624,3 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
 
     minimized
 }
-

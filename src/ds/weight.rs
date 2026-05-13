@@ -88,7 +88,7 @@ use std::sync::{Arc, Weak};
 #[derive(Debug, Clone)]
 pub struct Weight(pub Arc<WeightMap>);
 
-type SharedTokenSet = Arc<RangeSetBlaze<u32>>;
+pub(crate) type SharedTokenSet = Arc<RangeSetBlaze<u32>>;
 type WeightMap = RangeMapBlaze<u32, SharedTokenSet>;
 
 const INTERNER_CLEANUP_INTERVAL: usize = 1024;
@@ -1529,6 +1529,38 @@ impl Weight {
     ) -> Option<(u32, u32, SharedTokenSet)> {
         let entry = single_compact_entry(self)?;
         Some((entry.start, entry.end, entry.tokens))
+    }
+
+    pub(crate) fn outer_range_count(&self) -> usize {
+        self.0.ranges().count()
+    }
+
+    pub(crate) fn single_tsid_shared_entry(&self) -> Option<(u32, SharedTokenSet)> {
+        let (start, end, tokens) = self.single_compact_entry_parts()?;
+        if start == end && start != WEIGHT_ALL_SENTINEL {
+            Some((start, tokens))
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn union_single_tsid_shared_entries(
+        entries: impl IntoIterator<Item = (u32, SharedTokenSet)>,
+    ) -> Self {
+        let mut per_tsid: BTreeMap<u32, SharedTokenSet> = BTreeMap::new();
+
+        for (tsid, tokens) in entries {
+            per_tsid
+                .entry(tsid)
+                .and_modify(|existing| *existing = shared_token_union(existing, &tokens))
+                .or_insert(tokens);
+        }
+
+        let mut builder = CompactRangeBuilder::new();
+        for (tsid, tokens) in per_tsid {
+            builder.push(tsid, tsid, tokens);
+        }
+        builder.finish()
     }
 
     pub(crate) fn intersect_single_parts(

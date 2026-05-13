@@ -1,9 +1,10 @@
 //! Template bundle assembly into a weighted NWA.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Instant;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
+use std::sync::Arc;
 
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::unweighted_u32::nfa::NFA as UnweightedNfa;
@@ -14,10 +15,11 @@ use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::{NWA, NWAState};
 use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::templates::compile_dfa::Templates;
-use crate::ds::weight::Weight;
+use crate::ds::weight::{SharedTokenSet, Weight};
 
 type SubsetKey = SmallVec<[u64; 4]>;
 const SUBSET_BLOCK_BITS: usize = 8;
+const SUBSET_BLOCK_MASK: u64 = (1u64 << SUBSET_BLOCK_BITS) - 1;
 
 fn empty_bundle_nwa() -> NWA {
     let mut nwa = NWA::new(0, 0);
@@ -62,7 +64,8 @@ fn cached_subset_union(
     subset_key: &SubsetKey,
     subset: &[usize],
     group_weights: &[Weight],
-    block_unions: Option<&[Box<[Weight]>]>,
+    subset_unions: Option<&SubsetUnionIndex>,
+    single_tsid_entries: Option<&[(u32, SharedTokenSet)]>,
 ) -> Weight {
     match subset {
         [] => return Weight::empty(),
@@ -74,9 +77,18 @@ fn cached_subset_union(
         return existing.clone();
     }
 
-    let result = if subset.len() >= SUBSET_BLOCK_BITS {
-        if let Some(block_unions) = block_unions {
-            subset_union_from_blocks(subset_key, block_unions)
+    let result = if let Some(single_tsid_entries) = single_tsid_entries {
+        Weight::union_single_tsid_shared_entries(
+            subset
+                .iter()
+                .map(|&index| {
+                    let (tsid, tokens) = &single_tsid_entries[index];
+                    (*tsid, Arc::clone(tokens))
+                }),
+        )
+    } else if subset.len() >= SUBSET_BLOCK_BITS {
+        if let Some(subset_unions) = subset_unions {
+            subset_unions.union(subset_key)
         } else {
             Weight::union_all(subset.iter().map(|&index| &group_weights[index]))
         }
@@ -85,6 +97,95 @@ fn cached_subset_union(
     };
     cache.insert(subset_key.clone(), result.clone());
     result
+}
+
+struct SubsetUnionIndex {
+    block_unions: Vec<Box<[Weight]>>,
+    segment_base: usize,
+    segment_unions: Vec<Weight>,
+}
+
+impl SubsetUnionIndex {
+    fn new(group_weights: &[Weight]) -> Self {
+        Self {
+            block_unions: build_subset_block_unions(group_weights),
+            segment_base: group_weights.len().next_power_of_two(),
+            segment_unions: build_subset_segment_unions(group_weights),
+        }
+    }
+
+    fn union(&self, subset_key: &SubsetKey) -> Weight {
+        let block_parts = self.block_parts(subset_key);
+        let segment_parts = self.segment_parts(subset_key);
+        if segment_parts.len() < block_parts.len() {
+            Weight::union_all(segment_parts)
+        } else {
+            Weight::union_all(block_parts)
+        }
+    }
+
+    fn block_parts<'a>(&'a self, subset_key: &SubsetKey) -> SmallVec<[&'a Weight; 8]> {
+        let mut parts = SmallVec::<[&Weight; 8]>::new();
+        for (block_index, block_table) in self.block_unions.iter().enumerate() {
+            let bit_offset = block_index * SUBSET_BLOCK_BITS;
+            let word_index = bit_offset / 64;
+            let bit_index = bit_offset % 64;
+            let mask = ((subset_key[word_index] >> bit_index) & SUBSET_BLOCK_MASK) as usize;
+            if mask != 0 {
+                parts.push(&block_table[mask]);
+            }
+        }
+        parts
+    }
+
+    fn segment_parts<'a>(&'a self, subset_key: &SubsetKey) -> SmallVec<[&'a Weight; 8]> {
+        let mut parts = SmallVec::<[&Weight; 8]>::new();
+        for (word_index, &word) in subset_key.iter().enumerate() {
+            let mut remaining = word;
+            while remaining != 0 {
+                let start_bit = remaining.trailing_zeros() as usize;
+                let shifted = remaining >> start_bit;
+                let run_len = (!shifted).trailing_zeros().min(64 - start_bit as u32) as usize;
+                let start = word_index * 64 + start_bit;
+                self.push_segment_range_parts(start, start + run_len, &mut parts);
+                let run_mask = if run_len == 64 {
+                    u64::MAX
+                } else {
+                    ((1u64 << run_len) - 1) << start_bit
+                };
+                remaining &= !run_mask;
+            }
+        }
+        parts
+    }
+
+    fn push_segment_range_parts<'a>(
+        &'a self,
+        mut start: usize,
+        mut end: usize,
+        parts: &mut SmallVec<[&'a Weight; 8]>,
+    ) {
+        start += self.segment_base;
+        end += self.segment_base;
+        while start < end {
+            if start % 2 == 1 {
+                let weight = &self.segment_unions[start];
+                if !weight.is_empty() {
+                    parts.push(weight);
+                }
+                start += 1;
+            }
+            if end % 2 == 1 {
+                end -= 1;
+                let weight = &self.segment_unions[end];
+                if !weight.is_empty() {
+                    parts.push(weight);
+                }
+            }
+            start /= 2;
+            end /= 2;
+        }
+    }
 }
 
 fn build_subset_block_unions(group_weights: &[Weight]) -> Vec<Box<[Weight]>> {
@@ -103,18 +204,16 @@ fn build_subset_block_unions(group_weights: &[Weight]) -> Vec<Box<[Weight]>> {
         .collect()
 }
 
-fn subset_union_from_blocks(subset_key: &SubsetKey, block_unions: &[Box<[Weight]>]) -> Weight {
-    let mut parts = SmallVec::<[&Weight; 8]>::new();
-    for (block_index, block_table) in block_unions.iter().enumerate() {
-        let bit_offset = block_index * SUBSET_BLOCK_BITS;
-        let word_index = bit_offset / 64;
-        let bit_index = bit_offset % 64;
-        let mask = ((subset_key[word_index] >> bit_index) & 0xff) as usize;
-        if mask != 0 {
-            parts.push(&block_table[mask]);
-        }
+fn build_subset_segment_unions(group_weights: &[Weight]) -> Vec<Weight> {
+    let base = group_weights.len().next_power_of_two();
+    let mut tree = vec![Weight::empty(); base * 2];
+    for (index, weight) in group_weights.iter().enumerate() {
+        tree[base + index] = weight.clone();
     }
-    Weight::union_all(parts)
+    for index in (1..base).rev() {
+        tree[index] = tree[index * 2].union(&tree[index * 2 + 1]);
+    }
+    tree
 }
 
 #[derive(Clone, Debug, Default)]
@@ -122,6 +221,9 @@ pub(crate) struct BundleBuildProfile {
     pub(crate) input_terminals: usize,
     pub(crate) nonempty_terminals: usize,
     pub(crate) weight_groups: usize,
+    pub(crate) single_entry_weights: usize,
+    pub(crate) single_tsid_weights: usize,
+    pub(crate) total_weight_outer_ranges: usize,
     pub(crate) singleton_groups: usize,
     pub(crate) multi_terminal_groups: usize,
     pub(crate) largest_weight_group: usize,
@@ -175,6 +277,29 @@ fn minimize_template_bundles_enabled() -> bool {
 
 fn count_unweighted_dfa_transitions(dfa: &UnweightedDfa) -> usize {
     dfa.states.iter().map(|state| state.transitions.len()).sum()
+}
+
+fn dfa_order_key(dfa: &UnweightedDfa) -> Vec<i32> {
+    let mut key = Vec::new();
+    let mut stack = vec![dfa.start_state];
+    let mut seen = vec![false; dfa.states.len()];
+
+    while let Some(state_id) = stack.pop() {
+        let index = state_id as usize;
+        if index >= seen.len() || seen[index] {
+            continue;
+        }
+        seen[index] = true;
+
+        let state = &dfa.states[index];
+        key.push(if state.is_accepting { i32::MIN } else { i32::MIN + 1 });
+        for (&label, &target) in state.transitions.iter().rev() {
+            key.push(label);
+            stack.push(target);
+        }
+    }
+
+    key
 }
 
 fn count_weighted_dwa_transitions(dwa: &DWA) -> usize {
@@ -257,6 +382,7 @@ impl Templates {
 
             group_dfas.push((*weight, merged));
         }
+        group_dfas.sort_by_cached_key(|(_, dfa)| dfa_order_key(dfa));
         profile.build_group_dfas_ms = elapsed_ms(build_started_at);
         group_dfas
     }
@@ -281,6 +407,15 @@ impl Templates {
 
         let weight_groups = self.group_terminals_by_weight(terminal_weights);
         profile.weight_groups = weight_groups.len();
+        for weight in weight_groups.keys() {
+            profile.total_weight_outer_ranges += weight.outer_range_count();
+            if weight.single_compact_entry_parts().is_some() {
+                profile.single_entry_weights += 1;
+            }
+            if weight.single_tsid_shared_entry().is_some() {
+                profile.single_tsid_weights += 1;
+            }
+        }
         let group_dfas = self.build_group_dfas_profiled(&weight_groups, &mut profile);
 
         let determinize_started_at = Instant::now();
@@ -381,28 +516,33 @@ fn determinize_bundle_groups_profiled(
         return (DWA::new(0, 0), profile);
     }
 
-    const DEAD: u32 = u32::MAX;
-
     let group_weights: Vec<Weight> = groups
         .iter()
         .map(|(weight, _)| (*weight).clone())
         .collect();
+    let single_tsid_entries = group_weights
+        .iter()
+        .map(Weight::single_tsid_shared_entry)
+        .collect::<Option<Vec<_>>>();
 
     let mut subset_union_cache: FxHashMap<SubsetKey, Weight> = FxHashMap::default();
-    let block_unions = (n >= 32).then(|| build_subset_block_unions(&group_weights));
+    let subset_unions = (n >= 32).then(|| SubsetUnionIndex::new(&group_weights));
 
-    let start_key: Vec<u32> = groups.iter().map(|(_, dfa)| dfa.start_state).collect();
+    let start_key: Vec<(u32, u32)> = groups
+        .iter()
+        .enumerate()
+        .map(|(group_id, (_, dfa))| (group_id as u32, dfa.start_state))
+        .collect();
 
     let mut dwa = DWA::new(0, 0);
-    let mut state_map: FxHashMap<Vec<u32>, u32> = FxHashMap::default();
-    let mut worklist: VecDeque<Vec<u32>> = VecDeque::new();
+    let mut state_map: FxHashMap<Vec<(u32, u32)>, u32> = FxHashMap::default();
+    let mut worklist: VecDeque<Vec<(u32, u32)>> = VecDeque::new();
 
     state_map.insert(start_key.clone(), 0);
     worklist.push_back(start_key.clone());
     profile.worklist_peak = worklist.len();
 
-    let mut all_labels: BTreeSet<i32> = BTreeSet::new();
-    let mut next_state: Vec<u32> = vec![DEAD; n];
+    let mut label_targets: BTreeMap<i32, Vec<(u32, u32)>> = BTreeMap::new();
     let key_words = n.div_ceil(64);
     let mut final_groups = SmallVec::<[usize; 8]>::new();
     let mut final_key = SubsetKey::from_elem(0, key_words);
@@ -416,9 +556,7 @@ fn determinize_bundle_groups_profiled(
         profile.pop_state_ms += elapsed_ms(state_started_at);
 
         let alive_started_at = Instant::now();
-        let alive_groups: Vec<usize> = (0..n)
-            .filter(|&i| product_state[i] != DEAD)
-            .collect();
+        let _alive_groups = product_state.len();
         profile.alive_groups_ms += elapsed_ms(alive_started_at);
 
         let effective_started_at = Instant::now();
@@ -427,10 +565,11 @@ fn determinize_bundle_groups_profiled(
         let final_started_at = Instant::now();
         final_groups.clear();
         clear_subset_key(&mut final_key);
-        for &i in &alive_groups {
-            if groups[i].1.states[product_state[i] as usize].is_accepting {
-                final_groups.push(i);
-                set_subset_key_bit(&mut final_key, i);
+        for &(group_id, dfa_state) in &product_state {
+            let group_id = group_id as usize;
+            if groups[group_id].1.states[dfa_state as usize].is_accepting {
+                final_groups.push(group_id);
+                set_subset_key_bit(&mut final_key, group_id);
             }
         }
         let final_w = cached_subset_union(
@@ -438,7 +577,8 @@ fn determinize_bundle_groups_profiled(
             &final_key,
             &final_groups,
             &group_weights,
-            block_unions.as_deref(),
+            subset_unions.as_ref(),
+            single_tsid_entries.as_deref(),
         );
         if !final_w.is_empty() {
             dwa.set_final_weight(dwa_state, final_w);
@@ -446,40 +586,28 @@ fn determinize_bundle_groups_profiled(
         profile.final_weight_ms += elapsed_ms(final_started_at);
 
         let labels_started_at = Instant::now();
-        all_labels.clear();
-        for &i in &alive_groups {
-            for &label in groups[i].1.states[product_state[i] as usize]
+        label_targets.clear();
+        for &(group_id, dfa_state) in &product_state {
+            for (&label, &target) in &groups[group_id as usize].1.states[dfa_state as usize]
                 .transitions
-                .keys()
             {
-                all_labels.insert(label);
+                label_targets
+                    .entry(label)
+                    .or_default()
+                    .push((group_id, target));
             }
         }
         profile.collect_labels_ms += elapsed_ms(labels_started_at);
-        profile.labels_processed += all_labels.len();
+        profile.labels_processed += label_targets.len();
 
-        for &label in &all_labels {
+        for (&label, next_state) in &label_targets {
             let next_state_started_at = Instant::now();
             edge_groups.clear();
             clear_subset_key(&mut edge_key);
-            for i in 0..n {
-                let target = if product_state[i] == DEAD {
-                    DEAD
-                } else if let Some(&target) = groups[i]
-                    .1
-                    .states[product_state[i] as usize]
-                    .transitions
-                    .get(&label)
-                {
-                    target
-                } else {
-                    DEAD
-                };
-                next_state[i] = target;
-                if target != DEAD {
-                    edge_groups.push(i);
-                    set_subset_key_bit(&mut edge_key, i);
-                }
+            for &(group_id, _) in next_state {
+                let group_id = group_id as usize;
+                edge_groups.push(group_id);
+                set_subset_key_bit(&mut edge_key, group_id);
             }
             profile.next_state_ms += elapsed_ms(next_state_started_at);
 
@@ -500,7 +628,8 @@ fn determinize_bundle_groups_profiled(
                 &edge_key,
                 &edge_groups,
                 &group_weights,
-                block_unions.as_deref(),
+                subset_unions.as_ref(),
+                single_tsid_entries.as_deref(),
             );
             if edge_w.is_empty() {
                 profile.edge_weight_ms += elapsed_ms(edge_weight_started_at);
@@ -509,7 +638,7 @@ fn determinize_bundle_groups_profiled(
             profile.edge_weight_ms += elapsed_ms(edge_weight_started_at);
 
             let lookup_started_at = Instant::now();
-            let to_dwa = if let Some(&existing) = state_map.get(&*next_state) {
+            let to_dwa = if let Some(&existing) = state_map.get(next_state) {
                 existing
             } else {
                 let key = next_state.clone();
