@@ -10254,11 +10254,6 @@ impl<'a> SchemaCtx<'a> {
         let body = if excluded.is_empty() {
             GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())
         } else {
-            let literal_alt_set = choice_or_single(excluded.clone());
-            self.insert_rule(
-                "AP_SHARED_LITERAL_KEY_SET",
-                literal_alt_set,
-            );
             GrammarExpr::Exclude {
                 expr: Box::new(GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())),
                 exclude: Box::new(choice_or_single(excluded)),
