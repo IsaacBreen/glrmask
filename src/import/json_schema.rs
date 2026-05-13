@@ -2665,8 +2665,40 @@ fn power_of_ten_multiple_scale(value: f64) -> Option<usize> {
     None
 }
 
+fn integer_power_of_ten_exponent(mut value: u64) -> Option<usize> {
+    if value == 0 {
+        return None;
+    }
+    let mut exponent = 0usize;
+    while value > 1 {
+        if value % 10 != 0 {
+            return None;
+        }
+        value /= 10;
+        exponent += 1;
+    }
+    Some(exponent)
+}
+
+fn integer_power_of_ten_multiple_expr(exponent: usize, allow_fractional_zero: bool) -> LexerExpr {
+    let integer = if exponent == 0 {
+        r#"-?(0|[1-9][0-9]*)"#.to_string()
+    } else {
+        format!(r#"-?(0|[1-9][0-9]*0{{{exponent}}})"#)
+    };
+    let regex = if allow_fractional_zero {
+        format!(r#"{integer}(?:\.0+)?"#)
+    } else {
+        integer
+    };
+    parse_regex(&regex, true)
+}
+
 fn integer_multiple_expr(multiple: u64, allow_fractional_zero: bool) -> LexerExpr {
     assert!(multiple > 0);
+    if let Some(exponent) = integer_power_of_ten_exponent(multiple) {
+        return integer_power_of_ten_multiple_expr(exponent, allow_fractional_zero);
+    }
 
     SchemaCtx::build_state_machine_expr(
         IntegerMultipleState::Start,
@@ -11610,6 +11642,7 @@ mod tests {
     use super::json_schema_uri_mode;
     use super::json_literal_string_merge_config;
     use super::common_outer_anchor_pattern;
+    use super::integer_multiple_expr;
     use super::json_string_merge_config;
     use super::pattern_all_branches_anchored;
     use super::JsonSchemaUriMode;
@@ -11618,6 +11651,7 @@ mod tests {
     use super::string_value_body_regex;
     use super::uri_quote_merge_warning_needed;
     use super::wrap_string_value_expr_parts;
+    use crate::automata::lexer::compile::build_regex;
     use crate::grammar::ast::lower;
     use crate::grammar::glrm::to_glrm;
     use crate::grammar::ast::GrammarExpr;
@@ -12395,6 +12429,28 @@ mod tests {
             common_outer_anchor_pattern(r"^$|(^(?:\S+\s+){0,19}\S+$)"),
             Some((true, true, r"(?:|(?:\S+\s+){0,19}\S+)".to_string()))
         );
+    }
+
+    #[test]
+    fn integer_power_of_ten_multiple_uses_compact_expression() {
+        let regex = build_regex(&[integer_multiple_expr(10, true)]);
+        let accepts = |text: &str| {
+            let mut state = 0u32;
+            for &byte in text.as_bytes() {
+                let Some(next) = regex.step(state, byte) else {
+                    return false;
+                };
+                state = next;
+            }
+            regex.dfa.finalizers(state).contains(0)
+        };
+
+        assert!(accepts("0"));
+        assert!(accepts("10"));
+        assert!(accepts("-120.000"));
+        assert!(!accepts("12"));
+        assert!(!accepts("10.5"));
+        assert!(regex.num_states() < 20);
     }
 
     #[test]
