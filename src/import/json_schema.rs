@@ -702,6 +702,7 @@ fn split_top_level_regex_branches(pattern: &str) -> Vec<&str> {
 }
 
 fn strip_branch_outer_anchors(branch: &str) -> (bool, bool, &str) {
+    let branch = strip_transparent_outer_regex_group(branch);
     let anchored_start = branch.as_bytes().first().copied() == Some(b'^');
     let mut end_index = branch.len();
     let mut anchored_end = false;
@@ -725,6 +726,57 @@ fn strip_branch_outer_anchors(branch: &str) -> (bool, bool, &str) {
 
     let start_index = if anchored_start { 1 } else { 0 };
     (anchored_start, anchored_end, &branch[start_index..end_index])
+}
+
+fn strip_transparent_outer_regex_group(mut branch: &str) -> &str {
+    loop {
+        let bytes = branch.as_bytes();
+        if bytes.first().copied() != Some(b'(') || bytes.last().copied() != Some(b')') {
+            return branch;
+        }
+
+        let mut depth = 0usize;
+        let mut in_class = false;
+        let mut escaped = false;
+        let mut closes_at_end = false;
+        for (index, &byte) in bytes.iter().enumerate() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match byte {
+                b'\\' => escaped = true,
+                b'[' if !in_class => in_class = true,
+                b']' if in_class => in_class = false,
+                b'(' if !in_class => depth += 1,
+                b')' if !in_class => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        closes_at_end = index + 1 == bytes.len();
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if !closes_at_end {
+            return branch;
+        }
+
+        let inner_start = consume_regex_group_prefix(bytes, 1);
+        branch = &branch[inner_start..branch.len() - 1];
+    }
+}
+
+fn consume_regex_group_prefix(input: &[u8], pos: usize) -> usize {
+    if pos >= input.len() || input[pos] != b'?' {
+        return pos;
+    }
+    if pos + 1 < input.len() && input[pos + 1] == b':' {
+        return pos + 2;
+    }
+    pos
 }
 
 fn common_outer_anchor_pattern(pattern: &str) -> Option<(bool, bool, String)> {
@@ -11557,9 +11609,12 @@ fn repeat_expr(item: GrammarExpr, min: usize, max: Option<usize>) -> GrammarExpr
 mod tests {
     use super::json_schema_uri_mode;
     use super::json_literal_string_merge_config;
+    use super::common_outer_anchor_pattern;
     use super::json_string_merge_config;
+    use super::pattern_all_branches_anchored;
     use super::JsonSchemaUriMode;
     use super::schema_to_named_grammar;
+    use super::strip_branch_outer_anchors;
     use super::string_value_body_regex;
     use super::uri_quote_merge_warning_needed;
     use super::wrap_string_value_expr_parts;
@@ -12327,6 +12382,19 @@ mod tests {
         assert_eq!(pattern_cfg.merge_close, false);
         assert_eq!(string_value_body_regex("a+", false), "(?:a+)\"");
         assert_eq!(string_value_body_regex("a+", true), "\"(?:a+)");
+    }
+
+    #[test]
+    fn outer_parenthesized_anchors_count_as_branch_anchors() {
+        assert_eq!(
+            strip_branch_outer_anchors(r"(^(?:\S+\s+){0,19}\S+$)"),
+            (true, true, r"(?:\S+\s+){0,19}\S+")
+        );
+        assert!(pattern_all_branches_anchored(r"^$|(^(?:\S+\s+){0,19}\S+$)"));
+        assert_eq!(
+            common_outer_anchor_pattern(r"^$|(^(?:\S+\s+){0,19}\S+$)"),
+            Some((true, true, r"(?:|(?:\S+\s+){0,19}\S+)".to_string()))
+        );
     }
 
     #[test]
