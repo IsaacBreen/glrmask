@@ -18,6 +18,17 @@ use optimize::merge_same_core_lr1_states;
 
 use row::{ActionRow, GotoRow};
 
+const DISABLE_DEFAULT_ACTION_ROWS_ENV: &str = "GLRMASK_DISABLE_DEFAULT_ACTION_ROWS";
+
+fn default_action_rows_enabled() -> bool {
+    !std::env::var(DISABLE_DEFAULT_ACTION_ROWS_ENV)
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GLRTable {
     pub action: Vec<ActionRow>,
@@ -35,6 +46,12 @@ pub struct GLRTable {
 impl GLRTable {
     pub fn build(grammar: &AnalyzedGrammar) -> Self {
         build_table(grammar)
+    }
+
+    pub(crate) fn compress_default_action_rows(&mut self) {
+        for row in &mut self.action {
+            row.compress_default(self.num_terminals);
+        }
     }
 
     #[inline]

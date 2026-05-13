@@ -35,7 +35,7 @@ impl GLRTable {
         }
 
         for state in 0..self.num_states as usize {
-            let terminals: Vec<TerminalID> = self.action[state].keys().copied().collect();
+            let terminals: Vec<TerminalID> = self.action[state].keys().collect();
             for terminal in terminals {
                 let Some(Action::StackShifts(shifts)) = self.action[state].get(&terminal).cloned() else {
                     continue;
@@ -95,7 +95,7 @@ impl GLRTable {
                 .map(|&s| {
                     self.action[s as usize]
                         .iter()
-                        .map(|(&tid, action)| (tid, remap_action_targets(action, &mapping)))
+                        .map(|(tid, action)| (tid, remap_action_targets(action, &mapping)))
                         .collect()
                 })
                 .collect();
@@ -149,7 +149,7 @@ impl GLRTable {
             let mut changed = false;
 
             for state in 0..nstates {
-                let tids: Vec<TerminalID> = self.action[state].keys().copied().collect();
+                let tids: Vec<TerminalID> = self.action[state].keys().collect();
                 for tid in tids {
                     let Some(action) = self.action[state].get(&tid).cloned() else {
                         continue;
@@ -253,7 +253,7 @@ impl GLRTable {
                     let old = std::mem::take(&mut self.action[state]);
                     let new_action: ActionRow = old
                         .iter()
-                        .map(|(&tid, action)| {
+                        .map(|(tid, action)| {
                             let remapped = match action {
                                 Action::Reduce(nt, len) => {
                                     let canon = nt_remap.get(&nt).copied().unwrap_or(*nt);
@@ -333,7 +333,7 @@ impl GLRTable {
             let mut collapsed_any = false;
             let mut collapses: Vec<(usize, TerminalID, (NonterminalID, u32))> = Vec::new();
             for state in 0..nstates2 {
-                for (&tid, action) in &self.action[state] {
+                for (tid, action) in &self.action[state] {
                     if let Action::Split { shift, reduces, accept } = action {
                         // Only handle pure-reduce splits (no shift, no accept).
                         if shift.is_some() || *accept {
@@ -419,7 +419,7 @@ impl GLRTable {
             let pure_rr_splits: BTreeSet<(usize, TerminalID)> = {
                 let mut set = BTreeSet::new();
                 for s in 0..nstates2 {
-                    for (&t, a) in &self.action[s] {
+                    for (t, a) in &self.action[s] {
                         if let Action::Split { shift, reduces: _, accept } = a {
                             if shift.is_none() && !*accept {
                                 set.insert((s, t));
@@ -431,7 +431,7 @@ impl GLRTable {
             };
 
             for state in 0..nstates2 {
-                for (&tid, action) in &self.action[state] {
+                for (tid, action) in &self.action[state] {
                     let Action::Split { shift, reduces, accept } = action else { continue };
                     if shift.is_some() || *accept { continue }
                     if reduces.is_empty() { continue }
@@ -652,15 +652,21 @@ fn row_key(
     action_row: &ActionRow,
     goto_row: &GotoRow,
 ) -> TableRowKey {
+    let mut action = action_row
+        .iter()
+        .map(|(terminal, action)| (terminal, action.clone()))
+        .collect::<Vec<_>>();
+    action.sort_unstable_by_key(|(terminal, _)| *terminal);
+
+    let mut goto = goto_row
+        .iter()
+        .map(|(&nonterminal, &target)| (nonterminal, target))
+        .collect::<Vec<_>>();
+    goto.sort_unstable_by_key(|(nonterminal, _)| *nonterminal);
+
     TableRowKey {
-        action: action_row
-            .iter()
-            .map(|(&terminal, action)| (terminal, action.clone()))
-            .collect(),
-        goto: goto_row
-            .iter()
-            .map(|(&nonterminal, &target)| (nonterminal, target))
-            .collect(),
+        action,
+        goto,
     }
 }
 
@@ -843,7 +849,7 @@ fn build_merged_action_row(
 ) -> Result<ActionRow, ()> {
     let mut terminals = BTreeSet::new();
     for &state in subset {
-        for &tid in table.action[state as usize].keys() {
+        for tid in table.action[state as usize].keys() {
             terminals.insert(tid);
         }
     }
@@ -1707,7 +1713,7 @@ fn try_create_delayed_stack_shift_state(
     let mut terminals = BTreeSet::new();
     for effect in effects {
         let top = *effect.pushes.last()?;
-        for &terminal in table.action.get(top as usize)?.keys() {
+        for terminal in table.action.get(top as usize)?.keys() {
             terminals.insert(terminal);
         }
     }
@@ -2074,7 +2080,7 @@ fn refine_same_core_partition(table: &GLRTable, core_keys: &[Vec<Item>]) -> Vec<
         for state in 0..nstates {
             let action = table.action[state]
                 .iter()
-                .map(|(&terminal, action)| {
+                .map(|(terminal, action)| {
                     (terminal, remap_action_to_partition(action, &partition))
                 })
                 .collect();
@@ -2121,7 +2127,7 @@ pub(super) fn merge_same_core_lr1_states(table: GLRTable, core_keys: &[Vec<Item>
         .map(|&rep| {
             table.action[rep as usize]
                 .iter()
-                .map(|(&terminal, action)| (terminal, remap_action_targets(action, &partition)))
+                .map(|(terminal, action)| (terminal, remap_action_targets(action, &partition)))
                 .collect()
         })
         .collect();

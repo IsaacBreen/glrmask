@@ -274,7 +274,7 @@ fn build_characterization_index(
 ) -> CharacterizationIndex {
     let mut action_states_by_terminal = vec![Vec::new(); grammar.num_terminals as usize];
     for (state, row) in table.action.iter().enumerate() {
-        for (&terminal, _) in row.iter() {
+        for (terminal, _) in row.iter() {
             if let Some(states) = action_states_by_terminal.get_mut(terminal as usize) {
                 states.push(state as u32);
             }

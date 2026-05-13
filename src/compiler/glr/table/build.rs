@@ -22,6 +22,10 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
     let recog_ms = t3.elapsed().as_secs_f64() * 1000.0;
     let _ = (lr1_ms, ielr_ms, pre_merge_states, merge_ms, recog_ms, item_sets);
 
+    if default_action_rows_enabled() {
+        table.compress_default_action_rows();
+    }
+
     table
 }
 

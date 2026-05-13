@@ -21,7 +21,6 @@ pub(crate) fn compute_terminal_coloring(table: &GLRTable) -> TerminalColoring {
     for row in &table.action {
         let terminals: Vec<usize> = row
             .keys()
-            .copied()
             .filter(|&terminal| (terminal as usize) < num_terminals)
             .map(|terminal| terminal as usize)
             .collect();

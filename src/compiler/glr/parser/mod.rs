@@ -1239,7 +1239,7 @@ pub(crate) fn stack_may_advance_on_any(
     let virtual_stack = stack.try_virtual_stack();
     stack.peek_values().into_iter().any(|state| {
         table.action.get(state as usize).is_some_and(|actions| {
-            actions.iter().any(|(&terminal, action)| {
+            actions.iter().any(|(terminal, action)| {
                 if !terminals.contains(terminal as usize) {
                     return false;
                 }
