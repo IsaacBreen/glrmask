@@ -1008,6 +1008,12 @@ impl<'a> ConstraintState<'a> {
                 continue;
             }
 
+            // TODO: Add a direct `try_virtual_stack()` mask path and remove
+            // this `to_stacks()` fallback entirely. Once mask generation can
+            // consume virtual stacks without materializing concrete paths,
+            // reassess whether the broader single-path fast paths are still
+            // pulling their weight; `try_virtual_stack()` should cover most
+            // of the cases that justify special handling.
             if mask_single_path_to_stacks_fallback_disabled() {
                 return false;
             }
