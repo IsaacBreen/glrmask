@@ -727,6 +727,29 @@ fn strip_branch_outer_anchors(branch: &str) -> (bool, bool, &str) {
     (anchored_start, anchored_end, &branch[start_index..end_index])
 }
 
+fn common_outer_anchor_pattern(pattern: &str) -> Option<(bool, bool, String)> {
+    let branches = split_top_level_regex_branches(pattern);
+    let mut iter = branches.into_iter();
+    let first = iter.next()?;
+    let (anchored_start, anchored_end, core) = strip_branch_outer_anchors(first);
+    let mut cores = vec![core.to_string()];
+
+    for branch in iter {
+        let (branch_start, branch_end, branch_core) = strip_branch_outer_anchors(branch);
+        if branch_start != anchored_start || branch_end != anchored_end {
+            return None;
+        }
+        cores.push(branch_core.to_string());
+    }
+
+    let core = if cores.len() == 1 {
+        cores.pop().unwrap()
+    } else {
+        format!("(?:{})", cores.join("|"))
+    };
+    Some((anchored_start, anchored_end, core))
+}
+
 fn json_search_branch_fragment(branch: &str) -> String {
     json_search_branch_fragment_impl(branch, None)
 }
@@ -776,6 +799,18 @@ fn json_search_pattern(pattern: &str) -> String {
 }
 
 fn json_search_pattern_impl(pattern: &str, max_tail: Option<usize>) -> String {
+    if let Some((anchored_start, anchored_end, core)) = common_outer_anchor_pattern(pattern) {
+        return json_search_branch_fragment_impl(
+            &format!(
+                "{}{}{}",
+                if anchored_start { "^" } else { "" },
+                core,
+                if anchored_end { "$" } else { "" },
+            ),
+            max_tail,
+        );
+    }
+
     let branches = split_top_level_regex_branches(pattern);
     let map_fn = |b| match max_tail {
         Some(n) => json_search_branch_fragment_bounded(b, n),
@@ -1680,6 +1715,38 @@ fn decoded_regex_search_branch_expr(branch: &str, max_tail: Option<usize>) -> Le
 }
 
 fn decoded_regex_search_expr(pattern: &str, max_tail: Option<usize>) -> LexerExpr {
+    if let Some((anchored_start, anchored_end, core)) = common_outer_anchor_pattern(pattern) {
+        let inner = if core.is_empty() {
+            LexerExpr::Epsilon
+        } else {
+            decoded_regex_fullmatch_expr(&core)
+        };
+        return match (anchored_start, anchored_end) {
+            (true, true) => inner,
+            (true, false) => LexerExpr::make_seq(vec![inner, json_string_tail_lexer_expr(max_tail)]),
+            (false, true) => LexerExpr::make_seq(vec![json_string_tail_lexer_expr(max_tail), inner]),
+            (false, false) => match max_tail {
+                Some(n) => LexerExpr::make_choice(
+                    (0..=n)
+                        .map(|left_budget| {
+                            let right_budget = n.saturating_sub(left_budget);
+                            LexerExpr::make_seq(vec![
+                                json_string_tail_lexer_expr(Some(left_budget)),
+                                inner.clone(),
+                                json_string_tail_lexer_expr(Some(right_budget)),
+                            ])
+                        })
+                        .collect(),
+                ),
+                None => LexerExpr::make_seq(vec![
+                    json_string_tail_lexer_expr(None),
+                    inner,
+                    json_string_tail_lexer_expr(None),
+                ]),
+            },
+        };
+    }
+
     let branches = split_top_level_regex_branches(pattern);
     LexerExpr::make_choice(
         branches
