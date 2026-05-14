@@ -6391,7 +6391,7 @@ impl<'a> SchemaCtx<'a> {
         let mut state_ids = BTreeMap::<AnyOfObjectDfaState, u32>::new();
         let mut additional_entry_state_ids =
             BTreeMap::<(bool, Vec<String>), (u32, u32)>::new();
-        let mut additional_leaf_variants = BTreeMap::<u32, BTreeSet<u16>>::new();
+        let mut additional_leaf_targets = BTreeSet::<(u32, u32)>::new();
         let mut queue = VecDeque::<AnyOfObjectDfaState>::new();
         for variant_idx in 0..variants.len() {
             let state = AnyOfObjectDfaState {
@@ -6456,6 +6456,20 @@ impl<'a> SchemaCtx<'a> {
 
             if can_leave_fixed_tail {
                 if let Some(value_expr) = &variant.additional_value_expr {
+                    let ap_state = AnyOfObjectDfaState {
+                        variant_idx: state.variant_idx,
+                        cursor: variant.len() as u16,
+                        has_content: true,
+                        phase: AnyOfObjectDfaPhase::Additional,
+                    };
+                    let ap_state_id = if let Some(&existing) = state_ids.get(&ap_state) {
+                        existing
+                    } else {
+                        let id = builder.add_state();
+                        state_ids.insert(ap_state, id);
+                        queue.push_back(ap_state);
+                        id
+                    };
                     let key_symbol_paths = self.build_anyof_object_ap_key_symbol_paths(
                         base_name,
                         state.variant_idx as usize,
@@ -6491,10 +6505,9 @@ impl<'a> SchemaCtx<'a> {
                             (entry_id, leaf_id)
                         };
                         builder.add_epsilon(state_id, entry_state_id);
-                        additional_leaf_variants
-                            .entry(leaf_state_id)
-                            .or_default()
-                            .insert(state.variant_idx);
+                        if additional_leaf_targets.insert((leaf_state_id, ap_state_id)) {
+                            builder.add_epsilon(leaf_state_id, ap_state_id);
+                        }
                     }
                 }
             }
@@ -6532,69 +6545,6 @@ impl<'a> SchemaCtx<'a> {
                 symbols.push(self.json_key_colon_literal(key));
                 symbols.push(value_expr);
                 Self::add_expr_nfa_symbol_path(&mut builder, state_id, symbols, next_state_id);
-            }
-        }
-
-        let mut additional_union_state_ids = BTreeMap::<Vec<u16>, u32>::new();
-        let mut additional_union_queue = VecDeque::<Vec<u16>>::new();
-        for variants_set in additional_leaf_variants.values() {
-            let key = variants_set.iter().copied().collect::<Vec<_>>();
-            if additional_union_state_ids.contains_key(&key) {
-                continue;
-            }
-            let id = builder.add_state();
-            additional_union_state_ids.insert(key.clone(), id);
-            additional_union_queue.push_back(key);
-        }
-
-        while let Some(variant_set) = additional_union_queue.pop_front() {
-            let state_id = additional_union_state_ids[&variant_set];
-            builder.add_epsilon(state_id, accept);
-
-            let mut grouped_paths =
-                BTreeMap::<Vec<String>, (Vec<GrammarExpr>, BTreeSet<u16>)>::new();
-            for variant_idx in &variant_set {
-                let variant = &variants[*variant_idx as usize];
-                let Some(value_expr) = &variant.additional_value_expr else {
-                    continue;
-                };
-                let key_symbol_paths = self.build_anyof_object_ap_key_symbol_paths(
-                    base_name,
-                    *variant_idx as usize,
-                    &variant.fixed_keys,
-                    &variant.pattern_keys,
-                )?;
-                for key_symbols in key_symbol_paths {
-                    let mut symbols = vec![self.json_item_separator_expr()];
-                    symbols.extend(key_symbols);
-                    symbols.push(value_expr.clone());
-                    let key = symbols.iter().map(expr_key).collect::<Vec<_>>();
-                    let entry = grouped_paths
-                        .entry(key)
-                        .or_insert_with(|| (symbols, BTreeSet::new()));
-                    entry.1.insert(*variant_idx);
-                }
-            }
-
-            for (_path_key, (symbols, successors)) in grouped_paths {
-                let successor_key = successors.iter().copied().collect::<Vec<_>>();
-                let successor_state_id =
-                    if let Some(&existing) = additional_union_state_ids.get(&successor_key) {
-                        existing
-                    } else {
-                        let id = builder.add_state();
-                        additional_union_state_ids.insert(successor_key.clone(), id);
-                        additional_union_queue.push_back(successor_key);
-                        id
-                    };
-                Self::add_expr_nfa_symbol_path(&mut builder, state_id, symbols, successor_state_id);
-            }
-        }
-
-        for (leaf_state_id, variants_set) in additional_leaf_variants {
-            let key = variants_set.iter().copied().collect::<Vec<_>>();
-            if let Some(&target_state_id) = additional_union_state_ids.get(&key) {
-                builder.add_epsilon(leaf_state_id, target_state_id);
             }
         }
 
