@@ -602,6 +602,18 @@ fn apply_single_top_action_fast(
             }
         }
         Action::StackShifts(shifts) => {
+            if let Some(first) = shifts.first()
+                && !first.pushes.is_empty()
+                && shifts
+                    .iter()
+                    .all(|shift| shift.pop == first.pop && !shift.pushes.is_empty())
+                && let Some(shifted) = gss.apply_shared_pop_push_branches(
+                    first.pop as usize,
+                    shifts.iter().map(|shift| shift.pushes.as_slice()),
+                )
+            {
+                return Some(shifted);
+            }
             if let Some(shifted) = gss.apply_stack_effects_to_single_concrete_path(
                 shifts
                     .iter()
@@ -620,18 +632,6 @@ fn apply_single_top_action_fast(
                     branch.push(target);
                 }
                 return Some(branch.into_gss());
-            }
-            if let Some(first) = shifts.first() {
-                if !first.pushes.is_empty()
-                    && shifts
-                        .iter()
-                        .all(|shift| shift.pop == first.pop && !shift.pushes.is_empty())
-                {
-                    return stack.into_gss_after_popping_and_pushing_branches(
-                        first.pop as usize,
-                        shifts.iter().map(|shift| shift.pushes.as_slice()),
-                    );
-                }
             }
 
             let mut shifted = ParserGSS::empty();
@@ -1619,6 +1619,7 @@ fn commit_bytes_impl_profiled(
                             }
                         }
                         queue_offset += 1;
+
                     }
 
                     profile.queue_ns = queue_start.elapsed().as_nanos() as u64;
@@ -1820,6 +1821,7 @@ fn commit_bytes_impl_profiled(
     profile.queue_bookkeeping_ns = profile.queue_ns.saturating_sub(queue_accounted_ns);
 
     let fuse_start = Instant::now();
+
     let new_state = finalize_pending_state(std::mem::take(&mut pending_state));
     profile.fuse_ns = fuse_start.elapsed().as_nanos() as u64;
 
@@ -2507,6 +2509,8 @@ fn commit_bytes_impl(
                 );
             }
         }
+
+        offset += 1;
     }
 
     let new_state = finalize_pending_state(std::mem::take(&mut bufs.pending_state));

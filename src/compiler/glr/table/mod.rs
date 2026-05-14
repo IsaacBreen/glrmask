@@ -77,3 +77,34 @@ impl GLRTable {
             .map(String::as_str)
     }
 }
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::{Action, GLRTable};
+    use super::row::{ActionRow, GotoRow};
+    use crate::grammar::flat::{NonterminalID, TerminalID};
+
+    pub(crate) fn build_test_table(
+        num_states: u32,
+        num_terminals: u32,
+        action_rows: &[&[(TerminalID, Action)]],
+        goto_rows: &[&[(NonterminalID, (u32, bool))]],
+    ) -> GLRTable {
+        GLRTable {
+            action: action_rows
+                .iter()
+                .map(|row| ActionRow::from_iter(row.iter().cloned()))
+                .collect(),
+            goto: goto_rows
+                .iter()
+                .map(|row| GotoRow::from_iter(row.iter().cloned()))
+                .collect(),
+            num_states,
+            num_terminals,
+            num_rules: 0,
+            rules: Vec::new(),
+            nonterminal_display_names: Vec::new(),
+            forwarded_shifts: Default::default(),
+        }
+    }
+}

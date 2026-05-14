@@ -1985,6 +1985,19 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
+    pub fn apply_shared_pop_push_branches<'a, I>(
+        &self,
+        pop: usize,
+        pushes: I,
+    ) -> Option<Self>
+    where
+        I: IntoIterator<Item = &'a [T]>,
+        T: 'a,
+    {
+        self.try_virtual_stack()?
+            .into_gss_after_popping_and_pushing_branches(pop, pushes)
+    }
+
     pub fn apply_guarded_stack_effects_to_single_concrete_path<'a, I, G>(
         &self,
         effects: I,
@@ -4268,9 +4281,37 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
+}
 
+#[cfg(test)]
+mod tests {
+    use super::LeveledGSS;
+    use super::Merge;
 
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    struct TestAcc(u32);
 
+    impl Merge for TestAcc {
+        fn merge(&self, other: &Self) -> Self {
+            Self(self.0.max(other.0))
+        }
+    }
 
+    #[test]
+    fn apply_shared_pop_push_branches_matches_virtual_stack_branch_builder() {
+        let gss = LeveledGSS::from_single_stack(vec![10_u32, 20, 30, 40], TestAcc(1));
+        let pushes = [vec![50_u32, 60], vec![70_u32, 80], vec![90_u32, 60]];
 
+        let expected = gss
+            .try_virtual_stack()
+            .unwrap()
+            .into_gss_after_popping_and_pushing_branches(2, pushes.iter().map(|push| push.as_slice()))
+            .unwrap();
+        let actual = gss
+            .apply_shared_pop_push_branches(2, pushes.iter().map(|push| push.as_slice()))
+            .unwrap();
+
+        assert_eq!(actual, expected);
+        assert_eq!(actual.to_stacks(), expected.to_stacks());
+    }
 }

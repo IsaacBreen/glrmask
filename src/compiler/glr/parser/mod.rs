@@ -25,6 +25,7 @@ type ReduceBranches = SmallVec<[(ParserGSS, u32, bool); 4]>;
 
 const SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH: usize = 64;
 const GUARDED_STACK_TO_STACKS_MAX_DEPTH: usize = 64;
+const SMALL_REDUCE_FANOUT_COLLAPSE_MAX_BRANCHES: usize = 4;
 
 fn env_flag_enabled(name: &str) -> bool {
     std::env::var(name)
@@ -235,6 +236,22 @@ pub(crate) fn advance_stacks_profiled(
                 profile.total_ns = total_start.elapsed().as_nanos() as u64;
                 return (shifted, profile);
             }
+            Some(Action::Reduce(nt, len)) => {
+                if let Some(trace) = profile.trace.as_mut() {
+                    trace.det_steps.push(trace_action_summary(
+                        table,
+                        state,
+                        &gss,
+                        Some(&Action::Reduce(*nt, *len)),
+                    ));
+                }
+                if let Some(shifted) = try_collapse_small_reduce_fanout(table, &gss, token) {
+                    profile.fast_path_ns = fast_path_start.elapsed().as_nanos() as u64;
+                    profile.stack_shift_apply_ns = profile.fast_path_ns;
+                    profile.total_ns = total_start.elapsed().as_nanos() as u64;
+                    return (shifted, profile);
+                }
+            }
             _ => {}
         }
     }
@@ -288,6 +305,11 @@ fn advance_stacks_core(table: &GLRTable, mut gss: ParserGSS, token: TerminalID) 
         if let Some(Action::GuardedStackShifts(shifts)) = table.action(state, token) {
             return apply_guarded_stack_shifts(gss, shifts);
         }
+        if matches!(table.action(state, token), Some(Action::Reduce(..)))
+            && let Some(shifted) = try_collapse_small_reduce_fanout(table, &gss, token)
+        {
+            return shifted;
+        }
     }
 
     if let Some(shifted) = advance_pure_frontier_shifts(table, &gss, token) {
@@ -299,6 +321,45 @@ fn advance_stacks_core(table: &GLRTable, mut gss: ParserGSS, token: TerminalID) 
     }
 
     advance_nondeterministically(table, gss, token)
+}
+
+fn try_collapse_small_reduce_fanout(
+    table: &GLRTable,
+    gss: &ParserGSS,
+    token: TerminalID,
+) -> Option<ParserGSS> {
+    let state = gss.single_exclusive_top_value()?;
+    let Action::Reduce(nt, len) = table.action(state, token)? else {
+        return None;
+    };
+
+    let branches = reduce_branches_from_isolated(table, gss, *nt, *len as usize);
+    if branches.len() <= 1 || branches.len() > SMALL_REDUCE_FANOUT_COLLAPSE_MAX_BRANCHES {
+        return None;
+    }
+
+    let mut collapsed: Option<ParserGSS> = None;
+    for (base, target, is_replace) in branches {
+        let (branch, det_ok) = advance_reduce_branch(table, base, target, is_replace, token);
+        if !det_ok {
+            return None;
+        }
+
+        let branch = branch.into_gss();
+        if branch.is_empty() {
+            return None;
+        }
+
+        if let Some(existing) = collapsed.as_ref() {
+            if &branch != existing {
+                return None;
+            }
+        } else {
+            collapsed = Some(branch);
+        }
+    }
+
+    collapsed
 }
 
 #[inline]
@@ -1374,6 +1435,47 @@ pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: T
             _ => true,
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ParserGSS, advance_stacks};
+    use crate::compiler::glr::accumulator::TerminalsDisallowed;
+    use crate::compiler::glr::table::testing::build_test_table;
+    use crate::compiler::glr::table::{Action, StackShift};
+
+    #[test]
+    fn advance_stacks_matches_reduce_fanout_collapse_fast_path() {
+        let token = 0;
+        let nt = 0;
+        let table = build_test_table(
+            5,
+            1,
+            &[
+                &[],
+                &[],
+                &[(token, Action::StackShifts(vec![StackShift { pop: 2, pushes: vec![7] }]))],
+                &[(token, Action::StackShifts(vec![StackShift { pop: 2, pushes: vec![7] }]))],
+                &[(token, Action::Reduce(nt, 1))],
+            ],
+            &[
+                &[(nt, (2, false))],
+                &[(nt, (3, false))],
+                &[],
+                &[],
+                &[],
+            ],
+        );
+
+        let acc = TerminalsDisallowed::new();
+        let before = ParserGSS::from_stacks(&[
+            (vec![0, 4], acc.clone()),
+            (vec![1, 4], acc),
+        ]);
+        let expected = ParserGSS::from_single_stack(vec![7], TerminalsDisallowed::new());
+
+        assert_eq!(advance_stacks(&table, &before, token), expected);
+    }
 }
 
 pub(crate) fn stack_may_advance_on_any(
