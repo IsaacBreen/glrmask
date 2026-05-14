@@ -3472,32 +3472,6 @@ fn bare_ref_value(schema: &Value) -> Option<&str> {
     annotation_only.then_some(ref_value)
 }
 
-fn normalize_schema_for_language_comparison(value: &Value) -> Value {
-    match value {
-        Value::Object(object) => {
-            let mut normalized = Map::new();
-            for (key, child) in object {
-                if META_AND_ANNOTATION_KEYWORDS.contains(&key.as_str()) || key.starts_with('_') {
-                    continue;
-                }
-                normalized.insert(key.clone(), normalize_schema_for_language_comparison(child));
-            }
-            Value::Object(normalized)
-        }
-        Value::Array(items) => Value::Array(
-            items
-                .iter()
-                .map(normalize_schema_for_language_comparison)
-                .collect(),
-        ),
-        _ => value.clone(),
-    }
-}
-
-fn schemas_equal_for_language(lhs: &Value, rhs: &Value) -> bool {
-    normalize_schema_for_language_comparison(lhs) == normalize_schema_for_language_comparison(rhs)
-}
-
 fn merge_two_schemas(s1: &Map<String, Value>, s2: &Map<String, Value>) -> Map<String, Value> {
     if s2.is_empty() {
         return s1.clone();
@@ -7000,9 +6974,7 @@ impl<'a> SchemaCtx<'a> {
                     .and_then(Value::as_object)
                     .unwrap_or(&empty_props);
                 props_j.iter().all(|(k, sv)| {
-                    props_i
-                        .get(k)
-                        .map_or(true, |sv2| schemas_equal_for_language(sv, sv2))
+                    props_i.get(k).map_or(true, |sv2| sv == sv2)
                 })
             })
         });
@@ -10010,17 +9982,17 @@ impl<'a> SchemaCtx<'a> {
             } else {
                 options.push(GrammarExpr::Exclude {
                     expr: Box::new(GrammarExpr::Ref("AP_SHARED_LITERAL_KEY_SET".into())),
-                    exclude: Box::new(parenthesized_expr(choice_or_single(
-                        still_excluded_literal_alts,
-                    ))),
+                    exclude: Box::new(parenthesized_expr(choice_or_single(still_excluded_literal_alts))),
                 });
             }
         }
         for pattern in &allowed_back_patterns {
-            options.push(self.shared_additional_pattern_key_body_expr_excluding_literals(
-                pattern,
-                excluded_literal_keys,
-            ));
+            options.push(
+                self.shared_additional_pattern_key_body_expr_excluding_literals(
+                    pattern,
+                    excluded_literal_keys,
+                ),
+            );
         }
 
         let rule_name = self.fresh_rule_name(prefix);
@@ -11920,83 +11892,6 @@ mod tests {
                         "role": {"type": "string"},
                         "sort": {"type": "string"},
                         "thumbnail": {"type": "string"}
-                    },
-                    "required": ["name"]
-                }
-            },
-            "anyOf": [
-                {"$ref": "#/definitions/person"},
-                {"$ref": "#/definitions/organization"}
-            ]
-        });
-
-        let named = schema_to_named_grammar(&schema).unwrap();
-        assert!(
-            !named.rules.iter().any(|rule| expr_contains_expr_nfa(&rule.expr)),
-            "{named:#?}"
-        );
-        lower(&named).unwrap();
-    }
-
-    #[test]
-    fn anyof_open_object_dominance_ignores_annotations_and_private_extensions() {
-        let schema = json!({
-            "definitions": {
-                "organization": {
-                    "type": "object",
-                    "properties": {
-                        "email": {
-                            "_format": "uri",
-                            "description": "An email address for this organization",
-                            "type": "string"
-                        },
-                        "name": {
-                            "description": "The name of the organization.",
-                            "type": "string"
-                        },
-                        "sameAs": {
-                            "description": "Identifiers that describe this organization",
-                            "items": {
-                                "_format": "uri",
-                                "type": "string"
-                            },
-                            "type": "array"
-                        }
-                    },
-                    "required": ["name"]
-                },
-                "person": {
-                    "type": "object",
-                    "properties": {
-                        "additionalName": {
-                            "description": "middle name",
-                            "type": "string"
-                        },
-                        "email": {
-                            "_format": "email",
-                            "description": "The email address for this person.",
-                            "type": "string"
-                        },
-                        "familyName": {
-                            "description": "last name",
-                            "type": "string"
-                        },
-                        "givenName": {
-                            "description": "first name",
-                            "type": "string"
-                        },
-                        "name": {
-                            "description": "The name of the person.",
-                            "type": "string"
-                        },
-                        "sameAs": {
-                            "description": "Identifiers that describe the person",
-                            "items": {
-                                "_format": "uri",
-                                "type": "string"
-                            },
-                            "type": "array"
-                        }
                     },
                     "required": ["name"]
                 }
