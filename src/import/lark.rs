@@ -641,7 +641,6 @@ fn expand_lark_expr(
             max: *max,
         },
         GrammarExpr::Literal(bytes) => GrammarExpr::Literal(bytes.clone()),
-        GrammarExpr::TerminalLanguage(expr) => GrammarExpr::TerminalLanguage(expr.clone()),
         GrammarExpr::CharClass { def, negate, utf8 } => GrammarExpr::CharClass {
             def: def.clone(),
             negate: *negate,

@@ -110,21 +110,6 @@ impl Nfa {
         })
     }
 
-    pub fn accepts_bytes(&self, bytes: &[u8]) -> bool {
-        let dfa = self.as_deterministic();
-        let mut state = dfa.start_state;
-        for &byte in bytes {
-            let Some(next) = dfa.step(state, byte) else {
-                return false;
-            };
-            state = next;
-        }
-        dfa.states
-            .get(state as usize)
-            .map(|state| state.is_end)
-            .unwrap_or(false)
-    }
-
     pub fn accepting_states(&self) -> impl Iterator<Item = u32> + '_ {
         self.states
             .iter()
@@ -273,14 +258,6 @@ impl Nfa {
         }
 
         out.minimize()
-    }
-
-    pub fn intersect(&self, rhs: &Self) -> Self {
-        self.subtract(&self.subtract(rhs))
-    }
-
-    pub fn is_empty(&self) -> bool {
-        !self.states.iter().any(|state| state.is_end)
     }
 
     fn transition_tables(&self) -> Vec<TransitionTable> {

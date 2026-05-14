@@ -523,7 +523,6 @@ fn finite_literal_alternatives(
         | GrammarExpr::Repeat(_)
         | GrammarExpr::RepeatOne(_)
         | GrammarExpr::RepeatRange { .. }
-        | GrammarExpr::TerminalLanguage(_)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::AnyByte
@@ -4457,7 +4456,6 @@ impl<'a> SchemaCtx<'a> {
                 GrammarExpr::Grouped(Box::new(self.hoist_patterns_in_expr(*inner, prefix)))
             }
             GrammarExpr::Ref(_) | GrammarExpr::Literal(_) | GrammarExpr::Epsilon => expr,
-            GrammarExpr::TerminalLanguage(_) => expr,
             GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_) | GrammarExpr::AnyByte => {
                 self.extract_pattern_terminal_rule(expr, prefix)
             }
@@ -6334,63 +6332,6 @@ impl<'a> SchemaCtx<'a> {
         )
     }
 
-    fn build_anyof_object_shared_ap_key_body_symbols(
-        &self,
-        excluded_literal_keys: &BTreeSet<String>,
-        excluded_pattern_keys: &BTreeSet<String>,
-    ) -> Option<Vec<GrammarExpr>> {
-        if ap_key_any_string() || self.per_object_ap_keys_enabled() {
-            return None;
-        }
-
-        let allowed_back_patterns: Vec<String> = self
-            .shared_additional_key_plan
-            .pattern_keys
-            .iter()
-            .filter(|pattern| !excluded_pattern_keys.contains(*pattern))
-            .cloned()
-            .collect();
-        let excluded_by_patterns =
-            self.shared_additional_literal_keys_matched_by_any_pattern(excluded_pattern_keys);
-        let allowed_back_by_patterns = allowed_back_patterns
-            .iter()
-            .flat_map(|pattern| {
-                self.shared_additional_key_plan
-                    .literal_keys_by_pattern
-                    .get(pattern)
-                    .into_iter()
-                    .flat_map(|keys| keys.iter().cloned())
-            })
-            .collect::<BTreeSet<_>>();
-        let allowed_back_keys: BTreeSet<String> = self
-            .shared_additional_key_plan
-            .literal_keys
-            .iter()
-            .filter(|key| {
-                !excluded_literal_keys.contains(*key)
-                    && !excluded_by_patterns.contains(*key)
-                    && !allowed_back_by_patterns.contains(*key)
-            })
-            .cloned()
-            .collect();
-
-        let mut out = vec![GrammarExpr::TerminalLanguage(Box::new(
-            self.shared_additional_key_body_terminal_expr(),
-        ))];
-        if let Some(literal_union) = Self::literal_key_colon_union_expr(&allowed_back_keys) {
-            out.push(GrammarExpr::TerminalLanguage(Box::new(literal_union)));
-        }
-        for pattern in &allowed_back_patterns {
-            out.push(GrammarExpr::TerminalLanguage(Box::new(
-                self.shared_additional_pattern_key_body_terminal_expr_excluding_literals(
-                    pattern,
-                    excluded_literal_keys,
-                ),
-            )));
-        }
-        Some(out)
-    }
-
     fn add_expr_nfa_symbol_path(
         builder: &mut ExprNfaBuilder,
         from: u32,
@@ -6515,38 +6456,14 @@ impl<'a> SchemaCtx<'a> {
                             if state.has_content {
                                 symbols.push(self.json_item_separator_expr());
                             }
-                            if let Some(body_symbols) = self.build_anyof_object_shared_ap_key_body_symbols(
+                            symbols.push(self.build_anyof_object_ap_key_expr(
+                                base_name,
+                                state.variant_idx as usize,
                                 &variant.fixed_keys,
                                 &variant.pattern_keys,
-                            ) {
-                                let mut current = id;
-                                if state.has_content {
-                                    let next = builder.add_state();
-                                    builder.add_transition(current, self.json_item_separator_expr(), next);
-                                    current = next;
-                                }
-                                let body_entry = builder.add_state();
-                                builder.add_transition(current, literal_expr(b"\""), body_entry);
-                                let suffix_state = builder.add_state();
-                                for body_symbol in body_symbols {
-                                    builder.add_transition(body_entry, body_symbol, suffix_state);
-                                }
-                                Self::add_expr_nfa_symbol_path(
-                                    &mut builder,
-                                    suffix_state,
-                                    vec![key_colon_suffix_expr(), value_expr.clone()],
-                                    ap_state_id,
-                                );
-                            } else {
-                                symbols.push(self.build_anyof_object_ap_key_expr(
-                                    base_name,
-                                    state.variant_idx as usize,
-                                    &variant.fixed_keys,
-                                    &variant.pattern_keys,
-                                )?);
-                                symbols.push(value_expr.clone());
-                                Self::add_expr_nfa_symbol_path(&mut builder, id, symbols, ap_state_id);
-                            }
+                            )?);
+                            symbols.push(value_expr.clone());
+                            Self::add_expr_nfa_symbol_path(&mut builder, id, symbols, ap_state_id);
                             id
                         };
                     builder.add_epsilon(state_id, entry_state_id);
@@ -9953,54 +9870,6 @@ impl<'a> SchemaCtx<'a> {
         expr
     }
 
-    fn shared_additional_key_body_terminal_expr(&self) -> LexerExpr {
-        let mut excluded = self
-            .shared_additional_key_plan
-            .literal_keys
-            .iter()
-            .map(|key| LexerExpr::U8Seq(key_colon_literal_body_bytes(key)))
-            .collect::<Vec<_>>();
-        excluded.extend(
-            self.shared_additional_key_plan
-                .pattern_keys
-                .iter()
-                .map(|pattern| self.shared_additional_pattern_key_body_terminal_expr(pattern)),
-        );
-
-        let body = json_body_with_closing_quote_expr(lexer_repeat(json_string_char_lexer_expr(), 0, None));
-        if excluded.is_empty() {
-            body
-        } else {
-            LexerExpr::Exclude {
-                expr: Box::new(body),
-                exclude: Box::new(LexerExpr::make_choice(excluded)),
-            }
-        }
-    }
-
-    fn shared_additional_pattern_key_body_terminal_expr(&self, pattern: &str) -> LexerExpr {
-        json_body_with_closing_quote_expr(decoded_regex_search_expr(pattern, None))
-    }
-
-    fn shared_additional_pattern_key_body_terminal_expr_excluding_literals(
-        &self,
-        pattern: &str,
-        excluded_literal_keys: &BTreeSet<String>,
-    ) -> LexerExpr {
-        if excluded_literal_keys.is_empty() {
-            return self.shared_additional_pattern_key_body_terminal_expr(pattern);
-        }
-
-        let excluded = excluded_literal_keys
-            .iter()
-            .map(|key| LexerExpr::U8Seq(key_colon_literal_body_bytes(key)))
-            .collect::<Vec<_>>();
-        LexerExpr::Exclude {
-            expr: Box::new(self.shared_additional_pattern_key_body_terminal_expr(pattern)),
-            exclude: Box::new(LexerExpr::make_choice(excluded)),
-        }
-    }
-
     fn shared_additional_pattern_key_body_expr_excluding_literals(
         &mut self,
         pattern: &str,
@@ -10132,75 +10001,6 @@ impl<'a> SchemaCtx<'a> {
             .body_rule_cache
             .insert(cache_key, rule_name.clone());
         Ok(GrammarExpr::Ref(rule_name))
-    }
-
-    fn build_shared_additional_key_body_choice_terminal_expr(
-        &self,
-        excluded_literal_keys: &BTreeSet<String>,
-        excluded_pattern_keys: &BTreeSet<String>,
-    ) -> LexerExpr {
-        let allowed_back_patterns: Vec<String> = self
-            .shared_additional_key_plan
-            .pattern_keys
-            .iter()
-            .filter(|pattern| !excluded_pattern_keys.contains(*pattern))
-            .cloned()
-            .collect();
-        let excluded_by_patterns =
-            self.shared_additional_literal_keys_matched_by_any_pattern(excluded_pattern_keys);
-        let allowed_back_by_patterns = allowed_back_patterns
-            .iter()
-            .flat_map(|pattern| {
-                self.shared_additional_key_plan
-                    .literal_keys_by_pattern
-                    .get(pattern)
-                    .into_iter()
-                    .flat_map(|keys| keys.iter().cloned())
-            })
-            .collect::<BTreeSet<_>>();
-        let allowed_back_keys: Vec<String> = self
-            .shared_additional_key_plan
-            .literal_keys
-            .iter()
-            .filter(|key| {
-                !excluded_literal_keys.contains(*key)
-                    && !excluded_by_patterns.contains(*key)
-                    && !allowed_back_by_patterns.contains(*key)
-            })
-            .cloned()
-            .collect();
-
-        let mut options = Vec::with_capacity(1 + allowed_back_keys.len() + allowed_back_patterns.len());
-        options.push(self.shared_additional_key_body_terminal_expr());
-        if !allowed_back_keys.is_empty() {
-            let still_excluded_literal_keys = self
-                .shared_additional_key_plan
-                .literal_keys
-                .iter()
-                .filter(|key| !allowed_back_keys.contains(*key))
-                .cloned()
-                .collect::<BTreeSet<_>>();
-            if let Some(all_literal_keys) = Self::literal_key_colon_union_expr(&self.shared_additional_key_plan.literal_keys) {
-                if still_excluded_literal_keys.is_empty() {
-                    options.push(all_literal_keys);
-                } else if let Some(excluded_literals) = Self::literal_key_colon_union_expr(&still_excluded_literal_keys) {
-                    options.push(LexerExpr::Exclude {
-                        expr: Box::new(all_literal_keys),
-                        exclude: Box::new(excluded_literals),
-                    });
-                }
-            }
-        }
-        for pattern in &allowed_back_patterns {
-            options.push(
-                self.shared_additional_pattern_key_body_terminal_expr_excluding_literals(
-                    pattern,
-                    excluded_literal_keys,
-                ),
-            );
-        }
-
-        LexerExpr::make_choice(options)
     }
 
     fn build_shared_additional_key_choice_expr(
@@ -11840,7 +11640,6 @@ fn collect_grammar_visible_refs(
                     out.insert(name.clone());
                 }
             }
-            GrammarExpr::TerminalLanguage(_) => {}
             GrammarExpr::Grouped(inner) => walk(inner, terminal_names, out),
             GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
                 for p in parts {
@@ -11949,14 +11748,13 @@ mod tests {
     use super::string_value_body_regex;
     use super::uri_quote_merge_warning_needed;
     use super::wrap_string_value_expr_parts;
-    use crate::automata::lexer::ast::Expr as LexerExpr;
     use crate::automata::lexer::compile::build_regex;
     use crate::grammar::ast::lower;
     use crate::grammar::ast::GrammarExpr;
     use crate::grammar::glrm::to_glrm;
     use crate::dump_json_schema_grammar_glrm;
     use serde_json::{json, Value};
-    use std::{env, ffi::OsString, fs, path::PathBuf, sync::Mutex};
+    use std::{env, ffi::OsString, sync::Mutex};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -12022,7 +11820,6 @@ mod tests {
             GrammarExpr::Ref(_)
             | GrammarExpr::Literal(_)
             | GrammarExpr::Epsilon
-            | GrammarExpr::TerminalLanguage(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::AnyByte => false,
@@ -12034,17 +11831,6 @@ mod tests {
         named.rules
             .iter()
             .any(|rule| expr_contains_expr_nfa(&rule.expr))
-    }
-
-    fn load_maskbench_schema(name: &str) -> Value {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../constraint-framework-analysis/data/sources/jsonschemabench/maskbench/data")
-            .join(name);
-        let schema = fs::read_to_string(&path)
-            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-        let value: Value = serde_json::from_str(&schema)
-            .unwrap_or_else(|err| panic!("failed to parse {}: {err}", path.display()));
-        value.get("schema").cloned().unwrap_or(value)
     }
 
     fn find_rule_line_with_prefix<'a>(glrm: &'a str, rule_prefix: &str) -> &'a str {
@@ -12187,7 +11973,7 @@ mod tests {
     }
 
     #[test]
-    fn anyof_object_expr_nfa_exposes_shared_ap_body_terminal_languages() {
+    fn anyof_object_expr_nfa_uses_one_ap_terminal_with_sibling_literals() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _promote = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES", "0");
 
@@ -12212,13 +11998,13 @@ mod tests {
         });
 
         let glrm = dump_glrm(schema);
+        assert!(glrm.contains("t AP_SHARED_KEY ::="), "{glrm}");
         assert!(
-            glrm.contains("0 -- \"\\\"\" -->")
-                && glrm.contains("TerminalLanguage(")
-                && glrm.contains("U8Seq([116, 104, 117, 109, 98, 110, 97, 105, 108, 34])"),
+            glrm.contains("nt obj_anyof_fa_0_ap_key_v1_body")
+                && glrm.contains("AP_SHARED_KEY | (AP_SHARED_LITERAL_KEY_SET - (\"name\\\"\"))"),
             "{glrm}"
         );
-        assert!(!glrm.contains("nt obj_anyof_fa_0_ap_key_v1_body"), "{glrm}");
+        assert_eq!(glrm.matches("t AP_SHARED_KEY ::=").count(), 1, "{glrm}");
     }
 
     #[test]
@@ -12335,121 +12121,6 @@ mod tests {
         let named = schema_to_named_grammar(&schema).unwrap();
         assert!(named.rules.iter().any(|rule| expr_contains_expr_nfa(&rule.expr)));
         lower(&named).unwrap();
-    }
-
-    #[test]
-    fn o65883_reaches_anyof_object_expr_nfa_path() {
-        let schema = load_maskbench_schema("Github_hard---o65883.json");
-        let named = schema_to_named_grammar(&schema).unwrap();
-        assert!(
-            named.rules.iter().any(|rule| expr_contains_expr_nfa(&rule.expr)),
-            "o65883 did not reach ExprNFA import path"
-        );
-        assert!(
-            named.rules.iter().any(|rule| rule.name.starts_with("obj_anyof_fa_")),
-            "o65883 did not generate anyOf-object ExprNFA rules"
-        );
-
-        lower(&named).unwrap();
-    }
-
-    #[test]
-    fn o65883_obj_anyof_fa_body_exposes_terminal_language_symbols() {
-        let schema = load_maskbench_schema("Github_hard---o65883.json");
-        let named = schema_to_named_grammar(&schema).unwrap();
-        let body_rule = named
-            .rules
-            .iter()
-            .find(|rule| {
-                rule.name.starts_with("obj_anyof_fa_") && rule.name.ends_with("_body")
-            })
-            .unwrap_or_else(|| panic!("missing obj_anyof_fa body rule"));
-
-        let GrammarExpr::ExprNFA(expr_nfa) = &body_rule.expr else {
-            panic!("expected ExprNFA body rule, got {:?}", body_rule.expr);
-        };
-
-        let terminal_language_symbols: Vec<&GrammarExpr> = expr_nfa
-            .symbols
-            .iter()
-            .filter(|symbol| matches!(symbol, GrammarExpr::TerminalLanguage(_)))
-            .collect();
-
-        assert!(
-            !terminal_language_symbols.is_empty(),
-            "o65883 obj_anyof_fa body had no TerminalLanguage symbols; all symbols: {:?}",
-            expr_nfa.symbols
-        );
-    }
-
-    #[test]
-    fn o65883_obj_anyof_fa_body_terminal_language_shapes_fit_simple_ap_partitioning() {
-        let schema = load_maskbench_schema("Github_hard---o65883.json");
-        let named = schema_to_named_grammar(&schema).unwrap();
-        let body_rule = named
-            .rules
-            .iter()
-            .find(|rule| {
-                rule.name.starts_with("obj_anyof_fa_") && rule.name.ends_with("_body")
-            })
-            .unwrap_or_else(|| panic!("missing obj_anyof_fa body rule"));
-
-        let GrammarExpr::ExprNFA(expr_nfa) = &body_rule.expr else {
-            panic!("expected ExprNFA body rule, got {:?}", body_rule.expr);
-        };
-
-        let terminal_language_exprs: Vec<&LexerExpr> = expr_nfa
-            .symbols
-            .iter()
-            .filter_map(|symbol| match symbol {
-                GrammarExpr::TerminalLanguage(expr) => Some(&**expr),
-                _ => None,
-            })
-            .collect();
-
-        let exclude_count = terminal_language_exprs
-            .iter()
-            .filter(|expr| matches!(expr, LexerExpr::Exclude { .. }))
-            .count();
-        let choice_count = terminal_language_exprs
-            .iter()
-            .filter(|expr| matches!(expr, LexerExpr::Choice(_)))
-            .count();
-        let intersect_count = terminal_language_exprs
-            .iter()
-            .filter(|expr| matches!(expr, LexerExpr::Intersect { .. }))
-            .count();
-        let other_count = terminal_language_exprs.len()
-            - exclude_count
-            - choice_count
-            - intersect_count
-            - terminal_language_exprs
-                .iter()
-                .filter(|expr| matches!(expr, LexerExpr::U8Seq(_)))
-                .count();
-
-        assert!(
-            exclude_count > 0,
-            "o65883 obj_anyof_fa body had no Exclude-shaped TerminalLanguage exprs: {:?}",
-            terminal_language_exprs
-        );
-        assert!(
-            choice_count > 0,
-            "o65883 obj_anyof_fa body had no literal-choice TerminalLanguage exprs: {:?}",
-            terminal_language_exprs
-        );
-        assert_eq!(
-            intersect_count,
-            0,
-            "o65883 obj_anyof_fa body already contains Intersect-shaped TerminalLanguage exprs: {:?}",
-            terminal_language_exprs
-        );
-        assert_eq!(
-            other_count,
-            0,
-            "o65883 obj_anyof_fa body contains non-simple TerminalLanguage exprs: {:?}",
-            terminal_language_exprs
-        );
     }
 
     #[test]

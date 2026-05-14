@@ -215,7 +215,6 @@ impl SiteCollector {
             GrammarExpr::Ref(_)
             | GrammarExpr::Epsilon
             | GrammarExpr::Literal(_)
-            | GrammarExpr::TerminalLanguage(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::AnyByte => Ok(()),
@@ -485,7 +484,6 @@ fn rewrite_expr(
         GrammarExpr::Ref(_)
         | GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
-        | GrammarExpr::TerminalLanguage(_)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::AnyByte => Ok(()),
@@ -666,7 +664,6 @@ mod tests {
             GrammarExpr::Ref(_)
             | GrammarExpr::Epsilon
             | GrammarExpr::Literal(_)
-            | GrammarExpr::TerminalLanguage(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::AnyByte => false,

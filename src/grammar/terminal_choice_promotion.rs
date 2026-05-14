@@ -226,7 +226,6 @@ impl CandidateCollector {
             GrammarExpr::Ref(_)
             | GrammarExpr::Epsilon
             | GrammarExpr::Literal(_)
-            | GrammarExpr::TerminalLanguage(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::AnyByte => {
@@ -242,7 +241,6 @@ impl CandidateCollector {
         match expr {
             GrammarExpr::Grouped(inner) => self.eligible_atom(inner),
             GrammarExpr::Literal(_) => Some(expr.clone()),
-            GrammarExpr::TerminalLanguage(_) if self.include_non_literal_terminals => Some(expr.clone()),
             GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_) | GrammarExpr::AnyByte
                 if self.include_non_literal_terminals =>
             {
