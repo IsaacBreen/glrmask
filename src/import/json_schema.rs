@@ -6332,6 +6332,29 @@ impl<'a> SchemaCtx<'a> {
         )
     }
 
+    fn build_anyof_object_ap_key_symbol_paths(
+        &mut self,
+        base_name: &str,
+        variant_idx: usize,
+        variant_keys: &BTreeSet<String>,
+        variant_pattern_keys: &BTreeSet<String>,
+    ) -> Result<Vec<Vec<GrammarExpr>>, GlrMaskError> {
+        if ap_key_any_string() || self.per_object_ap_keys_enabled() {
+            return Ok(vec![vec![self.build_anyof_object_ap_key_expr(
+                base_name,
+                variant_idx,
+                variant_keys,
+                variant_pattern_keys,
+            )?]]);
+        }
+
+        Ok(self
+            .build_shared_additional_key_body_options(variant_keys, variant_pattern_keys)
+            .into_iter()
+            .map(|body| vec![literal_expr(b"\""), body, key_colon_suffix_expr()])
+            .collect())
+    }
+
     fn add_expr_nfa_symbol_path(
         builder: &mut ExprNfaBuilder,
         from: u32,
@@ -6366,7 +6389,9 @@ impl<'a> SchemaCtx<'a> {
         builder.set_accepting(accept);
 
         let mut state_ids = BTreeMap::<AnyOfObjectDfaState, u32>::new();
-        let mut additional_entry_state_ids = BTreeMap::<(u16, bool), u32>::new();
+        let mut additional_entry_state_ids =
+            BTreeMap::<(bool, Vec<String>), (u32, u32)>::new();
+        let mut additional_leaf_variants = BTreeMap::<u32, BTreeSet<u16>>::new();
         let mut queue = VecDeque::<AnyOfObjectDfaState>::new();
         for variant_idx in 0..variants.len() {
             let state = AnyOfObjectDfaState {
@@ -6431,42 +6456,46 @@ impl<'a> SchemaCtx<'a> {
 
             if can_leave_fixed_tail {
                 if let Some(value_expr) = &variant.additional_value_expr {
-                    let ap_state = AnyOfObjectDfaState {
-                        variant_idx: state.variant_idx,
-                        cursor: variant.len() as u16,
-                        has_content: true,
-                        phase: AnyOfObjectDfaPhase::Additional,
-                    };
-                    let ap_state_id = if let Some(&existing) = state_ids.get(&ap_state) {
-                        existing
-                    } else {
-                        let id = builder.add_state();
-                        state_ids.insert(ap_state, id);
-                        queue.push_back(ap_state);
-                        id
-                    };
-                    let entry_key = (state.variant_idx, state.has_content);
-                    let entry_state_id =
-                        if let Some(&existing) = additional_entry_state_ids.get(&entry_key) {
+                    let key_symbol_paths = self.build_anyof_object_ap_key_symbol_paths(
+                        base_name,
+                        state.variant_idx as usize,
+                        &variant.fixed_keys,
+                        &variant.pattern_keys,
+                    )?;
+                    for key_symbols in key_symbol_paths {
+                        let mut symbols = Vec::new();
+                        if state.has_content {
+                            symbols.push(self.json_item_separator_expr());
+                        }
+                        symbols.extend(key_symbols);
+                        symbols.push(value_expr.clone());
+
+                        let entry_key = (
+                            state.has_content,
+                            symbols.iter().map(expr_key).collect::<Vec<_>>(),
+                        );
+                        let (entry_state_id, leaf_state_id) = if let Some(&existing) =
+                            additional_entry_state_ids.get(&entry_key)
+                        {
                             existing
                         } else {
-                            let id = builder.add_state();
-                            additional_entry_state_ids.insert(entry_key, id);
-                            let mut symbols = Vec::new();
-                            if state.has_content {
-                                symbols.push(self.json_item_separator_expr());
-                            }
-                            symbols.push(self.build_anyof_object_ap_key_expr(
-                                base_name,
-                                state.variant_idx as usize,
-                                &variant.fixed_keys,
-                                &variant.pattern_keys,
-                            )?);
-                            symbols.push(value_expr.clone());
-                            Self::add_expr_nfa_symbol_path(&mut builder, id, symbols, ap_state_id);
-                            id
+                            let entry_id = builder.add_state();
+                            let leaf_id = builder.add_state();
+                            Self::add_expr_nfa_symbol_path(
+                                &mut builder,
+                                entry_id,
+                                symbols,
+                                leaf_id,
+                            );
+                            additional_entry_state_ids.insert(entry_key, (entry_id, leaf_id));
+                            (entry_id, leaf_id)
                         };
-                    builder.add_epsilon(state_id, entry_state_id);
+                        builder.add_epsilon(state_id, entry_state_id);
+                        additional_leaf_variants
+                            .entry(leaf_state_id)
+                            .or_default()
+                            .insert(state.variant_idx);
+                    }
                 }
             }
 
@@ -6503,6 +6532,69 @@ impl<'a> SchemaCtx<'a> {
                 symbols.push(self.json_key_colon_literal(key));
                 symbols.push(value_expr);
                 Self::add_expr_nfa_symbol_path(&mut builder, state_id, symbols, next_state_id);
+            }
+        }
+
+        let mut additional_union_state_ids = BTreeMap::<Vec<u16>, u32>::new();
+        let mut additional_union_queue = VecDeque::<Vec<u16>>::new();
+        for variants_set in additional_leaf_variants.values() {
+            let key = variants_set.iter().copied().collect::<Vec<_>>();
+            if additional_union_state_ids.contains_key(&key) {
+                continue;
+            }
+            let id = builder.add_state();
+            additional_union_state_ids.insert(key.clone(), id);
+            additional_union_queue.push_back(key);
+        }
+
+        while let Some(variant_set) = additional_union_queue.pop_front() {
+            let state_id = additional_union_state_ids[&variant_set];
+            builder.add_epsilon(state_id, accept);
+
+            let mut grouped_paths =
+                BTreeMap::<Vec<String>, (Vec<GrammarExpr>, BTreeSet<u16>)>::new();
+            for variant_idx in &variant_set {
+                let variant = &variants[*variant_idx as usize];
+                let Some(value_expr) = &variant.additional_value_expr else {
+                    continue;
+                };
+                let key_symbol_paths = self.build_anyof_object_ap_key_symbol_paths(
+                    base_name,
+                    *variant_idx as usize,
+                    &variant.fixed_keys,
+                    &variant.pattern_keys,
+                )?;
+                for key_symbols in key_symbol_paths {
+                    let mut symbols = vec![self.json_item_separator_expr()];
+                    symbols.extend(key_symbols);
+                    symbols.push(value_expr.clone());
+                    let key = symbols.iter().map(expr_key).collect::<Vec<_>>();
+                    let entry = grouped_paths
+                        .entry(key)
+                        .or_insert_with(|| (symbols, BTreeSet::new()));
+                    entry.1.insert(*variant_idx);
+                }
+            }
+
+            for (_path_key, (symbols, successors)) in grouped_paths {
+                let successor_key = successors.iter().copied().collect::<Vec<_>>();
+                let successor_state_id =
+                    if let Some(&existing) = additional_union_state_ids.get(&successor_key) {
+                        existing
+                    } else {
+                        let id = builder.add_state();
+                        additional_union_state_ids.insert(successor_key.clone(), id);
+                        additional_union_queue.push_back(successor_key);
+                        id
+                    };
+                Self::add_expr_nfa_symbol_path(&mut builder, state_id, symbols, successor_state_id);
+            }
+        }
+
+        for (leaf_state_id, variants_set) in additional_leaf_variants {
+            let key = variants_set.iter().copied().collect::<Vec<_>>();
+            if let Some(&target_state_id) = additional_union_state_ids.get(&key) {
+                builder.add_epsilon(leaf_state_id, target_state_id);
             }
         }
 
@@ -9966,7 +10058,58 @@ impl<'a> SchemaCtx<'a> {
             return Ok(GrammarExpr::Ref(rule_name.clone()));
         }
 
-        let mut options = Vec::with_capacity(1 + allowed_back_keys.len() + allowed_back_patterns.len());
+        let options = self
+            .build_shared_additional_key_body_options(excluded_literal_keys, excluded_pattern_keys);
+        if options.len() == 1 {
+            return Ok(options.into_iter().next().expect("single body option"));
+        }
+
+        let rule_name = self.fresh_rule_name(prefix);
+        self.insert_rule(rule_name.clone(), choice_or_single(options));
+        self.shared_additional_key_plan
+            .body_rule_cache
+            .insert(cache_key, rule_name.clone());
+        Ok(GrammarExpr::Ref(rule_name))
+    }
+
+    fn build_shared_additional_key_body_options(
+        &mut self,
+        excluded_literal_keys: &BTreeSet<String>,
+        excluded_pattern_keys: &BTreeSet<String>,
+    ) -> Vec<GrammarExpr> {
+        let allowed_back_patterns: Vec<String> = self
+            .shared_additional_key_plan
+            .pattern_keys
+            .iter()
+            .filter(|pattern| !excluded_pattern_keys.contains(*pattern))
+            .cloned()
+            .collect();
+        let excluded_by_patterns =
+            self.shared_additional_literal_keys_matched_by_any_pattern(excluded_pattern_keys);
+        let allowed_back_by_patterns = allowed_back_patterns
+            .iter()
+            .flat_map(|pattern| {
+                self.shared_additional_key_plan
+                    .literal_keys_by_pattern
+                    .get(pattern)
+                    .into_iter()
+                    .flat_map(|keys| keys.iter().cloned())
+            })
+            .collect::<BTreeSet<_>>();
+        let allowed_back_keys: Vec<String> = self
+            .shared_additional_key_plan
+            .literal_keys
+            .iter()
+            .filter(|key| {
+                !excluded_literal_keys.contains(*key)
+                    && !excluded_by_patterns.contains(*key)
+                    && !allowed_back_by_patterns.contains(*key)
+            })
+            .cloned()
+            .collect();
+
+        let mut options =
+            Vec::with_capacity(1 + allowed_back_keys.len() + allowed_back_patterns.len());
         options.push(self.shared_additional_key_body_expr());
         if !allowed_back_keys.is_empty() {
             let still_excluded_literal_alts = self
@@ -9982,25 +10125,19 @@ impl<'a> SchemaCtx<'a> {
             } else {
                 options.push(GrammarExpr::Exclude {
                     expr: Box::new(GrammarExpr::Ref("AP_SHARED_LITERAL_KEY_SET".into())),
-                    exclude: Box::new(parenthesized_expr(choice_or_single(still_excluded_literal_alts))),
+                    exclude: Box::new(parenthesized_expr(choice_or_single(
+                        still_excluded_literal_alts,
+                    ))),
                 });
             }
         }
         for pattern in &allowed_back_patterns {
-            options.push(
-                self.shared_additional_pattern_key_body_expr_excluding_literals(
-                    pattern,
-                    excluded_literal_keys,
-                ),
-            );
+            options.push(self.shared_additional_pattern_key_body_expr_excluding_literals(
+                pattern,
+                excluded_literal_keys,
+            ));
         }
-
-        let rule_name = self.fresh_rule_name(prefix);
-        self.insert_rule(rule_name.clone(), choice_or_single(options));
-        self.shared_additional_key_plan
-            .body_rule_cache
-            .insert(cache_key, rule_name.clone());
-        Ok(GrammarExpr::Ref(rule_name))
+        options
     }
 
     fn build_shared_additional_key_choice_expr(
@@ -12000,11 +12137,61 @@ mod tests {
         let glrm = dump_glrm(schema);
         assert!(glrm.contains("t AP_SHARED_KEY ::="), "{glrm}");
         assert!(
-            glrm.contains("nt obj_anyof_fa_0_ap_key_v1_body")
-                && glrm.contains("AP_SHARED_KEY | (AP_SHARED_LITERAL_KEY_SET - (\"name\\\"\"))"),
+            glrm.contains("-- AP_SHARED_KEY -->")
+                && glrm.contains("-- AP_SHARED_LITERAL_KEY_SET - (\"name\\\"\") -->"),
             "{glrm}"
         );
+        assert!(!glrm.contains("obj_anyof_fa_0_ap_key_v1"), "{glrm}");
         assert_eq!(glrm.matches("t AP_SHARED_KEY ::=").count(), 1, "{glrm}");
+    }
+
+    #[test]
+    fn anyof_object_expr_nfa_person_org_shape_uses_shared_ap_key_paths() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _promote = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES", "0");
+
+        let schema = json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "email": {"type": "string"},
+                        "name": {"type": "string"},
+                        "sameAs": {
+                            "items": {"type": "string"},
+                            "type": "array"
+                        }
+                    },
+                    "required": ["name"],
+                    "additionalProperties": {"type": "number"}
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "additionalName": {"type": "string"},
+                        "email": {"type": "string"},
+                        "familyName": {"type": "string"},
+                        "givenName": {"type": "string"},
+                        "name": {"type": "string"},
+                        "sameAs": {
+                            "items": {"type": "string"},
+                            "type": "array"
+                        }
+                    },
+                    "required": ["name"],
+                    "additionalProperties": {"type": "number"}
+                }
+            ]
+        });
+
+        let glrm = dump_glrm(schema.clone());
+        assert!(glrm.contains("fa obj_anyof_fa_0_body"), "{glrm}");
+    assert!(glrm.contains("-- AP_SHARED_KEY -->"), "{glrm}");
+        assert!(!glrm.contains("obj_anyof_fa_0_ap_key_v0"), "{glrm}");
+        assert!(!glrm.contains("obj_anyof_fa_0_ap_key_v1"), "{glrm}");
+
+        let named = schema_to_named_grammar(&schema).unwrap();
+        lower(&named).unwrap();
     }
 
     #[test]
