@@ -177,6 +177,7 @@ fn finish_table(
         num_terminals: grammar.num_terminals,
         num_rules: grammar.rules.len() as u32,
         rules: grammar.rules.clone(),
+        nonterminal_display_names: grammar.nonterminal_display_names.clone(),
         forwarded_shifts,
     }
 }

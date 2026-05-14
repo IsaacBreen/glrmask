@@ -1,4 +1,42 @@
 #[derive(Clone, Debug, Default)]
+pub struct AdvanceTrace {
+    pub det_steps: Vec<AdvanceTraceStep>,
+    pub nondet_waves: Vec<AdvanceTraceWave>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AdvanceTraceWave {
+    pub wave_index: u32,
+    pub frontier_states: Vec<u32>,
+    pub branches: Vec<AdvanceTraceStep>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AdvanceTraceStep {
+    pub source_state: u32,
+    pub action_kind: String,
+    pub shift_target: Option<u32>,
+    pub shift_replace: Option<bool>,
+    pub reduces: Vec<AdvanceTraceReduce>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AdvanceTraceReduce {
+    pub lhs_nt: u32,
+    pub lhs_name: Option<String>,
+    pub pop_len: u32,
+    pub goto_sources: Vec<u32>,
+    pub goto_targets: Vec<AdvanceTraceGoto>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AdvanceTraceGoto {
+    pub source_state: u32,
+    pub target_state: u32,
+    pub replace: bool,
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct AdvanceProfile {
     pub pure_shift: bool,
     pub deterministic_entered: bool,
@@ -26,4 +64,5 @@ pub struct AdvanceProfile {
     pub n_nondet_reduce_ops: u32,
     pub n_nondet_merges: u32,
     pub n_nondet_isolates: u32,
+    pub trace: Option<AdvanceTrace>,
 }

@@ -114,6 +114,72 @@ fn string_result<T>(result: Result<T, String>) -> PyResult<T> {
     result.map_err(PyValueError::new_err)
 }
 
+fn advance_trace_to_dict<'py>(
+    py: Python<'py>,
+    trace: &glrmask::AdvanceTrace,
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+
+    let det_steps = pyo3::types::PyList::empty(py);
+    for step in &trace.det_steps {
+        det_steps.append(advance_trace_step_to_dict(py, step)?)?;
+    }
+    dict.set_item("det_steps", det_steps)?;
+
+    let nondet_waves = pyo3::types::PyList::empty(py);
+    for wave in &trace.nondet_waves {
+        let wave_dict = PyDict::new(py);
+        wave_dict.set_item("wave_index", wave.wave_index)?;
+        wave_dict.set_item("frontier_states", wave.frontier_states.clone())?;
+        let branches = pyo3::types::PyList::empty(py);
+        for branch in &wave.branches {
+            branches.append(advance_trace_step_to_dict(py, branch)?)?;
+        }
+        wave_dict.set_item("branches", branches)?;
+        nondet_waves.append(wave_dict)?;
+    }
+    dict.set_item("nondet_waves", nondet_waves)?;
+
+    Ok(dict)
+}
+
+fn advance_trace_step_to_dict<'py>(
+    py: Python<'py>,
+    step: &glrmask::AdvanceTraceStep,
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("source_state", step.source_state)?;
+    dict.set_item("action_kind", step.action_kind.as_str())?;
+    if let Some(target) = step.shift_target {
+        dict.set_item("shift_target", target)?;
+    }
+    if let Some(replace) = step.shift_replace {
+        dict.set_item("shift_replace", replace)?;
+    }
+    let reduces = pyo3::types::PyList::empty(py);
+    for reduce in &step.reduces {
+        let reduce_dict = PyDict::new(py);
+        reduce_dict.set_item("lhs_nt", reduce.lhs_nt)?;
+        if let Some(lhs_name) = &reduce.lhs_name {
+            reduce_dict.set_item("lhs_name", lhs_name.as_str())?;
+        }
+        reduce_dict.set_item("pop_len", reduce.pop_len)?;
+        reduce_dict.set_item("goto_sources", reduce.goto_sources.clone())?;
+        let goto_targets = pyo3::types::PyList::empty(py);
+        for goto in &reduce.goto_targets {
+            let goto_dict = PyDict::new(py);
+            goto_dict.set_item("source_state", goto.source_state)?;
+            goto_dict.set_item("target_state", goto.target_state)?;
+            goto_dict.set_item("replace", goto.replace)?;
+            goto_targets.append(goto_dict)?;
+        }
+        reduce_dict.set_item("goto_targets", goto_targets)?;
+        reduces.append(reduce_dict)?;
+    }
+    dict.set_item("reduces", reduces)?;
+    Ok(dict)
+}
+
 // ---------------------------------------------------------------------------
 // PyVocab
 // ---------------------------------------------------------------------------
@@ -470,6 +536,9 @@ impl PyConstraintState {
             d.set_item("n_nondet_reduce_ops", p.n_nondet_reduce_ops)?;
             d.set_item("n_nondet_merges", p.n_nondet_merges)?;
             d.set_item("n_nondet_isolates", p.n_nondet_isolates)?;
+            if let Some(trace) = &p.trace {
+                d.set_item("trace", advance_trace_to_dict(py, trace)?)?;
+            }
             d.set_item("summary_ns", entry.summary_ns)?;
             advance_list.append(d)?;
         }

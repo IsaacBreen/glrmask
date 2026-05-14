@@ -713,6 +713,7 @@ mod tests {
             num_terminals: 6,
             num_rules: 0,
             rules: Vec::new(),
+            nonterminal_display_names: Vec::new(),
             forwarded_shifts: Default::default(),
         };
 

@@ -1551,6 +1551,7 @@ mod tests {
             num_terminals: 1,
             num_rules: 0,
             rules: Vec::new(),
+            nonterminal_display_names: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
         }
     }
@@ -2154,6 +2155,7 @@ pub(super) fn merge_same_core_lr1_states(table: GLRTable, core_keys: &[Vec<Item>
         num_terminals: table.num_terminals,
         num_rules: table.num_rules,
         rules: table.rules,
+        nonterminal_display_names: table.nonterminal_display_names,
         forwarded_shifts,
     }
 }

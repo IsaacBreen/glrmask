@@ -12,6 +12,7 @@ pub struct AnalyzedGrammar {
     pub num_terminals: u32,
     pub terminal_display_names: Vec<String>,
     pub num_nonterminals: u32,
+    pub nonterminal_display_names: Vec<String>,
     pub nullable: BTreeSet<NonterminalID>,
     pub first: Vec<BitSet>,
     pub follow: Vec<BitSet>,
@@ -56,6 +57,18 @@ impl AnalyzedGrammar {
                 .map(|terminal| g.terminal_display_name(terminal))
                 .collect(),
             num_nonterminals,
+            nonterminal_display_names: (0..num_nonterminals)
+                .map(|nonterminal| {
+                    if nonterminal == augmented_start {
+                        "<augmented-start>".to_string()
+                    } else {
+                        g.nonterminal_names
+                            .get(&nonterminal)
+                            .cloned()
+                            .unwrap_or_else(|| format!("N{nonterminal}"))
+                    }
+                })
+                .collect(),
             nullable,
             first,
             follow,

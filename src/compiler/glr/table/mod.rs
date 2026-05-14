@@ -37,6 +37,8 @@ pub struct GLRTable {
     pub num_terminals: u32,
     pub num_rules: u32,
     pub rules: Vec<Rule>,
+    #[serde(default)]
+    pub nonterminal_display_names: Vec<String>,
     /// Set of (state, terminal) pairs where the shift was created by the
     /// transfer mechanism. The characterization should treat these as
     /// non-replace to avoid creating pop-0 reduces in the template NFA.
@@ -66,5 +68,12 @@ impl GLRTable {
         self.goto
             .get(state as usize)
             .and_then(|by_nt| by_nt.get(&nt).copied())
+    }
+
+    #[inline]
+    pub fn nonterminal_display_name(&self, nt: NonterminalID) -> Option<&str> {
+        self.nonterminal_display_names
+            .get(nt as usize)
+            .map(String::as_str)
     }
 }

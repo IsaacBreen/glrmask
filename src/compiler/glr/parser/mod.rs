@@ -9,7 +9,14 @@ use std::sync::OnceLock;
 
 mod profile;
 
-pub use profile::AdvanceProfile;
+pub use profile::{
+    AdvanceTrace,
+    AdvanceTraceGoto,
+    AdvanceProfile,
+    AdvanceTraceReduce,
+    AdvanceTraceStep,
+    AdvanceTraceWave,
+};
 
 pub type ParserGSS = LeveledGSS<u32, TerminalsDisallowed>;
 
@@ -36,6 +43,102 @@ fn guarded_stack_to_stacks_fallback_disabled() -> bool {
 fn stack_effect_to_stacks_fallback_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
     *DISABLED.get_or_init(|| env_flag_enabled("GLRMASK_DISABLE_STACK_EFFECT_TO_STACKS_FALLBACK"))
+}
+
+fn advance_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("GLRMASK_PROFILE_ADVANCE_TRACE"))
+}
+
+fn trace_action_kind(action: Option<&Action>) -> &'static str {
+    match action {
+        Some(Action::Shift(..)) => "shift",
+        Some(Action::StackShifts(..)) => "stack-shifts",
+        Some(Action::GuardedStackShifts(..)) => "guarded-stack-shifts",
+        Some(Action::Reduce(..)) => "reduce",
+        Some(Action::Split { accept: true, .. }) => "split-accept",
+        Some(Action::Split { .. }) => "split",
+        Some(Action::Accept) => "accept",
+        None => "none",
+    }
+}
+
+fn trace_reduce_summary(
+    table: &GLRTable,
+    gss: &ParserGSS,
+    lhs_nt: u32,
+    pop_len: usize,
+) -> AdvanceTraceReduce {
+    let mut goto_sources = Vec::new();
+    let mut goto_targets = Vec::new();
+    for (goto_from, _) in reduce_sources_from_isolated(gss, pop_len) {
+        goto_sources.push(goto_from);
+        if let Some((target_state, replace)) = table.goto_target(goto_from, lhs_nt) {
+            goto_targets.push(AdvanceTraceGoto {
+                source_state: goto_from,
+                target_state,
+                replace,
+            });
+        }
+    }
+    goto_sources.sort_unstable();
+    goto_sources.dedup();
+    goto_targets.sort_by_key(|entry| (entry.source_state, entry.target_state, entry.replace));
+    goto_targets.dedup_by(|left, right| {
+        left.source_state == right.source_state
+            && left.target_state == right.target_state
+            && left.replace == right.replace
+    });
+    AdvanceTraceReduce {
+        lhs_nt,
+        lhs_name: table.nonterminal_display_name(lhs_nt).map(str::to_owned),
+        pop_len: pop_len as u32,
+        goto_sources,
+        goto_targets,
+    }
+}
+
+fn trace_action_summary(
+    table: &GLRTable,
+    source_state: u32,
+    gss: &ParserGSS,
+    action: Option<&Action>,
+) -> AdvanceTraceStep {
+    match action {
+        Some(Action::Shift(target, replace)) => AdvanceTraceStep {
+            source_state,
+            action_kind: trace_action_kind(action).to_string(),
+            shift_target: Some(*target),
+            shift_replace: Some(*replace),
+            reduces: Vec::new(),
+        },
+        Some(Action::StackShifts(..)) | Some(Action::GuardedStackShifts(..)) | Some(Action::Accept) | None => {
+            AdvanceTraceStep {
+                source_state,
+                action_kind: trace_action_kind(action).to_string(),
+                shift_target: None,
+                shift_replace: None,
+                reduces: Vec::new(),
+            }
+        }
+        Some(Action::Reduce(lhs_nt, pop_len)) => AdvanceTraceStep {
+            source_state,
+            action_kind: trace_action_kind(action).to_string(),
+            shift_target: None,
+            shift_replace: None,
+            reduces: vec![trace_reduce_summary(table, gss, *lhs_nt, *pop_len as usize)],
+        },
+        Some(Action::Split { shift, reduces, accept }) => AdvanceTraceStep {
+            source_state,
+            action_kind: if *accept { "split-accept" } else { "split" }.to_string(),
+            shift_target: shift.map(|(target, _)| target),
+            shift_replace: shift.map(|(_, replace)| replace),
+            reduces: reduces
+                .iter()
+                .map(|&(lhs_nt, pop_len)| trace_reduce_summary(table, gss, lhs_nt, pop_len as usize))
+                .collect(),
+        },
+    }
 }
 
 enum AdvancedBranch {
@@ -77,6 +180,7 @@ pub(crate) fn advance_stacks_profiled(
         top_states: stack.peek_values().len() as u32,
         gss_depth: stack.max_depth(),
         vstack_len: stack.try_virtual_stack().map_or(0, |vstack| vstack.len() as u32),
+        trace: advance_trace_enabled().then(AdvanceTrace::default),
         ..AdvanceProfile::default()
     };
 
@@ -84,6 +188,14 @@ pub(crate) fn advance_stacks_profiled(
     if let Some(state) = gss.single_exclusive_top_value() {
         match table.action(state, token) {
             Some(Action::Shift(target, is_replace)) => {
+                if let Some(trace) = profile.trace.as_mut() {
+                    trace.det_steps.push(trace_action_summary(
+                        table,
+                        state,
+                        &gss,
+                        Some(&Action::Shift(*target, *is_replace)),
+                    ));
+                }
                 profile.pure_shift = true;
                 profile.fast_path_ns = fast_path_start.elapsed().as_nanos() as u64;
                 let apply_start = Instant::now();
@@ -97,6 +209,9 @@ pub(crate) fn advance_stacks_profiled(
                 return (shifted, profile);
             }
             Some(Action::StackShifts(shifts)) => {
+                if let Some(trace) = profile.trace.as_mut() {
+                    trace.det_steps.push(trace_action_summary(table, state, &gss, Some(&Action::StackShifts(shifts.clone()))));
+                }
                 profile.fast_path_ns = fast_path_start.elapsed().as_nanos() as u64;
                 let apply_start = Instant::now();
                 let shifted = apply_stack_shifts(gss, shifts);
@@ -105,6 +220,14 @@ pub(crate) fn advance_stacks_profiled(
                 return (shifted, profile);
             }
             Some(Action::GuardedStackShifts(shifts)) => {
+                if let Some(trace) = profile.trace.as_mut() {
+                    trace.det_steps.push(trace_action_summary(
+                        table,
+                        state,
+                        &gss,
+                        Some(&Action::GuardedStackShifts(shifts.clone())),
+                    ));
+                }
                 profile.fast_path_ns = fast_path_start.elapsed().as_nanos() as u64;
                 let apply_start = Instant::now();
                 let shifted = apply_guarded_stack_shifts(gss, shifts);
@@ -759,7 +882,13 @@ fn advance_deterministically_profiled(
         };
 
         profile.n_det_action_lookups += 1;
-        match table.action(state, token) {
+        let action = table.action(state, token);
+        if let Some(trace) = profile.trace.as_mut() {
+            let trace_gss = stack.clone().into_gss();
+            trace.det_steps
+                .push(trace_action_summary(table, state, &trace_gss, action));
+        }
+        match action {
             Some(Action::Reduce(nt, len)) => {
                 let rhs_len = *len as usize;
                 if rhs_len < stack.len() {
@@ -896,11 +1025,27 @@ fn advance_nondeterministically_profiled(
     let mut shifted = ParserGSS::empty();
     loop {
         profile.n_nondet_waves += 1;
+        let frontier_states = closure.peek_values();
+        if let Some(trace) = profile.trace.as_mut() {
+            trace.nondet_waves.push(AdvanceTraceWave {
+                wave_index: profile.n_nondet_waves,
+                frontier_states: frontier_states.to_vec(),
+                branches: Vec::new(),
+            });
+        }
         let mut next = ParserGSS::empty();
 
-        for state in closure.peek_values() {
+        for state in frontier_states {
             profile.n_nondet_branches += 1;
-            let Some(action) = table.action(state, token) else {
+            let action = table.action(state, token);
+            if let Some(trace) = profile.trace.as_mut() {
+                let branch_gss = closure.isolate(Some(state));
+                if let Some(wave) = trace.nondet_waves.last_mut() {
+                    wave.branches
+                        .push(trace_action_summary(table, state, &branch_gss, action));
+                }
+            }
+            let Some(action) = action else {
                 continue;
             };
             profile.n_nondet_isolates += 1;

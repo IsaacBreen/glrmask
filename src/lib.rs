@@ -18,6 +18,12 @@ pub use ds::weight::{
 };
 pub use error::{Error, GlrMaskError, Result};
 pub use runtime::{
+    AdvanceProfile,
+    AdvanceTrace,
+    AdvanceTraceGoto,
+    AdvanceTraceReduce,
+    AdvanceTraceStep,
+    AdvanceTraceWave,
     CommitProfile,
     Constraint,
     ConstraintState,

@@ -1428,6 +1428,11 @@ fn commit_bytes_impl_profiled(
             }
             let mut linear_profile = profile.clone();
             let mut linear_advances = Vec::new();
+            let linear_advances_sink = if advances.is_some() {
+                Some(&mut linear_advances)
+            } else {
+                None
+            };
             linear_profile.linear_fast_path_setup_ns +=
                 linear_setup_start.elapsed().as_nanos() as u64;
             match commit_bytes_linear_fast_path_profiled(
@@ -1435,9 +1440,7 @@ fn commit_bytes_impl_profiled(
                 start_gss,
                 bytes,
                 exec_result.clone(),
-                advances
-                    .as_ref()
-                    .map(|_| &mut linear_advances as &mut Vec<PerAdvanceEntry>),
+                linear_advances_sink,
                 &mut linear_profile,
             ) {
                 LinearFastPathResult::Complete(result) => {
@@ -1457,6 +1460,9 @@ fn commit_bytes_impl_profiled(
                 }
                 LinearFastPathResult::Continue { gss, offset } => {
                     profile = linear_profile;
+                    if let Some(advances) = advances.as_deref_mut() {
+                        advances.extend(linear_advances);
+                    }
                     let update_start = Instant::now();
                     state.clear();
                     state.insert(constraint.tokenizer.initial_state(), gss);
