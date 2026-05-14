@@ -4,9 +4,7 @@ use std::sync::Arc;
 use crate::automata::lexer::ast::Expr as LexerExpr;
 use crate::automata::lexer::compile::build_regex;
 use crate::automata::lexer::regex::parse_regex;
-use crate::automata::unweighted_u32::dfa::DFA;
-use crate::automata::unweighted_u32::nfa::NFA;
-use crate::grammar::expr_nfa::{ExprNFA, ExprNfaBuilder};
+use crate::grammar::expr_nfa::ExprNfaBuilder;
 use crate::import::ast::{expr_to_grammar_expr, GrammarExpr, NamedGrammar, NamedRule};
 use crate::GlrMaskError;
 use serde_json::{Map, Value};
@@ -6509,32 +6507,8 @@ impl<'a> SchemaCtx<'a> {
         }
 
         Ok(Some(GrammarExpr::ExprNFA(Box::new(
-            Self::minimized_expr_nfa(builder.build()),
+            builder.build().into_determinized_and_minimized(),
         ))))
-    }
-
-    fn minimized_expr_nfa(expr_nfa: ExprNFA) -> ExprNFA {
-        let dfa = expr_nfa.determinize_and_minimize();
-        Self::expr_dfa_to_nfa(dfa, expr_nfa.symbols)
-    }
-
-    fn expr_dfa_to_nfa(dfa: DFA, symbols: Vec<GrammarExpr>) -> ExprNFA {
-        let mut nfa = NFA::new_empty();
-        for _ in &dfa.states {
-            nfa.add_state();
-        }
-        if !dfa.states.is_empty() {
-            nfa.start_states.push(dfa.start_state);
-        }
-        for (state_id, state) in dfa.states.iter().enumerate() {
-            if state.is_accepting {
-                nfa.set_accepting(state_id as u32);
-            }
-            for (&label, &target) in &state.transitions {
-                nfa.add_transition(state_id as u32, label, target);
-            }
-        }
-        ExprNFA::new(nfa, symbols)
     }
 
     fn try_build_anyof_object_expr_nfa(

@@ -23,6 +23,27 @@ impl ExprNFA {
         Self { nfa, symbols }
     }
 
+    pub fn into_determinized_and_minimized(self) -> Self {
+        let dfa = self.determinize_and_minimize();
+        let symbols = self.symbols;
+        let mut nfa = NFA::new_empty();
+        for _ in &dfa.states {
+            nfa.add_state();
+        }
+        if !dfa.states.is_empty() {
+            nfa.start_states.push(dfa.start_state);
+        }
+        for (state_id, state) in dfa.states.iter().enumerate() {
+            if state.is_accepting {
+                nfa.set_accepting(state_id as u32);
+            }
+            for (&label, &target) in &state.transitions {
+                nfa.add_transition(state_id as u32, label, target);
+            }
+        }
+        Self::new(nfa, symbols)
+    }
+
     pub fn determinize(&self) -> DFA {
         determinize_nfa(&self.nfa)
     }
@@ -275,5 +296,13 @@ mod tests {
             .values()
             .any(|&target| target == dfa.start_state));
         assert!(dfa.states.iter().any(|state| state.is_accepting));
+
+        let minimized_expr_nfa = expr_nfa.into_determinized_and_minimized();
+        assert_eq!(minimized_expr_nfa.symbols.len(), 2);
+        assert!(minimized_expr_nfa
+            .nfa
+            .states
+            .iter()
+            .all(|state| state.epsilons.is_empty()));
     }
 }
