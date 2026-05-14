@@ -283,6 +283,7 @@ fn collect_ref_counts(expr: &GrammarExpr, counts: &mut HashMap<String, usize>) {
         }
         GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
+        | GrammarExpr::TerminalLanguage(_)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::AnyByte => {}
@@ -357,6 +358,7 @@ fn inline_refs_in_expr(
         GrammarExpr::Ref(_)
         | GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
+        | GrammarExpr::TerminalLanguage(_)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::AnyByte => {}

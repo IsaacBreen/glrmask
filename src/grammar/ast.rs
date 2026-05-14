@@ -36,6 +36,7 @@ pub enum GrammarExpr {
         min: usize,
         max: usize,
     },
+    TerminalLanguage(Box<Expr>),
     Literal(Vec<u8>),
     CharClass { def: String, negate: bool, utf8: bool },
     RawRegex(String),
@@ -153,6 +154,7 @@ impl NamedGrammar {
                     for (e, _) in items { collect_refs(e, out); }
                     collect_refs(separator, out);
                 }
+                GrammarExpr::TerminalLanguage(_) => {}
                 GrammarExpr::ExprNFA(expr_nfa) => {
                     for symbol in &expr_nfa.symbols {
                         collect_refs(symbol, out);
@@ -330,6 +332,9 @@ fn grammar_expr_to_lark_with_indent(
         GrammarExpr::RepeatRange { expr: inner, min, max } => {
             grammar_expr_to_lark_with_indent(inner, out, true, indent);
             write!(out, "~{}..{}", min, max).unwrap();
+        }
+        GrammarExpr::TerminalLanguage(expr) => {
+            write!(out, "/*TerminalLanguage({expr:?})*/").unwrap();
         }
         GrammarExpr::Epsilon => {
             out.push_str("/*eps*/");
@@ -655,6 +660,20 @@ impl Lowerer {
                 let tid = self.terminal_id(&String::from_utf8_lossy(bytes), &pattern, false);
                 Ok(Some(Symbol::Terminal(tid)))
             }
+            GrammarExpr::TerminalLanguage(expr) => {
+                let expr = if expr.is_nullable() {
+                    Expr::Exclude {
+                        expr: Box::new((**expr).clone()),
+                        exclude: Box::new(Expr::Epsilon),
+                    }
+                    .optimize()
+                } else {
+                    (**expr).clone()
+                };
+                let name = format!("__nonnullable_terminal_{}", self.generated_nonterminal_counter);
+                let tid = self.register_terminal_expr(&name, expr);
+                Ok(Some(Symbol::Terminal(tid)))
+            }
             GrammarExpr::Grouped(inner) => self.nonnullable_terminal_symbol(inner),
             GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
@@ -745,6 +764,7 @@ impl Lowerer {
                 }
                 self.nonnullable_terminal_symbol(expr)
             }
+            GrammarExpr::TerminalLanguage(_) => self.nonnullable_terminal_symbol(expr),
             GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
@@ -805,6 +825,7 @@ impl Lowerer {
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::AnyByte
+            | GrammarExpr::TerminalLanguage(_)
             | GrammarExpr::Intersect { .. } => {
                 if let Some(symbol) = self.nonnullable_terminal_symbol(expr)? {
                     self.rules.push(Rule { lhs, rhs: vec![symbol] });
@@ -1507,6 +1528,10 @@ impl Lowerer {
                 let pattern = bytes.iter().map(|&b| regex_escape_byte(b)).collect::<String>();
                 Symbol::Terminal(self.terminal_id(&String::from_utf8_lossy(bytes), &pattern, false))
             }
+            GrammarExpr::TerminalLanguage(expr) => {
+                let name = format!("__terminal_expr_{}", self.generated_nonterminal_counter);
+                Symbol::Terminal(self.register_terminal_expr(&name, (**expr).clone()))
+            }
             GrammarExpr::CharClass { def, negate, utf8 } => {
                 let pattern = char_class_pattern(def, *negate);
                 Symbol::Terminal(self.terminal_id(&pattern, &pattern, *utf8))
@@ -1798,6 +1823,7 @@ fn grammar_expr_to_expr(
             min: *min,
             max: Some(*max),
         },
+        GrammarExpr::TerminalLanguage(expr) => (**expr).clone(),
         GrammarExpr::Ref(name) => {
             // Look up in cache first
             if let Some(cached) = terminal_expr_cache.get(name) {
@@ -1840,6 +1866,7 @@ fn grammar_expr_is_nullable(
 ) -> bool {
     match expr {
         GrammarExpr::Ref(name) => rule_nullable.get(name).copied().unwrap_or(false),
+        GrammarExpr::TerminalLanguage(expr) => expr.is_nullable(),
         GrammarExpr::Grouped(inner) => grammar_expr_is_nullable(inner, rule_nullable),
         GrammarExpr::Sequence(parts) => parts.iter().all(|part| grammar_expr_is_nullable(part, rule_nullable)),
         GrammarExpr::Choice(options) => options.iter().any(|option| grammar_expr_is_nullable(option, rule_nullable)),
@@ -1972,6 +1999,7 @@ fn validate_expr_nfa_placement(grammar: &NamedGrammar) -> Result<(), GlrMaskErro
                 }
                 walk(separator, false, rule_name)?;
             }
+            GrammarExpr::TerminalLanguage(_) => {}
             GrammarExpr::Ref(_)
             | GrammarExpr::Epsilon
             | GrammarExpr::Literal(_)

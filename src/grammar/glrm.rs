@@ -212,6 +212,7 @@ fn dump_nt_atom(expr: &GrammarExpr) -> String {
         }
         GrammarExpr::AnyByte => ".".to_string(),
         GrammarExpr::Epsilon => "eps".to_string(),
+        GrammarExpr::TerminalLanguage(expr) => format!("TerminalLanguage({expr:?})"),
         GrammarExpr::Exclude { expr: inner, exclude } => {
             let lhs = dump_set_operand(inner);
             match exclude.as_ref() {
