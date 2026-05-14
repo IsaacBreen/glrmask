@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
-use crate::automata::lexer::tokenizer::TokenizerExecResult;
+use crate::automata::lexer::tokenizer::{TokenizerExecResult, TokenizerMatch};
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{
     ParserGSS,
@@ -20,6 +20,15 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 type ParserStatesByTokenizer = FxHashMap<u32, ParserGSS>;
+
+const SMALL_NORMALIZED_MATCH_LINEAR_SCAN_MAX: usize = 8;
+
+#[derive(Clone, Copy)]
+struct NormalizedMatch {
+    terminal_id: u32,
+    width: usize,
+    ignored: bool,
+}
 
 pub type GssProfileSummary = LeveledGSSSummary;
 
@@ -386,6 +395,72 @@ fn is_actionable_terminal(
 ) -> bool {
     !actionable_terminals
         .is_some_and(|actionable| !actionable.contains(constraint, terminal))
+}
+
+fn collect_unique_actionable_matches(
+    constraint: &Constraint,
+    actionable_terminals: Option<&ActionableTerminals>,
+    ignore_terminal: Option<u32>,
+    matches: &[TokenizerMatch],
+    reusable_seen_matches: Option<&mut FxHashSet<(usize, u32)>>,
+) -> SmallVec<[NormalizedMatch; 8]> {
+    let mut normalized = SmallVec::<[NormalizedMatch; 8]>::new();
+
+    if matches.len() <= SMALL_NORMALIZED_MATCH_LINEAR_SCAN_MAX {
+        'matches: for matched in matches {
+            let ignored = is_ignored_terminal(ignore_terminal, matched.id);
+            if !ignored && !is_actionable_terminal(actionable_terminals, constraint, matched.id) {
+                continue;
+            }
+            for existing in &normalized {
+                if existing.width == matched.width && existing.terminal_id == matched.id {
+                    continue 'matches;
+                }
+            }
+            normalized.push(NormalizedMatch {
+                terminal_id: matched.id,
+                width: matched.width,
+                ignored,
+            });
+        }
+        return normalized;
+    }
+
+    if let Some(seen_matches) = reusable_seen_matches {
+        seen_matches.clear();
+        for matched in matches {
+            let ignored = is_ignored_terminal(ignore_terminal, matched.id);
+            if !ignored && !is_actionable_terminal(actionable_terminals, constraint, matched.id) {
+                continue;
+            }
+            if !seen_matches.insert((matched.width, matched.id)) {
+                continue;
+            }
+            normalized.push(NormalizedMatch {
+                terminal_id: matched.id,
+                width: matched.width,
+                ignored,
+            });
+        }
+        return normalized;
+    }
+
+    let mut seen_matches = FxHashSet::default();
+    for matched in matches {
+        let ignored = is_ignored_terminal(ignore_terminal, matched.id);
+        if !ignored && !is_actionable_terminal(actionable_terminals, constraint, matched.id) {
+            continue;
+        }
+        if !seen_matches.insert((matched.width, matched.id)) {
+            continue;
+        }
+        normalized.push(NormalizedMatch {
+            terminal_id: matched.id,
+            width: matched.width,
+            ignored,
+        });
+    }
+    normalized
 }
 
 fn prune_initial_states(
@@ -1502,26 +1577,20 @@ fn commit_bytes_impl_profiled(
                             profile.queue_exec_ns += queue_exec_elapsed;
                             profile.exec_ns += queue_exec_elapsed;
 
-                            let mut seen_matches = FxHashSet::default();
+                            let match_start = Instant::now();
+                            let normalized_matches = collect_unique_actionable_matches(
+                                constraint,
+                                actionable_terminals.as_ref(),
+                                ignore_terminal,
+                                &exec_result.matches,
+                                None,
+                            );
+                            profile.queue_match_ns += match_start.elapsed().as_nanos() as u64;
 
-                            for matched in &exec_result.matches {
-                                let match_start = Instant::now();
+                            for matched in normalized_matches {
                                 let new_offset = queue_offset + matched.width;
-                                let ignored = is_ignored_terminal(ignore_terminal, matched.id);
-                                let actionable = ignored
-                                    || is_actionable_terminal(
-                                        actionable_terminals.as_ref(),
-                                        constraint,
-                                        matched.id,
-                                    );
-                                let first_match = seen_matches.insert((matched.width, matched.id));
-                                profile.queue_match_ns += match_start.elapsed().as_nanos() as u64;
 
-                                if !actionable || !first_match {
-                                    continue;
-                                }
-
-                                if ignored {
+                                if matched.ignored {
                                     let enqueue_start = Instant::now();
                                     queue_parser_state(
                                         &mut processing_queue,
@@ -1538,7 +1607,7 @@ fn commit_bytes_impl_profiled(
 
                                 let may_start = Instant::now();
                                 let may_advance =
-                                    stack_may_advance_on(&constraint.table, &gss_at_offset, matched.id);
+                                    stack_may_advance_on(&constraint.table, &gss_at_offset, matched.terminal_id);
                                 let may_elapsed = may_start.elapsed().as_nanos() as u64;
                                 profile.advance_may_check_ns += may_elapsed;
                                 if !may_advance {
@@ -1547,7 +1616,11 @@ fn commit_bytes_impl_profiled(
 
                                 let advance_core_start = Instant::now();
                                 let (advanced_before_disallow, advance_profile) =
-                                    advance_stacks_profiled(&constraint.table, &gss_at_offset, matched.id);
+                                    advance_stacks_profiled(
+                                        &constraint.table,
+                                        &gss_at_offset,
+                                        matched.terminal_id,
+                                    );
                                 let advance_core_elapsed =
                                     advance_core_start.elapsed().as_nanos() as u64;
                                 profile.advance_core_ns += advance_core_elapsed;
@@ -1557,7 +1630,7 @@ fn commit_bytes_impl_profiled(
                                     profile.adv_summary_ns += record_per_advance_entry(
                                         advances,
                                         tokenizer_state,
-                                        matched.id,
+                                        matched.terminal_id,
                                         &gss_at_offset,
                                         &advanced_before_disallow,
                                         queue_offset,
@@ -1572,7 +1645,7 @@ fn commit_bytes_impl_profiled(
                                 let advanced = apply_future_terminal_disallow(
                                     constraint,
                                     &exec_result,
-                                    matched.id,
+                                    matched.terminal_id,
                                     advanced_before_disallow,
                                 );
                                 let future_elapsed = future_start.elapsed().as_nanos() as u64;
@@ -1698,25 +1771,20 @@ fn commit_bytes_impl_profiled(
             profile.queue_exec_ns += queue_exec_elapsed;
             profile.exec_ns += queue_exec_elapsed;
 
-            let mut seen_matches = FxHashSet::default();
+            let match_start = Instant::now();
+            let normalized_matches = collect_unique_actionable_matches(
+                constraint,
+                actionable_terminals.as_ref(),
+                ignore_terminal,
+                &exec_result.matches,
+                None,
+            );
+            profile.queue_match_ns += match_start.elapsed().as_nanos() as u64;
 
-            for matched in &exec_result.matches {
-                let match_start = Instant::now();
+            for matched in normalized_matches {
                 let new_offset = offset + matched.width;
-                let ignored = is_ignored_terminal(ignore_terminal, matched.id);
-                let actionable = ignored
-                    || is_actionable_terminal(actionable_terminals.as_ref(), constraint, matched.id);
-                let first_match = seen_matches.insert((matched.width, matched.id));
-                profile.queue_match_ns += match_start.elapsed().as_nanos() as u64;
 
-                if !actionable {
-                    continue;
-                }
-                if !first_match {
-                    continue;
-                }
-
-                if ignored {
+                if matched.ignored {
                     let enqueue_start = Instant::now();
                     queue_parser_state(
                         &mut processing_queue,
@@ -1731,7 +1799,8 @@ fn commit_bytes_impl_profiled(
                 }
 
                 let may_start = Instant::now();
-                let may_advance = stack_may_advance_on(&constraint.table, &gss_at_offset, matched.id);
+                let may_advance =
+                    stack_may_advance_on(&constraint.table, &gss_at_offset, matched.terminal_id);
                 let may_elapsed = may_start.elapsed().as_nanos() as u64;
                 profile.advance_may_check_ns += may_elapsed;
                 if !may_advance {
@@ -1740,7 +1809,7 @@ fn commit_bytes_impl_profiled(
 
                 let advance_core_start = Instant::now();
                 let (advanced_before_disallow, advance_profile) =
-                    advance_stacks_profiled(&constraint.table, &gss_at_offset, matched.id);
+                    advance_stacks_profiled(&constraint.table, &gss_at_offset, matched.terminal_id);
                 let advance_core_elapsed = advance_core_start.elapsed().as_nanos() as u64;
                 profile.advance_core_ns += advance_core_elapsed;
                 apply_advance_profile(&mut profile, &advance_profile);
@@ -1749,7 +1818,7 @@ fn commit_bytes_impl_profiled(
                     profile.adv_summary_ns += record_per_advance_entry(
                         advances,
                         tokenizer_state,
-                        matched.id,
+                        matched.terminal_id,
                         &gss_at_offset,
                         &advanced_before_disallow,
                         offset,
@@ -1764,7 +1833,7 @@ fn commit_bytes_impl_profiled(
                 let advanced = apply_future_terminal_disallow(
                     constraint,
                     &exec_result,
-                    matched.id,
+                    matched.terminal_id,
                     advanced_before_disallow,
                 );
                 let future_elapsed = future_start.elapsed().as_nanos() as u64;
@@ -2263,27 +2332,20 @@ fn commit_bytes_impl(
                                 tokenizer_state,
                             );
 
-                            bufs.seen_matches.clear();
                             bufs.terminal_result_cache.clear();
 
-                            for matched in &exec_result.matches {
+                            let normalized_matches = collect_unique_actionable_matches(
+                                constraint,
+                                actionable_terminals.as_ref(),
+                                ignore_terminal,
+                                &exec_result.matches,
+                                Some(&mut bufs.seen_matches),
+                            );
+
+                            for matched in normalized_matches {
                                 let new_offset = offset + matched.width;
-                                let ignored = is_ignored_terminal(ignore_terminal, matched.id);
 
-                                if !ignored
-                                    && !is_actionable_terminal(
-                                        actionable_terminals.as_ref(),
-                                        constraint,
-                                        matched.id,
-                                    )
-                                {
-                                    continue;
-                                }
-                                if !bufs.seen_matches.insert((matched.width, matched.id)) {
-                                    continue;
-                                }
-
-                                if ignored {
+                                if matched.ignored {
                                     queue_parser_state(
                                         &mut processing_queue,
                                         &mut bufs.pending_state,
@@ -2298,7 +2360,7 @@ fn commit_bytes_impl(
                                 let Some(gss) = advance_terminal_match(
                                     constraint,
                                     &gss_at_offset,
-                                    matched.id,
+                                    matched.terminal_id,
                                     &exec_result,
                                     &mut bufs.advance_result_cache,
                                     &mut bufs.terminal_result_cache,
@@ -2441,27 +2503,20 @@ fn commit_bytes_impl(
                 execute_tokenizer_from_state_small(constraint, &bytes[offset..], tokenizer_state)
             };
 
-            bufs.seen_matches.clear();
             bufs.terminal_result_cache.clear();
 
-            for matched in &exec_result.matches {
+            let normalized_matches = collect_unique_actionable_matches(
+                constraint,
+                actionable_terminals.as_ref(),
+                ignore_terminal,
+                &exec_result.matches,
+                Some(&mut bufs.seen_matches),
+            );
+
+            for matched in normalized_matches {
                 let new_offset = offset + matched.width;
-                let ignored = is_ignored_terminal(ignore_terminal, matched.id);
 
-                if !ignored
-                    && !is_actionable_terminal(
-                        actionable_terminals.as_ref(),
-                        constraint,
-                        matched.id,
-                    )
-                {
-                    continue;
-                }
-                if !bufs.seen_matches.insert((matched.width, matched.id)) {
-                    continue;
-                }
-
-                if ignored {
+                if matched.ignored {
                     queue_parser_state(
                         &mut processing_queue,
                         &mut bufs.pending_state,
@@ -2476,7 +2531,7 @@ fn commit_bytes_impl(
                 let Some(gss) = advance_terminal_match(
                     constraint,
                     &gss_at_offset,
-                    matched.id,
+                    matched.terminal_id,
                     &exec_result,
                     &mut bufs.advance_result_cache,
                     &mut bufs.terminal_result_cache,
