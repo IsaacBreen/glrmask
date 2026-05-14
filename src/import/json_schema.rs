@@ -5618,7 +5618,7 @@ impl<'a> SchemaCtx<'a> {
             Some("object") => {}
             None if allow_implicit_object
                 && variant.contains_key("properties")
-                && !Self::has_nonempty_pattern_properties(variant)
+                && !variant.contains_key("patternProperties")
                 && !variant.contains_key("propertyNames") => {}
             _ => return Ok(None),
         }
@@ -5626,7 +5626,7 @@ impl<'a> SchemaCtx<'a> {
             Some(Value::Bool(false)) => {}
             _ => return Ok(None),
         }
-        if Self::has_nonempty_pattern_properties(variant)
+        if variant.contains_key("patternProperties")
             || variant.contains_key("propertyNames")
             || variant.contains_key("minProperties")
             || variant.contains_key("maxProperties")
@@ -6689,7 +6689,7 @@ impl<'a> SchemaCtx<'a> {
                 Some(Value::Bool(false)) => {}
                 _ => return Ok(None),
             }
-            if Self::has_nonempty_pattern_properties(v) {
+            if v.contains_key("patternProperties") {
                 return Ok(None);
             }
             if v.contains_key("minProperties") || v.contains_key("maxProperties") {
@@ -6945,9 +6945,7 @@ impl<'a> SchemaCtx<'a> {
             }
             for key in &["patternProperties", "anyOf", "oneOf", "allOf", "$ref",
                          "minProperties", "maxProperties", "if", "then", "else"] {
-                if (*key == "patternProperties" && Self::has_nonempty_pattern_properties(v))
-                    || (*key != "patternProperties" && v.contains_key(*key))
-                {
+                if v.contains_key(*key) {
                     return Ok(None);
                 }
             }
@@ -7075,9 +7073,7 @@ impl<'a> SchemaCtx<'a> {
                 "then",
                 "else",
             ] {
-                if (*key == "patternProperties" && Self::has_nonempty_pattern_properties(v))
-                    || (*key != "patternProperties" && v.contains_key(*key))
-                {
+                if v.contains_key(*key) {
                     return Ok(None);
                 }
             }
@@ -9255,14 +9251,6 @@ impl<'a> SchemaCtx<'a> {
                     .collect()
             })
             .unwrap_or_default()
-    }
-
-    fn has_nonempty_pattern_properties(schema: &Map<String, Value>) -> bool {
-        match schema.get("patternProperties") {
-            Some(Value::Object(patterns)) => !patterns.is_empty(),
-            Some(_) => true,
-            None => false,
-        }
     }
 
     fn key_matches_property_names(
@@ -11788,8 +11776,8 @@ mod tests {
     use super::wrap_string_value_expr_parts;
     use crate::automata::lexer::compile::build_regex;
     use crate::grammar::ast::lower;
-    use crate::grammar::glrm::to_glrm;
     use crate::grammar::ast::GrammarExpr;
+    use crate::grammar::glrm::to_glrm;
     use crate::dump_json_schema_grammar_glrm;
     use serde_json::{json, Value};
     use std::{env, ffi::OsString, sync::Mutex};

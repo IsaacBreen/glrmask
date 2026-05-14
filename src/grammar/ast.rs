@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::GlrMaskError;
+use crate::automata::unweighted_u32::dfa::DFA;
 use crate::automata::lexer::ast::Expr;
 use crate::automata::lexer::regex::parse_regex;
 use crate::ds::u8set::U8Set;
@@ -1264,22 +1265,25 @@ impl Lowerer {
         Ok(nts)
     }
 
-    fn emit_expr_nfa(&mut self, lhs: NonterminalID, expr_nfa: &ExprNFA) -> Result<(), GlrMaskError> {
-        let dfa = expr_nfa.determinize_and_minimize();
-        let nts = self.expr_nfa_state_nonterminals(
-            dfa.states.len(),
-            dfa.start_state as usize,
-            "expr_nfa",
-            Some(lhs),
-        )?;
+    fn emit_expr_dfa_leftlinear(
+        &mut self,
+        lhs: NonterminalID,
+        expr_nfa: &ExprNFA,
+        dfa: &DFA,
+    ) -> Result<(), GlrMaskError> {
+        let state_count = dfa.states.len();
+        let start = dfa.start_state as usize;
+        let nts = self.expr_nfa_state_nonterminals(state_count, start, "expr_nfa_prefix", None)?;
+        let start_nt = nts[start];
+        self.rules.push(Rule {
+            lhs: start_nt,
+            rhs: Vec::new(),
+        });
+
         for (state_index, state) in dfa.states.iter().enumerate() {
-            let state_nt = nts[state_index];
-            if state.is_accepting {
-                self.rules.push(Rule { lhs: state_nt, rhs: Vec::new() });
-            }
             for (label, target) in &state.transitions {
                 let target = *target as usize;
-                if target >= nts.len() {
+                if target >= state_count {
                     return Err(GlrMaskError::GrammarParse(format!(
                         "ExprNFA transition from state {state_index} targets out-of-range state {target}"
                     )));
@@ -1291,20 +1295,30 @@ impl Lowerer {
                 })?;
                 let symbol = self.lower_expr_terminalish(symbol_expr)?;
                 self.rules.push(Rule {
-                    lhs: state_nt,
-                    rhs: vec![symbol, Symbol::Nonterminal(nts[target])],
+                    lhs: nts[target],
+                    rhs: vec![Symbol::Nonterminal(nts[state_index]), symbol],
                 });
             }
         }
+
+        for (state_index, state) in dfa.states.iter().enumerate() {
+            if state.is_accepting {
+                self.rules.push(Rule {
+                    lhs,
+                    rhs: vec![Symbol::Nonterminal(nts[state_index])],
+                });
+            }
+        }
+
         Ok(())
     }
 
-    fn emit_expr_nfa_nonnullable(
+    fn emit_expr_dfa_leftlinear_nonnullable(
         &mut self,
         lhs: NonterminalID,
         expr_nfa: &ExprNFA,
+        dfa: &DFA,
     ) -> Result<(), GlrMaskError> {
-        let dfa = expr_nfa.determinize_and_minimize();
         let state_count = dfa.states.len();
         let start = dfa.start_state as usize;
         if start >= state_count {
@@ -1314,27 +1328,25 @@ impl Lowerer {
             )));
         }
 
-        let mut nullable_nts = Vec::with_capacity(state_count);
-        let mut nonnullable_nts = Vec::with_capacity(state_count);
-        for state_index in 0..state_count {
-            if state_index == start {
-                nullable_nts.push(lhs);
-            } else {
-                let (_, nt) = self.fresh_nonterminal("expr_nfa_nullable_prefix");
-                nullable_nts.push(nt);
-            }
-            let (_, nt) = self.fresh_nonterminal("expr_nfa_nonnullable");
-            nonnullable_nts.push(nt);
-        }
+        let nullable_nts = self.expr_nfa_state_nonterminals(
+            state_count,
+            start,
+            "expr_nfa_nullable_prefix",
+            None,
+        )?;
+        let nonnullable_nts = self.expr_nfa_state_nonterminals(
+            state_count,
+            start,
+            "expr_nfa_nonnullable_prefix",
+            None,
+        )?;
+
+        self.rules.push(Rule {
+            lhs: nullable_nts[start],
+            rhs: Vec::new(),
+        });
 
         for (state_index, state) in dfa.states.iter().enumerate() {
-            if state.is_accepting {
-                self.rules.push(Rule {
-                    lhs: nonnullable_nts[state_index],
-                    rhs: Vec::new(),
-                });
-            }
-
             for (label, target) in &state.transitions {
                 let target = *target as usize;
                 if target >= state_count {
@@ -1351,26 +1363,50 @@ impl Lowerer {
                 if self.expr_is_nullable(symbol_expr) {
                     let symbol = self.lower_expr_terminalish(symbol_expr)?;
                     self.rules.push(Rule {
-                        lhs: nullable_nts[state_index],
-                        rhs: vec![symbol, Symbol::Nonterminal(nullable_nts[target])],
+                        lhs: nullable_nts[target],
+                        rhs: vec![Symbol::Nonterminal(nullable_nts[state_index]), symbol],
                     });
                 }
+
                 if let Some(symbol) = self.lower_nonnullable_expr_symbol(symbol_expr)? {
                     self.rules.push(Rule {
-                        lhs: nullable_nts[state_index],
-                        rhs: vec![symbol, Symbol::Nonterminal(nonnullable_nts[target])],
+                        lhs: nonnullable_nts[target],
+                        rhs: vec![Symbol::Nonterminal(nullable_nts[state_index]), symbol],
                     });
                 }
 
                 let symbol = self.lower_expr_terminalish(symbol_expr)?;
                 self.rules.push(Rule {
-                    lhs: nonnullable_nts[state_index],
-                    rhs: vec![symbol, Symbol::Nonterminal(nonnullable_nts[target])],
+                    lhs: nonnullable_nts[target],
+                    rhs: vec![Symbol::Nonterminal(nonnullable_nts[state_index]), symbol],
+                });
+            }
+        }
+
+        for (state_index, state) in dfa.states.iter().enumerate() {
+            if state.is_accepting {
+                self.rules.push(Rule {
+                    lhs,
+                    rhs: vec![Symbol::Nonterminal(nonnullable_nts[state_index])],
                 });
             }
         }
 
         Ok(())
+    }
+
+    fn emit_expr_nfa(&mut self, lhs: NonterminalID, expr_nfa: &ExprNFA) -> Result<(), GlrMaskError> {
+        let dfa = expr_nfa.determinize_and_minimize();
+        self.emit_expr_dfa_leftlinear(lhs, expr_nfa, &dfa)
+    }
+
+    fn emit_expr_nfa_nonnullable(
+        &mut self,
+        lhs: NonterminalID,
+        expr_nfa: &ExprNFA,
+    ) -> Result<(), GlrMaskError> {
+        let dfa = expr_nfa.determinize_and_minimize();
+        self.emit_expr_dfa_leftlinear_nonnullable(lhs, expr_nfa, &dfa)
     }
 
     fn lower_expr(&mut self, expr: &GrammarExpr) -> Symbol {

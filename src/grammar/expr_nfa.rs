@@ -250,7 +250,7 @@ mod tests {
         assert!(lowered
             .rules
             .iter()
-            .any(|rule| matches!(rule.rhs.as_slice(), [Symbol::Terminal(_), Symbol::Nonterminal(_)])));
+            .any(|rule| matches!(rule.rhs.as_slice(), [Symbol::Nonterminal(_), Symbol::Terminal(_)])));
     }
 
     #[test]

@@ -954,42 +954,127 @@ fn eliminate_hidden_left_recursion(
     rules: &mut Vec<Rule>,
     nullable: &BTreeSet<NonterminalID>,
 ) {
-    const MAX_ITERATIONS: usize = 20;
+    let lr_graph = build_left_reachability_graph(rules, nullable);
+    let cycle = match find_indirect_lr_cycle(&lr_graph) {
+        Some(c) => c,
+        None => return,
+    };
+    let cycle_nodes: BTreeSet<NonterminalID> = cycle.into_iter().collect();
+    let rhs_by_lhs = build_rhs_by_lhs(rules);
 
-    for _ in 0..MAX_ITERATIONS {
-        let lr_graph = build_left_reachability_graph(rules, nullable);
-        let cycle = match find_indirect_lr_cycle(&lr_graph) {
-            Some(c) => c,
-            None => break,
-        };
-        let cycle_nodes: BTreeSet<NonterminalID> = cycle.into_iter().collect();
+    let mut additions = Vec::new();
+    let mut replaced_cycle_rules = HashSet::new();
+    for rule in rules.iter() {
+        if !cycle_nodes.contains(&rule.lhs) {
+            continue;
+        }
 
-        let mut additions = Vec::new();
-        for rule in rules.iter() {
-            if !cycle_nodes.contains(&rule.lhs) {
-                continue;
-            }
-
-            let prefix_end = nullable_prefix_len(&rule.rhs, nullable);
-            // For each skip length, if next symbol is a cycle member, add shortened rule
-            for skip in 1..=prefix_end {
-                let suffix = &rule.rhs[skip..];
-                if let Some(Symbol::Nonterminal(nt)) = suffix.first() {
-                    if cycle_nodes.contains(nt) {
-                        additions.push(Rule {
-                            lhs: rule.lhs,
-                            rhs: suffix.to_vec(),
-                        });
-                    }
+        let prefix_end = nullable_prefix_len(&rule.rhs, nullable);
+        // For each skip length, if next symbol is a cycle member, add shortened rule
+        for skip in 1..=prefix_end {
+            let suffix = &rule.rhs[skip..];
+            if let Some(Symbol::Nonterminal(nt)) = suffix.first() {
+                if cycle_nodes.contains(nt) {
+                    additions.push(Rule {
+                        lhs: rule.lhs,
+                        rhs: suffix.to_vec(),
+                    });
                 }
             }
         }
 
-        if additions.is_empty() {
-            break;
+        let first_after_nullable = rule.rhs.get(prefix_end);
+        if let Some(Symbol::Nonterminal(next_nt)) = first_after_nullable {
+            if *next_nt != rule.lhs && cycle_nodes.contains(next_nt) {
+                let expansions = expand_cycle_head_paths(
+                    &rhs_by_lhs,
+                    &cycle_nodes,
+                    *next_nt,
+                    rule.lhs,
+                );
+                let mut produced_replacement = false;
+                for expansion in expansions {
+                    let mut rhs = expansion;
+                    rhs.extend_from_slice(&rule.rhs[prefix_end + 1..]);
+                    additions.push(Rule { lhs: rule.lhs, rhs });
+                    produced_replacement = true;
+                }
+                if produced_replacement {
+                    replaced_cycle_rules.insert(rule.clone());
+                }
+            }
         }
+    }
+
+    let existing: HashSet<Rule> = rules.iter().cloned().collect();
+    let mut unique_additions = HashSet::new();
+    additions.retain(|rule| !existing.contains(rule) && unique_additions.insert(rule.clone()));
+
+    if !replaced_cycle_rules.is_empty() {
+        rules.retain(|rule| !replaced_cycle_rules.contains(rule));
+    }
+
+    if !additions.is_empty() {
         rules.extend(additions);
     }
+}
+
+fn expand_cycle_head_paths(
+    rhs_by_lhs: &BTreeMap<NonterminalID, BTreeSet<Vec<Symbol>>>,
+    cycle_nodes: &BTreeSet<NonterminalID>,
+    current: NonterminalID,
+    goal: NonterminalID,
+) -> Vec<Vec<Symbol>> {
+    fn expand(
+        rhs_by_lhs: &BTreeMap<NonterminalID, BTreeSet<Vec<Symbol>>>,
+        cycle_nodes: &BTreeSet<NonterminalID>,
+        current: NonterminalID,
+        goal: NonterminalID,
+        visited: &mut BTreeSet<NonterminalID>,
+        out: &mut Vec<Vec<Symbol>>,
+    ) {
+        if !visited.insert(current) {
+            return;
+        }
+
+        if let Some(expansions) = rhs_by_lhs.get(&current) {
+            for expansion_rhs in expansions {
+                match expansion_rhs.first() {
+                    Some(Symbol::Nonterminal(head))
+                        if cycle_nodes.contains(head) && *head != goal =>
+                    {
+                        let mut nested = Vec::new();
+                        expand(
+                            rhs_by_lhs,
+                            cycle_nodes,
+                            *head,
+                            goal,
+                            visited,
+                            &mut nested,
+                        );
+                        for mut nested_rhs in nested {
+                            nested_rhs.extend_from_slice(&expansion_rhs[1..]);
+                            out.push(nested_rhs);
+                        }
+                    }
+                    _ => out.push(expansion_rhs.clone()),
+                }
+            }
+        }
+
+        visited.remove(&current);
+    }
+
+    let mut out = Vec::new();
+    expand(
+        rhs_by_lhs,
+        cycle_nodes,
+        current,
+        goal,
+        &mut BTreeSet::new(),
+        &mut out,
+    );
+    out
 }
 
 fn nullable_prefix_len(rhs: &[Symbol], nullable: &BTreeSet<NonterminalID>) -> usize {
