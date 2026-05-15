@@ -1848,6 +1848,10 @@ fn decoded_search_branch_expr(branch: &str, max_tail: Option<usize>) -> LexerExp
 }
 
 fn decoded_regex_matches_search(pattern: &str, text: &str) -> bool {
+    if let Some(literals) = literal_alternation_search_literals(pattern) {
+        return literals.into_iter().any(|literal| text.contains(literal));
+    }
+
     let expr = LexerExpr::make_choice(
         split_top_level_regex_branches(pattern)
             .into_iter()
@@ -1863,6 +1867,35 @@ fn decoded_regex_matches_search(pattern: &str, text: &str) -> bool {
         state = next;
     }
     regex.dfa.finalizers(state).contains(0)
+}
+
+fn literal_alternation_search_literals(pattern: &str) -> Option<Vec<&str>> {
+    const REGEX_META: &[u8] = b"\\.^$|?*+()[]{}";
+
+    let branches = split_top_level_regex_branches(pattern);
+    if branches.len() <= 1 {
+        return None;
+    }
+
+    let mut literals = Vec::with_capacity(branches.len());
+    for branch in branches {
+        if branch.is_empty() {
+            return None;
+        }
+        if !branch.is_ascii() {
+            return None;
+        }
+        if branch
+            .as_bytes()
+            .iter()
+            .any(|byte| REGEX_META.contains(byte))
+        {
+            return None;
+        }
+        literals.push(branch);
+    }
+
+    Some(literals)
 }
 
 fn env_flag(name: &str) -> bool {
@@ -12103,8 +12136,10 @@ mod tests {
     use super::json_schema_uri_mode;
     use super::json_literal_string_merge_config;
     use super::common_outer_anchor_pattern;
+    use super::decoded_regex_matches_search;
     use super::integer_multiple_expr;
     use super::json_string_merge_config;
+    use super::literal_alternation_search_literals;
     use super::per_object_ap_keys_enabled_for_plan;
     use super::pattern_all_branches_anchored;
     use super::promote_literal_choices_enabled;
@@ -12210,6 +12245,29 @@ mod tests {
         assert!(ctx.increment_schema_build_count().is_ok());
         let err = ctx.increment_schema_build_count().unwrap_err();
         assert!(matches!(err, crate::GlrMaskError::GrammarParse(message) if message == "schema too large"));
+    }
+
+    #[test]
+    fn literal_alternation_fast_path_matches_o48423_pattern() {
+        let pattern = "Red|Blue|Yellow|Gold|Silver|Crystal|Ruby|Sapphire|Emerald|FireRed|LeafGreen|Diamond|Pearl|Platinum|HeartGold|SoulSilver|Black|White|Black 2|White 2|X|Y|Omega Ruby|Alpha Sapphire|Sun|Moon|Ultra Sun|Ultra Moon|Let's Go Pikachu|Let's Go Eevee";
+
+        assert!(decoded_regex_matches_search(pattern, "Pokemon Red Version"));
+        assert!(decoded_regex_matches_search(pattern, "Pokemon Black 2 Version"));
+        assert!(decoded_regex_matches_search(pattern, "Pokemon Let's Go Eevee Save Data"));
+        assert!(!decoded_regex_matches_search(pattern, "Pokemon Scarlet Version"));
+    }
+
+    #[test]
+    fn literal_alternation_fast_path_rejects_non_literal_patterns() {
+        for pattern in ["^foo$", "foo.*bar", "[abc]", r"foo\d+", "(foo|bar)"] {
+            assert!(literal_alternation_search_literals(pattern).is_none(), "pattern should fall back: {pattern}");
+        }
+
+        assert!(decoded_regex_matches_search("^foo$", "foo"));
+        assert!(decoded_regex_matches_search("foo.*bar", "xxfoobazbaryy"));
+        assert!(decoded_regex_matches_search("[abc]", "zzayy"));
+        assert!(decoded_regex_matches_search(r"foo\d+", "prefix foo123 suffix"));
+        assert!(decoded_regex_matches_search("(foo|bar)", "prefix bar suffix"));
     }
 
     #[test]
