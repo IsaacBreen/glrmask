@@ -3774,6 +3774,14 @@ fn emit_schema_ctx_phase_counts(
 }
 
 pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskError> {
+    let validate_schema_keywords_started_at =
+        emit_json_schema_phase_start("validate_schema_keywords");
+    validate_reachable_llguidance_keyword_compatibility(schema)?;
+    emit_json_schema_phase_end(
+        "validate_schema_keywords",
+        validate_schema_keywords_started_at,
+    );
+
     let schema_ctx_new_started_at = emit_json_schema_phase_start("schema_ctx_new");
     let mut ctx = SchemaCtx::new(schema);
     emit_json_schema_phase_end("schema_ctx_new", schema_ctx_new_started_at);
@@ -4036,6 +4044,107 @@ fn enqueue_child_schemas<'a>(
     }
 }
 
+fn enqueue_child_schemas_with_draft<'a>(
+    root: &'a Value,
+    object: &'a Map<String, Value>,
+    draft: JsonSchemaDraft,
+    queue: &mut VecDeque<(&'a Value, JsonSchemaDraft)>,
+) {
+    if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+        queue.extend(properties.values().map(|value| (value, draft)));
+    }
+    if let Some(pattern_properties) = object.get("patternProperties").and_then(Value::as_object) {
+        queue.extend(pattern_properties.values().map(|value| (value, draft)));
+    }
+
+    if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+        if let Some(target) = resolve_shared_ap_ref_target(root, reference) {
+            queue.push_back((target, draft));
+        }
+    }
+
+    for keyword in [
+        "additionalProperties",
+        "propertyNames",
+        "items",
+        "additionalItems",
+        "contains",
+        "unevaluatedProperties",
+        "if",
+        "then",
+        "else",
+        "not",
+    ] {
+        if let Some(value) = object.get(keyword) {
+            queue.push_back((value, draft));
+        }
+    }
+
+    for keyword in ["prefixItems", "allOf", "anyOf", "oneOf"] {
+        if let Some(values) = object.get(keyword).and_then(Value::as_array) {
+            queue.extend(values.iter().map(|value| (value, draft)));
+        }
+    }
+
+    for keyword in ["dependentSchemas"] {
+        if let Some(values) = object.get(keyword).and_then(Value::as_object) {
+            queue.extend(values.values().map(|value| (value, draft)));
+        }
+    }
+}
+
+fn validate_llguidance_keyword_compatibility_for_object(
+    schema: &Map<String, Value>,
+    draft: JsonSchemaDraft,
+) -> Result<(), GlrMaskError> {
+    if schema
+        .keys()
+        .all(|key| META_AND_ANNOTATION_KEYWORDS.contains(&key.as_str()) || !is_known_keyword(draft, key))
+    {
+        return Ok(());
+    }
+
+    let mut unimplemented = schema
+        .keys()
+        .filter(|key| {
+            is_known_keyword(draft, key)
+                && !IMPLEMENTED_JSON_SCHEMA_KEYWORDS.contains(&key.as_str())
+                && !META_AND_ANNOTATION_KEYWORDS.contains(&key.as_str())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unimplemented.is_empty() {
+        unimplemented.sort();
+        return Err(GlrMaskError::GrammarParse(format!(
+            "Unimplemented keys: {:?}",
+            unimplemented
+        )));
+    }
+    Ok(())
+}
+
+fn validate_reachable_llguidance_keyword_compatibility(root: &Value) -> Result<(), GlrMaskError> {
+    let mut queue = VecDeque::from([(root, DEFAULT_JSON_SCHEMA_DRAFT)]);
+    let mut visited = BTreeSet::new();
+
+    while let Some((node, inherited_draft)) = queue.pop_front() {
+        let node_id = node as *const Value as usize;
+        if !visited.insert(node_id) {
+            continue;
+        }
+
+        let Some(object) = node.as_object() else {
+            continue;
+        };
+
+        let draft = detect_draft(object, inherited_draft)?;
+        validate_llguidance_keyword_compatibility_for_object(object, draft)?;
+        enqueue_child_schemas_with_draft(root, object, draft, &mut queue);
+    }
+
+    Ok(())
+}
+
 fn build_enum_terminal_groups(
     prefix: &str,
     value_signatures: BTreeMap<Vec<u8>, Vec<usize>>,
@@ -4249,30 +4358,7 @@ impl<'a> SchemaCtx<'a> {
         schema: &Map<String, Value>,
         draft: JsonSchemaDraft,
     ) -> Result<(), GlrMaskError> {
-        if schema
-            .keys()
-            .all(|key| META_AND_ANNOTATION_KEYWORDS.contains(&key.as_str()) || !is_known_keyword(draft, key))
-        {
-            return Ok(());
-        }
-
-        let mut unimplemented = schema
-            .keys()
-            .filter(|key| {
-                is_known_keyword(draft, key)
-                    && !IMPLEMENTED_JSON_SCHEMA_KEYWORDS.contains(&key.as_str())
-                    && !META_AND_ANNOTATION_KEYWORDS.contains(&key.as_str())
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        if !unimplemented.is_empty() {
-            unimplemented.sort();
-            return Err(GlrMaskError::GrammarParse(format!(
-                "Unimplemented keys: {:?}",
-                unimplemented
-            )));
-        }
-        Ok(())
+        validate_llguidance_keyword_compatibility_for_object(schema, draft)
     }
 
     fn one_of_is_explicitly_coerced(&self) -> bool {
@@ -12124,6 +12210,52 @@ mod tests {
         assert!(ctx.increment_schema_build_count().is_ok());
         let err = ctx.increment_schema_build_count().unwrap_err();
         assert!(matches!(err, crate::GlrMaskError::GrammarParse(message) if message == "schema too large"));
+    }
+
+    #[test]
+    fn nested_if_then_reports_unimplemented_keys() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "type": "object",
+                    "if": {
+                        "properties": {
+                            "kind": { "const": "x" }
+                        }
+                    },
+                    "then": {
+                        "required": ["value"]
+                    }
+                }
+            }
+        });
+
+        let err = schema_to_named_grammar(&schema).unwrap_err();
+        assert!(matches!(err, crate::GlrMaskError::GrammarParse(message) if message == "Unimplemented keys: [\"if\", \"then\"]"));
+    }
+
+    #[test]
+    fn local_ref_if_then_reports_unimplemented_keys() {
+        let schema = json!({
+            "$ref": "#/$defs/branch",
+            "$defs": {
+                "branch": {
+                    "type": "object",
+                    "if": {
+                        "properties": {
+                            "kind": { "const": "x" }
+                        }
+                    },
+                    "then": {
+                        "required": ["value"]
+                    }
+                }
+            }
+        });
+
+        let err = schema_to_named_grammar(&schema).unwrap_err();
+        assert!(matches!(err, crate::GlrMaskError::GrammarParse(message) if message == "Unimplemented keys: [\"if\", \"then\"]"));
     }
 
     fn find_rule_line_with_prefix<'a>(glrm: &'a str, rule_prefix: &str) -> &'a str {
