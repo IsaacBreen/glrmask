@@ -106,6 +106,7 @@ const EXACT_CLOSED_OBJECT_SINGLE_MAX_KEYS: usize = 16;
 const EXACT_CLOSED_OBJECT_UNION_MAX_STATES: usize = 128;
 const ANYOF_OBJECT_EXPR_DFA_MAX_STATES: usize = 512;
 const FACTORED_OPEN_OBJECT_MAX_KEYS: usize = 200;
+const REQUIRED_SHARED_AP_POWERSHOT_BAILOUT_THRESHOLD: usize = 32;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 enum JsonSchemaDraft {
@@ -10834,6 +10835,15 @@ impl<'a> SchemaCtx<'a> {
             );
         }
 
+        if properties.is_none()
+            && required_list.len() > REQUIRED_SHARED_AP_POWERSHOT_BAILOUT_THRESHOLD
+            && pattern_properties.is_none()
+            && property_names.is_none()
+            && additional_schema.is_some()
+        {
+            return Err(GlrMaskError::GrammarParse("schema too large".into()));
+        }
+
         if !required_list.is_empty() && pattern_properties.is_none() && property_names.is_none() {
             return self.build_required_any_order_object_expr(&required_list, additional_schema);
         }
@@ -12153,6 +12163,7 @@ mod tests {
     use super::wrap_string_value_expr_parts;
     use crate::automata::lexer::compile::build_regex;
     use crate::grammar::ast::lower;
+    use crate::GlrMaskError;
     use crate::grammar::ast::GrammarExpr;
     use crate::grammar::glrm::to_glrm;
     use crate::dump_json_schema_grammar_glrm;
@@ -13314,6 +13325,41 @@ mod tests {
             }
             other => panic!("expected top-level intersect, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn large_required_only_shared_ap_object_errors_as_schema_too_large() {
+        let required = (0..33)
+            .map(|idx| format!("field_{idx}"))
+            .collect::<Vec<_>>();
+        let schema = json!({
+            "type": "object",
+            "required": required,
+            "additionalProperties": {"type": "string"}
+        });
+
+        let err = schema_to_named_grammar(&schema).unwrap_err();
+        assert!(matches!(
+            err,
+            GlrMaskError::GrammarParse(message) if message == "schema too large"
+        ));
+    }
+
+    #[test]
+    fn small_required_only_shared_ap_object_still_builds() {
+        let required = (0..4)
+            .map(|idx| format!("field_{idx}"))
+            .collect::<Vec<_>>();
+        let schema = json!({
+            "type": "object",
+            "required": required,
+            "additionalProperties": {"type": "string"}
+        });
+
+        let named = schema_to_named_grammar(&schema).unwrap();
+        let glrm = to_glrm(&named);
+        assert!(glrm.contains("obj_req_any_"), "{glrm}");
+        lower(&named).unwrap();
     }
 }
 
