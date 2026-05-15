@@ -108,13 +108,18 @@ impl<'a> ExactSubtractionResolver<'a> {
             ))
         })?;
         let lhs_alts = top_level_alternatives(lhs_rule_expr);
+        let lhs_alt_keys = lhs_alts
+            .iter()
+            .map(|alt| self.canonical_exact_expr(alt))
+            .collect::<Vec<_>>();
         let mut remaining_indices = (0..lhs_alts.len()).collect::<Vec<_>>();
         let mut removed_indices = Vec::new();
 
         for remove_alt in self.exact_subtraction_alternatives(lhs_name, exclude)? {
+            let remove_alt_key = self.canonical_exact_expr(&remove_alt);
             let Some(position) = remaining_indices
                 .iter()
-                .position(|&index| lhs_alts[index] == remove_alt)
+                .position(|&index| lhs_alt_keys[index] == remove_alt_key)
             else {
                 return Err(GlrMaskError::GrammarParse(format!(
                     "no exact alternative {:?} in {}",
@@ -159,6 +164,107 @@ impl<'a> ExactSubtractionResolver<'a> {
                 Ok(top_level_alternatives(referenced_expr))
             }
             other => Ok(top_level_alternatives(other)),
+        }
+    }
+
+    fn canonical_exact_expr(&self, expr: &GrammarExpr) -> GrammarExpr {
+        let mut visiting = HashSet::new();
+        let mut memo = HashMap::new();
+        self.canonical_exact_expr_inner(expr, &mut visiting, &mut memo)
+    }
+
+    fn canonical_exact_expr_inner(
+        &self,
+        expr: &GrammarExpr,
+        visiting: &mut HashSet<String>,
+        memo: &mut HashMap<String, GrammarExpr>,
+    ) -> GrammarExpr {
+        match strip_grouping(expr) {
+            GrammarExpr::Ref(name) => {
+                if self.rule_is_terminal.get(name).copied().unwrap_or(false) {
+                    return GrammarExpr::Ref(name.clone());
+                }
+                let Some(referenced) = self.rule_exprs.get(name) else {
+                    return GrammarExpr::Ref(name.clone());
+                };
+                if let Some(canonical) = memo.get(name) {
+                    return canonical.clone();
+                }
+                if !visiting.insert(name.clone()) {
+                    return GrammarExpr::Ref(name.clone());
+                }
+                let canonical = self.canonical_exact_expr_inner(referenced, visiting, memo);
+                visiting.remove(name);
+                memo.insert(name.clone(), canonical.clone());
+                canonical
+            }
+            GrammarExpr::Grouped(inner) => self.canonical_exact_expr_inner(inner, visiting, memo),
+            GrammarExpr::Optional(inner) => GrammarExpr::Optional(Box::new(
+                self.canonical_exact_expr_inner(inner, visiting, memo),
+            )),
+            GrammarExpr::Repeat(inner) => GrammarExpr::Repeat(Box::new(
+                self.canonical_exact_expr_inner(inner, visiting, memo),
+            )),
+            GrammarExpr::RepeatOne(inner) => GrammarExpr::RepeatOne(Box::new(
+                self.canonical_exact_expr_inner(inner, visiting, memo),
+            )),
+            GrammarExpr::RepeatRange { expr, min, max } => GrammarExpr::RepeatRange {
+                expr: Box::new(self.canonical_exact_expr_inner(expr, visiting, memo)),
+                min: *min,
+                max: *max,
+            },
+            GrammarExpr::Sequence(items) => GrammarExpr::Sequence(
+                items
+                    .iter()
+                    .map(|item| self.canonical_exact_expr_inner(item, visiting, memo))
+                    .collect(),
+            ),
+            GrammarExpr::Choice(items) => GrammarExpr::Choice(
+                items
+                    .iter()
+                    .map(|item| self.canonical_exact_expr_inner(item, visiting, memo))
+                    .collect(),
+            ),
+            GrammarExpr::Exclude { expr, exclude } => GrammarExpr::Exclude {
+                expr: Box::new(self.canonical_exact_expr_inner(expr, visiting, memo)),
+                exclude: Box::new(self.canonical_exact_expr_inner(exclude, visiting, memo)),
+            },
+            GrammarExpr::Intersect { expr, intersect } => GrammarExpr::Intersect {
+                expr: Box::new(self.canonical_exact_expr_inner(expr, visiting, memo)),
+                intersect: Box::new(self.canonical_exact_expr_inner(intersect, visiting, memo)),
+            },
+            GrammarExpr::SeparatedSequence {
+                items,
+                separator,
+                allow_empty,
+            } => GrammarExpr::SeparatedSequence {
+                items: items
+                    .iter()
+                    .map(|(item, required)| {
+                        (
+                            self.canonical_exact_expr_inner(item, visiting, memo),
+                            *required,
+                        )
+                    })
+                    .collect(),
+                separator: Box::new(self.canonical_exact_expr_inner(separator, visiting, memo)),
+                allow_empty: *allow_empty,
+            },
+            GrammarExpr::ExprNFA(expr_nfa) => GrammarExpr::ExprNFA(Box::new(
+                crate::grammar::expr_nfa::ExprNFA {
+                    nfa: expr_nfa.nfa.clone(),
+                    symbols: expr_nfa
+                        .symbols
+                        .iter()
+                        .map(|symbol| self.canonical_exact_expr_inner(symbol, visiting, memo))
+                        .collect(),
+                },
+            )),
+            GrammarExpr::Epsilon
+            | GrammarExpr::Literal(_)
+            | GrammarExpr::CharClass { .. }
+            | GrammarExpr::RawRegex(_)
+            | GrammarExpr::AnyByte => strip_grouping(expr).clone(),
         }
     }
 }
@@ -624,6 +730,15 @@ mod tests {
         }
     }
 
+    fn terminal(name: &str, expr: GrammarExpr) -> NamedRule {
+        NamedRule {
+            name: name.to_string(),
+            expr,
+            is_terminal: true,
+            is_internal: false,
+        }
+    }
+
     fn literal(text: &str) -> GrammarExpr {
         GrammarExpr::Literal(text.as_bytes().to_vec())
     }
@@ -779,6 +894,69 @@ mod tests {
                     "start",
                     subtract("A", GrammarExpr::Grouped(Box::new(literal("c")))),
                 ),
+            ],
+            start: "start".to_string(),
+            ignore: None,
+        };
+
+        let err = lower_exact_subtractions(&mut grammar).unwrap_err();
+        assert!(format!("{err}").contains("no exact alternative"), "{err}");
+    }
+
+    #[test]
+    fn exact_subtraction_matches_nonterminal_alias_body() {
+        let mut grammar = NamedGrammar {
+            rules: vec![
+                terminal("JSON_STRING_BODY", literal("body\"")),
+                nonterminal(
+                    "json_string",
+                    GrammarExpr::Sequence(vec![
+                        literal("\""),
+                        GrammarExpr::Ref("JSON_STRING_BODY".to_string()),
+                    ]),
+                ),
+                nonterminal(
+                    "json_value",
+                    GrammarExpr::Choice(vec![
+                        GrammarExpr::Ref("json_string".to_string()),
+                        literal("0"),
+                    ]),
+                ),
+                nonterminal(
+                    "start",
+                    subtract("json_value", GrammarExpr::Ref("json_string".to_string())),
+                ),
+            ],
+            start: "start".to_string(),
+            ignore: None,
+        };
+
+        let stats = lower_exact_subtractions(&mut grammar).unwrap();
+
+        assert_eq!(stats.rewritten_sites, 1);
+        assert!(!contains_exclude(&find_rule(&grammar, "start").expr));
+        lower(&grammar).unwrap();
+    }
+
+    #[test]
+    fn exact_subtraction_canonicalization_is_cycle_safe() {
+        let mut grammar = NamedGrammar {
+            rules: vec![
+                nonterminal(
+                    "loop",
+                    GrammarExpr::Sequence(vec![
+                        GrammarExpr::Ref("loop".to_string()),
+                        literal("y"),
+                    ]),
+                ),
+                nonterminal(
+                    "A",
+                    GrammarExpr::Choice(vec![
+                        GrammarExpr::Ref("loop".to_string()),
+                        literal("x"),
+                    ]),
+                ),
+                nonterminal("start", subtract("A", literal("z"))),
             ],
             start: "start".to_string(),
             ignore: None,
