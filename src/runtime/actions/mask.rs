@@ -18,6 +18,7 @@ type DenseMaskGSS = LeveledGSS<u32, DenseMaskAcc>;
 
 const DELTA_SEED_MIN_SAVINGS: u64 = 2048;
 const MASK_SINGLE_PATH_DIRECT_MAX_DEPTH: u32 = 64;
+const MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS: usize = 6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MaskQueueMode {
@@ -996,7 +997,7 @@ impl<'a> ConstraintState<'a> {
             return false;
         }
 
-        let mut paths = SmallVec::<[(u32, TerminalsDisallowed, SmallVec<[u32; 16]>); 4]>::new();
+        let mut paths = SmallVec::<[(u32, TerminalsDisallowed, SmallVec<[u32; 16]>); MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS]>::new();
         for (&original_tokenizer_state, gss) in &self.state {
             if gss.max_depth() > MASK_SINGLE_PATH_DIRECT_MAX_DEPTH {
                 return false;
@@ -1024,7 +1025,7 @@ impl<'a> ConstraintState<'a> {
                 stack.clear();
                 stack.extend(stack_bottom_first.iter().rev().copied());
                 paths.push((original_tokenizer_state, terminals_disallowed, stack.clone()));
-                if paths.len() > 4 {
+                if paths.len() > MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS {
                     return false;
                 }
             }
