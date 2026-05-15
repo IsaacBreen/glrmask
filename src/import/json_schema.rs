@@ -2222,6 +2222,7 @@ struct SharedStringValuePlan {
 }
 
 fn collect_shared_additional_key_plan(root: &Value) -> SharedAdditionalKeyPlan {
+    let bfs_scan_started_at = emit_schema_ctx_phase_start("shared_ap_bfs_scan");
     let mut literal_keys = BTreeSet::new();
     let mut pattern_keys = BTreeSet::new();
     let mut queue = VecDeque::from([root]);
@@ -2291,7 +2292,16 @@ fn collect_shared_additional_key_plan(root: &Value) -> SharedAdditionalKeyPlan {
             }
         }
     }
+    emit_schema_ctx_phase_end("shared_ap_bfs_scan", bfs_scan_started_at);
 
+    let literal_keys_by_pattern_started_at =
+        emit_schema_ctx_phase_start("shared_ap_literal_keys_by_pattern");
+    emit_schema_ctx_phase_counts(
+        "shared_ap_literal_keys_by_pattern",
+        literal_keys.len(),
+        pattern_keys.len(),
+        literal_keys.len().saturating_mul(pattern_keys.len()),
+    );
     let mut literal_keys_by_pattern = BTreeMap::new();
     for pattern in &pattern_keys {
         let matching_keys = literal_keys
@@ -2301,6 +2311,10 @@ fn collect_shared_additional_key_plan(root: &Value) -> SharedAdditionalKeyPlan {
             .collect::<BTreeSet<_>>();
         literal_keys_by_pattern.insert(pattern.clone(), matching_keys);
     }
+    emit_schema_ctx_phase_end(
+        "shared_ap_literal_keys_by_pattern",
+        literal_keys_by_pattern_started_at,
+    );
 
     SharedAdditionalKeyPlan {
         literal_keys,
@@ -3713,6 +3727,44 @@ fn emit_json_schema_phase_end(name: &'static str, started_at: Option<std::time::
     }
 }
 
+fn emit_schema_ctx_phase_start(name: &'static str) -> Option<std::time::Instant> {
+    if !json_schema_phase_profile_enabled() {
+        return None;
+    }
+
+    eprintln!("[glrmask/profile][schema-ctx-phase-start] name={}", name);
+    Some(std::time::Instant::now())
+}
+
+fn emit_schema_ctx_phase_end(name: &'static str, started_at: Option<std::time::Instant>) {
+    if let Some(started_at) = started_at {
+        eprintln!(
+            "[glrmask/profile][schema-ctx-phase-end] name={} elapsed_ms={:.3}",
+            name,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+}
+
+fn emit_schema_ctx_phase_counts(
+    name: &'static str,
+    literal_keys: usize,
+    pattern_keys: usize,
+    cross_product: usize,
+) {
+    if !json_schema_phase_profile_enabled() {
+        return;
+    }
+
+    eprintln!(
+        "[glrmask/profile][schema-ctx-phase-counts] name={} literal_keys={} pattern_keys={} cross_product={}",
+        name,
+        literal_keys,
+        pattern_keys,
+        cross_product,
+    );
+}
+
 pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskError> {
     let schema_ctx_new_started_at = emit_json_schema_phase_start("schema_ctx_new");
     let mut ctx = SchemaCtx::new(schema);
@@ -4016,6 +4068,7 @@ fn rule_name_force_visible_terminal(name: &str) -> bool {
 
 impl<'a> SchemaCtx<'a> {
     fn new(root: &'a Value) -> Self {
+        let guidance_flags_started_at = emit_schema_ctx_phase_start("guidance_flags");
         let (coerce_one_of, lenient_json_schema) = root
             .as_object()
             .and_then(|object| object.get("x-guidance"))
@@ -4033,8 +4086,29 @@ impl<'a> SchemaCtx<'a> {
                 )
             })
             .unwrap_or((false, false));
-        let enum_terminal_plan = EnumTerminalPlan::for_root(root);
+        emit_schema_ctx_phase_end("guidance_flags", guidance_flags_started_at);
 
+        let enum_terminal_plan_started_at = emit_schema_ctx_phase_start("enum_terminal_plan_for_root");
+        let enum_terminal_plan = EnumTerminalPlan::for_root(root);
+        emit_schema_ctx_phase_end("enum_terminal_plan_for_root", enum_terminal_plan_started_at);
+
+        let shared_additional_key_plan_started_at =
+            emit_schema_ctx_phase_start("collect_shared_additional_key_plan");
+        let shared_additional_key_plan = collect_shared_additional_key_plan(root);
+        emit_schema_ctx_phase_end(
+            "collect_shared_additional_key_plan",
+            shared_additional_key_plan_started_at,
+        );
+
+        let shared_string_value_plan_started_at =
+            emit_schema_ctx_phase_start("collect_shared_string_value_plan");
+        let shared_string_value_plan = collect_shared_string_value_plan(root);
+        emit_schema_ctx_phase_end(
+            "collect_shared_string_value_plan",
+            shared_string_value_plan_started_at,
+        );
+
+        let ctx_init_started_at = emit_schema_ctx_phase_start("ctx_init");
         let mut ctx = Self {
             root_schema: root,
             coerce_one_of,
@@ -4049,8 +4123,8 @@ impl<'a> SchemaCtx<'a> {
             expr_dedup_cache: BTreeMap::new(),
             json_string_exact_cache: BTreeMap::new(),
             json_string_upto_cache: BTreeMap::new(),
-            shared_additional_key_plan: collect_shared_additional_key_plan(root),
-            shared_string_value_plan: collect_shared_string_value_plan(root),
+            shared_additional_key_plan,
+            shared_string_value_plan,
             shared_string_value_exclusions_enabled: !string_value_exclusions_abdcffb6b_compat()
                 && env_flag_default("GLRMASK_SHARED_STRING_VALUE_EXCLUSIONS", true),
             anyof_object_expr_nfa_cache: BTreeMap::new(),
@@ -4059,8 +4133,19 @@ impl<'a> SchemaCtx<'a> {
             schema_convert_cache: BTreeMap::new(),
             enum_terminal_plan,
         };
+        emit_schema_ctx_phase_end("ctx_init", ctx_init_started_at);
+
+        let ensure_base_rules_started_at = emit_schema_ctx_phase_start("ensure_base_rules");
         ctx.ensure_base_rules();
+        emit_schema_ctx_phase_end("ensure_base_rules", ensure_base_rules_started_at);
+
+        let ensure_enum_terminal_rules_started_at =
+            emit_schema_ctx_phase_start("ensure_enum_terminal_rules");
         ctx.ensure_enum_terminal_rules();
+        emit_schema_ctx_phase_end(
+            "ensure_enum_terminal_rules",
+            ensure_enum_terminal_rules_started_at,
+        );
         ctx
     }
 
