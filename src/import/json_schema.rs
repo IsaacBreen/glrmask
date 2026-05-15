@@ -3690,18 +3690,68 @@ fn merge_two_schemas(s1: &Map<String, Value>, s2: &Map<String, Value>) -> Map<St
     merged
 }
 
+fn json_schema_phase_profile_enabled() -> bool {
+    crate::compiler::compile::compile_profile_enabled()
+}
+
+fn emit_json_schema_phase_start(name: &'static str) -> Option<std::time::Instant> {
+    if !json_schema_phase_profile_enabled() {
+        return None;
+    }
+
+    eprintln!("[glrmask/profile][json-schema-phase-start] name={}", name);
+    Some(std::time::Instant::now())
+}
+
+fn emit_json_schema_phase_end(name: &'static str, started_at: Option<std::time::Instant>) {
+    if let Some(started_at) = started_at {
+        eprintln!(
+            "[glrmask/profile][json-schema-phase-end] name={} elapsed_ms={:.3}",
+            name,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+}
+
 pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskError> {
+    let schema_ctx_new_started_at = emit_json_schema_phase_start("schema_ctx_new");
     let mut ctx = SchemaCtx::new(schema);
+    emit_json_schema_phase_end("schema_ctx_new", schema_ctx_new_started_at);
+
+    let register_root_definitions_started_at =
+        emit_json_schema_phase_start("register_root_definitions");
     ctx.register_root_definitions();
+    emit_json_schema_phase_end(
+        "register_root_definitions",
+        register_root_definitions_started_at,
+    );
+
+    let materialize_registered_refs_started_at =
+        emit_json_schema_phase_start("materialize_registered_refs");
     ctx.materialize_registered_refs()?;
+    emit_json_schema_phase_end(
+        "materialize_registered_refs",
+        materialize_registered_refs_started_at,
+    );
+
+    let convert_schema_root_started_at = emit_json_schema_phase_start("convert_schema_root");
     let start_expr = match ctx.convert_schema(schema) {
         Ok(expr) => expr,
         Err(err) if is_unsat_schema_error(&err) => never_expr(),
         Err(err) => return Err(err),
     };
+    emit_json_schema_phase_end("convert_schema_root", convert_schema_root_started_at);
 
+    let insert_start_rule_started_at = emit_json_schema_phase_start("insert_start_rule");
     ctx.insert_rule("start", start_expr);
+    emit_json_schema_phase_end("insert_start_rule", insert_start_rule_started_at);
+
+    let hoist_pattern_terminals_started_at =
+        emit_json_schema_phase_start("hoist_pattern_terminals");
     ctx.hoist_pattern_terminals_in_nonterminals();
+    emit_json_schema_phase_end("hoist_pattern_terminals", hoist_pattern_terminals_started_at);
+
+    let terminal_name_scan_started_at = emit_json_schema_phase_start("terminal_name_scan");
     let terminal_names: BTreeSet<String> = ctx
         .rules
         .iter()
@@ -3709,15 +3759,27 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
         .filter(|name| rule_name_is_terminal(name))
         .map(|s| s.to_string())
         .collect();
+    emit_json_schema_phase_end("terminal_name_scan", terminal_name_scan_started_at);
+
+    let named_rule_materialization_started_at =
+        emit_json_schema_phase_start("named_rule_materialization");
     let rules: Vec<NamedRule> = ctx.rules.into_iter().map(|(name, expr)| {
         let is_terminal = terminal_names.contains(&name);
         NamedRule { name, expr, is_terminal, is_internal: false }
     }).collect();
+    emit_json_schema_phase_end(
+        "named_rule_materialization",
+        named_rule_materialization_started_at,
+    );
 
     // Mark terminal rules as internal-only when they are never referenced
     // from any nonterminal rule body.  Internal terminals exist solely as
     // sub-expressions of other terminal rules (resolved via Expr::Shared).
+    let collect_visible_started_at = emit_json_schema_phase_start("collect_grammar_visible_refs");
     let grammar_visible = collect_grammar_visible_refs(&rules, &terminal_names);
+    emit_json_schema_phase_end("collect_grammar_visible_refs", collect_visible_started_at);
+
+    let mark_internal_started_at = emit_json_schema_phase_start("mark_internal_terminals");
     let rules = rules.into_iter().map(|mut rule| {
         if rule.is_terminal
             && !grammar_visible.contains(&rule.name)
@@ -3727,6 +3789,7 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
         }
         rule
     }).collect();
+    emit_json_schema_phase_end("mark_internal_terminals", mark_internal_started_at);
 
     Ok(NamedGrammar {
         rules,
