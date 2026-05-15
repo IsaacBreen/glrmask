@@ -6355,229 +6355,6 @@ impl<'a> SchemaCtx<'a> {
             .collect())
     }
 
-    fn get_or_create_anyof_object_dfa_state_id(
-        builder: &mut ExprNfaBuilder,
-        state_ids: &mut BTreeMap<AnyOfObjectDfaState, u32>,
-        queue: &mut VecDeque<AnyOfObjectDfaState>,
-        state: AnyOfObjectDfaState,
-    ) -> u32 {
-        if let Some(&existing) = state_ids.get(&state) {
-            return existing;
-        }
-        let id = builder.add_state();
-        state_ids.insert(state, id);
-        queue.push_back(state);
-        id
-    }
-
-    fn expr_is_exact_json_value_ref(expr: &GrammarExpr) -> bool {
-        matches!(expr, GrammarExpr::Ref(name) if name == JSON_VALUE_RULE)
-    }
-
-    fn expr_is_canonical_json_string_body(expr: &GrammarExpr) -> bool {
-        match expr {
-            GrammarExpr::Grouped(inner) => Self::expr_is_canonical_json_string_body(inner),
-            GrammarExpr::Ref(name) => name == JSON_STRING_BODY_RULE,
-            GrammarExpr::Sequence(parts) if parts.len() == 1 => {
-                Self::expr_is_canonical_json_string_body(&parts[0])
-            }
-            GrammarExpr::Sequence(parts) if parts.len() == 2 => {
-                matches!(&parts[0], GrammarExpr::Repeat(inner)
-                    if matches!(inner.as_ref(), GrammarExpr::Ref(name) if name == JSON_STRING_CHAR_RULE))
-                    && matches!(&parts[1], GrammarExpr::Literal(bytes) if bytes == b"\"")
-            }
-            _ => false,
-        }
-    }
-
-    fn expr_is_canonical_json_string(expr: &GrammarExpr) -> bool {
-        match expr {
-            GrammarExpr::Grouped(inner) => Self::expr_is_canonical_json_string(inner),
-            GrammarExpr::Ref(name) => name == JSON_STRING_RULE,
-            GrammarExpr::Sequence(parts) if parts.len() == 1 => {
-                Self::expr_is_canonical_json_string(&parts[0])
-            }
-            GrammarExpr::Sequence(parts) if parts.len() == 2 => {
-                matches!(&parts[0], GrammarExpr::Literal(bytes) if bytes == b"\"")
-                    && Self::expr_is_canonical_json_string_body(&parts[1])
-            }
-            _ => false,
-        }
-    }
-
-    fn key_matches_any_pattern(
-        patterns: &BTreeSet<String>,
-        key: &str,
-    ) -> Result<bool, GlrMaskError> {
-        for pattern in patterns {
-            if Self::schema_pattern_matches_key(pattern, key)? {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    fn collect_string_partition_start_overlap_peer_variants(
-        &self,
-        state: AnyOfObjectDfaState,
-        key: &str,
-        variants: &[AnyOfObjectVariant],
-    ) -> Result<Vec<usize>, GlrMaskError> {
-        if state.phase != AnyOfObjectDfaPhase::Fixed || state.has_content || state.cursor != 0 {
-            return Ok(Vec::new());
-        }
-
-        let mut peers = Vec::new();
-        for (peer_idx, peer_variant) in variants.iter().enumerate() {
-            if peer_idx == state.variant_idx as usize {
-                continue;
-            }
-            if !peer_variant.close_allowed(0) {
-                continue;
-            }
-            if !matches!(
-                peer_variant.additional_value_expr.as_ref(),
-                Some(expr) if Self::expr_is_exact_json_value_ref(expr)
-            ) {
-                continue;
-            }
-            if peer_variant.fixed_keys.contains(key) {
-                continue;
-            }
-            if Self::key_matches_any_pattern(&peer_variant.pattern_keys, key)? {
-                continue;
-            }
-            peers.push(peer_idx);
-        }
-        Ok(peers)
-    }
-
-    fn collect_string_partition_start_overlap_excluded_ap_keys(
-        &self,
-        state: AnyOfObjectDfaState,
-        variants: &[AnyOfObjectVariant],
-    ) -> Result<BTreeSet<String>, GlrMaskError> {
-        if state.phase != AnyOfObjectDfaPhase::Fixed || state.has_content || state.cursor != 0 {
-            return Ok(BTreeSet::new());
-        }
-
-        let mut excluded = BTreeSet::new();
-        for (source_idx, source_variant) in variants.iter().enumerate() {
-            if source_idx == state.variant_idx as usize {
-                continue;
-            }
-            let source_state = AnyOfObjectDfaState {
-                variant_idx: source_idx as u16,
-                cursor: 0,
-                has_content: false,
-                phase: AnyOfObjectDfaPhase::Fixed,
-            };
-            for key in source_variant.legal_next_keys(0) {
-                let Some(value_expr) = source_variant.value_expr_for_key(key) else {
-                    continue;
-                };
-                if !Self::expr_is_canonical_json_string(&value_expr) {
-                    continue;
-                }
-                let peers = self.collect_string_partition_start_overlap_peer_variants(
-                    source_state,
-                    key,
-                    variants,
-                )?;
-                if peers.iter().any(|&peer_idx| peer_idx == state.variant_idx as usize) {
-                    excluded.insert(key.to_string());
-                }
-            }
-        }
-        Ok(excluded)
-    }
-
-    fn emit_string_partitioned_start_key_overlap(
-        &mut self,
-        builder: &mut ExprNfaBuilder,
-        state_ids: &mut BTreeMap<AnyOfObjectDfaState, u32>,
-        queue: &mut VecDeque<AnyOfObjectDfaState>,
-        source_state: AnyOfObjectDfaState,
-        source_state_id: u32,
-        key: &str,
-        next_cursor: usize,
-        peer_variant_indices: &[usize],
-        variants: &[AnyOfObjectVariant],
-    ) {
-        let next_state = AnyOfObjectDfaState {
-            variant_idx: source_state.variant_idx,
-            cursor: next_cursor as u16,
-            has_content: true,
-            phase: AnyOfObjectDfaPhase::Fixed,
-        };
-        let next_state_id = Self::get_or_create_anyof_object_dfa_state_id(
-            builder,
-            state_ids,
-            queue,
-            next_state,
-        );
-
-        let mut peer_source_ids = Vec::new();
-        let mut peer_ap_state_ids = Vec::new();
-        for &peer_idx in peer_variant_indices {
-            let peer_source_state = AnyOfObjectDfaState {
-                variant_idx: peer_idx as u16,
-                cursor: 0,
-                has_content: false,
-                phase: AnyOfObjectDfaPhase::Fixed,
-            };
-            if let Some(&peer_source_id) = state_ids.get(&peer_source_state) {
-                peer_source_ids.push(peer_source_id);
-            }
-            let peer_ap_state = AnyOfObjectDfaState {
-                variant_idx: peer_idx as u16,
-                cursor: variants[peer_idx].len() as u16,
-                has_content: true,
-                phase: AnyOfObjectDfaPhase::Additional,
-            };
-            let peer_ap_state_id = Self::get_or_create_anyof_object_dfa_state_id(
-                builder,
-                state_ids,
-                queue,
-                peer_ap_state,
-            );
-            peer_ap_state_ids.push(peer_ap_state_id);
-        }
-
-        let prefix_entry_id = builder.add_state();
-        let prefix_leaf_id = builder.add_state();
-        builder.add_epsilon(source_state_id, prefix_entry_id);
-        for peer_source_id in peer_source_ids {
-            builder.add_epsilon(peer_source_id, prefix_entry_id);
-        }
-        let mut prefix_symbols = Vec::new();
-        if source_state.has_content {
-            prefix_symbols.push(self.json_item_separator_expr());
-        }
-        prefix_symbols.push(self.json_key_colon_literal(key));
-        Self::add_expr_nfa_symbol_path(builder, prefix_entry_id, prefix_symbols, prefix_leaf_id);
-
-        let overlap_leaf_id = builder.add_state();
-        builder.add_transition(prefix_leaf_id, self.json_string_ref(), overlap_leaf_id);
-        builder.add_epsilon(overlap_leaf_id, next_state_id);
-        for &peer_ap_state_id in &peer_ap_state_ids {
-            builder.add_epsilon(overlap_leaf_id, peer_ap_state_id);
-        }
-
-        let residual_leaf_id = builder.add_state();
-        builder.add_transition(
-            prefix_leaf_id,
-            GrammarExpr::Exclude {
-                expr: Box::new(self.json_value_ref()),
-                exclude: Box::new(self.json_string_ref()),
-            },
-            residual_leaf_id,
-        );
-        for peer_ap_state_id in peer_ap_state_ids {
-            builder.add_epsilon(residual_leaf_id, peer_ap_state_id);
-        }
-    }
-
     fn add_expr_nfa_symbol_path(
         builder: &mut ExprNfaBuilder,
         from: u32,
@@ -6654,12 +6431,14 @@ impl<'a> SchemaCtx<'a> {
                     has_content: true,
                     phase: AnyOfObjectDfaPhase::Pattern,
                 };
-                let pattern_state_id = Self::get_or_create_anyof_object_dfa_state_id(
-                    &mut builder,
-                    &mut state_ids,
-                    &mut queue,
-                    pattern_state,
-                );
+                let pattern_state_id = if let Some(&existing) = state_ids.get(&pattern_state) {
+                    existing
+                } else {
+                    let id = builder.add_state();
+                    state_ids.insert(pattern_state, id);
+                    queue.push_back(pattern_state);
+                    id
+                };
                 for pattern_pair_expr in &variant.pattern_pair_exprs {
                     let mut symbols = Vec::new();
                     if state.has_content {
@@ -6683,20 +6462,18 @@ impl<'a> SchemaCtx<'a> {
                         has_content: true,
                         phase: AnyOfObjectDfaPhase::Additional,
                     };
-                    let ap_state_id = Self::get_or_create_anyof_object_dfa_state_id(
-                        &mut builder,
-                        &mut state_ids,
-                        &mut queue,
-                        ap_state,
-                    );
-                    let mut ap_excluded_keys = variant.fixed_keys.clone();
-                    ap_excluded_keys.extend(
-                        self.collect_string_partition_start_overlap_excluded_ap_keys(state, variants)?,
-                    );
+                    let ap_state_id = if let Some(&existing) = state_ids.get(&ap_state) {
+                        existing
+                    } else {
+                        let id = builder.add_state();
+                        state_ids.insert(ap_state, id);
+                        queue.push_back(ap_state);
+                        id
+                    };
                     let key_symbol_paths = self.build_anyof_object_ap_key_symbol_paths(
                         base_name,
                         state.variant_idx as usize,
-                        &ap_excluded_keys,
+                        &variant.fixed_keys,
                         &variant.pattern_keys,
                     )?;
                     for key_symbols in key_symbol_paths {
@@ -6752,34 +6529,14 @@ impl<'a> SchemaCtx<'a> {
                     has_content: true,
                     phase: AnyOfObjectDfaPhase::Fixed,
                 };
-                if Self::expr_is_canonical_json_string(&value_expr) {
-                    let overlap_peers = self.collect_string_partition_start_overlap_peer_variants(
-                        state,
-                        key,
-                        variants,
-                    )?;
-                    if !overlap_peers.is_empty() {
-                        self.emit_string_partitioned_start_key_overlap(
-                            &mut builder,
-                            &mut state_ids,
-                            &mut queue,
-                            state,
-                            state_id,
-                            key,
-                            next_cursor,
-                            &overlap_peers,
-                            variants,
-                        );
-                        continue;
-                    }
-                }
-
-                let next_state_id = Self::get_or_create_anyof_object_dfa_state_id(
-                    &mut builder,
-                    &mut state_ids,
-                    &mut queue,
-                    next_state,
-                );
+                let next_state_id = if let Some(&existing) = state_ids.get(&next_state) {
+                    existing
+                } else {
+                    let id = builder.add_state();
+                    state_ids.insert(next_state, id);
+                    queue.push_back(next_state);
+                    id
+                };
 
                 let mut symbols = Vec::new();
                 if state.has_content {
@@ -12078,8 +11835,6 @@ mod tests {
     use super::string_value_body_regex;
     use super::uri_quote_merge_warning_needed;
     use super::wrap_string_value_expr_parts;
-    use super::JSON_STRING_RULE;
-    use super::JSON_VALUE_RULE;
     use crate::automata::lexer::compile::build_regex;
     use crate::grammar::ast::lower;
     use crate::grammar::ast::GrammarExpr;
@@ -12163,42 +11918,6 @@ mod tests {
         named.rules
             .iter()
             .any(|rule| expr_contains_expr_nfa(&rule.expr))
-    }
-
-    fn expr_nfa_contains_string_partition(expr: &GrammarExpr) -> bool {
-        match expr {
-            GrammarExpr::Grouped(inner) => expr_nfa_contains_string_partition(inner),
-            GrammarExpr::ExprNFA(expr_nfa) => expr_nfa.symbols.iter().any(|symbol| {
-                matches!(
-                    symbol,
-                    GrammarExpr::Exclude { expr, exclude }
-                        if matches!(expr.as_ref(), GrammarExpr::Ref(name) if name == JSON_VALUE_RULE)
-                            && matches!(exclude.as_ref(), GrammarExpr::Ref(name) if name == JSON_STRING_RULE)
-                )
-            }),
-            GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
-                parts.iter().any(expr_nfa_contains_string_partition)
-            }
-            GrammarExpr::Optional(inner)
-            | GrammarExpr::Repeat(inner)
-            | GrammarExpr::RepeatOne(inner) => expr_nfa_contains_string_partition(inner),
-            GrammarExpr::RepeatRange { expr, .. } => expr_nfa_contains_string_partition(expr),
-            GrammarExpr::Exclude { expr, exclude }
-            | GrammarExpr::Intersect { expr, intersect: exclude } => {
-                expr_nfa_contains_string_partition(expr)
-                    || expr_nfa_contains_string_partition(exclude)
-            }
-            GrammarExpr::SeparatedSequence { items, separator, .. } => {
-                items.iter().any(|(item, _)| expr_nfa_contains_string_partition(item))
-                    || expr_nfa_contains_string_partition(separator)
-            }
-            GrammarExpr::Ref(_)
-            | GrammarExpr::Literal(_)
-            | GrammarExpr::Epsilon
-            | GrammarExpr::CharClass { .. }
-            | GrammarExpr::RawRegex(_)
-            | GrammarExpr::AnyByte => false,
-        }
     }
 
     fn find_rule_line_with_prefix<'a>(glrm: &'a str, rule_prefix: &str) -> &'a str {
@@ -12538,47 +12257,6 @@ mod tests {
 
         let named = schema_to_named_grammar(&schema).unwrap();
         assert!(named.rules.iter().any(|rule| expr_contains_expr_nfa(&rule.expr)));
-        lower(&named).unwrap();
-    }
-
-    #[test]
-    fn anyof_object_expr_nfa_partitions_shared_start_key_overlap_with_json_string() {
-        let schema = json!({
-            "definitions": {
-                "PathPoint": {
-                    "type": "object",
-                    "properties": {
-                        "$ref": {"type": "string", "format": "uri"}
-                    }
-                },
-                "ArrayPoint": {
-                    "type": "array",
-                    "items": {"type": "string"}
-                },
-                "Point": {
-                    "anyOf": [
-                        {"$ref": "#/definitions/PathPoint"},
-                        {"$ref": "#/definitions/ArrayPoint"},
-                        {
-                            "type": "object",
-                            "patternProperties": {
-                                "^(/[^/]+)+$": {"$ref": "#/definitions/Point"}
-                            }
-                        }
-                    ]
-                }
-            },
-            "$ref": "#/definitions/Point"
-        });
-
-        let named = schema_to_named_grammar(&schema).unwrap();
-        assert!(
-            named
-                .rules
-                .iter()
-                .any(|rule| expr_nfa_contains_string_partition(&rule.expr)),
-            "{named:#?}"
-        );
         lower(&named).unwrap();
     }
 
