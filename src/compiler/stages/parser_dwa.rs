@@ -36,6 +36,12 @@ fn add_target_contribution(contribs: &mut TargetContribs, target: u32, add: Weig
     }
 }
 
+fn extend_target_contribs(dst: &mut TargetContribs, src: &TargetContribs) {
+    for (target, weight) in src {
+        add_target_contribution(dst, *target, weight.clone());
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Branch {
     target: u32,
@@ -750,10 +756,12 @@ fn determinize_parser_dwa_with_fallbacks(
     let mut touched_dense_labels: Vec<usize> = Vec::new();
     let mut dense_label_touched: Vec<bool> = vec![false; dense_label_limit];
     let mut default_touched = false;
+    let mut dense_default_all_raw_targets: TargetContribs = TargetContribs::new();
     let mut key_buf: Vec<(u32, usize)> = Vec::new();
     let mut final_contributions: Vec<Weight> = Vec::new();
 
     while let Some(subset_entries) = worklist.pop_front() {
+        dense_default_all_raw_targets.clear();
         let from_state = subset_map[&subset_key(&subset_entries)];
 
         final_contributions.clear();
@@ -799,6 +807,7 @@ fn determinize_parser_dwa_with_fallbacks(
             let Some((default_target, default_weight)) = state.transitions.get(&DEFAULT_LABEL) else {
                 continue;
             };
+
             let fallback_weight = path_weight.intersection(default_weight);
             if fallback_weight.is_empty() {
                 continue;
@@ -827,15 +836,11 @@ fn determinize_parser_dwa_with_fallbacks(
 
             match possible_by_state.get(*dwa_state_id as usize) {
                 Some(PossibleOutgoingIds::All) => {
-                    for parser_state_id in 0..num_parser_states {
-                        let label_idx = parser_state_id as usize;
-                        if !dense_label_touched[label_idx] {
-                            dense_label_touched[label_idx] = true;
-                            touched_dense_labels.push(label_idx);
-                        }
-                        let target_weights = &mut dense_raw_targets[label_idx];
-                        add_target_contribution(target_weights, *default_target, fallback_weight.clone());
-                    }
+                    add_target_contribution(
+                        &mut dense_default_all_raw_targets,
+                        *default_target,
+                        fallback_weight.clone(),
+                    );
                 }
                 Some(PossibleOutgoingIds::Some(ids)) => {
                     for parser_state_id in ids.iter_ones() {
@@ -888,7 +893,16 @@ fn determinize_parser_dwa_with_fallbacks(
 
         for label_idx in touched_dense_labels.drain(..) {
             dense_label_touched[label_idx] = false;
-            process_label(label_idx as i32, std::mem::take(&mut dense_raw_targets[label_idx]));
+            if !dense_default_all_raw_targets.is_empty() {
+                extend_target_contribs(
+                    &mut dense_raw_targets[label_idx],
+                    &dense_default_all_raw_targets,
+                );
+            }
+            process_label(
+                label_idx as i32,
+                std::mem::take(&mut dense_raw_targets[label_idx]),
+            );
         }
         if default_touched {
             default_touched = false;
