@@ -1351,10 +1351,10 @@ fn json_escaped_byte_fragments(byte: u8) -> Vec<String> {
         b'"' => fragments.push(String::from(r#"\x5C\x22"#)),
         b'/' => fragments.push(String::from(r#"\x5C\x2F"#)),
         b'\\' => fragments.push(String::from(r#"\x5C\x5C"#)),
-        0x08 => fragments.push(String::from(r#"\x5Cb"#)),
+        0x08 => fragments.push(String::from(r#"\x5C\x62"#)),
         0x09 => fragments.push(String::from(r#"\x5Ct"#)),
         0x0A => fragments.push(String::from(r#"\x5Cn"#)),
-        0x0C => fragments.push(String::from(r#"\x5Cf"#)),
+        0x0C => fragments.push(String::from(r#"\x5C\x66"#)),
         0x0D => fragments.push(String::from(r#"\x5Cr"#)),
         _ => {}
     }
@@ -1569,8 +1569,8 @@ fn compact_negated_json_class(excluded: &BTreeSet<u8>, exclude_nbsp: bool) -> St
     let named_escapes: &[(u8, &str)] = &[
         (0x22, r#"\x5C\x22"#),  // \"
         (0x5C, r#"\x5C\x5C"#),  // \\
-        (0x08, r#"\x5Cb"#),     // \b
-        (0x0C, r#"\x5Cf"#),     // \f
+        (0x08, r#"\x5C\x62"#), // \b
+        (0x0C, r#"\x5C\x66"#), // \f
         (0x0A, r#"\x5Cn"#),     // \n
         (0x0D, r#"\x5Cr"#),     // \r
         (0x09, r#"\x5Ct"#),     // \t
@@ -8454,7 +8454,7 @@ impl<'a> SchemaCtx<'a> {
                 const MAX_BOUNDED_SEARCH_TAIL: usize = 100;
                 if let Some(ml) = max_len {
                     if ml <= MAX_BOUNDED_SEARCH_TAIL {
-                        let search_expr = decoded_regex_search_expr(&pattern, None);
+                        let search_expr = decoded_regex_search_expr(&pattern, Some(ml));
                         let intersected = LexerExpr::Intersect {
                             expr: Box::new(search_expr),
                             intersect: Box::new(lexer_repeat(json_string_char_lexer_expr(), min_len, Some(ml))),

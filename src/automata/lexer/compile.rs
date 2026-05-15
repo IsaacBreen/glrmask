@@ -858,11 +858,15 @@ pub fn build_regex(exprs: &[Expr]) -> Regex {
         dfa.set_group_u8set(group_id as u32, set);
     }
 
+    let mut group_ops_changed = false;
     if !plan.exclusions.is_empty() {
-        dfa.apply_group_exclusions(&plan.exclusions);
+        group_ops_changed |= dfa.apply_group_exclusions(&plan.exclusions);
     }
     if !plan.intersections.is_empty() {
-        dfa.apply_group_intersections(&plan.intersections);
+        group_ops_changed |= dfa.apply_group_intersections(&plan.intersections);
+    }
+    if group_ops_changed {
+        dfa.recompute_possible_futures();
     }
 
     let dfa = if plan.visible_groups < plan.compiled_exprs.len() {

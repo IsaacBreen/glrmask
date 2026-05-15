@@ -321,6 +321,75 @@ fn json_schema_email_format_rejects_missing_at_sign() {
 }
 
 #[test]
+fn json_schema_pattern_with_max_length_token_mask_rejects_overlong_identifier() {
+    let schema_text = r#"{
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 18,
+                    "pattern": "^[A-Za-z][A-Za-z0-9_]*"
+                }
+            },
+            "required": ["name"],
+            "additionalProperties": false
+        }"#;
+    let token_constraint = schema(
+        &["OptionsItemSelected", "TemperatureSensor"],
+        schema_text,
+    );
+
+    let mut token_state = token_constraint.start();
+    token_state.commit_bytes(br#"{"name": ""#).unwrap();
+    assert_eq!(allowed(&token_state.mask()), vec![1]);
+
+    let mut overlong_token_state = token_constraint.start();
+    overlong_token_state.commit_bytes(br#"{"name": ""#).unwrap();
+    assert!(overlong_token_state.commit_token(0).is_err());
+
+    let mut allowed_token_state = token_constraint.start();
+    allowed_token_state.commit_bytes(br#"{"name": ""#).unwrap();
+    allowed_token_state.commit_token(1).unwrap();
+
+    let mut token_prefix_state = token_constraint.start();
+    token_prefix_state.commit_bytes(br#"{"name": ""#).unwrap();
+    assert!(token_prefix_state.commit_bytes(b"OptionsItemSelected").is_err());
+
+    let constraint = byte_schema(
+        schema_text,
+    );
+
+    let mut prefix_state = constraint.start();
+    prefix_state.commit_bytes(br#"{"name": "#).unwrap();
+    assert!(prefix_state.commit_bytes(b"OptionsItemSelected").is_err());
+
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(br#"{"name": "OptionsItemSelected"}"#).is_err());
+}
+
+#[test]
+fn json_schema_pattern_with_s_separator_accepts_tab_and_formfeed_prefixes() {
+    let constraint = byte_schema(
+        r#"{
+            "type": "string",
+            "pattern": "^(KONG_\\w+=\\S+)*(\\sKONG_\\w+=\\S+)*$"
+        }"#,
+    );
+
+    let mut tab_state = constraint.start();
+    tab_state.commit_bytes(br#"""#).unwrap();
+    tab_state.commit_bytes(br#"\t"#).unwrap();
+
+    let mut formfeed_state = constraint.start();
+    formfeed_state.commit_bytes(br#"""#).unwrap();
+    formfeed_state.commit_bytes(br#"\f"#).unwrap();
+
+    assert_accepts_bytes(&constraint, br#""\tKONG_A=x""#);
+    assert_accepts_bytes(&constraint, br#""\fKONG_A=x""#);
+}
+
+#[test]
 fn json_schema_pattern_accepts_decoded_quote_string() {
     let constraint = byte_schema(r#"{"type":"string","pattern":"^\"$"}"#);
     assert_accepts_bytes(&constraint, br#""\"""#);

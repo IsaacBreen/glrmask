@@ -36,7 +36,7 @@ fn ascii_digit_set() -> U8Set {
 }
 
 fn ascii_space_set() -> U8Set {
-    U8Set::from_bytes(b" \t\r\n")
+    U8Set::from_bytes(b" \t\r\n\x0B\x0C")
 }
 
 fn ascii_word_set() -> U8Set {
