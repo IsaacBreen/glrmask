@@ -3091,11 +3091,16 @@ fn simple_repeated_single_char_expr(pattern: &str) -> Option<LexerExpr> {
     // characters outside the char-class, so we must fall back to the general
     // json_search_pattern path.
     let core = pattern.strip_prefix('^')?.strip_suffix('$')?;
-    let repeated = core.strip_suffix('+')?;
-    if !(repeated.starts_with('[') && repeated.ends_with(']')) {
+    let expr = parse_regex(core, true);
+    let LexerExpr::Repeat { expr, min: 1, max: None } = expr else {
+        return None;
+    };
+    let unit_expr = *expr;
+    let (min_len, max_len) = regex_byte_length_bounds(&unit_expr);
+    if min_len != 1 || max_len != Some(1) {
         return None;
     }
-    Some(decoded_regex_fullmatch_expr(repeated))
+    Some(json_encoded_regex_expr(unit_expr))
 }
 
 /// Returns `true` when every top-level branch of `pattern` starts with `^` and
@@ -12143,6 +12148,7 @@ mod tests {
     use super::json_literal_string_merge_config;
     use super::common_outer_anchor_pattern;
     use super::decoded_regex_matches_search;
+    use super::decoded_regex_fullmatch_expr;
     use super::integer_multiple_expr;
     use super::json_string_merge_config;
     use super::literal_alternation_search_literals;
@@ -13201,6 +13207,26 @@ mod tests {
         assert!(!accepts("12"));
         assert!(!accepts("10.5"));
         assert!(regex.num_states() < 20);
+    }
+
+    #[test]
+    fn decoded_regex_fullmatch_expr_preserves_multi_digit_separator_language() {
+        let regex = build_regex(&[decoded_regex_fullmatch_expr(r"[0-9]+x[0-9]+")]);
+        let accepts = |text: &str| {
+            let mut state = 0u32;
+            for &byte in text.as_bytes() {
+                let Some(next) = regex.step(state, byte) else {
+                    return false;
+                };
+                state = next;
+            }
+            regex.dfa.finalizers(state).contains(0)
+        };
+
+        assert!(accepts("1x2"));
+        assert!(accepts("1920x1080"));
+        assert!(!accepts("1x23x"));
+        assert!(!accepts("1920x108x0"));
     }
 
     #[test]

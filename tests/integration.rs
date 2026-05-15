@@ -454,6 +454,36 @@ fn json_schema_pattern_accepts_decoded_newline_escape_spellings() {
 }
 
 #[test]
+fn json_schema_pattern_accepts_multi_digit_dimensions_string() {
+    let constraint = byte_schema(r#"{"type":"string","pattern":"^[0-9]+x[0-9]+$"}"#);
+    assert_accepts_bytes(&constraint, br#""1920x1080""#);
+}
+
+#[test]
+fn json_schema_pattern_rejects_extra_separator_in_dimensions_string() {
+    let constraint = byte_schema(r#"{"type":"string","pattern":"^[0-9]+x[0-9]+$"}"#);
+
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(br#""1920x108x0""#).is_err());
+}
+
+#[test]
+fn json_schema_pattern_dimensions_prefix_rejects_second_separator_token() {
+    let constraint = byte_schema(r#"{"type":"string","pattern":"^[0-9]+x[0-9]+$"}"#);
+    let mut state = constraint.start();
+
+    state.commit_bytes(br#""1920x108"#).unwrap();
+    let mask = allowed(&state.mask());
+    assert!(mask.contains(&(b'0' as usize)));
+    assert!(!mask.contains(&(b'x' as usize)));
+    assert!(state.commit_bytes(b"x").is_err());
+
+    let mut ok_state = constraint.start();
+    ok_state.commit_bytes(br#""1920x108"#).unwrap();
+    ok_state.commit_bytes(b"0").unwrap();
+}
+
+#[test]
 fn json_schema_dot_pattern_rejects_invalid_utf8_bytes() {
     let constraint = byte_schema(r#"{"type":"string","pattern":"^.$"}"#);
     assert_accepts_bytes(&constraint, br#""a""#);
