@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 
@@ -98,6 +99,7 @@ const UNTYPED_SCHEMA_APPLICABLE_TYPES: &[(&str, &[&str])] = &[
     ("number", UNTYPED_NUMBER_KEYWORD_KEYS),
 ];
 const UNSAT_SCHEMA_ERROR: &str = "__unsat_schema__";
+const JSON_SCHEMA_BUILD_LIMIT: usize = 50_000;
 const EXACT_CLOSED_OBJECT_UNION_MAX_VARIANTS: usize = 8;
 const EXACT_CLOSED_OBJECT_UNION_MAX_KEYS: usize = 16;
 const EXACT_CLOSED_OBJECT_SINGLE_MAX_KEYS: usize = 16;
@@ -3486,12 +3488,18 @@ fn bare_ref_value(schema: &Value) -> Option<&str> {
     annotation_only.then_some(ref_value)
 }
 
-fn merge_two_schemas(s1: &Map<String, Value>, s2: &Map<String, Value>) -> Map<String, Value> {
+fn merge_two_schemas(
+    ctx: &SchemaCtx<'_>,
+    s1: &Map<String, Value>,
+    s2: &Map<String, Value>,
+) -> Result<Map<String, Value>, GlrMaskError> {
+    ctx.increment_schema_build_count()?;
+
     if s2.is_empty() {
-        return s1.clone();
+        return Ok(s1.clone());
     }
     if s1.is_empty() {
-        return s2.clone();
+        return Ok(s2.clone());
     }
 
     let mut merged = Map::new();
@@ -3504,7 +3512,7 @@ fn merge_two_schemas(s1: &Map<String, Value>, s2: &Map<String, Value>) -> Map<St
             if intersection.is_empty() {
                 let mut unsat = Map::new();
                 unsat.insert("not".into(), Value::Object(Map::new()));
-                return unsat;
+                return Ok(unsat);
             }
             if intersection.len() == 1 {
                 merged.insert("type".into(), Value::String(intersection[0].clone()));
@@ -3550,7 +3558,7 @@ fn merge_two_schemas(s1: &Map<String, Value>, s2: &Map<String, Value>) -> Map<St
                 props2.and_then(|props| props.get(&key)).and_then(Value::as_object),
             ) {
                 (Some(left), Some(right)) => {
-                    merged_props.insert(key, Value::Object(merge_two_schemas(left, right)));
+                    merged_props.insert(key, Value::Object(merge_two_schemas(ctx, left, right)?));
                 }
                 _ => {
                     if let Some(value) = props1.and_then(|props| props.get(&key)).cloned() {
@@ -3595,7 +3603,7 @@ fn merge_two_schemas(s1: &Map<String, Value>, s2: &Map<String, Value>) -> Map<St
         } else if let (Some(Value::Object(left)), Some(Value::Object(right))) = (ap1, ap2) {
             merged.insert(
                 "additionalProperties".into(),
-                Value::Object(merge_two_schemas(left, right)),
+                Value::Object(merge_two_schemas(ctx, left, right)?),
             );
         } else if has_ap1 {
             merged.insert(
@@ -3701,7 +3709,7 @@ fn merge_two_schemas(s1: &Map<String, Value>, s2: &Map<String, Value>) -> Map<St
         }
     }
 
-    merged
+    Ok(merged)
 }
 
 fn json_schema_phase_profile_enabled() -> bool {
@@ -3854,6 +3862,8 @@ struct SchemaCtx<'a> {
     root_schema: &'a Value,
     coerce_one_of: bool,
     lenient_json_schema: bool,
+    schema_build_count: Cell<usize>,
+    schema_build_limit: usize,
     rules: Vec<(String, GrammarExpr)>,
     rule_indices: BTreeMap<String, usize>,
     used_rule_names: BTreeSet<String>,
@@ -4113,6 +4123,8 @@ impl<'a> SchemaCtx<'a> {
             root_schema: root,
             coerce_one_of,
             lenient_json_schema,
+            schema_build_count: Cell::new(0),
+            schema_build_limit: JSON_SCHEMA_BUILD_LIMIT,
             rules: Vec::new(),
             rule_indices: BTreeMap::new(),
             used_rule_names: BTreeSet::new(),
@@ -4147,6 +4159,15 @@ impl<'a> SchemaCtx<'a> {
             ensure_enum_terminal_rules_started_at,
         );
         ctx
+    }
+
+    fn increment_schema_build_count(&self) -> Result<(), GlrMaskError> {
+        let next = self.schema_build_count.get().saturating_add(1);
+        self.schema_build_count.set(next);
+        if next > self.schema_build_limit {
+            return Err(GlrMaskError::GrammarParse("schema too large".into()));
+        }
+        Ok(())
     }
 
     fn ensure_enum_terminal_rules(&mut self) {
@@ -4341,63 +4362,66 @@ impl<'a> SchemaCtx<'a> {
         &self,
         schema: &Map<String, Value>,
         keyword: &str,
-    ) -> Option<Vec<Value>> {
-        let options = schema.get(keyword)?.as_array()?;
+    ) -> Result<Option<Vec<Value>>, GlrMaskError> {
+        let Some(options) = schema.get(keyword).and_then(Value::as_array) else {
+            return Ok(None);
+        };
         let base = Self::schema_without_keys(schema, &["anyOf", "oneOf"]);
-        Some(
-            options
-                .iter()
-                .map(|option| {
-                    if base.is_empty() {
-                        Value::Object(self.schema_for_intersection(option))
-                    } else {
-                        Value::Object(
-                            self.merge_resolved_subschemas(&base, std::slice::from_ref(option)),
-                        )
-                    }
-                })
-                .collect(),
-        )
+        let resolved = options
+            .iter()
+            .map(|option| {
+                if base.is_empty() {
+                    Ok(Value::Object(self.schema_for_intersection(option)?))
+                } else {
+                    Ok(Value::Object(
+                        self.merge_resolved_subschemas(&base, std::slice::from_ref(option))?,
+                    ))
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Some(resolved))
     }
 
-    fn normalized_allof_schema(&self, schema: &Map<String, Value>) -> Option<Value> {
-        let all_of = schema.get("allOf")?.as_array()?;
+    fn normalized_allof_schema(&self, schema: &Map<String, Value>) -> Result<Option<Value>, GlrMaskError> {
+        let Some(all_of) = schema.get("allOf").and_then(Value::as_array) else {
+            return Ok(None);
+        };
         let base = Self::schema_without_keys(schema, &["allOf"]);
-        Some(Value::Object(self.merge_resolved_subschemas(&base, all_of)))
+        Ok(Some(Value::Object(self.merge_resolved_subschemas(&base, all_of)?)))
     }
 
-    fn schemas_are_verifiably_disjoint(&self, left: &Value, right: &Value) -> bool {
+    fn schemas_are_verifiably_disjoint(&self, left: &Value, right: &Value) -> Result<bool, GlrMaskError> {
         if left == &Value::Bool(false) || right == &Value::Bool(false) {
-            return true;
+            return Ok(true);
         }
         if left == &Value::Bool(true) || right == &Value::Bool(true) {
-            return false;
+            return Ok(false);
         }
 
         let Some(left_object) = left.as_object() else {
-            return false;
+            return Ok(false);
         };
         let Some(right_object) = right.as_object() else {
-            return false;
+            return Ok(false);
         };
 
         if let Some(reference) = left_object.get("$ref").and_then(Value::as_str) {
             if let Ok(target) = self.resolve_local_ref(reference) {
                 return self.schemas_are_verifiably_disjoint(target, right);
             }
-            return false;
+            return Ok(false);
         }
         if let Some(reference) = right_object.get("$ref").and_then(Value::as_str) {
             if let Ok(target) = self.resolve_local_ref(reference) {
                 return self.schemas_are_verifiably_disjoint(left, target);
             }
-            return false;
+            return Ok(false);
         }
 
-        if let Some(normalized) = self.normalized_allof_schema(left_object) {
+        if let Some(normalized) = self.normalized_allof_schema(left_object)? {
             return self.schemas_are_verifiably_disjoint(&normalized, right);
         }
-        if let Some(normalized) = self.normalized_allof_schema(right_object) {
+        if let Some(normalized) = self.normalized_allof_schema(right_object)? {
             return self.schemas_are_verifiably_disjoint(left, &normalized);
         }
 
@@ -4405,58 +4429,70 @@ impl<'a> SchemaCtx<'a> {
             self.schema_const_value(left),
             self.schema_const_value(right),
         ) {
-            return left_const != right_const;
+            return Ok(left_const != right_const);
         }
 
         if let (Some(left_const), Some(right_enum)) = (
             self.schema_const_value(left),
             self.schema_enum_values(right),
         ) {
-            return !right_enum.iter().any(|value| value == left_const);
+            return Ok(!right_enum.iter().any(|value| value == left_const));
         }
 
         if let (Some(left_enum), Some(right_const)) = (
             self.schema_enum_values(left),
             self.schema_const_value(right),
         ) {
-            return !left_enum.iter().any(|value| value == right_const);
+            return Ok(!left_enum.iter().any(|value| value == right_const));
         }
 
         if let (Some(left_enum), Some(right_enum)) = (
             self.schema_enum_values(left),
             self.schema_enum_values(right),
         ) {
-            return left_enum
+            return Ok(left_enum
                 .iter()
-                .all(|left_value| !right_enum.iter().any(|right_value| right_value == left_value));
+                .all(|left_value| !right_enum.iter().any(|right_value| right_value == left_value)));
         }
 
         if let (Some(left_literal), Some(right_literal)) = (
             self.schema_exact_string_literal(left),
             self.schema_exact_string_literal(right),
         ) {
-            return left_literal != right_literal;
+            return Ok(left_literal != right_literal);
         }
 
-        if let Some(any_of) = self.resolved_structural_options(left_object, "anyOf") {
-            return any_of
-                .iter()
-                .all(|option| self.schemas_are_verifiably_disjoint(option, right));
+        if let Some(any_of) = self.resolved_structural_options(left_object, "anyOf")? {
+            for option in &any_of {
+                if !self.schemas_are_verifiably_disjoint(option, right)? {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
         }
-        if let Some(one_of) = self.resolved_structural_options(left_object, "oneOf") {
-            return one_of
-                .iter()
-                .all(|option| self.schemas_are_verifiably_disjoint(option, right));
+        if let Some(one_of) = self.resolved_structural_options(left_object, "oneOf")? {
+            for option in &one_of {
+                if !self.schemas_are_verifiably_disjoint(option, right)? {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
         }
-        if let Some(any_of) = self.resolved_structural_options(right_object, "anyOf") {
-            return any_of
-                .iter()
-                .all(|option| self.schemas_are_verifiably_disjoint(left, option));
+        if let Some(any_of) = self.resolved_structural_options(right_object, "anyOf")? {
+            for option in &any_of {
+                if !self.schemas_are_verifiably_disjoint(left, option)? {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
         }
-        if let Some(one_of) = self.resolved_structural_options(right_object, "oneOf") {
-            return one_of
-                .iter()
-                .all(|option| self.schemas_are_verifiably_disjoint(left, option));
+        if let Some(one_of) = self.resolved_structural_options(right_object, "oneOf")? {
+            for option in &one_of {
+                if !self.schemas_are_verifiably_disjoint(left, option)? {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
         }
 
         let left_types = self.schema_type_names(left);
@@ -4470,7 +4506,7 @@ impl<'a> SchemaCtx<'a> {
                 })
             });
             if !overlaps {
-                return true;
+                return Ok(true);
             }
         }
 
@@ -4495,43 +4531,49 @@ impl<'a> SchemaCtx<'a> {
                 keys.extend(required.iter().filter_map(Value::as_str).map(String::from));
             }
 
-            return keys.into_iter().any(|key| {
+            for key in keys {
                 let left_prop = self
                     .schema_object_property(left, &key)
                     .unwrap_or(&Value::Bool(true));
                 let right_prop = self
                     .schema_object_property(right, &key)
                     .unwrap_or(&Value::Bool(true));
-                self.schemas_are_verifiably_disjoint(left_prop, right_prop)
-            });
+                if self.schemas_are_verifiably_disjoint(left_prop, right_prop)? {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
         }
 
-        false
+        Ok(false)
     }
 
     fn one_of_options_are_safe_to_coerce(
         &self,
         schema: &Map<String, Value>,
         options: &[Value],
-    ) -> bool {
+    ) -> Result<bool, GlrMaskError> {
         let resolved: Vec<Value> = options
             .iter()
             .map(|option| {
                 if has_structural_keywords(schema) {
                     let base = Self::schema_without_keys(schema, &["anyOf", "oneOf"]);
-                    Value::Object(self.merge_resolved_subschemas(&base, std::slice::from_ref(option)))
+                    Ok(Value::Object(self.merge_resolved_subschemas(&base, std::slice::from_ref(option))?))
                 } else {
-                    Value::Object(self.schema_for_intersection(option))
+                    Ok(Value::Object(self.schema_for_intersection(option)?))
                 }
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
 
-        resolved.iter().enumerate().all(|(index, left)| {
-            resolved
-                .iter()
-                .skip(index + 1)
-                .all(|right| self.schemas_are_verifiably_disjoint(left, right))
-        })
+        for (index, left) in resolved.iter().enumerate() {
+            for right in resolved.iter().skip(index + 1) {
+                if !self.schemas_are_verifiably_disjoint(left, right)? {
+                    return Ok(false);
+                }
+            }
+        }
+
+        Ok(true)
     }
 
     fn insert_rule(&mut self, name: impl Into<String>, expr: GrammarExpr) -> String {
@@ -5561,42 +5603,43 @@ impl<'a> SchemaCtx<'a> {
         Ok(current)
     }
 
-    fn schema_for_intersection(&self, schema: &Value) -> Map<String, Value> {
+    fn schema_for_intersection(&self, schema: &Value) -> Result<Map<String, Value>, GlrMaskError> {
         if schema == &Value::Bool(false) {
             let mut unsat = Map::new();
             unsat.insert("not".into(), Value::Object(Map::new()));
-            return unsat;
+            return Ok(unsat);
         }
         if schema == &Value::Bool(true) {
-            return Map::new();
+            return Ok(Map::new());
         }
         let Some(object) = schema.as_object() else {
-            return Map::new();
+            return Ok(Map::new());
         };
         let Some(ref_value) = object.get("$ref").and_then(Value::as_str) else {
-            return object.clone();
+            return Ok(object.clone());
         };
         let Ok(resolved) = self.resolve_local_ref(ref_value) else {
-            return object.clone();
+            return Ok(object.clone());
         };
         let mut merged = resolved.as_object().cloned().unwrap_or_default();
         let siblings = Self::schema_without_keys(object, &["$ref"]);
         if !siblings.is_empty() {
-            merged = merge_two_schemas(&merged, &siblings);
+            merged = merge_two_schemas(self, &merged, &siblings)?;
         }
-        merged
+        Ok(merged)
     }
 
     fn merge_resolved_subschemas(
         &self,
         base: &Map<String, Value>,
         sub_schemas: &[Value],
-    ) -> Map<String, Value> {
+    ) -> Result<Map<String, Value>, GlrMaskError> {
         let mut merged = base.clone();
         for schema in sub_schemas {
-            merged = merge_two_schemas(&merged, &self.schema_for_intersection(schema));
+            let intersected = self.schema_for_intersection(schema)?;
+            merged = merge_two_schemas(self, &merged, &intersected)?;
         }
-        merged
+        Ok(merged)
     }
 
     fn schema_without_keys(
@@ -6290,7 +6333,7 @@ impl<'a> SchemaCtx<'a> {
                     self.schema_for_intersection(opt)
                 }
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         let mut schema_variants = Vec::with_capacity(resolved.len());
         for variant in &resolved {
@@ -6720,7 +6763,7 @@ impl<'a> SchemaCtx<'a> {
                     self.schema_for_intersection(opt)
                 }
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
         let mut object_variants = Vec::new();
         let mut non_object_options = Vec::new();
         for resolved_option in resolved {
@@ -6841,7 +6884,7 @@ impl<'a> SchemaCtx<'a> {
                     self.schema_for_intersection(opt)
                 }
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         // Guard 1: every variant must be a plain object with explicit
         //          "type": "object", additionalProperties: false, no patternProperties.
@@ -7097,7 +7140,7 @@ impl<'a> SchemaCtx<'a> {
                     self.schema_for_intersection(opt)
                 }
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         // Guard: every variant must be a plain open object with no complex sub-keywords.
         for v in &resolved {
@@ -7215,7 +7258,7 @@ impl<'a> SchemaCtx<'a> {
                     self.schema_for_intersection(opt)
                 }
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         for v in &resolved {
             if v.get("type").and_then(Value::as_str) != Some("object") {
@@ -7317,7 +7360,7 @@ impl<'a> SchemaCtx<'a> {
 
         if keyword == "oneOf"
             && !self.one_of_is_explicitly_coerced()
-            && !self.one_of_options_are_safe_to_coerce(schema, options)
+            && !self.one_of_options_are_safe_to_coerce(schema, options)?
         {
             return Err(GlrMaskError::GrammarParse(
                 "oneOf constraints are not supported. Enable 'coerce_one_of' option to approximate oneOf with anyOf".to_string(),
@@ -7352,7 +7395,7 @@ impl<'a> SchemaCtx<'a> {
                 .iter()
                 .map(|option| {
                     let merged = Value::Object(
-                        self.merge_resolved_subschemas(&base, std::slice::from_ref(option)),
+                        self.merge_resolved_subschemas(&base, std::slice::from_ref(option))?,
                     );
                     self.convert_schema(&merged)
                 })
@@ -7427,6 +7470,8 @@ impl<'a> SchemaCtx<'a> {
             ));
         }
 
+        self.increment_schema_build_count()?;
+
         // Schema-level dedup: reuse the expression produced by an earlier
         // identical sub-schema instead of generating duplicate rules.
         // The cache key includes the current draft so that draft-sensitive
@@ -7490,7 +7535,7 @@ impl<'a> SchemaCtx<'a> {
             if let Some(all_of) = object.get("allOf").and_then(Value::as_array) {
                 if !all_of.is_empty() {
                     let base = Self::schema_without_keys(object, &["allOf"]);
-                    let merged = self.merge_resolved_subschemas(&base, all_of);
+                    let merged = self.merge_resolved_subschemas(&base, all_of)?;
                     return self.convert_schema(&Value::Object(merged));
                 }
             }
@@ -7924,6 +7969,7 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn convert_type(&mut self, type_name: &str, schema: &Map<String, Value>) -> Result<GrammarExpr, GlrMaskError> {
+        self.increment_schema_build_count()?;
         match type_name {
             "object" => self.build_object_expr(schema),
             "array" => self.build_array_expr(schema),
@@ -11977,6 +12023,7 @@ mod tests {
     use super::pattern_all_branches_anchored;
     use super::promote_literal_choices_enabled;
     use super::JsonSchemaUriMode;
+    use super::SchemaCtx;
     use super::SharedAdditionalKeyPlan;
     use super::schema_to_named_grammar;
     use super::strip_branch_outer_anchors;
@@ -12066,6 +12113,17 @@ mod tests {
         named.rules
             .iter()
             .any(|rule| expr_contains_expr_nfa(&rule.expr))
+    }
+
+    #[test]
+    fn schema_build_budget_guard_returns_schema_too_large() {
+        let schema = json!({});
+        let mut ctx = SchemaCtx::new(&schema);
+        ctx.schema_build_limit = 1;
+
+        assert!(ctx.increment_schema_build_count().is_ok());
+        let err = ctx.increment_schema_build_count().unwrap_err();
+        assert!(matches!(err, crate::GlrMaskError::GrammarParse(message) if message == "schema too large"));
     }
 
     fn find_rule_line_with_prefix<'a>(glrm: &'a str, rule_prefix: &str) -> &'a str {
