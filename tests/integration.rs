@@ -227,6 +227,7 @@ fn json_schema_rejects_invalid_utf8_in_string() {
 fn json_schema_uri_format_accepts_basic_uri() {
     let _lock = URI_ENV_LOCK.lock().unwrap();
     let _unset = EnvVarGuard::unset("GLRMASK_STRICT_URI_FORMAT");
+    let _uri_mode = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_URI_MODE");
 
     let constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
     let mut state = constraint.start();
@@ -238,6 +239,7 @@ fn json_schema_uri_format_accepts_basic_uri() {
 fn json_schema_uri_format_strict_accepts_basic_uri() {
     let _lock = URI_ENV_LOCK.lock().unwrap();
     let _strict = EnvVarGuard::set("GLRMASK_STRICT_URI_FORMAT", "1");
+    let _uri_mode = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_URI_MODE");
 
     let constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
     let mut state = constraint.start();
@@ -246,15 +248,20 @@ fn json_schema_uri_format_strict_accepts_basic_uri() {
 }
 
 #[test]
-fn json_schema_uri_format_default_approximates_bracketed_host() {
+fn json_schema_uri_format_approx_mode_accepts_bracketed_host() {
     let _lock = URI_ENV_LOCK.lock().unwrap();
-    let _unset = EnvVarGuard::unset("GLRMASK_STRICT_URI_FORMAT");
+    let _strict = EnvVarGuard::unset("GLRMASK_STRICT_URI_FORMAT");
+    let _approx = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_URI_MODE", "approx");
 
-    let default_constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
-    assert_accepts_bytes(&default_constraint, br#""http://[not::strict::]/path""#);
+    let approx_constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
+    assert_accepts_bytes(&approx_constraint, br#""http://[not::strict::]/path""#);
+}
 
-    drop(_unset);
-    let _strict = EnvVarGuard::set("GLRMASK_STRICT_URI_FORMAT", "1");
+#[test]
+fn json_schema_uri_format_default_rejects_bracketed_host() {
+    let _lock = URI_ENV_LOCK.lock().unwrap();
+    let _strict = EnvVarGuard::unset("GLRMASK_STRICT_URI_FORMAT");
+    let _uri_mode = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_URI_MODE");
 
     let strict_constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
     let mut state = strict_constraint.start();
@@ -262,22 +269,55 @@ fn json_schema_uri_format_default_approximates_bracketed_host() {
 }
 
 #[test]
-fn json_schema_uri_format_default_accepts_non_uri_string() {
+fn json_schema_uri_format_approx_mode_accepts_non_uri_string() {
     let _lock = URI_ENV_LOCK.lock().unwrap();
-    let _unset = EnvVarGuard::unset("GLRMASK_STRICT_URI_FORMAT");
+    let _strict = EnvVarGuard::unset("GLRMASK_STRICT_URI_FORMAT");
+    let _approx = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_URI_MODE", "approx");
 
     let constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
     assert_accepts_bytes(&constraint, br#""not a uri""#);
 }
 
 #[test]
-fn json_schema_uri_format_strict_rejects_missing_scheme() {
+fn json_schema_uri_format_default_rejects_missing_scheme() {
     let _lock = URI_ENV_LOCK.lock().unwrap();
-    let _strict = EnvVarGuard::set("GLRMASK_STRICT_URI_FORMAT", "1");
+    let _strict = EnvVarGuard::unset("GLRMASK_STRICT_URI_FORMAT");
+    let _uri_mode = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_URI_MODE");
 
     let constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
     let mut state = constraint.start();
     assert!(state.commit_bytes(br#""not a uri""#).is_err());
+}
+
+#[test]
+fn json_schema_uri_format_default_rejects_relative_path() {
+    let _lock = URI_ENV_LOCK.lock().unwrap();
+    let _strict = EnvVarGuard::unset("GLRMASK_STRICT_URI_FORMAT");
+    let _uri_mode = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_URI_MODE");
+
+    let constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(br#""/not-absolute""#).is_err());
+}
+
+#[test]
+fn json_schema_email_format_accepts_basic_email() {
+    let constraint = byte_schema(r#"{"type":"string","format":"email"}"#);
+    assert_accepts_bytes(&constraint, br#""john.doe@example.com""#);
+}
+
+#[test]
+fn json_schema_email_format_rejects_empty_string() {
+    let constraint = byte_schema(r#"{"type":"string","format":"email"}"#);
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(br#""""#).is_err());
+}
+
+#[test]
+fn json_schema_email_format_rejects_missing_at_sign() {
+    let constraint = byte_schema(r#"{"type":"string","format":"email"}"#);
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(br#""not an email""#).is_err());
 }
 
 #[test]
