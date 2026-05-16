@@ -328,6 +328,13 @@ fn try_collapse_small_reduce_fanout(
     gss: &ParserGSS,
     token: TerminalID,
 ) -> Option<ParserGSS> {
+    // This optimization only applies when reducing exposes multiple isolated
+    // branches. A virtual stack is a single concrete path, so the existing
+    // branch construction would produce at most one branch and return `None`.
+    if gss.try_virtual_stack().is_some() {
+        return None;
+    }
+
     let state = gss.single_exclusive_top_value()?;
     let Action::Reduce(nt, len) = table.action(state, token)? else {
         return None;

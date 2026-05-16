@@ -943,51 +943,6 @@ fn eos_mask_bit(buf: &[u32], eos_token_id: Option<u32>) -> bool {
 }
 
 impl<'a> ConstraintState<'a> {
-    fn merge_final_weight_to_buf_direct_only(
-        &self,
-        final_weight: &Weight,
-        acc: &DenseMaskAcc,
-        buf: &mut [u32],
-    ) -> bool {
-        if final_weight.is_full() {
-            for (_, dense) in &acc.0 {
-                let Some(seed_idx) = self.constraint.seed_state_index_for_dense(dense) else {
-                    return false;
-                };
-                if !self.constraint.or_seed_state_dense_to_buf(seed_idx, buf) {
-                    return false;
-                }
-            }
-            return true;
-        }
-
-        for (tsid, dense) in &acc.0 {
-            let Some(token_set) = final_weight.0.get(*tsid) else {
-                continue;
-            };
-            let token_set_key = Arc::as_ptr(token_set) as usize;
-            if self
-                .constraint
-                .weight_token_sparse_buf_masks
-                .contains_key(&token_set_key)
-                && self
-                    .constraint
-                    .or_dense_token_set_to_buf_sparse(dense, token_set, 2048, buf)
-                    .is_some()
-            {
-                continue;
-            }
-            if !self
-                .constraint
-                .or_weight_token_set_to_buf_if_contained(dense, token_set, buf)
-            {
-                return false;
-            }
-        }
-
-        true
-    }
-
     fn try_fill_mask_single_path_direct(&self, buf: &mut [u32]) -> bool {
         if mask_inner_profile_enabled() || mask_delta_profile_enabled() {
             return false;
@@ -1039,7 +994,21 @@ impl<'a> ConstraintState<'a> {
         buf.fill(0);
 
         let precomputed = &self.constraint.weight_token_dense_masks;
+        let dense_words = self.constraint.internal_token_dense_words;
+        let mut merged = {
+            let mut scratch = self.mask_scratch.lock().unwrap();
+            std::mem::take(&mut scratch.merged_dense)
+        };
+        merged.clear();
+        merged.resize(dense_words, 0);
         let mut used_direct_final = false;
+        let mut direct_buf_dirty = false;
+
+        let restore_scratch = |merged: Vec<u64>| {
+            let mut scratch = self.mask_scratch.lock().unwrap();
+            scratch.merged_dense = merged;
+            scratch.chain_merged_dense.clear();
+        };
 
         for (original_tokenizer_state, terminals_disallowed, stack) in paths {
             let internal_tsid = self
@@ -1059,10 +1028,15 @@ impl<'a> ConstraintState<'a> {
             loop {
                 let dwa_state = &parser_dwa.states()[dwa_state_id as usize];
                 if let Some(final_weight) = &dwa_state.final_weight {
-                    if !self.merge_final_weight_to_buf_direct_only(final_weight, &acc, buf) {
-                        return false;
-                    }
                     used_direct_final = true;
+                    self.merge_final_weight_to_internal(
+                        final_weight,
+                        &acc,
+                        precomputed,
+                        &mut merged,
+                        Some(&mut *buf),
+                        &mut direct_buf_dirty,
+                    );
                 }
 
                 let Some(&parser_state) = stack.get(stack_idx) else {
@@ -1087,11 +1061,24 @@ impl<'a> ConstraintState<'a> {
         }
 
         if !used_direct_final && !self.is_complete() {
+            restore_scratch(merged);
             return false;
         }
 
+        if merged.iter().any(|&word| word != 0) {
+            let buf_zeroed = !direct_buf_dirty;
+            self.constraint.or_internal_dense_to_buf(&merged, buf, buf_zeroed);
+        }
+
         update_eos_mask(buf, self.constraint.eos_token_id, self.is_complete());
-        self.store_mask_cache_reuse_dense(buf);
+
+        if direct_buf_dirty {
+            self.store_mask_cache_reuse_dense(buf);
+        } else {
+            self.store_mask_cache(buf, &merged);
+        }
+
+        restore_scratch(merged);
         true
     }
 
@@ -1195,64 +1182,75 @@ impl<'a> ConstraintState<'a> {
         mut direct_buf: Option<&mut [u32]>,
         direct_buf_dirty: &mut bool,
     ) -> bool {
-        let direct_handled = direct_buf
-            .as_ref()
-            .is_some_and(|_| self.can_direct_final_weight_to_buf(final_weight, acc));
+        let mut all_direct = true;
         if final_weight.is_full() {
-            acc.or_into_merged(merged);
-            if direct_handled
-                && let Some(buf) = direct_buf.as_deref_mut()
-            {
-                for (_, dense) in &acc.0 {
-                    if let Some(seed_idx) = self.constraint.seed_state_index_for_dense(dense) {
+            for (_, dense) in &acc.0 {
+                let handled_directly = if let Some(buf) = direct_buf.as_deref_mut() {
+                    self.constraint
+                        .seed_state_index_for_dense(dense)
+                        .filter(|&seed_idx| self.constraint.has_seed_state_buf_mask(seed_idx))
+                        .map(|seed_idx| {
                         self.constraint.or_seed_state_dense_to_buf(seed_idx, buf);
                         *direct_buf_dirty = true;
+                        })
+                        .is_some()
+                } else {
+                    false
+                };
+
+                if !handled_directly {
+                    let n = dense.len().min(merged.len());
+                    for i in 0..n {
+                        merged[i] |= dense[i];
                     }
+                    all_direct = false;
                 }
             }
         } else {
-            acc.or_intersection_into_merged(final_weight, precomputed, merged);
-            if direct_handled
-                && let Some(buf) = direct_buf.as_deref_mut()
-            {
-                for (tsid, dense) in &acc.0 {
-                    let Some(token_set) = final_weight.0.get(*tsid) else {
-                        continue;
-                    };
+            for (tsid, dense) in &acc.0 {
+                let Some(token_set) = final_weight.0.get(*tsid) else {
+                    continue;
+                };
+
+                let handled_directly = if let Some(buf) = direct_buf.as_deref_mut() {
+                    let token_set_key = Arc::as_ptr(token_set) as usize;
                     if self
+                        .constraint
+                        .weight_token_sparse_buf_masks
+                        .contains_key(&token_set_key)
+                        && self
+                            .constraint
+                            .or_dense_token_set_to_buf_sparse(dense, token_set, 2048, buf)
+                            .is_some()
+                    {
+                        *direct_buf_dirty = true;
+                        true
+                    } else if self
                         .constraint
                         .or_weight_token_set_to_buf_if_contained(dense, token_set, buf)
                     {
                         *direct_buf_dirty = true;
-                        continue;
-                    }
-                    if let Some(seed_idx) = self.constraint.seed_state_index_for_dense(dense) {
+                        true
+                    } else if let Some(seed_idx) = self.constraint.seed_state_index_for_dense(dense) {
                         self.constraint
                             .or_seed_dense_token_set_to_buf(seed_idx, token_set, buf);
                         *direct_buf_dirty = true;
+                        true
+                    } else {
+                        false
                     }
+                } else {
+                    false
+                };
+
+                if !handled_directly {
+                    DenseMaskAcc::or_dense_and_token_set_into(dense, token_set, precomputed, merged);
+                    all_direct = false;
                 }
             }
         }
 
-        direct_handled
-    }
-
-    fn can_direct_final_weight_to_buf(&self, final_weight: &Weight, acc: &DenseMaskAcc) -> bool {
-        if final_weight.is_full() {
-            return acc.0.iter().all(|(_, dense)| {
-                self.constraint
-                    .seed_state_index_for_dense(dense)
-                    .is_some_and(|seed_idx| self.constraint.has_seed_state_buf_mask(seed_idx))
-            });
-        }
-
-        acc.0.iter().all(|(tsid, dense)| {
-            final_weight.0.get(*tsid).is_none_or(|token_set| {
-                self.constraint
-                    .has_weight_token_set_buf_if_contained(dense, token_set)
-            })
-        })
+        all_direct
     }
 
     fn merge_final_weight_for_accs(
@@ -1396,6 +1394,7 @@ impl<'a> ConstraintState<'a> {
                 cache_data.generation = self.generation;
                 cache_data.mask.clear();
                 cache_data.mask.extend_from_slice(buf);
+                cache_data.merged_dense.clear();
             }
             None => {
                 *cache = Some(MaskCacheData {
@@ -1558,13 +1557,18 @@ impl<'a> ConstraintState<'a> {
         drop(direct_buf);
         let finalize_start = profile.as_ref().map(|_| Instant::now());
 
-        let direct_finalized = direct_buf_used && direct_buf_possible;
+        let merged_has_leftovers = merged.iter().any(|&word| word != 0);
+        let direct_finalized = direct_buf_used && direct_buf_possible && !merged_has_leftovers;
+        let can_use_merged_cache = !direct_buf_dirty;
         let mut use_delta_seed = direct_finalized;
         let mut reuse_existing_cache_dense = false;
-        if !direct_finalized {
+        if !direct_finalized && can_use_merged_cache {
             let cache = self.mask_cache.lock().unwrap();
             if let Some(cache_data) = cache.as_ref() {
-                if cache_data.mask.len() == buf.len() && cache_data.merged_dense == merged {
+                if cache_data.mask.len() == buf.len()
+                    && cache_data.merged_dense.len() == merged.len()
+                    && cache_data.merged_dense == merged
+                {
                     let zero_start = profile.as_ref().map(|_| Instant::now());
                     buf.copy_from_slice(&cache_data.mask);
                     if let (Some(profile), Some(start)) = (profile.as_mut(), zero_start) {
@@ -1582,138 +1586,134 @@ impl<'a> ConstraintState<'a> {
                 }
             }
             if !use_delta_seed {
-            if let Some(cache_data) = cache.as_ref() {
-                let scratch_cost = self.constraint.estimate_internal_dense_to_buf_cost(&merged);
-                let copy_cost_words = self.constraint.mask_len() as u64;
-                let mut added_bits = 0u64;
-                let mut removed_bits = 0u64;
-                let mut unchanged_words = 0u64;
-                let mut unchanged_bits = 0u64;
-                let mut added_cost = 0u64;
-                let mut removed_cost = 0u64;
-                let capture_delta_summary = delta_profile_enabled;
-                let n_internal = self.constraint.internal_token_to_tokens.len();
-                let word_len = merged.len().max(cache_data.merged_dense.len());
-                for wi in 0..word_len {
-                    if wi * 64 >= n_internal {
-                        break;
-                    }
-                    let remaining = n_internal - wi * 64;
-                    let valid_mask = if remaining >= 64 { !0u64 } else { (1u64 << remaining) - 1 };
-                    let current = merged.get(wi).copied().unwrap_or(0) & valid_mask;
-                    let previous = cache_data.merged_dense.get(wi).copied().unwrap_or(0) & valid_mask;
-                    if capture_delta_summary && current == previous {
-                        unchanged_words += 1;
-                    }
-                    if capture_delta_summary {
-                        unchanged_bits += (!(current ^ previous) & valid_mask).count_ones() as u64;
-                    }
+                if let Some(cache_data) = cache.as_ref().filter(|c| c.merged_dense.len() == merged.len()) {
+                    let scratch_cost = self.constraint.estimate_internal_dense_to_buf_cost(&merged);
+                    let copy_cost_words = self.constraint.mask_len() as u64;
+                    let mut added_bits = 0u64;
+                    let mut removed_bits = 0u64;
+                    let mut unchanged_words = 0u64;
+                    let mut unchanged_bits = 0u64;
+                    let mut added_cost = 0u64;
+                    let mut removed_cost = 0u64;
+                    let capture_delta_summary = delta_profile_enabled;
+                    let n_internal = self.constraint.internal_token_to_tokens.len();
+                    let word_len = merged.len().max(cache_data.merged_dense.len());
+                    for wi in 0..word_len {
+                        if wi * 64 >= n_internal {
+                            break;
+                        }
+                        let remaining = n_internal - wi * 64;
+                        let valid_mask = if remaining >= 64 { !0u64 } else { (1u64 << remaining) - 1 };
+                        let current = merged.get(wi).copied().unwrap_or(0) & valid_mask;
+                        let previous = cache_data.merged_dense.get(wi).copied().unwrap_or(0) & valid_mask;
+                        if capture_delta_summary && current == previous {
+                            unchanged_words += 1;
+                        }
+                        if capture_delta_summary {
+                            unchanged_bits += (!(current ^ previous) & valid_mask).count_ones() as u64;
+                        }
 
-                    let added = current & !previous;
-                    if capture_delta_summary {
-                        added_bits += added.count_ones() as u64;
-                    }
-                    if added == valid_mask {
-                        if let Some(group_mask) = self.constraint.word_group_sparse_masks.get(wi) {
-                            added_cost += group_mask.len() as u64;
-                        } else {
+                        let added = current & !previous;
+                        if capture_delta_summary {
+                            added_bits += added.count_ones() as u64;
+                        }
+                        if added == valid_mask {
+                            if let Some(group_mask) = self.constraint.word_group_sparse_masks.get(wi) {
+                                added_cost += group_mask.len() as u64;
+                            } else {
+                                added_cost += self
+                                    .constraint
+                                    .internal_bits_grouped_buf_op_cost(wi, added, valid_mask, copy_cost_words as usize)
+                                    as u64;
+                            }
+                        } else if added != 0 {
                             added_cost += self
                                 .constraint
                                 .internal_bits_grouped_buf_op_cost(wi, added, valid_mask, copy_cost_words as usize)
                                 as u64;
                         }
-                    } else if added != 0 {
-                        added_cost += self
-                            .constraint
-                            .internal_bits_grouped_buf_op_cost(wi, added, valid_mask, copy_cost_words as usize)
-                            as u64;
-                    }
 
-                    let removed = previous & !current;
-                    if capture_delta_summary {
-                        removed_bits += removed.count_ones() as u64;
-                    }
-                    if removed == valid_mask {
-                        if let Some(group_mask) = self.constraint.word_group_sparse_masks.get(wi) {
-                            removed_cost += group_mask.len() as u64;
-                        } else {
+                        let removed = previous & !current;
+                        if capture_delta_summary {
+                            removed_bits += removed.count_ones() as u64;
+                        }
+                        if removed == valid_mask {
+                            if let Some(group_mask) = self.constraint.word_group_sparse_masks.get(wi) {
+                                removed_cost += group_mask.len() as u64;
+                            } else {
+                                removed_cost += self
+                                    .constraint
+                                    .internal_bits_grouped_buf_op_cost(wi, removed, valid_mask, copy_cost_words as usize)
+                                    as u64;
+                            }
+                        } else if removed != 0 {
                             removed_cost += self
                                 .constraint
                                 .internal_bits_grouped_buf_op_cost(wi, removed, valid_mask, copy_cost_words as usize)
                                 as u64;
                         }
-                    } else if removed != 0 {
-                        removed_cost += self
-                            .constraint
-                            .internal_bits_grouped_buf_op_cost(wi, removed, valid_mask, copy_cost_words as usize)
-                            as u64;
-                    }
-                }
-
-                let delta_cost = copy_cost_words + added_cost + removed_cost;
-                let delta_savings = scratch_cost.saturating_sub(delta_cost);
-
-                if delta_profile_enabled {
-                    if let Some(profile) = profile.as_mut() {
-                        profile.delta_prev_available = 1;
-                        profile.delta_added_bits = added_bits;
-                        profile.delta_removed_bits = removed_bits;
-                        profile.delta_unchanged_words = unchanged_words;
-                        profile.delta_unchanged_bits = unchanged_bits;
-                        profile.delta_added_cost = added_cost;
-                        profile.delta_removed_cost = removed_cost;
-                        profile.delta_copy_cost_words = copy_cost_words;
-                        profile.delta_scratch_estimated_cost = scratch_cost;
-                        profile.delta_estimated_cost = delta_cost;
-                        profile.delta_estimated_savings = delta_savings;
-                    }
-                }
-                let delta_wins_decisively =
-                    delta_savings > DELTA_SEED_MIN_SAVINGS && delta_cost.saturating_mul(2) < scratch_cost;
-                if delta_wins_decisively && cache_data.mask.len() == buf.len() {
-                    let zero_start = profile.as_ref().map(|_| Instant::now());
-                    buf.copy_from_slice(&cache_data.mask);
-                    if let (Some(profile), Some(start)) = (profile.as_mut(), zero_start) {
-                        profile.finalize_zero_ns += elapsed_ns(start);
                     }
 
-                    let dense_to_buf_start = profile.as_ref().map(|_| Instant::now());
-                    let delta_replay = self.constraint.apply_internal_dense_delta_to_buf(
-                        &cache_data.merged_dense,
-                        &merged,
-                        buf,
-                    );
-                    if let Some(profile) = profile.as_mut() {
-                        profile.delta_replay = delta_replay;
-                        profile.finalize_delta_replay = 1;
-                        if delta_profile_enabled {
-                            profile.delta_used_seed = 1;
-                        }
-                        if let Some(start) = dense_to_buf_start {
-                            profile.finalize_dense_to_buf_ns += elapsed_ns(start);
+                    let delta_cost = copy_cost_words + added_cost + removed_cost;
+                    let delta_savings = scratch_cost.saturating_sub(delta_cost);
+
+                    if delta_profile_enabled {
+                        if let Some(profile) = profile.as_mut() {
+                            profile.delta_prev_available = 1;
+                            profile.delta_added_bits = added_bits;
+                            profile.delta_removed_bits = removed_bits;
+                            profile.delta_unchanged_words = unchanged_words;
+                            profile.delta_unchanged_bits = unchanged_bits;
+                            profile.delta_added_cost = added_cost;
+                            profile.delta_removed_cost = removed_cost;
+                            profile.delta_copy_cost_words = copy_cost_words;
+                            profile.delta_scratch_estimated_cost = scratch_cost;
+                            profile.delta_estimated_cost = delta_cost;
+                            profile.delta_estimated_savings = delta_savings;
                         }
                     }
-                    use_delta_seed = true;
+                    let delta_wins_decisively =
+                        delta_savings > DELTA_SEED_MIN_SAVINGS && delta_cost.saturating_mul(2) < scratch_cost;
+                    if delta_wins_decisively && cache_data.mask.len() == buf.len() {
+                        let zero_start = profile.as_ref().map(|_| Instant::now());
+                        buf.copy_from_slice(&cache_data.mask);
+                        if let (Some(profile), Some(start)) = (profile.as_mut(), zero_start) {
+                            profile.finalize_zero_ns += elapsed_ns(start);
+                        }
+
+                        let dense_to_buf_start = profile.as_ref().map(|_| Instant::now());
+                        let delta_replay = self.constraint.apply_internal_dense_delta_to_buf(
+                            &cache_data.merged_dense,
+                            &merged,
+                            buf,
+                        );
+                        if let Some(profile) = profile.as_mut() {
+                            profile.delta_replay = delta_replay;
+                            profile.finalize_delta_replay = 1;
+                            if delta_profile_enabled {
+                                profile.delta_used_seed = 1;
+                            }
+                            if let Some(start) = dense_to_buf_start {
+                                profile.finalize_dense_to_buf_ns += elapsed_ns(start);
+                            }
+                        }
+                        use_delta_seed = true;
+                    }
                 }
-            }
             }
         }
 
         if !use_delta_seed {
-            let dense_to_buf = if direct_buf_used && direct_buf_possible {
+            let dense_to_buf = if direct_finalized || !merged_has_leftovers {
                 DenseToBufProfileStats::default()
             } else {
-                if direct_buf_dirty {
-                    let zero_start = profile.as_ref().map(|_| Instant::now());
-                    buf.fill(0);
-                    if let (Some(profile), Some(start)) = (profile.as_mut(), zero_start) {
-                        profile.finalize_zero_ns += elapsed_ns(start);
-                    }
-                }
+                let buf_zeroed = !direct_buf_dirty;
 
                 if profile.is_some() {
                     let dense_to_buf_start = Instant::now();
-                    let dense_to_buf = self.constraint.or_internal_dense_to_buf(&merged, buf, true);
+                    let dense_to_buf = self
+                        .constraint
+                        .or_internal_dense_to_buf(&merged, buf, buf_zeroed);
                     if let Some(profile) = profile.as_mut() {
                         profile.finalize_dense_to_buf_ns += elapsed_ns(dense_to_buf_start);
                     }
@@ -1722,7 +1722,7 @@ impl<'a> ConstraintState<'a> {
                     let fast_conversion_start =
                         mask_fast_conversion_profile_enabled().then(Instant::now);
                     self.constraint
-                        .or_internal_dense_to_buf_fast(&merged, buf, true);
+                        .or_internal_dense_to_buf_fast(&merged, buf, buf_zeroed);
                     if let Some(start) = fast_conversion_start {
                         let merged_set_bits =
                             merged.iter().map(|word| word.count_ones() as u64).sum::<u64>();
@@ -1760,14 +1760,18 @@ impl<'a> ConstraintState<'a> {
         }
 
         let cache_start = profile.as_ref().map(|_| Instant::now());
-        if reuse_existing_cache_dense {
-            if eos_unchanged {
-                self.touch_mask_cache_generation();
+        if can_use_merged_cache {
+            if reuse_existing_cache_dense {
+                if eos_unchanged {
+                    self.touch_mask_cache_generation();
+                } else {
+                    self.store_mask_cache_reuse_dense(buf);
+                }
             } else {
-                self.store_mask_cache_reuse_dense(buf);
+                self.store_mask_cache(buf, &merged);
             }
         } else {
-            self.store_mask_cache(buf, &merged);
+            self.store_mask_cache_reuse_dense(buf);
         }
         if let (Some(profile), Some(start)) = (profile.as_mut(), cache_start) {
             profile.finalize_cache_ns += elapsed_ns(start);
