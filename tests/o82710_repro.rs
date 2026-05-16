@@ -35,6 +35,10 @@ fn object_schema() -> &'static str {
     }"#
 }
 
+fn pattern_whitespace_schema() -> &'static str {
+    r#"{"type":"string","pattern":"^[\\w\\s-]+$"}"#
+}
+
 fn string_prefix() -> Vec<u8> {
     let mut prefix = String::from("\"");
     prefix.push_str(&"This is a Vimeo video block. ".repeat(79));
@@ -85,4 +89,24 @@ fn o82710_string_prefix_commits_disputed_single_token() {
 #[test]
 fn o82710_object_prefix_allows_disputed_token() {
     assert_token_in_mask(object_schema(), &object_prefix(), &[b"');?>\"", b" Vimeo"], 0);
+}
+
+#[test]
+fn json_schema_pattern_s_allows_ecma_unicode_whitespace_token() {
+    let unicode_space = "\u{3000}".as_bytes();
+    assert_token_in_mask(pattern_whitespace_schema(), b"\"", &[unicode_space, b"x"], 0);
+}
+
+#[test]
+fn json_schema_pattern_s_allows_ecma_unicode_whitespace_lead_byte_token() {
+    assert_token_in_mask(pattern_whitespace_schema(), b"\"", &[b"\xE2", b"x"], 0);
+}
+
+#[test]
+fn json_schema_pattern_s_accepts_ecma_unicode_whitespace_string() {
+    let vocab = vocab(&["\"".as_bytes(), "\u{3000}".as_bytes()]);
+    let constraint = Constraint::from_json_schema(pattern_whitespace_schema(), &vocab).unwrap();
+    let mut state = constraint.start();
+    state.commit_bytes("\"\u{3000}\"".as_bytes()).unwrap();
+    assert!(state.is_finished());
 }

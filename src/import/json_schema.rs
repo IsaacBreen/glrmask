@@ -1296,6 +1296,21 @@ fn regex_literal_bytes(bytes: &[u8]) -> String {
         .join("")
 }
 
+fn ecma262_non_ascii_whitespace_literals() -> Vec<String> {
+    [
+        '\u{00A0}', '\u{1680}', '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}',
+        '\u{2004}', '\u{2005}', '\u{2006}', '\u{2007}', '\u{2008}', '\u{2009}',
+        '\u{200A}', '\u{2028}', '\u{2029}', '\u{202F}', '\u{205F}', '\u{3000}',
+        '\u{FEFF}',
+    ]
+    .into_iter()
+    .map(|ch| {
+        let mut buf = [0u8; 4];
+        regex_literal_bytes(ch.encode_utf8(&mut buf).as_bytes())
+    })
+    .collect()
+}
+
 fn parse_json_encoded_byte_regex(pattern: &str) -> LexerExpr {
     parse_regex(pattern, false)
 }
@@ -1368,18 +1383,17 @@ fn json_escaped_byte_fragments(byte: u8) -> Vec<String> {
     fragments
 }
 
-fn parse_class_escape_set(input: &[u8], pos: usize) -> Option<(BTreeSet<u8>, usize)> {
+fn parse_class_escape_set(input: &[u8], pos: usize) -> Option<(BTreeSet<u8>, bool, usize)> {
     if pos + 1 >= input.len() {
         return None;
     }
     let mut set = BTreeSet::new();
+    let mut includes_ecma_unicode_whitespace = false;
     match input[pos + 1] {
         b'd' => set.extend(b'0'..=b'9'),
         b's' => {
-            set.extend(0x09..=0x0D);
-            set.insert(0x20);
-            set.insert(0x85);
-            set.insert(0xA0);
+            set.extend(shorthand_class_bytes(b's'));
+            includes_ecma_unicode_whitespace = true;
         }
         b'w' => {
             set.extend(b'0'..=b'9');
@@ -1389,7 +1403,7 @@ fn parse_class_escape_set(input: &[u8], pos: usize) -> Option<(BTreeSet<u8>, usi
         }
         _ => return None,
     }
-    Some((set, pos + 2))
+    Some((set, includes_ecma_unicode_whitespace, pos + 2))
 }
 
 fn parse_class_escape_byte(input: &[u8], pos: usize) -> (u8, usize) {
@@ -1461,10 +1475,14 @@ fn jsonify_regex_char_class(input: &[u8], start: usize) -> Option<(String, usize
         pos += 1;
     }
     let mut matched = BTreeSet::new();
+    let mut includes_ecma_unicode_whitespace = false;
     while pos < input.len() && input[pos] != b']' {
         if input[pos] == b'\\' {
-            if let Some((escape_set, next_pos)) = parse_class_escape_set(input, pos) {
+            if let Some((escape_set, escape_includes_unicode_ws, next_pos)) =
+                parse_class_escape_set(input, pos)
+            {
                 matched.extend(escape_set);
+                includes_ecma_unicode_whitespace |= escape_includes_unicode_ws;
                 pos = next_pos;
                 continue;
             }
@@ -1493,7 +1511,12 @@ fn jsonify_regex_char_class(input: &[u8], start: usize) -> Option<(String, usize
     if pos >= input.len() || input[pos] != b']' {
         return None;
     }
-    let fragment = jsonified_char_class_fragment(&matched, negate)?;
+    let mut fragment = jsonified_char_class_fragment(&matched, negate)?;
+    if includes_ecma_unicode_whitespace && !negate {
+        let mut alternatives = vec![fragment];
+        alternatives.extend(ecma262_non_ascii_whitespace_literals());
+        fragment = format!("(?:{})", alternatives.join("|"));
+    }
     Some((fragment, pos + 1))
 }
 
@@ -1511,12 +1534,13 @@ fn jsonify_shorthand_class(escape_char: u8) -> Option<String> {
             jsonified_char_class_fragment(&matched, false)
         }
         b's' => {
-            // \s matches ASCII whitespace + NBSP (U+00A0 = \xC2\xA0).
-            // llguidance treats NBSP as whitespace, matching ECMA-262 behavior.
+            // JSON Schema `pattern` follows ECMA-262: \s includes Unicode
+            // WhiteSpace and LineTerminator code points, not just ASCII.
             let matched = shorthand_class_bytes(b's');
             let mut fragment = jsonified_char_class_fragment(&matched, false)?;
-            // Append NBSP as a 2-byte UTF-8 literal alternative
-            fragment = format!("(?:{}|\\xC2\\xA0)", fragment);
+            let mut alternatives = vec![fragment];
+            alternatives.extend(ecma262_non_ascii_whitespace_literals());
+            fragment = format!("(?:{})", alternatives.join("|"));
             Some(fragment)
         }
         b'D' | b'W' => {
@@ -1707,7 +1731,16 @@ fn json_encoded_regex_expr(expr: LexerExpr) -> LexerExpr {
         ),
         LexerExpr::U8Class(set) => {
             let matched: BTreeSet<u8> = set.iter().collect();
-            jsonified_char_class_fragment(&matched, false)
+            let mut fragment = jsonified_char_class_fragment(&matched, false);
+            let ascii_space = shorthand_class_bytes(b's');
+            if matched.is_superset(&ascii_space) {
+                fragment = fragment.map(|fragment| {
+                    let mut alternatives = vec![fragment];
+                    alternatives.extend(ecma262_non_ascii_whitespace_literals());
+                    format!("(?:{})", alternatives.join("|"))
+                });
+            }
+            fragment
                 .map(|fragment| parse_json_encoded_byte_regex(&fragment))
                 .unwrap_or_else(|| LexerExpr::Choice(vec![]))
         }
