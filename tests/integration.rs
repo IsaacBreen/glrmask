@@ -224,7 +224,7 @@ fn json_schema_rejects_invalid_utf8_in_string() {
 }
 
 #[test]
-fn json_schema_uri_format_accepts_basic_uri() {
+fn json_schema_uri_format_default_mode_accepts_basic_uri() {
     let _lock = URI_ENV_LOCK.lock().unwrap();
     let _uri_mode = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_URI_MODE");
 

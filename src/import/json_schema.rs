@@ -2000,7 +2000,7 @@ fn json_schema_uri_mode() -> JsonSchemaUriMode {
         });
     }
 
-    JsonSchemaUriMode::Structured
+    JsonSchemaUriMode::StructuredSingleTerminal
 }
 
 // ---------------------------------------------------------------------------
@@ -13246,7 +13246,10 @@ mod tests {
         let _lock = ENV_LOCK.lock().unwrap();
         let _uri_mode = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_URI_MODE");
 
-        assert_eq!(json_schema_uri_mode(), JsonSchemaUriMode::Structured);
+        assert_eq!(
+            json_schema_uri_mode(),
+            JsonSchemaUriMode::StructuredSingleTerminal
+        );
 
         let _uri_mode = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_URI_MODE", "structured_single_terminal");
         assert_eq!(json_schema_uri_mode(), JsonSchemaUriMode::StructuredSingleTerminal);
