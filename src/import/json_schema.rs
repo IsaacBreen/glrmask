@@ -1979,10 +1979,8 @@ fn json_uri_merge_env_explicitly_set() -> bool {
         || std::env::var_os("GLRMASK_JSON_URI_MERGE_CLOSE").is_some()
 }
 
-fn uri_quote_merge_warning_needed(mode: JsonSchemaUriMode, strict_uri: bool) -> bool {
-    mode == JsonSchemaUriMode::Structured
-        && strict_uri
-        && json_uri_merge_env_explicitly_set()
+fn uri_quote_merge_warning_needed(mode: JsonSchemaUriMode) -> bool {
+    mode == JsonSchemaUriMode::Structured && json_uri_merge_env_explicitly_set()
 }
 
 fn parse_json_schema_uri_mode(value: &str) -> Option<JsonSchemaUriMode> {
@@ -2000,29 +1998,6 @@ fn json_schema_uri_mode() -> JsonSchemaUriMode {
         return parse_json_schema_uri_mode(&value).unwrap_or_else(|| {
             panic!("invalid GLRMASK_JSON_SCHEMA_URI_MODE={value:?}; expected one of structured, structured_single_terminal, llguidance_pattern, approx")
         });
-    }
-
-    if std::env::var_os("GLRMASK_RESTORED_STRUCTURED_URI").is_some() {
-        eprintln!(
-            "[glrmask/import][warn] GLRMASK_RESTORED_STRUCTURED_URI is deprecated; use GLRMASK_JSON_SCHEMA_URI_MODE instead"
-        );
-        return if restored_structured_uri_enabled() {
-            JsonSchemaUriMode::Structured
-        } else {
-            JsonSchemaUriMode::LlguidancePattern
-        };
-    }
-
-    if std::env::var_os("GLRMASK_SIMPLE_URI_FORMAT").is_some() && simple_uri_format_enabled() {
-        return JsonSchemaUriMode::Approx;
-    }
-
-    if std::env::var_os("GLRMASK_STRUCT_URI_FORMAT").is_some() {
-        return if use_structured_uri() {
-            JsonSchemaUriMode::LlguidancePattern
-        } else {
-            JsonSchemaUriMode::Structured
-        };
     }
 
     JsonSchemaUriMode::Structured
@@ -2438,22 +2413,6 @@ fn shared_string_value_exclusion_limit() -> Option<usize> {
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .or_else(|| string_value_exclusions_abdcffb6b_compat().then_some(32))
-}
-
-fn use_structured_uri() -> bool {
-    env_flag_default("GLRMASK_STRUCT_URI_FORMAT", true)
-}
-
-fn simple_uri_format_enabled() -> bool {
-    env_flag_default("GLRMASK_SIMPLE_URI_FORMAT", false)
-}
-
-fn restored_structured_uri_enabled() -> bool {
-    env_flag_default("GLRMASK_STRING_REPEAT_CHUNK", true)
-}
-
-fn strict_uri_format_enabled() -> bool {
-    env_flag_default("GLRMASK_STRICT_URI_FORMAT", true)
 }
 
 fn uri_aggregate_scheme_enabled() -> bool {
@@ -8617,8 +8576,7 @@ impl<'a> SchemaCtx<'a> {
 
     fn build_uri_expr(&mut self) -> GrammarExpr {
         let mode = json_schema_uri_mode();
-        let strict_uri = strict_uri_format_enabled();
-        if uri_quote_merge_warning_needed(mode, strict_uri) {
+        if uri_quote_merge_warning_needed(mode) {
             eprintln!(
                 "[glrmask/import][warn] GLRMASK_JSON_URI_MERGE_OPEN/CLOSE are ignored for strict multi-terminal structured URI mode"
             );
@@ -8690,18 +8648,10 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn build_structured_uri_expr(&mut self) -> GrammarExpr {
-        if !strict_uri_format_enabled() {
-            return self.build_approx_uri_expr();
-        }
-
         quoted_expr(self.build_structured_uri_body_expr(), false)
     }
 
     fn build_structured_uri_single_terminal_expr(&mut self) -> GrammarExpr {
-        if !strict_uri_format_enabled() {
-            return self.build_approx_uri_expr();
-        }
-
         let body = self.build_structured_uri_body_expr();
         single_terminal_quoted_expr(
             self,
@@ -8712,8 +8662,6 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn build_structured_uri_body_expr(&mut self) -> GrammarExpr {
-        debug_assert!(strict_uri_format_enabled());
-
         let ablate: std::collections::BTreeSet<String> = std::env::var("URI_ABLATE")
             .ok()
             .map(|v| {
@@ -13266,14 +13214,14 @@ mod tests {
     fn json_schema_uri_mode_defaults_and_explicit_values() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _uri_mode = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_URI_MODE");
-        let _restored = EnvVarGuard::unset("GLRMASK_RESTORED_STRUCTURED_URI");
-        let _simple = EnvVarGuard::unset("GLRMASK_SIMPLE_URI_FORMAT");
-        let _struct = EnvVarGuard::unset("GLRMASK_STRUCT_URI_FORMAT");
 
         assert_eq!(json_schema_uri_mode(), JsonSchemaUriMode::Structured);
 
         let _uri_mode = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_URI_MODE", "structured_single_terminal");
         assert_eq!(json_schema_uri_mode(), JsonSchemaUriMode::StructuredSingleTerminal);
+
+        let _uri_mode = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_URI_MODE", "structured");
+        assert_eq!(json_schema_uri_mode(), JsonSchemaUriMode::Structured);
 
         let _uri_mode = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_URI_MODE", "llguidance_pattern");
         assert_eq!(json_schema_uri_mode(), JsonSchemaUriMode::LlguidancePattern);
@@ -13288,21 +13236,19 @@ mod tests {
         let _uri_open = EnvVarGuard::unset("GLRMASK_JSON_URI_MERGE_OPEN");
         let _uri_close = EnvVarGuard::unset("GLRMASK_JSON_URI_MERGE_CLOSE");
 
-        assert!(!uri_quote_merge_warning_needed(JsonSchemaUriMode::Structured, true));
+        assert!(!uri_quote_merge_warning_needed(JsonSchemaUriMode::Structured));
 
         let _uri_open = EnvVarGuard::set("GLRMASK_JSON_URI_MERGE_OPEN", "1");
-        assert!(uri_quote_merge_warning_needed(JsonSchemaUriMode::Structured, true));
-        assert!(!uri_quote_merge_warning_needed(JsonSchemaUriMode::Structured, false));
-        assert!(!uri_quote_merge_warning_needed(JsonSchemaUriMode::StructuredSingleTerminal, true));
-        assert!(!uri_quote_merge_warning_needed(JsonSchemaUriMode::LlguidancePattern, true));
-        assert!(!uri_quote_merge_warning_needed(JsonSchemaUriMode::Approx, true));
+        assert!(uri_quote_merge_warning_needed(JsonSchemaUriMode::Structured));
+        assert!(!uri_quote_merge_warning_needed(JsonSchemaUriMode::StructuredSingleTerminal));
+        assert!(!uri_quote_merge_warning_needed(JsonSchemaUriMode::LlguidancePattern));
+        assert!(!uri_quote_merge_warning_needed(JsonSchemaUriMode::Approx));
     }
 
     #[test]
     fn structured_single_terminal_uri_mode_respects_uri_quote_merge_envs() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _uri_mode = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_URI_MODE", "structured_single_terminal");
-        let _strict_uri = EnvVarGuard::set("GLRMASK_STRICT_URI_FORMAT", "1");
         let _uri_open = EnvVarGuard::set("GLRMASK_JSON_URI_MERGE_OPEN", "1");
         let _uri_close = EnvVarGuard::set("GLRMASK_JSON_URI_MERGE_CLOSE", "0");
         let _string_open = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_OPEN");
