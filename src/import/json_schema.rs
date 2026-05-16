@@ -45,23 +45,23 @@ fn json_string_repeat_chunk() -> usize {
 }
 
 const JSON_STRING_BODY_REGEX: &str =
-    r#"([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*""#;
+    r#"([^\x00-\x1f\x7f"\\]|\\["\\bfnrt])*""#;
 /// Body chars only, no surrounding quotes.
 const JSON_STRING_BODY_ONLY_REGEX: &str =
-    r#"([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*"#;
+    r#"([^\x00-\x1f\x7f"\\]|\\["\\bfnrt])*"#;
 /// Full JSON string including both opening and closing quotes.
 const JSON_STRING_FULL_REGEX: &str =
-    r#""([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*""#;
+    r#""([^\x00-\x1f\x7f"\\]|\\["\\bfnrt])*""#;
 /// Opening quote + body chars, no closing quote.
 const JSON_STRING_OPEN_BODY_REGEX: &str =
-    r#""([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*"#;
+    r#""([^\x00-\x1f\x7f"\\]|\\["\\bfnrt])*"#;
 const JSON_KEY_COLON_BODY_REGEX: &str =
-    r#"([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*": "#;
+    r#"([^\x00-\x1f\x7f"\\]|\\["\\bfnrt])*": "#;
 /// Full key+colon including opening quote: `"key": `.
 const JSON_KEY_COLON_FULL_REGEX: &str =
-    r#""([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*": "#;
+    r#""([^\x00-\x1f\x7f"\\]|\\["\\bfnrt])*": "#;
 const JSON_STRING_CHAR_PATTERN: &str =
-    r#"[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}"#;
+    r#"[^\x00-\x1f\x7f"\\]|\\["\\bfnrt]"#;
 const JSON_NUMBER_NONINTEGER_REGEX: &str =
     r#"-?(0|[1-9][0-9]*)(\.[0-9]+([eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+)"#;
 const JSON_NONNEG_NUMBER_NONINTEGER_REGEX: &str =
@@ -1251,7 +1251,6 @@ fn json_escapable_bytes() -> BTreeSet<u8> {
     let mut out = BTreeSet::new();
     out.extend(0x00..=0x1F);
     out.insert(0x22);
-    out.insert(0x2F);
     out.insert(0x5C);
     out
 }
@@ -1298,10 +1297,10 @@ fn regex_literal_bytes(bytes: &[u8]) -> String {
 
 fn ecma262_non_ascii_whitespace_literals() -> Vec<String> {
     [
-        '\u{00A0}', '\u{1680}', '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}',
-        '\u{2004}', '\u{2005}', '\u{2006}', '\u{2007}', '\u{2008}', '\u{2009}',
-        '\u{200A}', '\u{2028}', '\u{2029}', '\u{202F}', '\u{205F}', '\u{3000}',
-        '\u{FEFF}',
+        '\u{0085}', '\u{00A0}', '\u{1680}', '\u{2000}', '\u{2001}', '\u{2002}',
+        '\u{2003}', '\u{2004}', '\u{2005}', '\u{2006}', '\u{2007}', '\u{2008}',
+        '\u{2009}', '\u{200A}', '\u{2028}', '\u{2029}', '\u{202F}', '\u{205F}',
+        '\u{3000}', '\u{FEFF}',
     ]
     .into_iter()
     .map(|ch| {
@@ -1316,59 +1315,18 @@ fn parse_json_encoded_byte_regex(pattern: &str) -> LexerExpr {
 }
 
 fn jsonified_literal_fragment(byte: u8) -> Option<String> {
-    if byte != b'/' {
-        return None;
-    }
-    let mut parts = Vec::new();
-    if json_direct_ascii_bytes().contains(&byte) {
-        parts.push(regex_literal_bytes(&[byte]));
-    }
-    parts.extend(json_escaped_byte_fragments(byte));
-    if parts.is_empty() {
-        return None;
-    }
-    if parts.len() == 1 {
-        return parts.into_iter().next();
-    }
-    Some(format!("(?:{})", parts.join("|")))
+    let _ = byte;
+    None
 }
 
 fn is_regex_metachar(byte: u8) -> bool {
     matches!(byte, b'[' | b']' | b'(' | b')' | b'{' | b'}' | b'.' | b'*' | b'+' | b'?' | b'|' | b'^' | b'$' | b'\\')
 }
 
-fn hex_nibble_chars(value: u8) -> Vec<char> {
-    match value {
-        0..=9 => vec![char::from(b'0' + value)],
-        10..=15 => vec![
-            char::from(b'A' + value - 10),
-            char::from(b'a' + value - 10),
-        ],
-        _ => Vec::new(),
-    }
-}
-
-fn json_unicode_escape_fragment(byte: u8) -> String {
-    let high = hex_nibble_chars((byte >> 4) & 0x0F);
-    let low = hex_nibble_chars(byte & 0x0F);
-    let mut options = Vec::new();
-    for high in &high {
-        for low in &low {
-            options.push(format!(r#"\x5Cu00{high}{low}"#));
-        }
-    }
-    if options.len() == 1 {
-        options.pop().unwrap()
-    } else {
-        format!("(?:{})", options.join("|"))
-    }
-}
-
 fn json_escaped_byte_fragments(byte: u8) -> Vec<String> {
     let mut fragments = Vec::new();
     match byte {
         b'"' => fragments.push(String::from(r#"\x5C\x22"#)),
-        b'/' => fragments.push(String::from(r#"\x5C\x2F"#)),
         b'\\' => fragments.push(String::from(r#"\x5C\x5C"#)),
         0x08 => fragments.push(String::from(r#"\x5C\x62"#)),
         0x09 => fragments.push(String::from(r#"\x5Ct"#)),
@@ -1376,9 +1334,6 @@ fn json_escaped_byte_fragments(byte: u8) -> Vec<String> {
         0x0C => fragments.push(String::from(r#"\x5C\x66"#)),
         0x0D => fragments.push(String::from(r#"\x5Cr"#)),
         _ => {}
-    }
-    if !json_direct_ascii_bytes().contains(&byte) {
-        fragments.push(json_unicode_escape_fragment(byte));
     }
     fragments
 }
@@ -1607,10 +1562,6 @@ fn compact_negated_json_class(excluded: &BTreeSet<u8>, exclude_nbsp: bool) -> St
         }
     }
 
-    // JSON \uXXXX escape sequences (over-approximation: accepts all
-    // codepoints, not just those outside the excluded set).
-    parts.push(String::from(r#"\x5Cu[0-9A-Fa-f]{4}"#));
-
     // Multi-byte UTF-8 character patterns.
     if exclude_nbsp {
         // For \S: exclude NBSP (U+00A0 = \xC2\xA0) from the 2-byte UTF-8 range.
@@ -1633,7 +1584,7 @@ fn compact_negated_json_class(excluded: &BTreeSet<u8>, exclude_nbsp: bool) -> St
 /// Also expands shorthand character classes (`\s`, `\S`, `\d`, `\D`, `\w`, `\W`)
 /// into JSON-string-safe equivalents.
 fn jsonify_regex_dot(pattern: &str) -> String {
-    let json_dot = r#"(?:[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})"#;
+    let json_dot = r#"(?:[^\x00-\x1f\x7f"\\]|\\["\\bfnrt])"#;
     let mut out = String::with_capacity(pattern.len() * 2);
     let bytes = pattern.as_bytes();
     let mut i = 0;

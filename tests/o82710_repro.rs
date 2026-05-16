@@ -110,3 +110,12 @@ fn json_schema_pattern_s_accepts_ecma_unicode_whitespace_string() {
     state.commit_bytes("\"\u{3000}\"".as_bytes()).unwrap();
     assert!(state.is_finished());
 }
+
+#[test]
+fn json_schema_pattern_s_accepts_llguidance_nel_whitespace_string() {
+    let vocab = vocab(&["\"".as_bytes(), "\u{0085}".as_bytes()]);
+    let constraint = Constraint::from_json_schema(pattern_whitespace_schema(), &vocab).unwrap();
+    let mut state = constraint.start();
+    state.commit_bytes("\"\u{0085}\"".as_bytes()).unwrap();
+    assert!(state.is_finished());
+}

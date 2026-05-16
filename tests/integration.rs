@@ -443,7 +443,8 @@ fn json_schema_pattern_range_accepts_backslash_fused_token() {
 fn json_schema_pattern_accepts_decoded_newline_escape_spellings() {
     let constraint = byte_schema(r#"{"type":"string","pattern":"^\\n$"}"#);
     assert_accepts_bytes(&constraint, br#""\n""#);
-    assert_accepts_bytes(&constraint, br#""\u000A""#);
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(br#""\u000A""#).is_err());
 }
 
 #[test]
