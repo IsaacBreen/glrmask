@@ -10833,7 +10833,11 @@ impl<'a> SchemaCtx<'a> {
             let match_all_pattern = pattern == "^.*$" || pattern == ".*";
             let matched_property_names = serde_json::json!({"pattern": pattern});
             let value_expr = self.convert_schema(value_schema)?;
-            if matches!(additional_properties, Some(Value::Bool(false))) || match_all_pattern {
+            if match_all_pattern {
+                let pair = sequence_or_single(vec![self.json_key_colon_ref(), value_expr]);
+                return Ok(self.build_repeated_object_pairs(pair));
+            }
+            if matches!(additional_properties, Some(Value::Bool(false))) {
                 return self.build_pattern_named_object_expr(&matched_property_names, value_expr);
             }
 
