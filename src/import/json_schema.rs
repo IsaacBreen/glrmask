@@ -1297,7 +1297,7 @@ fn regex_literal_bytes(bytes: &[u8]) -> String {
 
 fn ecma262_non_ascii_whitespace_literals() -> Vec<String> {
     [
-        '\u{0085}', '\u{00A0}', '\u{1680}', '\u{2000}', '\u{2001}', '\u{2002}',
+        '\u{0085}', '\u{1680}', '\u{2000}', '\u{2001}', '\u{2002}',
         '\u{2003}', '\u{2004}', '\u{2005}', '\u{2006}', '\u{2007}', '\u{2008}',
         '\u{2009}', '\u{200A}', '\u{2028}', '\u{2029}', '\u{202F}', '\u{205F}',
         '\u{3000}',
@@ -1500,11 +1500,11 @@ fn jsonify_shorthand_class(escape_char: u8) -> Option<String> {
         }
         b'D' | b'W' => {
             let excluded = shorthand_class_bytes(escape_char.to_ascii_lowercase());
-            Some(compact_negated_json_class(&excluded, false))
+            Some(compact_negated_json_class(&excluded))
         }
         b'S' => {
             let excluded = shorthand_class_bytes(b's');
-            Some(compact_negated_json_class(&excluded, true))
+            Some(compact_negated_json_class(&excluded))
         }
         _ => None,
     }
@@ -1533,7 +1533,7 @@ fn shorthand_class_bytes(class: u8) -> BTreeSet<u8> {
 /// sequences, direct multi-byte UTF-8 patterns, and `\\uXXXX` encodings
 /// (as an over-approximation — all `\\uXXXX` values are accepted regardless
 /// of whether the encoded codepoint is in the excluded set).
-fn compact_negated_json_class(excluded: &BTreeSet<u8>, exclude_nbsp: bool) -> String {
+fn compact_negated_json_class(excluded: &BTreeSet<u8>) -> String {
     let direct_ascii_all = json_direct_ascii_bytes();
     let mut parts = Vec::new();
 
@@ -1563,15 +1563,7 @@ fn compact_negated_json_class(excluded: &BTreeSet<u8>, exclude_nbsp: bool) -> St
     }
 
     // Multi-byte UTF-8 character patterns.
-    if exclude_nbsp {
-        // For \S: exclude NBSP (U+00A0 = \xC2\xA0) from the 2-byte UTF-8 range.
-        // Split \xC2 continuation to skip \xA0, matching llguidance's behavior
-        // which treats NBSP as whitespace (\s).
-        let utf8_no_nbsp = r#"(?:\xC2[\x80-\x9F\xA1-\xBF]|[\xC3-\xDF][\x80-\xBF]|[\xE0][\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC][\x80-\xBF][\x80-\xBF]|[\xED][\x80-\x9F][\x80-\xBF]|[\xEE-\xEF][\x80-\xBF][\x80-\xBF]|[\xF0][\x90-\xBF][\x80-\xBF][\x80-\xBF]|[\xF1-\xF3][\x80-\xBF][\x80-\xBF][\x80-\xBF]|[\xF4][\x80-\x8F][\x80-\xBF][\x80-\xBF])"#;
-        parts.push(String::from(utf8_no_nbsp));
-    } else {
-        parts.push(String::from(JSON_DIRECT_UTF8_PATTERN));
-    }
+    parts.push(String::from(JSON_DIRECT_UTF8_PATTERN));
 
     if parts.len() == 1 {
         return parts.into_iter().next().unwrap();
