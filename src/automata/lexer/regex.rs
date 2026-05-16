@@ -187,7 +187,14 @@ fn parse_atom(input: &[u8], pos: usize, utf8: bool) -> (Expr, usize) {
         b'(' => parse_group(input, pos, utf8),
         b'[' => parse_char_class(input, pos, utf8),
         b'\\' => parse_escape(input, pos, utf8),
-        b'.' => (Expr::U8Class(U8Set::all()), pos + 1),
+        b'.' => {
+            let expr = if utf8 {
+                utf8_aware_negated_ascii_class(U8Set::empty())
+            } else {
+                Expr::U8Class(U8Set::all())
+            };
+            (expr, pos + 1)
+        }
         byte => (Expr::U8Seq(vec![byte]), pos + 1),
     }
 }

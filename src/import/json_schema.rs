@@ -1222,7 +1222,7 @@ fn prune_pattern_branches_for_min_length(pattern: &str, min_len: usize) -> Optio
         }
 
         let inner = jsonify_regex_dot(core);
-        let expr = parse_regex(&inner, true);
+        let expr = parse_json_encoded_byte_regex(&inner);
         let (_, max_bytes) = regex_byte_length_bounds(&expr);
         if max_bytes.is_some_and(|bound| bound < min_len) {
             continue;
@@ -1294,6 +1294,10 @@ fn regex_literal_bytes(bytes: &[u8]) -> String {
         .map(|byte| format!(r#"\x{:02X}"#, byte))
         .collect::<Vec<_>>()
         .join("")
+}
+
+fn parse_json_encoded_byte_regex(pattern: &str) -> LexerExpr {
+    parse_regex(pattern, false)
 }
 
 fn jsonified_literal_fragment(byte: u8) -> Option<String> {
@@ -1433,7 +1437,7 @@ fn jsonified_char_class_fragment(matched: &BTreeSet<u8>, negate: bool) -> Option
             parts.push(regex_char_class_from_ranges(&compress_byte_set(&direct_ascii)));
         }
         for byte in matched.iter().copied().filter(|byte| *byte >= 0x80) {
-            parts.push(regex_literal_bytes(char::from(byte).to_string().as_bytes()));
+            parts.push(regex_literal_bytes(&[byte]));
         }
         for byte in escapable_all.intersection(matched).copied() {
             parts.extend(json_escaped_byte_fragments(byte));
@@ -1544,8 +1548,6 @@ fn shorthand_class_bytes(class: u8) -> BTreeSet<u8> {
     s
 }
 
-/// Produce a compact JSON-string-safe regex fragment for a negated ASCII class.
-///
 /// Unlike `jsonified_char_class_fragment(_, true)`, this produces a compact
 /// fragment that avoids DFA explosion when combined with bounded repetition
 /// like `{0,99}`. It includes single-byte ASCII chars, named JSON escape
@@ -1654,9 +1656,8 @@ fn json_string_char_lexer_expr() -> LexerExpr {
 }
 
 fn decoded_utf8_char_lexer_expr() -> LexerExpr {
-    parse_regex(
+    parse_json_encoded_byte_regex(
         &format!(r"(?:[\x00-\x7F]|{})", JSON_DIRECT_UTF8_PATTERN),
-        true,
     )
 }
 
@@ -1689,7 +1690,7 @@ fn json_encoded_literal_byte_expr(byte: u8) -> LexerExpr {
 
     if byte < 0x80 {
         for fragment in json_escaped_byte_fragments(byte) {
-            options.push(parse_regex(&fragment, true));
+            options.push(parse_json_encoded_byte_regex(&fragment));
         }
     }
 
@@ -1707,7 +1708,7 @@ fn json_encoded_regex_expr(expr: LexerExpr) -> LexerExpr {
         LexerExpr::U8Class(set) => {
             let matched: BTreeSet<u8> = set.iter().collect();
             jsonified_char_class_fragment(&matched, false)
-                .map(|fragment| parse_regex(&fragment, true))
+                .map(|fragment| parse_json_encoded_byte_regex(&fragment))
                 .unwrap_or_else(|| LexerExpr::Choice(vec![]))
         }
         LexerExpr::Intersect { expr, intersect } => LexerExpr::Intersect {
@@ -1735,7 +1736,10 @@ fn json_encoded_regex_expr(expr: LexerExpr) -> LexerExpr {
 }
 
 fn decoded_regex_fullmatch_expr(pattern: &str) -> LexerExpr {
-    json_encoded_regex_expr(parse_regex(pattern, true))
+    let core = common_outer_anchor_pattern(pattern)
+        .map(|(_, _, core)| core)
+        .unwrap_or_else(|| pattern.to_string());
+    json_encoded_regex_expr(parse_regex(&core, true))
 }
 
 fn decoded_regex_search_branch_expr(branch: &str, max_tail: Option<usize>) -> LexerExpr {
@@ -12113,6 +12117,7 @@ mod tests {
     use super::uri_quote_merge_warning_needed;
     use super::wrap_string_value_expr_parts;
     use crate::automata::lexer::compile::build_regex;
+    use crate::automata::lexer::regex::parse_regex;
     use crate::grammar::ast::lower;
     use crate::GlrMaskError;
     use crate::grammar::ast::GrammarExpr;
@@ -13176,6 +13181,112 @@ mod tests {
         assert!(accepts("1920x1080"));
         assert!(!accepts("1x23x"));
         assert!(!accepts("1920x108x0"));
+    }
+
+    #[test]
+    fn decoded_regex_fullmatch_expr_accepts_utf8_under_negated_char_class() {
+        let regex = build_regex(&[decoded_regex_fullmatch_expr(r"^[^&]*$")]);
+        let accepts_bytes = |bytes: &[u8]| {
+            let mut state = 0u32;
+            for &byte in bytes {
+                let Some(next) = regex.step(state, byte) else {
+                    return false;
+                };
+                state = next;
+            }
+            regex.dfa.finalizers(state).contains(0)
+        };
+        let accepts = |text: &str| accepts_bytes(text.as_bytes());
+
+        assert!(accepts("и"));
+        assert!(accepts("ивання"));
+        assert!(accepts(" веществ"));
+        assert!(accepts(" balık"));
+        assert!(accepts("홈"));
+        assert!(accepts("工程"));
+        assert!(!accepts_bytes(b"\x80"));
+        assert!(!accepts_bytes(b"\xbb"));
+        assert!(!accepts_bytes(b"&\xbb"));
+        assert!(!accepts("a&b"));
+    }
+
+    #[test]
+    fn parse_regex_utf8_negated_ascii_class_accepts_utf8() {
+        let regex = build_regex(&[parse_regex(r"[^&]*", true)]);
+        let accepts = |text: &str| {
+            let mut state = 0u32;
+            for &byte in text.as_bytes() {
+                let Some(next) = regex.step(state, byte) else {
+                    return false;
+                };
+                state = next;
+            }
+            regex.dfa.finalizers(state).contains(0)
+        };
+
+        assert!(accepts("и"));
+        assert!(accepts("ивання"));
+        assert!(accepts("홈"));
+        assert!(!accepts("a&b"));
+    }
+
+    #[test]
+    fn decoded_regex_fullmatch_expr_accepts_positive_high_byte_literal() {
+        let regex = build_regex(&[decoded_regex_fullmatch_expr("ивання")]);
+        let accepts = |text: &str| {
+            let mut state = 0u32;
+            for &byte in text.as_bytes() {
+                let Some(next) = regex.step(state, byte) else {
+                    return false;
+                };
+                state = next;
+            }
+            regex.dfa.finalizers(state).contains(0)
+        };
+
+        assert!(accepts("ивання"));
+        assert!(!accepts("Ð¸Ð²Ð°Ð½Ð½Ñ"));
+        assert!(!accepts("ivannya"));
+    }
+
+    #[test]
+    fn decoded_regex_fullmatch_expr_accepts_positive_high_byte_class() {
+        let regex = build_regex(&[decoded_regex_fullmatch_expr(r"^[\xD0-\xD1][\x80-\xBF]$")]);
+        let accepts = |text: &str| {
+            let mut state = 0u32;
+            for &byte in text.as_bytes() {
+                let Some(next) = regex.step(state, byte) else {
+                    return false;
+                };
+                state = next;
+            }
+            regex.dfa.finalizers(state).contains(0)
+        };
+
+        assert!(accepts("и"));
+        assert!(!accepts("ивання"));
+        assert!(!accepts("hello"));
+        assert!(!accepts("&"));
+    }
+
+    #[test]
+    fn decoded_regex_fullmatch_expr_dot_rejects_lone_continuation_byte() {
+        let regex = build_regex(&[decoded_regex_fullmatch_expr(r"^.*\.md$")]);
+        let accepts_bytes = |bytes: &[u8]| {
+            let mut state = 0u32;
+            for &byte in bytes {
+                let Some(next) = regex.step(state, byte) else {
+                    return false;
+                };
+                state = next;
+            }
+            regex.dfa.finalizers(state).contains(0)
+        };
+
+        assert!(accepts_bytes("и.md".as_bytes()));
+        assert!(accepts_bytes("Task description.md".as_bytes()));
+        assert!(!accepts_bytes(b"\xbb.md"));
+        assert!(!accepts_bytes(b"Task description\xbb.md"));
     }
 
     #[test]
