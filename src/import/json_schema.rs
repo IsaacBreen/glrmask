@@ -1965,7 +1965,7 @@ fn json_literal_string_merge_config() -> JsonStringMergeConfig {
 }
 
 fn json_uri_merge_config() -> JsonStringMergeConfig {
-    let base = json_string_merge_config(false);
+    let base = json_string_merge_config(true);
     JsonStringMergeConfig {
         merge_open: env_flag_optional("GLRMASK_JSON_URI_MERGE_OPEN")
             .unwrap_or(base.merge_open),
@@ -12098,6 +12098,7 @@ mod tests {
     use super::decoded_regex_matches_search;
     use super::decoded_regex_fullmatch_expr;
     use super::integer_multiple_expr;
+    use super::json_uri_merge_config;
     use super::json_string_merge_config;
     use super::literal_alternation_search_literals;
     use super::per_object_ap_keys_enabled_for_plan;
@@ -13208,6 +13209,36 @@ mod tests {
         let pattern_override_cfg = json_string_merge_config(true);
         assert_eq!(pattern_override_cfg.merge_open, false);
         assert_eq!(pattern_override_cfg.merge_close, true);
+    }
+
+    #[test]
+    fn json_uri_merge_defaults_inherit_pattern_string_defaults() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _string_open = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_OPEN");
+        let _string_close = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_CLOSE");
+        let _pattern_open = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_STRING_MERGE_OPEN");
+        let _pattern_close = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_STRING_MERGE_CLOSE");
+        let _uri_open = EnvVarGuard::unset("GLRMASK_JSON_URI_MERGE_OPEN");
+        let _uri_close = EnvVarGuard::unset("GLRMASK_JSON_URI_MERGE_CLOSE");
+
+        let cfg = json_uri_merge_config();
+        assert_eq!(cfg.merge_open, true);
+        assert_eq!(cfg.merge_close, false);
+    }
+
+    #[test]
+    fn json_uri_merge_env_overrides_still_apply_on_top_of_pattern_defaults() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _string_open = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_OPEN");
+        let _string_close = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_CLOSE");
+        let _pattern_open = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_STRING_MERGE_OPEN");
+        let _pattern_close = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_STRING_MERGE_CLOSE");
+        let _uri_open = EnvVarGuard::set("GLRMASK_JSON_URI_MERGE_OPEN", "0");
+        let _uri_close = EnvVarGuard::set("GLRMASK_JSON_URI_MERGE_CLOSE", "1");
+
+        let cfg = json_uri_merge_config();
+        assert_eq!(cfg.merge_open, false);
+        assert_eq!(cfg.merge_close, true);
     }
 
     #[test]
