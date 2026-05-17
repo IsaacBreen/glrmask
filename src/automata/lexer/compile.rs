@@ -739,6 +739,90 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
     Some((dfa, false))
 }
 
+fn prepend_literal_prefix_to_dfa(prefix_bytes: &[u8], tail_dfa: DFA) -> Option<DFA> {
+    if prefix_bytes.is_empty() {
+        return Some(tail_dfa);
+    }
+
+    let total_states = prefix_bytes.len().checked_add(tail_dfa.num_states())?;
+    let tail_offset = prefix_bytes.len() as u32;
+    let mut dfa = DFA::new(total_states);
+    dfa.ensure_group_capacity(tail_dfa.num_groups());
+
+    for (i, &byte) in prefix_bytes.iter().enumerate() {
+        let mut future = BitSet::new(tail_dfa.num_groups());
+        if tail_dfa.num_groups() > 0 {
+            future.set(0);
+        }
+        dfa.overwrite_state_metadata(i as u32, BitSet::new(tail_dfa.num_groups()), future);
+        let target = if i + 1 == prefix_bytes.len() {
+            tail_offset
+        } else {
+            (i + 1) as u32
+        };
+        dfa.set_transitions_from_sorted_entries(i as u32, vec![(byte, target)]);
+    }
+
+    for state_id in 0..tail_dfa.num_states() {
+        let mapped_state = tail_offset + state_id as u32;
+        dfa.overwrite_state_metadata(
+            mapped_state,
+            tail_dfa.finalizers(state_id as u32).clone(),
+            tail_dfa.possible_future_group_ids(state_id as u32).clone(),
+        );
+        let transitions = tail_dfa.states()[state_id]
+            .transitions
+            .iter()
+            .map(|(byte, &target)| (byte, tail_offset + target))
+            .collect();
+        dfa.set_transitions_from_sorted_entries(mapped_state, transitions);
+    }
+
+    Some(dfa)
+}
+
+fn build_prefixed_bounded_repeat_with_suffix_dfa(parts: &[Expr]) -> Option<(DFA, bool)> {
+    let mut flat_parts = Vec::new();
+    for part in parts {
+        match part {
+            Expr::Shared(inner) => match inner.as_ref() {
+                Expr::Seq(inner_parts) => flat_parts.extend(inner_parts.iter().cloned()),
+                _ => flat_parts.push(part.clone()),
+            },
+            Expr::Seq(inner_parts) => flat_parts.extend(inner_parts.iter().cloned()),
+            _ => flat_parts.push(part.clone()),
+        }
+    }
+
+    let parts = flat_parts.as_slice();
+    if parts.len() < 3 {
+        return None;
+    }
+
+    for repeat_index in 1..parts.len() - 1 {
+        let repeat_expr = match &parts[repeat_index] {
+            Expr::Shared(inner) => inner.as_ref(),
+            other => other,
+        };
+        let Expr::Repeat { max: Some(max), .. } = repeat_expr else {
+            continue;
+        };
+        if *max < DIRECT_BOUNDED_REPEAT_THRESHOLD {
+            continue;
+        }
+
+        let prefix_bytes = collect_suffix_bytes(&parts[..repeat_index])?;
+        let tail_parts: Vec<Expr> = parts[repeat_index..].to_vec();
+        let (tail_dfa, needs_future_recompute) =
+            build_bounded_repeat_with_suffix_dfa(&tail_parts)
+                .or_else(|| build_bounded_repeat_with_regex_suffix(&tail_parts))?;
+        let dfa = prepend_literal_prefix_to_dfa(&prefix_bytes, tail_dfa)?;
+        return Some((dfa, needs_future_recompute));
+    }
+
+    None
+}
+
 fn append_bounded_repeat_expr(expr: &Expr, min: usize, max: usize, nfa: &mut NFA, start: u32, end: u32) {
     if max < min {
         return;
@@ -949,7 +1033,8 @@ fn compile_product_component_dfa_direct(expr: &Expr) -> Option<(DFA, bool)> {
             max: Some(max),
         } => build_bounded_repeat_dfa(expr, *min, *max).map(|dfa| (dfa, false)),
         Expr::Seq(parts) => build_bounded_repeat_with_suffix_dfa(parts)
-            .or_else(|| build_bounded_repeat_with_regex_suffix(parts)),
+            .or_else(|| build_bounded_repeat_with_regex_suffix(parts))
+            .or_else(|| build_prefixed_bounded_repeat_with_suffix_dfa(parts)),
         _ => None,
     }
 }
@@ -1490,6 +1575,108 @@ mod tests {
         assert!(
             exec.matches.iter().any(|matched| matched.id == 1 && matched.width == 16),
             "GLRM family exact repeat did not match at len 16: {:?}",
+            exec.matches,
+        );
+    }
+
+    #[test]
+    fn product_vbr_with_literal_prefix_uses_direct_bounded_repeat_tail() {
+        let quote = Expr::U8Seq(vec![b'"']);
+        let spaces = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::single(b' '))),
+            min: 0,
+            max: Some(32),
+        };
+        let expr = Expr::Seq(vec![quote.clone(), spaces, quote]);
+
+        let Some((dfa, _)) = super::compile_product_component_dfa_direct(&expr) else {
+            panic!("prefixed bounded repeat did not use direct product component path");
+        };
+        assert!(
+            dfa.num_states() <= 80,
+            "direct prefixed bounded repeat DFA unexpectedly large: {} states",
+            dfa.num_states(),
+        );
+
+        let tokenizer = Tokenizer {
+            dfa,
+            num_terminals: 1,
+            exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
+        };
+
+        for len in [0usize, 1, 31, 32] {
+            let mut input = Vec::with_capacity(len + 2);
+            input.push(b'"');
+            input.extend(std::iter::repeat(b' ').take(len));
+            input.push(b'"');
+            let exec = tokenizer.execute_from_state(&input, tokenizer.initial_state());
+            assert!(
+                exec.matches
+                    .iter()
+                    .any(|matched| matched.id == 0 && matched.width == input.len()),
+                "prefixed bounded repeat did not match length {len}: {:?}",
+                exec.matches,
+            );
+        }
+    }
+
+    #[test]
+    fn product_vbr_with_literal_prefix_and_regex_suffix_matches() {
+        let quote = Expr::U8Seq(vec![b'"']);
+        let word = Expr::U8Class(U8Set::single(b'a'));
+        let space = Expr::U8Class(U8Set::single(b' '));
+        let word_run = Expr::Repeat {
+            expr: Box::new(word.clone()),
+            min: 1,
+            max: None,
+        };
+        let space_run = Expr::Repeat {
+            expr: Box::new(space),
+            min: 1,
+            max: None,
+        };
+        let pair = Expr::Seq(vec![word_run.clone(), space_run]);
+        let repeated_pairs = Expr::Repeat {
+            expr: Box::new(pair),
+            min: 0,
+            max: Some(49),
+        };
+        let expr = Expr::Seq(vec![quote, repeated_pairs, word_run]);
+
+        let Some((dfa, _)) = super::compile_product_component_dfa_direct(&expr) else {
+            panic!("prefixed bounded repeat with regex suffix did not use direct path");
+        };
+        assert!(
+            dfa.num_states() <= 400,
+            "direct prefixed bounded repeat with regex suffix unexpectedly large: {} states",
+            dfa.num_states(),
+        );
+
+        let tokenizer = Tokenizer {
+            dfa,
+            num_terminals: 1,
+            exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
+        };
+
+        for input in [b"\"a".as_slice(), b"\"aa", b"\"a a", b"\"aa  aaa"] {
+            let exec = tokenizer.execute_from_state(input, tokenizer.initial_state());
+            assert!(
+                exec.matches
+                    .iter()
+                    .any(|matched| matched.id == 0 && matched.width == input.len()),
+                "prefixed bounded repeat with suffix did not match {:?}: {:?}",
+                std::str::from_utf8(input).unwrap(),
+                exec.matches,
+            );
+        }
+
+        let exec = tokenizer.execute_from_state(b"\"a ", tokenizer.initial_state());
+        assert!(
+            !exec
+                .matches
+                .iter()
+                .any(|matched| matched.id == 0 && matched.width == 3),
+            "prefixed bounded repeat with suffix matched trailing space: {:?}",
             exec.matches,
         );
     }
