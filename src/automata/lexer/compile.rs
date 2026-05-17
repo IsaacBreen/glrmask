@@ -372,9 +372,20 @@ fn compile_direct_bounded_repeat_base_dfa(expr: &Expr, max: usize) -> Option<DFA
     Some(base_dfa)
 }
 
-fn build_bounded_repeat_dfa(expr: &Expr, min: usize, max: usize) -> Option<DFA> {
-    let base_dfa = compile_direct_bounded_repeat_base_dfa(expr, max)?;
+fn compile_nonnullable_bounded_repeat_base_dfa(expr: &Expr, max: usize) -> Option<DFA> {
+    if max < DIRECT_BOUNDED_REPEAT_THRESHOLD {
+        return None;
+    }
 
+    let base_dfa = compile_expr_to_dfa(expr);
+    if base_dfa.num_states() == 0 || !base_dfa.finalizers(0).is_empty() {
+        return None;
+    }
+
+    Some(base_dfa)
+}
+
+fn build_prefix_free_bounded_repeat_dfa(base_dfa: &DFA, min: usize, max: usize) -> Option<DFA> {
     let base_states = base_dfa.states();
     let base_state_count = base_states.len();
     let total_states = (max + 1).checked_mul(base_state_count)?;
@@ -412,6 +423,129 @@ fn build_bounded_repeat_dfa(expr: &Expr, min: usize, max: usize) -> Option<DFA> 
     }
 
     Some(dfa)
+}
+
+fn build_generic_bounded_repeat_dfa(base_dfa: &DFA, min: usize, max: usize) -> Option<DFA> {
+    let base_state_count = base_dfa.num_states();
+    let pair_count = (max + 1).checked_mul(base_state_count)?;
+    if pair_count > 500_000 {
+        return None;
+    }
+
+    let productive = productive_dfa_states(base_dfa);
+    let final_states: Vec<usize> = (0..base_state_count)
+        .filter(|&state| !base_dfa.finalizers(state as u32).is_empty())
+        .collect();
+
+    let pair_index = |state: usize, copies_done: usize| copies_done * base_state_count + state;
+    let close_subset = |subset: &mut BitSet| {
+        for copies_done in 0..max {
+            if final_states
+                .iter()
+                .any(|&state| subset.get(pair_index(state, copies_done)))
+            {
+                subset.set(pair_index(0, copies_done + 1));
+            }
+        }
+    };
+    let is_accepting = |subset: &BitSet| {
+        (min..=max).any(|copies_done| subset.get(pair_index(0, copies_done)))
+    };
+    let has_future = |subset: &BitSet| {
+        subset.iter_ones().any(|index| {
+            let copies_done = index / base_state_count;
+            let state = index % base_state_count;
+            copies_done < max && productive[state]
+        })
+    };
+
+    let mut start_subset = BitSet::new(pair_count);
+    start_subset.set(pair_index(0, 0));
+    close_subset(&mut start_subset);
+
+    let mut dfa = DFA::new(1);
+    dfa.ensure_group_capacity(1);
+
+    let mut start_finalizers = BitSet::new(1);
+    let mut start_future = BitSet::new(1);
+    if is_accepting(&start_subset) {
+        start_finalizers.set(0);
+    }
+    if has_future(&start_subset) {
+        start_future.set(0);
+    }
+    dfa.overwrite_state_metadata(0, start_finalizers, start_future);
+
+    let mut state_map: FxHashMap<BitSet, u32> = FxHashMap::default();
+    let mut worklist: VecDeque<(u32, BitSet)> = VecDeque::new();
+    state_map.insert(start_subset.clone(), 0);
+    worklist.push_back((0, start_subset));
+
+    while let Some((dfa_state, subset))) = worklist.pop_front() {
+        let mut transitions = Vec::new();
+
+        for byte_val in 0u16..=255 {
+            let byte = byte_val as u8;
+            let mut next_subset = BitSet::new(pair_count);
+
+            for index in subset.iter_ones() {
+                let copies_done = index / base_state_count;
+                if copies_done >= max {
+                    continue;
+                }
+
+                let state = index % base_state_count;
+                if let Some(target) = base_dfa.step(state as u32, byte) {
+                    if productive[target as usize] {
+                        next_subset.set(pair_index(target as usize, copies_done));
+                    }
+                }
+            }
+
+            if next_subset.is_empty() {
+                continue;
+            }
+
+            close_subset(&mut next_subset);
+
+            let target_dfa_state = if let Some(&existing) = state_map.get(&next_subset) {
+                existing
+            } else {
+                if state_map.len() >= 500_000 {
+                    return None;
+                }
+
+                let new_state = dfa.add_state();
+                let mut finalizers = BitSet::new(1);
+                let mut future = BitSet::new(1);
+                if is_accepting(&next_subset) {
+                    finalizers.set(0);
+                }
+                if has_future(&next_subset) {
+                    future.set(0);
+                }
+                dfa.overwrite_state_metadata(new_state, finalizers, future);
+                state_map.insert(next_subset.clone(), new_state);
+                worklist.push_back((new_state, next_subset));
+                new_state
+            };
+
+            transitions.push((byte, target_dfa_state));
+        }
+
+        dfa.set_transitions_from_sorted_entries(dfa_state, transitions);
+    }
+
+    Some(dfa.minimize())
+}
+
+fn build_bounded_repeat_dfa(expr: &Expr, min: usize, max: usize) -> Option<DFA> {
+    if let Some(base_dfa) = compile_direct_bounded_repeat_base_dfa(expr, max) {
+        return build_prefix_free_bounded_repeat_dfa(&base_dfa, min, max);
+    }
+
+    let base_dfa = compile_nonnullable_bounded_repeat_base_dfa(expr, max)?;
+    build_generic_bounded_repeat_dfa(&base_dfa, min, max)
 }
 
 /// Collects all bytes from a slice of suffix expressions that are all U8Seq.
@@ -1328,11 +1462,51 @@ fn build_regex_nfa_impl(exprs: &[Expr]) -> NFA {
 
 #[cfg(test)]
 mod tests {
-    use super::build_regex;
+    use super::{build_bounded_repeat_dfa, build_regex};
     use crate::automata::lexer::ast::Expr;
+    use crate::automata::lexer::regex::parse_regex;
     use crate::automata::lexer::tokenizer::Tokenizer;
     use crate::ds::u8set::U8Set;
     use std::sync::Arc;
+
+    fn assert_direct_repeat_matches(
+        body: Expr,
+        min: usize,
+        max: usize,
+        input: &str,
+        should_match: bool,
+    ) {
+        let expr = Expr::Repeat {
+            expr: Box::new(body),
+            min,
+            max: Some(max),
+        };
+        let dfa = build_bounded_repeat_dfa(
+            match &expr {
+                Expr::Repeat { expr, .. } => expr.as_ref(),
+                _ => unreachable!(),
+            },
+            min,
+            max,
+        )
+        .expect("bounded repeat should use the direct DFA builder");
+        let tokenizer = Tokenizer {
+            dfa,
+            num_terminals: 1,
+            exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
+        };
+        let exec = tokenizer.execute_from_state(input.as_bytes(), tokenizer.initial_state());
+        let matched = exec
+            .matches
+            .iter()
+            .any(|matched| matched.id == 0 && matched.width == input.len());
+        assert_eq!(
+            matched,
+            should_match,
+            "direct repeat mismatch for input {input:?}: {:?}",
+            exec.matches,
+        );
+    }
 
     #[test]
     fn standalone_exact_repeat_matches_only_at_full_length() {
@@ -1492,6 +1666,74 @@ mod tests {
             "GLRM family exact repeat did not match at len 16: {:?}",
             exec.matches,
         );
+    }
+
+    #[test]
+    fn direct_bounded_repeat_handles_non_prefix_free_body() {
+        let body = Expr::Seq(vec![
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::single(b'a'))),
+                min: 1,
+                max: None,
+            },
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::single(b' '))),
+                min: 1,
+                max: None,
+            },
+        ]);
+
+        assert_direct_repeat_matches(body.clone(), 0, 4, "", true);
+        assert_direct_repeat_matches(body.clone(), 0, 4, "a ", true);
+        assert_direct_repeat_matches(body.clone(), 0, 4, "aa  a   ", true);
+        assert_direct_repeat_matches(body.clone(), 0, 4, "a", false);
+        assert_direct_repeat_matches(body, 0, 4, "a a", false);
+    }
+
+    #[test]
+    fn direct_bounded_repeat_handles_problem_shape_body() {
+        let body = parse_regex(r"\S+\s+", true);
+
+        assert_direct_repeat_matches(body.clone(), 0, 49, "", true);
+        assert_direct_repeat_matches(body.clone(), 0, 49, "word ", true);
+        assert_direct_repeat_matches(body.clone(), 0, 49, "one two ", true);
+        assert_direct_repeat_matches(body.clone(), 0, 49, "word", false);
+        assert_direct_repeat_matches(body, 0, 49, " one", false);
+    }
+
+    #[test]
+    fn bounded_repeat_inside_literal_prefix_sequence_matches_exactly() {
+        let repeated_body = Expr::Repeat {
+            expr: Box::new(parse_regex(r"\S+\s+", true)),
+            min: 0,
+            max: Some(49),
+        };
+        let expr = Expr::Seq(vec![Expr::U8Seq(vec![b'"']), repeated_body.clone()]);
+        let regex = build_regex(std::slice::from_ref(&expr));
+        let tokenizer = Tokenizer {
+            dfa: regex.dfa,
+            num_terminals: 1,
+            exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
+        };
+
+        for (input, should_match) in [
+            ("\"", true),
+            ("\"word ", true),
+            ("\"one two ", true),
+            ("\"word", false),
+        ] {
+            let exec = tokenizer.execute_from_state(input.as_bytes(), tokenizer.initial_state());
+            let matched = exec
+                .matches
+                .iter()
+                .any(|matched| matched.id == 0 && matched.width == input.len());
+            assert_eq!(
+                matched,
+                should_match,
+                "literal-prefix repeat mismatch for input {input:?}: {:?}",
+                exec.matches,
+            );
+        }
     }
 
 }
