@@ -451,7 +451,7 @@ fn build_local_to_global_tsid_map(
     global_id_map: &InternalIdMap,
 ) -> Vec<Vec<u32>> {
     let num_local = local_id_map.num_tsids() as usize;
-    let mut local_to_global = vec![BTreeSet::new(); num_local];
+    let mut local_to_global = vec![Vec::new(); num_local];
 
     for (state, &local_tsid) in local_id_map
         .tokenizer_states
@@ -460,13 +460,14 @@ fn build_local_to_global_tsid_map(
         .enumerate()
     {
         let global_tsid = global_id_map.tokenizer_states.original_to_internal[state];
-        local_to_global[local_tsid as usize].insert(global_tsid);
+        local_to_global[local_tsid as usize].push(global_tsid);
     }
 
+    for globals in &mut local_to_global {
+        globals.sort_unstable();
+        globals.dedup();
+    }
     local_to_global
-        .into_iter()
-        .map(|s| s.into_iter().collect())
-        .collect()
 }
 
 /// Map local internal token classes to global internal token classes.
@@ -475,7 +476,7 @@ fn build_local_to_global_token_map(
     global_id_map: &InternalIdMap,
 ) -> Vec<Vec<u32>> {
     let num_local = local_id_map.num_internal_tokens() as usize;
-    let mut local_to_global = vec![BTreeSet::new(); num_local];
+    let mut local_to_global = vec![Vec::new(); num_local];
 
     for (orig, &local_class) in local_id_map
         .vocab_tokens
@@ -495,13 +496,14 @@ fn build_local_to_global_token_map(
         if global_class == u32::MAX {
             continue;
         }
-        local_to_global[local_class as usize].insert(global_class);
+        local_to_global[local_class as usize].push(global_class);
     }
 
+    for globals in &mut local_to_global {
+        globals.sort_unstable();
+        globals.dedup();
+    }
     local_to_global
-        .into_iter()
-        .map(|s| s.into_iter().collect())
-        .collect()
 }
 
 /// Remap all weights in an NWA from local TSID/token space to global space.
