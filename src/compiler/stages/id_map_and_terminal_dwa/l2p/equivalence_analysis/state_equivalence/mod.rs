@@ -1,10 +1,8 @@
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 
-pub(crate) mod f_signature;
 pub(crate) mod max_length;
 pub(crate) mod pass;
 pub(crate) mod pipeline;
-pub(crate) mod vocab_trie_hash128;
 
 pub(crate) use pass::StateEquivalenceScope;
 pub(crate) use pipeline::{

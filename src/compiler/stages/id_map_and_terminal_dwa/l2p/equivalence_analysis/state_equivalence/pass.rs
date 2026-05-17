@@ -5,16 +5,14 @@ use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StateEquivalencePassKind {
     MaxLength,
-    VocabTrieHash128,
 }
 
 impl StateEquivalencePassKind {
     pub(crate) fn parse(value: &str) -> Result<Self, String> {
         match value.trim() {
             "max_length" => Ok(Self::MaxLength),
-            "vocab_trie_hash128" => Ok(Self::VocabTrieHash128),
             other => Err(format!(
-                "unknown state-equivalence pass `{other}`; expected one of: max_length, vocab_trie_hash128"
+                "unknown state-equivalence pass `{other}`; expected one of: max_length"
             )),
         }
     }

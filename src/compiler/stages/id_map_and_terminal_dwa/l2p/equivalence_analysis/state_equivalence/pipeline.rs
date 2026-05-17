@@ -7,7 +7,6 @@ use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use super::identity_state_map;
 use super::max_length::MaxLengthPass;
 use super::pass::{StateEquivalencePass, StateEquivalencePassKind, StateEquivalenceScope};
-use super::vocab_trie_hash128::VocabTrieHash128Pass;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct StateEquivalencePipelineConfig {
@@ -139,25 +138,6 @@ pub(crate) fn run_state_equivalence_pipeline(
                 profile.max_length_skipped = false;
                 profile.max_length_state_equiv_ms = elapsed_ms;
                 profile.max_length_reps = current_state_map.num_internal_ids() as usize;
-                profile.pass_profiles.push(StateEquivalencePassProfile {
-                    kind: *kind,
-                    name: pass.name(),
-                    elapsed_ms,
-                    representative_count: current_state_map.num_internal_ids() as usize,
-                    skipped: false,
-                });
-            }
-            (StateEquivalencePassKind::VocabTrieHash128, _) => {
-                let pass = VocabTrieHash128Pass;
-                let statistic = pass.compute_statistic(vocab);
-                let started_at = Instant::now();
-                current_state_map = pass.compute_state_map(
-                    tokenizer,
-                    &statistic,
-                    Some(&current_state_map),
-                    active_groups,
-                );
-                let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
                 profile.pass_profiles.push(StateEquivalencePassProfile {
                     kind: *kind,
                     name: pass.name(),
