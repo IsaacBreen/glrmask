@@ -6,7 +6,28 @@ use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 
 use super::identity_state_map;
 use super::max_length::{self, MaxLengthMode};
-use super::pass::{StateEquivalencePassKind, StateEquivalenceScope};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StateEquivalencePassKind {
+    MaxLength,
+}
+
+impl StateEquivalencePassKind {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.trim() {
+            "max_length" => Ok(Self::MaxLength),
+            other => Err(format!(
+                "unknown state-equivalence pass `{other}`; expected one of: max_length"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StateEquivalenceScope {
+    Global,
+    L2p,
+}
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct StateEquivalencePipelineConfig {
