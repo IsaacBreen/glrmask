@@ -1807,16 +1807,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
-    pub fn from_single_stack(values: Vec<T>, acc: A) -> Self {
-        let floor = new_lower(CompactMap::new(), true);
-        let inner = if values.is_empty() {
-            new_interface(floor, acc)
-        } else {
-            new_interface(new_segment(SV::from_vec(values), floor), acc)
-        };
-        LeveledGSS { inner }
-    }
-
     pub fn to_stacks(&self) -> Vec<(Vec<T>, A)> {
         let mut res: Vec<(Vec<T>, A)> = Vec::new();
 
@@ -1906,161 +1896,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
         dfs_upper(&self.inner, &mut vec![], &mut res);
         res
-    }
-
-    /// Apply a set of stack effects by materializing the single concrete stack.
-    ///
-    /// This is only a win for already-deterministic parser states that have a
-    /// large `StackShifts` action. In that shape, the generic GSS branch builder
-    /// can spend most of its time constructing and merging branches that collapse
-    /// back to one or two concrete stacks.
-    pub fn apply_stack_effects_to_single_concrete_path<'a, I>(
-        &self,
-        effects: I,
-        max_materialized_depth: usize,
-    ) -> Option<Self>
-    where
-        I: IntoIterator<Item = (usize, &'a [T])>,
-        T: 'a,
-    {
-        if let Some(stack) = self.try_virtual_stack() {
-            let mut out: Option<Self> = None;
-            for (pop, pushes) in effects {
-                let mut branch = stack.clone();
-                if branch.pop(pop) != 0 {
-                    continue;
-                }
-                for value in pushes {
-                    branch.push(value.clone());
-                }
-                let branch = branch.into_gss();
-                out = Some(match out {
-                    Some(existing) => existing.merge(&branch),
-                    None => branch,
-                });
-            }
-            if let Some(out) = out {
-                return Some(out);
-            }
-            let empty: Vec<(Vec<T>, A)> = Vec::new();
-            return Some(Self::from_stacks(&empty));
-        }
-
-        if self.max_depth() as usize > max_materialized_depth {
-            return None;
-        }
-
-        let mut stacks = self.to_stacks();
-        if stacks.len() != 1 {
-            return None;
-        }
-        let (stack, acc) = stacks.pop().unwrap();
-
-        let mut out: Vec<(Vec<T>, A)> = Vec::new();
-        for (pop, pushes) in effects {
-            if pop > stack.len() {
-                continue;
-            }
-
-            let keep = stack.len() - pop;
-            let mut next = Vec::with_capacity(keep + pushes.len());
-            next.extend_from_slice(&stack[..keep]);
-            next.extend_from_slice(pushes);
-
-            if let Some((_, existing_acc)) =
-                out.iter_mut().find(|(existing_stack, _)| *existing_stack == next)
-            {
-                *existing_acc = existing_acc.merge(&acc);
-            } else {
-                out.push((next, acc.clone()));
-            }
-        }
-
-        match out.len() {
-            1 => {
-                let (stack, acc) = out.pop().unwrap();
-                Some(Self::from_single_stack(stack, acc))
-            }
-            _ => Some(Self::from_stacks(&out)),
-        }
-    }
-
-    pub fn apply_shared_pop_push_branches<'a, I>(
-        &self,
-        pop: usize,
-        pushes: I,
-    ) -> Option<Self>
-    where
-        I: IntoIterator<Item = &'a [T]>,
-        T: 'a,
-    {
-        self.try_virtual_stack()?
-            .into_gss_after_popping_and_pushing_branches(pop, pushes)
-    }
-
-    pub fn apply_guarded_stack_effects_to_single_concrete_path<'a, I, G>(
-        &self,
-        effects: I,
-        max_materialized_depth: usize,
-    ) -> Option<Self>
-    where
-        I: IntoIterator<Item = (G, usize, &'a [T])>,
-        G: IntoIterator<Item = (usize, &'a [T])>,
-        T: 'a,
-    {
-        if self.max_depth() as usize > max_materialized_depth {
-            return None;
-        }
-
-        let mut stacks = self.to_stacks();
-        if stacks.len() != 1 {
-            return None;
-        }
-        let (stack, acc) = stacks.pop().unwrap();
-
-        let mut out: Vec<(Vec<T>, A)> = Vec::new();
-        for (guards, pop, pushes) in effects {
-            if pop > stack.len() {
-                continue;
-            }
-
-            let mut allowed = true;
-            for (guard_pop, guard_states) in guards {
-                if guard_pop >= stack.len() {
-                    allowed = false;
-                    break;
-                }
-                let state = &stack[stack.len() - 1 - guard_pop];
-                if !guard_states.iter().any(|candidate| candidate == state) {
-                    allowed = false;
-                    break;
-                }
-            }
-            if !allowed {
-                continue;
-            }
-
-            let keep = stack.len() - pop;
-            let mut next = Vec::with_capacity(keep + pushes.len());
-            next.extend_from_slice(&stack[..keep]);
-            next.extend_from_slice(pushes);
-
-            if let Some((_, existing_acc)) =
-                out.iter_mut().find(|(existing_stack, _)| *existing_stack == next)
-            {
-                *existing_acc = existing_acc.merge(&acc);
-            } else {
-                out.push((next, acc.clone()));
-            }
-        }
-
-        match out.len() {
-            1 => {
-                let (stack, acc) = out.pop().unwrap();
-                Some(Self::from_single_stack(stack, acc))
-            }
-            _ => Some(Self::from_stacks(&out)),
-        }
     }
 
     pub fn push(&self, value: T) -> Self {
@@ -3835,76 +3670,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         self.path_count_at_most(2) <= 1
     }
 
-    pub fn single_path_top_first_and_acc(&self, out: &mut SmallVec<[T; 16]>) -> Option<A> {
-        fn push_lower_path<T>(node: &Arc<Lower<T>>, out: &mut SmallVec<[T; 16]>) -> bool
-        where
-            T: Clone + Eq + Hash,
-        {
-            match &**node {
-                Lower::Segment(seg) => {
-                    for value in seg.values.iter().rev() {
-                        out.push(value.clone());
-                    }
-                    push_lower_path(&seg.next, out)
-                }
-                Lower::General { children, empty, .. } => {
-                    if *empty {
-                        return children.is_empty();
-                    }
-                    if children.len() != 1 {
-                        return false;
-                    }
-                    let (value, kids) = children.iter().next().unwrap();
-                    if kids.len() != 1 {
-                        return false;
-                    }
-                    out.push(value.clone());
-                    push_lower_path(kids.values().next().unwrap(), out)
-                }
-            }
-        }
-
-        fn push_upper_path<T, A>(
-            node: &Arc<Upper<T, A>>,
-            out: &mut SmallVec<[T; 16]>,
-        ) -> Option<A>
-        where
-            T: Clone + Eq + Hash,
-            A: Merge + Clone + Eq + Hash,
-        {
-            match &**node {
-                Upper::Interface(interface) => {
-                    if push_lower_path(&interface.inner, out) {
-                        Some(interface.acc.clone())
-                    } else {
-                        None
-                    }
-                }
-                Upper::Branch(branch) => {
-                    if branch.empty.is_some() || branch.children.len() != 1 {
-                        return None;
-                    }
-                    let (value, kids) = branch.children.iter().next().unwrap();
-                    if kids.len() != 1 {
-                        return None;
-                    }
-                    out.push(value.clone());
-                    push_upper_path(kids.values().next().unwrap(), out)
-                }
-            }
-        }
-
-        out.clear();
-        let start_len = out.len();
-        match push_upper_path(&self.inner, out) {
-            Some(acc) => Some(acc),
-            None => {
-                out.truncate(start_len);
-                None
-            }
-        }
-    }
-
     pub fn reduce_acc(&self) -> Option<A> {
 
         let mut unique: HashSet<A> = HashSet::new();
@@ -4281,37 +4046,9 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
-}
 
-#[cfg(test)]
-mod tests {
-    use super::LeveledGSS;
-    use super::Merge;
 
-    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-    struct TestAcc(u32);
 
-    impl Merge for TestAcc {
-        fn merge(&self, other: &Self) -> Self {
-            Self(self.0.max(other.0))
-        }
-    }
 
-    #[test]
-    fn apply_shared_pop_push_branches_matches_virtual_stack_branch_builder() {
-        let gss = LeveledGSS::from_single_stack(vec![10_u32, 20, 30, 40], TestAcc(1));
-        let pushes = [vec![50_u32, 60], vec![70_u32, 80], vec![90_u32, 60]];
 
-        let expected = gss
-            .try_virtual_stack()
-            .unwrap()
-            .into_gss_after_popping_and_pushing_branches(2, pushes.iter().map(|push| push.as_slice()))
-            .unwrap();
-        let actual = gss
-            .apply_shared_pop_push_branches(2, pushes.iter().map(|push| push.as_slice()))
-            .unwrap();
-
-        assert_eq!(actual, expected);
-        assert_eq!(actual.to_stacks(), expected.to_stacks());
-    }
 }

@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::{FxHashMap, FxHashSet};
-use smallvec::SmallVec;
 
 use crate::automata::weighted::nwa::{NWA, NWAState};
 use crate::compiler::glr::labels::{DEFAULT_LABEL, is_negative_label, negative_to_positive_label};
@@ -16,7 +15,6 @@ type CancellationTask = (u32, u32, i32);
 type QueryWeights = Vec<Option<FxHashMap<QueryKey, Weight>>>;
 type QueuedQueries = Vec<SmallQueuedQueries>;
 type DerivedEpsilons = Vec<Option<FxHashMap<u32, Weight>>>;
-type SubsetMemo = FxHashMap<(usize, usize), bool>;
 
 #[derive(Clone, Default)]
 enum SmallQueuedQueries {
@@ -117,142 +115,10 @@ fn intersect_or_clone_right_if_subset(left: &Weight, right: &Weight) -> Weight {
     }
 }
 
-fn intersect_or_clone_right_if_subset_cached(
-    left: &Weight,
-    right: &Weight,
-    subset_memo: &mut SubsetMemo,
-) -> Weight {
-    let key = (left.ptr_key(), right.ptr_key());
-    let subset = *subset_memo
-        .entry(key)
-        .or_insert_with(|| right.is_subset(left));
-    if subset {
-        right.clone()
-    } else {
-        left.intersection(right)
-    }
-}
-
 #[derive(Clone, Copy)]
 struct PredEdge<'a> {
     from: usize,
     weight: &'a Weight,
-}
-
-#[derive(Clone)]
-struct GuardedFinalWeight {
-    weight: Weight,
-    /// `Some(weight)` is a proof that `weight` is a subset of the cloned,
-    /// interned edge weight stored here. Owning the guard prevents pointer
-    /// reuse / ABA issues while the proof exists and still lets finality
-    /// propagation skip idempotent intersections along chains of equal
-    /// parser-template edge weights.
-    subset_of: Option<Weight>,
-}
-
-impl GuardedFinalWeight {
-    fn initial(weight: Weight) -> Option<Self> {
-        (!weight.is_empty()).then_some(Self {
-            weight,
-            subset_of: None,
-        })
-    }
-
-    fn is_guarded_by(&self, edge_weight: &Weight) -> bool {
-        self.subset_of
-            .as_ref()
-            .is_some_and(|guard| Arc::ptr_eq(&guard.0, &edge_weight.0))
-    }
-
-    fn intersection_with_edge(&self, edge_weight: &Weight) -> Option<Self> {
-        if self.weight.is_empty() || edge_weight.is_empty() {
-            return None;
-        }
-
-        if self.is_guarded_by(edge_weight) {
-            return Some(self.clone());
-        }
-
-        if edge_weight.is_full() {
-            return Some(Self {
-                weight: self.weight.clone(),
-                subset_of: Some(edge_weight.clone()),
-            });
-        }
-
-        if self.weight.is_full() {
-            return Some(Self {
-                weight: edge_weight.clone(),
-                subset_of: Some(edge_weight.clone()),
-            });
-        }
-
-        let weight = self.weight.intersection(edge_weight);
-        (!weight.is_empty()).then_some(Self {
-            weight,
-            subset_of: Some(edge_weight.clone()),
-        })
-    }
-}
-
-fn merge_guarded_final_weight(
-    entry: &mut Option<GuardedFinalWeight>,
-    add: GuardedFinalWeight,
-) -> bool {
-    if add.weight.is_empty() {
-        return false;
-    }
-
-    match entry {
-        Some(existing) => {
-            let updated = existing.weight.union(&add.weight);
-            if updated != existing.weight {
-                let subset_of = if existing
-                    .subset_of
-                    .as_ref()
-                    .zip(add.subset_of.as_ref())
-                    .is_some_and(|(left, right)| Arc::ptr_eq(&left.0, &right.0))
-                {
-                    existing.subset_of.clone()
-                } else {
-                    None
-                };
-                existing.weight = updated;
-                existing.subset_of = subset_of;
-                true
-            } else {
-                false
-            }
-        }
-        None => {
-            *entry = Some(add);
-            true
-        }
-    }
-}
-
-fn union_guarded_pending(
-    pending: &[GuardedFinalWeight],
-) -> Option<GuardedFinalWeight> {
-    match pending {
-        [] => None,
-        [single] => Some(single.clone()),
-        _ => {
-            let shared_guard = pending[0].subset_of.clone().filter(|first_guard| {
-                pending[1..].iter().all(|entry| {
-                    entry
-                        .subset_of
-                        .as_ref()
-                        .is_some_and(|guard| Arc::ptr_eq(&first_guard.0, &guard.0))
-                })
-            });
-            let weight = Weight::union_all(pending.iter().map(|entry| &entry.weight));
-            (!weight.is_empty()).then_some(GuardedFinalWeight {
-                weight,
-                subset_of: shared_guard,
-            })
-        }
-    }
 }
 
 fn enqueue_cancellation_task(
@@ -358,7 +224,6 @@ fn extend_derived_epsilons(
     worklist: &mut VecDeque<CancellationTask>,
     queued: &mut QueuedQueries,
     derived_epsilons: &mut DerivedEpsilons,
-    subset_memo: &mut SubsetMemo,
 ) {
     let new_derived_weight = intersect_with_single_weight_hint(
         query_weight_to_current,
@@ -393,11 +258,7 @@ fn extend_derived_epsilons(
     let mut propagated_updates = Vec::with_capacity(existing_queries.len());
 
     for ((upstream_source_state, upstream_label), upstream_weight) in existing_queries {
-        let propagated = intersect_or_clone_right_if_subset_cached(
-            upstream_weight,
-            derived_weight,
-            subset_memo,
-        );
+        let propagated = intersect_or_clone_right_if_subset(upstream_weight, derived_weight);
         if propagated.is_empty() {
             continue;
         }
@@ -457,7 +318,6 @@ fn compute_cancellations_range_inner(
     let mut worklist = VecDeque::<CancellationTask>::new();
     let mut queued: QueuedQueries = vec![SmallQueuedQueries::Empty; state_count as usize];
     let mut derived_epsilons: DerivedEpsilons = vec![None; state_count as usize];
-    let mut subset_memo = SubsetMemo::default();
 
     for source_state in range {
         if source_state >= state_count {
@@ -525,7 +385,6 @@ fn compute_cancellations_range_inner(
                         &mut worklist,
                         &mut queued,
                         &mut derived_epsilons,
-                        &mut subset_memo,
                     );
                 }
             }
@@ -547,7 +406,6 @@ fn compute_cancellations_range_inner(
                         &mut worklist,
                         &mut queued,
                         &mut derived_epsilons,
-                        &mut subset_memo,
                     );
                 }
             }
@@ -585,6 +443,27 @@ fn compute_cancellations_range_inner(
 pub(crate) fn apply_cancellations_range(nwa: &mut NWA, range: std::ops::Range<u32>) {
     for (from, to, weight) in compute_cancellations_range(nwa, range) {
         nwa.add_epsilon(from, to, weight);
+    }
+}
+
+fn merge_final_weight(entry: &mut Option<Weight>, add: Weight) -> bool {
+    if add.is_empty() {
+        return false;
+    }
+    match entry {
+        Some(existing) => {
+            let updated = existing.union(&add);
+            if updated != *existing {
+                *existing = updated;
+                true
+            } else {
+                false
+            }
+        }
+        None => {
+            *entry = Some(add);
+            true
+        }
     }
 }
 
@@ -657,29 +536,22 @@ fn build_finality_reverse_topo_order(
     (reverse_topo_order.len() == state_count).then_some(reverse_topo_order)
 }
 
-fn collect_initial_final_weights(nwa: &NWA) -> Vec<Option<GuardedFinalWeight>> {
+fn collect_initial_final_weights(nwa: &NWA) -> Vec<Option<Weight>> {
     nwa.states()
         .iter()
-        .map(|state| {
-            state
-                .final_weight
-                .clone()
-                .and_then(GuardedFinalWeight::initial)
-        })
+        .map(|state| state.final_weight.clone().filter(|weight| !weight.is_empty()))
         .collect()
 }
 
-fn write_final_weights(nwa: &mut NWA, reachable_final_weights: Vec<Option<GuardedFinalWeight>>) {
+fn write_final_weights(nwa: &mut NWA, reachable_final_weights: Vec<Option<Weight>>) {
     for (state_id, final_weight) in reachable_final_weights.into_iter().enumerate() {
-        nwa.states_mut()[state_id].final_weight = final_weight
-            .map(|guarded| guarded.weight)
-            .filter(|weight| !weight.is_empty());
+        nwa.states_mut()[state_id].final_weight = final_weight.filter(|weight| !weight.is_empty());
     }
 }
 
 fn propagate_final_weights_to_predecessors(
     preds: &[Vec<PredEdge<'_>>],
-    reachable_final_weights: &mut [Option<GuardedFinalWeight>],
+    reachable_final_weights: &mut [Option<Weight>],
     state_id: usize,
     mut on_change: impl FnMut(usize),
 ) {
@@ -688,10 +560,8 @@ fn propagate_final_weights_to_predecessors(
     };
 
     for edge in &preds[state_id] {
-        let Some(propagated) = reachable_final.intersection_with_edge(edge.weight) else {
-            continue;
-        };
-        if merge_guarded_final_weight(&mut reachable_final_weights[edge.from], propagated) {
+        let propagated = reachable_final.intersection(&edge.weight);
+        if merge_final_weight(&mut reachable_final_weights[edge.from], propagated) {
             on_change(edge.from);
         }
     }
@@ -700,7 +570,7 @@ fn propagate_final_weights_to_predecessors(
 fn apply_finality_fixpoint_worklist(
     nwa: &NWA,
     preds: &[Vec<PredEdge<'_>>],
-    reachable_final_weights: &mut [Option<GuardedFinalWeight>],
+    reachable_final_weights: &mut [Option<Weight>],
 ) {
     let n = nwa.states().len();
     let mut worklist = VecDeque::<usize>::new();
@@ -733,32 +603,16 @@ fn apply_finality_fixpoint_worklist(
 
 fn apply_finality_fixpoint_acyclic(
     preds: &[Vec<PredEdge<'_>>],
-    reachable_final_weights: &mut [Option<GuardedFinalWeight>],
+    reachable_final_weights: &mut [Option<Weight>],
     reverse_topo_order: &[usize],
 ) {
-    let mut pending_by_state: Vec<SmallVec<[GuardedFinalWeight; 4]>> = (0..preds.len())
-        .map(|_| SmallVec::new())
-        .collect();
-
-    for (state_id, final_weight) in reachable_final_weights.iter_mut().enumerate() {
-        if let Some(final_weight) = final_weight.take() {
-            pending_by_state[state_id].push(final_weight);
-        }
-    }
-
     for &state_id in reverse_topo_order {
-        let Some(reachable_final) = union_guarded_pending(&pending_by_state[state_id]) else {
-            continue;
-        };
-
-        reachable_final_weights[state_id] = Some(reachable_final.clone());
-
-        for edge in &preds[state_id] {
-            let Some(propagated) = reachable_final.intersection_with_edge(edge.weight) else {
-                continue;
-            };
-            pending_by_state[edge.from].push(propagated);
-        }
+        propagate_final_weights_to_predecessors(
+            preds,
+            reachable_final_weights,
+            state_id,
+            |_| {},
+        );
     }
 }
 

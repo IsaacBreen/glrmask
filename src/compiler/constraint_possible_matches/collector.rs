@@ -19,20 +19,7 @@ use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
 use crate::grammar::flat::TerminalID;
 
 pub(crate) type TokenRange = (u32, u32);
-
-/// A possible-match row that applies the same token ranges to a whole terminal
-/// set.  The previous representation expanded this to one `TerminalID ->
-/// ranges` entry per terminal.  Keeping the terminal set intact is exact (the
-/// row denotes the Cartesian product `terminals × ranges`) and avoids creating
-/// millions of duplicate interval/event records for grammars where many
-/// terminals are recognized at the same tokenizer prefix.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct TerminalRangeGroup {
-    pub(crate) terminals: Box<[TerminalID]>,
-    pub(crate) ranges: Vec<TokenRange>,
-}
-
-pub(crate) type IntervalPossibleMatchMap = Vec<TerminalRangeGroup>;
+pub(crate) type IntervalPossibleMatchMap = BTreeMap<TerminalID, Vec<TokenRange>>;
 
 pub(crate) struct TrieClassBuildResult {
     pub(crate) state_classes: Vec<u32>,
@@ -113,34 +100,17 @@ impl BuildTimings {
 }
 
 #[inline]
-fn normalized_terminal_box(terminals: &[TerminalID]) -> Option<Box<[TerminalID]>> {
-    if terminals.is_empty() { return None; }
-    let mut terminals = terminals.to_vec();
-    terminals.sort_unstable();
-    terminals.dedup();
-    (!terminals.is_empty()).then(|| terminals.into_boxed_slice())
+fn append_range(map: &mut IntervalPossibleMatchMap, terminal: TerminalID, range: TokenRange) {
+    if range.0 <= range.1 { map.entry(terminal).or_default().push(range); }
 }
 
 #[inline]
-fn append_range(map: &mut IntervalPossibleMatchMap, terminals: &[TerminalID], range: TokenRange) {
-    if range.0 <= range.1 {
-        if let Some(terminals) = normalized_terminal_box(terminals) {
-            map.push(TerminalRangeGroup { terminals, ranges: vec![range] });
-        }
-    }
-}
-
-#[inline]
-fn append_ranges(map: &mut IntervalPossibleMatchMap, terminals: &[TerminalID], ranges: &[TokenRange]) {
-    if !ranges.is_empty() {
-        if let Some(terminals) = normalized_terminal_box(terminals) {
-            map.push(TerminalRangeGroup { terminals, ranges: ranges.to_vec() });
-        }
-    }
+fn append_ranges(map: &mut IntervalPossibleMatchMap, terminal: TerminalID, ranges: &[TokenRange]) {
+    if !ranges.is_empty() { map.entry(terminal).or_default().extend_from_slice(ranges); }
 }
 
 fn merge_interval_maps(into: &mut IntervalPossibleMatchMap, other: &IntervalPossibleMatchMap) {
-    into.extend(other.iter().cloned());
+    for (&terminal, ranges) in other { append_ranges(into, terminal, ranges); }
 }
 
 fn normalize_ranges(ranges: &mut Vec<TokenRange>) {
@@ -157,27 +127,7 @@ fn normalize_ranges(ranges: &mut Vec<TokenRange>) {
 }
 
 fn normalize_interval_map(map: &mut IntervalPossibleMatchMap) {
-    if map.is_empty() { return; }
-
-    map.retain(|entry| !entry.terminals.is_empty() && !entry.ranges.is_empty());
-    for entry in map.iter_mut() { normalize_ranges(&mut entry.ranges); }
-    map.retain(|entry| !entry.ranges.is_empty());
-    if map.len() <= 1 { return; }
-
-    map.sort_unstable_by(|left, right| left.terminals.as_ref().cmp(right.terminals.as_ref()));
-    let mut merged: IntervalPossibleMatchMap = Vec::with_capacity(map.len());
-    for entry in map.drain(..) {
-        if let Some(last) = merged.last_mut() {
-            if last.terminals.as_ref() == entry.terminals.as_ref() {
-                last.ranges.extend_from_slice(&entry.ranges);
-                continue;
-            }
-        }
-        merged.push(entry);
-    }
-    for entry in merged.iter_mut() { normalize_ranges(&mut entry.ranges); }
-    merged.retain(|entry| !entry.ranges.is_empty());
-    *map = merged;
+    map.retain(|_, ranges| { normalize_ranges(ranges); !ranges.is_empty() });
 }
 
 fn reachable_ranges(node: &VocabPrefixTreeNode) -> Box<[TokenRange]> {
@@ -441,10 +391,10 @@ fn build_node(
         let mut result = IntervalPossibleMatchMap::default();
         if node.has_token() {
             let token_id = node.token_id() as u32;
-            append_range(&mut result, terminal_sets.get(node_terminal_ids[state as usize]), (token_id, token_id));
+            for &terminal in terminal_sets.get(node_terminal_ids[state as usize]) { append_range(&mut result, terminal, (token_id, token_id)); }
         }
         for child in &child_data {
-            append_ranges(&mut result, terminal_sets.get(child.outcomes[state_pos].terminals_id), &child.reachable);
+            for &terminal in terminal_sets.get(child.outcomes[state_pos].terminals_id) { append_ranges(&mut result, terminal, &child.reachable); }
             let child_class_id = child.child_class_ids[state_pos];
             if child_class_id != u32::MAX { merge_interval_maps(&mut result, child.result.class_maps[child_class_id as usize].as_ref()); }
         }
@@ -477,10 +427,7 @@ pub(crate) fn collect_possible_matches_interval_trie_class_build_with_classes(
     let empty_terminals_id = terminal_sets.intern_slice(&[]);
     let node_terminal_ids: Vec<u32> = matched_terminals.iter().map(|terminals| terminal_sets.intern_slice(terminals)).collect();
     let parallel_depth = std::env::var("GLRMASK_PM_ROOT_PARALLEL_DEPTH").ok().and_then(|v| v.parse::<u8>().ok()).unwrap_or(5);
-    let parallel_min_active = std::env::var("GLRMASK_PM_PARALLEL_MIN_ACTIVE_STATES")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(1024);
+    let parallel_min_active = std::env::var("GLRMASK_PM_PARALLEL_MIN_ACTIVE_STATES").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(1024);
     if profile_summary_enabled() {
         eprintln!("[glrmask/profile][trie_build_interval] root_parallel_children={} parallel_depth={} parallel_min_active_states={}", root.children().len(), parallel_depth, parallel_min_active);
     }

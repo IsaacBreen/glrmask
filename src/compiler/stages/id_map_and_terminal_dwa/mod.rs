@@ -25,9 +25,8 @@ use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 
 use classify::classify_vocab_char_type;
-use l2p::equivalence_analysis::state_equivalence::{
-    resolve_global_pipeline_config, run_state_equivalence_pipeline, StateEquivalenceScope,
-};
+use l2p::equivalence_analysis::compat::{compute_byte_classes, TokenizerView};
+use l2p::equivalence_analysis::state::max_length::find_state_equivalence_classes_stable_byte_restricted;
 use types::{
     compile_profile_enabled, LocalIdMapTerminalDwa, TerminalColoring, TerminalDwaPhaseProfile,
 };
@@ -92,14 +91,7 @@ fn l2p_auto_min_grammar_terminals_from_env() -> usize {
         .unwrap_or(12)
 }
 
-#[derive(Debug)]
-struct CharTypeSubVocabs {
-    sub_vocabs: Arc<[Vocab]>,
-}
-
-impl crate::vocab::VocabDerivedArtifact for CharTypeSubVocabs {}
-
-fn vocab_from_token_partitions(vocab: &Vocab, token_partitions: Vec<Vec<u32>>) -> Arc<[Vocab]> {
+fn vocab_from_token_partitions(vocab: &Vocab, token_partitions: Vec<Vec<u32>>) -> Vec<Vocab> {
     token_partitions
         .into_iter()
         .map(|token_ids| {
@@ -109,41 +101,19 @@ fn vocab_from_token_partitions(vocab: &Vocab, token_partitions: Vec<Vec<u32>>) -
                 .collect();
             Vocab::new(entries, None)
         })
-        .collect::<Vec<_>>()
-        .into()
+        .collect()
 }
 
-fn build_char_type_sub_vocabs(vocab: &Vocab) -> Arc<[Vocab]> {
-    if let Some(cached) = vocab.vocab_derived_cache_get::<CharTypeSubVocabs>() {
-        return Arc::clone(&cached.sub_vocabs);
-    }
-
+fn build_char_type_sub_vocabs(vocab: &Vocab) -> Vec<Vocab> {
     let mut partition_entries: Vec<Vec<(u32, Vec<u8>)>> = (0..7).map(|_| Vec::new()).collect();
-    for (&token_id, bytes) in vocab.entries.iter() {
+    for (&token_id, bytes) in &vocab.entries {
         let idx = classify_vocab_char_type(bytes) as usize;
         partition_entries[idx].push((token_id, bytes.clone()));
     }
-    let sub_vocabs: Arc<[Vocab]> = partition_entries
+    partition_entries
         .into_iter()
         .map(|entries| Vocab::new(entries, None))
-        .collect::<Vec<_>>()
-        .into();
-    vocab.vocab_derived_cache_set(Arc::new(CharTypeSubVocabs {
-        sub_vocabs: Arc::clone(&sub_vocabs),
-    }));
-    sub_vocabs
-}
-
-pub(crate) fn prepare_vocab_for_terminal_dwa(vocab: &Vocab) {
-    classify::prepare_vocab_for_terminal_classification(vocab);
-    l1::prepare_l1_identity_vocab_order(vocab);
-
-    if std::env::var("GLRMASK_PARTITION_SCHEME").as_deref().unwrap_or("char_type") == "char_type" {
-        for sub_vocab in build_char_type_sub_vocabs(vocab).iter() {
-            classify::prepare_vocab_for_terminal_classification(sub_vocab);
-            l1::prepare_l1_identity_vocab_order(sub_vocab);
-        }
-    }
+        .collect()
 }
 
 fn global_max_length_env_override() -> Option<bool> {
@@ -168,11 +138,33 @@ fn use_global_max_length(tokenizer: &Tokenizer) -> bool {
 pub(crate) fn build_global_max_length_state_map(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
-    _flat_trans: &Arc<[u32]>,
+    flat_trans: &Arc<[u32]>,
 ) -> ManyToOneIdMap {
     let started_at = Instant::now();
     let num_states_u32 = tokenizer.num_states();
     let num_states = num_states_u32 as usize;
+
+    if !use_global_max_length(tokenizer) {
+        let original_to_internal: Vec<u32> = (0..num_states_u32).collect();
+        let representative_original_ids = original_to_internal.clone();
+
+        if compile_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][global_max_length] mode=identity skipped=true states={} reps={} tokens_included=0 max_token_len=0 ms={:.3}",
+                num_states,
+                representative_original_ids.len(),
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+
+        return ManyToOneIdMap::from_original_to_internal_with_representatives(
+            original_to_internal,
+            representative_original_ids.len() as u32,
+            representative_original_ids,
+        );
+    }
+
+    let tokenizer_view = TokenizerView::new_from_flat_trans(flat_trans, tokenizer);
     let token_bytes: Vec<&[u8]> = vocab
         .entries
         .values()
@@ -183,38 +175,51 @@ pub(crate) fn build_global_max_length_state_map(
         .map(|bytes| bytes.len())
         .max()
         .unwrap_or(0);
-
-    let config = resolve_global_pipeline_config(use_global_max_length(tokenizer));
-    let (state_map, profile) = run_state_equivalence_pipeline(
-        tokenizer,
-        vocab,
-        None,
-        None,
-        StateEquivalenceScope::Global,
-        &config,
-    );
-
-    if compile_profile_enabled() {
-        if profile.max_length_skipped {
-            eprintln!(
-                "[glrmask/profile][global_max_length] mode=identity skipped=true states={} reps={} tokens_included=0 max_token_len=0 ms={:.3}",
-                num_states,
-                state_map.representative_original_ids.len(),
-                started_at.elapsed().as_secs_f64() * 1000.0,
-            );
-        } else {
-            eprintln!(
-                "[glrmask/profile][global_max_length] mode=stable skipped=false states={} reps={} tokens_included={} max_token_len={} ms={:.3}",
-                num_states,
-                state_map.representative_original_ids.len(),
-                token_bytes.len(),
-                max_token_len,
-                profile.max_length_state_equiv_ms,
-            );
+    let mut relevant_bytes = [false; 256];
+    for bytes in &token_bytes {
+        for &byte in *bytes {
+            relevant_bytes[byte as usize] = true;
         }
     }
+    let byte_to_class = compute_byte_classes(tokenizer_view.dfa());
+    let mapping = find_state_equivalence_classes_stable_byte_restricted(
+        &tokenizer_view,
+        Some(&byte_to_class),
+        None,
+        Some(&relevant_bytes),
+    );
+    debug_assert_eq!(mapping.len(), num_states);
 
-    state_map
+    let mut rep_to_internal = vec![u32::MAX; num_states];
+    let mut original_to_internal = vec![u32::MAX; num_states];
+    let mut representative_original_ids = Vec::new();
+    for (state, &rep) in mapping.iter().enumerate() {
+        debug_assert!(rep < num_states);
+        let mut internal = rep_to_internal[rep];
+        if internal == u32::MAX {
+            internal = representative_original_ids.len() as u32;
+            rep_to_internal[rep] = internal;
+            representative_original_ids.push(rep as u32);
+        }
+        original_to_internal[state] = internal;
+    }
+
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][global_max_length] mode=stable skipped=false states={} reps={} tokens_included={} max_token_len={} ms={:.3}",
+            num_states,
+            representative_original_ids.len(),
+            token_bytes.len(),
+            max_token_len,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    ManyToOneIdMap::from_original_to_internal_with_representatives(
+        original_to_internal,
+        representative_original_ids.len() as u32,
+        representative_original_ids,
+    )
 }
 
 /// Build the global `(InternalIdMap, DWA)` for the full vocabulary.
@@ -276,7 +281,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     let partition_vocab_started_at = Instant::now();
     let partition_scheme =
         std::env::var("GLRMASK_PARTITION_SCHEME").unwrap_or_else(|_| "char_type".to_string());
-    let sub_vocabs: Arc<[Vocab]> = match partition_scheme.as_str() {
+    let sub_vocabs: Vec<Vocab> = match partition_scheme.as_str() {
         "char_type" => build_char_type_sub_vocabs(vocab),
         "l2p_cost" => {
             let cost_fn = l2p_partition_cost_fn_from_env();
@@ -440,7 +445,6 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     // changes the DFA (reducing state count via minimization).
     let shared_vocab_dfa_cache = l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
     let shared_simplify_cache = l2p::SharedSimplifyCache::default();
-    let shared_disallowed_follow_dfa_cache = l2p::postprocess::SharedDisallowedFollowDfaCache::new();
 
     use rayon::prelude::*;
     let partition_results: Vec<(Option<(LocalIdMapTerminalDwa, f64)>, usize)> = sub_vocabs
@@ -462,7 +466,6 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
                 Some(global_max_length_state_map),
                 Some(&shared_vocab_dfa_cache),
                 Some(&shared_simplify_cache),
-                Some(&shared_disallowed_follow_dfa_cache),
                 Some(&shared_classify_cache),
             )
             .map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0));

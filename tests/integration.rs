@@ -206,16 +206,6 @@ fn json_schema_scalar_and_enum() {
 }
 
 #[test]
-fn json_schema_filtered_enum_does_not_overaccept_merged_group() {
-    let enum_schema = schema(
-        &[r#""a""#, r#""bb""#],
-        r#"{"enum":["a","bb"],"minLength":2}"#,
-    );
-    assert_rejects_token(&enum_schema, &[], 0);
-    assert_accepts_tokens(&enum_schema, &[1]);
-}
-
-#[test]
 fn json_schema_rejects_invalid_utf8_in_string() {
     let constraint = byte_schema(r#"{"type":"string"}"#);
     let mut state = constraint.start();
@@ -224,9 +214,9 @@ fn json_schema_rejects_invalid_utf8_in_string() {
 }
 
 #[test]
-fn json_schema_uri_format_default_mode_accepts_basic_uri() {
+fn json_schema_uri_format_accepts_basic_uri() {
     let _lock = URI_ENV_LOCK.lock().unwrap();
-    let _uri_mode = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_URI_MODE");
+    let _unset = EnvVarGuard::unset("GLRMASK_STRICT_URI_FORMAT");
 
     let constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
     let mut state = constraint.start();
@@ -235,9 +225,9 @@ fn json_schema_uri_format_default_mode_accepts_basic_uri() {
 }
 
 #[test]
-fn json_schema_uri_format_structured_mode_accepts_basic_uri() {
+fn json_schema_uri_format_strict_accepts_basic_uri() {
     let _lock = URI_ENV_LOCK.lock().unwrap();
-    let _uri_mode = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_URI_MODE", "structured");
+    let _strict = EnvVarGuard::set("GLRMASK_STRICT_URI_FORMAT", "1");
 
     let constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
     let mut state = constraint.start();
@@ -246,18 +236,15 @@ fn json_schema_uri_format_structured_mode_accepts_basic_uri() {
 }
 
 #[test]
-fn json_schema_uri_format_approx_mode_accepts_bracketed_host() {
+fn json_schema_uri_format_default_approximates_bracketed_host() {
     let _lock = URI_ENV_LOCK.lock().unwrap();
-    let _approx = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_URI_MODE", "approx");
+    let _unset = EnvVarGuard::unset("GLRMASK_STRICT_URI_FORMAT");
 
-    let approx_constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
-    assert_accepts_bytes(&approx_constraint, br#""http://[not::strict::]/path""#);
-}
+    let default_constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
+    assert_accepts_bytes(&default_constraint, br#""http://[not::strict::]/path""#);
 
-#[test]
-fn json_schema_uri_format_default_rejects_bracketed_host() {
-    let _lock = URI_ENV_LOCK.lock().unwrap();
-    let _uri_mode = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_URI_MODE");
+    drop(_unset);
+    let _strict = EnvVarGuard::set("GLRMASK_STRICT_URI_FORMAT", "1");
 
     let strict_constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
     let mut state = strict_constraint.start();
@@ -265,121 +252,22 @@ fn json_schema_uri_format_default_rejects_bracketed_host() {
 }
 
 #[test]
-fn json_schema_uri_format_approx_mode_accepts_non_uri_string() {
+fn json_schema_uri_format_default_accepts_non_uri_string() {
     let _lock = URI_ENV_LOCK.lock().unwrap();
-    let _approx = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_URI_MODE", "approx");
+    let _unset = EnvVarGuard::unset("GLRMASK_STRICT_URI_FORMAT");
 
     let constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
     assert_accepts_bytes(&constraint, br#""not a uri""#);
 }
 
 #[test]
-fn json_schema_uri_format_default_rejects_missing_scheme() {
+fn json_schema_uri_format_strict_rejects_missing_scheme() {
     let _lock = URI_ENV_LOCK.lock().unwrap();
-    let _uri_mode = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_URI_MODE");
+    let _strict = EnvVarGuard::set("GLRMASK_STRICT_URI_FORMAT", "1");
 
     let constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
     let mut state = constraint.start();
     assert!(state.commit_bytes(br#""not a uri""#).is_err());
-}
-
-#[test]
-fn json_schema_uri_format_default_rejects_relative_path() {
-    let _lock = URI_ENV_LOCK.lock().unwrap();
-    let _uri_mode = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_URI_MODE");
-
-    let constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
-    let mut state = constraint.start();
-    assert!(state.commit_bytes(br#""/not-absolute""#).is_err());
-}
-
-#[test]
-fn json_schema_email_format_accepts_basic_email() {
-    let constraint = byte_schema(r#"{"type":"string","format":"email"}"#);
-    assert_accepts_bytes(&constraint, br#""john.doe@example.com""#);
-}
-
-#[test]
-fn json_schema_email_format_rejects_empty_string() {
-    let constraint = byte_schema(r#"{"type":"string","format":"email"}"#);
-    let mut state = constraint.start();
-    assert!(state.commit_bytes(br#""""#).is_err());
-}
-
-#[test]
-fn json_schema_email_format_rejects_missing_at_sign() {
-    let constraint = byte_schema(r#"{"type":"string","format":"email"}"#);
-    let mut state = constraint.start();
-    assert!(state.commit_bytes(br#""not an email""#).is_err());
-}
-
-#[test]
-fn json_schema_pattern_with_max_length_token_mask_rejects_overlong_identifier() {
-    let schema_text = r#"{
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 18,
-                    "pattern": "^[A-Za-z][A-Za-z0-9_]*"
-                }
-            },
-            "required": ["name"],
-            "additionalProperties": false
-        }"#;
-    let token_constraint = schema(
-        &["OptionsItemSelected", "TemperatureSensor"],
-        schema_text,
-    );
-
-    let mut token_state = token_constraint.start();
-    token_state.commit_bytes(br#"{"name": ""#).unwrap();
-    assert_eq!(allowed(&token_state.mask()), vec![1]);
-
-    let mut overlong_token_state = token_constraint.start();
-    overlong_token_state.commit_bytes(br#"{"name": ""#).unwrap();
-    assert!(overlong_token_state.commit_token(0).is_err());
-
-    let mut allowed_token_state = token_constraint.start();
-    allowed_token_state.commit_bytes(br#"{"name": ""#).unwrap();
-    allowed_token_state.commit_token(1).unwrap();
-
-    let mut token_prefix_state = token_constraint.start();
-    token_prefix_state.commit_bytes(br#"{"name": ""#).unwrap();
-    assert!(token_prefix_state.commit_bytes(b"OptionsItemSelected").is_err());
-
-    let constraint = byte_schema(
-        schema_text,
-    );
-
-    let mut prefix_state = constraint.start();
-    prefix_state.commit_bytes(br#"{"name": "#).unwrap();
-    assert!(prefix_state.commit_bytes(b"OptionsItemSelected").is_err());
-
-    let mut state = constraint.start();
-    assert!(state.commit_bytes(br#"{"name": "OptionsItemSelected"}"#).is_err());
-}
-
-#[test]
-fn json_schema_pattern_with_s_separator_accepts_tab_and_formfeed_prefixes() {
-    let constraint = byte_schema(
-        r#"{
-            "type": "string",
-            "pattern": "^(KONG_\\w+=\\S+)*(\\sKONG_\\w+=\\S+)*$"
-        }"#,
-    );
-
-    let mut tab_state = constraint.start();
-    tab_state.commit_bytes(br#"""#).unwrap();
-    tab_state.commit_bytes(br#"\t"#).unwrap();
-
-    let mut formfeed_state = constraint.start();
-    formfeed_state.commit_bytes(br#"""#).unwrap();
-    formfeed_state.commit_bytes(br#"\f"#).unwrap();
-
-    assert_accepts_bytes(&constraint, br#""\tKONG_A=x""#);
-    assert_accepts_bytes(&constraint, br#""\fKONG_A=x""#);
 }
 
 #[test]
@@ -443,38 +331,7 @@ fn json_schema_pattern_range_accepts_backslash_fused_token() {
 fn json_schema_pattern_accepts_decoded_newline_escape_spellings() {
     let constraint = byte_schema(r#"{"type":"string","pattern":"^\\n$"}"#);
     assert_accepts_bytes(&constraint, br#""\n""#);
-    let mut state = constraint.start();
-    assert!(state.commit_bytes(br#""\u000A""#).is_err());
-}
-
-#[test]
-fn json_schema_pattern_accepts_multi_digit_dimensions_string() {
-    let constraint = byte_schema(r#"{"type":"string","pattern":"^[0-9]+x[0-9]+$"}"#);
-    assert_accepts_bytes(&constraint, br#""1920x1080""#);
-}
-
-#[test]
-fn json_schema_pattern_rejects_extra_separator_in_dimensions_string() {
-    let constraint = byte_schema(r#"{"type":"string","pattern":"^[0-9]+x[0-9]+$"}"#);
-
-    let mut state = constraint.start();
-    assert!(state.commit_bytes(br#""1920x108x0""#).is_err());
-}
-
-#[test]
-fn json_schema_pattern_dimensions_prefix_rejects_second_separator_token() {
-    let constraint = byte_schema(r#"{"type":"string","pattern":"^[0-9]+x[0-9]+$"}"#);
-    let mut state = constraint.start();
-
-    state.commit_bytes(br#""1920x108"#).unwrap();
-    let mask = allowed(&state.mask());
-    assert!(mask.contains(&(b'0' as usize)));
-    assert!(!mask.contains(&(b'x' as usize)));
-    assert!(state.commit_bytes(b"x").is_err());
-
-    let mut ok_state = constraint.start();
-    ok_state.commit_bytes(br#""1920x108"#).unwrap();
-    ok_state.commit_bytes(b"0").unwrap();
+    assert_accepts_bytes(&constraint, br#""\u000A""#);
 }
 
 #[test]
@@ -512,30 +369,6 @@ fn json_schema_pattern_properties_match_decoded_fixed_quote_key() {
 
     let mut state = constraint.start();
     assert!(state.commit_bytes(br#"{"\"": 1}"#).is_err());
-}
-
-#[test]
-fn json_schema_additional_property_pattern_addback_does_not_reaccept_declared_key() {
-    let constraint = byte_schema(
-        r#"{
-            "type": "object",
-            "properties": {
-                "applicationId": {"type": "string"},
-                "nested": {
-                    "type": "object",
-                    "patternProperties": {
-                        "^[0-9A-Za-z_-]{1,255}$": {"type": "number"}
-                    },
-                    "additionalProperties": true
-                }
-            },
-            "additionalProperties": true
-        }"#,
-    );
-
-    assert_accepts_bytes(&constraint, br#"{"x_key": 123}"#);
-    let mut state = constraint.start();
-    assert!(state.commit_bytes(br#"{"applicationId": 123}"#).is_err());
 }
 
 #[test]

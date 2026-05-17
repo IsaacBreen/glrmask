@@ -13,8 +13,8 @@ use range_set_blaze::RangeSetBlaze;
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::NWA;
+use crate::compiler::stages::compact::compact_dwa_dimensions_fast_with_stats;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
-use crate::compiler::stages::mapped_artifact::MappedArtifact;
 use crate::ds::weight::Weight;
 
 use super::types::{LocalIdMapTerminalDwa, TerminalDwaPhaseProfile, compile_profile_enabled};
@@ -59,8 +59,7 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
 
     let input_refs: Vec<&LocalIdMapTerminalDwa> = inputs.iter().collect();
     let id_map_refs: Vec<&InternalIdMap> = input_refs.iter().map(|input| &input.id_map).collect();
-    let (global_id_map, _) =
-        build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
+    let global_id_map = build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
 
     let mut global_nwa = NWA::new(
         global_id_map.num_tsids(),
@@ -114,8 +113,7 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     }
 
     let id_map_refs: Vec<&InternalIdMap> = inputs.iter().map(|input| &input.id_map).collect();
-    let (global_id_map, direct_local_to_global_token_maps) =
-        build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
+    let global_id_map = build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
 
     let mut global_nwa = NWA::new(
         global_id_map.num_tsids(),
@@ -123,79 +121,54 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     );
     let mut global_body = global_nwa.body();
 
-    for (input_idx, input) in inputs.iter().enumerate() {
+    for input in &inputs {
         let mut nwa = input.dwa.to_nwa();
-
         let tsid_map = build_local_to_global_tsid_map(&input.id_map, &global_id_map);
-
-        let token_map = direct_local_to_global_token_maps
-            .as_ref()
-            .and_then(|maps| maps.get(input_idx))
-            .map(|direct_map| build_direct_local_to_global_token_map(direct_map))
-            .unwrap_or_else(|| build_local_to_global_token_map(&input.id_map, &global_id_map));
-
+        let token_map = build_local_to_global_token_map(&input.id_map, &global_id_map);
         remap_nwa_with_maps(
             &mut nwa,
             &tsid_map,
             &token_map,
             global_id_map.num_tsids() as usize,
         );
-
         global_body = global_nwa.union_in_place(&nwa, &global_body);
     }
     global_nwa.set_start_states(global_body.start_states);
 
     let det = determinize(&global_nwa)
         .expect("merge terminal NWA determinization failed");
-
-    let dwa = if minimize_merged_terminal_dwa_enabled() {
+    let mut dwa = if minimize_merged_terminal_dwa_enabled() {
         minimize(&det)
     } else {
         det.clone()
     };
-    let mut mapped_dwa = MappedArtifact::new(dwa, global_id_map);
-    let profiling = compile_profile_enabled();
-    let before_compact_stats = profiling.then(|| mapped_dwa.artifact().stats());
-    let before_compact_range_counts = profiling.then(|| mapped_dwa.interned_range_counts());
-    let before_num_tsids = profiling.then(|| mapped_dwa.id_map().num_tsids());
-    let before_num_tokens = profiling.then(|| mapped_dwa.id_map().num_internal_tokens());
+    let before_compact_stats = dwa.stats();
+    let before_num_tsids = global_id_map.num_tsids();
+    let before_num_tokens = global_id_map.num_internal_tokens();
+    let mut id_map = global_id_map;
     let compact_enabled = compact_merged_terminal_dwa_enabled();
     let (compact_report, compact_ms) = if compact_enabled {
         let compact_started_at = Instant::now();
-        let compact_report = if profiling {
-            mapped_dwa.compact_dimensions_fast_with_stats()
-        } else {
-            mapped_dwa.compact_dimensions_fast()
-        };
+        let compact_report = compact_dwa_dimensions_fast_with_stats(&mut dwa, &mut id_map);
         let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
         (Some(compact_report), compact_ms)
     } else {
         (None, 0.0)
     };
-    let after_compact_stats = profiling.then(|| mapped_dwa.artifact().stats());
-    let after_compact_range_counts = profiling.then(|| mapped_dwa.interned_range_counts());
-    let (dwa, id_map) = mapped_dwa.into_parts();
+    let after_compact_stats = dwa.stats();
 
-    if profiling {
-        let before_compact_stats = before_compact_stats.unwrap();
-        let before_compact_range_counts = before_compact_range_counts.unwrap();
-        let before_num_tsids = before_num_tsids.unwrap();
-        let before_num_tokens = before_num_tokens.unwrap();
-        let after_compact_stats = after_compact_stats.unwrap();
-        let after_compact_range_counts = after_compact_range_counts.unwrap();
+    if compile_profile_enabled() {
         let profile_stats = compact_report.and_then(|report| report.profile_stats);
         eprintln!(
-            "[glrmask/profile][merged_terminal_dwa] minimize_enabled={} compact_enabled={} states_before_compact={} transitions_before_compact={} interned_ranges_before_compact={} token_ranges_before_compact={} states_after_compact={} transitions_after_compact={} interned_ranges_after_compact={} token_ranges_after_compact={} tsids_before_compact={} tsids_after_compact={} tokens_before_compact={} tokens_after_compact={} compact_ms={:.3}",
+            "[glrmask/profile][merged_terminal_dwa] minimize_enabled={} compact_enabled={} states_before_compact={} transitions_before_compact={} interned_ranges_before_compact={} states_after_compact={} transitions_after_compact={} interned_ranges_after_compact={} tsids_before_compact={} tsids_after_compact={} tokens_before_compact={} tokens_after_compact={} compact_ms={:.3}",
             minimize_merged_terminal_dwa_enabled(),
             compact_enabled,
             before_compact_stats.states,
             before_compact_stats.transitions,
             before_compact_stats.interned_ranges,
-            before_compact_range_counts.token_ranges,
             after_compact_stats.states,
             after_compact_stats.transitions,
             after_compact_stats.interned_ranges,
-            after_compact_range_counts.token_ranges,
             before_num_tsids,
             profile_stats.map(|stats| stats.tsids_after).unwrap_or(before_num_tsids as usize),
             before_num_tokens,
@@ -218,7 +191,7 @@ fn build_unified_global_id_map(
     inputs: &[&InternalIdMap],
     num_tokenizer_states: usize,
     max_token_id: u32,
-) -> (InternalIdMap, Option<Vec<Vec<u32>>>) {
+) -> InternalIdMap {
     let mut composite_to_class: HashMap<Vec<u32>, u32> = HashMap::new();
     let mut state_o2i = vec![0u32; num_tokenizer_states];
     let mut state_i2o: Vec<Vec<u32>> = Vec::new();
@@ -241,26 +214,6 @@ fn build_unified_global_id_map(
 
     reorder_classes(composite_to_class, &mut state_o2i, &mut state_i2o, &mut state_reps);
 
-    let (vocab_tokens, direct_local_to_global_token_maps) =
-        build_unified_global_token_id_map_disjoint(inputs, max_token_id)
-            .unwrap_or_else(|| (build_unified_global_token_id_map_generic(inputs, max_token_id), None));
-    (
-        InternalIdMap {
-            tokenizer_states: ManyToOneIdMap {
-                original_to_internal: state_o2i,
-                internal_to_originals: state_i2o,
-                representative_original_ids: state_reps,
-            },
-            vocab_tokens,
-        },
-        direct_local_to_global_token_maps,
-    )
-}
-
-fn build_unified_global_token_id_map_generic(
-    inputs: &[&InternalIdMap],
-    max_token_id: u32,
-) -> ManyToOneIdMap {
     let mut token_composite_to_class: HashMap<Vec<u32>, u32> = HashMap::new();
     let mut token_o2i = vec![u32::MAX; max_token_id as usize + 1];
     let mut token_i2o: Vec<Vec<u32>> = Vec::new();
@@ -302,78 +255,18 @@ fn build_unified_global_token_id_map_generic(
         u32::MAX,
     );
 
-    ManyToOneIdMap {
-        original_to_internal: token_o2i,
-        internal_to_originals: token_i2o,
-        representative_original_ids: token_reps,
-    }
-}
-
-fn build_unified_global_token_id_map_disjoint(
-    inputs: &[&InternalIdMap],
-    max_token_id: u32,
-) -> Option<(ManyToOneIdMap, Option<Vec<Vec<u32>>>)> {
-    let mut owner_by_token = vec![usize::MAX; max_token_id as usize + 1];
-
-    for (input_idx, input) in inputs.iter().enumerate() {
-        for (token_id, &local_class) in input.vocab_tokens.original_to_internal.iter().enumerate() {
-            if local_class == u32::MAX {
-                continue;
-            }
-            let owner = &mut owner_by_token[token_id];
-            if *owner != usize::MAX && *owner != input_idx {
-                return None;
-            }
-            *owner = input_idx;
-        }
-    }
-
-    let mut token_o2i = vec![u32::MAX; max_token_id as usize + 1];
-    let mut token_i2o: Vec<Vec<u32>> = Vec::new();
-    let mut token_reps: Vec<u32> = Vec::new();
-    let mut direct_local_to_global_token_maps = Vec::with_capacity(inputs.len());
-
-    for input in inputs {
-        let mut local_to_global = vec![u32::MAX; input.num_internal_tokens() as usize];
-
-        for (local_class, originals) in input.vocab_tokens.internal_to_originals.iter().enumerate() {
-            if originals.is_empty() {
-                continue;
-            }
-
-            let global_class = token_i2o.len() as u32;
-            local_to_global[local_class] = global_class;
-            token_reps.push(input.vocab_tokens.representative_original_ids[local_class]);
-            token_i2o.push(originals.clone());
-            for &token_id in originals {
-                token_o2i[token_id as usize] = global_class;
-            }
-        }
-
-        direct_local_to_global_token_maps.push(local_to_global);
-    }
-
-    Some((
-        ManyToOneIdMap {
+    InternalIdMap {
+        tokenizer_states: ManyToOneIdMap {
+            original_to_internal: state_o2i,
+            internal_to_originals: state_i2o,
+            representative_original_ids: state_reps,
+        },
+        vocab_tokens: ManyToOneIdMap {
             original_to_internal: token_o2i,
             internal_to_originals: token_i2o,
             representative_original_ids: token_reps,
         },
-        Some(direct_local_to_global_token_maps),
-    ))
-}
-
-fn build_direct_local_to_global_token_map(local_to_global: &[u32]) -> Vec<Vec<u32>> {
-    local_to_global
-        .iter()
-        .map(|&global_class| {
-            if global_class == u32::MAX {
-                Vec::new()
-            } else {
-                vec![global_class]
-            }
-        })
-        .collect()
+    }
 }
 
 fn reorder_classes(
@@ -714,3 +607,4 @@ fn remap_weight_general(
 
     finalize_weight_map(map)
 }
+

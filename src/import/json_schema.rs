@@ -1,11 +1,9 @@
-use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 
 use crate::automata::lexer::ast::Expr as LexerExpr;
 use crate::automata::lexer::compile::build_regex;
 use crate::automata::lexer::regex::parse_regex;
-use crate::grammar::expr_nfa::ExprNfaBuilder;
 use crate::import::ast::{expr_to_grammar_expr, GrammarExpr, NamedGrammar, NamedRule};
 use crate::GlrMaskError;
 use serde_json::{Map, Value};
@@ -35,7 +33,7 @@ const JSON_BOOL_RULE: &str = "JSON_BOOL";
 const JSON_NULL_RULE: &str = "JSON_NULL";
 const JSON_KEY_COLON_RULE: &str = "json_key_colon";
 const JSON_KEY_COLON_BODY_RULE: &str = "JSON_KEY_COLON_BODY";
-const JSON_STRING_REPEAT_CHUNK_DEFAULT: usize = 50;
+const JSON_STRING_REPEAT_CHUNK_DEFAULT: usize = 256;
 
 fn json_string_repeat_chunk() -> usize {
     std::env::var("GLRMASK_STRING_REPEAT_CHUNK")
@@ -45,23 +43,23 @@ fn json_string_repeat_chunk() -> usize {
 }
 
 const JSON_STRING_BODY_REGEX: &str =
-    r#"([^\x00-\x1f\x7f"\\]|\\["\\bfnrt])*""#;
+    r#"([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*""#;
 /// Body chars only, no surrounding quotes.
 const JSON_STRING_BODY_ONLY_REGEX: &str =
-    r#"([^\x00-\x1f\x7f"\\]|\\["\\bfnrt])*"#;
+    r#"([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*"#;
 /// Full JSON string including both opening and closing quotes.
 const JSON_STRING_FULL_REGEX: &str =
-    r#""([^\x00-\x1f\x7f"\\]|\\["\\bfnrt])*""#;
+    r#""([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*""#;
 /// Opening quote + body chars, no closing quote.
 const JSON_STRING_OPEN_BODY_REGEX: &str =
-    r#""([^\x00-\x1f\x7f"\\]|\\["\\bfnrt])*"#;
+    r#""([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*"#;
 const JSON_KEY_COLON_BODY_REGEX: &str =
-    r#"([^\x00-\x1f\x7f"\\]|\\["\\bfnrt])*": "#;
+    r#"([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*": "#;
 /// Full key+colon including opening quote: `"key": `.
 const JSON_KEY_COLON_FULL_REGEX: &str =
-    r#""([^\x00-\x1f\x7f"\\]|\\["\\bfnrt])*": "#;
+    r#""([^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*": "#;
 const JSON_STRING_CHAR_PATTERN: &str =
-    r#"[^\x00-\x1f\x7f"\\]|\\["\\bfnrt]"#;
+    r#"[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4}"#;
 const JSON_NUMBER_NONINTEGER_REGEX: &str =
     r#"-?(0|[1-9][0-9]*)(\.[0-9]+([eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+)"#;
 const JSON_NONNEG_NUMBER_NONINTEGER_REGEX: &str =
@@ -99,14 +97,11 @@ const UNTYPED_SCHEMA_APPLICABLE_TYPES: &[(&str, &[&str])] = &[
     ("number", UNTYPED_NUMBER_KEYWORD_KEYS),
 ];
 const UNSAT_SCHEMA_ERROR: &str = "__unsat_schema__";
-const JSON_SCHEMA_BUILD_LIMIT: usize = 50_000;
 const EXACT_CLOSED_OBJECT_UNION_MAX_VARIANTS: usize = 8;
 const EXACT_CLOSED_OBJECT_UNION_MAX_KEYS: usize = 16;
 const EXACT_CLOSED_OBJECT_SINGLE_MAX_KEYS: usize = 16;
 const EXACT_CLOSED_OBJECT_UNION_MAX_STATES: usize = 128;
-const ANYOF_OBJECT_EXPR_DFA_MAX_STATES: usize = 512;
 const FACTORED_OPEN_OBJECT_MAX_KEYS: usize = 200;
-const REQUIRED_SHARED_AP_POWERSHOT_BAILOUT_THRESHOLD: usize = 32;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 enum JsonSchemaDraft {
@@ -147,77 +142,13 @@ struct OrderedClosedObjectVariant {
     items: Vec<OrderedClosedObjectItem>,
 }
 
-#[derive(Debug, Clone)]
-struct AnyOfObjectVariant {
-    items: Vec<OrderedClosedObjectItem>,
-    fixed_keys: BTreeSet<String>,
-    pattern_pair_exprs: Vec<GrammarExpr>,
-    pattern_key_terminals: Vec<GrammarExpr>,
-    pattern_keys: BTreeSet<String>,
-    additional_value_expr: Option<GrammarExpr>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct OrderedSubsetCursor {
     variant_idx: u16,
     cursor: u16,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum AnyOfObjectDfaPhase {
-    Fixed,
-    Pattern,
-    Additional,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct AnyOfObjectDfaState {
-    variant_idx: u16,
-    cursor: u16,
-    has_content: bool,
-    phase: AnyOfObjectDfaPhase,
-}
-
 impl OrderedClosedObjectVariant {
-    fn len(&self) -> usize {
-        self.items.len()
-    }
-
-    fn advance_cursor(&self, cursor: usize, key: &str) -> Option<usize> {
-        let idx = self.items[cursor..]
-            .iter()
-            .position(|item| item.key == key)
-            .map(|offset| cursor + offset)?;
-        if self.items[cursor..idx].iter().any(|item| item.required) {
-            return None;
-        }
-        Some(idx + 1)
-    }
-
-    fn close_allowed(&self, cursor: usize) -> bool {
-        !self.items[cursor..].iter().any(|item| item.required)
-    }
-
-    fn legal_next_keys(&self, cursor: usize) -> Vec<&str> {
-        let mut keys = Vec::new();
-        for item in &self.items[cursor..] {
-            keys.push(item.key.as_str());
-            if item.required {
-                break;
-            }
-        }
-        keys
-    }
-
-    fn value_expr_for_key(&self, key: &str) -> Option<GrammarExpr> {
-        self.items
-            .iter()
-            .find(|item| item.key == key)
-            .map(|item| item.value_expr.clone())
-    }
-}
-
-impl AnyOfObjectVariant {
     fn len(&self) -> usize {
         self.items.len()
     }
@@ -460,10 +391,6 @@ fn empty_expr() -> GrammarExpr {
     GrammarExpr::Sequence(Vec::new())
 }
 
-fn parenthesized_expr(expr: GrammarExpr) -> GrammarExpr {
-    GrammarExpr::Grouped(Box::new(expr))
-}
-
 fn dedup_literal_alternatives(mut alts: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
     if alts.len() > 1 {
         alts.sort();
@@ -477,7 +404,6 @@ fn finite_literal_alternatives(
     max_alts: usize,
 ) -> Option<Vec<Vec<u8>>> {
     let alts = match expr {
-        GrammarExpr::Grouped(inner) => return finite_literal_alternatives(inner, max_alts),
         GrammarExpr::Literal(bytes) => vec![bytes.clone()],
         GrammarExpr::Sequence(parts) => {
             let mut acc = vec![Vec::new()];
@@ -530,8 +456,7 @@ fn finite_literal_alternatives(
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::AnyByte
         | GrammarExpr::Intersect { .. }
-        | GrammarExpr::SeparatedSequence { .. }
-        | GrammarExpr::ExprNFA(_) => return None,
+        | GrammarExpr::SeparatedSequence { .. } => return None,
     };
 
     let total_bytes = alts.iter().map(Vec::len).sum::<usize>();
@@ -708,7 +633,6 @@ fn split_top_level_regex_branches(pattern: &str) -> Vec<&str> {
 }
 
 fn strip_branch_outer_anchors(branch: &str) -> (bool, bool, &str) {
-    let branch = strip_transparent_outer_regex_group(branch);
     let anchored_start = branch.as_bytes().first().copied() == Some(b'^');
     let mut end_index = branch.len();
     let mut anchored_end = false;
@@ -732,80 +656,6 @@ fn strip_branch_outer_anchors(branch: &str) -> (bool, bool, &str) {
 
     let start_index = if anchored_start { 1 } else { 0 };
     (anchored_start, anchored_end, &branch[start_index..end_index])
-}
-
-fn strip_transparent_outer_regex_group(mut branch: &str) -> &str {
-    loop {
-        let bytes = branch.as_bytes();
-        if bytes.first().copied() != Some(b'(') || bytes.last().copied() != Some(b')') {
-            return branch;
-        }
-
-        let mut depth = 0usize;
-        let mut in_class = false;
-        let mut escaped = false;
-        let mut closes_at_end = false;
-        for (index, &byte) in bytes.iter().enumerate() {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            match byte {
-                b'\\' => escaped = true,
-                b'[' if !in_class => in_class = true,
-                b']' if in_class => in_class = false,
-                b'(' if !in_class => depth += 1,
-                b')' if !in_class => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
-                        closes_at_end = index + 1 == bytes.len();
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        if !closes_at_end {
-            return branch;
-        }
-
-        let inner_start = consume_regex_group_prefix(bytes, 1);
-        branch = &branch[inner_start..branch.len() - 1];
-    }
-}
-
-fn consume_regex_group_prefix(input: &[u8], pos: usize) -> usize {
-    if pos >= input.len() || input[pos] != b'?' {
-        return pos;
-    }
-    if pos + 1 < input.len() && input[pos + 1] == b':' {
-        return pos + 2;
-    }
-    pos
-}
-
-fn common_outer_anchor_pattern(pattern: &str) -> Option<(bool, bool, String)> {
-    let branches = split_top_level_regex_branches(pattern);
-    let mut iter = branches.into_iter();
-    let first = iter.next()?;
-    let (anchored_start, anchored_end, core) = strip_branch_outer_anchors(first);
-    let mut cores = vec![core.to_string()];
-
-    for branch in iter {
-        let (branch_start, branch_end, branch_core) = strip_branch_outer_anchors(branch);
-        if branch_start != anchored_start || branch_end != anchored_end {
-            return None;
-        }
-        cores.push(branch_core.to_string());
-    }
-
-    let core = if cores.len() == 1 {
-        cores.pop().unwrap()
-    } else {
-        format!("(?:{})", cores.join("|"))
-    };
-    Some((anchored_start, anchored_end, core))
 }
 
 fn json_search_branch_fragment(branch: &str) -> String {
@@ -857,18 +707,6 @@ fn json_search_pattern(pattern: &str) -> String {
 }
 
 fn json_search_pattern_impl(pattern: &str, max_tail: Option<usize>) -> String {
-    if let Some((anchored_start, anchored_end, core)) = common_outer_anchor_pattern(pattern) {
-        return json_search_branch_fragment_impl(
-            &format!(
-                "{}{}{}",
-                if anchored_start { "^" } else { "" },
-                core,
-                if anchored_end { "$" } else { "" },
-            ),
-            max_tail,
-        );
-    }
-
     let branches = split_top_level_regex_branches(pattern);
     let map_fn = |b| match max_tail {
         Some(n) => json_search_branch_fragment_bounded(b, n),
@@ -1222,7 +1060,7 @@ fn prune_pattern_branches_for_min_length(pattern: &str, min_len: usize) -> Optio
         }
 
         let inner = jsonify_regex_dot(core);
-        let expr = parse_json_encoded_byte_regex(&inner);
+        let expr = parse_regex(&inner, true);
         let (_, max_bytes) = regex_byte_length_bounds(&expr);
         if max_bytes.is_some_and(|bound| bound < min_len) {
             continue;
@@ -1251,6 +1089,7 @@ fn json_escapable_bytes() -> BTreeSet<u8> {
     let mut out = BTreeSet::new();
     out.extend(0x00..=0x1F);
     out.insert(0x22);
+    out.insert(0x2F);
     out.insert(0x5C);
     out
 }
@@ -1295,60 +1134,86 @@ fn regex_literal_bytes(bytes: &[u8]) -> String {
         .join("")
 }
 
-fn ecma262_non_ascii_whitespace_literals() -> Vec<String> {
-    [
-        '\u{0085}', '\u{1680}', '\u{2000}', '\u{2001}', '\u{2002}',
-        '\u{2003}', '\u{2004}', '\u{2005}', '\u{2006}', '\u{2007}', '\u{2008}',
-        '\u{2009}', '\u{200A}', '\u{2028}', '\u{2029}', '\u{202F}', '\u{205F}',
-        '\u{3000}',
-    ]
-    .into_iter()
-    .map(|ch| {
-        let mut buf = [0u8; 4];
-        regex_literal_bytes(ch.encode_utf8(&mut buf).as_bytes())
-    })
-    .collect()
-}
-
-fn parse_json_encoded_byte_regex(pattern: &str) -> LexerExpr {
-    parse_regex(pattern, false)
-}
-
 fn jsonified_literal_fragment(byte: u8) -> Option<String> {
-    let _ = byte;
-    None
+    if byte != b'/' {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if json_direct_ascii_bytes().contains(&byte) {
+        parts.push(regex_literal_bytes(&[byte]));
+    }
+    parts.extend(json_escaped_byte_fragments(byte));
+    if parts.is_empty() {
+        return None;
+    }
+    if parts.len() == 1 {
+        return parts.into_iter().next();
+    }
+    Some(format!("(?:{})", parts.join("|")))
 }
 
 fn is_regex_metachar(byte: u8) -> bool {
     matches!(byte, b'[' | b']' | b'(' | b')' | b'{' | b'}' | b'.' | b'*' | b'+' | b'?' | b'|' | b'^' | b'$' | b'\\')
 }
 
+fn hex_nibble_chars(value: u8) -> Vec<char> {
+    match value {
+        0..=9 => vec![char::from(b'0' + value)],
+        10..=15 => vec![
+            char::from(b'A' + value - 10),
+            char::from(b'a' + value - 10),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn json_unicode_escape_fragment(byte: u8) -> String {
+    let high = hex_nibble_chars((byte >> 4) & 0x0F);
+    let low = hex_nibble_chars(byte & 0x0F);
+    let mut options = Vec::new();
+    for high in &high {
+        for low in &low {
+            options.push(format!(r#"\x5Cu00{high}{low}"#));
+        }
+    }
+    if options.len() == 1 {
+        options.pop().unwrap()
+    } else {
+        format!("(?:{})", options.join("|"))
+    }
+}
+
 fn json_escaped_byte_fragments(byte: u8) -> Vec<String> {
     let mut fragments = Vec::new();
     match byte {
         b'"' => fragments.push(String::from(r#"\x5C\x22"#)),
+        b'/' => fragments.push(String::from(r#"\x5C\x2F"#)),
         b'\\' => fragments.push(String::from(r#"\x5C\x5C"#)),
-        0x08 => fragments.push(String::from(r#"\x5C\x62"#)),
+        0x08 => fragments.push(String::from(r#"\x5Cb"#)),
         0x09 => fragments.push(String::from(r#"\x5Ct"#)),
         0x0A => fragments.push(String::from(r#"\x5Cn"#)),
-        0x0C => fragments.push(String::from(r#"\x5C\x66"#)),
+        0x0C => fragments.push(String::from(r#"\x5Cf"#)),
         0x0D => fragments.push(String::from(r#"\x5Cr"#)),
         _ => {}
+    }
+    if !json_direct_ascii_bytes().contains(&byte) {
+        fragments.push(json_unicode_escape_fragment(byte));
     }
     fragments
 }
 
-fn parse_class_escape_set(input: &[u8], pos: usize) -> Option<(BTreeSet<u8>, bool, usize)> {
+fn parse_class_escape_set(input: &[u8], pos: usize) -> Option<(BTreeSet<u8>, usize)> {
     if pos + 1 >= input.len() {
         return None;
     }
     let mut set = BTreeSet::new();
-    let mut includes_ecma_unicode_whitespace = false;
     match input[pos + 1] {
         b'd' => set.extend(b'0'..=b'9'),
         b's' => {
-            set.extend(shorthand_class_bytes(b's'));
-            includes_ecma_unicode_whitespace = true;
+            set.extend(0x09..=0x0D);
+            set.insert(0x20);
+            set.insert(0x85);
+            set.insert(0xA0);
         }
         b'w' => {
             set.extend(b'0'..=b'9');
@@ -1358,7 +1223,7 @@ fn parse_class_escape_set(input: &[u8], pos: usize) -> Option<(BTreeSet<u8>, boo
         }
         _ => return None,
     }
-    Some((set, includes_ecma_unicode_whitespace, pos + 2))
+    Some((set, pos + 2))
 }
 
 fn parse_class_escape_byte(input: &[u8], pos: usize) -> (u8, usize) {
@@ -1406,7 +1271,7 @@ fn jsonified_char_class_fragment(matched: &BTreeSet<u8>, negate: bool) -> Option
             parts.push(regex_char_class_from_ranges(&compress_byte_set(&direct_ascii)));
         }
         for byte in matched.iter().copied().filter(|byte| *byte >= 0x80) {
-            parts.push(regex_literal_bytes(&[byte]));
+            parts.push(regex_literal_bytes(char::from(byte).to_string().as_bytes()));
         }
         for byte in escapable_all.intersection(matched).copied() {
             parts.extend(json_escaped_byte_fragments(byte));
@@ -1430,14 +1295,10 @@ fn jsonify_regex_char_class(input: &[u8], start: usize) -> Option<(String, usize
         pos += 1;
     }
     let mut matched = BTreeSet::new();
-    let mut includes_ecma_unicode_whitespace = false;
     while pos < input.len() && input[pos] != b']' {
         if input[pos] == b'\\' {
-            if let Some((escape_set, escape_includes_unicode_ws, next_pos)) =
-                parse_class_escape_set(input, pos)
-            {
+            if let Some((escape_set, next_pos)) = parse_class_escape_set(input, pos) {
                 matched.extend(escape_set);
-                includes_ecma_unicode_whitespace |= escape_includes_unicode_ws;
                 pos = next_pos;
                 continue;
             }
@@ -1466,12 +1327,7 @@ fn jsonify_regex_char_class(input: &[u8], start: usize) -> Option<(String, usize
     if pos >= input.len() || input[pos] != b']' {
         return None;
     }
-    let mut fragment = jsonified_char_class_fragment(&matched, negate)?;
-    if includes_ecma_unicode_whitespace && !negate {
-        let mut alternatives = vec![fragment];
-        alternatives.extend(ecma262_non_ascii_whitespace_literals());
-        fragment = format!("(?:{})", alternatives.join("|"));
-    }
+    let fragment = jsonified_char_class_fragment(&matched, negate)?;
     Some((fragment, pos + 1))
 }
 
@@ -1489,22 +1345,21 @@ fn jsonify_shorthand_class(escape_char: u8) -> Option<String> {
             jsonified_char_class_fragment(&matched, false)
         }
         b's' => {
-            // JSON Schema `pattern` follows ECMA-262: \s includes Unicode
-            // WhiteSpace and LineTerminator code points, not just ASCII.
+            // \s matches ASCII whitespace + NBSP (U+00A0 = \xC2\xA0).
+            // llguidance treats NBSP as whitespace, matching ECMA-262 behavior.
             let matched = shorthand_class_bytes(b's');
             let mut fragment = jsonified_char_class_fragment(&matched, false)?;
-            let mut alternatives = vec![fragment];
-            alternatives.extend(ecma262_non_ascii_whitespace_literals());
-            fragment = format!("(?:{})", alternatives.join("|"));
+            // Append NBSP as a 2-byte UTF-8 literal alternative
+            fragment = format!("(?:{}|\\xC2\\xA0)", fragment);
             Some(fragment)
         }
         b'D' | b'W' => {
             let excluded = shorthand_class_bytes(escape_char.to_ascii_lowercase());
-            Some(compact_negated_json_class(&excluded))
+            Some(compact_negated_json_class(&excluded, false))
         }
         b'S' => {
             let excluded = shorthand_class_bytes(b's');
-            Some(compact_negated_json_class(&excluded))
+            Some(compact_negated_json_class(&excluded, true))
         }
         _ => None,
     }
@@ -1527,13 +1382,15 @@ fn shorthand_class_bytes(class: u8) -> BTreeSet<u8> {
     s
 }
 
+/// Produce a compact JSON-string-safe regex fragment for a negated ASCII class.
+///
 /// Unlike `jsonified_char_class_fragment(_, true)`, this produces a compact
 /// fragment that avoids DFA explosion when combined with bounded repetition
 /// like `{0,99}`. It includes single-byte ASCII chars, named JSON escape
 /// sequences, direct multi-byte UTF-8 patterns, and `\\uXXXX` encodings
 /// (as an over-approximation — all `\\uXXXX` values are accepted regardless
 /// of whether the encoded codepoint is in the excluded set).
-fn compact_negated_json_class(excluded: &BTreeSet<u8>) -> String {
+fn compact_negated_json_class(excluded: &BTreeSet<u8>, exclude_nbsp: bool) -> String {
     let direct_ascii_all = json_direct_ascii_bytes();
     let mut parts = Vec::new();
 
@@ -1550,8 +1407,8 @@ fn compact_negated_json_class(excluded: &BTreeSet<u8>) -> String {
     let named_escapes: &[(u8, &str)] = &[
         (0x22, r#"\x5C\x22"#),  // \"
         (0x5C, r#"\x5C\x5C"#),  // \\
-        (0x08, r#"\x5C\x62"#), // \b
-        (0x0C, r#"\x5C\x66"#), // \f
+        (0x08, r#"\x5Cb"#),     // \b
+        (0x0C, r#"\x5Cf"#),     // \f
         (0x0A, r#"\x5Cn"#),     // \n
         (0x0D, r#"\x5Cr"#),     // \r
         (0x09, r#"\x5Ct"#),     // \t
@@ -1562,8 +1419,20 @@ fn compact_negated_json_class(excluded: &BTreeSet<u8>) -> String {
         }
     }
 
+    // JSON \uXXXX escape sequences (over-approximation: accepts all
+    // codepoints, not just those outside the excluded set).
+    parts.push(String::from(r#"\x5Cu[0-9A-Fa-f]{4}"#));
+
     // Multi-byte UTF-8 character patterns.
-    parts.push(String::from(JSON_DIRECT_UTF8_PATTERN));
+    if exclude_nbsp {
+        // For \S: exclude NBSP (U+00A0 = \xC2\xA0) from the 2-byte UTF-8 range.
+        // Split \xC2 continuation to skip \xA0, matching llguidance's behavior
+        // which treats NBSP as whitespace (\s).
+        let utf8_no_nbsp = r#"(?:\xC2[\x80-\x9F\xA1-\xBF]|[\xC3-\xDF][\x80-\xBF]|[\xE0][\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC][\x80-\xBF][\x80-\xBF]|[\xED][\x80-\x9F][\x80-\xBF]|[\xEE-\xEF][\x80-\xBF][\x80-\xBF]|[\xF0][\x90-\xBF][\x80-\xBF][\x80-\xBF]|[\xF1-\xF3][\x80-\xBF][\x80-\xBF][\x80-\xBF]|[\xF4][\x80-\x8F][\x80-\xBF][\x80-\xBF])"#;
+        parts.push(String::from(utf8_no_nbsp));
+    } else {
+        parts.push(String::from(JSON_DIRECT_UTF8_PATTERN));
+    }
 
     if parts.len() == 1 {
         return parts.into_iter().next().unwrap();
@@ -1576,7 +1445,7 @@ fn compact_negated_json_class(excluded: &BTreeSet<u8>) -> String {
 /// Also expands shorthand character classes (`\s`, `\S`, `\d`, `\D`, `\w`, `\W`)
 /// into JSON-string-safe equivalents.
 fn jsonify_regex_dot(pattern: &str) -> String {
-    let json_dot = r#"(?:[^\x00-\x1f\x7f"\\]|\\["\\bfnrt])"#;
+    let json_dot = r#"(?:[^\x00-\x1f\x7f"\\]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})"#;
     let mut out = String::with_capacity(pattern.len() * 2);
     let bytes = pattern.as_bytes();
     let mut i = 0;
@@ -1623,8 +1492,9 @@ fn json_string_char_lexer_expr() -> LexerExpr {
 }
 
 fn decoded_utf8_char_lexer_expr() -> LexerExpr {
-    parse_json_encoded_byte_regex(
+    parse_regex(
         &format!(r"(?:[\x00-\x7F]|{})", JSON_DIRECT_UTF8_PATTERN),
+        true,
     )
 }
 
@@ -1657,7 +1527,7 @@ fn json_encoded_literal_byte_expr(byte: u8) -> LexerExpr {
 
     if byte < 0x80 {
         for fragment in json_escaped_byte_fragments(byte) {
-            options.push(parse_json_encoded_byte_regex(&fragment));
+            options.push(parse_regex(&fragment, true));
         }
     }
 
@@ -1674,17 +1544,8 @@ fn json_encoded_regex_expr(expr: LexerExpr) -> LexerExpr {
         ),
         LexerExpr::U8Class(set) => {
             let matched: BTreeSet<u8> = set.iter().collect();
-            let mut fragment = jsonified_char_class_fragment(&matched, false);
-            let ascii_space = shorthand_class_bytes(b's');
-            if matched.is_superset(&ascii_space) {
-                fragment = fragment.map(|fragment| {
-                    let mut alternatives = vec![fragment];
-                    alternatives.extend(ecma262_non_ascii_whitespace_literals());
-                    format!("(?:{})", alternatives.join("|"))
-                });
-            }
-            fragment
-                .map(|fragment| parse_json_encoded_byte_regex(&fragment))
+            jsonified_char_class_fragment(&matched, false)
+                .map(|fragment| parse_regex(&fragment, true))
                 .unwrap_or_else(|| LexerExpr::Choice(vec![]))
         }
         LexerExpr::Intersect { expr, intersect } => LexerExpr::Intersect {
@@ -1712,10 +1573,7 @@ fn json_encoded_regex_expr(expr: LexerExpr) -> LexerExpr {
 }
 
 fn decoded_regex_fullmatch_expr(pattern: &str) -> LexerExpr {
-    let core = common_outer_anchor_pattern(pattern)
-        .map(|(_, _, core)| core)
-        .unwrap_or_else(|| pattern.to_string());
-    json_encoded_regex_expr(parse_regex(&core, true))
+    json_encoded_regex_expr(parse_regex(pattern, true))
 }
 
 fn decoded_regex_search_branch_expr(branch: &str, max_tail: Option<usize>) -> LexerExpr {
@@ -1753,38 +1611,6 @@ fn decoded_regex_search_branch_expr(branch: &str, max_tail: Option<usize>) -> Le
 }
 
 fn decoded_regex_search_expr(pattern: &str, max_tail: Option<usize>) -> LexerExpr {
-    if let Some((anchored_start, anchored_end, core)) = common_outer_anchor_pattern(pattern) {
-        let inner = if core.is_empty() {
-            LexerExpr::Epsilon
-        } else {
-            decoded_regex_fullmatch_expr(&core)
-        };
-        return match (anchored_start, anchored_end) {
-            (true, true) => inner,
-            (true, false) => LexerExpr::make_seq(vec![inner, json_string_tail_lexer_expr(max_tail)]),
-            (false, true) => LexerExpr::make_seq(vec![json_string_tail_lexer_expr(max_tail), inner]),
-            (false, false) => match max_tail {
-                Some(n) => LexerExpr::make_choice(
-                    (0..=n)
-                        .map(|left_budget| {
-                            let right_budget = n.saturating_sub(left_budget);
-                            LexerExpr::make_seq(vec![
-                                json_string_tail_lexer_expr(Some(left_budget)),
-                                inner.clone(),
-                                json_string_tail_lexer_expr(Some(right_budget)),
-                            ])
-                        })
-                        .collect(),
-                ),
-                None => LexerExpr::make_seq(vec![
-                    json_string_tail_lexer_expr(None),
-                    inner,
-                    json_string_tail_lexer_expr(None),
-                ]),
-            },
-        };
-    }
-
     let branches = split_top_level_regex_branches(pattern);
     LexerExpr::make_choice(
         branches
@@ -1829,10 +1655,6 @@ fn decoded_search_branch_expr(branch: &str, max_tail: Option<usize>) -> LexerExp
 }
 
 fn decoded_regex_matches_search(pattern: &str, text: &str) -> bool {
-    if let Some(literals) = literal_alternation_search_literals(pattern) {
-        return literals.into_iter().any(|literal| text.contains(literal));
-    }
-
     let expr = LexerExpr::make_choice(
         split_top_level_regex_branches(pattern)
             .into_iter()
@@ -1850,137 +1672,8 @@ fn decoded_regex_matches_search(pattern: &str, text: &str) -> bool {
     regex.dfa.finalizers(state).contains(0)
 }
 
-fn literal_alternation_search_literals(pattern: &str) -> Option<Vec<&str>> {
-    const REGEX_META: &[u8] = b"\\.^$|?*+()[]{}";
-
-    let branches = split_top_level_regex_branches(pattern);
-    if branches.len() <= 1 {
-        return None;
-    }
-
-    let mut literals = Vec::with_capacity(branches.len());
-    for branch in branches {
-        if branch.is_empty() {
-            return None;
-        }
-        if !branch.is_ascii() {
-            return None;
-        }
-        if branch
-            .as_bytes()
-            .iter()
-            .any(|byte| REGEX_META.contains(byte))
-        {
-            return None;
-        }
-        literals.push(branch);
-    }
-
-    Some(literals)
-}
-
 fn env_flag(name: &str) -> bool {
     env_flag_default(name, false)
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct JsonStringMergeConfig {
-    merge_open: bool,
-    merge_close: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum JsonSchemaUriMode {
-    Structured,
-    StructuredSingleTerminal,
-    LlguidancePattern,
-    Approx,
-}
-
-fn env_flag_optional(name: &str) -> Option<bool> {
-    std::env::var(name).ok().map(|v| {
-        let n = v.trim().to_ascii_lowercase();
-        !matches!(n.as_str(), "" | "0" | "false" | "no" | "off")
-    })
-}
-
-fn json_string_merge_config(is_pattern: bool) -> JsonStringMergeConfig {
-    let default = JsonStringMergeConfig {
-        merge_open: false,
-        merge_close: true,
-    };
-
-    let base = JsonStringMergeConfig {
-        merge_open: env_flag_optional("GLRMASK_JSON_STRING_MERGE_OPEN")
-            .unwrap_or(default.merge_open),
-        merge_close: env_flag_optional("GLRMASK_JSON_STRING_MERGE_CLOSE")
-            .unwrap_or(default.merge_close),
-    };
-
-    if !is_pattern {
-        return base;
-    }
-
-    let pattern_default = JsonStringMergeConfig {
-        merge_open: true,
-        merge_close: false,
-    };
-
-    JsonStringMergeConfig {
-        merge_open: env_flag_optional("GLRMASK_JSON_PATTERN_STRING_MERGE_OPEN")
-            .unwrap_or(pattern_default.merge_open),
-        merge_close: env_flag_optional("GLRMASK_JSON_PATTERN_STRING_MERGE_CLOSE")
-            .unwrap_or(pattern_default.merge_close),
-    }
-}
-
-fn json_literal_string_merge_config() -> JsonStringMergeConfig {
-    let base = json_string_merge_config(false);
-    JsonStringMergeConfig {
-        merge_open: env_flag_optional("GLRMASK_JSON_LITERAL_STRING_MERGE_OPEN")
-            .unwrap_or(base.merge_open),
-        merge_close: env_flag_optional("GLRMASK_JSON_LITERAL_STRING_MERGE_CLOSE")
-            .unwrap_or(base.merge_close),
-    }
-}
-
-fn json_uri_merge_config() -> JsonStringMergeConfig {
-    let base = json_string_merge_config(true);
-    JsonStringMergeConfig {
-        merge_open: env_flag_optional("GLRMASK_JSON_URI_MERGE_OPEN")
-            .unwrap_or(base.merge_open),
-        merge_close: env_flag_optional("GLRMASK_JSON_URI_MERGE_CLOSE")
-            .unwrap_or(base.merge_close),
-    }
-}
-
-fn json_uri_merge_env_explicitly_set() -> bool {
-    std::env::var_os("GLRMASK_JSON_URI_MERGE_OPEN").is_some()
-        || std::env::var_os("GLRMASK_JSON_URI_MERGE_CLOSE").is_some()
-}
-
-fn uri_quote_merge_warning_needed(mode: JsonSchemaUriMode) -> bool {
-    mode == JsonSchemaUriMode::Structured && json_uri_merge_env_explicitly_set()
-}
-
-fn parse_json_schema_uri_mode(value: &str) -> Option<JsonSchemaUriMode> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "structured" => Some(JsonSchemaUriMode::Structured),
-        "structured_single_terminal" => Some(JsonSchemaUriMode::StructuredSingleTerminal),
-        "llguidance_pattern" => Some(JsonSchemaUriMode::LlguidancePattern),
-        "approx" => Some(JsonSchemaUriMode::Approx),
-        _ => None,
-    }
-}
-
-fn json_schema_uri_mode() -> JsonSchemaUriMode {
-    if let Ok(value) = std::env::var("GLRMASK_JSON_SCHEMA_URI_MODE") {
-        return parse_json_schema_uri_mode(&value).unwrap_or_else(|| {
-            panic!("invalid GLRMASK_JSON_SCHEMA_URI_MODE={value:?}; expected one of structured, structured_single_terminal, llguidance_pattern, approx")
-        });
-    }
-
-    JsonSchemaUriMode::StructuredSingleTerminal
 }
 
 // ---------------------------------------------------------------------------
@@ -2024,8 +1717,8 @@ fn json_schema_uri_mode() -> JsonSchemaUriMode {
 ///
 /// The caller wraps the result with `regex_expr()` and passes it to
 /// `wrap_string_value_terminal()`.
-fn string_value_body_regex(inner: &str, is_pattern: bool) -> String {
-    quoted_body_regex(inner, json_string_merge_config(is_pattern), false)
+fn string_value_body_regex(inner: &str) -> String {
+    quoted_body_regex(inner, false)
 }
 
 /// Build the regex pattern for the body terminal of a JSON object **key-colon**
@@ -2036,30 +1729,11 @@ fn string_value_body_regex(inner: &str, is_pattern: bool) -> String {
 ///  - `split_close=false` → pattern includes close `"`
 ///  - `split_colon=false` → pattern includes `": "`
 fn key_colon_body_regex(inner: &str) -> String {
-    quoted_body_regex(
-        inner,
-        JsonStringMergeConfig {
-            merge_open: false,
-            merge_close: true,
-        },
-        true,
-    )
+    quoted_body_regex(inner, true)
 }
 
-fn quoted_body_regex(
-    inner: &str,
-    merge_config: JsonStringMergeConfig,
-    _include_colon_space: bool,
-) -> String {
-    let mut out = String::new();
-    if merge_config.merge_open {
-        out.push('"');
-    }
-    out.push_str(&format!("(?:{inner})"));
-    if merge_config.merge_close {
-        out.push('"');
-    }
-    out
+fn quoted_body_regex(inner: &str, _include_colon_space: bool) -> String {
+    format!("(?:{inner})\"")
 }
 
 /// Build literal bytes for the body terminal of a JSON object **key-colon**.
@@ -2082,16 +1756,8 @@ fn key_colon_suffix_expr() -> GrammarExpr {
 ///
 /// Adds split-off quote literals around the body terminal.
 /// The body terminal must already include fused (non-split) quotes.
-fn wrap_string_value_terminal(body: GrammarExpr, merge_config: JsonStringMergeConfig) -> GrammarExpr {
-    let mut parts = Vec::new();
-    if !merge_config.merge_open {
-        parts.push(literal_expr(b"\""));
-    }
-    parts.push(body);
-    if !merge_config.merge_close {
-        parts.push(literal_expr(b"\""));
-    }
-    sequence_or_single(parts)
+fn wrap_string_value_terminal(body: GrammarExpr) -> GrammarExpr {
+    sequence_or_single(vec![literal_expr(b"\""), body])
 }
 
 /// Wrap a body terminal expression as a JSON object **key-colon**.
@@ -2114,23 +1780,6 @@ fn wrap_key_colon_regex(inner_regex: &str) -> GrammarExpr {
 
 fn parsed_regex_expr(pattern: &str, utf8: bool) -> GrammarExpr {
     expr_to_grammar_expr(&parse_regex(pattern, utf8))
-}
-
-fn per_object_ap_key_threshold() -> usize {
-    std::env::var("GLRMASK_JSON_SCHEMA_PER_OBJECT_AP_KEY_THRESHOLD")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|threshold| *threshold > 0)
-        .unwrap_or(128)
-}
-
-fn per_object_ap_keys_enabled_for_plan(plan: &SharedAdditionalKeyPlan) -> bool {
-    if let Some(enabled) = env_flag_optional("GLRMASK_JSON_SCHEMA_PER_OBJECT_AP_KEYS") {
-        return enabled;
-    }
-
-    let score = plan.literal_keys.len() + 8 * plan.pattern_keys.len();
-    score >= per_object_ap_key_threshold()
 }
 
 fn ap_key_any_string() -> bool {
@@ -2189,33 +1838,8 @@ fn resolve_shared_ap_ref_target<'a>(root: &'a Value, ref_value: &str) -> Option<
     Some(current)
 }
 
-#[derive(Debug, Default, Clone)]
-struct SharedAdditionalKeyPlan {
-    literal_keys: BTreeSet<String>,
-    pattern_keys: BTreeSet<String>,
-    literal_keys_by_pattern: BTreeMap<String, BTreeSet<String>>,
-    common_body_expr: Option<GrammarExpr>,
-    pattern_body_cache: BTreeMap<String, GrammarExpr>,
-    constrained_pattern_body_cache: BTreeMap<(String, Vec<String>), GrammarExpr>,
-    body_rule_cache: BTreeMap<(Vec<String>, Vec<String>, Vec<String>), String>,
-    key_rule_cache: BTreeMap<(Vec<String>, Vec<String>, Vec<String>), String>,
-}
-
-#[derive(Debug, Default, Clone)]
-struct SharedStringValuePlan {
-    literal_values: BTreeSet<String>,
-    pattern_values: BTreeSet<String>,
-    common_body_expr: Option<GrammarExpr>,
-    literal_body_cache: BTreeMap<String, GrammarExpr>,
-    pattern_body_cache: BTreeMap<String, GrammarExpr>,
-    local_excluding_value_cache: BTreeMap<(Vec<String>, Vec<String>), GrammarExpr>,
-    value_rule_cache: BTreeMap<(Vec<String>, Vec<String>), String>,
-}
-
-fn collect_shared_additional_key_plan(root: &Value) -> SharedAdditionalKeyPlan {
-    let bfs_scan_started_at = emit_schema_ctx_phase_start("shared_ap_bfs_scan");
-    let mut literal_keys = BTreeSet::new();
-    let mut pattern_keys = BTreeSet::new();
+fn collect_shared_ap_literal_keys(root: &Value) -> BTreeSet<String> {
+    let mut collected = BTreeSet::new();
     let mut queue = VecDeque::from([root]);
     let mut visited = BTreeSet::new();
 
@@ -2229,15 +1853,14 @@ fn collect_shared_additional_key_plan(root: &Value) -> SharedAdditionalKeyPlan {
             continue;
         };
 
-        if let Some(properties) = object.get("properties").and_then(Value::as_object) {
-            literal_keys.extend(properties.keys().cloned());
-        }
-        if let Some(required) = object.get("required").and_then(Value::as_array) {
-            literal_keys.extend(required.iter().filter_map(Value::as_str).map(String::from));
-        }
-        if let Some(pattern_properties) = object.get("patternProperties").and_then(Value::as_object) {
-            for pattern in pattern_properties.keys() {
-                pattern_keys.insert(pattern.clone());
+        let additional_properties = object.get("additionalProperties");
+        let allows_additional_properties = !matches!(additional_properties, Some(Value::Bool(false)));
+        if allows_additional_properties {
+            if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+                collected.extend(properties.keys().cloned());
+            }
+            if let Some(required) = object.get("required").and_then(Value::as_array) {
+                collected.extend(required.iter().filter_map(Value::as_str).map(String::from));
             }
         }
 
@@ -2283,116 +1906,26 @@ fn collect_shared_additional_key_plan(root: &Value) -> SharedAdditionalKeyPlan {
             }
         }
     }
-    emit_schema_ctx_phase_end("shared_ap_bfs_scan", bfs_scan_started_at);
 
-    let literal_keys_by_pattern_started_at =
-        emit_schema_ctx_phase_start("shared_ap_literal_keys_by_pattern");
-    emit_schema_ctx_phase_counts(
-        "shared_ap_literal_keys_by_pattern",
-        literal_keys.len(),
-        pattern_keys.len(),
-        literal_keys.len().saturating_mul(pattern_keys.len()),
-    );
-    let mut literal_keys_by_pattern = BTreeMap::new();
-    for pattern in &pattern_keys {
-        let matching_keys = literal_keys
-            .iter()
-            .filter(|key| decoded_regex_matches_search(pattern, key))
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        literal_keys_by_pattern.insert(pattern.clone(), matching_keys);
-    }
-    emit_schema_ctx_phase_end(
-        "shared_ap_literal_keys_by_pattern",
-        literal_keys_by_pattern_started_at,
-    );
-
-    SharedAdditionalKeyPlan {
-        literal_keys,
-        pattern_keys,
-        literal_keys_by_pattern,
-        ..Default::default()
-    }
+    collected
 }
 
-fn schema_allows_string_values(object: &Map<String, Value>) -> bool {
-    match object.get("type") {
-        Some(Value::String(type_name)) => type_name == "string",
-        Some(Value::Array(type_names)) => type_names.iter().filter_map(Value::as_str).any(|name| name == "string"),
-        _ => true,
-    }
+const SHARED_AP_MAX_ALLOW_BACK_KEYS: usize = 32;
+
+fn use_structured_uri() -> bool {
+    env_flag_default("GLRMASK_STRUCT_URI_FORMAT", true)
 }
 
-fn collect_shared_string_value_plan(root: &Value) -> SharedStringValuePlan {
-    if !global_shared_string_value_exclusions_enabled() {
-        return SharedStringValuePlan::default();
-    }
-
-    let mut literal_values = BTreeSet::new();
-    let mut pattern_values = BTreeSet::new();
-    let mut queue = VecDeque::from([root]);
-    let mut visited = BTreeSet::new();
-
-    while let Some(node) = queue.pop_front() {
-        let node_id = node as *const Value as usize;
-        if !visited.insert(node_id) {
-            continue;
-        }
-
-        let Some(object) = node.as_object() else {
-            continue;
-        };
-
-        if schema_allows_string_values(object) {
-            if let Some(Value::String(value)) = object.get("const") {
-                literal_values.insert(value.clone());
-            }
-            if let Some(values) = object.get("enum").and_then(Value::as_array) {
-                literal_values.extend(values.iter().filter_map(Value::as_str).map(String::from));
-            }
-            if let Some(pattern) = object.get("pattern").and_then(Value::as_str) {
-                pattern_values.insert(pattern.to_string());
-            }
-        }
-
-        enqueue_child_schemas(root, object, &mut queue);
-    }
-
-    if shared_string_value_exclusion_limit()
-        .map(|limit| literal_values.len() + pattern_values.len() > limit)
-        .unwrap_or(false)
-    {
-        SharedStringValuePlan::default()
-    } else {
-        SharedStringValuePlan {
-            literal_values,
-            pattern_values,
-            ..Default::default()
-        }
-    }
+fn simple_uri_format_enabled() -> bool {
+    env_flag_default("GLRMASK_SIMPLE_URI_FORMAT", false)
 }
 
-fn string_value_exclusions_abdcffb6b_compat() -> bool {
-    std::env::var("GLRMASK_STRING_VALUE_EXCLUSIONS_COMPAT")
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "abdcffb" | "abdcffb6b"
-            )
-        })
-        .unwrap_or(false)
+fn restored_structured_uri_enabled() -> bool {
+    env_flag_default("GLRMASK_RESTORED_STRUCTURED_URI", true)
 }
 
-fn global_shared_string_value_exclusions_enabled() -> bool {
-    string_value_exclusions_abdcffb6b_compat()
-        || env_flag_default("GLRMASK_GLOBAL_SHARED_STRING_VALUE_EXCLUSIONS", false)
-}
-
-fn shared_string_value_exclusion_limit() -> Option<usize> {
-    std::env::var("GLRMASK_SHARED_STRING_VALUE_EXCLUSION_LIMIT")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .or_else(|| string_value_exclusions_abdcffb6b_compat().then_some(32))
+fn strict_uri_format_enabled() -> bool {
+    env_flag("GLRMASK_STRICT_URI_FORMAT")
 }
 
 fn uri_aggregate_scheme_enabled() -> bool {
@@ -2454,12 +1987,6 @@ fn uri_explicit_ipv6_rules_enabled() -> bool {
 }
 
 fn uri_rule_should_be_terminal(name: &str) -> Option<bool> {
-    if json_schema_uri_mode() == JsonSchemaUriMode::StructuredSingleTerminal
-        && (name == "uri" || name.starts_with("uri_"))
-    {
-        return Some(true);
-    }
-
     match name {
         "uri_scheme" => Some(env_flag_default("GLRMASK_URI_SCHEME_TERMINAL", false)),
         "uri_alpha_char" => Some(env_flag_default("GLRMASK_URI_ALPHA_CHAR_TERMINAL", true)),
@@ -2616,7 +2143,7 @@ fn json_wrapped_string_length_regex(min_len: usize, max_len: usize) -> String {
             max_len,
         )
     };
-    string_value_body_regex(&inner, false)
+    string_value_body_regex(&inner)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2674,40 +2201,8 @@ fn power_of_ten_multiple_scale(value: f64) -> Option<usize> {
     None
 }
 
-fn integer_power_of_ten_exponent(mut value: u64) -> Option<usize> {
-    if value == 0 {
-        return None;
-    }
-    let mut exponent = 0usize;
-    while value > 1 {
-        if value % 10 != 0 {
-            return None;
-        }
-        value /= 10;
-        exponent += 1;
-    }
-    Some(exponent)
-}
-
-fn integer_power_of_ten_multiple_expr(exponent: usize, allow_fractional_zero: bool) -> LexerExpr {
-    let integer = if exponent == 0 {
-        r#"-?(0|[1-9][0-9]*)"#.to_string()
-    } else {
-        format!(r#"-?(0|[1-9][0-9]*0{{{exponent}}})"#)
-    };
-    let regex = if allow_fractional_zero {
-        format!(r#"{integer}(?:\.0+)?"#)
-    } else {
-        integer
-    };
-    parse_regex(&regex, true)
-}
-
 fn integer_multiple_expr(multiple: u64, allow_fractional_zero: bool) -> LexerExpr {
     assert!(multiple > 0);
-    if let Some(exponent) = integer_power_of_ten_exponent(multiple) {
-        return integer_power_of_ten_multiple_expr(exponent, allow_fractional_zero);
-    }
 
     SchemaCtx::build_state_machine_expr(
         IntegerMultipleState::Start,
@@ -2843,68 +2338,13 @@ fn compile_regex_union_expr(regexes: &[String]) -> LexerExpr {
 /// This is the GrammarExpr analogue of `string_value_body_regex` +
 /// `wrap_string_value_terminal` for cases where the body is an
 /// expression tree rather than a regex string.
-fn wrap_string_value_expr_parts(
-    body: GrammarExpr,
-    is_pattern: bool,
-) -> (GrammarExpr, Box<dyn FnOnce(GrammarExpr) -> GrammarExpr>) {
-    let merge_config = json_string_merge_config(is_pattern);
-    wrap_string_value_expr_parts_with_merge_config(body, merge_config)
-}
-
-fn wrap_string_value_expr_parts_with_merge_config(
-    body: GrammarExpr,
-    merge_config: JsonStringMergeConfig,
-) -> (GrammarExpr, Box<dyn FnOnce(GrammarExpr) -> GrammarExpr>) {
-    let terminal_body = wrap_expr_with_string_literals(body, merge_config);
+fn wrap_string_value_expr_parts(body: GrammarExpr) -> (GrammarExpr, Box<dyn FnOnce(GrammarExpr) -> GrammarExpr>) {
+    let terminal_body = sequence_or_single(vec![body, literal_expr(b"\"")]);
     // Wrap the terminal ref with split-off quotes
     let wrap = move |term: GrammarExpr| -> GrammarExpr {
-        wrap_string_value_terminal(term, merge_config)
+        wrap_string_value_terminal(term)
     };
     (terminal_body, Box::new(wrap))
-}
-
-fn wrap_expr_with_string_literals(
-    body: GrammarExpr,
-    merge_config: JsonStringMergeConfig,
-) -> GrammarExpr {
-    let with_open = if merge_config.merge_open {
-        prepend_literal_preserving_group_ops(body, literal_expr(b"\""))
-    } else {
-        body
-    };
-    if merge_config.merge_close {
-        append_literal_preserving_group_ops(with_open, literal_expr(b"\""))
-    } else {
-        with_open
-    }
-}
-
-fn prepend_literal_preserving_group_ops(expr: GrammarExpr, literal: GrammarExpr) -> GrammarExpr {
-    match expr {
-        GrammarExpr::Intersect { expr, intersect } => GrammarExpr::Intersect {
-            expr: Box::new(prepend_literal_preserving_group_ops(*expr, literal.clone())),
-            intersect: Box::new(prepend_literal_preserving_group_ops(*intersect, literal)),
-        },
-        GrammarExpr::Exclude { expr, exclude } => GrammarExpr::Exclude {
-            expr: Box::new(prepend_literal_preserving_group_ops(*expr, literal.clone())),
-            exclude: Box::new(prepend_literal_preserving_group_ops(*exclude, literal)),
-        },
-        other => sequence_or_single(vec![literal, other]),
-    }
-}
-
-fn append_literal_preserving_group_ops(expr: GrammarExpr, literal: GrammarExpr) -> GrammarExpr {
-    match expr {
-        GrammarExpr::Intersect { expr, intersect } => GrammarExpr::Intersect {
-            expr: Box::new(append_literal_preserving_group_ops(*expr, literal.clone())),
-            intersect: Box::new(append_literal_preserving_group_ops(*intersect, literal)),
-        },
-        GrammarExpr::Exclude { expr, exclude } => GrammarExpr::Exclude {
-            expr: Box::new(append_literal_preserving_group_ops(*expr, literal.clone())),
-            exclude: Box::new(append_literal_preserving_group_ops(*exclude, literal)),
-        },
-        other => sequence_or_single(vec![other, literal]),
-    }
 }
 
 fn wrap_key_colon_expr_parts(body: GrammarExpr) -> (GrammarExpr, Box<dyn FnOnce(GrammarExpr) -> GrammarExpr>) {
@@ -2917,27 +2357,9 @@ fn wrap_key_colon_expr_parts(body: GrammarExpr) -> (GrammarExpr, Box<dyn FnOnce(
 ///
 /// Equivalent to composing `wrap_string_value_expr_parts` but for cases
 /// where the body does not need to be named as a separate terminal rule.
-fn quoted_expr(inner: GrammarExpr, is_pattern: bool) -> GrammarExpr {
-    quoted_expr_with_merge_config(inner, json_string_merge_config(is_pattern))
-}
-
-fn quoted_expr_with_merge_config(
-    inner: GrammarExpr,
-    merge_config: JsonStringMergeConfig,
-) -> GrammarExpr {
-    let (body, wrap) = wrap_string_value_expr_parts_with_merge_config(inner, merge_config);
+fn quoted_expr(inner: GrammarExpr) -> GrammarExpr {
+    let (body, wrap) = wrap_string_value_expr_parts(inner);
     wrap(body)
-}
-
-fn single_terminal_quoted_expr(
-    this: &mut SchemaCtx,
-    inner: GrammarExpr,
-    prefix: &str,
-    merge_config: JsonStringMergeConfig,
-) -> GrammarExpr {
-    let terminal_body = wrap_expr_with_string_literals(inner, merge_config);
-    let term = this.extract_terminal_rule(terminal_body, prefix);
-    wrap_string_value_terminal(term, merge_config)
 }
 
 fn json_date_body_expr() -> GrammarExpr {
@@ -3030,16 +2452,11 @@ fn simple_repeated_single_char_expr(pattern: &str) -> Option<LexerExpr> {
     // characters outside the char-class, so we must fall back to the general
     // json_search_pattern path.
     let core = pattern.strip_prefix('^')?.strip_suffix('$')?;
-    let expr = parse_regex(core, true);
-    let LexerExpr::Repeat { expr, min: 1, max: None } = expr else {
-        return None;
-    };
-    let unit_expr = *expr;
-    let (min_len, max_len) = regex_byte_length_bounds(&unit_expr);
-    if min_len != 1 || max_len != Some(1) {
+    let repeated = core.strip_suffix('+')?;
+    if !(repeated.starts_with('[') && repeated.ends_with(']')) {
         return None;
     }
-    Some(json_encoded_regex_expr(unit_expr))
+    Some(decoded_regex_fullmatch_expr(repeated))
 }
 
 /// Returns `true` when every top-level branch of `pattern` starts with `^` and
@@ -3193,43 +2610,8 @@ fn coalesce_json_pattern_literals(expr: GrammarExpr) -> GrammarExpr {
     }
 }
 
-fn json_pattern_grammar_expr_impl(expr: &LexerExpr, json_char: &LexerExpr) -> GrammarExpr {
-    if expr == json_char {
-        return GrammarExpr::Ref(JSON_STRING_CHAR_RULE.into());
-    }
-
-    match expr {
-        LexerExpr::U8Seq(_) | LexerExpr::U8Class(_) | LexerExpr::Epsilon => expr_to_grammar_expr(expr),
-        LexerExpr::Seq(parts) => sequence_or_single(
-            parts
-                .iter()
-                .map(|part| json_pattern_grammar_expr_impl(part, json_char))
-                .collect(),
-        ),
-        LexerExpr::Choice(options) => choice_or_single(
-            options
-                .iter()
-                .map(|option| json_pattern_grammar_expr_impl(option, json_char))
-                .collect(),
-        ),
-        LexerExpr::Repeat { expr, min, max } => {
-            repeat_expr(json_pattern_grammar_expr_impl(expr, json_char), *min, *max)
-        }
-        LexerExpr::Intersect { expr, intersect } => GrammarExpr::Intersect {
-            expr: Box::new(json_pattern_grammar_expr_impl(expr, json_char)),
-            intersect: Box::new(json_pattern_grammar_expr_impl(intersect, json_char)),
-        },
-        LexerExpr::Exclude { expr, exclude } => GrammarExpr::Exclude {
-            expr: Box::new(json_pattern_grammar_expr_impl(expr, json_char)),
-            exclude: Box::new(json_pattern_grammar_expr_impl(exclude, json_char)),
-        },
-        LexerExpr::Shared(inner) => json_pattern_grammar_expr_impl(inner, json_char),
-    }
-}
-
 fn json_pattern_grammar_expr(expr: &LexerExpr) -> GrammarExpr {
-    let json_char = json_string_char_lexer_expr();
-    coalesce_json_pattern_literals(json_pattern_grammar_expr_impl(expr, &json_char))
+    coalesce_json_pattern_literals(expr_to_grammar_expr(expr))
 }
 
 fn json_string_literal_bytes(text: &str) -> Vec<u8> {
@@ -3281,11 +2663,6 @@ fn json_value_literal_bytes(value: &Value) -> Vec<u8> {
     rendered.into_bytes()
 }
 
-fn json_enum_string_terminal_bytes(text: &str) -> Vec<u8> {
-    let full = json_string_literal_bytes(text);
-    full[1..].to_vec()
-}
-
 fn json_value_literal_expr(value: &Value) -> GrammarExpr {
     let bytes = json_value_literal_bytes(value);
     if value.is_string() && bytes.len() >= 2 && bytes[0] == b'"' {
@@ -3302,7 +2679,7 @@ fn json_value_literal_expr(value: &Value) -> GrammarExpr {
         let body = literal_expr(&body_bytes);
 
         // Wrap with split-off quotes
-        wrap_string_value_terminal(body, json_literal_string_merge_config())
+        wrap_string_value_terminal(body)
     } else {
         literal_expr(&bytes)
     }
@@ -3310,38 +2687,6 @@ fn json_value_literal_expr(value: &Value) -> GrammarExpr {
 
 fn expr_key(expr: &GrammarExpr) -> String {
     format!("{expr:?}")
-}
-
-fn env_flag_default_true(name: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|value| {
-            let value = value.trim().to_ascii_lowercase();
-            !matches!(value.as_str(), "0" | "false" | "no" | "off")
-        })
-        .unwrap_or(true)
-}
-
-pub(crate) fn factor_common_affixes_enabled() -> bool {
-    env_flag_default_true("GLRMASK_JSON_SCHEMA_FACTOR_COMMON_AFFIXES")
-}
-
-pub(crate) fn promote_literal_choices_enabled() -> bool {
-    env_flag_default_true("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES")
-}
-
-pub(crate) fn simplify_grammar_enabled() -> bool {
-    std::env::var("GLRMASK_JSON_SCHEMA_SIMPLIFY_GRAMMAR")
-        .ok()
-        .map(|value| {
-            let value = value.trim().to_ascii_lowercase();
-            matches!(value.as_str(), "1" | "true" | "yes" | "on")
-        })
-        .unwrap_or(false)
-}
-
-pub(crate) fn lower_exact_subtractions_enabled() -> bool {
-    env_flag_default_true("GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS")
 }
 
 fn seq_elements(expr: &GrammarExpr) -> Vec<GrammarExpr> {
@@ -3352,10 +2697,6 @@ fn seq_elements(expr: &GrammarExpr) -> Vec<GrammarExpr> {
 }
 
 fn factor_common_affixes(options: Vec<GrammarExpr>) -> GrammarExpr {
-    if !factor_common_affixes_enabled() {
-        return choice_or_single(options);
-    }
-
     if options.len() <= 1 {
         return choice_or_single(options);
     }
@@ -3466,18 +2807,12 @@ fn bare_ref_value(schema: &Value) -> Option<&str> {
     annotation_only.then_some(ref_value)
 }
 
-fn merge_two_schemas(
-    ctx: &SchemaCtx<'_>,
-    s1: &Map<String, Value>,
-    s2: &Map<String, Value>,
-) -> Result<Map<String, Value>, GlrMaskError> {
-    ctx.increment_schema_build_count()?;
-
+fn merge_two_schemas(s1: &Map<String, Value>, s2: &Map<String, Value>) -> Map<String, Value> {
     if s2.is_empty() {
-        return Ok(s1.clone());
+        return s1.clone();
     }
     if s1.is_empty() {
-        return Ok(s2.clone());
+        return s2.clone();
     }
 
     let mut merged = Map::new();
@@ -3490,7 +2825,7 @@ fn merge_two_schemas(
             if intersection.is_empty() {
                 let mut unsat = Map::new();
                 unsat.insert("not".into(), Value::Object(Map::new()));
-                return Ok(unsat);
+                return unsat;
             }
             if intersection.len() == 1 {
                 merged.insert("type".into(), Value::String(intersection[0].clone()));
@@ -3536,7 +2871,7 @@ fn merge_two_schemas(
                 props2.and_then(|props| props.get(&key)).and_then(Value::as_object),
             ) {
                 (Some(left), Some(right)) => {
-                    merged_props.insert(key, Value::Object(merge_two_schemas(ctx, left, right)?));
+                    merged_props.insert(key, Value::Object(merge_two_schemas(left, right)));
                 }
                 _ => {
                     if let Some(value) = props1.and_then(|props| props.get(&key)).cloned() {
@@ -3581,7 +2916,7 @@ fn merge_two_schemas(
         } else if let (Some(Value::Object(left)), Some(Value::Object(right))) = (ap1, ap2) {
             merged.insert(
                 "additionalProperties".into(),
-                Value::Object(merge_two_schemas(ctx, left, right)?),
+                Value::Object(merge_two_schemas(left, right)),
             );
         } else if has_ap1 {
             merged.insert(
@@ -3687,117 +3022,21 @@ fn merge_two_schemas(
         }
     }
 
-    Ok(merged)
-}
-
-fn json_schema_phase_profile_enabled() -> bool {
-    crate::compiler::compile::compile_profile_enabled()
-}
-
-fn emit_json_schema_phase_start(name: &'static str) -> Option<std::time::Instant> {
-    if !json_schema_phase_profile_enabled() {
-        return None;
-    }
-
-    eprintln!("[glrmask/profile][json-schema-phase-start] name={}", name);
-    Some(std::time::Instant::now())
-}
-
-fn emit_json_schema_phase_end(name: &'static str, started_at: Option<std::time::Instant>) {
-    if let Some(started_at) = started_at {
-        eprintln!(
-            "[glrmask/profile][json-schema-phase-end] name={} elapsed_ms={:.3}",
-            name,
-            started_at.elapsed().as_secs_f64() * 1000.0,
-        );
-    }
-}
-
-fn emit_schema_ctx_phase_start(name: &'static str) -> Option<std::time::Instant> {
-    if !json_schema_phase_profile_enabled() {
-        return None;
-    }
-
-    eprintln!("[glrmask/profile][schema-ctx-phase-start] name={}", name);
-    Some(std::time::Instant::now())
-}
-
-fn emit_schema_ctx_phase_end(name: &'static str, started_at: Option<std::time::Instant>) {
-    if let Some(started_at) = started_at {
-        eprintln!(
-            "[glrmask/profile][schema-ctx-phase-end] name={} elapsed_ms={:.3}",
-            name,
-            started_at.elapsed().as_secs_f64() * 1000.0,
-        );
-    }
-}
-
-fn emit_schema_ctx_phase_counts(
-    name: &'static str,
-    literal_keys: usize,
-    pattern_keys: usize,
-    cross_product: usize,
-) {
-    if !json_schema_phase_profile_enabled() {
-        return;
-    }
-
-    eprintln!(
-        "[glrmask/profile][schema-ctx-phase-counts] name={} literal_keys={} pattern_keys={} cross_product={}",
-        name,
-        literal_keys,
-        pattern_keys,
-        cross_product,
-    );
+    merged
 }
 
 pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskError> {
-    let validate_schema_keywords_started_at =
-        emit_json_schema_phase_start("validate_schema_keywords");
-    validate_reachable_llguidance_keyword_compatibility(schema)?;
-    emit_json_schema_phase_end(
-        "validate_schema_keywords",
-        validate_schema_keywords_started_at,
-    );
-
-    let schema_ctx_new_started_at = emit_json_schema_phase_start("schema_ctx_new");
     let mut ctx = SchemaCtx::new(schema);
-    emit_json_schema_phase_end("schema_ctx_new", schema_ctx_new_started_at);
-
-    let register_root_definitions_started_at =
-        emit_json_schema_phase_start("register_root_definitions");
     ctx.register_root_definitions();
-    emit_json_schema_phase_end(
-        "register_root_definitions",
-        register_root_definitions_started_at,
-    );
-
-    let materialize_registered_refs_started_at =
-        emit_json_schema_phase_start("materialize_registered_refs");
     ctx.materialize_registered_refs()?;
-    emit_json_schema_phase_end(
-        "materialize_registered_refs",
-        materialize_registered_refs_started_at,
-    );
-
-    let convert_schema_root_started_at = emit_json_schema_phase_start("convert_schema_root");
     let start_expr = match ctx.convert_schema(schema) {
         Ok(expr) => expr,
         Err(err) if is_unsat_schema_error(&err) => never_expr(),
         Err(err) => return Err(err),
     };
-    emit_json_schema_phase_end("convert_schema_root", convert_schema_root_started_at);
 
-    let insert_start_rule_started_at = emit_json_schema_phase_start("insert_start_rule");
     ctx.insert_rule("start", start_expr);
-    emit_json_schema_phase_end("insert_start_rule", insert_start_rule_started_at);
-
-    let hoist_pattern_terminals_started_at =
-        emit_json_schema_phase_start("hoist_pattern_terminals");
     ctx.hoist_pattern_terminals_in_nonterminals();
-    emit_json_schema_phase_end("hoist_pattern_terminals", hoist_pattern_terminals_started_at);
-
-    let terminal_name_scan_started_at = emit_json_schema_phase_start("terminal_name_scan");
     let terminal_names: BTreeSet<String> = ctx
         .rules
         .iter()
@@ -3805,27 +3044,15 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
         .filter(|name| rule_name_is_terminal(name))
         .map(|s| s.to_string())
         .collect();
-    emit_json_schema_phase_end("terminal_name_scan", terminal_name_scan_started_at);
-
-    let named_rule_materialization_started_at =
-        emit_json_schema_phase_start("named_rule_materialization");
     let rules: Vec<NamedRule> = ctx.rules.into_iter().map(|(name, expr)| {
         let is_terminal = terminal_names.contains(&name);
         NamedRule { name, expr, is_terminal, is_internal: false }
     }).collect();
-    emit_json_schema_phase_end(
-        "named_rule_materialization",
-        named_rule_materialization_started_at,
-    );
 
     // Mark terminal rules as internal-only when they are never referenced
     // from any nonterminal rule body.  Internal terminals exist solely as
     // sub-expressions of other terminal rules (resolved via Expr::Shared).
-    let collect_visible_started_at = emit_json_schema_phase_start("collect_grammar_visible_refs");
     let grammar_visible = collect_grammar_visible_refs(&rules, &terminal_names);
-    emit_json_schema_phase_end("collect_grammar_visible_refs", collect_visible_started_at);
-
-    let mark_internal_started_at = emit_json_schema_phase_start("mark_internal_terminals");
     let rules = rules.into_iter().map(|mut rule| {
         if rule.is_terminal
             && !grammar_visible.contains(&rule.name)
@@ -3835,7 +3062,6 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
         }
         rule
     }).collect();
-    emit_json_schema_phase_end("mark_internal_terminals", mark_internal_started_at);
 
     Ok(NamedGrammar {
         rules,
@@ -3848,8 +3074,6 @@ struct SchemaCtx<'a> {
     root_schema: &'a Value,
     coerce_one_of: bool,
     lenient_json_schema: bool,
-    schema_build_count: Cell<usize>,
-    schema_build_limit: usize,
     rules: Vec<(String, GrammarExpr)>,
     rule_indices: BTreeMap<String, usize>,
     used_rule_names: BTreeSet<String>,
@@ -3860,298 +3084,19 @@ struct SchemaCtx<'a> {
     expr_dedup_cache: BTreeMap<String, String>,
     json_string_exact_cache: BTreeMap<usize, String>,
     json_string_upto_cache: BTreeMap<usize, String>,
-    shared_additional_key_plan: SharedAdditionalKeyPlan,
-    shared_string_value_plan: SharedStringValuePlan,
-    shared_string_value_exclusions_enabled: bool,
-    anyof_object_expr_nfa_cache: BTreeMap<String, GrammarExpr>,
+    shared_ap_literal_keys: BTreeSet<String>,
+    shared_ap_key_body_expr: Option<GrammarExpr>,
+    shared_ap_key_body_rule_cache: BTreeMap<Vec<String>, String>,
+    shared_ap_key_colon_expr: Option<GrammarExpr>,
+    shared_ap_key_rule_cache: BTreeMap<Vec<String>, String>,
     draft_stack: Vec<JsonSchemaDraft>,
     convert_depth: usize,
     /// Cache for `convert_schema`: identical sub-schemas produce the same
     /// grammar expression, avoiding duplicate rule generation.
     schema_convert_cache: BTreeMap<String, GrammarExpr>,
-    enum_terminal_plan: EnumTerminalPlan,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EnumAtomKind {
-    String,
-    Number,
-}
-
-#[derive(Debug, Clone)]
-struct EnumTerminalGroup {
-    name: String,
-    values: Vec<Vec<u8>>,
-}
-
-#[derive(Debug, Default, Clone)]
-struct EnumTerminalPlan {
-    string_value_to_group: HashMap<Vec<u8>, usize>,
-    number_value_to_group: HashMap<Vec<u8>, usize>,
-    string_groups: Vec<EnumTerminalGroup>,
-    number_groups: Vec<EnumTerminalGroup>,
-}
-
-impl EnumTerminalPlan {
-    fn for_root(root: &Value) -> Self {
-        let mut string_signatures: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
-        let mut number_signatures: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
-        collect_enum_terminal_signatures(
-            root,
-            &mut string_signatures,
-            &mut number_signatures,
-        );
-
-        let (string_value_to_group, string_groups) =
-            build_enum_terminal_groups("JSON_ENUM_STRING", string_signatures);
-        let (number_value_to_group, number_groups) =
-            build_enum_terminal_groups("JSON_ENUM_NUMBER", number_signatures);
-
-        Self {
-            string_value_to_group,
-            number_value_to_group,
-            string_groups,
-            number_groups,
-        }
-    }
-
-    fn group(&self, kind: EnumAtomKind, group_id: usize) -> &EnumTerminalGroup {
-        match kind {
-            EnumAtomKind::String => &self.string_groups[group_id],
-            EnumAtomKind::Number => &self.number_groups[group_id],
-        }
-    }
-
-    fn group_for_value(&self, kind: EnumAtomKind, bytes: &[u8]) -> Option<usize> {
-        match kind {
-            EnumAtomKind::String => self.string_value_to_group.get(bytes).copied(),
-            EnumAtomKind::Number => self.number_value_to_group.get(bytes).copied(),
-        }
-    }
-}
-
-fn collect_enum_terminal_signatures(
-    root: &Value,
-    string_signatures: &mut BTreeMap<Vec<u8>, Vec<usize>>,
-    number_signatures: &mut BTreeMap<Vec<u8>, Vec<usize>>,
-) {
-    let mut queue = VecDeque::from([root]);
-    let mut visited = BTreeSet::new();
-    let mut enum_count = 0usize;
-
-    while let Some(node) = queue.pop_front() {
-        let node_id = node as *const Value as usize;
-        if !visited.insert(node_id) {
-            continue;
-        }
-
-        let Some(object) = node.as_object() else {
-            continue;
-        };
-
-        if let Some(values) = object.get("enum").and_then(Value::as_array) {
-            let enum_id = enum_count;
-            enum_count += 1;
-
-            let mut string_values_in_enum = BTreeSet::new();
-            let mut number_values_in_enum = BTreeSet::new();
-            for value in values {
-                if let Some(text) = value.as_str() {
-                    string_values_in_enum.insert(json_enum_string_terminal_bytes(text));
-                } else if value.is_number() {
-                    number_values_in_enum.insert(json_value_literal_bytes(value));
-                }
-            }
-            for bytes in string_values_in_enum {
-                string_signatures.entry(bytes).or_default().push(enum_id);
-            }
-            for bytes in number_values_in_enum {
-                number_signatures.entry(bytes).or_default().push(enum_id);
-            }
-        }
-
-        enqueue_child_schemas(root, object, &mut queue);
-    }
-}
-
-fn enqueue_child_schemas<'a>(
-    root: &'a Value,
-    object: &'a Map<String, Value>,
-    queue: &mut VecDeque<&'a Value>,
-) {
-    if let Some(properties) = object.get("properties").and_then(Value::as_object) {
-        queue.extend(properties.values());
-    }
-    if let Some(pattern_properties) = object.get("patternProperties").and_then(Value::as_object) {
-        queue.extend(pattern_properties.values());
-    }
-
-    if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
-        if let Some(target) = resolve_shared_ap_ref_target(root, reference) {
-            queue.push_back(target);
-        }
-    }
-
-    for keyword in [
-        "additionalProperties",
-        "propertyNames",
-        "items",
-        "additionalItems",
-        "contains",
-        "unevaluatedProperties",
-        "if",
-        "then",
-        "else",
-        "not",
-    ] {
-        if let Some(value) = object.get(keyword) {
-            queue.push_back(value);
-        }
-    }
-
-    for keyword in ["prefixItems", "allOf", "anyOf", "oneOf"] {
-        if let Some(values) = object.get(keyword).and_then(Value::as_array) {
-            queue.extend(values);
-        }
-    }
-
-    for keyword in ["$defs", "definitions", "dependentSchemas"] {
-        if let Some(values) = object.get(keyword).and_then(Value::as_object) {
-            queue.extend(values.values());
-        }
-    }
-}
-
-fn enqueue_child_schemas_with_draft<'a>(
-    root: &'a Value,
-    object: &'a Map<String, Value>,
-    draft: JsonSchemaDraft,
-    queue: &mut VecDeque<(&'a Value, JsonSchemaDraft)>,
-) {
-    if let Some(properties) = object.get("properties").and_then(Value::as_object) {
-        queue.extend(properties.values().map(|value| (value, draft)));
-    }
-    if let Some(pattern_properties) = object.get("patternProperties").and_then(Value::as_object) {
-        queue.extend(pattern_properties.values().map(|value| (value, draft)));
-    }
-
-    if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
-        if let Some(target) = resolve_shared_ap_ref_target(root, reference) {
-            queue.push_back((target, draft));
-        }
-    }
-
-    for keyword in [
-        "additionalProperties",
-        "propertyNames",
-        "items",
-        "additionalItems",
-        "contains",
-        "unevaluatedProperties",
-        "if",
-        "then",
-        "else",
-        "not",
-    ] {
-        if let Some(value) = object.get(keyword) {
-            queue.push_back((value, draft));
-        }
-    }
-
-    for keyword in ["prefixItems", "allOf", "anyOf", "oneOf"] {
-        if let Some(values) = object.get(keyword).and_then(Value::as_array) {
-            queue.extend(values.iter().map(|value| (value, draft)));
-        }
-    }
-
-    for keyword in ["dependentSchemas"] {
-        if let Some(values) = object.get(keyword).and_then(Value::as_object) {
-            queue.extend(values.values().map(|value| (value, draft)));
-        }
-    }
-}
-
-fn validate_llguidance_keyword_compatibility_for_object(
-    schema: &Map<String, Value>,
-    draft: JsonSchemaDraft,
-) -> Result<(), GlrMaskError> {
-    if schema
-        .keys()
-        .all(|key| META_AND_ANNOTATION_KEYWORDS.contains(&key.as_str()) || !is_known_keyword(draft, key))
-    {
-        return Ok(());
-    }
-
-    let mut unimplemented = schema
-        .keys()
-        .filter(|key| {
-            is_known_keyword(draft, key)
-                && !IMPLEMENTED_JSON_SCHEMA_KEYWORDS.contains(&key.as_str())
-                && !META_AND_ANNOTATION_KEYWORDS.contains(&key.as_str())
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    if !unimplemented.is_empty() {
-        unimplemented.sort();
-        return Err(GlrMaskError::GrammarParse(format!(
-            "Unimplemented keys: {:?}",
-            unimplemented
-        )));
-    }
-    Ok(())
-}
-
-fn validate_reachable_llguidance_keyword_compatibility(root: &Value) -> Result<(), GlrMaskError> {
-    let mut queue = VecDeque::from([(root, DEFAULT_JSON_SCHEMA_DRAFT)]);
-    let mut visited = BTreeSet::new();
-
-    while let Some((node, inherited_draft)) = queue.pop_front() {
-        let node_id = node as *const Value as usize;
-        if !visited.insert(node_id) {
-            continue;
-        }
-
-        let Some(object) = node.as_object() else {
-            continue;
-        };
-
-        let draft = detect_draft(object, inherited_draft)?;
-        validate_llguidance_keyword_compatibility_for_object(object, draft)?;
-        enqueue_child_schemas_with_draft(root, object, draft, &mut queue);
-    }
-
-    Ok(())
-}
-
-fn build_enum_terminal_groups(
-    prefix: &str,
-    value_signatures: BTreeMap<Vec<u8>, Vec<usize>>,
-) -> (HashMap<Vec<u8>, usize>, Vec<EnumTerminalGroup>) {
-    let mut signature_to_values = BTreeMap::<Vec<usize>, Vec<Vec<u8>>>::new();
-    for (bytes, signature) in value_signatures {
-        signature_to_values.entry(signature).or_default().push(bytes);
-    }
-
-    let mut value_to_group = HashMap::new();
-    let mut groups = Vec::new();
-    for values in signature_to_values.into_values() {
-        let group_id = groups.len();
-        for value in &values {
-            value_to_group.insert(value.clone(), group_id);
-        }
-        groups.push(EnumTerminalGroup {
-            name: format!("{prefix}_{group_id}"),
-            values,
-        });
-    }
-
-    (value_to_group, groups)
 }
 
 fn rule_name_is_terminal(name: &str) -> bool {
-    if name == "AP_SHARED_LITERAL_KEY_SET" {
-        return false;
-    }
     uri_rule_should_be_terminal(name).unwrap_or(false)
         || (!name.is_empty()
             && name
@@ -4165,7 +3110,6 @@ fn rule_name_force_visible_terminal(name: &str) -> bool {
 
 impl<'a> SchemaCtx<'a> {
     fn new(root: &'a Value) -> Self {
-        let guidance_flags_started_at = emit_schema_ctx_phase_start("guidance_flags");
         let (coerce_one_of, lenient_json_schema) = root
             .as_object()
             .and_then(|object| object.get("x-guidance"))
@@ -4183,35 +3127,11 @@ impl<'a> SchemaCtx<'a> {
                 )
             })
             .unwrap_or((false, false));
-        emit_schema_ctx_phase_end("guidance_flags", guidance_flags_started_at);
 
-        let enum_terminal_plan_started_at = emit_schema_ctx_phase_start("enum_terminal_plan_for_root");
-        let enum_terminal_plan = EnumTerminalPlan::for_root(root);
-        emit_schema_ctx_phase_end("enum_terminal_plan_for_root", enum_terminal_plan_started_at);
-
-        let shared_additional_key_plan_started_at =
-            emit_schema_ctx_phase_start("collect_shared_additional_key_plan");
-        let shared_additional_key_plan = collect_shared_additional_key_plan(root);
-        emit_schema_ctx_phase_end(
-            "collect_shared_additional_key_plan",
-            shared_additional_key_plan_started_at,
-        );
-
-        let shared_string_value_plan_started_at =
-            emit_schema_ctx_phase_start("collect_shared_string_value_plan");
-        let shared_string_value_plan = collect_shared_string_value_plan(root);
-        emit_schema_ctx_phase_end(
-            "collect_shared_string_value_plan",
-            shared_string_value_plan_started_at,
-        );
-
-        let ctx_init_started_at = emit_schema_ctx_phase_start("ctx_init");
         let mut ctx = Self {
             root_schema: root,
             coerce_one_of,
             lenient_json_schema,
-            schema_build_count: Cell::new(0),
-            schema_build_limit: JSON_SCHEMA_BUILD_LIMIT,
             rules: Vec::new(),
             rule_indices: BTreeMap::new(),
             used_rule_names: BTreeSet::new(),
@@ -4222,72 +3142,17 @@ impl<'a> SchemaCtx<'a> {
             expr_dedup_cache: BTreeMap::new(),
             json_string_exact_cache: BTreeMap::new(),
             json_string_upto_cache: BTreeMap::new(),
-            shared_additional_key_plan,
-            shared_string_value_plan,
-            shared_string_value_exclusions_enabled: !string_value_exclusions_abdcffb6b_compat()
-                && env_flag_default("GLRMASK_SHARED_STRING_VALUE_EXCLUSIONS", true),
-            anyof_object_expr_nfa_cache: BTreeMap::new(),
+            shared_ap_literal_keys: collect_shared_ap_literal_keys(root),
+            shared_ap_key_body_expr: None,
+            shared_ap_key_body_rule_cache: BTreeMap::new(),
+            shared_ap_key_colon_expr: None,
+            shared_ap_key_rule_cache: BTreeMap::new(),
             draft_stack: vec![DEFAULT_JSON_SCHEMA_DRAFT],
             convert_depth: 0,
             schema_convert_cache: BTreeMap::new(),
-            enum_terminal_plan,
         };
-        emit_schema_ctx_phase_end("ctx_init", ctx_init_started_at);
-
-        let ensure_base_rules_started_at = emit_schema_ctx_phase_start("ensure_base_rules");
         ctx.ensure_base_rules();
-        emit_schema_ctx_phase_end("ensure_base_rules", ensure_base_rules_started_at);
-
-        let ensure_enum_terminal_rules_started_at =
-            emit_schema_ctx_phase_start("ensure_enum_terminal_rules");
-        ctx.ensure_enum_terminal_rules();
-        emit_schema_ctx_phase_end(
-            "ensure_enum_terminal_rules",
-            ensure_enum_terminal_rules_started_at,
-        );
         ctx
-    }
-
-    fn increment_schema_build_count(&self) -> Result<(), GlrMaskError> {
-        let next = self.schema_build_count.get().saturating_add(1);
-        self.schema_build_count.set(next);
-        if next > self.schema_build_limit {
-            return Err(GlrMaskError::GrammarParse("schema too large".into()));
-        }
-        Ok(())
-    }
-
-    fn ensure_enum_terminal_rules(&mut self) {
-        let string_rules = self
-            .enum_terminal_plan
-            .string_groups
-            .iter()
-            .map(|group| {
-                (
-                    group.name.clone(),
-                    choice_or_single(group.values.iter().map(|bytes| literal_expr(bytes)).collect()),
-                )
-            })
-            .collect::<Vec<_>>();
-        let number_rules = self
-            .enum_terminal_plan
-            .number_groups
-            .iter()
-            .map(|group| {
-                (
-                    group.name.clone(),
-                    choice_or_single(group.values.iter().map(|bytes| literal_expr(bytes)).collect()),
-                )
-            })
-            .collect::<Vec<_>>();
-
-        for (name, expr) in string_rules.into_iter().chain(number_rules) {
-            self.insert_rule(name, expr);
-        }
-    }
-
-    fn per_object_ap_keys_enabled(&self) -> bool {
-        per_object_ap_keys_enabled_for_plan(&self.shared_additional_key_plan)
     }
 
     fn try_append_suffix_to_trailing_literal_expr(
@@ -4336,7 +3201,30 @@ impl<'a> SchemaCtx<'a> {
         schema: &Map<String, Value>,
         draft: JsonSchemaDraft,
     ) -> Result<(), GlrMaskError> {
-        validate_llguidance_keyword_compatibility_for_object(schema, draft)
+        if schema
+            .keys()
+            .all(|key| META_AND_ANNOTATION_KEYWORDS.contains(&key.as_str()) || !is_known_keyword(draft, key))
+        {
+            return Ok(());
+        }
+
+        let mut unimplemented = schema
+            .keys()
+            .filter(|key| {
+                is_known_keyword(draft, key)
+                    && !IMPLEMENTED_JSON_SCHEMA_KEYWORDS.contains(&key.as_str())
+                    && !META_AND_ANNOTATION_KEYWORDS.contains(&key.as_str())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !unimplemented.is_empty() {
+            unimplemented.sort();
+            return Err(GlrMaskError::GrammarParse(format!(
+                "Unimplemented keys: {:?}",
+                unimplemented
+            )));
+        }
+        Ok(())
     }
 
     fn one_of_is_explicitly_coerced(&self) -> bool {
@@ -4426,66 +3314,63 @@ impl<'a> SchemaCtx<'a> {
         &self,
         schema: &Map<String, Value>,
         keyword: &str,
-    ) -> Result<Option<Vec<Value>>, GlrMaskError> {
-        let Some(options) = schema.get(keyword).and_then(Value::as_array) else {
-            return Ok(None);
-        };
+    ) -> Option<Vec<Value>> {
+        let options = schema.get(keyword)?.as_array()?;
         let base = Self::schema_without_keys(schema, &["anyOf", "oneOf"]);
-        let resolved = options
-            .iter()
-            .map(|option| {
-                if base.is_empty() {
-                    Ok(Value::Object(self.schema_for_intersection(option)?))
-                } else {
-                    Ok(Value::Object(
-                        self.merge_resolved_subschemas(&base, std::slice::from_ref(option))?,
-                    ))
-                }
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Some(resolved))
+        Some(
+            options
+                .iter()
+                .map(|option| {
+                    if base.is_empty() {
+                        Value::Object(self.schema_for_intersection(option))
+                    } else {
+                        Value::Object(
+                            self.merge_resolved_subschemas(&base, std::slice::from_ref(option)),
+                        )
+                    }
+                })
+                .collect(),
+        )
     }
 
-    fn normalized_allof_schema(&self, schema: &Map<String, Value>) -> Result<Option<Value>, GlrMaskError> {
-        let Some(all_of) = schema.get("allOf").and_then(Value::as_array) else {
-            return Ok(None);
-        };
+    fn normalized_allof_schema(&self, schema: &Map<String, Value>) -> Option<Value> {
+        let all_of = schema.get("allOf")?.as_array()?;
         let base = Self::schema_without_keys(schema, &["allOf"]);
-        Ok(Some(Value::Object(self.merge_resolved_subschemas(&base, all_of)?)))
+        Some(Value::Object(self.merge_resolved_subschemas(&base, all_of)))
     }
 
-    fn schemas_are_verifiably_disjoint(&self, left: &Value, right: &Value) -> Result<bool, GlrMaskError> {
+    fn schemas_are_verifiably_disjoint(&self, left: &Value, right: &Value) -> bool {
         if left == &Value::Bool(false) || right == &Value::Bool(false) {
-            return Ok(true);
+            return true;
         }
         if left == &Value::Bool(true) || right == &Value::Bool(true) {
-            return Ok(false);
+            return false;
         }
 
         let Some(left_object) = left.as_object() else {
-            return Ok(false);
+            return false;
         };
         let Some(right_object) = right.as_object() else {
-            return Ok(false);
+            return false;
         };
 
         if let Some(reference) = left_object.get("$ref").and_then(Value::as_str) {
             if let Ok(target) = self.resolve_local_ref(reference) {
                 return self.schemas_are_verifiably_disjoint(target, right);
             }
-            return Ok(false);
+            return false;
         }
         if let Some(reference) = right_object.get("$ref").and_then(Value::as_str) {
             if let Ok(target) = self.resolve_local_ref(reference) {
                 return self.schemas_are_verifiably_disjoint(left, target);
             }
-            return Ok(false);
+            return false;
         }
 
-        if let Some(normalized) = self.normalized_allof_schema(left_object)? {
+        if let Some(normalized) = self.normalized_allof_schema(left_object) {
             return self.schemas_are_verifiably_disjoint(&normalized, right);
         }
-        if let Some(normalized) = self.normalized_allof_schema(right_object)? {
+        if let Some(normalized) = self.normalized_allof_schema(right_object) {
             return self.schemas_are_verifiably_disjoint(left, &normalized);
         }
 
@@ -4493,70 +3378,58 @@ impl<'a> SchemaCtx<'a> {
             self.schema_const_value(left),
             self.schema_const_value(right),
         ) {
-            return Ok(left_const != right_const);
+            return left_const != right_const;
         }
 
         if let (Some(left_const), Some(right_enum)) = (
             self.schema_const_value(left),
             self.schema_enum_values(right),
         ) {
-            return Ok(!right_enum.iter().any(|value| value == left_const));
+            return !right_enum.iter().any(|value| value == left_const);
         }
 
         if let (Some(left_enum), Some(right_const)) = (
             self.schema_enum_values(left),
             self.schema_const_value(right),
         ) {
-            return Ok(!left_enum.iter().any(|value| value == right_const));
+            return !left_enum.iter().any(|value| value == right_const);
         }
 
         if let (Some(left_enum), Some(right_enum)) = (
             self.schema_enum_values(left),
             self.schema_enum_values(right),
         ) {
-            return Ok(left_enum
+            return left_enum
                 .iter()
-                .all(|left_value| !right_enum.iter().any(|right_value| right_value == left_value)));
+                .all(|left_value| !right_enum.iter().any(|right_value| right_value == left_value));
         }
 
         if let (Some(left_literal), Some(right_literal)) = (
             self.schema_exact_string_literal(left),
             self.schema_exact_string_literal(right),
         ) {
-            return Ok(left_literal != right_literal);
+            return left_literal != right_literal;
         }
 
-        if let Some(any_of) = self.resolved_structural_options(left_object, "anyOf")? {
-            for option in &any_of {
-                if !self.schemas_are_verifiably_disjoint(option, right)? {
-                    return Ok(false);
-                }
-            }
-            return Ok(true);
+        if let Some(any_of) = self.resolved_structural_options(left_object, "anyOf") {
+            return any_of
+                .iter()
+                .all(|option| self.schemas_are_verifiably_disjoint(option, right));
         }
-        if let Some(one_of) = self.resolved_structural_options(left_object, "oneOf")? {
-            for option in &one_of {
-                if !self.schemas_are_verifiably_disjoint(option, right)? {
-                    return Ok(false);
-                }
-            }
-            return Ok(true);
+        if let Some(one_of) = self.resolved_structural_options(left_object, "oneOf") {
+            return one_of
+                .iter()
+                .all(|option| self.schemas_are_verifiably_disjoint(option, right));
         }
-        if let Some(any_of) = self.resolved_structural_options(right_object, "anyOf")? {
-            for option in &any_of {
-                if !self.schemas_are_verifiably_disjoint(left, option)? {
-                    return Ok(false);
-                }
-            }
-            return Ok(true);
+        if let Some(any_of) = self.resolved_structural_options(right_object, "anyOf") {
+            return any_of
+                .iter()
+                .all(|option| self.schemas_are_verifiably_disjoint(left, option));
         }
-        if let Some(one_of) = self.resolved_structural_options(right_object, "oneOf")? {
-            for option in &one_of {
-                if !self.schemas_are_verifiably_disjoint(left, option)? {
-                    return Ok(false);
-                }
-            }
-            return Ok(true);
+        if let Some(one_of) = self.resolved_structural_options(right_object, "oneOf") {
+            return one_of
+                .iter()
+                .all(|option| self.schemas_are_verifiably_disjoint(left, option));
         }
 
         let left_types = self.schema_type_names(left);
@@ -4570,7 +3443,7 @@ impl<'a> SchemaCtx<'a> {
                 })
             });
             if !overlaps {
-                return Ok(true);
+                return true;
             }
         }
 
@@ -4595,49 +3468,43 @@ impl<'a> SchemaCtx<'a> {
                 keys.extend(required.iter().filter_map(Value::as_str).map(String::from));
             }
 
-            for key in keys {
+            return keys.into_iter().any(|key| {
                 let left_prop = self
                     .schema_object_property(left, &key)
                     .unwrap_or(&Value::Bool(true));
                 let right_prop = self
                     .schema_object_property(right, &key)
                     .unwrap_or(&Value::Bool(true));
-                if self.schemas_are_verifiably_disjoint(left_prop, right_prop)? {
-                    return Ok(true);
-                }
-            }
-            return Ok(false);
+                self.schemas_are_verifiably_disjoint(left_prop, right_prop)
+            });
         }
 
-        Ok(false)
+        false
     }
 
     fn one_of_options_are_safe_to_coerce(
         &self,
         schema: &Map<String, Value>,
         options: &[Value],
-    ) -> Result<bool, GlrMaskError> {
+    ) -> bool {
         let resolved: Vec<Value> = options
             .iter()
             .map(|option| {
                 if has_structural_keywords(schema) {
                     let base = Self::schema_without_keys(schema, &["anyOf", "oneOf"]);
-                    Ok(Value::Object(self.merge_resolved_subschemas(&base, std::slice::from_ref(option))?))
+                    Value::Object(self.merge_resolved_subschemas(&base, std::slice::from_ref(option)))
                 } else {
-                    Ok(Value::Object(self.schema_for_intersection(option)?))
+                    Value::Object(self.schema_for_intersection(option))
                 }
             })
-            .collect::<Result<_, _>>()?;
+            .collect();
 
-        for (index, left) in resolved.iter().enumerate() {
-            for right in resolved.iter().skip(index + 1) {
-                if !self.schemas_are_verifiably_disjoint(left, right)? {
-                    return Ok(false);
-                }
-            }
-        }
-
-        Ok(true)
+        resolved.iter().enumerate().all(|(index, left)| {
+            resolved
+                .iter()
+                .skip(index + 1)
+                .all(|right| self.schemas_are_verifiably_disjoint(left, right))
+        })
     }
 
     fn insert_rule(&mut self, name: impl Into<String>, expr: GrammarExpr) -> String {
@@ -4706,9 +3573,6 @@ impl<'a> SchemaCtx<'a> {
 
     fn hoist_patterns_in_expr(&mut self, expr: GrammarExpr, prefix: &str) -> GrammarExpr {
         match expr {
-            GrammarExpr::Grouped(inner) => {
-                GrammarExpr::Grouped(Box::new(self.hoist_patterns_in_expr(*inner, prefix)))
-            }
             GrammarExpr::Ref(_) | GrammarExpr::Literal(_) | GrammarExpr::Epsilon => expr,
             GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_) | GrammarExpr::AnyByte => {
                 self.extract_pattern_terminal_rule(expr, prefix)
@@ -4757,14 +3621,6 @@ impl<'a> SchemaCtx<'a> {
                 separator: Box::new(self.hoist_patterns_in_expr(*separator, prefix)),
                 allow_empty,
             },
-            GrammarExpr::ExprNFA(mut expr_nfa) => {
-                expr_nfa.symbols = expr_nfa
-                    .symbols
-                    .into_iter()
-                    .map(|symbol| self.hoist_patterns_in_expr(symbol, prefix))
-                    .collect();
-                GrammarExpr::ExprNFA(expr_nfa)
-            }
         }
     }
 
@@ -5524,10 +4380,7 @@ impl<'a> SchemaCtx<'a> {
 
         // JSON_STRING_BODY_RULE: split-aware body terminal used by json_string
         // so the nonterminal does not embed the character body directly.
-        let (body_expr, _) = wrap_string_value_expr_parts(
-            GrammarExpr::Repeat(Box::new(self.json_string_char_ref())),
-            false,
-        );
+        let (body_expr, _) = wrap_string_value_expr_parts(GrammarExpr::Repeat(Box::new(self.json_string_char_ref())));
         self.insert_rule(JSON_STRING_BODY_RULE, body_expr);
 
         // JSON_STRING_MIDDLE_RULE: reusable middle fragment used to build
@@ -5542,10 +4395,7 @@ impl<'a> SchemaCtx<'a> {
         );
 
         // JSON_STRING_RULE: always assembled from literals + named terminals.
-        let json_string_expr = wrap_string_value_terminal(
-            GrammarExpr::Ref(JSON_STRING_BODY_RULE.into()),
-            json_string_merge_config(false),
-        );
+        let json_string_expr = wrap_string_value_terminal(GrammarExpr::Ref(JSON_STRING_BODY_RULE.into()));
         self.insert_rule(JSON_STRING_RULE, json_string_expr);
         self.insert_rule(JSON_INTEGER_RULE, regex_expr(r#"-?(0|[1-9][0-9]*)"#));
         self.insert_rule(JSON_NUMBER_RULE, regex_expr(JSON_NUMBER_NONINTEGER_REGEX));
@@ -5667,43 +4517,42 @@ impl<'a> SchemaCtx<'a> {
         Ok(current)
     }
 
-    fn schema_for_intersection(&self, schema: &Value) -> Result<Map<String, Value>, GlrMaskError> {
+    fn schema_for_intersection(&self, schema: &Value) -> Map<String, Value> {
         if schema == &Value::Bool(false) {
             let mut unsat = Map::new();
             unsat.insert("not".into(), Value::Object(Map::new()));
-            return Ok(unsat);
+            return unsat;
         }
         if schema == &Value::Bool(true) {
-            return Ok(Map::new());
+            return Map::new();
         }
         let Some(object) = schema.as_object() else {
-            return Ok(Map::new());
+            return Map::new();
         };
         let Some(ref_value) = object.get("$ref").and_then(Value::as_str) else {
-            return Ok(object.clone());
+            return object.clone();
         };
         let Ok(resolved) = self.resolve_local_ref(ref_value) else {
-            return Ok(object.clone());
+            return object.clone();
         };
         let mut merged = resolved.as_object().cloned().unwrap_or_default();
         let siblings = Self::schema_without_keys(object, &["$ref"]);
         if !siblings.is_empty() {
-            merged = merge_two_schemas(self, &merged, &siblings)?;
+            merged = merge_two_schemas(&merged, &siblings);
         }
-        Ok(merged)
+        merged
     }
 
     fn merge_resolved_subschemas(
         &self,
         base: &Map<String, Value>,
         sub_schemas: &[Value],
-    ) -> Result<Map<String, Value>, GlrMaskError> {
+    ) -> Map<String, Value> {
         let mut merged = base.clone();
         for schema in sub_schemas {
-            let intersected = self.schema_for_intersection(schema)?;
-            merged = merge_two_schemas(self, &merged, &intersected)?;
+            merged = merge_two_schemas(&merged, &self.schema_for_intersection(schema));
         }
-        Ok(merged)
+        merged
     }
 
     fn schema_without_keys(
@@ -5721,140 +4570,10 @@ impl<'a> SchemaCtx<'a> {
         &mut self,
         options: &[Value],
     ) -> Result<Vec<GrammarExpr>, GlrMaskError> {
-        if self.shared_string_value_exclusions_default_enabled() {
-            if let Some(string_exclusions) = self.string_option_exclusions(options) {
-                return options
-                    .iter()
-                    .enumerate()
-                    .map(|(index, option)| {
-                        let (literals, patterns) = &string_exclusions[index];
-                        if Self::is_plain_unbounded_string_schema(option)
-                            && (!literals.is_empty() || !patterns.is_empty())
-                        {
-                            Ok(self.build_excluding_string_value_expr(
-                                literals,
-                                patterns,
-                                "STRING_ANYOF_VALUE",
-                            ))
-                        } else {
-                            self.convert_schema(option)
-                        }
-                    })
-                    .collect();
-            }
-        }
-
         options
             .iter()
             .map(|option| self.convert_schema(option))
             .collect()
-    }
-
-    fn shared_string_value_exclusions_default_enabled(&self) -> bool {
-        self.shared_string_value_exclusions_enabled
-    }
-
-    fn string_option_exclusions(
-        &self,
-        options: &[Value],
-    ) -> Option<Vec<(Vec<String>, Vec<String>)>> {
-        let plain_string_options = options
-            .iter()
-            .map(Self::is_plain_unbounded_string_schema)
-            .collect::<Vec<_>>();
-        if !plain_string_options.iter().any(|&is_plain| is_plain) {
-            return None;
-        }
-
-        let mut literal_by_option = Vec::with_capacity(options.len());
-        let mut pattern_by_option = Vec::with_capacity(options.len());
-        for option in options {
-            literal_by_option.push(Self::string_literals_covered_by_schema(option));
-            pattern_by_option.push(Self::string_pattern_covered_by_schema(option));
-        }
-
-        let exclusions = (0..options.len())
-            .map(|index| {
-                if !plain_string_options[index] {
-                    return (Vec::new(), Vec::new());
-                }
-
-                let mut literals = BTreeSet::new();
-                let mut patterns = BTreeSet::new();
-                for sibling_index in 0..options.len() {
-                    if sibling_index == index {
-                        continue;
-                    }
-                    literals.extend(literal_by_option[sibling_index].iter().cloned());
-                    if let Some(pattern) = &pattern_by_option[sibling_index] {
-                        patterns.insert(pattern.clone());
-                    }
-                }
-                (literals.into_iter().collect(), patterns.into_iter().collect())
-            })
-            .collect::<Vec<_>>();
-
-        if exclusions
-            .iter()
-            .any(|(literals, patterns)| !literals.is_empty() || !patterns.is_empty())
-        {
-            Some(exclusions)
-        } else {
-            None
-        }
-    }
-
-    fn is_plain_unbounded_string_schema(schema: &Value) -> bool {
-        let Some(object) = schema.as_object() else {
-            return false;
-        };
-        matches!(object.get("type").and_then(Value::as_str), Some("string"))
-            && !object.contains_key("const")
-            && !object.contains_key("enum")
-            && !object.contains_key("pattern")
-            && !object.contains_key("format")
-            && !object.contains_key("minLength")
-            && !object.contains_key("maxLength")
-            && !object.contains_key("allOf")
-            && !object.contains_key("anyOf")
-            && !object.contains_key("oneOf")
-            && !object.contains_key("not")
-    }
-
-    fn string_literals_covered_by_schema(schema: &Value) -> Vec<String> {
-        let Some(object) = schema.as_object() else {
-            return Vec::new();
-        };
-        if !schema_allows_string_values(object) {
-            return Vec::new();
-        }
-
-        let mut values = BTreeSet::new();
-        if let Some(value) = object.get("const").and_then(Value::as_str) {
-            values.insert(value.to_string());
-        }
-        if let Some(enum_values) = object.get("enum").and_then(Value::as_array) {
-            values.extend(enum_values.iter().filter_map(Value::as_str).map(String::from));
-        }
-        values.into_iter().collect()
-    }
-
-    fn string_pattern_covered_by_schema(schema: &Value) -> Option<String> {
-        let object = schema.as_object()?;
-        if !schema_allows_string_values(object) {
-            return None;
-        }
-        if object
-            .get("minLength")
-            .and_then(Value::as_u64)
-            .is_some_and(|min| min != 0)
-            || object.contains_key("maxLength")
-            || object.contains_key("const")
-            || object.contains_key("enum")
-        {
-            return None;
-        }
-        object.get("pattern").and_then(Value::as_str).map(String::from)
     }
 
     fn collect_ordered_closed_object_schema_variant(
@@ -6397,7 +5116,7 @@ impl<'a> SchemaCtx<'a> {
                     self.schema_for_intersection(opt)
                 }
             })
-            .collect::<Result<_, _>>()?;
+            .collect();
 
         let mut schema_variants = Vec::with_capacity(resolved.len());
         for variant in &resolved {
@@ -6436,494 +5155,6 @@ impl<'a> SchemaCtx<'a> {
         self.build_exact_ordered_closed_object_variants(variants, mode)
     }
 
-    fn collect_anyof_expr_nfa_object_variant(
-        &mut self,
-        variant: &Map<String, Value>,
-    ) -> Result<Option<AnyOfObjectVariant>, GlrMaskError> {
-        if variant.get("type").and_then(Value::as_str) != Some("object") {
-            return Ok(None);
-        }
-        for key in &[
-            "propertyNames",
-            "minProperties",
-            "maxProperties",
-            "anyOf",
-            "oneOf",
-            "allOf",
-            "$ref",
-            "if",
-            "then",
-            "else",
-        ] {
-            if variant.contains_key(*key) {
-                return Ok(None);
-            }
-        }
-
-        let properties = variant
-            .get("properties")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-        let required: BTreeSet<String> = variant
-            .get("required")
-            .and_then(Value::as_array)
-            .map(|arr| arr.iter().filter_map(Value::as_str).map(String::from).collect())
-            .unwrap_or_default();
-        if required.iter().any(|key| !properties.contains_key(key)) {
-            return Ok(None);
-        }
-
-        let mut fixed_keys = properties.keys().cloned().collect::<BTreeSet<_>>();
-        fixed_keys.extend(required.iter().cloned());
-
-        let pattern_properties =
-            Self::pattern_property_entries(variant.get("patternProperties").and_then(Value::as_object));
-
-        let mut items = Vec::new();
-        for (key, value_schema) in properties {
-            let mut schemas = vec![value_schema];
-            schemas.extend(Self::matching_pattern_schemas_for_key(
-                &pattern_properties,
-                &key,
-            )?);
-            let effective_schema = Self::schema_all_of(schemas);
-            let value_expr = match self.convert_schema(&effective_schema) {
-                Ok(expr) => expr,
-                Err(err) if is_unsat_schema_error(&err) => {
-                    if required.contains(&key) {
-                        return Ok(None);
-                    }
-                    continue;
-                }
-                Err(err) => return Err(err),
-            };
-            items.push(OrderedClosedObjectItem {
-                key: key.clone(),
-                value_expr,
-                required: required.contains(&key),
-            });
-        }
-
-        let upper_base_name = format!(
-            "ANYOF_OBJECT_VARIANT_{}",
-            self.generated_object_rule_counter
-        );
-        let mut pattern_pair_exprs = Vec::new();
-        let mut pattern_key_terminals = Vec::new();
-        for (pattern_idx, (pattern, pattern_schema)) in pattern_properties.iter().enumerate() {
-            let body = self.pattern_key_colon_body_expr(
-                pattern,
-                &format!("{upper_base_name}_PP{pattern_idx}_KEY_BODY"),
-            );
-            let (terminal_body, wrap) = wrap_key_colon_expr_parts(body);
-            let term_ref = self.extract_terminal_rule(
-                terminal_body,
-                &format!("{upper_base_name}_PP{pattern_idx}_KEY"),
-            );
-            let key_expr = wrap(term_ref.clone());
-
-            let value_expr = match self.convert_schema(pattern_schema) {
-                Ok(expr) => expr,
-                Err(err) if is_unsat_schema_error(&err) => continue,
-                Err(err) => return Err(err),
-            };
-
-            pattern_pair_exprs.push(sequence_or_single(vec![key_expr, value_expr]));
-            pattern_key_terminals.push(term_ref);
-        }
-
-        let additional_value_expr =
-            match self.normalized_additional_properties_schema(variant.get("additionalProperties")) {
-                Some(schema) => match self.convert_schema(&schema) {
-                    Ok(expr) => Some(expr),
-                    Err(err) if is_unsat_schema_error(&err) => None,
-                    Err(err) => return Err(err),
-                },
-                None => None,
-            };
-
-        Ok(Some(AnyOfObjectVariant {
-            items,
-            fixed_keys,
-            pattern_pair_exprs,
-            pattern_key_terminals,
-            pattern_keys: pattern_properties
-                .iter()
-                .map(|(pattern, _)| pattern.clone())
-                .collect(),
-            additional_value_expr,
-        }))
-    }
-
-    fn build_anyof_object_ap_key_expr(
-        &mut self,
-        base_name: &str,
-        variant_idx: usize,
-        variant_keys: &BTreeSet<String>,
-        variant_pattern_keys: &BTreeSet<String>,
-    ) -> Result<GrammarExpr, GlrMaskError> {
-        if ap_key_any_string() {
-            let upper_base_name = base_name.to_uppercase();
-            let key_expr = Self::scoped_key_colon_expr(None)?;
-            return Ok(self.build_excluding_key_colon_expr_internal(
-                key_expr,
-                Vec::new(),
-                &format!("{upper_base_name}_AP_KEY_V{variant_idx}"),
-            ));
-        }
-        if self.per_object_ap_keys_enabled() {
-            return Ok(self.build_per_object_additional_key_choice_expr(
-                variant_keys,
-                variant_pattern_keys,
-                &format!("{}_AP_KEY_V{}", base_name.to_uppercase(), variant_idx),
-            ));
-        }
-
-        self.build_shared_additional_key_choice_expr(
-            variant_keys,
-            variant_pattern_keys,
-            &format!("{base_name}_ap_key_v{variant_idx}"),
-        )
-    }
-
-    fn build_anyof_object_ap_key_symbol_paths(
-        &mut self,
-        base_name: &str,
-        variant_idx: usize,
-        variant_keys: &BTreeSet<String>,
-        variant_pattern_keys: &BTreeSet<String>,
-    ) -> Result<Vec<Vec<GrammarExpr>>, GlrMaskError> {
-        if ap_key_any_string() || self.per_object_ap_keys_enabled() {
-            return Ok(vec![vec![self.build_anyof_object_ap_key_expr(
-                base_name,
-                variant_idx,
-                variant_keys,
-                variant_pattern_keys,
-            )?]]);
-        }
-
-        Ok(self
-            .build_shared_additional_key_body_options(variant_keys, variant_pattern_keys)
-            .into_iter()
-            .map(|body| vec![literal_expr(b"\""), body, key_colon_suffix_expr()])
-            .collect())
-    }
-
-    fn add_expr_nfa_symbol_path(
-        builder: &mut ExprNfaBuilder,
-        from: u32,
-        symbols: Vec<GrammarExpr>,
-        to: u32,
-    ) {
-        if symbols.is_empty() {
-            builder.add_epsilon(from, to);
-            return;
-        }
-
-        let mut current = from;
-        let last = symbols.len() - 1;
-        for (index, symbol) in symbols.into_iter().enumerate() {
-            let next = if index == last { to } else { builder.add_state() };
-            builder.add_transition(current, symbol, next);
-            current = next;
-        }
-    }
-
-    fn build_anyof_object_expr_nfa_body(
-        &mut self,
-        variants: &[AnyOfObjectVariant],
-        base_name: &str,
-    ) -> Result<Option<GrammarExpr>, GlrMaskError> {
-        if variants.is_empty() {
-            return Ok(None);
-        }
-
-        let mut builder = ExprNfaBuilder::new();
-        let accept = builder.add_state();
-        builder.set_accepting(accept);
-
-        let mut state_ids = BTreeMap::<AnyOfObjectDfaState, u32>::new();
-        let mut additional_entry_state_ids =
-            BTreeMap::<(bool, Vec<String>), (u32, u32)>::new();
-        let mut additional_leaf_targets = BTreeSet::<(u32, u32)>::new();
-        let mut queue = VecDeque::<AnyOfObjectDfaState>::new();
-        for variant_idx in 0..variants.len() {
-            let state = AnyOfObjectDfaState {
-                variant_idx: variant_idx as u16,
-                cursor: 0,
-                has_content: false,
-                phase: AnyOfObjectDfaPhase::Fixed,
-            };
-            let state_id = builder.add_state();
-            builder.add_epsilon(builder.start_state(), state_id);
-            state_ids.insert(state, state_id);
-            queue.push_back(state);
-        }
-
-        while let Some(state) = queue.pop_front() {
-            if state_ids.len() > ANYOF_OBJECT_EXPR_DFA_MAX_STATES {
-                return Ok(None);
-            }
-            let state_id = state_ids[&state];
-            let variant = &variants[state.variant_idx as usize];
-            let cursor = state.cursor as usize;
-
-            let fixed_phase = state.phase == AnyOfObjectDfaPhase::Fixed;
-            let can_leave_fixed_tail = !fixed_phase || variant.close_allowed(cursor);
-
-            if can_leave_fixed_tail {
-                builder.add_epsilon(state_id, accept);
-            }
-
-            if can_leave_fixed_tail
-                && state.phase != AnyOfObjectDfaPhase::Additional
-                && !variant.pattern_pair_exprs.is_empty()
-            {
-                let pattern_state = AnyOfObjectDfaState {
-                    variant_idx: state.variant_idx,
-                    cursor: variant.len() as u16,
-                    has_content: true,
-                    phase: AnyOfObjectDfaPhase::Pattern,
-                };
-                let pattern_state_id = if let Some(&existing) = state_ids.get(&pattern_state) {
-                    existing
-                } else {
-                    let id = builder.add_state();
-                    state_ids.insert(pattern_state, id);
-                    queue.push_back(pattern_state);
-                    id
-                };
-                for pattern_pair_expr in &variant.pattern_pair_exprs {
-                    let mut symbols = Vec::new();
-                    if state.has_content {
-                        symbols.push(self.json_item_separator_expr());
-                    }
-                    symbols.push(pattern_pair_expr.clone());
-                    Self::add_expr_nfa_symbol_path(
-                        &mut builder,
-                        state_id,
-                        symbols,
-                        pattern_state_id,
-                    );
-                }
-            }
-
-            if can_leave_fixed_tail {
-                if let Some(value_expr) = &variant.additional_value_expr {
-                    let ap_state = AnyOfObjectDfaState {
-                        variant_idx: state.variant_idx,
-                        cursor: variant.len() as u16,
-                        has_content: true,
-                        phase: AnyOfObjectDfaPhase::Additional,
-                    };
-                    let ap_state_id = if let Some(&existing) = state_ids.get(&ap_state) {
-                        existing
-                    } else {
-                        let id = builder.add_state();
-                        state_ids.insert(ap_state, id);
-                        queue.push_back(ap_state);
-                        id
-                    };
-                    let key_symbol_paths = self.build_anyof_object_ap_key_symbol_paths(
-                        base_name,
-                        state.variant_idx as usize,
-                        &variant.fixed_keys,
-                        &variant.pattern_keys,
-                    )?;
-                    for key_symbols in key_symbol_paths {
-                        let mut symbols = Vec::new();
-                        if state.has_content {
-                            symbols.push(self.json_item_separator_expr());
-                        }
-                        symbols.extend(key_symbols);
-                        symbols.push(value_expr.clone());
-
-                        let entry_key = (
-                            state.has_content,
-                            symbols.iter().map(expr_key).collect::<Vec<_>>(),
-                        );
-                        let (entry_state_id, leaf_state_id) = if let Some(&existing) =
-                            additional_entry_state_ids.get(&entry_key)
-                        {
-                            existing
-                        } else {
-                            let entry_id = builder.add_state();
-                            let leaf_id = builder.add_state();
-                            Self::add_expr_nfa_symbol_path(
-                                &mut builder,
-                                entry_id,
-                                symbols,
-                                leaf_id,
-                            );
-                            additional_entry_state_ids.insert(entry_key, (entry_id, leaf_id));
-                            (entry_id, leaf_id)
-                        };
-                        builder.add_epsilon(state_id, entry_state_id);
-                        if additional_leaf_targets.insert((leaf_state_id, ap_state_id)) {
-                            builder.add_epsilon(leaf_state_id, ap_state_id);
-                        }
-                    }
-                }
-            }
-
-            if !fixed_phase {
-                continue;
-            }
-
-            for key in variant.legal_next_keys(cursor) {
-                let Some(next_cursor) = variant.advance_cursor(cursor, key) else {
-                    continue;
-                };
-                let Some(value_expr) = variant.value_expr_for_key(key) else {
-                    continue;
-                };
-                let next_state = AnyOfObjectDfaState {
-                    variant_idx: state.variant_idx,
-                    cursor: next_cursor as u16,
-                    has_content: true,
-                    phase: AnyOfObjectDfaPhase::Fixed,
-                };
-                let next_state_id = if let Some(&existing) = state_ids.get(&next_state) {
-                    existing
-                } else {
-                    let id = builder.add_state();
-                    state_ids.insert(next_state, id);
-                    queue.push_back(next_state);
-                    id
-                };
-
-                let mut symbols = Vec::new();
-                if state.has_content {
-                    symbols.push(self.json_item_separator_expr());
-                }
-                symbols.push(self.json_key_colon_literal(key));
-                symbols.push(value_expr);
-                Self::add_expr_nfa_symbol_path(&mut builder, state_id, symbols, next_state_id);
-            }
-        }
-
-        Ok(Some(GrammarExpr::ExprNFA(Box::new(
-            builder.build().into_determinized_and_minimized(),
-        ))))
-    }
-
-    fn try_build_anyof_object_expr_nfa(
-        &mut self,
-        schema: &Map<String, Value>,
-        options: &[Value],
-    ) -> Result<Option<GrammarExpr>, GlrMaskError> {
-        if options.len() < 2 {
-            return Ok(None);
-        }
-
-        let resolved = options
-            .iter()
-            .map(|opt| {
-                if has_structural_keywords(schema) {
-                    let base = Self::schema_without_keys(schema, &["anyOf", "oneOf"]);
-                    self.merge_resolved_subschemas(&base, std::slice::from_ref(opt))
-                } else {
-                    self.schema_for_intersection(opt)
-                }
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut object_variants = Vec::new();
-        let mut non_object_options = Vec::new();
-        for resolved_option in resolved {
-            if resolved_option.get("type").and_then(Value::as_str) == Some("object") {
-                let Some(variant) = self.collect_anyof_expr_nfa_object_variant(&resolved_option)? else {
-                    return Ok(None);
-                };
-                object_variants.push(variant);
-            } else {
-                non_object_options.push(Value::Object(resolved_option));
-            }
-        }
-
-        if object_variants.len() < 2 {
-            return Ok(None);
-        }
-        let cache_key = Self::anyof_object_expr_nfa_cache_key(&object_variants, &non_object_options);
-        if let Some(expr) = self.anyof_object_expr_nfa_cache.get(&cache_key).cloned() {
-            return Ok(Some(expr));
-        }
-
-        let mut base_index = self.generated_object_rule_counter;
-        let base_name = loop {
-            let candidate = format!("obj_anyof_fa_{base_index}");
-            if !self.used_rule_names.contains(&format!("{candidate}_obj")) {
-                break candidate;
-            }
-            base_index += 1;
-        };
-        self.generated_object_rule_counter = base_index + 1;
-
-        let Some(body) = self.build_anyof_object_expr_nfa_body(&object_variants, &base_name)? else {
-            return Ok(None);
-        };
-        let body_rule = self.insert_shared_rule(format!("{base_name}_body"), body);
-        let object_expr = sequence_or_single(vec![
-            literal_expr(b"{"),
-            GrammarExpr::Ref(body_rule),
-            literal_expr(b"}"),
-        ]);
-        let object_rule = self.insert_shared_rule(format!("{base_name}_obj"), object_expr);
-
-        let mut alts = vec![GrammarExpr::Ref(object_rule)];
-        for option in non_object_options {
-            alts.push(self.convert_schema(&option)?);
-        }
-        let expr = factor_common_affixes(alts);
-        self.anyof_object_expr_nfa_cache.insert(cache_key, expr.clone());
-        Ok(Some(expr))
-    }
-
-    fn anyof_object_expr_nfa_cache_key(
-        variants: &[AnyOfObjectVariant],
-        non_object_options: &[Value],
-    ) -> String {
-        let mut key = String::new();
-        key.push_str("objects:");
-        for variant in variants {
-            key.push('[');
-            for item in &variant.items {
-                key.push_str(&item.key);
-                key.push('=');
-                key.push_str(if item.required { "required" } else { "optional" });
-                key.push(':');
-                key.push_str(&expr_key(&item.value_expr));
-                key.push(';');
-            }
-            key.push_str("|fixed=");
-            for fixed_key in &variant.fixed_keys {
-                key.push_str(fixed_key);
-                key.push(',');
-            }
-            key.push_str("|patterns=");
-            for pattern_expr in &variant.pattern_pair_exprs {
-                key.push_str(&expr_key(pattern_expr));
-                key.push(';');
-            }
-            key.push_str("|pattern_keys=");
-            for pattern_key in &variant.pattern_key_terminals {
-                key.push_str(&expr_key(pattern_key));
-                key.push(';');
-            }
-            key.push_str("|additional=");
-            if let Some(additional_value_expr) = &variant.additional_value_expr {
-                key.push_str(&expr_key(additional_value_expr));
-            }
-            key.push(']');
-        }
-        key.push_str("|non_objects:");
-        for option in non_object_options {
-            append_json_native(option, &mut key);
-            key.push(';');
-        }
-        key
-    }
-
     /// Try to merge anyOf/oneOf variants that are all closed objects
     /// (additionalProperties: false) with shared + mutually-exclusive unique
     /// properties into a single ordering tree with a one-shot unique-kv
@@ -6948,7 +5179,7 @@ impl<'a> SchemaCtx<'a> {
                     self.schema_for_intersection(opt)
                 }
             })
-            .collect::<Result<_, _>>()?;
+            .collect();
 
         // Guard 1: every variant must be a plain object with explicit
         //          "type": "object", additionalProperties: false, no patternProperties.
@@ -7171,16 +5402,10 @@ impl<'a> SchemaCtx<'a> {
     /// For `anyOf` of open objects, detect when one variant's language dominates the union
     /// and compile just that variant to eliminate GLR ambiguity.
     ///
-    /// For open objects with unconstrained additional properties on B,
-    /// `language(A) ⊆ language(B)` iff:
+    /// For open objects (no `additionalProperties: false`), `language(A) ⊆ language(B)` iff:
     ///   1. `B.required ⊆ A.required`  (B requires fewer keys → accepts more objects)
     ///   2. `B.properties.keys() ⊆ A.properties.keys()`  (B has fewer typed constraints)
     ///   3. For every key `k` shared by both: `B.properties[k] == A.properties[k]`
-    ///
-    /// This intentionally only uses a dominant B whose additionalProperties are
-    /// absent/true/{} so keys that are typed only by A are accepted by B as JSON
-    /// values. A constrained additionalProperties schema would need a real
-    /// schema-subset proof for each omitted key.
     ///
     /// When these hold for all `i ≠ j`, `anyOf[A₀…Aₙ] = B` exactly, so compiling just `B`
     /// is language-preserving and eliminates the ambiguous GLR branching.
@@ -7204,7 +5429,7 @@ impl<'a> SchemaCtx<'a> {
                     self.schema_for_intersection(opt)
                 }
             })
-            .collect::<Result<_, _>>()?;
+            .collect();
 
         // Guard: every variant must be a plain open object with no complex sub-keywords.
         for v in &resolved {
@@ -7243,10 +5468,6 @@ impl<'a> SchemaCtx<'a> {
         // Find a dominant variant j such that for all i ≠ j: language(i) ⊆ language(j).
         let empty_props = Map::new();
         let dominant_idx = (0..resolved.len()).find(|&j| {
-            if !Self::additional_properties_are_unconstrained(resolved[j].get("additionalProperties"))
-            {
-                return false;
-            }
             let (req_j, keys_j) = &info[j];
             let req_j_set: std::collections::BTreeSet<&str> =
                 req_j.iter().map(String::as_str).collect();
@@ -7288,14 +5509,6 @@ impl<'a> SchemaCtx<'a> {
         Ok(Some(self.convert_schema(&dominant)?))
     }
 
-    fn additional_properties_are_unconstrained(additional_properties: Option<&Value>) -> bool {
-        match additional_properties {
-            None | Some(Value::Bool(true)) => true,
-            Some(Value::Object(map)) => map.is_empty(),
-            _ => false,
-        }
-    }
-
     /// For closed objects (`additionalProperties: false`), `language(A) ⊆ language(B)` iff:
     ///   1. `B.required ⊆ A.required`  (B requires fewer keys → accepts more objects)
     ///   2. `A.properties.keys() ⊆ B.properties.keys()`  (B allows at least every key A allows)
@@ -7322,7 +5535,7 @@ impl<'a> SchemaCtx<'a> {
                     self.schema_for_intersection(opt)
                 }
             })
-            .collect::<Result<_, _>>()?;
+            .collect();
 
         for v in &resolved {
             if v.get("type").and_then(Value::as_str) != Some("object") {
@@ -7424,7 +5637,7 @@ impl<'a> SchemaCtx<'a> {
 
         if keyword == "oneOf"
             && !self.one_of_is_explicitly_coerced()
-            && !self.one_of_options_are_safe_to_coerce(schema, options)?
+            && !self.one_of_options_are_safe_to_coerce(schema, options)
         {
             return Err(GlrMaskError::GrammarParse(
                 "oneOf constraints are not supported. Enable 'coerce_one_of' option to approximate oneOf with anyOf".to_string(),
@@ -7436,17 +5649,14 @@ impl<'a> SchemaCtx<'a> {
             // compile the oneOf as a plain anyOf-style union of branches.
         }
 
-        if keyword == "anyOf" || keyword == "oneOf" {
+        if keyword == "anyOf" {
             if let Some(expr) = self.try_reduce_anyof_closed_objects(schema, options)? {
                 return Ok(Some(expr));
             }
-            if let Some(expr) = self.try_reduce_anyof_open_objects(schema, options)? {
-                return Ok(Some(expr));
-            }
-            if let Some(expr) = self.try_build_anyof_object_expr_nfa(schema, options)? {
-                return Ok(Some(expr));
-            }
-        } else {
+            // Deliberately keep anyOf lowering rudimentary for now: emit a plain
+            // choice over branch object definitions and accept the extra GLR
+            // ambiguity instead of trying to factor object unions.
+        } else if keyword != "oneOf" {
             return Ok(None);
         }
 
@@ -7459,7 +5669,7 @@ impl<'a> SchemaCtx<'a> {
                 .iter()
                 .map(|option| {
                     let merged = Value::Object(
-                        self.merge_resolved_subschemas(&base, std::slice::from_ref(option))?,
+                        self.merge_resolved_subschemas(&base, std::slice::from_ref(option)),
                     );
                     self.convert_schema(&merged)
                 })
@@ -7534,8 +5744,6 @@ impl<'a> SchemaCtx<'a> {
             ));
         }
 
-        self.increment_schema_build_count()?;
-
         // Schema-level dedup: reuse the expression produced by an earlier
         // identical sub-schema instead of generating duplicate rules.
         // The cache key includes the current draft so that draft-sensitive
@@ -7599,7 +5807,7 @@ impl<'a> SchemaCtx<'a> {
             if let Some(all_of) = object.get("allOf").and_then(Value::as_array) {
                 if !all_of.is_empty() {
                     let base = Self::schema_without_keys(object, &["allOf"]);
-                    let merged = self.merge_resolved_subschemas(&base, all_of)?;
+                    let merged = self.merge_resolved_subschemas(&base, all_of);
                     return self.convert_schema(&Value::Object(merged));
                 }
             }
@@ -7636,11 +5844,6 @@ impl<'a> SchemaCtx<'a> {
         if let Some(value) = object.get("const") {
             let remaining_schema = Value::Object(Self::schema_without_keys(object, &["const"]));
             if self.value_satisfies_schema(value, &remaining_schema) {
-                if let Some(text) = value.as_str()
-                    && self.shared_string_value_exclusions_active()
-                {
-                    return Ok(Some(self.shared_string_literal_value_expr(text)));
-                }
                 return Ok(Some(self.json_literal(value)));
             }
             return Err(unsat_schema_error());
@@ -7648,7 +5851,11 @@ impl<'a> SchemaCtx<'a> {
 
         if let Some(values) = object.get("enum").and_then(Value::as_array) {
             let remaining_schema = Value::Object(Self::schema_without_keys(object, &["enum"]));
-            let options = self.optimized_enum_options(values, &remaining_schema);
+            let options: Vec<GrammarExpr> = values
+                .iter()
+                .filter(|value| self.value_satisfies_schema(value, &remaining_schema))
+                .map(|value| self.json_literal(value))
+                .collect();
             if !options.is_empty() {
                 return Ok(Some(factor_common_affixes(options)));
             }
@@ -7656,105 +5863,6 @@ impl<'a> SchemaCtx<'a> {
         }
 
         Ok(None)
-    }
-
-    fn optimized_enum_options(&self, values: &[Value], remaining_schema: &Value) -> Vec<GrammarExpr> {
-        self.optimized_prescanned_enum_options(values, remaining_schema)
-    }
-
-    fn optimized_prescanned_enum_options(
-        &self,
-        values: &[Value],
-        remaining_schema: &Value,
-    ) -> Vec<GrammarExpr> {
-        let mut valid_string_values = BTreeSet::new();
-        let mut valid_number_values = BTreeSet::new();
-        let mut other_options = Vec::new();
-
-        for value in values {
-            if !self.value_satisfies_schema(value, remaining_schema) {
-                continue;
-            }
-            if let Some(text) = value.as_str() {
-                valid_string_values.insert(json_enum_string_terminal_bytes(text));
-            } else if value.is_number() {
-                valid_number_values.insert(json_value_literal_bytes(value));
-            } else {
-                other_options.push(self.json_literal(value));
-            }
-        }
-
-        let mut options = Vec::new();
-        self.push_optimized_enum_group_options(
-            EnumAtomKind::String,
-            &valid_string_values,
-            &mut options,
-        );
-        self.push_optimized_enum_group_options(
-            EnumAtomKind::Number,
-            &valid_number_values,
-            &mut options,
-        );
-        options.extend(other_options);
-        options
-    }
-
-    fn push_optimized_enum_group_options(
-        &self,
-        kind: EnumAtomKind,
-        valid_values: &BTreeSet<Vec<u8>>,
-        options: &mut Vec<GrammarExpr>,
-    ) {
-        let mut group_ids = BTreeSet::new();
-        for value in valid_values {
-            if let Some(group_id) = self.enum_terminal_plan.group_for_value(kind, value) {
-                group_ids.insert(group_id);
-            } else {
-                match kind {
-                    EnumAtomKind::String => {
-                        options.push(wrap_string_value_terminal(
-                            literal_expr(value),
-                            json_literal_string_merge_config(),
-                        ));
-                    }
-                    EnumAtomKind::Number => options.push(literal_expr(value)),
-                }
-            }
-        }
-
-        for group_id in group_ids {
-            let group = self.enum_terminal_plan.group(kind, group_id);
-            if group
-                .values
-                .iter()
-                .all(|value| valid_values.contains(value))
-            {
-                let terminal_ref = GrammarExpr::Ref(group.name.clone());
-                match kind {
-                    EnumAtomKind::String => {
-                        options.push(wrap_string_value_terminal(
-                            terminal_ref,
-                            json_literal_string_merge_config(),
-                        ));
-                    }
-                    EnumAtomKind::Number => options.push(terminal_ref),
-                }
-            } else {
-                for value in &group.values {
-                    if valid_values.contains(value) {
-                        match kind {
-                            EnumAtomKind::String => {
-                                options.push(wrap_string_value_terminal(
-                                    literal_expr(value),
-                                    json_literal_string_merge_config(),
-                                ));
-                            }
-                            EnumAtomKind::Number => options.push(literal_expr(value)),
-                        }
-                    }
-                }
-            }
-        }
     }
 
     fn string_value_satisfies_schema(
@@ -8033,7 +6141,6 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn convert_type(&mut self, type_name: &str, schema: &Map<String, Value>) -> Result<GrammarExpr, GlrMaskError> {
-        self.increment_schema_build_count()?;
         match type_name {
             "object" => self.build_object_expr(schema),
             "array" => self.build_array_expr(schema),
@@ -8328,9 +6435,6 @@ impl<'a> SchemaCtx<'a> {
             let Some(pattern) = prune_pattern_branches_for_min_length(pattern, min_len) else {
                 return Ok(self.extract_terminal_rule(never_expr(), "JSON_STRING_PATTERN_UNSAT"));
             };
-            if min_len == 0 && max_len.is_none() && self.shared_string_value_exclusions_active() {
-                return Ok(self.shared_string_pattern_value_expr(&pattern));
-            }
             if let Some(unit_expr) = simple_repeated_single_char_expr(&pattern) {
                 let required_min = min_len.max(1);
                 if matches!(max_len, Some(max) if max < required_min) {
@@ -8378,13 +6482,17 @@ impl<'a> SchemaCtx<'a> {
                 // keep the length DFA small (avoids explosion from large
                 // maxLength values).
                 let search_expr = decoded_regex_search_expr(&pattern, None);
+                let length_inner = match max_len {
+                    Some(ml) if ml <= 100 => format!(r#"(?:{}){{{},{}}}"#, JSON_STRING_CHAR_PATTERN, min_len, ml),
+                    _ => format!(r#"(?:{}){{{},}}"#, JSON_STRING_CHAR_PATTERN, min_len),
+                };
                 let intersected = LexerExpr::Intersect {
                     expr: Box::new(search_expr),
-                    intersect: Box::new(lexer_repeat(json_string_char_lexer_expr(), min_len, max_len.filter(|ml| *ml <= 100))),
+                    intersect: Box::new(parse_regex(&length_inner, true)),
                 };
                         let body = self
                             .build_pattern_lexer_expr(&intersected, "JSON_STRING_PATTERN_ANCHORED_BOUNDED");
-                let (terminal_body, wrap) = wrap_string_value_expr_parts(body, true);
+                let (terminal_body, wrap) = wrap_string_value_expr_parts(body);
                 let term = self.extract_terminal_rule(terminal_body, "JSON_STRING_PATTERN_ANCHORED_BOUNDED");
                 return Ok(wrap(term));
             }
@@ -8399,13 +6507,14 @@ impl<'a> SchemaCtx<'a> {
                 if let Some(ml) = max_len {
                     if ml <= MAX_BOUNDED_SEARCH_TAIL {
                         let search_expr = decoded_regex_search_expr(&pattern, Some(ml));
+                        let length_inner = format!(r#"(?:{}){{{},{}}}"#, JSON_STRING_CHAR_PATTERN, min_len, ml);
                         let intersected = LexerExpr::Intersect {
                             expr: Box::new(search_expr),
-                            intersect: Box::new(lexer_repeat(json_string_char_lexer_expr(), min_len, Some(ml))),
+                            intersect: Box::new(parse_regex(&length_inner, true)),
                         };
                         let body =
                             self.build_pattern_lexer_expr(&intersected, "JSON_STRING_PATTERN_BOUNDED");
-                        let (terminal_body, wrap) = wrap_string_value_expr_parts(body, true);
+                        let (terminal_body, wrap) = wrap_string_value_expr_parts(body);
                         let term = self.extract_terminal_rule(terminal_body, "JSON_STRING_PATTERN_BOUNDED");
                         return Ok(wrap(term));
                     }
@@ -8415,13 +6524,14 @@ impl<'a> SchemaCtx<'a> {
                 // DFA explosion).
                 if min_len > 0 {
                     let search_expr = decoded_regex_search_expr(&pattern, None);
+                    let length_inner = format!(r#"(?:{}){{{},}}"#, JSON_STRING_CHAR_PATTERN, min_len);
                     let intersected = LexerExpr::Intersect {
                         expr: Box::new(search_expr),
-                        intersect: Box::new(lexer_repeat(json_string_char_lexer_expr(), min_len, None)),
+                        intersect: Box::new(parse_regex(&length_inner, true)),
                     };
                     let body =
                         self.build_pattern_lexer_expr(&intersected, "JSON_STRING_PATTERN_MINLEN");
-                    let (terminal_body, wrap) = wrap_string_value_expr_parts(body, true);
+                    let (terminal_body, wrap) = wrap_string_value_expr_parts(body);
                     let term = self.extract_terminal_rule(terminal_body, "JSON_STRING_PATTERN_MINLEN");
                     return Ok(wrap(term));
                 }
@@ -8432,10 +6542,14 @@ impl<'a> SchemaCtx<'a> {
         }
 
         if let Some(format_name) = schema.get("format").and_then(Value::as_str) {
-            return self.build_format_string_expr(format_name);
+            // Email regexes currently leak byte-level lexical structure into
+            // parser-visible terminals. Keep them on the regular string path.
+            if format_name != "email" {
+                return self.build_format_string_expr(format_name);
+            }
         }
         if min_len == 0 && max_len.is_none() {
-            return Ok(self.shared_unconstrained_string_value_expr());
+            return Ok(self.json_string_ref());
         }
 
         if self.should_split_bounded_string(min_len, max_len) {
@@ -8480,7 +6594,7 @@ impl<'a> SchemaCtx<'a> {
             }
         };
 
-        let (terminal_body, wrap) = wrap_string_value_expr_parts(bounded_body, false);
+        let (terminal_body, wrap) = wrap_string_value_expr_parts(bounded_body);
         let body = self.extract_terminal_rule(terminal_body, "JSON_STRING_BOUNDED");
         Ok(wrap(body))
     }
@@ -8517,7 +6631,7 @@ impl<'a> SchemaCtx<'a> {
             }
         };
 
-        let (terminal_body, wrap) = wrap_string_value_expr_parts(bounded_body, false);
+        let (terminal_body, wrap) = wrap_string_value_expr_parts(bounded_body);
         let body = self.extract_terminal_rule(terminal_body, "JSON_STRING_BOUNDED_PATTERN");
         wrap(body)
     }
@@ -8530,7 +6644,7 @@ impl<'a> SchemaCtx<'a> {
                     "time" => json_time_body_expr(),
                     _ => json_date_time_body_expr(),
                 };
-                let (terminal_body, wrap) = wrap_string_value_expr_parts(body_inner, false);
+                let (terminal_body, wrap) = wrap_string_value_expr_parts(body_inner);
                 let body = self.extract_terminal_rule(terminal_body, "JSON_FORMAT_STRING");
                 Ok(wrap(body))
             }
@@ -8545,30 +6659,20 @@ impl<'a> SchemaCtx<'a> {
                         literal_expr(b"."),
                         label,
                     ]))),
-                ]), false))
+                ])))
             }
-            "uri" => Ok(self.build_uri_expr()),
+            "uri" if simple_uri_format_enabled() => {
+                Ok(quoted_expr(GrammarExpr::Repeat(Box::new(self.json_string_char_ref()))))
+            }
+            "uri" if restored_structured_uri_enabled() => {
+                Ok(self.build_structured_uri_expr())
+            }
+            "uri" if use_structured_uri() => {
+                Ok(self.build_llguidance_uri_expr())
+            }
             _ => json_format_pattern(format_name)
                 .map(|pattern| self.build_json_wrapped_fullmatch_pattern(&pattern, "JSON_FORMAT_STRING"))
                 .ok_or_else(|| GlrMaskError::GrammarParse(format!("Unknown format: {format_name}"))),
-        }
-    }
-
-    fn build_uri_expr(&mut self) -> GrammarExpr {
-        let mode = json_schema_uri_mode();
-        if uri_quote_merge_warning_needed(mode) {
-            eprintln!(
-                "[glrmask/import][warn] GLRMASK_JSON_URI_MERGE_OPEN/CLOSE are ignored for strict multi-terminal structured URI mode"
-            );
-        }
-
-        match mode {
-            JsonSchemaUriMode::Structured => self.build_structured_uri_expr(),
-            JsonSchemaUriMode::StructuredSingleTerminal => {
-                self.build_structured_uri_single_terminal_expr()
-            }
-            JsonSchemaUriMode::LlguidancePattern => self.build_llguidance_uri_expr(),
-            JsonSchemaUriMode::Approx => self.build_approx_uri_expr(),
         }
     }
 
@@ -8613,35 +6717,18 @@ impl<'a> SchemaCtx<'a> {
             r"(?:\?(?P<query>(?:[a-zA-Z0-9\-._~!$&'()*+,;=:@/?]|%[0-9a-fA-F]{2})*))?",
             r"(?:\#(?P<fragment>(?:[a-zA-Z0-9\-._~!$&'()*+,;=:@/?]|%[0-9a-fA-F]{2})*))?"
         );
-        self.build_json_wrapped_fullmatch_pattern_with_merge_config(
-            pattern,
-            "JSON_FORMAT_URI",
-            json_uri_merge_config(),
-        )
+        self.build_json_wrapped_fullmatch_pattern(pattern, "JSON_FORMAT_URI")
     }
 
     fn build_approx_uri_expr(&mut self) -> GrammarExpr {
-        quoted_expr_with_merge_config(
-            GrammarExpr::Repeat(Box::new(self.json_string_char_ref())),
-            json_uri_merge_config(),
-        )
+        quoted_expr(GrammarExpr::Repeat(Box::new(self.json_string_char_ref())))
     }
 
     fn build_structured_uri_expr(&mut self) -> GrammarExpr {
-        quoted_expr(self.build_structured_uri_body_expr(), false)
-    }
+        if !strict_uri_format_enabled() {
+            return self.build_approx_uri_expr();
+        }
 
-    fn build_structured_uri_single_terminal_expr(&mut self) -> GrammarExpr {
-        let body = self.build_structured_uri_body_expr();
-        single_terminal_quoted_expr(
-            self,
-            body,
-            "JSON_FORMAT_URI_STRUCTURED",
-            json_uri_merge_config(),
-        )
-    }
-
-    fn build_structured_uri_body_expr(&mut self) -> GrammarExpr {
         let ablate: std::collections::BTreeSet<String> = std::env::var("URI_ABLATE")
             .ok()
             .map(|v| {
@@ -8801,7 +6888,7 @@ impl<'a> SchemaCtx<'a> {
             sequence_or_single(vec![literal_expr(b"#"), uri_query_frag_sequence_expr.clone()]),
         );
 
-        let uri_reg_name = self.insert_uri_rule(
+        self.insert_rule(
             "uri_reg_name",
             uri_reg_name_terminal.unwrap_or_else(|| {
                 GrammarExpr::Repeat(Box::new(choice_or_single(vec![
@@ -8810,6 +6897,7 @@ impl<'a> SchemaCtx<'a> {
                 ])))
             }),
         );
+        let uri_reg_name = GrammarExpr::Ref("uri_reg_name".into());
 
         let uri_ipvfuture_char = self.insert_named_terminal_rule(
             "URI_IPVFUTURE_CHAR",
@@ -9083,7 +7171,7 @@ impl<'a> SchemaCtx<'a> {
             };
             let uri_ipv6_address = self.insert_uri_rule("uri_ipv6_address", uri_ipv6_address_expr);
 
-            let uri_ipv_future = self.insert_uri_rule(
+            self.insert_rule(
                 "uri_ipv_future",
                 sequence_or_single(vec![
                     literal_expr(b"v"),
@@ -9092,8 +7180,9 @@ impl<'a> SchemaCtx<'a> {
                     GrammarExpr::RepeatOne(Box::new(uri_ipvfuture_char.clone())),
                 ]),
             );
+            let uri_ipv_future = GrammarExpr::Ref("uri_ipv_future".into());
 
-            let uri_ipv4_address = self.insert_uri_rule(
+            self.insert_rule(
                 "uri_ipv4_address",
                 sequence_or_single(vec![
                     uri_dec_octet.clone(),
@@ -9105,13 +7194,14 @@ impl<'a> SchemaCtx<'a> {
                     uri_dec_octet.clone(),
                 ]),
             );
+            let uri_ipv4_address = GrammarExpr::Ref("uri_ipv4_address".into());
 
             let ip_literal_choice = if ablated("ipv_future") {
                 uri_ipv6_address.clone()
             } else {
                 choice_or_single(vec![uri_ipv6_address.clone(), uri_ipv_future.clone()])
             };
-            let uri_ip_literal = self.insert_uri_rule(
+            self.insert_rule(
                 "uri_ip_literal",
                 sequence_or_single(vec![
                     literal_expr(b"["),
@@ -9119,8 +7209,9 @@ impl<'a> SchemaCtx<'a> {
                     literal_expr(b"]"),
                 ]),
             );
+            let uri_ip_literal = GrammarExpr::Ref("uri_ip_literal".into());
 
-        let uri_host = self.insert_uri_rule(
+        self.insert_rule(
             "uri_host",
             if ablated("reg_name") && ablated("ip_literal") && ablated("ipv4") {
                 uri_alpha.clone()
@@ -9138,8 +7229,9 @@ impl<'a> SchemaCtx<'a> {
                 choice_or_single(host_alts)
             },
         );
+        let uri_host = GrammarExpr::Ref("uri_host".into());
 
-        let uri_port = self.insert_uri_rule(
+        self.insert_rule(
             "uri_port",
             uri_port_terminal.unwrap_or_else(|| {
                 sequence_or_single(vec![
@@ -9148,8 +7240,9 @@ impl<'a> SchemaCtx<'a> {
                 ])
             }),
         );
+        let uri_port = GrammarExpr::Ref("uri_port".into());
 
-        let uri_authority = self.insert_uri_rule(
+        self.insert_rule(
             "uri_authority",
             sequence_or_single(vec![
                 if ablated("userinfo") {
@@ -9165,16 +7258,18 @@ impl<'a> SchemaCtx<'a> {
                 },
             ]),
         );
+        let uri_authority = GrammarExpr::Ref("uri_authority".into());
 
-        let uri_path_abempty = self.insert_uri_rule(
+        self.insert_rule(
             "uri_path_abempty",
             GrammarExpr::Repeat(Box::new(sequence_or_single(vec![
                 literal_expr(b"/"),
                 uri_pchar_sequence_expr.clone(),
             ]))),
         );
+        let uri_path_abempty = GrammarExpr::Ref("uri_path_abempty".into());
 
-        let uri_path_absolute = self.insert_uri_rule(
+        self.insert_rule(
             "uri_path_absolute",
             sequence_or_single(vec![
                 literal_expr(b"/"),
@@ -9187,8 +7282,9 @@ impl<'a> SchemaCtx<'a> {
                 ]))),
             ]),
         );
+        let uri_path_absolute = GrammarExpr::Ref("uri_path_absolute".into());
 
-        let uri_path_rootless = self.insert_uri_rule(
+        self.insert_rule(
             "uri_path_rootless",
             sequence_or_single(vec![
                 uri_pchar_sequence_nonempty_expr,
@@ -9198,6 +7294,7 @@ impl<'a> SchemaCtx<'a> {
                 ]))),
             ]),
         );
+        let uri_path_rootless = GrammarExpr::Ref("uri_path_rootless".into());
 
         let mut hier_alts = vec![sequence_or_single(vec![
             literal_expr(b"//"),
@@ -9217,9 +7314,10 @@ impl<'a> SchemaCtx<'a> {
             }
             hier_alts.push(empty_expr());
         }
-        let uri_hier_part = self.insert_uri_rule("uri_hier_part", choice_or_single(hier_alts));
+        self.insert_rule("uri_hier_part", choice_or_single(hier_alts));
+        let uri_hier_part = GrammarExpr::Ref("uri_hier_part".into());
 
-        self.insert_uri_rule(
+        self.insert_rule(
             "uri",
             sequence_or_single(vec![
                 uri_scheme,
@@ -9238,7 +7336,7 @@ impl<'a> SchemaCtx<'a> {
             ]),
         );
 
-        GrammarExpr::Ref("uri".into())
+        quoted_expr(GrammarExpr::Ref("uri".into()))
     }
 
     fn json_literal(&self, value: &Value) -> GrammarExpr {
@@ -9535,39 +7633,18 @@ impl<'a> SchemaCtx<'a> {
         Ok(matching)
     }
 
-    fn build_repeated_object_pairs(&mut self, pair: GrammarExpr) -> GrammarExpr {
+    fn build_repeated_object_pairs(&self, pair: GrammarExpr) -> GrammarExpr {
         self.build_repeated_object_pairs_with_bounds(pair, 0, None)
     }
 
     fn build_repeated_object_pairs_with_bounds(
-        &mut self,
+        &self,
         pair: GrammarExpr,
         min_pairs: usize,
         max_pairs: Option<usize>,
     ) -> GrammarExpr {
         if max_pairs == Some(0) {
             return sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]);
-        }
-
-        if min_pairs == 0 && max_pairs.is_none() {
-            let base_name = self.fresh_rule_name("obj_pairs");
-            let pair_rule = self.insert_shared_rule(format!("{base_name}_pair"), pair);
-            let list_rule = self.insert_shared_rule(
-                format!("{base_name}_list"),
-                choice_or_single(vec![
-                    GrammarExpr::Ref(pair_rule.clone()),
-                    sequence_or_single(vec![
-                        GrammarExpr::Ref(format!("{base_name}_list")),
-                        self.json_item_separator_expr(),
-                        GrammarExpr::Ref(pair_rule),
-                    ]),
-                ]),
-            );
-            return sequence_or_single(vec![
-                literal_expr(b"{"),
-                choice_or_single(vec![empty_expr(), GrammarExpr::Ref(list_rule)]),
-                literal_expr(b"}"),
-            ]);
         }
 
         let body = GrammarExpr::SeparatedSequence {
@@ -9767,7 +7844,7 @@ impl<'a> SchemaCtx<'a> {
 
     fn build_json_wrapped_pattern(&mut self, pattern: &str, prefix: &str) -> GrammarExpr {
         let body = self.build_pattern_lexer_expr(&decoded_regex_search_expr(pattern, None), prefix);
-        let (terminal_body, wrap) = wrap_string_value_expr_parts(body, true);
+        let (terminal_body, wrap) = wrap_string_value_expr_parts(body);
         let term = self.extract_terminal_rule(terminal_body, prefix);
         wrap(term)
     }
@@ -9777,22 +7854,8 @@ impl<'a> SchemaCtx<'a> {
         pattern: &str,
         prefix: &str,
     ) -> GrammarExpr {
-        self.build_json_wrapped_fullmatch_pattern_with_merge_config(
-            pattern,
-            prefix,
-            json_string_merge_config(true),
-        )
-    }
-
-    fn build_json_wrapped_fullmatch_pattern_with_merge_config(
-        &mut self,
-        pattern: &str,
-        prefix: &str,
-        merge_config: JsonStringMergeConfig,
-    ) -> GrammarExpr {
         let body = self.build_pattern_lexer_expr(&decoded_regex_fullmatch_expr(pattern), prefix);
-        let (terminal_body, wrap) =
-            wrap_string_value_expr_parts_with_merge_config(body, merge_config);
+        let (terminal_body, wrap) = wrap_string_value_expr_parts(body);
         let term = self.extract_terminal_rule(terminal_body, prefix);
         wrap(term)
     }
@@ -9910,7 +7973,7 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn build_pattern_lexer_expr(&mut self, expr: &LexerExpr, prefix: &str) -> GrammarExpr {
-        self.extract_json_pattern_lexer_expr_decomposed(expr.clone(), prefix)
+        self.extract_terminal_rule(json_pattern_grammar_expr(expr), prefix)
     }
 
     fn add_option_expr(slot: &mut Option<LexerExpr>, new_expr: LexerExpr) {
@@ -9956,32 +8019,6 @@ impl<'a> SchemaCtx<'a> {
         }
     }
 
-    fn extract_json_pattern_lexer_expr_decomposed(
-        &mut self,
-        expr: LexerExpr,
-        prefix: &str,
-    ) -> GrammarExpr {
-        match expr {
-            LexerExpr::Intersect { expr, intersect } => {
-                let left = self.extract_json_pattern_lexer_expr_decomposed(*expr, prefix);
-                let right = self.extract_json_pattern_lexer_expr_decomposed(*intersect, prefix);
-                GrammarExpr::Intersect {
-                    expr: Box::new(left),
-                    intersect: Box::new(right),
-                }
-            }
-            LexerExpr::Exclude { expr, exclude } => {
-                let left = self.extract_json_pattern_lexer_expr_decomposed(*expr, prefix);
-                let right = self.extract_json_pattern_lexer_expr_decomposed(*exclude, prefix);
-                GrammarExpr::Exclude {
-                    expr: Box::new(left),
-                    exclude: Box::new(right),
-                }
-            }
-            other => self.extract_terminal_rule(json_pattern_grammar_expr(&other), prefix),
-        }
-    }
-
     fn build_excluding_key_colon_expr_internal(
         &mut self,
         base_expr: LexerExpr,
@@ -10006,7 +8043,7 @@ impl<'a> SchemaCtx<'a> {
         excluded_exprs: Vec<GrammarExpr>,
         prefix: &str,
     ) -> GrammarExpr {
-        let base_body = self.extract_json_pattern_lexer_expr_decomposed(base_expr, prefix);
+        let base_body = self.extract_lexer_expr_decomposed(base_expr, prefix);
         let body = if excluded_exprs.is_empty() {
             base_body
         } else {
@@ -10043,88 +8080,41 @@ impl<'a> SchemaCtx<'a> {
         wrap_key_colon_terminal(self.extract_terminal_rule(expr, prefix))
     }
 
-    fn build_per_object_additional_key_body_expr(
-        &mut self,
-        excluded_literal_keys: &BTreeSet<String>,
-        excluded_pattern_keys: &BTreeSet<String>,
-        prefix: &str,
-    ) -> GrammarExpr {
-        let mut excluded = excluded_literal_keys
-            .iter()
-            .map(|key| literal_expr(&key_colon_literal_body_bytes(key)))
-            .collect::<Vec<_>>();
-        for (pattern_idx, pattern) in excluded_pattern_keys.iter().enumerate() {
-            excluded.push(self.pattern_key_colon_body_expr(
-                pattern,
-                &format!("{prefix}_PATTERN_{pattern_idx}"),
-            ));
+    fn shared_additional_key_colon_expr(&mut self) -> Result<GrammarExpr, GlrMaskError> {
+        if let Some(expr) = &self.shared_ap_key_colon_expr {
+            return Ok(expr.clone());
         }
 
-        let body = if excluded.is_empty() {
-            GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())
+        let expr = if self.shared_ap_literal_keys.is_empty() {
+            self.json_key_colon_ref()
         } else {
-            GrammarExpr::Exclude {
-                expr: Box::new(GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())),
-                exclude: Box::new(choice_or_single(excluded)),
+            let key_expr = Self::scoped_key_colon_expr(None)?;
+            let shared_excluded_expr = Self::literal_key_colon_union_expr(&self.shared_ap_literal_keys);
+            let mut excluded_exprs: Vec<LexerExpr> = Vec::new();
+            if let Some(expr) = shared_excluded_expr {
+                excluded_exprs.push(expr);
             }
+            self.build_excluding_key_colon_expr_internal(
+                key_expr,
+                excluded_exprs,
+                "AP_SHARED_KEY_COLON",
+            )
         };
 
-        self.extract_terminal_rule(body, prefix)
-    }
-
-    fn build_per_object_additional_key_choice_expr(
-        &mut self,
-        excluded_literal_keys: &BTreeSet<String>,
-        excluded_pattern_keys: &BTreeSet<String>,
-        prefix: &str,
-    ) -> GrammarExpr {
-        wrap_key_colon_terminal(self.build_per_object_additional_key_body_expr(
-            excluded_literal_keys,
-            excluded_pattern_keys,
-            prefix,
-        ))
+        self.shared_ap_key_colon_expr = Some(expr.clone());
+        Ok(expr)
     }
 
     fn shared_additional_key_body_expr(&mut self) -> GrammarExpr {
-        if let Some(expr) = &self.shared_additional_key_plan.common_body_expr {
+        if let Some(expr) = &self.shared_ap_key_body_expr {
             return expr.clone();
         }
 
-        let excluded_keys: Vec<String> = self
-            .shared_additional_key_plan
-            .literal_keys
+        let excluded_keys: Vec<String> = self.shared_ap_literal_keys.iter().cloned().collect();
+        let excluded = excluded_keys
             .iter()
-            .cloned()
-            .collect();
-        let literal_excluded = excluded_keys
-            .iter()
-            .map(|key| {
-                self.force_extract_terminal_rule(
-                    literal_expr(&key_colon_literal_body_bytes(key)),
-                    "AP_SHARED_LITERAL_KEY",
-                )
-            })
+            .map(|key| self.force_extract_terminal_rule(literal_expr(&key_colon_literal_body_bytes(key)), "AP_SHARED_LITERAL_KEY"))
             .collect::<Vec<_>>();
-        if !literal_excluded.is_empty() {
-            let literal_alt_set = excluded_keys
-                .iter()
-                .map(|key| literal_expr(&key_colon_literal_body_bytes(key)))
-                .collect::<Vec<_>>();
-            self.insert_rule(
-                "AP_SHARED_LITERAL_KEY_SET",
-                choice_or_single(literal_alt_set),
-            );
-        }
-        let mut excluded = literal_excluded;
-        let excluded_patterns = self
-            .shared_additional_key_plan
-            .pattern_keys
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        for pattern in excluded_patterns {
-            excluded.push(self.shared_additional_pattern_key_body_expr(&pattern));
-        }
 
         let body = if excluded.is_empty() {
             GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())
@@ -10136,538 +8126,88 @@ impl<'a> SchemaCtx<'a> {
         };
 
         let expr = self.insert_named_terminal_rule("AP_SHARED_KEY", body);
-        self.shared_additional_key_plan.common_body_expr = Some(expr.clone());
-        expr
-    }
-
-    fn shared_additional_pattern_key_body_expr(&mut self, pattern: &str) -> GrammarExpr {
-        if let Some(expr) = self.shared_additional_key_plan.pattern_body_cache.get(pattern) {
-            return expr.clone();
-        }
-
-        let prefix = format!("AP_SHARED_PATTERN_KEY_{}", self.shared_additional_key_plan.pattern_body_cache.len());
-        let body = self.pattern_key_colon_body_expr(pattern, &format!("{prefix}_BODY"));
-        let (terminal_body, _) = wrap_key_colon_expr_parts(body);
-        let expr = self.extract_terminal_rule(terminal_body, &prefix);
-        self.shared_additional_key_plan
-            .pattern_body_cache
-            .insert(pattern.to_string(), expr.clone());
-        expr
-    }
-
-    fn shared_additional_pattern_key_body_expr_excluding_literals(
-        &mut self,
-        pattern: &str,
-        excluded_literal_keys: &BTreeSet<String>,
-    ) -> GrammarExpr {
-        if excluded_literal_keys.is_empty() {
-            return self.shared_additional_pattern_key_body_expr(pattern);
-        }
-
-        let excluded_keys = excluded_literal_keys.iter().cloned().collect::<Vec<_>>();
-        let cache_key = (pattern.to_string(), excluded_keys.clone());
-        if let Some(expr) = self
-            .shared_additional_key_plan
-            .constrained_pattern_body_cache
-            .get(&cache_key)
-        {
-            return expr.clone();
-        }
-
-        let pattern_expr = self.shared_additional_pattern_key_body_expr(pattern);
-        let excluded = excluded_keys
-            .iter()
-            .map(|key| {
-                self.force_extract_terminal_rule(
-                    literal_expr(&key_colon_literal_body_bytes(key)),
-                    "AP_SHARED_LITERAL_KEY",
-                )
-            })
-            .collect::<Vec<_>>();
-        let expr = self.insert_named_terminal_rule(
-            format!(
-                "AP_SHARED_PATTERN_KEY_FILTERED_{}",
-                self.shared_additional_key_plan.constrained_pattern_body_cache.len()
-            ),
-            GrammarExpr::Exclude {
-                expr: Box::new(pattern_expr),
-                exclude: Box::new(choice_or_single(excluded)),
-            },
-        );
-        self.shared_additional_key_plan
-            .constrained_pattern_body_cache
-            .insert(cache_key, expr.clone());
+        self.shared_ap_key_body_expr = Some(expr.clone());
         expr
     }
 
     fn build_shared_additional_key_body_choice_expr(
         &mut self,
         excluded_literal_keys: &BTreeSet<String>,
-        excluded_pattern_keys: &BTreeSet<String>,
         prefix: &str,
-    ) -> Result<GrammarExpr, GlrMaskError> {
-        let allowed_back_patterns: Vec<String> = self
-            .shared_additional_key_plan
-            .pattern_keys
-            .iter()
-            .filter(|pattern| !excluded_pattern_keys.contains(*pattern))
-            .cloned()
-            .collect();
-        let excluded_by_patterns =
-            self.shared_additional_literal_keys_matched_by_any_pattern(excluded_pattern_keys);
-        let allowed_back_by_patterns = allowed_back_patterns
-            .iter()
-            .flat_map(|pattern| {
-                self.shared_additional_key_plan
-                    .literal_keys_by_pattern
-                    .get(pattern)
-                    .into_iter()
-                    .flat_map(|keys| keys.iter().cloned())
-            })
-            .collect::<BTreeSet<_>>();
+    ) -> GrammarExpr {
         let allowed_back_keys: Vec<String> = self
-            .shared_additional_key_plan
-            .literal_keys
+            .shared_ap_literal_keys
             .iter()
-            .filter(|key| {
-                !excluded_literal_keys.contains(*key)
-                    && !excluded_by_patterns.contains(*key)
-                    && !allowed_back_by_patterns.contains(*key)
-            })
+            .filter(|key| !excluded_literal_keys.contains(*key))
             .cloned()
             .collect();
 
-        if allowed_back_keys.is_empty() && allowed_back_patterns.is_empty() {
-            return Ok(self.shared_additional_key_body_expr());
+        if allowed_back_keys.is_empty() {
+            return self.shared_additional_key_body_expr();
         }
 
-        let excluded_keys = excluded_literal_keys.iter().cloned().collect::<Vec<_>>();
-        let cache_key = (
-            allowed_back_keys.clone(),
-            allowed_back_patterns.clone(),
-            excluded_keys,
+        if let Some(rule_name) = self.shared_ap_key_body_rule_cache.get(&allowed_back_keys) {
+            return GrammarExpr::Ref(rule_name.clone());
+        }
+
+        let mut options = Vec::with_capacity(1 + allowed_back_keys.len());
+        options.push(self.shared_additional_key_body_expr());
+        options.extend(
+            allowed_back_keys
+                .iter()
+                .map(|key| literal_expr(&key_colon_literal_body_bytes(key))),
         );
-        if let Some(rule_name) = self.shared_additional_key_plan.body_rule_cache.get(&cache_key) {
-            return Ok(GrammarExpr::Ref(rule_name.clone()));
-        }
-
-        let options = self
-            .build_shared_additional_key_body_options(excluded_literal_keys, excluded_pattern_keys);
-        if options.len() == 1 {
-            return Ok(options.into_iter().next().expect("single body option"));
-        }
 
         let rule_name = self.fresh_rule_name(prefix);
         self.insert_rule(rule_name.clone(), choice_or_single(options));
-        self.shared_additional_key_plan
-            .body_rule_cache
-            .insert(cache_key, rule_name.clone());
-        Ok(GrammarExpr::Ref(rule_name))
-    }
-
-    fn build_shared_additional_key_body_options(
-        &mut self,
-        excluded_literal_keys: &BTreeSet<String>,
-        excluded_pattern_keys: &BTreeSet<String>,
-    ) -> Vec<GrammarExpr> {
-        let allowed_back_patterns: Vec<String> = self
-            .shared_additional_key_plan
-            .pattern_keys
-            .iter()
-            .filter(|pattern| !excluded_pattern_keys.contains(*pattern))
-            .cloned()
-            .collect();
-        let excluded_by_patterns =
-            self.shared_additional_literal_keys_matched_by_any_pattern(excluded_pattern_keys);
-        let allowed_back_by_patterns = allowed_back_patterns
-            .iter()
-            .flat_map(|pattern| {
-                self.shared_additional_key_plan
-                    .literal_keys_by_pattern
-                    .get(pattern)
-                    .into_iter()
-                    .flat_map(|keys| keys.iter().cloned())
-            })
-            .collect::<BTreeSet<_>>();
-        let allowed_back_keys: Vec<String> = self
-            .shared_additional_key_plan
-            .literal_keys
-            .iter()
-            .filter(|key| {
-                !excluded_literal_keys.contains(*key)
-                    && !excluded_by_patterns.contains(*key)
-                    && !allowed_back_by_patterns.contains(*key)
-            })
-            .cloned()
-            .collect();
-
-        let mut options =
-            Vec::with_capacity(1 + allowed_back_keys.len() + allowed_back_patterns.len());
-        options.push(self.shared_additional_key_body_expr());
-        if !allowed_back_keys.is_empty() {
-            let still_excluded_literal_alts = self
-                .shared_additional_key_plan
-                .literal_keys
-                .iter()
-                .filter(|key| !allowed_back_keys.contains(*key))
-                .cloned()
-                .map(|key| literal_expr(&key_colon_literal_body_bytes(&key)))
-                .collect::<Vec<_>>();
-            if still_excluded_literal_alts.is_empty() {
-                options.push(GrammarExpr::Ref("AP_SHARED_LITERAL_KEY_SET".into()));
-            } else {
-                options.push(GrammarExpr::Exclude {
-                    expr: Box::new(GrammarExpr::Ref("AP_SHARED_LITERAL_KEY_SET".into())),
-                    exclude: Box::new(parenthesized_expr(choice_or_single(
-                        still_excluded_literal_alts,
-                    ))),
-                });
-            }
-        }
-        for pattern in &allowed_back_patterns {
-            options.push(self.shared_additional_pattern_key_body_expr_excluding_literals(
-                pattern,
-                excluded_literal_keys,
-            ));
-        }
-        options
+        self.shared_ap_key_body_rule_cache
+            .insert(allowed_back_keys, rule_name.clone());
+        GrammarExpr::Ref(rule_name)
     }
 
     fn build_shared_additional_key_choice_expr(
         &mut self,
         excluded_literal_keys: &BTreeSet<String>,
-        excluded_pattern_keys: &BTreeSet<String>,
         prefix: &str,
     ) -> Result<GrammarExpr, GlrMaskError> {
-        let allowed_back_patterns: Vec<String> = self
-            .shared_additional_key_plan
-            .pattern_keys
-            .iter()
-            .filter(|pattern| !excluded_pattern_keys.contains(*pattern))
-            .cloned()
-            .collect();
-        let excluded_by_patterns =
-            self.shared_additional_literal_keys_matched_by_any_pattern(excluded_pattern_keys);
-        let allowed_back_by_patterns = allowed_back_patterns
-            .iter()
-            .flat_map(|pattern| {
-                self.shared_additional_key_plan
-                    .literal_keys_by_pattern
-                    .get(pattern)
-                    .into_iter()
-                    .flat_map(|keys| keys.iter().cloned())
-            })
-            .collect::<BTreeSet<_>>();
         let allowed_back_keys: Vec<String> = self
-            .shared_additional_key_plan
-            .literal_keys
+            .shared_ap_literal_keys
             .iter()
-            .filter(|key| {
-                !excluded_literal_keys.contains(*key)
-                    && !excluded_by_patterns.contains(*key)
-                    && !allowed_back_by_patterns.contains(*key)
-            })
+            .filter(|key| !excluded_literal_keys.contains(*key))
             .cloned()
             .collect();
-        let excluded_keys = excluded_literal_keys.iter().cloned().collect::<Vec<_>>();
-        let cache_key = (
-            allowed_back_keys.clone(),
-            allowed_back_patterns.clone(),
-            excluded_keys,
-        );
 
-        if let Some(rule_name) = self.shared_additional_key_plan.key_rule_cache.get(&cache_key) {
+        if allowed_back_keys.is_empty() {
+            return self.shared_additional_key_colon_expr();
+        }
+
+        if let Some(rule_name) = self.shared_ap_key_rule_cache.get(&allowed_back_keys) {
             return Ok(GrammarExpr::Ref(rule_name.clone()));
         }
 
-        let body = self.build_shared_additional_key_body_choice_expr(
-            excluded_literal_keys,
-            excluded_pattern_keys,
-            &format!("{prefix}_body"),
-        )?;
-        let expr = wrap_key_colon_terminal(body);
+        let mut options = Vec::with_capacity(1 + allowed_back_keys.len());
+        options.push(self.shared_additional_key_colon_expr()?);
+        options.extend(allowed_back_keys.iter().map(|key| self.json_key_colon_literal(key)));
 
         let rule_name = self.fresh_rule_name(prefix);
-        self.insert_rule(rule_name.clone(), expr);
-        self.shared_additional_key_plan
-            .key_rule_cache
-            .insert(cache_key, rule_name.clone());
+        self.insert_rule(rule_name.clone(), choice_or_single(options));
+        self.shared_ap_key_rule_cache.insert(allowed_back_keys, rule_name.clone());
         Ok(GrammarExpr::Ref(rule_name))
     }
 
-    fn shared_additional_literal_keys_matched_by_any_pattern(
+    fn use_shared_additional_key_exclusions(
         &self,
-        patterns: &BTreeSet<String>,
-    ) -> BTreeSet<String> {
-        patterns
-            .iter()
-            .flat_map(|pattern| {
-                self.shared_additional_key_plan
-                    .literal_keys_by_pattern
-                    .get(pattern)
-                    .into_iter()
-                    .flat_map(|keys| keys.iter().cloned())
-            })
-            .collect()
-    }
-
-    fn string_value_literal_body_expr_with_merge_config(
-        text: &str,
-        merge_config: JsonStringMergeConfig,
-    ) -> GrammarExpr {
-        let full = json_string_literal_bytes(text);
-        let body_only = literal_expr(&full[1..full.len() - 1]);
-        wrap_expr_with_string_literals(body_only, merge_config)
-    }
-
-    fn shared_string_literal_value_body_inline_expr(text: &str) -> GrammarExpr {
-        Self::string_value_literal_body_expr_with_merge_config(
-            text,
-            json_literal_string_merge_config(),
-        )
-    }
-
-    fn shared_string_literal_value_body_expr(&mut self, text: &str) -> GrammarExpr {
-        if let Some(expr) = self.shared_string_value_plan.literal_body_cache.get(text) {
-            return expr.clone();
+        excluded_literal_keys: &BTreeSet<String>,
+    ) -> bool {
+        if ap_key_any_string() {
+            return false;
         }
 
-        let expr = self.force_extract_terminal_rule(
-            Self::string_value_literal_body_expr_with_merge_config(
-                text,
-                json_literal_string_merge_config(),
-            ),
-            "STRING_SHARED_LITERAL_VALUE",
-        );
-        self.shared_string_value_plan
-            .literal_body_cache
-            .insert(text.to_string(), expr.clone());
-        expr
-    }
-
-    fn shared_string_pattern_value_body_expr(&mut self, pattern: &str) -> GrammarExpr {
-        if let Some(expr) = self.shared_string_value_plan.pattern_body_cache.get(pattern) {
-            return expr.clone();
-        }
-
-        let prefix = format!(
-            "STRING_SHARED_PATTERN_VALUE_{}",
-            self.shared_string_value_plan.pattern_body_cache.len()
-        );
-        let body = self.build_pattern_lexer_expr(&decoded_regex_search_expr(pattern, None), &format!("{prefix}_BODY"));
-        let (terminal_body, _) =
-            wrap_string_value_expr_parts_with_merge_config(body, json_literal_string_merge_config());
-        let expr = self.extract_terminal_rule(terminal_body, &prefix);
-        self.shared_string_value_plan
-            .pattern_body_cache
-            .insert(pattern.to_string(), expr.clone());
-        expr
-    }
-
-    fn shared_string_literal_value_expr(&mut self, text: &str) -> GrammarExpr {
-        wrap_string_value_terminal(
-            self.shared_string_literal_value_body_expr(text),
-            json_literal_string_merge_config(),
-        )
-    }
-
-    fn shared_string_pattern_value_expr(&mut self, pattern: &str) -> GrammarExpr {
-        wrap_string_value_terminal(
-            self.shared_string_pattern_value_body_expr(pattern),
-            json_literal_string_merge_config(),
-        )
-    }
-
-    fn shared_string_value_exclusions_active(&self) -> bool {
-        !self.shared_string_value_plan.literal_values.is_empty()
-            || !self.shared_string_value_plan.pattern_values.is_empty()
-    }
-
-    fn shared_string_value_common_body_expr(&mut self) -> GrammarExpr {
-        if let Some(expr) = &self.shared_string_value_plan.common_body_expr {
-            return expr.clone();
-        }
-
-        let merge_config = json_literal_string_merge_config();
-        let base_body = self.extract_terminal_rule(
-            wrap_expr_with_string_literals(
-                GrammarExpr::Repeat(Box::new(self.json_string_char_ref())),
-                merge_config,
-            ),
-            "STRING_SHARED_VALUE_BASE",
-        );
-
-        let literal_values = self
-            .shared_string_value_plan
-            .literal_values
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut excluded = literal_values
-            .iter()
-            .map(|value| Self::shared_string_literal_value_body_inline_expr(value))
-            .collect::<Vec<_>>();
-        let pattern_values = self
-            .shared_string_value_plan
-            .pattern_values
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        for pattern in pattern_values {
-            excluded.push(self.shared_string_pattern_value_body_expr(&pattern));
-        }
-
-        let body = if excluded.is_empty() {
-            base_body
-        } else {
-            GrammarExpr::Exclude {
-                expr: Box::new(base_body),
-                exclude: Box::new(choice_or_single(excluded)),
-            }
-        };
-
-        let expr = self.insert_named_terminal_rule("STRING_SHARED_VALUE", body);
-        self.shared_string_value_plan.common_body_expr = Some(expr.clone());
-        expr
-    }
-
-    fn build_shared_string_value_expr(
-        &mut self,
-        allowed_literals: Vec<String>,
-        allowed_patterns: Vec<String>,
-        prefix: &str,
-    ) -> GrammarExpr {
-        let mut allowed_literals = allowed_literals;
-        let mut allowed_patterns = allowed_patterns;
-        allowed_literals.sort();
-        allowed_literals.dedup();
-        allowed_patterns.sort();
-        allowed_patterns.dedup();
-        allowed_literals.retain(|value| {
-            !allowed_patterns
-                .iter()
-                .any(|pattern| decoded_regex_matches_search(pattern, value))
-        });
-
-        let cache_key = (allowed_literals.clone(), allowed_patterns.clone());
-        if let Some(rule_name) = self.shared_string_value_plan.value_rule_cache.get(&cache_key) {
-            return GrammarExpr::Ref(rule_name.clone());
-        }
-
-        let mut body_options = Vec::with_capacity(1 + allowed_literals.len() + allowed_patterns.len());
-        body_options.push(self.shared_string_value_common_body_expr());
-        self.push_shared_string_literal_body_options(&allowed_literals, &mut body_options);
-        for pattern in &allowed_patterns {
-            body_options.push(self.shared_string_pattern_value_body_expr(pattern));
-        }
-
-        let body = choice_or_single(body_options);
-        let expr = wrap_string_value_terminal(body, json_literal_string_merge_config());
-        let rule_name = self.fresh_rule_name(prefix);
-        self.insert_rule(rule_name.clone(), expr);
-        self.shared_string_value_plan
-            .value_rule_cache
-            .insert(cache_key, rule_name.clone());
-        GrammarExpr::Ref(rule_name)
-    }
-
-    fn push_shared_string_literal_body_options(
-        &self,
-        allowed_literals: &[String],
-        body_options: &mut Vec<GrammarExpr>,
-    ) {
-        let mut valid_values = BTreeSet::new();
-        for value in allowed_literals {
-            valid_values.insert(json_enum_string_terminal_bytes(value));
-        }
-
-        let mut group_ids = BTreeSet::new();
-        for value in &valid_values {
-            if let Some(group_id) = self
-                .enum_terminal_plan
-                .group_for_value(EnumAtomKind::String, value)
-            {
-                group_ids.insert(group_id);
-            } else {
-                body_options.push(literal_expr(value));
-            }
-        }
-
-        for group_id in group_ids {
-            let group = self.enum_terminal_plan.group(EnumAtomKind::String, group_id);
-            if group.values.iter().all(|value| valid_values.contains(value)) {
-                body_options.push(GrammarExpr::Ref(group.name.clone()));
-            } else {
-                for value in &group.values {
-                    if valid_values.contains(value) {
-                        body_options.push(literal_expr(value));
-                    }
-                }
-            }
-        }
-    }
-
-    fn build_excluding_string_value_expr(
-        &mut self,
-        excluded_literals: &[String],
-        excluded_patterns: &[String],
-        prefix: &str,
-    ) -> GrammarExpr {
-        let cache_key = (excluded_literals.to_vec(), excluded_patterns.to_vec());
-        if let Some(expr) = self
-            .shared_string_value_plan
-            .local_excluding_value_cache
-            .get(&cache_key)
-        {
-            return expr.clone();
-        }
-
-        let mut excluded = excluded_literals
-            .iter()
-            .map(|value| Self::shared_string_literal_value_body_inline_expr(value))
-            .collect::<Vec<_>>();
-        for pattern in excluded_patterns {
-            excluded.push(self.shared_string_pattern_value_body_expr(pattern));
-        }
-
-        let body = if excluded.is_empty() {
-            GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())
-        } else {
-            GrammarExpr::Exclude {
-                expr: Box::new(GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())),
-                exclude: Box::new(choice_or_single(excluded)),
-            }
-        };
-        let body = self.force_extract_terminal_rule(body, prefix);
-        let expr = wrap_string_value_terminal(body, json_literal_string_merge_config());
-        self.shared_string_value_plan
-            .local_excluding_value_cache
-            .insert(cache_key, expr.clone());
-        expr
-    }
-
-    fn shared_unconstrained_string_value_expr(&mut self) -> GrammarExpr {
-        if !self.shared_string_value_exclusions_active() {
-            return self.json_string_ref();
-        }
-
-        let allowed_literals = self
-            .shared_string_value_plan
-            .literal_values
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        let allowed_patterns = self
-            .shared_string_value_plan
-            .pattern_values
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        self.build_shared_string_value_expr(
-            allowed_literals,
-            allowed_patterns,
-            "string_shared_value",
-        )
+        let allowed_back = self
+            .shared_ap_literal_keys
+            .len()
+            .saturating_sub(excluded_literal_keys.len());
+        allowed_back <= SHARED_AP_MAX_ALLOW_BACK_KEYS
     }
 
     fn build_object_expr(&mut self, schema: &Map<String, Value>) -> Result<GrammarExpr, GlrMaskError> {
@@ -10764,15 +8304,6 @@ impl<'a> SchemaCtx<'a> {
             );
         }
 
-        if properties.is_none()
-            && required_list.len() > REQUIRED_SHARED_AP_POWERSHOT_BAILOUT_THRESHOLD
-            && pattern_properties.is_none()
-            && property_names.is_none()
-            && additional_schema.is_some()
-        {
-            return Err(GlrMaskError::GrammarParse("schema too large".into()));
-        }
-
         if !required_list.is_empty() && pattern_properties.is_none() && property_names.is_none() {
             return self.build_required_any_order_object_expr(&required_list, additional_schema);
         }
@@ -10809,11 +8340,7 @@ impl<'a> SchemaCtx<'a> {
             let match_all_pattern = pattern == "^.*$" || pattern == ".*";
             let matched_property_names = serde_json::json!({"pattern": pattern});
             let value_expr = self.convert_schema(value_schema)?;
-            if match_all_pattern {
-                let pair = sequence_or_single(vec![self.json_key_colon_ref(), value_expr]);
-                return Ok(self.build_repeated_object_pairs(pair));
-            }
-            if matches!(additional_properties, Some(Value::Bool(false))) {
+            if matches!(additional_properties, Some(Value::Bool(false))) || match_all_pattern {
                 return self.build_pattern_named_object_expr(&matched_property_names, value_expr);
             }
 
@@ -10823,7 +8350,7 @@ impl<'a> SchemaCtx<'a> {
                 _ => return Ok(self.json_object_ref()),
             };
             let unmatched_key_colon_body = if let Some(property_names) = property_names {
-                self.build_pattern_lexer_expr(
+                self.build_lexer_expr(
                     &Self::scoped_key_colon_expr(Some(property_names))?,
                     "PP_UNMATCHED_KEY_COLON_BODY",
                 )
@@ -11046,24 +8573,26 @@ impl<'a> SchemaCtx<'a> {
                     ),
                     extra_value_expr,
                 ]))
-            } else if self.per_object_ap_keys_enabled() {
-                let excluded_pattern_keys = BTreeSet::new();
-                Some(sequence_or_single(vec![
-                    self.build_per_object_additional_key_choice_expr(
-                        &excluded_literal_keys,
-                        &excluded_pattern_keys,
-                        &format!("{}_AP_KEY", base_name.to_uppercase()),
-                    ),
-                    extra_value_expr,
-                ]))
-            } else {
-                let excluded_pattern_keys = BTreeSet::new();
+            } else if self.use_shared_additional_key_exclusions(&excluded_literal_keys) {
                 Some(sequence_or_single(vec![
                     self.build_shared_additional_key_choice_expr(
                         &excluded_literal_keys,
-                        &excluded_pattern_keys,
                         &format!("{base_name}_ap_key"),
                     )?,
+                    extra_value_expr,
+                ]))
+            } else {
+                let key_expr = Self::scoped_key_colon_expr(None)?;
+                let mut excluded_exprs: Vec<LexerExpr> = Vec::new();
+                if let Some(expr) = Self::literal_key_colon_union_expr(&excluded_literal_keys) {
+                    excluded_exprs.push(expr);
+                }
+                Some(sequence_or_single(vec![
+                    self.build_excluding_key_colon_expr_internal(
+                        key_expr,
+                        excluded_exprs,
+                        &format!("{}_KEY_COLON", base_name.to_uppercase()),
+                    ),
                     extra_value_expr,
                 ]))
             }
@@ -11443,6 +8972,22 @@ impl<'a> SchemaCtx<'a> {
             return Ok(sequence_or_single(vec![literal_expr(b"{"), literal_expr(b"}")]));
         }
 
+        if pattern_properties.is_empty()
+            && property_names.is_none()
+            && additional_properties_schema.is_some()
+            && ordered.iter().all(|(_, _, required)| !*required)
+            && ordered
+                .iter()
+                .all(|(_, value_expr, _)| Self::supports_literal_properties_any_order_fast_path(value_expr))
+        {
+            return self.build_literal_properties_any_order_object_expr(
+                properties,
+                required_list,
+                required_keys,
+                additional_properties_schema,
+            );
+        }
+
         let mut base_index = self.generated_object_rule_counter;
         let base_name = loop {
             let candidate = format!("obj_ord_{base_index}");
@@ -11467,21 +9012,7 @@ impl<'a> SchemaCtx<'a> {
             for (pattern_idx, (pattern, pattern_schema)) in pattern_properties.iter().enumerate() {
                 let body = self.pattern_key_colon_body_expr(pattern, &format!("{}_PP{}_KEY_BODY", upper_base_name, pattern_idx));
                 let (terminal_body, wrap) = wrap_key_colon_expr_parts(body);
-                let raw_term_ref = self.extract_terminal_rule(
-                    terminal_body,
-                    &format!("{}_PP{}_KEY", upper_base_name, pattern_idx),
-                );
-                let term_ref = if let Some(np_terminal) = &np_terminal {
-                    self.insert_named_terminal_rule(
-                        format!("{upper_base_name}_PP{pattern_idx}_KEY_FILTERED"),
-                        GrammarExpr::Exclude {
-                            expr: Box::new(raw_term_ref),
-                            exclude: Box::new(np_terminal.clone()),
-                        },
-                    )
-                } else {
-                    raw_term_ref
-                };
+                let term_ref = self.extract_terminal_rule(terminal_body, &format!("{}_PP{}_KEY", upper_base_name, pattern_idx));
                 let key_expr = wrap(term_ref.clone());
 
                 let value_expr = match self.convert_schema(pattern_schema) {
@@ -11511,11 +9042,24 @@ impl<'a> SchemaCtx<'a> {
         let mut ap_kv_rule = None;
         let has_additional_properties = additional_properties_schema.is_some();
         if let Some(schema) = additional_properties_schema {
-            let excluded_pattern_keys = pattern_properties
-                .iter()
-                .map(|(pattern, _)| pattern.clone())
-                .collect::<BTreeSet<_>>();
-            let ap_key_expr = if ap_key_any_string() {
+            let ap_key_expr = if self.use_shared_additional_key_exclusions(&fixed_literal_keys) {
+                let shared_choice = self.build_shared_additional_key_body_choice_expr(
+                    &fixed_literal_keys,
+                    &format!("{base_name}_ap_key"),
+                );
+
+                if let Some(pattern_terminal) = &pattern_terminal {
+                    self.insert_named_terminal_rule(
+                        format!("{upper_base_name}_AP_SHARED_FILTERED"),
+                        GrammarExpr::Exclude {
+                            expr: Box::new(shared_choice),
+                            exclude: Box::new(pattern_terminal.clone()),
+                        },
+                    )
+                } else {
+                    shared_choice
+                }
+            } else {
                 let mut excluded_ap_exprs = Vec::<GrammarExpr>::new();
                 if let Some(np_terminal) = &np_terminal {
                     excluded_ap_exprs.push(np_terminal.clone());
@@ -11533,18 +9077,6 @@ impl<'a> SchemaCtx<'a> {
                     }
                 };
                 self.insert_named_terminal_rule(format!("{upper_base_name}_AP"), ap_body)
-            } else if self.per_object_ap_keys_enabled() {
-                self.build_per_object_additional_key_body_expr(
-                    &fixed_literal_keys,
-                    &excluded_pattern_keys,
-                    &format!("{upper_base_name}_AP"),
-                )
-            } else {
-                self.build_shared_additional_key_body_choice_expr(
-                    &fixed_literal_keys,
-                    &excluded_pattern_keys,
-                    &format!("{base_name}_ap_key"),
-                )?
             };
 
             let wrapped_ap_key = wrap_key_colon_terminal(ap_key_expr);
@@ -11983,7 +9515,6 @@ fn collect_grammar_visible_refs(
                     out.insert(name.clone());
                 }
             }
-            GrammarExpr::Grouped(inner) => walk(inner, terminal_names, out),
             GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
                 for p in parts {
                     walk(p, terminal_names, out);
@@ -12002,11 +9533,6 @@ fn collect_grammar_visible_refs(
                     walk(item_expr, terminal_names, out);
                 }
                 walk(separator, terminal_names, out);
-            }
-            GrammarExpr::ExprNFA(expr_nfa) => {
-                for symbol in &expr_nfa.symbols {
-                    walk(symbol, terminal_names, out);
-                }
             }
             GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
@@ -12076,582 +9602,8 @@ fn repeat_expr(item: GrammarExpr, min: usize, max: Option<usize>) -> GrammarExpr
 
 #[cfg(test)]
 mod tests {
-    use super::json_schema_uri_mode;
-    use super::json_literal_string_merge_config;
-    use super::common_outer_anchor_pattern;
-    use super::decoded_regex_matches_search;
-    use super::decoded_regex_fullmatch_expr;
-    use super::integer_multiple_expr;
-    use super::json_uri_merge_config;
-    use super::json_string_merge_config;
-    use super::literal_alternation_search_literals;
-    use super::per_object_ap_keys_enabled_for_plan;
-    use super::pattern_all_branches_anchored;
-    use super::promote_literal_choices_enabled;
-    use super::JsonSchemaUriMode;
-    use super::SchemaCtx;
-    use super::SharedAdditionalKeyPlan;
     use super::schema_to_named_grammar;
-    use super::strip_branch_outer_anchors;
-    use super::string_value_body_regex;
-    use super::uri_quote_merge_warning_needed;
-    use super::wrap_string_value_expr_parts;
-    use crate::automata::lexer::compile::build_regex;
-    use crate::automata::lexer::regex::parse_regex;
-    use crate::grammar::ast::lower;
-    use crate::GlrMaskError;
-    use crate::grammar::ast::GrammarExpr;
-    use crate::grammar::glrm::to_glrm;
-    use crate::dump_json_schema_grammar_glrm;
-    use serde_json::{json, Value};
-    use std::{env, ffi::OsString, sync::Mutex};
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    struct EnvVarGuard {
-        key: &'static str,
-        original: Option<OsString>,
-    }
-
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let original = env::var_os(key);
-            unsafe {
-                env::set_var(key, value);
-            }
-            Self { key, original }
-        }
-
-        fn unset(key: &'static str) -> Self {
-            let original = env::var_os(key);
-            unsafe {
-                env::remove_var(key);
-            }
-            Self { key, original }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            match &self.original {
-                Some(value) => unsafe {
-                    env::set_var(self.key, value);
-                },
-                None => unsafe {
-                    env::remove_var(self.key);
-                },
-            }
-        }
-    }
-
-    fn dump_glrm(schema: serde_json::Value) -> String {
-        let named = schema_to_named_grammar(&schema).unwrap();
-        to_glrm(&named)
-    }
-
-    fn expr_contains_expr_nfa(expr: &GrammarExpr) -> bool {
-        match expr {
-            GrammarExpr::Grouped(inner) => expr_contains_expr_nfa(inner),
-            GrammarExpr::ExprNFA(_) => true,
-            GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
-                parts.iter().any(expr_contains_expr_nfa)
-            }
-            GrammarExpr::Optional(inner)
-            | GrammarExpr::Repeat(inner)
-            | GrammarExpr::RepeatOne(inner) => expr_contains_expr_nfa(inner),
-            GrammarExpr::RepeatRange { expr, .. } => expr_contains_expr_nfa(expr),
-            GrammarExpr::Exclude { expr, exclude } | GrammarExpr::Intersect { expr, intersect: exclude } => {
-                expr_contains_expr_nfa(expr) || expr_contains_expr_nfa(exclude)
-            }
-            GrammarExpr::SeparatedSequence { items, separator, .. } => {
-                items.iter().any(|(item, _)| expr_contains_expr_nfa(item))
-                    || expr_contains_expr_nfa(separator)
-            }
-            GrammarExpr::Ref(_)
-            | GrammarExpr::Literal(_)
-            | GrammarExpr::Epsilon
-            | GrammarExpr::CharClass { .. }
-            | GrammarExpr::RawRegex(_)
-            | GrammarExpr::AnyByte => false,
-        }
-    }
-
-    fn grammar_contains_expr_nfa(schema: serde_json::Value) -> bool {
-        let named = schema_to_named_grammar(&schema).unwrap();
-        named.rules
-            .iter()
-            .any(|rule| expr_contains_expr_nfa(&rule.expr))
-    }
-
-    #[test]
-    fn schema_build_budget_guard_returns_schema_too_large() {
-        let schema = json!({});
-        let mut ctx = SchemaCtx::new(&schema);
-        ctx.schema_build_limit = 1;
-
-        assert!(ctx.increment_schema_build_count().is_ok());
-        let err = ctx.increment_schema_build_count().unwrap_err();
-        assert!(matches!(err, crate::GlrMaskError::GrammarParse(message) if message == "schema too large"));
-    }
-
-    #[test]
-    fn literal_alternation_fast_path_matches_o48423_pattern() {
-        let pattern = "Red|Blue|Yellow|Gold|Silver|Crystal|Ruby|Sapphire|Emerald|FireRed|LeafGreen|Diamond|Pearl|Platinum|HeartGold|SoulSilver|Black|White|Black 2|White 2|X|Y|Omega Ruby|Alpha Sapphire|Sun|Moon|Ultra Sun|Ultra Moon|Let's Go Pikachu|Let's Go Eevee";
-
-        assert!(decoded_regex_matches_search(pattern, "Pokemon Red Version"));
-        assert!(decoded_regex_matches_search(pattern, "Pokemon Black 2 Version"));
-        assert!(decoded_regex_matches_search(pattern, "Pokemon Let's Go Eevee Save Data"));
-        assert!(!decoded_regex_matches_search(pattern, "Pokemon Scarlet Version"));
-    }
-
-    #[test]
-    fn literal_alternation_fast_path_rejects_non_literal_patterns() {
-        for pattern in ["^foo$", "foo.*bar", "[abc]", r"foo\d+", "(foo|bar)"] {
-            assert!(literal_alternation_search_literals(pattern).is_none(), "pattern should fall back: {pattern}");
-        }
-
-        assert!(decoded_regex_matches_search("^foo$", "foo"));
-        assert!(decoded_regex_matches_search("foo.*bar", "xxfoobazbaryy"));
-        assert!(decoded_regex_matches_search("[abc]", "zzayy"));
-        assert!(decoded_regex_matches_search(r"foo\d+", "prefix foo123 suffix"));
-        assert!(decoded_regex_matches_search("(foo|bar)", "prefix bar suffix"));
-    }
-
-    #[test]
-    fn nested_if_then_reports_unimplemented_keys() {
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "payload": {
-                    "type": "object",
-                    "if": {
-                        "properties": {
-                            "kind": { "const": "x" }
-                        }
-                    },
-                    "then": {
-                        "required": ["value"]
-                    }
-                }
-            }
-        });
-
-        let err = schema_to_named_grammar(&schema).unwrap_err();
-        assert!(matches!(err, crate::GlrMaskError::GrammarParse(message) if message == "Unimplemented keys: [\"if\", \"then\"]"));
-    }
-
-    #[test]
-    fn local_ref_if_then_reports_unimplemented_keys() {
-        let schema = json!({
-            "$ref": "#/$defs/branch",
-            "$defs": {
-                "branch": {
-                    "type": "object",
-                    "if": {
-                        "properties": {
-                            "kind": { "const": "x" }
-                        }
-                    },
-                    "then": {
-                        "required": ["value"]
-                    }
-                }
-            }
-        });
-
-        let err = schema_to_named_grammar(&schema).unwrap_err();
-        assert!(matches!(err, crate::GlrMaskError::GrammarParse(message) if message == "Unimplemented keys: [\"if\", \"then\"]"));
-    }
-
-    fn find_rule_line_with_prefix<'a>(glrm: &'a str, rule_prefix: &str) -> &'a str {
-        glrm.lines()
-            .find(|line| line.starts_with(&format!("t {rule_prefix}")))
-            .unwrap_or_else(|| panic!("missing rule prefix {rule_prefix} in grammar:\n{glrm}"))
-    }
-
-    #[test]
-    fn anyof_object_variants_lower_through_expr_nfa() {
-        let schema = json!({
-            "anyOf": [
-                {
-                    "type": "object",
-                    "properties": {
-                        "kind": {"const": "left"},
-                        "a": {"type": "string"}
-                    },
-                    "required": ["kind"],
-                    "additionalProperties": {"type": "number"}
-                },
-                {
-                    "type": "object",
-                    "properties": {
-                        "kind": {"const": "right"},
-                        "b": {"type": "boolean"}
-                    },
-                    "required": ["kind"],
-                    "additionalProperties": {"type": "number"}
-                }
-            ]
-        });
-
-        assert!(grammar_contains_expr_nfa(schema));
-    }
-
-    #[test]
-    fn anyof_object_expr_nfa_open_variants_lower_without_nested_excludes() {
-        let schema = json!({
-            "definitions": {
-                "organization": {
-                    "type": "object",
-                    "properties": {
-                        "email": {"type": "string"},
-                        "links": {"type": "array", "items": {"type": "string"}},
-                        "name": {"type": "string"},
-                        "role": {"type": "string"},
-                        "sort": {"type": "string"}
-                    },
-                    "required": ["name"]
-                },
-                "person": {
-                    "type": "object",
-                    "properties": {
-                        "description": {"type": "string"},
-                        "email": {"type": "string"},
-                        "links": {"type": "array", "items": {"type": "string"}},
-                        "name": {"type": "string"},
-                        "role": {"type": "string"},
-                        "sort": {"type": "string"},
-                        "thumbnail": {"type": "string"}
-                    },
-                    "required": ["name"]
-                }
-            },
-            "anyOf": [
-                {"$ref": "#/definitions/person"},
-                {"$ref": "#/definitions/organization"}
-            ]
-        });
-
-        let named = schema_to_named_grammar(&schema).unwrap();
-        assert!(
-            !named.rules.iter().any(|rule| expr_contains_expr_nfa(&rule.expr)),
-            "{named:#?}"
-        );
-        lower(&named).unwrap();
-    }
-
-    #[test]
-    fn anyof_open_object_dominance_does_not_reduce_constrained_additional_properties() {
-        let schema = json!({
-            "anyOf": [
-                {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "thumbnail": {"type": "string"}
-                    },
-                    "required": ["name"],
-                    "additionalProperties": {"type": "number"}
-                },
-                {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"}
-                    },
-                    "required": ["name"],
-                    "additionalProperties": {"type": "number"}
-                }
-            ]
-        });
-
-        let named = schema_to_named_grammar(&schema).unwrap();
-        assert!(named.rules.iter().any(|rule| expr_contains_expr_nfa(&rule.expr)));
-        lower(&named).unwrap();
-    }
-
-    #[test]
-    fn anyof_object_expr_nfa_fixed_keys_use_split_key_colon_symbols() {
-        let schema = json!({
-            "anyOf": [
-                {
-                    "type": "object",
-                    "properties": {
-                        "thumbnail": {"type": "string"}
-                    },
-                    "additionalProperties": false
-                },
-                {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"}
-                    },
-                    "additionalProperties": false
-                }
-            ]
-        });
-
-        let glrm = dump_glrm(schema);
-        assert!(glrm.contains("fa obj_anyof_fa_0_body"), "{glrm}");
-        assert!(
-            glrm.contains("-- \"\\\"\" \"thumbnail\\\"\" \": \" -->"),
-            "{glrm}"
-        );
-        assert!(
-            !glrm.contains("-- \"\\\"thumbnail\\\": \" -->"),
-            "{glrm}"
-        );
-    }
-
-    #[test]
-    fn anyof_object_expr_nfa_uses_one_ap_terminal_with_sibling_literals() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _promote = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES", "0");
-
-        let schema = json!({
-            "anyOf": [
-                {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "thumbnail": {"type": "string"}
-                    },
-                    "additionalProperties": {"type": "number"}
-                },
-                {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"}
-                    },
-                    "additionalProperties": {"type": "number"}
-                }
-            ]
-        });
-
-        let glrm = dump_glrm(schema);
-        assert!(glrm.contains("t AP_SHARED_KEY ::="), "{glrm}");
-        assert!(
-            glrm.contains("-- AP_SHARED_KEY -->")
-                && glrm.contains("-- AP_SHARED_LITERAL_KEY_SET - (\"name\\\"\") -->"),
-            "{glrm}"
-        );
-        assert!(!glrm.contains("obj_anyof_fa_0_ap_key_v1"), "{glrm}");
-        assert_eq!(glrm.matches("t AP_SHARED_KEY ::=").count(), 1, "{glrm}");
-    }
-
-    #[test]
-    fn anyof_object_expr_nfa_person_org_shape_uses_shared_ap_key_paths() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _promote = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES", "0");
-
-        let schema = json!({
-            "anyOf": [
-                {
-                    "type": "object",
-                    "properties": {
-                        "email": {"type": "string"},
-                        "name": {"type": "string"},
-                        "sameAs": {
-                            "items": {"type": "string"},
-                            "type": "array"
-                        }
-                    },
-                    "required": ["name"],
-                    "additionalProperties": {"type": "number"}
-                },
-                {
-                    "type": "object",
-                    "properties": {
-                        "additionalName": {"type": "string"},
-                        "email": {"type": "string"},
-                        "familyName": {"type": "string"},
-                        "givenName": {"type": "string"},
-                        "name": {"type": "string"},
-                        "sameAs": {
-                            "items": {"type": "string"},
-                            "type": "array"
-                        }
-                    },
-                    "required": ["name"],
-                    "additionalProperties": {"type": "number"}
-                }
-            ]
-        });
-
-        let glrm = dump_glrm(schema.clone());
-        assert!(glrm.contains("fa obj_anyof_fa_0_body"), "{glrm}");
-    assert!(glrm.contains("-- AP_SHARED_KEY -->"), "{glrm}");
-        assert!(!glrm.contains("obj_anyof_fa_0_ap_key_v0"), "{glrm}");
-        assert!(!glrm.contains("obj_anyof_fa_0_ap_key_v1"), "{glrm}");
-
-        let named = schema_to_named_grammar(&schema).unwrap();
-        lower(&named).unwrap();
-    }
-
-    #[test]
-    fn repeated_anyof_object_expr_nfa_sites_share_generated_fa() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _promote = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES", "0");
-
-        let schema = json!({
-            "definitions": {
-                "person": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "thumbnail": {"type": "string"}
-                    },
-                    "additionalProperties": {"type": "number"}
-                },
-                "organization": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"}
-                    },
-                    "additionalProperties": {"type": "number"}
-                }
-            },
-            "type": "object",
-            "properties": {
-                "attributions": {
-                    "type": "array",
-                    "items": {
-                        "anyOf": [
-                            {"$ref": "#/definitions/person"},
-                            {"$ref": "#/definitions/organization"}
-                        ]
-                    }
-                },
-                "copyright_holder": {
-                    "anyOf": [
-                        {"$ref": "#/definitions/person"},
-                        {"$ref": "#/definitions/organization"}
-                    ]
-                }
-            }
-        });
-
-        let glrm = dump_glrm(schema);
-        assert_eq!(glrm.matches("fa obj_anyof_fa_").count(), 1, "{glrm}");
-        assert_eq!(glrm.matches("t AP_SHARED_KEY ::=").count(), 1, "{glrm}");
-        assert!(glrm.contains("nt obj_anyof_fa_"), "{glrm}");
-    }
-
-    #[test]
-    fn coerced_oneof_object_variants_use_expr_nfa_like_anyof() {
-        let schema = json!({
-            "x-guidance": {"coerce_one_of": true},
-            "oneOf": [
-                {
-                    "type": "object",
-                    "properties": {
-                        "kind": {"const": "left"},
-                        "a": {"type": "string"}
-                    },
-                    "required": ["kind"],
-                    "additionalProperties": {"type": "number"}
-                },
-                {
-                    "type": "object",
-                    "properties": {
-                        "kind": {"const": "right"},
-                        "b": {"type": "boolean"}
-                    },
-                    "required": ["kind"],
-                    "additionalProperties": {"type": "number"}
-                }
-            ]
-        });
-
-        let named = schema_to_named_grammar(&schema).unwrap();
-        assert!(named.rules.iter().any(|rule| expr_contains_expr_nfa(&rule.expr)));
-        lower(&named).unwrap();
-    }
-
-    #[test]
-    fn anyof_object_expr_nfa_supports_pattern_properties_tail() {
-        let schema = json!({
-            "anyOf": [
-                {
-                    "type": "object",
-                    "properties": {
-                        "kind": {"const": "left"},
-                        "a": {"type": "string"}
-                    },
-                    "patternProperties": {
-                        "^x_": {"type": "string"}
-                    },
-                    "required": ["kind"],
-                    "additionalProperties": {"type": "number"}
-                },
-                {
-                    "type": "object",
-                    "properties": {
-                        "kind": {"const": "right"},
-                        "b": {"type": "boolean"}
-                    },
-                    "patternProperties": {
-                        "^y_": {"type": "boolean"}
-                    },
-                    "required": ["kind"],
-                    "additionalProperties": {"type": "number"}
-                }
-            ]
-        });
-
-        let named = schema_to_named_grammar(&schema).unwrap();
-        assert!(named.rules.iter().any(|rule| expr_contains_expr_nfa(&rule.expr)));
-        lower(&named).unwrap();
-    }
-
-    #[test]
-    fn match_all_pattern_properties_use_left_recursive_pair_list() {
-        let schema = json!({
-            "type": "object",
-            "patternProperties": {
-                ".*": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"}
-                    },
-                    "required": ["name"],
-                    "additionalProperties": false
-                }
-            }
-        });
-
-        let glrm = dump_glrm(schema.clone());
-        assert!(glrm.contains("nt obj_pairs_"), "{glrm}");
-        assert!(glrm.contains("_list ::= obj_pairs_"), "{glrm}");
-        let start_line = glrm
-            .lines()
-            .find(|line| line.starts_with("nt start ::="))
-            .unwrap();
-        assert!(!start_line.contains("\", \" ~ ("), "{glrm}");
-        lower(&schema_to_named_grammar(&schema).unwrap()).unwrap();
-    }
-
-    #[test]
-    fn anyof_object_expr_nfa_keeps_non_object_options() {
-        let schema = json!({
-            "anyOf": [
-                {
-                    "type": "object",
-                    "properties": {"a": {"type": "string"}},
-                    "additionalProperties": false
-                },
-                {
-                    "type": "object",
-                    "properties": {"b": {"type": "string"}},
-                    "additionalProperties": false
-                },
-                {"type": "string"}
-            ]
-        });
-
-        let glrm = dump_glrm(schema);
-        assert!(glrm.contains("fa obj_anyof_fa_0_body"), "{glrm}");
-        assert!(glrm.contains("json_string"), "{glrm}");
-    }
+    use serde_json::json;
 
     #[test]
     fn duplicate_self_ref_anyof_closed_object_compiles() {
@@ -12675,784 +9627,6 @@ mod tests {
         });
 
         assert!(schema_to_named_grammar(&schema).is_ok());
-    }
-
-    #[test]
-    fn enum_string_values_with_same_membership_share_terminal() {
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "left": { "enum": ["a", "b"] },
-                "right": { "enum": ["a", "b"] }
-            },
-            "required": ["left", "right"],
-            "additionalProperties": false
-        });
-
-        let glrm = dump_glrm(schema);
-
-        assert!(glrm.contains("t JSON_ENUM_STRING_0 ::= \"a\\\"\" | \"b\\\"\";"), "{glrm}");
-        assert_eq!(glrm.matches("t JSON_ENUM_STRING_").count(), 1, "{glrm}");
-        assert!(!glrm.contains("\"a\\\"\" | \"b\\\"\" |"), "{glrm}");
-    }
-
-    #[test]
-    fn shared_additional_properties_key_exclusions_are_on_by_default() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _promote = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES", "0");
-
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "left": {
-                    "type": "object",
-                    "properties": {"a": {"type": "string"}},
-                    "additionalProperties": {"type": "string"}
-                },
-                "right": {
-                    "type": "object",
-                    "properties": {"b": {"type": "string"}},
-                    "additionalProperties": {"type": "string"}
-                }
-            },
-            "additionalProperties": false
-        });
-
-        let glrm = dump_glrm(schema);
-        assert!(glrm.contains("t AP_SHARED_KEY ::= "), "{glrm}");
-        assert!(glrm.contains("AP_SHARED_LITERAL_KEY_0 ::= \"a\\\"\""), "{glrm}");
-        assert!(glrm.contains("AP_SHARED_LITERAL_KEY_1 ::= \"b\\\"\""), "{glrm}");
-        assert!(glrm.contains("AP_SHARED_LITERAL_KEY_2 ::= \"left\\\"\""), "{glrm}");
-        assert!(glrm.contains("AP_SHARED_LITERAL_KEY_3 ::= \"right\\\"\""), "{glrm}");
-    }
-
-    #[test]
-    fn shared_additional_properties_key_exclusions_are_ubiquitous() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _shared = EnvVarGuard::set("GLRMASK_AP_SHARED_EXCLUSIONS", "0");
-        let _promote = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES", "0");
-
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "left": {
-                    "type": "object",
-                    "properties": {"a": {"type": "string"}},
-                    "additionalProperties": {"type": "string"}
-                },
-                "right": {
-                    "type": "object",
-                    "properties": {"b": {"type": "string"}},
-                    "additionalProperties": {"type": "string"}
-                }
-            },
-            "additionalProperties": false
-        });
-
-        let glrm = dump_glrm(schema);
-        assert!(glrm.contains("t AP_SHARED_KEY ::= "), "{glrm}");
-    }
-
-    #[test]
-    fn shared_additional_properties_key_excludes_global_patterns_and_adds_back_siblings() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _promote = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES", "0");
-
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "first": {
-                    "type": "object",
-                    "properties": {
-                        "a": {"type": "string"},
-                        "b": {"type": "string"}
-                    },
-                    "additionalProperties": {"type": "string"}
-                },
-                "second": {
-                    "type": "object",
-                    "properties": {
-                        "b": {"type": "string"}
-                    },
-                    "patternProperties": {
-                        "^x_": {"type": "number"}
-                    },
-                    "additionalProperties": {"type": "string"}
-                }
-            },
-            "additionalProperties": false
-        });
-
-        let glrm = dump_glrm(schema);
-        assert!(glrm.contains("t AP_SHARED_KEY ::="), "{glrm}");
-        assert!(glrm.contains("AP_SHARED_PATTERN_KEY_0"), "{glrm}");
-        assert!(glrm.contains(" - AP_SHARED_PATTERN_KEY_0"), "{glrm}");
-        assert!(
-            glrm.contains("AP_SHARED_LITERAL_KEY_SET - (\"a\\\"\" | \"b\\\"\")"),
-            "{glrm}"
-        );
-        assert!(
-            glrm.contains(
-                "AP_SHARED_PATTERN_KEY_FILTERED_0 ::= AP_SHARED_PATTERN_KEY_0_5 - AP_SHARED_LITERAL_KEY_0 - AP_SHARED_LITERAL_KEY_1"
-            ),
-            "{glrm}"
-        );
-        assert!(!glrm.contains("AP_SHARED_KEY | \"a\\\"\""), "{glrm}");
-    }
-
-    #[test]
-    fn shared_additional_properties_key_exclusions_are_not_thresholded() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _promote = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES", "0");
-
-        let mut properties = serde_json::Map::new();
-        properties.insert(
-            "target".into(),
-            json!({
-                "type": "object",
-                "properties": {"target_key": {"type": "string"}},
-                "additionalProperties": {"type": "string"}
-            }),
-        );
-
-        for index in 0..40 {
-            properties.insert(
-                format!("branch_{index}"),
-                json!({
-                    "type": "object",
-                    "properties": {
-                        format!("shared_key_{index}"): {"type": "string"}
-                    },
-                    "additionalProperties": {"type": "string"}
-                }),
-            );
-        }
-
-        let schema = serde_json::Value::Object(serde_json::Map::from_iter([
-            ("type".into(), json!("object")),
-            ("properties".into(), serde_json::Value::Object(properties)),
-            ("additionalProperties".into(), json!(false)),
-        ]));
-
-        let _shared = EnvVarGuard::unset("GLRMASK_AP_SHARED_EXCLUSIONS");
-        let default_glrm = dump_glrm(schema.clone());
-        assert!(default_glrm.contains("t AP_SHARED_KEY ::= "), "{default_glrm}");
-
-        let _shared = EnvVarGuard::set("GLRMASK_AP_SHARED_EXCLUSIONS", "1");
-        let forced_glrm = dump_glrm(schema);
-        assert!(forced_glrm.contains("t AP_SHARED_KEY ::= "), "{forced_glrm}");
-    }
-
-    #[test]
-    fn per_object_ap_keys_override_forces_true_for_small_plan() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _enabled = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PER_OBJECT_AP_KEYS", "1");
-        let _threshold = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PER_OBJECT_AP_KEY_THRESHOLD", "1000");
-
-        let plan = SharedAdditionalKeyPlan::default();
-
-        assert!(per_object_ap_keys_enabled_for_plan(&plan));
-    }
-
-    #[test]
-    fn per_object_ap_keys_override_forces_false_for_large_plan() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _enabled = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PER_OBJECT_AP_KEYS", "0");
-        let _threshold = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PER_OBJECT_AP_KEY_THRESHOLD", "1");
-
-        let plan = SharedAdditionalKeyPlan {
-            literal_keys: (0..32).map(|idx| format!("k{idx}")).collect(),
-            pattern_keys: [String::from("^p")].into_iter().collect(),
-            ..Default::default()
-        };
-
-        assert!(!per_object_ap_keys_enabled_for_plan(&plan));
-    }
-
-    #[test]
-    fn per_object_ap_keys_auto_enables_at_threshold() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _enabled = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_PER_OBJECT_AP_KEYS");
-        let _threshold = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PER_OBJECT_AP_KEY_THRESHOLD", "17");
-
-        let plan = SharedAdditionalKeyPlan {
-            literal_keys: (0..9).map(|idx| format!("k{idx}")).collect(),
-            pattern_keys: [String::from("^p")].into_iter().collect(),
-            ..Default::default()
-        };
-
-        assert!(per_object_ap_keys_enabled_for_plan(&plan));
-    }
-
-    #[test]
-    fn per_object_ap_keys_auto_stays_off_below_threshold() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _enabled = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_PER_OBJECT_AP_KEYS");
-        let _threshold = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PER_OBJECT_AP_KEY_THRESHOLD", "18");
-
-        let plan = SharedAdditionalKeyPlan {
-            literal_keys: (0..9).map(|idx| format!("k{idx}")).collect(),
-            pattern_keys: [String::from("^p")].into_iter().collect(),
-            ..Default::default()
-        };
-
-        assert!(!per_object_ap_keys_enabled_for_plan(&plan));
-    }
-
-    #[test]
-    fn shared_additional_properties_promote_literal_choices_by_default() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _promote = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES");
-
-        assert!(promote_literal_choices_enabled());
-    }
-
-    #[test]
-    fn shared_additional_properties_can_disable_literal_choice_promotion() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _promote = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES", "0");
-
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "first": {
-                    "type": "object",
-                    "properties": {
-                        "a": {"type": "string"},
-                        "b": {"type": "string"}
-                    },
-                    "additionalProperties": {"type": "string"}
-                },
-                "second": {
-                    "type": "object",
-                    "properties": {
-                        "b": {"type": "string"}
-                    },
-                    "patternProperties": {
-                        "^x_": {"type": "number"}
-                    },
-                    "additionalProperties": {"type": "string"}
-                }
-            },
-            "additionalProperties": false
-        });
-
-        let glrm = dump_json_schema_grammar_glrm(&schema.to_string()).unwrap();
-        assert!(!glrm.contains("__GLRMASK_LITERAL_CHOICE_"), "{glrm}");
-        assert!(glrm.contains("nt AP_SHARED_LITERAL_KEY_SET ::= "), "{glrm}");
-    }
-
-    #[test]
-    fn enum_number_values_are_grouped_separately_from_strings() {
-        let schema = json!({
-            "anyOf": [
-                { "enum": [1, 2, "1", "2"] },
-                { "enum": [1, 2, "1", "2"] }
-            ]
-        });
-
-        let glrm = dump_glrm(schema);
-
-        assert!(glrm.contains("t JSON_ENUM_NUMBER_0 ::= \"1\" | \"2\";"), "{glrm}");
-        assert!(glrm.contains("t JSON_ENUM_STRING_0 ::= \"1\\\"\" | \"2\\\"\";"), "{glrm}");
-    }
-
-    #[test]
-    fn unconstrained_string_values_share_literal_and_pattern_exclusions() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _compat = EnvVarGuard::unset("GLRMASK_STRING_VALUE_EXCLUSIONS_COMPAT");
-        let _shared = EnvVarGuard::set("GLRMASK_GLOBAL_SHARED_STRING_VALUE_EXCLUSIONS", "1");
-        let _limit = EnvVarGuard::unset("GLRMASK_SHARED_STRING_VALUE_EXCLUSION_LIMIT");
-
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "plain": {"type": "string"},
-                "literal": {"const": "ready"},
-                "choice": {"enum": ["open", "closed"]},
-                "patterned": {"type": "string", "pattern": "^x_"}
-            },
-            "additionalProperties": false
-        });
-
-        let glrm = dump_glrm(schema);
-
-        assert!(glrm.contains("t STRING_SHARED_VALUE ::="), "{glrm}");
-        assert!(glrm.contains("STRING_SHARED_LITERAL_VALUE"), "{glrm}");
-        assert!(glrm.contains("STRING_SHARED_PATTERN_VALUE"), "{glrm}");
-        assert!(glrm.contains(" - \"ready\""), "{glrm}");
-        assert!(glrm.contains(" - STRING_SHARED_PATTERN_VALUE"), "{glrm}");
-        assert!(
-            glrm.contains("STRING_SHARED_VALUE | \"ready\\\"\"")
-                && glrm.contains("STRING_SHARED_PATTERN_VALUE"),
-            "{glrm}"
-        );
-    }
-
-    #[test]
-    fn shared_string_value_exclusion_limit_caps_global_plan() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _compat = EnvVarGuard::unset("GLRMASK_STRING_VALUE_EXCLUSIONS_COMPAT");
-        let _shared = EnvVarGuard::set("GLRMASK_GLOBAL_SHARED_STRING_VALUE_EXCLUSIONS", "1");
-        let _limit = EnvVarGuard::set("GLRMASK_SHARED_STRING_VALUE_EXCLUSION_LIMIT", "2");
-
-        let schema = json!({
-            "anyOf": [
-                {"type": "string"},
-                {"const": "a"},
-                {"const": "b"},
-                {"const": "c"}
-            ]
-        });
-
-        let glrm = dump_glrm(schema);
-
-        assert!(!glrm.contains("t STRING_SHARED_VALUE ::="), "{glrm}");
-    }
-
-    #[test]
-    fn abdcffb6b_string_value_compat_restores_capped_global_mode() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _compat = EnvVarGuard::set("GLRMASK_STRING_VALUE_EXCLUSIONS_COMPAT", "abdcffb6b");
-        let _shared = EnvVarGuard::unset("GLRMASK_GLOBAL_SHARED_STRING_VALUE_EXCLUSIONS");
-        let _limit = EnvVarGuard::unset("GLRMASK_SHARED_STRING_VALUE_EXCLUSION_LIMIT");
-
-        let small_schema = json!({
-            "anyOf": [
-                {"type": "string"},
-                {"const": "ready"}
-            ]
-        });
-        let small_glrm = dump_glrm(small_schema);
-        assert!(small_glrm.contains("t STRING_SHARED_VALUE ::="), "{small_glrm}");
-        assert!(
-            !small_glrm.contains("t STRING_ANYOF_VALUE_"),
-            "{small_glrm}"
-        );
-
-        let large_values = (0..33)
-            .map(|idx| json!({"const": format!("value-{idx}")}))
-            .collect::<Vec<_>>();
-        let mut options = Vec::with_capacity(1 + large_values.len());
-        options.push(json!({"type": "string"}));
-        options.extend(large_values);
-        let large_schema = json!({"anyOf": options});
-        let large_glrm = dump_glrm(large_schema);
-
-        assert!(!large_glrm.contains("t STRING_SHARED_VALUE ::="), "{large_glrm}");
-        assert!(!large_glrm.contains("t STRING_ANYOF_VALUE_"), "{large_glrm}");
-    }
-
-    #[test]
-    fn shared_string_value_exclusions_are_enabled_by_default_without_a_threshold() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _compat = EnvVarGuard::unset("GLRMASK_STRING_VALUE_EXCLUSIONS_COMPAT");
-        let _shared = EnvVarGuard::unset("GLRMASK_SHARED_STRING_VALUE_EXCLUSIONS");
-
-        let values = (0..40)
-            .map(|idx| Value::String(format!("value-{idx}")))
-            .collect::<Vec<_>>();
-        let schema = json!({
-            "anyOf": [
-                {"type": "string"},
-                {"enum": values}
-            ]
-        });
-
-        let glrm = dump_glrm(schema);
-
-        assert!(glrm.contains("t STRING_ANYOF_VALUE_"), "{glrm}");
-        assert!(glrm.contains(" - \"value-0\""), "{glrm}");
-    }
-
-    #[test]
-    fn shared_string_value_exclusions_can_be_disabled() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _compat = EnvVarGuard::unset("GLRMASK_STRING_VALUE_EXCLUSIONS_COMPAT");
-        let _shared = EnvVarGuard::set("GLRMASK_SHARED_STRING_VALUE_EXCLUSIONS", "0");
-
-        let values = (0..40)
-            .map(|idx| Value::String(format!("value-{idx}")))
-            .collect::<Vec<_>>();
-        let schema = json!({
-            "anyOf": [
-                {"type": "string"},
-                {"enum": values}
-            ]
-        });
-
-        let glrm = dump_glrm(schema);
-
-        assert!(!glrm.contains("t STRING_ANYOF_VALUE_"), "{glrm}");
-    }
-
-    #[test]
-    fn json_string_merge_defaults_preserve_split_open_and_merged_close() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _string_open = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_OPEN");
-        let _string_close = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_CLOSE");
-        let _literal_open = EnvVarGuard::unset("GLRMASK_JSON_LITERAL_STRING_MERGE_OPEN");
-        let _literal_close = EnvVarGuard::unset("GLRMASK_JSON_LITERAL_STRING_MERGE_CLOSE");
-        let _pattern_open = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_STRING_MERGE_OPEN");
-        let _pattern_close = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_STRING_MERGE_CLOSE");
-
-        let default_cfg = json_string_merge_config(false);
-        let literal_cfg = json_literal_string_merge_config();
-        let pattern_cfg = json_string_merge_config(true);
-        assert_eq!(default_cfg.merge_open, false);
-        assert_eq!(default_cfg.merge_close, true);
-        assert_eq!(literal_cfg, default_cfg);
-        assert_eq!(pattern_cfg.merge_open, true);
-        assert_eq!(pattern_cfg.merge_close, false);
-        assert_eq!(string_value_body_regex("a+", false), "(?:a+)\"");
-        assert_eq!(string_value_body_regex("a+", true), "\"(?:a+)");
-    }
-
-    #[test]
-    fn outer_parenthesized_anchors_count_as_branch_anchors() {
-        assert_eq!(
-            strip_branch_outer_anchors(r"(^(?:\S+\s+){0,19}\S+$)"),
-            (true, true, r"(?:\S+\s+){0,19}\S+")
-        );
-        assert!(pattern_all_branches_anchored(r"^$|(^(?:\S+\s+){0,19}\S+$)"));
-        assert_eq!(
-            common_outer_anchor_pattern(r"^$|(^(?:\S+\s+){0,19}\S+$)"),
-            Some((true, true, r"(?:|(?:\S+\s+){0,19}\S+)".to_string()))
-        );
-    }
-
-    #[test]
-    fn integer_power_of_ten_multiple_uses_compact_expression() {
-        let regex = build_regex(&[integer_multiple_expr(10, true)]);
-        let accepts = |text: &str| {
-            let mut state = 0u32;
-            for &byte in text.as_bytes() {
-                let Some(next) = regex.step(state, byte) else {
-                    return false;
-                };
-                state = next;
-            }
-            regex.dfa.finalizers(state).contains(0)
-        };
-
-        assert!(accepts("0"));
-        assert!(accepts("10"));
-        assert!(accepts("-120.000"));
-        assert!(!accepts("12"));
-        assert!(!accepts("10.5"));
-        assert!(regex.num_states() < 20);
-    }
-
-    #[test]
-    fn decoded_regex_fullmatch_expr_preserves_multi_digit_separator_language() {
-        let regex = build_regex(&[decoded_regex_fullmatch_expr(r"[0-9]+x[0-9]+")]);
-        let accepts = |text: &str| {
-            let mut state = 0u32;
-            for &byte in text.as_bytes() {
-                let Some(next) = regex.step(state, byte) else {
-                    return false;
-                };
-                state = next;
-            }
-            regex.dfa.finalizers(state).contains(0)
-        };
-
-        assert!(accepts("1x2"));
-        assert!(accepts("1920x1080"));
-        assert!(!accepts("1x23x"));
-        assert!(!accepts("1920x108x0"));
-    }
-
-    #[test]
-    fn decoded_regex_fullmatch_expr_accepts_utf8_under_negated_char_class() {
-        let regex = build_regex(&[decoded_regex_fullmatch_expr(r"^[^&]*$")]);
-        let accepts_bytes = |bytes: &[u8]| {
-            let mut state = 0u32;
-            for &byte in bytes {
-                let Some(next) = regex.step(state, byte) else {
-                    return false;
-                };
-                state = next;
-            }
-            regex.dfa.finalizers(state).contains(0)
-        };
-        let accepts = |text: &str| accepts_bytes(text.as_bytes());
-
-        assert!(accepts("и"));
-        assert!(accepts("ивання"));
-        assert!(accepts(" веществ"));
-        assert!(accepts(" balık"));
-        assert!(accepts("홈"));
-        assert!(accepts("工程"));
-        assert!(!accepts_bytes(b"\x80"));
-        assert!(!accepts_bytes(b"\xbb"));
-        assert!(!accepts_bytes(b"&\xbb"));
-        assert!(!accepts("a&b"));
-    }
-
-    #[test]
-    fn parse_regex_utf8_negated_ascii_class_accepts_utf8() {
-        let regex = build_regex(&[parse_regex(r"[^&]*", true)]);
-        let accepts = |text: &str| {
-            let mut state = 0u32;
-            for &byte in text.as_bytes() {
-                let Some(next) = regex.step(state, byte) else {
-                    return false;
-                };
-                state = next;
-            }
-            regex.dfa.finalizers(state).contains(0)
-        };
-
-        assert!(accepts("и"));
-        assert!(accepts("ивання"));
-        assert!(accepts("홈"));
-        assert!(!accepts("a&b"));
-    }
-
-    #[test]
-    fn decoded_regex_fullmatch_expr_accepts_positive_high_byte_literal() {
-        let regex = build_regex(&[decoded_regex_fullmatch_expr("ивання")]);
-        let accepts = |text: &str| {
-            let mut state = 0u32;
-            for &byte in text.as_bytes() {
-                let Some(next) = regex.step(state, byte) else {
-                    return false;
-                };
-                state = next;
-            }
-            regex.dfa.finalizers(state).contains(0)
-        };
-
-        assert!(accepts("ивання"));
-        assert!(!accepts("Ð¸Ð²Ð°Ð½Ð½Ñ"));
-        assert!(!accepts("ivannya"));
-    }
-
-    #[test]
-    fn decoded_regex_fullmatch_expr_accepts_positive_high_byte_class() {
-        let regex = build_regex(&[decoded_regex_fullmatch_expr(r"^[\xD0-\xD1][\x80-\xBF]$")]);
-        let accepts = |text: &str| {
-            let mut state = 0u32;
-            for &byte in text.as_bytes() {
-                let Some(next) = regex.step(state, byte) else {
-                    return false;
-                };
-                state = next;
-            }
-            regex.dfa.finalizers(state).contains(0)
-        };
-
-        assert!(accepts("и"));
-        assert!(!accepts("ивання"));
-        assert!(!accepts("hello"));
-        assert!(!accepts("&"));
-    }
-
-    #[test]
-    fn decoded_regex_fullmatch_expr_dot_rejects_lone_continuation_byte() {
-        let regex = build_regex(&[decoded_regex_fullmatch_expr(r"^.*\.md$")]);
-        let accepts_bytes = |bytes: &[u8]| {
-            let mut state = 0u32;
-            for &byte in bytes {
-                let Some(next) = regex.step(state, byte) else {
-                    return false;
-                };
-                state = next;
-            }
-            regex.dfa.finalizers(state).contains(0)
-        };
-
-        assert!(accepts_bytes("и.md".as_bytes()));
-        assert!(accepts_bytes("Task description.md".as_bytes()));
-        assert!(!accepts_bytes(b"\xbb.md"));
-        assert!(!accepts_bytes(b"Task description\xbb.md"));
-    }
-
-    #[test]
-    fn string_merge_env_layers_resolve_pattern_and_literal_independently() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _string_open = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_OPEN");
-        let _string_close = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_CLOSE");
-        let _literal_open = EnvVarGuard::unset("GLRMASK_JSON_LITERAL_STRING_MERGE_OPEN");
-        let _literal_close = EnvVarGuard::unset("GLRMASK_JSON_LITERAL_STRING_MERGE_CLOSE");
-        let _pattern_open = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_STRING_MERGE_OPEN");
-        let _pattern_close = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_STRING_MERGE_CLOSE");
-
-        let _string_open = EnvVarGuard::set("GLRMASK_JSON_STRING_MERGE_OPEN", "1");
-        let _string_close = EnvVarGuard::set("GLRMASK_JSON_STRING_MERGE_CLOSE", "0");
-        let _literal_open = EnvVarGuard::set("GLRMASK_JSON_LITERAL_STRING_MERGE_OPEN", "0");
-        let _literal_close = EnvVarGuard::set("GLRMASK_JSON_LITERAL_STRING_MERGE_CLOSE", "1");
-
-        let generic_cfg = json_string_merge_config(false);
-        let literal_cfg = json_literal_string_merge_config();
-        let pattern_cfg = json_string_merge_config(true);
-
-        assert_eq!(generic_cfg.merge_open, true);
-        assert_eq!(generic_cfg.merge_close, false);
-        assert_eq!(literal_cfg.merge_open, false);
-        assert_eq!(literal_cfg.merge_close, true);
-        assert_eq!(pattern_cfg.merge_open, true);
-        assert_eq!(pattern_cfg.merge_close, false);
-
-        let _pattern_open = EnvVarGuard::set("GLRMASK_JSON_PATTERN_STRING_MERGE_OPEN", "0");
-        let _pattern_close = EnvVarGuard::set("GLRMASK_JSON_PATTERN_STRING_MERGE_CLOSE", "1");
-        let pattern_override_cfg = json_string_merge_config(true);
-        assert_eq!(pattern_override_cfg.merge_open, false);
-        assert_eq!(pattern_override_cfg.merge_close, true);
-    }
-
-    #[test]
-    fn json_uri_merge_defaults_inherit_pattern_string_defaults() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _string_open = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_OPEN");
-        let _string_close = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_CLOSE");
-        let _pattern_open = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_STRING_MERGE_OPEN");
-        let _pattern_close = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_STRING_MERGE_CLOSE");
-        let _uri_open = EnvVarGuard::unset("GLRMASK_JSON_URI_MERGE_OPEN");
-        let _uri_close = EnvVarGuard::unset("GLRMASK_JSON_URI_MERGE_CLOSE");
-
-        let cfg = json_uri_merge_config();
-        assert_eq!(cfg.merge_open, true);
-        assert_eq!(cfg.merge_close, false);
-    }
-
-    #[test]
-    fn json_uri_merge_env_overrides_still_apply_on_top_of_pattern_defaults() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _string_open = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_OPEN");
-        let _string_close = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_CLOSE");
-        let _pattern_open = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_STRING_MERGE_OPEN");
-        let _pattern_close = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_STRING_MERGE_CLOSE");
-        let _uri_open = EnvVarGuard::set("GLRMASK_JSON_URI_MERGE_OPEN", "0");
-        let _uri_close = EnvVarGuard::set("GLRMASK_JSON_URI_MERGE_CLOSE", "1");
-
-        let cfg = json_uri_merge_config();
-        assert_eq!(cfg.merge_open, false);
-        assert_eq!(cfg.merge_close, true);
-    }
-
-    #[test]
-    fn json_schema_uri_mode_defaults_and_explicit_values() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _uri_mode = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_URI_MODE");
-
-        assert_eq!(
-            json_schema_uri_mode(),
-            JsonSchemaUriMode::StructuredSingleTerminal
-        );
-
-        let _uri_mode = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_URI_MODE", "structured_single_terminal");
-        assert_eq!(json_schema_uri_mode(), JsonSchemaUriMode::StructuredSingleTerminal);
-
-        let _uri_mode = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_URI_MODE", "structured");
-        assert_eq!(json_schema_uri_mode(), JsonSchemaUriMode::Structured);
-
-        let _uri_mode = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_URI_MODE", "llguidance_pattern");
-        assert_eq!(json_schema_uri_mode(), JsonSchemaUriMode::LlguidancePattern);
-
-        let _uri_mode = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_URI_MODE", "approx");
-        assert_eq!(json_schema_uri_mode(), JsonSchemaUriMode::Approx);
-    }
-
-    #[test]
-    fn uri_quote_merge_warning_is_only_for_strict_structured_mode() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _uri_open = EnvVarGuard::unset("GLRMASK_JSON_URI_MERGE_OPEN");
-        let _uri_close = EnvVarGuard::unset("GLRMASK_JSON_URI_MERGE_CLOSE");
-
-        assert!(!uri_quote_merge_warning_needed(JsonSchemaUriMode::Structured));
-
-        let _uri_open = EnvVarGuard::set("GLRMASK_JSON_URI_MERGE_OPEN", "1");
-        assert!(uri_quote_merge_warning_needed(JsonSchemaUriMode::Structured));
-        assert!(!uri_quote_merge_warning_needed(JsonSchemaUriMode::StructuredSingleTerminal));
-        assert!(!uri_quote_merge_warning_needed(JsonSchemaUriMode::LlguidancePattern));
-        assert!(!uri_quote_merge_warning_needed(JsonSchemaUriMode::Approx));
-    }
-
-    #[test]
-    fn structured_single_terminal_uri_mode_respects_uri_quote_merge_envs() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _uri_mode = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_URI_MODE", "structured_single_terminal");
-        let _uri_open = EnvVarGuard::set("GLRMASK_JSON_URI_MERGE_OPEN", "1");
-        let _uri_close = EnvVarGuard::set("GLRMASK_JSON_URI_MERGE_CLOSE", "0");
-        let _string_open = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_OPEN");
-        let _string_close = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_CLOSE");
-
-        let schema = json!({
-            "type": "string",
-            "format": "uri"
-        });
-
-        let glrm = dump_glrm(schema);
-        let uri_rule = find_rule_line_with_prefix(&glrm, "JSON_FORMAT_URI_STRUCTURED");
-        assert!(uri_rule.contains("::= \"\\\"\" "));
-        assert!(!uri_rule.ends_with("\";"));
-    }
-
-    #[test]
-    fn pattern_string_wrap_keeps_intersect_top_level() {
-        let body = GrammarExpr::Intersect {
-            expr: Box::new(GrammarExpr::Ref("lhs".into())),
-            intersect: Box::new(GrammarExpr::Ref("rhs".into())),
-        };
-
-        let (wrapped, _) = wrap_string_value_expr_parts(body, true);
-
-        match wrapped {
-            GrammarExpr::Intersect { expr, intersect } => {
-                assert_eq!(
-                    *expr,
-                    GrammarExpr::Sequence(vec![
-                        GrammarExpr::Literal(b"\"".to_vec()),
-                        GrammarExpr::Ref("lhs".into()),
-                    ])
-                );
-                assert_eq!(
-                    *intersect,
-                    GrammarExpr::Sequence(vec![
-                        GrammarExpr::Literal(b"\"".to_vec()),
-                        GrammarExpr::Ref("rhs".into()),
-                    ])
-                );
-            }
-            other => panic!("expected top-level intersect, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn large_required_only_shared_ap_object_errors_as_schema_too_large() {
-        let required = (0..33)
-            .map(|idx| format!("field_{idx}"))
-            .collect::<Vec<_>>();
-        let schema = json!({
-            "type": "object",
-            "required": required,
-            "additionalProperties": {"type": "string"}
-        });
-
-        let err = schema_to_named_grammar(&schema).unwrap_err();
-        assert!(matches!(
-            err,
-            GlrMaskError::GrammarParse(message) if message == "schema too large"
-        ));
-    }
-
-    #[test]
-    fn small_required_only_shared_ap_object_still_builds() {
-        let required = (0..4)
-            .map(|idx| format!("field_{idx}"))
-            .collect::<Vec<_>>();
-        let schema = json!({
-            "type": "object",
-            "required": required,
-            "additionalProperties": {"type": "string"}
-        });
-
-        let named = schema_to_named_grammar(&schema).unwrap();
-        let glrm = to_glrm(&named);
-        assert!(glrm.contains("obj_req_any_"), "{glrm}");
-        lower(&named).unwrap();
     }
 }
 

@@ -8,6 +8,20 @@ fn token_allowed(mask: &[u32], token_id: u32) -> bool {
     word < mask.len() && ((mask[word] >> bit) & 1) != 0
 }
 
+fn has_disallowed_future(
+    stacks: &[(u32, Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)>)],
+    tokenizer_state: u32,
+    terminal_id: u32,
+) -> bool {
+    stacks.iter().any(|(_, per_state)| {
+        per_state.iter().any(|(_, disallowed)| {
+            disallowed.iter().any(|(state, terminals)| {
+                *state == tokenizer_state && terminals.contains(&terminal_id)
+            })
+        })
+    })
+}
+
 #[test]
 fn snowplow_hostname_replay_mask_includes_token_15() {
     let vocab = snowplow_vocab();
@@ -33,6 +47,8 @@ fn snowplow_hostname_replay_mask_includes_token_15() {
         replay_state.parser_path_count(1_000_000)
     );
     assert_ne!(bytes_stacks, replay_stacks);
+    assert!(!has_disallowed_future(&bytes_stacks, 1332, 14));
+    assert!(has_disallowed_future(&replay_stacks, 1332, 14));
 
     let mut replay_commit_bytes = replay_state.clone();
     replay_commit_bytes.commit_bytes(b"0").unwrap();

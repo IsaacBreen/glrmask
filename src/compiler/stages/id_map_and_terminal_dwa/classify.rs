@@ -24,32 +24,6 @@ pub struct SharedClassifyBytesets {
 /// Cache type for lazy `SharedClassifyBytesets` initialization across partitions.
 pub type SharedClassifyCache = std::sync::OnceLock<SharedClassifyBytesets>;
 
-#[derive(Debug)]
-struct VocabByteSet {
-    bytes: U8Set,
-}
-
-impl crate::vocab::VocabDerivedArtifact for VocabByteSet {}
-
-fn vocab_byte_set(vocab: &Vocab) -> U8Set {
-    if let Some(cached) = vocab.vocab_derived_cache_get::<VocabByteSet>() {
-        return cached.bytes;
-    }
-
-    let mut byteset = U8Set::empty();
-    for bytes in vocab.entries.values() {
-        for &byte in bytes {
-            byteset.insert(byte);
-        }
-    }
-    vocab.vocab_derived_cache_set(std::sync::Arc::new(VocabByteSet { bytes: byteset }));
-    byteset
-}
-
-pub(crate) fn prepare_vocab_for_terminal_classification(vocab: &Vocab) {
-    let _ = vocab_byte_set(vocab);
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum L2pPartitionCostFn {
     Size,
@@ -315,7 +289,12 @@ pub(crate) fn classify_terminal_path_lengths(
     let nt = num_terminals as usize;
 
     // 1. Vocab byte bitset: all bytes appearing in any vocab token.
-    let vocab_bytes = vocab_byte_set(vocab);
+    let mut vocab_bytes = U8Set::empty();
+    for bytes in vocab.entries.values() {
+        for &b in bytes {
+            vocab_bytes.insert(b);
+        }
+    }
 
     // 2. Byte bitsets per terminal — use cache if available.
     let owned_bytesets: Option<SharedClassifyBytesets>;
@@ -472,7 +451,7 @@ fn compute_token_l2p_map(
         build_byte_terminal_reverse_index(bytesets, num_terminals);
 
     let mut token_l2p_map = BTreeMap::<u32, BitSet>::new();
-    for (&token_id, bytes) in vocab.entries.iter() {
+    for (&token_id, bytes) in &vocab.entries {
         token_l2p_map.insert(
             token_id,
             token_l2p_terminals(
@@ -489,7 +468,7 @@ fn compute_token_l2p_map(
 
 pub(crate) fn partition_vocab_char_type_tokens(vocab: &Vocab) -> Vec<Vec<u32>> {
     let mut partitions: Vec<Vec<u32>> = (0..7).map(|_| Vec::new()).collect();
-    for (&token_id, bytes) in vocab.entries.iter() {
+    for (&token_id, bytes) in &vocab.entries {
         let idx = classify_vocab_char_type(bytes) as usize;
         partitions[idx].push(token_id);
     }

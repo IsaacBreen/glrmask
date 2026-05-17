@@ -31,28 +31,6 @@ impl ManyToOneIdMap {
         }
     }
 
-    pub fn from_singleton_original_to_internal_with_representatives(
-        original_to_internal: Vec<u32>,
-        representative_original_ids: Vec<u32>,
-    ) -> Self {
-        debug_assert!(representative_original_ids
-            .iter()
-            .enumerate()
-            .all(|(internal, &original)| original_to_internal
-                .get(original as usize)
-                .copied()
-                == Some(internal as u32)));
-        let internal_to_originals = representative_original_ids
-            .iter()
-            .map(|&original| vec![original])
-            .collect();
-        Self {
-            original_to_internal,
-            internal_to_originals,
-            representative_original_ids,
-        }
-    }
-
     pub fn from_original_to_internal_allowing_unmapped(
         original_to_internal: Vec<u32>,
         num_internal: u32,
@@ -139,7 +117,55 @@ pub struct InternalIdMap {
     pub vocab_tokens: ManyToOneIdMap,
 }
 
-pub(crate) use super::mapped_artifact::MappedArtifact;
+#[derive(Debug, Clone)]
+pub(crate) struct MappedArtifact<T> {
+    artifact: T,
+    id_map: InternalIdMap,
+}
+
+impl<T> MappedArtifact<T> {
+    /// Invariant: `artifact` IDs are expressed in the internal spaces described by `id_map`.
+    pub(crate) fn new(artifact: T, id_map: InternalIdMap) -> Self {
+        Self { artifact, id_map }
+    }
+
+    pub(crate) fn artifact(&self) -> &T {
+        &self.artifact
+    }
+
+    pub(crate) fn id_map(&self) -> &InternalIdMap {
+        &self.id_map
+    }
+
+    pub(crate) fn parts_mut(&mut self) -> (&mut T, &mut InternalIdMap) {
+        (&mut self.artifact, &mut self.id_map)
+    }
+
+    pub(crate) fn into_parts(self) -> (T, InternalIdMap) {
+        (self.artifact, self.id_map)
+    }
+
+    pub(crate) fn into_artifact(self) -> T {
+        self.artifact
+    }
+}
+
+impl<A, B> MappedArtifact<(A, B)> {
+    pub(crate) fn split_pair(self) -> (MappedArtifact<A>, MappedArtifact<B>) {
+        let ((left, right), id_map) = self.into_parts();
+        (
+            MappedArtifact::new(left, id_map.clone()),
+            MappedArtifact::new(right, id_map),
+        )
+    }
+}
+
+impl<T> MappedArtifact<Vec<T>> {
+    pub(crate) fn split_vec(self) -> Vec<MappedArtifact<T>> {
+        let (artifacts, id_map) = self.into_parts();
+        artifacts.into_iter().map(|artifact| MappedArtifact::new(artifact, id_map.clone())).collect()
+    }
+}
 
 impl InternalIdMap {
     pub fn num_tsids(&self) -> u32 {

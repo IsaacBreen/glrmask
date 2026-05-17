@@ -2,19 +2,16 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::GlrMaskError;
-use crate::automata::unweighted_u32::dfa::DFA;
 use crate::automata::lexer::ast::Expr;
 use crate::automata::lexer::regex::parse_regex;
 use crate::ds::u8set::U8Set;
 use crate::grammar::flat::{
     GrammarDef, NonterminalID, Rule, Symbol, Terminal, TerminalID,
 };
-use crate::grammar::expr_nfa::ExprNFA;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GrammarExpr {
     Ref(String),
-    Grouped(Box<GrammarExpr>),
     Sequence(Vec<GrammarExpr>),
     Choice(Vec<GrammarExpr>),
     /// Empty string / epsilon. Equivalent to `Sequence([])` for grammar purposes;
@@ -54,12 +51,6 @@ pub enum GrammarExpr {
         separator: Box<GrammarExpr>,
         allow_empty: bool,
     },
-    /// An NFA whose transition labels are indices into a side table of grammar
-    /// expressions.
-    ///
-    /// This is only valid as the complete expression of a nonterminal rule.
-    /// GLRM likewise serializes it as a named top-level definition.
-    ExprNFA(Box<ExprNFA>),
 }
 
 /// Controls the tree shape used when lowering [`GrammarExpr::SeparatedSequence`].
@@ -136,7 +127,6 @@ impl NamedGrammar {
         fn collect_refs(expr: &GrammarExpr, out: &mut HashSet<String>) {
             match expr {
                 GrammarExpr::Ref(name) => { out.insert(name.clone()); }
-                GrammarExpr::Grouped(inner) => collect_refs(inner, out),
                 GrammarExpr::Sequence(items) => { for e in items { collect_refs(e, out); } }
                 GrammarExpr::Choice(alts) => { for e in alts { collect_refs(e, out); } }
                 GrammarExpr::Exclude { expr, exclude } => {
@@ -152,11 +142,6 @@ impl NamedGrammar {
                 GrammarExpr::SeparatedSequence { items, separator, .. } => {
                     for (e, _) in items { collect_refs(e, out); }
                     collect_refs(separator, out);
-                }
-                GrammarExpr::ExprNFA(expr_nfa) => {
-                    for symbol in &expr_nfa.symbols {
-                        collect_refs(symbol, out);
-                    }
                 }
                 GrammarExpr::Epsilon | GrammarExpr::Literal(_)
                 | GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_)
@@ -256,11 +241,6 @@ fn grammar_expr_to_lark_with_indent(
     match expr {
         GrammarExpr::Ref(name) => {
             out.push_str(name);
-        }
-        GrammarExpr::Grouped(inner) => {
-            out.push('(');
-            grammar_expr_to_lark_with_indent(inner, out, false, indent);
-            out.push(')');
         }
         GrammarExpr::Sequence(items) => {
             if parens && items.len() > 1 {
@@ -374,15 +354,6 @@ fn grammar_expr_to_lark_with_indent(
                 if !required { write!(out, "?").unwrap(); }
             }
             write!(out, "])*/").unwrap();
-        }
-        GrammarExpr::ExprNFA(expr_nfa) => {
-            write!(
-                out,
-                "/*ExprNFA(states={}, symbols={})*/",
-                expr_nfa.nfa.states.len(),
-                expr_nfa.symbols.len()
-            )
-            .unwrap();
         }
     }
 }
@@ -540,199 +511,6 @@ impl Lowerer {
         grammar_expr_is_nullable(expr, &self.rule_nullable)
     }
 
-    fn strip_grouping(expr: &GrammarExpr) -> &GrammarExpr {
-        match expr {
-            GrammarExpr::Grouped(inner) => Self::strip_grouping(inner),
-            _ => expr,
-        }
-    }
-
-    fn top_level_alternatives(expr: &GrammarExpr) -> Vec<GrammarExpr> {
-        match Self::strip_grouping(expr) {
-            GrammarExpr::Choice(options) => options
-                .iter()
-                .map(|option| Self::strip_grouping(option).clone())
-                .collect(),
-            other => vec![other.clone()],
-        }
-    }
-
-    fn exact_subtraction_alternatives(
-        &self,
-        lhs_name: &str,
-        exclude: &GrammarExpr,
-    ) -> Result<Vec<GrammarExpr>, GlrMaskError> {
-        match exclude {
-            GrammarExpr::Choice(options) => {
-                let mut out = Vec::new();
-                for option in options {
-                    out.extend(self.exact_subtraction_alternatives(lhs_name, option)?);
-                }
-                Ok(out)
-            }
-            GrammarExpr::Grouped(inner) => Ok(Self::top_level_alternatives(inner)),
-            GrammarExpr::Ref(name) => {
-                let Some(false) = self.named_rule_is_terminal.get(name).copied() else {
-                    return Err(GlrMaskError::GrammarParse(format!(
-                        "{lhs_name} - {name} requires {name} to name a nonterminal rule"
-                    )));
-                };
-                let referenced_expr = self.named_rule_exprs.get(name).ok_or_else(|| {
-                    GlrMaskError::GrammarParse(format!(
-                        "unknown rule referenced in exact alternative subtraction: {name}"
-                    ))
-                })?;
-                Ok(Self::top_level_alternatives(referenced_expr))
-            }
-            other => Ok(Self::top_level_alternatives(other)),
-        }
-    }
-
-    fn canonical_exact_expr(&self, expr: &GrammarExpr) -> GrammarExpr {
-        let mut visiting = HashSet::new();
-        let mut memo = HashMap::new();
-        self.canonical_exact_expr_inner(expr, &mut visiting, &mut memo)
-    }
-
-    fn canonical_exact_expr_inner(
-        &self,
-        expr: &GrammarExpr,
-        visiting: &mut HashSet<String>,
-        memo: &mut HashMap<String, GrammarExpr>,
-    ) -> GrammarExpr {
-        match Self::strip_grouping(expr) {
-            GrammarExpr::Ref(name) => {
-                if self.named_rule_is_terminal.get(name).copied().unwrap_or(false) {
-                    return GrammarExpr::Ref(name.clone());
-                }
-                let Some(referenced) = self.named_rule_exprs.get(name) else {
-                    return GrammarExpr::Ref(name.clone());
-                };
-                if let Some(canonical) = memo.get(name) {
-                    return canonical.clone();
-                }
-                if !visiting.insert(name.clone()) {
-                    return GrammarExpr::Ref(name.clone());
-                }
-                let canonical = self.canonical_exact_expr_inner(referenced, visiting, memo);
-                visiting.remove(name);
-                memo.insert(name.clone(), canonical.clone());
-                canonical
-            }
-            GrammarExpr::Grouped(inner) => self.canonical_exact_expr_inner(inner, visiting, memo),
-            GrammarExpr::Sequence(items) => GrammarExpr::Sequence(
-                items
-                    .iter()
-                    .map(|item| self.canonical_exact_expr_inner(item, visiting, memo))
-                    .collect(),
-            ),
-            GrammarExpr::Choice(items) => GrammarExpr::Choice(
-                items
-                    .iter()
-                    .map(|item| self.canonical_exact_expr_inner(item, visiting, memo))
-                    .collect(),
-            ),
-            GrammarExpr::Exclude { expr, exclude } => GrammarExpr::Exclude {
-                expr: Box::new(self.canonical_exact_expr_inner(expr, visiting, memo)),
-                exclude: Box::new(self.canonical_exact_expr_inner(exclude, visiting, memo)),
-            },
-            GrammarExpr::Intersect { expr, intersect } => GrammarExpr::Intersect {
-                expr: Box::new(self.canonical_exact_expr_inner(expr, visiting, memo)),
-                intersect: Box::new(self.canonical_exact_expr_inner(intersect, visiting, memo)),
-            },
-            GrammarExpr::Optional(inner) => GrammarExpr::Optional(Box::new(
-                self.canonical_exact_expr_inner(inner, visiting, memo),
-            )),
-            GrammarExpr::Repeat(inner) => GrammarExpr::Repeat(Box::new(
-                self.canonical_exact_expr_inner(inner, visiting, memo),
-            )),
-            GrammarExpr::RepeatOne(inner) => GrammarExpr::RepeatOne(Box::new(
-                self.canonical_exact_expr_inner(inner, visiting, memo),
-            )),
-            GrammarExpr::RepeatRange { expr, min, max } => GrammarExpr::RepeatRange {
-                expr: Box::new(self.canonical_exact_expr_inner(expr, visiting, memo)),
-                min: *min,
-                max: *max,
-            },
-            GrammarExpr::SeparatedSequence {
-                items,
-                separator,
-                allow_empty,
-            } => GrammarExpr::SeparatedSequence {
-                items: items
-                    .iter()
-                    .map(|(item, required)| {
-                        (
-                            self.canonical_exact_expr_inner(item, visiting, memo),
-                            *required,
-                        )
-                    })
-                    .collect(),
-                separator: Box::new(self.canonical_exact_expr_inner(separator, visiting, memo)),
-                allow_empty: *allow_empty,
-            },
-            GrammarExpr::ExprNFA(expr_nfa) => GrammarExpr::ExprNFA(Box::new(ExprNFA {
-                nfa: expr_nfa.nfa.clone(),
-                symbols: expr_nfa
-                    .symbols
-                    .iter()
-                    .map(|symbol| self.canonical_exact_expr_inner(symbol, visiting, memo))
-                    .collect(),
-            })),
-            GrammarExpr::Epsilon
-            | GrammarExpr::Literal(_)
-            | GrammarExpr::CharClass { .. }
-            | GrammarExpr::RawRegex(_)
-            | GrammarExpr::AnyByte => Self::strip_grouping(expr).clone(),
-        }
-    }
-
-    fn exact_nonterminal_subtraction_expr(
-        &self,
-        expr: &GrammarExpr,
-    ) -> Result<Option<GrammarExpr>, GlrMaskError> {
-        let GrammarExpr::Exclude { expr: lhs_expr, exclude } = expr else {
-            return Ok(None);
-        };
-        let GrammarExpr::Ref(lhs_name) = Self::strip_grouping(lhs_expr) else {
-            return Ok(None);
-        };
-        let Some(false) = self.named_rule_is_terminal.get(lhs_name).copied() else {
-            return Ok(None);
-        };
-
-        let lhs_rule_expr = self.named_rule_exprs.get(lhs_name).ok_or_else(|| {
-            GlrMaskError::GrammarParse(format!(
-                "unknown nonterminal referenced in exact alternative subtraction: {lhs_name}"
-            ))
-        })?;
-        let mut remaining = Self::top_level_alternatives(lhs_rule_expr);
-        let mut remaining_keys = remaining
-            .iter()
-            .map(|candidate| self.canonical_exact_expr(candidate))
-            .collect::<Vec<_>>();
-        for remove_alt in self.exact_subtraction_alternatives(lhs_name, exclude)? {
-            let remove_alt_key = self.canonical_exact_expr(&remove_alt);
-            let Some(position) = remaining_keys
-                .iter()
-                .position(|candidate| candidate == &remove_alt_key)
-            else {
-                return Err(GlrMaskError::GrammarParse(format!(
-                    "no exact alternative {:?} in {}",
-                    remove_alt, lhs_name
-                )));
-            };
-            remaining.remove(position);
-            remaining_keys.remove(position);
-        }
-
-        Ok(Some(match remaining.len() {
-            0 => GrammarExpr::Choice(Vec::new()),
-            1 => remaining.pop().unwrap(),
-            _ => GrammarExpr::Choice(remaining),
-        }))
-    }
-
     fn resolve_terminal_expr(
         &mut self,
         owner_name: Option<&str>,
@@ -763,7 +541,6 @@ impl Lowerer {
                 let tid = self.terminal_id(&String::from_utf8_lossy(bytes), &pattern, false);
                 Ok(Some(Symbol::Terminal(tid)))
             }
-            GrammarExpr::Grouped(inner) => self.nonnullable_terminal_symbol(inner),
             GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::AnyByte
@@ -844,19 +621,13 @@ impl Lowerer {
         match expr {
             GrammarExpr::Epsilon => Ok(None),
             GrammarExpr::Literal(bytes) if bytes.is_empty() => Ok(None),
-            GrammarExpr::Grouped(inner) => self.lower_nonnullable_expr_symbol(inner),
             GrammarExpr::Ref(name) => Ok(Some(self.lower_nonnullable_named_rule(name)?)),
             GrammarExpr::Optional(inner) => self.lower_nonnullable_expr_symbol(inner),
-            GrammarExpr::Exclude { .. } => {
-                if let Some(lowered) = self.exact_nonterminal_subtraction_expr(expr)? {
-                    return self.lower_nonnullable_expr_symbol(&lowered);
-                }
-                self.nonnullable_terminal_symbol(expr)
-            }
             GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::AnyByte
+            | GrammarExpr::Exclude { .. }
             | GrammarExpr::Intersect { .. } => self.nonnullable_terminal_symbol(expr),
             _ => {
                 let (_, nt) = self.fresh_nonterminal("nonnullable_expr");
@@ -895,24 +666,15 @@ impl Lowerer {
         expr: &GrammarExpr,
     ) -> Result<(), GlrMaskError> {
         match expr {
-            GrammarExpr::Grouped(inner) => {
-                self.emit_nonnullable_expr(lhs, inner)?;
-            }
             GrammarExpr::Ref(name) => {
                 let symbol = self.lower_nonnullable_named_rule(name)?;
                 self.rules.push(Rule { lhs, rhs: vec![symbol] });
-            }
-            GrammarExpr::Exclude { .. } => {
-                if let Some(lowered) = self.exact_nonterminal_subtraction_expr(expr)? {
-                    self.emit_nonnullable_expr(lhs, &lowered)?;
-                } else if let Some(symbol) = self.nonnullable_terminal_symbol(expr)? {
-                    self.rules.push(Rule { lhs, rhs: vec![symbol] });
-                }
             }
             GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::AnyByte
+            | GrammarExpr::Exclude { .. }
             | GrammarExpr::Intersect { .. } => {
                 if let Some(symbol) = self.nonnullable_terminal_symbol(expr)? {
                     self.rules.push(Rule { lhs, rhs: vec![symbol] });
@@ -972,9 +734,6 @@ impl Lowerer {
                     lhs,
                     rhs: vec![symbol],
                 });
-            }
-            GrammarExpr::ExprNFA(expr_nfa) => {
-                self.emit_expr_nfa_nonnullable(lhs, expr_nfa)?;
             }
             GrammarExpr::Epsilon => {}
         }
@@ -1347,180 +1106,9 @@ impl Lowerer {
         Ok(())
     }
 
-    fn expr_nfa_state_nonterminals(
-        &mut self,
-        state_count: usize,
-        start: usize,
-        hint: &str,
-        start_lhs: Option<NonterminalID>,
-    ) -> Result<Vec<NonterminalID>, GlrMaskError> {
-        if start >= state_count {
-            return Err(GlrMaskError::GrammarParse(format!(
-                "ExprNFA start state {} is out of range for {} states",
-                start, state_count
-            )));
-        }
-
-        let mut nts = Vec::with_capacity(state_count);
-        for state_index in 0..state_count {
-            if Some(state_index) == start_lhs.map(|_| start) {
-                nts.push(start_lhs.unwrap());
-            } else {
-                let (_, nt) = self.fresh_nonterminal(hint);
-                nts.push(nt);
-            }
-        }
-        Ok(nts)
-    }
-
-    fn emit_expr_dfa_leftlinear(
-        &mut self,
-        lhs: NonterminalID,
-        expr_nfa: &ExprNFA,
-        dfa: &DFA,
-    ) -> Result<(), GlrMaskError> {
-        let state_count = dfa.states.len();
-        let start = dfa.start_state as usize;
-        let nts = self.expr_nfa_state_nonterminals(state_count, start, "expr_nfa_prefix", None)?;
-        let start_nt = nts[start];
-        self.rules.push(Rule {
-            lhs: start_nt,
-            rhs: Vec::new(),
-        });
-
-        for (state_index, state) in dfa.states.iter().enumerate() {
-            for (label, target) in &state.transitions {
-                let target = *target as usize;
-                if target >= state_count {
-                    return Err(GlrMaskError::GrammarParse(format!(
-                        "ExprNFA transition from state {state_index} targets out-of-range state {target}"
-                    )));
-                }
-                let symbol_expr = expr_nfa.symbol_for_label(*label).ok_or_else(|| {
-                    GlrMaskError::GrammarParse(format!(
-                        "ExprNFA transition label {label} is not a valid symbol index"
-                    ))
-                })?;
-                let symbol = self.lower_expr_terminalish(symbol_expr)?;
-                self.rules.push(Rule {
-                    lhs: nts[target],
-                    rhs: vec![Symbol::Nonterminal(nts[state_index]), symbol],
-                });
-            }
-        }
-
-        for (state_index, state) in dfa.states.iter().enumerate() {
-            if state.is_accepting {
-                self.rules.push(Rule {
-                    lhs,
-                    rhs: vec![Symbol::Nonterminal(nts[state_index])],
-                });
-            }
-        }
-
-        Ok(())
-    }
-
-    fn emit_expr_dfa_leftlinear_nonnullable(
-        &mut self,
-        lhs: NonterminalID,
-        expr_nfa: &ExprNFA,
-        dfa: &DFA,
-    ) -> Result<(), GlrMaskError> {
-        let state_count = dfa.states.len();
-        let start = dfa.start_state as usize;
-        if start >= state_count {
-            return Err(GlrMaskError::GrammarParse(format!(
-                "ExprNFA start state {} is out of range for {} states",
-                dfa.start_state, state_count
-            )));
-        }
-
-        let nullable_nts = self.expr_nfa_state_nonterminals(
-            state_count,
-            start,
-            "expr_nfa_nullable_prefix",
-            None,
-        )?;
-        let nonnullable_nts = self.expr_nfa_state_nonterminals(
-            state_count,
-            start,
-            "expr_nfa_nonnullable_prefix",
-            None,
-        )?;
-
-        self.rules.push(Rule {
-            lhs: nullable_nts[start],
-            rhs: Vec::new(),
-        });
-
-        for (state_index, state) in dfa.states.iter().enumerate() {
-            for (label, target) in &state.transitions {
-                let target = *target as usize;
-                if target >= state_count {
-                    return Err(GlrMaskError::GrammarParse(format!(
-                        "ExprNFA transition from state {state_index} targets out-of-range state {target}"
-                    )));
-                }
-                let symbol_expr = expr_nfa.symbol_for_label(*label).ok_or_else(|| {
-                    GlrMaskError::GrammarParse(format!(
-                        "ExprNFA transition label {label} is not a valid symbol index"
-                    ))
-                })?;
-
-                if self.expr_is_nullable(symbol_expr) {
-                    let symbol = self.lower_expr_terminalish(symbol_expr)?;
-                    self.rules.push(Rule {
-                        lhs: nullable_nts[target],
-                        rhs: vec![Symbol::Nonterminal(nullable_nts[state_index]), symbol],
-                    });
-                }
-
-                if let Some(symbol) = self.lower_nonnullable_expr_symbol(symbol_expr)? {
-                    self.rules.push(Rule {
-                        lhs: nonnullable_nts[target],
-                        rhs: vec![Symbol::Nonterminal(nullable_nts[state_index]), symbol],
-                    });
-                }
-
-                let symbol = self.lower_expr_terminalish(symbol_expr)?;
-                self.rules.push(Rule {
-                    lhs: nonnullable_nts[target],
-                    rhs: vec![Symbol::Nonterminal(nonnullable_nts[state_index]), symbol],
-                });
-            }
-        }
-
-        for (state_index, state) in dfa.states.iter().enumerate() {
-            if state.is_accepting {
-                self.rules.push(Rule {
-                    lhs,
-                    rhs: vec![Symbol::Nonterminal(nonnullable_nts[state_index])],
-                });
-            }
-        }
-
-        Ok(())
-    }
-
-    fn emit_expr_nfa(&mut self, lhs: NonterminalID, expr_nfa: &ExprNFA) -> Result<(), GlrMaskError> {
-        let dfa = expr_nfa.determinize_and_minimize();
-        self.emit_expr_dfa_leftlinear(lhs, expr_nfa, &dfa)
-    }
-
-    fn emit_expr_nfa_nonnullable(
-        &mut self,
-        lhs: NonterminalID,
-        expr_nfa: &ExprNFA,
-    ) -> Result<(), GlrMaskError> {
-        let dfa = expr_nfa.determinize_and_minimize();
-        self.emit_expr_dfa_leftlinear_nonnullable(lhs, expr_nfa, &dfa)
-    }
-
     fn lower_expr(&mut self, expr: &GrammarExpr) -> Symbol {
         fn emit(lowerer: &mut Lowerer, lhs: NonterminalID, expr: &GrammarExpr) -> Result<(), GlrMaskError> {
             match expr {
-                GrammarExpr::Grouped(inner) => emit(lowerer, lhs, inner)?,
                 GrammarExpr::Sequence(parts) => {
                     let mut rhs = Vec::new();
                     for part in parts {
@@ -1571,14 +1159,7 @@ impl Lowerer {
                 GrammarExpr::Epsilon => {
                     lowerer.rules.push(Rule { lhs, rhs: Vec::new() });
                 }
-                GrammarExpr::ExprNFA(expr_nfa) => {
-                    lowerer.emit_expr_nfa(lhs, expr_nfa)?;
-                }
                 _ => {
-                    if let Some(lowered) = lowerer.exact_nonterminal_subtraction_expr(expr)? {
-                        emit(lowerer, lhs, &lowered)?;
-                        return Ok(());
-                    }
                     let symbol = lowerer.lower_expr_terminalish(expr)?;
                     lowerer.rules.push(Rule {
                         lhs,
@@ -1597,7 +1178,6 @@ impl Lowerer {
 
     fn lower_expr_terminalish(&mut self, expr: &GrammarExpr) -> Result<Symbol, GlrMaskError> {
         Ok(match expr {
-            GrammarExpr::Grouped(inner) => return self.lower_expr_terminalish(inner),
             GrammarExpr::Ref(name) => {
                 if !self.named_rule_exprs.contains_key(name) {
                     return Err(GlrMaskError::GrammarParse(format!(
@@ -1629,13 +1209,17 @@ impl Lowerer {
                 self.rules.push(Rule { lhs: nt, rhs: Vec::new() });
                 Symbol::Nonterminal(nt)
             }
-            GrammarExpr::Exclude { .. } | GrammarExpr::Intersect { .. } => {
-                if let Some(lowered) = self.exact_nonterminal_subtraction_expr(expr)? {
-                    return Ok(self.lower_expr(&lowered));
-                }
-                let expr = self.resolve_terminal_expr(None, expr)?;
-                let name = format!("__terminal_expr_{}", self.generated_nonterminal_counter);
-                Symbol::Terminal(self.register_terminal_expr(&name, expr))
+            GrammarExpr::Exclude { .. } => {
+                return Err(GlrMaskError::GrammarParse(
+                    "GrammarExpr::Exclude must be extracted into a terminal rule before lowering"
+                        .into(),
+                ));
+            }
+            GrammarExpr::Intersect { .. } => {
+                return Err(GlrMaskError::GrammarParse(
+                    "GrammarExpr::Intersect must be extracted into a terminal rule before lowering"
+                        .into(),
+                ));
             }
             GrammarExpr::AnyByte => {
                 Symbol::Terminal(self.terminal_id(".", ".", false))
@@ -1647,12 +1231,6 @@ impl Lowerer {
             | GrammarExpr::RepeatOne(_)
             | GrammarExpr::RepeatRange { .. }
             | GrammarExpr::SeparatedSequence { .. } => self.lower_expr(expr),
-            | GrammarExpr::ExprNFA(_) => {
-                return Err(GlrMaskError::GrammarParse(
-                    "GrammarExpr::ExprNFA must be the complete expression of a nonterminal rule"
-                        .into(),
-                ));
-            }
         })
     }
 
@@ -1851,9 +1429,6 @@ fn grammar_expr_to_expr(
     visiting: &mut HashSet<String>,
 ) -> Result<Expr, GlrMaskError> {
     Ok(match expr {
-        GrammarExpr::Grouped(inner) => {
-            return grammar_expr_to_expr(inner, terminal_bodies, terminal_expr_cache, visiting);
-        }
         GrammarExpr::Literal(bytes) => Expr::U8Seq(bytes.clone()),
         GrammarExpr::CharClass { def, negate, utf8 } => {
             let pattern = char_class_pattern(def, *negate);
@@ -1934,11 +1509,6 @@ fn grammar_expr_to_expr(
                 "GrammarExpr::SeparatedSequence cannot appear inside a terminal rule".into(),
             ));
         }
-        GrammarExpr::ExprNFA(_) => {
-            return Err(GlrMaskError::GrammarParse(
-                "GrammarExpr::ExprNFA cannot appear inside a terminal rule".into(),
-            ));
-        }
     })
 }
 
@@ -1948,7 +1518,6 @@ fn grammar_expr_is_nullable(
 ) -> bool {
     match expr {
         GrammarExpr::Ref(name) => rule_nullable.get(name).copied().unwrap_or(false),
-        GrammarExpr::Grouped(inner) => grammar_expr_is_nullable(inner, rule_nullable),
         GrammarExpr::Sequence(parts) => parts.iter().all(|part| grammar_expr_is_nullable(part, rule_nullable)),
         GrammarExpr::Choice(options) => options.iter().any(|option| grammar_expr_is_nullable(option, rule_nullable)),
         GrammarExpr::Epsilon => true,
@@ -1977,44 +1546,6 @@ fn grammar_expr_is_nullable(
                     .iter()
                     .all(|(item, is_required)| !*is_required || grammar_expr_is_nullable(item, rule_nullable))
         }
-        GrammarExpr::ExprNFA(expr_nfa) => {
-            let dfa = expr_nfa.determinize_and_minimize();
-            let state_count = dfa.states.len();
-            let start = dfa.start_state as usize;
-            if start >= state_count {
-                return false;
-            }
-
-            let mut nullable_from_state = vec![false; state_count];
-            for (state_index, state) in dfa.states.iter().enumerate() {
-                nullable_from_state[state_index] = state.is_accepting;
-            }
-
-            let mut changed = true;
-            while changed {
-                changed = false;
-                for (state_index, state) in dfa.states.iter().enumerate() {
-                    if nullable_from_state[state_index] {
-                        continue;
-                    }
-                    for (label, target) in &state.transitions {
-                        let target = *target as usize;
-                        let Some(symbol) = expr_nfa.symbol_for_label(*label) else {
-                            continue;
-                        };
-                        if target < state_count
-                            && nullable_from_state[target]
-                            && grammar_expr_is_nullable(symbol, rule_nullable)
-                        {
-                            nullable_from_state[state_index] = true;
-                            changed = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            nullable_from_state[start]
-        }
     }
 }
 
@@ -2042,66 +1573,6 @@ fn compute_rule_nullability(grammar: &NamedGrammar) -> HashMap<String, bool> {
     nullable
 }
 
-fn validate_expr_nfa_placement(grammar: &NamedGrammar) -> Result<(), GlrMaskError> {
-    fn walk(expr: &GrammarExpr, top_level: bool, rule_name: &str) -> Result<(), GlrMaskError> {
-        match expr {
-            GrammarExpr::ExprNFA(_) => {
-                if !top_level {
-                    return Err(GlrMaskError::GrammarParse(format!(
-                        "GrammarExpr::ExprNFA must be the complete expression of a nonterminal rule; found nested in {rule_name}"
-                    )));
-                }
-            }
-            GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
-                for part in parts {
-                    walk(part, false, rule_name)?;
-                }
-            }
-            GrammarExpr::Grouped(inner) => {
-                walk(inner, false, rule_name)?;
-            }
-            GrammarExpr::Exclude { expr, exclude } => {
-                walk(expr, false, rule_name)?;
-                walk(exclude, false, rule_name)?;
-            }
-            GrammarExpr::Intersect { expr, intersect } => {
-                walk(expr, false, rule_name)?;
-                walk(intersect, false, rule_name)?;
-            }
-            GrammarExpr::Optional(inner)
-            | GrammarExpr::Repeat(inner)
-            | GrammarExpr::RepeatOne(inner)
-            | GrammarExpr::RepeatRange { expr: inner, .. } => {
-                walk(inner, false, rule_name)?;
-            }
-            GrammarExpr::SeparatedSequence { items, separator, .. } => {
-                for (item, _) in items {
-                    walk(item, false, rule_name)?;
-                }
-                walk(separator, false, rule_name)?;
-            }
-            GrammarExpr::Ref(_)
-            | GrammarExpr::Epsilon
-            | GrammarExpr::Literal(_)
-            | GrammarExpr::CharClass { .. }
-            | GrammarExpr::RawRegex(_)
-            | GrammarExpr::AnyByte => {}
-        }
-        Ok(())
-    }
-
-    for rule in &grammar.rules {
-        if rule.is_terminal && matches!(rule.expr, GrammarExpr::ExprNFA(_)) {
-            return Err(GlrMaskError::GrammarParse(format!(
-                "GrammarExpr::ExprNFA cannot be used as terminal rule {}",
-                rule.name
-            )));
-        }
-        walk(&rule.expr, true, &rule.name)?;
-    }
-    Ok(())
-}
-
 /// Convert a lexer-level [`Expr`] into an equivalent [`GrammarExpr`].
 ///
 /// Every `Expr` variant has a `GrammarExpr` counterpart, so this is lossless.
@@ -2109,7 +1580,6 @@ fn validate_expr_nfa_placement(grammar: &NamedGrammar) -> Result<(), GlrMaskErro
 /// range-encoded string representation.
 pub fn expr_to_grammar_expr(expr: &Expr) -> GrammarExpr {
     match expr {
-        Expr::Shared(inner) => expr_to_grammar_expr(inner),
         Expr::U8Seq(bytes) => GrammarExpr::Literal(bytes.clone()),
         Expr::U8Class(set) => GrammarExpr::CharClass {
             def: u8set_to_class_def(set),
@@ -2157,6 +1627,7 @@ pub fn expr_to_grammar_expr(expr: &Expr) -> GrammarExpr {
                 }
             }
         }
+        Expr::Shared(inner) => expr_to_grammar_expr(inner),
     }
 }
 
@@ -2200,9 +1671,104 @@ fn push_class_char(out: &mut String, b: u8) {
     }
 }
 
-pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
-    validate_expr_nfa_placement(grammar)?;
+/// Promote large alternations of literals in non-terminal rules to terminal rules.
+///
+/// When a `Choice` of ≥ `threshold` `Literal` options appears in a non-terminal
+/// rule, create a new UPPERCASE terminal rule containing that choice (compiled as
+/// a regex DFA) and replace the original `Choice` with a `Ref` to the new rule.
+/// This avoids creating thousands of LR productions for large enums.
+pub fn promote_large_literal_alts(grammar: &mut NamedGrammar, threshold: usize) {
+    let mut new_rules: Vec<NamedRule> = Vec::new();
+    let mut cache: HashMap<Vec<Vec<u8>>, String> = HashMap::new();
+    let mut counter = 0usize;
 
+    for rule in &mut grammar.rules {
+        if rule.is_terminal {
+            continue;
+        }
+        promote_expr_literals(
+            &mut rule.expr,
+            threshold,
+            &mut new_rules,
+            &mut cache,
+            &mut counter,
+        );
+    }
+
+    grammar.rules.extend(new_rules);
+}
+
+fn promote_expr_literals(
+    expr: &mut GrammarExpr,
+    threshold: usize,
+    new_rules: &mut Vec<NamedRule>,
+    cache: &mut HashMap<Vec<Vec<u8>>, String>,
+    counter: &mut usize,
+) {
+    match expr {
+        GrammarExpr::Choice(options) => {
+            if options.len() >= threshold
+                && options
+                    .iter()
+                    .all(|o| matches!(o, GrammarExpr::Literal(_)))
+            {
+                let mut literal_options: Vec<Vec<u8>> = options
+                    .iter()
+                    .filter_map(|option| match option {
+                        GrammarExpr::Literal(bytes) => Some(bytes.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                literal_options.sort();
+
+                let rule_name = cache
+                    .entry(literal_options)
+                    .or_insert_with(|| {
+                        let name = format!("ENUM_{}", *counter);
+                        *counter += 1;
+                        new_rules.push(NamedRule {
+                            name: name.clone(),
+                            expr: std::mem::replace(expr, GrammarExpr::Literal(Vec::new())),
+                            is_terminal: true,
+                            is_internal: false,
+                        });
+                        name
+                    })
+                    .clone();
+
+                *expr = GrammarExpr::Ref(rule_name);
+                return;
+            }
+            for option in options.iter_mut() {
+                promote_expr_literals(option, threshold, new_rules, cache, counter);
+            }
+        }
+        GrammarExpr::Exclude { expr, exclude } => {
+            promote_expr_literals(expr, threshold, new_rules, cache, counter);
+            promote_expr_literals(exclude, threshold, new_rules, cache, counter);
+        }
+        GrammarExpr::Sequence(parts) => {
+            for part in parts.iter_mut() {
+                promote_expr_literals(part, threshold, new_rules, cache, counter);
+            }
+        }
+        GrammarExpr::Optional(inner)
+        | GrammarExpr::Repeat(inner)
+        | GrammarExpr::RepeatOne(inner)
+        | GrammarExpr::RepeatRange { expr: inner, .. } => {
+            promote_expr_literals(inner, threshold, new_rules, cache, counter);
+        }
+        GrammarExpr::SeparatedSequence { items, separator, .. } => {
+            for (item, _) in items.iter_mut() {
+                promote_expr_literals(item, threshold, new_rules, cache, counter);
+            }
+            promote_expr_literals(separator, threshold, new_rules, cache, counter);
+        }
+        _ => {}
+    }
+}
+
+pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
     let mut lowerer = Lowerer::new();
     lowerer.named_rule_exprs = grammar
         .rules
@@ -2261,10 +1827,6 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
         let lhs = lowerer.nonterminal_id(&rule.name);
 
         match &rule.expr {
-            GrammarExpr::Grouped(inner) => {
-                let symbol = lowerer.lower_expr_terminalish(inner)?;
-                lowerer.rules.push(Rule { lhs, rhs: vec![symbol] });
-            }
             GrammarExpr::Sequence(parts) => {
                 let rhs = parts.iter().map(|part| lowerer.lower_expr_terminalish(part)).collect::<Result<Vec<_>, _>>()?;
                 lowerer.rules.push(Rule { lhs, rhs });
@@ -2300,9 +1862,6 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
             }
             GrammarExpr::RepeatRange { expr, min, max } => {
                 lowerer.emit_repeat_range(lhs, expr, *min, *max)?;
-            }
-            GrammarExpr::ExprNFA(expr_nfa) => {
-                lowerer.emit_expr_nfa(lhs, expr_nfa)?;
             }
             _ => {
                 let symbol = lowerer.lower_expr_terminalish(&rule.expr)?;
@@ -2360,98 +1919,5 @@ fn regex_escape_byte(b: u8) -> String {
             format!("\\{}", b as char)
         }
         _ => escape_byte(b),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{lower, GrammarExpr, NamedGrammar, NamedRule};
-
-    fn nonterminal(name: &str, expr: GrammarExpr) -> NamedRule {
-        NamedRule {
-            name: name.to_string(),
-            expr,
-            is_terminal: false,
-            is_internal: false,
-        }
-    }
-
-    fn terminal(name: &str, expr: GrammarExpr) -> NamedRule {
-        NamedRule {
-            name: name.to_string(),
-            expr,
-            is_terminal: true,
-            is_internal: false,
-        }
-    }
-
-    fn literal(text: &str) -> GrammarExpr {
-        GrammarExpr::Literal(text.as_bytes().to_vec())
-    }
-
-    fn subtract(lhs: &str, exclude: GrammarExpr) -> GrammarExpr {
-        GrammarExpr::Exclude {
-            expr: Box::new(GrammarExpr::Ref(lhs.to_string())),
-            exclude: Box::new(exclude),
-        }
-    }
-
-    #[test]
-    fn exact_subtraction_matches_nonterminal_alias_body() {
-        let grammar = NamedGrammar {
-            rules: vec![
-                terminal("JSON_STRING_BODY", literal("body\"")),
-                nonterminal(
-                    "json_string",
-                    GrammarExpr::Sequence(vec![
-                        literal("\""),
-                        GrammarExpr::Ref("JSON_STRING_BODY".to_string()),
-                    ]),
-                ),
-                nonterminal(
-                    "json_value",
-                    GrammarExpr::Choice(vec![
-                        GrammarExpr::Ref("json_string".to_string()),
-                        literal("0"),
-                    ]),
-                ),
-                nonterminal(
-                    "start",
-                    subtract("json_value", GrammarExpr::Ref("json_string".to_string())),
-                ),
-            ],
-            start: "start".to_string(),
-            ignore: None,
-        };
-
-        lower(&grammar).unwrap();
-    }
-
-    #[test]
-    fn exact_subtraction_canonicalization_is_cycle_safe() {
-        let grammar = NamedGrammar {
-            rules: vec![
-                nonterminal(
-                    "loop",
-                    GrammarExpr::Sequence(vec![
-                        GrammarExpr::Ref("loop".to_string()),
-                        literal("y"),
-                    ]),
-                ),
-                nonterminal(
-                    "A",
-                    GrammarExpr::Choice(vec![
-                        GrammarExpr::Ref("loop".to_string()),
-                        literal("x"),
-                    ]),
-                ),
-                nonterminal("start", subtract("A", literal("z"))),
-            ],
-            start: "start".to_string(),
-            ignore: None,
-        };
-
-        let err = lower(&grammar).unwrap_err();
-        assert!(format!("{err}").contains("no exact alternative"), "{err}");
     }
 }
