@@ -422,15 +422,6 @@ fn build_start_state_suffix_nodes(
     suffix_nodes
 }
 
-/// Find state equivalence classes for a tokenizer.
-pub fn find_state_equivalence_classes<S: AsRef<[u8]> + Sync>(
-    tokenizer: &TokenizerView,
-    tokens: &[S],
-    states: &[usize],
-) -> Vec<usize> {
-    find_state_equivalence_classes_ex(tokenizer, tokens, states, &[], None, None, None)
-}
-
 pub fn find_state_equivalence_classes_with_disallowed<S: AsRef<[u8]> + Sync>(
     tokenizer: &TokenizerView,
     tokens: &[S],
@@ -447,58 +438,6 @@ pub fn find_state_equivalence_classes_with_disallowed<S: AsRef<[u8]> + Sync>(
         None,
         None,
         false,
-    )
-}
-
-/// Find state equivalence classes with optional disallowed-follows filtering
-/// and batch limit.
-///
-/// `skip_groups`: groups that are universally disallowed and can be ignored
-///                in the trellis hash.
-/// `max_batches`: if `Some(n)`, stop after processing `n` token batches
-///                (useful for coarse pre-vocab reduction).
-/// `batch_size`: override the default 5000-token batch size.
-pub fn find_state_equivalence_classes_ex<S: AsRef<[u8]> + Sync>(
-    tokenizer: &TokenizerView,
-    tokens: &[S],
-    states: &[usize],
-    skip_groups: &[bool],
-    max_batches: Option<usize>,
-    batch_size: Option<usize>,
-    early_stop_override: Option<bool>,
-) -> Vec<usize> {
-    find_state_equivalence_classes_ex_inner(
-        tokenizer,
-        tokens,
-        states,
-        skip_groups,
-        None,
-        max_batches,
-        batch_size,
-        early_stop_override,
-        false,
-    )
-}
-
-pub fn find_state_equivalence_classes_ex_with_rep_confirmation<S: AsRef<[u8]> + Sync>(
-    tokenizer: &TokenizerView,
-    tokens: &[S],
-    states: &[usize],
-    skip_groups: &[bool],
-    max_batches: Option<usize>,
-    batch_size: Option<usize>,
-    early_stop_override: Option<bool>,
-) -> Vec<usize> {
-    find_state_equivalence_classes_ex_inner(
-        tokenizer,
-        tokens,
-        states,
-        skip_groups,
-        None,
-        max_batches,
-        batch_size,
-        early_stop_override,
-        true,
     )
 }
 
@@ -1110,4 +1049,3 @@ pub fn mapping_to_equivalence_classes(
 
     rep_to_class.into_values().collect()
 }
-
