@@ -5,39 +5,28 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 
 use super::build_state_map_from_subset_representatives;
-use super::pass::StateEquivalencePass;
 
 const MISSING_BLOCK: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy)]
-enum MaxLengthMode {
+pub(crate) enum MaxLengthMode {
     StableByteRestricted,
     KBoundedByteRestricted,
 }
 
+impl MaxLengthMode {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            MaxLengthMode::StableByteRestricted => "max_length_stable",
+            MaxLengthMode::KBoundedByteRestricted => "max_length_kbounded",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct MaxLengthStatistic {
-    pub(crate) max_token_len: usize,
-    pub(crate) relevant_bytes: [bool; 256],
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct MaxLengthPass {
-    mode: MaxLengthMode,
-}
-
-impl MaxLengthPass {
-    pub(crate) fn stable_byte_restricted() -> Self {
-        Self {
-            mode: MaxLengthMode::StableByteRestricted,
-        }
-    }
-
-    pub(crate) fn kbounded_byte_restricted() -> Self {
-        Self {
-            mode: MaxLengthMode::KBoundedByteRestricted,
-        }
-    }
+    max_token_len: usize,
+    relevant_bytes: [bool; 256],
 }
 
 #[inline(always)]
@@ -430,80 +419,67 @@ fn stable_refinement_blocks(
     blocks
 }
 
-impl StateEquivalencePass for MaxLengthPass {
-    type Statistic = MaxLengthStatistic;
-
-    fn name(&self) -> &'static str {
-        match self.mode {
-            MaxLengthMode::StableByteRestricted => "max_length_stable",
-            MaxLengthMode::KBoundedByteRestricted => "max_length_kbounded",
+pub(crate) fn compute_statistic(vocab: &Vocab) -> MaxLengthStatistic {
+    let mut relevant_bytes = [false; 256];
+    let mut max_token_len = 0usize;
+    for bytes in vocab.entries.values() {
+        max_token_len = max_token_len.max(bytes.len());
+        for &byte in bytes {
+            relevant_bytes[byte as usize] = true;
         }
     }
+    MaxLengthStatistic {
+        max_token_len,
+        relevant_bytes,
+    }
+}
 
-    fn compute_statistic(&self, vocab: &Vocab) -> Self::Statistic {
-        let mut relevant_bytes = [false; 256];
-        let mut max_token_len = 0usize;
-        for bytes in vocab.entries.values() {
-            max_token_len = max_token_len.max(bytes.len());
-            for &byte in bytes {
-                relevant_bytes[byte as usize] = true;
-            }
-        }
-        MaxLengthStatistic {
-            max_token_len,
-            relevant_bytes,
-        }
+pub(crate) fn compute_state_map(
+    tokenizer: &Tokenizer,
+    statistic: &MaxLengthStatistic,
+    initial_state_map: Option<&ManyToOneIdMap>,
+    active_groups: Option<&[bool]>,
+    mode: MaxLengthMode,
+) -> ManyToOneIdMap {
+    let num_states = tokenizer.num_states() as usize;
+    let states: Vec<usize> = match initial_state_map {
+        Some(map) => map
+            .representative_original_ids
+            .iter()
+            .map(|&state| state as usize)
+            .collect(),
+        None => (0..num_states).collect(),
+    };
+    if states.is_empty() {
+        return initial_state_map
+            .cloned()
+            .unwrap_or_else(|| super::identity_state_map(num_states));
     }
 
-    fn compute_state_map(
-        &self,
-        tokenizer: &Tokenizer,
-        statistic: &Self::Statistic,
-        initial_state_map: Option<&ManyToOneIdMap>,
-        active_groups: Option<&[bool]>,
-    ) -> ManyToOneIdMap {
-        let num_states = tokenizer.num_states() as usize;
-        let states: Vec<usize> = match initial_state_map {
-            Some(map) => map
-                .representative_original_ids
-                .iter()
-                .map(|&state| state as usize)
-                .collect(),
-            None => (0..num_states).collect(),
-        };
-        if states.is_empty() {
-            return initial_state_map
-                .cloned()
-                .unwrap_or_else(|| super::identity_state_map(num_states));
+    let byte_to_class = compute_byte_classes(tokenizer);
+    let active_bytes =
+        active_byte_representatives(Some(&statistic.relevant_bytes), Some(&byte_to_class));
+    let full_mapping = match mode {
+        MaxLengthMode::StableByteRestricted => {
+            let blocks = stable_refinement_blocks(tokenizer, active_groups, &active_bytes);
+            build_full_mapping_from_blocks(&blocks, num_states)
         }
+        MaxLengthMode::KBoundedByteRestricted => {
+            let blocks = compute_kbounded_partition(
+                tokenizer,
+                statistic.max_token_len,
+                active_groups,
+                &active_bytes,
+            );
+            build_full_mapping_from_blocks(&blocks, num_states)
+        }
+    };
+    let representative_states = build_subset_mapping(&states, &full_mapping);
 
-        let byte_to_class = compute_byte_classes(tokenizer);
-        let active_bytes = active_byte_representatives(
-            Some(&statistic.relevant_bytes),
-            Some(&byte_to_class),
-        );
-        let full_mapping = match self.mode {
-            MaxLengthMode::StableByteRestricted => {
-                let blocks = stable_refinement_blocks(tokenizer, active_groups, &active_bytes);
-                build_full_mapping_from_blocks(&blocks, num_states)
-            }
-            MaxLengthMode::KBoundedByteRestricted => {
-                let blocks = compute_kbounded_partition(
-                    tokenizer,
-                    statistic.max_token_len,
-                    active_groups,
-                    &active_bytes,
-                );
-                build_full_mapping_from_blocks(&blocks, num_states)
-            }
-        };
-        let representative_states = build_subset_mapping(&states, &full_mapping);
-
-        build_state_map_from_subset_representatives(
-            &states,
-            &representative_states,
-            num_states,
-            initial_state_map,
-        )
-    }
+    build_state_map_from_subset_representatives(
+        &states,
+        &representative_states,
+        num_states,
+        initial_state_map,
+    )
 }

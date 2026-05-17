@@ -5,8 +5,8 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 
 use super::identity_state_map;
-use super::max_length::MaxLengthPass;
-use super::pass::{StateEquivalencePass, StateEquivalencePassKind, StateEquivalenceScope};
+use super::max_length::{self, MaxLengthMode};
+use super::pass::{StateEquivalencePassKind, StateEquivalenceScope};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct StateEquivalencePipelineConfig {
@@ -101,53 +101,50 @@ pub(crate) fn run_state_equivalence_pipeline(
     };
 
     for kind in &config.passes {
-        match (*kind, scope) {
-            (StateEquivalencePassKind::MaxLength, StateEquivalenceScope::Global) => {
-                let pass = MaxLengthPass::stable_byte_restricted();
-                let statistic = pass.compute_statistic(vocab);
+        match *kind {
+            StateEquivalencePassKind::MaxLength => {
+                let mode = match scope {
+                    StateEquivalenceScope::Global => MaxLengthMode::StableByteRestricted,
+                    StateEquivalenceScope::L2p => MaxLengthMode::KBoundedByteRestricted,
+                };
+                let statistic = max_length::compute_statistic(vocab);
                 let started_at = Instant::now();
-                current_state_map = pass.compute_state_map(
+                current_state_map = max_length::compute_state_map(
                     tokenizer,
                     &statistic,
                     Some(&current_state_map),
                     active_groups,
+                    mode,
                 );
-                let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
-                profile.max_length_skipped = false;
-                profile.max_length_state_equiv_ms = elapsed_ms;
-                profile.max_length_reps = current_state_map.num_internal_ids() as usize;
-                profile.pass_profiles.push(StateEquivalencePassProfile {
-                    kind: *kind,
-                    name: pass.name(),
-                    elapsed_ms,
-                    representative_count: current_state_map.num_internal_ids() as usize,
-                    skipped: false,
-                });
-            }
-            (StateEquivalencePassKind::MaxLength, StateEquivalenceScope::L2p) => {
-                let pass = MaxLengthPass::kbounded_byte_restricted();
-                let statistic = pass.compute_statistic(vocab);
-                let started_at = Instant::now();
-                current_state_map = pass.compute_state_map(
-                    tokenizer,
-                    &statistic,
-                    Some(&current_state_map),
-                    active_groups,
+                record_max_length_profile(
+                    &mut profile,
+                    *kind,
+                    mode,
+                    started_at.elapsed().as_secs_f64() * 1000.0,
+                    current_state_map.num_internal_ids() as usize,
                 );
-                let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
-                profile.max_length_skipped = false;
-                profile.max_length_state_equiv_ms = elapsed_ms;
-                profile.max_length_reps = current_state_map.num_internal_ids() as usize;
-                profile.pass_profiles.push(StateEquivalencePassProfile {
-                    kind: *kind,
-                    name: pass.name(),
-                    elapsed_ms,
-                    representative_count: current_state_map.num_internal_ids() as usize,
-                    skipped: false,
-                });
             }
         }
     }
 
     (current_state_map, profile)
+}
+
+fn record_max_length_profile(
+    profile: &mut StateEquivalencePipelineProfile,
+    kind: StateEquivalencePassKind,
+    mode: MaxLengthMode,
+    elapsed_ms: f64,
+    representative_count: usize,
+) {
+    profile.max_length_skipped = false;
+    profile.max_length_state_equiv_ms = elapsed_ms;
+    profile.max_length_reps = representative_count;
+    profile.pass_profiles.push(StateEquivalencePassProfile {
+        kind,
+        name: mode.name(),
+        elapsed_ms,
+        representative_count,
+        skipped: false,
+    });
 }
