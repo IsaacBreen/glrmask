@@ -558,12 +558,14 @@ fn build_bounded_repeat_with_suffix_dfa(parts: &[Expr]) -> Option<(DFA, bool)> {
 ///
 /// The product state is `(body_state, suffix_state, counter)`:
 ///   - body tracks progress through the repeat body expression
-///   - suffix tracks the suffix match (started at body boundaries when counter >= min)
+///   - suffix tracks the active suffix-match state set (started at body
+///     boundaries when counter >= min)
 ///   - counter tracks completed body repetitions (0..max)
 ///
 /// At body completion (body transitions from accept to dead), counter increments
-/// and both body and suffix restart. If both old and fresh suffix are alive but
-/// diverge, the function falls back to None (would need NFA-like tracking).
+/// and both body and suffix restart. The suffix component is tracked as a state
+/// set so ambiguity between an already-active suffix and a freshly-started
+/// suffix remains exact instead of falling back to NFA compilation.
 fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)> {
     if parts.len() < 2 {
         return None;
@@ -627,24 +629,41 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
     }
 
     let body_dead = body_dfa.num_states() as u32;
-    let suffix_dead = suffix_dfa.num_states() as u32;
+    let suffix_state_count = suffix_dfa.num_states() as usize;
 
-    let mut state_map: FxHashMap<(u32, u32, u32), u32> = FxHashMap::default();
-    let mut worklist: VecDeque<(u32, (u32, u32, u32))> = VecDeque::new();
+    let suffix_step = |states: &BitSet, byte: u8| {
+        let mut next = BitSet::new(suffix_state_count);
+        for state in states.iter_ones() {
+            if let Some(target) = suffix_dfa.step(state as u32, byte) {
+                next.set(target as usize);
+            }
+        }
+        next
+    };
+
+    let suffix_accepts = |states: &BitSet| {
+        states
+            .iter_ones()
+            .any(|state| !suffix_dfa.finalizers(state as u32).is_empty())
+    };
+
+    let mut state_map: FxHashMap<(u32, BitSet, u32), u32> = FxHashMap::default();
+    let mut worklist: VecDeque<(u32, (u32, BitSet, u32))> = VecDeque::new();
     let mut dfa = DFA::new(1);
     dfa.ensure_group_capacity(1);
 
-    let start_suffix = if min == 0 { 0u32 } else { suffix_dead };
-    let start_key = (0u32, start_suffix, 0u32);
-    state_map.insert(start_key, 0);
+    let mut start_suffix = BitSet::new(suffix_state_count);
+    if min == 0 {
+        start_suffix.set(0);
+    }
+    let start_key = (0u32, start_suffix.clone(), 0u32);
+    state_map.insert(start_key.clone(), 0);
     worklist.push_back((0, start_key));
 
     {
-        let is_accept = start_suffix < suffix_dead
-            && !suffix_dfa.finalizers(start_suffix).is_empty();
         let mut finalizers = BitSet::new(1);
         let mut future = BitSet::new(1);
-        if is_accept {
+        if suffix_accepts(&start_suffix) {
             finalizers.set(0);
         }
         future.set(0);
@@ -672,46 +691,33 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
                     } else {
                         body_dead
                     };
-                    let old_s_next = if s < suffix_dead {
-                        suffix_dfa.step(s, x).map_or(suffix_dead, |t| t)
-                    } else {
-                        suffix_dead
-                    };
-                    let fresh_s = if new_c >= min as u32 {
-                        suffix_dfa.step(0, x).map_or(suffix_dead, |t| t)
-                    } else {
-                        suffix_dead
-                    };
-                    let new_s = match (old_s_next < suffix_dead, fresh_s < suffix_dead) {
-                        (true, true) if old_s_next != fresh_s => return None,
-                        (true, _) => old_s_next,
-                        (_, true) => fresh_s,
-                        _ => suffix_dead,
-                    };
+                    let mut new_s = suffix_step(&s, x);
+                    if new_c >= min as u32 {
+                        if let Some(fresh_s) = suffix_dfa.step(0, x) {
+                            new_s.set(fresh_s as usize);
+                        }
+                    }
                     (new_b, new_s, new_c)
                 } else {
-                    let s_next = if s < suffix_dead {
-                        suffix_dfa.step(s, x).map_or(suffix_dead, |t| t)
-                    } else {
-                        suffix_dead
-                    };
+                    let s_next = suffix_step(&s, x);
                     (b_next, s_next, c)
                 };
 
-            if final_b == body_dead && final_s == suffix_dead {
+            if final_b == body_dead && final_s.is_empty() {
                 continue;
             }
 
-            let target_key = (final_b, final_s, final_c);
+            let target_key = (final_b, final_s.clone(), final_c);
             let target_dfa_state =
                 if let Some(&existing) = state_map.get(&target_key) {
                     existing
                 } else {
+                    if state_map.len() >= 500_000 {
+                        return None;
+                    }
                     let new_state = dfa.add_state();
-                    let accept = final_s < suffix_dead
-                        && !suffix_dfa.finalizers(final_s).is_empty()
-                        && final_c >= min as u32;
-                    let has_future = final_b < body_dead || final_s < suffix_dead;
+                    let accept = final_c >= min as u32 && suffix_accepts(&final_s);
+                    let has_future = final_b < body_dead || !final_s.is_empty();
                     let mut finalizers = BitSet::new(1);
                     let mut future = BitSet::new(1);
                     if accept {
@@ -721,7 +727,7 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
                         future.set(0);
                     }
                     dfa.overwrite_state_metadata(new_state, finalizers, future);
-                    state_map.insert(target_key, new_state);
+                    state_map.insert(target_key.clone(), new_state);
                     worklist.push_back((new_state, target_key));
                     new_state
                 };
@@ -940,6 +946,49 @@ fn explicit_dead_sink_state(dfa: &DFA) -> Option<u32> {
     None
 }
 
+fn shared_u8seq_bytes(expr: &Expr) -> Option<&[u8]> {
+    match expr {
+        Expr::U8Seq(bytes) => Some(bytes),
+        Expr::Shared(inner) => shared_u8seq_bytes(inner),
+        _ => None,
+    }
+}
+
+fn split_literal_prefix(parts: &[Expr]) -> Option<(Vec<u8>, Vec<Expr>)> {
+    let mut prefix = Vec::new();
+    let mut split_at = 0usize;
+
+    for part in parts {
+        let Some(bytes) = shared_u8seq_bytes(part) else {
+            break;
+        };
+        prefix.extend_from_slice(bytes);
+        split_at += 1;
+    }
+
+    if prefix.is_empty() || split_at >= parts.len() {
+        return None;
+    }
+
+    Some((prefix, parts[split_at..].to_vec()))
+}
+
+fn prepend_literal_prefix_to_dfa(prefix: &[u8], dfa: &DFA) -> DFA {
+    if prefix.is_empty() {
+        return dfa.clone();
+    }
+
+    let mut nfa = NFA::new(1);
+    let accept = nfa.add_state();
+    let split = if prefix.len() == 1 { accept } else { nfa.add_state() };
+
+    append_byte_sequence_expr(prefix, &mut nfa, 0, split);
+    append_dfa_expr(dfa, &mut nfa, split, accept);
+    nfa.add_finalizer(accept, 0);
+    nfa.condense_epsilon_sccs();
+    nfa.to_dfa().minimize()
+}
+
 fn compile_product_component_dfa_direct(expr: &Expr) -> Option<(DFA, bool)> {
     match expr {
         Expr::Shared(inner) => compile_product_component_dfa_direct(inner),
@@ -949,7 +998,21 @@ fn compile_product_component_dfa_direct(expr: &Expr) -> Option<(DFA, bool)> {
             max: Some(max),
         } => build_bounded_repeat_dfa(expr, *min, *max).map(|dfa| (dfa, false)),
         Expr::Seq(parts) => build_bounded_repeat_with_suffix_dfa(parts)
-            .or_else(|| build_bounded_repeat_with_regex_suffix(parts)),
+            .or_else(|| build_bounded_repeat_with_regex_suffix(parts))
+            .or_else(|| {
+                let (prefix, remainder_parts) = split_literal_prefix(parts)?;
+                let remainder = if remainder_parts.len() == 1 {
+                    remainder_parts[0].clone()
+                } else {
+                    Expr::Seq(remainder_parts)
+                };
+                let (dfa, needs_future_recompute) =
+                    compile_product_component_dfa_direct(&remainder)?;
+                Some((
+                    prepend_literal_prefix_to_dfa(&prefix, &dfa),
+                    needs_future_recompute,
+                ))
+            }),
         _ => None,
     }
 }
@@ -1328,11 +1391,33 @@ fn build_regex_nfa_impl(exprs: &[Expr]) -> NFA {
 
 #[cfg(test)]
 mod tests {
-    use super::build_regex;
+    use super::{build_regex, compile_product_component_dfa_direct};
     use crate::automata::lexer::ast::Expr;
+    use crate::automata::lexer::regex::parse_regex;
     use crate::automata::lexer::tokenizer::Tokenizer;
     use crate::ds::u8set::U8Set;
     use std::sync::Arc;
+
+    fn assert_direct_regex_matches(expr: Expr, input: &str, should_match: bool) {
+        let (dfa, _) = compile_product_component_dfa_direct(&expr)
+            .expect("direct bounded-repeat builder should handle regex suffix ambiguity");
+        let tokenizer = Tokenizer {
+            dfa,
+            num_terminals: 1,
+            exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
+        };
+        let exec = tokenizer.execute_from_state(input.as_bytes(), tokenizer.initial_state());
+        let matched = exec
+            .matches
+            .iter()
+            .any(|matched| matched.id == 0 && matched.width == input.len());
+        assert_eq!(
+            matched,
+            should_match,
+            "direct regex builder mismatch for input {input:?}: {:?}",
+            exec.matches,
+        );
+    }
 
     #[test]
     fn standalone_exact_repeat_matches_only_at_full_length() {
@@ -1492,6 +1577,44 @@ mod tests {
             "GLRM family exact repeat did not match at len 16: {:?}",
             exec.matches,
         );
+    }
+
+    #[test]
+    fn direct_bounded_repeat_with_regex_suffix_handles_problem_shape() {
+        let expr = parse_regex(r"(?:\S+\s+){0,49}\S+", true);
+
+        assert_direct_regex_matches(expr.clone(), "word", true);
+        assert_direct_regex_matches(expr.clone(), "one two", true);
+        assert_direct_regex_matches(expr.clone(), "one  two", true);
+        assert_direct_regex_matches(expr.clone(), " one", false);
+        assert_direct_regex_matches(expr, "one ", false);
+    }
+
+    #[test]
+    fn direct_bounded_repeat_with_regex_suffix_tracks_divergent_suffix_starts() {
+        let expr = parse_regex(r"(?:a+\s+){0,49}aa", true);
+
+        assert_direct_regex_matches(expr.clone(), "aa", true);
+        assert_direct_regex_matches(expr.clone(), "a aa", true);
+        assert_direct_regex_matches(expr.clone(), "aa aa", true);
+        assert_direct_regex_matches(expr.clone(), "a a", false);
+        assert_direct_regex_matches(expr, "aa ", false);
+    }
+
+    #[test]
+    fn direct_bounded_repeat_with_regex_suffix_handles_literal_prefix() {
+        let expr = Expr::Seq(vec![
+            Expr::U8Seq(vec![b'"']),
+            parse_regex(r"(?:\S+\s+){0,49}\S+", true),
+        ]);
+
+        let direct = compile_product_component_dfa_direct(&expr);
+        assert!(direct.is_some(), "quote-prefixed problem shape should stay on the direct path");
+
+        assert_direct_regex_matches(expr.clone(), "\"word", true);
+        assert_direct_regex_matches(expr.clone(), "\"one two", true);
+        assert_direct_regex_matches(expr.clone(), "word", false);
+        assert_direct_regex_matches(expr, "\"one ", false);
     }
 
 }
