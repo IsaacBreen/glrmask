@@ -1,3 +1,6 @@
+pub(crate) mod profile;
+pub(crate) mod tokenizer_scan;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
@@ -13,11 +16,17 @@ use crate::compiler::glr::parser::{
     stack_may_advance_on_any,
 };
 use crate::compiler::glr::table::{Action, GLRTable};
-use crate::ds::leveled_gss::LeveledGSSSummary;
 use crate::runtime::constraint::Constraint;
 use crate::runtime::state::{CommitBuffers, ConstraintState};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
+use self::profile::{
+    apply_advance_profile,
+    fast_action_advance_profile,
+    CommitProfile,
+    PerAdvanceEntry,
+};
+use self::tokenizer_scan::{execute_tokenizer_from_state_small, InitialCommitScan};
 
 type ParserStatesByTokenizer = FxHashMap<u32, ParserGSS>;
 
@@ -30,202 +39,18 @@ struct NormalizedMatch {
     ignored: bool,
 }
 
-pub type GssProfileSummary = LeveledGSSSummary;
-
 const SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH: usize = 256;
-
-// Commit is a central runtime method and this profiling surface is used by
-// CFA profile_step to choose optimization targets. Keep parent/child timing
-// buckets on one wall-clock accounting tree; do not remove or repurpose
-// fields without updating profile_step at the same time.
-#[derive(Clone, Debug, Default)]
-pub struct CommitProfile {
-    pub total_ns: u64,
-    pub scan_ns: u64,
-    pub prune_ns: u64,
-    pub queue_ns: u64,
-    pub fuse_ns: u64,
-    pub initial_exec_ns: u64,
-    pub exec_ns: u64,
-    pub queue_exec_ns: u64,
-    pub queue_match_ns: u64,
-    pub queue_enqueue_ns: u64,
-    pub queue_bookkeeping_ns: u64,
-    pub advance_ns: u64,
-    pub advance_may_check_ns: u64,
-    pub advance_core_ns: u64,
-    pub advance_future_disallow_ns: u64,
-    pub actionable_ns: u64,
-    pub may_advance_ns: u64,
-    pub n_tokenizer_states: u64,
-    pub n_queue_entries: u64,
-    pub n_advances: u64,
-    pub adv_n_reduces_above_floor: u64,
-    pub adv_n_floor_crossings: u64,
-    pub adv_n_nondet_waves: u64,
-    pub adv_n_nondet_branches: u64,
-    pub adv_clone_ns: u64,
-    pub adv_summary_ns: u64,
-    pub adv_fast_path_ns: u64,
-    pub adv_stack_shift_apply_ns: u64,
-    pub adv_det_ns: u64,
-    pub adv_nondet_ns: u64,
-    pub adv_vstack_len: u64,
-    pub adv_gss_depth: u64,
-    pub adv_det_exit_reason: u64,
-    pub adv_det_exit_state: u64,
-    pub adv_n_det_action_lookups: u64,
-    pub adv_n_det_goto_lookups: u64,
-    pub adv_n_det_popn_ops: u64,
-    pub adv_n_nondet_reduce_ops: u64,
-    pub adv_n_nondet_merges: u64,
-    pub adv_n_nondet_isolates: u64,
-    pub adv_nondet_det_ns: u64,
-    pub fast_path_total_ns: u64,
-    pub fast_path_tokenizer_exec_ns: u64,
-    pub fast_path_match_scan_ns: u64,
-    pub fast_path_end_state_check_ns: u64,
-    pub fast_path_prune_ns: u64,
-    pub fast_path_advance_ns: u64,
-    pub fast_path_future_disallow_ns: u64,
-    pub fast_path_fuse_ns: u64,
-    pub fast_path_state_update_ns: u64,
-    pub failed_fast_path_probe_ns: u64,
-    pub linear_fast_path_total_ns: u64,
-    pub linear_fast_path_exec_ns: u64,
-    pub linear_fast_path_match_scan_ns: u64,
-    pub linear_fast_path_end_state_check_ns: u64,
-    pub linear_fast_path_advance_ns: u64,
-    pub linear_fast_path_future_disallow_ns: u64,
-    pub linear_fast_path_fuse_ns: u64,
-    pub linear_fast_path_eligibility_ns: u64,
-    pub linear_fast_path_setup_ns: u64,
-    pub linear_fast_path_state_update_ns: u64,
-    pub linear_fast_path_steps: u64,
-}
-
-#[derive(Clone, Debug)]
-pub struct PerAdvanceEntry {
-    pub terminal_id: u32,
-    pub tokenizer_state: u32,
-    pub gss_stacks_before: Vec<Vec<u32>>,
-    pub gss_stacks_after: Vec<Vec<u32>>,
-    pub gss_summary_before: GssProfileSummary,
-    pub gss_summary_after: GssProfileSummary,
-    pub match_start: usize,
-    pub match_end: usize,
-    pub token_bound: usize,
-    pub match_bytes: Vec<u8>,
-    pub profile: AdvanceProfile,
-    pub summary_ns: u64,
-}
 
 /// Cache for `advance_stacks` results, keyed by (GSS pointer, terminal).
 /// Stores the key GSS alongside the result to keep its Arc alive and prevent
 /// address reuse (ABA problem) within a single `commit_bytes_impl` call.
 type AdvanceResultCache = FxHashMap<(usize, u32), (ParserGSS, ParserGSS)>;
 
-struct InitialCommitScan {
-    exec_results: FxHashMap<u32, TokenizerExecResult>,
-    remapped_tokenizer_states: FxHashMap<u32, u32>,
-    accepted_terminals: FxHashMap<u32, FxHashSet<u32>>,
-}
-
-fn execute_tokenizer_from_state_small(
-    constraint: &Constraint,
-    bytes: &[u8],
-    start_state: u32,
-) -> TokenizerExecResult {
-    let mut tokenizer_state = start_state;
-    let mut matches = SmallVec::<[(u32, usize, u32); 8]>::new();
-
-    for (index, &byte) in bytes.iter().enumerate() {
-        let next_state = constraint
-            .tokenizer_fast_transitions
-            .get(tokenizer_state as usize)
-            .map_or(u32::MAX, |transitions| transitions[byte as usize]);
-        if next_state == u32::MAX {
-            return TokenizerExecResult {
-                end_state: None,
-                matches: matches
-                    .into_iter()
-                    .map(|(id, width, end_state)| crate::automata::lexer::tokenizer::TokenizerMatch {
-                        id,
-                        width,
-                        end_state,
-                    })
-                    .collect(),
-            };
-        }
-
-        tokenizer_state = next_state;
-        let width = index + 1;
-        for terminal in constraint.tokenizer.matched_terminals_iter(tokenizer_state) {
-            if let Some((_, existing_width, existing_end_state)) =
-                matches.iter_mut().find(|(id, _, _)| *id == terminal)
-            {
-                *existing_width = width;
-                *existing_end_state = tokenizer_state;
-            } else {
-                matches.push((terminal, width, tokenizer_state));
-            }
-        }
-    }
-
-    TokenizerExecResult {
-        end_state: Some(tokenizer_state),
-        matches: matches
-            .into_iter()
-            .map(|(id, width, end_state)| crate::automata::lexer::tokenizer::TokenizerMatch {
-                id,
-                width,
-                end_state,
-            })
-            .collect(),
-    }
-}
 
 fn parser_stacks_only(gss: &ParserGSS) -> Vec<Vec<u32>> {
     gss.to_stacks().into_iter().map(|(stack, _)| stack).collect()
 }
 
-fn apply_advance_profile(commit_profile: &mut CommitProfile, profile: &AdvanceProfile) {
-    commit_profile.adv_n_reduces_above_floor += profile.n_reduces_above_floor as u64;
-    commit_profile.adv_n_floor_crossings += profile.n_floor_crossings as u64;
-    commit_profile.adv_n_nondet_waves += profile.n_nondet_waves as u64;
-    commit_profile.adv_n_nondet_branches += profile.n_nondet_branches as u64;
-    commit_profile.adv_clone_ns += profile.clone_ns;
-    commit_profile.adv_fast_path_ns += profile.fast_path_ns;
-    commit_profile.adv_stack_shift_apply_ns += profile.stack_shift_apply_ns;
-    commit_profile.adv_det_ns += profile.det_ns;
-    commit_profile.adv_nondet_ns += profile.nondet_ns;
-    commit_profile.adv_vstack_len = profile.vstack_len as u64;
-    commit_profile.adv_gss_depth = profile.gss_depth as u64;
-    commit_profile.adv_det_exit_reason = profile.det_exit_reason as u64;
-    commit_profile.adv_det_exit_state = profile.det_exit_state as u64;
-    commit_profile.adv_n_det_action_lookups += profile.n_det_action_lookups as u64;
-    commit_profile.adv_n_det_goto_lookups += profile.n_det_goto_lookups as u64;
-    commit_profile.adv_n_det_popn_ops += profile.n_det_popn_ops as u64;
-    commit_profile.adv_n_nondet_reduce_ops += profile.n_nondet_reduce_ops as u64;
-    commit_profile.adv_n_nondet_merges += profile.n_nondet_merges as u64;
-    commit_profile.adv_n_nondet_isolates += profile.n_nondet_isolates as u64;
-    commit_profile.adv_nondet_det_ns += profile.nondet_det_ns;
-}
-
-fn fast_action_advance_profile(gss: &ParserGSS, action: &Action, elapsed_ns: u64) -> AdvanceProfile {
-    AdvanceProfile {
-        pure_shift: matches!(action, Action::Shift(..)),
-        fast_path_ns: elapsed_ns,
-        stack_shift_apply_ns: elapsed_ns,
-        total_ns: elapsed_ns,
-        top_states: gss.peek_values().len() as u32,
-        gss_depth: gss.max_depth(),
-        vstack_len: gss
-            .try_virtual_stack()
-            .map_or(0, |vstack| vstack.len() as u32),
-        ..AdvanceProfile::default()
-    }
-}
 
 fn token_bytes_for_id(constraint: &Constraint, token_id: u32) -> Option<&[u8]> {
     constraint
