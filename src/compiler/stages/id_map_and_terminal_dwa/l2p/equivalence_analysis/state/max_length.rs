@@ -239,8 +239,7 @@ fn build_active_transition_table(dfa: &FlatDfa, active_bytes: &[u8]) -> ActiveTr
 }
 
 fn refine_once_sorted(
-    dfa: &FlatDfa,
-    active_bytes: &[u8],
+    active_targets: &ActiveTransitionTable,
     label_ids: &[u32],
     prev_blocks: &[u32],
     signatures: &mut [u32],
@@ -248,7 +247,7 @@ fn refine_once_sorted(
     order: &mut [usize],
 ) -> (Vec<u32>, usize) {
     let n = prev_blocks.len();
-    let width = 1 + active_bytes.len();
+    let width = 1 + active_targets.width;
     debug_assert_eq!(signatures.len(), n * width);
     debug_assert_eq!(row_hashes.len(), n);
 
@@ -258,9 +257,11 @@ fn refine_once_sorted(
         .enumerate()
         .for_each(|(state, (row, row_hash))| {
             row[0] = label_ids[state];
-            for (i, &byte) in active_bytes.iter().enumerate() {
-                let target = dfa.trans(state, byte as usize);
-                row[i + 1] = if target == u32::MAX {
+            let target_start = state * active_targets.width;
+            let targets =
+                &active_targets.targets_flat[target_start..target_start + active_targets.width];
+            for (i, &target) in targets.iter().enumerate() {
+                row[i + 1] = if target == MISSING_BLOCK {
                     MISSING_BLOCK
                 } else {
                     prev_blocks[target as usize]
@@ -463,8 +464,7 @@ fn compute_kbounded_partition(
 
         let (next_blocks, next_count) = if use_sorted {
             refine_once_sorted(
-                dfa,
-                active_bytes,
+                &active_targets,
                 &label_ids,
                 &blocks,
                 &mut signatures,
