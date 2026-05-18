@@ -502,7 +502,9 @@ fn build_default_dimension_compaction(
     let token_compacted_refs = weight_refs(&token_compacted_weights);
     let (tsid_merge_perm, merged_num_tsids) =
         build_exact_tsid_merge_permutation(&token_compacted_refs, num_tsids);
-    let tsid_perm = if use_default_layout {
+    let tsid_perm = if merged_num_tsids == num_tsids || !use_default_layout {
+        tsid_merge_perm
+    } else {
         if adaptive_layout {
             order_tsid_groups_exact_profile(
                 &token_compacted_weights,
@@ -518,8 +520,6 @@ fn build_default_dimension_compaction(
                 merged_num_tokens,
             )
         }
-    } else {
-        tsid_merge_perm
     };
 
     DimensionCompaction {
