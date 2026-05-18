@@ -456,8 +456,7 @@ fn apply_push_sequences(base: ParserGSS, pushes: &[&[u32]]) -> ParserGSS {
 }
 
 fn apply_stack_shifts(gss: ParserGSS, shifts: &[StackShift]) -> ParserGSS {
-    if shifts.len() > 1
-        && let Some(shifted) = gss.apply_stack_effects_to_single_concrete_path(
+    if let Some(shifted) = gss.apply_stack_effects_to_single_concrete_path(
             shifts
                 .iter()
                 .map(|shift| (shift.pop as usize, shift.pushes.as_slice())),
@@ -466,8 +465,7 @@ fn apply_stack_shifts(gss: ParserGSS, shifts: &[StackShift]) -> ParserGSS {
             } else {
                 SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH
             },
-        )
-    {
+        ) {
         return shifted;
     }
 

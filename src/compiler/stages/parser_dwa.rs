@@ -1388,7 +1388,41 @@ fn build_parser_nwa_from_terminal_dwa(
     compose_detail.state_init_ms = elapsed_ms(state_init_started_at);
 
     let mut branch_fragment_memo: FxHashMap<(usize, u32), NwaBody> = FxHashMap::default();
-    let mut built_bundle_cache: Vec<Option<Arc<NWA>>> = vec![None; summaries.unique_bundles.len()];
+    let mut used_multi_bundle = vec![false; summaries.unique_bundles.len()];
+    for (state_id, state) in states.iter().enumerate() {
+        if !productive[state_id] {
+            continue;
+        }
+        for branch in &state.branches {
+            let target_idx = branch.target as usize;
+            if productive.get(target_idx).copied().unwrap_or(false)
+                && summaries
+                    .bundle_accepts
+                    .get(branch.bundle_id)
+                    .copied()
+                    .unwrap_or(false)
+                && summaries.unique_bundles[branch.bundle_id].len() > 1
+            {
+                used_multi_bundle[branch.bundle_id] = true;
+            }
+        }
+    }
+
+    let mut built_bundle_cache: Vec<Option<Arc<NWA>>> = if compose_detail_enabled {
+        vec![None; summaries.unique_bundles.len()]
+    } else {
+        use rayon::prelude::*;
+
+        summaries
+            .unique_bundles
+            .par_iter()
+            .enumerate()
+            .map(|(bundle_id, bundle)| {
+                used_multi_bundle[bundle_id]
+                    .then(|| Arc::new(templates.build_bundle(bundle)))
+            })
+            .collect()
+    };
 
     let branch_walk_started_at = Instant::now();
     for (state_id, state) in states.iter().enumerate() {

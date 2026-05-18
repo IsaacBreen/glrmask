@@ -886,7 +886,7 @@ fn commit_bytes_small_queue_fast_path(
     state: &mut BTreeMap<u32, ParserGSS>,
     bytes: &[u8],
 ) -> Option<Result<(), String>> {
-    if bytes.len() > 4 || state.len() > 2 {
+    if bytes.len() > 8 || state.len() > 2 {
         return None;
     }
 

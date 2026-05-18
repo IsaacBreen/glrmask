@@ -232,11 +232,11 @@ fn merge_guarded_final_weight(
 }
 
 fn union_guarded_pending(
-    pending: &[GuardedFinalWeight],
+    pending: SmallVec<[GuardedFinalWeight; 4]>,
 ) -> Option<GuardedFinalWeight> {
-    match pending {
-        [] => None,
-        [single] => Some(single.clone()),
+    match pending.len() {
+        0 => None,
+        1 => pending.into_iter().next(),
         _ => {
             let shared_guard = pending[0].subset_of.clone().filter(|first_guard| {
                 pending[1..].iter().all(|entry| {
@@ -747,11 +747,9 @@ fn apply_finality_fixpoint_acyclic(
     }
 
     for &state_id in reverse_topo_order {
-        let Some(reachable_final) = union_guarded_pending(&pending_by_state[state_id]) else {
+        let Some(reachable_final) = union_guarded_pending(std::mem::take(&mut pending_by_state[state_id])) else {
             continue;
         };
-
-        reachable_final_weights[state_id] = Some(reachable_final.clone());
 
         for edge in &preds[state_id] {
             let Some(propagated) = reachable_final.intersection_with_edge(edge.weight) else {
@@ -759,6 +757,8 @@ fn apply_finality_fixpoint_acyclic(
             };
             pending_by_state[edge.from].push(propagated);
         }
+
+        reachable_final_weights[state_id] = Some(reachable_final);
     }
 }
 
@@ -880,4 +880,3 @@ pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
     remove_negative_transitions(nwa);
     remove_redundant_default_transitions(nwa);
 }
-
