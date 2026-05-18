@@ -292,11 +292,12 @@ fn build_node(
 ) -> NodeClasses {
     let mut child_pending = Vec::new();
     for (segment, child) in node.iter_children() {
-        let segment_key = segment.to_vec();
-        let segment_table_idx = if let Some(&idx) = segment_cache.get(&segment_key) { idx } else {
+        let segment_table_idx = if let Some(&idx) = segment_cache.get(segment) {
+            idx
+        } else {
             let idx = segment_outcome_tables.len();
             segment_outcome_tables.push(FxHashMap::default());
-            segment_cache.insert(segment_key, idx);
+            segment_cache.insert(segment.to_vec(), idx);
             idx
         };
         let outcomes = segment_outcomes_for_states(&mut segment_outcome_tables[segment_table_idx], active_states, segment, matched_terminals, byte_transitions, terminal_sets, empty_terminals_id, terminal_stamps, stamp_gen, timings, node_terminal_ids);
