@@ -881,9 +881,10 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
     } else {
         ids_by_label.into_iter().map(|(terminal_id, by_state)| {
             let mut entries = Vec::new();
-            for (state, mut ids) in by_state {
-                ids.sort_unstable();
-                ids.dedup();
+            // `ids` are appended while iterating `signature_labels` in increasing
+            // `signature_id` order, and labels are deduped within each signature,
+            // so each bucket is already strictly increasing and unique.
+            for (state, ids) in by_state {
                 let token_set = range_set_from_sorted_ids(&ids);
                 if !token_set.is_empty() {
                     state_token_sets += 1;
