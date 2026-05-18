@@ -1871,6 +1871,15 @@ fn decoded_regex_matches_search(pattern: &str, text: &str) -> bool {
     regex.dfa.finalizers(state).contains(0)
 }
 
+fn try_pattern_bounded_dfa_leaf(expr: &LexerExpr, max_states: usize) -> Option<GrammarExpr> {
+    let regex = build_regex(std::slice::from_ref(expr));
+    if regex.num_states() > max_states {
+        return None;
+    }
+
+    Some(json_pattern_grammar_expr(&lexer_dfa_expr(regex.dfa)))
+}
+
 fn literal_alternation_search_literals(pattern: &str) -> Option<Vec<&str>> {
     const REGEX_META: &[u8] = b"\\.^$|?*+()[]{}";
 
@@ -8467,6 +8476,7 @@ impl<'a> SchemaCtx<'a> {
                 // This preserves JSON Schema search semantics while enforcing
                 // minLength/maxLength exactly.
                 const MAX_BOUNDED_SEARCH_TAIL: usize = 100;
+                const MAX_PATTERN_BOUNDED_DFA_STATES: usize = 4096;
                 if let Some(ml) = max_len {
                     if ml <= MAX_BOUNDED_SEARCH_TAIL {
                         let search_expr = decoded_regex_search_expr(&pattern, Some(ml));
@@ -8474,8 +8484,16 @@ impl<'a> SchemaCtx<'a> {
                             expr: Box::new(search_expr),
                             intersect: Box::new(lexer_repeat(json_string_char_lexer_expr(), min_len, Some(ml))),
                         };
-                        let body =
-                            self.build_pattern_lexer_expr(&intersected, "JSON_STRING_PATTERN_BOUNDED");
+                        let body = try_pattern_bounded_dfa_leaf(
+                            &intersected,
+                            MAX_PATTERN_BOUNDED_DFA_STATES,
+                        )
+                        .unwrap_or_else(|| {
+                            self.build_pattern_lexer_expr(
+                                &intersected,
+                                "JSON_STRING_PATTERN_BOUNDED",
+                            )
+                        });
                         let (terminal_body, wrap) = wrap_string_value_expr_parts(body, true);
                         let term = self.extract_terminal_rule(terminal_body, "JSON_STRING_PATTERN_BOUNDED");
                         return Ok(wrap(term));
