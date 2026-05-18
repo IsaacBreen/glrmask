@@ -19,6 +19,10 @@ user-invocable: true
 
 ## Example Commands
 
+## Measurement Workflow
+- `constraint-framework-analysis` imports the installed `_glrmask` extension, not the repo source tree directly.
+- After any Rust or Python extension change in `/Users/isaacbreen/Projects2/glrmask2`, run `make ffi-release` there, then restart the CFA `GlrmaskWorkerPool`, or measurements may use stale installed code.
+
 ```bash
 cd /Users/isaacbreen/Projects2/constraint-framework-analysis
 GLRMASK_PROFILE_COMPILE=1 GLRMASK_PROFILE_COMPILE_SUMMARY=1 make example-specific PROBLEM=jsb/data/<problem>.json FRAMEWORKS='glrmask_native'
