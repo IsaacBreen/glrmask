@@ -677,16 +677,12 @@ fn commit_bytes_fast_path(
     }
     let terminal = sole_terminal?;
 
-    // Check if end_state needs processing
-    if let Some(end_state) = exec_result.end_state {
-        if end_state_may_advance(constraint, gss, end_state) {
-            return None;
-        }
-    }
-
     let no_end_state = exec_result.end_state.is_none();
-    let all_accs_empty = no_end_state
-        && gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty());
+    let accs_empty = gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty());
+    let all_accs_empty = no_end_state && accs_empty;
+    let end_state_to_keep = exec_result
+        .end_state
+        .filter(|&end_state| end_state_may_advance(constraint, gss, end_state));
 
     // Ultra-fast path: single Interface, empty accs, no end_state, pure shift.
     // Inlines the entire advance + prune + fuse to avoid all function call overhead.
@@ -709,7 +705,7 @@ fn commit_bytes_fast_path(
     let (_, gss_owned) = state.pop_first().unwrap();
 
     // Standard fast path: skip prune when accumulators are empty.
-    let pruned_gss = if all_accs_empty {
+    let pruned_gss = if accs_empty {
         gss_owned
     } else {
         let pruned = gss_owned.apply_and_prune_no_promote(|td: &TerminalsDisallowed| {
@@ -742,6 +738,7 @@ fn commit_bytes_fast_path(
     };
 
     // Advance the parser — use owned variant to avoid initial Arc clone
+    let end_state_gss = end_state_to_keep.map(|_| pruned_gss.clone());
     let advanced = advance_stacks_owned(&constraint.table, pruned_gss, terminal);
     if advanced.is_empty() {
         return Some(Err(
@@ -760,6 +757,264 @@ fn commit_bytes_fast_path(
     }
 
     state.insert(constraint.tokenizer.initial_state(), fused);
+    if let Some(end_state) = end_state_to_keep {
+        let Some(end_gss) = end_state_gss else {
+            return Some(Err(
+                "commit rejected: no valid parser states remain".to_string(),
+            ));
+        };
+        let fused = end_gss.fuse(Some(1));
+        if !fused.is_empty() {
+            state
+                .entry(end_state)
+                .and_modify(|existing| *existing = existing.merge(&fused))
+                .or_insert(fused);
+        }
+    }
+    Some(Ok(()))
+}
+
+fn commit_bytes_full_width_fast_path(
+    constraint: &Constraint,
+    state: &mut BTreeMap<u32, ParserGSS>,
+    bytes: &[u8],
+) -> Option<Result<(), String>> {
+    if state.len() > 2 {
+        return None;
+    }
+
+    let mut output = ParserStatesByTokenizer::default();
+    for (&tokenizer_state, gss) in state.iter() {
+        let exec_result = execute_tokenizer_from_state_small(constraint, bytes, tokenizer_state);
+        let actionable_terminals = ActionableTerminals::from_gss(constraint, gss);
+        let mut terminal = None;
+
+        for matched in &exec_result.matches {
+            if matched.width != bytes.len()
+                || is_ignored_terminal(constraint.ignore_terminal, matched.id)
+            {
+                return None;
+            }
+            if !is_actionable_terminal(actionable_terminals.as_ref(), constraint, matched.id) {
+                continue;
+            }
+            if terminal.is_some_and(|existing| existing != matched.id) {
+                return None;
+            }
+            terminal = Some(matched.id);
+        }
+
+        let pruned_gss = if gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()) {
+            gss.clone()
+        } else {
+            let pruned = prune_single_initial_state_for_exec(
+                constraint,
+                gss.clone(),
+                tokenizer_state,
+                &exec_result,
+            );
+            if pruned.is_empty() {
+                continue;
+            }
+            pruned
+        };
+
+        if let Some(terminal) = terminal {
+            let advanced = if let Some(top_state) = pruned_gss.single_exclusive_top_value()
+                && let Some(action) = constraint.table.action(top_state, terminal)
+                && let Some(advanced) =
+                    apply_single_top_action_fast(&constraint.table, &pruned_gss, terminal, action)
+            {
+                advanced
+            } else {
+                if !stack_may_advance_on(&constraint.table, &pruned_gss, terminal) {
+                    return None;
+                }
+                advance_stacks(&constraint.table, &pruned_gss, terminal)
+            };
+            if advanced.is_empty() {
+                continue;
+            }
+            let advanced = apply_future_terminal_disallow(
+                constraint,
+                &exec_result,
+                terminal,
+                advanced,
+            );
+            if !advanced.is_empty() {
+                merge_parser_state(
+                    &mut output,
+                    constraint.tokenizer.initial_state(),
+                    advanced,
+                );
+            }
+        }
+
+        if let Some(end_state) = exec_result.end_state {
+            if end_state_may_advance(constraint, &pruned_gss, end_state) {
+                merge_parser_state(&mut output, end_state, pruned_gss);
+            }
+        }
+    }
+
+    let new_state = finalize_pending_state(output);
+    if new_state.is_empty() {
+        return Some(Err(
+            "commit rejected: no valid parser states remain".to_string(),
+        ));
+    }
+    *state = new_state;
+    Some(Ok(()))
+}
+
+fn merge_small_parser_state(
+    states: &mut SmallVec<[(u32, ParserGSS); 4]>,
+    tokenizer_state: u32,
+    gss: ParserGSS,
+) {
+    for (existing_state, existing_gss) in states.iter_mut() {
+        if *existing_state == tokenizer_state {
+            *existing_gss = existing_gss.merge(&gss);
+            return;
+        }
+    }
+    states.push((tokenizer_state, gss));
+}
+
+fn commit_bytes_small_queue_fast_path(
+    constraint: &Constraint,
+    state: &mut BTreeMap<u32, ParserGSS>,
+    bytes: &[u8],
+) -> Option<Result<(), String>> {
+    if bytes.len() > 4 || state.len() > 2 {
+        return None;
+    }
+
+    let mut processing_queue: Vec<SmallVec<[(u32, ParserGSS); 4]>> =
+        (0..=bytes.len()).map(|_| SmallVec::new()).collect();
+    for (&tokenizer_state, gss) in state.iter() {
+        processing_queue[0].push((tokenizer_state, gss.clone()));
+    }
+
+    let mut pending_state = ParserStatesByTokenizer::default();
+    let mut offset = 0usize;
+    while offset <= bytes.len() {
+        if processing_queue[offset].is_empty() {
+            offset += 1;
+            continue;
+        }
+
+        let states_to_process = std::mem::take(&mut processing_queue[offset]);
+        for (tokenizer_state, mut gss_at_offset) in states_to_process {
+            let exec_result =
+                execute_tokenizer_from_state_small(constraint, &bytes[offset..], tokenizer_state);
+
+            if offset == 0
+                && !gss_at_offset.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty())
+            {
+                gss_at_offset = prune_single_initial_state_for_exec(
+                    constraint,
+                    gss_at_offset,
+                    tokenizer_state,
+                    &exec_result,
+                );
+                if gss_at_offset.is_empty() {
+                    continue;
+                }
+            }
+
+            let actionable_terminals = ActionableTerminals::from_gss(constraint, &gss_at_offset);
+            let normalized_matches = collect_unique_actionable_matches(
+                constraint,
+                actionable_terminals.as_ref(),
+                constraint.ignore_terminal,
+                &exec_result.matches,
+                None,
+            );
+
+            for matched in normalized_matches {
+                let new_offset = offset + matched.width;
+                if new_offset > bytes.len() {
+                    return None;
+                }
+
+                if matched.ignored {
+                    if new_offset == bytes.len() {
+                        merge_parser_state(
+                            &mut pending_state,
+                            constraint.tokenizer.initial_state(),
+                            gss_at_offset.clone(),
+                        );
+                    } else {
+                        merge_small_parser_state(
+                            &mut processing_queue[new_offset],
+                            constraint.tokenizer.initial_state(),
+                            gss_at_offset.clone(),
+                        );
+                    }
+                    continue;
+                }
+
+                let advanced = if let Some(top_state) = gss_at_offset.single_exclusive_top_value()
+                    && let Some(action) = constraint.table.action(top_state, matched.terminal_id)
+                    && let Some(advanced) = apply_single_top_action_fast(
+                        &constraint.table,
+                        &gss_at_offset,
+                        matched.terminal_id,
+                        action,
+                    )
+                {
+                    advanced
+                } else {
+                    if !stack_may_advance_on(
+                        &constraint.table,
+                        &gss_at_offset,
+                        matched.terminal_id,
+                    ) {
+                        continue;
+                    }
+                    advance_stacks(&constraint.table, &gss_at_offset, matched.terminal_id)
+                };
+                let advanced = apply_future_terminal_disallow(
+                    constraint,
+                    &exec_result,
+                    matched.terminal_id,
+                    advanced,
+                );
+                if advanced.is_empty() {
+                    continue;
+                }
+                if new_offset == bytes.len() {
+                    merge_parser_state(
+                        &mut pending_state,
+                        constraint.tokenizer.initial_state(),
+                        advanced,
+                    );
+                } else {
+                    merge_small_parser_state(
+                        &mut processing_queue[new_offset],
+                        constraint.tokenizer.initial_state(),
+                        advanced,
+                    );
+                }
+            }
+
+            if let Some(end_state) = exec_result.end_state {
+                if end_state_may_advance(constraint, &gss_at_offset, end_state) {
+                    merge_parser_state(&mut pending_state, end_state, gss_at_offset);
+                }
+            }
+        }
+        offset += 1;
+    }
+
+    let new_state = finalize_pending_state(pending_state);
+    if new_state.is_empty() {
+        return Some(Err(
+            "commit rejected: no valid parser states remain".to_string(),
+        ));
+    }
+    *state = new_state;
     Some(Ok(()))
 }
 
@@ -2070,6 +2325,14 @@ fn commit_bytes_impl(
                 }
             }
         }
+    }
+
+    if let Some(result) = commit_bytes_small_queue_fast_path(constraint, state, bytes) {
+        return result;
+    }
+
+    if let Some(result) = commit_bytes_full_width_fast_path(constraint, state, bytes) {
+        return result;
     }
 
     if state.len() == 1 {

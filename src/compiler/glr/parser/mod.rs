@@ -25,7 +25,7 @@ type ReduceBranches = SmallVec<[(ParserGSS, u32, bool); 4]>;
 
 const SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH: usize = 64;
 const GUARDED_STACK_TO_STACKS_MAX_DEPTH: usize = 64;
-const SMALL_REDUCE_FANOUT_COLLAPSE_MAX_BRANCHES: usize = 4;
+const SMALL_REDUCE_FANOUT_COLLAPSE_MAX_BRANCHES: usize = 8;
 
 fn env_flag_enabled(name: &str) -> bool {
     std::env::var(name)

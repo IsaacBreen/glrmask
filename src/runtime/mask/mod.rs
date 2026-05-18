@@ -32,7 +32,7 @@ type DenseMaskGSS = LeveledGSS<u32, DenseMaskAcc>;
 
 const DELTA_SEED_MIN_SAVINGS: u64 = 2048;
 const MASK_SINGLE_PATH_DIRECT_MAX_DEPTH: u32 = 64;
-const MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS: usize = 6;
+const MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS: usize = 8;
 
 
 /// Dense bitmap accumulator used while walking the parser DWA.
@@ -528,7 +528,9 @@ impl<'a> ConstraintState<'a> {
             if mask_single_path_to_stacks_fallback_disabled() {
                 return false;
             }
-            if gss.path_count_at_most(5) > 4 {
+            if gss.path_count_at_most(MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS + 1)
+                > MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS
+            {
                 return false;
             }
             for (stack_bottom_first, terminals_disallowed) in gss.to_stacks() {

@@ -92,6 +92,23 @@ const UNTYPED_NUMBER_KEYWORD_KEYS: &[&str] = &[
     "exclusiveMaximum",
     "multipleOf",
 ];
+const JSON_SCHEMA_GENERIC_ASSERTION_KEYS: &[&str] = &[
+    "$ref",
+    "allOf",
+    "anyOf",
+    "const",
+    "contains",
+    "dependencies",
+    "dependentRequired",
+    "dependentSchemas",
+    "else",
+    "enum",
+    "if",
+    "not",
+    "oneOf",
+    "then",
+    "uniqueItems",
+];
 const UNTYPED_SCHEMA_APPLICABLE_TYPES: &[(&str, &[&str])] = &[
     ("object", UNTYPED_OBJECT_KEYWORD_KEYS),
     ("array", UNTYPED_ARRAY_KEYWORD_KEYS),
@@ -6440,7 +6457,7 @@ impl<'a> SchemaCtx<'a> {
         &mut self,
         variant: &Map<String, Value>,
     ) -> Result<Option<AnyOfObjectVariant>, GlrMaskError> {
-        if variant.get("type").and_then(Value::as_str) != Some("object") {
+        if !Self::schema_is_object_like_for_anyof_reduction(variant) {
             return Ok(None);
         }
         for key in &[
@@ -6830,8 +6847,12 @@ impl<'a> SchemaCtx<'a> {
             .collect::<Result<Vec<_>, _>>()?;
         let mut object_variants = Vec::new();
         let mut non_object_options = Vec::new();
+        let mut include_untyped_non_object_alts = false;
         for resolved_option in resolved {
-            if resolved_option.get("type").and_then(Value::as_str) == Some("object") {
+            if Self::schema_is_object_like_for_anyof_reduction(&resolved_option) {
+                if resolved_option.get("type").and_then(Value::as_str) != Some("object") {
+                    include_untyped_non_object_alts = true;
+                }
                 let Some(variant) = self.collect_anyof_expr_nfa_object_variant(&resolved_option)? else {
                     return Ok(None);
                 };
@@ -6871,6 +6892,13 @@ impl<'a> SchemaCtx<'a> {
         let object_rule = self.insert_shared_rule(format!("{base_name}_obj"), object_expr);
 
         let mut alts = vec![GrammarExpr::Ref(object_rule)];
+        if include_untyped_non_object_alts {
+            alts.push(self.json_array_ref());
+            alts.push(self.json_string_ref());
+            alts.push(self.json_number_type_expr());
+            alts.push(self.json_bool_ref());
+            alts.push(self.json_null_ref());
+        }
         for option in non_object_options {
             alts.push(self.convert_schema(&option)?);
         }
@@ -6950,10 +6978,12 @@ impl<'a> SchemaCtx<'a> {
             })
             .collect::<Result<_, _>>()?;
 
-        // Guard 1: every variant must be a plain object with explicit
-        //          "type": "object", additionalProperties: false, no patternProperties.
+        // Guard 1: every variant must be a plain closed object. Untyped schemas
+        // with only object-applicable keywords are accepted here because their
+        // non-object alternatives are identical and are restored once around the
+        // merged object expression.
         for v in &resolved {
-            if v.get("type").and_then(Value::as_str) != Some("object") {
+            if !Self::schema_is_object_like_for_anyof_reduction(v) {
                 return Ok(None);
             }
             match v.get("additionalProperties") {
@@ -7207,8 +7237,12 @@ impl<'a> SchemaCtx<'a> {
             .collect::<Result<_, _>>()?;
 
         // Guard: every variant must be a plain open object with no complex sub-keywords.
+        // Untyped schemas with only object-applicable keywords are object-like for
+        // this reduction: their non-object alternatives are identical across the
+        // anyOf branches, so reducing the object language to the dominant branch
+        // still preserves those alternatives through convert_untyped_schema.
         for v in &resolved {
-            if v.get("type").and_then(Value::as_str) != Some("object") {
+            if !Self::schema_is_object_like_for_anyof_reduction(v) {
                 return Ok(None);
             }
             if matches!(v.get("additionalProperties"), Some(Value::Bool(false))) {
@@ -7294,6 +7328,33 @@ impl<'a> SchemaCtx<'a> {
             Some(Value::Object(map)) => map.is_empty(),
             _ => false,
         }
+    }
+
+    fn schema_is_object_like_for_anyof_reduction(schema: &Map<String, Value>) -> bool {
+        match schema.get("type").and_then(Value::as_str) {
+            Some("object") => return true,
+            Some(_) => return false,
+            None => {}
+        }
+
+        let has_object_keyword = UNTYPED_OBJECT_KEYWORD_KEYS
+            .iter()
+            .any(|key| schema.contains_key(*key));
+        if !has_object_keyword {
+            return false;
+        }
+
+        if schema.keys().any(|key| {
+            let key = key.as_str();
+            JSON_SCHEMA_GENERIC_ASSERTION_KEYS.contains(&key)
+                || UNTYPED_ARRAY_KEYWORD_KEYS.contains(&key)
+                || UNTYPED_STRING_KEYWORD_KEYS.contains(&key)
+                || UNTYPED_NUMBER_KEYWORD_KEYS.contains(&key)
+        }) {
+            return false;
+        }
+
+        true
     }
 
     /// For closed objects (`additionalProperties: false`), `language(A) ⊆ language(B)` iff:
@@ -12651,6 +12712,27 @@ mod tests {
         let glrm = dump_glrm(schema);
         assert!(glrm.contains("fa obj_anyof_fa_0_body"), "{glrm}");
         assert!(glrm.contains("json_string"), "{glrm}");
+    }
+
+    #[test]
+    fn implicit_object_anyof_reduction_requires_object_only_keywords() {
+        let object_only = json!({
+            "properties": {"a": {"type": "string"}},
+            "additionalProperties": false,
+            "description": "annotation-only"
+        });
+        assert!(SchemaCtx::schema_is_object_like_for_anyof_reduction(
+            object_only.as_object().unwrap()
+        ));
+
+        let constrained_non_objects = json!({
+            "properties": {"a": {"type": "string"}},
+            "additionalProperties": false,
+            "enum": [{"a": "x"}]
+        });
+        assert!(!SchemaCtx::schema_is_object_like_for_anyof_reduction(
+            constrained_non_objects.as_object().unwrap()
+        ));
     }
 
     #[test]
