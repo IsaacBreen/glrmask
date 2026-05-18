@@ -19,7 +19,9 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
     let merge_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
     let t3 = std::time::Instant::now();
-    table.merge_recognizer_equivalent();
+    // The downstream parser and template builders already merge equivalent
+    // artifacts. Running the recognizer-only equivalence pass here costs more
+    // on large schemas than it saves in later phases.
     table.canonicalize_stack_shift_predecessors();
     let recog_ms = t3.elapsed().as_secs_f64() * 1000.0;
     let _ = (lr1_ms, ielr_ms, pre_merge_states, merge_ms, recog_ms, item_sets);
