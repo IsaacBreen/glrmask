@@ -6,6 +6,7 @@ use crate::automata::lexer::ast::{dfa as lexer_dfa_expr, Expr as LexerExpr};
 use crate::automata::lexer::compile::build_regex;
 use crate::automata::lexer::dfa::DFA;
 use crate::automata::lexer::regex::parse_regex;
+use crate::ds::u8set::U8Set;
 use crate::grammar::expr_nfa::ExprNfaBuilder;
 use crate::import::ast::{expr_to_grammar_expr, GrammarExpr, NamedGrammar, NamedRule};
 use crate::GlrMaskError;
@@ -3103,6 +3104,360 @@ fn char_class_expr_for_bytes(bytes: &[u8]) -> GrammarExpr {
             utf8: false,
         }
     }
+}
+
+fn json_direct_ascii_u8set() -> U8Set {
+    let mut set = U8Set::empty();
+    for byte in json_direct_ascii_bytes() {
+        set.insert(byte);
+    }
+    set
+}
+
+fn extract_fixed_ascii_class_concat_expr(
+    expr: &LexerExpr,
+    direct_ascii: U8Set,
+    out: &mut Vec<U8Set>,
+) -> Option<()> {
+    match expr {
+        LexerExpr::Seq(parts) => {
+            for part in parts {
+                extract_fixed_ascii_class_concat_expr(part, direct_ascii, out)?;
+            }
+            Some(())
+        }
+        LexerExpr::U8Seq(bytes) if bytes.len() == 1 && direct_ascii.contains(bytes[0]) => {
+            out.push(U8Set::from_byte(bytes[0]));
+            Some(())
+        }
+        LexerExpr::U8Class(set) if !set.is_empty() && set.is_subset(&direct_ascii) => {
+            out.push(*set);
+            Some(())
+        }
+        _ => None,
+    }
+}
+
+fn extract_fixed_ascii_class_concat_pattern(pattern: &str) -> Option<Vec<U8Set>> {
+    let branches = split_top_level_regex_branches(pattern);
+    if branches.len() != 1 {
+        return None;
+    }
+    let (anchored_start, anchored_end, core) = strip_branch_outer_anchors(branches[0]);
+    if anchored_start || anchored_end || core.is_empty() {
+        return None;
+    }
+    if core.as_bytes().contains(&b'\\') {
+        return None;
+    }
+
+    let direct_ascii = json_direct_ascii_u8set();
+    let expr = parse_regex(core, true);
+    let mut out = Vec::new();
+    extract_fixed_ascii_class_concat_expr(&expr, direct_ascii, &mut out)?;
+    if out.is_empty() || out.len() > 128 {
+        return None;
+    }
+    Some(out)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+enum FixedAsciiSearchMode {
+    Searching(u128),
+    Matched,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+enum FixedAsciiJsonCharPhase {
+    Boundary,
+    AfterBackslash,
+    Utf8Need1,
+    Utf8Need2,
+    Utf8Need3,
+    Utf8Need2AfterE0,
+    Utf8Need2AfterED,
+    Utf8Need3AfterF0,
+    Utf8Need3AfterF4,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+struct FixedAsciiSearchState {
+    decoded_len: u8,
+    mode: FixedAsciiSearchMode,
+    phase: FixedAsciiJsonCharPhase,
+}
+
+fn advance_fixed_ascii_search_ascii(mode: FixedAsciiSearchMode, byte: u8, classes: &[U8Set]) -> FixedAsciiSearchMode {
+    match mode {
+        FixedAsciiSearchMode::Matched => FixedAsciiSearchMode::Matched,
+        FixedAsciiSearchMode::Searching(mask) => {
+            let mut next_mask = 1u128;
+            for (idx, class) in classes.iter().enumerate() {
+                if (mask & (1u128 << idx)) == 0 || !class.contains(byte) {
+                    continue;
+                }
+                let next_idx = idx + 1;
+                if next_idx == classes.len() {
+                    return FixedAsciiSearchMode::Matched;
+                }
+                next_mask |= 1u128 << next_idx;
+            }
+            FixedAsciiSearchMode::Searching(next_mask)
+        }
+    }
+}
+
+fn advance_fixed_ascii_search_other(mode: FixedAsciiSearchMode) -> FixedAsciiSearchMode {
+    match mode {
+        FixedAsciiSearchMode::Matched => FixedAsciiSearchMode::Matched,
+        FixedAsciiSearchMode::Searching(_) => FixedAsciiSearchMode::Searching(1),
+    }
+}
+
+fn push_state_range(
+    transitions: &mut Vec<(u8, FixedAsciiSearchState)>,
+    start: u8,
+    end: u8,
+    next_state: FixedAsciiSearchState,
+) {
+    for byte in start..=end {
+        transitions.push((byte, next_state));
+    }
+}
+
+fn build_fixed_ascii_class_bounded_search_dfa(
+    classes: &[U8Set],
+    min_len: usize,
+    max_len: usize,
+) -> DFA {
+    let direct_ascii = json_direct_ascii_u8set();
+    let start = FixedAsciiSearchState {
+        decoded_len: 0,
+        mode: FixedAsciiSearchMode::Searching(1),
+        phase: FixedAsciiJsonCharPhase::Boundary,
+    };
+
+    SchemaCtx::build_state_machine_dfa(
+        start,
+        |state| {
+            state.phase == FixedAsciiJsonCharPhase::Boundary
+                && matches!(state.mode, FixedAsciiSearchMode::Matched)
+                && (state.decoded_len as usize) >= min_len
+                && (state.decoded_len as usize) <= max_len
+        },
+        |state| {
+            let mut transitions = Vec::new();
+            match state.phase {
+                FixedAsciiJsonCharPhase::Boundary => {
+                    if state.decoded_len as usize >= max_len {
+                        return transitions;
+                    }
+
+                    let next_len = state.decoded_len + 1;
+                    for byte in direct_ascii.iter() {
+                        transitions.push((
+                            byte,
+                            FixedAsciiSearchState {
+                                decoded_len: next_len,
+                                mode: advance_fixed_ascii_search_ascii(state.mode, byte, classes),
+                                phase: FixedAsciiJsonCharPhase::Boundary,
+                            },
+                        ));
+                    }
+
+                    transitions.push((
+                        b'\\',
+                        FixedAsciiSearchState {
+                            decoded_len: next_len,
+                            mode: advance_fixed_ascii_search_other(state.mode),
+                            phase: FixedAsciiJsonCharPhase::AfterBackslash,
+                        },
+                    ));
+
+                    let utf8_next = FixedAsciiSearchState {
+                        decoded_len: next_len,
+                        mode: advance_fixed_ascii_search_other(state.mode),
+                        phase: FixedAsciiJsonCharPhase::Utf8Need1,
+                    };
+                    push_state_range(&mut transitions, 0xC2, 0xDF, utf8_next);
+
+                    push_state_range(
+                        &mut transitions,
+                        0xE1,
+                        0xEC,
+                        FixedAsciiSearchState {
+                            decoded_len: next_len,
+                            mode: advance_fixed_ascii_search_other(state.mode),
+                            phase: FixedAsciiJsonCharPhase::Utf8Need2,
+                        },
+                    );
+                    push_state_range(
+                        &mut transitions,
+                        0xEE,
+                        0xEF,
+                        FixedAsciiSearchState {
+                            decoded_len: next_len,
+                            mode: advance_fixed_ascii_search_other(state.mode),
+                            phase: FixedAsciiJsonCharPhase::Utf8Need2,
+                        },
+                    );
+                    transitions.push((
+                        0xE0,
+                        FixedAsciiSearchState {
+                            decoded_len: next_len,
+                            mode: advance_fixed_ascii_search_other(state.mode),
+                            phase: FixedAsciiJsonCharPhase::Utf8Need2AfterE0,
+                        },
+                    ));
+                    transitions.push((
+                        0xED,
+                        FixedAsciiSearchState {
+                            decoded_len: next_len,
+                            mode: advance_fixed_ascii_search_other(state.mode),
+                            phase: FixedAsciiJsonCharPhase::Utf8Need2AfterED,
+                        },
+                    ));
+                    push_state_range(
+                        &mut transitions,
+                        0xF1,
+                        0xF3,
+                        FixedAsciiSearchState {
+                            decoded_len: next_len,
+                            mode: advance_fixed_ascii_search_other(state.mode),
+                            phase: FixedAsciiJsonCharPhase::Utf8Need3,
+                        },
+                    );
+                    transitions.push((
+                        0xF0,
+                        FixedAsciiSearchState {
+                            decoded_len: next_len,
+                            mode: advance_fixed_ascii_search_other(state.mode),
+                            phase: FixedAsciiJsonCharPhase::Utf8Need3AfterF0,
+                        },
+                    ));
+                    transitions.push((
+                        0xF4,
+                        FixedAsciiSearchState {
+                            decoded_len: next_len,
+                            mode: advance_fixed_ascii_search_other(state.mode),
+                            phase: FixedAsciiJsonCharPhase::Utf8Need3AfterF4,
+                        },
+                    ));
+                }
+                FixedAsciiJsonCharPhase::AfterBackslash => {
+                    for byte in [b'"', b'\\', b'b', b'f', b'n', b'r', b't'] {
+                        transitions.push((
+                            byte,
+                            FixedAsciiSearchState {
+                                phase: FixedAsciiJsonCharPhase::Boundary,
+                                ..state
+                            },
+                        ));
+                    }
+                }
+                FixedAsciiJsonCharPhase::Utf8Need1 => {
+                    push_state_range(
+                        &mut transitions,
+                        0x80,
+                        0xBF,
+                        FixedAsciiSearchState {
+                            phase: FixedAsciiJsonCharPhase::Boundary,
+                            ..state
+                        },
+                    );
+                }
+                FixedAsciiJsonCharPhase::Utf8Need2 => {
+                    push_state_range(
+                        &mut transitions,
+                        0x80,
+                        0xBF,
+                        FixedAsciiSearchState {
+                            phase: FixedAsciiJsonCharPhase::Utf8Need1,
+                            ..state
+                        },
+                    );
+                }
+                FixedAsciiJsonCharPhase::Utf8Need3 => {
+                    push_state_range(
+                        &mut transitions,
+                        0x80,
+                        0xBF,
+                        FixedAsciiSearchState {
+                            phase: FixedAsciiJsonCharPhase::Utf8Need2,
+                            ..state
+                        },
+                    );
+                }
+                FixedAsciiJsonCharPhase::Utf8Need2AfterE0 => {
+                    push_state_range(
+                        &mut transitions,
+                        0xA0,
+                        0xBF,
+                        FixedAsciiSearchState {
+                            phase: FixedAsciiJsonCharPhase::Utf8Need1,
+                            ..state
+                        },
+                    );
+                }
+                FixedAsciiJsonCharPhase::Utf8Need2AfterED => {
+                    push_state_range(
+                        &mut transitions,
+                        0x80,
+                        0x9F,
+                        FixedAsciiSearchState {
+                            phase: FixedAsciiJsonCharPhase::Utf8Need1,
+                            ..state
+                        },
+                    );
+                }
+                FixedAsciiJsonCharPhase::Utf8Need3AfterF0 => {
+                    push_state_range(
+                        &mut transitions,
+                        0x90,
+                        0xBF,
+                        FixedAsciiSearchState {
+                            phase: FixedAsciiJsonCharPhase::Utf8Need2,
+                            ..state
+                        },
+                    );
+                }
+                FixedAsciiJsonCharPhase::Utf8Need3AfterF4 => {
+                    push_state_range(
+                        &mut transitions,
+                        0x80,
+                        0x8F,
+                        FixedAsciiSearchState {
+                            phase: FixedAsciiJsonCharPhase::Utf8Need2,
+                            ..state
+                        },
+                    );
+                }
+            }
+            transitions
+        },
+    )
+}
+
+fn try_fixed_ascii_class_bounded_search_dfa(
+    pattern: &str,
+    min_len: usize,
+    max_len: usize,
+) -> Option<DFA> {
+    let classes = extract_fixed_ascii_class_concat_pattern(pattern)?;
+    Some(build_fixed_ascii_class_bounded_search_dfa(
+        &classes,
+        min_len,
+        max_len,
+    ))
+}
+
+fn try_fixed_ascii_class_bounded_search_body(
+    pattern: &str,
+    min_len: usize,
+    max_len: usize,
+) -> Option<GrammarExpr> {
+    let dfa = try_fixed_ascii_class_bounded_search_dfa(pattern, min_len, max_len)?;
+    Some(json_pattern_grammar_expr(&lexer_dfa_expr(dfa)))
 }
 
 fn literal_trie_to_grammar_expr(node: &LiteralTrieNode) -> GrammarExpr {
@@ -10070,6 +10425,12 @@ impl<'a> SchemaCtx<'a> {
             return body.clone();
         }
 
+        if let Some(body) = try_fixed_ascii_class_bounded_search_body(pattern, min_len, max_len) {
+            self.bounded_pattern_body_cache
+                .insert(cache_key, body.clone());
+            return body;
+        }
+
         let search_expr = decoded_regex_search_expr(pattern, Some(max_len));
         let intersected = LexerExpr::Intersect {
             expr: Box::new(search_expr),
@@ -12255,8 +12616,13 @@ mod tests {
     use super::json_schema_uri_mode;
     use super::json_literal_string_merge_config;
     use super::common_outer_anchor_pattern;
+    use super::decoded_regex_search_expr;
+    use super::extract_fixed_ascii_class_concat_pattern;
+    use super::json_string_char_lexer_expr;
+    use super::lexer_repeat;
     use super::decoded_regex_matches_search;
     use super::decoded_regex_fullmatch_expr;
+    use super::try_fixed_ascii_class_bounded_search_dfa;
     use super::integer_multiple_expr;
     use super::json_uri_merge_config;
     use super::json_string_merge_config;
@@ -12273,6 +12639,8 @@ mod tests {
     use super::uri_quote_merge_warning_needed;
     use super::wrap_string_value_expr_parts;
     use crate::automata::lexer::compile::build_regex;
+    use crate::automata::lexer::ast::Expr as LexerExpr;
+    use crate::automata::lexer::ast::dfa as lexer_dfa_expr;
     use crate::automata::lexer::regex::parse_regex;
     use crate::grammar::ast::lower;
     use crate::GlrMaskError;
@@ -12392,6 +12760,168 @@ mod tests {
         assert!(decoded_regex_matches_search("[abc]", "zzayy"));
         assert!(decoded_regex_matches_search(r"foo\d+", "prefix foo123 suffix"));
         assert!(decoded_regex_matches_search("(foo|bar)", "prefix bar suffix"));
+    }
+
+    fn fixed_ascii_bounded_search_accepts(
+        pattern: &str,
+        min_len: usize,
+        max_len: usize,
+        body: &[u8],
+    ) -> bool {
+        let dfa = try_fixed_ascii_class_bounded_search_dfa(pattern, min_len, max_len)
+            .expect("strict fixed-ascii extractor should accept pattern");
+        let regex = build_regex(&[lexer_dfa_expr(dfa)]);
+        let mut state = 0u32;
+        for &byte in body {
+            let Some(next) = regex.step(state, byte) else {
+                return false;
+            };
+            state = next;
+        }
+        regex.dfa.finalizers(state).contains(0)
+    }
+
+    #[test]
+    fn fixed_ascii_class_concat_extractor_accepts_platform_id_pattern() {
+        let pattern = "[RD][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][KMRASPDHEG]";
+        let classes = extract_fixed_ascii_class_concat_pattern(pattern).expect("pattern should extract");
+        assert_eq!(classes.len(), 11);
+        assert!(classes[0].contains(b'R'));
+        assert!(classes[0].contains(b'D'));
+        assert!(classes[1].contains(b'0'));
+        assert!(classes[1].contains(b'9'));
+        assert!(classes[10].contains(b'K'));
+        assert!(classes[10].contains(b'G'));
+    }
+
+    #[test]
+    fn fixed_ascii_class_concat_extractor_rejects_unsupported_shapes() {
+        for pattern in [
+            "^[RD][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][KMRASPDHEG]$",
+            "[RD][0-9]{9}[KMRASPDHEG]",
+            "[RD][0-9][0-9]|foo",
+            "[\\d][0-9]",
+            "é[0-9]",
+        ] {
+            assert!(extract_fixed_ascii_class_concat_pattern(pattern).is_none(), "pattern should reject: {pattern}");
+        }
+    }
+
+    #[test]
+    fn fixed_ascii_bounded_search_accepts_platform_id_examples() {
+        let pattern = "[RD][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][KMRASPDHEG]";
+        assert!(fixed_ascii_bounded_search_accepts(pattern, 0, 36, b"R123456789K"));
+        assert!(fixed_ascii_bounded_search_accepts(pattern, 0, 36, b"D000000000M"));
+        assert!(fixed_ascii_bounded_search_accepts(pattern, 0, 36, b"xxR123456789Kyy"));
+    }
+
+    #[test]
+    fn fixed_ascii_bounded_search_rejects_invalid_platform_id_examples() {
+        let pattern = "[RD][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][KMRASPDHEG]";
+        assert!(!fixed_ascii_bounded_search_accepts(pattern, 0, 36, b"X123456789K"));
+        assert!(!fixed_ascii_bounded_search_accepts(pattern, 0, 36, b"R12345678K"));
+        assert!(!fixed_ascii_bounded_search_accepts(pattern, 0, 36, b"R123456789Z"));
+    }
+
+    #[test]
+    fn fixed_ascii_bounded_search_honors_prefix_suffix_and_length_limit() {
+        let pattern = "[RD][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][KMRASPDHEG]";
+        let body = format!("{}R123456789K", "A".repeat(25));
+        assert!(fixed_ascii_bounded_search_accepts(pattern, 0, 36, body.as_bytes()));
+
+        let body = format!("R123456789K{}", "A".repeat(25));
+        assert!(fixed_ascii_bounded_search_accepts(pattern, 0, 36, body.as_bytes()));
+
+        let body = format!("{}R123456789K{}", "A".repeat(10), "B".repeat(15));
+        assert!(fixed_ascii_bounded_search_accepts(pattern, 0, 36, body.as_bytes()));
+
+        let body = format!("{}R123456789K", "A".repeat(26));
+        assert!(!fixed_ascii_bounded_search_accepts(pattern, 0, 36, body.as_bytes()));
+    }
+
+    #[test]
+    fn fixed_ascii_bounded_search_treats_named_escapes_as_nonmatching_chars() {
+        let pattern = "[RD][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][KMRASPDHEG]";
+        assert!(fixed_ascii_bounded_search_accepts(pattern, 0, 36, b"\\nR123456789K"));
+        assert!(fixed_ascii_bounded_search_accepts(pattern, 0, 36, b"\\\\R123456789K"));
+        assert!(fixed_ascii_bounded_search_accepts(pattern, 0, 36, b"\\\"R123456789K"));
+        assert!(!fixed_ascii_bounded_search_accepts(pattern, 0, 36, b"\\u0052123456789K"));
+        assert!(!fixed_ascii_bounded_search_accepts(pattern, 0, 36, b"R12345\\u00363789K"));
+    }
+
+    #[test]
+    fn fixed_ascii_bounded_search_counts_direct_utf8_tail_chars() {
+        let pattern = "[RD][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][KMRASPDHEG]";
+        let body = format!("{}éR123456789K", "A".repeat(24));
+        assert!(fixed_ascii_bounded_search_accepts(pattern, 0, 36, body.as_bytes()));
+
+        let body = format!("{}éR123456789K", "A".repeat(25));
+        assert!(!fixed_ascii_bounded_search_accepts(pattern, 0, 36, body.as_bytes()));
+    }
+
+    #[test]
+    fn fixed_ascii_bounded_search_dfa_matches_generic_bounded_construction() {
+        let pattern = "[AB][0-1]";
+        let min_len = 0;
+        let max_len = 4;
+        let direct = build_regex(&[lexer_dfa_expr(
+            try_fixed_ascii_class_bounded_search_dfa(pattern, min_len, max_len)
+                .expect("strict fixed-ascii DFA should build"),
+        )]);
+        let generic_expr = LexerExpr::Intersect {
+            expr: Box::new(decoded_regex_search_expr(pattern, Some(max_len))),
+            intersect: Box::new(lexer_repeat(
+                json_string_char_lexer_expr(),
+                min_len,
+                Some(max_len),
+            )),
+        };
+        let generic = build_regex(&[generic_expr]);
+
+        let tokens: Vec<Vec<u8>> = vec![
+            b"A".to_vec(),
+            b"B".to_vec(),
+            b"0".to_vec(),
+            b"1".to_vec(),
+            b"X".to_vec(),
+            b"\\n".to_vec(),
+            b"\\\"".to_vec(),
+            b"\\\\".to_vec(),
+            "é".as_bytes().to_vec(),
+        ];
+
+        let accepts = |regex: &crate::automata::lexer::compile::Regex, body: &[u8]| {
+            let mut state = 0u32;
+            for &byte in body {
+                let Some(next) = regex.step(state, byte) else {
+                    return false;
+                };
+                state = next;
+            }
+            regex.dfa.finalizers(state).contains(0)
+        };
+
+        let mut bodies = vec![Vec::new()];
+        for _ in 0..max_len {
+            let mut next = bodies.clone();
+            for body in &bodies {
+                for token in &tokens {
+                    let mut extended = body.clone();
+                    extended.extend_from_slice(token);
+                    next.push(extended);
+                }
+            }
+            bodies = next;
+        }
+
+        for body in bodies {
+            assert_eq!(
+                accepts(&direct, &body),
+                accepts(&generic, &body),
+                "body mismatch for {:?}",
+                String::from_utf8_lossy(&body),
+            );
+        }
     }
 
     #[test]
