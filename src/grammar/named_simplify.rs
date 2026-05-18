@@ -285,6 +285,7 @@ fn collect_ref_counts(expr: &GrammarExpr, counts: &mut HashMap<String, usize>) {
         | GrammarExpr::Literal(_)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
+        | GrammarExpr::LexerDfa(_)
         | GrammarExpr::AnyByte => {}
     }
 }
@@ -359,6 +360,7 @@ fn inline_refs_in_expr(
         | GrammarExpr::Literal(_)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
+        | GrammarExpr::LexerDfa(_)
         | GrammarExpr::AnyByte => {}
     }
 }

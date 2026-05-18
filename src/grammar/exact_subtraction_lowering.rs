@@ -264,6 +264,7 @@ impl<'a> ExactSubtractionResolver<'a> {
             | GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
+            | GrammarExpr::LexerDfa(_)
             | GrammarExpr::AnyByte => strip_grouping(expr).clone(),
         }
     }
@@ -323,6 +324,7 @@ impl SiteCollector {
             | GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
+            | GrammarExpr::LexerDfa(_)
             | GrammarExpr::AnyByte => Ok(()),
         }
     }
@@ -592,6 +594,7 @@ fn rewrite_expr(
         | GrammarExpr::Literal(_)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
+        | GrammarExpr::LexerDfa(_)
         | GrammarExpr::AnyByte => Ok(()),
     }
 }
@@ -781,6 +784,7 @@ mod tests {
             | GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
+            | GrammarExpr::LexerDfa(_)
             | GrammarExpr::AnyByte => false,
         }
     }

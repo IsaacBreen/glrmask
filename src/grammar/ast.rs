@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::GlrMaskError;
-use crate::automata::unweighted_u32::dfa::DFA;
 use crate::automata::lexer::ast::Expr;
+use crate::automata::lexer::dfa::DFA as LexerDFA;
+use crate::automata::unweighted_u32::dfa::DFA;
 use crate::automata::lexer::regex::parse_regex;
 use crate::ds::u8set::U8Set;
 use crate::grammar::flat::{
@@ -39,6 +40,7 @@ pub enum GrammarExpr {
     Literal(Vec<u8>),
     CharClass { def: String, negate: bool, utf8: bool },
     RawRegex(String),
+    LexerDfa(Arc<LexerDFA>),
     AnyByte,
     /// A separator-delimited sequence of items where some items are optional.
     ///
@@ -160,6 +162,7 @@ impl NamedGrammar {
                 }
                 GrammarExpr::Epsilon | GrammarExpr::Literal(_)
                 | GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_)
+                | GrammarExpr::LexerDfa(_)
                 | GrammarExpr::AnyByte => {}
             }
         }
@@ -360,6 +363,9 @@ fn grammar_expr_to_lark_with_indent(
         }
         GrammarExpr::RawRegex(pattern) => {
             write!(out, "/{}/", pattern).unwrap();
+        }
+        GrammarExpr::LexerDfa(dfa) => {
+            write!(out, "/*LexerDfa(states={})*/", dfa.num_states()).unwrap();
         }
         GrammarExpr::AnyByte => {
             out.push_str("/./ /*AnyByte*/");
@@ -683,6 +689,7 @@ impl Lowerer {
             | GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
+            | GrammarExpr::LexerDfa(_)
             | GrammarExpr::AnyByte => Self::strip_grouping(expr).clone(),
         }
     }
@@ -912,6 +919,7 @@ impl Lowerer {
             GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
+            | GrammarExpr::LexerDfa(_)
             | GrammarExpr::AnyByte
             | GrammarExpr::Intersect { .. } => {
                 if let Some(symbol) = self.nonnullable_terminal_symbol(expr)? {
@@ -1623,6 +1631,11 @@ impl Lowerer {
                 // assume utf8 true for raw regex from lark/ebnf
                 Symbol::Terminal(self.terminal_id(pattern, pattern, true))
             }
+            GrammarExpr::LexerDfa(_) => {
+                let expr = self.resolve_terminal_expr(None, expr)?;
+                let name = format!("__terminal_expr_{}", self.generated_nonterminal_counter);
+                Symbol::Terminal(self.register_terminal_expr(&name, expr))
+            }
             GrammarExpr::Epsilon => {
                 // Epsilon as an inline NT atom: create a nonterminal with an empty production.
                 let (_, nt) = self.fresh_nonterminal("eps");
@@ -1860,6 +1873,7 @@ fn grammar_expr_to_expr(
             parse_regex(&pattern, *utf8)
         }
         GrammarExpr::RawRegex(pattern) => parse_regex(pattern, true),
+        GrammarExpr::LexerDfa(dfa) => Expr::Dfa(dfa.clone()),
         GrammarExpr::AnyByte => Expr::U8Class(U8Set::from_range(0, 255)),
         GrammarExpr::Epsilon => Expr::Epsilon,
         GrammarExpr::Sequence(parts) => {
@@ -1970,6 +1984,7 @@ fn grammar_expr_is_nullable(
             parse_regex(&char_class_pattern(def, *negate), *utf8).is_nullable()
         }
         GrammarExpr::RawRegex(pattern) => parse_regex(pattern, true).is_nullable(),
+        GrammarExpr::LexerDfa(dfa) => !dfa.finalizers(0).is_empty(),
         GrammarExpr::AnyByte => false,
         GrammarExpr::SeparatedSequence { items, allow_empty, .. } => {
             *allow_empty
@@ -2085,6 +2100,7 @@ fn validate_expr_nfa_placement(grammar: &NamedGrammar) -> Result<(), GlrMaskErro
             | GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
+            | GrammarExpr::LexerDfa(_)
             | GrammarExpr::AnyByte => {}
         }
         Ok(())
@@ -2116,6 +2132,7 @@ pub fn expr_to_grammar_expr(expr: &Expr) -> GrammarExpr {
             negate: false,
             utf8: false,
         },
+        Expr::Dfa(dfa) => GrammarExpr::LexerDfa(dfa.clone()),
         Expr::Epsilon => GrammarExpr::Epsilon,
         Expr::Seq(parts) => {
             let items: Vec<_> = parts.iter().map(expr_to_grammar_expr).collect();

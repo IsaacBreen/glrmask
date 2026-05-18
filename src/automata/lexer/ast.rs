@@ -10,12 +10,14 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use super::dfa::DFA;
 use crate::ds::u8set::U8Set;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Expr {
     U8Seq(Vec<u8>),
     U8Class(U8Set),
+    Dfa(Arc<DFA>),
     Intersect {
         expr: Box<Expr>,
         intersect: Box<Expr>,
@@ -45,6 +47,10 @@ pub fn bytes(bs: &[u8]) -> Expr {
 
 pub fn class(set: U8Set) -> Expr {
     Expr::U8Class(set)
+}
+
+pub fn dfa(dfa: DFA) -> Expr {
+    Expr::Dfa(Arc::new(dfa))
 }
 
 pub fn seq(exprs: Vec<Expr>) -> Expr {
@@ -182,6 +188,7 @@ impl Expr {
         match self {
             Expr::U8Seq(bytes) => bytes.is_empty(),
             Expr::U8Class(_) => false,
+            Expr::Dfa(dfa) => !dfa.finalizers(0).is_empty(),
             Expr::Intersect { expr, intersect } => expr.is_nullable() && intersect.is_nullable(),
             Expr::Seq(parts) => parts.iter().all(Expr::is_nullable),
             Expr::Choice(options) => options.iter().any(Expr::is_nullable),
@@ -210,6 +217,7 @@ impl Expr {
                 let child = expr.optimize();
                 optimize_repeat_expr(child, min, max)
             }
+            Expr::Dfa(dfa) => Expr::Dfa(dfa),
             Expr::Shared(inner) => Expr::Shared(Arc::new(inner.as_ref().clone().optimize())),
             leaf => leaf,
         }
@@ -230,6 +238,7 @@ impl Expr {
                 }
                 None
             }
+            Expr::Dfa(_) => None,
             Expr::Intersect { .. } => None,
             Expr::Exclude { .. } => None,
             Expr::Shared(inner) => inner.strip_prefix(prefix),

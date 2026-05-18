@@ -2,8 +2,9 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 
-use crate::automata::lexer::ast::Expr as LexerExpr;
+use crate::automata::lexer::ast::{dfa as lexer_dfa_expr, Expr as LexerExpr};
 use crate::automata::lexer::compile::build_regex;
+use crate::automata::lexer::dfa::DFA;
 use crate::automata::lexer::regex::parse_regex;
 use crate::grammar::expr_nfa::ExprNfaBuilder;
 use crate::import::ast::{expr_to_grammar_expr, GrammarExpr, NamedGrammar, NamedRule};
@@ -545,6 +546,7 @@ fn finite_literal_alternatives(
         | GrammarExpr::RepeatRange { .. }
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
+        | GrammarExpr::LexerDfa(_)
         | GrammarExpr::AnyByte
         | GrammarExpr::Intersect { .. }
         | GrammarExpr::SeparatedSequence { .. }
@@ -904,6 +906,7 @@ fn regex_byte_length_bounds(expr: &crate::automata::lexer::ast::Expr) -> (usize,
     match expr {
         Expr::U8Seq(bytes) => (bytes.len(), Some(bytes.len())),
         Expr::U8Class(_) => (1, Some(1)),
+        Expr::Dfa(_) => (0, None),
         Expr::Seq(parts) => {
             let mut min_total = 0usize;
             let mut max_total = Some(0usize);
@@ -1704,6 +1707,7 @@ fn json_encoded_regex_expr(expr: LexerExpr) -> LexerExpr {
                 .map(|fragment| parse_json_encoded_byte_regex(&fragment))
                 .unwrap_or_else(|| LexerExpr::Choice(vec![]))
         }
+        LexerExpr::Dfa(dfa) => LexerExpr::Dfa(dfa),
         LexerExpr::Intersect { expr, intersect } => LexerExpr::Intersect {
             expr: Box::new(json_encoded_regex_expr(*expr)),
             intersect: Box::new(json_encoded_regex_expr(*intersect)),
@@ -2726,7 +2730,7 @@ fn integer_multiple_expr(multiple: u64, allow_fractional_zero: bool) -> LexerExp
         return integer_power_of_ten_multiple_expr(exponent, allow_fractional_zero);
     }
 
-    SchemaCtx::build_state_machine_expr(
+    lexer_dfa_expr(SchemaCtx::build_state_machine_dfa(
         IntegerMultipleState::Start,
         |state| match state {
             IntegerMultipleState::Zero => true,
@@ -2775,7 +2779,7 @@ fn integer_multiple_expr(multiple: u64, allow_fractional_zero: bool) -> LexerExp
             }
             transitions
         },
-    )
+    ))
 }
 
 fn reciprocal_power_of_ten_expr(scale: usize) -> LexerExpr {
@@ -3216,7 +3220,10 @@ fn json_pattern_grammar_expr_impl(expr: &LexerExpr, json_char: &LexerExpr) -> Gr
     }
 
     match expr {
-        LexerExpr::U8Seq(_) | LexerExpr::U8Class(_) | LexerExpr::Epsilon => expr_to_grammar_expr(expr),
+        LexerExpr::U8Seq(_)
+        | LexerExpr::U8Class(_)
+        | LexerExpr::Dfa(_)
+        | LexerExpr::Epsilon => expr_to_grammar_expr(expr),
         LexerExpr::Seq(parts) => sequence_or_single(
             parts
                 .iter()
@@ -4727,7 +4734,10 @@ impl<'a> SchemaCtx<'a> {
                 GrammarExpr::Grouped(Box::new(self.hoist_patterns_in_expr(*inner, prefix)))
             }
             GrammarExpr::Ref(_) | GrammarExpr::Literal(_) | GrammarExpr::Epsilon => expr,
-            GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_) | GrammarExpr::AnyByte => {
+            GrammarExpr::CharClass { .. }
+            | GrammarExpr::RawRegex(_)
+            | GrammarExpr::LexerDfa(_)
+            | GrammarExpr::AnyByte => {
                 self.extract_pattern_terminal_rule(expr, prefix)
             }
             GrammarExpr::Sequence(parts) => sequence_or_single(
@@ -9966,6 +9976,71 @@ impl<'a> SchemaCtx<'a> {
         }
     }
 
+    fn build_state_machine_dfa<State, IsAccepting, Transitions>(
+        start: State,
+        mut is_accepting: IsAccepting,
+        mut transitions_for: Transitions,
+    ) -> DFA
+    where
+        State: Copy + Eq + std::hash::Hash,
+        IsAccepting: FnMut(State) -> bool,
+        Transitions: FnMut(State) -> Vec<(u8, State)>,
+    {
+        let mut state_ids = HashMap::<State, usize>::new();
+        let mut worklist = VecDeque::<State>::new();
+        let mut transitions = Vec::<Vec<(u8, usize)>>::new();
+        let mut accepting = Vec::<bool>::new();
+        let mut all_bytes = crate::ds::u8set::U8Set::empty();
+
+        state_ids.insert(start, 0);
+        worklist.push_back(start);
+        transitions.push(Vec::new());
+        accepting.push(false);
+
+        while let Some(product_state) = worklist.pop_front() {
+            let result_state_id = state_ids[&product_state];
+            accepting[result_state_id] = is_accepting(product_state);
+
+            let mut entries = Vec::new();
+            for (byte, next_state) in transitions_for(product_state) {
+                all_bytes.insert(byte);
+                let next_result_state_id = if let Some(&existing) = state_ids.get(&next_state) {
+                    existing
+                } else {
+                    let new_state_id = state_ids.len();
+                    state_ids.insert(next_state, new_state_id);
+                    worklist.push_back(next_state);
+                    transitions.push(Vec::new());
+                    accepting.push(false);
+                    new_state_id
+                };
+                entries.push((byte, next_result_state_id));
+            }
+            entries.sort_unstable_by_key(|(byte, _)| *byte);
+            transitions[result_state_id] = entries;
+        }
+
+        let mut dfa = DFA::new(transitions.len());
+        dfa.ensure_group_capacity(1);
+        dfa.set_group_u8set(0, all_bytes);
+
+        for (state_id, entries) in transitions.into_iter().enumerate() {
+            let entries: Vec<(u8, u32)> = entries
+                .into_iter()
+                .map(|(byte, target)| (byte, target as u32))
+                .collect();
+            dfa.set_transitions_from_sorted_entries(state_id as u32, entries);
+
+            let mut finalizers = crate::ds::bitset::BitSet::new(1);
+            if accepting[state_id] {
+                finalizers.set(0);
+            }
+            dfa.overwrite_state_metadata(state_id as u32, finalizers, crate::ds::bitset::BitSet::new(1));
+        }
+
+        dfa
+    }
+
     fn build_lexer_expr(&mut self, expr: &LexerExpr, prefix: &str) -> GrammarExpr {
         self.extract_terminal_rule(expr_to_grammar_expr(expr), prefix)
     }
@@ -12072,6 +12147,7 @@ fn collect_grammar_visible_refs(
             GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
+            | GrammarExpr::LexerDfa(_)
             | GrammarExpr::Epsilon
             | GrammarExpr::AnyByte
             | GrammarExpr::Intersect { .. } => {}
@@ -12233,6 +12309,7 @@ mod tests {
             | GrammarExpr::Epsilon
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
+            | GrammarExpr::LexerDfa(_)
             | GrammarExpr::AnyByte => false,
         }
     }

@@ -37,7 +37,7 @@ fn expr_contains_group_op(expr: &Expr) -> bool {
         Expr::Seq(parts) | Expr::Choice(parts) => parts.iter().any(expr_contains_group_op),
         Expr::Repeat { expr, .. } => expr_contains_group_op(expr),
         Expr::Shared(inner) => expr_contains_group_op(inner),
-        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Epsilon => false,
+        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => false,
     }
 }
 
@@ -135,6 +135,7 @@ fn expr_accepts_empty(expr: &Expr) -> bool {
     match expr {
         Expr::U8Seq(bytes) => bytes.is_empty(),
         Expr::U8Class(_) => false,
+        Expr::Dfa(dfa) => !dfa.finalizers(0).is_empty(),
         Expr::Intersect { expr, intersect } => {
             expr_accepts_empty(expr) && expr_accepts_empty(intersect)
         }
@@ -151,6 +152,15 @@ fn expr_u8set(expr: &Expr) -> U8Set {
     match expr {
         Expr::U8Seq(bytes) => U8Set::from_bytes(bytes),
         Expr::U8Class(set) => *set,
+        Expr::Dfa(dfa) => {
+            let mut set = U8Set::empty();
+            for state in dfa.states() {
+                for (byte, _) in state.transitions.iter() {
+                    set.insert(byte);
+                }
+            }
+            set
+        }
         Expr::Seq(parts) | Expr::Choice(parts) => parts
             .iter()
             .fold(U8Set::empty(), |acc, part| acc | expr_u8set(part)),
@@ -875,6 +885,7 @@ fn append_compiled_expr(expr: &Expr, nfa: &mut NFA, start: u32, end: u32) {
         Expr::U8Class(set) => {
             nfa.add_u8set_transition(start, *set, end);
         }
+        Expr::Dfa(dfa) => append_dfa_expr(dfa, nfa, start, end),
         Expr::Intersect { .. } => {
             unreachable!("nested Expr::Intersect must be lowered before NFA compilation")
         }
@@ -1027,6 +1038,7 @@ fn explicit_dead_sink_state(dfa: &DFA) -> Option<u32> {
 fn compile_product_component_dfa_direct(expr: &Expr) -> Option<(DFA, bool)> {
     match expr {
         Expr::Shared(inner) => compile_product_component_dfa_direct(inner),
+        Expr::Dfa(dfa) => Some((dfa.as_ref().clone(), true)),
         Expr::Repeat {
             expr,
             min,

@@ -228,6 +228,7 @@ impl CandidateCollector {
             | GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
+            | GrammarExpr::LexerDfa(_)
             | GrammarExpr::AnyByte => {
                 if let Some(atom) = self.eligible_atom(expr) {
                     let atom_id = self.atom_id(atom);
@@ -241,7 +242,10 @@ impl CandidateCollector {
         match expr {
             GrammarExpr::Grouped(inner) => self.eligible_atom(inner),
             GrammarExpr::Literal(_) => Some(expr.clone()),
-            GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_) | GrammarExpr::AnyByte
+            GrammarExpr::CharClass { .. }
+            | GrammarExpr::RawRegex(_)
+            | GrammarExpr::LexerDfa(_)
+            | GrammarExpr::AnyByte
                 if self.include_non_literal_terminals =>
             {
                 Some(expr.clone())

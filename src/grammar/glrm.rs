@@ -210,6 +210,7 @@ fn dump_nt_atom(expr: &GrammarExpr) -> String {
             let suffix = if *utf8 { "/utf8" } else { "" };
             format!("[{}]{}", inner, suffix)
         }
+        GrammarExpr::LexerDfa(dfa) => format!("LexerDfa(states={})", dfa.num_states()),
         GrammarExpr::AnyByte => ".".to_string(),
         GrammarExpr::Epsilon => "eps".to_string(),
         GrammarExpr::Exclude { expr: inner, exclude } => {
