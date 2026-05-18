@@ -620,35 +620,80 @@ fn build_sweep_events(
     (events, event_positions, groups, labels_by_id, stats)
 }
 
-fn insert_sorted_group_id(active_group_ids: &mut Vec<u32>, group_id: u32) {
-    match active_group_ids.binary_search(&group_id) {
-        Ok(_) => {}
-        Err(index) => active_group_ids.insert(index, group_id),
-    }
+#[inline]
+fn active_group_hash(group_id: u32) -> u64 {
+    let mut value = (group_id as u64).wrapping_add(0x9e3779b97f4a7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d049bb133111eb);
+    value ^ (value >> 31)
 }
 
-fn remove_sorted_group_id(active_group_ids: &mut Vec<u32>, group_id: u32) {
-    if let Ok(index) = active_group_ids.binary_search(&group_id) {
-        active_group_ids.remove(index);
+fn insert_active_group_id(
+    active_group_ids: &mut Vec<u32>,
+    active_group_positions: &mut [u32],
+    active_group_fingerprint: &mut u64,
+    group_id: u32,
+) {
+    let slot = &mut active_group_positions[group_id as usize];
+    if *slot != u32::MAX {
+        return;
     }
+    *slot = active_group_ids.len() as u32;
+    active_group_ids.push(group_id);
+    *active_group_fingerprint ^= active_group_hash(group_id);
 }
 
-fn apply_sweep_events(active_group_counts: &mut [u32], events: &[SweepEvent], active_group_ids: &mut Vec<u32>) {
+fn remove_active_group_id(
+    active_group_ids: &mut Vec<u32>,
+    active_group_positions: &mut [u32],
+    active_group_fingerprint: &mut u64,
+    group_id: u32,
+) {
+    let remove_index = active_group_positions[group_id as usize] as usize;
+    debug_assert!(remove_index < active_group_ids.len());
+    let removed_group_id = active_group_ids.swap_remove(remove_index);
+    debug_assert_eq!(removed_group_id, group_id);
+    if remove_index < active_group_ids.len() {
+        let moved_group_id = active_group_ids[remove_index];
+        active_group_positions[moved_group_id as usize] = remove_index as u32;
+    }
+    active_group_positions[group_id as usize] = u32::MAX;
+    *active_group_fingerprint ^= active_group_hash(group_id);
+}
+
+fn apply_sweep_events(
+    active_group_counts: &mut [u32],
+    events: &[SweepEvent],
+    active_group_ids: &mut Vec<u32>,
+    active_group_positions: &mut [u32],
+    active_group_fingerprint: &mut u64,
+) {
     for event in events.iter().filter(|event| !event.add) {
         let count = &mut active_group_counts[event.group_id as usize];
         assert!(*count > 0, "pmv sweep removal underflow for group_id={}", event.group_id);
         if *count == 1 {
-            remove_sorted_group_id(active_group_ids, event.group_id);
+            remove_active_group_id(active_group_ids, active_group_positions, active_group_fingerprint, event.group_id);
         }
         *count -= 1;
     }
     for event in events.iter().filter(|event| event.add) {
         let count = &mut active_group_counts[event.group_id as usize];
         if *count == 0 {
-            insert_sorted_group_id(active_group_ids, event.group_id);
+            insert_active_group_id(active_group_ids, active_group_positions, active_group_fingerprint, event.group_id);
         }
         *count += 1;
     }
+}
+
+fn active_group_key_matches(
+    active_group_counts: &[u32],
+    active_group_ids: &[u32],
+    sorted_key: &[u32],
+) -> bool {
+    if active_group_ids.len() != sorted_key.len() {
+        return false;
+    }
+    sorted_key.iter().all(|&group_id| active_group_counts[group_id as usize] > 0)
 }
 
 fn build_signature_from_active_groups(
@@ -724,12 +769,14 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
     let sweep_events_ms = elapsed_ms(sweep_events_started_at);
 
     let mut signature_to_id: FxHashMap<Vec<StateTerminalLabel>, SignatureClassId> = FxHashMap::default();
-    let mut active_group_signature_to_signature_id: FxHashMap<Vec<u32>, SignatureClassId> = FxHashMap::default();
+    let mut active_group_signature_to_signature_id: FxHashMap<u64, Vec<(Vec<u32>, SignatureClassId)>> = FxHashMap::default();
     let mut signature_labels: Vec<Vec<StateTerminalLabel>> = Vec::new();
     let mut original_to_internal = vec![u32::MAX; ordered_vocab.original_slot_count];
     let mut internal_to_originals: Vec<Vec<u32>> = Vec::new();
     let mut active_group_counts = vec![0u32; groups.len()];
     let mut active_group_ids = Vec::<u32>::new();
+    let mut active_group_positions = vec![u32::MAX; groups.len()];
+    let mut active_group_fingerprint = 0u64;
     let mut label_stamps = vec![0u32; labels_by_id.len()];
     let mut stamp_generation = 0u32;
 
@@ -751,19 +798,36 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
     let mut position = 0usize;
     while position < num_ordered_tokens {
         while event_index < event_positions.len() && event_positions[event_index] as usize == position {
-            apply_sweep_events(&mut active_group_counts, &events[position], &mut active_group_ids);
+            apply_sweep_events(
+                &mut active_group_counts,
+                &events[position],
+                &mut active_group_ids,
+                &mut active_group_positions,
+                &mut active_group_fingerprint,
+            );
             event_index += 1;
         }
 
         let next_position = event_positions.get(event_index).map(|&next| (next as usize).min(num_ordered_tokens)).unwrap_or(num_ordered_tokens);
         let active_group_signature_started_at = Instant::now();
-        active_group_signature_build_ms += elapsed_ms(active_group_signature_started_at);
         sweep_segments += 1;
         total_active_group_len += active_group_ids.len();
         max_active_group_len = max_active_group_len.max(active_group_ids.len());
+        let cached_signature_id = active_group_signature_to_signature_id
+            .get(&active_group_fingerprint)
+            .and_then(|bucket| {
+                bucket.iter().find_map(|(sorted_key, signature_id)| {
+                    if active_group_key_matches(&active_group_counts, &active_group_ids, sorted_key) {
+                        Some(*signature_id)
+                    } else {
+                        None
+                    }
+                })
+            });
+        active_group_signature_build_ms += elapsed_ms(active_group_signature_started_at);
 
         let signature_lookup_started_at = Instant::now();
-        let signature_id = if let Some(&existing) = active_group_signature_to_signature_id.get(active_group_ids.as_slice()) {
+        let signature_id = if let Some(existing) = cached_signature_id {
             active_group_signature_cache_hits += 1;
             existing
         } else {
@@ -787,7 +851,14 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
                 internal_to_originals.push(Vec::new());
                 new_id
             };
-            active_group_signature_to_signature_id.insert(active_group_ids.clone(), signature_id);
+            let active_group_key_started_at = Instant::now();
+            let mut active_group_key = active_group_ids.clone();
+            active_group_key.sort_unstable();
+            active_group_signature_build_ms += elapsed_ms(active_group_key_started_at);
+            active_group_signature_to_signature_id
+                .entry(active_group_fingerprint)
+                .or_default()
+                .push((active_group_key, signature_id));
             signature_id
         };
         signature_lookup_ms += elapsed_ms(signature_lookup_started_at);
