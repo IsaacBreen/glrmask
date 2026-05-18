@@ -37,6 +37,7 @@ const JSON_NULL_RULE: &str = "JSON_NULL";
 const JSON_KEY_COLON_RULE: &str = "json_key_colon";
 const JSON_KEY_COLON_BODY_RULE: &str = "JSON_KEY_COLON_BODY";
 const JSON_STRING_REPEAT_CHUNK_DEFAULT: usize = 50;
+const MAX_PATTERN_BOUNDED_DFA_STATES: usize = 4096;
 
 fn json_string_repeat_chunk() -> usize {
     std::env::var("GLRMASK_STRING_REPEAT_CHUNK")
@@ -3893,6 +3894,7 @@ struct SchemaCtx<'a> {
     expr_dedup_cache: BTreeMap<String, String>,
     json_string_exact_cache: BTreeMap<usize, String>,
     json_string_upto_cache: BTreeMap<usize, String>,
+    bounded_pattern_body_cache: BTreeMap<(String, usize, Option<usize>), GrammarExpr>,
     shared_additional_key_plan: SharedAdditionalKeyPlan,
     shared_string_value_plan: SharedStringValuePlan,
     shared_string_value_exclusions_enabled: bool,
@@ -4255,6 +4257,7 @@ impl<'a> SchemaCtx<'a> {
             expr_dedup_cache: BTreeMap::new(),
             json_string_exact_cache: BTreeMap::new(),
             json_string_upto_cache: BTreeMap::new(),
+            bounded_pattern_body_cache: BTreeMap::new(),
             shared_additional_key_plan,
             shared_string_value_plan,
             shared_string_value_exclusions_enabled: !string_value_exclusions_abdcffb6b_compat()
@@ -8476,24 +8479,13 @@ impl<'a> SchemaCtx<'a> {
                 // This preserves JSON Schema search semantics while enforcing
                 // minLength/maxLength exactly.
                 const MAX_BOUNDED_SEARCH_TAIL: usize = 100;
-                const MAX_PATTERN_BOUNDED_DFA_STATES: usize = 4096;
                 if let Some(ml) = max_len {
                     if ml <= MAX_BOUNDED_SEARCH_TAIL {
-                        let search_expr = decoded_regex_search_expr(&pattern, Some(ml));
-                        let intersected = LexerExpr::Intersect {
-                            expr: Box::new(search_expr),
-                            intersect: Box::new(lexer_repeat(json_string_char_lexer_expr(), min_len, Some(ml))),
-                        };
-                        let body = try_pattern_bounded_dfa_leaf(
-                            &intersected,
-                            MAX_PATTERN_BOUNDED_DFA_STATES,
-                        )
-                        .unwrap_or_else(|| {
-                            self.build_pattern_lexer_expr(
-                                &intersected,
-                                "JSON_STRING_PATTERN_BOUNDED",
-                            )
-                        });
+                        let body = self.build_bounded_pattern_string_body(
+                            &pattern,
+                            min_len,
+                            ml,
+                        );
                         let (terminal_body, wrap) = wrap_string_value_expr_parts(body, true);
                         let term = self.extract_terminal_rule(terminal_body, "JSON_STRING_PATTERN_BOUNDED");
                         return Ok(wrap(term));
@@ -10065,6 +10057,35 @@ impl<'a> SchemaCtx<'a> {
 
     fn build_pattern_lexer_expr(&mut self, expr: &LexerExpr, prefix: &str) -> GrammarExpr {
         self.extract_json_pattern_lexer_expr_decomposed(expr.clone(), prefix)
+    }
+
+    fn build_bounded_pattern_string_body(
+        &mut self,
+        pattern: &str,
+        min_len: usize,
+        max_len: usize,
+    ) -> GrammarExpr {
+        let cache_key = (pattern.to_string(), min_len, Some(max_len));
+        if let Some(body) = self.bounded_pattern_body_cache.get(&cache_key) {
+            return body.clone();
+        }
+
+        let search_expr = decoded_regex_search_expr(pattern, Some(max_len));
+        let intersected = LexerExpr::Intersect {
+            expr: Box::new(search_expr),
+            intersect: Box::new(lexer_repeat(
+                json_string_char_lexer_expr(),
+                min_len,
+                Some(max_len),
+            )),
+        };
+        let body = try_pattern_bounded_dfa_leaf(&intersected, MAX_PATTERN_BOUNDED_DFA_STATES)
+            .unwrap_or_else(|| {
+                self.build_pattern_lexer_expr(&intersected, "JSON_STRING_PATTERN_BOUNDED")
+            });
+        self.bounded_pattern_body_cache
+            .insert(cache_key, body.clone());
+        body
     }
 
     fn add_option_expr(slot: &mut Option<LexerExpr>, new_expr: LexerExpr) {
