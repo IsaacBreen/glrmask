@@ -8944,7 +8944,7 @@ impl<'a> SchemaCtx<'a> {
             }
         };
 
-        let (terminal_body, wrap) = wrap_string_value_expr_parts(bounded_body, false);
+        let (terminal_body, wrap) = wrap_string_value_expr_parts(bounded_body, true);
         let body = self.extract_terminal_rule(terminal_body, "JSON_STRING_BOUNDED_PATTERN");
         wrap(body)
     }
@@ -13841,6 +13841,41 @@ mod tests {
         assert!(glrm.contains("::= \"\\\"\" ("), "{glrm}");
         assert!(glrm.contains("JSON_STRING_CHAR_EXACT_CLOSE"), "{glrm}");
         assert!(!glrm.contains("JSON_STRING_CHAR_EXACT_OPEN"), "{glrm}");
+    }
+
+    #[test]
+    fn bounded_simple_pattern_merges_open_quote_not_close_by_default() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _string_open = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_OPEN");
+        let _string_close = EnvVarGuard::unset("GLRMASK_JSON_STRING_MERGE_CLOSE");
+        let _pattern_open = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_STRING_MERGE_OPEN");
+        let _pattern_close = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_STRING_MERGE_CLOSE");
+
+        let glrm = dump_glrm(json!({
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "pattern": "^[A-Za-z0-9_-]+$",
+        }));
+
+        let pattern_line = glrm
+            .lines()
+            .find(|line| line.starts_with("t JSON_STRING_BOUNDED_PATTERN_"))
+            .unwrap_or_else(|| panic!("{glrm}"));
+        let start_line = glrm
+            .lines()
+            .find(|line| line.starts_with("nt start ::="))
+            .unwrap_or_else(|| panic!("{glrm}"));
+
+        assert!(
+            pattern_line.contains("::= \"\\\"\" (JSON_STRING_PATTERN_CHAR_"),
+            "{glrm}"
+        );
+        assert!(!pattern_line.ends_with("\"\\\"\";"), "{glrm}");
+        assert!(
+            start_line.contains("JSON_STRING_BOUNDED_PATTERN_") && start_line.ends_with("\"\\\"\";"),
+            "{glrm}"
+        );
     }
 
     #[test]
