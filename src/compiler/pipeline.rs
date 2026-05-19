@@ -488,15 +488,11 @@ fn compile_prepared_with_profile(
                             Some(&shared_classify_cache),
                         )
                     },
-                    || {
-                        cpm::compute_constraint_possible_matches_for_vocab(
-                            &tokenizer,
-                            vocab,
-                            cpm::ConstraintPossibleMatchesConfig {
-                                initial_state_map: Some(&global_max_length_state_map),
-                            },
-                        )
-                    },
+                    || cpm::compute_constraint_possible_matches_for_vocab(
+                        &tokenizer,
+                        vocab,
+                        cpm::ConstraintPossibleMatchesConfig,
+                    ),
                 )
             },
             || {

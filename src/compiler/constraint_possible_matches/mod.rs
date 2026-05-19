@@ -15,7 +15,12 @@ use crate::compiler::constraint_possible_matches::collector::{
 use crate::compiler::pm_profile::elapsed_ms;
 use crate::compiler::possible_matches::PossibleMatchesComputer;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap, MappedArtifact};
-use crate::ds::vocab_prefix_tree::VocabPrefixTree;
+use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::compat::{
+    FlatDfa, FlatDfaState, TokenizerView,
+};
+use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::vocab::fast as vocab_equivalence_analysis;
+use crate::ds::bitset::BitSet;
+use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::ds::weight::{shared_rangeset, Weight};
 use crate::grammar::flat::TerminalID;
 use crate::vocab::VocabDerivedArtifact;
@@ -33,10 +38,11 @@ pub(crate) struct PossibleMatchVocabMap {
     pub(crate) internal_to_originals: Vec<Vec<u32>>,
 }
 
+// WARNING: terminal-DWA equivalence maps must never be reused for possible
+// matches. Terminal-DWA equivalence does not imply possible-matches
+// equivalence. This warning must never be removed under any circumstances.
 #[derive(Debug, Clone)]
-pub(crate) struct ConstraintPossibleMatchesConfig<'a> {
-    pub(crate) initial_state_map: Option<&'a ManyToOneIdMap>,
-}
+pub(crate) struct ConstraintPossibleMatchesConfig;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct ConstraintPossibleMatchesProfile {
@@ -503,27 +509,299 @@ fn range_set_from_u128_mask(mask: u128) -> RangeSetBlaze<u32> {
     RangeSetBlaze::from_iter(ranges)
 }
 
-fn compose_state_classes_with_initial_map(state_classes: &[u32], initial_state_map: &ManyToOneIdMap) -> Vec<u32> {
-    let num_dfa_states = initial_state_map.original_to_internal.len();
-    let mut composed_state_classes = vec![u32::MAX; num_dfa_states];
-    for (initial_internal, originals) in initial_state_map.internal_to_originals.iter().enumerate() {
-        let Some(&initial_rep) = initial_state_map.representative_original_ids.get(initial_internal) else { continue; };
-        let Some(&class_id) = state_classes.get(initial_rep as usize) else { continue; };
-        if class_id == u32::MAX { continue; }
-        for &original in originals { composed_state_classes[original as usize] = class_id; }
-    }
-    composed_state_classes
+#[inline]
+fn pm_vocab_equiv_enabled() -> bool {
+    std::env::var("GLRMASK_PM_VOCAB_EQUIV")
+        .map(|value| {
+            let trimmed = value.trim();
+            trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true)
 }
 
-fn canonical_states_from_initial_map(initial_state_map: &ManyToOneIdMap, num_states: u32) -> Vec<u32> {
-    let mut canonical: Vec<u32> = (0..num_states).collect();
-    for (state, &internal) in initial_state_map.original_to_internal.iter().enumerate() {
-        if internal == u32::MAX { continue; }
-        let Some(&representative) = initial_state_map.representative_original_ids.get(internal as usize) else { continue; };
-        if representative == u32::MAX { continue; }
-        if let Some(slot) = canonical.get_mut(state) { *slot = representative; }
+#[derive(Clone, Copy)]
+struct PmTokenOutcome {
+    terminals: u128,
+    end_state: u32,
+}
+
+#[inline]
+fn mix_pm_signature_word(hash: u64, word: u64) -> u64 {
+    let mixed = word.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    hash ^ mixed
+        .wrapping_add(hash << 6)
+        .wrapping_add(hash >> 2)
+        .wrapping_mul(0x517c_c1b7_2722_0a95)
+}
+
+fn pm_signature_hash(outcomes: &[PmTokenOutcome]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for outcome in outcomes {
+        hash = mix_pm_signature_word(hash, outcome.terminals as u64);
+        hash = mix_pm_signature_word(hash, (outcome.terminals >> 64) as u64);
     }
-    canonical
+    hash
+}
+
+fn pm_signature_matches(signature: &[u128], outcomes: &[PmTokenOutcome]) -> bool {
+    signature.len() == outcomes.len()
+        && signature
+            .iter()
+            .zip(outcomes.iter())
+            .all(|(&left, right)| left == right.terminals)
+}
+
+fn intern_pm_token_signature(
+    outcomes: &[PmTokenOutcome],
+    buckets: &mut FxHashMap<u64, Vec<u32>>,
+    signatures: &mut Vec<Vec<u128>>,
+) -> u32 {
+    let hash = pm_signature_hash(outcomes);
+    if let Some(bucket) = buckets.get(&hash) {
+        for &signature_id in bucket {
+            if pm_signature_matches(&signatures[signature_id as usize], outcomes) {
+                return signature_id;
+            }
+        }
+    }
+
+    let signature_id = signatures.len() as u32;
+    let signature = outcomes
+        .iter()
+        .map(|outcome| outcome.terminals)
+        .collect::<Vec<_>>();
+    signatures.push(signature);
+    buckets.entry(hash).or_default().push(signature_id);
+    signature_id
+}
+
+fn advance_pm_token_outcomes(
+    parent: &[PmTokenOutcome],
+    segment: &[u8],
+    byte_transitions: &[Vec<u32>],
+    matched_terminal_masks: &[u128],
+) -> Vec<PmTokenOutcome> {
+    let mut child = Vec::with_capacity(parent.len());
+    for &outcome in parent {
+        let mut terminals = outcome.terminals;
+        let mut current_state = outcome.end_state;
+        if current_state != u32::MAX {
+            for &byte in segment {
+                let next_state = byte_transitions[byte as usize][current_state as usize];
+                if next_state == u32::MAX {
+                    current_state = u32::MAX;
+                    break;
+                }
+                current_state = next_state;
+                terminals |= matched_terminal_masks[current_state as usize];
+            }
+        }
+        child.push(PmTokenOutcome {
+            terminals,
+            end_state: current_state,
+        });
+    }
+    child
+}
+
+struct PmVocabEquivBuilder<'a> {
+    ordered_vocab: &'a OrderedVocab,
+    byte_transitions: &'a [Vec<u32>],
+    matched_terminal_masks: &'a [u128],
+    signature_buckets: FxHashMap<u64, Vec<u32>>,
+    signatures: Vec<Vec<u128>>,
+    original_to_internal: Vec<u32>,
+    internal_to_originals: Vec<Vec<u32>>,
+    representative_original_ids: Vec<u32>,
+}
+
+impl<'a> PmVocabEquivBuilder<'a> {
+    fn new(
+        ordered_vocab: &'a OrderedVocab,
+        byte_transitions: &'a [Vec<u32>],
+        matched_terminal_masks: &'a [u128],
+    ) -> Self {
+        Self {
+            ordered_vocab,
+            byte_transitions,
+            matched_terminal_masks,
+            signature_buckets: FxHashMap::default(),
+            signatures: Vec::new(),
+            original_to_internal: vec![u32::MAX; ordered_vocab.original_slot_count],
+            internal_to_originals: Vec::new(),
+            representative_original_ids: Vec::new(),
+        }
+    }
+
+    fn record_token(&mut self, ordered_token_id: usize, outcomes: &[PmTokenOutcome]) {
+        let class_id = intern_pm_token_signature(
+            outcomes,
+            &mut self.signature_buckets,
+            &mut self.signatures,
+        );
+        let class_idx = class_id as usize;
+        while self.internal_to_originals.len() <= class_idx {
+            self.internal_to_originals.push(Vec::new());
+            self.representative_original_ids.push(u32::MAX);
+        }
+        let Some(originals) = self.ordered_vocab.ordered_to_originals.get(ordered_token_id) else {
+            return;
+        };
+        for &original in originals {
+            if let Some(slot) = self.original_to_internal.get_mut(original as usize) {
+                *slot = class_id;
+            }
+            if self.representative_original_ids[class_idx] == u32::MAX {
+                self.representative_original_ids[class_idx] = original;
+            }
+            self.internal_to_originals[class_idx].push(original);
+        }
+    }
+
+    fn visit(&mut self, node: &VocabPrefixTreeNode, outcomes: &[PmTokenOutcome]) {
+        if node.has_token() {
+            self.record_token(node.token_id(), outcomes);
+        }
+        for (segment, child) in node.iter_children() {
+            let child_outcomes = advance_pm_token_outcomes(
+                outcomes,
+                segment,
+                self.byte_transitions,
+                self.matched_terminal_masks,
+            );
+            self.visit(child, &child_outcomes);
+        }
+    }
+
+    fn finish(mut self) -> ManyToOneIdMap {
+        for originals in &mut self.internal_to_originals {
+            originals.sort_unstable();
+            originals.dedup();
+        }
+        ManyToOneIdMap {
+            original_to_internal: self.original_to_internal,
+            internal_to_originals: self.internal_to_originals,
+            representative_original_ids: self.representative_original_ids,
+        }
+    }
+}
+
+fn compute_pm_vocab_equivalence_map(
+    tokenizer: &Tokenizer,
+    ordered_vocab: &OrderedVocab,
+    trie: &VocabPrefixTree,
+) -> ManyToOneIdMap {
+    let num_states = tokenizer.num_states() as usize;
+    let mut byte_transitions = vec![vec![u32::MAX; num_states]; 256];
+    for (state_idx, dfa_state) in tokenizer.dfa.states().iter().enumerate() {
+        for (byte, &target) in dfa_state.transitions.iter() {
+            byte_transitions[byte as usize][state_idx] = target;
+        }
+    }
+
+    let mut matched_terminal_masks = Vec::with_capacity(num_states);
+    for state in 0..tokenizer.num_states() {
+        let mut mask = 0u128;
+        for terminal in tokenizer.matched_terminals_iter(state) {
+            if terminal < 128 {
+                mask |= 1u128 << terminal;
+            }
+        }
+        matched_terminal_masks.push(mask);
+    }
+
+    let root_outcomes = (0..tokenizer.num_states())
+        .map(|state| PmTokenOutcome {
+            terminals: 0,
+            end_state: state,
+        })
+        .collect::<Vec<_>>();
+    let mut builder = PmVocabEquivBuilder::new(
+        ordered_vocab,
+        &byte_transitions,
+        &matched_terminal_masks,
+    );
+    builder.visit(&trie.root, &root_outcomes);
+    builder.finish()
+}
+
+fn compute_pm_vocab_equivalence_map_fast(
+    tokenizer: &Tokenizer,
+    ordered_vocab: &OrderedVocab,
+) -> ManyToOneIdMap {
+    let dfa_states = tokenizer.dfa.states();
+    let num_states = dfa_states.len();
+    let mut transitions = vec![u32::MAX; num_states * 256];
+    let states = dfa_states
+        .iter()
+        .enumerate()
+        .map(|(state_idx, state)| {
+            let base = state_idx * 256;
+            for (byte, &target) in state.transitions.iter() {
+                transitions[base + byte as usize] = target;
+            }
+            FlatDfaState {
+                finalizers: state.finalizers.iter().collect(),
+                // PM token equivalence only cares which terminals can be
+                // reached while consuming the token bytes. Terminal-DWA
+                // future-group metadata is deliberately not part of this PM
+                // owned equivalence relation.
+                possible_future_group_ids: Vec::new(),
+            }
+        })
+        .collect::<Vec<_>>();
+    let tokenizer_view = TokenizerView {
+        flat_dfa: FlatDfa {
+            states,
+            start_state: tokenizer.start_state() as usize,
+            transitions: Arc::from(transitions),
+        },
+    };
+    let strings = ordered_vocab
+        .ordered_token_bytes
+        .iter()
+        .map(|bytes| bytes.as_slice())
+        .collect::<Vec<_>>();
+    let initial_states = (0..tokenizer.num_states() as usize).collect::<Vec<_>>();
+    let disallowed_follows = BTreeMap::<u32, BitSet>::new();
+    let classes = vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter(
+        &tokenizer_view,
+        &strings,
+        &initial_states,
+        &disallowed_follows,
+        None,
+        None,
+        None,
+    );
+
+    let mut original_to_internal = vec![u32::MAX; ordered_vocab.original_slot_count];
+    let mut internal_to_originals = Vec::new();
+    let mut representative_original_ids = Vec::new();
+    for class in classes {
+        let internal = internal_to_originals.len() as u32;
+        let mut originals = Vec::new();
+        for ordered_id in class {
+            if let Some(ordered_originals) = ordered_vocab.ordered_to_originals.get(ordered_id) {
+                for &original in ordered_originals {
+                    if let Some(slot) = original_to_internal.get_mut(original as usize) {
+                        *slot = internal;
+                    }
+                    originals.push(original);
+                }
+            }
+        }
+        originals.sort_unstable();
+        originals.dedup();
+        let representative = originals.first().copied().unwrap_or(u32::MAX);
+        internal_to_originals.push(originals);
+        representative_original_ids.push(representative);
+    }
+
+    ManyToOneIdMap {
+        original_to_internal,
+        internal_to_originals,
+        representative_original_ids,
+    }
 }
 
 fn used_state_class_ids(state_classes: &[u32]) -> Vec<u32> {
@@ -1410,13 +1688,13 @@ fn collect_sparse_root_possible_matches(
 pub(crate) fn compute_constraint_possible_matches(
     tokenizer: &Tokenizer,
     token_bytes: &BTreeMap<u32, Vec<u8>>,
-    config: ConstraintPossibleMatchesConfig,
+    _config: ConstraintPossibleMatchesConfig,
 ) -> ConstraintPossibleMatchesComputation {
     compute_constraint_possible_matches_with_artifacts(
         tokenizer,
         token_bytes.len(),
         get_ordered_vocab_trie_artifacts(token_bytes),
-        config,
+        None,
     )
 }
 
@@ -1424,7 +1702,7 @@ fn compute_constraint_possible_matches_with_artifacts(
     tokenizer: &Tokenizer,
     original_token_count: usize,
     artifacts_and_profile: (OrderedVocabTrieArtifacts, OrderedVocabCacheProfile),
-    config: ConstraintPossibleMatchesConfig,
+    initial_vocab_map: Option<&ManyToOneIdMap>,
 ) -> ConstraintPossibleMatchesComputation {
     let pm_started_at = Instant::now();
 
@@ -1433,20 +1711,14 @@ fn compute_constraint_possible_matches_with_artifacts(
     let ordered_vocab = artifacts.ordered_vocab;
     let trie = artifacts.trie;
 
-    let trie_build_states: Vec<u32> = match config.initial_state_map {
-        Some(init_map) => init_map.representative_original_ids.clone(),
-        None => (0..tokenizer.num_states()).collect(),
-    };
-    let canonical_states = config
-        .initial_state_map
-        .map(|init_map| canonical_states_from_initial_map(init_map, tokenizer.num_states()));
+    let trie_build_states: Vec<u32> = (0..tokenizer.num_states()).collect();
 
     let root_terminal_union = root_terminal_union_count(tokenizer, &trie_build_states);
     let use_sparse_root_collect = sparse_root_collect_enabled()
         && trie_build_states.len() <= sparse_root_state_limit()
         && root_terminal_union <= sparse_root_terminal_limit();
 
-    let mut trie_class_result = if use_sparse_root_collect {
+    let trie_class_result = if use_sparse_root_collect {
         if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
         {
@@ -1462,36 +1734,39 @@ fn compute_constraint_possible_matches_with_artifacts(
             tokenizer,
             &trie.root,
             &trie_build_states,
-            canonical_states.as_deref(),
+            None,
         )
     } else {
         collector::collect_possible_matches_interval_trie_class_build_with_classes(
             tokenizer,
             &trie.root,
             &trie_build_states,
-            canonical_states.as_deref(),
+            None,
         )
         .0
     };
-
-    if let Some(init_map) = config.initial_state_map {
-        trie_class_result.state_classes = compose_state_classes_with_initial_map(&trie_class_result.state_classes, init_map);
-    }
 
     let possible_matches_collect_ms = elapsed_ms(pm_started_at);
 
     let possible_match_vocab_started_at = Instant::now();
     let (possible_match_vocab, possible_matches) = build_possible_match_vocab_and_weights_from_interval_maps(&trie_class_result.class_maps, &trie_class_result.state_classes, ordered_vocab.as_ref());
 
+    let local_vocab_map = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+        possible_match_vocab.original_to_internal.clone(),
+        possible_match_vocab.internal_to_originals.len() as u32,
+    );
+    let vocab_tokens = if let Some(initial_vocab_map) = initial_vocab_map {
+        initial_vocab_map.compose(&local_vocab_map)
+    } else {
+        local_vocab_map
+    };
+
     let possible_matches_id_map = InternalIdMap {
         tokenizer_states: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
             trie_class_result.state_classes.clone(),
             trie_class_result.state_classes.iter().copied().filter(|&class_id| class_id != u32::MAX).max().map(|class_id| class_id + 1).unwrap_or(0),
         ),
-        vocab_tokens: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
-            possible_match_vocab.original_to_internal.clone(),
-            possible_match_vocab.internal_to_originals.len() as u32,
-        ),
+        vocab_tokens,
     };
 
     if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some() || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
@@ -1509,13 +1784,50 @@ fn compute_constraint_possible_matches_with_artifacts(
 pub(crate) fn compute_constraint_possible_matches_for_vocab(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
-    config: ConstraintPossibleMatchesConfig,
+    _config: ConstraintPossibleMatchesConfig,
 ) -> ConstraintPossibleMatchesComputation {
+    if pm_vocab_equiv_enabled() {
+        let (full_artifacts, full_profile) = get_ordered_vocab_trie_artifacts_for_vocab(vocab);
+        emit_ordered_vocab_cache_profile(full_profile);
+        let vocab_equiv_started_at = Instant::now();
+        let use_naive = std::env::var("GLRMASK_PM_VOCAB_EQUIV_NAIVE")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let pm_vocab_map = if use_naive {
+            compute_pm_vocab_equivalence_map(
+                tokenizer,
+                full_artifacts.ordered_vocab.as_ref(),
+                full_artifacts.trie.as_ref(),
+            )
+        } else {
+            compute_pm_vocab_equivalence_map_fast(tokenizer, full_artifacts.ordered_vocab.as_ref())
+        };
+        if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+        {
+            eprintln!(
+                "[glrmask/profile][pm_vocab_equiv] original_tokens={} pm_vocab_classes={} mode={} ms={:.3}",
+                vocab.entries.len(),
+                pm_vocab_map.internal_to_originals.len(),
+                if use_naive { "naive" } else { "fast" },
+                elapsed_ms(vocab_equiv_started_at),
+            );
+        }
+        let compact_token_bytes =
+            build_internal_token_bytes_from_groups(vocab, &pm_vocab_map.internal_to_originals);
+        return compute_constraint_possible_matches_with_artifacts(
+            tokenizer,
+            vocab.entries.len(),
+            get_ordered_vocab_trie_artifacts(&compact_token_bytes),
+            Some(&pm_vocab_map),
+        );
+    }
+
     compute_constraint_possible_matches_with_artifacts(
         tokenizer,
         vocab.entries.len(),
         get_ordered_vocab_trie_artifacts_for_vocab(vocab),
-        config,
+        None,
     )
 }
 
