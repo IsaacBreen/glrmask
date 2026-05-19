@@ -1513,6 +1513,35 @@ impl TrieWalkState {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+struct TrieWalkChunkStats {
+    dfs_step_ms: f64,
+    collect_targets_ms: f64,
+    single_target_suffix_ms: f64,
+    multi_target_suffix_ms: f64,
+    finish_signature_ms: f64,
+    clean_tokens: usize,
+    dirty_tokens: usize,
+    single_target_tokens: usize,
+    multi_target_tokens: usize,
+    total_targets: usize,
+}
+
+impl TrieWalkChunkStats {
+    fn add_assign(&mut self, other: Self) {
+        self.dfs_step_ms += other.dfs_step_ms;
+        self.collect_targets_ms += other.collect_targets_ms;
+        self.single_target_suffix_ms += other.single_target_suffix_ms;
+        self.multi_target_suffix_ms += other.multi_target_suffix_ms;
+        self.finish_signature_ms += other.finish_signature_ms;
+        self.clean_tokens += other.clean_tokens;
+        self.dirty_tokens += other.dirty_tokens;
+        self.single_target_tokens += other.single_target_tokens;
+        self.multi_target_tokens += other.multi_target_tokens;
+        self.total_targets += other.total_targets;
+    }
+}
+
 /// Walk one byte forward at the given depth, recording all state changes
 /// to the change log for later backtracking.
 fn dfs_step(
@@ -1708,11 +1737,15 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
     state_group_size: usize,
     scratch: &mut Scratch,
     trie: &mut TrieWalkState,
-    _profile: bool,
-) -> Vec<(usize, u64)> {
+    profile: bool,
+) -> (Vec<(usize, u64)>, TrieWalkChunkStats) {
     let batch_len = batch.len();
     let num_groups = dfa.num_groups;
     let mut results = Vec::with_capacity(chunk.len());
+    let elapsed_ms = |started_at: Option<Instant>| {
+        started_at.map_or(0.0, |instant| instant.elapsed().as_secs_f64() * 1000.0)
+    };
+    let mut stats = TrieWalkChunkStats::default();
 
     // Initialize: copy initial states and mark dead-ends
     scratch.current_states[..batch_len].clone_from_slice(batch);
@@ -1740,6 +1773,7 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
     for &token_idx in chunk {
         let token = strings[token_idx].as_ref();
         let token_len = token.len();
+        let dfs_started_at = profile.then(Instant::now);
 
         let lcp = prev_token
             .iter()
@@ -1758,11 +1792,21 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
             dfs_step(dfa, scratch, trie, token[depth], depth, batch_len);
             dirty_count += trie.depth_logs[depth].dirty_state_flag_changes.len();
         }
+        stats.dfs_step_ms += elapsed_ms(dfs_started_at);
         current_depth = token_len;
 
         let sig = if dirty_count == 0 {
-            finish_token_signature_clean(dfa, batch_len, scratch)
+            if profile {
+                stats.clean_tokens += 1;
+            }
+            let finish_started_at = profile.then(Instant::now);
+            let signature = finish_token_signature_clean(dfa, batch_len, scratch);
+            stats.finish_signature_ms += elapsed_ms(finish_started_at);
+            signature
         } else {
+            if profile {
+                stats.dirty_tokens += 1;
+            }
             scratch.targets.clear();
             scratch.target_gids.clear();
             scratch.single_target_pos = usize::MAX;
@@ -1770,6 +1814,7 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
             scratch.single_target_hash_pos = usize::MAX;
             scratch.single_target_hash = 0;
 
+            let collect_targets_started_at = profile.then(Instant::now);
             if state_group_size >= batch_len {
                 collect_targets(
                     scratch,
@@ -1791,9 +1836,17 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
                     );
                 }
             }
+            stats.collect_targets_ms += elapsed_ms(collect_targets_started_at);
 
             let target_count = scratch.targets.len();
+            if profile {
+                stats.total_targets += target_count;
+            }
             if target_count == 1 {
+                if profile {
+                    stats.single_target_tokens += 1;
+                }
+                let single_target_started_at = profile.then(Instant::now);
                 if try_hash_single_target_suffix(dfa, token, scratch).is_none() {
                     ensure_target_gids_map(
                         &mut scratch.target_gids,
@@ -1802,11 +1855,20 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
                     );
                     hash_suffixes(dfa, token, scratch, false);
                 }
+                stats.single_target_suffix_ms += elapsed_ms(single_target_started_at);
             } else if target_count > 0 {
+                if profile {
+                    stats.multi_target_tokens += 1;
+                }
+                let multi_target_started_at = profile.then(Instant::now);
                 hash_suffixes(dfa, token, scratch, false);
+                stats.multi_target_suffix_ms += elapsed_ms(multi_target_started_at);
             }
 
-            finish_token_signature_no_cleanup(dfa, batch_len, scratch)
+            let finish_started_at = profile.then(Instant::now);
+            let signature = finish_token_signature_no_cleanup(dfa, batch_len, scratch);
+            stats.finish_signature_ms += elapsed_ms(finish_started_at);
+            signature
         };
 
         results.push((token_idx, sig));
@@ -1818,7 +1880,7 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
         dfs_backtrack(scratch, trie, current_depth, 0);
     }
 
-    results
+    (results, stats)
 }
 
 /// Vocab equivalence with optional group filtering.
@@ -2041,6 +2103,7 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
     let mut refinement_ms = 0.0;
     let mut batches = 0usize;
     let mut used_trie_walk = false;
+    let mut trie_walk_stats = TrieWalkChunkStats::default();
 
     for (_batch_index, batch_start) in (0..num_initial_states).step_by(batch_size).enumerate() {
         if active_indices.is_empty() {
@@ -2062,7 +2125,7 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
             });
             sort_tokens_ms += elapsed_ms(sort_started_at);
             let signature_started_at = profiling.then(Instant::now);
-            let chunk_results: Vec<Vec<(usize, u64)>> = sorted_indices
+            let chunk_results: Vec<(Vec<(usize, u64)>, TrieWalkChunkStats)> = sorted_indices
                 .par_chunks(TRIE_CHUNK_SIZE)
                 .map_init(
                     || {
@@ -2080,13 +2143,20 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
                             state_group_size,
                             scratch,
                             trie_state,
-                            false,
+                            profiling,
                         )
                     },
                 )
                 .collect();
             signature_ms += elapsed_ms(signature_started_at);
-            chunk_results.into_iter().flatten().collect()
+            let mut flat_results = Vec::with_capacity(sorted_indices.len());
+            for (chunk_result, chunk_stats) in chunk_results {
+                flat_results.extend(chunk_result);
+                if profiling {
+                    trie_walk_stats.add_assign(chunk_stats);
+                }
+            }
+            flat_results
         } else {
             let signature_started_at = profiling.then(Instant::now);
             let result = active_indices
@@ -2203,7 +2273,7 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
 
     if profiling {
         eprintln!(
-            "[glrmask/profile][vocab_equiv] strings={} initial_states={} batches={} used_trie_walk={} active_final={} original_states={} effective_states={} compacted={} build_dfa_ms={:.3} compact_dfa_ms={:.3} state_order_ms={:.3} sort_tokens_ms={:.3} signature_ms={:.3} refinement_ms={:.3} final_groups_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][vocab_equiv] strings={} initial_states={} batches={} used_trie_walk={} active_final={} original_states={} effective_states={} compacted={} build_dfa_ms={:.3} compact_dfa_ms={:.3} state_order_ms={:.3} sort_tokens_ms={:.3} signature_ms={:.3} refinement_ms={:.3} final_groups_ms={:.3} dfs_step_ms={:.3} collect_targets_ms={:.3} single_target_suffix_ms={:.3} multi_target_suffix_ms={:.3} finish_signature_ms={:.3} clean_tokens={} dirty_tokens={} single_target_tokens={} multi_target_tokens={} total_targets={} total_ms={:.3}",
             num_tokens,
             num_initial_states,
             batches,
@@ -2219,6 +2289,16 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
             signature_ms,
             refinement_ms,
             final_groups_ms,
+            trie_walk_stats.dfs_step_ms,
+            trie_walk_stats.collect_targets_ms,
+            trie_walk_stats.single_target_suffix_ms,
+            trie_walk_stats.multi_target_suffix_ms,
+            trie_walk_stats.finish_signature_ms,
+            trie_walk_stats.clean_tokens,
+            trie_walk_stats.dirty_tokens,
+            trie_walk_stats.single_target_tokens,
+            trie_walk_stats.multi_target_tokens,
+            trie_walk_stats.total_targets,
             elapsed_ms(total_started_at),
         );
     }
