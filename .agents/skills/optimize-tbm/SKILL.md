@@ -21,6 +21,11 @@ Requirements:
 - `TBM` max: below `25us`.
 
 Workflow:
+Notes requirement:
+- For TBM optimization work, keep a running dated note in `/Users/isaacbreen/Projects2/gcg-paper/notes/` as work proceeds.
+- Record slow-step sources, profile commands, env vars, before/after stabilized timings, failed experiments, and keep/revert decisions.
+- Check the current note before retrying an approach.
+
 1. Identify slow steps with CFA `report-slow-steps` on a stabilized artifact.
 2. Profile the exact step with `scripts.profile_step`, matching active `GLRMASK_*` env vars from the report.
 3. Account for all measured time before optimizing; if profile buckets do not explain the cost, add narrow profiled-entrypoint instrumentation rather than broad debug paths.

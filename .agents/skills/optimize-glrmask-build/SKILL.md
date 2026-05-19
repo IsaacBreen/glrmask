@@ -25,6 +25,11 @@ user-invocable: true
 - After any Rust or Python extension change in `/Users/isaacbreen/Projects2/glrmask2`, run `make ffi-release` there, then restart the CFA `GlrmaskWorkerPool`, or measurements may use stale installed code.
 - For timeout schemas, use short capped probes first (10s, then at most 30s unless the user asks otherwise). Treat a small schema that exceeds those caps as a compiler bug to localize, not as a reason to add an importer shortcut for that schema's pattern text.
 
+## Optimization Notes
+- When optimizing glrmask build/compile time, keep a running dated note in `/Users/isaacbreen/Projects2/gcg-paper/notes/` as work proceeds.
+- Record committed wins, failed experiments, exact env vars, representative before/after timings, and keep/revert decisions.
+- Before retrying an idea, check the current note for rejected experiments so work is not repeated.
+
 ```bash
 cd /Users/isaacbreen/Projects2/constraint-framework-analysis
 GLRMASK_PROFILE_COMPILE=1 GLRMASK_PROFILE_COMPILE_SUMMARY=1 make example-specific PROBLEM=jsb/data/<problem>.json FRAMEWORKS='glrmask_native'
