@@ -1520,6 +1520,13 @@ struct TrieWalkChunkStats {
     single_target_suffix_ms: f64,
     multi_target_suffix_ms: f64,
     finish_signature_ms: f64,
+    dfs_steps: usize,
+    dfs_steps_without_new_dirty: usize,
+    dfs_states_visited: usize,
+    dfs_dead_transitions: usize,
+    dfs_dead_without_new_dirty: usize,
+    dfs_new_dirty_groups: usize,
+    dfs_new_dirty_states: usize,
     clean_tokens: usize,
     dirty_tokens: usize,
     single_target_tokens: usize,
@@ -1534,12 +1541,28 @@ impl TrieWalkChunkStats {
         self.single_target_suffix_ms += other.single_target_suffix_ms;
         self.multi_target_suffix_ms += other.multi_target_suffix_ms;
         self.finish_signature_ms += other.finish_signature_ms;
+        self.dfs_steps += other.dfs_steps;
+        self.dfs_steps_without_new_dirty += other.dfs_steps_without_new_dirty;
+        self.dfs_states_visited += other.dfs_states_visited;
+        self.dfs_dead_transitions += other.dfs_dead_transitions;
+        self.dfs_dead_without_new_dirty += other.dfs_dead_without_new_dirty;
+        self.dfs_new_dirty_groups += other.dfs_new_dirty_groups;
+        self.dfs_new_dirty_states += other.dfs_new_dirty_states;
         self.clean_tokens += other.clean_tokens;
         self.dirty_tokens += other.dirty_tokens;
         self.single_target_tokens += other.single_target_tokens;
         self.multi_target_tokens += other.multi_target_tokens;
         self.total_targets += other.total_targets;
     }
+}
+
+#[derive(Clone, Copy, Default)]
+struct DfsStepStats {
+    states_visited: usize,
+    dead_transitions: usize,
+    dead_without_new_dirty: usize,
+    new_dirty_groups: usize,
+    new_dirty_states: usize,
 }
 
 /// Walk one byte forward at the given depth, recording all state changes
@@ -1607,6 +1630,87 @@ fn dfs_step(
             scratch.current_states[i] = STATE_NONE;
         }
     }
+}
+
+fn dfs_step_profiled(
+    dfa: &Dfa,
+    scratch: &mut Scratch,
+    trie: &mut TrieWalkState,
+    byte: u8,
+    depth: usize,
+    batch_len: usize,
+) -> DfsStepStats {
+    trie.ensure_depth(depth);
+    let log = &mut trie.depth_logs[depth];
+    log.clear();
+
+    let mut step_stats = DfsStepStats::default();
+
+    let num_groups = dfa.num_groups;
+    let dirty_words = scratch.dirty_words;
+    let position = (depth + 1) as u32;
+    let class = dfa.byte_to_class[byte as usize] as usize;
+    let class_base = class * dfa.num_states;
+
+    for i in 0..batch_len {
+        let old_state = scratch.current_states[i];
+        if old_state == STATE_NONE {
+            continue;
+        }
+        step_stats.states_visited += 1;
+
+        let mut state_new_dirty_groups = 0usize;
+
+        let next_state_raw =
+            unsafe { *dfa.trans_by_class.get_unchecked(class_base + old_state) };
+        if next_state_raw == NONE {
+            log.state_changes.push((i, old_state));
+            scratch.current_states[i] = STATE_NONE;
+            step_stats.dead_transitions += 1;
+            step_stats.dead_without_new_dirty += 1;
+            continue;
+        }
+
+        let ns = next_state_raw as usize;
+        log.state_changes.push((i, old_state));
+        scratch.current_states[i] = ns;
+
+        let base = i * num_groups;
+        for &gid in &dfa.finalizers[ns] {
+            if gid < num_groups {
+                let ix = base + gid;
+                let old_mp = scratch.match_positions[ix];
+                if old_mp == NONE {
+                    let word_idx = gid / 64;
+                    let bit = gid % 64;
+                    let flat_idx = i * dirty_words + word_idx;
+                    log.dirty_changes
+                        .push((flat_idx, scratch.dirty_group_masks[flat_idx]));
+                    if scratch.dirty_state_flags[i] == 0 {
+                        log.dirty_state_flag_changes
+                            .push((i, scratch.dirty_state_flags[i]));
+                        scratch.dirty_state_flags[i] = 1;
+                        step_stats.new_dirty_states += 1;
+                    }
+                    scratch.dirty_group_masks[flat_idx] |= 1u64 << bit;
+                    step_stats.new_dirty_groups += 1;
+                    state_new_dirty_groups += 1;
+                }
+                log.match_changes.push((ix, old_mp));
+                scratch.match_positions[ix] = position;
+            }
+        }
+
+        if dfa.is_dead_end[ns] {
+            scratch.current_states[i] = STATE_NONE;
+            step_stats.dead_transitions += 1;
+            if state_new_dirty_groups == 0 {
+                step_stats.dead_without_new_dirty += 1;
+            }
+        }
+    }
+
+    step_stats
 }
 
 /// Undo all changes recorded at a single depth level.
@@ -1789,8 +1893,23 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
         }
 
         for depth in lcp..token_len {
-            dfs_step(dfa, scratch, trie, token[depth], depth, batch_len);
-            dirty_count += trie.depth_logs[depth].dirty_state_flag_changes.len();
+            if profile {
+                let step_stats =
+                    dfs_step_profiled(dfa, scratch, trie, token[depth], depth, batch_len);
+                dirty_count += trie.depth_logs[depth].dirty_state_flag_changes.len();
+                stats.dfs_steps += 1;
+                if step_stats.new_dirty_groups == 0 {
+                    stats.dfs_steps_without_new_dirty += 1;
+                }
+                stats.dfs_states_visited += step_stats.states_visited;
+                stats.dfs_dead_transitions += step_stats.dead_transitions;
+                stats.dfs_dead_without_new_dirty += step_stats.dead_without_new_dirty;
+                stats.dfs_new_dirty_groups += step_stats.new_dirty_groups;
+                stats.dfs_new_dirty_states += step_stats.new_dirty_states;
+            } else {
+                dfs_step(dfa, scratch, trie, token[depth], depth, batch_len);
+                dirty_count += trie.depth_logs[depth].dirty_state_flag_changes.len();
+            }
         }
         stats.dfs_step_ms += elapsed_ms(dfs_started_at);
         current_depth = token_len;
@@ -2273,7 +2392,7 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
 
     if profiling {
         eprintln!(
-            "[glrmask/profile][vocab_equiv] strings={} initial_states={} batches={} used_trie_walk={} active_final={} original_states={} effective_states={} compacted={} build_dfa_ms={:.3} compact_dfa_ms={:.3} state_order_ms={:.3} sort_tokens_ms={:.3} signature_ms={:.3} refinement_ms={:.3} final_groups_ms={:.3} dfs_step_ms={:.3} collect_targets_ms={:.3} single_target_suffix_ms={:.3} multi_target_suffix_ms={:.3} finish_signature_ms={:.3} clean_tokens={} dirty_tokens={} single_target_tokens={} multi_target_tokens={} total_targets={} total_ms={:.3}",
+            "[glrmask/profile][vocab_equiv] strings={} initial_states={} batches={} used_trie_walk={} active_final={} original_states={} effective_states={} compacted={} build_dfa_ms={:.3} compact_dfa_ms={:.3} state_order_ms={:.3} sort_tokens_ms={:.3} signature_ms={:.3} refinement_ms={:.3} final_groups_ms={:.3} dfs_step_ms={:.3} collect_targets_ms={:.3} single_target_suffix_ms={:.3} multi_target_suffix_ms={:.3} finish_signature_ms={:.3} dfs_steps={} dfs_steps_without_new_dirty={} dfs_states_visited={} dfs_dead_transitions={} dfs_dead_without_new_dirty={} dfs_new_dirty_groups={} dfs_new_dirty_states={} clean_tokens={} dirty_tokens={} single_target_tokens={} multi_target_tokens={} total_targets={} total_ms={:.3}",
             num_tokens,
             num_initial_states,
             batches,
@@ -2294,6 +2413,13 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
             trie_walk_stats.single_target_suffix_ms,
             trie_walk_stats.multi_target_suffix_ms,
             trie_walk_stats.finish_signature_ms,
+            trie_walk_stats.dfs_steps,
+            trie_walk_stats.dfs_steps_without_new_dirty,
+            trie_walk_stats.dfs_states_visited,
+            trie_walk_stats.dfs_dead_transitions,
+            trie_walk_stats.dfs_dead_without_new_dirty,
+            trie_walk_stats.dfs_new_dirty_groups,
+            trie_walk_stats.dfs_new_dirty_states,
             trie_walk_stats.clean_tokens,
             trie_walk_stats.dirty_tokens,
             trie_walk_stats.single_target_tokens,
