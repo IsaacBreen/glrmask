@@ -387,6 +387,27 @@ impl Templates {
         group_dfas
     }
 
+    fn build_group_dfas<'a>(
+        &'a self,
+        weight_groups: &'a HashMap<&'a Weight, Vec<TerminalID>>,
+    ) -> Vec<(&'a Weight, UnweightedDfa)> {
+        let mut group_dfas = Vec::with_capacity(weight_groups.len());
+        for (weight, terminals) in weight_groups {
+            if terminals.len() == 1 {
+                if let Some(template) = self.by_terminal.get(&terminals[0]) {
+                    group_dfas.push((*weight, template.clone()));
+                }
+            } else {
+                let merged = union_unweighted_dfas(
+                    terminals.iter().filter_map(|terminal| self.by_terminal.get(terminal)),
+                );
+                group_dfas.push((*weight, merged));
+            }
+        }
+        group_dfas.sort_by_cached_key(|(_, dfa)| dfa_order_key(dfa));
+        group_dfas
+    }
+
     pub(crate) fn build_bundle_profiled(
         &self,
         terminal_weights: &BTreeMap<TerminalID, Weight>,
@@ -476,7 +497,19 @@ impl Templates {
         &self,
         terminal_weights: &BTreeMap<TerminalID, Weight>,
     ) -> NWA {
-        self.build_bundle_profiled(terminal_weights).0
+        if let Some(bundle) = self.build_single_terminal_bundle(terminal_weights) {
+            return bundle;
+        }
+
+        let weight_groups = self.group_terminals_by_weight(terminal_weights);
+        let group_dfas = self.build_group_dfas(&weight_groups);
+        let bundle_dwa = determinize_bundle_groups(&group_dfas);
+        let minimized = if weight_groups.len() > 1 && minimize_template_bundles_enabled() {
+            minimize(&bundle_dwa)
+        } else {
+            bundle_dwa
+        };
+        dwa_to_nwa(&minimized)
     }
 }
 
@@ -660,6 +693,120 @@ fn determinize_bundle_groups_profiled(
     profile.cache_entries = subset_union_cache.len();
 
     (dwa, profile)
+}
+
+fn determinize_bundle_groups(groups: &[(&Weight, UnweightedDfa)]) -> DWA {
+    use crate::automata::weighted_u32::dwa::DWA;
+
+    let n = groups.len();
+    if n == 0 {
+        return DWA::new(0, 0);
+    }
+
+    let group_weights: Vec<Weight> = groups
+        .iter()
+        .map(|(weight, _)| (*weight).clone())
+        .collect();
+    let single_tsid_entries = group_weights
+        .iter()
+        .map(Weight::single_tsid_shared_entry)
+        .collect::<Option<Vec<_>>>();
+
+    let mut subset_union_cache: FxHashMap<SubsetKey, Weight> = FxHashMap::default();
+    let subset_unions = (n >= 32).then(|| SubsetUnionIndex::new(&group_weights));
+
+    let start_key: Vec<(u32, u32)> = groups
+        .iter()
+        .enumerate()
+        .map(|(group_id, (_, dfa))| (group_id as u32, dfa.start_state))
+        .collect();
+
+    let mut dwa = DWA::new(0, 0);
+    let mut state_map: FxHashMap<Vec<(u32, u32)>, u32> = FxHashMap::default();
+    let mut worklist: VecDeque<Vec<(u32, u32)>> = VecDeque::new();
+
+    state_map.insert(start_key.clone(), 0);
+    worklist.push_back(start_key);
+
+    let mut label_targets: BTreeMap<i32, Vec<(u32, u32)>> = BTreeMap::new();
+    let key_words = n.div_ceil(64);
+    let mut final_groups = SmallVec::<[usize; 8]>::new();
+    let mut final_key = SubsetKey::from_elem(0, key_words);
+    let mut edge_groups = SmallVec::<[usize; 8]>::new();
+    let mut edge_key = SubsetKey::from_elem(0, key_words);
+
+    while let Some(product_state) = worklist.pop_front() {
+        let dwa_state = state_map[&product_state];
+
+        final_groups.clear();
+        clear_subset_key(&mut final_key);
+        for &(group_id, dfa_state) in &product_state {
+            let group_id = group_id as usize;
+            if groups[group_id].1.states[dfa_state as usize].is_accepting {
+                final_groups.push(group_id);
+                set_subset_key_bit(&mut final_key, group_id);
+            }
+        }
+        let final_w = cached_subset_union(
+            &mut subset_union_cache,
+            &final_key,
+            &final_groups,
+            &group_weights,
+            subset_unions.as_ref(),
+            single_tsid_entries.as_deref(),
+        );
+        if !final_w.is_empty() {
+            dwa.set_final_weight(dwa_state, final_w);
+        }
+
+        label_targets.clear();
+        for &(group_id, dfa_state) in &product_state {
+            for (&label, &target) in &groups[group_id as usize].1.states[dfa_state as usize]
+                .transitions
+            {
+                label_targets
+                    .entry(label)
+                    .or_default()
+                    .push((group_id, target));
+            }
+        }
+
+        for (&label, next_state) in &label_targets {
+            edge_groups.clear();
+            clear_subset_key(&mut edge_key);
+            for &(group_id, _) in next_state {
+                let group_id = group_id as usize;
+                edge_groups.push(group_id);
+                set_subset_key_bit(&mut edge_key, group_id);
+            }
+
+            let edge_w = cached_subset_union(
+                &mut subset_union_cache,
+                &edge_key,
+                &edge_groups,
+                &group_weights,
+                subset_unions.as_ref(),
+                single_tsid_entries.as_deref(),
+            );
+            if edge_w.is_empty() {
+                continue;
+            }
+
+            let to_dwa = if let Some(&existing) = state_map.get(next_state) {
+                existing
+            } else {
+                let key = next_state.clone();
+                let new_id = dwa.add_state();
+                state_map.insert(key.clone(), new_id);
+                worklist.push_back(key);
+                new_id
+            };
+
+            dwa.add_transition(dwa_state, label, to_dwa, edge_w);
+        }
+    }
+
+    dwa
 }
 
 /// Union multiple unweighted DFAs into one DFA via NFA union + determinize + minimize.
