@@ -10711,16 +10711,15 @@ impl<'a> SchemaCtx<'a> {
                 )
             })
             .collect::<Vec<_>>();
-        let expr = self.insert_named_terminal_rule(
-            format!(
-                "AP_SHARED_PATTERN_KEY_FILTERED_{}",
-                self.shared_additional_key_plan.constrained_pattern_body_cache.len()
-            ),
+        let rule_name = self.fresh_rule_name("ap_shared_pattern_key_filtered");
+        self.insert_rule(
+            rule_name.clone(),
             GrammarExpr::Exclude {
                 expr: Box::new(pattern_expr),
                 exclude: Box::new(choice_or_single(excluded)),
             },
         );
+        let expr = GrammarExpr::Ref(rule_name);
         self.shared_additional_key_plan
             .constrained_pattern_body_cache
             .insert(cache_key, expr.clone());
@@ -13512,7 +13511,7 @@ mod tests {
         );
         assert!(
             glrm.contains(
-                "AP_SHARED_PATTERN_KEY_FILTERED_0 ::= AP_SHARED_PATTERN_KEY_0_5 - AP_SHARED_LITERAL_KEY_0 - AP_SHARED_LITERAL_KEY_1"
+                "ap_shared_pattern_key_filtered_6 ::= AP_SHARED_PATTERN_KEY_0_5 - AP_SHARED_LITERAL_KEY_0 - AP_SHARED_LITERAL_KEY_1"
             ),
             "{glrm}"
         );

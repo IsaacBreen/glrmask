@@ -5,6 +5,7 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 
 use super::build_state_map_from_subset_representatives;
+use super::super::compat::TokenizerView;
 
 const MISSING_BLOCK: u32 = u32::MAX;
 
@@ -459,22 +460,28 @@ pub(crate) fn compute_state_map(
     let byte_to_class = compute_byte_classes(tokenizer);
     let active_bytes =
         active_byte_representatives(Some(&statistic.relevant_bytes), Some(&byte_to_class));
-    let full_mapping = match mode {
+    let representative_states = match mode {
         MaxLengthMode::StableByteRestricted => {
             let blocks = stable_refinement_blocks(tokenizer, active_groups, &active_bytes);
-            build_full_mapping_from_blocks(&blocks, num_states)
+            let full_mapping = build_full_mapping_from_blocks(&blocks, num_states);
+            build_subset_mapping(&states, &full_mapping)
         }
         MaxLengthMode::KBoundedByteRestricted => {
-            let blocks = compute_kbounded_partition(
-                tokenizer,
+            let tokenizer_view = match active_groups {
+                Some(active_groups) => TokenizerView::new_filtered(tokenizer, active_groups),
+                None => TokenizerView::new(tokenizer),
+            };
+            super::super::state::max_length::find_state_equivalence_classes_kbounded(
+                &tokenizer_view,
+                &states,
                 statistic.max_token_len,
                 active_groups,
-                &active_bytes,
-            );
-            build_full_mapping_from_blocks(&blocks, num_states)
+                Some(&statistic.relevant_bytes),
+                Some(&byte_to_class),
+                "pipeline_kbounded",
+            )
         }
     };
-    let representative_states = build_subset_mapping(&states, &full_mapping);
 
     build_state_map_from_subset_representatives(
         &states,

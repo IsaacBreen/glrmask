@@ -517,7 +517,7 @@ fn build_subset_mapping(states: &[usize], blocks: &[u32]) -> Vec<usize> {
     mapping
 }
 
-fn find_state_equivalence_classes_kbounded(
+pub(crate) fn find_state_equivalence_classes_kbounded(
     tokenizer: &TokenizerView,
     states: &[usize],
     k: usize,
