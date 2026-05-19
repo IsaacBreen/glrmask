@@ -14182,6 +14182,29 @@ mod tests {
         assert!(glrm.contains("obj_req_any_"), "{glrm}");
         lower(&named).unwrap();
     }
+
+    fn imported_optional_word_list_pattern_expr(max_pairs: usize) -> LexerExpr {
+        let pattern = format!(r"^$|(^(?:\S+\s+){{0,{max_pairs}}}\S+$)");
+        LexerExpr::Seq(vec![
+            LexerExpr::U8Seq(vec![b'"']),
+            decoded_regex_search_expr(&pattern, None),
+        ])
+    }
+
+    #[test]
+    #[ignore = "reproduces slow bounded-repeat suffix determinization"]
+    fn imported_json_pattern_optional_choice_build_regex_repro() {
+        let expr = imported_optional_word_list_pattern_expr(199);
+        let started = std::time::Instant::now();
+        let regex = build_regex(std::slice::from_ref(&expr));
+        let elapsed = started.elapsed();
+
+        eprintln!(
+            "imported_json_pattern_optional_choice_build_regex_repro elapsed={elapsed:?} states={}",
+            regex.num_states(),
+        );
+        assert!(regex.num_states() > 0);
+    }
 }
 
 fn sanitize_rule_name(s: &str) -> String {

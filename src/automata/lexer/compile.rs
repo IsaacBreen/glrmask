@@ -805,7 +805,7 @@ fn build_prefixed_bounded_repeat_with_suffix_dfa(parts: &[Expr]) -> Option<(DFA,
     }
 
     let parts = flat_parts.as_slice();
-    if parts.len() < 3 {
+    if parts.len() < 2 {
         return None;
     }
 
@@ -828,6 +828,19 @@ fn build_prefixed_bounded_repeat_with_suffix_dfa(parts: &[Expr]) -> Option<(DFA,
                 .or_else(|| build_bounded_repeat_with_regex_suffix(&tail_parts))?;
         let dfa = prepend_literal_prefix_to_dfa(&prefix_bytes, tail_dfa)?;
         return Some((dfa, needs_future_recompute));
+    }
+
+    if parts.len() == 2 {
+        let prefix_bytes = collect_suffix_bytes(&parts[..1])?;
+        let tail_parts = optional_tail_parts(&parts[1])?;
+        if tail_parts.len() >= 2 {
+            let (tail_dfa, needs_future_recompute) =
+                build_bounded_repeat_with_suffix_dfa(&tail_parts)
+                    .or_else(|| build_bounded_repeat_with_regex_suffix(&tail_parts))?;
+            let mut dfa = prepend_literal_prefix_to_dfa(&prefix_bytes, tail_dfa)?;
+            mark_state_accepting(&mut dfa, prefix_bytes.len() as u32);
+            return Some((dfa, needs_future_recompute));
+        }
     }
 
     None
@@ -931,8 +944,22 @@ impl Expr {
 /// Compile multiple expressions into a single multi-group [`Regex`].
 ///
 /// Each expression's index becomes its group ID in the resulting DFA.
-pub fn build_regex(exprs: &[Expr]) -> Regex {
-    let plan = build_exclusion_compile_plan(exprs);
+fn compile_single_expr_dfa(expr: &Expr) -> DFA {
+    if let Some((mut dfa, needs_future_recompute)) = compile_product_component_dfa_direct(expr) {
+        dfa.ensure_group_capacity(1);
+        dfa.set_group_u8set(0, expr_u8set(expr));
+        if needs_future_recompute {
+            dfa.recompute_possible_futures();
+        }
+        return dfa;
+    }
+
+    let mut nfa = build_regex_nfa(std::slice::from_ref(expr));
+    nfa.condense_epsilon_sccs();
+    nfa.to_dfa()
+}
+
+fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
     let group_sets: Vec<U8Set> = plan
         .compiled_exprs
         .iter()
@@ -943,9 +970,7 @@ pub fn build_regex(exprs: &[Expr]) -> Regex {
     let mut dfa = if used_product_dfa {
         build_product_dfa(&plan.compiled_exprs)
     } else {
-        let mut nfa = build_regex_nfa(&plan.compiled_exprs);
-        nfa.condense_epsilon_sccs();
-        nfa.to_dfa()
+        compile_single_expr_dfa(&plan.compiled_exprs[0])
     };
 
     dfa.ensure_group_capacity(group_sets.len());
@@ -970,7 +995,11 @@ pub fn build_regex(exprs: &[Expr]) -> Regex {
         dfa
     };
 
-    let dfa = if used_product_dfa { dfa } else { dfa.minimize() };
+    if used_product_dfa { dfa } else { dfa.minimize() }
+}
+
+pub fn build_regex(exprs: &[Expr]) -> Regex {
+    let dfa = compile_with_plan(build_exclusion_compile_plan(exprs));
 
     Regex { dfa }
 }
@@ -1035,10 +1064,67 @@ fn explicit_dead_sink_state(dfa: &DFA) -> Option<u32> {
     None
 }
 
+fn expr_is_epsilon_only(expr: &Expr) -> bool {
+    match expr {
+        Expr::Epsilon => true,
+        Expr::U8Seq(bytes) => bytes.is_empty(),
+        Expr::Seq(parts) => parts.iter().all(expr_is_epsilon_only),
+        Expr::Shared(inner) => expr_is_epsilon_only(inner),
+        Expr::U8Class(_)
+        | Expr::Dfa(_)
+        | Expr::Choice(_)
+        | Expr::Exclude { .. }
+        | Expr::Intersect { .. }
+        | Expr::Repeat { .. } => false,
+    }
+}
+
+fn optional_choice_non_epsilon(expr: &Expr) -> Option<&Expr> {
+    let options = match expr {
+        Expr::Shared(inner) => return optional_choice_non_epsilon(inner),
+        Expr::Choice(options) if options.len() == 2 => options,
+        _ => return None,
+    };
+
+    if expr_is_epsilon_only(&options[0]) {
+        Some(&options[1])
+    } else if expr_is_epsilon_only(&options[1]) {
+        Some(&options[0])
+    } else {
+        None
+    }
+}
+
+fn optional_tail_parts(expr: &Expr) -> Option<Vec<Expr>> {
+    let non_epsilon = optional_choice_non_epsilon(expr)?;
+    match non_epsilon {
+        Expr::Shared(inner) => optional_tail_parts(inner).or_else(|| Some(vec![inner.as_ref().clone()])),
+        Expr::Seq(parts) => Some(parts.clone()),
+        other => Some(vec![other.clone()]),
+    }
+}
+
+fn mark_state_accepting(dfa: &mut DFA, state_id: u32) {
+    dfa.ensure_group_capacity(1);
+
+    let mut finalizers = dfa.finalizers(state_id).clone();
+    finalizers.set(0);
+    let mut future = dfa.possible_future_group_ids(state_id).clone();
+    future.set(0);
+    dfa.overwrite_state_metadata(state_id, finalizers, future);
+}
+
 fn compile_product_component_dfa_direct(expr: &Expr) -> Option<(DFA, bool)> {
     match expr {
         Expr::Shared(inner) => compile_product_component_dfa_direct(inner),
         Expr::Dfa(dfa) => Some((dfa.as_ref().clone(), true)),
+        Expr::Choice(_) => {
+            let non_epsilon = optional_choice_non_epsilon(expr)?;
+            let (mut dfa, needs_future_recompute) =
+                compile_product_component_dfa_direct(non_epsilon)?;
+            mark_state_accepting(&mut dfa, 0);
+            Some((dfa, needs_future_recompute))
+        }
         Expr::Repeat {
             expr,
             min,
@@ -1052,16 +1138,7 @@ fn compile_product_component_dfa_direct(expr: &Expr) -> Option<(DFA, bool)> {
 }
 
 fn compile_product_component_dfa(expr: &Expr) -> DFA {
-    if let Some((mut dfa, needs_future_recompute)) = compile_product_component_dfa_direct(expr) {
-        dfa.ensure_group_capacity(1);
-        dfa.set_group_u8set(0, expr_u8set(expr));
-        if needs_future_recompute {
-            dfa.recompute_possible_futures();
-        }
-        return dfa;
-    }
-
-    build_regex(std::slice::from_ref(expr)).dfa
+    compile_with_plan(build_exclusion_compile_plan(std::slice::from_ref(expr)))
 }
 
 enum ProductComponent {
@@ -1426,6 +1503,7 @@ fn build_regex_nfa_impl(exprs: &[Expr]) -> NFA {
 #[cfg(test)]
 mod tests {
     use super::build_regex;
+    use super::compile_product_component_dfa_direct;
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::tokenizer::Tokenizer;
     use crate::ds::u8set::U8Set;
@@ -1689,6 +1767,82 @@ mod tests {
                 .iter()
                 .any(|matched| matched.id == 0 && matched.width == 3),
             "prefixed bounded repeat with suffix matched trailing space: {:?}",
+            exec.matches,
+        );
+    }
+
+    fn prefixed_optional_word_list_expr(max_pairs: usize) -> Expr {
+        let nonspace_plus = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::single(b'a'))),
+            min: 1,
+            max: None,
+        };
+        let space_plus = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::single(b' '))),
+            min: 1,
+            max: None,
+        };
+        let body = Expr::Seq(vec![nonspace_plus.clone(), space_plus]);
+        let repeated = Expr::Repeat {
+            expr: Box::new(body),
+            min: 0,
+            max: Some(max_pairs),
+        };
+
+        Expr::Seq(vec![
+            Expr::U8Seq(vec![b'"']),
+            Expr::Choice(vec![
+                Expr::Epsilon,
+                Expr::Seq(vec![repeated, nonspace_plus]),
+            ]),
+        ])
+    }
+
+    #[test]
+    fn prefixed_optional_choice_uses_direct_component_path_for_bounded_repeat_suffix() {
+        let expr = prefixed_optional_word_list_expr(199);
+
+        let Some((dfa, _)) = compile_product_component_dfa_direct(&expr) else {
+            panic!("prefixed optional wrapper did not use direct product component path");
+        };
+
+        assert!(
+            dfa.num_states() < 10_000,
+            "prefixed optional direct-path DFA unexpectedly large: {} states",
+            dfa.num_states(),
+        );
+        assert!(dfa.finalizers(1).contains(0));
+    }
+
+    #[test]
+    fn prefixed_optional_word_list_semantics() {
+        let expr = prefixed_optional_word_list_expr(2);
+        let regex = build_regex(std::slice::from_ref(&expr));
+        let tokenizer = Tokenizer {
+            dfa: regex.dfa,
+            num_terminals: 1,
+            exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
+        };
+
+        for input in [b"\"".as_slice(), b"\"a", b"\"a a", b"\"a  a"] {
+            let exec = tokenizer.execute_from_state(input, tokenizer.initial_state());
+            assert!(
+                exec.matches
+                    .iter()
+                    .any(|matched| matched.id == 0 && matched.width == input.len()),
+                "prefixed optional word-list did not match {:?}: {:?}",
+                std::str::from_utf8(input).unwrap(),
+                exec.matches,
+            );
+        }
+
+        let exec = tokenizer.execute_from_state(b"\" a", tokenizer.initial_state());
+        assert!(
+            !exec
+                .matches
+                .iter()
+                .any(|matched| matched.id == 0 && matched.width == 3),
+            "prefixed optional word-list matched leading space unexpectedly: {:?}",
             exec.matches,
         );
     }
