@@ -223,8 +223,13 @@ pub(crate) struct CombinedEquivalenceProfile {
     pub(crate) token_len_gt_16: usize,
     pub(crate) token_len_gt_32: usize,
     pub(crate) token_len_gt_64: usize,
+    pub(crate) prepare_inputs_ms: f64,
+    pub(crate) byte_class_setup_ms: f64,
+    pub(crate) token_dedup_ms: f64,
     pub(crate) max_length_state_equiv_ms: f64,
+    pub(crate) vocab_equiv_ms: f64,
     pub(crate) exact_state_equiv_ms: f64,
+    pub(crate) id_map_finalize_ms: f64,
     pub(crate) max_length_reps: usize,
     pub(crate) exact_reps: usize,
     pub(crate) exact_rep_confirmation_used: bool,
@@ -367,9 +372,12 @@ fn analyze_equivalences_impl(
         _ => TokenizerView::new(tokenizer),
     };
 
+    let prepare_inputs_started_at = Instant::now();
     let prepared = prepare_equivalence_inputs(tokenizer, vocab, initial_state_map);
     let token_len_stats = token_length_stats(&prepared.token_bytes);
+    let prepare_inputs_ms = prepare_inputs_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    let byte_class_setup_started_at = Instant::now();
     if let Some(cache) = shared_vocab_dfa_cache {
         cache.get_or_init(|| vocab_equivalence_analysis::SharedVocabDfaBase::build_from_dfa(tokenizer_view.dfa()));
     }
@@ -380,8 +388,11 @@ fn analyze_equivalences_impl(
     let byte_to_class = compatible_cache
         .map(|base| base.byte_to_class())
         .unwrap_or_else(|| super::compat::compute_byte_classes(tokenizer_view.dfa()));
+    let byte_class_setup_ms = byte_class_setup_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    let token_dedup_started_at = Instant::now();
     let dedup = deduplicate_tokens_by_byte_class(&prepared.token_bytes, &byte_to_class);
+    let token_dedup_ms = token_dedup_started_at.elapsed().as_secs_f64() * 1000.0;
     let max_token_len = dedup
         .representative_token_bytes
         .iter()
@@ -417,6 +428,7 @@ fn analyze_equivalences_impl(
     let normalized_disallowed_follows =
         normalize_disallowed_follows(tokenizer_group_count(&tokenizer_view), effective_disallowed);
 
+    let vocab_equiv_started_at = Instant::now();
     let dedup_vocab_classes = vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter(
         &tokenizer_view,
         &dedup.representative_token_bytes,
@@ -426,6 +438,7 @@ fn analyze_equivalences_impl(
         active_groups,
         shared_vocab_dfa_cache,
     );
+    let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
     let vocab_representative_tokens = representative_tokens_for_vocab_classes(
         &dedup_vocab_classes,
         &dedup.representative_token_bytes,
@@ -465,6 +478,8 @@ fn analyze_equivalences_impl(
             rep_to_final[&pre_rep]
         })
         .collect::<Vec<_>>();
+
+    let id_map_finalize_started_at = Instant::now();
     let vocab_classes = expand_vocab_classes(
         dedup_vocab_classes,
         &dedup.original_to_repr,
@@ -477,9 +492,12 @@ fn analyze_equivalences_impl(
         vocab_classes,
         state_classes,
     };
+    let internal_id_map =
+        build_internal_id_map_from_combined_result(tokenizer, initial_state_map, &prepared, &result);
+    let id_map_finalize_ms = id_map_finalize_started_at.elapsed().as_secs_f64() * 1000.0;
 
     (
-        build_internal_id_map_from_combined_result(tokenizer, initial_state_map, &prepared, &result),
+        internal_id_map,
         CombinedEquivalenceProfile {
             initial_states_considered: prepared.initial_states.len(),
             max_length_skipped: pipeline_profile.max_length_skipped,
@@ -489,8 +507,13 @@ fn analyze_equivalences_impl(
             token_len_gt_16: token_len_stats.gt_16,
             token_len_gt_32: token_len_stats.gt_32,
             token_len_gt_64: token_len_stats.gt_64,
+            prepare_inputs_ms,
+            byte_class_setup_ms,
+            token_dedup_ms,
             max_length_state_equiv_ms: pipeline_profile.max_length_state_equiv_ms,
+            vocab_equiv_ms,
             exact_state_equiv_ms,
+            id_map_finalize_ms,
             max_length_reps: pipeline_profile.max_length_reps,
             exact_reps,
             exact_rep_confirmation_used,
