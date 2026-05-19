@@ -473,7 +473,7 @@ pub(crate) fn collect_possible_matches_interval_trie_class_build_with_classes(
     let parallel_min_active = std::env::var("GLRMASK_PM_PARALLEL_MIN_ACTIVE_STATES")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(1024);
+        .unwrap_or(512);
     if profile_summary_enabled() {
         eprintln!("[glrmask/profile][trie_build_interval] root_parallel_children={} parallel_depth={} parallel_min_active_states={}", root.children().len(), parallel_depth, parallel_min_active);
     }
