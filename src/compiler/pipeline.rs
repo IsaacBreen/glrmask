@@ -442,13 +442,13 @@ fn compile_prepared_with_profile(
         profile.disallowed_follows_ms = disallowed_follows_ms;
         profile.analysis_wall_ms = elapsed_ms(analysis_started_at);
 
-        let adjusted_disallowed_for_classification = disallowed_follows.clone();
+        let disallowed_follows_for_classification = &disallowed_follows;
         let shared_classify_cache = SharedClassifyCache::new();
         let classify_started_at = Instant::now();
         let _terminal_path_lengths = classify_terminal_path_lengths(
             &tokenizer,
             vocab,
-            &adjusted_disallowed_for_classification,
+            disallowed_follows_for_classification,
             analyzed_grammar.num_terminals,
             Some(&shared_classify_cache),
         );
@@ -482,7 +482,7 @@ fn compile_prepared_with_profile(
                             true,
                             prepared_grammar.ignore_terminal,
                             &analyzed_grammar,
-                            &adjusted_disallowed_for_classification,
+                            disallowed_follows_for_classification,
                             Arc::clone(&flat_trans),
                             &global_max_length_state_map,
                             Some(&shared_classify_cache),
