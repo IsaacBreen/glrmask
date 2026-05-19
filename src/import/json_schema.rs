@@ -8875,19 +8875,10 @@ impl<'a> SchemaCtx<'a> {
         }
 
         if self.should_split_bounded_string(min_len, max_len) {
-            // When min_len > 0 the exact-part terminal must start with the
-            // opening quote so the tokenizer DFA cannot conflate it with
-            // JSON_STRING_BODY (which also follows a standalone '"' terminal).
-            let actually_split_open = min_len == 0;
-            let prefix = if actually_split_open { None } else { Some(literal_expr(b"\"")) };
             let suffix = Some(literal_expr(b"\""));
-            let body = self.build_split_json_string_body_wrapped(min_len, max_len, prefix, suffix);
+            let body = self.build_split_json_string_body_wrapped(min_len, max_len, None, suffix);
 
-            let mut result_parts = Vec::new();
-            if actually_split_open {
-                result_parts.push(literal_expr(b"\""));
-            }
-            result_parts.push(body);
+            let result_parts = vec![literal_expr(b"\""), body];
 
             return Ok(self.extract_rule(
                 sequence_or_single(result_parts),
@@ -13834,6 +13825,23 @@ mod tests {
         assert_eq!(pattern_cfg.merge_close, false);
         assert_eq!(string_value_body_regex("a+", false), "(?:a+)\"");
         assert_eq!(string_value_body_regex("a+", true), "\"(?:a+)");
+    }
+
+    #[test]
+    fn bounded_non_pattern_split_keeps_open_quote_separate_by_default() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _chunk = EnvVarGuard::set("GLRMASK_STRING_REPEAT_CHUNK", "4");
+
+        let glrm = dump_glrm(json!({
+            "type": "string",
+            "minLength": 5,
+            "maxLength": 5,
+        }));
+
+        assert!(glrm.contains("json_string_bounded_split"), "{glrm}");
+        assert!(glrm.contains("::= \"\\\"\" ("), "{glrm}");
+        assert!(glrm.contains("JSON_STRING_CHAR_EXACT_CLOSE"), "{glrm}");
+        assert!(!glrm.contains("JSON_STRING_CHAR_EXACT_OPEN"), "{glrm}");
     }
 
     #[test]

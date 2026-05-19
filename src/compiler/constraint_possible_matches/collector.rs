@@ -61,12 +61,7 @@ struct TerminalSetInterner {
 
 impl TerminalSetInterner {
     fn intern_slice(&mut self, terminals: &[TerminalID]) -> u32 {
-        if let Some(&id) = self.ids.get(terminals) { return id; }
-        let id = self.sets.len() as u32;
-        let owned = terminals.to_vec();
-        self.ids.insert(owned.clone(), id);
-        self.sets.push(owned);
-        id
+        self.intern_vec(terminals.to_vec())
     }
     fn intern_vec(&mut self, mut terminals: Vec<TerminalID>) -> u32 {
         terminals.sort_unstable();
@@ -113,18 +108,15 @@ impl BuildTimings {
 }
 
 #[inline]
-fn normalized_terminal_box(terminals: &[TerminalID]) -> Option<Box<[TerminalID]>> {
+fn canonical_terminal_box(terminals: &[TerminalID]) -> Option<Box<[TerminalID]>> {
     if terminals.is_empty() { return None; }
-    let mut terminals = terminals.to_vec();
-    terminals.sort_unstable();
-    terminals.dedup();
-    (!terminals.is_empty()).then(|| terminals.into_boxed_slice())
+    Some(terminals.to_vec().into_boxed_slice())
 }
 
 #[inline]
 fn append_range(map: &mut IntervalPossibleMatchMap, terminals: &[TerminalID], range: TokenRange) {
     if range.0 <= range.1 {
-        if let Some(terminals) = normalized_terminal_box(terminals) {
+        if let Some(terminals) = canonical_terminal_box(terminals) {
             map.push(TerminalRangeGroup { terminals, ranges: vec![range] });
         }
     }
@@ -133,7 +125,7 @@ fn append_range(map: &mut IntervalPossibleMatchMap, terminals: &[TerminalID], ra
 #[inline]
 fn append_ranges(map: &mut IntervalPossibleMatchMap, terminals: &[TerminalID], ranges: &[TokenRange]) {
     if !ranges.is_empty() {
-        if let Some(terminals) = normalized_terminal_box(terminals) {
+        if let Some(terminals) = canonical_terminal_box(terminals) {
             map.push(TerminalRangeGroup { terminals, ranges: ranges.to_vec() });
         }
     }

@@ -369,17 +369,20 @@ fn dfa_is_nonnullable_and_prefix_free(dfa: &DFA) -> bool {
     true
 }
 
-fn compile_direct_bounded_repeat_base_dfa(expr: &Expr, max: usize) -> Option<DFA> {
-    if max < DIRECT_BOUNDED_REPEAT_THRESHOLD {
-        return None;
-    }
-
+fn compile_direct_bounded_repeat_base_dfa_unconditionally(expr: &Expr) -> Option<DFA> {
     let base_dfa = compile_expr_to_dfa(expr);
     if base_dfa.num_states() == 0 || !dfa_is_nonnullable_and_prefix_free(&base_dfa) {
         return None;
     }
 
     Some(base_dfa)
+}
+
+fn compile_direct_bounded_repeat_base_dfa(expr: &Expr, max: usize) -> Option<DFA> {
+    if max < DIRECT_BOUNDED_REPEAT_THRESHOLD {
+        return None;
+    }
+    compile_direct_bounded_repeat_base_dfa_unconditionally(expr)
 }
 
 fn build_bounded_repeat_dfa(expr: &Expr, min: usize, max: usize) -> Option<DFA> {
@@ -465,7 +468,7 @@ fn build_bounded_repeat_with_suffix_dfa(parts: &[Expr]) -> Option<(DFA, bool)> {
     };
 
     let suffix_bytes = collect_suffix_bytes(&parts[1..])?;
-    let base_dfa = compile_direct_bounded_repeat_base_dfa(repeat_expr, max)?;
+    let base_dfa = compile_direct_bounded_repeat_base_dfa_unconditionally(repeat_expr)?;
 
     let base_states = base_dfa.states();
     let base_state_count = base_states.len();
@@ -611,10 +614,6 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
         } => (expr.as_ref(), *min, *max),
         _ => return None,
     };
-    if max < DIRECT_BOUNDED_REPEAT_THRESHOLD {
-        return None;
-    }
-
     let body_dfa = compile_expr_to_dfa(repeat_expr);
     if body_dfa.num_states() == 0 || !body_dfa.finalizers(0).is_empty() {
         return None;
@@ -814,12 +813,9 @@ fn build_prefixed_bounded_repeat_with_suffix_dfa(parts: &[Expr]) -> Option<(DFA,
             Expr::Shared(inner) => inner.as_ref(),
             other => other,
         };
-        let Expr::Repeat { max: Some(max), .. } = repeat_expr else {
+        let Expr::Repeat { .. } = repeat_expr else {
             continue;
         };
-        if *max < DIRECT_BOUNDED_REPEAT_THRESHOLD {
-            continue;
-        }
 
         let prefix_bytes = collect_suffix_bytes(&parts[..repeat_index])?;
         let tail_parts: Vec<Expr> = parts[repeat_index..].to_vec();
@@ -1768,6 +1764,73 @@ mod tests {
                 .any(|matched| matched.id == 0 && matched.width == 3),
             "prefixed bounded repeat with suffix matched trailing space: {:?}",
             exec.matches,
+        );
+    }
+
+    #[test]
+    fn prefixed_bounded_repeat_with_regex_suffix_uses_direct_path_without_repeat_cutoff() {
+        let quote = Expr::U8Seq(vec![b'"']);
+        let word = Expr::U8Class(U8Set::single(b'a'));
+        let space = Expr::U8Class(U8Set::single(b' '));
+        let word_run = Expr::Repeat {
+            expr: Box::new(word.clone()),
+            min: 1,
+            max: None,
+        };
+        let space_run = Expr::Repeat {
+            expr: Box::new(space),
+            min: 1,
+            max: None,
+        };
+        let pair = Expr::Seq(vec![word_run.clone(), space_run]);
+        let repeated_pairs = Expr::Repeat {
+            expr: Box::new(pair),
+            min: 0,
+            max: Some(29),
+        };
+        let expr = Expr::Seq(vec![quote, repeated_pairs, word_run]);
+
+        let Some((dfa, _)) = super::compile_product_component_dfa_direct(&expr) else {
+            panic!("prefixed bounded repeat with regex suffix did not use direct path");
+        };
+        assert!(
+            dfa.num_states() <= 300,
+            "direct prefixed bounded repeat with regex suffix unexpectedly large: {} states",
+            dfa.num_states(),
+        );
+
+        let repeated_pairs = Expr::Repeat {
+            expr: Box::new(Expr::Seq(vec![
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Class(U8Set::single(b'a'))),
+                    min: 1,
+                    max: None,
+                },
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Class(U8Set::single(b' '))),
+                    min: 1,
+                    max: None,
+                },
+            ])),
+            min: 0,
+            max: Some(2),
+        };
+        let expr = Expr::Seq(vec![
+            Expr::U8Seq(vec![b'"']),
+            repeated_pairs,
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::single(b'a'))),
+                min: 1,
+                max: None,
+            },
+        ]);
+        let Some((dfa, _)) = super::compile_product_component_dfa_direct(&expr) else {
+            panic!("small prefixed bounded repeat with regex suffix did not use direct path");
+        };
+        assert!(
+            dfa.num_states() <= 40,
+            "small direct prefixed bounded repeat with regex suffix unexpectedly large: {} states",
+            dfa.num_states(),
         );
     }
 
