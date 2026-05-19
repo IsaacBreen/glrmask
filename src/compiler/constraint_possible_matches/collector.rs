@@ -92,6 +92,15 @@ struct BuildTimings {
     recursive_ms: f64,
     reachable_interval_ms: f64,
     child_precompute_ms: f64,
+    parallel_terminal_sets_clone_ms: f64,
+    parallel_segment_cache_init_ms: f64,
+    parallel_stamp_alloc_ms: f64,
+    parallel_child_class_project_ms: f64,
+    serial_child_class_project_ms: f64,
+    parallel_children_built: usize,
+    serial_children_built: usize,
+    parallel_empty_children: usize,
+    serial_empty_children: usize,
 }
 
 impl BuildTimings {
@@ -104,6 +113,15 @@ impl BuildTimings {
         self.recursive_ms += other.recursive_ms;
         self.reachable_interval_ms += other.reachable_interval_ms;
         self.child_precompute_ms += other.child_precompute_ms;
+        self.parallel_terminal_sets_clone_ms += other.parallel_terminal_sets_clone_ms;
+        self.parallel_segment_cache_init_ms += other.parallel_segment_cache_init_ms;
+        self.parallel_stamp_alloc_ms += other.parallel_stamp_alloc_ms;
+        self.parallel_child_class_project_ms += other.parallel_child_class_project_ms;
+        self.serial_child_class_project_ms += other.serial_child_class_project_ms;
+        self.parallel_children_built += other.parallel_children_built;
+        self.serial_children_built += other.serial_children_built;
+        self.parallel_empty_children += other.parallel_empty_children;
+        self.serial_empty_children += other.serial_empty_children;
     }
 }
 
@@ -333,21 +351,34 @@ fn build_node(
     if should_parallelize {
         let built: Vec<(ChildBuildData, BuildTimings)> = child_pending.into_par_iter().map(|pending| {
             let mut local_timings = BuildTimings::default();
+            local_timings.parallel_children_built += 1;
             let (result, child_class_ids) = if pending.child_active_states.is_empty() {
+                local_timings.parallel_empty_children += 1;
                 (NodeClasses { classes: Vec::new(), class_maps: Vec::new() }, vec![u32::MAX; pending.descend_positions.len()])
             } else {
+                let terminal_sets_clone_started_at = Instant::now();
                 let mut local_terminal_sets = terminal_sets.clone();
+                local_timings.parallel_terminal_sets_clone_ms += elapsed_ms(terminal_sets_clone_started_at);
+
+                let segment_cache_init_started_at = Instant::now();
                 let mut local_segment_cache = FxHashMap::default();
                 let mut local_segment_outcome_tables = Vec::<FxHashMap<u32, SegmentOutcome>>::new();
+                local_timings.parallel_segment_cache_init_ms += elapsed_ms(segment_cache_init_started_at);
+
                 let mut local_stamp_gen = 0u32;
-                let mut local_terminal_stamps = vec![0u32; tokenizer.num_terminals as usize];
                 let mut local_active_seen_gen = 0u32;
+                let stamp_alloc_started_at = Instant::now();
+                let mut local_terminal_stamps = vec![0u32; tokenizer.num_terminals as usize];
                 let mut local_active_seen_stamps = vec![0u32; tokenizer.num_states() as usize];
                 let mut local_active_seen_positions = vec![0u32; tokenizer.num_states() as usize];
+                local_timings.parallel_stamp_alloc_ms += elapsed_ms(stamp_alloc_started_at);
+
                 let recursive_started_at = Instant::now();
                 let result = build_node(pending.child, tokenizer, &pending.child_active_states, matched_terminals, node_terminal_ids, empty_terminals_id, is_end, byte_transitions, self_loop_bytes, canonical_state, &mut local_terminal_sets, &mut local_segment_cache, &mut local_segment_outcome_tables, &mut local_timings, &mut local_stamp_gen, &mut local_terminal_stamps, &mut local_active_seen_gen, &mut local_active_seen_stamps, &mut local_active_seen_positions, 0, parallel_min_active);
                 local_timings.recursive_ms += elapsed_ms(recursive_started_at);
+                let child_class_project_started_at = Instant::now();
                 let child_class_ids = pending.descend_positions.iter().map(|&pos| if pos == u32::MAX { u32::MAX } else { result.classes[pos as usize] }).collect();
+                local_timings.parallel_child_class_project_ms += elapsed_ms(child_class_project_started_at);
                 (result, child_class_ids)
             };
             (ChildBuildData { outcomes: pending.outcomes, child_class_ids, reachable: pending.reachable, result }, local_timings)
@@ -355,13 +386,17 @@ fn build_node(
         for (data, local_timings) in built { timings.add_assign(local_timings); child_data.push(data); }
     } else {
         for pending in child_pending {
+            timings.serial_children_built += 1;
             let (result, child_class_ids) = if pending.child_active_states.is_empty() {
+                timings.serial_empty_children += 1;
                 (NodeClasses { classes: Vec::new(), class_maps: Vec::new() }, vec![u32::MAX; pending.descend_positions.len()])
             } else {
                 let recursive_started_at = Instant::now();
                 let result = build_node(pending.child, tokenizer, &pending.child_active_states, matched_terminals, node_terminal_ids, empty_terminals_id, is_end, byte_transitions, self_loop_bytes, canonical_state, terminal_sets, segment_cache, segment_outcome_tables, timings, stamp_gen, terminal_stamps, active_seen_gen, active_seen_stamps, active_seen_positions, parallel_depth.saturating_sub(1), parallel_min_active);
                 timings.recursive_ms += elapsed_ms(recursive_started_at);
+                let child_class_project_started_at = Instant::now();
                 let child_class_ids = pending.descend_positions.iter().map(|&pos| if pos == u32::MAX { u32::MAX } else { result.classes[pos as usize] }).collect();
+                timings.serial_child_class_project_ms += elapsed_ms(child_class_project_started_at);
                 (result, child_class_ids)
             };
             child_data.push(ChildBuildData { outcomes: pending.outcomes, child_class_ids, reachable: pending.reachable, result });
@@ -489,7 +524,7 @@ pub(crate) fn collect_possible_matches_interval_trie_class_build_with_classes(
     let root_result = build_node(root, tokenizer, entries, &matched_terminals, &node_terminal_ids, empty_terminals_id, &is_end, &byte_transitions, &self_loop_bytes, canonical_state, &mut terminal_sets, &mut segment_cache, &mut segment_outcome_tables, &mut timings, &mut stamp_gen, &mut terminal_stamps, &mut active_seen_gen, &mut active_seen_stamps, &mut active_seen_positions, parallel_depth, parallel_min_active);
     let root_compute_ms = elapsed_ms(root_started_at);
     if profile_summary_enabled() {
-        eprintln!("[glrmask/profile][trie_build_interval_timings] segment_table_ms={:.3} signature_hash_ms={:.3} map_materialize_ms={:.3} child_active_ms={:.3} recursive_ms={:.3} reachable_interval_ms={:.3} child_precompute_ms={:.3} classes_built={}", timings.segment_table_ms, timings.signature_hash_ms, timings.map_materialize_ms, timings.child_active_ms, timings.recursive_ms, timings.reachable_interval_ms, timings.child_precompute_ms, timings.classes_built);
+        eprintln!("[glrmask/profile][trie_build_interval_timings] segment_table_ms={:.3} signature_hash_ms={:.3} map_materialize_ms={:.3} child_active_ms={:.3} recursive_ms={:.3} reachable_interval_ms={:.3} child_precompute_ms={:.3} parallel_terminal_sets_clone_ms={:.3} parallel_segment_cache_init_ms={:.3} parallel_stamp_alloc_ms={:.3} parallel_child_class_project_ms={:.3} serial_child_class_project_ms={:.3} parallel_children_built={} serial_children_built={} parallel_empty_children={} serial_empty_children={} classes_built={}", timings.segment_table_ms, timings.signature_hash_ms, timings.map_materialize_ms, timings.child_active_ms, timings.recursive_ms, timings.reachable_interval_ms, timings.child_precompute_ms, timings.parallel_terminal_sets_clone_ms, timings.parallel_segment_cache_init_ms, timings.parallel_stamp_alloc_ms, timings.parallel_child_class_project_ms, timings.serial_child_class_project_ms, timings.parallel_children_built, timings.serial_children_built, timings.parallel_empty_children, timings.serial_empty_children, timings.classes_built);
     }
     let profile = PossibleMatchesProfile { cache_entries: root_result.class_maps.len(), root_compute_ms, ..Default::default() };
     let mut state_classes = vec![u32::MAX; tokenizer.num_states() as usize];
