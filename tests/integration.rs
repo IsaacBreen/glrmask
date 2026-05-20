@@ -348,6 +348,62 @@ fn json_schema_email_format_rejects_missing_at_sign() {
 }
 
 #[test]
+fn json_schema_number_multiple_of_001_accepts_two_decimal_places() {
+    let constraint = byte_schema(r#"{"type":"number","multipleOf":0.01}"#);
+    assert_accepts_bytes(&constraint, b"1.23");
+}
+
+#[test]
+fn json_schema_number_multiple_of_001_rejects_three_decimal_places() {
+    let constraint = byte_schema(r#"{"type":"number","multipleOf":0.01}"#);
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(b"1.234").is_err());
+}
+
+#[test]
+fn json_schema_number_multiple_of_001_rejects_extra_significant_digits() {
+    let constraint = byte_schema(r#"{"type":"number","multipleOf":0.01}"#);
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(b"1.001").is_err());
+}
+
+#[test]
+fn json_schema_number_multiple_of_001_accepts_trailing_zero_spelling() {
+    let constraint = byte_schema(r#"{"type":"number","multipleOf":0.01}"#);
+    assert_accepts_bytes(&constraint, b"1.230");
+}
+
+#[test]
+fn json_schema_number_multiple_of_05_accepts_half_steps() {
+    let constraint = byte_schema(r#"{"type":"number","multipleOf":0.5}"#);
+    assert_accepts_bytes(&constraint, b"1.5");
+}
+
+#[test]
+fn json_schema_number_multiple_of_05_rejects_non_half_steps() {
+    let constraint = byte_schema(r#"{"type":"number","multipleOf":0.5}"#);
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(b"1.2").is_err());
+}
+
+#[test]
+fn json_schema_number_multiple_of_10_accepts_integer_multiple() {
+    let constraint = byte_schema(
+        r#"{"type":"array","items":{"type":"number","multipleOf":10},"minItems":1,"maxItems":1}"#,
+    );
+    assert_accepts_bytes(&constraint, b"[20]");
+}
+
+#[test]
+fn json_schema_number_multiple_of_10_rejects_non_multiple() {
+    let constraint = byte_schema(
+        r#"{"type":"array","items":{"type":"number","multipleOf":10},"minItems":1,"maxItems":1}"#,
+    );
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(b"[21]").is_err());
+}
+
+#[test]
 fn json_schema_pattern_with_max_length_token_mask_rejects_overlong_identifier() {
     let schema_text = r#"{
             "type": "object",

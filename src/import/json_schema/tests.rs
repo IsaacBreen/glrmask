@@ -204,6 +204,42 @@ fn unknown_format_errors() {
 }
 
 #[test]
+fn unknown_metadata_keys_are_ignored() {
+    let schema = json!({
+        "type": "string",
+        "version": "x",
+        "example": "abc"
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn oneof_errors_as_unimplemented_key() {
+    let schema = json!({
+        "oneOf": [
+            {"const": "left"},
+            {"const": "right"}
+        ]
+    });
+
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("oneOf"), "{error}");
+}
+
+#[test]
+fn not_errors_as_unimplemented_key() {
+    let schema = json!({
+        "type": "string",
+        "not": {"const": "forbidden"}
+    });
+
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("not"), "{error}");
+}
+
+#[test]
 fn enum_and_const_lower_to_exact_json_literals() {
     let schema = json!({"enum": [null, true, "ready", 7]});
     let grammar = schema_to_named_grammar(&schema).unwrap();
@@ -263,19 +299,6 @@ fn anyof_allows_sibling_assertions() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     lower(&grammar).unwrap();
-}
-
-#[test]
-fn oneof_is_rejected_as_unimplemented() {
-    let schema = json!({
-        "oneOf": [
-            {"const": "left"},
-            {"const": "right"}
-        ]
-    });
-
-    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
-    assert!(error.contains("oneOf"), "{error}");
 }
 
 #[test]

@@ -108,7 +108,7 @@ fn load_assertions(object: &Map<String, Value>, location: &str) -> ImportResult<
 fn validate_supported_keys(object: &Map<String, Value>, location: &str) -> ImportResult<()> {
     let unsupported = object
         .keys()
-        .filter(|key| !is_supported_key(key))
+        .filter(|key| is_unsupported_validation_key(key))
         .cloned()
         .collect::<Vec<_>>();
     if unsupported.is_empty() {
@@ -118,46 +118,26 @@ fn validate_supported_keys(object: &Map<String, Value>, location: &str) -> Impor
     }
 }
 
-fn is_supported_key(key: &str) -> bool {
+fn is_unsupported_validation_key(key: &str) -> bool {
     matches!(
         key,
-        "$schema"
-            | "$id"
-            | "id"
-            | "$defs"
-            | "$comment"
-            | "$ref"
-            | "definitions"
-            | "title"
-            | "description"
-            | "default"
-            | "examples"
-            | "deprecated"
-            | "readOnly"
-            | "writeOnly"
-            | "type"
-            | "const"
-            | "enum"
-            | "anyOf"
-            | "allOf"
-            | "properties"
-            | "required"
-            | "patternProperties"
-            | "additionalProperties"
-            | "items"
-            | "additionalItems"
-            | "prefixItems"
-            | "minItems"
-            | "maxItems"
-            | "minLength"
-            | "maxLength"
-            | "pattern"
-            | "format"
-            | "minimum"
-            | "maximum"
-            | "exclusiveMinimum"
-            | "exclusiveMaximum"
-            | "multipleOf"
+        "not"
+            | "oneOf"
+            | "propertyNames"
+            | "minProperties"
+            | "maxProperties"
+            | "uniqueItems"
+            | "contains"
+            | "minContains"
+            | "maxContains"
+            | "dependencies"
+            | "dependentRequired"
+            | "dependentSchemas"
+            | "if"
+            | "then"
+            | "else"
+            | "unevaluatedProperties"
+            | "unevaluatedItems"
     )
 }
 
