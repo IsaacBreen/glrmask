@@ -3107,26 +3107,43 @@ fn json_direct_ascii_u8set() -> U8Set {
     set
 }
 
+fn fixed_ascii_search_u8set() -> U8Set {
+    let mut set = json_direct_ascii_u8set();
+    set.insert(b'"');
+    set.insert(b'\\');
+    set
+}
+
 fn extract_fixed_ascii_class_concat_expr(
     expr: &LexerExpr,
-    direct_ascii: U8Set,
+    searchable_ascii: U8Set,
     out: &mut Vec<U8Set>,
 ) -> Option<()> {
     match expr {
         LexerExpr::Seq(parts) => {
             for part in parts {
-                extract_fixed_ascii_class_concat_expr(part, direct_ascii, out)?;
+                extract_fixed_ascii_class_concat_expr(part, searchable_ascii, out)?;
             }
             Some(())
         }
-        LexerExpr::U8Seq(bytes) if bytes.len() == 1 && direct_ascii.contains(bytes[0]) => {
+        LexerExpr::U8Seq(bytes) if bytes.len() == 1 && searchable_ascii.contains(bytes[0]) => {
             out.push(U8Set::from_byte(bytes[0]));
             Some(())
         }
-        LexerExpr::U8Class(set) if !set.is_empty() && set.is_subset(&direct_ascii) => {
+        LexerExpr::U8Class(set) if !set.is_empty() && set.is_subset(&searchable_ascii) => {
             out.push(*set);
             Some(())
         }
+        _ => None,
+    }
+}
+
+fn extract_fixed_ascii_unit_expr(expr: &LexerExpr, direct_ascii: U8Set) -> Option<U8Set> {
+    match expr {
+        LexerExpr::U8Seq(bytes) if bytes.len() == 1 && direct_ascii.contains(bytes[0]) => {
+            Some(U8Set::from_byte(bytes[0]))
+        }
+        LexerExpr::U8Class(set) if !set.is_empty() && set.is_subset(&direct_ascii) => Some(*set),
         _ => None,
     }
 }
@@ -3144,7 +3161,7 @@ fn extract_fixed_ascii_class_concat_pattern(pattern: &str) -> Option<Vec<U8Set>>
         return None;
     }
 
-    let direct_ascii = json_direct_ascii_u8set();
+    let direct_ascii = fixed_ascii_search_u8set();
     let expr = parse_regex(core, true);
     let mut out = Vec::new();
     extract_fixed_ascii_class_concat_expr(&expr, direct_ascii, &mut out)?;
@@ -3152,6 +3169,30 @@ fn extract_fixed_ascii_class_concat_pattern(pattern: &str) -> Option<Vec<U8Set>>
         return None;
     }
     Some(out)
+}
+
+fn extract_fixed_ascii_class_search_pattern(pattern: &str) -> Option<Vec<U8Set>> {
+    if let Some(classes) = extract_fixed_ascii_class_concat_pattern(pattern) {
+        return Some(classes);
+    }
+
+    let branches = split_top_level_regex_branches(pattern);
+    if branches.len() != 1 {
+        return None;
+    }
+    let (anchored_start, anchored_end, core) = strip_branch_outer_anchors(branches[0]);
+    if anchored_start || anchored_end || core.is_empty() || core.as_bytes().contains(&b'\\') {
+        return None;
+    }
+
+    let direct_ascii = fixed_ascii_search_u8set();
+    match parse_regex(core, true) {
+        LexerExpr::Repeat { expr, min, max: _ } if min > 0 && min <= 128 => {
+            let unit = extract_fixed_ascii_unit_expr(&expr, direct_ascii)?;
+            Some(vec![unit; min])
+        }
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -3258,14 +3299,14 @@ fn build_fixed_ascii_class_bounded_search_dfa(
                         ));
                     }
 
-                    transitions.push((
-                        b'\\',
-                        FixedAsciiSearchState {
-                            decoded_len: next_len,
-                            mode: advance_fixed_ascii_search_other(state.mode),
-                            phase: FixedAsciiJsonCharPhase::AfterBackslash,
-                        },
-                    ));
+                      transitions.push((
+                          b'\\',
+                          FixedAsciiSearchState {
+                              decoded_len: next_len,
+                              mode: state.mode,
+                              phase: FixedAsciiJsonCharPhase::AfterBackslash,
+                          },
+                      ));
 
                     let utf8_next = FixedAsciiSearchState {
                         decoded_len: next_len,
@@ -3336,15 +3377,29 @@ fn build_fixed_ascii_class_bounded_search_dfa(
                             phase: FixedAsciiJsonCharPhase::Utf8Need3AfterF4,
                         },
                     ));
-                }
-                FixedAsciiJsonCharPhase::AfterBackslash => {
-                    for byte in [b'"', b'\\', b'b', b'f', b'n', b'r', b't'] {
-                        transitions.push((
-                            byte,
-                            FixedAsciiSearchState {
-                                phase: FixedAsciiJsonCharPhase::Boundary,
-                                ..state
-                            },
+                 }
+                 FixedAsciiJsonCharPhase::AfterBackslash => {
+                     for (byte, decoded) in [
+                         (b'"', b'"'),
+                         (b'\\', b'\\'),
+                         (b'b', 0x08),
+                         (b'f', 0x0C),
+                         (b'n', 0x0A),
+                         (b'r', 0x0D),
+                         (b't', 0x09),
+                     ] {
+                         let mode = if decoded == b'"' || decoded == b'\\' {
+                             advance_fixed_ascii_search_ascii(state.mode, decoded, classes)
+                         } else {
+                             advance_fixed_ascii_search_other(state.mode)
+                         };
+                         transitions.push((
+                             byte,
+                             FixedAsciiSearchState {
+                                 mode,
+                                 phase: FixedAsciiJsonCharPhase::Boundary,
+                                 ..state
+                             },
                         ));
                     }
                 }
@@ -3436,7 +3491,7 @@ fn try_fixed_ascii_class_bounded_search_dfa(
     min_len: usize,
     max_len: usize,
 ) -> Option<DFA> {
-    let classes = extract_fixed_ascii_class_concat_pattern(pattern)?;
+    let classes = extract_fixed_ascii_class_search_pattern(pattern)?;
     Some(build_fixed_ascii_class_bounded_search_dfa(
         &classes,
         min_len,
@@ -12598,10 +12653,11 @@ fn repeat_expr(item: GrammarExpr, min: usize, max: Option<usize>) -> GrammarExpr
 mod tests {
     use super::json_schema_uri_mode;
     use super::json_literal_string_merge_config;
-    use super::common_outer_anchor_pattern;
-    use super::decoded_regex_search_expr;
-    use super::extract_fixed_ascii_class_concat_pattern;
-    use super::json_string_char_lexer_expr;
+      use super::common_outer_anchor_pattern;
+      use super::decoded_regex_search_expr;
+      use super::extract_fixed_ascii_class_concat_pattern;
+      use super::extract_fixed_ascii_class_search_pattern;
+      use super::json_string_char_lexer_expr;
     use super::lexer_repeat;
     use super::decoded_regex_matches_search;
     use super::decoded_regex_fullmatch_expr;
@@ -12778,6 +12834,19 @@ mod tests {
     }
 
     #[test]
+    fn fixed_ascii_class_search_extractor_accepts_repeated_class_pattern() {
+        let classes = extract_fixed_ascii_class_search_pattern("[A-z]+")
+            .expect("repeated class search should extract");
+        assert_eq!(classes.len(), 1);
+        assert!(classes[0].contains(b'A'));
+        assert!(classes[0].contains(b'z'));
+
+        let classes = extract_fixed_ascii_class_search_pattern("[A-z]{3,64}")
+            .expect("bounded repeated class search should extract");
+        assert_eq!(classes.len(), 3);
+    }
+
+    #[test]
     fn fixed_ascii_class_concat_extractor_rejects_unsupported_shapes() {
         for pattern in [
             "^[RD][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][KMRASPDHEG]$",
@@ -12796,6 +12865,17 @@ mod tests {
         assert!(fixed_ascii_bounded_search_accepts(pattern, 0, 36, b"R123456789K"));
         assert!(fixed_ascii_bounded_search_accepts(pattern, 0, 36, b"D000000000M"));
         assert!(fixed_ascii_bounded_search_accepts(pattern, 0, 36, b"xxR123456789Kyy"));
+    }
+
+    #[test]
+    fn fixed_ascii_bounded_search_accepts_unanchored_repeated_class_examples() {
+        let pattern = "[A-z]+";
+        assert!(fixed_ascii_bounded_search_accepts(pattern, 3, 64, b"abc"));
+        assert!(fixed_ascii_bounded_search_accepts(pattern, 3, 64, b"12A"));
+        assert!(fixed_ascii_bounded_search_accepts(pattern, 3, 64, b"12\\\\"));
+        assert!(!fixed_ascii_bounded_search_accepts(pattern, 3, 64, b"123"));
+        assert!(!fixed_ascii_bounded_search_accepts(pattern, 3, 64, b"12\\\""));
+        assert!(!fixed_ascii_bounded_search_accepts(pattern, 3, 64, b"ab"));
     }
 
     #[test]
