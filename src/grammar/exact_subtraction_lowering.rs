@@ -1001,8 +1001,8 @@ mod tests {
         });
 
         let glrm = dump_json_schema_grammar_glrm(&schema.to_string()).unwrap();
-        assert!(glrm.contains("__exact_sub_AP_SHARED_LITERAL_KEY_SET_result"), "{glrm}");
-        assert!(!glrm.contains("AP_SHARED_LITERAL_KEY_SET - (\"a\\\"\" | \"b\\\"\")"), "{glrm}");
+        assert!(glrm.contains("JSON_STRING - \"\\\"a\\\"\" - \"\\\"b\\\"\""), "{glrm}");
+        assert!(!glrm.contains("__exact_sub_AP_SHARED_LITERAL_KEY_SET_result"), "{glrm}");
     }
 
     #[test]
@@ -1037,7 +1037,7 @@ mod tests {
         });
 
         let glrm = dump_json_schema_grammar_glrm(&schema.to_string()).unwrap();
-        assert!(glrm.contains("AP_SHARED_LITERAL_KEY_SET - (\"a\\\"\" | \"b\\\"\")"), "{glrm}");
+        assert!(glrm.contains("JSON_STRING - \"\\\"a\\\"\" - \"\\\"b\\\"\""), "{glrm}");
         assert!(!glrm.contains("__exact_sub_AP_SHARED_LITERAL_KEY_SET_result"), "{glrm}");
     }
 }
