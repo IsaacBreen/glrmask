@@ -2,6 +2,17 @@ use super::*;
 
 use crate::ds::bitset::BitSet;
 
+const DISABLE_UNIT_REDUCTION_INLINING_ENV: &str = "GLRMASK_DISABLE_UNIT_REDUCTION_INLINING";
+
+fn unit_reduction_inlining_enabled() -> bool {
+    !std::env::var(DISABLE_UNIT_REDUCTION_INLINING_ENV)
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
 pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
     let t0 = std::time::Instant::now();
     let (item_sets, transitions) = build_lr1_item_sets(grammar);
@@ -16,8 +27,11 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
     let merge1_started_at = std::time::Instant::now();
     table.merge_identical_rows();
     let merge_identical1_ms = merge1_started_at.elapsed().as_secs_f64() * 1000.0;
+    let unit_collapse_enabled = unit_reduction_inlining_enabled();
     let collapse_started_at = std::time::Instant::now();
-    table.collapse_sr_unit_reductions_with_compatible_gotos();
+    if unit_collapse_enabled {
+        table.collapse_sr_unit_reductions_with_compatible_gotos();
+    }
     let unit_collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
     let prune_started_at = std::time::Instant::now();
     table.prune_unreachable_states();
@@ -59,7 +73,7 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
             ielr_ms,
             pre_merge_states,
             table.num_states,
-            true,
+            unit_collapse_enabled,
             merge_ms,
             merge_identical1_ms,
             unit_collapse_ms,
