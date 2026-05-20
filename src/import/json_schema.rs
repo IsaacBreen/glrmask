@@ -2061,17 +2061,15 @@ fn string_value_body_regex(inner: &str, is_pattern: bool) -> String {
 }
 
 /// Build the regex pattern for the body terminal of a JSON object **key-colon**
-/// (`"key": `).
+/// (`"key"`).
 ///
-/// Fuses non-split quotes AND colon-space into the pattern:
-///  - `split_open=false` → pattern starts with `"`
-///  - `split_close=false` → pattern includes close `"`
-///  - `split_colon=false` → pattern includes `": "`
+/// Key terminals intentionally fuse both quotes into the body.  Splitting the
+/// opening quote makes commits like `, "` branch across every possible key.
 fn key_colon_body_regex(inner: &str) -> String {
     quoted_body_regex(
         inner,
         JsonStringMergeConfig {
-            merge_open: false,
+            merge_open: true,
             merge_close: true,
         },
         true,
@@ -2095,14 +2093,9 @@ fn quoted_body_regex(
 }
 
 /// Build literal bytes for the body terminal of a JSON object **key-colon**.
-///
-/// Fuses non-split quotes and colon-space into the byte sequence.
+/// The trailing colon-space remains outside the terminal body.
 fn key_colon_literal_body_bytes(text: &str) -> Vec<u8> {
-    let full = json_string_literal_bytes(text); // b'"text"'
-    let body_only = &full[1..full.len() - 1];
-    let mut bytes = body_only.to_vec();
-    bytes.push(b'"');
-    bytes
+    json_string_literal_bytes(text)
 }
 
 /// Build the colon-space suffix expression for keys.
@@ -2128,10 +2121,10 @@ fn wrap_string_value_terminal(body: GrammarExpr, merge_config: JsonStringMergeCo
 
 /// Wrap a body terminal expression as a JSON object **key-colon**.
 ///
-/// Adds split-off quote literals and colon-space around the body terminal.
-/// The body terminal must already include fused (non-split) quotes and colon.
+/// Adds colon-space after the body terminal.  The body terminal already includes
+/// both quotes so key entry does not fan out on a standalone opening quote.
 fn wrap_key_colon_terminal(body: GrammarExpr) -> GrammarExpr {
-    sequence_or_single(vec![literal_expr(b"\""), body, key_colon_suffix_expr()])
+    sequence_or_single(vec![body, key_colon_suffix_expr()])
 }
 
 // ---------------------------------------------------------------------------
@@ -2940,7 +2933,7 @@ fn append_literal_preserving_group_ops(expr: GrammarExpr, literal: GrammarExpr) 
 }
 
 fn wrap_key_colon_expr_parts(body: GrammarExpr) -> (GrammarExpr, Box<dyn FnOnce(GrammarExpr) -> GrammarExpr>) {
-    let terminal_body = sequence_or_single(vec![body, literal_expr(b"\"")]);
+    let terminal_body = sequence_or_single(vec![literal_expr(b"\""), body, literal_expr(b"\"")]);
     let wrap = move |term: GrammarExpr| -> GrammarExpr { wrap_key_colon_terminal(term) };
     (terminal_body, Box::new(wrap))
 }
@@ -7000,7 +6993,7 @@ impl<'a> SchemaCtx<'a> {
         Ok(self
             .build_shared_additional_key_body_options(variant_keys, variant_pattern_keys)
             .into_iter()
-            .map(|body| vec![literal_expr(b"\""), body, key_colon_suffix_expr()])
+            .map(|body| vec![body, key_colon_suffix_expr()])
             .collect())
     }
 
@@ -10450,8 +10443,8 @@ impl<'a> SchemaCtx<'a> {
     }
 
     /// Build a grammar expression for a key-colon DFA, wrapping it with
-    /// the split-off literal parts (opening quote, close quote, colon-space)
-    /// just like `wrap_key_colon_regex` does for regex-based keys.
+    /// the key-colon wrapper just like `wrap_key_colon_regex` does for
+    /// regex-based keys.
     fn build_key_colon_expr(&mut self, expr: &LexerExpr, prefix: &str) -> GrammarExpr {
         self.build_excluding_key_colon_expr_internal(expr.clone(), vec![], prefix)
     }
@@ -10588,10 +10581,10 @@ impl<'a> SchemaCtx<'a> {
         }
 
         let body = if excluded.is_empty() {
-            GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())
+            GrammarExpr::Ref(JSON_KEY_COLON_BODY_RULE.into())
         } else {
             GrammarExpr::Exclude {
-                expr: Box::new(GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())),
+                expr: Box::new(GrammarExpr::Ref(JSON_KEY_COLON_BODY_RULE.into())),
                 exclude: Box::new(choice_or_single(excluded)),
             }
         };
@@ -10654,10 +10647,10 @@ impl<'a> SchemaCtx<'a> {
         }
 
         let body = if excluded.is_empty() {
-            GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())
+            GrammarExpr::Ref(JSON_KEY_COLON_BODY_RULE.into())
         } else {
             GrammarExpr::Exclude {
-                expr: Box::new(GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())),
+                expr: Box::new(GrammarExpr::Ref(JSON_KEY_COLON_BODY_RULE.into())),
                 exclude: Box::new(choice_or_single(excluded)),
             }
         };
@@ -12051,10 +12044,10 @@ impl<'a> SchemaCtx<'a> {
                 }
 
                 let ap_body = if excluded_ap_exprs.is_empty() {
-                    GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())
+                    GrammarExpr::Ref(JSON_KEY_COLON_BODY_RULE.into())
                 } else {
                     GrammarExpr::Exclude {
-                        expr: Box::new(GrammarExpr::Ref(JSON_STRING_BODY_RULE.into())),
+                        expr: Box::new(GrammarExpr::Ref(JSON_KEY_COLON_BODY_RULE.into())),
                         exclude: Box::new(choice_or_single(excluded_ap_exprs)),
                     }
                 };
@@ -13067,7 +13060,7 @@ mod tests {
     }
 
     #[test]
-    fn anyof_object_expr_nfa_fixed_keys_use_split_key_colon_symbols() {
+    fn anyof_object_expr_nfa_fixed_keys_use_fused_key_colon_symbols() {
         let schema = json!({
             "anyOf": [
                 {
@@ -13090,11 +13083,11 @@ mod tests {
         let glrm = dump_glrm(schema);
         assert!(glrm.contains("fa obj_anyof_fa_0_body"), "{glrm}");
         assert!(
-            glrm.contains("-- \"\\\"\" \"thumbnail\\\"\" \": \" -->"),
+            glrm.contains("-- \"\\\"thumbnail\\\"\" \": \" -->"),
             "{glrm}"
         );
         assert!(
-            !glrm.contains("-- \"\\\"thumbnail\\\": \" -->"),
+            !glrm.contains("-- \"\\\"\" \"thumbnail\\\"\" \": \" -->"),
             "{glrm}"
         );
     }
@@ -13128,7 +13121,7 @@ mod tests {
         assert!(glrm.contains("t AP_SHARED_KEY ::="), "{glrm}");
         assert!(
             glrm.contains("-- AP_SHARED_KEY -->")
-                && glrm.contains("-- AP_SHARED_LITERAL_KEY_SET - (\"name\\\"\") -->"),
+                && glrm.contains("-- AP_SHARED_LITERAL_KEY_SET - (\"\\\"name\\\"\") -->"),
             "{glrm}"
         );
         assert!(!glrm.contains("obj_anyof_fa_0_ap_key_v1"), "{glrm}");
@@ -13438,10 +13431,10 @@ mod tests {
 
         let glrm = dump_glrm(schema);
         assert!(glrm.contains("t AP_SHARED_KEY ::= "), "{glrm}");
-        assert!(glrm.contains("AP_SHARED_LITERAL_KEY_0 ::= \"a\\\"\""), "{glrm}");
-        assert!(glrm.contains("AP_SHARED_LITERAL_KEY_1 ::= \"b\\\"\""), "{glrm}");
-        assert!(glrm.contains("AP_SHARED_LITERAL_KEY_2 ::= \"left\\\"\""), "{glrm}");
-        assert!(glrm.contains("AP_SHARED_LITERAL_KEY_3 ::= \"right\\\"\""), "{glrm}");
+        assert!(glrm.contains("AP_SHARED_LITERAL_KEY_0 ::= \"\\\"a\\\"\""), "{glrm}");
+        assert!(glrm.contains("AP_SHARED_LITERAL_KEY_1 ::= \"\\\"b\\\"\""), "{glrm}");
+        assert!(glrm.contains("AP_SHARED_LITERAL_KEY_2 ::= \"\\\"left\\\"\""), "{glrm}");
+        assert!(glrm.contains("AP_SHARED_LITERAL_KEY_3 ::= \"\\\"right\\\"\""), "{glrm}");
     }
 
     #[test]
@@ -13506,7 +13499,7 @@ mod tests {
         assert!(glrm.contains("AP_SHARED_PATTERN_KEY_0"), "{glrm}");
         assert!(glrm.contains(" - AP_SHARED_PATTERN_KEY_0"), "{glrm}");
         assert!(
-            glrm.contains("AP_SHARED_LITERAL_KEY_SET - (\"a\\\"\" | \"b\\\"\")"),
+            glrm.contains("AP_SHARED_LITERAL_KEY_SET - (\"\\\"a\\\"\" | \"\\\"b\\\"\")"),
             "{glrm}"
         );
         assert!(
