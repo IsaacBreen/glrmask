@@ -39,10 +39,11 @@ pub struct CommitProfile {
 	pub adv_clone_ns: u64,
 	pub adv_summary_ns: u64,
 	pub adv_fast_path_ns: u64,
-	pub adv_stack_shift_apply_ns: u64,
-	pub adv_det_ns: u64,
-	pub adv_nondet_ns: u64,
-	pub adv_vstack_len: u64,
+        pub adv_stack_shift_apply_ns: u64,
+        pub adv_det_ns: u64,
+        pub adv_det_floor_cross_ns: u64,
+        pub adv_nondet_ns: u64,
+        pub adv_vstack_len: u64,
 	pub adv_gss_depth: u64,
 	pub adv_det_exit_reason: u64,
 	pub adv_det_exit_state: u64,
@@ -50,9 +51,10 @@ pub struct CommitProfile {
 	pub adv_n_det_goto_lookups: u64,
 	pub adv_n_det_popn_ops: u64,
 	pub adv_n_nondet_reduce_ops: u64,
-	pub adv_n_nondet_merges: u64,
-	pub adv_n_nondet_isolates: u64,
-	pub adv_nondet_det_ns: u64,
+        pub adv_n_nondet_merges: u64,
+        pub adv_n_nondet_isolates: u64,
+        pub adv_nondet_det_ns: u64,
+        pub adv_nondet_det_floor_cross_ns: u64,
 	pub fast_path_total_ns: u64,
 	pub fast_path_tokenizer_exec_ns: u64,
 	pub fast_path_match_scan_ns: u64,
@@ -99,9 +101,10 @@ pub(super) fn apply_advance_profile(commit_profile: &mut CommitProfile, profile:
 	commit_profile.adv_n_nondet_branches += profile.n_nondet_branches as u64;
 	commit_profile.adv_clone_ns += profile.clone_ns;
 	commit_profile.adv_fast_path_ns += profile.fast_path_ns;
-	commit_profile.adv_stack_shift_apply_ns += profile.stack_shift_apply_ns;
-	commit_profile.adv_det_ns += profile.det_ns;
-	commit_profile.adv_nondet_ns += profile.nondet_ns;
+    commit_profile.adv_stack_shift_apply_ns += profile.stack_shift_apply_ns;
+    commit_profile.adv_det_ns += profile.det_ns;
+    commit_profile.adv_det_floor_cross_ns += profile.det_floor_cross_ns;
+    commit_profile.adv_nondet_ns += profile.nondet_ns;
 	commit_profile.adv_vstack_len = profile.vstack_len as u64;
 	commit_profile.adv_gss_depth = profile.gss_depth as u64;
 	commit_profile.adv_det_exit_reason = profile.det_exit_reason as u64;
@@ -111,8 +114,9 @@ pub(super) fn apply_advance_profile(commit_profile: &mut CommitProfile, profile:
 	commit_profile.adv_n_det_popn_ops += profile.n_det_popn_ops as u64;
 	commit_profile.adv_n_nondet_reduce_ops += profile.n_nondet_reduce_ops as u64;
 	commit_profile.adv_n_nondet_merges += profile.n_nondet_merges as u64;
-	commit_profile.adv_n_nondet_isolates += profile.n_nondet_isolates as u64;
-	commit_profile.adv_nondet_det_ns += profile.nondet_det_ns;
+    commit_profile.adv_n_nondet_isolates += profile.n_nondet_isolates as u64;
+    commit_profile.adv_nondet_det_ns += profile.nondet_det_ns;
+    commit_profile.adv_nondet_det_floor_cross_ns += profile.nondet_det_floor_cross_ns;
 }
 
 pub(super) fn fast_action_advance_profile(

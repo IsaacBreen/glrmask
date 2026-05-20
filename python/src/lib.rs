@@ -431,6 +431,7 @@ impl PyConstraintState {
         dict.set_item("adv_fast_path_ns", profile.adv_fast_path_ns)?;
         dict.set_item("adv_stack_shift_apply_ns", profile.adv_stack_shift_apply_ns)?;
         dict.set_item("adv_det_ns", profile.adv_det_ns)?;
+        dict.set_item("adv_det_floor_cross_ns", profile.adv_det_floor_cross_ns)?;
         dict.set_item("adv_nondet_ns", profile.adv_nondet_ns)?;
         dict.set_item("adv_vstack_len", profile.adv_vstack_len)?;
         dict.set_item("adv_gss_depth", profile.adv_gss_depth)?;
@@ -443,6 +444,10 @@ impl PyConstraintState {
         dict.set_item("adv_n_nondet_merges", profile.adv_n_nondet_merges)?;
         dict.set_item("adv_n_nondet_isolates", profile.adv_n_nondet_isolates)?;
         dict.set_item("adv_nondet_det_ns", profile.adv_nondet_det_ns)?;
+        dict.set_item(
+            "adv_nondet_det_floor_cross_ns",
+            profile.adv_nondet_det_floor_cross_ns,
+        )?;
         dict.set_item("adv_summary_ns", profile.adv_summary_ns)?;
         dict.set_item("fast_path_total_ns", profile.fast_path_total_ns)?;
         dict.set_item("fast_path_tokenizer_exec_ns", profile.fast_path_tokenizer_exec_ns)?;
@@ -526,8 +531,10 @@ impl PyConstraintState {
             d.set_item("fast_path_ns", p.fast_path_ns)?;
             d.set_item("stack_shift_apply_ns", p.stack_shift_apply_ns)?;
             d.set_item("det_ns", p.det_ns)?;
+            d.set_item("det_floor_cross_ns", p.det_floor_cross_ns)?;
             d.set_item("nondet_ns", p.nondet_ns)?;
             d.set_item("nondet_det_ns", p.nondet_det_ns)?;
+            d.set_item("nondet_det_floor_cross_ns", p.nondet_det_floor_cross_ns)?;
             d.set_item("det_exit_reason", p.det_exit_reason)?;
             d.set_item("det_exit_state", p.det_exit_state)?;
             d.set_item("n_det_action_lookups", p.n_det_action_lookups)?;
@@ -573,6 +580,10 @@ impl PyConstraintState {
         commit_dict.set_item("adv_fast_path_ns", commit_profile.adv_fast_path_ns)?;
         commit_dict.set_item("adv_stack_shift_apply_ns", commit_profile.adv_stack_shift_apply_ns)?;
         commit_dict.set_item("adv_det_ns", commit_profile.adv_det_ns)?;
+        commit_dict.set_item(
+            "adv_det_floor_cross_ns",
+            commit_profile.adv_det_floor_cross_ns,
+        )?;
         commit_dict.set_item("adv_nondet_ns", commit_profile.adv_nondet_ns)?;
         commit_dict.set_item("adv_vstack_len", commit_profile.adv_vstack_len)?;
         commit_dict.set_item("adv_gss_depth", commit_profile.adv_gss_depth)?;
@@ -585,6 +596,10 @@ impl PyConstraintState {
         commit_dict.set_item("adv_n_nondet_merges", commit_profile.adv_n_nondet_merges)?;
         commit_dict.set_item("adv_n_nondet_isolates", commit_profile.adv_n_nondet_isolates)?;
         commit_dict.set_item("adv_nondet_det_ns", commit_profile.adv_nondet_det_ns)?;
+        commit_dict.set_item(
+            "adv_nondet_det_floor_cross_ns",
+            commit_profile.adv_nondet_det_floor_cross_ns,
+        )?;
         commit_dict.set_item("adv_summary_ns", commit_profile.adv_summary_ns)?;
         commit_dict.set_item("fast_path_total_ns", commit_profile.fast_path_total_ns)?;
         commit_dict.set_item("fast_path_tokenizer_exec_ns", commit_profile.fast_path_tokenizer_exec_ns)?;

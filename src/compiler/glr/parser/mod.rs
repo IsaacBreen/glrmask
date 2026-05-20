@@ -995,6 +995,7 @@ fn advance_deterministically_profiled(
                 } else {
                     profile.n_floor_crossings += 1;
                     profile.n_det_popn_ops += 1;
+                    let floor_cross_start = std::time::Instant::now();
                     let popped = stack.into_gss_after_popping(rhs_len);
                     let mut normal_shifts = SmallVec::<[(u32, u32); 8]>::new();
                     let mut replace_gotos = SmallVec::<[(u32, u32); 4]>::new();
@@ -1018,6 +1019,7 @@ fn advance_deterministically_profiled(
                         }
                         rebuilt
                     };
+                    profile.det_floor_cross_ns += floor_cross_start.elapsed().as_nanos() as u64;
                     let Some(next_stack) = rebuilt.try_virtual_stack() else {
                         *gss = rebuilt;
                         profile.det_exit_reason = 7;
