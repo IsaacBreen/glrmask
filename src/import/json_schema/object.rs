@@ -15,6 +15,11 @@ use super::string::property_name_matches_pattern;
 impl<'a> Lowerer<'a> {
     pub(crate) fn lower_object(&mut self, schema: &ObjectSchema) -> ImportResult<GrammarExpr> {
         let normalized = self.object_with_required_synthetic_properties(schema)?;
+        let fixed_names = normalized
+            .properties
+            .iter()
+            .map(|property| property.name.clone())
+            .collect::<BTreeSet<_>>();
         let mut items = normalized
             .properties
             .iter()
@@ -25,18 +30,24 @@ impl<'a> Lowerer<'a> {
             })
             .collect::<ImportResult<Vec<_>>>()?;
 
-        if normalized.pattern_properties.is_empty()
-            && matches!(normalized.additional_properties, AdditionalProperties::Deny)
-            && !normalized.properties.is_empty()
-        {
-            return self.lower_closed_fixed_object_body_exprnfa(&items);
+        if normalized.pattern_properties.is_empty() && !normalized.properties.is_empty() {
+            let tail_pair = match &normalized.additional_properties {
+                AdditionalProperties::Deny => None,
+                AdditionalProperties::AllowAny => Some(seq(vec![
+                    self.lower_additional_key_colon(&fixed_names, &[])?,
+                    r(JSON_VALUE_RULE),
+                ])),
+                AdditionalProperties::Schema(value_schema) => {
+                    let value = self.lower_schema(value_schema)?;
+                    Some(seq(vec![
+                        self.lower_additional_key_colon(&fixed_names, &[])?,
+                        value,
+                    ]))
+                }
+            };
+            return self.lower_fixed_object_body_exprnfa(&items, tail_pair);
         }
 
-        let fixed_names = normalized
-            .properties
-            .iter()
-            .map(|property| property.name.clone())
-            .collect::<BTreeSet<_>>();
         let pattern_keys = normalized
             .pattern_properties
             .iter()
@@ -91,9 +102,10 @@ impl<'a> Lowerer<'a> {
         Ok(seq(vec![lit("{"), body, lit("}")]))
     }
 
-    fn lower_closed_fixed_object_body_exprnfa(
+    fn lower_fixed_object_body_exprnfa(
         &mut self,
         items: &[(GrammarExpr, bool)],
+        tail_pair: Option<GrammarExpr>,
     ) -> ImportResult<GrammarExpr> {
         let mut builder = ExprNfaBuilder::new();
         let mut states = vec![[0u32; 2]; items.len() + 1];
@@ -116,6 +128,22 @@ impl<'a> Lowerer<'a> {
 
         builder.set_accepting(states[items.len()][0]);
         builder.set_accepting(states[items.len()][1]);
+
+        if let Some(tail_pair_expr) = tail_pair {
+            let tail_state = builder.add_state();
+            builder.set_accepting(tail_state);
+            builder.add_transition(states[items.len()][0], tail_pair_expr.clone(), tail_state);
+            builder.add_transition(
+                states[items.len()][1],
+                seq(vec![self.item_separator_expr(), tail_pair_expr.clone()]),
+                tail_state,
+            );
+            builder.add_transition(
+                tail_state,
+                seq(vec![self.item_separator_expr(), tail_pair_expr]),
+                tail_state,
+            );
+        }
 
         let rule_name = self.fresh_rule_name("json_closed_object_body");
         let body = GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized()));

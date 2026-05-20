@@ -112,34 +112,36 @@ fn closed_object_lowers_to_expr_nfa_body() {
 }
 
 #[test]
-fn open_object_still_uses_separated_sequence() {
+fn open_no_pattern_object_lowers_to_expr_nfa_body() {
     let schema = json!({
         "type": "object",
         "properties": {
             "name": {"type": "string"},
             "age": {"type": "integer"}
         },
-        "required": ["name"]
+        "required": ["name"],
+        "additionalProperties": {"type": "string"}
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(contains_separated_sequence(start_expr(&grammar)));
+    assert!(!contains_separated_sequence(start_expr(&grammar)));
+    assert!(grammar.rules.iter().any(|rule| contains_expr_nfa(&rule.expr)));
+    assert!(grammar.rules.iter().any(|rule| rule.name == "JSON_ADDITIONAL_KEY_COLON_SHARED"));
     lower(&grammar).unwrap();
 }
 
 #[test]
-fn open_object_has_repeat_tail_and_excludes_fixed_keys() {
+fn pattern_property_object_still_uses_separated_sequence() {
     let schema = json!({
         "type": "object",
         "properties": {"kind": {"const": "event"}},
+        "patternProperties": {"^x": {"type": "string"}},
         "required": ["kind"],
         "additionalProperties": {"type": "string"}
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(grammar.rules.iter().any(|rule| rule.name == "JSON_ADDITIONAL_KEY_COLON_SHARED"));
-    let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("+?"), "{glrm}");
+    assert!(contains_separated_sequence(start_expr(&grammar)));
     lower(&grammar).unwrap();
 }
 

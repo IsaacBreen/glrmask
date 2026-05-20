@@ -261,6 +261,74 @@ fn json_schema_closed_object_required_property_still_mandatory() {
 }
 
 #[test]
+fn json_schema_open_object_all_optional_fixed_props_accepts_tail_only_after_prefix() {
+    let constraint = byte_schema(
+        r#"{
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "additionalProperties": {"type": "string"}
+        }"#,
+    );
+
+    assert_accepts_bytes(&constraint, br#"{}"#);
+    assert_accepts_bytes(&constraint, br#"{"a": "x"}"#);
+    assert_accepts_bytes(&constraint, br#"{"z": "extra"}"#);
+    assert_accepts_bytes(&constraint, br#"{"a": "x", "z": "extra", "y": "more"}"#);
+}
+
+#[test]
+fn json_schema_open_object_rejects_additional_property_before_later_fixed_property() {
+    let constraint = byte_schema(
+        r#"{
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "additionalProperties": {"type": "string"}
+        }"#,
+    );
+
+    assert_rejects_bytes(&constraint, br#"{"z": "extra", "b": "y"}"#);
+}
+
+#[test]
+fn json_schema_open_object_tail_rejects_fixed_property_name() {
+    let constraint = byte_schema(
+        r#"{
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"}
+            },
+            "additionalProperties": {"type": "string"}
+        }"#,
+    );
+
+    assert_rejects_bytes(&constraint, br#"{"a": "x", "a": "again"}"#);
+}
+
+#[test]
+fn json_schema_open_object_required_fixed_property_remains_mandatory_with_ap_tail() {
+    let constraint = byte_schema(
+        r#"{
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "required": ["a"],
+            "additionalProperties": {"type": "string"}
+        }"#,
+    );
+
+    assert_rejects_bytes(&constraint, br#"{"z": "extra"}"#);
+    assert_accepts_bytes(&constraint, br#"{"a": "x", "z": "extra"}"#);
+}
+
+#[test]
 fn json_schema_rejects_invalid_utf8_in_string() {
     let constraint = byte_schema(r#"{"type":"string"}"#);
     let mut state = constraint.start();
