@@ -1169,6 +1169,40 @@ fn build_and_color_hybrid(
         .map(|&rep| build_class_profile(rep, old_to_new, productive_transitions, dwa))
         .collect();
     let class_profiles_ms = class_profiles_started_at.elapsed().as_secs_f64() * 1000.0;
+    let classes_with_final_weight = class_profiles
+        .iter()
+        .filter(|profile| profile.final_weight.is_some())
+        .count();
+    let min_targets = class_profiles
+        .iter()
+        .map(|profile| profile.targets.len())
+        .min()
+        .unwrap_or(0);
+    let max_targets = class_profiles
+        .iter()
+        .map(|profile| profile.targets.len())
+        .max()
+        .unwrap_or(0);
+    let avg_targets = class_profiles
+        .iter()
+        .map(|profile| profile.targets.len() as f64)
+        .sum::<f64>()
+        / num_classes as f64;
+    let min_weights = class_profiles
+        .iter()
+        .map(|profile| profile.weights.len())
+        .min()
+        .unwrap_or(0);
+    let max_weights = class_profiles
+        .iter()
+        .map(|profile| profile.weights.len())
+        .max()
+        .unwrap_or(0);
+    let avg_weights = class_profiles
+        .iter()
+        .map(|profile| profile.weights.len() as f64)
+        .sum::<f64>()
+        / num_classes as f64;
 
     // Step 3: Greedy merge of classes, handling both disjoint and overlapping
     // needed sets. Instead of building an O(K²) incompatibility graph, we check
@@ -1188,6 +1222,20 @@ fn build_and_color_hybrid(
 
     let greedy_merge_started_at = Instant::now();
     let mut groups: Vec<OverlapMergeGroup> = Vec::new();
+    let mut group_attempts = 0usize;
+    let mut target_checks = 0usize;
+    let mut target_rejects = 0usize;
+    let mut target_check_ms = 0.0;
+    let mut disjoint_checks = 0usize;
+    let mut disjoint_true = 0usize;
+    let mut disjoint_check_ms = 0.0;
+    let mut final_weight_checks = 0usize;
+    let mut final_weight_rejects = 0usize;
+    let mut final_weight_check_ms = 0.0;
+    let mut transition_weight_checks = 0usize;
+    let mut transition_weight_rejects = 0usize;
+    let mut transition_weight_check_ms = 0.0;
+    let mut group_update_ms = 0.0;
 
     for class in 0..num_classes {
         let cn = &class_needed_union[class];
@@ -1195,15 +1243,30 @@ fn build_and_color_hybrid(
 
         let mut placed = false;
         for g in &mut groups {
-            if !sorted_targets_compatible(&class_profile.targets, &g.targets) {
+            group_attempts += 1;
+
+            target_checks += 1;
+            let target_check_started_at = Instant::now();
+            let targets_compatible = sorted_targets_compatible(&class_profile.targets, &g.targets);
+            target_check_ms += target_check_started_at.elapsed().as_secs_f64() * 1000.0;
+            if !targets_compatible {
+                target_rejects += 1;
                 continue;
             }
 
+            disjoint_checks += 1;
+            let disjoint_check_started_at = Instant::now();
             let is_disjoint = cn.is_disjoint(&g.needed_union);
+            disjoint_check_ms += disjoint_check_started_at.elapsed().as_secs_f64() * 1000.0;
+            if is_disjoint {
+                disjoint_true += 1;
+            }
 
             if !is_disjoint {
                 // Check weight compatibility on the overlap domain without
                 // materializing cn ∩ g.needed_union as a Weight.
+                final_weight_checks += 1;
+                let final_weight_check_started_at = Instant::now();
                 let weight_ok = match (&class_profile.final_weight, &g.merged_final_weight) {
                     (Some(fw), Some(gfw)) => {
                         weights_equal_on_domain_intersection(fw, gfw, cn, &g.needed_union)
@@ -1216,21 +1279,31 @@ fn build_and_color_hybrid(
                     }
                     (None, None) => true,
                 };
+                final_weight_check_ms +=
+                    final_weight_check_started_at.elapsed().as_secs_f64() * 1000.0;
                 if !weight_ok {
+                    final_weight_rejects += 1;
                     continue;
                 }
 
-                if !sorted_weights_compatible_on_domain_intersection(
+                transition_weight_checks += 1;
+                let transition_weight_check_started_at = Instant::now();
+                let transition_weights_ok = sorted_weights_compatible_on_domain_intersection(
                     &class_profile.weights,
                     &g.merged_transition_weights,
                     cn,
                     &g.needed_union,
-                ) {
+                );
+                transition_weight_check_ms +=
+                    transition_weight_check_started_at.elapsed().as_secs_f64() * 1000.0;
+                if !transition_weights_ok {
+                    transition_weight_rejects += 1;
                     continue;
                 }
             }
 
             // Compatible — merge into this group
+            let group_update_started_at = Instant::now();
             g.needed_union = g.needed_union.union(cn);
             merge_sorted_targets(&mut g.targets, &class_profile.targets);
             if let Some(fw) = &class_profile.final_weight {
@@ -1241,6 +1314,7 @@ fn build_and_color_hybrid(
             }
             merge_sorted_weights(&mut g.merged_transition_weights, &class_profile.weights);
             g.member_classes.push(class);
+            group_update_ms += group_update_started_at.elapsed().as_secs_f64() * 1000.0;
             placed = true;
             break;
         }
@@ -1257,6 +1331,16 @@ fn build_and_color_hybrid(
     }
 
     let greedy_merge_ms = greedy_merge_started_at.elapsed().as_secs_f64() * 1000.0;
+    let min_group_size = groups
+        .iter()
+        .map(|group| group.member_classes.len())
+        .min()
+        .unwrap_or(0);
+    let max_group_size = groups
+        .iter()
+        .map(|group| group.member_classes.len())
+        .max()
+        .unwrap_or(0);
 
     // Step 4: Map each candidate through class -> merged color.
     let map_started_at = Instant::now();
@@ -1286,6 +1370,35 @@ fn build_and_color_hybrid(
             greedy_merge_ms,
             map_ms,
             total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+        eprintln!(
+            "[glrmask/profile][weighted_dwa_minimize_hybrid_detail] candidates={} classes={} groups={} group_attempts={} target_checks={} target_rejects={} target_check_ms={:.3} disjoint_checks={} disjoint_true={} disjoint_check_ms={:.3} final_weight_checks={} final_weight_rejects={} final_weight_check_ms={:.3} transition_weight_checks={} transition_weight_rejects={} transition_weight_check_ms={:.3} group_update_ms={:.3} classes_with_final_weight={} min_targets={} max_targets={} avg_targets={:.3} min_weights={} max_weights={} avg_weights={:.3} min_group_size={} max_group_size={}",
+            candidates.len(),
+            num_classes,
+            groups.len(),
+            group_attempts,
+            target_checks,
+            target_rejects,
+            target_check_ms,
+            disjoint_checks,
+            disjoint_true,
+            disjoint_check_ms,
+            final_weight_checks,
+            final_weight_rejects,
+            final_weight_check_ms,
+            transition_weight_checks,
+            transition_weight_rejects,
+            transition_weight_check_ms,
+            group_update_ms,
+            classes_with_final_weight,
+            min_targets,
+            max_targets,
+            avg_targets,
+            min_weights,
+            max_weights,
+            avg_weights,
+            min_group_size,
+            max_group_size,
         );
     }
 
