@@ -139,7 +139,6 @@ fn is_supported_key(key: &str) -> bool {
             | "const"
             | "enum"
             | "anyOf"
-            | "oneOf"
             | "allOf"
             | "properties"
             | "required"

@@ -266,7 +266,7 @@ fn anyof_allows_sibling_assertions() {
 }
 
 #[test]
-fn oneof_lowers_as_documented_union() {
+fn oneof_is_rejected_as_unimplemented() {
     let schema = json!({
         "oneOf": [
             {"const": "left"},
@@ -274,22 +274,8 @@ fn oneof_lowers_as_documented_union() {
         ]
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
-}
-
-#[test]
-fn oneof_allows_sibling_assertions() {
-    let schema = json!({
-        "oneOf": [
-            {"type": "string", "pattern": "^left+$"},
-            {"type": "string", "pattern": "^right+$"}
-        ],
-        "minLength": 4
-    });
-
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    lower(&grammar).unwrap();
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("oneOf"), "{error}");
 }
 
 #[test]
