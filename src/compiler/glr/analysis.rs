@@ -45,6 +45,23 @@ fn emit_normalize_profile(
     }
 }
 
+fn emit_inline_null_profile(
+    stage: &str,
+    elapsed_ms: f64,
+    rules_before: usize,
+    rules_after: usize,
+    extra: &str,
+) {
+    eprintln!(
+        "[glrmask-profile] inline_null_productions stage={} ms={:.3} rules_before={} rules_after={}{}",
+        stage,
+        elapsed_ms,
+        rules_before,
+        rules_after,
+        extra,
+    );
+}
+
 #[derive(Debug, Clone)]
 pub struct AnalyzedGrammar {
     pub rules: Vec<Rule>,
@@ -619,9 +636,148 @@ fn resolve_direct_rr_batched(
 }
 
 fn inline_null_productions_exhaustive(rules: &[Rule], num_nt: u32) -> Vec<Rule> {
+    let profile_enabled = compile_profile_enabled();
+    let total_started_at = profile_enabled.then(Instant::now);
+    let rules_before = rules.len();
+
+    let compute_nullable_started_at = profile_enabled.then(Instant::now);
     let nullable = compute_nullable(rules, num_nt);
+    if let Some(started_at) = compute_nullable_started_at {
+        let extra = format!(" nullable_count={}", nullable.len());
+        emit_inline_null_profile(
+            "exhaustive_compute_nullable",
+            elapsed_ms(started_at),
+            rules_before,
+            rules_before,
+            &extra,
+        );
+    }
     if nullable.is_empty() {
-        return rules.to_vec();
+        let result = rules.to_vec();
+        if let Some(started_at) = total_started_at {
+            emit_inline_null_profile(
+                "inline_null_productions_exhaustive",
+                elapsed_ms(started_at),
+                rules_before,
+                result.len(),
+                &format!(
+                    " nullable_count=0 scanned_rules=0 total_nullable_positions=0 max_nullable_positions=0 output_rules={} shortcut=nullable_empty",
+                    result.len(),
+                ),
+            );
+        }
+        return result;
+    }
+
+    if profile_enabled {
+        let scan_started_at = Instant::now();
+        let nullable_positions_by_rule: Vec<Vec<usize>> = rules
+            .iter()
+            .map(|rule| {
+                rule.rhs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, sym)| match sym {
+                        Symbol::Nonterminal(nt) if nullable.contains(nt) => Some(i),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect();
+        let total_nullable_positions: usize = nullable_positions_by_rule
+            .iter()
+            .map(Vec::len)
+            .sum();
+        let max_nullable_positions = nullable_positions_by_rule
+            .iter()
+            .map(Vec::len)
+            .max()
+            .unwrap_or(0);
+        emit_inline_null_profile(
+            "exhaustive_nullable_position_scan",
+            elapsed_ms(scan_started_at),
+            rules_before,
+            rules_before,
+            &format!(
+                " nullable_count={} scanned_rules={} total_nullable_positions={} max_nullable_positions={}",
+                nullable.len(),
+                rules.len(),
+                total_nullable_positions,
+                max_nullable_positions,
+            ),
+        );
+
+        let emit_started_at = Instant::now();
+        let mut seen = HashSet::<Rule>::new();
+        let mut out = Vec::new();
+
+        for (rule, nullable_positions) in rules.iter().zip(nullable_positions_by_rule.iter()) {
+            let k = nullable_positions.len();
+            assert!(
+                k <= 20,
+                "production for NT {} has {} nullable positions; refusing power-set",
+                rule.lhs, k,
+            );
+
+            for mask in 0u64..(1u64 << k) {
+                let new_rhs: Vec<Symbol> = rule
+                    .rhs
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| match nullable_positions.binary_search(i) {
+                        Ok(idx) => mask & (1u64 << idx) != 0,
+                        Err(_) => true,
+                    })
+                    .map(|(_, sym)| sym.clone())
+                    .collect();
+
+                if new_rhs.is_empty() {
+                    continue;
+                }
+
+                let candidate = Rule {
+                    lhs: rule.lhs,
+                    rhs: new_rhs,
+                };
+                if seen.insert(candidate.clone()) {
+                    out.push(candidate);
+                }
+            }
+        }
+
+        emit_inline_null_profile(
+            "exhaustive_powerset_emit_and_dedup",
+            elapsed_ms(emit_started_at),
+            rules_before,
+            out.len(),
+            &format!(
+                " nullable_count={} scanned_rules={} total_nullable_positions={} max_nullable_positions={} output_rules={}",
+                nullable.len(),
+                rules.len(),
+                total_nullable_positions,
+                max_nullable_positions,
+                out.len(),
+            ),
+        );
+
+        if let Some(started_at) = total_started_at {
+            emit_inline_null_profile(
+                "inline_null_productions_exhaustive",
+                elapsed_ms(started_at),
+                rules_before,
+                out.len(),
+                &format!(
+                    " nullable_count={} scanned_rules={} total_nullable_positions={} max_nullable_positions={} output_rules={}",
+                    nullable.len(),
+                    rules.len(),
+                    total_nullable_positions,
+                    max_nullable_positions,
+                    out.len(),
+                ),
+            );
+        }
+
+        return out;
     }
 
     let mut seen = HashSet::<Rule>::new();
@@ -748,27 +904,116 @@ fn compute_nonempty_productive(rules: &[Rule], num_nt: u32) -> BTreeSet<Nontermi
 }
 
 fn compress_nullable_runs_with_optional_tree(rules: &[Rule], num_nt: u32) -> Vec<Rule> {
+    let profile_enabled = compile_profile_enabled();
+    let total_started_at = profile_enabled.then(Instant::now);
+    let rules_before = rules.len();
+
+    let compute_nullable_started_at = profile_enabled.then(Instant::now);
     let nullable = compute_nullable(rules, num_nt);
-    if nullable.is_empty() {
-        return rules.to_vec();
+    if let Some(started_at) = compute_nullable_started_at {
+        emit_inline_null_profile(
+            "compress_compute_nullable",
+            elapsed_ms(started_at),
+            rules_before,
+            rules_before,
+            &format!(" nullable_count={}", nullable.len()),
+        );
     }
-    let nonempty_productive = compute_nonempty_productive(rules, num_nt);
+    if nullable.is_empty() {
+        let result = rules.to_vec();
+        if let Some(started_at) = total_started_at {
+            emit_inline_null_profile(
+                "compress_nullable_runs_with_optional_tree",
+                elapsed_ms(started_at),
+                rules_before,
+                result.len(),
+                &format!(
+                    " nullable_count=0 run_count=0 max_run_len=0 output_rules={} shortcut=nullable_empty",
+                    result.len(),
+                ),
+            );
+        }
+        return result;
+    }
 
     let mut run_count = 0usize;
     let mut max_run_len = 0usize;
+    let run_scan_started_at = profile_enabled.then(Instant::now);
     for rule in rules {
         for (start, end) in find_nullable_runs(&rule.rhs, &nullable, 1) {
             run_count += 1;
             max_run_len = max_run_len.max(end - start + 1);
         }
     }
+    if let Some(started_at) = run_scan_started_at {
+        emit_inline_null_profile(
+            "compress_run_scan",
+            elapsed_ms(started_at),
+            rules_before,
+            rules_before,
+            &format!(
+                " nullable_count={} run_count={} max_run_len={}",
+                nullable.len(),
+                run_count,
+                max_run_len,
+            ),
+        );
+    }
     if run_count == 0 {
-        return rules.to_vec();
+        let result = rules.to_vec();
+        if let Some(started_at) = total_started_at {
+            emit_inline_null_profile(
+                "compress_nullable_runs_with_optional_tree",
+                elapsed_ms(started_at),
+                rules_before,
+                result.len(),
+                &format!(
+                    " nullable_count={} run_count=0 max_run_len=0 output_rules={} shortcut=no_runs",
+                    nullable.len(),
+                    result.len(),
+                ),
+            );
+        }
+        return result;
     }
 
+    let compute_nonempty_started_at = profile_enabled.then(Instant::now);
+    let nonempty_productive = compute_nonempty_productive(rules, num_nt);
+    if let Some(started_at) = compute_nonempty_started_at {
+        emit_inline_null_profile(
+            "compress_compute_nonempty_productive",
+            elapsed_ms(started_at),
+            rules_before,
+            rules_before,
+            &format!(
+                " nullable_count={} run_count={} max_run_len={} nonempty_productive_count={}",
+                nullable.len(),
+                run_count,
+                max_run_len,
+                nonempty_productive.len(),
+            ),
+        );
+    }
+
+    let by_lhs_started_at = profile_enabled.then(Instant::now);
     let mut by_lhs = BTreeMap::<NonterminalID, Vec<Vec<Symbol>>>::new();
     for rule in rules {
         by_lhs.entry(rule.lhs).or_default().push(rule.rhs.clone());
+    }
+    if let Some(started_at) = by_lhs_started_at {
+        emit_inline_null_profile(
+            "compress_build_by_lhs",
+            elapsed_ms(started_at),
+            rules_before,
+            rules_before,
+            &format!(
+                " nullable_count={} run_count={} max_run_len={} lhs_count={}",
+                nullable.len(),
+                run_count,
+                max_run_len,
+                by_lhs.len(),
+            ),
+        );
     }
 
     let mut next_nt = max_nt_id(rules) + 1;
@@ -780,6 +1025,7 @@ fn compress_nullable_runs_with_optional_tree(rules: &[Rule], num_nt: u32) -> Vec
 
     let mut nn_cache = BTreeMap::<NonterminalID, NonterminalID>::new();
     let mut result = Vec::<Rule>::new();
+    let tree_build_started_at = profile_enabled.then(Instant::now);
     for rule in rules {
         let runs = find_nullable_runs(&rule.rhs, &nullable, 1);
         if runs.is_empty() {
@@ -819,8 +1065,56 @@ fn compress_nullable_runs_with_optional_tree(rules: &[Rule], num_nt: u32) -> Vec
             rhs: new_rhs,
         });
     }
+    if let Some(started_at) = tree_build_started_at {
+        emit_inline_null_profile(
+            "compress_tree_build_and_emit",
+            elapsed_ms(started_at),
+            rules_before,
+            result.len(),
+            &format!(
+                " nullable_count={} run_count={} max_run_len={} output_rules={} fresh_nt_upper_bound={}",
+                nullable.len(),
+                run_count,
+                max_run_len,
+                result.len(),
+                next_nt,
+            ),
+        );
+    }
 
+    let dedup_rules_before = result.len();
+    let dedup_started_at = profile_enabled.then(Instant::now);
     dedup_rules(&mut result);
+    if let Some(started_at) = dedup_started_at {
+        emit_inline_null_profile(
+            "compress_final_dedup_rules",
+            elapsed_ms(started_at),
+            dedup_rules_before,
+            result.len(),
+            &format!(
+                " nullable_count={} run_count={} max_run_len={} output_rules={}",
+                nullable.len(),
+                run_count,
+                max_run_len,
+                result.len(),
+            ),
+        );
+    }
+    if let Some(started_at) = total_started_at {
+        emit_inline_null_profile(
+            "compress_nullable_runs_with_optional_tree",
+            elapsed_ms(started_at),
+            rules_before,
+            result.len(),
+            &format!(
+                " nullable_count={} run_count={} max_run_len={} output_rules={}",
+                nullable.len(),
+                run_count,
+                max_run_len,
+                result.len(),
+            ),
+        );
+    }
     result
 }
 
@@ -991,8 +1285,24 @@ fn get_or_create_non_nullable_nt(
 /// existing exhaustive elimination, to avoid the raw power-set blowups that
 /// occur when many nullable nonterminals appear consecutively.
 pub(crate) fn inline_null_productions(rules: &[Rule], num_nt: u32) -> Vec<Rule> {
+    let profile_enabled = compile_profile_enabled();
+    let total_started_at = profile_enabled.then(Instant::now);
+    let rules_before = rules.len();
     let preprocessed = compress_nullable_runs_with_optional_tree(rules, num_nt);
     let result = inline_null_productions_exhaustive(&preprocessed, max_nt_id(&preprocessed) + 1);
+    if let Some(started_at) = total_started_at {
+        emit_inline_null_profile(
+            "inline_null_productions",
+            elapsed_ms(started_at),
+            rules_before,
+            result.len(),
+            &format!(
+                " preprocessed_rules={} output_rules={}",
+                preprocessed.len(),
+                result.len(),
+            ),
+        );
+    }
     result
 }
 
