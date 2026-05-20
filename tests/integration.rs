@@ -113,6 +113,11 @@ fn assert_accepts_bytes(constraint: &Constraint, bytes: &[u8]) {
     assert!(state.is_finished());
 }
 
+fn assert_rejects_bytes(constraint: &Constraint, bytes: &[u8]) {
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(bytes).is_err());
+}
+
 fn max_paths_and_stacks(constraint: &Constraint, text: &str) -> (usize, usize) {
     let mut state = constraint.start();
     let mut max_paths = state.parser_path_count(1_000_000);
@@ -213,6 +218,46 @@ fn json_schema_filtered_enum_does_not_overaccept_merged_group() {
     );
     assert_rejects_token(&enum_schema, &[], 0);
     assert_accepts_tokens(&enum_schema, &[1]);
+}
+
+#[test]
+fn json_schema_closed_object_all_optional_accepts_sparse_in_order_members() {
+    let constraint = byte_schema(
+        r#"{
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"},
+                "c": {"type": "string"}
+            },
+            "additionalProperties": false
+        }"#,
+    );
+
+    assert_accepts_bytes(&constraint, br#"{}"#);
+    assert_accepts_bytes(&constraint, br#"{"a": "x"}"#);
+    assert_accepts_bytes(&constraint, br#"{"c": "z"}"#);
+    assert_accepts_bytes(&constraint, br#"{"a": "x", "c": "z"}"#);
+    assert_rejects_bytes(&constraint, br#"{"c": "z", "a": "x"}"#);
+}
+
+#[test]
+fn json_schema_closed_object_required_property_still_mandatory() {
+    let constraint = byte_schema(
+        r#"{
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "required": ["a"],
+            "additionalProperties": false
+        }"#,
+    );
+
+    assert_rejects_bytes(&constraint, br#"{}"#);
+    assert_accepts_bytes(&constraint, br#"{"a": "x"}"#);
+    assert_accepts_bytes(&constraint, br#"{"a": "x", "b": "y"}"#);
 }
 
 #[test]

@@ -41,6 +41,34 @@ fn contains_separated_sequence(expr: &GrammarExpr) -> bool {
     }
 }
 
+fn contains_expr_nfa(expr: &GrammarExpr) -> bool {
+    match expr {
+        GrammarExpr::ExprNFA(_) => true,
+        GrammarExpr::Grouped(inner)
+        | GrammarExpr::Optional(inner)
+        | GrammarExpr::Repeat(inner)
+        | GrammarExpr::RepeatOne(inner) => contains_expr_nfa(inner),
+        GrammarExpr::RepeatRange { expr, .. } => contains_expr_nfa(expr),
+        GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => items.iter().any(contains_expr_nfa),
+        GrammarExpr::Exclude { expr, exclude } => {
+            contains_expr_nfa(expr) || contains_expr_nfa(exclude)
+        }
+        GrammarExpr::Intersect { expr, intersect } => {
+            contains_expr_nfa(expr) || contains_expr_nfa(intersect)
+        }
+        GrammarExpr::SeparatedSequence { items, separator, .. } => {
+            items.iter().any(|(item, _)| contains_expr_nfa(item)) || contains_expr_nfa(separator)
+        }
+        GrammarExpr::Ref(_)
+        | GrammarExpr::Epsilon
+        | GrammarExpr::Literal(_)
+        | GrammarExpr::CharClass { .. }
+        | GrammarExpr::RawRegex(_)
+        | GrammarExpr::LexerDfa(_)
+        | GrammarExpr::AnyByte => false,
+    }
+}
+
 fn contains_exclude(expr: &GrammarExpr) -> bool {
     match expr {
         GrammarExpr::Exclude { .. } => true,
@@ -66,7 +94,7 @@ fn contains_exclude(expr: &GrammarExpr) -> bool {
 }
 
 #[test]
-fn closed_object_lowers_to_separated_sequence() {
+fn closed_object_lowers_to_expr_nfa_body() {
     let schema = json!({
         "type": "object",
         "properties": {
@@ -75,6 +103,23 @@ fn closed_object_lowers_to_separated_sequence() {
         },
         "required": ["name"],
         "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(!contains_separated_sequence(start_expr(&grammar)));
+    assert!(grammar.rules.iter().any(|rule| contains_expr_nfa(&rule.expr)));
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn open_object_still_uses_separated_sequence() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "age": {"type": "integer"}
+        },
+        "required": ["name"]
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();

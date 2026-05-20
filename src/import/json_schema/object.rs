@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use crate::grammar::expr_nfa::ExprNfaBuilder;
 use crate::import::ast::GrammarExpr;
 
 use super::ast::{
@@ -14,6 +15,23 @@ use super::string::property_name_matches_pattern;
 impl<'a> Lowerer<'a> {
     pub(crate) fn lower_object(&mut self, schema: &ObjectSchema) -> ImportResult<GrammarExpr> {
         let normalized = self.object_with_required_synthetic_properties(schema)?;
+        let mut items = normalized
+            .properties
+            .iter()
+            .map(|property| {
+                let required = normalized.required.contains(&property.name);
+                self.lower_property_pair(property, &normalized.pattern_properties)
+                    .map(|pair| (pair, required))
+            })
+            .collect::<ImportResult<Vec<_>>>()?;
+
+        if normalized.pattern_properties.is_empty()
+            && matches!(normalized.additional_properties, AdditionalProperties::Deny)
+            && !normalized.properties.is_empty()
+        {
+            return self.lower_closed_fixed_object_body_exprnfa(&items);
+        }
+
         let fixed_names = normalized
             .properties
             .iter()
@@ -24,16 +42,6 @@ impl<'a> Lowerer<'a> {
             .iter()
             .map(|pattern_property| pattern_property.pattern.clone())
             .collect::<Vec<_>>();
-
-        let mut items = normalized
-            .properties
-            .iter()
-            .map(|property| {
-                let required = normalized.required.contains(&property.name);
-                self.lower_property_pair(property, &normalized.pattern_properties)
-                    .map(|pair| (pair, required))
-            })
-            .collect::<ImportResult<Vec<_>>>()?;
 
         let mut tail_pairs = Vec::new();
         for pattern_property in &normalized.pattern_properties {
@@ -81,6 +89,39 @@ impl<'a> Lowerer<'a> {
         };
 
         Ok(seq(vec![lit("{"), body, lit("}")]))
+    }
+
+    fn lower_closed_fixed_object_body_exprnfa(
+        &mut self,
+        items: &[(GrammarExpr, bool)],
+    ) -> ImportResult<GrammarExpr> {
+        let mut builder = ExprNfaBuilder::new();
+        let mut states = vec![[0u32; 2]; items.len() + 1];
+        states[0][0] = builder.start_state();
+        states[0][1] = builder.add_state();
+        for state_pair in states.iter_mut().skip(1) {
+            state_pair[0] = builder.add_state();
+            state_pair[1] = builder.add_state();
+        }
+
+        for (index, (pair_expr, required)) in items.iter().enumerate() {
+            let separator_pair = seq(vec![self.item_separator_expr(), pair_expr.clone()]);
+            if !required {
+                builder.add_epsilon(states[index][0], states[index + 1][0]);
+                builder.add_epsilon(states[index][1], states[index + 1][1]);
+            }
+            builder.add_transition(states[index][0], pair_expr.clone(), states[index + 1][1]);
+            builder.add_transition(states[index][1], separator_pair, states[index + 1][1]);
+        }
+
+        builder.set_accepting(states[items.len()][0]);
+        builder.set_accepting(states[items.len()][1]);
+
+        let rule_name = self.fresh_rule_name("json_closed_object_body");
+        let body = GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized()));
+        self.add_nonterminal_rule(&rule_name, body);
+
+        Ok(seq(vec![lit("{"), r(&rule_name), lit("}")]))
     }
 
     fn lower_property_pair(
