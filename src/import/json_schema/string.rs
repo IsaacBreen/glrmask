@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 
+use regex::Regex;
+
 use crate::import::ast::GrammarExpr;
 
 use super::ast::StringSchema;
@@ -62,23 +64,67 @@ impl<'a> Lowerer<'a> {
         Ok(seq(vec![key, self.key_separator_expr()]))
     }
 
-    pub(crate) fn lower_additional_key_colon(&mut self, fixed_keys: &BTreeSet<String>) -> GrammarExpr {
-        let key = if fixed_keys.is_empty() {
-            r(JSON_STRING_RULE)
+    pub(crate) fn lower_pattern_key_colon_excluding(
+        &mut self,
+        pattern: &str,
+        fixed_keys: &BTreeSet<String>,
+    ) -> ImportResult<GrammarExpr> {
+        let key_colon = GrammarExpr::RawRegex(pattern_key_colon_regex(pattern));
+        let filtered = self.exclude_literal_key_colon_exprs(key_colon, fixed_keys);
+        let name = self.fresh_rule_name("json_pattern_key_colon_filtered");
+        self.add_terminal_rule(&name, filtered);
+        Ok(r(&name))
+    }
+
+    pub(crate) fn lower_pattern_key_colon_terminal(
+        &mut self,
+        pattern: &str,
+    ) -> ImportResult<GrammarExpr> {
+        let key_colon = GrammarExpr::RawRegex(pattern_key_colon_regex(pattern));
+        let name = self.fresh_rule_name("json_pattern_key_colon");
+        self.add_terminal_rule(&name, key_colon);
+        Ok(r(&name))
+    }
+
+    pub(crate) fn lower_additional_key_colon(
+        &mut self,
+        fixed_keys: &BTreeSet<String>,
+        pattern_key_exclusions: &[GrammarExpr],
+    ) -> GrammarExpr {
+        let mut excluded = fixed_keys
+            .iter()
+            .map(|key| self.lower_literal_key_colon(key))
+            .collect::<Vec<_>>();
+        excluded.extend(pattern_key_exclusions.iter().cloned());
+
+        let key_colon = seq(vec![r(JSON_STRING_RULE), self.key_separator_expr()]);
+        if excluded.is_empty() {
+            key_colon
         } else {
-            let excluded = fixed_keys
-                .iter()
-                .map(|key| {
-                    let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
-                    lit_bytes(encoded.into_bytes())
-                })
-                .collect::<Vec<_>>();
             GrammarExpr::Exclude {
-                expr: Box::new(r(JSON_STRING_RULE)),
+                expr: Box::new(key_colon),
                 exclude: Box::new(choice(excluded)),
             }
-        };
-        seq(vec![key, self.key_separator_expr()])
+        }
+    }
+
+    fn exclude_literal_key_colon_exprs(
+        &mut self,
+        key_colon: GrammarExpr,
+        fixed_keys: &BTreeSet<String>,
+    ) -> GrammarExpr {
+        if fixed_keys.is_empty() {
+            return key_colon;
+        }
+
+        let excluded = fixed_keys
+            .iter()
+            .map(|key| self.lower_literal_key_colon(key))
+            .collect::<Vec<_>>();
+        GrammarExpr::Exclude {
+            expr: Box::new(key_colon),
+            exclude: Box::new(choice(excluded)),
+        }
     }
 
     fn string_body_for_length(&self, min: usize, max: Option<usize>) -> GrammarExpr {
@@ -125,13 +171,50 @@ impl<'a> Lowerer<'a> {
 
 fn string_pattern_as_body_regex(pattern: &str) -> String {
     if let Some(stripped) = strip_simple_anchors(pattern) {
-        stripped.to_string()
+        rewrite_simple_json_string_body_pattern(stripped)
+    } else if let Some(stripped) = pattern.strip_prefix('^') {
+        format!("(?:{stripped}).*")
+    } else if let Some(stripped) = pattern.strip_suffix('$') {
+        format!(".*(?:{stripped})")
     } else {
         format!(".*({pattern}).*")
     }
 }
 
+fn pattern_key_colon_regex(pattern: &str) -> String {
+    let string_char = r#"(?:[^\x00-\x1f\x7f"\\]|\\["\\bfnrt])"#;
+    let body = if let Some(stripped) = strip_simple_anchors(pattern) {
+        if stripped == ".*" {
+            format!("(?:{string_char})*")
+        } else {
+            rewrite_simple_json_string_body_pattern(stripped)
+        }
+    } else if let Some(stripped) = pattern.strip_prefix('^') {
+        format!("(?:{stripped})(?:{string_char})*")
+    } else if let Some(stripped) = pattern.strip_suffix('$') {
+        format!("(?:{string_char})*(?:{stripped})")
+    } else {
+        format!("(?:{string_char})*(?:{pattern})(?:{string_char})*")
+    };
+    format!(r#""{body}"(?:: )"#)
+}
+
 fn strip_simple_anchors(pattern: &str) -> Option<&str> {
     let without_start = pattern.strip_prefix('^')?;
     without_start.strip_suffix('$')
+}
+
+fn rewrite_simple_json_string_body_pattern(pattern: &str) -> String {
+    match pattern {
+        "\"" => r#"\\\""#.to_string(),
+        _ => pattern.to_string(),
+    }
+}
+
+pub(crate) fn property_name_matches_pattern(pattern: &str, property_name: &str) -> ImportResult<bool> {
+    let encoded = serde_json::to_string(property_name).unwrap_or_else(|_| "\"\"".to_string());
+    let body = encoded.strip_prefix('"').and_then(|text| text.strip_suffix('"')).unwrap_or("");
+    let regex = Regex::new(&format!(r#"^(?:{})$"#, string_pattern_as_body_regex(pattern)))
+        .map_err(|error| SchemaImportError::new(format!("invalid patternProperties regex {pattern:?}: {error}")))?;
+    Ok(regex.is_match(body))
 }

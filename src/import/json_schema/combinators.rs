@@ -157,7 +157,7 @@ fn merge_additional_properties(
     }
 }
 
-fn all_of_schema(left: Schema, right: Schema) -> Schema {
+pub(crate) fn all_of_schema(left: Schema, right: Schema) -> Schema {
     Schema::assertions(
         "<merged-allOf-property>",
         SchemaAssertions {

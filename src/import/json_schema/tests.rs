@@ -41,6 +41,30 @@ fn contains_separated_sequence(expr: &GrammarExpr) -> bool {
     }
 }
 
+fn contains_exclude(expr: &GrammarExpr) -> bool {
+    match expr {
+        GrammarExpr::Exclude { .. } => true,
+        GrammarExpr::Grouped(inner)
+        | GrammarExpr::Optional(inner)
+        | GrammarExpr::Repeat(inner)
+        | GrammarExpr::RepeatOne(inner) => contains_exclude(inner),
+        GrammarExpr::RepeatRange { expr, .. } => contains_exclude(expr),
+        GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => items.iter().any(contains_exclude),
+        GrammarExpr::SeparatedSequence { items, separator, .. } => {
+            items.iter().any(|(item, _)| contains_exclude(item)) || contains_exclude(separator)
+        }
+        GrammarExpr::Intersect { expr, intersect } => contains_exclude(expr) || contains_exclude(intersect),
+        GrammarExpr::Ref(_)
+        | GrammarExpr::Epsilon
+        | GrammarExpr::Literal(_)
+        | GrammarExpr::CharClass { .. }
+        | GrammarExpr::RawRegex(_)
+        | GrammarExpr::LexerDfa(_)
+        | GrammarExpr::AnyByte
+        | GrammarExpr::ExprNFA(_) => false,
+    }
+}
+
 #[test]
 fn closed_object_lowers_to_separated_sequence() {
     let schema = json!({
@@ -68,8 +92,8 @@ fn open_object_has_repeat_tail_and_excludes_fixed_keys() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(contains_exclude(start_expr(&grammar)));
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("JSON_STRING - \"\\\"kind\\\"\""), "{glrm}");
     assert!(glrm.contains("+?"), "{glrm}");
     lower(&grammar).unwrap();
 }

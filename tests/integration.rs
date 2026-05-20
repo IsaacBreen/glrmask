@@ -594,7 +594,7 @@ fn json_schema_pattern_properties_match_decoded_fixed_quote_key() {
         r#"{
             "type":"object",
             "properties":{"\"":{"type":"integer"}},
-            "patternProperties":{"^\"$":{"minimum":2}},
+            "patternProperties":{"^\"$":{"minimum":2,"maximum":5}},
             "additionalProperties":false
         }"#,
     );
@@ -602,6 +602,39 @@ fn json_schema_pattern_properties_match_decoded_fixed_quote_key() {
 
     let mut state = constraint.start();
     assert!(state.commit_bytes(br#"{"\"": 1}"#).is_err());
+}
+
+#[test]
+fn json_schema_pattern_properties_do_not_reaccept_declared_key() {
+    let constraint = byte_schema(
+        r#"{
+            "type":"object",
+            "properties":{"kind":{"const":"event"}},
+            "patternProperties":{"^.*$":{"type":"integer"}},
+            "additionalProperties":false
+        }"#,
+    );
+    let mut event_state = constraint.start();
+    assert!(event_state.commit_bytes(br#"{"kind": "event"}"#).is_err());
+
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(br#"{"kind": 1}"#).is_err());
+}
+
+#[test]
+fn json_schema_additional_properties_exclude_pattern_matched_keys() {
+    let constraint = byte_schema(
+        r#"{
+            "type":"object",
+            "patternProperties":{"^x":{"type":"string"}},
+            "additionalProperties":{"type":"integer"}
+        }"#,
+    );
+    assert_accepts_bytes(&constraint, br#"{"x1": "ok"}"#);
+    assert_accepts_bytes(&constraint, br#"{"y": 1}"#);
+
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(br#"{"x1": 1}"#).is_err());
 }
 
 #[test]
