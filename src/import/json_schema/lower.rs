@@ -148,16 +148,10 @@ impl<'a> Lowerer<'a> {
     }
 
     fn separator_regex(&self, separator: &str) -> String {
-        let whitespace = self.whitespace_regex();
-        if whitespace.is_empty() {
-            format!("(?:{separator})")
-        } else {
-            format!("(?:{whitespace})(?:{separator})(?:{whitespace})")
+        match separator {
+            "," | ":" => format!("(?:{separator} )"),
+            _ => format!("(?:{separator})"),
         }
-    }
-
-    fn whitespace_regex(&self) -> &'static str {
-        r#"[ \t\n\r]*"#
     }
 
     fn json_string_char_regex(&self) -> String {

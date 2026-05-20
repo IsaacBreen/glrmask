@@ -123,6 +123,7 @@ fn is_supported_key(key: &str) -> bool {
         key,
         "$schema"
             | "$id"
+            | "id"
             | "$defs"
             | "$comment"
             | "$ref"

@@ -157,6 +157,42 @@ fn string_format_lowers_as_regex_intersection() {
 }
 
 #[test]
+fn json_separators_are_canonical_space_separated() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "id": {"type": "string"}
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("(?:, )") || glrm.contains("\", \""), "{glrm}");
+    assert!(glrm.contains("(?:: )") || glrm.contains("\": \""), "{glrm}");
+    assert!(!glrm.contains("[ \\t\\n\\r]*"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn legacy_id_metadata_is_accepted() {
+    let schema = json!({
+        "definitions": {
+            "commandObject": {
+                "id": "command-object",
+                "type": "object",
+                "properties": {
+                    "directory": {"type": "string"}
+                }
+            }
+        },
+        "$ref": "#/definitions/commandObject"
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn unknown_format_errors() {
     let schema = json!({
         "type": "string",
