@@ -1700,27 +1700,31 @@ fn canonicalize_stack_shift_predecessors_by_goto_superset(table: &GLRTable, shif
             continue;
         }
 
-        for rep_idx in 0..idx {
-            if shifts[idx].pop != shifts[rep_idx].pop
-                || shifts[idx].pushes.len() != shifts[rep_idx].pushes.len()
-                || shifts[idx].pushes[1..] != shifts[rep_idx].pushes[1..]
-            {
-                continue;
-            }
+        for pos in 0..shifts[idx].pushes.len() - 1 {
+            for rep_idx in 0..idx {
+                if shifts[idx].pop != shifts[rep_idx].pop
+                    || shifts[idx].pushes.len() != shifts[rep_idx].pushes.len()
+                    || shifts[idx].pushes[..pos] != shifts[rep_idx].pushes[..pos]
+                    || shifts[idx].pushes[pos + 1..] != shifts[rep_idx].pushes[pos + 1..]
+                {
+                    continue;
+                }
 
-            // The predecessor is buried below an identical pushed suffix. Once
-            // buried, it can only be observed by a later reduction querying its
-            // goto row, so prefer a predecessor whose goto row is a compatible
-            // superset and let the otherwise identical stack paths merge.
-            let pred = shifts[idx].pushes[0];
-            let rep = shifts[rep_idx].pushes[0];
-            if goto_row_is_target_compatible_subset(table, pred, rep) {
-                shifts[idx].pushes[0] = rep;
-                break;
-            }
-            if goto_row_is_target_compatible_subset(table, rep, pred) {
-                shifts[rep_idx].pushes[0] = pred;
-                break;
+                // This pushed state is buried below an identical pushed suffix
+                // and below the current top state. Once buried, it can only be
+                // observed by a later reduction querying its goto row, so
+                // prefer a predecessor whose goto row is a compatible superset
+                // and let the otherwise identical stack paths merge.
+                let pred = shifts[idx].pushes[pos];
+                let rep = shifts[rep_idx].pushes[pos];
+                if goto_row_is_target_compatible_subset(table, pred, rep) {
+                    shifts[idx].pushes[pos] = rep;
+                    break;
+                }
+                if goto_row_is_target_compatible_subset(table, rep, pred) {
+                    shifts[rep_idx].pushes[pos] = pred;
+                    break;
+                }
             }
         }
     }
@@ -1923,6 +1927,72 @@ mod tests {
                 StackShift {
                     pop: 1,
                     pushes: vec![2, 3, 4],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn canonicalizes_buried_middle_stack_shift_predecessor_to_goto_superset() {
+        let mut table = table_with_stack_shifts(
+            vec![
+                StackShift {
+                    pop: 1,
+                    pushes: vec![9, 1, 3, 4],
+                },
+                StackShift {
+                    pop: 1,
+                    pushes: vec![9, 2, 3, 4],
+                },
+            ],
+            &[
+                (1, &[(10, (20, true)), (11, (21, false))]),
+                (2, &[(10, (20, true))]),
+            ],
+        );
+
+        table.canonicalize_stack_shift_predecessors();
+
+        assert_eq!(
+            stack_shifts_at_start(&table),
+            vec![StackShift {
+                pop: 1,
+                pushes: vec![9, 1, 3, 4],
+            }]
+        );
+    }
+
+    #[test]
+    fn does_not_canonicalize_top_pushed_state_even_when_goto_rows_are_compatible() {
+        let mut table = table_with_stack_shifts(
+            vec![
+                StackShift {
+                    pop: 1,
+                    pushes: vec![9, 3, 1],
+                },
+                StackShift {
+                    pop: 1,
+                    pushes: vec![9, 3, 2],
+                },
+            ],
+            &[
+                (1, &[(10, (20, true)), (11, (21, false))]),
+                (2, &[(10, (20, true))]),
+            ],
+        );
+
+        table.canonicalize_stack_shift_predecessors();
+
+        assert_eq!(
+            stack_shifts_at_start(&table),
+            vec![
+                StackShift {
+                    pop: 1,
+                    pushes: vec![9, 3, 1],
+                },
+                StackShift {
+                    pop: 1,
+                    pushes: vec![9, 3, 2],
                 },
             ]
         );
