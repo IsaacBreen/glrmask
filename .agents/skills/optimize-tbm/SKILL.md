@@ -15,6 +15,14 @@ cost. Caches are only acceptable when they represent normal precomputed
 constraint artifacts built before timing, or per-state/generation caches that
 serve the real API semantics without relying on repeated benchmark runs.
 
+Do not improve one TBM/build sample by disabling, skipping, threshold-gating, or
+making opt-in an existing correctness, compression, table, parser-DWA,
+terminal-DWA, or runtime optimization. Those optimizations often exist for
+important cases outside the immediate sample. When such an optimization is hot,
+preserve its semantic effect and optimize its implementation, data structures,
+sharing, memoization, or downstream representation. Disabling or narrowing it
+requires explicit human approval and broader tradeoff evidence.
+
 Requirements:
 - `commit` max: below `10us`; `10us` is the hard ceiling.
 - `mask` max: below `20us`.
