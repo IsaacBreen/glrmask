@@ -30,6 +30,9 @@ user-invocable: true
 - Record committed wins, failed experiments, exact env vars, representative before/after timings, and keep/revert decisions.
 - Before retrying an idea, check the current note for rejected experiments so work is not repeated.
 
+## Pre-Commit Evidence Checklist
+Before committing build-performance work, verify the commit message names the exact problem/schema ID(s), the build metric, and before/after values when known. If the change is motivated by a timeout or tail-latency artifact but exact before/after is unavailable, name the artifact/path and state the motivating evidence without implying a measured win. Mention any known tradeoff, especially when a build-time shortcut can affect runtime TBM or mask latency.
+
 ```bash
 cd /Users/isaacbreen/Projects2/constraint-framework-analysis
 GLRMASK_PROFILE_COMPILE=1 GLRMASK_PROFILE_COMPILE_SUMMARY=1 make example-specific PROBLEM=jsb/data/<problem>.json FRAMEWORKS='glrmask_native'

@@ -26,6 +26,9 @@ Notes requirement:
 - Record slow-step sources, profile commands, env vars, before/after stabilized timings, failed experiments, and keep/revert decisions.
 - Check the current note before retrying an approach.
 
+## Pre-Commit Evidence Checklist
+Before committing TBM or runtime-latency work, verify the commit message names the exact problem/schema ID(s), the metric (`mask`, `commit`, `TBM`, or build time), and before/after stabilized values when known. If before/after is unavailable, name the profile or sweep artifact and state the motivating evidence without implying a measured win. Mention any known tradeoff, especially when a runtime optimization changes compile/build behavior.
+
 1. Identify slow steps with CFA `report-slow-steps` on a stabilized artifact.
 2. Profile the exact step with `scripts.profile_step`, matching active `GLRMASK_*` env vars from the report.
 3. Account for all measured time before optimizing; if profile buckets do not explain the cost, add narrow profiled-entrypoint instrumentation rather than broad debug paths.
