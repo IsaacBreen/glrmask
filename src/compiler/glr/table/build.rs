@@ -2,8 +2,6 @@ use super::*;
 
 use crate::ds::bitset::BitSet;
 
-const UNIT_REDUCTION_COLLAPSE_MAX_STATES: u32 = 2_000;
-
 pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
     let t0 = std::time::Instant::now();
     let (item_sets, transitions) = build_lr1_item_sets(grammar);
@@ -16,10 +14,7 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
     let pre_merge_states = table.num_states;
     let t2 = std::time::Instant::now();
     table.merge_identical_rows();
-    let collapse_unit_reductions = pre_merge_states <= UNIT_REDUCTION_COLLAPSE_MAX_STATES;
-    if collapse_unit_reductions {
-        table.collapse_sr_unit_reductions_with_compatible_gotos();
-    }
+    table.collapse_sr_unit_reductions_with_compatible_gotos();
     table.merge_identical_rows();
     let merge_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
@@ -44,7 +39,7 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
             ielr_ms,
             pre_merge_states,
             table.num_states,
-            collapse_unit_reductions,
+            true,
             merge_ms,
             recog_ms,
         );
