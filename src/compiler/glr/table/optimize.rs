@@ -2,6 +2,7 @@ use super::*;
 
 const DISABLE_STACK_SHIFT_PREDECESSOR_CANONICALIZATION_ENV: &str =
     "GLRMASK_DISABLE_STACK_SHIFT_PREDECESSOR_CANONICALIZATION";
+const ENABLE_DELAYED_STACK_SHIFT_STATES_ENV: &str = "GLRMASK_ENABLE_DELAYED_STACK_SHIFT_STATES";
 
 fn stack_shift_predecessor_canonicalization_enabled() -> bool {
     !env_flag_enabled(DISABLE_STACK_SHIFT_PREDECESSOR_CANONICALIZATION_ENV, false)
@@ -1510,7 +1511,9 @@ fn try_inline_action_to_stack_shifts(
     if effects.is_empty() {
         return None;
     }
-    if effects_can_be_delayed(&effects) {
+    if effects_can_be_delayed(&effects)
+        && env_flag_enabled(ENABLE_DELAYED_STACK_SHIFT_STATES_ENV, false)
+    {
         if effects.iter().any(|effect| effect.pop == 0) {
             return None;
         }
