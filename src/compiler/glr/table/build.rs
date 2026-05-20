@@ -506,11 +506,11 @@ fn build_lr1_item_sets(
 
     let mut queue = VecDeque::from([0u32]);
     while let Some(state_id) = queue.pop_front() {
-        let source_items = item_sets[state_id as usize].clone();
+        let source_items = &item_sets[state_id as usize];
 
         // Build all goto kernels in a single pass over items.
         let mut kernels: BTreeMap<Symbol, LR1ItemSet> = BTreeMap::new();
-        for (item, lookaheads) in &source_items {
+        for (item, lookaheads) in source_items {
             // Transferred items only advance through nonterminal gotos.
             if item.transferred {
                 if let Some(Symbol::Nonterminal(nt)) = item.next_symbol(rules) {
@@ -534,13 +534,12 @@ fn build_lr1_item_sets(
             }
         }
 
-        for (symbol, mut kernel) in kernels {
-            let base_kernel = kernel.clone();
+        for (symbol, kernel) in kernels {
             // Check replace condition: is_replace iff no item in the kernel
             // has dot at position 1 (i.e., all items came from items that
             // already had dot > 0).
             let has_dot_1 = kernel.keys().any(|item| item.dot == 1);
-            let mut is_replace = match &symbol {
+            let is_replace = match &symbol {
                 Symbol::Terminal(_) => !has_dot_1 && replace_shifts_enabled(),
                 Symbol::Nonterminal(_) => !has_dot_1 && replace_gotos_enabled(),
             };
@@ -551,7 +550,7 @@ fn build_lr1_item_sets(
             // so the transition can still be marked as replace.
             let _ = transfer_safe;
 
-            let kernel_has_transferred = used_transfer && kernel.keys().any(|item| item.transferred);
+            let kernel_has_transferred = false;
 
             // If replace, decrement stack_depth for non-transferred kernel
             // items — the replace absorbs one stack level for items that
@@ -579,23 +578,7 @@ fn build_lr1_item_sets(
                 kernel
             };
 
-            let mut target_items = lr1_closure(&adjusted_kernel, grammar, &first);
-            if used_transfer && matches!(symbol, Symbol::Terminal(_)) {
-                let base_target_items = lr1_closure(&base_kernel, grammar, &first);
-                let base_has_zero_pop_completed = base_target_items.iter().any(|(item, _)| {
-                    let rule = &rules[item.rule as usize];
-                    (item.dot as usize) == rule.rhs.len() && item.stack_depth == 0
-                });
-                let transferred_has_zero_pop_completed = target_items.iter().any(|(item, _)| {
-                    let rule = &rules[item.rule as usize];
-                    (item.dot as usize) == rule.rhs.len() && item.stack_depth == 0
-                });
-                if transferred_has_zero_pop_completed && !base_has_zero_pop_completed {
-                    kernel = base_kernel;
-                    is_replace = false;
-                    target_items = lr1_closure(&kernel, grammar, &first);
-                }
-            }
+            let target_items = lr1_closure(&adjusted_kernel, grammar, &first);
 
             // Track whether this replace was created by the transfer mechanism.
             let is_forwarded = is_replace && kernel_has_transferred;
